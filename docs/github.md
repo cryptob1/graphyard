@@ -59,7 +59,9 @@ Strict base protection and commit-specific checks prevent common stale-head/base
 
 Likewise, a worker with Git credentials can still push its own branch after losing a Graphyard lease. Separate worktrees, individual identities, branch protection, and the `watch` process supervisor reduce interference. They are not a remote filesystem security boundary.
 
-Unlinked PRs lack the required check and should remain blocked by GitHub. A bypassed merge of linked work is recorded as a permanent violation; Graphyard will not silently mark it done after backfilled evidence.
+GitHub check runs are commit-scoped, not PR-scoped. An unlinked PR normally lacks the required check, but another PR using the same head commit can inherit a successful check. The MVP does not close that authorization reuse path. A merge broker must bind authorization to the exact PR and restrict alternative merge identities.
+
+A bypassed merge of linked work is recorded as a permanent violation; Graphyard will not silently mark it done after backfilled evidence. Merge observation retains the previously tested base for attribution; it does not independently verify the merge/squash/rebase artifact against that base. Recording a merge SHA is not proof that the resulting artifact was tested.
 
 ## Troubleshooting
 

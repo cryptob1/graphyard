@@ -49,6 +49,7 @@ export class GitHub {
     } catch { return false; }
   }
   async observe(work: Work): Promise<Observation> {
+    const startedAt = new Date().toISOString();
     const pr = await this.request(`/pulls/${work.submission!.pr}`);
     demand(pr.base.repo.full_name.toLowerCase() === this.config.repository.toLowerCase() && pr.head.repo?.full_name.toLowerCase() === this.config.repository.toLowerCase(), 'MVP requires same-repository pull requests');
     demand(pr.base.ref === this.config.base, 'Pull request targets an unmanaged branch');
@@ -57,22 +58,27 @@ export class GitHub {
     ]);
     const latest = new Map<string, any>();
     for (const r of reviews) if (['APPROVED', 'CHANGES_REQUESTED', 'DISMISSED'].includes(r.state)) latest.set(r.user.login, r);
+    const confirmed = await this.request(`/pulls/${work.submission!.pr}`);
+    demand(confirmed.head.sha === pr.head.sha && confirmed.base.sha === pr.base.sha && confirmed.base.ref === pr.base.ref && confirmed.head.ref === pr.head.ref
+      && confirmed.state === pr.state && confirmed.draft === pr.draft && confirmed.merged === pr.merged, 'PR changed while collecting evidence; retry');
     return {
       candidate: { sha: pr.head.sha, baseSha: pr.merged && work.candidate && work.candidate.sha === pr.head.sha ? work.candidate.baseSha : pr.base.sha, pr: pr.number, branch: pr.head.ref, author: pr.user.login },
       checks: checks.filter(c => c.name !== CHECK_NAME).map(c => ({ name: c.name, result: c.status === 'completed' ? c.conclusion : c.status, appId: c.app.id })),
       reviews: [...latest.values()].map(r => ({ reviewer: r.user.login, sha: r.commit_id, state: r.state })),
       merged: pr.merged, mergeSha: pr.merge_commit_sha, mergedAt: pr.merged_at, mergeable: pr.mergeable === true && !pr.draft && pr.state === 'open',
-      protected: protectedBranch, files: files.map(f => f.filename), at: new Date().toISOString(),
+      protected: protectedBranch, files: files.map(f => f.filename), at: startedAt,
     };
   }
-  async publish(work: Work, forcedReason?: string) {
+  async publish(work: Work, forcedReason?: string, beforeWrite: () => Promise<void> = async () => {}) {
     if (!work.candidate) return;
-    const pr = await this.request(`/pulls/${work.candidate.pr}`);
-    demand(pr.head.sha === work.candidate.sha && pr.base.sha === work.candidate.baseSha, 'PR changed before check publication; retry');
     const reasons = [...work.gates.flatMap(g => g.reasons), ...work.violations, ...(forcedReason ? [forcedReason] : [])];
     const existing = (await this.pages(`/commits/${work.candidate.sha}/check-runs?check_name=${encodeURIComponent(CHECK_NAME)}&filter=latest`, 'check_runs')).find(c => c.app.id === this.config.appId);
     const body = { name: CHECK_NAME, head_sha: work.candidate.sha, status: 'completed', conclusion: reasons.length ? 'failure' : 'success', external_id: work.id,
       output: { title: reasons.length ? 'REFUSED' : 'All required gates passed', summary: (reasons.length ? reasons.map(r => `- ${r}`).join('\n') : `Candidate ${work.candidate.sha}; base ${work.candidate.baseSha}; policy ${work.policyRevision}; revision ${work.revision}`).slice(0, 60000) } };
+    const pr = await this.request(`/pulls/${work.candidate.pr}`);
+    if (!reasons.length || !forcedReason) demand(pr.head.sha === work.candidate.sha && pr.base.sha === work.candidate.baseSha, 'PR changed before check publication; retry');
+    if (!reasons.length) demand(pr.state === 'open' && !pr.draft && pr.base.ref === this.config.base, 'PR is closed, draft, or retargeted; refusing success');
+    await beforeWrite();
     await this.request(existing ? `/check-runs/${existing.id}` : '/check-runs', existing ? 'PATCH' : 'POST', body);
   }
 }
@@ -85,19 +91,26 @@ export async function processJob(engine: Engine, github: GitHub) {
   const job = await engine.store.takeJob();
   if (!job) return;
   let work: Work | undefined;
+  const guard = (snapshot: Work, success: boolean) => async () => {
+    const result = await engine.store.pool.query(`SELECT w.document,clock_timestamp() AS now FROM work_items w JOIN jobs j ON j.work_id=w.id
+      WHERE w.id=$1 AND j.token=$2 AND j.locked_until>clock_timestamp()`, [job.work_id, job.token]);
+    const row = result.rows[0];
+    demand(row && row.document.revision === snapshot.revision, 'Work or job ownership changed before publication; retry');
+    if (success) demand(snapshot.observation && row.now.getTime() - Date.parse(snapshot.observation.at) < 120_000, 'Observation expired before publication; retry');
+  };
   try {
     work = (await engine.store.list()).find(w => w.id === job.work_id);
     if (work?.submission && work.stage !== 'done') {
       const observation = await github.observe(work);
-      work = await engine.observe(work.id, work.revision, observation);
-      const ownership = await engine.store.pool.query('SELECT 1 FROM jobs WHERE work_id=$1 AND token=$2 AND locked_until>now()', [job.work_id, job.token]);
-      demand(ownership.rowCount, 'Integration job lease expired; retry');
-      if (!observation.merged) await github.publish(work);
+      work = await engine.observe(work.id, work.revision, observation, job.token);
+      if (!observation.merged) await github.publish(work, undefined, guard(work, work.gates.every(g => g.passed) && !work.violations.length));
     }
+    if (work?.stage === 'done') await engine.store.pool.query('DELETE FROM jobs WHERE work_id=$1 AND token=$2', [job.work_id, job.token]);
     await engine.store.finishJob(job.work_id, job.token);
   } catch (error) {
     const message = error instanceof Error ? error.message : 'GitHub reconciliation failed';
-    if (work?.candidate) try { await github.publish(work, 'Reconciliation failed; fresh verification required'); } catch { /* Durable retry follows. */ }
+    const latest = (await engine.store.list()).find(w => w.id === job.work_id);
+    if (latest?.candidate && latest.stage !== 'done') try { await github.publish(latest, 'Reconciliation failed; fresh verification required', guard(latest, false)); } catch { /* Durable retry follows. */ }
     await engine.store.finishJob(job.work_id, job.token, message);
   }
 }

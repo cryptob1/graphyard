@@ -44,6 +44,8 @@ Add or rotate principals in `GRAPHYARD_PRINCIPALS`, then redeploy. Use a unique 
 
 The UI keeps its token in session storage. Sign out on shared machines. Producer credentials should be held by trusted reporters, never by arbitrary PR code. Logs intentionally omit tokens, but operator-provided blocker text and evidence URLs can still contain sensitive data; avoid submitting secrets as engineering metadata.
 
+Environment files, `.graphyard/`, and private-key file extensions are excluded from Git and Docker build context. Only `.env.example` is allowed in Git. CI runs a pinned, checksum-verified Gitleaks release against all fetched history. GitHub secret scanning and push protection are enabled on the public upstream repository. A clean scan is not a guarantee against unknown secret formats: if a credential is ever committed, revoke it first, then handle history and cached copies. Local Compose and isolated-test passwords are public development fixtures, never production credentials.
+
 ## Scale limits
 
 The kernel serializes short coordination mutations. The initial reconciler processes up to four provider jobs per tick per replica. The list API returns all work, while the event API returns the most recent 300 events. These are deliberate MVP bounds, not a benchmark claiming hundreds of agents at production load. Monitor latency, database lock wait, job lag, memory, and GitHub rate limits before increasing concurrency.

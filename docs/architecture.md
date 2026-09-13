@@ -55,6 +55,10 @@ The server runs a non-overlapping tick every two seconds. It expires leases and 
 
 Signed webhooks deduplicate delivery IDs and wake jobs. Their payload is a notification, not trusted workflow truth: the worker refetches GitHub data. Periodic polling catches missed webhooks. Observation application compares the work revision read before external I/O to the current revision; concurrent changes force a retry.
 
+Applying an observation also requires the integration job's unexpired owner token. Check publication rechecks that token, the current work revision, and observation freshness after provider reads and immediately before writing. The adapter rereads the PR after collecting evidence and refuses a changed head, base, draft, or open/closed state. These checks narrow races; they do not make the provider write atomic with Postgres.
+
+Each job wake increments a generation. If evidence or a webhook arrives during a running job, acknowledgment preserves an immediate retry instead of overwriting the wake with the normal polling delay. Expired owners cannot acknowledge jobs. Authorized completed work removes its polling job.
+
 GitHub observations older than two minutes refuse the merge gate. Actual GitHub check revocation is asynchronous and cannot be guaranteed during outages. See the [external enforcement boundary](github.md#enforcement-boundary).
 
 ## Display state and history
@@ -63,7 +67,9 @@ The graph shows the first refusing stage; the card contains all refusal reasons.
 
 The board is a view of evaluated state. There is no drag-to-done API. Current dwell metrics measure how long items have been in their present stage; they are not historical throughput percentiles.
 
-Before a merge can complete work, Graphyard must have recorded an authorization for the same head, base, and policy. Evidence received after an earlier merge cannot retroactively invent approval. Timestamp comparison follows GitHub's whole-second precision and assumes reasonably synchronized clocks; it cannot establish subsecond ordering across providers.
+Before a merge can complete work, Graphyard must have recorded an authorization for the same head, base, and policy. The engine consults ledger snapshots at the reported merge time, so an outage or later failure does not erase historical authorization. The delivery record references the authorization revision and observed merge SHA. Later differing checks remain visible as a follow-up warning.
+
+Evidence received after an earlier merge cannot retroactively invent approval. Authorization must predate the earliest possible merge instant; changes within the provider timestamp's precision window are considered conservatively. GitHub's whole-second timestamps can cause same-second authorizations to be refused. This assumes reasonably synchronized provider/database clocks and cannot establish subsecond ordering or prove the merged artifact was tested; a restricted merge broker and artifact verification remain necessary for a stronger guarantee.
 
 ## Why no workflow framework yet?
 

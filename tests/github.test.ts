@@ -12,7 +12,7 @@ function fixture() {
   github.request = async (path, method = 'GET', body) => {
     calls.push({ path, method, body });
     if (method !== 'GET') return { id: 12 };
-    if (path === '/pulls/10') return pr;
+    if (path === '/pulls/10') return structuredClone(pr);
     if (path.includes('/protection')) return { required_status_checks: { strict: true, checks: [{ context: CHECK_NAME, app_id: protectedBranch ? 1234 : 999 }] }, enforce_admins: { enabled: true }, allow_force_pushes: { enabled: false }, allow_deletions: { enabled: false } };
     if (path.includes('/reviews')) return reviews;
     if (path.includes('/files')) return [{ filename: 'src/claims.ts' }];
@@ -51,4 +51,27 @@ test('pagination fetches every page instead of accepting an incomplete check inv
   const f = fixture(); let count = 0;
   f.github.request = async path => { count++; return { check_runs: path.includes('page=2') ? [{ id: 101 }] : Array.from({ length: 100 }, (_, i) => ({ id: i + 1 })) }; };
   const rows = await f.github.pages('/commits/sha/check-runs', 'check_runs'); assert.equal(rows.length, 101); assert.equal(count, 2);
+});
+
+test('a PR changing during evidence collection is retried, not accepted as one snapshot', async () => {
+  const f = fixture(), request = f.github.request.bind(f.github);
+  f.github.request = async (path, method, body) => {
+    if (path.includes('/reviews')) f.pr.head.sha = 'c'.repeat(40);
+    return request(path, method, body);
+  };
+  await assert.rejects(f.github.observe(f.work), /changed while collecting/);
+});
+
+test('publication rechecks ownership and work revision immediately before the write', async () => {
+  const f = fixture(); let checked = false;
+  await assert.rejects(f.github.publish(f.work, undefined, async () => { checked = true; throw new Error('Ownership superseded'); }), /superseded/);
+  assert.equal(checked, true); assert.ok(f.calls.every(c => c.method === 'GET'));
+});
+
+test('a previously approved PR cannot publish success after becoming draft or retargeting', async () => {
+  for (const change of [{ draft: true }, { base: { sha: base, ref: 'other' } }, { state: 'closed' }]) {
+    const f = fixture(); f.work.gates = []; Object.assign(f.pr, change);
+    await assert.rejects(f.github.publish(f.work), /closed, draft, or retargeted/);
+    assert.ok(f.calls.every(c => c.method === 'GET'));
+  }
 });

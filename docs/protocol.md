@@ -57,11 +57,15 @@ Claims last 120 seconds. Renew at least every 30 seconds; the CLI supervisor use
 
 If communication fails, stop implementation and pushing until ownership is re-established. `graphyard watch` follows this rule and terminates the worker's process group on failed renewal. An independently detached daemon is outside that supervision boundary.
 
+Run `watch` from the registered workspace on its registered host. Every automatic heartbeat uses a fresh idempotency key, even when `GRAPHYARD_REQUEST_ID` is set for command retries. The supervisor uses elapsed local time and the server's granted lease duration, so host clock offsets do not extend ownership. A stalled renewal cannot extend the deadline. On lease loss, interruption, or worker exit, it stops renewing, sends SIGTERM to the process group, and sends SIGKILL after a five-second grace period, including to surviving descendants. Process-group supervision targets Linux/macOS; Windows does not provide the same descendant containment.
+
 Submitted work continues through gates without an active implementation lease. To reassign submitted work, an operator must stop the previous process and request `rework`. This clears ownership and closes the build gate while preserving PR attribution. A new claim gets a higher epoch and must register the same PR branch in a fresh host/path. Resubmission closes the rework request. Rework of an observed merged item is refused; create a follow-up instead.
 
 ## Workspaces
 
 Herdr may create worktrees itself. Register the exact branch and a stable machine ID before submitting the PR. Branches must begin `graphyard/`. A branch is globally unique in this control plane; paths are unique per host, including historical reservations. Use the assignment epoch in path and branch names.
+
+Paths are normalized lexically; aliases through `..`, repeated separators, and nested reservations on the same host are rejected as overlaps. The server cannot resolve remote symlinks or detect two host IDs naming the same machine. Use canonical paths and stable host IDs. For submitted rework, `next` includes the item and `worktree` preserves the linked PR branch. Fetch that branch first in a replacement clone; Git refuses if it is already checked out locally. No force-checkout or automatic cleanup is performed.
 
 ```sh
 node /path/to/graphyard/bin/graphyard.mjs register GY-1 workspace.json
