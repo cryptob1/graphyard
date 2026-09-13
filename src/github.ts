@@ -61,7 +61,7 @@ export class GitHub {
       candidate: { sha: pr.head.sha, baseSha: pr.merged && work.candidate && work.candidate.sha === pr.head.sha ? work.candidate.baseSha : pr.base.sha, pr: pr.number, branch: pr.head.ref, author: pr.user.login },
       checks: checks.filter(c => c.name !== CHECK_NAME).map(c => ({ name: c.name, result: c.status === 'completed' ? c.conclusion : c.status, appId: c.app.id })),
       reviews: [...latest.values()].map(r => ({ reviewer: r.user.login, sha: r.commit_id, state: r.state })),
-      merged: pr.merged, mergeSha: pr.merge_commit_sha, mergeable: pr.mergeable === true && !pr.draft && pr.state === 'open',
+      merged: pr.merged, mergeSha: pr.merge_commit_sha, mergedAt: pr.merged_at, mergeable: pr.mergeable === true && !pr.draft && pr.state === 'open',
       protected: protectedBranch, files: files.map(f => f.filename), at: new Date().toISOString(),
     };
   }

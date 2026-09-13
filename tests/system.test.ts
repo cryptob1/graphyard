@@ -135,13 +135,20 @@ test('wrong CI producer, self review, and missing protection fail closed', async
 test('only an independently observed merge with all gates satisfied completes work', async () => {
   let w = await submitted(); w = await engine.observe(w.id, w.revision, observation(w));
   w = await engine.execute(producer, 'evidence', w.id, proof(), randomUUID()); assert.equal(w.stage, 'merge');
-  w = await engine.observe(w.id, w.revision, { ...observation(w), merged: true, mergeSha: 'e'.repeat(40) }); assert.equal(w.stage, 'done');
+  w = await engine.observe(w.id, w.revision, { ...observation(w), merged: true, mergedAt: new Date().toISOString(), mergeSha: 'e'.repeat(40) }); assert.equal(w.stage, 'done');
   await assert.rejects(engine.execute(worker, 'claim', w.id, {}, randomUUID()), /immutable/);
 });
 test('bypassed merge is a permanent visible violation, not done', async () => {
   let w = await submitted(); w = await engine.observe(w.id, w.revision, { ...observation(w), merged: true });
   assert.notEqual(w.stage, 'done'); assert.ok(w.violations.length);
   w = await engine.execute(producer, 'evidence', w.id, proof(), randomUUID()); assert.notEqual(w.stage, 'done');
+});
+test('evidence arriving after the actual merge cannot retroactively authorize it', async () => {
+  let w = await submitted(); w = await engine.observe(w.id, w.revision, observation(w));
+  const actualMerge = '2000-01-01T00:00:00Z';
+  w = await engine.execute(producer, 'evidence', w.id, proof(), randomUUID()); assert.ok(w.mergeAuthorization);
+  w = await engine.observe(w.id, w.revision, { ...observation(w), merged: true, mergedAt: actualMerge });
+  assert.notEqual(w.stage, 'done'); assert.ok(w.violations.includes('Merge observed without a prior authorization for this candidate'));
 });
 test('delayed external observations cannot overwrite concurrent decisions', async () => {
   const w = await submitted(); await engine.execute(worker, 'evidence', w.id, proof(), randomUUID());

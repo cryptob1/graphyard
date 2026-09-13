@@ -1,10 +1,11 @@
-import { defineRailway, postgres, preserve, project, service, volume } from "railway/iac";
+import { defineRailway, github, postgres, preserve, project, service, volume } from "railway/iac";
 
 export default defineRailway(() => {
   const Postgres = postgres("Postgres", { region: "us-west2" });
   Postgres.networking = { privateNetworkEndpoint: "postgres" };
   const postgresVolume = volume("postgres-volume", { alerts: { usage: { "100": {}, "80": {}, "95": {} } }, allowOnlineResize: true, region: "us-west2", sizeMB: 5000 });
   const graphyard = service("graphyard", {
+    source: github("cryptob1/graphyard", { branch: "main" }),
     build: { builder: "DOCKERFILE", dockerfilePath: "Dockerfile" },
     healthcheck: "/healthz",
     healthcheckTimeout: 120,

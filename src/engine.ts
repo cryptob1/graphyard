@@ -23,7 +23,7 @@ export type Command = keyof typeof commands;
 export class Engine {
   constructor(public store: Store, public ciAppIds: number[] = [15368], public leaseSeconds = 120) {}
   async execute(actor: Principal, command: Command, id: string | null, input: unknown, key: string) {
-    demand(commands[command], 'Unknown command', 404);
+    demand(Object.hasOwn(commands, command), 'Unknown command', 404);
     demand(key && key.length <= 200, 'An Idempotency-Key is required', 400);
     const data: any = commands[command].parse(input);
     const fingerprint = createHash('sha256').update(JSON.stringify({ command, id, data })).digest('hex');
@@ -103,6 +103,10 @@ export class Engine {
     const result = evaluate(work, all, now, this.ciAppIds);
     if (work.stage !== result.stage) work.stageEnteredAt = now.toISOString();
     Object.assign(work, result);
+    if (work.gates.some(g => !g.passed) || work.violations.length) work.mergeAuthorization = null;
+    else if (work.candidate && !work.observation?.merged && (!work.mergeAuthorization || work.mergeAuthorization.sha !== work.candidate.sha || work.mergeAuthorization.baseSha !== work.candidate.baseSha)) {
+      work.mergeAuthorization = { sha: work.candidate.sha, baseSha: work.candidate.baseSha, policyRevision: work.policyRevision, at: now.toISOString() };
+    }
   }
   async reconcile() {
     await this.store.transaction(async (db, now) => {
@@ -124,6 +128,14 @@ export class Engine {
       demand(work.submission?.pr === observation.candidate.pr, 'Unassigned pull request');
       demand(work.workspaces.some(w => w.epoch === work.submission!.epoch && w.branch === observation.candidate.branch), 'PR branch does not match the assigned workspace');
       if (work.stage === 'done') return work;
+      if (observation.merged) {
+        const authorization = work.mergeAuthorization;
+        const authorized = authorization && authorization.sha === observation.candidate.sha && authorization.baseSha === observation.candidate.baseSha && authorization.policyRevision === work.policyRevision
+          // GitHub reports merge times at whole-second precision.
+          && observation.mergedAt && Math.floor(Date.parse(authorization.at) / 1000) <= Math.floor(Date.parse(observation.mergedAt) / 1000);
+        const violation = 'Merge observed without a prior authorization for this candidate';
+        if (!authorized && !work.violations.includes(violation)) work.violations.push(violation);
+      }
       work.candidate = observation.candidate;
       work.observation = observation;
       this.evaluate(work, all, now);

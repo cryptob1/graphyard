@@ -31,7 +31,7 @@ export interface Evidence {
 export interface Observation {
   candidate: Candidate; checks: { name: string; result: string; appId: number }[];
   reviews: { reviewer: string; sha: string; state: string }[];
-  merged: boolean; mergeSha: string | null; mergeable: boolean;
+  merged: boolean; mergeSha: string | null; mergedAt?: string | null; mergeable: boolean;
   protected: boolean; files: string[]; at: string;
 }
 export interface Gate { name: string; passed: boolean; reasons: string[] }
@@ -42,6 +42,7 @@ export interface Work extends Create {
   submission: { epoch: number; pr: number } | null;
   reworkRequested: boolean;
   scenarioRequirements: { proof: string; revision: number; environment: string; hash: string }[];
+  mergeAuthorization?: { sha: string; baseSha: string; policyRevision: number; at: string } | null;
   evidence: Evidence[]; observation: Observation | null; blocker: string | null;
   gates: Gate[]; violations: string[];
 }

@@ -63,6 +63,8 @@ The graph shows the first refusing stage; the card contains all refusal reasons.
 
 The board is a view of evaluated state. There is no drag-to-done API. Current dwell metrics measure how long items have been in their present stage; they are not historical throughput percentiles.
 
+Before a merge can complete work, Graphyard must have recorded an authorization for the same head, base, and policy. Evidence received after an earlier merge cannot retroactively invent approval. Timestamp comparison follows GitHub's whole-second precision and assumes reasonably synchronized clocks; it cannot establish subsecond ordering across providers.
+
 ## Why no workflow framework yet?
 
 LangGraph would be appropriate inside an agent runtime; Graphyard is runtime-independent. Temporal could eventually run long-lived deployment/rollback activities. The MVP has a small set of short database commands and repeatable external observations. Postgres transactions and durable retries cover that workload while keeping deployment to two services. Domain invariants remain Graphyard's responsibility whichever execution mechanism is used.
