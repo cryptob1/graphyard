@@ -27,9 +27,10 @@ test('installed CLI resolves its runtime from another repository and includes su
 
 test('watch refuses the wrong workspace and uses a fresh heartbeat key despite command retry configuration', async () => {
   const cwd = await mkdtemp(join(tmpdir(), 'graphyard-watch-'));
-  let registeredPath = tmpdir(); const keys: string[] = [];
+  let registeredPath = tmpdir(), role = 'worker'; const keys: string[] = [];
   const http = createServer((req, res) => {
     res.setHeader('Content-Type', 'application/json');
+    if (req.url === '/api/status') { res.end(JSON.stringify({ actor: { role } })); return; }
     if (req.method === 'POST') { keys.push(String(req.headers['idempotency-key'])); res.end(JSON.stringify(renewal())); }
     else res.end(JSON.stringify([{ id: 'task', key: 'GY-1', workspaces: [{ epoch: 1, host: hostname(), path: registeredPath }] }]));
   });
@@ -38,9 +39,21 @@ test('watch refuses the wrong workspace and uses a fresh heartbeat key despite c
   try {
     await assert.rejects(exec(process.execPath, [launcher, 'watch', 'GY-1', '1', '--', process.execPath, '-e', 'process.exit(0)'], { cwd, env }), /assigned workspace/);
     assert.equal(keys.length, 0); registeredPath = cwd;
+    role = 'admin';
+    await assert.rejects(exec(process.execPath, [launcher, 'watch', 'GY-1', '1', '--', process.execPath, '-e', 'process.exit(0)'], { cwd, env }), /requires a worker credential/);
+    assert.equal(keys.length, 0); role = 'worker';
     await exec(process.execPath, [launcher, 'watch', 'GY-1', '1', '--', process.execPath, '-e', 'process.exit(0)'], { cwd, env });
     assert.equal(keys.length, 1); assert.notEqual(keys[0], 'replayed-command');
   } finally { await new Promise<void>(r => http.close(() => r())); await rm(cwd, { recursive: true, force: true }); }
+});
+
+test('implementation subprocesses do not inherit Graphyard server credentials', async () => {
+  const previous = process.env.GRAPHYARD_PRINCIPALS;
+  process.env.GRAPHYARD_PRINCIPALS = 'test-only-server-credential';
+  try {
+    const code = await supervise(process.execPath, ['-e', "process.exit(process.env.GRAPHYARD_PRINCIPALS === undefined ? 0 : 1)"], 1, async () => renewal(), { graceMs: 25 });
+    assert.equal(code, 0);
+  } finally { if (previous === undefined) delete process.env.GRAPHYARD_PRINCIPALS; else process.env.GRAPHYARD_PRINCIPALS = previous; }
 });
 
 test('supervisor stops a worker when renewal hangs beyond the granted lease', async () => {

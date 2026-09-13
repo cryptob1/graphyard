@@ -14,7 +14,9 @@ export async function supervise(command: string, args: string[], epoch: number, 
     if (deadline <= performance.now()) throw new Error('Lease expired during renewal');
   }
   await heartbeat();
-  const child = spawn(command, args, { stdio: 'inherit', detached: process.platform !== 'win32' });
+  const env = { ...process.env };
+  for (const key of ['GRAPHYARD_PRINCIPALS', 'DATABASE_URL', 'GITHUB_PRIVATE_KEY', 'GITHUB_PRIVATE_KEY_FILE', 'GITHUB_WEBHOOK_SECRET']) delete env[key];
+  const child = spawn(command, args, { stdio: 'inherit', detached: process.platform !== 'win32', env });
   return new Promise<number>(resolve => {
     let stopping = false, pending = false;
     let expiry: ReturnType<typeof setTimeout>;

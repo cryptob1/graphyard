@@ -59,6 +59,8 @@ If communication fails, stop implementation and pushing until ownership is re-es
 
 Run `watch` from the registered workspace on its registered host. Every automatic heartbeat uses a fresh idempotency key, even when `GRAPHYARD_REQUEST_ID` is set for command retries. The supervisor uses elapsed local time and the server's granted lease duration, so host clock offsets do not extend ownership. A stalled renewal cannot extend the deadline. On lease loss, interruption, or worker exit, it stops renewing, sends SIGTERM to the process group, and sends SIGKILL after a five-second grace period, including to surviving descendants. Process-group supervision targets Linux/macOS; Windows does not provide the same descendant containment.
 
+`watch` requires a `worker` credential, even though operators may use manual claim commands. It removes the known Graphyard server credential variables from the child's environment. Keep worker machines and readable files free of operator/producer secrets too; environment filtering is not a sandbox or a general-purpose secret detector.
+
 Submitted work continues through gates without an active implementation lease. To reassign submitted work, an operator must stop the previous process and request `rework`. This clears ownership and closes the build gate while preserving PR attribution. A new claim gets a higher epoch and must register the same PR branch in a fresh host/path. Resubmission closes the rework request. Rework of an observed merged item is refused; create a follow-up instead.
 
 ## Workspaces

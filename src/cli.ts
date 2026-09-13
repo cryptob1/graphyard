@@ -91,6 +91,7 @@ Never share an operator or producer credential with an implementation agent.`); 
     if (separator < 0 || !args[separator + 1]) throw new Error('Usage: watch GY-N EPOCH -- command args');
     const workspace = work.workspaces.find((w: any) => w.epoch === epoch);
     if (!workspace || workspace.host !== (process.env.GRAPHYARD_HOST_ID ?? hostname()) || await realpath(process.cwd()) !== await realpath(workspace.path)) throw new Error('Run watch from the assigned workspace on its registered host');
+    if ((await api('status')).actor?.role !== 'worker') throw new Error('watch requires a worker credential; never pass operator or producer credentials to implementation processes');
     process.exitCode = await supervise(args[separator + 1], args.slice(separator + 2), epoch,
       () => api(`work/${work.id}/heartbeat`, { epoch }, randomUUID()));
     return;
