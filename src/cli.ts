@@ -4,6 +4,8 @@ import { hostname } from 'node:os';
 import { resolve } from 'node:path';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { supervise } from './supervisor.js';
+import { discover, saveDiscovery } from './onboarding.js';
+import { startGithubSetup } from './github-setup.js';
 
 try { process.loadEnvFile(); } catch (error: any) { if (error.code !== 'ENOENT') throw error; }
 const [command, id, ...args] = process.argv.slice(2);
@@ -21,6 +23,8 @@ async function main() {
 
 Environment: GRAPHYARD_URL, GRAPHYARD_TOKEN (individual role-scoped credential)
   init                         Scan repository and append agent instructions
+  doctor                       Inspect local discovery and live integration readiness
+  github-setup HTTPS_URL        Register a GitHub App through a local browser flow
   status [GY-N]                Control-plane or work status
   list | next                  List all work / claimable work
   create path/to/work.json      Create work with acceptance criteria (operator)
@@ -45,10 +49,24 @@ Never share an operator or producer credential with an implementation agent.`); 
   }
   if (command === 'init') {
     const root = execFileSync('git', ['rev-parse', '--show-toplevel'], { encoding: 'utf8' }).trim();
-    let packageJson: any = {}; try { packageJson = JSON.parse(await readFile(resolve(root, 'package.json'), 'utf8')); } catch { /* non-Node repo */ }
     let existing = ''; try { existing = await readFile(resolve(root, 'AGENTS.md'), 'utf8'); } catch { /* new file */ }
     if (!existing.includes('<!-- graphyard -->')) await writeFile(resolve(root, 'AGENTS.md'), `${existing}\n<!-- graphyard -->\n## Graphyard coordination\n\nClaim an authorized Graphyard work item before editing. Use the assigned worktree.\nRun the worker through \`graphyard watch\` or heartbeat at least every 30 seconds.\nStop on lease loss; do not continue writing or pushing. Check dependencies and blockers.\nSubmit the PR through \`graphyard complete\`; only Graphyard gates can mark work done.\nNever use an operator/producer token for implementation. Never weaken task proof requirements.\n<!-- /graphyard -->\n`);
-    print({ root, scripts: Object.keys(packageJson.scripts ?? {}), proposedChecks: ['test', 'typecheck'].filter(s => packageJson.scripts?.[s]), instructions: 'AGENTS.md', next: 'Create a work JSON file with explicit criteria. Configure GitHub enforcement using docs/github.md.' }); return;
+    print({ root, ...await saveDiscovery(root), instructions: 'AGENTS.md', next: 'Run github-setup HTTPS_URL to register the App, then doctor to inspect readiness. Discovered checks are proposals; confirm their actual CI job names.' }); return;
+  }
+  if (command === 'github-setup' || command === 'doctor') {
+    const root = execFileSync('git', ['rev-parse', '--show-toplevel'], { encoding: 'utf8' }).trim();
+    const discovered = await discover(root);
+    if (command === 'github-setup') {
+      if (!discovered.repository) throw new Error('Set origin to the GitHub repository being managed first');
+      const setup = await startGithubSetup(root, discovered.repository, id);
+      console.log(`Open ${setup.url} in your browser. On SSH, forward port 4311 to this machine first. Credentials stay in .graphyard/github-app.json; do not share that file. Press Ctrl+C when finished.`);
+      const stop = () => setup.http.close(); process.once('SIGINT', stop); process.once('SIGTERM', stop); return;
+    }
+    let live: any = null, failure: string | undefined;
+    try { live = await api('status'); } catch (error: any) { failure = error.message; }
+    return print({ discovered, server: base, connected: !!live, githubConfigured: !!live?.github, role: live?.actor?.role, failure,
+      next: !live ? 'Configure GRAPHYARD_URL and an individual token' : !live.github ? 'Complete github-setup and configure the server App credentials' : 'Submit a real PR and inspect every gate; configured is not proof of enforcement',
+      limits: ['CI discovery is a proposal, not executed-test inventory', 'Herdr two-host recovery and GitHub refusal-to-acceptance must be demonstrated'] });
   }
   if (command === 'status' && !id) return print(await api('status'));
   if (command === 'scenarios') return print(await api('scenarios'));

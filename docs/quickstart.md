@@ -1,5 +1,7 @@
 # Quickstart
 
+For repository discovery, guided GitHub registration, and the first independently proven PR, follow [First enforced PR](first-pr.md).
+
 This guide starts one control plane and registers a worker. Run one shared server for all machines; do not give every machine a separate ledger.
 
 ## 1. Start the server
