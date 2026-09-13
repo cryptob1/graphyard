@@ -1,0 +1,18 @@
+id = "graphyard"
+name = "Graphyard"
+version = "0.1.0"
+min_herdr_version = "0.7.1"
+description = "Claim work and inspect evidence-backed delivery gates from Herdr"
+platforms = ["macos", "linux"]
+
+[[actions]]
+id = "open"
+title = "Open Graphyard control plane"
+contexts = ["pane"]
+command = ["node", "integrations/herdr/open.mjs"]
+
+[[panes]]
+id = "ledger"
+title = "Graphyard"
+placement = "tab"
+command = ["node", "integrations/herdr/ledger.mjs"]

@@ -1,0 +1,12 @@
+{
+  "id": "confirmed-booking-sends-sms",
+  "title": "Booking confirmation sends one SMS",
+  "purpose": "Prove exactly-once confirmation behavior visible to the customer",
+  "setup": ["A pending booking exists", "Staging captures outgoing SMS requests"],
+  "steps": ["Confirm the booking", "Retry confirmation", "Read captured SMS requests"],
+  "expected": ["Exactly one SMS was sent", "The message includes the booking date and time"],
+  "environment": "staging",
+  "runner": "Playwright",
+  "testPath": "tests/e2e/booking-sms.spec.ts",
+  "expectedRevision": 0
+}

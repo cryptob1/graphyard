@@ -1,0 +1,12 @@
+{
+  "title": "Recover safely when an agent disappears",
+  "description": "An expired assignment can be reclaimed by a worker on another machine. The previous owner must be unable to submit or renew the superseded lease.",
+  "type": "feature",
+  "priority": 1,
+  "criteria": [
+    { "id": "AC-1", "text": "Concurrent claims have exactly one winner", "proofs": ["integration:claim-safety"] },
+    { "id": "AC-2", "text": "Expired owners cannot mutate a reassigned task", "proofs": ["integration:lease-fencing"] }
+  ],
+  "policy": { "checks": ["test", "typecheck"], "review": true },
+  "plannedFiles": ["src/engine.ts", "tests/system.test.ts"]
+}

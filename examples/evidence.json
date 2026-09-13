@@ -1,0 +1,10 @@
+{
+  "proof": "integration:claim-safety",
+  "sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "baseSha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "policyRevision": 1,
+  "result": "pass",
+  "executed": 32,
+  "skipped": 0,
+  "url": "https://github.com/OWNER/REPO/actions/runs/RUN"
+}

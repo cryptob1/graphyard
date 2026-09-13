@@ -1,0 +1,54 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { GitHub, CHECK_NAME } from '../src/github.js';
+import type { Work } from '../src/model.js';
+const head = 'a'.repeat(40), base = 'b'.repeat(40);
+function fixture() {
+  const calls: { path: string; method: string; body: any }[] = [];
+  const pr: any = { number: 10, head: { sha: head, ref: 'graphyard/task', repo: { full_name: 'owner/repo' } }, base: { sha: base, ref: 'main', repo: { full_name: 'owner/repo' } }, user: { login: 'author' }, merged: false, mergeable: true, draft: false, state: 'open', merge_commit_sha: null };
+  let reviews: any[] = [];
+  let protectedBranch = true;
+  const github = new GitHub({ repository: 'owner/repo', base: 'main', appId: 1234, installationId: 1, privateKey: 'not-used-in-adapter-test' });
+  github.request = async (path, method = 'GET', body) => {
+    calls.push({ path, method, body });
+    if (method !== 'GET') return { id: 12 };
+    if (path === '/pulls/10') return pr;
+    if (path.includes('/protection')) return { required_status_checks: { strict: true, checks: [{ context: CHECK_NAME, app_id: protectedBranch ? 1234 : 999 }] }, enforce_admins: { enabled: true }, allow_force_pushes: { enabled: false }, allow_deletions: { enabled: false } };
+    if (path.includes('/reviews')) return reviews;
+    if (path.includes('/files')) return [{ filename: 'src/claims.ts' }];
+    if (path.includes('check_name=')) return { check_runs: [{ id: 12, name: CHECK_NAME, app: { id: 1234 } }] };
+    if (path.includes('/check-runs')) return { check_runs: [{ id: 9, name: 'test', status: 'completed', conclusion: 'success', app: { id: 15368 } }, { id: 12, name: CHECK_NAME, status: 'completed', conclusion: 'failure', app: { id: 1234 } }] };
+    throw new Error(`Unexpected request ${path}`);
+  };
+  const work = { id: 'task-id', submission: { pr: 10, epoch: 1 }, candidate: { sha: head, baseSha: base, pr: 10 }, policyRevision: 1, revision: 3, gates: [{ name: 'acceptance', passed: false, reasons: ['AC-1 requires proof'] }], violations: [] } as unknown as Work;
+  return { github, calls, pr, work, reviews: (r: any[]) => { reviews = r; }, protection: (p: boolean) => { protectedBranch = p; } };
+}
+test('GitHub adapter binds observations to repository, base, current reviews, and producer', async () => {
+  const f = fixture(); f.reviews([{ user: { login: 'reviewer' }, commit_id: head, state: 'APPROVED' }, { user: { login: 'reviewer' }, commit_id: head, state: 'CHANGES_REQUESTED' }]);
+  const obs = await f.github.observe(f.work);
+  assert.deepEqual(obs.checks, [{ name: 'test', result: 'success', appId: 15368 }]);
+  assert.equal(obs.reviews[0].state, 'CHANGES_REQUESTED'); assert.equal(obs.candidate.baseSha, base); assert.equal(obs.protected, true);
+  f.pr.base.ref = 'other'; await assert.rejects(f.github.observe(f.work), /unmanaged/);
+  f.pr.base.ref = 'main'; f.pr.head.repo.full_name = 'attacker/fork'; await assert.rejects(f.github.observe(f.work), /same-repository/);
+});
+test('App binding is mandatory even when a check with the correct name is required', async () => {
+  const f = fixture(); f.protection(false); assert.equal(await f.github.protection(), false);
+});
+test('observing a merge preserves the tested pre-merge base candidate', async () => {
+  const f = fixture(); f.pr.merged = true; f.pr.base.sha = 'c'.repeat(40);
+  assert.equal((await f.github.observe(f.work)).candidate.baseSha, base);
+});
+test('check publisher updates its own existing check and includes actionable refusal', async () => {
+  const f = fixture(); await f.github.publish(f.work);
+  const call = f.calls.find(c => c.method === 'PATCH')!;
+  assert.equal(call.path, '/check-runs/12'); assert.equal(call.body.conclusion, 'failure'); assert.equal(call.body.head_sha, head); assert.match(call.body.output.summary, /AC-1/);
+});
+test('publisher refuses a head or base that changed after evaluation', async () => {
+  const f = fixture(); f.pr.head.sha = 'c'.repeat(40);
+  await assert.rejects(f.github.publish(f.work), /changed/); assert.ok(f.calls.every(c => c.method === 'GET'));
+});
+test('pagination fetches every page instead of accepting an incomplete check inventory', async () => {
+  const f = fixture(); let count = 0;
+  f.github.request = async path => { count++; return { check_runs: path.includes('page=2') ? [{ id: 101 }] : Array.from({ length: 100 }, (_, i) => ({ id: i + 1 })) }; };
+  const rows = await f.github.pages('/commits/sha/check-runs', 'check_runs'); assert.equal(rows.length, 101); assert.equal(count, 2);
+});

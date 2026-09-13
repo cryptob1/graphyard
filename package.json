@@ -1,0 +1,39 @@
+{
+  "name": "graphyard",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Evidence-backed coordination for distributed software agents",
+  "license": "Apache-2.0",
+  "bin": {
+    "graphyard": "./bin/graphyard.mjs"
+  },
+  "scripts": {
+    "dev": "tsx watch src/server.ts",
+    "dev:web": "vite --host 127.0.0.1",
+    "build": "tsc --noEmit && vite build",
+    "start": "tsx src/server.ts",
+    "cli": "tsx src/cli.ts",
+    "test": "tsx --test tests/*.test.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "pg": "8.22.0",
+    "react": "19.2.7",
+    "react-dom": "19.2.7",
+    "react-markdown": "^10.1.0",
+    "remark-gfm": "^4.0.1",
+    "tsx": "4.23.13",
+    "zod": "4.4.3"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "@types/pg": "8.20.0",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "embedded-postgres": "^18.4.0-beta.17",
+    "railway": "^3.11.0",
+    "typescript": "5.9.3",
+    "vite": "^7.3.6"
+  }
+}
