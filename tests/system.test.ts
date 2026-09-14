@@ -8,7 +8,7 @@ import EmbeddedPostgres from 'embedded-postgres';
 import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import { server } from '../src/server.js';
-import type { Principal, Work, Observation } from '../src/model.js';
+import { ReconciliationRetry, type Principal, type Work, type Observation } from '../src/model.js';
 import { defineScenario, scenarios } from '../src/scenarios.js';
 import { setTimeout as delay } from 'node:timers/promises';
 import { processJob, type GitHub } from '../src/github.js';
@@ -16,7 +16,7 @@ import { processJob, type GitHub } from '../src/github.js';
 import { exercise } from '../scripts/acceptance-contract.mjs';
 
 const operator: Principal = { id: 'operator', role: 'admin' };
-const worker: Principal = { id: 'agent-a', role: 'worker' };
+const worker: Principal = { id: 'agent-a', role: 'worker', displayName: 'Atlas', runtime: 'Codex' };
 const other: Principal = { id: 'agent-b', role: 'worker' };
 const producer: Principal = { id: 'ci-runner', role: 'producer', proofs: ['integration:claim-safety'] };
 const head = 'a'.repeat(40), base = 'b'.repeat(40);
@@ -290,4 +290,158 @@ test('integration publication discards a passing snapshot superseded by failed e
 test('protected acceptance harness exercises five contracts against the real HTTP server and Postgres', async () => {
   const result = await exercise(url, [{ ...operator, token: 'o'.repeat(32) }, ...probeWorkers]);
   assert.equal(result.length, 5); assert.ok(result.every((c: any) => c.result === 'pass'));
+});
+
+
+test('assignment identity comes from the authenticated principal and survives release and reclaim in history', async () => {
+  const item = await ready();
+  const claim = (data: unknown) => fetch(`${url}/api/work/${item.id}/claim`, { method: 'POST', headers: { Authorization: `Bearer ${'w'.repeat(32)}`, 'Content-Type': 'application/json', 'Idempotency-Key': randomUUID() }, body: JSON.stringify(data) });
+  const spoof = await claim({ owner: 'agent-b', displayName: 'Other worker', runtime: 'Claude' });
+  assert.equal(spoof.status, 400);
+  const response = await claim({}); assert.equal(response.status, 200);
+  let w = await response.json() as Work;
+  assert.equal(w.lease?.owner, worker.id); assert.equal(w.lastAssignment?.displayName, 'Atlas'); assert.equal(w.lastAssignment?.runtime, 'Codex');
+  const first = w.lastAssignment;
+  w = await engine.execute(worker, 'release', w.id, { epoch: 1 }, randomUUID());
+  assert.equal(w.lease, null); assert.deepEqual(w.lastAssignment, first);
+  w = await engine.execute({ ...other, displayName: 'Beacon', runtime: 'Claude' }, 'claim', w.id, {}, randomUUID());
+  assert.equal(w.lastAssignment?.owner, other.id); assert.equal(w.lastAssignment?.epoch, 2); assert.equal(w.lastAssignment?.runtime, 'Claude');
+  const history = (await store.events(w.id)).filter(e => e.kind === 'claim').sort((a, b) => Number(a.seq) - Number(b.seq));
+  assert.equal(history[0].payload.work.lastAssignment.displayName, 'Atlas');
+  assert.equal(history[1].payload.work.lastAssignment.displayName, 'Beacon');
+  await assert.rejects(engine.execute(worker, 'heartbeat', w.id, { epoch: 1 }, randomUUID()), /superseded/);
+});
+
+ test('upgrade preserves legacy ownership before expiry or explicit release, with audited history', async () => {
+  for (const operation of ['expiry', 'release']) {
+    let w = await claimed();
+    delete w.lastAssignment;
+    if (operation === 'expiry') w.lease!.expiresAt = '2000-01-01T00:00:00Z';
+    await store.pool.query('UPDATE work_items SET document=$2::jsonb WHERE id=$1', [w.id, JSON.stringify(w)]);
+    if (operation === 'expiry') { await engine.reconcile(); w = (await store.list()).find(x => x.id === w.id)!; }
+    else w = await engine.execute(worker, 'release', w.id, { epoch: 1 }, randomUUID());
+    assert.equal(w.lease, null); assert.deepEqual(w.lastAssignment, { owner: worker.id, epoch: 1 });
+    const event = (await store.events(w.id)).find(e => e.kind === (operation === 'expiry' ? 'reconciled' : 'release'));
+    assert.deepEqual(event.payload.work.lastAssignment, { owner: worker.id, epoch: 1 });
+  }
+ });
+
+ test('status uses the lease database clock even when the application clock is skewed', async () => {
+  const originalDate = globalThis.Date;
+  const before = (await store.pool.query('SELECT clock_timestamp() AS now')).rows[0].now.getTime();
+  try {
+    globalThis.Date = new Proxy(originalDate, { construct(target, args, newTarget) { return Reflect.construct(target, args.length ? args : ['2099-01-01T00:00:00Z'], newTarget); } });
+    const response = await fetch(`${url}/api/status`, { headers: { Authorization: `Bearer ${'w'.repeat(32)}` } });
+    assert.equal(response.status, 200);
+    const status = await response.json();
+    const after = (await store.pool.query('SELECT clock_timestamp() AS now')).rows[0].now.getTime();
+    assert.ok(Date.parse(status.now) >= before && Date.parse(status.now) <= after);
+  } finally { globalThis.Date = originalDate; }
+ });
+test('review-provider revisions require operator identity, compare revisions, and invalidate acceptance', async () => {
+  let w = await submitted(); w = await engine.observe(w.id, w.revision, observation(w)); w = await engine.execute(producer, 'evidence', w.id, proof(), randomUUID());
+  const input = { provider: 'codex', expectedPolicyRevision: 1, reason: 'Operator chooses independent cloud review' };
+  await assert.rejects(engine.execute(worker, 'reviewpolicy', w.id, input, randomUUID()), /Operator/);
+  w = await engine.execute(operator, 'reviewpolicy', w.id, input, randomUUID());
+  assert.equal(w.policyRevision, 2); assert.equal(w.policy.reviewProvider, 'codex'); assert.equal(w.observation, null);
+  assert.equal(w.gates.find(g => g.name === 'acceptance')?.passed, false); assert.equal(w.evidence.length, 1);
+  await assert.rejects(engine.execute(operator, 'reviewpolicy', w.id, { ...input, provider: 'github' }, randomUUID()), /revision/);
+  assert.equal((await store.events(w.id)).find(e => e.kind === 'reviewpolicy').payload.details.reason, input.reason);
+  await assert.rejects(engine.execute(producer, 'rereview', w.id, {}, randomUUID()), /Worker or operator/);
+  await assert.rejects(engine.bindReviewRequest(w.id, w.revision, { commentId: 1, sha: head, baseSha: base, policyRevision: 2, body: '@codex review', createdAt: new Date().toISOString() }, randomUUID()), /lease/);
+});
+
+
+test('only a leased integration job binds dispatch and current bound Codex approval satisfies review', async () => {
+  let w = await submitted(); w = await engine.observe(w.id, w.revision, observation(w));
+  w = await engine.execute(operator, 'reviewpolicy', w.id, { provider: 'codex', expectedPolicyRevision: 1, reason: 'Use independent agent review' }, randomUUID());
+  w = await engine.observe(w.id, w.revision, observation(w));
+  const token = randomUUID();
+  await store.pool.query("UPDATE jobs SET token=$2,locked_until=now()+interval '90 seconds' WHERE work_id=$1", [w.id, token]);
+  const request = { commentId: 8123, sha: head, baseSha: base, policyRevision: 2, body: '@codex review', createdAt: new Date().toISOString() };
+  w = await engine.bindReviewRequest(w.id, w.revision, request, token);
+  const clean = { ...observation(w), reviews: [], agentReview: { provider: 'codex' as const, sha: head, approved: true, requestId: 8123, reason: 'Clean review' } };
+  w = await engine.observe(w.id, w.revision, clean);
+  assert.equal(w.gates.find(g => g.name === 'review')?.passed, true);
+  w = await engine.observe(w.id, w.revision, { ...clean, agentReview: { ...clean.agentReview, requestId: 999 } });
+  assert.equal(w.gates.find(g => g.name === 'review')?.passed, false);
+  w = await engine.observe(w.id, w.revision, { ...clean, reviews: [{ reviewer: 'human', sha: head, state: 'CHANGES_REQUESTED' }] });
+  assert.equal(w.gates.find(g => g.name === 'review')?.passed, false);
+  w = await engine.execute(operator, 'rereview', w.id, {}, randomUUID());
+  assert.equal(w.reviewRequest, null); assert.equal(w.gates.find(g => g.name === 'review')?.passed, false);
+  assert.ok((await store.events(w.id)).some(e => e.kind === 'review.requested'));
+});
+
+test('concurrent task changes schedule a prompt retry without an operator error', async () => {
+  let w = await submitted();
+  w = await engine.observe(w.id, w.revision, observation(w));
+  await store.pool.query("UPDATE jobs SET available_at=now()+interval '1 hour'");
+  await store.pool.query('UPDATE jobs SET available_at=now() WHERE work_id=$1', [w.id]);
+  let publications = 0;
+  const adapter = {
+    async observe() {
+      await engine.execute(worker, 'heartbeat', w.id, { epoch: 1 }, randomUUID());
+      return observation(w);
+    },
+    async publish(_work: Work, reason: string, guard: () => Promise<void>) { assert.match(reason, /fresh verification/); await guard(); publications++; },
+  } as unknown as GitHub;
+  await processJob(engine, adapter);
+  const row = (await store.pool.query("SELECT error,token,available_at<=clock_timestamp()+interval '3 seconds' AS soon FROM jobs WHERE work_id=$1", [w.id])).rows[0];
+  assert.equal(row.error, null); assert.equal(row.token, null); assert.equal(row.soon, true); assert.equal(publications, 1);
+  const current = (await store.list()).find(x => x.id === w.id)!;
+  assert.deepEqual(current.observation, w.observation);
+  const job = await store.pool.query("UPDATE jobs SET token=$2,locked_until=now()+interval '90 seconds' WHERE work_id=$1", [w.id, '11111111-1111-4111-8111-111111111111']);
+  assert.equal(job.rowCount, 1);
+  await store.finishJob(w.id, '11111111-1111-4111-8111-111111111111', 'GitHub permission denied');
+  assert.equal((await store.pool.query('SELECT error FROM jobs WHERE work_id=$1', [w.id])).rows[0].error, 'GitHub permission denied');
+});
+
+ test('a policy change after the actual merge cannot invalidate historical delivery authorization', async () => {
+  let w = await submitted(); w = await engine.observe(w.id, w.revision, observation(w));
+  w = await engine.execute(producer, 'evidence', w.id, proof(), randomUUID());
+  const authorizedRevision = w.revision;
+  await delay(5); const mergedAt = new Date().toISOString(); await delay(5);
+  w = await engine.execute(operator, 'reviewpolicy', w.id, { provider: 'codex', expectedPolicyRevision: 1, reason: 'Merge not observed yet' }, randomUUID());
+  assert.equal(w.policyRevision, 2); assert.equal(w.mergeAuthorization, null);
+  w = await engine.observe(w.id, w.revision, { ...observation(w), merged: true, mergedAt, mergeSha: 'e'.repeat(40) });
+  assert.equal(w.stage, 'done'); assert.equal(w.delivery?.authorizationRevision, authorizedRevision);
+  assert.ok(!w.violations.some(v => v.includes('without a prior authorization')));
+  assert.ok(w.violations.some(v => v.includes('Post-merge')));
+ });
+
+ test('review request persistence classifies an expired dispatch lease as a safe retry', async () => {
+  let w = await submitted(); w = await engine.observe(w.id, w.revision, observation(w));
+  const token = randomUUID();
+  await store.pool.query("UPDATE jobs SET token=$2,locked_until=clock_timestamp()-interval '1 second' WHERE work_id=$1", [w.id, token]);
+  await assert.rejects(engine.bindReviewRequest(w.id, w.revision, { commentId: 999, sha: head, baseSha: base, policyRevision: 1, body: '@codex review', createdAt: new Date().toISOString() }, token), ReconciliationRetry);
+  const current = (await store.list()).find(x => x.id === w.id)!;
+  assert.equal(current.reviewRequest, undefined); assert.equal(current.revision, w.revision);
+ });
+
+ test('whole-second delivery never searches past a same-second policy revocation', async () => {
+  let w = await submitted(); w = await engine.observe(w.id, w.revision, observation(w));
+  w = await engine.execute(producer, 'evidence', w.id, proof(), randomUUID());
+  await delay(1100 - Date.now() % 1000);
+  w = await engine.execute(operator, 'reviewpolicy', w.id, { provider: 'codex', expectedPolicyRevision: 1, reason: 'Revoke the prior review policy' }, randomUUID());
+  const mergedAt = w.updatedAt.replace(/\.\d+Z$/, 'Z');
+  w = await engine.observe(w.id, w.revision, { ...observation(w), merged: true, mergedAt, mergeSha: 'e'.repeat(40) });
+  assert.notEqual(w.stage, 'done'); assert.ok(w.violations.some(v => v.includes('without a prior authorization')));
+ });
+
+test('draft and closed submissions wait normally and dispatch after becoming ready', async () => {
+  for (const initial of [{prState:'open' as const,draft:true},{prState:'closed' as const,draft:false}]) {
+    let w = await submitted();
+    w = await engine.execute(operator,'reviewpolicy',w.id,{provider:'codex',expectedPolicyRevision:1,reason:'Use agent review'},randomUUID());
+    let state = initial, requests = 0;
+    const adapter = {
+      observe: async (work: Work) => ({...observation(work),...state,mergeable:state.prState==='open'&&!state.draft}),
+      requestCodex: async (work: Work, guard:()=>Promise<void>) => {await guard();requests++;return {commentId:900,sha:head,baseSha:base,policyRevision:work.policyRevision,body:'@codex review',createdAt:new Date().toISOString()};},
+      publish: async (_work:Work, forced:unknown, guard:()=>Promise<void>) => {assert.equal(forced,undefined);await guard();},
+    } as unknown as GitHub;
+    async function run() {await store.pool.query("UPDATE jobs SET available_at=now()+interval '1 hour'");await store.pool.query('UPDATE jobs SET available_at=now() WHERE work_id=$1',[w.id]);await processJob(engine,adapter);}
+    await run(); assert.equal(requests,0);
+    assert.equal((await store.pool.query('SELECT error FROM jobs WHERE work_id=$1',[w.id])).rows[0].error,null);
+    state={prState:'open',draft:false}; await run(); assert.equal(requests,1);
+    assert.equal((await store.list()).find(x=>x.id===w.id)!.reviewRequest?.commentId,900);
+  }
 });

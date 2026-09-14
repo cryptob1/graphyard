@@ -7,6 +7,7 @@ export const criterionSchema = z.object({ id: z.string().regex(/^AC-\d+$/), text
 export const policySchema = z.object({
   checks: z.array(z.string().min(1).max(200)).min(1).max(30).default(['test', 'typecheck']),
   review: z.boolean().default(true),
+  reviewProvider: z.enum(['github', 'codex']).optional(),
 }).strict();
 export const createSchema = z.object({
   title: z.string().min(1).max(200), description: z.string().max(20000).default(''),
@@ -18,7 +19,8 @@ export const createSchema = z.object({
   plannedFiles: z.array(z.string().min(1).max(500)).max(100).default([]),
 }).strict();
 export type Create = z.infer<typeof createSchema>;
-export interface Principal { id: string; role: 'admin' | 'worker' | 'producer' | 'reader'; proofs?: string[] }
+export interface Principal { id: string; role: 'admin' | 'worker' | 'producer' | 'reader'; proofs?: string[]; displayName?: string; runtime?: string }
+export interface AssignmentIdentity { owner: string; epoch: number; displayName?: string; runtime?: string; claimedAt?: string }
 export interface Lease { owner: string; epoch: number; expiresAt: string }
 export interface Workspace { host: string; path: string; branch: string; epoch: number; owner: string }
 export interface Candidate { sha: string; baseSha: string; pr: number; branch: string; author: string }
@@ -28,7 +30,11 @@ export interface Evidence {
   executed: number; skipped: number; url?: string; at: string;
   scenarioRevision?: number; environment?: string;
 }
+export interface ReviewRequest { commentId: number; sha: string; baseSha: string; policyRevision: number; body: string; createdAt: string }
+export interface AgentReview { provider: 'codex'; sha: string; approved: boolean; reason: string; summaryId?: number; resultId?: number; requestId?: number; reactionId?: number; completedAt?: string }
 export interface Observation {
+  agentReview?: AgentReview;
+  prState?: 'open' | 'closed'; draft?: boolean;
   candidate: Candidate; checks: { name: string; result: string; appId: number }[];
   reviews: { reviewer: string; sha: string; state: string }[];
   merged: boolean; mergeSha: string | null; mergedAt?: string | null; mergeable: boolean;
@@ -38,10 +44,11 @@ export interface Gate { name: string; passed: boolean; reasons: string[] }
 export interface Work extends Create {
   id: string; key: string; stage: Stage; revision: number; policyRevision: number;
   createdAt: string; updatedAt: string; stageEnteredAt: string; ready: boolean;
-  epoch: number; lease: Lease | null; workspaces: Workspace[]; candidate: Candidate | null;
+  epoch: number; lease: Lease | null; lastAssignment?: AssignmentIdentity; workspaces: Workspace[]; candidate: Candidate | null;
   submission: { epoch: number; pr: number } | null;
   reworkRequested: boolean;
   scenarioRequirements: { proof: string; revision: number; environment: string; hash: string }[];
+  reviewRequest?: ReviewRequest | null;
   mergeAuthorization?: { sha: string; baseSha: string; policyRevision: number; at: string } | null;
   delivery?: { mergedAt: string; mergeSha: string; authorizationRevision: number };
   evidence: Evidence[]; observation: Observation | null; blocker: string | null;
@@ -49,6 +56,10 @@ export interface Work extends Create {
 }
 export class Refusal extends Error {
   constructor(message: string, public status = 409) { super(message); }
+}
+export class ReconciliationRetry extends Refusal {}
+export function requireCurrent(value: unknown, message: string): asserts value {
+  if (!value) throw new ReconciliationRetry(message, 409);
 }
 export function demand(value: unknown, message: string, status = 409): asserts value {
   if (!value) throw new Refusal(message, status);
@@ -70,7 +81,15 @@ export function evaluate(work: Work, all: Work[], now: Date, ciAppIds: number[])
   const fresh = current && now.getTime() - Date.parse(obs!.at) < 120_000;
   add('build', [...(!work.submission || work.reworkRequested ? ['Worker has not submitted implementation for this attempt'] : []), ...(!candidate ? ['Pull request has not been independently observed'] : []), ...(!work.workspaces.length ? ['No workspace registered'] : [])]);
   const reviews = current ? obs!.reviews : [];
-  add('review', work.policy.review && (!candidate || !reviews.some(r => r.sha === candidate.sha && r.state === 'APPROVED' && r.reviewer !== candidate.author) || reviews.some(r => r.state === 'CHANGES_REQUESTED')) ? ['Independent approval of the current commit is required; outstanding change requests must be resolved'] : []);
+  const changesRequested = reviews.some(r => r.state === 'CHANGES_REQUESTED');
+  const agentReview = current ? obs!.agentReview : undefined;
+  const reviewPassed = work.policy.reviewProvider === 'codex'
+    ? !!candidate && !!agentReview?.approved && agentReview.provider === 'codex' && agentReview.sha === candidate.sha && work.reviewRequest?.commentId === agentReview.requestId && work.reviewRequest?.sha === candidate.sha && work.reviewRequest?.baseSha === candidate.baseSha && work.reviewRequest?.policyRevision === work.policyRevision
+    : !!candidate && reviews.some(r => r.sha === candidate.sha && r.state === 'APPROVED' && r.reviewer !== candidate.author);
+  add('review', work.policy.review ? [
+    ...(!reviewPassed ? [work.policy.reviewProvider === 'codex' ? agentReview?.reason ?? 'Verified clean Codex review of the current commit is required' : 'Independent approval of the current commit is required'] : []),
+    ...(changesRequested ? ['Outstanding change requests must be resolved through a new review'] : []),
+  ] : []);
   add('test', work.policy.checks.filter(name => {
     const checks = current ? obs!.checks.filter(c => c.name === name && ciAppIds.includes(c.appId)) : [];
     return !checks.length || checks.some(c => c.result !== 'success');

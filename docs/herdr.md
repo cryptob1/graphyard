@@ -74,3 +74,16 @@ Host IDs from setup and `GRAPHYARD_HOST_ID` have surrounding whitespace removed 
 When a server declares its GitHub repository, setup verifies that the checkout's `origin` identifies the same repository (case-insensitively) before saving credentials or enabling the plugin. A missing/unrecognized origin or a different repository refuses setup. Configure the correct GitHub origin first. Servers without a configured repository can still support local bootstrap discovery.
 
 An explicit `GRAPHYARD_HOST_ID` takes precedence over the host ID saved by setup in both the CLI and Herdr handoff. Invalid explicit values are passed through to the CLI's validation rather than silently replaced by a saved host.
+## Agent names and automatic board assignment
+
+Each independently running worker must have its own Graphyard principal and token. The operator can optionally add `displayName` and `runtime` to that principal in the server's private `GRAPHYARD_PRINCIPALS` configuration. For example, a worker with ID `worker-17`, display name `Atlas`, and runtime `Codex` appears as **Atlas · Codex** when it claims a task. Runtime is a display label and can describe Claude, Codex, a custom tool, or a human-assisted worker; it does not change authorization.
+
+Assignment happens atomically when the authenticated worker successfully claims the task. The work board and Herdr ledger derive ownership from that lease, not from a typed name, a prompt delivery, or a PR author's GitHub account. Claim requests cannot supply another owner's identity. Agent names and runtimes are operator-configured metadata; Graphyard does not infer them from running processes or verify the model a worker actually uses.
+
+The display identity is snapshotted with each claim and preserved in event history. After release or expiry, the card says **Last worked by Atlas · Codex**, while details say there is no active assignment. Reclaiming under another worker updates the current label and preserves the earlier claim in history. An unconfigured worker displays its canonical ID, and older work items use their recorded workspace owner when available. Renaming a configured worker affects future claims; it does not rewrite historical identity.
+
+Configure one identity per concurrent worker, even when several workers use the same coding tool. A shared `herdr-worker-1` token cannot identify which of several sessions is acting. Keep the stable canonical worker ID visible in task details when names are similar. Server configuration changes require a restart; follow your deployment review process and never commit the principal tokens.
+
+Assignment activity in the dashboard and Herdr ledger is evaluated at the control plane’s last observed Postgres time, matching the clock used to enforce leases. A worker machine’s clock cannot expire or revive a lease in the display. Refresh to obtain a newer observation; the server remains authoritative for all commands.
+
+During upgrades, existing leases retain their owner and epoch before expiry or release clears the lease. Older assignments without recorded labels or claim times keep those fields unknown; Graphyard does not invent identity metadata.

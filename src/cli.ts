@@ -42,6 +42,8 @@ Environment: GRAPHYARD_URL, GRAPHYARD_TOKEN (individual role-scoped credential)
   ready GY-N                   Release backlog item (operator)
   unblock GY-N REASON           Clear a blocker with an audit reason (operator)
   rework GY-N --previous-worker-stopped REASON  Authorize reassignment (operator)
+  rereview GY-N [EPOCH]         Request a fresh Codex review (operator or current worker)
+  reviewpolicy GY-N github|codex POLICY_REVISION REASON  Revise reviewer source (operator)
   claim GY-N                   Acquire a two-minute lease; returns epoch
   handoff GY-N                 Show assigned workspace and supervisor command
   heartbeat GY-N EPOCH          Extend current lease
@@ -100,6 +102,8 @@ Never share an operator or producer credential with an implementation agent.`); 
   if (command === 'status') return print(work);
   if (command === 'handoff') return print(handoff(work, await api('status'), hostId, connection?.cliPath ?? cliPath));
   if (command === 'events') return print(await api(`events?work=${work.id}`));
+  if (command === 'rereview') return print(await mutate(command, args[0] ? { epoch: Number(args[0]) } : {}));
+  if (command === 'reviewpolicy') return print(await mutate(command, { provider: args[0], expectedPolicyRevision: Number(args[1]), reason: args.slice(2).join(' ') }));
   if (command === 'ready' || command === 'claim') return print(await mutate(command, {}));
   if (command === 'unblock') return print(await mutate('unblock', { reason: args.join(' ') }));
   if (command === 'rework') {
