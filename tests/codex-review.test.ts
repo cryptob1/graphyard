@@ -47,9 +47,10 @@ test('the same Codex numeric identity cannot review its own PR after a login ren
 import { assertReviewServer } from '../scripts/review-server.mjs';
 test('native approval migration refuses a different, disconnected or unsupported live installation', () => {
  const app = { appId: 1234, installationId: 7 };
- const status = { github: true, repository: 'owner/repo', githubAppId: 1234, githubInstallationId: 7, reviewProviders: ['codex'] };
+ const status = { githubPermissions: {pull_requests:'write',issues:'read',checks:'write'}, github: true, repository: 'owner/repo', githubAppId: 1234, githubInstallationId: 7, reviewProviders: ['codex'] };
  assert.doesNotThrow(() => assertReviewServer(status, 'owner/repo', app));
  assert.doesNotThrow(() => assertReviewServer({...status, repository:'OWNER/Repo'}, 'owner/repo', app));
+ for (const permissions of [undefined, {}, {pull_requests:'read',issues:'read',checks:'write'}, {pull_requests:'write',issues:'none',checks:'write'}, {pull_requests:'write',issues:'read',checks:'read'}]) assert.throws(() => assertReviewServer({...status,githubPermissions:permissions}, 'owner/repo', app), /permissions/);
  for (const override of [{github:false}, {repository:'other/repo'}, {githubAppId:987}, {githubInstallationId:8}, {reviewProviders:[]}]) assert.throws(() => assertReviewServer({...status,...override}, 'owner/repo', app), /does not manage/);
 });
 
