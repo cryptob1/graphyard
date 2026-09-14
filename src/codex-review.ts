@@ -7,12 +7,19 @@ const isCodex = (item: any) => item.user?.id === CODEX_USER_ID && item.user?.typ
 interface Source { pages(path: string): Promise<any[]>; request(path: string): Promise<any> }
 // Exact observed provider footer; arbitrary appended prose cannot be treated as approval.
 const cleanFooter = "<details> <summary>ℹ️ About Codex in GitHub</summary> <br/> Codex has been enabled to automatically review pull requests in this repo. Reviews are triggered when you - Open a pull request for review - Mark a draft as ready - Comment \"@codex review\". If Codex has suggestions, it will comment; otherwise it will react with 👍. When you [sign up for Codex through ChatGPT](https://openai.com/codex), Codex can also answer questions or update the PR, like \"@codex address that feedback\". </details>";
+const cleanCourtesies = new Set([
+  '', ':+1:', ':tada:', 'what shall we delve into next?',
+  'delightful', 'nice work', 'bravo', 'keep it up', 'well done', 'good job',
+  'great work', 'great job', 'looks good', 'looking good', 'excellent', 'splendid',
+  'wonderful', 'fantastic', 'awesome', 'nice', 'cheers', 'all good', 'all clear',
+  'lgtm', 'onward', 'happy coding',
+]);
 function cleanCommit(body: unknown): string | null {
   if (typeof body !== 'string') return null;
-  const match = /^Codex Review: Didn't find any major issues\.(?: :(?:\+1|tada):| What shall we delve into next\?)?\n\n\*\*Reviewed commit:\*\* `([a-f0-9]{7,40})`(?=\s|$)/.exec(body);
-  if (!match) return null;
+  const match = /^Codex Review: Didn't find any major issues\.([^\r\n]*)\n\n\*\*Reviewed commit:\*\* `([a-f0-9]{7,40})`(?=\s|$)/.exec(body);
+  if (!match || !cleanCourtesies.has(match[1].trim().replace(/[.!]+$/, '').toLowerCase())) return null;
   const tail = body.slice(match[0].length).trim().replace(/\s+/g, ' ');
-  return !tail || tail === cleanFooter ? match[1] : null;
+  return !tail || tail === cleanFooter ? match[2] : null;
 }
 /** Conservative adapter for the observed hosted Codex review protocol. Unknown formats refuse. */
 export async function observeCodex(source: Source, pr: number, head: string, reviews: any[], authorId: number, request: ReviewRequest | null | undefined, base: string, policyRevision: number, graphyardAppId: number): Promise<AgentReview> {
