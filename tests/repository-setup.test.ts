@@ -1,0 +1,104 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { execFileSync, execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+import { mkdtemp, readFile, rm, stat, writeFile, symlink, chmod } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { createServer } from 'node:http';
+import { handoff, loadConnection, managedInstructions, setupRepository } from '../src/repository-setup.js';
+const launcher = fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url));
+const secret = 'fixture-worker-token-'.padEnd(40, 'x');
+const connection = { url: 'https://example.com', token: secret, cliPath: launcher, hostId: 'machine-a' };
+const fetcher = async () => new Response(JSON.stringify({ actor: { id: 'worker-a', role: 'worker' } }));
+async function repo() { const root = await mkdtemp(join(tmpdir(), 'graphyard-init-')); execFileSync('git', ['init', '-q', root]); return root; }
+
+test('managed instructions refresh one section and preserve all surrounding operator content', () => {
+  const original = '# Operator rules\nNever delete customer data.\n';
+  const first = managedInstructions(original, 'https://one.example');
+  const surrounding = `${first}\n## Team review\nAsk the maintainer.\n`;
+  const updated = managedInstructions(surrounding, 'https://two.example');
+  assert.ok(updated.startsWith(original)); assert.ok(updated.endsWith('## Team review\nAsk the maintainer.\n'));
+  assert.equal(updated.split('<!-- graphyard -->').length, 2); assert.doesNotMatch(updated, /one.example/);
+  assert.equal(managedInstructions(updated, 'https://two.example'), updated);
+  for (const broken of ['<!-- graphyard -->', '<!-- /graphyard --><!-- graphyard -->', first + first]) assert.throws(() => managedInstructions(broken, 'https://example.com'), /markers/);
+});
+
+test('Herdr setup validates identity, privately saves configuration, updates instructions, and enables last', async () => {
+  const root = await repo(); const config = join(root, 'herdr-private'); const calls: string[][] = [];
+  const runHerdr = (args: string[]) => { calls.push(args); return args[1] === 'config-dir' ? config : ''; };
+  try {
+    await writeFile(join(root, 'AGENTS.md'), '# Original instructions\n', { mode: 0o600 });
+    const result = await setupRepository(root, connection, { herdr: true, fetcher, runHerdr });
+    const text = await readFile(join(root, 'AGENTS.md'), 'utf8');
+    assert.ok(text.startsWith('# Original instructions\n')); assert.doesNotMatch(text, new RegExp(secret));
+    assert.equal(JSON.stringify(result).includes(secret), false); assert.equal(result.pluginConfigured, true);
+    assert.equal((await stat(join(root, '.graphyard/connection.json'))).mode & 0o777, 0o600);
+    assert.equal((await stat(join(root, 'AGENTS.md'))).mode & 0o777, 0o600);
+    assert.equal((await stat(join(config, 'config.json'))).mode & 0o777, 0o600);
+    assert.deepEqual(calls.at(-1), ['plugin', 'enable', 'graphyard']);
+    assert.equal((await loadConnection(root))?.principal, 'worker-a');
+    await setupRepository(root, connection, { herdr: true, fetcher, runHerdr });
+    assert.equal(await readFile(join(root, 'AGENTS.md'), 'utf8'), text);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test('privileged or rejected credentials cause no instruction, plugin, or credential writes', async () => {
+  for (const role of ['admin', 'producer', 'reader', 'rejected']) {
+    const root = await repo(); let invoked = false;
+    try {
+      await assert.rejects(setupRepository(root, connection, { herdr: true, fetcher: async () => new Response(JSON.stringify({ actor: { role } }), { status: role === 'rejected' ? 401 : 200 }), runHerdr: () => { invoked = true; return ''; } }));
+      assert.equal(invoked, false); await assert.rejects(stat(join(root, 'AGENTS.md'))); await assert.rejects(stat(join(root, '.graphyard/connection.json')));
+    } finally { await rm(root, { recursive: true, force: true }); }
+  }
+});
+
+test('setup does not follow an AGENTS.md symlink and refuses insecure credential file permissions', async () => {
+  const root = await repo(); const target = join(root, 'operator-rules');
+  try {
+    await writeFile(target, 'Keep this intact'); await symlink(target, join(root, 'AGENTS.md'));
+    await assert.rejects(setupRepository(root, connection, { fetcher }), /non-regular/);
+    assert.equal(await readFile(target, 'utf8'), 'Keep this intact'); await rm(join(root, 'AGENTS.md'));
+    await setupRepository(root, connection, { fetcher }); await chmod(join(root, '.graphyard/connection.json'), 0o644);
+    await assert.rejects(loadConnection(root), /0600/);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test('linked worktrees inherit their primary checkout connection without copying credentials into Git', async () => {
+  const root = await repo();
+  try {
+    execFileSync('git', ['-c', 'user.name=Test', '-c', 'user.email=test@localhost', 'commit', '--allow-empty', '-m', 'Initial'], { cwd: root, stdio: 'ignore' });
+    await setupRepository(root, connection, { fetcher });
+    const worktree = join(root, 'isolated'); execFileSync('git', ['worktree', 'add', '-b', 'assignment', worktree], { cwd: root, stdio: 'ignore' });
+    assert.equal((await loadConnection(worktree))?.token, secret);
+    await assert.rejects(stat(join(worktree, '.graphyard/connection.json')));
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test('handoff fences stale ownership and hosts and returns safely quoted workspace commands', () => {
+  const work = { key: 'GY-5', lease: { owner: 'worker-a', epoch: 2, expiresAt: '2030-01-01T00:02:00Z' }, workspaces: [{ epoch: 2, host: 'machine-a', path: "/tmp/worker's workspace" }] };
+  const status = { actor: { id: 'worker-a', role: 'worker' }, now: '2030-01-01T00:00:00Z' };
+  assert.match(handoff(work, status, 'machine-a', launcher).commands[0], /'\\''/);
+  assert.throws(() => handoff(work, status, 'machine-b', launcher), /another host/);
+  assert.throws(() => handoff(work, { ...status, actor: { id: 'other', role: 'worker' } }, 'machine-a', launcher), /lease/);
+  assert.throws(() => handoff(work, { ...status, now: '2030-01-01T00:03:00Z' }, 'machine-a', launcher), /lease/);
+  assert.match(handoff({ ...work, workspaces: [] }, status, 'machine-a', launcher).commands[0], /worktree/);
+});
+
+test('init accepts a token over stdin, and a server override never forwards a saved token elsewhere', async () => {
+  const root = await repo(); let received = '';
+  const http = createServer((req, res) => { received = String(req.headers.authorization ?? ''); res.setHeader('Content-Type', 'application/json'); res.end(JSON.stringify({ actor: { role: 'worker', id: 'worker-a' } })); });
+  await new Promise<void>(r => http.listen(0, '127.0.0.1', r));
+  const url = `http://127.0.0.1:${(http.address() as any).port}`;
+  const env = { ...process.env }; delete env.GRAPHYARD_TOKEN; delete env.GRAPHYARD_URL;
+  try {
+    const child = execFile(process.execPath, [launcher, 'init', '--url', url, '--token-stdin'], { cwd: root, env });
+    child.stdin!.end(secret);
+    const output = await new Promise<string>((accept, reject) => { let text = ''; child.stdout!.on('data', d => text += d); child.on('exit', code => code === 0 ? accept(text) : reject(new Error('init failed'))); child.on('error', reject); });
+    assert.equal(received, `Bearer ${secret}`); assert.equal(output.includes(secret), false);
+    received = '';
+    await promisify(execFile)(process.execPath, [launcher, 'doctor'], { cwd: root, env: { ...env, GRAPHYARD_URL: url.replace('127.0.0.1', 'localhost') } });
+    assert.equal(received, '');
+  } finally { await new Promise<void>(r => http.close(() => r())); await rm(root, { recursive: true, force: true }); }
+});
