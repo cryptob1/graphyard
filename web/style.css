@@ -6,3 +6,5 @@
 
 /* Connection recovery must remain accessible on small screens. */
 @media(max-width:650px){.sidebar .sidebar-bottom{display:block;width:100%;margin-top:8px}.sidebar-bottom p{display:none}.sidebar-bottom .text-button{margin-left:12px}.sidebar{flex-wrap:wrap}}
+
+.history-scroll{max-height:320px;overflow:auto;overscroll-behavior:contain;margin:12px 0}.history-scroll:focus-visible{outline:2px solid #b7d78d;outline-offset:3px}.history-option{display:flex;align-items:center;gap:8px;margin:12px 0}.history-option input{width:auto}.history-scroll .timeline>div{flex-wrap:wrap;overflow-wrap:anywhere}

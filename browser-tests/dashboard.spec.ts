@@ -130,3 +130,24 @@ test('a delayed post-create refresh cannot restore the signed-out session or lea
   await expect.poll(() => eventReads, { timeout: 10000 }).toBeGreaterThan(1);
   await expect(page.getByRole('dialog').getByText('fixture-created', { exact: true })).toBeVisible();
  });
+
+test('history groups observation noise and bounds expanded rows without losing other events', async ({ page }) => {
+  await fixture(page);
+  const events = Array.from({ length: 60 }, (_, i) => ({ seq: 60 - i, kind: i < 40 ? 'github.observed' : `work.event-${i}`, actor: 'github', created_at: new Date(Date.UTC(2026, 0, 1, 0, 60 - i)).toISOString() }));
+  await page.route('**/api/events**', route => route.fulfill({ json: events }));
+  await login(page); await page.getByRole('button', { name: /GY-1 P1/ }).click();
+  const history = page.getByRole('region', { name: 'Work history', exact: true });
+  await expect(history.getByText('github.observed × 40', { exact: true })).toBeVisible();
+  await expect(history.locator('.timeline > div')).toHaveCount(20);
+  await history.getByRole('button', { name: 'Show more history' }).click();
+  await expect(history.locator('.timeline > div')).toHaveCount(21);
+  await expect(history.getByText('work.event-59', { exact: true })).toBeAttached();
+  await history.getByLabel('Group consecutive GitHub observations').uncheck();
+  await expect(history.locator('.timeline > div')).toHaveCount(20);
+  await history.getByRole('button', { name: 'Show more history' }).click();
+  await expect(history.locator('.timeline > div')).toHaveCount(40);
+  const bounds = await history.getByRole('region', { name: 'History entries' }).evaluate(e => ({ height: e.clientHeight, content: e.scrollHeight }));
+  expect(bounds.height).toBeLessThanOrEqual(320); expect(bounds.content).toBeGreaterThan(bounds.height);
+  await history.getByRole('button', { name: 'Show less history' }).click();
+  await expect(history.locator('.timeline > div')).toHaveCount(20);
+});

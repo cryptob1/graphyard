@@ -63,3 +63,9 @@ Run `npm run test:browser` after `npx playwright install chromium` to exercise t
 Signing out invalidates pending work mutations and their dashboard refreshes locally. Responses from a previous session cannot restore its data or errors after another token is entered. A write already accepted by the server remains in the work ledger.
 
 The work-detail History panel retains its last loaded entries during periodic refresh and temporary event-fetch failures. Selecting different work or ending the session clears those entries.
+
+### Bounded work history
+
+The work detail drawer shows 20 history entries at a time inside a keyboard-accessible, height-limited scroll area. Consecutive GitHub observations from the same actor are grouped with a count and time range; this groups observation activity, not a claim that their payloads are identical. Turn off grouping to inspect individual event rows, and use **Show more history** or **Show less history** to change the visible count. Refreshes preserve this choice; opening another work item resets it.
+
+The dashboard receives the latest 300 events per work item. Its display limits do not delete or truncate the append-only database audit ledger; older events remain in storage.
