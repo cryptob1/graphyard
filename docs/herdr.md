@@ -71,3 +71,21 @@ Record actual evidence in Graphyard. The automated local race tests are useful k
 ## Next plugin work
 
 Automated dispatch/ACK handling, agent-specific lifecycle hooks, and rich Herdr pane rendering are intentionally deferred until this basic protocol is exercised with real sessions. No multiple-agent session is launched during the initial single-agent build.
+
+## Agent names and automatic board assignment
+
+Each independently running worker must have its own Graphyard principal and token. The operator can optionally add `displayName` and `runtime` to that principal in the server's private `GRAPHYARD_PRINCIPALS` configuration. For example, a worker with ID `worker-17`, display name `Atlas`, and runtime `Codex` appears as **Atlas · Codex** when it claims a task. Runtime is a display label and can describe Claude, Codex, a custom tool, or a human-assisted worker; it does not change authorization.
+
+Assignment happens atomically when the authenticated worker successfully claims the task. The work board and Herdr ledger derive ownership from that lease, not from a typed name, a prompt delivery, or a PR author's GitHub account. Claim requests cannot supply another owner's identity. Agent names and runtimes are operator-configured metadata; Graphyard does not infer them from running processes or verify the model a worker actually uses.
+
+The display identity is snapshotted with each claim and preserved in event history. After release or expiry, the card says **Last worked by Atlas · Codex**, while details say there is no active assignment. Reclaiming under another worker updates the current label and preserves the earlier claim in history. An unconfigured worker displays its canonical ID, and older work items use their recorded workspace owner when available. Renaming a configured worker affects future claims; it does not rewrite historical identity.
+
+Configure one identity per concurrent worker, even when several workers use the same coding tool. A shared `herdr-worker-1` token cannot identify which of several sessions is acting. Keep the stable canonical worker ID visible in task details when names are similar. Server configuration changes require a restart; follow your deployment review process and never commit the principal tokens.
+
+Assignment activity in the dashboard and Herdr ledger is evaluated at the control plane’s work-snapshot Postgres time, matching the clock used to enforce leases. A worker machine’s clock cannot expire or revive a lease in the display. Refresh to obtain a newer observation; the server remains authoritative for all commands.
+
+During upgrades, existing leases retain their owner and epoch before expiry or release clears the lease. Older assignments without recorded labels or claim times keep those fields unknown; Graphyard does not invent identity metadata.
+
+The dashboard and Herdr list use `/api/work-snapshot`, which returns work and its database observation time in one SQL snapshot. They do not pair a work response with a separately fetched status clock. Upgrade the server before using this adapter version.
+
+Long agent names and runtimes are truncated on work cards. Hover the label to see the full identity and worker ID, or open the work details for the full, wrapped assignment.

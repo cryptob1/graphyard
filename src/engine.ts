@@ -23,6 +23,12 @@ const commands = {
 } as const;
 export type Command = keyof typeof commands;
 
+// Old deployments did not persist assignment labels. Preserve the known owner/epoch
+// before clearing a legacy lease; its original claim time is unknown.
+function preserveAssignment(work: Work) {
+  if (work.lease && (!work.lastAssignment || work.lastAssignment.epoch < work.lease.epoch))
+    work.lastAssignment = { owner: work.lease.owner, epoch: work.lease.epoch };
+}
 export class Engine {
   constructor(public store: Store, public ciAppIds: number[] = [15368], public leaseSeconds = 120) {}
   async execute(actor: Principal, command: Command, id: string | null, input: unknown, key: string) {
@@ -54,6 +60,7 @@ export class Engine {
         all.push(work!);
       }
       demand(work, 'Work item not found', 404);
+      preserveAssignment(work);
       if (command !== 'create') demand(work.stage !== 'done', 'Delivered work is immutable; create a follow-up task');
       if (command === 'rereview') {
         if (actor.role !== 'admin') { demand(actor.role === 'worker', 'Worker or operator required', 403); activeLease(work, actor, data.epoch, now); }
@@ -85,6 +92,7 @@ export class Engine {
         demand(!work.lease || Date.parse(work.lease.expiresAt) <= now.getTime(), 'Task already has an active owner');
         demand(!work.submission || work.reworkRequested, 'Implementation is submitted; an operator must request rework before reassignment');
         work.epoch++;
+        work.lastAssignment = { owner: actor.id, epoch: work.epoch, claimedAt: now.toISOString(), ...(actor.displayName ? { displayName: actor.displayName } : {}), ...(actor.runtime ? { runtime: actor.runtime } : {}) };
         work.lease = { owner: actor.id, epoch: work.epoch, expiresAt: new Date(now.getTime() + this.leaseSeconds * 1000).toISOString() };
       }
       if (['heartbeat', 'release', 'workspace', 'submit', 'blocked'].includes(command)) activeLease(work, actor, data.epoch, now);
@@ -144,6 +152,7 @@ export class Engine {
       for (const work of all) {
         if (work.stage === 'done') continue;
         const before = JSON.stringify(work);
+        preserveAssignment(work);
         if (work.lease && Date.parse(work.lease.expiresAt) <= now.getTime()) work.lease = null;
         this.evaluate(work, all, now);
         if (JSON.stringify(work) !== before) {

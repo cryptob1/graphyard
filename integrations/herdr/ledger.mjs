@@ -14,11 +14,20 @@ async function request(path, data) {
   const response = await fetch(`${url}/api/${path}`, { method: data === undefined ? 'GET' : 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', 'Idempotency-Key': randomUUID() }, body: data === undefined ? undefined : JSON.stringify(data), signal: AbortSignal.timeout(15000) });
   const result = await response.json(); if (!response.ok) throw new Error(result.error); return result;
 }
+const ownership = (w, now) => {
+  const active = w.lease && Date.parse(w.lease.expiresAt) > now;
+  const previous = w.lastAssignment ?? [...w.workspaces].sort((a, b) => b.epoch - a.epoch)[0];
+  const owner = active ? w.lease.owner : previous?.owner ?? w.lease?.owner;
+  const epoch = active ? w.lease.epoch : previous?.epoch ?? w.lease?.epoch;
+  const identity = w.lastAssignment?.owner === owner && w.lastAssignment?.epoch === epoch ? w.lastAssignment : null;
+  return owner ? `${active ? '' : 'Last: '}${identity?.displayName ?? owner}${identity?.runtime ? ` · ${identity.runtime}` : ''}` : 'unassigned';
+};
 const rl = createInterface({ input: process.stdin, output: process.stdout });
 console.log('GRAPHYARD · Herdr work ledger\nCommands: list, show GY-N, claim GY-N, heartbeat GY-N EPOCH, release GY-N EPOCH, quit\nClaiming reserves work; it does not launch an agent or start automatic heartbeats.');
 async function list() {
-  const rows = await request('work');
-  console.log('\n' + rows.map(w => `${clean(w.key).padEnd(8)} ${clean(w.stage).padEnd(11)} ${clean(w.lease?.owner ?? 'unassigned').padEnd(16)} ${clean(w.title)}\n         ${clean(w.gates.find(g => !g.passed)?.reasons[0] ?? 'All gates passed')}`).join('\n'));
+  const { work: rows, now } = await request('work-snapshot');
+  const observedAt = Date.parse(now);
+  console.log('\n' + rows.map(w => `${clean(w.key).padEnd(8)} ${clean(w.stage).padEnd(11)} ${clean(ownership(w, observedAt)).padEnd(16)} ${clean(w.title)}\n         ${clean(w.gates.find(g => !g.passed)?.reasons[0] ?? 'All gates passed')}`).join('\n'));
   if (!rows.length) console.log('No work yet. Create a work item in the web UI.');
   return rows;
 }

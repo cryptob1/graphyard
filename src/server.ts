@@ -10,7 +10,7 @@ import { Refusal, demand, type Principal } from './model.js';
 import { githubFromEnv, processJob, type GitHub } from './github.js';
 import { defineScenario, scenarios } from './scenarios.js';
 
-export const principalSchema = z.array(z.object({ id: z.string().min(1), role: z.enum(['admin', 'worker', 'producer', 'reader']), token: z.string().min(32), proofs: z.array(z.string()).optional() }).strict()).min(1);
+export const principalSchema = z.array(z.object({ id: z.string().min(1), role: z.enum(['admin', 'worker', 'producer', 'reader']), token: z.string().min(32), proofs: z.array(z.string()).optional(), displayName: z.string().trim().min(1).max(100).regex(/^[^\u0000-\u001f\u007f]+$/).optional(), runtime: z.string().trim().min(1).max(80).regex(/^[^\u0000-\u001f\u007f]+$/).optional() }).strict()).min(1);
 export type Credential = Principal & { token: string };
 async function body(req: IncomingMessage) {
   const chunks: Buffer[] = []; let size = 0;
@@ -59,8 +59,10 @@ export function server(engine: Engine, credentials: Credential[], github: GitHub
           const githubRepository = github ? await github.reviewRepository() : null;
           const githubPermissions = github ? await github.reviewPermissions() : {};
           const codexAvailable = !!githubRepository && githubPermissions.pull_requests === 'write' && ['read', 'write'].includes(githubPermissions.issues) && githubPermissions.checks === 'write';
-          return send(200, { actor, repository: github?.config.repository ?? process.env.GITHUB_REPOSITORY ?? null, github: !!github, check: 'Graphyard / merge', reviewProviders: codexAvailable ? ['github', 'codex'] : ['github'], githubPermissions, githubRepository, githubAppId: github?.config.appId ?? null, githubInstallationId: github?.config.installationId ?? null, jobs, now: new Date().toISOString() });
+          const observedAt = (await engine.store.pool.query('SELECT clock_timestamp() AS now')).rows[0].now as Date;
+          return send(200, { actor, repository: github?.config.repository ?? process.env.GITHUB_REPOSITORY ?? null, github: !!github, check: 'Graphyard / merge', reviewProviders: codexAvailable ? ['github', 'codex'] : ['github'], githubPermissions, githubRepository, githubAppId: github?.config.appId ?? null, githubInstallationId: github?.config.installationId ?? null, jobs, now: observedAt.toISOString() });
         }
+        if (req.method === 'GET' && url.pathname === '/api/work-snapshot') return send(200, await engine.store.workSnapshot());
         if (req.method === 'GET' && url.pathname === '/api/work') return send(200, await engine.store.list());
         if (req.method === 'GET' && url.pathname === '/api/events') {
           const id = url.searchParams.get('work') ?? undefined;
