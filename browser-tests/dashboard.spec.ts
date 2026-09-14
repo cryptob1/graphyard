@@ -118,3 +118,15 @@ test('a delayed post-create refresh cannot restore the signed-out session or lea
   await expect(page.getByRole('heading', { name: 'Browser fixture' })).toHaveCount(0);
   await expect(page.getByRole('heading', { name: 'Delivery graph' })).toHaveCount(0);
 });
+
+ test('polling retains loaded history when an event refresh fails', async ({ page }) => {
+  await fixture(page); let eventReads = 0;
+  await page.route('**/api/events**', route => {
+    eventReads++;
+    return eventReads === 1 ? route.fulfill({ json: [{ seq: 1, kind: 'fixture-created', actor: 'fixture', created_at: '2026-01-01T00:00:00Z' }] }) : route.fulfill({ status: 503, json: { error: 'History temporarily unavailable' } });
+  });
+  await login(page); await page.getByRole('button', { name: /GY-1 P1/ }).click();
+  await expect(page.getByRole('dialog').getByText('fixture-created', { exact: true })).toBeVisible();
+  await expect.poll(() => eventReads, { timeout: 10000 }).toBeGreaterThan(1);
+  await expect(page.getByRole('dialog').getByText('fixture-created', { exact: true })).toBeVisible();
+ });

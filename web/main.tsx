@@ -52,7 +52,8 @@ function App() {
     void load(); const timer = setInterval(load, 5000);
     return () => { active = false; controller.abort(); clearInterval(timer); };
   }, [token]);
-  useEffect(() => { let active = true; const epoch = sessionEpoch.current; setEvents([]); if (selected) void api(`events?work=${selected}`).then(rows => { if (active && epoch === sessionEpoch.current) setEvents(rows); }).catch(e => { if (active && epoch === sessionEpoch.current) setError(e.message); }); return () => { active = false; }; }, [selected, work]);
+  useEffect(() => { setEvents([]); }, [selected, token]);
+  useEffect(() => { let active = true; const epoch = sessionEpoch.current; if (selected) void api(`events?work=${selected}`).then(rows => { if (active && epoch === sessionEpoch.current) setEvents(rows); }).catch(e => { if (active && epoch === sessionEpoch.current) setError(e.message); }); return () => { active = false; }; }, [selected, work]);
   const item = work.find(w => w.id === selected);
   const visible = work.filter(w => (!filter || w.stage === filter) && `${w.key} ${w.title}`.toLowerCase().includes(query.toLowerCase()));
   const blocked = work.filter(w => w.blocker || w.submission && w.gates.some(g => !g.passed));
