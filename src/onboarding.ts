@@ -31,6 +31,14 @@ export async function localDirectory(root: string) {
   if (tracked.trim()) throw new Error('.graphyard contains tracked files; untrack and inspect them before saving credentials');
   const ignorePath = resolve(root, '.gitignore');
   let ignore = ''; try { ignore = await readFile(ignorePath, 'utf8'); } catch (error: any) { if (error.code !== 'ENOENT') throw error; }
-  if (!ignore.split('\n').includes('.graphyard/')) await writeFile(ignorePath, `${ignore}${ignore.endsWith('\n') || !ignore ? '' : '\n'}.graphyard/\n`);
-  const directory = resolve(root, '.graphyard'); await mkdir(directory, { recursive: true, mode: 0o700 }); return directory;
+  const ignored = (path: string) => {
+    try { execFileSync('git', ['check-ignore', '--quiet', '--', path], { cwd: root, stdio: 'ignore' }); return true; }
+    catch (error: any) { if (error.status === 1) return false; throw new Error('Cannot verify Git ignores local Graphyard credentials'); }
+  };
+  // An earlier matching line can be overridden by later negations. Ignore the
+  // directory itself so nested rules cannot re-include credentials or temp files.
+  const directory = resolve(root, '.graphyard'); await mkdir(directory, { recursive: true, mode: 0o700 });
+  if (!ignored('.graphyard')) await writeFile(ignorePath, `${ignore}${ignore.endsWith('\n') || !ignore ? '' : '\n'}.graphyard/\n`);
+  if (!ignored('.graphyard') || !ignored('.graphyard/connection.json')) throw new Error('Local Graphyard credentials must be ignored by Git before saving');
+  return directory;
 }
