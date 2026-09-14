@@ -5,7 +5,8 @@ import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { localDirectory, saveDiscovery } from './onboarding.js';
 
-export const connectionSchema = z.object({ url: z.string(), cliPath: z.string(), hostId: z.string().min(1).max(200), token: z.string().min(32).optional(), principal: z.string().optional() }).strict();
+export const hostIdSchema = z.string().trim().min(1).max(200);
+export const connectionSchema = z.object({ url: z.string(), cliPath: z.string(), hostId: hostIdSchema, token: z.string().min(32).optional(), principal: z.string().optional() }).strict();
 export type Connection = z.infer<typeof connectionSchema>;
 export function serverOrigin(value: string) {
   const url = new URL(value);

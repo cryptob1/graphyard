@@ -68,3 +68,5 @@ Record actual evidence in Graphyard. The automated local race tests are useful k
 ## Next plugin work
 
 Automated dispatch/ACK handling, agent-specific lifecycle hooks, and rich Herdr pane rendering are intentionally deferred until this basic protocol is exercised with real sessions. No multiple-agent session is launched during the initial single-agent build.
+
+Host IDs from setup and `GRAPHYARD_HOST_ID` have surrounding whitespace removed before workspace registration and handoff checks. Empty host IDs are rejected. Use a stable, distinct ID for each machine.

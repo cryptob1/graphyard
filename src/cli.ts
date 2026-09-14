@@ -8,7 +8,7 @@ import { discover } from './onboarding.js';
 import { startGithubSetup } from './github-setup.js';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
-import { loadConnection, setupRepository, handoff } from './repository-setup.js';
+import { loadConnection, setupRepository, handoff, hostIdSchema } from './repository-setup.js';
 
 try { process.loadEnvFile(); } catch (error: any) { if (error.code !== 'ENOENT') throw error; }
 const [command, id, ...args] = process.argv.slice(2);
@@ -18,7 +18,7 @@ const base = process.env.GRAPHYARD_URL ?? connection?.url ?? 'http://127.0.0.1:4
 let savedToken: string | undefined;
 try { if (connection && new URL(base).origin === connection.url) savedToken = connection.token; } catch { /* request validation reports an invalid URL */ }
 const token = process.env.GRAPHYARD_TOKEN ?? savedToken;
-const hostId = process.env.GRAPHYARD_HOST_ID ?? connection?.hostId ?? hostname();
+const hostId = hostIdSchema.parse(process.env.GRAPHYARD_HOST_ID ?? connection?.hostId ?? hostname());
 const cliPath = fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url));
 async function api(path: string, data?: unknown, requestId = process.env.GRAPHYARD_REQUEST_ID ?? randomUUID()) {
   if (!token) throw new Error('Set GRAPHYARD_TOKEN to your individual credential');

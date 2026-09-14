@@ -102,3 +102,16 @@ test('init accepts a token over stdin, and a server override never forwards a sa
     assert.equal(received, '');
   } finally { await new Promise<void>(r => http.close(() => r())); await rm(root, { recursive: true, force: true }); }
 });
+
+ test('padded host IDs normalize before saving and match registered workspace handoffs', async () => {
+  const root = await repo(); const config = join(root, 'herdr-private');
+  try {
+    await setupRepository(root, { ...connection, hostId: '  machine-a  ' }, { herdr: true, fetcher, runHerdr: args => args[1] === 'config-dir' ? config : '' });
+    const saved = (await loadConnection(root))!;
+    assert.equal(saved.hostId, 'machine-a');
+    assert.equal(JSON.parse(await readFile(join(config, 'config.json'), 'utf8')).hostId, 'machine-a');
+    const work = { key: 'GY-5', lease: { owner: 'worker-a', epoch: 2, expiresAt: '2030-01-01T00:02:00Z' }, workspaces: [{ epoch: 2, host: 'machine-a', path: root }] };
+    assert.ok(handoff(work, { actor: { id: 'worker-a', role: 'worker' }, now: '2030-01-01T00:00:00Z' }, saved.hostId, launcher).commands.length);
+    await assert.rejects(setupRepository(root, { ...connection, hostId: '   ' }, { fetcher }));
+  } finally { await rm(root, { recursive: true, force: true }); }
+ });
