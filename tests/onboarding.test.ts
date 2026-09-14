@@ -11,7 +11,8 @@ async function repository() { const root = await mkdtemp(join(tmpdir(), 'graphya
 test('discovery identifies GitHub without exposing embedded credentials and preserves repository instructions', async () => {
   assert.equal(repositoryFromRemote('https://test-only-password@github.com/owner/repo.git'), 'owner/repo');
   assert.equal(repositoryFromRemote('git@github.com:owner/repo.git'), 'owner/repo');
-  assert.equal(repositoryFromRemote('https://github.com.attacker.test/owner/repo'), null);
+  for (const remote of ['ssh://git@GitHub.com/owner/repo.git', 'ssh://git@github.com/owner/repo.git', 'ssh://git@github.com:22/owner/repo.git', 'ssh://git@ssh.github.com:443/owner/repo.git', 'https://GitHub.com/owner/repo.git', 'https://github.com:443/owner/repo.git']) assert.equal(repositoryFromRemote(remote), 'owner/repo');
+  for (const remote of ['https://github.com.attacker.test/owner/repo', 'ssh://git@github.com.attacker.test/owner/repo', 'https://github.com@attacker.test/owner/repo', 'ssh://git@github.com/owner/repo.git?other', 'file:///owner/repo']) assert.equal(repositoryFromRemote(remote), null);
   const root = await repository();
   try {
     execFileSync('git', ['remote', 'add', 'origin', 'git@github.com:owner/repo.git'], { cwd: root });

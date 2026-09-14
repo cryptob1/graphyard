@@ -125,8 +125,10 @@ test('setup binds the checkout identity before saving credentials or changing He
     execFileSync('git',['remote','add','origin','git@github.com:other/project.git'],{cwd:root});
     await assert.rejects(setupRepository(root,connection,{fetcher,herdr:true,runHerdr}),/different repositories/);
     assert.equal(calls,0); await assert.rejects(stat(join(root,'.graphyard/connection.json'))); await assert.rejects(stat(join(root,'AGENTS.md')));
-    execFileSync('git',['remote','set-url','origin','https://github.com/owner/project.git'],{cwd:root});
-    assert.equal((await setupRepository(root,connection,{fetcher})).connected,true);
+    for (const remote of ['https://github.com/owner/project.git','ssh://git@github.com/owner/project.git','ssh://git@ssh.github.com:443/owner/project.git']) {
+      execFileSync('git',['remote','set-url','origin',remote],{cwd:root});
+      assert.equal((await setupRepository(root,connection,{fetcher})).connected,true);
+    }
   } finally { await rm(root,{recursive:true,force:true}); }
 });
 
