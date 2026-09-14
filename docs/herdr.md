@@ -84,6 +84,8 @@ The display identity is snapshotted with each claim and preserved in event histo
 
 Configure one identity per concurrent worker, even when several workers use the same coding tool. A shared `herdr-worker-1` token cannot identify which of several sessions is acting. Keep the stable canonical worker ID visible in task details when names are similar. Server configuration changes require a restart; follow your deployment review process and never commit the principal tokens.
 
-Assignment activity in the dashboard and Herdr ledger is evaluated at the control plane’s last observed Postgres time, matching the clock used to enforce leases. A worker machine’s clock cannot expire or revive a lease in the display. Refresh to obtain a newer observation; the server remains authoritative for all commands.
+Assignment activity in the dashboard and Herdr ledger is evaluated at the control plane’s work-snapshot Postgres time, matching the clock used to enforce leases. A worker machine’s clock cannot expire or revive a lease in the display. Refresh to obtain a newer observation; the server remains authoritative for all commands.
 
 During upgrades, existing leases retain their owner and epoch before expiry or release clears the lease. Older assignments without recorded labels or claim times keep those fields unknown; Graphyard does not invent identity metadata.
+
+The dashboard and Herdr list use `/api/work-snapshot`, which returns work and its database observation time in one SQL snapshot. They do not pair a work response with a separately fetched status clock. Upgrade the server before using this adapter version.
