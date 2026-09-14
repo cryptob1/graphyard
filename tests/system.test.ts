@@ -8,7 +8,7 @@ import EmbeddedPostgres from 'embedded-postgres';
 import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import { server } from '../src/server.js';
-import type { Principal, Work, Observation } from '../src/model.js';
+import { ReconciliationRetry, type Principal, type Work, type Observation } from '../src/model.js';
 import { defineScenario, scenarios } from '../src/scenarios.js';
 import { setTimeout as delay } from 'node:timers/promises';
 import { processJob, type GitHub } from '../src/github.js';
@@ -361,4 +361,23 @@ test('concurrent task changes schedule a prompt retry without an operator error'
   assert.equal(w.stage, 'done'); assert.equal(w.delivery?.authorizationRevision, authorizedRevision);
   assert.ok(!w.violations.some(v => v.includes('without a prior authorization')));
   assert.ok(w.violations.some(v => v.includes('Post-merge')));
+ });
+
+ test('review request persistence classifies an expired dispatch lease as a safe retry', async () => {
+  let w = await submitted(); w = await engine.observe(w.id, w.revision, observation(w));
+  const token = randomUUID();
+  await store.pool.query("UPDATE jobs SET token=$2,locked_until=clock_timestamp()-interval '1 second' WHERE work_id=$1", [w.id, token]);
+  await assert.rejects(engine.bindReviewRequest(w.id, w.revision, { commentId: 999, sha: head, baseSha: base, policyRevision: 1, body: '@codex review', createdAt: new Date().toISOString() }, token), ReconciliationRetry);
+  const current = (await store.list()).find(x => x.id === w.id)!;
+  assert.equal(current.reviewRequest, undefined); assert.equal(current.revision, w.revision);
+ });
+
+ test('whole-second delivery never searches past a same-second policy revocation', async () => {
+  let w = await submitted(); w = await engine.observe(w.id, w.revision, observation(w));
+  w = await engine.execute(producer, 'evidence', w.id, proof(), randomUUID());
+  await delay(1100 - Date.now() % 1000);
+  w = await engine.execute(operator, 'reviewpolicy', w.id, { provider: 'codex', expectedPolicyRevision: 1, reason: 'Revoke the prior review policy' }, randomUUID());
+  const mergedAt = w.updatedAt.replace(/\.\d+Z$/, 'Z');
+  w = await engine.observe(w.id, w.revision, { ...observation(w), merged: true, mergedAt, mergeSha: 'e'.repeat(40) });
+  assert.notEqual(w.stage, 'done'); assert.ok(w.violations.some(v => v.includes('without a prior authorization')));
  });

@@ -119,7 +119,7 @@ export class Engine {
   async bindReviewRequest(id: string, expectedRevision: number, request: ReviewRequest, jobToken: string) {
     return this.store.transaction(async (db, now) => {
       const job = (await db.query('SELECT 1 FROM jobs WHERE work_id=$1 AND token=$2 AND locked_until>$3', [id, jobToken, now])).rows[0];
-      demand(job, 'Integration job lease expired or superseded');
+      requireCurrent(job, 'Integration job lease expired or superseded');
       const all: Work[] = (await db.query('SELECT document FROM work_items ORDER BY number')).rows.map(r => r.document);
       const work = all.find(w => w.id === id);
       requireCurrent(work && work.revision === expectedRevision && work.stage !== 'done' && !work.observation?.merged, 'Task changed during review dispatch');
