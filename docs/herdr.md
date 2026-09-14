@@ -91,3 +91,5 @@ During upgrades, existing leases retain their owner and epoch before expiry or r
 The dashboard and Herdr list use `/api/work-snapshot`, which returns work and its database observation time in one SQL snapshot. They do not pair a work response with a separately fetched status clock. Upgrade the server before using this adapter version.
 
 CLI `next` and `handoff` also use the timestamp paired with `/api/work-snapshot`. Host clock skew or a later status response cannot make an active assignment appear expired. Handoff still checks the authenticated worker identity; the supervisor verifies the current lease before launching the child.
+
+Long agent names and runtimes are truncated on work cards. Hover the label to see the full identity and worker ID, or open the work details for the full, wrapped assignment.

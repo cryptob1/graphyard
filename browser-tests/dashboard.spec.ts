@@ -171,3 +171,19 @@ test('history groups observation noise and bounds expanded rows without losing o
   await login(page);const card=page.locator('.card').first();await expect(card).toContainText('Atlas · Codex');await expect(card).not.toContainText('Last worked by');
   await expect(card.locator('.dot.green')).toHaveCount(1);
  });
+
+ test('maximum-length agent labels fit board cards and remain available in details', async ({page}) => {
+  await fixture(page);
+  const displayName='A'.repeat(100),runtime='R'.repeat(80),identity=`${displayName} · ${runtime}`;
+  const assigned={...work,lease:{owner:'worker-a',epoch:1,expiresAt:'2026-01-01T00:01:00Z'},lastAssignment:{owner:'worker-a',epoch:1,displayName,runtime}};
+  await page.route('**/api/work-snapshot',route=>route.fulfill({json:{work:[assigned],now:'2026-01-01T00:00:00Z'}}));
+  await login(page);await page.getByRole('button',{name:/Work board/}).click();
+  const card=page.locator('.card').first(),label=card.locator('.assignment-label');
+  await expect(label).toHaveText(identity);
+  await expect(label).toHaveAttribute('title',`${identity} · Worker ID: worker-a`);
+  const bounds=await card.evaluate(e=>{const label=e.querySelector('.assignment-label')!;return {card:e.clientWidth,content:e.scrollWidth,label:label.clientWidth,text:label.scrollWidth,ellipsis:getComputedStyle(label).textOverflow}});
+  expect(bounds.content).toBeLessThanOrEqual(bounds.card);expect(bounds.text).toBeGreaterThan(bounds.label);expect(bounds.ellipsis).toBe('ellipsis');
+  await card.click();const details=page.getByRole('dialog').locator('.assignment-details');
+  await expect(details).toHaveText(identity);
+  expect(await details.evaluate(e=>e.scrollWidth<=e.clientWidth)).toBe(true);
+ });

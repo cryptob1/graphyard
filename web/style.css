@@ -8,3 +8,5 @@
 @media(max-width:650px){.sidebar .sidebar-bottom{display:block;width:100%;margin-top:8px}.sidebar-bottom p{display:none}.sidebar-bottom .text-button{margin-left:12px}.sidebar{flex-wrap:wrap}}
 
 .history-scroll{max-height:320px;overflow:auto;overscroll-behavior:contain;margin:12px 0}.history-scroll:focus-visible{outline:2px solid #b7d78d;outline-offset:3px}.history-option{display:flex;align-items:center;gap:8px;margin:12px 0}.history-option input{width:auto}.history-scroll .timeline>div{flex-wrap:wrap;overflow-wrap:anywhere}
+
+.card-meta .assignment-label{min-width:0;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.card-meta .dot,.card-meta .push{flex-shrink:0}.card-meta .push{padding-left:8px}.assignment-details{overflow-wrap:anywhere}
