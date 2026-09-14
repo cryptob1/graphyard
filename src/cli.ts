@@ -4,7 +4,7 @@ import { hostname } from 'node:os';
 import { resolve } from 'node:path';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { supervise } from './supervisor.js';
-import { discover } from './onboarding.js';
+import { assertRepository, discover } from './onboarding.js';
 import { startGithubSetup } from './github-setup.js';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
@@ -123,6 +123,8 @@ Never share an operator or producer credential with an implementation agent.`); 
   if (command === 'evidence' || command === 'register') return print(await mutate(command === 'register' ? 'workspace' : 'evidence', JSON.parse(await readFile(args[0], 'utf8'))));
   if (command === 'worktree') {
     const epoch = Number(args[0]); const root = execFileSync('git', ['rev-parse', '--show-toplevel'], { encoding: 'utf8' }).trim();
+    const status = await api('status');
+    assertRepository((await discover(root)).repository, status.repository);
     const branch = work.submission ? work.workspaces.find((w: any) => w.epoch === work.submission.epoch)?.branch : `graphyard/${work.key.toLowerCase()}-${epoch}`;
     if (!branch) throw new Error('Submitted workspace branch is missing');
     const path = resolve(root, '.graphyard/worktrees', `${work.key}-${epoch}`);

@@ -101,3 +101,5 @@ When init runs in a linked worktree, it saves the shared worker connection in th
 Repository discovery recognizes GitHub HTTPS, `git@github.com:owner/repo.git`, and URI-style SSH origins, including `ssh://git@github.com/owner/repo.git` and `ssh://git@ssh.github.com:443/owner/repo.git`. Other hosts are not treated as GitHub.
 
 An explicitly empty or whitespace-only `GRAPHYARD_TOKEN` also refuses init instead of clearing saved credentials. A nonempty `--token-stdin` value takes precedence over that environment setting.
+
+For a handoff without a registered workspace, run the printed worktree command from the managed repository checkout. Before reserving or creating anything, worktree verifies that checkout’s GitHub origin against the server’s configured repository. An unrelated or unrecognized checkout refuses. A server without a configured repository still permits local bootstrap; it cannot provide this repository identity check.

@@ -3,7 +3,7 @@ import { execFileSync } from 'node:child_process';
 import { dirname, isAbsolute, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
-import { discover, localDirectory, saveDiscovery } from './onboarding.js';
+import { assertRepository, discover, localDirectory, saveDiscovery } from './onboarding.js';
 
 export const hostIdSchema = z.string().trim().min(1).max(200);
 export const connectionSchema = z.object({ url: z.string(), cliPath: z.string(), hostId: hostIdSchema, token: z.string().min(32).optional(), principal: z.string().optional() }).strict();
@@ -88,10 +88,7 @@ export async function setupRepository(root: string, input: Connection, options: 
     if (!response.ok) throw new Error(`Graphyard rejected the credential (${response.status}); setup has not saved it`);
     const status = await response.json();
     if (status.actor?.role !== 'worker') throw new Error('Repository worker setup requires a worker credential; operator, producer, and reader tokens are not suitable for launching workers');
-    if (typeof status.repository === 'string' && status.repository) {
-      if (!detected.repository) throw new Error('Cannot verify this checkout against the configured server repository; configure its GitHub origin before setup');
-      if (detected.repository.toLowerCase() !== status.repository.toLowerCase()) throw new Error('This checkout and Graphyard server are configured for different repositories; setup has not saved credentials');
-    }
+    assertRepository(detected.repository, status.repository);
     connection.principal = status.actor.id;
   }
   const instructionsFile = resolve(root, 'AGENTS.md'); await regularOrMissing(instructionsFile);
@@ -128,5 +125,5 @@ export function handoff(work: any, status: any, hostId: string, cliPath: string)
   const cli = `node ${shellQuote(cliPath)}`;
   return { work: work.key, epoch: lease.epoch, owner: lease.owner, workspace: workspace ?? null,
     commands: workspace ? [`cd ${shellQuote(workspace.path)}`, `${cli} watch ${shellQuote(work.key)} ${lease.epoch} -- YOUR_AGENT_COMMAND`] : [`${cli} worktree ${shellQuote(work.key)} ${lease.epoch}`, `${cli} handoff ${shellQuote(work.key)}`],
-    note: 'Handoff does not start a worker or renew ownership. Keep the lease alive while preparing, then start the supervisor.' };
+    note: `${!workspace ? 'Run worktree from the managed repository checkout; its origin is verified before reservation. ' : ''}Handoff does not start a worker or renew ownership. Keep the lease alive while preparing, then start the supervisor.` };
 }
