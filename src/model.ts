@@ -33,6 +33,7 @@ export interface ReviewRequest { commentId: number; sha: string; baseSha: string
 export interface AgentReview { provider: 'codex'; sha: string; approved: boolean; reason: string; summaryId?: number; resultId?: number; requestId?: number; reactionId?: number; completedAt?: string }
 export interface Observation {
   agentReview?: AgentReview;
+  prState?: 'open' | 'closed'; draft?: boolean;
   candidate: Candidate; checks: { name: string; result: string; appId: number }[];
   reviews: { reviewer: string; sha: string; state: string }[];
   merged: boolean; mergeSha: string | null; mergedAt?: string | null; mergeable: boolean;

@@ -381,3 +381,21 @@ test('concurrent task changes schedule a prompt retry without an operator error'
   w = await engine.observe(w.id, w.revision, { ...observation(w), merged: true, mergedAt, mergeSha: 'e'.repeat(40) });
   assert.notEqual(w.stage, 'done'); assert.ok(w.violations.some(v => v.includes('without a prior authorization')));
  });
+
+test('draft and closed submissions wait normally and dispatch after becoming ready', async () => {
+  for (const initial of [{prState:'open' as const,draft:true},{prState:'closed' as const,draft:false}]) {
+    let w = await submitted();
+    w = await engine.execute(operator,'reviewpolicy',w.id,{provider:'codex',expectedPolicyRevision:1,reason:'Use agent review'},randomUUID());
+    let state = initial, requests = 0;
+    const adapter = {
+      observe: async (work: Work) => ({...observation(work),...state,mergeable:state.prState==='open'&&!state.draft}),
+      requestCodex: async (work: Work, guard:()=>Promise<void>) => {await guard();requests++;return {commentId:900,sha:head,baseSha:base,policyRevision:work.policyRevision,body:'@codex review',createdAt:new Date().toISOString()};},
+      publish: async (_work:Work, forced:unknown, guard:()=>Promise<void>) => {assert.equal(forced,undefined);await guard();},
+    } as unknown as GitHub;
+    async function run() {await store.pool.query("UPDATE jobs SET available_at=now()+interval '1 hour'");await store.pool.query('UPDATE jobs SET available_at=now() WHERE work_id=$1',[w.id]);await processJob(engine,adapter);}
+    await run(); assert.equal(requests,0);
+    assert.equal((await store.pool.query('SELECT error FROM jobs WHERE work_id=$1',[w.id])).rows[0].error,null);
+    state={prState:'open',draft:false}; await run(); assert.equal(requests,1);
+    assert.equal((await store.list()).find(x=>x.id===w.id)!.reviewRequest?.commentId,900);
+  }
+});

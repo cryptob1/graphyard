@@ -138,3 +138,13 @@ test('unchanged check output avoids redundant writes while still guarding the sn
   await f.github.publish(f.work, 'New refusal', async () => { guards++; });
   assert.equal(writes, 2);
 });
+
+test('draft and closed PRs expose actionable review waits without requesting provider evidence', async () => {
+  for (const state of [{state:'open',draft:true}, {state:'closed',draft:false}]) {
+    const f = fixture(); Object.assign(f.pr,state); f.work.policy.reviewProvider='codex';
+    const observed = await f.github.observe(f.work);
+    assert.equal(observed.prState,state.state); assert.equal(observed.draft,state.draft);
+    assert.equal(observed.agentReview?.approved,false); assert.match(observed.agentReview!.reason,/mark it ready|reopen/);
+    assert.ok(!f.calls.some(c=>c.path.includes('/comments')));
+  }
+});

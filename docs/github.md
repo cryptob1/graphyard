@@ -128,3 +128,5 @@ Rate/access refusals (403/429) pause that process's GitHub client for at least o
 Concurrent jobs share one installation-token refresh. Token creation uses the same rate-limit cooldown as repository reads and writes, so an authentication refusal cannot trigger a fresh token request for every queued job.
 
 The agent-review migration refuses repositories that require CODEOWNERS approval before making any protection changes. The current adapter proves an independent Codex review, not approval by a configured owner. Define an explicit ownership-review policy first; the helper does not silently remove that additional requirement. This applies to both preview and apply.
+
+Draft and closed, unmerged PRs wait at a refusing gate without dispatching review requests or raising integration-job errors. Mark the PR ready or reopen it to resume dispatch. If the PR changes between observation and dispatch/publication, the stale snapshot is rejected and retried through the normal coordination-retry path.

@@ -94,7 +94,9 @@ export class GitHub {
     const latest = new Map<string, any>();
     for (const r of reviews) if (['APPROVED', 'CHANGES_REQUESTED', 'DISMISSED'].includes(r.state)) latest.set(r.user.login, r);
     const candidateBase = pr.merged && work.candidate && work.candidate.sha === pr.head.sha ? work.candidate.baseSha : pr.base.sha;
-    const agentReview = work.policy.review && work.policy.reviewProvider === 'codex' ? await observeCodex(this, pr.number, pr.head.sha, reviews, pr.user.id, work.reviewRequest, candidateBase, work.policyRevision, this.config.appId) : undefined;
+    const agentReview = work.policy.review && work.policy.reviewProvider === 'codex' ? !pr.merged && (pr.state !== 'open' || pr.draft !== false)
+      ? { provider: 'codex' as const, sha: pr.head.sha, approved: false, reason: pr.draft ? 'Pull request is draft; mark it ready to request code review' : 'Pull request is not open; reopen it to request code review' }
+      : await observeCodex(this, pr.number, pr.head.sha, reviews, pr.user.id, work.reviewRequest, candidateBase, work.policyRevision, this.config.appId) : undefined;
     const confirmed = await this.request(`/pulls/${work.submission!.pr}`);
     demand(confirmed.head.sha === pr.head.sha && confirmed.base.sha === pr.base.sha && confirmed.base.ref === pr.base.ref && confirmed.head.ref === pr.head.ref
       && confirmed.state === pr.state && confirmed.draft === pr.draft && confirmed.merged === pr.merged, 'PR changed while collecting evidence; retry');
@@ -103,14 +105,14 @@ export class GitHub {
       checks: checks.filter(c => c.name !== CHECK_NAME).map(c => ({ name: c.name, result: c.status === 'completed' ? c.conclusion : c.status, appId: c.app.id })),
       ...(agentReview ? { agentReview } : {}),
       reviews: [...latest.values()].map(r => ({ reviewer: r.user.login, sha: r.commit_id, state: r.state })),
-      merged: pr.merged, mergeSha: pr.merge_commit_sha, mergedAt: pr.merged_at, mergeable: pr.mergeable === true && !pr.draft && pr.state === 'open',
+      prState: pr.state, draft: pr.draft, merged: pr.merged, mergeSha: pr.merge_commit_sha, mergedAt: pr.merged_at, mergeable: pr.mergeable === true && !pr.draft && pr.state === 'open',
       protected: protectedBranch, files: files.map(f => f.filename), at: startedAt,
     };
   }
   async requestCodex(work: Work, beforeWrite: () => Promise<void>): Promise<ReviewRequest> {
     demand(work.candidate && work.policy.review && work.policy.reviewProvider === 'codex', 'Candidate with Codex review policy required');
     const pr = await this.request(`/pulls/${work.candidate.pr}`);
-    demand(pr.head.sha === work.candidate.sha && pr.base.sha === work.candidate.baseSha && pr.state === 'open' && !pr.draft, 'PR changed before review dispatch; retry');
+    requireCurrent(pr.head.sha === work.candidate.sha && pr.base.sha === work.candidate.baseSha && pr.state === 'open' && pr.draft === false, 'PR changed before review dispatch; retry');
     const body = `@codex review\n\n<!-- graphyard-review:${randomUUID()} head:${work.candidate.sha} base:${work.candidate.baseSha} policy:${work.policyRevision} -->`;
     await beforeWrite();
     const comment = await this.request(`/issues/${work.candidate.pr}/comments`, 'POST', { body });
@@ -124,8 +126,8 @@ export class GitHub {
     const body = { name: CHECK_NAME, head_sha: work.candidate.sha, status: 'completed', conclusion: reasons.length ? 'failure' : 'success', external_id: work.id,
       output: { title: reasons.length ? 'REFUSED' : 'All required gates passed', summary: (reasons.length ? reasons.map(r => `- ${r}`).join('\n') : `Candidate ${work.candidate.sha}; base ${work.candidate.baseSha}; policy ${work.policyRevision}`).slice(0, 60000) } };
     const pr = await this.request(`/pulls/${work.candidate.pr}`);
-    if (!reasons.length || !forcedReason) demand(pr.head.sha === work.candidate.sha && pr.base.sha === work.candidate.baseSha, 'PR changed before check publication; retry');
-    if (!reasons.length) demand(pr.state === 'open' && !pr.draft && pr.base.ref === this.config.base, 'PR is closed, draft, or retargeted; refusing success');
+    if (!reasons.length || !forcedReason) requireCurrent(pr.head.sha === work.candidate.sha && pr.base.sha === work.candidate.baseSha, 'PR changed before check publication; retry');
+    if (!reasons.length) requireCurrent(pr.state === 'open' && !pr.draft && pr.base.ref === this.config.base, 'PR is closed, draft, or retargeted; refusing success');
     await beforeWrite();
     if (existing?.status === body.status && existing.conclusion === body.conclusion && existing.external_id === body.external_id
       && existing.output?.title === body.output.title && existing.output?.summary === body.output.summary) return;
@@ -153,7 +155,7 @@ export async function processJob(engine: Engine, github: GitHub) {
     if (work?.submission && work.stage !== 'done') {
       const observation = await github.observe(work);
       work = await engine.observe(work.id, work.revision, observation, job.token);
-      if (!observation.merged && work.policy.review && work.policy.reviewProvider === 'codex' && (!work.reviewRequest || work.reviewRequest.sha !== work.candidate?.sha || work.reviewRequest.baseSha !== work.candidate?.baseSha || work.reviewRequest.policyRevision !== work.policyRevision)) {
+      if (!observation.merged && observation.prState === 'open' && observation.draft === false && work.policy.review && work.policy.reviewProvider === 'codex' && (!work.reviewRequest || work.reviewRequest.sha !== work.candidate?.sha || work.reviewRequest.baseSha !== work.candidate?.baseSha || work.reviewRequest.policyRevision !== work.policyRevision)) {
         const request = await github.requestCodex(work, guard(work, false));
         work = await engine.bindReviewRequest(work.id, work.revision, request, job.token);
       }
