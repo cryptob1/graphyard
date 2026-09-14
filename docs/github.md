@@ -136,3 +136,5 @@ Hosted Codex varies courtesy text after its fixed clean verdict. The adapter nor
 Codex capability is advertised only when the active installation token confirms Pull requests: write, Issues: read (or write), and Checks: write. Token authentication errors or missing permissions disable the advertised capability, and protection migration refuses older/unverified servers. Accept updated GitHub App permissions before migration; credentials are never returned by the status API. Permission observations refresh with installation authentication.
 
 The dashboard disables Codex provider selection and re-review when the server does not advertise verified support, with an explanation to check the App connection and permission updates. Switching an existing task back to formal GitHub review remains available to the operator.
+
+Capability verification also checks the installation token’s paginated repository inventory and records the matched repository ID/name. A configured name or access to a public repository does not prove installation membership. Missing membership or an unavailable inventory disables Codex support and refuses the protection migration.
