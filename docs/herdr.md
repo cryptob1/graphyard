@@ -89,3 +89,5 @@ Assignment activity in the dashboard and Herdr ledger is evaluated at the contro
 During upgrades, existing leases retain their owner and epoch before expiry or release clears the lease. Older assignments without recorded labels or claim times keep those fields unknown; Graphyard does not invent identity metadata.
 
 The dashboard and Herdr list use `/api/work-snapshot`, which returns work and its database observation time in one SQL snapshot. They do not pair a work response with a separately fetched status clock. Upgrade the server before using this adapter version.
+
+CLI `next` and `handoff` also use the timestamp paired with `/api/work-snapshot`. Host clock skew or a later status response cannot make an active assignment appear expired. Handoff still checks the authenticated worker identity; the supervisor verifies the current lease before launching the child.

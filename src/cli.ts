@@ -91,16 +91,21 @@ Never share an operator or producer credential with an implementation agent.`); 
   if (command === 'scenarios') return print(await api('scenarios'));
   if (command === 'scenario') return print(await api('scenarios', JSON.parse(await readFile(id, 'utf8'))));
   if (command === 'list' || command === 'next') {
-    const items = await api('work');
-    return print(command === 'list' ? items : items.filter((w: any) => w.stage !== 'done' && w.ready && !w.blocker && (!w.submission || w.reworkRequested) && (!w.lease || Date.parse(w.lease.expiresAt) <= Date.now()) && w.dependencies.every((d: string) => items.some((x: any) => x.id === d && x.stage === 'done'))).sort((a: any, b: any) => a.priority - b.priority));
+    const snapshot = await api('work-snapshot'); const items = snapshot.work;
+    return print(command === 'list' ? items : items.filter((w: any) => w.stage !== 'done' && w.ready && !w.blocker && (!w.submission || w.reworkRequested) && (!w.lease || Date.parse(w.lease.expiresAt) <= Date.parse(snapshot.now)) && w.dependencies.every((d: string) => items.some((x: any) => x.id === d && x.stage === 'done'))).sort((a: any, b: any) => a.priority - b.priority));
   }
   if (command === 'create') return print(await api('work', JSON.parse(await readFile(id, 'utf8'))));
+  if (command === 'handoff') {
+    const [snapshot, status] = await Promise.all([api('work-snapshot'), api('status')]);
+    const work = snapshot.work.find((w: any) => w.id === id || w.key === id);
+    if (!work) throw new Error(`Unknown work item ${id}`);
+    return print(handoff(work, { ...status, now: snapshot.now }, hostId, connection?.cliPath ?? cliPath));
+  }
   const items = await api('work'); const work = items.find((w: any) => w.id === id || w.key === id);
   if (command === 'events' && !id) return print(await api('events'));
   if (!work) throw new Error(`Unknown work item ${id}`);
   const mutate = (name: string, data: unknown) => api(`work/${work.id}/${name}`, data);
   if (command === 'status') return print(work);
-  if (command === 'handoff') return print(handoff(work, await api('status'), hostId, connection?.cliPath ?? cliPath));
   if (command === 'events') return print(await api(`events?work=${work.id}`));
   if (command === 'rereview') return print(await mutate(command, args[0] ? { epoch: Number(args[0]) } : {}));
   if (command === 'reviewpolicy') return print(await mutate(command, { provider: args[0], expectedPolicyRevision: Number(args[1]), reason: args.slice(2).join(' ') }));
