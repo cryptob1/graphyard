@@ -68,3 +68,7 @@ A trusted producer with permission for that exact proof name submits ordinary ev
 Include the exact tested head SHA, base SHA, policy revision, result, counts, and artifact URL described in the [agent protocol](protocol.md#evidence). The evidence must match the pinned scenario revision and environment, in addition to the candidate and policy. A passed staging run cannot satisfy a production requirement. An older or newer scenario run cannot satisfy the pinned version accidentally.
 
 Defining a case does not count as running it. Running it does not count as passing it. A worker reporting pass does not make the result independently trusted.
+
+## Loading and revised work
+
+The library distinguishes loading, failed reads and a confirmed empty result. Retry a failed read; previously loaded definitions are labeled potentially stale. Adding a definition does not run tests. Work requirements can be revised by an operator using the [coordination guide](coordination.md), while existing scenario pins remain unchanged.

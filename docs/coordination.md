@@ -1,0 +1,87 @@
+# Coordinating independent agents
+
+Graphyard owns assignment authority and evidence admissibility. Herdr owns processes. Git owns source history. This guide describes coordination features implemented in this change; the two-host operational trial is still a separate validation task.
+
+## Start with an observable requirement
+
+A criterion states an outcome and names one or more required proofs. For example:
+
+```json
+{
+  "id": "AC-1",
+  "text": "Retrying a confirmed booking produces exactly one SMS request",
+  "proofs": ["integration:sms-idempotency", "e2e:confirmed-booking-sms"]
+}
+```
+
+The repository's tests define the actual assertions. Graphyard checks evidence identity, version, result and execution counts; it does not independently understand booking semantics. Register an E2E scenario before referring to it. A configured proof name alone does not establish a trusted producer: authorize the reporter separately as described in the [protocol](protocol.md#evidence).
+
+Work details show required proofs as **unmeasured**, **incomplete**, **failed**, or **passed**. Untrusted assertions and evidence for another head, base, policy, scenario or environment cannot produce a pass. A later matching failure or incomplete run supersedes the earlier pass. The preview uses the same applicability rules as the gate, but only the server authorizes progression.
+
+## Revise requirements explicitly
+
+Operators can use **Revise requirements** in work details, or:
+
+```sh
+graphyard requirements GY-N revision.json
+```
+
+Example `revision.json`:
+
+```json
+{
+  "expectedPolicyRevision": 1,
+  "reason": "Retries must preserve exactly-once behavior",
+  "criteria": [{"id":"AC-1","text":"Retries produce one SMS request","proofs":["integration:sms-idempotency"]}],
+  "dependencies": [],
+  "plannedFiles": ["src/booking/", "src/sms/send.ts"],
+  "exclusiveResources": ["staging:sms-test-account"]
+}
+```
+
+The command replaces the full requirements document; omitted criteria are removed, not implicitly retained. Keep the same criterion ID when clarifying the same obligation. Removed IDs are retired and cannot be recycled for unrelated requirements. Dependencies must name existing items and cannot form a cycle.
+
+Stop the worker and release its lease first. Only an operator may revise requirements; implementation workers cannot weaken their own gates. Concurrent edits compare the expected policy revision. Every successful revision records the authenticated actor, reason, complete requirements and new policy revision in append-only history. Historical snapshots retain previous criteria.
+
+All previous acceptance evidence remains in history but becomes inapplicable to the new policy. Review requests, observations and merge authorization are invalidated. Previously submitted work requires a new claimed attempt and resubmission on its existing PR branch. GitHub check revocation is asynchronous: suspend merging until the refusing check is visible, as with rework. Delivered or observed-merged work requires a follow-up task.
+
+Existing E2E proof names retain their pinned scenario version. Newly added E2E proofs pin the latest definition at revision time. This command does not silently upgrade existing pins. Selecting a newer revision of the same scenario and selective reuse of unaffected evidence remain future work.
+
+## Detect overlap without pretending to understand every API
+
+`plannedFiles` can contain exact repository-relative paths or directory prefixes ending in `/`, `/*`, or `/**`. For this advisory feature all three directory forms include descendants. Arbitrary glob expressions, renames across historical paths, generated-file relationships and semantic dependencies are not inferred.
+
+Graphyard compares planned paths and provider-observed PR files against other unfinished ready, assigned or submitted work. Cards show the other work keys; details show the overlapping scopes. Backlog-only peers are omitted until scheduled. Warnings may use the last observed diff; they are not proof of current filesystem contents. Overlap does not block a claim: two compatible edits may legitimately touch the same file. Coordinate or add an explicit dependency when ordering is required.
+
+## Reserve explicitly shared resources
+
+Optional `exclusiveResources` names declare resources that cannot be assigned concurrently, such as `staging:sms-test-account`. Names are case-sensitive lowercase identifiers using letters, digits, `.`, `_`, `:`, `/`, and `-`. Give the same real resource the same name throughout this single-repository installation.
+
+Claiming work atomically reserves all declared names for that assignment. A conflicting active assignment refuses the whole claim. `next` excludes work with busy resources. Reservations follow the worker lease: release or expiry makes them claimable again; an old heartbeat cannot recover expired authority. Submission alone does not release an active lease.
+
+These are coordination reservations, not physical locks on an external account or environment. A disconnected process may still access external systems using its credentials. Use supervised workers and verify that the old process has stopped before touching shared resources. Runner-specific resource fencing and leases spanning independent E2E execution are part of future runner orchestration. Never treat a resource name as a substitute for an access-control boundary.
+
+## Explain stalls
+
+```sh
+graphyard diagnose GY-N
+```
+
+The CLI and work detail drawer explain dependencies, explicit blockers, missing ownership or workspace, busy resources, unobserved/stale PRs, integration failures, overdue unowned integration jobs, violations and the first refusing gate. Output includes required proof and file overlap. Work, job metadata and database time come from one snapshot. This is diagnostic evidence, not another lifecycle state setter.
+
+Released and expired assignments are described as no longer authoritative; the UI does not invent a cause or claim the process has terminated. Integration errors retain automatic retry information. Missing observation and unavailable connectivity must not be interpreted as successful delivery.
+
+## Two-machine operational drill
+
+Run this with two real hosts, two distinct worker principals, and an operator. Isolated tests using independent connection pools are useful but are **not** evidence that this drill ran.
+
+1. Connect both hosts with `graphyard init --herdr --token-stdin`; check distinct host IDs and principal IDs. Keep operator and producer credentials off both worker environments.
+2. Create a small real work item with a repository test as its acceptance proof. Concurrently claim it from both hosts. Record one winner and one refusal, then register the winner's worktree.
+3. Run the winner through `watch`. Interrupt its connection to Graphyard while retaining logs. Confirm the supervisor terminates its child before treating the host as stopped.
+4. After server-clock lease expiry, claim from the other host. Record the higher epoch and fresh registered workspace. Preserve the first workspace for inspection.
+5. Restore the first connection. Try its old-epoch heartbeat, workspace registration and submission. All must refuse. Do not push old work; Graphyard cannot revoke independent Git credentials through a lease.
+6. Implement and submit from the new owner. Push another commit after an independent review and confirm the previous approval/evidence no longer authorizes the new head.
+7. Exercise duplicate and delayed provider deliveries and a temporary integration outage. Confirm the job recovers without duplicate authority or a stale pass. Avoid disabling protection on the production repository.
+8. Finish through normal review and gates, record both host identities, epochs, timestamps, sanitized logs, CI and PR URLs, and the observer's result. Record failures honestly; do not mark the drill complete based on this checklist.
+
+The current implementation is still through-merge coordination. Verified production delivery and automatic runner orchestration require the next delivery work.

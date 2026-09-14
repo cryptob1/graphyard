@@ -182,3 +182,13 @@ test('migration refuses required code-owner review before making any external ch
   f.source.pages=async path=>{const rows=await original(path);if(path.endsWith('/comments'))rows.push({...f.summary,id:99,body:'Starting another review',updated_at:'2026-01-01T00:02:00Z'});return rows};
   assert.equal((await f.run()).approved,false);
  });
+
+test('dogfood clean-result variants do not require redundant reviews and unknown results explain refusal', async () => {
+  for (const suffix of ['Keep them coming!', 'Another round soon, please!', 'Swish!', 'You’re on a roll!', "You're on a roll!"]) {
+    const f = commentFixture(); f.result.body = f.result.body.replace(':+1:', suffix);
+    assert.equal((await f.run()).approved, true, suffix);
+    f.result.updated_at = '2026-01-01T00:03:00Z'; assert.equal((await f.run()).approved, false);
+  }
+  const f = commentFixture(); f.result.body = f.result.body.replace(':+1:', 'A newly invented unsupported statement.');
+  const result = await f.run(); assert.equal(result.approved, false); assert.match(result.reason, /unsupported clean-result format/);
+});

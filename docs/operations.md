@@ -72,3 +72,7 @@ The dashboard receives the latest 300 events per work item. Its display limits d
 ### Concurrent reconciliation
 
 If a task changes while GitHub is being read, or the integration lease expires before a review request can be recorded, Graphyard rejects that stale snapshot and schedules another observation after two seconds (or immediately when newer work has already queued a wakeup). This expected concurrency retry does not appear as an integration error in the dashboard. The existing revision and job-lease checks still prevent stale success publication, and failed checks are conservatively revoked where possible. Actual integration failures, such as API or permission errors, remain visible and retry durably.
+
+## Coordination diagnosis and recovery drills
+
+Use `graphyard diagnose GY-N` or the work-detail Coordination section for concrete next steps. See [coordination](coordination.md) for requirement revisions, overlap warnings, declared-resource reservations and the two-machine drill. A drill procedure is not completed execution evidence.

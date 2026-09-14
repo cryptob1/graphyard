@@ -138,3 +138,7 @@ Codex capability is advertised only when the active installation token confirms 
 The dashboard disables Codex provider selection and re-review when the server does not advertise verified support, with an explanation to check the App connection and permission updates. Switching an existing task back to formal GitHub review remains available to the operator.
 
 Capability verification also checks the installation token’s paginated repository inventory and records the matched repository ID/name. A configured name or access to a public repository does not prove installation membership. Missing membership or an unavailable inventory disables Codex support and refuses the protection migration.
+
+### Unsupported Codex result formats
+
+Known clean-result courtesy variants observed while dogfooding (including “Keep them coming!”, “Another round soon, please!”, “Swish!” and “You’re on a roll!”) use the same exact verdict/commit contract. They do not bypass identity, freshness, findings, request binding or final rereads. Unknown prose refuses with an explicit unsupported-format explanation. An operator should inspect the actual result and add a tested provider contract or request a fresh review; resolving comments or editing the result does not approve it. The adapter remains a conservative compatibility layer, not a stable provider API guarantee.

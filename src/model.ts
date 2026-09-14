@@ -9,6 +9,7 @@ export const policySchema = z.object({
   review: z.boolean().default(true),
   reviewProvider: z.enum(['github', 'codex']).optional(),
 }).strict();
+export const resourcesSchema = z.array(z.string().regex(/^[a-z0-9][a-z0-9._:/-]*$/).max(200)).max(30).refine(v => new Set(v).size === v.length, 'Resource names must be unique');
 export const createSchema = z.object({
   title: z.string().min(1).max(200), description: z.string().max(20000).default(''),
   type: z.enum(['feature', 'bug', 'chore']).default('feature'),
@@ -17,6 +18,7 @@ export const createSchema = z.object({
   criteria: z.array(criterionSchema).min(1).max(50),
   policy: policySchema.default({ checks: ['test', 'typecheck'], review: true }),
   plannedFiles: z.array(z.string().min(1).max(500)).max(100).default([]),
+  exclusiveResources: resourcesSchema.optional(),
 }).strict();
 export type Create = z.infer<typeof createSchema>;
 export interface Principal { id: string; role: 'admin' | 'worker' | 'producer' | 'reader'; proofs?: string[]; displayName?: string; runtime?: string }
@@ -42,6 +44,7 @@ export interface Observation {
 }
 export interface Gate { name: string; passed: boolean; reasons: string[] }
 export interface Work extends Create {
+  retiredCriterionIds?: string[];
   id: string; key: string; stage: Stage; revision: number; policyRevision: number;
   createdAt: string; updatedAt: string; stageEnteredAt: string; ready: boolean;
   epoch: number; lease: Lease | null; lastAssignment?: AssignmentIdentity; workspaces: Workspace[]; candidate: Candidate | null;
