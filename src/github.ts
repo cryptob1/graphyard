@@ -42,10 +42,10 @@ export class GitHub {
     }
     throw new Error('GitHub pagination exceeded safety limit; refusing incomplete evidence');
   }
-  async protection() {
+  async protection(requireNativeReview = false) {
     try {
       const p = await this.request(`/branches/${encodeURIComponent(this.config.base)}/protection`);
-      return !!p.required_status_checks?.strict && !!p.enforce_admins?.enabled && !p.allow_force_pushes?.enabled && !p.allow_deletions?.enabled
+      return (!requireNativeReview || p.required_pull_request_reviews?.required_approving_review_count >= 1 && p.required_pull_request_reviews?.dismiss_stale_reviews && p.required_pull_request_reviews?.require_last_push_approval) && !!p.required_status_checks?.strict && !!p.enforce_admins?.enabled && !p.allow_force_pushes?.enabled && !p.allow_deletions?.enabled
         && p.required_status_checks.checks?.some((c: any) => c.context === CHECK_NAME && c.app_id === this.config.appId);
     } catch { return false; }
   }
@@ -55,7 +55,7 @@ export class GitHub {
     demand(pr.base.repo.full_name.toLowerCase() === this.config.repository.toLowerCase() && pr.head.repo?.full_name.toLowerCase() === this.config.repository.toLowerCase(), 'MVP requires same-repository pull requests');
     demand(pr.base.ref === this.config.base, 'Pull request targets an unmanaged branch');
     const [checks, reviews, protectedBranch, files] = await Promise.all([
-      this.pages(`/commits/${pr.head.sha}/check-runs?filter=latest`, 'check_runs'), this.pages(`/pulls/${pr.number}/reviews`), this.protection(), this.pages(`/pulls/${pr.number}/files`),
+      this.pages(`/commits/${pr.head.sha}/check-runs?filter=latest`, 'check_runs'), this.pages(`/pulls/${pr.number}/reviews`), this.protection(work.policy.review && work.policy.reviewProvider !== 'codex'), this.pages(`/pulls/${pr.number}/files`),
     ]);
     const latest = new Map<string, any>();
     for (const r of reviews) if (['APPROVED', 'CHANGES_REQUESTED', 'DISMISSED'].includes(r.state)) latest.set(r.user.login, r);

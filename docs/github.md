@@ -109,7 +109,7 @@ node scripts/protect-github.mjs --plan --agent-reviews
 node scripts/protect-github.mjs --apply --agent-reviews
 ```
 
-The default helper behavior still preserves native review requirements. The explicit migration refuses to apply unless the configured live server advertises Codex review support and administrator enforcement is active. Check organization rulesets separately. Changing branch protection does not change individual task policies; migrate those explicitly and regenerate acceptance evidence. The adapter's own introduction still needs an independently reviewed bootstrap path; it cannot approve its own installation.
+The default helper behavior still preserves native review requirements. The explicit migration refuses to apply unless the configured live server advertises Codex review support and administrator enforcement is active. Check organization rulesets separately. Changing branch protection does not change individual task policies; migrate those explicitly and regenerate acceptance evidence. Tasks still using native GitHub review require a nonzero native approval count, stale-review dismissal and last-push approval. They remain blocked after the branch switches to agent-only review until an operator explicitly adopts the Codex policy. This prevents public read-only approvals from replacing GitHub’s eligible-reviewer enforcement. The adapter's own introduction still needs an independently reviewed bootstrap path; it cannot approve its own installation.
 
 ### Limits and recovery
 

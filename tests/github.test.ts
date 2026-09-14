@@ -14,7 +14,7 @@ function fixture() {
     calls.push({ path, method, body });
     if (method !== 'GET') return { id: 12 };
     if (path === '/pulls/10') return structuredClone(pr);
-    if (path.includes('/protection')) return { required_status_checks: { strict: true, checks: [{ context: CHECK_NAME, app_id: protectedBranch ? 1234 : 999 }] }, enforce_admins: { enabled: true }, allow_force_pushes: { enabled: false }, allow_deletions: { enabled: false } };
+    if (path.includes('/protection')) return { required_pull_request_reviews: { required_approving_review_count: 1, dismiss_stale_reviews: true, require_last_push_approval: true }, required_status_checks: { strict: true, checks: [{ context: CHECK_NAME, app_id: protectedBranch ? 1234 : 999 }] }, enforce_admins: { enabled: true }, allow_force_pushes: { enabled: false }, allow_deletions: { enabled: false } };
     if (path.includes('/reviews')) return reviews;
     if (path.includes('/files')) return [{ filename: 'src/claims.ts' }];
     if (path.includes('check_name=')) return { check_runs: [{ id: 12, name: CHECK_NAME, app: { id: 1234 } }] };
@@ -110,4 +110,16 @@ test('Codex dispatch checks candidate and job guard before posting and binds the
   f.pr.merged = false;
   const rebased = await f.github.observe(f.work);
   assert.equal(rebased.candidate.baseSha, f.pr.base.sha); assert.equal(rebased.agentReview?.approved, false);
+ });
+
+ test('native review tasks cannot silently lose GitHub reviewer enforcement after agent migration', async () => {
+  const f = fixture(), original = f.github.request;
+  f.github.request = async (path, method, body) => {
+    const result = await original(path, method, body);
+    if (path.includes('/protection')) result.required_pull_request_reviews.required_approving_review_count = 0;
+    return result;
+  };
+  assert.equal((await f.github.observe(f.work)).protected, false);
+  f.work.policy.reviewProvider = 'codex';
+  assert.equal((await f.github.observe(f.work)).protected, true);
  });
