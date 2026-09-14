@@ -12,7 +12,7 @@ const cleanCourtesies = new Set([
   'delightful', 'nice work', 'bravo', 'keep it up', 'well done', 'good job',
   'great work', 'great job', 'looks good', 'looking good', 'excellent', 'splendid',
   'wonderful', 'fantastic', 'awesome', 'nice', 'cheers', 'all good', 'all clear',
-  'lgtm', 'onward', 'happy coding',
+  'lgtm', 'onward', 'happy coding', 'hooray', 'hurrah', 'hurray', 'huzzah', 'woohoo', 'yay',
 ]);
 function cleanCommit(body: unknown): string | null {
   if (typeof body !== 'string') return null;
