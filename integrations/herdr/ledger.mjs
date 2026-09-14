@@ -25,8 +25,8 @@ const ownership = (w, now) => {
 const rl = createInterface({ input: process.stdin, output: process.stdout });
 console.log('GRAPHYARD · Herdr work ledger\nCommands: list, show GY-N, claim GY-N, heartbeat GY-N EPOCH, release GY-N EPOCH, quit\nClaiming reserves work; it does not launch an agent or start automatic heartbeats.');
 async function list() {
-  const [rows, status] = await Promise.all([request('work'), request('status')]);
-  const observedAt = Date.parse(status.now);
+  const { work: rows, now } = await request('work-snapshot');
+  const observedAt = Date.parse(now);
   console.log('\n' + rows.map(w => `${clean(w.key).padEnd(8)} ${clean(w.stage).padEnd(11)} ${clean(ownership(w, observedAt)).padEnd(16)} ${clean(w.title)}\n         ${clean(w.gates.find(g => !g.passed)?.reasons[0] ?? 'All gates passed')}`).join('\n'));
   if (!rows.length) console.log('No work yet. Create a work item in the web UI.');
   return rows;

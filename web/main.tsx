@@ -24,13 +24,14 @@ function App() {
   const [events, setEvents] = useState<any[]>([]);
   const [creating, setCreating] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [observedAt, setObservedAt] = useState(Number.NaN);
   const [query, setQuery] = useState('');
   async function api(path: string, data?: unknown) {
     const response = await fetch(`/api/${path}`, { method: data === undefined ? 'GET' : 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', 'Idempotency-Key': crypto.randomUUID() }, body: data === undefined ? undefined : JSON.stringify(data) });
     const body = await response.json(); if (!response.ok) throw new Error(body.error + (body.issues ? `: ${body.issues.map((i: any) => i.message).join(', ')}` : '')); return body;
   }
-  function signOut() { sessionEpoch.current++; setBusy(false); sessionStorage.removeItem('graphyard-token'); setToken(''); setDraftToken(''); setStatus(null); setWork([]); setSelected(null); setEvents([]); setCreating(false); setConnected(false); setLastUpdated(null); setError(''); }
-  async function refresh(epoch: number) { const [items, system] = await Promise.all([api('work'), api('status')]); if (epoch !== sessionEpoch.current) return; setWork(items); setStatus(system); setConnected(true); setLastUpdated(new Date().toLocaleTimeString()); setError(''); }
+  function signOut() { sessionEpoch.current++; setBusy(false); sessionStorage.removeItem('graphyard-token'); setToken(''); setDraftToken(''); setStatus(null); setWork([]); setObservedAt(Number.NaN); setSelected(null); setEvents([]); setCreating(false); setConnected(false); setLastUpdated(null); setError(''); }
+  async function refresh(epoch: number) { const [items, system] = await Promise.all([api('work-snapshot'), api('status')]); if (epoch !== sessionEpoch.current) return; setWork(items.work); setObservedAt(Date.parse(items.now)); setStatus(system); setConnected(true); setLastUpdated(new Date().toLocaleTimeString()); setError(''); }
   useEffect(() => {
     if (!token) return;
     const controller = new AbortController(); const epoch = sessionEpoch.current; let active = true; let pending = false;
@@ -43,8 +44,8 @@ function App() {
           if (!response.ok) throw new Error(`Unable to load dashboard (${response.status}). Retrying automatically.`);
           return response.json();
         };
-        const [items, system] = await Promise.all([read('work'), read('status')]);
-        if (active && epoch === sessionEpoch.current) { setWork(items); setStatus(system); setConnected(true); setLastUpdated(new Date().toLocaleTimeString()); setError(''); }
+        const [items, system] = await Promise.all([read('work-snapshot'), read('status')]);
+        if (active && epoch === sessionEpoch.current) { setWork(items.work); setObservedAt(Date.parse(items.now)); setStatus(system); setConnected(true); setLastUpdated(new Date().toLocaleTimeString()); setError(''); }
       } catch (e: any) {
         if (!active || epoch !== sessionEpoch.current) return;
         if (e.unauthorized) { signOut(); setError(e.message); }
@@ -60,7 +61,6 @@ function App() {
   const item = work.find(w => w.id === selected);
   const visible = work.filter(w => (!filter || w.stage === filter) && `${w.key} ${w.title}`.toLowerCase().includes(query.toLowerCase()));
   const blocked = work.filter(w => w.blocker || w.submission && w.gates.some(g => !g.passed));
-  const observedAt = Date.parse(status?.now ?? '');
   const active = work.filter(w => assignment(w, observedAt).active);
   async function action(id: string, command: string, data: unknown = {}) { const epoch = sessionEpoch.current; setBusy(true); try { await api(`work/${id}/${command}`, data); if (epoch !== sessionEpoch.current) return; await refresh(epoch); } catch (e) { if (epoch === sessionEpoch.current) setError((e as Error).message); } finally { if (epoch === sessionEpoch.current) setBusy(false); } }
   if (!token || !status) return <main className="login"><div className="brand"><span className="mark">g</span> graphyard</div><h1>Keep the work<br/>moving forward.</h1><p>One place for ownership, evidence, and delivery.</p>{error && <p role="alert" className="notice danger">{error}</p>}{token ? <><p role="status">Verifying connection…</p><button onClick={signOut}>Use another token</button></> : <form onSubmit={e => { e.preventDefault(); const value = draftToken.trim(); if (!value) { setError('Enter an access token.'); return; } sessionEpoch.current++; setError(''); sessionStorage.setItem('graphyard-token', value); setToken(value); }}><label>Access token<input type="password" required value={draftToken} onChange={e => setDraftToken(e.target.value)} autoComplete="off" placeholder="Your Graphyard token"/></label><button>Open control plane ↗</button></form>}<small>Tokens are scoped to your role and kept for this browser session.</small></main>;

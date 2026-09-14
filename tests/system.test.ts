@@ -445,3 +445,14 @@ test('draft and closed submissions wait normally and dispatch after becoming rea
     assert.equal((await store.list()).find(x=>x.id===w.id)!.reviewRequest?.commentId,900);
   }
 });
+
+ test('work snapshot pairs database time with immutable work data in one read', async () => {
+  let w=await ready();w=await engine.execute(worker,'claim',w.id,{},randomUUID());
+  const before=(await store.pool.query('SELECT clock_timestamp() AS now')).rows[0].now.getTime();
+  const response=await fetch(`${url}/api/work-snapshot`,{headers:{Authorization:`Bearer ${'w'.repeat(32)}`}});assert.equal(response.status,200);const snapshot=await response.json();
+  const after=(await store.pool.query('SELECT clock_timestamp() AS now')).rows[0].now.getTime();
+  assert.ok(Date.parse(snapshot.now)>=before&&Date.parse(snapshot.now)<=after);
+  const captured=snapshot.work.find((item:Work)=>item.id===w.id);assert.equal(captured.revision,w.revision);assert.ok(Date.parse(captured.lease.expiresAt)>Date.parse(snapshot.now));
+  w=await engine.execute(worker,'heartbeat',w.id,{epoch:1},randomUUID());assert.ok(captured.revision<w.revision);
+  const denied=await fetch(`${url}/api/work-snapshot`);assert.equal(denied.status,401);
+ });

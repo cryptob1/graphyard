@@ -54,6 +54,10 @@ export class Store {
   async list(): Promise<Work[]> {
     return (await this.pool.query('SELECT document FROM work_items ORDER BY number')).rows.map(r => r.document);
   }
+  async workSnapshot(): Promise<{ work: Work[]; now: string }> {
+    const row = (await this.pool.query("SELECT COALESCE(jsonb_agg(document ORDER BY number), '[]'::jsonb) AS work, statement_timestamp() AS observed_at FROM work_items")).rows[0];
+    return { work: row.work, now: row.observed_at.toISOString() };
+  }
   async events(id?: string) {
     return (await this.pool.query('SELECT * FROM events WHERE ($1::uuid IS NULL OR work_id=$1) ORDER BY seq DESC LIMIT 300', [id ?? null])).rows;
   }
