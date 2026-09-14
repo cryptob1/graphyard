@@ -50,6 +50,25 @@ Environment files, `.graphyard/`, and private-key file extensions are excluded f
 
 The kernel serializes short coordination mutations. The initial reconciler processes up to four provider jobs per tick per replica. The list API returns all work, while the event API returns the most recent 300 events. These are deliberate MVP bounds, not a benchmark claiming hundreds of agents at production load. Monitor latency, database lock wait, job lag, memory, and GitHub rate limits before increasing concurrency.
 
+## Dashboard connection and keyboard behavior
+
+The dashboard verifies the access token before displaying work or integration status. Leading and trailing whitespace is removed from pasted tokens. A rejected or revoked token returns to the login form with an explicit error and clears previously loaded work. During initial verification, unknown counts are not presented as zero and unknown GitHub connectivity is not reported as disconnected.
+
+After a successful load, polling failures retain the last snapshot with a disconnected/stale-data warning and last-success timestamp. Polling retries every five seconds; requests time out after fifteen seconds. A successful refresh clears the warning. The snapshot is informational: the server still authorizes every mutation. Sign out remains available on narrow screens and clears the browser session token.
+
+Work details, new-work forms, and test-case forms move keyboard focus inside when opened. Tab and Shift-Tab remain inside the dialog, Escape closes it, and focus returns to the opening control.
+
+Run `npm run test:browser` after `npx playwright install chromium` to exercise these behaviors in headless Chromium. The tests serve the UI locally and intercept API calls with isolated fixtures. They cover client behavior, not server authorization or successful production writes; the real-Postgres and protected acceptance suites cover coordination separately. Required CI runs both the ordinary tests and browser regressions.
+
+Signing out invalidates pending work mutations and their dashboard refreshes locally. Responses from a previous session cannot restore its data or errors after another token is entered. A write already accepted by the server remains in the work ledger.
+
+The work-detail History panel retains its last loaded entries during periodic refresh and temporary event-fetch failures. Selecting different work or ending the session clears those entries.
+
+### Bounded work history
+
+The work detail drawer shows 20 history entries at a time inside a keyboard-accessible, height-limited scroll area. Consecutive GitHub observations from the same actor are grouped with a count and time range; this groups observation activity, not a claim that their payloads are identical. Turn off grouping to inspect individual event rows, and use **Show more history** or **Show less history** to change the visible count. Refreshes preserve this choice; opening another work item resets it.
+
+The dashboard receives the latest 300 events per work item. Its display limits do not delete or truncate the append-only database audit ledger; older events remain in storage.
 ### Concurrent reconciliation
 
 If a task changes while GitHub is being read, or the integration lease expires before a review request can be recorded, Graphyard rejects that stale snapshot and schedules another observation after two seconds (or immediately when newer work has already queued a wakeup). This expected concurrency retry does not appear as an integration error in the dashboard. The existing revision and job-lease checks still prevent stale success publication, and failed checks are conservatively revoked where possible. Actual integration failures, such as API or permission errors, remain visible and retry durably.
