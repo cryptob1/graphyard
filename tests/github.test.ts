@@ -1,5 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { CODEX_APP_ID, CODEX_USER_ID } from '../src/codex-review.js';
 import { GitHub, CHECK_NAME } from '../src/github.js';
 import type { Work } from '../src/model.js';
 const head = 'a'.repeat(40), base = 'b'.repeat(40);
@@ -86,3 +87,27 @@ test('Codex dispatch checks candidate and job guard before posting and binds the
   await assert.rejects(f.github.requestCodex(f.work, async () => { throw Error('Lease lost'); }), /Lease lost/);
   f.pr.head.sha = 'd'.repeat(40); await assert.rejects(f.github.requestCodex(f.work, async () => {}), /changed/);
 });
+
+ test('merged Codex observations retain the authorized review base while open rebases require a new review', async () => {
+  const f = fixture(); f.work.policy.reviewProvider = 'codex'; f.pr.user.id = 12345;
+  const createdAt = '2026-01-01T00:00:00Z', completed = '2026-01-01T00:01:00Z';
+  f.work.reviewRequest = { commentId: 12, sha: head, baseSha: base, policyRevision: 1, body: '@codex review', createdAt };
+  const bot = { id: CODEX_USER_ID, type: 'Bot' };
+  const trigger = { id: 12, body: '@codex review', user: { type: 'Bot' }, performed_via_github_app: { id: 1234 }, created_at: createdAt, updated_at: createdAt };
+  const summary = { id: 13, user: bot, performed_via_github_app: { id: CODEX_APP_ID }, body: `<!-- codex-pull-request-review-summary -->\n| 📝 **Code Review** | ✅ **Completed** <relative-time datetime="${completed}">${completed}</relative-time> | \`aaaaaaa\` | Manual request |`, updated_at: completed };
+  const original = f.github.request;
+  f.github.request = async (path, method, body) => {
+    if (path.startsWith('/issues/comments/12/reactions')) return [{ id: 14, user: bot, content: '+1', created_at: completed }];
+    if (path.startsWith('/issues/10/comments')) return [trigger, summary];
+    if (path === '/issues/comments/12') return trigger;
+    if (path === '/issues/comments/13') return summary;
+    if (path === '/commits/aaaaaaa') return { sha: head };
+    return original(path, method, body);
+  };
+  f.pr.merged = true; f.pr.base.sha = 'c'.repeat(40);
+  const merged = await f.github.observe(f.work);
+  assert.equal(merged.candidate.baseSha, base); assert.equal(merged.agentReview?.approved, true);
+  f.pr.merged = false;
+  const rebased = await f.github.observe(f.work);
+  assert.equal(rebased.candidate.baseSha, f.pr.base.sha); assert.equal(rebased.agentReview?.approved, false);
+ });

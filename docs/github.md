@@ -86,6 +86,8 @@ Graphyard dispatches a fresh `@codex review` comment through its own GitHub App 
 
 The initial adapter supports the observed **manual-request** summary format from OpenAI's hosted Codex connector. It requires the known numeric bot and App identities, a completed summary, GitHub resolution of the displayed abbreviated commit to the full current head, the original unedited Graphyard request, and a fresh clean-review reaction from the Codex bot after completion. Reviews that publish findings/output, a remaining running reaction, stale reactions, unknown formats, missing records, and collection errors refuse approval. Mutable evidence is reread before accepting the snapshot. Reviews are bound to Graphyard's recorded request rather than trusting an editable summary as the sole commit binding.
 
+For merged PRs, review validation retains the previously tested base, just as candidate attribution does; GitHub may already report an advanced base branch. Open PRs whose base changes require a new review.
+
 A fresh clean re-review can supersede earlier Codex findings. Marking conversations resolved alone never counts. Native outstanding `CHANGES_REQUESTED` reviews still block. This does not reinterpret a Codex reaction as a GitHub `APPROVED` event: Graphyard's own required check enforces the selected agent-review policy.
 
 The API/CLI accepts an explicit operator revision for existing work:

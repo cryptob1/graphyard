@@ -59,12 +59,13 @@ export class GitHub {
     ]);
     const latest = new Map<string, any>();
     for (const r of reviews) if (['APPROVED', 'CHANGES_REQUESTED', 'DISMISSED'].includes(r.state)) latest.set(r.user.login, r);
-    const agentReview = work.policy.review && work.policy.reviewProvider === 'codex' ? await observeCodex(this, pr.number, pr.head.sha, reviews, pr.user.id, work.reviewRequest, pr.base.sha, work.policyRevision, this.config.appId) : undefined;
+    const candidateBase = pr.merged && work.candidate && work.candidate.sha === pr.head.sha ? work.candidate.baseSha : pr.base.sha;
+    const agentReview = work.policy.review && work.policy.reviewProvider === 'codex' ? await observeCodex(this, pr.number, pr.head.sha, reviews, pr.user.id, work.reviewRequest, candidateBase, work.policyRevision, this.config.appId) : undefined;
     const confirmed = await this.request(`/pulls/${work.submission!.pr}`);
     demand(confirmed.head.sha === pr.head.sha && confirmed.base.sha === pr.base.sha && confirmed.base.ref === pr.base.ref && confirmed.head.ref === pr.head.ref
       && confirmed.state === pr.state && confirmed.draft === pr.draft && confirmed.merged === pr.merged, 'PR changed while collecting evidence; retry');
     return {
-      candidate: { sha: pr.head.sha, baseSha: pr.merged && work.candidate && work.candidate.sha === pr.head.sha ? work.candidate.baseSha : pr.base.sha, pr: pr.number, branch: pr.head.ref, author: pr.user.login },
+      candidate: { sha: pr.head.sha, baseSha: candidateBase, pr: pr.number, branch: pr.head.ref, author: pr.user.login },
       checks: checks.filter(c => c.name !== CHECK_NAME).map(c => ({ name: c.name, result: c.status === 'completed' ? c.conclusion : c.status, appId: c.app.id })),
       ...(agentReview ? { agentReview } : {}),
       reviews: [...latest.values()].map(r => ({ reviewer: r.user.login, sha: r.commit_id, state: r.state })),
