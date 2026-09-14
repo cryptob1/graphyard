@@ -2,16 +2,18 @@ import { createHash, randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { Store, save, wakeJob } from './store.js';
 import { workspacePath, pathsOverlap, validBranch } from './workspace.js';
-import { activeLease, admin, createSchema, demand, evaluate, proofSchema, type Principal, type Work, type Observation } from './model.js';
+import { activeLease, admin, requireCurrent, createSchema, demand, evaluate, proofSchema, type Principal, type Work, type Observation, type ReviewRequest } from './model.js';
 
 const epoch = z.number().int().positive();
 const sha = z.string().regex(/^[a-f0-9]{40}$/);
 const commands = {
   create: createSchema,
   ready: z.object({}).strict(),
+  reviewpolicy: z.object({ provider: z.enum(['github', 'codex']), expectedPolicyRevision: z.number().int().positive(), reason: z.string().trim().min(1).max(2000) }).strict(),
   unblock: z.object({ reason: z.string().min(1).max(2000) }).strict(),
   rework: z.object({ reason: z.string().min(1).max(2000), previousWorkerStopped: z.literal(true) }).strict(),
   claim: z.object({}).strict(),
+  rereview: z.object({ epoch: epoch.optional() }).strict(),
   heartbeat: z.object({ epoch }).strict(),
   release: z.object({ epoch }).strict(),
   workspace: z.object({ epoch, host: z.string().trim().min(1).max(200), path: z.string().startsWith('/').max(1000).refine(p => !/[\u0000-\u001f]/.test(p), 'Invalid path').transform(workspacePath), branch: z.string().max(200).refine(validBranch, 'Invalid Graphyard branch name') }).strict(),
@@ -21,6 +23,12 @@ const commands = {
 } as const;
 export type Command = keyof typeof commands;
 
+// Old deployments did not persist assignment labels. Preserve the known owner/epoch
+// before clearing a legacy lease; its original claim time is unknown.
+function preserveAssignment(work: Work) {
+  if (work.lease && (!work.lastAssignment || work.lastAssignment.epoch < work.lease.epoch))
+    work.lastAssignment = { owner: work.lease.owner, epoch: work.lease.epoch };
+}
 export class Engine {
   constructor(public store: Store, public ciAppIds: number[] = [15368], public leaseSeconds = 120) {}
   async execute(actor: Principal, command: Command, id: string | null, input: unknown, key: string) {
@@ -52,7 +60,23 @@ export class Engine {
         all.push(work!);
       }
       demand(work, 'Work item not found', 404);
+      preserveAssignment(work);
       if (command !== 'create') demand(work.stage !== 'done', 'Delivered work is immutable; create a follow-up task');
+      if (command === 'rereview') {
+        if (actor.role !== 'admin') { demand(actor.role === 'worker', 'Worker or operator required', 403); activeLease(work, actor, data.epoch, now); }
+        demand(work.policy.review && work.policy.reviewProvider === 'codex' && work.submission && !work.observation?.merged, 'Open submitted work with Codex review policy required');
+        work.reviewRequest = null; work.observation = null; work.mergeAuthorization = null;
+      }
+      if (command === 'reviewpolicy') {
+        admin(actor);
+        demand(!work.observation?.merged, 'Merged work requires a follow-up task');
+        demand(work.policy.review, 'Task must already require review');
+        demand(work.policyRevision === data.expectedPolicyRevision, 'Policy revision changed; reload before revising');
+        demand((work.policy.reviewProvider ?? 'github') !== data.provider, 'Review provider is already selected');
+        work.policy = { ...work.policy, reviewProvider: data.provider };
+        work.policyRevision++;
+        work.observation = null; work.mergeAuthorization = null; work.reviewRequest = null;
+      }
       if (command === 'ready') { admin(actor); work.ready = true; }
       if (command === 'unblock') { admin(actor); work.blocker = null; }
       if (command === 'rework') {
@@ -68,6 +92,7 @@ export class Engine {
         demand(!work.lease || Date.parse(work.lease.expiresAt) <= now.getTime(), 'Task already has an active owner');
         demand(!work.submission || work.reworkRequested, 'Implementation is submitted; an operator must request rework before reassignment');
         work.epoch++;
+        work.lastAssignment = { owner: actor.id, epoch: work.epoch, claimedAt: now.toISOString(), ...(actor.displayName ? { displayName: actor.displayName } : {}), ...(actor.runtime ? { runtime: actor.runtime } : {}) };
         work.lease = { owner: actor.id, epoch: work.epoch, expiresAt: new Date(now.getTime() + this.leaseSeconds * 1000).toISOString() };
       }
       if (['heartbeat', 'release', 'workspace', 'submit', 'blocked'].includes(command)) activeLease(work, actor, data.epoch, now);
@@ -99,6 +124,19 @@ export class Engine {
       return work;
     });
   }
+  async bindReviewRequest(id: string, expectedRevision: number, request: ReviewRequest, jobToken: string) {
+    return this.store.transaction(async (db, now) => {
+      const job = (await db.query('SELECT 1 FROM jobs WHERE work_id=$1 AND token=$2 AND locked_until>$3', [id, jobToken, now])).rows[0];
+      requireCurrent(job, 'Integration job lease expired or superseded');
+      const all: Work[] = (await db.query('SELECT document FROM work_items ORDER BY number')).rows.map(r => r.document);
+      const work = all.find(w => w.id === id);
+      requireCurrent(work && work.revision === expectedRevision && work.stage !== 'done' && !work.observation?.merged, 'Task changed during review dispatch');
+      demand(work.policy.review && work.policy.reviewProvider === 'codex' && request.sha === work.candidate?.sha && request.baseSha === work.candidate?.baseSha && request.policyRevision === work.policyRevision, 'Review request candidate or policy changed');
+      work.reviewRequest = request;
+      if (work.observation) work.observation.agentReview = { provider: 'codex', sha: request.sha, approved: false, reason: 'Waiting for dispatched Codex review' };
+      this.evaluate(work, all, now); await save(db, work, 'github', 'review.requested', now); return work;
+    });
+  }
   evaluate(work: Work, all: Work[], now: Date) {
     const result = evaluate(work, all, now, this.ciAppIds);
     if (work.stage !== result.stage) work.stageEnteredAt = now.toISOString();
@@ -114,6 +152,7 @@ export class Engine {
       for (const work of all) {
         if (work.stage === 'done') continue;
         const before = JSON.stringify(work);
+        preserveAssignment(work);
         if (work.lease && Date.parse(work.lease.expiresAt) <= now.getTime()) work.lease = null;
         this.evaluate(work, all, now);
         if (JSON.stringify(work) !== before) {
@@ -127,11 +166,11 @@ export class Engine {
     return this.store.transaction(async (db, now) => {
       if (jobToken) {
         const owned = await db.query('SELECT 1 FROM jobs WHERE work_id=$1 AND token=$2 AND locked_until>clock_timestamp() FOR UPDATE', [id, jobToken]);
-        demand(owned.rowCount, 'Integration job lease expired or superseded; retry');
+        requireCurrent(owned.rowCount, 'Integration job lease expired or superseded; retry');
       }
       const all: Work[] = (await db.query('SELECT document FROM work_items ORDER BY number')).rows.map(r => r.document);
       const work = all.find(w => w.id === id);
-      demand(work && work.revision === expectedRevision, 'Task changed while GitHub was being observed; retry');
+      requireCurrent(work && work.revision === expectedRevision, 'Task changed while GitHub was being observed; retry');
       demand(work.submission?.pr === observation.candidate.pr, 'Unassigned pull request');
       demand(work.workspaces.some(w => w.epoch === work.submission!.epoch && w.branch === observation.candidate.branch), 'PR branch does not match the assigned workspace');
       if (work.stage === 'done') return work;
@@ -143,7 +182,7 @@ export class Engine {
         const cutoff = mergedTime + (/\.\d+Z$/.test(observation.mergedAt) ? 1 : 1000);
         const past = (await db.query("SELECT payload->'work' AS work FROM events WHERE work_id=$1 AND created_at<$2 AND payload ? 'work' ORDER BY seq DESC LIMIT 1", [id, new Date(cutoff)])).rows[0]?.work as Work | undefined;
         const authorization = past?.mergeAuthorization;
-        if (past && authorization && authorization.sha === observation.candidate.sha && authorization.baseSha === observation.candidate.baseSha && authorization.policyRevision === work.policyRevision
+        if (past && authorization && authorization.sha === observation.candidate.sha && authorization.baseSha === observation.candidate.baseSha && authorization.policyRevision === past.policyRevision
           && past.submission?.pr === observation.candidate.pr && past.gates.every(g => g.passed) && !past.violations.length
           && past.observation && cutoff - Date.parse(past.observation.at) < 120_000 && Date.parse(authorization.at) < mergedTime) authorizedSnapshot = past;
       }
