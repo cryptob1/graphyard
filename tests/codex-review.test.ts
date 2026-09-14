@@ -47,9 +47,10 @@ test('the same Codex numeric identity cannot review its own PR after a login ren
 import { assertReviewServer } from '../scripts/review-server.mjs';
 test('native approval migration refuses a different, disconnected or unsupported live installation', () => {
  const app = { appId: 1234, installationId: 7 };
- const status = { github: true, repository: 'owner/repo', githubAppId: 1234, githubInstallationId: 7, reviewProviders: ['codex'] };
+ const status = { githubPermissions: {pull_requests:'write',issues:'read',checks:'write'}, github: true, repository: 'owner/repo', githubAppId: 1234, githubInstallationId: 7, reviewProviders: ['codex'] };
  assert.doesNotThrow(() => assertReviewServer(status, 'owner/repo', app));
  assert.doesNotThrow(() => assertReviewServer({...status, repository:'OWNER/Repo'}, 'owner/repo', app));
+ for (const permissions of [undefined, {}, {pull_requests:'read',issues:'read',checks:'write'}, {pull_requests:'write',issues:'none',checks:'write'}, {pull_requests:'write',issues:'read',checks:'read'}]) assert.throws(() => assertReviewServer({...status,githubPermissions:permissions}, 'owner/repo', app), /permissions/);
  for (const override of [{github:false}, {repository:'other/repo'}, {githubAppId:987}, {githubInstallationId:8}, {reviewProviders:[]}]) assert.throws(() => assertReviewServer({...status,...override}, 'owner/repo', app), /does not manage/);
 });
 
@@ -136,3 +137,47 @@ test('migration refuses required code-owner review before making any external ch
     assert.equal(calls.length,1); assert.deepEqual(calls[0],['api','repos/cryptob1/graphyard/branches/main/protection']);
   } finally {await rm(dir,{recursive:true,force:true});}
 });
+
+ test('clean-result courtesy normalization excludes contradictory or unknown verdict suffixes', async () => {
+  for (const suffix of ['Delightful!', 'Bravo.', 'Nice work!', 'Keep it up!', 'Well done!', 'Great work!', 'Excellent!', 'LGTM.', 'Hooray!', 'Hurrah!', 'Hurray!', 'Huzzah!', 'Woohoo!', 'Yay!']) {
+    const f = commentFixture(); f.result.body = f.result.body.replace(':+1:', suffix);
+    assert.equal((await f.run()).approved, true, suffix);
+  }
+  for (const suffix of ['P1: fix authentication', 'Nice work! However, a bug remains.', 'Critical!', 'Please fix the review findings.', 'Unknown protocol payload']) {
+    const f = commentFixture(); f.result.body = f.result.body.replace(':+1:', suffix);
+    assert.equal((await f.run()).approved, false, suffix);
+  }
+ });
+
+ test('clean approval refuses edits visible only in the final list snapshot', async () => {
+  for (const target of ['result', 'trigger'] as const) {
+    const f = commentFixture(), original = f.source.pages; let reads = 0;
+    f.source.pages = async path => {
+      const rows = await original(path);
+      if (path.endsWith('/comments') && ++reads > 1) rows.find(c => c.id === f[target].id).body += ' edited';
+      return rows;
+    };
+    assert.equal((await f.run()).approved, false);
+  }
+ });
+
+ test('summary approval refuses final-list additions, removals, edits, and newer provider activity', async () => {
+  for (const change of ['duplicate', 'new activity', 'edit', 'remove', 'trigger']) {
+    const f = fixture(), original = f.source.pages; let reads = 0;
+    f.source.pages = async path => {
+      const rows = await original(path);
+      if (path.endsWith('/comments') && ++reads > 1) {
+        if (change === 'duplicate') rows.push({...f.summary,id:99});
+        if (change === 'new activity') rows.push({...f.summary,id:99,body:'Starting another review'});
+        if (change === 'edit') rows.find(c=>c.id===13).body += ' changed';
+        if (change === 'remove') rows.splice(rows.findIndex(c=>c.id===13),1);
+        if (change === 'trigger') rows.find(c=>c.id===12).body += ' changed';
+      }
+      return rows;
+    };
+    assert.equal((await f.run()).approved,false,change);
+  }
+  const f=fixture(), original=f.source.pages;
+  f.source.pages=async path=>{const rows=await original(path);if(path.endsWith('/comments'))rows.push({...f.summary,id:99,body:'Starting another review',updated_at:'2026-01-01T00:02:00Z'});return rows};
+  assert.equal((await f.run()).approved,false);
+ });

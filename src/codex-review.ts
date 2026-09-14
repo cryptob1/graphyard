@@ -7,12 +7,19 @@ const isCodex = (item: any) => item.user?.id === CODEX_USER_ID && item.user?.typ
 interface Source { pages(path: string): Promise<any[]>; request(path: string): Promise<any> }
 // Exact observed provider footer; arbitrary appended prose cannot be treated as approval.
 const cleanFooter = "<details> <summary>ℹ️ About Codex in GitHub</summary> <br/> Codex has been enabled to automatically review pull requests in this repo. Reviews are triggered when you - Open a pull request for review - Mark a draft as ready - Comment \"@codex review\". If Codex has suggestions, it will comment; otherwise it will react with 👍. When you [sign up for Codex through ChatGPT](https://openai.com/codex), Codex can also answer questions or update the PR, like \"@codex address that feedback\". </details>";
+const cleanCourtesies = new Set([
+  '', ':+1:', ':tada:', 'what shall we delve into next?',
+  'delightful', 'nice work', 'bravo', 'keep it up', 'well done', 'good job',
+  'great work', 'great job', 'looks good', 'looking good', 'excellent', 'splendid',
+  'wonderful', 'fantastic', 'awesome', 'nice', 'cheers', 'all good', 'all clear',
+  'lgtm', 'onward', 'happy coding', 'hooray', 'hurrah', 'hurray', 'huzzah', 'woohoo', 'yay',
+]);
 function cleanCommit(body: unknown): string | null {
   if (typeof body !== 'string') return null;
-  const match = /^Codex Review: Didn't find any major issues\.(?: :(?:\+1|tada):| What shall we delve into next\?)?\n\n\*\*Reviewed commit:\*\* `([a-f0-9]{7,40})`(?=\s|$)/.exec(body);
-  if (!match) return null;
+  const match = /^Codex Review: Didn't find any major issues\.([^\r\n]*)\n\n\*\*Reviewed commit:\*\* `([a-f0-9]{7,40})`(?=\s|$)/.exec(body);
+  if (!match || !cleanCourtesies.has(match[1].trim().replace(/[.!]+$/, '').toLowerCase())) return null;
   const tail = body.slice(match[0].length).trim().replace(/\s+/g, ' ');
-  return !tail || tail === cleanFooter ? match[1] : null;
+  return !tail || tail === cleanFooter ? match[2] : null;
 }
 /** Conservative adapter for the observed hosted Codex review protocol. Unknown formats refuse. */
 export async function observeCodex(source: Source, pr: number, head: string, reviews: any[], authorId: number, request: ReviewRequest | null | undefined, base: string, policyRevision: number, graphyardAppId: number): Promise<AgentReview> {
@@ -41,9 +48,11 @@ export async function observeCodex(source: Source, pr: number, head: string, rev
       source.pages(`/issues/${pr}/comments`), source.pages(`/pulls/${pr}/reviews`),
       source.pages(`/issues/${pr}/reactions`), source.pages(`/issues/comments/${trigger.id}/reactions`),
     ]);
-    if (!isCodex(resultAgain) || resultAgain.performed_via_github_app?.id !== CODEX_APP_ID || resultAgain.body !== result.body
-      || resultAgain.created_at !== result.created_at || resultAgain.updated_at !== result.updated_at || !authenticTrigger(triggerAgain)
-      || !commentsAgain.some(c => c.id === result.id) || conflictingComments(commentsAgain) || findings(reviewsAgain)
+    const unchangedResult = (c: any) => c && c.id === result.id && isCodex(c) && c.performed_via_github_app?.id === CODEX_APP_ID
+      && c.body === result.body && c.created_at === result.created_at && c.updated_at === result.updated_at;
+    if (!unchangedResult(resultAgain) || !authenticTrigger(triggerAgain)
+      || !unchangedResult(commentsAgain.find(c => c.id === result.id)) || !authenticTrigger(commentsAgain.find(c => c.id === trigger.id))
+      || conflictingComments(commentsAgain) || findings(reviewsAgain)
       || running(prReactions) || running(requestReactions)) return refuse('Codex review changed or is running; retry');
     return { provider: 'codex', sha: head, approved: true, reason: 'Authenticated Codex result reported no major issues', resultId: result.id, requestId: trigger.id, completedAt: new Date(completedAt).toISOString() };
   }
@@ -71,13 +80,19 @@ export async function observeCodex(source: Source, pr: number, head: string, rev
   const reactions = await source.pages(reactionPath);
   const clean = reactions.filter(r => isCodex(r) && r.content === '+1' && Date.parse(r.created_at) > completedAt);
   if (clean.length !== 1 || reactions.some(r => isCodex(r) && r.content === 'eyes')) return refuse('A fresh Codex clean-review reaction is required; review may still be running or have findings');
+  if (comments.some(c => isCodex(c) && c.id !== summary.id && Date.parse(c.updated_at ?? c.created_at) >= completedAt)) return refuse('Codex has newer review activity; request a fresh review');
+  // Every observed provider comment must remain unchanged; a newly added summary invalidates the snapshot too.
+  const providerSnapshot = (rows: any[]) => JSON.stringify(rows.filter(isCodex).map(c => [c.id, c.user, c.performed_via_github_app?.id, c.body, c.created_at, c.updated_at]).sort((a, b) => a[0] - b[0]));
   // Reread mutable summary/request/reaction state before accepting a snapshot.
-  const [summaryAgain, triggerAgain, reactionsAgain, reviewsAgain] = await Promise.all([
+  const [summaryAgain, triggerAgain, reactionsAgain, reviewsAgain, commentsAgain] = await Promise.all([
     source.request(`/issues/comments/${summary.id}`), source.request(`/issues/comments/${trigger.id}`),
-    source.pages(reactionPath), source.pages(`/pulls/${pr}/reviews`),
+    source.pages(reactionPath), source.pages(`/pulls/${pr}/reviews`), source.pages(`/issues/${pr}/comments`),
   ]);
-  if (!isCodex(summaryAgain) || summaryAgain.performed_via_github_app?.id !== CODEX_APP_ID || summaryAgain.body !== summary.body || summaryAgain.updated_at !== summary.updated_at
-    || triggerAgain.performed_via_github_app?.id !== graphyardAppId || triggerAgain.created_at !== trigger.created_at || triggerAgain.body !== trigger.body || triggerAgain.updated_at !== trigger.updated_at
+  const listedTrigger = commentsAgain.find(c => c.id === trigger.id);
+  if (providerSnapshot(commentsAgain) !== providerSnapshot(comments) || !listedTrigger || listedTrigger.user?.type !== 'Bot'
+    || listedTrigger.performed_via_github_app?.id !== graphyardAppId || listedTrigger.body !== trigger.body || listedTrigger.created_at !== trigger.created_at || listedTrigger.updated_at !== trigger.updated_at
+    || !isCodex(summaryAgain) || summaryAgain.performed_via_github_app?.id !== CODEX_APP_ID || summaryAgain.body !== summary.body || summaryAgain.updated_at !== summary.updated_at
+    || triggerAgain.user?.type !== 'Bot' || triggerAgain.performed_via_github_app?.id !== graphyardAppId || triggerAgain.created_at !== trigger.created_at || triggerAgain.body !== trigger.body || triggerAgain.updated_at !== trigger.updated_at
     || !reactionsAgain.some(r => r.id === clean[0].id && isCodex(r) && r.content === '+1' && r.created_at === clean[0].created_at)
     || reactionsAgain.some(r => isCodex(r) && r.content === 'eyes')
     || reviewsAgain.some(r => isCodex(r) && Date.parse(r.submitted_at) >= Date.parse(trigger.created_at))) return refuse('Codex review changed while collecting approval; retry');

@@ -10,6 +10,7 @@ export interface GitHubConfig { repository: string; base: string; appId: number;
 export class GitHub {
   private token = '';
   private expires = 0;
+  private permissions: Record<string, string> = {};
   private blockedUntil = 0;
   private rateFailures = 0;
   private authentication?: Promise<void>;
@@ -37,14 +38,21 @@ export class GitHub {
       const result: any = await response.json();
       demand(typeof result.token === 'string' && result.token.length > 0 && Number.isFinite(Date.parse(result.expires_at)) && Date.parse(result.expires_at) > Date.now(), 'Invalid GitHub installation token response', 502);
       this.token = result.token; this.expires = Date.parse(result.expires_at);
+      this.permissions = result.permissions && typeof result.permissions === 'object' ? result.permissions : {};
   }
-  async request(path: string, method = 'GET', body?: unknown): Promise<any> {
+  private async authenticate() {
     demand(Date.now() >= this.blockedUntil, `GitHub requests paused until ${new Date(this.blockedUntil).toISOString()} after a rate/access refusal`, 502);
     if (this.expires < Date.now() + 60_000) {
       this.authentication ??= this.refreshToken().finally(() => { this.authentication = undefined; });
       await this.authentication;
     }
     demand(Date.now() >= this.blockedUntil, 'GitHub requests paused after a rate/access refusal', 502);
+  }
+  async reviewPermissions(): Promise<Record<string, string>> {
+    try { await this.authenticate(); return { ...this.permissions }; } catch { return {}; }
+  }
+  async request(path: string, method = 'GET', body?: unknown): Promise<any> {
+    await this.authenticate();
     const cached = method === 'GET' ? this.cache.get(path) : undefined;
     const response = await fetch(`https://api.github.com/repos/${this.config.repository}${path}`, {
       method, headers: { Authorization: `Bearer ${this.token}`, Accept: 'application/vnd.github+json', 'Content-Type': 'application/json', 'X-GitHub-Api-Version': '2022-11-28', ...(cached ? { 'If-None-Match': cached.etag } : {}) },
