@@ -3,7 +3,7 @@ import { execFileSync } from 'node:child_process';
 import { dirname, isAbsolute, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
-import { localDirectory, saveDiscovery } from './onboarding.js';
+import { discover, localDirectory, saveDiscovery } from './onboarding.js';
 
 export const hostIdSchema = z.string().trim().min(1).max(200);
 export const connectionSchema = z.object({ url: z.string(), cliPath: z.string(), hostId: hostIdSchema, token: z.string().min(32).optional(), principal: z.string().optional() }).strict();
@@ -75,12 +75,17 @@ export async function setupRepository(root: string, input: Connection, options: 
   delete connection.principal; // Identity is established only by the authenticated server response.
   if (!isAbsolute(connection.cliPath) || !(await lstat(connection.cliPath)).isFile()) throw new Error('CLI path must be an existing absolute launcher path');
   if (options.herdr && !connection.token) throw new Error('Herdr setup requires an individual worker credential via GRAPHYARD_TOKEN or --token-stdin');
+  const detected = await discover(root);
   if (connection.token) {
     let response: Response;
     try { response = await (options.fetcher ?? fetch)(`${connection.url}/api/status`, { headers: { Authorization: `Bearer ${connection.token}` }, signal: AbortSignal.timeout(15000) }); } catch { throw new Error('Cannot reach Graphyard; setup has not saved credentials'); }
     if (!response.ok) throw new Error(`Graphyard rejected the credential (${response.status}); setup has not saved it`);
     const status = await response.json();
     if (status.actor?.role !== 'worker') throw new Error('Repository worker setup requires a worker credential; operator, producer, and reader tokens are not suitable for launching workers');
+    if (typeof status.repository === 'string' && status.repository) {
+      if (!detected.repository) throw new Error('Cannot verify this checkout against the configured server repository; configure its GitHub origin before setup');
+      if (detected.repository.toLowerCase() !== status.repository.toLowerCase()) throw new Error('This checkout and Graphyard server are configured for different repositories; setup has not saved credentials');
+    }
     connection.principal = status.actor.id;
   }
   const instructionsFile = resolve(root, 'AGENTS.md'); await regularOrMissing(instructionsFile);

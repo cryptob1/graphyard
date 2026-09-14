@@ -70,3 +70,7 @@ Record actual evidence in Graphyard. The automated local race tests are useful k
 Automated dispatch/ACK handling, agent-specific lifecycle hooks, and rich Herdr pane rendering are intentionally deferred until this basic protocol is exercised with real sessions. No multiple-agent session is launched during the initial single-agent build.
 
 Host IDs from setup and `GRAPHYARD_HOST_ID` have surrounding whitespace removed before workspace registration and handoff checks. Empty host IDs are rejected. Use a stable, distinct ID for each machine.
+
+When a server declares its GitHub repository, setup verifies that the checkout's `origin` identifies the same repository (case-insensitively) before saving credentials or enabling the plugin. A missing/unrecognized origin or a different repository refuses setup. Configure the correct GitHub origin first. Servers without a configured repository can still support local bootstrap discovery.
+
+An explicit `GRAPHYARD_HOST_ID` takes precedence over the host ID saved by setup in both the CLI and Herdr handoff. Invalid explicit values are passed through to the CLI's validation rather than silently replaced by a saved host.

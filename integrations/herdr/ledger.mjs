@@ -9,6 +9,7 @@ let config = {};
 try { config = JSON.parse(await readFile(join(process.env.HERDR_PLUGIN_CONFIG_DIR || '.', 'config.json'), 'utf8')); } catch { /* env configuration is also supported */ }
 const url = process.env.GRAPHYARD_URL || config.url;
 const token = process.env.GRAPHYARD_TOKEN || config.token;
+const hostId = process.env.GRAPHYARD_HOST_ID ?? config.hostId;
 const cliPath = process.env.GRAPHYARD_CLI || config.cliPath || fileURLToPath(new URL('../../bin/graphyard.mjs', import.meta.url));
 if (!url || !token) { console.error('Configure Graphyard URL and an individual worker/reader token in the Herdr plugin config.json. See docs/herdr.md.'); process.exit(1); }
 // Treat server content as text, never terminal control sequences.
@@ -37,7 +38,7 @@ try {
       if (command === 'show') console.log(clean(JSON.stringify(work, null, 2)).replaceAll('  ', ' '));
       else if (command === 'handoff') {
         try {
-          const result = execFileSync(process.execPath, [cliPath, 'handoff', work.key], { env: { ...process.env, GRAPHYARD_URL: url, GRAPHYARD_TOKEN: token, ...(config.hostId ? { GRAPHYARD_HOST_ID: config.hostId } : {}) }, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+          const result = execFileSync(process.execPath, [cliPath, 'handoff', work.key], { env: { ...process.env, GRAPHYARD_URL: url, GRAPHYARD_TOKEN: token, ...(hostId !== undefined ? { GRAPHYARD_HOST_ID: hostId } : {}) }, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
           const data = JSON.parse(result); console.log(data.commands.map(clean).join('\n')); console.log(clean(data.note));
         } catch { throw new Error('Handoff refused. Check current ownership, expiry, registered host, and the configured CLI version.'); }
       }

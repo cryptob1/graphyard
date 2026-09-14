@@ -115,3 +115,17 @@ test('init accepts a token over stdin, and a server override never forwards a sa
     await assert.rejects(setupRepository(root, { ...connection, hostId: '   ' }, { fetcher }));
   } finally { await rm(root, { recursive: true, force: true }); }
  });
+
+test('setup binds the checkout identity before saving credentials or changing Herdr', async () => {
+  const root = await repo(); let calls = 0;
+  const fetcher = async () => new Response(JSON.stringify({ actor: { id:'worker-a',role:'worker' },repository:'OWNER/Project' }));
+  const runHerdr = () => { calls++; return ''; };
+  try {
+    await assert.rejects(setupRepository(root,connection,{fetcher,herdr:true,runHerdr}),/Cannot verify/);
+    execFileSync('git',['remote','add','origin','git@github.com:other/project.git'],{cwd:root});
+    await assert.rejects(setupRepository(root,connection,{fetcher,herdr:true,runHerdr}),/different repositories/);
+    assert.equal(calls,0); await assert.rejects(stat(join(root,'.graphyard/connection.json'))); await assert.rejects(stat(join(root,'AGENTS.md')));
+    execFileSync('git',['remote','set-url','origin','https://github.com/owner/project.git'],{cwd:root});
+    assert.equal((await setupRepository(root,connection,{fetcher})).connected,true);
+  } finally { await rm(root,{recursive:true,force:true}); }
+});
