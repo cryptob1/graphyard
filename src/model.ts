@@ -35,17 +35,19 @@ export interface Evidence {
 export interface ReviewRequest { commentId: number; sha: string; baseSha: string; policyRevision: number; body: string; createdAt: string }
 export interface AgentReview { provider: 'codex'; sha: string; approved: boolean; reason: string; summaryId?: number; resultId?: number; requestId?: number; reactionId?: number; completedAt?: string }
 export interface Observation {
+  reviewIds?: number[];
   agentReview?: AgentReview;
   prState?: 'open' | 'closed'; draft?: boolean;
   candidate: Candidate; checks: { name: string; result: string; appId: number }[];
-  reviews: { reviewer: string; sha: string; state: string; submittedAt?: string }[];
+  reviews: { reviewer: string; sha: string; state: string; id?: number; submittedAt?: string }[];
   merged: boolean; mergeSha: string | null; mergedAt?: string | null; mergeable: boolean;
   protected: boolean; files: string[]; at: string;
 }
 export interface Gate { name: string; passed: boolean; reasons: string[] }
 export interface Work extends Create {
   retiredCriterionIds?: string[];
-  reviewNotBefore?: string;
+  formalReviewResetRequired?: boolean;
+  formalReviewBaseline?: { pr: number; policyRevision: number; reviewIds: number[] };
   id: string; key: string; stage: Stage; revision: number; policyRevision: number;
   createdAt: string; updatedAt: string; stageEnteredAt: string; ready: boolean;
   epoch: number; lease: Lease | null; lastAssignment?: AssignmentIdentity; workspaces: Workspace[]; candidate: Candidate | null;
@@ -90,9 +92,9 @@ export function evaluate(work: Work, all: Work[], now: Date, ciAppIds: number[])
   const reviewPassed = work.policy.reviewProvider === 'codex'
     ? !!candidate && !!agentReview?.approved && agentReview.provider === 'codex' && agentReview.sha === candidate.sha && work.reviewRequest?.commentId === agentReview.requestId && work.reviewRequest?.sha === candidate.sha && work.reviewRequest?.baseSha === candidate.baseSha && work.reviewRequest?.policyRevision === work.policyRevision
     : !!candidate && reviews.some(r => r.sha === candidate.sha && r.state === 'APPROVED' && r.reviewer !== candidate.author
-      && (!work.reviewNotBefore || !!r.submittedAt && Date.parse(r.submittedAt) > Date.parse(work.reviewNotBefore) && Date.parse(r.submittedAt) <= now.getTime()));
+      && (!work.formalReviewResetRequired || work.formalReviewBaseline?.pr === candidate.pr && work.formalReviewBaseline.policyRevision === work.policyRevision && Number.isSafeInteger(r.id) && r.id! > 0 && !work.formalReviewBaseline.reviewIds.includes(r.id!)));
   add('review', work.policy.review ? [
-    ...(!reviewPassed ? [work.policy.reviewProvider === 'codex' ? agentReview?.reason ?? 'Verified clean Codex review of the current commit is required' : 'Independent approval of the current commit is required'] : []),
+    ...(!reviewPassed ? [work.policy.reviewProvider === 'codex' ? agentReview?.reason ?? 'Verified clean Codex review of the current commit is required' : work.formalReviewResetRequired ? 'A new independent GitHub approval after the requirement-review baseline is required' : 'Independent approval of the current commit is required'] : []),
     ...(changesRequested ? ['Outstanding change requests must be resolved through a new review'] : []),
   ] : []);
   add('test', work.policy.checks.filter(name => {

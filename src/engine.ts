@@ -77,7 +77,7 @@ export class Engine {
         demand((work.policy.reviewProvider ?? 'github') !== data.provider, 'Review provider is already selected');
         work.policy = { ...work.policy, reviewProvider: data.provider };
         work.policyRevision++;
-        work.reviewNotBefore = now.toISOString();
+        work.formalReviewResetRequired = true; work.formalReviewBaseline = undefined;
         work.observation = null; work.mergeAuthorization = null; work.reviewRequest = null;
       }
       if (command === 'requirements') {
@@ -107,7 +107,7 @@ export class Engine {
         work.retiredCriterionIds = [...(work.retiredCriterionIds ?? []), ...work.criteria.filter(ac => !data.criteria.some((next: { id: string }) => next.id === ac.id)).map(ac => ac.id)];
         work.criteria = data.criteria; work.dependencies = data.dependencies; work.plannedFiles = data.plannedFiles; work.exclusiveResources = data.exclusiveResources;
         work.scenarioRequirements = pins; work.policyRevision++;
-        work.reviewNotBefore = now.toISOString();
+        work.formalReviewResetRequired = true; work.formalReviewBaseline = undefined;
         work.lease = null; work.observation = null; work.mergeAuthorization = null; work.reviewRequest = null;
         // A submitted implementation must be explicitly reconsidered for changed intent.
         if (work.submission) work.reworkRequested = true;
@@ -225,6 +225,13 @@ export class Engine {
       }
       work.candidate = observation.candidate;
       work.observation = observation;
+      // Snapshot all provider review identities after the revision. Approvals in this
+      // first observation never count, regardless of clock skew or future reevaluation.
+      if (work.formalReviewResetRequired && work.policy.reviewProvider !== 'codex' && !work.formalReviewBaseline && observation.reviewIds
+        && observation.reviewIds.every(id => Number.isSafeInteger(id) && id > 0)
+        && observation.reviews.every(r => Number.isSafeInteger(r.id) && observation.reviewIds!.includes(r.id!))) {
+        work.formalReviewBaseline = { pr: observation.candidate.pr, policyRevision: work.policyRevision, reviewIds: [...observation.reviewIds] };
+      }
       this.evaluate(work, all, now);
       if (observation.merged) {
         const violation = 'Merge observed without a prior authorization for this candidate';

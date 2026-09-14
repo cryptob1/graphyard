@@ -518,25 +518,30 @@ test('exclusive resource claims serialize across replicas and expired epochs can
   } finally { await second.close(); }
 });
 
-test('formal approvals cannot survive a requirement revision on an unchanged commit', async () => {
-  let w = await submitted(); const old = new Date(Date.now() - 10000).toISOString();
-  w = await engine.observe(w.id, w.revision, { ...observation(w), reviews: [{ reviewer: 'reviewer', sha: head, state: 'APPROVED', submittedAt: old }] });
-  assert.equal(w.gates.find(g => g.name === 'review')!.passed, true);
+test('formal review identities stay excluded after revisions regardless of clock skew', async () => {
+  let w = await submitted();
+  const existing = { id: 100, reviewer: 'reviewer', sha: head, state: 'APPROVED', submittedAt: new Date(Date.now() + 60000).toISOString() };
+  w = await engine.observe(w.id, w.revision, { ...observation(w), reviewIds: [100], reviews: [existing] });
   await engine.execute(worker, 'release', w.id, { epoch: 1 }, randomUUID());
-  w = await engine.execute(operator, 'requirements', w.id, { expectedPolicyRevision: 1, reason: 'Change the outcome without changing code', criteria: [{ ...w.criteria[0], text: 'The revised intent must be reviewed' }], dependencies: [], plannedFiles: [], exclusiveResources: [] }, randomUUID());
-  assert.ok(w.reviewNotBefore);
-  for (const submittedAt of [undefined, old, w.reviewNotBefore, new Date(Date.now() + 60000).toISOString()]) {
-    w = await engine.observe(w.id, w.revision, { ...observation(w), reviews: [{ reviewer: 'reviewer', sha: head, state: 'APPROVED', submittedAt }] });
+  w = await engine.execute(operator, 'requirements', w.id, { expectedPolicyRevision: 1, reason: 'Change intent without changing code', criteria: [{ ...w.criteria[0], text: 'Revised intent' }], dependencies: [], plannedFiles: [], exclusiveResources: [] }, randomUUID());
+  assert.equal(w.formalReviewResetRequired, true); assert.equal(w.formalReviewBaseline, undefined);
+  w = await engine.observe(w.id, w.revision, { ...observation(w), reviews: [existing] });
+  assert.equal(w.gates.find(g => g.name === 'review')!.passed, false); assert.equal(w.formalReviewBaseline, undefined);
+  w = await engine.observe(w.id, w.revision, { ...observation(w), reviewIds: [100, 101], reviews: [existing] });
+  assert.deepEqual(w.formalReviewBaseline!.reviewIds, [100, 101]);
+  assert.equal(w.gates.find(g => g.name === 'review')!.passed, false);
+  // A later database evaluation cannot make the same immutable identity fresh.
+  const { evaluate } = await import('../src/model.js');
+  assert.equal(evaluate(w, [w], new Date(Date.now() + 120000), [15368]).gates.find(g => g.name === 'review')!.passed, false);
+  for (const id of [undefined, 100, 101]) {
+    w = await engine.observe(w.id, w.revision, { ...observation(w), reviewIds: [100, 101], reviews: [{ ...existing, id }] });
     assert.equal(w.gates.find(g => g.name === 'review')!.passed, false);
   }
-  await delay(5);
-  w = await engine.observe(w.id, w.revision, { ...observation(w), reviews: [{ reviewer: 'reviewer', sha: head, state: 'APPROVED', submittedAt: new Date().toISOString() }] });
+  w = await engine.observe(w.id, w.revision, { ...observation(w), reviewIds: [100, 101, 102], reviews: [{ ...existing, id: 102 }] });
   assert.equal(w.gates.find(g => g.name === 'review')!.passed, true);
-  w = await engine.execute(operator, 'reviewpolicy', w.id, { provider: 'codex', expectedPolicyRevision: 2, reason: 'Select cloud review' }, randomUUID());
-  const boundary = w.reviewNotBefore!;
-  await delay(5);
-  w = await engine.execute(operator, 'reviewpolicy', w.id, { provider: 'github', expectedPolicyRevision: 3, reason: 'Select formal review again' }, randomUUID());
-  assert.ok(Date.parse(w.reviewNotBefore!) > Date.parse(boundary));
-  w = await engine.observe(w.id, w.revision, { ...observation(w), reviews: [{ reviewer: 'reviewer', sha: head, state: 'APPROVED', submittedAt: boundary }] });
+  w = await engine.execute(operator, 'reviewpolicy', w.id, { provider: 'codex', expectedPolicyRevision: 2, reason: 'Cloud review' }, randomUUID());
+  w = await engine.execute(operator, 'reviewpolicy', w.id, { provider: 'github', expectedPolicyRevision: 3, reason: 'Formal review again' }, randomUUID());
+  assert.equal(w.formalReviewBaseline, undefined);
+  w = await engine.observe(w.id, w.revision, { ...observation(w), reviewIds: [100, 101, 102], reviews: [{ ...existing, id: 102 }] });
   assert.equal(w.gates.find(g => g.name === 'review')!.passed, false);
 });
