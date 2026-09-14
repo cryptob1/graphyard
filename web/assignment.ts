@@ -1,7 +1,7 @@
 import type { Work } from '../src/model';
 
-/** Display identity never replaces the authenticated lease owner. */
-export function assignment(work: Pick<Work, 'lease' | 'lastAssignment' | 'workspaces'>, now = Date.now()) {
+/** Use the control plane observation time, never the worker machine clock. */
+export function assignment(work: Pick<Work, 'lease' | 'lastAssignment' | 'workspaces'>, now: number) {
   const active = !!work.lease && Date.parse(work.lease.expiresAt) > now;
   const latestWorkspace = work.workspaces.reduce<Work['workspaces'][number] | undefined>((latest, workspace) => !latest || workspace.epoch > latest.epoch ? workspace : latest, undefined);
   const previous = work.lastAssignment ?? latestWorkspace;

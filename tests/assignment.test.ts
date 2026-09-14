@@ -23,3 +23,14 @@ test('operator identity configuration accepts bounded labels without terminal co
   assert.equal(principalSchema.parse([{ ...base, displayName: ' Atlas ', runtime: 'Codex' }])[0].displayName, 'Atlas');
   for (const displayName of ['', 'x'.repeat(101), 'agent\u001b[0m']) assert.equal(principalSchema.safeParse([{ ...base, displayName }]).success, false);
 });
+
+ test('assignment status uses the server observation despite a skewed client clock', () => {
+  const original = Date.now;
+  try {
+    for (const offset of [-86400000, 86400000]) {
+      Date.now = () => now + offset;
+      assert.equal(assignment({ lease, lastAssignment, workspaces: [] }, now).active, true);
+      assert.equal(assignment({ lease, lastAssignment, workspaces: [] }, now + 180000).active, false);
+    }
+  } finally { Date.now = original; }
+ });
