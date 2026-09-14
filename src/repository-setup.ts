@@ -13,12 +13,18 @@ export function serverOrigin(value: string) {
   if (url.username || url.password || url.search || url.hash || url.pathname !== '/' || (url.protocol !== 'https:' && !(url.protocol === 'http:' && ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname)))) throw new Error('Use an HTTPS server origin, or HTTP on loopback; no credentials, query, or path');
   return url.origin;
 }
+function connectionRoots(cwd: string) {
+  const git = (...args: string[]) => execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+  const current = git('rev-parse', '--show-toplevel');
+  const primary = git('worktree', 'list', '--porcelain', '-z').split('\0').find(line => line.startsWith('worktree '))?.slice(9);
+  if (!primary) throw new Error('Cannot locate the primary checkout for shared worker configuration');
+  // A bare repository has no primary checkout in which to keep ignored config.
+  execFileSync('git', ['-C', primary, 'rev-parse', '--show-toplevel'], { stdio: 'ignore' });
+  return [...new Set([primary, current])];
+}
 export async function loadConnection(cwd: string): Promise<Connection | null> {
   let roots: string[];
-  try {
-    const git = (...args: string[]) => execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
-    roots = [...new Set([git('rev-parse', '--show-toplevel'), dirname(git('rev-parse', '--path-format=absolute', '--git-common-dir'))])];
-  } catch { return null; }
+  try { roots = connectionRoots(cwd); } catch { return null; }
   for (const root of roots) {
     try {
       const file = resolve(root, '.graphyard/connection.json'); const info = await lstat(file);
@@ -95,7 +101,7 @@ export async function setupRepository(root: string, input: Connection, options: 
     try { return execFileSync('herdr', args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim(); } catch { throw new Error('Herdr setup command failed; check installation and rerun init. No credentials were printed.'); }
   });
   if (options.herdr) runHerdr(['plugin', '--help']);
-  const directory = await localDirectory(root);
+  const directory = await localDirectory(connectionRoots(root)[0]);
   await atomicWrite(resolve(directory, 'connection.json'), JSON.stringify(connection, null, 2), 0o600);
   let instructionsMode = 0o644; try { instructionsMode = (await lstat(instructionsFile)).mode & 0o777; } catch { /* new instructions */ }
   await atomicWrite(instructionsFile, instructions, instructionsMode);
