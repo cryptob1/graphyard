@@ -48,9 +48,11 @@ export async function observeCodex(source: Source, pr: number, head: string, rev
       source.pages(`/issues/${pr}/comments`), source.pages(`/pulls/${pr}/reviews`),
       source.pages(`/issues/${pr}/reactions`), source.pages(`/issues/comments/${trigger.id}/reactions`),
     ]);
-    if (!isCodex(resultAgain) || resultAgain.performed_via_github_app?.id !== CODEX_APP_ID || resultAgain.body !== result.body
-      || resultAgain.created_at !== result.created_at || resultAgain.updated_at !== result.updated_at || !authenticTrigger(triggerAgain)
-      || !commentsAgain.some(c => c.id === result.id) || conflictingComments(commentsAgain) || findings(reviewsAgain)
+    const unchangedResult = (c: any) => c && c.id === result.id && isCodex(c) && c.performed_via_github_app?.id === CODEX_APP_ID
+      && c.body === result.body && c.created_at === result.created_at && c.updated_at === result.updated_at;
+    if (!unchangedResult(resultAgain) || !authenticTrigger(triggerAgain)
+      || !unchangedResult(commentsAgain.find(c => c.id === result.id)) || !authenticTrigger(commentsAgain.find(c => c.id === trigger.id))
+      || conflictingComments(commentsAgain) || findings(reviewsAgain)
       || running(prReactions) || running(requestReactions)) return refuse('Codex review changed or is running; retry');
     return { provider: 'codex', sha: head, approved: true, reason: 'Authenticated Codex result reported no major issues', resultId: result.id, requestId: trigger.id, completedAt: new Date(completedAt).toISOString() };
   }

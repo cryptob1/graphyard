@@ -147,3 +147,15 @@ test('migration refuses required code-owner review before making any external ch
     assert.equal((await f.run()).approved, false, suffix);
   }
  });
+
+ test('clean approval refuses edits visible only in the final list snapshot', async () => {
+  for (const target of ['result', 'trigger'] as const) {
+    const f = commentFixture(), original = f.source.pages; let reads = 0;
+    f.source.pages = async path => {
+      const rows = await original(path);
+      if (path.endsWith('/comments') && ++reads > 1) rows.find(c => c.id === f[target].id).body += ' edited';
+      return rows;
+    };
+    assert.equal((await f.run()).approved, false);
+  }
+ });
