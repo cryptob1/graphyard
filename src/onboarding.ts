@@ -3,8 +3,19 @@ import { mkdir, readdir, readFile, writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 
 export function repositoryFromRemote(remote: string) {
-  const match = remote.trim().match(/^(?:git@github\.com:|https:\/\/(?:[^/@]+@)?github\.com\/)([\w.-]+\/[\w.-]+?)(?:\.git)?\/?$/);
-  return match?.[1] ?? null;
+  const value = remote.trim();
+  let path = /^git@github\.com:(.+)$/i.exec(value)?.[1];
+  if (!path) {
+    try {
+      const url = new URL(value); const host = url.hostname.toLowerCase();
+      const https = url.protocol === 'https:' && host === 'github.com' && !url.port;
+      const ssh = url.protocol === 'ssh:' && url.username === 'git' && !url.password &&
+        (host === 'github.com' && ['', '22'].includes(url.port) || host === 'ssh.github.com' && url.port === '443');
+      if ((!https && !ssh) || url.search || url.hash) return null;
+      path = url.pathname.slice(1);
+    } catch { return null; }
+  }
+  return /^([\w.-]+\/[\w.-]+?)(?:\.git)?\/?$/.exec(path)?.[1] ?? null;
 }
 export async function discover(root: string) {
   const git = (...args: string[]) => execFileSync('git', args, { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
