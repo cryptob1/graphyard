@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { diagnose, fileConflicts, proofPreview } from '../src/coordination.js';
+import { diagnose, fileConflicts, proofPreview, resourceConflicts } from '../src/coordination.js';
 import type { Work } from '../src/model.js';
 const now = Date.parse('2026-01-01T00:10:00Z');
 function work(id: string): Work {
@@ -29,4 +29,11 @@ test('diagnostics distinguish expired ownership, resource waits and a stalled in
   a.submission = { epoch: 1, pr: 1 }; result = diagnose(a, [a,b], now, [{ work_id: 'A', available_at: new Date(now - 180000).toISOString(), locked_until: null, error: null }]);
   assert.ok(result.some(d => d.kind === 'unobserved')); assert.ok(result.some(d => d.kind === 'reconciliation-stalled'));
   a.stage = 'done'; assert.deepEqual(diagnose(a, [a,b], now), []);
+});
+
+test('completed work retains its resource reservation until its last lease expires', () => {
+  const a = work('A'), b = work('B'); a.exclusiveResources = b.exclusiveResources = ['staging'];
+  b.stage = 'done'; b.lease = { owner: 'last-worker', epoch: 1, expiresAt: new Date(now + 60000).toISOString() };
+  assert.deepEqual(resourceConflicts(a, [a, b], now), [{ resource: 'staging', key: 'B' }]);
+  assert.deepEqual(resourceConflicts(a, [a, b], now + 60000), []);
 });

@@ -507,6 +507,10 @@ test('exclusive resource claims serialize across replicas and expired epochs can
     assert.equal(results.filter(r => r.status === 'fulfilled').length, 1);
     const winner = (results.find(r => r.status === 'fulfilled') as PromiseFulfilledResult<Work>).value;
     const loser = tasks.find(w => w.id !== winner.id)!;
+    // Completion can precede the implementation worker's last lease expiry.
+    await store.pool.query("UPDATE work_items SET document=jsonb_set(document,'{stage}',to_jsonb('done'::text)) WHERE id=$1", [winner.id]);
+    await assert.rejects(engine.execute(other, 'claim', loser.id, {}, randomUUID()), /Exclusive resources held/);
+    await store.pool.query("UPDATE work_items SET document=jsonb_set(document,'{stage}',to_jsonb('build'::text)) WHERE id=$1", [winner.id]);
     await store.pool.query("UPDATE work_items SET document=jsonb_set(document,'{lease,expiresAt}',to_jsonb('2000-01-01T00:00:00Z'::text)) WHERE id=$1", [winner.id]);
     await engine.execute(other, 'claim', loser.id, {}, randomUUID());
     await assert.rejects(engine.execute({ id: winner.lease!.owner, role: 'worker' }, 'heartbeat', winner.id, { epoch: winner.epoch }, randomUUID()), /expired/);
