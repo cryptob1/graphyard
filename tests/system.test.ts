@@ -325,3 +325,16 @@ test('assignment identity comes from the authenticated principal and survives re
     assert.deepEqual(event.payload.work.lastAssignment, { owner: worker.id, epoch: 1 });
   }
  });
+
+ test('status uses the lease database clock even when the application clock is skewed', async () => {
+  const originalDate = globalThis.Date;
+  const before = (await store.pool.query('SELECT clock_timestamp() AS now')).rows[0].now.getTime();
+  try {
+    globalThis.Date = new Proxy(originalDate, { construct(target, args, newTarget) { return Reflect.construct(target, args.length ? args : ['2099-01-01T00:00:00Z'], newTarget); } });
+    const response = await fetch(`${url}/api/status`, { headers: { Authorization: `Bearer ${'w'.repeat(32)}` } });
+    assert.equal(response.status, 200);
+    const status = await response.json();
+    const after = (await store.pool.query('SELECT clock_timestamp() AS now')).rows[0].now.getTime();
+    assert.ok(Date.parse(status.now) >= before && Date.parse(status.now) <= after);
+  } finally { globalThis.Date = originalDate; }
+ });
