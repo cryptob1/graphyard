@@ -9,3 +9,31 @@ Domain mutations must be transactional, append history, and enforce principal id
 Run `npm run build` and `npm test` for domain/API changes. Tests run a temporary real Postgres database; do not substitute production data. Update the relevant guide under `docs/` when behavior changes. Keep external I/O outside coordination transactions.
 
 No secrets belong in Git. `.graphyard/credentials.json` and `.env` are local-only. Deployment changes use the Dockerfile and `.railway/railway.ts`; preview infrastructure changes before applying.
+
+<!-- graphyard -->
+## Graphyard coordination
+
+This repository uses Graphyard at https://graphyard-production.up.railway.app for ownership and delivery gates.
+Repository setup stores machine-specific CLI and connection settings in ignored
+`.graphyard/connection.json`. Never put credentials in AGENTS.md or Git.
+
+Before editing, claim an authorized work item and use its assigned worktree.
+Check dependencies, blockers, current owner, and lease epoch. Use `handoff GY-N`
+to obtain the workspace and launch command for this machine.
+
+Run agents through `watch GY-N EPOCH -- YOUR_AGENT_COMMAND`. The supervisor supplies
+`GRAPHYARD_CLI`, `GRAPHYARD_URL`, and worker identity to the child. Inside that
+session, invoke the CLI as `node "$GRAPHYARD_CLI" status GY-N` (or other commands).
+For manual startup, use the CLI path printed by `init` or Herdr's handoff command.
+
+Renew ownership at least every 30 seconds while actively working. Stop editing and
+pushing on lease loss; an expired or superseded epoch does not authorize more work.
+Register the assigned host/path/branch before submission. Do not reuse another
+assignment's worktree or quietly remove historical reservations.
+
+Submit the PR with `complete GY-N EPOCH PR_NUMBER`. This reports implementation
+completion; it does not set Done. CI, trusted evidence, independent review, and
+Graphyard's merge gate decide progression. Report blockers explicitly.
+Never use an operator/producer token for implementation or weaken proof requirements.
+Herdr runs sessions; Graphyard remains the source of ownership truth.
+<!-- /graphyard -->

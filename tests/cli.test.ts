@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir, hostname } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -14,14 +14,14 @@ const exec = promisify(execFile);
 const launcher = fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url));
 const renewal = (duration = 2000) => ({ updatedAt: new Date().toISOString(), lease: { epoch: 1, expiresAt: new Date(Date.now() + duration).toISOString() } });
 
-test('installed CLI resolves its runtime from another repository and includes submitted rework in next', async () => {
+test('installed CLI resolves its runtime from another repository and includes submitted rework in next using the work snapshot clock', async () => {
   const cwd = await mkdtemp(join(tmpdir(), 'graphyard cli '));
-  const http = createServer((req, res) => { res.setHeader('Content-Type', 'application/json'); res.end(JSON.stringify([{ id: 'rework', stage: 'build', ready: true, reworkRequested: true, submission: { pr: 1 }, dependencies: [], priority: 1 }])); });
+  const http = createServer((req, res) => { res.setHeader('Content-Type', 'application/json'); res.end(JSON.stringify({now:'2026-01-01T00:01:00Z',work:[{ id: 'rework', stage: 'build', ready: true, reworkRequested: true, submission: { pr: 1 }, dependencies: [], priority: 1 },{id:'active',stage:'build',ready:true,dependencies:[],priority:1,lease:{expiresAt:'2026-01-01T00:02:00Z'}},{id:'expired',stage:'build',ready:true,dependencies:[],priority:1,lease:{expiresAt:'2026-01-01T00:00:00Z'}}]})); });
   await new Promise<void>(r => http.listen(0, '127.0.0.1', r));
   try {
     assert.match((await exec(process.execPath, [launcher, '--help'], { cwd })).stdout, /Graphyard 0.1/);
     const { stdout } = await exec(process.execPath, [launcher, 'next'], { cwd, env: { ...process.env, GRAPHYARD_TOKEN: 'test-only', GRAPHYARD_URL: `http://127.0.0.1:${(http.address() as any).port}` } });
-    assert.equal(JSON.parse(stdout)[0].id, 'rework');
+    assert.deepEqual(JSON.parse(stdout).map((w:any)=>w.id), ['rework','expired']);
   } finally { await new Promise<void>(r => http.close(() => r())); await rm(cwd, { recursive: true, force: true }); }
 });
 
@@ -73,3 +73,49 @@ test('supervisor kills surviving descendants even after their group leader exits
     assert.equal(await readFile(output, 'utf8'), stopped);
   } finally { await rm(cwd, { recursive: true, force: true }); }
 });
+
+ test('handoff pairs ownership with its work observation rather than a later status clock', async () => {
+  const cwd=await mkdtemp(join(tmpdir(),'graphyard-handoff-'));const requests:string[]=[];
+  const http=createServer((req,res)=>{requests.push(req.url!);res.setHeader('Content-Type','application/json');res.end(JSON.stringify(req.url==='/api/status'?{actor:{id:'worker-a',role:'worker'},now:'2026-01-01T00:02:00Z'}:{now:'2026-01-01T00:00:00Z',work:[{id:'task',key:'GY-1',lease:{owner:'worker-a',epoch:7,expiresAt:'2026-01-01T00:01:00Z'},workspaces:[{epoch:7,host:'machine-a',path:cwd}]}]}))});
+  await new Promise<void>(r=>http.listen(0,'127.0.0.1',r));
+  try{const result=await exec(process.execPath,[launcher,'handoff','GY-1'],{cwd,env:{...process.env,GRAPHYARD_TOKEN:'fixture',GRAPHYARD_HOST_ID:'machine-a',GRAPHYARD_URL:`http://127.0.0.1:${(http.address() as any).port}`}});assert.match(JSON.parse(result.stdout).commands.join(' '),/watch/);assert.deepEqual(requests.sort(),['/api/status','/api/work-snapshot']);}
+  finally{await new Promise<void>(r=>http.close(()=>r()));await rm(cwd,{recursive:true,force:true});}
+ });
+
+ test('worktree verifies the checkout before reserving a workspace or creating a branch', async () => {
+  const cwd=await mkdtemp(join(tmpdir(),'graphyard-repository-fence-'));let reservations=0;
+  const http=createServer((req,res)=>{res.setHeader('Content-Type','application/json');
+    if(req.url==='/api/status')res.end(JSON.stringify({repository:'OWNER/project',actor:{id:'worker-a',role:'worker'}}));
+    else if(req.method==='POST'){reservations++;res.end('{}');}
+    else res.end(JSON.stringify([{id:'task',key:'GY-1',workspaces:[]}]));
+  });
+  await new Promise<void>(r=>http.listen(0,'127.0.0.1',r));
+  const env={...process.env,GRAPHYARD_TOKEN:'fixture',GRAPHYARD_URL:`http://127.0.0.1:${(http.address() as any).port}`};
+  try {
+    await exec('git',['init','-q'],{cwd});await exec('git',['-c','user.name=Test','-c','user.email=test@localhost','commit','--allow-empty','-m','Initial'],{cwd});
+    await assert.rejects(exec(process.execPath,[launcher,'worktree','GY-1','1'],{cwd,env}),/Cannot verify/);
+    await exec('git',['remote','add','origin','git@github.com:other/project.git'],{cwd});
+    await assert.rejects(exec(process.execPath,[launcher,'worktree','GY-1','1'],{cwd,env}),/different repositories/);
+    assert.equal(reservations,0);await assert.rejects(stat(join(cwd,'.graphyard/worktrees/GY-1-1')));
+    await assert.rejects(exec('git',['show-ref','--verify','refs/heads/graphyard/gy-1-1'],{cwd}));
+    await exec('git',['remote','set-url','origin','ssh://git@github.com/owner/project.git'],{cwd});
+    await exec(process.execPath,[launcher,'worktree','GY-1','1'],{cwd,env});
+    assert.equal(reservations,1);assert.ok((await stat(join(cwd,'.graphyard/worktrees/GY-1-1'))).isDirectory());
+  } finally {await new Promise<void>(r=>http.close(()=>r()));await rm(cwd,{recursive:true,force:true});}
+ });
+
+ test('handoff uses the active CLI or explicit override instead of a stale saved launcher', async () => {
+  const cwd=await mkdtemp(join(tmpdir(),'graphyard-active-cli-'));
+  const http=createServer((req,res)=>{res.setHeader('Content-Type','application/json');res.end(JSON.stringify(req.url==='/api/status'?{actor:{id:'worker-a',role:'worker'}}:{now:'2026-01-01T00:00:00Z',work:[{id:'task',key:'GY-1',lease:{owner:'worker-a',epoch:1,expiresAt:'2026-01-01T00:01:00Z'},workspaces:[{epoch:1,host:'machine-a',path:cwd}]}]}));});
+  await new Promise<void>(r=>http.listen(0,'127.0.0.1',r));const url=`http://127.0.0.1:${(http.address() as any).port}`;
+  const env:NodeJS.ProcessEnv={...process.env,GRAPHYARD_URL:url,GRAPHYARD_TOKEN:'fixture',GRAPHYARD_HOST_ID:'machine-a'};delete env.GRAPHYARD_CLI;
+  try {
+    await exec('git',['init','-q'],{cwd});await mkdir(join(cwd,'.graphyard'));
+    await writeFile(join(cwd,'.graphyard/connection.json'),JSON.stringify({url,token:'fixture'.padEnd(40,'x'),hostId:'machine-a',cliPath:'/removed/graphyard/bin/graphyard.mjs'}),{mode:0o600});
+    const commands=async (settings:NodeJS.ProcessEnv)=>JSON.parse((await exec(process.execPath,[launcher,'handoff','GY-1'],{cwd,env:settings})).stdout).commands.join(' ');
+    assert.ok((await commands(env)).includes(launcher));
+    const override=join(cwd,'active.mjs');await writeFile(override,'// fixture launcher');
+    assert.ok((await commands({...env,GRAPHYARD_CLI:override})).includes(override));
+    for(const invalid of ['',join(cwd,'missing.mjs')])await assert.rejects(commands({...env,GRAPHYARD_CLI:invalid}),/launcher/);
+  } finally {await new Promise<void>(r=>http.close(()=>r()));await rm(cwd,{recursive:true,force:true});}
+ });

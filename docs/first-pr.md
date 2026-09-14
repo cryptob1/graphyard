@@ -7,10 +7,10 @@ This guide connects the bootstrap components into one supervised loop. Creating 
 From the managed repository, using a checkout of Graphyard:
 
 ```sh
-node /path/to/graphyard/bin/graphyard.mjs init
+node /path/to/graphyard/bin/graphyard.mjs init --url https://YOUR-GRAPHYARD-HOST --herdr --token-stdin
 ```
 
-The command finds the GitHub origin, package scripts, supported test framework packages, and workflow files. It saves a proposal in ignored `.graphyard/project.json` and appends agent instructions without replacing existing instructions. Confirm the actual CI job names before using the proposed `test` and `typecheck` requirements. Discovery does not execute scripts or infer that tests passed.
+The command finds the GitHub origin, package scripts, supported test framework packages, and workflow files. It saves a proposal in ignored `.graphyard/project.json` and maintains one managed section in `AGENTS.md`, preserving instructions outside it. Supply an individual worker token on stdin; setup verifies the identity and privately configures the CLI and Herdr plugin. Omit `--herdr` if you use another runtime. See the [Herdr guide](herdr.md) for credential handling, reruns, and handoff. Confirm the actual CI job names before using the proposed `test` and `typecheck` requirements. Discovery does not execute scripts or infer that tests passed.
 
 ## Register the dedicated GitHub App
 

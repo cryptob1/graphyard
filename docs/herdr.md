@@ -4,25 +4,21 @@ Herdr is Graphyard's first launch integration. The root `herdr-plugin.toml` foll
 
 ## Install
 
-Requires Node 24 and Herdr with native plugin support (manifest minimum 0.7.1). From a local checkout:
+Requires Node 24 and Herdr with native plugin support (manifest minimum 0.7.1). From the repository you want to manage, invoke a local Graphyard checkout:
 
 ```sh
-herdr plugin link /absolute/path/to/graphyard --enabled
-herdr plugin config-dir graphyard
+node /absolute/path/to/graphyard/bin/graphyard.mjs init --url https://YOUR-GRAPHYARD-HOST --herdr --token-stdin
 ```
 
-Create `config.json` in the printed directory:
+Supply an individual worker token on standard input, then EOF (Ctrl-D). A password manager can pipe it in; do not put it in command arguments or shell history. `GRAPHYARD_TOKEN` is also supported. The npm package has not been published.
 
-```json
-{
-  "url": "https://YOUR-GRAPHYARD-HOST",
-  "token": "YOUR_INDIVIDUAL_WORKER_OR_READER_TOKEN"
-}
-```
+Setup authenticates the credential and requires the worker role. It saves the connection in ignored `.graphyard/connection.json` with mode 0600, updates one managed section in `AGENTS.md` while preserving your surrounding instructions, links the Herdr plugin disabled, saves its private configuration, and enables it last. Output contains connection metadata, never the token. Commit the updated `AGENTS.md`, not the local connection file.
 
-Restrict the file to your user with `chmod 600 config.json`. Alternatively supply `GRAPHYARD_URL` and `GRAPHYARD_TOKEN` to Herdr's plugin environment. Do not configure an operator or trusted CI credential in an implementation agent's environment.
+Rerunning updates the managed section without duplicating it. Malformed markers and non-regular setup files are refused. A failed Herdr command can leave repository setup saved; fix the installation and rerun. Keep the Graphyard checkout at its configured absolute path, or rerun with the new launcher path. Linked worktrees inherit the main checkout's connection without copying credentials.
 
-Once this repository is accessible to Herdr's installer, `herdr plugin install cryptob1/graphyard` is the intended repository install route. Private repository access depends on your Herdr/GitHub authentication; the local-link path is the reproducible bootstrap route.
+Without `--herdr`, setup only configures repository instructions and the CLI connection. Without a token, it saves an unverified connection and tells you to finish authentication. An explicit server change does not forward a saved token; supply the new server's credential explicitly.
+
+For a read-only plugin, manually link it and configure a reader credential. Automated worker setup deliberately rejects reader, operator, and producer tokens. Never configure privileged credentials in an implementation agent's environment.
 
 ## Use
 
@@ -32,6 +28,7 @@ Invoke **Open Graphyard control plane** from Herdr's plugin actions. The ledger 
 list
 show GY-1
 claim GY-1
+handoff GY-1
 heartbeat GY-1 1
 release GY-1 1
 quit
@@ -39,7 +36,7 @@ quit
 
 The pane displays each task's current stage, owner, and first refusal. Claiming work does not launch another agent, acknowledge a prompt, or start a background heartbeat. It returns the assignment epoch and next commands. The lease expires after two minutes unless a worker acknowledges ownership through renewal.
 
-For execution, create or register an isolated worktree, then launch the desired agent under the CLI supervisor in that workspace:
+After claiming, run `handoff GY-1` in the pane. It checks your live lease and machine identity, then prints worktree setup commands or the assigned workspace and supervisor command. It refuses expired ownership and workspaces on another host. Follow those commands to launch your desired agent:
 
 ```sh
 graphyard watch GY-1 1 -- YOUR_AGENT_COMMAND
@@ -49,7 +46,7 @@ Here `graphyard` means the locally installed bin or `node /path/to/graphyard/bin
 
 ## Many machines
 
-Every machine points to the same Graphyard URL and receives individual worker credentials. Use stable, unique host IDs for worktree registration. Herdr's remote session transport is independent of Graphyard's network protocol.
+Every machine points to the same Graphyard URL and receives individual worker credentials. Use stable, unique host IDs for worktree registration: pass `--host-id YOUR_MACHINE_ID` to init (default: hostname). Each independently running worker needs its own identity; do not share one worker token across concurrent sessions. The local plugin configuration currently selects one server and worker identity at a time. Herdr's remote session transport is independent of Graphyard's network protocol.
 
 The Graphyard server never needs SSH access or local paths mounted from worker machines. Worktree actions execute where Herdr or the agent runs. The server validates reservations and provider-observed PR branches.
 
@@ -72,6 +69,11 @@ Record actual evidence in Graphyard. The automated local race tests are useful k
 
 Automated dispatch/ACK handling, agent-specific lifecycle hooks, and rich Herdr pane rendering are intentionally deferred until this basic protocol is exercised with real sessions. No multiple-agent session is launched during the initial single-agent build.
 
+Host IDs from setup and `GRAPHYARD_HOST_ID` have surrounding whitespace removed before workspace registration and handoff checks. Empty host IDs are rejected. Use a stable, distinct ID for each machine.
+
+When a server declares its GitHub repository, setup verifies that the checkout's `origin` identifies the same repository (case-insensitively) before saving credentials or enabling the plugin. A missing/unrecognized origin or a different repository refuses setup. Configure the correct GitHub origin first. Servers without a configured repository can still support local bootstrap discovery.
+
+An explicit `GRAPHYARD_HOST_ID` takes precedence over the host ID saved by setup in both the CLI and Herdr handoff. Invalid explicit values are passed through to the CLI's validation rather than silently replaced by a saved host.
 ## Agent names and automatic board assignment
 
 Each independently running worker must have its own Graphyard principal and token. The operator can optionally add `displayName` and `runtime` to that principal in the server's private `GRAPHYARD_PRINCIPALS` configuration. For example, a worker with ID `worker-17`, display name `Atlas`, and runtime `Codex` appears as **Atlas · Codex** when it claims a task. Runtime is a display label and can describe Claude, Codex, a custom tool, or a human-assisted worker; it does not change authorization.
@@ -88,4 +90,18 @@ During upgrades, existing leases retain their owner and epoch before expiry or r
 
 The dashboard and Herdr list use `/api/work-snapshot`, which returns work and its database observation time in one SQL snapshot. They do not pair a work response with a separately fetched status clock. Upgrade the server before using this adapter version.
 
+CLI `next` and `handoff` also use the timestamp paired with `/api/work-snapshot`. Host clock skew or a later status response cannot make an active assignment appear expired. Handoff still checks the authenticated worker identity; the supervisor verifies the current lease before launching the child.
+
 Long agent names and runtimes are truncated on work cards. Hover the label to see the full identity and worker ID, or open the work details for the full, wrapped assignment.
+
+Setup checks Git’s effective ignore rules before saving local credentials. If later negations re-include `.graphyard`, it appends a final directory exclusion and verifies it; an unverifiable or still-unignored credential path refuses setup.
+
+When init runs in a linked worktree, it saves the shared worker connection in the primary checkout’s ignored `.graphyard/connection.json`; managed instructions and discovery stay in the checkout where init ran. Sibling worktrees read the shared connection first, with a legacy worktree-local connection used only when no shared file exists. Individual workers can override that machine default through their environment. Bare repositories without a primary checkout are not supported by this setup path. Explicit `--token-stdin` input must be nonempty; an empty or whitespace-only stream refuses before saving configuration.
+
+Repository discovery recognizes GitHub HTTPS, `git@github.com:owner/repo.git`, and URI-style SSH origins, including `ssh://git@github.com/owner/repo.git` and `ssh://git@ssh.github.com:443/owner/repo.git`. Other hosts are not treated as GitHub.
+
+An explicitly empty or whitespace-only `GRAPHYARD_TOKEN` also refuses init instead of clearing saved credentials. A nonempty `--token-stdin` value takes precedence over that environment setting.
+
+For a handoff without a registered workspace, run the printed worktree command from the managed repository checkout. Before reserving or creating anything, worktree verifies that checkout’s GitHub origin against the server’s configured repository. An unrelated or unrecognized checkout refuses. A server without a configured repository still permits local bootstrap; it cannot provide this repository identity check.
+
+Handoff and watch use the currently running CLI launcher, or an explicit `GRAPHYARD_CLI` override, rather than a stale launcher saved in the shared connection. The selected launcher must exist. Rerun init to update Herdr’s persistent launcher configuration after moving or upgrading the Graphyard checkout.
