@@ -68,6 +68,7 @@ Never share an operator or producer credential with an implementation agent.`); 
       workerToken = input.trim();
       if (!workerToken) throw new Error("--token-stdin requires a nonempty worker credential; setup has not changed local configuration");
     }
+    if (workerToken !== undefined && !workerToken.trim()) throw new Error('Worker credential must be nonempty; setup has not changed local configuration');
     const selectedUrl = values.url ?? base;
     // Never silently send a saved credential to a newly selected server.
     if (values.url && connection && new URL(values.url).origin !== connection.url && !process.env.GRAPHYARD_TOKEN && !values['token-stdin']) workerToken = undefined;
