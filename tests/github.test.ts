@@ -97,7 +97,7 @@ test('Codex dispatch checks candidate and job guard before posting and binds the
   const summary = { id: 13, user: bot, performed_via_github_app: { id: CODEX_APP_ID }, body: `<!-- codex-pull-request-review-summary -->\n| 📝 **Code Review** | ✅ **Completed** <relative-time datetime="${completed}">${completed}</relative-time> | \`aaaaaaa\` | Manual request |`, updated_at: completed };
   const original = f.github.request;
   f.github.request = async (path, method, body) => {
-    if (path.startsWith('/issues/comments/12/reactions')) return [{ id: 14, user: bot, content: '+1', created_at: completed }];
+    if (path.startsWith('/issues/comments/12/reactions')) return [{ id: 14, user: bot, content: '+1', created_at: '2026-01-01T00:01:01Z' }];
     if (path.startsWith('/issues/10/comments')) return [trigger, summary];
     if (path === '/issues/comments/12') return trigger;
     if (path === '/issues/comments/13') return summary;

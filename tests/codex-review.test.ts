@@ -97,3 +97,10 @@ test('explicit results refuse stale, edited, spoofed, conflicting and changing e
   ];
   for (const change of changes) { const f = commentFixture(); change(f); assert.equal((await f.run()).approved, false); }
 });
+
+ test('same-second clean reactions cannot prove they followed review completion', async () => {
+  const f = fixture(); f.reactions[0].created_at = '2026-01-01T00:01:00Z';
+  assert.equal((await f.run()).approved, false);
+  f.summary.body = f.summary.body.replace('00:01:00.200Z', '00:01:00Z');
+  assert.equal((await f.run()).approved, false);
+ });

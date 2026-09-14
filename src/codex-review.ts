@@ -61,7 +61,7 @@ export async function observeCodex(source: Source, pr: number, head: string, rev
   // Automatic reviews report their clean result on the PR, manual reviews on the request.
   const reactionPath = row[3] === 'Manual request' ? `/issues/comments/${trigger.id}/reactions` : `/issues/${pr}/reactions`;
   const reactions = await source.pages(reactionPath);
-  const clean = reactions.filter(r => isCodex(r) && r.content === '+1' && Date.parse(r.created_at) >= Math.floor(completedAt / 1000) * 1000);
+  const clean = reactions.filter(r => isCodex(r) && r.content === '+1' && Date.parse(r.created_at) > completedAt);
   if (clean.length !== 1 || reactions.some(r => isCodex(r) && r.content === 'eyes')) return refuse('A fresh Codex clean-review reaction is required; review may still be running or have findings');
   // Reread mutable summary/request/reaction state before accepting a snapshot.
   const [summaryAgain, triggerAgain, reactionsAgain, reviewsAgain] = await Promise.all([
