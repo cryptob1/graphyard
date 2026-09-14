@@ -99,3 +99,5 @@ Setup checks Git’s effective ignore rules before saving local credentials. If 
 When init runs in a linked worktree, it saves the shared worker connection in the primary checkout’s ignored `.graphyard/connection.json`; managed instructions and discovery stay in the checkout where init ran. Sibling worktrees read the shared connection first, with a legacy worktree-local connection used only when no shared file exists. Individual workers can override that machine default through their environment. Bare repositories without a primary checkout are not supported by this setup path. Explicit `--token-stdin` input must be nonempty; an empty or whitespace-only stream refuses before saving configuration.
 
 Repository discovery recognizes GitHub HTTPS, `git@github.com:owner/repo.git`, and URI-style SSH origins, including `ssh://git@github.com/owner/repo.git` and `ssh://git@ssh.github.com:443/owner/repo.git`. Other hosts are not treated as GitHub.
+
+An explicitly empty or whitespace-only `GRAPHYARD_TOKEN` also refuses init instead of clearing saved credentials. A nonempty `--token-stdin` value takes precedence over that environment setting.

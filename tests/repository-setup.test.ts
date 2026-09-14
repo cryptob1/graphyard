@@ -167,7 +167,7 @@ test('CLI init from a linked worktree shares credentials with siblings and repla
     for(const [branch,path] of [['first',first],['sibling',sibling]])execFileSync('git',['worktree','add','-b',branch,path],{cwd:root,stdio:'ignore'});
     await mkdir(join(first,'.graphyard'));
     await writeFile(join(first,'.graphyard/connection.json'),JSON.stringify({...connection,url,hostId:'legacy-host'}),{mode:0o600});
-    const result=JSON.parse(await runCli(first,['init','--url',url,'--host-id','shared-host','--token-stdin'],secret,env));
+    const result=JSON.parse(await runCli(first,['init','--url',url,'--host-id','shared-host','--token-stdin'],secret,{...env,GRAPHYARD_TOKEN:''}));
     assert.equal(result.connected,true);
     assert.equal((await loadConnection(first))?.hostId,'shared-host');
     assert.equal((await loadConnection(sibling))?.token,secret);
@@ -180,13 +180,18 @@ test('CLI init from a linked worktree shares credentials with siblings and repla
   } finally {await new Promise<void>(r=>http.close(()=>r()));await rm(root,{recursive:true,force:true});}
 });
 
-test('empty explicit stdin refuses without replacing saved credentials or instructions', async () => {
+test('empty explicit stdin and environment credentials refuse without replacing saved configuration', async () => {
   const root=await repo();const env={...process.env};delete env.GRAPHYARD_TOKEN;delete env.GRAPHYARD_URL;
   try {
     await setupRepository(root,connection,{fetcher});
     const saved=await readFile(join(root,'.graphyard/connection.json'),'utf8'),instructions=await readFile(join(root,'AGENTS.md'),'utf8');
     for(const input of ['', '  \n\t']) {
       await assert.rejects(runCli(root,['init','--token-stdin'],input,env),/nonempty worker credential/);
+      assert.equal(await readFile(join(root,'.graphyard/connection.json'),'utf8'),saved);
+      assert.equal(await readFile(join(root,'AGENTS.md'),'utf8'),instructions);
+    }
+    for (const value of ['', '   ']) {
+      await assert.rejects(runCli(root,['init'],'',{...env,GRAPHYARD_TOKEN:value}),/nonempty/);
       assert.equal(await readFile(join(root,'.graphyard/connection.json'),'utf8'),saved);
       assert.equal(await readFile(join(root,'AGENTS.md'),'utf8'),instructions);
     }
