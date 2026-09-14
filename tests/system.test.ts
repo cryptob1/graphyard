@@ -12,12 +12,15 @@ import type { Principal, Work, Observation } from '../src/model.js';
 import { defineScenario, scenarios } from '../src/scenarios.js';
 import { setTimeout as delay } from 'node:timers/promises';
 import { processJob, type GitHub } from '../src/github.js';
+// @ts-expect-error The trusted runner intentionally uses dependency-free JavaScript outside the candidate source.
+import { exercise } from '../scripts/acceptance-contract.mjs';
 
 const operator: Principal = { id: 'operator', role: 'admin' };
 const worker: Principal = { id: 'agent-a', role: 'worker' };
 const other: Principal = { id: 'agent-b', role: 'worker' };
 const producer: Principal = { id: 'ci-runner', role: 'producer', proofs: ['integration:claim-safety'] };
 const head = 'a'.repeat(40), base = 'b'.repeat(40);
+const probeWorkers = Array.from({ length: 32 }, (_, i) => ({ id: `probe-worker-${i}`, role: 'worker' as const, token: `test-probe-${i}-${'x'.repeat(32)}` }));
 let database: EmbeddedPostgres; let store: Store; let engine: Engine;
 let http: ReturnType<typeof server>; let url: string;
 const workInput = { title: 'Claims are exclusive', criteria: [{ id: 'AC-1', text: 'Only one agent claims the work', proofs: ['integration:claim-safety'] }] };
@@ -26,7 +29,7 @@ before(async () => {
   database = new EmbeddedPostgres({ databaseDir: await mkdtemp(join(tmpdir(), 'graphyard-test-')), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('graphyard_test');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/graphyard_test`); await store.init(); engine = new Engine(store);
-  http = server(engine, [{ ...operator, token: 'o'.repeat(32) }, { ...worker, token: 'w'.repeat(32) }]);
+  http = server(engine, [{ ...operator, token: 'o'.repeat(32) }, { ...worker, token: 'w'.repeat(32) }, ...probeWorkers]);
   await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));
   url = `http://127.0.0.1:${(http.address() as any).port}`;
 });
@@ -282,4 +285,9 @@ test('integration publication discards a passing snapshot superseded by failed e
   assert.equal(calls, 2); assert.equal(published.length, 1);
   assert.equal(published[0].passing, false); assert.match(published[0].forced!, /fresh verification/);
   assert.equal((await store.list()).find(x => x.id === w.id)!.stage, 'acceptance');
+});
+
+test('protected acceptance harness exercises five contracts against the real HTTP server and Postgres', async () => {
+  const result = await exercise(url, [{ ...operator, token: 'o'.repeat(32) }, ...probeWorkers]);
+  assert.equal(result.length, 5); assert.ok(result.every((c: any) => c.result === 'pass'));
 });

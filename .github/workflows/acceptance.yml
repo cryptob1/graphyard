@@ -1,0 +1,66 @@
+name: Trusted Graphyard acceptance
+on:
+  workflow_dispatch:
+    inputs:
+      pr:
+        description: Open PR number to test
+        required: true
+      work_id:
+        description: Graphyard work UUID (not display key)
+        required: true
+      policy_revision:
+        description: Required policy revision
+        required: true
+        default: '1'
+permissions:
+  contents: read
+jobs:
+  exercise:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with: { ref: '${{ github.sha }}', persist-credentials: false }
+      - uses: actions/setup-node@v4
+        with: { node-version: '24' }
+      - name: Prepare candidate from provider facts
+        run: node scripts/prepare-acceptance.mjs
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GRAPHYARD_PR: ${{ inputs.pr }}
+          GRAPHYARD_WORK_ID: ${{ inputs.work_id }}
+          GRAPHYARD_POLICY_REVISION: ${{ inputs.policy_revision }}
+      - name: Build isolated candidate
+        run: docker build --tag graphyard-acceptance candidate
+      - name: Execute protected HTTP contract against candidate
+        run: node scripts/run-acceptance.mjs candidate.json graphyard-acceptance acceptance.json
+      - uses: actions/upload-artifact@v4
+        if: always() && hashFiles('acceptance.json') != ''
+        with:
+          name: graphyard-acceptance
+          path: acceptance.json
+          if-no-files-found: error
+          retention-days: 14
+  publish:
+    needs: exercise
+    if: always() && github.ref == 'refs/heads/main' && needs.exercise.result != 'cancelled'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    # Configure this environment to permit only main BEFORE storing its producer secret.
+    environment: graphyard-reporting
+    steps:
+      - uses: actions/checkout@v4
+        with: { ref: '${{ github.sha }}', persist-credentials: false }
+      - uses: actions/setup-node@v4
+        with: { node-version: '24' }
+      - uses: actions/download-artifact@v4
+        with: { name: graphyard-acceptance, path: reports }
+      - name: Publish independently produced acceptance evidence
+        run: node scripts/publish-acceptance.mjs reports/acceptance.json
+        env:
+          GRAPHYARD_URL: ${{ vars.GRAPHYARD_URL }}
+          GRAPHYARD_PRODUCER_TOKEN: ${{ secrets.GRAPHYARD_PRODUCER_TOKEN }}
+          GRAPHYARD_PR: ${{ inputs.pr }}
+          GRAPHYARD_WORK_ID: ${{ inputs.work_id }}
+          GRAPHYARD_POLICY_REVISION: ${{ inputs.policy_revision }}

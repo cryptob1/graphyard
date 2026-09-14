@@ -4,6 +4,8 @@ Graphyard uses a dedicated GitHub App. Its installation token is minted from the
 
 ## Create and install the App
 
+For guided personal-account registration, use `graphyard github-setup HTTPS_URL`; it creates a local manifest callback and saves credentials without manual key copying. See [the first enforced PR guide](first-pr.md). The manual setup below remains available for organization accounts and existing Apps.
+
 In your personal GitHub developer settings, create a GitHub App with:
 
 - Homepage: your Graphyard URL.

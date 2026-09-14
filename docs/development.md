@@ -10,6 +10,8 @@
 | `src/github.ts` | App authentication, provider observations, check publishing |
 | `src/server.ts` | HTTP authentication, validation, webhook, static UI, worker loop |
 | `src/cli.ts` | Worker protocol, local worktrees, process supervision |
+| `src/onboarding.ts`, `src/github-setup.ts` | Repository discovery and local GitHub App registration |
+| `scripts/*acceptance*.mjs` | Protected HTTP contract harness and separate evidence publisher |
 | `web/` | React graph, board, work form, details and history |
 | `integrations/herdr/` | Native Herdr ledger pane and open action |
 | `tests/` | Real Postgres integration and HTTP tests |
@@ -32,6 +34,8 @@ Test behavioral invariants, not implementation details: conflicting claims, stal
 The first Graphyard implementation is built by one agent under human supervision. It cannot honestly claim to have governed its own creation. Record the initial code and validation as bootstrap work, then route subsequent work through Graphyard after the control plane, trusted producers, and required GitHub check are connected.
 
 The first fleet acceptance uses Herdr after the MVP. No autonomous multi-agent fleet is part of the bootstrap build.
+
+Follow [First enforced PR](first-pr.md) to connect the App and protected reporter. `container-acceptance` in regular PR CI validates Docker packaging and the HTTP harness without production credentials. The separate dispatched trusted workflow can publish evidence only from protected main after bootstrap review.
 
 ## Suggested first dogfooding tasks
 

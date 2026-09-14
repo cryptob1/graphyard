@@ -11,6 +11,7 @@ This is the first MVP, with a Postgres-backed coordination engine, HTTP API, CLI
 | Goal | Guide |
 | --- | --- |
 | Run locally and complete your first task | [Quickstart](docs/quickstart.md) |
+| Discover a repository and connect the first enforced PR | [Guided onboarding and acceptance](docs/first-pr.md) |
 | Understand the model and correctness guarantees | [Architecture](docs/architecture.md) |
 | Deploy on Railway or Docker | [Deployment](docs/deployment.md) |
 | Make Graphyard a required GitHub merge check | [GitHub enforcement](docs/github.md) |

@@ -6,6 +6,7 @@ const pages = [
   ['github', 'GitHub enforcement'], ['protocol', 'Agent protocol & API'], ['herdr', 'Herdr integration'],
   ['operations', 'Operations & recovery'], ['development', 'Development & dogfooding'],
   ['test-cases', 'E2E test cases'],
+  ['first-pr', 'First enforced PR'],
   ['implementation-audit', 'Implementation audit'],
 ];
 const sources = import.meta.glob('../docs/*.md', { query: '?raw', import: 'default', eager: true }) as Record<string, string>;
