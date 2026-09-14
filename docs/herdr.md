@@ -103,3 +103,5 @@ Repository discovery recognizes GitHub HTTPS, `git@github.com:owner/repo.git`, a
 An explicitly empty or whitespace-only `GRAPHYARD_TOKEN` also refuses init instead of clearing saved credentials. A nonempty `--token-stdin` value takes precedence over that environment setting.
 
 For a handoff without a registered workspace, run the printed worktree command from the managed repository checkout. Before reserving or creating anything, worktree verifies that checkout’s GitHub origin against the server’s configured repository. An unrelated or unrecognized checkout refuses. A server without a configured repository still permits local bootstrap; it cannot provide this repository identity check.
+
+Handoff and watch use the currently running CLI launcher, or an explicit `GRAPHYARD_CLI` override, rather than a stale launcher saved in the shared connection. The selected launcher must exist. Rerun init to update Herdr’s persistent launcher configuration after moving or upgrading the Graphyard checkout.
