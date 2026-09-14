@@ -291,3 +291,37 @@ test('protected acceptance harness exercises five contracts against the real HTT
   const result = await exercise(url, [{ ...operator, token: 'o'.repeat(32) }, ...probeWorkers]);
   assert.equal(result.length, 5); assert.ok(result.every((c: any) => c.result === 'pass'));
 });
+
+test('review-provider revisions require operator identity, compare revisions, and invalidate acceptance', async () => {
+  let w = await submitted(); w = await engine.observe(w.id, w.revision, observation(w)); w = await engine.execute(producer, 'evidence', w.id, proof(), randomUUID());
+  const input = { provider: 'codex', expectedPolicyRevision: 1, reason: 'Operator chooses independent cloud review' };
+  await assert.rejects(engine.execute(worker, 'reviewpolicy', w.id, input, randomUUID()), /Operator/);
+  w = await engine.execute(operator, 'reviewpolicy', w.id, input, randomUUID());
+  assert.equal(w.policyRevision, 2); assert.equal(w.policy.reviewProvider, 'codex'); assert.equal(w.observation, null);
+  assert.equal(w.gates.find(g => g.name === 'acceptance')?.passed, false); assert.equal(w.evidence.length, 1);
+  await assert.rejects(engine.execute(operator, 'reviewpolicy', w.id, { ...input, provider: 'github' }, randomUUID()), /revision/);
+  assert.equal((await store.events(w.id)).find(e => e.kind === 'reviewpolicy').payload.details.reason, input.reason);
+  await assert.rejects(engine.execute(producer, 'rereview', w.id, {}, randomUUID()), /Worker or operator/);
+  await assert.rejects(engine.bindReviewRequest(w.id, w.revision, { commentId: 1, sha: head, baseSha: base, policyRevision: 2, body: '@codex review', createdAt: new Date().toISOString() }, randomUUID()), /lease/);
+});
+
+
+test('only a leased integration job binds dispatch and current bound Codex approval satisfies review', async () => {
+  let w = await submitted(); w = await engine.observe(w.id, w.revision, observation(w));
+  w = await engine.execute(operator, 'reviewpolicy', w.id, { provider: 'codex', expectedPolicyRevision: 1, reason: 'Use independent agent review' }, randomUUID());
+  w = await engine.observe(w.id, w.revision, observation(w));
+  const token = randomUUID();
+  await store.pool.query("UPDATE jobs SET token=$2,locked_until=now()+interval '90 seconds' WHERE work_id=$1", [w.id, token]);
+  const request = { commentId: 8123, sha: head, baseSha: base, policyRevision: 2, body: '@codex review', createdAt: new Date().toISOString() };
+  w = await engine.bindReviewRequest(w.id, w.revision, request, token);
+  const clean = { ...observation(w), reviews: [], agentReview: { provider: 'codex' as const, sha: head, approved: true, requestId: 8123, reason: 'Clean review' } };
+  w = await engine.observe(w.id, w.revision, clean);
+  assert.equal(w.gates.find(g => g.name === 'review')?.passed, true);
+  w = await engine.observe(w.id, w.revision, { ...clean, agentReview: { ...clean.agentReview, requestId: 999 } });
+  assert.equal(w.gates.find(g => g.name === 'review')?.passed, false);
+  w = await engine.observe(w.id, w.revision, { ...clean, reviews: [{ reviewer: 'human', sha: head, state: 'CHANGES_REQUESTED' }] });
+  assert.equal(w.gates.find(g => g.name === 'review')?.passed, false);
+  w = await engine.execute(operator, 'rereview', w.id, {}, randomUUID());
+  assert.equal(w.reviewRequest, null); assert.equal(w.gates.find(g => g.name === 'review')?.passed, false);
+  assert.ok((await store.events(w.id)).some(e => e.kind === 'review.requested'));
+});

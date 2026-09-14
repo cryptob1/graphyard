@@ -2,16 +2,18 @@ import { createHash, randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { Store, save, wakeJob } from './store.js';
 import { workspacePath, pathsOverlap, validBranch } from './workspace.js';
-import { activeLease, admin, createSchema, demand, evaluate, proofSchema, type Principal, type Work, type Observation } from './model.js';
+import { activeLease, admin, createSchema, demand, evaluate, proofSchema, type Principal, type Work, type Observation, type ReviewRequest } from './model.js';
 
 const epoch = z.number().int().positive();
 const sha = z.string().regex(/^[a-f0-9]{40}$/);
 const commands = {
   create: createSchema,
   ready: z.object({}).strict(),
+  reviewpolicy: z.object({ provider: z.enum(['github', 'codex']), expectedPolicyRevision: z.number().int().positive(), reason: z.string().trim().min(1).max(2000) }).strict(),
   unblock: z.object({ reason: z.string().min(1).max(2000) }).strict(),
   rework: z.object({ reason: z.string().min(1).max(2000), previousWorkerStopped: z.literal(true) }).strict(),
   claim: z.object({}).strict(),
+  rereview: z.object({ epoch: epoch.optional() }).strict(),
   heartbeat: z.object({ epoch }).strict(),
   release: z.object({ epoch }).strict(),
   workspace: z.object({ epoch, host: z.string().trim().min(1).max(200), path: z.string().startsWith('/').max(1000).refine(p => !/[\u0000-\u001f]/.test(p), 'Invalid path').transform(workspacePath), branch: z.string().max(200).refine(validBranch, 'Invalid Graphyard branch name') }).strict(),
@@ -53,6 +55,21 @@ export class Engine {
       }
       demand(work, 'Work item not found', 404);
       if (command !== 'create') demand(work.stage !== 'done', 'Delivered work is immutable; create a follow-up task');
+      if (command === 'rereview') {
+        if (actor.role !== 'admin') { demand(actor.role === 'worker', 'Worker or operator required', 403); activeLease(work, actor, data.epoch, now); }
+        demand(work.policy.review && work.policy.reviewProvider === 'codex' && work.submission && !work.observation?.merged, 'Open submitted work with Codex review policy required');
+        work.reviewRequest = null; work.observation = null; work.mergeAuthorization = null;
+      }
+      if (command === 'reviewpolicy') {
+        admin(actor);
+        demand(!work.observation?.merged, 'Merged work requires a follow-up task');
+        demand(work.policy.review, 'Task must already require review');
+        demand(work.policyRevision === data.expectedPolicyRevision, 'Policy revision changed; reload before revising');
+        demand((work.policy.reviewProvider ?? 'github') !== data.provider, 'Review provider is already selected');
+        work.policy = { ...work.policy, reviewProvider: data.provider };
+        work.policyRevision++;
+        work.observation = null; work.mergeAuthorization = null; work.reviewRequest = null;
+      }
       if (command === 'ready') { admin(actor); work.ready = true; }
       if (command === 'unblock') { admin(actor); work.blocker = null; }
       if (command === 'rework') {
@@ -97,6 +114,19 @@ export class Engine {
       if (work.submission && !['heartbeat', 'release', 'claim', 'workspace'].includes(command)) await wakeJob(db, work.id);
       await db.query('INSERT INTO receipts(actor,key,fingerprint,result) VALUES($1,$2,$3,$4)', [actor.id, key, fingerprint, JSON.stringify(work)]);
       return work;
+    });
+  }
+  async bindReviewRequest(id: string, expectedRevision: number, request: ReviewRequest, jobToken: string) {
+    return this.store.transaction(async (db, now) => {
+      const job = (await db.query('SELECT 1 FROM jobs WHERE work_id=$1 AND token=$2 AND locked_until>$3', [id, jobToken, now])).rows[0];
+      demand(job, 'Integration job lease expired or superseded');
+      const all: Work[] = (await db.query('SELECT document FROM work_items ORDER BY number')).rows.map(r => r.document);
+      const work = all.find(w => w.id === id);
+      demand(work && work.revision === expectedRevision && work.stage !== 'done' && !work.observation?.merged, 'Task changed during review dispatch');
+      demand(work.policy.review && work.policy.reviewProvider === 'codex' && request.sha === work.candidate?.sha && request.baseSha === work.candidate?.baseSha && request.policyRevision === work.policyRevision, 'Review request candidate or policy changed');
+      work.reviewRequest = request;
+      if (work.observation) work.observation.agentReview = { provider: 'codex', sha: request.sha, approved: false, reason: 'Waiting for dispatched Codex review' };
+      this.evaluate(work, all, now); await save(db, work, 'github', 'review.requested', now); return work;
     });
   }
   evaluate(work: Work, all: Work[], now: Date) {

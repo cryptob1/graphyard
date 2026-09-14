@@ -99,3 +99,9 @@ All required proof names must pass. Evidence is selected for the exact head/base
 ## GitHub webhook
 
 `POST /api/github/webhook` uses GitHub HMAC verification instead of a bearer token. It validates the repository and delivery ID, deduplicates deliveries in Postgres, and wakes durable jobs. Own-App check events are ignored to prevent publication loops. The payload never directly marks a gate passed.
+
+### Review provider changes and re-review
+
+`POST /api/work/:id/reviewpolicy` is operator-only and accepts `{ "provider": "codex", "expectedPolicyRevision": 1, "reason": "Adopt agent review" }` (provider may also be `github`). It changes only the source of an already-required review, increments policy revision, preserves criteria/CI, and invalidates prior acceptance by version. It cannot mutate lifecycle state directly.
+
+`POST /api/work/:id/rereview` queues a fresh Codex request. Operators send `{}`; workers send `{ "epoch": 1 }` and must own the active lease. The caller never supplies a verdict, reviewer identity, or comment ID. Only the trusted integration job records the actual dispatched request. Both endpoints require normal idempotency headers and append history. See the GitHub guide for deployment and branch-protection prerequisites.

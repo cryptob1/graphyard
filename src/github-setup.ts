@@ -14,8 +14,8 @@ export function appManifest(repository: string, deployment: string, callback: st
   return { name: `Graphyard ${repository.replace('/', '-')}`, url: url.origin, public: false,
     hook_attributes: { url: `${url.origin}/api/github/webhook`, active: true },
     redirect_url: `${callback}/created`, setup_url: `${callback}/installed`,
-    default_permissions: { metadata: 'read', contents: 'read', pull_requests: 'read', checks: 'write', administration: 'read' },
-    default_events: ['pull_request', 'pull_request_review', 'check_run', 'check_suite', 'push'] };
+    default_permissions: { metadata: 'read', contents: 'read', pull_requests: 'write', checks: 'write', administration: 'read' },
+    default_events: ['pull_request', 'pull_request_review', 'issue_comment', 'check_run', 'check_suite', 'push'] };
 }
 export async function startGithubSetup(root: string, repository: string, deployment: string, port = 4311, dependencies: {
   convert?: (code: string) => Promise<any>;
@@ -63,7 +63,7 @@ export async function startGithubSetup(root: string, repository: string, deploym
         if (app?.installationId) return html(200, '<p>App registered and installation verified. Credentials are saved locally with restricted file permissions. You may close setup and configure Railway.</p>');
         if (app) return html(200, `<p>App registered. Install it only on ${escape(repository)}.</p><a href="https://github.com/apps/${encodeURIComponent(app.slug)}/installations/new">Install GitHub App</a>`);
         const manifest = appManifest(repository, deployment, `http://${address}`);
-        return html(200, `<p>Register a private App for <strong>${escape(repository)}</strong>. GitHub will ask you to sign in, name the App, and choose the repository.</p><p>The App reads code, reviews, and branch protection, and publishes its own gate check. It cannot write code or merge. Credentials return directly to this machine; no key copying is needed.</p><form method="post" action="https://github.com/settings/apps/new?state=${state}"><input type="hidden" name="manifest" value="${escape(JSON.stringify(manifest))}"><button>Register Graphyard App →</button></form>`);
+        return html(200, `<p>Register a private App for <strong>${escape(repository)}</strong>. GitHub will ask you to sign in, name the App, and choose the repository.</p><p>The App reads code and branch protection, publishes its gate check, and writes PR review requests. It cannot write source code. Credentials return directly to this machine; no key copying is needed.</p><form method="post" action="https://github.com/settings/apps/new?state=${state}"><input type="hidden" name="manifest" value="${escape(JSON.stringify(manifest))}"><button>Register Graphyard App →</button></form>`);
       }
       if (url.pathname === '/created') {
         const received = Buffer.from(url.searchParams.get('state') ?? ''), expected = Buffer.from(state);

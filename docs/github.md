@@ -77,3 +77,38 @@ A bypassed merge of linked work is recorded as a permanent violation; Graphyard 
 | No update after webhook | Signature secret and job errors; periodic polling still runs |
 
 References: [GitHub Checks API](https://docs.github.com/en/rest/checks/runs), [branch protection API](https://docs.github.com/en/rest/branches/branch-protection).
+
+## Agent review approval (Codex cloud adapter)
+
+A work policy can select `reviewProvider: "codex"` while retaining `review: true`. The alternative `github` (also the default for existing tasks) requires a formal independent GitHub approval. Human product/visual acceptance remains a separate criterion; selecting agent code review does not bypass it, CI, dependencies, or deployment checks.
+
+Graphyard dispatches a fresh `@codex review` comment through its own GitHub App and records the returned comment ID against the exact head SHA, base SHA, and policy revision. The comment includes a unique request marker. Arbitrary comments and previously posted manual requests cannot be imported as approvals. The App needs **Pull requests: write** to post PR comments, while Contents remains read-only. Existing installations must update and approve the permission before enabling this policy. Codex cloud must be connected and able to honor requests from this App; verify that live before adopting the policy. Failure to dispatch or a request that Codex does not execute keeps the gate closed.
+
+The initial adapter supports the observed **manual-request** summary format from OpenAI's hosted Codex connector. It requires the known numeric bot and App identities, a completed summary, GitHub resolution of the displayed abbreviated commit to the full current head, the original unedited Graphyard request, and a fresh clean-review reaction from the Codex bot after completion. Reviews that publish findings/output, a remaining running reaction, stale reactions, unknown formats, missing records, and collection errors refuse approval. Mutable evidence is reread before accepting the snapshot. Reviews are bound to Graphyard's recorded request rather than trusting an editable summary as the sole commit binding.
+
+A fresh clean re-review can supersede earlier Codex findings. Marking conversations resolved alone never counts. Native outstanding `CHANGES_REQUESTED` reviews still block. This does not reinterpret a Codex reaction as a GitHub `APPROVED` event: Graphyard's own required check enforces the selected agent-review policy.
+
+The API/CLI accepts an explicit operator revision for existing work:
+
+```sh
+graphyard reviewpolicy GY-N codex CURRENT_POLICY_REVISION "Adopt independent Codex cloud review"
+graphyard rereview GY-N
+```
+
+The first command preserves the criteria and CI requirements, increments the policy revision, appends audit history, invalidates prior acceptance evidence, and queues reconciliation. Workers cannot change policy. A currently leased worker can request re-review with `rereview GY-N EPOCH`; operators do not need an epoch. Head/base/policy changes cause a new request during reconciliation. The dashboard exposes provider selection and re-review to operators. Old evidence remains visible but must be regenerated for the new policy revision.
+
+### Branch protection migration
+
+GitHub's native required approval count is separate from Graphyard's gate. For repositories adopting agent review, retain strict checks, enforced administrator protection and the App-bound `Graphyard / merge` check, but remove the native approval-count/last-push requirement once reviewed code supporting the adapter is deployed. Otherwise GitHub will continue demanding a formal approval even after Graphyard passes.
+
+```sh
+node scripts/protect-github.mjs --plan --agent-reviews
+# After deployment and verification, with an individual Graphyard connection:
+node scripts/protect-github.mjs --apply --agent-reviews
+```
+
+The default helper behavior still preserves native review requirements. The explicit migration refuses to apply unless the configured live server advertises Codex review support and administrator enforcement is active. Check organization rulesets separately. Changing branch protection does not change individual task policies; migrate those explicitly and regenerate acceptance evidence. The adapter's own introduction still needs an independently reviewed bootstrap path; it cannot approve its own installation.
+
+### Limits and recovery
+
+Codex comments/reactions are a provider UI protocol, not a versioned approval API. The adapter refuses unrecognized formats rather than guessing. Hosted review behavior, including App-originated dispatch and the first clean result, must be demonstrated on this installation; fixtures do not prove cloud execution. GitHub remains a trusted administration boundary. Cross-system revocation and the merge-broker limitations above still apply. If the App posts a request but persistence loses a revision/job race, a retry may post another request; the unrecorded request cannot approve work. Automatic Codex reviews can still provide useful feedback, but this adapter only accepts results of its own recorded dispatch. Claude and other providers need their own authenticated adapters; they are not treated as Codex based on display names.

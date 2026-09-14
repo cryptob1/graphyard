@@ -20,7 +20,7 @@ function fixture() {
     if (path.includes('/check-runs')) return { check_runs: [{ id: 9, name: 'test', status: 'completed', conclusion: 'success', app: { id: 15368 } }, { id: 12, name: CHECK_NAME, status: 'completed', conclusion: 'failure', app: { id: 1234 } }] };
     throw new Error(`Unexpected request ${path}`);
   };
-  const work = { id: 'task-id', submission: { pr: 10, epoch: 1 }, candidate: { sha: head, baseSha: base, pr: 10 }, policyRevision: 1, revision: 3, gates: [{ name: 'acceptance', passed: false, reasons: ['AC-1 requires proof'] }], violations: [] } as unknown as Work;
+  const work = { id: 'task-id', policy: { review: true, checks: ['test'] }, submission: { pr: 10, epoch: 1 }, candidate: { sha: head, baseSha: base, pr: 10 }, policyRevision: 1, revision: 3, gates: [{ name: 'acceptance', passed: false, reasons: ['AC-1 requires proof'] }], violations: [] } as unknown as Work;
   return { github, calls, pr, work, reviews: (r: any[]) => { reviews = r; }, protection: (p: boolean) => { protectedBranch = p; } };
 }
 test('GitHub adapter binds observations to repository, base, current reviews, and producer', async () => {
@@ -74,4 +74,15 @@ test('a previously approved PR cannot publish success after becoming draft or re
     await assert.rejects(f.github.publish(f.work), /closed, draft, or retargeted/);
     assert.ok(f.calls.every(c => c.method === 'GET'));
   }
+});
+
+test('Codex dispatch checks candidate and job guard before posting and binds the provider response', async () => {
+  const f = fixture(); f.work.policy.reviewProvider = 'codex'; const original = f.github.request;
+  f.github.request = async (path, method, body: any) => method === 'POST' ? { id: 456, body: body.body, performed_via_github_app: { id: 1234 }, user: { type: 'Bot' }, created_at: new Date().toISOString() } : original(path, method, body);
+  let checked = false;
+  const request = await f.github.requestCodex(f.work, async () => { checked = true; });
+  assert.equal(checked, true); assert.equal(request.commentId, 456); assert.equal(request.sha, head); assert.equal(request.baseSha, base);
+  assert.match(request.body, /^@codex review\n/);
+  await assert.rejects(f.github.requestCodex(f.work, async () => { throw Error('Lease lost'); }), /Lease lost/);
+  f.pr.head.sha = 'd'.repeat(40); await assert.rejects(f.github.requestCodex(f.work, async () => {}), /changed/);
 });

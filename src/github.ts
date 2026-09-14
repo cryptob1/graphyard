@@ -1,7 +1,8 @@
-import { createSign } from 'node:crypto';
+import { createSign, randomUUID } from 'node:crypto';
+import { observeCodex } from './codex-review.js';
 import { readFile } from 'node:fs/promises';
 import type { Engine } from './engine.js';
-import { demand, type Observation, type Work } from './model.js';
+import { demand, type Observation, type Work, type ReviewRequest } from './model.js';
 
 export const CHECK_NAME = 'Graphyard / merge';
 export interface GitHubConfig { repository: string; base: string; appId: number; installationId: number; privateKey: string }
@@ -58,16 +59,28 @@ export class GitHub {
     ]);
     const latest = new Map<string, any>();
     for (const r of reviews) if (['APPROVED', 'CHANGES_REQUESTED', 'DISMISSED'].includes(r.state)) latest.set(r.user.login, r);
+    const agentReview = work.policy.review && work.policy.reviewProvider === 'codex' ? await observeCodex(this, pr.number, pr.head.sha, reviews, pr.user.login, work.reviewRequest, pr.base.sha, work.policyRevision, this.config.appId) : undefined;
     const confirmed = await this.request(`/pulls/${work.submission!.pr}`);
     demand(confirmed.head.sha === pr.head.sha && confirmed.base.sha === pr.base.sha && confirmed.base.ref === pr.base.ref && confirmed.head.ref === pr.head.ref
       && confirmed.state === pr.state && confirmed.draft === pr.draft && confirmed.merged === pr.merged, 'PR changed while collecting evidence; retry');
     return {
       candidate: { sha: pr.head.sha, baseSha: pr.merged && work.candidate && work.candidate.sha === pr.head.sha ? work.candidate.baseSha : pr.base.sha, pr: pr.number, branch: pr.head.ref, author: pr.user.login },
       checks: checks.filter(c => c.name !== CHECK_NAME).map(c => ({ name: c.name, result: c.status === 'completed' ? c.conclusion : c.status, appId: c.app.id })),
+      ...(agentReview ? { agentReview } : {}),
       reviews: [...latest.values()].map(r => ({ reviewer: r.user.login, sha: r.commit_id, state: r.state })),
       merged: pr.merged, mergeSha: pr.merge_commit_sha, mergedAt: pr.merged_at, mergeable: pr.mergeable === true && !pr.draft && pr.state === 'open',
       protected: protectedBranch, files: files.map(f => f.filename), at: startedAt,
     };
+  }
+  async requestCodex(work: Work, beforeWrite: () => Promise<void>): Promise<ReviewRequest> {
+    demand(work.candidate && work.policy.review && work.policy.reviewProvider === 'codex', 'Candidate with Codex review policy required');
+    const pr = await this.request(`/pulls/${work.candidate.pr}`);
+    demand(pr.head.sha === work.candidate.sha && pr.base.sha === work.candidate.baseSha && pr.state === 'open' && !pr.draft, 'PR changed before review dispatch; retry');
+    const body = `@codex review\n\n<!-- graphyard-review:${randomUUID()} head:${work.candidate.sha} base:${work.candidate.baseSha} policy:${work.policyRevision} -->`;
+    await beforeWrite();
+    const comment = await this.request(`/issues/${work.candidate.pr}/comments`, 'POST', { body });
+    demand(comment.performed_via_github_app?.id === this.config.appId && comment.user?.type === 'Bot' && comment.body === body && Number.isSafeInteger(comment.id) && Number.isFinite(Date.parse(comment.created_at)), 'Review dispatch did not return an authenticated Graphyard comment', 502);
+    return { commentId: comment.id, sha: work.candidate.sha, baseSha: work.candidate.baseSha, policyRevision: work.policyRevision, body, createdAt: comment.created_at };
   }
   async publish(work: Work, forcedReason?: string, beforeWrite: () => Promise<void> = async () => {}) {
     if (!work.candidate) return;
@@ -103,6 +116,10 @@ export async function processJob(engine: Engine, github: GitHub) {
     if (work?.submission && work.stage !== 'done') {
       const observation = await github.observe(work);
       work = await engine.observe(work.id, work.revision, observation, job.token);
+      if (!observation.merged && work.policy.review && work.policy.reviewProvider === 'codex' && (!work.reviewRequest || work.reviewRequest.sha !== work.candidate?.sha || work.reviewRequest.baseSha !== work.candidate?.baseSha || work.reviewRequest.policyRevision !== work.policyRevision)) {
+        const request = await github.requestCodex(work, guard(work, false));
+        work = await engine.bindReviewRequest(work.id, work.revision, request, job.token);
+      }
       if (!observation.merged) await github.publish(work, undefined, guard(work, work.gates.every(g => g.passed) && !work.violations.length));
     }
     if (work?.stage === 'done') await engine.store.pool.query('DELETE FROM jobs WHERE work_id=$1 AND token=$2', [job.work_id, job.token]);
