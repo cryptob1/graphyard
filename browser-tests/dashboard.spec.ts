@@ -1,7 +1,7 @@
 import { test, expect, type Page } from '@playwright/test';
 
 // Browser-only API fixtures: no production requests, credentials, or writes.
-const work = { id: 'fixture-work', key: 'GY-1', title: 'Browser fixture', description: 'Isolated UI audit', type: 'feature', priority: 1, stage: 'review', stageEnteredAt: '2026-01-01T00:00:00Z', ready: true, policyRevision: 1, revision: 1, violations: [], workspaces: [], criteria: [{ id: 'AC-1', text: 'Observable behavior', proofs: ['manual:browser'] }], evidence: [], gates: [{ name: 'review', passed: false, reasons: ['Independent review required'] }], submission: { epoch: 1 }, candidate: { pr: 1, sha: 'abcdef123456' } };
+const work = { id: 'fixture-work', key: 'GY-1', title: 'Browser fixture', description: 'Isolated UI audit', type: 'feature', priority: 1, stage: 'review', stageEnteredAt: '2026-01-01T00:00:00Z', ready: true, policy: { review: true, reviewProvider: 'github', checks: ['test'] }, policyRevision: 1, revision: 1, violations: [], workspaces: [], criteria: [{ id: 'AC-1', text: 'Observable behavior', proofs: ['manual:browser'] }], evidence: [], gates: [{ name: 'review', passed: false, reasons: ['Independent review required'] }], submission: { epoch: 1 }, candidate: { pr: 1, sha: 'abcdef123456' } };
 async function fixture(page: Page, role = 'admin') {
   const state = { offline: false, unauthorized: false, writes: 0, pause: false };
   await page.route('**/api/**', async route => {
@@ -91,7 +91,7 @@ test('a delayed post-create refresh cannot restore the signed-out session or lea
   const pending = new Promise<void>(resolve => { requested = resolve; });
   let created = false;
   await page.route('**/api/work', async route => {
-    if (route.request().method() === 'POST') { created = true; return route.fulfill({ json: work }); }
+    if (route.request().method() === 'POST') { expect(route.request().postDataJSON().policy.reviewProvider).toBe('codex'); created = true; return route.fulfill({ json: work }); }
     if (!created) return route.fallback();
     requested(); await held; return route.fulfill({ json: [work] });
   });
@@ -99,6 +99,7 @@ test('a delayed post-create refresh cannot restore the signed-out session or lea
   await page.getByLabel('Title', { exact: true }).fill('Delayed creation');
   await page.getByLabel('Acceptance criterion').fill('No data crosses sessions');
   await page.getByLabel('Required proof').fill('manual:session');
+  await page.getByLabel('Code review provider').selectOption('codex');
   await page.getByRole('button', { name: 'Create work item', exact: true }).click();
   await pending;
   await page.getByRole('button', { name: 'Sign out' }).click();
