@@ -104,3 +104,12 @@ test('explicit results refuse stale, edited, spoofed, conflicting and changing e
   f.summary.body = f.summary.body.replace('00:01:00.200Z', '00:01:00Z');
   assert.equal((await f.run()).approved, false);
  });
+
+ test('known standalone result variants retain the same strict verdict and commit binding', async () => {
+  for (const suffix of ['', ' :tada:', ' What shall we delve into next?']) {
+    const f = commentFixture(); f.result.body = f.result.body.replace(' :+1:', suffix);
+    assert.equal((await f.run()).approved, true);
+  }
+  const unknown = commentFixture(); unknown.result.body = unknown.result.body.replace(' :+1:', ' However, a critical issue remains.');
+  assert.equal((await unknown.run()).approved, false);
+ });

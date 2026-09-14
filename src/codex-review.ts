@@ -12,7 +12,7 @@ export async function observeCodex(source: Source, pr: number, head: string, rev
   if (!Number.isSafeInteger(authorId) || authorId === CODEX_USER_ID) return refuse('Reviewer must be independent of the PR author');
   const comments = await source.pages(`/issues/${pr}/comments`);
   // Some hosted runs publish a signed clean-result comment while leaving the summary running.
-  const cleanPattern = /^Codex Review: Didn't find any major issues\. :(?:\+1|tada):\n\n\*\*Reviewed commit:\*\* `([a-f0-9]{7,40})`(?:\n|$)/;
+  const cleanPattern = /^Codex Review: Didn't find any major issues\.(?: :(?:\+1|tada):| What shall we delve into next\?)?\n\n\*\*Reviewed commit:\*\* `([a-f0-9]{7,40})`(?:\n|$)/;
   const results = comments.filter(c => isCodex(c) && c.performed_via_github_app?.id === CODEX_APP_ID && cleanPattern.test(c.body ?? '')
     && Date.parse(c.created_at) > Date.parse(request.createdAt)).sort((a, b) => Date.parse(b.created_at) - Date.parse(a.created_at));
   if (results.length) {
