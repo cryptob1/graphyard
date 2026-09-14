@@ -82,3 +82,39 @@ test('reader has no creation controls; graph filters and search still work', asy
   await expect(page.getByRole('heading', { name: 'Test-case library' })).toBeVisible();
   await expect(page.getByRole('button', { name: '＋ New test case' })).toHaveCount(0);
 });
+
+test('a delayed post-create refresh cannot restore the signed-out session or leak into a new login', async ({ page }) => {
+  await fixture(page); await login(page);
+  let resume!: () => void;
+  const held = new Promise<void>(resolve => { resume = resolve; });
+  let requested!: () => void;
+  const pending = new Promise<void>(resolve => { requested = resolve; });
+  let created = false;
+  await page.route('**/api/work', async route => {
+    if (route.request().method() === 'POST') { created = true; return route.fulfill({ json: work }); }
+    if (!created) return route.fallback();
+    requested(); await held; return route.fulfill({ json: [work] });
+  });
+  await page.getByRole('button', { name: '＋ New work item' }).click();
+  await page.getByLabel('Title', { exact: true }).fill('Delayed creation');
+  await page.getByLabel('Acceptance criterion').fill('No data crosses sessions');
+  await page.getByLabel('Required proof').fill('manual:session');
+  await page.getByRole('button', { name: 'Create work item', exact: true }).click();
+  await pending;
+  await page.getByRole('button', { name: 'Sign out' }).click();
+  const oldResponse = page.waitForResponse(response => response.url().endsWith('/api/work') && response.status() === 200);
+  resume(); await oldResponse;
+  // Let the old response's React updates settle before attempting another login.
+  await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+  let rejectLogin!: () => void;
+  const rejected = new Promise<void>(resolve => { rejectLogin = resolve; });
+  await page.route('**/api/status', async route => { await rejected; return route.fulfill({ status: 401, json: { error: 'Rejected' } }); });
+  await login(page, 'invalid');
+  await expect(page.getByRole('status')).toContainText('Verifying');
+  await expect(page.getByRole('heading', { name: 'Delivery graph' })).toHaveCount(0);
+  rejectLogin();
+  await expect(page.getByRole('alert')).toContainText('rejected');
+  await expect(page.getByLabel('Access token')).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Browser fixture' })).toHaveCount(0);
+  await expect(page.getByRole('heading', { name: 'Delivery graph' })).toHaveCount(0);
+});
