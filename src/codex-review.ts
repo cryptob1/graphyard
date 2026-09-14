@@ -7,12 +7,19 @@ const isCodex = (item: any) => item.user?.id === CODEX_USER_ID && item.user?.typ
 interface Source { pages(path: string): Promise<any[]>; request(path: string): Promise<any> }
 // Exact observed provider footer; arbitrary appended prose cannot be treated as approval.
 const cleanFooter = "<details> <summary>ℹ️ About Codex in GitHub</summary> <br/> Codex has been enabled to automatically review pull requests in this repo. Reviews are triggered when you - Open a pull request for review - Mark a draft as ready - Comment \"@codex review\". If Codex has suggestions, it will comment; otherwise it will react with 👍. When you [sign up for Codex through ChatGPT](https://openai.com/codex), Codex can also answer questions or update the PR, like \"@codex address that feedback\". </details>";
+const cleanCourtesies = new Set([
+  '', ':+1:', ':tada:', 'what shall we delve into next?',
+  'delightful', 'nice work', 'bravo', 'keep it up', 'well done', 'good job',
+  'great work', 'great job', 'looks good', 'looking good', 'excellent', 'splendid',
+  'wonderful', 'fantastic', 'awesome', 'nice', 'cheers', 'all good', 'all clear',
+  'lgtm', 'onward', 'happy coding', 'hooray', 'hurrah', 'hurray', 'huzzah', 'woohoo', 'yay',
+]);
 function cleanCommit(body: unknown): string | null {
   if (typeof body !== 'string') return null;
-  const match = /^Codex Review: Didn't find any major issues\.(?: :(?:\+1|tada):| What shall we delve into next\?)?\n\n\*\*Reviewed commit:\*\* `([a-f0-9]{7,40})`(?=\s|$)/.exec(body);
-  if (!match) return null;
+  const match = /^Codex Review: Didn't find any major issues\.([^\r\n]*)\n\n\*\*Reviewed commit:\*\* `([a-f0-9]{7,40})`(?=\s|$)/.exec(body);
+  if (!match || !cleanCourtesies.has(match[1].trim().replace(/[.!]+$/, '').toLowerCase())) return null;
   const tail = body.slice(match[0].length).trim().replace(/\s+/g, ' ');
-  return !tail || tail === cleanFooter ? match[1] : null;
+  return !tail || tail === cleanFooter ? match[2] : null;
 }
 /** Conservative adapter for the observed hosted Codex review protocol. Unknown formats refuse. */
 export async function observeCodex(source: Source, pr: number, head: string, reviews: any[], authorId: number, request: ReviewRequest | null | undefined, base: string, policyRevision: number, graphyardAppId: number): Promise<AgentReview> {
@@ -41,9 +48,11 @@ export async function observeCodex(source: Source, pr: number, head: string, rev
       source.pages(`/issues/${pr}/comments`), source.pages(`/pulls/${pr}/reviews`),
       source.pages(`/issues/${pr}/reactions`), source.pages(`/issues/comments/${trigger.id}/reactions`),
     ]);
-    if (!isCodex(resultAgain) || resultAgain.performed_via_github_app?.id !== CODEX_APP_ID || resultAgain.body !== result.body
-      || resultAgain.created_at !== result.created_at || resultAgain.updated_at !== result.updated_at || !authenticTrigger(triggerAgain)
-      || !commentsAgain.some(c => c.id === result.id) || conflictingComments(commentsAgain) || findings(reviewsAgain)
+    const unchangedResult = (c: any) => c && c.id === result.id && isCodex(c) && c.performed_via_github_app?.id === CODEX_APP_ID
+      && c.body === result.body && c.created_at === result.created_at && c.updated_at === result.updated_at;
+    if (!unchangedResult(resultAgain) || !authenticTrigger(triggerAgain)
+      || !unchangedResult(commentsAgain.find(c => c.id === result.id)) || !authenticTrigger(commentsAgain.find(c => c.id === trigger.id))
+      || conflictingComments(commentsAgain) || findings(reviewsAgain)
       || running(prReactions) || running(requestReactions)) return refuse('Codex review changed or is running; retry');
     return { provider: 'codex', sha: head, approved: true, reason: 'Authenticated Codex result reported no major issues', resultId: result.id, requestId: trigger.id, completedAt: new Date(completedAt).toISOString() };
   }

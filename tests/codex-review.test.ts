@@ -136,3 +136,26 @@ test('migration refuses required code-owner review before making any external ch
     assert.equal(calls.length,1); assert.deepEqual(calls[0],['api','repos/cryptob1/graphyard/branches/main/protection']);
   } finally {await rm(dir,{recursive:true,force:true});}
 });
+
+ test('clean-result courtesy normalization excludes contradictory or unknown verdict suffixes', async () => {
+  for (const suffix of ['Delightful!', 'Bravo.', 'Nice work!', 'Keep it up!', 'Well done!', 'Great work!', 'Excellent!', 'LGTM.', 'Hooray!', 'Hurrah!', 'Hurray!', 'Huzzah!', 'Woohoo!', 'Yay!']) {
+    const f = commentFixture(); f.result.body = f.result.body.replace(':+1:', suffix);
+    assert.equal((await f.run()).approved, true, suffix);
+  }
+  for (const suffix of ['P1: fix authentication', 'Nice work! However, a bug remains.', 'Critical!', 'Please fix the review findings.', 'Unknown protocol payload']) {
+    const f = commentFixture(); f.result.body = f.result.body.replace(':+1:', suffix);
+    assert.equal((await f.run()).approved, false, suffix);
+  }
+ });
+
+ test('clean approval refuses edits visible only in the final list snapshot', async () => {
+  for (const target of ['result', 'trigger'] as const) {
+    const f = commentFixture(), original = f.source.pages; let reads = 0;
+    f.source.pages = async path => {
+      const rows = await original(path);
+      if (path.endsWith('/comments') && ++reads > 1) rows.find(c => c.id === f[target].id).body += ' edited';
+      return rows;
+    };
+    assert.equal((await f.run()).approved, false);
+  }
+ });
