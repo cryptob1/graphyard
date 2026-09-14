@@ -10,7 +10,7 @@ async function fixture(page: Page, role = 'admin') {
     if (route.request().headers().authorization !== 'Bearer browser-fixture' || state.unauthorized) return route.fulfill({ status: 401, json: { error: 'Rejected' } });
     if (route.request().method() !== 'GET') state.writes++;
     const path = new URL(route.request().url()).pathname;
-    return route.fulfill({ json: path.endsWith('/status') ? { actor: { id: 'fixture', role }, github: true, repository: 'fixture/repository', jobs: [] } : path.endsWith('/work') ? [work] : [] });
+    return route.fulfill({ json: path.endsWith('/status') ? { actor: { id: 'fixture', role }, github: true, reviewProviders: ['github','codex'], repository: 'fixture/repository', jobs: [] } : path.endsWith('/work') ? [work] : [] });
   });
   await page.goto('/'); return state;
 }
@@ -152,3 +152,13 @@ test('history groups observation noise and bounds expanded rows without losing o
   await history.getByRole('button', { name: 'Show less history' }).click();
   await expect(history.locator('.timeline > div')).toHaveCount(20);
 });
+
+ test('unavailable review providers disable selection and explain the missing connection', async ({page}) => {
+  await fixture(page);
+  await page.route('**/api/status',route=>route.fulfill({json:{actor:{id:'fixture',role:'admin'},github:true,reviewProviders:['github'],repository:'fixture/repository',jobs:[]}}));
+  await login(page);await page.getByRole('button',{name:/GY-1 P1/}).click();
+  await expect(page.getByRole('button',{name:'Use Codex cloud review'})).toBeDisabled();
+  await expect(page.getByText(/Codex review is unavailable/)).toBeVisible();
+  await page.getByLabel('Close details').click();await page.getByRole('button',{name:'New work item'}).click();
+  expect(await page.locator('option[value="codex"]').evaluate((e:HTMLOptionElement)=>e.disabled)).toBe(true);
+ });

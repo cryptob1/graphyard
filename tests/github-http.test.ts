@@ -54,3 +54,27 @@ test('concurrent token refreshes share authentication and honor authentication b
   await assert.rejects(github.request('/pulls/5'), /paused/); assert.equal(calls, 1);
   assert.ok((github as any).blockedUntil >= Date.now() + 119000);
 });
+
+ test('review capability reads actual installation-token permissions and fails closed on refresh errors', async t => {
+  const {generateKeyPairSync}=await import('node:crypto');const {privateKey}=generateKeyPairSync('rsa',{modulusLength:2048});
+  const github=new GitHub({repository:'fixture/repo',base:'main',appId:1,installationId:2,privateKey:privateKey.export({type:'pkcs8',format:'pem'}).toString()});
+  let permissions:any={pull_requests:'read',issues:'read',checks:'write'},failed=false,calls=0;
+  t.mock.method(globalThis,'fetch',async()=>{calls++;return failed?new Response('{}',{status:403}):new Response(JSON.stringify({token:'fixture',expires_at:new Date(Date.now()+3600000).toISOString(),permissions}))});
+  assert.equal((await github.reviewPermissions()).pull_requests,'read');
+  permissions={pull_requests:'write',issues:'read',checks:'write'};Object.assign(github,{expires:0});
+  const result=await github.reviewPermissions();assert.equal(result.pull_requests,'write');result.pull_requests='spoof';assert.equal((await github.reviewPermissions()).pull_requests,'write');assert.equal(calls,2);
+  failed=true;Object.assign(github,{expires:0});assert.deepEqual(await github.reviewPermissions(),{});assert.deepEqual(await github.reviewPermissions(),{});assert.equal(calls,3);
+ });
+
+ test('review capability verifies installation repository membership across pages and rejects unknown scope', async t => {
+  const github=client();let mode='member',calls=0;
+  t.mock.method(globalThis,'fetch',async(url:unknown)=>{
+    calls++;assert.match(String(url),/\/installation\/repositories\?per_page=100&page=/);
+    if(mode==='failure')return new Response('{}',{status:503});
+    if(mode==='invalid')return new Response('{}');
+    if(mode==='absent')return new Response(JSON.stringify({repositories:[{id:9,full_name:'other/repo'}]}));
+    return new Response(JSON.stringify({repositories:String(url).endsWith('page=1')?Array.from({length:100},(_,i)=>({id:i+1,full_name:`other/repo-${i}`})):[{id:999,full_name:'FIXTURE/Repo'}]}));
+  });
+  assert.deepEqual(await github.reviewRepository(),{id:999,fullName:'FIXTURE/Repo'});assert.equal(calls,2);
+  for(mode of ['absent','invalid','failure'])assert.equal(await github.reviewRepository(),null);
+ });

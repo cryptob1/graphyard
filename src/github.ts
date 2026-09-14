@@ -10,6 +10,7 @@ export interface GitHubConfig { repository: string; base: string; appId: number;
 export class GitHub {
   private token = '';
   private expires = 0;
+  private permissions: Record<string, string> = {};
   private blockedUntil = 0;
   private rateFailures = 0;
   private authentication?: Promise<void>;
@@ -37,16 +38,26 @@ export class GitHub {
       const result: any = await response.json();
       demand(typeof result.token === 'string' && result.token.length > 0 && Number.isFinite(Date.parse(result.expires_at)) && Date.parse(result.expires_at) > Date.now(), 'Invalid GitHub installation token response', 502);
       this.token = result.token; this.expires = Date.parse(result.expires_at);
+      this.permissions = result.permissions && typeof result.permissions === 'object' ? result.permissions : {};
   }
-  async request(path: string, method = 'GET', body?: unknown): Promise<any> {
+  private async authenticate() {
     demand(Date.now() >= this.blockedUntil, `GitHub requests paused until ${new Date(this.blockedUntil).toISOString()} after a rate/access refusal`, 502);
     if (this.expires < Date.now() + 60_000) {
       this.authentication ??= this.refreshToken().finally(() => { this.authentication = undefined; });
       await this.authentication;
     }
     demand(Date.now() >= this.blockedUntil, 'GitHub requests paused after a rate/access refusal', 502);
+  }
+  async reviewPermissions(): Promise<Record<string, string>> {
+    try { await this.authenticate(); return { ...this.permissions }; } catch { return {}; }
+  }
+  async request(path: string, method = 'GET', body?: unknown): Promise<any> {
+    return this.apiRequest(`/repos/${this.config.repository}${path}`, method, body);
+  }
+  private async apiRequest(path: string, method = 'GET', body?: unknown): Promise<any> {
+    await this.authenticate();
     const cached = method === 'GET' ? this.cache.get(path) : undefined;
-    const response = await fetch(`https://api.github.com/repos/${this.config.repository}${path}`, {
+    const response = await fetch(`https://api.github.com${path}`, {
       method, headers: { Authorization: `Bearer ${this.token}`, Accept: 'application/vnd.github+json', 'Content-Type': 'application/json', 'X-GitHub-Api-Version': '2022-11-28', ...(cached ? { 'If-None-Match': cached.etag } : {}) },
       body: body === undefined ? undefined : JSON.stringify(body), signal: AbortSignal.timeout(15_000),
     });
@@ -64,6 +75,19 @@ export class GitHub {
       }
     }
     return value;
+  }
+  async reviewRepository(): Promise<{ id: number; fullName: string } | null> {
+    try {
+      // Membership in the token's installation is stronger than public repository readability.
+      for (let page = 1; page <= 100; page++) {
+        const response = await this.apiRequest(`/installation/repositories?per_page=100&page=${page}`);
+        demand(Array.isArray(response.repositories), 'Invalid installation repository inventory', 502);
+        const repo = response.repositories.find((r: any) => typeof r.full_name === 'string' && r.full_name.toLowerCase() === this.config.repository.toLowerCase());
+        if (repo) return Number.isSafeInteger(repo.id) && repo.id > 0 ? { id: repo.id, fullName: repo.full_name } : null;
+        if (response.repositories.length < 100) return null;
+      }
+    } catch { /* Unknown scope must not advertise dispatch support. */ }
+    return null;
   }
   async pages(path: string, field?: string): Promise<any[]> {
     const result: any[] = [];

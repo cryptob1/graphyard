@@ -1,3 +1,5 @@
 export function assertReviewServer(status, repository, app) {
+  if (!Number.isSafeInteger(status.githubRepository?.id) || status.githubRepository.id <= 0 || typeof status.githubRepository.fullName !== 'string' || status.githubRepository.fullName.toLowerCase() !== repository.toLowerCase()) throw new Error('Live installation has not verified repository membership');
+  if (status.githubPermissions?.pull_requests !== 'write' || !['read', 'write'].includes(status.githubPermissions?.issues) || status.githubPermissions?.checks !== 'write') throw new Error('Live installation has not verified Codex dispatch and evidence permissions');
   if (!status.reviewProviders?.includes('codex') || !status.github || typeof status.repository !== 'string' || status.repository.toLowerCase() !== repository.toLowerCase() || status.githubAppId !== app.appId || (app.installationId && status.githubInstallationId !== app.installationId)) throw new Error('Live server does not manage this repository/App installation with Codex review support');
 }
