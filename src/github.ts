@@ -12,11 +12,18 @@ export class GitHub {
   private expires = 0;
   private blockedUntil = 0;
   private rateFailures = 0;
+  private authentication?: Promise<void>;
   private cache = new Map<string, { etag: string; value: any }>();
   constructor(public config: GitHubConfig) {}
-  async request(path: string, method = 'GET', body?: unknown): Promise<any> {
-    demand(Date.now() >= this.blockedUntil, `GitHub requests paused until ${new Date(this.blockedUntil).toISOString()} after a rate/access refusal`, 502);
-    if (this.expires < Date.now() + 60_000) {
+  private backoff(response: Response) {
+    if (response.status === 403 || response.status === 429) {
+      const retry = Number(response.headers.get('retry-after'));
+      const reset = Number(response.headers.get('x-ratelimit-reset')) * 1000;
+      this.blockedUntil = Math.max(this.blockedUntil, Date.now() + Math.min(3600_000, 60_000 * 2 ** Math.min(this.rateFailures++, 6)), Number.isFinite(retry) && retry > 0 ? Date.now() + retry * 1000 : 0,
+        response.headers.get('x-ratelimit-remaining') === '0' && Number.isFinite(reset) ? reset : 0);
+    }
+  }
+  private async refreshToken() {
       const now = Math.floor(Date.now() / 1000);
       const encode = (x: unknown) => Buffer.from(JSON.stringify(x)).toString('base64url');
       const unsigned = `${encode({ alg: 'RS256', typ: 'JWT' })}.${encode({ iat: now - 60, exp: now + 540, iss: String(this.config.appId) })}`;
@@ -25,22 +32,26 @@ export class GitHub {
       const response = await fetch(`https://api.github.com/app/installations/${this.config.installationId}/access_tokens`, {
         method: 'POST', headers: { Authorization: `Bearer ${jwt}`, Accept: 'application/vnd.github+json' }, signal: AbortSignal.timeout(15_000),
       });
+      this.backoff(response);
       demand(response.ok, `GitHub installation authentication failed (${response.status})`, 502);
       const result: any = await response.json();
+      demand(typeof result.token === 'string' && result.token.length > 0 && Number.isFinite(Date.parse(result.expires_at)) && Date.parse(result.expires_at) > Date.now(), 'Invalid GitHub installation token response', 502);
       this.token = result.token; this.expires = Date.parse(result.expires_at);
+  }
+  async request(path: string, method = 'GET', body?: unknown): Promise<any> {
+    demand(Date.now() >= this.blockedUntil, `GitHub requests paused until ${new Date(this.blockedUntil).toISOString()} after a rate/access refusal`, 502);
+    if (this.expires < Date.now() + 60_000) {
+      this.authentication ??= this.refreshToken().finally(() => { this.authentication = undefined; });
+      await this.authentication;
     }
+    demand(Date.now() >= this.blockedUntil, 'GitHub requests paused after a rate/access refusal', 502);
     const cached = method === 'GET' ? this.cache.get(path) : undefined;
     const response = await fetch(`https://api.github.com/repos/${this.config.repository}${path}`, {
       method, headers: { Authorization: `Bearer ${this.token}`, Accept: 'application/vnd.github+json', 'Content-Type': 'application/json', 'X-GitHub-Api-Version': '2022-11-28', ...(cached ? { 'If-None-Match': cached.etag } : {}) },
       body: body === undefined ? undefined : JSON.stringify(body), signal: AbortSignal.timeout(15_000),
     });
     if (response.status === 304 && cached) { this.rateFailures = 0; return structuredClone(cached.value); }
-    if (response.status === 403 || response.status === 429) {
-      const retry = Number(response.headers.get('retry-after'));
-      const reset = Number(response.headers.get('x-ratelimit-reset')) * 1000;
-      this.blockedUntil = Math.max(Date.now() + Math.min(3600_000, 60_000 * 2 ** Math.min(this.rateFailures++, 6)), Number.isFinite(retry) && retry > 0 ? Date.now() + retry * 1000 : 0,
-        response.headers.get('x-ratelimit-remaining') === '0' && Number.isFinite(reset) ? reset : 0);
-    }
+    this.backoff(response);
     demand(response.ok, `GitHub ${method} ${path} failed (${response.status})${this.blockedUntil > Date.now() ? `; requests paused until ${new Date(this.blockedUntil).toISOString()}` : ''}`, 502);
     this.rateFailures = 0;
     const value = response.status === 204 ? null : await response.json();

@@ -38,3 +38,19 @@ test('an unsolicited not-modified response cannot become evidence', async t => {
   t.mock.method(globalThis, 'fetch', async () => new Response(null, { status: 304 }));
   await assert.rejects(client().request('/pulls/1'), /304/);
 });
+
+test('concurrent token refreshes share authentication and honor authentication backoff', async t => {
+  const {generateKeyPairSync} = await import('node:crypto');
+  const {privateKey} = generateKeyPairSync('rsa', { modulusLength: 2048 });
+  const github = new GitHub({ repository: 'fixture/repo', base: 'main', appId: 1, installationId: 2, privateKey: privateKey.export({type:'pkcs8',format:'pem'}).toString() });
+  let calls = 0;
+  t.mock.method(globalThis, 'fetch', async (url: unknown) => {
+    calls++; assert.match(String(url), /access_tokens$/);
+    await new Promise(resolve => setTimeout(resolve, 10));
+    return new Response('{}', { status: 429, headers: { 'retry-after': '120' } });
+  });
+  const results = await Promise.allSettled([1,2,3,4].map(n => github.request(`/pulls/${n}`)));
+  assert.ok(results.every(r => r.status === 'rejected')); assert.equal(calls, 1);
+  await assert.rejects(github.request('/pulls/5'), /paused/); assert.equal(calls, 1);
+  assert.ok((github as any).blockedUntil >= Date.now() + 119000);
+});
