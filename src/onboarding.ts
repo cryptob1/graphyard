@@ -17,6 +17,11 @@ export function repositoryFromRemote(remote: string) {
   }
   return /^([\w.-]+\/[\w.-]+?)(?:\.git)?\/?$/.exec(path)?.[1] ?? null;
 }
+export function assertRepository(repository: string | null, configured: unknown) {
+  if (typeof configured !== 'string' || !configured) return;
+  if (!repository) throw new Error('Cannot verify this checkout against the configured server repository; configure its GitHub origin first');
+  if (repository.toLowerCase() !== configured.toLowerCase()) throw new Error('This checkout and Graphyard server are configured for different repositories');
+}
 export async function discover(root: string) {
   const git = (...args: string[]) => execFileSync('git', args, { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
   let repository: string | null = null;
