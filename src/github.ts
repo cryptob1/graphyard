@@ -59,7 +59,7 @@ export class GitHub {
     ]);
     const latest = new Map<string, any>();
     for (const r of reviews) if (['APPROVED', 'CHANGES_REQUESTED', 'DISMISSED'].includes(r.state)) latest.set(r.user.login, r);
-    const agentReview = work.policy.review && work.policy.reviewProvider === 'codex' ? await observeCodex(this, pr.number, pr.head.sha, reviews, pr.user.login, work.reviewRequest, pr.base.sha, work.policyRevision, this.config.appId) : undefined;
+    const agentReview = work.policy.review && work.policy.reviewProvider === 'codex' ? await observeCodex(this, pr.number, pr.head.sha, reviews, pr.user.id, work.reviewRequest, pr.base.sha, work.policyRevision, this.config.appId) : undefined;
     const confirmed = await this.request(`/pulls/${work.submission!.pr}`);
     demand(confirmed.head.sha === pr.head.sha && confirmed.base.sha === pr.base.sha && confirmed.base.ref === pr.base.ref && confirmed.head.ref === pr.head.ref
       && confirmed.state === pr.state && confirmed.draft === pr.draft && confirmed.merged === pr.merged, 'PR changed while collecting evidence; retry');

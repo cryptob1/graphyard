@@ -6,10 +6,10 @@ export const CODEX_USER_ID = 199175422;
 const isCodex = (item: any) => item.user?.id === CODEX_USER_ID && item.user?.type === 'Bot';
 interface Source { pages(path: string): Promise<any[]>; request(path: string): Promise<any> }
 /** Conservative adapter for the observed hosted Codex review protocol. Unknown formats refuse. */
-export async function observeCodex(source: Source, pr: number, head: string, reviews: any[], author: string, request: ReviewRequest | null | undefined, base: string, policyRevision: number, graphyardAppId: number): Promise<AgentReview> {
+export async function observeCodex(source: Source, pr: number, head: string, reviews: any[], authorId: number, request: ReviewRequest | null | undefined, base: string, policyRevision: number, graphyardAppId: number): Promise<AgentReview> {
   const refuse = (reason: string): AgentReview => ({ provider: 'codex', sha: head, approved: false, reason });
   if (!request || request.sha !== head || request.baseSha !== base || request.policyRevision !== policyRevision) return refuse('Graphyard must dispatch a review bound to this candidate and policy');
-  if (author === 'chatgpt-codex-connector[bot]') return refuse('Reviewer must be independent of the PR author');
+  if (!Number.isSafeInteger(authorId) || authorId === CODEX_USER_ID) return refuse('Reviewer must be independent of the PR author');
   const comments = await source.pages(`/issues/${pr}/comments`);
   const summaries = comments.filter(c => isCodex(c) && c.performed_via_github_app?.id === CODEX_APP_ID && c.body?.startsWith('<!-- codex-pull-request-review-summary -->'));
   if (summaries.length !== 1) return refuse('Exactly one authenticated Codex review summary is required');

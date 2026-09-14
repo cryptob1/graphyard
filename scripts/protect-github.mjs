@@ -1,5 +1,6 @@
 // Bind the App-owned gate; native approval migration requires an explicit flag.
 import { execFileSync } from 'node:child_process';
+import { assertReviewServer } from './review-server.mjs';
 import { readFile } from 'node:fs/promises';
 const apply = process.argv.includes('--apply');
 const agentReviews = process.argv.includes('--agent-reviews');
@@ -18,7 +19,10 @@ try {
       if (agentReviews) {
         if (!process.env.GRAPHYARD_URL || !process.env.GRAPHYARD_TOKEN) throw new Error('Server connection required');
         const response = await fetch(`${process.env.GRAPHYARD_URL}/api/status`, { headers: { Authorization: `Bearer ${process.env.GRAPHYARD_TOKEN}` }, signal: AbortSignal.timeout(15000) });
-        if (!response.ok || !(await response.json()).reviewProviders?.includes('codex') || !current.enforce_admins?.enabled) throw new Error('Deploy and verify agent review support before changing native approvals');
+        if (!response.ok) throw new Error('Live server verification failed');
+        const status = await response.json();
+        assertReviewServer(status, repository, app);
+        if (!current.enforce_admins?.enabled) throw new Error('Administrator enforcement is required');
       }
       // Updating only the status-check subresource preserves reviewer/bypass settings.
       gh(['api', '--method', 'PATCH', `repos/${repository}/branches/main/protection/required_status_checks`, '--input', '-'], JSON.stringify({ strict: true, checks }));

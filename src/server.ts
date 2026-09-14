@@ -56,7 +56,7 @@ export function server(engine: Engine, credentials: Credential[], github: GitHub
         }
         if (req.method === 'GET' && url.pathname === '/api/status') {
           const jobs = (await engine.store.pool.query('SELECT work_id,available_at,locked_until,attempts,error FROM jobs WHERE error IS NOT NULL ORDER BY available_at LIMIT 50')).rows;
-          return send(200, { actor, repository: github?.config.repository ?? process.env.GITHUB_REPOSITORY ?? null, github: !!github, check: 'Graphyard / merge', reviewProviders: ['github', 'codex'], jobs, now: new Date().toISOString() });
+          return send(200, { actor, repository: github?.config.repository ?? process.env.GITHUB_REPOSITORY ?? null, github: !!github, check: 'Graphyard / merge', reviewProviders: ['github', 'codex'], githubAppId: github?.config.appId ?? null, githubInstallationId: github?.config.installationId ?? null, jobs, now: new Date().toISOString() });
         }
         if (req.method === 'GET' && url.pathname === '/api/work') return send(200, await engine.store.list());
         if (req.method === 'GET' && url.pathname === '/api/events') {

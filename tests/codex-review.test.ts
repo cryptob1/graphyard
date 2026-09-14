@@ -11,7 +11,7 @@ function fixture() {
   const reactions: any[] = [{ id: 14, user: bot, content: '+1', created_at: '2026-01-01T00:01:01Z' }];
   const reviews: any[] = []; let resolved = head;
   const source = { async pages(path: string) { return structuredClone(path.endsWith('/reactions') ? reactions : path.endsWith('/reviews') ? reviews : [summary, trigger]); }, async request(path: string) { return structuredClone(path.startsWith('/commits/') ? { sha: resolved } : path.endsWith('/13') ? summary : trigger); } };
-  return { request, trigger, summary, reactions, reviews, source, resolve: (sha: string) => { resolved = sha; }, run: () => observeCodex(source, 1, head, reviews, 'author', request, base, 1, 1234) };
+  return { request, trigger, summary, reactions, reviews, source, resolve: (sha: string) => { resolved = sha; }, run: () => observeCodex(source, 1, head, reviews, 12345, request, base, 1, 1234) };
 }
 test('a clean Codex response approves only the recorded full candidate and policy', async () => {
   const f = fixture(); const result = await f.run(); assert.equal(result.approved, true); assert.equal(result.sha, head); assert.equal(result.requestId, 12);
@@ -37,4 +37,17 @@ test('provider resolution failure and changed evidence never produce approval', 
   const g = fixture(), original = g.source.request;
   g.source.request = async path => { const result = await original(path); if (path.endsWith('/13')) result.body += 'changed'; return result; };
   assert.equal((await g.run()).approved, false);
+});
+
+test('the same Codex numeric identity cannot review its own PR after a login rename', async () => {
+ const f = fixture(); const result = await observeCodex(f.source, 1, head, [], CODEX_USER_ID, f.request, base, 1, 1234); assert.equal(result.approved, false); assert.match(result.reason, /independent/);
+});
+
+// @ts-expect-error The deployment helper intentionally runs as standalone JavaScript.
+import { assertReviewServer } from '../scripts/review-server.mjs';
+test('native approval migration refuses a different, disconnected or unsupported live installation', () => {
+ const app = { appId: 1234, installationId: 7 };
+ const status = { github: true, repository: 'owner/repo', githubAppId: 1234, githubInstallationId: 7, reviewProviders: ['codex'] };
+ assert.doesNotThrow(() => assertReviewServer(status, 'owner/repo', app));
+ for (const override of [{github:false}, {repository:'other/repo'}, {githubAppId:987}, {githubInstallationId:8}, {reviewProviders:[]}]) assert.throws(() => assertReviewServer({...status,...override}, 'owner/repo', app), /does not manage/);
 });
