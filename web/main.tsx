@@ -31,7 +31,7 @@ function App() {
   async function refresh(epoch: number) { const [items, system] = await Promise.all([api('work'), api('status')]); if (epoch !== sessionEpoch.current) return; setWork(items); setStatus(system); setConnected(true); setLastUpdated(new Date().toLocaleTimeString()); setError(''); }
   useEffect(() => {
     if (!token) return;
-    const controller = new AbortController(); let active = true; let pending = false;
+    const controller = new AbortController(); const epoch = sessionEpoch.current; let active = true; let pending = false;
     const load = async () => {
       if (pending) return; pending = true;
       try {
@@ -42,9 +42,9 @@ function App() {
           return response.json();
         };
         const [items, system] = await Promise.all([read('work'), read('status')]);
-        if (active) { setWork(items); setStatus(system); setConnected(true); setLastUpdated(new Date().toLocaleTimeString()); setError(''); }
+        if (active && epoch === sessionEpoch.current) { setWork(items); setStatus(system); setConnected(true); setLastUpdated(new Date().toLocaleTimeString()); setError(''); }
       } catch (e: any) {
-        if (!active) return;
+        if (!active || epoch !== sessionEpoch.current) return;
         if (e.unauthorized) { signOut(); setError(e.message); }
         else { setConnected(false); setError('Connection unavailable. Displayed data may be stale; retrying automatically.'); }
       } finally { pending = false; }
@@ -52,7 +52,7 @@ function App() {
     void load(); const timer = setInterval(load, 5000);
     return () => { active = false; controller.abort(); clearInterval(timer); };
   }, [token]);
-  useEffect(() => { let active = true; setEvents([]); if (selected) void api(`events?work=${selected}`).then(rows => { if (active) setEvents(rows); }).catch(e => { if (active) setError(e.message); }); return () => { active = false; }; }, [selected, work]);
+  useEffect(() => { let active = true; const epoch = sessionEpoch.current; setEvents([]); if (selected) void api(`events?work=${selected}`).then(rows => { if (active && epoch === sessionEpoch.current) setEvents(rows); }).catch(e => { if (active && epoch === sessionEpoch.current) setError(e.message); }); return () => { active = false; }; }, [selected, work]);
   const item = work.find(w => w.id === selected);
   const visible = work.filter(w => (!filter || w.stage === filter) && `${w.key} ${w.title}`.toLowerCase().includes(query.toLowerCase()));
   const blocked = work.filter(w => w.blocker || w.submission && w.gates.some(g => !g.passed));
