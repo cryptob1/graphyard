@@ -12,6 +12,7 @@ try {
   else {
     const gh = (args, input) => execFileSync('gh', args, { input, encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'] });
     const current = JSON.parse(gh(['api', `repos/${repository}/branches/main/protection`]));
+    if (agentReviews && current.required_pull_request_reviews?.require_code_owner_reviews) throw Object.assign(new Error('Blocked: required CODEOWNERS approval is not supported by the Codex adapter. No protection settings were changed; define an explicit ownership-review policy before migration.'), { code: 'CODE_OWNER_POLICY' });
     const checks = [...(current.required_status_checks?.checks ?? [])].filter(c => c.context !== checkName);
     checks.push({ context: checkName, app_id: app.appId });
     console.log(JSON.stringify({ repository, branch: 'main', requiredChecks: checks, retainReviewRequirements: !agentReviews, reviewRequirements: agentReviews ? { ...current.required_pull_request_reviews, required_approving_review_count: 0, require_last_push_approval: false } : current.required_pull_request_reviews, apply }, null, 2));
@@ -30,4 +31,4 @@ try {
       console.log(agentReviews ? 'App-bound gate retained; native approval count is zero. Task review policies still apply.' : 'App-bound check required. Existing review and administrator protection retained.');
     }
   }
-} catch { console.error('Could not inspect/update protection; no credentials were printed.'); process.exitCode = 1; }
+} catch (error) { console.error(error.code === 'CODE_OWNER_POLICY' ? error.message : 'Could not inspect/update protection; no credentials were printed.'); process.exitCode = 1; }

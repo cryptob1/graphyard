@@ -122,3 +122,17 @@ test('explicit results refuse stale, edited, spoofed, conflicting and changing e
     const f = commentFixture(); f.result.body = body; assert.equal((await f.run()).approved, false);
   }
  });
+
+test('migration refuses required code-owner review before making any external changes', async () => {
+  const {mkdtemp,writeFile,readFile,rm} = await import('node:fs/promises');
+  const {tmpdir} = await import('node:os'); const {join} = await import('node:path'); const {spawnSync} = await import('node:child_process');
+  const dir = await mkdtemp(join(tmpdir(),'graphyard-protection-'));
+  try {
+    const log = join(dir,'calls.jsonl');
+    await writeFile(join(dir,'gh'), `#!${process.execPath}\nconst fs=require('node:fs');fs.appendFileSync(${JSON.stringify(log)},JSON.stringify(process.argv.slice(2))+'\\n');console.log(JSON.stringify({required_pull_request_reviews:{require_code_owner_reviews:true}}));\n`, {mode:0o700});
+    const result = spawnSync(process.execPath, ['scripts/protect-github.mjs','--agent-reviews','--apply'], {encoding:'utf8',env:{...process.env,PATH:`${dir}:${process.env.PATH}`,GRAPHYARD_APP_ID:'1234'}});
+    assert.equal(result.status,1); assert.match(result.stderr,/CODEOWNERS.*No protection settings were changed/);
+    const calls=(await readFile(log,'utf8')).trim().split('\n').map(line=>JSON.parse(line));
+    assert.equal(calls.length,1); assert.deepEqual(calls[0],['api','repos/cryptob1/graphyard/branches/main/protection']);
+  } finally {await rm(dir,{recursive:true,force:true});}
+});
