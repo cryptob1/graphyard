@@ -311,3 +311,17 @@ test('assignment identity comes from the authenticated principal and survives re
   assert.equal(history[1].payload.work.lastAssignment.displayName, 'Beacon');
   await assert.rejects(engine.execute(worker, 'heartbeat', w.id, { epoch: 1 }, randomUUID()), /superseded/);
 });
+
+ test('upgrade preserves legacy ownership before expiry or explicit release, with audited history', async () => {
+  for (const operation of ['expiry', 'release']) {
+    let w = await claimed();
+    delete w.lastAssignment;
+    if (operation === 'expiry') w.lease!.expiresAt = '2000-01-01T00:00:00Z';
+    await store.pool.query('UPDATE work_items SET document=$2::jsonb WHERE id=$1', [w.id, JSON.stringify(w)]);
+    if (operation === 'expiry') { await engine.reconcile(); w = (await store.list()).find(x => x.id === w.id)!; }
+    else w = await engine.execute(worker, 'release', w.id, { epoch: 1 }, randomUUID());
+    assert.equal(w.lease, null); assert.deepEqual(w.lastAssignment, { owner: worker.id, epoch: 1 });
+    const event = (await store.events(w.id)).find(e => e.kind === (operation === 'expiry' ? 'reconciled' : 'release'));
+    assert.deepEqual(event.payload.work.lastAssignment, { owner: worker.id, epoch: 1 });
+  }
+ });

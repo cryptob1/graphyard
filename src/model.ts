@@ -19,7 +19,7 @@ export const createSchema = z.object({
 }).strict();
 export type Create = z.infer<typeof createSchema>;
 export interface Principal { id: string; role: 'admin' | 'worker' | 'producer' | 'reader'; proofs?: string[]; displayName?: string; runtime?: string }
-export interface AssignmentIdentity { owner: string; epoch: number; displayName?: string; runtime?: string; claimedAt: string }
+export interface AssignmentIdentity { owner: string; epoch: number; displayName?: string; runtime?: string; claimedAt?: string }
 export interface Lease { owner: string; epoch: number; expiresAt: string }
 export interface Workspace { host: string; path: string; branch: string; epoch: number; owner: string }
 export interface Candidate { sha: string; baseSha: string; pr: number; branch: string; author: string }
