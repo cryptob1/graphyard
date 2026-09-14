@@ -26,6 +26,8 @@ export async function observeCodex(source: Source, pr: number, head: string, rev
   if (!trigger || trigger.performed_via_github_app?.id !== graphyardAppId || trigger.user?.type !== 'Bot' || trigger.body !== request.body
     || trigger.created_at !== request.createdAt || trigger.created_at !== trigger.updated_at
     || !Number.isFinite(Date.parse(trigger.created_at)) || Date.parse(trigger.created_at) > completedAt) return refuse('The recorded Graphyard review request is missing, edited, or not yet completed');
+  if (row[3] !== 'Manual request' && Math.floor(completedAt / 1000) <= Math.floor(Date.parse(trigger.created_at) / 1000))
+    return refuse('Automatic review completion must be unambiguously later than the recorded request');
   // A new clean run supersedes earlier findings; resolving threads alone never does.
   if (reviews.some(r => isCodex(r) && Date.parse(r.submitted_at) >= Date.parse(trigger.created_at))) return refuse('Codex posted review findings/output for this request; fix them and request a fresh clean review');
   // Automatic reviews report their clean result on the PR, manual reviews on the request.

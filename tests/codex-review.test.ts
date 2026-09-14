@@ -60,6 +60,8 @@ test('native approval migration refuses a different, disconnected or unsupported
     assert.equal((await f.run()).approved, true);
     assert.ok(paths.includes('/issues/1/reactions'));
     assert.ok(!paths.includes('/issues/comments/12/reactions'));
+    f.request.createdAt = f.trigger.created_at = f.trigger.updated_at = '2026-01-01T00:01:00Z';
+    assert.equal((await f.run()).approved, false);
     f.request.createdAt = f.trigger.created_at = f.trigger.updated_at = '2026-01-01T00:02:00Z';
     assert.equal((await f.run()).approved, false);
   }
