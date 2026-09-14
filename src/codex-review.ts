@@ -11,6 +11,34 @@ export async function observeCodex(source: Source, pr: number, head: string, rev
   if (!request || request.sha !== head || request.baseSha !== base || request.policyRevision !== policyRevision) return refuse('Graphyard must dispatch a review bound to this candidate and policy');
   if (!Number.isSafeInteger(authorId) || authorId === CODEX_USER_ID) return refuse('Reviewer must be independent of the PR author');
   const comments = await source.pages(`/issues/${pr}/comments`);
+  // Some hosted runs publish a signed clean-result comment while leaving the summary running.
+  const cleanPattern = /^Codex Review: Didn't find any major issues\. :(?:\+1|tada):\n\n\*\*Reviewed commit:\*\* `([a-f0-9]{7,40})`(?:\n|$)/;
+  const results = comments.filter(c => isCodex(c) && c.performed_via_github_app?.id === CODEX_APP_ID && cleanPattern.test(c.body ?? '')
+    && Date.parse(c.created_at) > Date.parse(request.createdAt)).sort((a, b) => Date.parse(b.created_at) - Date.parse(a.created_at));
+  if (results.length) {
+    const result = results[0], completedAt = Date.parse(result.created_at);
+    const trigger = comments.find(c => c.id === request.commentId);
+    const authenticTrigger = (c: any) => c && c.user?.type === 'Bot' && c.performed_via_github_app?.id === graphyardAppId
+      && c.body === request.body && c.created_at === request.createdAt && c.updated_at === c.created_at;
+    if (!authenticTrigger(trigger) || !Number.isFinite(completedAt) || completedAt > Date.now() + 5000 || result.updated_at !== result.created_at)
+      return refuse('Clean result or recorded request is edited, invalid, or missing');
+    if ((await source.request(`/commits/${cleanPattern.exec(result.body)![1]}`)).sha !== head) return refuse('Codex reviewed a different commit');
+    const conflictingComments = (rows: any[]) => rows.some(c => isCodex(c) && c.id !== result.id
+      && Date.parse(c.updated_at ?? c.created_at) >= completedAt);
+    const findings = (rows: any[]) => rows.some(r => isCodex(r) && Date.parse(r.submitted_at) >= Date.parse(request.createdAt));
+    const running = (rows: any[]) => rows.some(r => isCodex(r) && r.content === 'eyes');
+    if (findings(reviews) || conflictingComments(comments)) return refuse('Codex has findings or newer review activity; request a fresh clean review');
+    const [resultAgain, triggerAgain, commentsAgain, reviewsAgain, prReactions, requestReactions] = await Promise.all([
+      source.request(`/issues/comments/${result.id}`), source.request(`/issues/comments/${trigger.id}`),
+      source.pages(`/issues/${pr}/comments`), source.pages(`/pulls/${pr}/reviews`),
+      source.pages(`/issues/${pr}/reactions`), source.pages(`/issues/comments/${trigger.id}/reactions`),
+    ]);
+    if (!isCodex(resultAgain) || resultAgain.performed_via_github_app?.id !== CODEX_APP_ID || resultAgain.body !== result.body
+      || resultAgain.created_at !== result.created_at || resultAgain.updated_at !== result.updated_at || !authenticTrigger(triggerAgain)
+      || !commentsAgain.some(c => c.id === result.id) || conflictingComments(commentsAgain) || findings(reviewsAgain)
+      || running(prReactions) || running(requestReactions)) return refuse('Codex review changed or is running; retry');
+    return { provider: 'codex', sha: head, approved: true, reason: 'Authenticated Codex result reported no major issues', resultId: result.id, requestId: trigger.id, completedAt: new Date(completedAt).toISOString() };
+  }
   const summaries = comments.filter(c => isCodex(c) && c.performed_via_github_app?.id === CODEX_APP_ID && c.body?.startsWith('<!-- codex-pull-request-review-summary -->'));
   if (summaries.length !== 1) return refuse('Exactly one authenticated Codex review summary is required');
   const summary = summaries[0];

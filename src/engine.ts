@@ -2,7 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { Store, save, wakeJob } from './store.js';
 import { workspacePath, pathsOverlap, validBranch } from './workspace.js';
-import { activeLease, admin, createSchema, demand, evaluate, proofSchema, type Principal, type Work, type Observation, type ReviewRequest } from './model.js';
+import { activeLease, admin, requireCurrent, createSchema, demand, evaluate, proofSchema, type Principal, type Work, type Observation, type ReviewRequest } from './model.js';
 
 const epoch = z.number().int().positive();
 const sha = z.string().regex(/^[a-f0-9]{40}$/);
@@ -122,7 +122,7 @@ export class Engine {
       demand(job, 'Integration job lease expired or superseded');
       const all: Work[] = (await db.query('SELECT document FROM work_items ORDER BY number')).rows.map(r => r.document);
       const work = all.find(w => w.id === id);
-      demand(work && work.revision === expectedRevision && work.stage !== 'done' && !work.observation?.merged, 'Task changed during review dispatch');
+      requireCurrent(work && work.revision === expectedRevision && work.stage !== 'done' && !work.observation?.merged, 'Task changed during review dispatch');
       demand(work.policy.review && work.policy.reviewProvider === 'codex' && request.sha === work.candidate?.sha && request.baseSha === work.candidate?.baseSha && request.policyRevision === work.policyRevision, 'Review request candidate or policy changed');
       work.reviewRequest = request;
       if (work.observation) work.observation.agentReview = { provider: 'codex', sha: request.sha, approved: false, reason: 'Waiting for dispatched Codex review' };
@@ -157,11 +157,11 @@ export class Engine {
     return this.store.transaction(async (db, now) => {
       if (jobToken) {
         const owned = await db.query('SELECT 1 FROM jobs WHERE work_id=$1 AND token=$2 AND locked_until>clock_timestamp() FOR UPDATE', [id, jobToken]);
-        demand(owned.rowCount, 'Integration job lease expired or superseded; retry');
+        requireCurrent(owned.rowCount, 'Integration job lease expired or superseded; retry');
       }
       const all: Work[] = (await db.query('SELECT document FROM work_items ORDER BY number')).rows.map(r => r.document);
       const work = all.find(w => w.id === id);
-      demand(work && work.revision === expectedRevision, 'Task changed while GitHub was being observed; retry');
+      requireCurrent(work && work.revision === expectedRevision, 'Task changed while GitHub was being observed; retry');
       demand(work.submission?.pr === observation.candidate.pr, 'Unassigned pull request');
       demand(work.workspaces.some(w => w.epoch === work.submission!.epoch && w.branch === observation.candidate.branch), 'PR branch does not match the assigned workspace');
       if (work.stage === 'done') return work;

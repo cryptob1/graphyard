@@ -67,3 +67,33 @@ test('native approval migration refuses a different, disconnected or unsupported
     assert.equal((await f.run()).approved, false);
   }
  });
+
+function commentFixture() {
+  const f = fixture();
+  f.summary.body = f.summary.body.replace('Completed', 'Running');
+  const result: any = { id: 15, user: { id: CODEX_USER_ID, type: 'Bot' }, performed_via_github_app: { id: CODEX_APP_ID }, body: "Codex Review: Didn't find any major issues. :+1:\n\n**Reviewed commit:** `aaaaaaaaaa`\n", created_at: '2026-01-01T00:02:00Z', updated_at: '2026-01-01T00:02:00Z' };
+  const comments = [f.summary, f.trigger, result];
+  const originalPages = f.source.pages, originalRequest = f.source.request;
+  f.source.pages = async path => path.endsWith('/comments') ? structuredClone(comments) : originalPages(path);
+  f.source.request = async path => path.endsWith('/15') ? structuredClone(result) : originalRequest(path);
+  return { ...f, result, comments };
+}
+test('authenticated explicit clean result supersedes an older stuck summary', async () => {
+  const f = commentFixture(); const result = await f.run(); assert.equal(result.approved, true); assert.equal(result.resultId, 15);
+});
+test('explicit results refuse stale, edited, spoofed, conflicting and changing evidence', async () => {
+  const changes = [
+    (f: ReturnType<typeof commentFixture>) => { f.result.user.id = 99; },
+    (f: ReturnType<typeof commentFixture>) => { f.result.performed_via_github_app.id = 99; },
+    (f: ReturnType<typeof commentFixture>) => { f.result.created_at = f.result.updated_at = f.request.createdAt; },
+    (f: ReturnType<typeof commentFixture>) => { f.result.updated_at = '2026-01-01T00:03:00Z'; },
+    (f: ReturnType<typeof commentFixture>) => { f.summary.updated_at = f.result.created_at; },
+    (f: ReturnType<typeof commentFixture>) => { f.trigger.body += 'edited'; },
+    (f: ReturnType<typeof commentFixture>) => { f.resolve('c'.repeat(40)); },
+    (f: ReturnType<typeof commentFixture>) => { f.reviews.push({ user: f.result.user, submitted_at: f.result.created_at }); },
+    (f: ReturnType<typeof commentFixture>) => { f.reactions.push({ user: f.result.user, content: 'eyes' }); },
+    (f: ReturnType<typeof commentFixture>) => { const original = f.source.request; f.source.request = async path => { const value = await original(path); if (path.endsWith('/15')) value.body += 'edited'; return value; }; },
+    (f: ReturnType<typeof commentFixture>) => { const original = f.source.pages; let reads = 0; f.source.pages = async path => { const rows = await original(path); if (path.endsWith('/comments') && ++reads > 1) rows.push({ id: 16, user: f.result.user, created_at: '2026-01-01T00:03:00Z' }); return rows; }; },
+  ];
+  for (const change of changes) { const f = commentFixture(); change(f); assert.equal((await f.run()).approved, false); }
+});

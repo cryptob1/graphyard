@@ -30,7 +30,7 @@ export interface Evidence {
   scenarioRevision?: number; environment?: string;
 }
 export interface ReviewRequest { commentId: number; sha: string; baseSha: string; policyRevision: number; body: string; createdAt: string }
-export interface AgentReview { provider: 'codex'; sha: string; approved: boolean; reason: string; summaryId?: number; requestId?: number; reactionId?: number; completedAt?: string }
+export interface AgentReview { provider: 'codex'; sha: string; approved: boolean; reason: string; summaryId?: number; resultId?: number; requestId?: number; reactionId?: number; completedAt?: string }
 export interface Observation {
   agentReview?: AgentReview;
   candidate: Candidate; checks: { name: string; result: string; appId: number }[];
@@ -54,6 +54,10 @@ export interface Work extends Create {
 }
 export class Refusal extends Error {
   constructor(message: string, public status = 409) { super(message); }
+}
+export class ReconciliationRetry extends Refusal {}
+export function requireCurrent(value: unknown, message: string): asserts value {
+  if (!value) throw new ReconciliationRetry(message, 409);
 }
 export function demand(value: unknown, message: string, status = 409): asserts value {
   if (!value) throw new Refusal(message, status);

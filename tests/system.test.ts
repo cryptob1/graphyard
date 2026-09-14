@@ -325,3 +325,27 @@ test('only a leased integration job binds dispatch and current bound Codex appro
   assert.equal(w.reviewRequest, null); assert.equal(w.gates.find(g => g.name === 'review')?.passed, false);
   assert.ok((await store.events(w.id)).some(e => e.kind === 'review.requested'));
 });
+
+test('concurrent task changes schedule a prompt retry without an operator error', async () => {
+  let w = await submitted();
+  w = await engine.observe(w.id, w.revision, observation(w));
+  await store.pool.query("UPDATE jobs SET available_at=now()+interval '1 hour'");
+  await store.pool.query('UPDATE jobs SET available_at=now() WHERE work_id=$1', [w.id]);
+  let publications = 0;
+  const adapter = {
+    async observe() {
+      await engine.execute(worker, 'heartbeat', w.id, { epoch: 1 }, randomUUID());
+      return observation(w);
+    },
+    async publish(_work: Work, reason: string, guard: () => Promise<void>) { assert.match(reason, /fresh verification/); await guard(); publications++; },
+  } as unknown as GitHub;
+  await processJob(engine, adapter);
+  const row = (await store.pool.query("SELECT error,token,available_at<=clock_timestamp()+interval '3 seconds' AS soon FROM jobs WHERE work_id=$1", [w.id])).rows[0];
+  assert.equal(row.error, null); assert.equal(row.token, null); assert.equal(row.soon, true); assert.equal(publications, 1);
+  const current = (await store.list()).find(x => x.id === w.id)!;
+  assert.deepEqual(current.observation, w.observation);
+  const job = await store.pool.query("UPDATE jobs SET token=$2,locked_until=now()+interval '90 seconds' WHERE work_id=$1", [w.id, '11111111-1111-4111-8111-111111111111']);
+  assert.equal(job.rowCount, 1);
+  await store.finishJob(w.id, '11111111-1111-4111-8111-111111111111', 'GitHub permission denied');
+  assert.equal((await store.pool.query('SELECT error FROM jobs WHERE work_id=$1', [w.id])).rows[0].error, 'GitHub permission denied');
+});

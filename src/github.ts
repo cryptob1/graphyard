@@ -1,3 +1,4 @@
+import { ReconciliationRetry, requireCurrent } from './model.js';
 import { createSign, randomUUID } from 'node:crypto';
 import { observeCodex } from './codex-review.js';
 import { readFile } from 'node:fs/promises';
@@ -109,8 +110,8 @@ export async function processJob(engine: Engine, github: GitHub) {
     const result = await engine.store.pool.query(`SELECT w.document,clock_timestamp() AS now FROM work_items w JOIN jobs j ON j.work_id=w.id
       WHERE w.id=$1 AND j.token=$2 AND j.locked_until>clock_timestamp()`, [job.work_id, job.token]);
     const row = result.rows[0];
-    demand(row && row.document.revision === snapshot.revision, 'Work or job ownership changed before publication; retry');
-    if (success) demand(snapshot.observation && row.now.getTime() - Date.parse(snapshot.observation.at) < 120_000, 'Observation expired before publication; retry');
+    requireCurrent(row && row.document.revision === snapshot.revision, 'Work or job ownership changed before publication; retry');
+    if (success) requireCurrent(snapshot.observation && row.now.getTime() - Date.parse(snapshot.observation.at) < 120_000, 'Observation expired before publication; retry');
   };
   try {
     work = (await engine.store.list()).find(w => w.id === job.work_id);
@@ -129,6 +130,6 @@ export async function processJob(engine: Engine, github: GitHub) {
     const message = error instanceof Error ? error.message : 'GitHub reconciliation failed';
     const latest = (await engine.store.list()).find(w => w.id === job.work_id);
     if (latest?.candidate && latest.stage !== 'done') try { await github.publish(latest, 'Reconciliation failed; fresh verification required', guard(latest, false)); } catch { /* Durable retry follows. */ }
-    await engine.store.finishJob(job.work_id, job.token, message);
+    await engine.store.finishJob(job.work_id, job.token, error instanceof ReconciliationRetry ? undefined : message, error instanceof ReconciliationRetry);
   }
 }
