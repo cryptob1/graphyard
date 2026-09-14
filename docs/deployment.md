@@ -43,6 +43,8 @@ railway domain --service graphyard --port 4310
 
 Do not paste secrets into committed configuration, screenshots, or issue reports. Each worker should receive only its own token. The initial provisioning helper in `scripts/provision-railway.mjs` is specific to this project's personal Railway deployment; generic installs should follow the variables table.
 
+The checked-in `.railway/railway.ts` describes this project's existing personal deployment, including preserved values. It is not a universal fresh-project template: adapt resource/source identities and supply your own secrets before planning a new installation. `preserve()` retains existing values; it does not generate credentials for new services.
+
 ## Docker Compose
 
 ```sh

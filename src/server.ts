@@ -41,7 +41,7 @@ export function server(engine: Engine, credentials: Credential[], github: GitHub
         const delivery = String(req.headers['x-github-delivery'] ?? ''); demand(delivery && delivery.length < 200, 'Missing delivery ID', 400);
         await engine.store.transaction(async db => {
           const result = await db.query('INSERT INTO webhook_receipts(id) VALUES($1) ON CONFLICT DO NOTHING RETURNING id', [delivery]);
-          if (result.rowCount) await db.query('UPDATE jobs SET available_at=now()');
+          if (result.rowCount) await db.query('UPDATE jobs SET available_at=now(),generation=generation+1');
         });
         return send(202, { accepted: true });
       }

@@ -1,16 +1,17 @@
-import { readFile, writeFile, mkdir } from 'node:fs/promises';
+import { readFile, writeFile, mkdir, realpath } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import { hostname } from 'node:os';
 import { resolve } from 'node:path';
-import { execFileSync, spawn } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
+import { supervise } from './supervisor.js';
 
 try { process.loadEnvFile(); } catch (error: any) { if (error.code !== 'ENOENT') throw error; }
 const [command, id, ...args] = process.argv.slice(2);
 const base = process.env.GRAPHYARD_URL ?? 'http://127.0.0.1:4310';
 const token = process.env.GRAPHYARD_TOKEN;
-async function api(path: string, data?: unknown) {
+async function api(path: string, data?: unknown, requestId = process.env.GRAPHYARD_REQUEST_ID ?? randomUUID()) {
   if (!token) throw new Error('Set GRAPHYARD_TOKEN to your individual credential');
-  const response = await fetch(`${base}/api/${path}`, { method: data === undefined ? 'GET' : 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', 'Idempotency-Key': process.env.GRAPHYARD_REQUEST_ID ?? randomUUID() }, body: data === undefined ? undefined : JSON.stringify(data), signal: AbortSignal.timeout(30_000) });
+  const response = await fetch(`${base}/api/${path}`, { method: data === undefined ? 'GET' : 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', 'Idempotency-Key': requestId }, body: data === undefined ? undefined : JSON.stringify(data), signal: AbortSignal.timeout(30_000) });
   const body = await response.json(); if (!response.ok) throw new Error(JSON.stringify(body)); return body;
 }
 const print = (value: unknown) => console.log(JSON.stringify(value, null, 2));
@@ -54,7 +55,7 @@ Never share an operator or producer credential with an implementation agent.`); 
   if (command === 'scenario') return print(await api('scenarios', JSON.parse(await readFile(id, 'utf8'))));
   if (command === 'list' || command === 'next') {
     const items = await api('work');
-    return print(command === 'list' ? items : items.filter((w: any) => w.ready && !w.blocker && !w.submission && (!w.lease || Date.parse(w.lease.expiresAt) <= Date.now()) && w.dependencies.every((d: string) => items.some((x: any) => x.id === d && x.stage === 'done'))).sort((a: any, b: any) => a.priority - b.priority));
+    return print(command === 'list' ? items : items.filter((w: any) => w.stage !== 'done' && w.ready && !w.blocker && (!w.submission || w.reworkRequested) && (!w.lease || Date.parse(w.lease.expiresAt) <= Date.now()) && w.dependencies.every((d: string) => items.some((x: any) => x.id === d && x.stage === 'done'))).sort((a: any, b: any) => a.priority - b.priority));
   }
   if (command === 'create') return print(await api('work', JSON.parse(await readFile(id, 'utf8'))));
   const items = await api('work'); const work = items.find((w: any) => w.id === id || w.key === id);
@@ -75,25 +76,24 @@ Never share an operator or producer credential with an implementation agent.`); 
   if (command === 'evidence' || command === 'register') return print(await mutate(command === 'register' ? 'workspace' : 'evidence', JSON.parse(await readFile(args[0], 'utf8'))));
   if (command === 'worktree') {
     const epoch = Number(args[0]); const root = execFileSync('git', ['rev-parse', '--show-toplevel'], { encoding: 'utf8' }).trim();
-    const branch = `graphyard/${work.key.toLowerCase()}-${epoch}`;
+    const branch = work.submission ? work.workspaces.find((w: any) => w.epoch === work.submission.epoch)?.branch : `graphyard/${work.key.toLowerCase()}-${epoch}`;
+    if (!branch) throw new Error('Submitted workspace branch is missing');
     const path = resolve(root, '.graphyard/worktrees', `${work.key}-${epoch}`);
     await mutate('workspace', { epoch, host: process.env.GRAPHYARD_HOST_ID ?? hostname(), path, branch });
     await mkdir(resolve(root, '.graphyard/worktrees'), { recursive: true });
-    try { execFileSync('git', ['worktree', 'add', '-b', branch, path, args[1] ?? 'HEAD'], { stdio: 'inherit' }); }
+    const exists = spawnSync('git', ['show-ref', '--verify', '--quiet', `refs/heads/${branch}`]).status === 0;
+    try { execFileSync('git', exists ? ['worktree', 'add', path, branch] : ['worktree', 'add', '-b', branch, path, args[1] ?? (work.submission ? `origin/${branch}` : 'HEAD')], { stdio: 'inherit' }); }
     catch { throw new Error('Git worktree creation failed. Reservation remains for safety; inspect the event and repair locally. Do not reuse the branch for another task.'); }
     return print({ path, branch, epoch });
   }
   if (command === 'watch') {
     const epoch = Number(args[0]); const separator = args.indexOf('--');
     if (separator < 0 || !args[separator + 1]) throw new Error('Usage: watch GY-N EPOCH -- command args');
-    await mutate('heartbeat', { epoch });
-    const child = spawn(args[separator + 1], args.slice(separator + 2), { stdio: 'inherit', detached: process.platform !== 'win32' });
-    let pending = false; let lost = false;
-    const stop = () => { if (!child.pid) return; try { if (process.platform === 'win32') child.kill('SIGTERM'); else process.kill(-child.pid, 'SIGTERM'); } catch { /* already exited */ } };
-    const timer = setInterval(async () => { if (pending) return; pending = true; try { await mutate('heartbeat', { epoch }); } catch { lost = true; console.error('Graphyard lease cannot be renewed. Stopping worker.'); stop(); setTimeout(() => { if (child.pid) try { process.kill(-child.pid, 'SIGKILL'); } catch {} }, 5000).unref(); } finally { pending = false; } }, 25_000);
-    process.on('SIGTERM', stop); process.on('SIGINT', stop);
-    child.on('error', error => { clearInterval(timer); console.error(error.message); process.exitCode = 1; });
-    child.on('exit', code => { clearInterval(timer); process.exitCode = lost ? 1 : code ?? 1; });
+    const workspace = work.workspaces.find((w: any) => w.epoch === epoch);
+    if (!workspace || workspace.host !== (process.env.GRAPHYARD_HOST_ID ?? hostname()) || await realpath(process.cwd()) !== await realpath(workspace.path)) throw new Error('Run watch from the assigned workspace on its registered host');
+    if ((await api('status')).actor?.role !== 'worker') throw new Error('watch requires a worker credential; never pass operator or producer credentials to implementation processes');
+    process.exitCode = await supervise(args[separator + 1], args.slice(separator + 2), epoch,
+      () => api(`work/${work.id}/heartbeat`, { epoch }, randomUUID()));
     return;
   }
   throw new Error(`Unknown command: ${command}`);

@@ -19,6 +19,7 @@ This is the first MVP, with a Postgres-backed coordination engine, HTTP API, CLI
 | Use Graphyard from Herdr | [Herdr plugin](docs/herdr.md) |
 | Recover from failures and operate the service | [Operations](docs/operations.md) |
 | Contribute and build Graphyard with Graphyard | [Development and dogfooding](docs/development.md) |
+| Compare the implementation with the product specification | [Implementation audit](docs/implementation-audit.md) |
 
 ## What works in v0.1
 

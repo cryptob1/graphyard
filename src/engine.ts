@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { z } from 'zod';
-import { Store, save } from './store.js';
+import { Store, save, wakeJob } from './store.js';
+import { workspacePath, pathsOverlap, validBranch } from './workspace.js';
 import { activeLease, admin, createSchema, demand, evaluate, proofSchema, type Principal, type Work, type Observation } from './model.js';
 
 const epoch = z.number().int().positive();
@@ -13,7 +14,7 @@ const commands = {
   claim: z.object({}).strict(),
   heartbeat: z.object({ epoch }).strict(),
   release: z.object({ epoch }).strict(),
-  workspace: z.object({ epoch, host: z.string().min(1).max(200), path: z.string().startsWith('/').max(1000), branch: z.string().regex(/^graphyard\/[a-zA-Z0-9/_-]+$/).max(200) }).strict(),
+  workspace: z.object({ epoch, host: z.string().trim().min(1).max(200), path: z.string().startsWith('/').max(1000).refine(p => !/[\u0000-\u001f]/.test(p), 'Invalid path').transform(workspacePath), branch: z.string().max(200).refine(validBranch, 'Invalid Graphyard branch name') }).strict(),
   submit: z.object({ epoch, pr: z.number().int().positive() }).strict(),
   blocked: z.object({ epoch, reason: z.string().max(2000).nullable() }).strict(),
   evidence: z.object({ proof: proofSchema, sha, baseSha: sha, policyRevision: z.number().int().positive(), result: z.enum(['pass', 'fail']), executed: z.number().int().min(0), skipped: z.number().int().min(0), url: z.string().url().max(2000).optional(), scenarioRevision: z.number().int().positive().optional(), environment: z.string().min(1).max(100).optional() }).strict(),
@@ -59,7 +60,6 @@ export class Engine {
         demand(!work.observation?.merged, 'Merged work requires a follow-up task');
         work.reworkRequested = true;
         work.lease = null;
-        await db.query('UPDATE jobs SET available_at=now() WHERE work_id=$1', [work.id]);
       }
       if (command === 'claim') {
         demand(actor.role === 'worker' || actor.role === 'admin', 'Worker permission required', 403);
@@ -76,7 +76,7 @@ export class Engine {
       if (command === 'blocked') work.blocker = data.reason;
       if (command === 'workspace') {
         demand(!work.workspaces.some(w => w.epoch === data.epoch), 'This assignment already has a workspace');
-        demand(!all.some(w => w.workspaces.some(s => (s.branch === data.branch && (w.id !== work!.id || !work!.reworkRequested)) || s.host === data.host && s.path === data.path)), 'Branch or host/path is already reserved; use a fresh workspace');
+        demand(!all.some(w => w.workspaces.some(s => (s.branch === data.branch && (w.id !== work!.id || !work!.reworkRequested)) || s.host === data.host && pathsOverlap(s.path, data.path))), 'Branch or host/path is already reserved or overlaps a reservation; use a fresh workspace');
         if (work.submission) demand(data.branch === work.workspaces.find(w => w.epoch === work!.submission!.epoch)?.branch, 'Rework must use the already linked PR branch in a fresh workspace');
         work.workspaces.push({ ...data, owner: actor.id });
       }
@@ -86,7 +86,6 @@ export class Engine {
         demand(!work.submission || work.submission.pr === data.pr, 'A submitted task cannot switch pull requests');
         work.submission = { epoch: data.epoch, pr: data.pr };
         work.reworkRequested = false;
-        await db.query('INSERT INTO jobs(work_id) VALUES($1) ON CONFLICT(work_id) DO UPDATE SET available_at=now()', [work.id]);
       }
       if (command === 'evidence') {
         demand(actor.role === 'producer' || actor.role === 'worker' || actor.role === 'admin', 'Evidence submission is not permitted', 403);
@@ -95,6 +94,7 @@ export class Engine {
       }
       this.evaluate(work, all, now);
       await save(db, work, actor.id, command, now, data);
+      if (work.submission && !['heartbeat', 'release', 'claim', 'workspace'].includes(command)) await wakeJob(db, work.id);
       await db.query('INSERT INTO receipts(actor,key,fingerprint,result) VALUES($1,$2,$3,$4)', [actor.id, key, fingerprint, JSON.stringify(work)]);
       return work;
     });
@@ -116,29 +116,49 @@ export class Engine {
         const before = JSON.stringify(work);
         if (work.lease && Date.parse(work.lease.expiresAt) <= now.getTime()) work.lease = null;
         this.evaluate(work, all, now);
-        if (JSON.stringify(work) !== before) await save(db, work, 'graphyard', 'reconciled', now);
+        if (JSON.stringify(work) !== before) {
+          await save(db, work, 'graphyard', 'reconciled', now);
+          if (work.submission) await wakeJob(db, work.id);
+        }
       }
     });
   }
-  async observe(id: string, expectedRevision: number, observation: Observation) {
+  async observe(id: string, expectedRevision: number, observation: Observation, jobToken?: string) {
     return this.store.transaction(async (db, now) => {
+      if (jobToken) {
+        const owned = await db.query('SELECT 1 FROM jobs WHERE work_id=$1 AND token=$2 AND locked_until>clock_timestamp() FOR UPDATE', [id, jobToken]);
+        demand(owned.rowCount, 'Integration job lease expired or superseded; retry');
+      }
       const all: Work[] = (await db.query('SELECT document FROM work_items ORDER BY number')).rows.map(r => r.document);
       const work = all.find(w => w.id === id);
       demand(work && work.revision === expectedRevision, 'Task changed while GitHub was being observed; retry');
       demand(work.submission?.pr === observation.candidate.pr, 'Unassigned pull request');
       demand(work.workspaces.some(w => w.epoch === work.submission!.epoch && w.branch === observation.candidate.branch), 'PR branch does not match the assigned workspace');
       if (work.stage === 'done') return work;
-      if (observation.merged) {
-        const authorization = work.mergeAuthorization;
-        const authorized = authorization && authorization.sha === observation.candidate.sha && authorization.baseSha === observation.candidate.baseSha && authorization.policyRevision === work.policyRevision
-          // GitHub reports merge times at whole-second precision.
-          && observation.mergedAt && Math.floor(Date.parse(authorization.at) / 1000) <= Math.floor(Date.parse(observation.mergedAt) / 1000);
-        const violation = 'Merge observed without a prior authorization for this candidate';
-        if (!authorized && !work.violations.includes(violation)) work.violations.push(violation);
+      let authorizedSnapshot: Work | null = null;
+      if (observation.merged && observation.mergedAt && Number.isFinite(Date.parse(observation.mergedAt))) {
+        const mergedTime = Date.parse(observation.mergedAt);
+        // Never allow evidence from after the earliest possible merge instant.
+        // Whole-second timestamps can therefore conservatively refuse same-second authorization.
+        const cutoff = mergedTime + (/\.\d+Z$/.test(observation.mergedAt) ? 1 : 1000);
+        const past = (await db.query("SELECT payload->'work' AS work FROM events WHERE work_id=$1 AND created_at<$2 AND payload ? 'work' ORDER BY seq DESC LIMIT 1", [id, new Date(cutoff)])).rows[0]?.work as Work | undefined;
+        const authorization = past?.mergeAuthorization;
+        if (past && authorization && authorization.sha === observation.candidate.sha && authorization.baseSha === observation.candidate.baseSha && authorization.policyRevision === work.policyRevision
+          && past.submission?.pr === observation.candidate.pr && past.gates.every(g => g.passed) && !past.violations.length
+          && past.observation && cutoff - Date.parse(past.observation.at) < 120_000 && Date.parse(authorization.at) < mergedTime) authorizedSnapshot = past;
       }
       work.candidate = observation.candidate;
       work.observation = observation;
       this.evaluate(work, all, now);
+      if (observation.merged) {
+        const violation = 'Merge observed without a prior authorization for this candidate';
+        if (authorizedSnapshot && observation.mergeSha) {
+          if (work.gates.some(g => !g.passed)) work.violations.push('Post-merge checks differ from the recorded authorization; follow-up required');
+          work.stage = 'done'; work.stageEnteredAt = now.toISOString();
+          work.delivery = { mergedAt: observation.mergedAt!, mergeSha: observation.mergeSha, authorizationRevision: authorizedSnapshot.revision };
+          await db.query('DELETE FROM jobs WHERE work_id=$1', [work.id]);
+        } else if (!work.violations.includes(violation)) work.violations.push(violation);
+      }
       await save(db, work, 'github', 'github.observed', now);
       return work;
     });

@@ -43,6 +43,7 @@ export interface Work extends Create {
   reworkRequested: boolean;
   scenarioRequirements: { proof: string; revision: number; environment: string; hash: string }[];
   mergeAuthorization?: { sha: string; baseSha: string; policyRevision: number; at: string } | null;
+  delivery?: { mergedAt: string; mergeSha: string; authorizationRevision: number };
   evidence: Evidence[]; observation: Observation | null; blocker: string | null;
   gates: Gate[]; violations: string[];
 }
@@ -84,9 +85,7 @@ export function evaluate(work: Work, all: Work[], now: Date, ciAppIds: number[])
   add('merge', [...(!fresh ? ['GitHub observation missing or older than two minutes'] : []), ...(!obs?.protected ? ['Required Graphyard check and strict branch protection have not been verified'] : []), ...(!obs?.mergeable && !obs?.merged ? ['Pull request is not mergeable against the current base'] : [])]);
   const first = gates.find(g => !g.passed);
   const violations = [...work.violations];
-  if (obs?.merged && first && !violations.includes('Merge observed without satisfied gates')) violations.push('Merge observed without satisfied gates');
   let stage: Stage = !work.ready ? 'backlog' : !work.submission ? (work.lease && Date.parse(work.lease.expiresAt) > now.getTime() ? 'build' : 'ready') : (first?.name === 'ready' ? 'build' : first?.name as Stage ?? 'merge');
-  if (obs?.merged && !first && !violations.length) stage = 'done';
   // Delivery history stays complete; later observations cannot rewrite it.
   if (work.stage === 'done') stage = 'done';
   return { stage, gates, violations };

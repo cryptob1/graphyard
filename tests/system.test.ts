@@ -10,6 +10,8 @@ import { Engine } from '../src/engine.js';
 import { server } from '../src/server.js';
 import type { Principal, Work, Observation } from '../src/model.js';
 import { defineScenario, scenarios } from '../src/scenarios.js';
+import { setTimeout as delay } from 'node:timers/promises';
+import { processJob, type GitHub } from '../src/github.js';
 
 const operator: Principal = { id: 'operator', role: 'admin' };
 const worker: Principal = { id: 'agent-a', role: 'worker' };
@@ -135,7 +137,10 @@ test('wrong CI producer, self review, and missing protection fail closed', async
 test('only an independently observed merge with all gates satisfied completes work', async () => {
   let w = await submitted(); w = await engine.observe(w.id, w.revision, observation(w));
   w = await engine.execute(producer, 'evidence', w.id, proof(), randomUUID()); assert.equal(w.stage, 'merge');
+  await delay(5);
   w = await engine.observe(w.id, w.revision, { ...observation(w), merged: true, mergedAt: new Date().toISOString(), mergeSha: 'e'.repeat(40) }); assert.equal(w.stage, 'done');
+  assert.ok(w.delivery?.authorizationRevision);
+  assert.equal((await store.pool.query('SELECT 1 FROM jobs WHERE work_id=$1', [w.id])).rowCount, 0);
   await assert.rejects(engine.execute(worker, 'claim', w.id, {}, randomUUID()), /immutable/);
 });
 test('bypassed merge is a permanent visible violation, not done', async () => {
@@ -202,4 +207,79 @@ test('E2E definitions are versioned, immutable, operator-owned, and pinned by wo
 });
 test('unknown E2E scenarios are refused rather than silently accepting undefined proof', async () => {
   await assert.rejects(engine.execute(operator, 'create', null, { title: 'Undefined test', criteria: [{ id: 'AC-1', text: 'Must work', proofs: ['e2e:undefined-case'] }] }, randomUUID()), /Register E2E scenario/);
+});
+
+test('workspace aliases, nested paths, and invalid Git branches cannot bypass reservations', async () => {
+  const a = await claimed(), b = await claimed();
+  const ws = { epoch: 1, host: 'alias-host', path: '/tmp/alias/reserved/', branch: 'graphyard/alias-a' };
+  const saved = await engine.execute(worker, 'workspace', a.id, ws, randomUUID());
+  assert.equal(saved.workspaces[0].path, '/tmp/alias/reserved');
+  for (const path of ['/tmp/alias/other/../reserved', '/tmp/alias/reserved/child', '/tmp/alias']) {
+    await assert.rejects(engine.execute(worker, 'workspace', b.id, { ...ws, path, branch: 'graphyard/alias-b' }, randomUUID()), /reserved/);
+  }
+  for (const branch of ['graphyard/invalid/', 'graphyard//invalid']) {
+    await assert.rejects(engine.execute(worker, 'workspace', b.id, { ...ws, path: '/tmp/elsewhere', branch }, randomUUID()), /Invalid Graphyard branch/);
+  }
+});
+
+test('expired integration owners cannot apply observations or acknowledge jobs', async () => {
+  const w = await submitted(), token = randomUUID();
+  await store.pool.query("UPDATE jobs SET token=$2,locked_until=now()-interval '1 second' WHERE work_id=$1", [w.id, token]);
+  await assert.rejects(engine.observe(w.id, w.revision, observation(w), token), /lease expired/);
+  await store.finishJob(w.id, token);
+  assert.equal((await store.pool.query('SELECT token FROM jobs WHERE work_id=$1', [w.id])).rows[0].token, token);
+  assert.equal((await store.list()).find(x => x.id === w.id)!.revision, w.revision);
+});
+
+test('new evidence wakes an in-flight integration job and its acknowledgment preserves the wakeup', async () => {
+  let w = await submitted(); const token = randomUUID();
+  await store.pool.query("UPDATE jobs SET token=$2,locked_until=now()+interval '90 seconds',claimed_generation=generation WHERE work_id=$1", [w.id, token]);
+  w = await engine.execute(worker, 'evidence', w.id, proof(), randomUUID());
+  await store.finishJob(w.id, token);
+  const row = (await store.pool.query('SELECT token, available_at<=clock_timestamp() AS ready FROM jobs WHERE work_id=$1', [w.id])).rows[0];
+  assert.equal(row.token, null); assert.equal(row.ready, true);
+  await store.init(); // Re-running startup migration preserves the new queue columns and history.
+  assert.equal((await store.events(w.id)).filter(e => e.kind === 'evidence').length, 1);
+});
+
+test('a delayed merge uses historical authorization despite an outage and later failing evidence', async () => {
+  let w = await submitted(); w = await engine.observe(w.id, w.revision, observation(w));
+  w = await engine.execute(producer, 'evidence', w.id, proof(), randomUUID());
+  const authorizedRevision = w.revision;
+  await delay(5); const mergedAt = new Date().toISOString(); await delay(5);
+  await store.pool.query("UPDATE work_items SET document=jsonb_set(document,'{observation,at}',to_jsonb('2000-01-01T00:00:00Z'::text)) WHERE id=$1", [w.id]);
+  await engine.reconcile();
+  w = await engine.execute(producer, 'evidence', w.id, { ...proof(), result: 'fail' }, randomUUID());
+  assert.equal(w.mergeAuthorization, null);
+  w = await engine.observe(w.id, w.revision, { ...observation(w), merged: true, mergedAt, mergeSha: 'e'.repeat(40) });
+  assert.equal(w.stage, 'done'); assert.equal(w.delivery?.authorizationRevision, authorizedRevision);
+  assert.ok(w.violations.some(v => v.includes('Post-merge')));
+});
+
+test('whole-second merge timestamps do not accept same-second backfilled authorization', async () => {
+  let w = await submitted(); w = await engine.observe(w.id, w.revision, observation(w));
+  w = await engine.execute(producer, 'evidence', w.id, proof(), randomUUID());
+  const mergedAt = w.mergeAuthorization!.at.replace(/\.\d+Z$/, 'Z');
+  w = await engine.observe(w.id, w.revision, { ...observation(w), merged: true, mergedAt, mergeSha: 'e'.repeat(40) });
+  assert.notEqual(w.stage, 'done');
+});
+
+test('integration publication discards a passing snapshot superseded by failed evidence', async () => {
+  let w = await submitted(); w = await engine.observe(w.id, w.revision, observation(w));
+  w = await engine.execute(producer, 'evidence', w.id, proof(), randomUUID());
+  await store.pool.query("UPDATE jobs SET available_at=now()+interval '1 hour'");
+  await store.pool.query('UPDATE jobs SET available_at=now(),locked_until=NULL,token=NULL WHERE work_id=$1', [w.id]);
+  const published: { forced?: string; passing: boolean }[] = []; let calls = 0;
+  const adapter = {
+    observe: async (work: Work) => observation(work),
+    publish: async (work: Work, forced: string | undefined, beforeWrite: () => Promise<void>) => {
+      if (++calls === 1) await engine.execute(producer, 'evidence', work.id, { ...proof(), result: 'fail' }, randomUUID());
+      await beforeWrite();
+      published.push({ forced, passing: work.gates.every(g => g.passed) });
+    },
+  } as unknown as GitHub;
+  await processJob(engine, adapter);
+  assert.equal(calls, 2); assert.equal(published.length, 1);
+  assert.equal(published[0].passing, false); assert.match(published[0].forced!, /fresh verification/);
+  assert.equal((await store.list()).find(x => x.id === w.id)!.stage, 'acceptance');
 });
