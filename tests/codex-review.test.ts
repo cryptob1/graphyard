@@ -159,3 +159,24 @@ test('migration refuses required code-owner review before making any external ch
     assert.equal((await f.run()).approved, false);
   }
  });
+
+ test('summary approval refuses final-list additions, removals, edits, and newer provider activity', async () => {
+  for (const change of ['duplicate', 'new activity', 'edit', 'remove', 'trigger']) {
+    const f = fixture(), original = f.source.pages; let reads = 0;
+    f.source.pages = async path => {
+      const rows = await original(path);
+      if (path.endsWith('/comments') && ++reads > 1) {
+        if (change === 'duplicate') rows.push({...f.summary,id:99});
+        if (change === 'new activity') rows.push({...f.summary,id:99,body:'Starting another review'});
+        if (change === 'edit') rows.find(c=>c.id===13).body += ' changed';
+        if (change === 'remove') rows.splice(rows.findIndex(c=>c.id===13),1);
+        if (change === 'trigger') rows.find(c=>c.id===12).body += ' changed';
+      }
+      return rows;
+    };
+    assert.equal((await f.run()).approved,false,change);
+  }
+  const f=fixture(), original=f.source.pages;
+  f.source.pages=async path=>{const rows=await original(path);if(path.endsWith('/comments'))rows.push({...f.summary,id:99,body:'Starting another review',updated_at:'2026-01-01T00:02:00Z'});return rows};
+  assert.equal((await f.run()).approved,false);
+ });

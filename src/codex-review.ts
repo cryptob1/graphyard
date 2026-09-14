@@ -80,13 +80,19 @@ export async function observeCodex(source: Source, pr: number, head: string, rev
   const reactions = await source.pages(reactionPath);
   const clean = reactions.filter(r => isCodex(r) && r.content === '+1' && Date.parse(r.created_at) > completedAt);
   if (clean.length !== 1 || reactions.some(r => isCodex(r) && r.content === 'eyes')) return refuse('A fresh Codex clean-review reaction is required; review may still be running or have findings');
+  if (comments.some(c => isCodex(c) && c.id !== summary.id && Date.parse(c.updated_at ?? c.created_at) >= completedAt)) return refuse('Codex has newer review activity; request a fresh review');
+  // Every observed provider comment must remain unchanged; a newly added summary invalidates the snapshot too.
+  const providerSnapshot = (rows: any[]) => JSON.stringify(rows.filter(isCodex).map(c => [c.id, c.user, c.performed_via_github_app?.id, c.body, c.created_at, c.updated_at]).sort((a, b) => a[0] - b[0]));
   // Reread mutable summary/request/reaction state before accepting a snapshot.
-  const [summaryAgain, triggerAgain, reactionsAgain, reviewsAgain] = await Promise.all([
+  const [summaryAgain, triggerAgain, reactionsAgain, reviewsAgain, commentsAgain] = await Promise.all([
     source.request(`/issues/comments/${summary.id}`), source.request(`/issues/comments/${trigger.id}`),
-    source.pages(reactionPath), source.pages(`/pulls/${pr}/reviews`),
+    source.pages(reactionPath), source.pages(`/pulls/${pr}/reviews`), source.pages(`/issues/${pr}/comments`),
   ]);
-  if (!isCodex(summaryAgain) || summaryAgain.performed_via_github_app?.id !== CODEX_APP_ID || summaryAgain.body !== summary.body || summaryAgain.updated_at !== summary.updated_at
-    || triggerAgain.performed_via_github_app?.id !== graphyardAppId || triggerAgain.created_at !== trigger.created_at || triggerAgain.body !== trigger.body || triggerAgain.updated_at !== trigger.updated_at
+  const listedTrigger = commentsAgain.find(c => c.id === trigger.id);
+  if (providerSnapshot(commentsAgain) !== providerSnapshot(comments) || !listedTrigger || listedTrigger.user?.type !== 'Bot'
+    || listedTrigger.performed_via_github_app?.id !== graphyardAppId || listedTrigger.body !== trigger.body || listedTrigger.created_at !== trigger.created_at || listedTrigger.updated_at !== trigger.updated_at
+    || !isCodex(summaryAgain) || summaryAgain.performed_via_github_app?.id !== CODEX_APP_ID || summaryAgain.body !== summary.body || summaryAgain.updated_at !== summary.updated_at
+    || triggerAgain.user?.type !== 'Bot' || triggerAgain.performed_via_github_app?.id !== graphyardAppId || triggerAgain.created_at !== trigger.created_at || triggerAgain.body !== trigger.body || triggerAgain.updated_at !== trigger.updated_at
     || !reactionsAgain.some(r => r.id === clean[0].id && isCodex(r) && r.content === '+1' && r.created_at === clean[0].created_at)
     || reactionsAgain.some(r => isCodex(r) && r.content === 'eyes')
     || reviewsAgain.some(r => isCodex(r) && Date.parse(r.submitted_at) >= Date.parse(trigger.created_at))) return refuse('Codex review changed while collecting approval; retry');
