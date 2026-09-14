@@ -1,76 +1,147 @@
 # Graphyard
 
-**A control plane for software work performed by many agents across many machines.**
+**Turn a fleet of coding agents into an engineering system.**
 
-Graphyard records who owns work, which isolated workspace belongs to it, what must be proven, and why delivery is blocked. Herdr and other execution tools run the agents. Graphyard owns workflow decisions.
+Graphyard is an open-source harness for multi-agent software engineering: a shared control plane for coordinating work, isolated worktrees, reviews, tests, and evidence across many agents and machines.
 
-This is the first MVP, with a Postgres-backed coordination engine, HTTP API, CLI, React delivery graph and work board, GitHub App adapter, and native Herdr plugin. It is intended for initial dogfooding, not a claim that all distributed engineering risks are solved.
+The ambition is to carry work all the way from intent to verified delivery. Writing code is one step. Knowing who owns it, what it depends on, whether the right behavior was tested, and whether the change actually reached users is the larger job.
 
-## Start here
+Herdr is the first integration. Your agent tools run the workers; Graphyard gives their work a durable lifecycle and decides when it has enough proof to advance.
 
-| Goal | Guide |
+**Available today:** coordination through an evidence-backed GitHub merge. **Next:** staging, E2E execution, production observations, and verification after deployment. This is v0.1, built for supervised dogfooding.
+
+[Get started](docs/quickstart.md) · [First enforced PR](docs/first-pr.md) · [Connect Herdr](docs/herdr.md) · [Deploy](docs/deployment.md) · [Architecture](docs/architecture.md)
+
+## More agents should mean more progress
+
+One agent can keep much of its work in context. A fleet cannot rely on a shared memory that does not exist.
+
+Across machines and worktrees, someone needs to answer:
+
+- Who owns this task, and is that worker still alive?
+- Is its dependency finished, or is it building against an assumption?
+- Which branch belongs to this attempt? Can a previous worker still submit?
+- Did the required tests run against the current candidate?
+- Was the acceptance criterion demonstrated, or did someone just report “done”?
+- What is blocked, why, and what evidence would unblock it?
+
+Graphyard records these facts in one durable ledger and applies explicit rules to them. Agents can claim work, write code, and submit results. Progression belongs to the control plane.
+
+## How work moves
+
+```mermaid
+flowchart LR
+  I[Intent and acceptance criteria] --> W[Claimed work and isolated workspace]
+  W --> C[Agent implements and opens PR]
+  C --> G[Review, CI and acceptance gates]
+  G --> M[Observed merge]
+  E[Trusted evidence producers] --> G
+```
+
+The current delivery graph is:
+
+```text
+Backlog → Ready → Build → Review → Test → Acceptance → Merge → Done
+```
+
+Every card appears at its first refusing gate. The board makes the next missing step visible; the ledger preserves what happened.
+
+For example, “send a confirmation SMS after booking” might require proof that confirmation sends one message, an unconfirmed booking sends none, and retries do not send duplicates. A green unit-test check alone does not satisfy all three. The work needs the specified, trusted evidence for the current candidate.
+
+`graphyard complete` means the worker has submitted its implementation. It does not move a card to Done. In v0.1, Done means Graphyard observed a merge with satisfied gates and a prior recorded authorization. Production verification is a later milestone.
+
+## What the harness does today
+
+| Capability | What it gives you |
 | --- | --- |
-| Run locally and complete your first task | [Quickstart](docs/quickstart.md) |
-| Discover a repository and connect the first enforced PR | [Guided onboarding and acceptance](docs/first-pr.md) |
-| Understand the model and correctness guarantees | [Architecture](docs/architecture.md) |
-| Deploy on Railway or Docker | [Deployment](docs/deployment.md) |
-| Make Graphyard a required GitHub merge check | [GitHub enforcement](docs/github.md) |
-| Connect workers and trusted evidence producers | [Agent protocol and API](docs/protocol.md) |
-| Store and version E2E test cases | [Test-case registry](docs/test-cases.md) |
-| Use Graphyard from Herdr | [Herdr plugin](docs/herdr.md) |
-| Recover from failures and operate the service | [Operations](docs/operations.md) |
-| Contribute and build Graphyard with Graphyard | [Development and dogfooding](docs/development.md) |
-| Compare the implementation with the product specification | [Implementation audit](docs/implementation-audit.md) |
+| **One work ledger** | Intent, dependencies, acceptance criteria, blockers, ownership, and append-only history. |
+| **Durable ownership** | Atomic claims across server replicas, expiring leases, and assignment epochs that reject stale worker commands. |
+| **Worktree coordination** | Host/path registration, globally reserved branches, and CLI-created local worktrees. Old attempts stay visible. |
+| **Evidence-backed gates** | Proof bound to head commit, base commit, and policy revision. Stale evidence stays auditable without satisfying the current candidate. |
+| **GitHub enforcement** | Independent PR, review, CI, and merge observation; an App-owned required merge check when branch protection is configured. |
+| **A live delivery view** | Delivery graph and Kanban board with ownership, gate refusals, evidence, integration errors, and history. |
+| **Versioned E2E definitions** | Scenario purpose, steps, expected outcomes, environment, and links to executable tests. Work pins the required scenario revision. |
+| **Recovery between steps** | Durable reconciliation jobs, deduplicated webhooks, retry-safe commands, and periodic reconciliation. |
+| **Herdr integration** | A native plugin to inspect work and manage claims, with CLI supervision for worker processes. |
 
-## What works in v0.1
+A test-case definition is a requirement, not a passing test. Executable tests stay in Git; runners execute them; Graphyard records and evaluates their evidence. Large artifacts stay in CI or object storage. See the [test-case registry](docs/test-cases.md).
 
-- Work items with immutable acceptance requirements, dependencies, priority, and append-only history.
-- Atomic claims across server replicas, two-minute leases, and monotonically increasing assignment epochs that fence stale commands.
-- Host-specific worktree registration, unique branch reservations, and local worktree creation through the CLI.
-- A delivery graph and Kanban view, with explicit gate refusals, ownership, evidence, integration errors, and history.
-- GitHub PR, review, CI check, and merge observation. A required App-owned check blocks merging when configured in branch protection.
-- Evidence scoped to commit, base commit, and policy revision, with producer permissions, executed-test counts, and skipped-test rejection.
-- Durable reconciliation jobs, deduplicated webhooks, retry-safe commands, and periodic recovery.
-- A Herdr plugin to inspect work and acquire or release claims; the CLI handles agent process supervision.
+## Bring your agents
 
-The initial lifecycle is `Backlog → Ready → Build → Review → Test → Acceptance → Merge → Done`. Review and required CI checks are configurable per item. The topology itself is fixed in this release. `Done` means an observed merge with satisfied gates; it does **not** mean deployed to production.
+Graphyard owns workflow truth. Git owns source truth. GitHub supplies PR and merge facts. Agent runtimes own their sessions. Trusted runners supply evidence.
 
-## Local launch
+Use the native [Herdr plugin](docs/herdr.md), or integrate an external worker through the [CLI and HTTP API](docs/protocol.md). Workers can use Claude Code, Codex, OpenCode, other runtimes, or human-operated tools without moving ownership into those runtimes. Herdr is the first packaged integration; other runtimes use the common protocol.
 
-Requires Node 24, Git, and Docker Compose:
+Run one shared Graphyard server. Point workers on each machine at it with individual credentials and stable host IDs. Worktrees stay on worker machines; the control plane does not need their filesystems mounted or SSH access.
+
+## Run it locally
+
+Requires Node 24, Git, and Docker Compose.
 
 ```sh
+git clone https://github.com/cryptob1/graphyard.git
+cd graphyard
 npm ci
 cp .env.example .env
-# Replace example credentials in .env with unique random secrets.
+# Replace example credentials in .env with distinct random secrets.
 docker compose up -d db
 npm run build
 npm start
 ```
 
-Open `http://localhost:4310` and enter an individual access token. Follow the [quickstart](docs/quickstart.md) to create and claim work. GitHub gates remain closed until the App and branch protection are configured.
+Open `http://localhost:4310` and sign in with your individual access token. The [quickstart](docs/quickstart.md) walks through creating work, claiming an assignment, creating its worktree, supervising a worker, and submitting a PR.
 
-The package is not published to npm yet. Use `npm run cli -- ...` or `node bin/graphyard.mjs ...` from the checkout. Do not assume `npx graphyard` installs this project.
+For repository discovery, agent instructions, GitHub App setup, and a real refusal-to-acceptance loop, follow [Your first enforced PR](docs/first-pr.md). GitHub merge gates remain closed until the integration and protection are configured.
 
-## Deployment
+The package is not published to npm yet. Use `npm run cli -- ...` or `node /path/to/graphyard/bin/graphyard.mjs ...` from a checkout.
 
-Railway builds the repository's Dockerfile. A single application container serves the UI/API and reconciles work; Postgres stores durable state. The service can be replicated because coordination locks and jobs live in Postgres. [Deployment instructions](docs/deployment.md) explain credentials, networking, and upgrades.
+## Self-host it
 
-No LangGraph, Temporal, Redis, or Kubernetes is required. These would add operational dependencies without supplying the domain-specific correctness rules Graphyard still needs to own.
+One application container and Postgres. The application serves the web UI and API and runs reconciliation; Postgres holds durable coordination state.
 
-## Validation
+Use [Railway or Docker Compose](docs/deployment.md). The repository includes a Dockerfile. Railway infrastructure configuration describes this project's deployment and needs adaptation for a new installation. No Helm chart ships yet.
+
+Graphyard does not require LangGraph, Temporal, Redis, or Kubernetes. Its current workload uses Postgres transactions and durable retries. See [why the engine works this way](docs/architecture.md#why-no-workflow-framework-yet).
+
+## Where we are going
+
+The full engineering lifecycle extends beyond merge. The next capabilities follow that path:
+
+- **Deployed behavior:** model environments and deployed versions, request E2E runs, and verify the candidate that is actually running.
+- **Safer parallel work:** add file-overlap warnings, then investigate API and semantic conflicts beyond branch isolation.
+- **Easier first value:** improve repository discovery, proof selection, and the first real PR flowing through gates.
+- **Evolving requirements:** introduce explicit, audited revisions with evidence invalidation.
+- **Broader delivery:** extend toward configurable graphs, release and rollback workflows, and multiple repositories.
+
+These are directions, not features available in v0.1. The current control plane supports one GitHub repository and one protected base branch, with multiple workers, machines, and worktrees. Fleet-scale throughput and recovery need measured validation before claiming support for hundreds of concurrent agents.
+
+A lease fences Graphyard commands; it cannot revoke filesystem access or Git credentials. GitHub checks are eventually consistent with the ledger, and completed checks do not expire when Graphyard is offline. The [enforcement boundary](docs/github.md#enforcement-boundary) explains these limits.
+
+## Documentation
+
+| You want to… | Read |
+| --- | --- |
+| Run locally and complete your first task | [Quickstart](docs/quickstart.md) |
+| Connect the first enforced PR | [Guided onboarding and acceptance](docs/first-pr.md) |
+| Understand decisions, evidence, and recovery | [Architecture](docs/architecture.md) |
+| Deploy, upgrade, or back up Graphyard | [Deployment](docs/deployment.md) |
+| Configure required GitHub gates | [GitHub enforcement](docs/github.md) |
+| Integrate workers and trusted producers | [Agent protocol and API](docs/protocol.md) |
+| Define and version E2E scenarios | [Test-case registry](docs/test-cases.md) |
+| Use Graphyard inside Herdr | [Herdr plugin](docs/herdr.md) |
+| Diagnose blocked or abandoned work | [Operations](docs/operations.md) |
+| Build Graphyard with Graphyard | [Development and dogfooding](docs/development.md) |
+| Inspect current coverage against the spec | [Implementation audit](docs/implementation-audit.md) |
+
+## Contribute
+
+Start with the [development guide](docs/development.md) and [AGENTS.md](AGENTS.md). Changes to coordination need evidence too.
 
 ```sh
 npm run build
 npm test
 ```
 
-Tests start a real, isolated Postgres instance from development dependencies and exercise concurrent claims across pools, lease expiry, idempotency, stale evidence, provenance, workspace uniqueness, durable jobs, append-only history, and the HTTP boundary. Tests require local socket access and a non-root account.
+Tests start a real, isolated Postgres instance and exercise concurrent claims, lease expiry, stale evidence, producer identity, workspace reservations, durable jobs, history, and the API boundary. They require local socket access and a non-root account.
 
-## Scope and limitations
-
-One GitHub repository and one protected base branch per control plane. Many workers, machines, and worktrees can use that control plane. GitHub App installation is required for external enforcement. Cross-repository graphs, deployment observations, automatic E2E execution, custom topology, semantic conflict detection, SSO, and automatic agent dispatch are future work.
-
-A Graphyard lease cannot revoke Git credentials or filesystem access. GitHub check publication is eventually consistent with database decisions, and completed GitHub checks do not expire when Graphyard is offline. Read the [enforcement boundary](docs/github.md#enforcement-boundary) before relying on the system.
-
-Licensed under [Apache 2.0](LICENSE).
+Graphyard is licensed under [Apache 2.0](LICENSE).
