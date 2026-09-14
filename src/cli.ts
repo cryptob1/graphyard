@@ -66,6 +66,7 @@ Never share an operator or producer credential with an implementation agent.`); 
     if (values['token-stdin']) {
       let input = ''; for await (const chunk of process.stdin) { input += chunk; if (input.length > 10000) throw new Error('Token input is too large'); }
       workerToken = input.trim();
+      if (!workerToken) throw new Error("--token-stdin requires a nonempty worker credential; setup has not changed local configuration");
     }
     const selectedUrl = values.url ?? base;
     // Never silently send a saved credential to a newly selected server.

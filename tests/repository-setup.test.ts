@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { mkdtemp, readFile, rm, stat, writeFile, symlink, chmod } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, rm, stat, writeFile, symlink, chmod } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -145,3 +145,48 @@ test('setup binds the checkout identity before saving credentials or changing He
     assert.equal(await readFile(join(root,'.gitignore'),'utf8'),ignored);
   } finally { await rm(root,{recursive:true,force:true}); }
  });
+
+function runCli(cwd: string, args: string[], input: string, env: NodeJS.ProcessEnv) {
+  return new Promise<string>((resolve,reject) => {
+    const child=execFile(process.execPath,[launcher,...args],{cwd,env},(error,stdout,stderr)=>error?reject(new Error(stderr)):resolve(stdout));
+    child.stdin!.end(input);
+  });
+}
+
+test('CLI init from a linked worktree shares credentials with siblings and replaces legacy defaults', async () => {
+  const root=await repo();let authorization='';
+  const http=createServer((req,res)=>{authorization=String(req.headers.authorization??'');res.setHeader('Content-Type','application/json');res.end(JSON.stringify({actor:{id:'worker-a',role:'worker'}}));});
+  await new Promise<void>(r=>http.listen(0,'127.0.0.1',r));
+  const url=`http://127.0.0.1:${(http.address() as any).port}`;
+  const env={...process.env};delete env.GRAPHYARD_TOKEN;delete env.GRAPHYARD_URL;delete env.GRAPHYARD_HOST_ID;
+  try {
+    execFileSync('git',['-c','user.name=Test','-c','user.email=test@localhost','commit','--allow-empty','-m','Initial'],{cwd:root,stdio:'ignore'});
+    const first=join(root,'first'),sibling=join(root,'sibling');
+    for(const [branch,path] of [['first',first],['sibling',sibling]])execFileSync('git',['worktree','add','-b',branch,path],{cwd:root,stdio:'ignore'});
+    await mkdir(join(first,'.graphyard'));
+    await writeFile(join(first,'.graphyard/connection.json'),JSON.stringify({...connection,url,hostId:'legacy-host'}),{mode:0o600});
+    const result=JSON.parse(await runCli(first,['init','--url',url,'--host-id','shared-host','--token-stdin'],secret,env));
+    assert.equal(result.connected,true);
+    assert.equal((await loadConnection(first))?.hostId,'shared-host');
+    assert.equal((await loadConnection(sibling))?.token,secret);
+    assert.equal((await stat(join(root,'.graphyard/connection.json'))).mode&0o777,0o600);
+    execFileSync('git',['check-ignore','--quiet','.graphyard/connection.json'],{cwd:root});
+    await assert.rejects(stat(join(sibling,'.graphyard/connection.json')));
+    assert.match(await readFile(join(first,'AGENTS.md'),'utf8'),/Graphyard coordination/);
+    assert.equal(JSON.parse(await runCli(sibling,['doctor'],'',env)).connected,true);
+    assert.equal(authorization,`Bearer ${secret}`);
+  } finally {await new Promise<void>(r=>http.close(()=>r()));await rm(root,{recursive:true,force:true});}
+});
+
+test('empty explicit stdin refuses without replacing saved credentials or instructions', async () => {
+  const root=await repo();const env={...process.env};delete env.GRAPHYARD_TOKEN;delete env.GRAPHYARD_URL;
+  try {
+    await setupRepository(root,connection,{fetcher});
+    const saved=await readFile(join(root,'.graphyard/connection.json'),'utf8'),instructions=await readFile(join(root,'AGENTS.md'),'utf8');
+    for(const input of ['', '  \n\t']) {
+      await assert.rejects(runCli(root,['init','--token-stdin'],input,env),/nonempty worker credential/);
+      assert.equal(await readFile(join(root,'.graphyard/connection.json'),'utf8'),saved);
+      assert.equal(await readFile(join(root,'AGENTS.md'),'utf8'),instructions);
+    }
+  } finally {await rm(root,{recursive:true,force:true});}
+});
