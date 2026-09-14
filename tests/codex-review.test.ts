@@ -47,9 +47,10 @@ test('the same Codex numeric identity cannot review its own PR after a login ren
 import { assertReviewServer } from '../scripts/review-server.mjs';
 test('native approval migration refuses a different, disconnected or unsupported live installation', () => {
  const app = { appId: 1234, installationId: 7 };
- const status = { githubPermissions: {pull_requests:'write',issues:'read',checks:'write'}, github: true, repository: 'owner/repo', githubAppId: 1234, githubInstallationId: 7, reviewProviders: ['codex'] };
+ const status = { githubRepository:{id:42,fullName:'OWNER/Repo'}, githubPermissions: {pull_requests:'write',issues:'read',checks:'write'}, github: true, repository: 'owner/repo', githubAppId: 1234, githubInstallationId: 7, reviewProviders: ['codex'] };
  assert.doesNotThrow(() => assertReviewServer(status, 'owner/repo', app));
  assert.doesNotThrow(() => assertReviewServer({...status, repository:'OWNER/Repo'}, 'owner/repo', app));
+ for (const repo of [undefined, {id:0,fullName:'owner/repo'}, {id:42,fullName:'other/repo'}]) assert.throws(()=>assertReviewServer({...status,githubRepository:repo},'owner/repo',app),/membership/);
  for (const permissions of [undefined, {}, {pull_requests:'read',issues:'read',checks:'write'}, {pull_requests:'write',issues:'none',checks:'write'}, {pull_requests:'write',issues:'read',checks:'read'}]) assert.throws(() => assertReviewServer({...status,githubPermissions:permissions}, 'owner/repo', app), /permissions/);
  for (const override of [{github:false}, {repository:'other/repo'}, {githubAppId:987}, {githubInstallationId:8}, {reviewProviders:[]}]) assert.throws(() => assertReviewServer({...status,...override}, 'owner/repo', app), /does not manage/);
 });
@@ -139,7 +140,7 @@ test('migration refuses required code-owner review before making any external ch
 });
 
  test('clean-result courtesy normalization excludes contradictory or unknown verdict suffixes', async () => {
-  for (const suffix of ['Delightful!', 'Bravo.', 'Nice work!', 'Keep it up!', 'Well done!', 'Great work!', 'Excellent!', 'LGTM.', 'Hooray!', 'Hurrah!', 'Hurray!', 'Huzzah!', 'Woohoo!', 'Yay!']) {
+  for (const suffix of ['Delightful!', 'Bravo.', 'Nice work!', 'Keep it up!', 'Well done!', 'Great work!', 'Excellent!', 'LGTM.', 'Breezy!', 'Peachy!', 'Smooth sailing!', 'Nice job!', 'Good work!', 'Lovely!', 'Superb!', 'Hooray!', 'Hurrah!', 'Hurray!', 'Huzzah!', 'Woohoo!', 'Yay!']) {
     const f = commentFixture(); f.result.body = f.result.body.replace(':+1:', suffix);
     assert.equal((await f.run()).approved, true, suffix);
   }
