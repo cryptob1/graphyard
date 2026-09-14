@@ -1,4 +1,4 @@
-import { readFile, mkdir, realpath } from 'node:fs/promises';
+import { readFile, mkdir, realpath, stat } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import { hostname } from 'node:os';
 import { resolve } from 'node:path';
@@ -20,6 +20,15 @@ try { if (connection && new URL(base).origin === connection.url) savedToken = co
 const token = process.env.GRAPHYARD_TOKEN ?? savedToken;
 const hostId = hostIdSchema.parse(process.env.GRAPHYARD_HOST_ID ?? connection?.hostId ?? hostname());
 const cliPath = fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url));
+async function activeCliPath() {
+  const selected = process.env.GRAPHYARD_CLI ?? cliPath;
+  if (!selected.trim()) throw new Error('GRAPHYARD_CLI must name an existing launcher');
+  try {
+    const path = await realpath(resolve(selected));
+    if (!(await stat(path)).isFile()) throw new Error();
+    return path;
+  } catch { throw new Error('The active Graphyard CLI launcher is unavailable; select an existing launcher'); }
+}
 async function api(path: string, data?: unknown, requestId = process.env.GRAPHYARD_REQUEST_ID ?? randomUUID()) {
   if (!token) throw new Error('Set GRAPHYARD_TOKEN to your individual credential');
   const response = await fetch(`${base}/api/${path}`, { method: data === undefined ? 'GET' : 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', 'Idempotency-Key': requestId }, body: data === undefined ? undefined : JSON.stringify(data), signal: AbortSignal.timeout(30_000) });
@@ -72,7 +81,7 @@ Never share an operator or producer credential with an implementation agent.`); 
     const selectedUrl = values.url ?? base;
     // Never silently send a saved credential to a newly selected server.
     if (values.url && connection && new URL(values.url).origin !== connection.url && !process.env.GRAPHYARD_TOKEN && !values['token-stdin']) workerToken = undefined;
-    return print(await setupRepository(root, { url: selectedUrl, cliPath: resolve(values['cli-path'] ?? cliPath), hostId: values['host-id'] ?? hostId, ...(workerToken ? { token: workerToken } : {}) }, { herdr: values.herdr }));
+    return print(await setupRepository(root, { url: selectedUrl, cliPath: resolve(values['cli-path'] ?? await activeCliPath()), hostId: values['host-id'] ?? hostId, ...(workerToken ? { token: workerToken } : {}) }, { herdr: values.herdr }));
   }
   if (command === 'github-setup' || command === 'doctor') {
     const root = execFileSync('git', ['rev-parse', '--show-toplevel'], { encoding: 'utf8' }).trim();
@@ -85,7 +94,7 @@ Never share an operator or producer credential with an implementation agent.`); 
     }
     let live: any = null, failure: string | undefined;
     try { live = await api('status'); } catch (error: any) { failure = error.message; }
-    return print({ discovered, server: base, cliPath: connection?.cliPath ?? cliPath, hostId, connected: !!live, githubConfigured: !!live?.github, role: live?.actor?.role, failure,
+    return print({ discovered, server: base, cliPath: await activeCliPath(), hostId, connected: !!live, githubConfigured: !!live?.github, role: live?.actor?.role, failure,
       next: !live ? 'Configure GRAPHYARD_URL and an individual token' : !live.github ? 'Complete github-setup and configure the server App credentials' : 'Submit a real PR and inspect every gate; configured is not proof of enforcement',
       limits: ['CI discovery is a proposal, not executed-test inventory', 'Herdr two-host recovery and GitHub refusal-to-acceptance must be demonstrated'] });
   }
@@ -101,7 +110,7 @@ Never share an operator or producer credential with an implementation agent.`); 
     const [snapshot, status] = await Promise.all([api('work-snapshot'), api('status')]);
     const work = snapshot.work.find((w: any) => w.id === id || w.key === id);
     if (!work) throw new Error(`Unknown work item ${id}`);
-    return print(handoff(work, { ...status, now: snapshot.now }, hostId, connection?.cliPath ?? cliPath));
+    return print(handoff(work, { ...status, now: snapshot.now }, hostId, await activeCliPath()));
   }
   const items = await api('work'); const work = items.find((w: any) => w.id === id || w.key === id);
   if (command === 'events' && !id) return print(await api('events'));
@@ -142,7 +151,7 @@ Never share an operator or producer credential with an implementation agent.`); 
     if (!workspace || workspace.host !== hostId || await realpath(process.cwd()) !== await realpath(workspace.path)) throw new Error('Run watch from the assigned workspace on its registered host');
     if ((await api('status')).actor?.role !== 'worker') throw new Error('watch requires a worker credential; never pass operator or producer credentials to implementation processes');
     process.env.GRAPHYARD_URL = base; process.env.GRAPHYARD_TOKEN = token;
-    process.env.GRAPHYARD_CLI = connection?.cliPath ?? cliPath; process.env.GRAPHYARD_HOST_ID = hostId;
+    process.env.GRAPHYARD_CLI = await activeCliPath(); process.env.GRAPHYARD_HOST_ID = hostId;
     process.exitCode = await supervise(args[separator + 1], args.slice(separator + 2), epoch,
       () => api(`work/${work.id}/heartbeat`, { epoch }, randomUUID()));
     return;
