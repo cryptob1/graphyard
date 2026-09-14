@@ -349,3 +349,16 @@ test('concurrent task changes schedule a prompt retry without an operator error'
   await store.finishJob(w.id, '11111111-1111-4111-8111-111111111111', 'GitHub permission denied');
   assert.equal((await store.pool.query('SELECT error FROM jobs WHERE work_id=$1', [w.id])).rows[0].error, 'GitHub permission denied');
 });
+
+ test('a policy change after the actual merge cannot invalidate historical delivery authorization', async () => {
+  let w = await submitted(); w = await engine.observe(w.id, w.revision, observation(w));
+  w = await engine.execute(producer, 'evidence', w.id, proof(), randomUUID());
+  const authorizedRevision = w.revision;
+  await delay(5); const mergedAt = new Date().toISOString(); await delay(5);
+  w = await engine.execute(operator, 'reviewpolicy', w.id, { provider: 'codex', expectedPolicyRevision: 1, reason: 'Merge not observed yet' }, randomUUID());
+  assert.equal(w.policyRevision, 2); assert.equal(w.mergeAuthorization, null);
+  w = await engine.observe(w.id, w.revision, { ...observation(w), merged: true, mergedAt, mergeSha: 'e'.repeat(40) });
+  assert.equal(w.stage, 'done'); assert.equal(w.delivery?.authorizationRevision, authorizedRevision);
+  assert.ok(!w.violations.some(v => v.includes('without a prior authorization')));
+  assert.ok(w.violations.some(v => v.includes('Post-merge')));
+ });
