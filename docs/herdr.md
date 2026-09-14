@@ -93,3 +93,5 @@ The dashboard and Herdr list use `/api/work-snapshot`, which returns work and it
 CLI `next` and `handoff` also use the timestamp paired with `/api/work-snapshot`. Host clock skew or a later status response cannot make an active assignment appear expired. Handoff still checks the authenticated worker identity; the supervisor verifies the current lease before launching the child.
 
 Long agent names and runtimes are truncated on work cards. Hover the label to see the full identity and worker ID, or open the work details for the full, wrapped assignment.
+
+Setup checks Git’s effective ignore rules before saving local credentials. If later negations re-include `.graphyard`, it appends a final directory exclusion and verifies it; an unverifiable or still-unignored credential path refuses setup.

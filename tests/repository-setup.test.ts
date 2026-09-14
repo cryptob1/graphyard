@@ -129,3 +129,19 @@ test('setup binds the checkout identity before saving credentials or changing He
     assert.equal((await setupRepository(root,connection,{fetcher})).connected,true);
   } finally { await rm(root,{recursive:true,force:true}); }
 });
+
+ test('setup overrides later credential ignore negations before writing a token and remains idempotent', async () => {
+  const root=await repo();
+  try {
+    await writeFile(join(root,'.gitignore'),'.graphyard/\n!.graphyard/\n.graphyard/*\n!.graphyard/connection.json\n');
+    await setupRepository(root,connection,{fetcher});
+    for(const path of ['.graphyard/connection.json','.graphyard/connection.json.pending.tmp']) {
+      execFileSync('git',['check-ignore','--quiet','--',path],{cwd:root});
+    }
+    const ignored=await readFile(join(root,'.gitignore'),'utf8');
+    assert.ok(ignored.endsWith('.graphyard/\n'));
+    assert.doesNotMatch(execFileSync('git',['ls-files','--others','--exclude-standard'],{cwd:root,encoding:'utf8'}),/connection/);
+    await setupRepository(root,connection,{fetcher});
+    assert.equal(await readFile(join(root,'.gitignore'),'utf8'),ignored);
+  } finally { await rm(root,{recursive:true,force:true}); }
+ });
