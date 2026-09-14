@@ -140,7 +140,7 @@ test('migration refuses required code-owner review before making any external ch
 });
 
  test('clean-result courtesy normalization excludes contradictory or unknown verdict suffixes', async () => {
-  for (const suffix of ['Delightful!', 'Bravo.', 'Nice work!', 'Keep it up!', 'Well done!', 'Great work!', 'Excellent!', 'LGTM.', 'Hooray!', 'Hurrah!', 'Hurray!', 'Huzzah!', 'Woohoo!', 'Yay!']) {
+  for (const suffix of ['Delightful!', 'Bravo.', 'Nice work!', 'Keep it up!', 'Well done!', 'Great work!', 'Excellent!', 'LGTM.', 'Breezy!', 'Peachy!', 'Smooth sailing!', 'Nice job!', 'Good work!', 'Lovely!', 'Superb!', 'Hooray!', 'Hurrah!', 'Hurray!', 'Huzzah!', 'Woohoo!', 'Yay!']) {
     const f = commentFixture(); f.result.body = f.result.body.replace(':+1:', suffix);
     assert.equal((await f.run()).approved, true, suffix);
   }
