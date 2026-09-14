@@ -64,10 +64,10 @@ export class Store {
       RETURNING *`, [token]);
     return result.rows[0] as { work_id: string; token: string; attempts: number } | undefined;
   }
-  async finishJob(id: string, token: string, error?: string) {
+  async finishJob(id: string, token: string, error?: string, retry = false) {
     await this.pool.query(`UPDATE jobs SET token=NULL,locked_until=NULL,error=$3,
-      available_at=now()+ CASE WHEN generation<>claimed_generation THEN interval '0 seconds' WHEN $3::text IS NULL THEN interval '20 seconds' ELSE interval '45 seconds' END
-      WHERE work_id=$1 AND token=$2 AND locked_until>clock_timestamp()`, [id, token, error ?? null]);
+      available_at=now()+ CASE WHEN generation<>claimed_generation THEN interval '0 seconds' WHEN $4::boolean THEN interval '2 seconds' WHEN $3::text IS NULL THEN interval '20 seconds' ELSE interval '45 seconds' END
+      WHERE work_id=$1 AND token=$2 AND locked_until>clock_timestamp()`, [id, token, error ?? null, retry]);
   }
 }
 
