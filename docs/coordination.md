@@ -85,3 +85,5 @@ Run this with two real hosts, two distinct worker principals, and an operator. I
 8. Finish through normal review and gates, record both host identities, epochs, timestamps, sanitized logs, CI and PR URLs, and the observer's result. Record failures honestly; do not mark the drill complete based on this checklist.
 
 The current implementation is still through-merge coordination. Verified production delivery and automatic runner orchestration require the next delivery work.
+
+Formal GitHub approvals after a requirement or review-provider revision must have a provider-supplied submission time strictly later than the recorded revision boundary. Missing timestamps, earlier approvals and ambiguous same-time approvals cannot authorize revised work, even when the commit SHA has not changed. Codex approval continues to require the new candidate/policy-bound request. A provider switch cannot restore an older formal approval.

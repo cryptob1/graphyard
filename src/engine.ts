@@ -77,6 +77,7 @@ export class Engine {
         demand((work.policy.reviewProvider ?? 'github') !== data.provider, 'Review provider is already selected');
         work.policy = { ...work.policy, reviewProvider: data.provider };
         work.policyRevision++;
+        work.reviewNotBefore = now.toISOString();
         work.observation = null; work.mergeAuthorization = null; work.reviewRequest = null;
       }
       if (command === 'requirements') {
@@ -106,6 +107,7 @@ export class Engine {
         work.retiredCriterionIds = [...(work.retiredCriterionIds ?? []), ...work.criteria.filter(ac => !data.criteria.some((next: { id: string }) => next.id === ac.id)).map(ac => ac.id)];
         work.criteria = data.criteria; work.dependencies = data.dependencies; work.plannedFiles = data.plannedFiles; work.exclusiveResources = data.exclusiveResources;
         work.scenarioRequirements = pins; work.policyRevision++;
+        work.reviewNotBefore = now.toISOString();
         work.lease = null; work.observation = null; work.mergeAuthorization = null; work.reviewRequest = null;
         // A submitted implementation must be explicitly reconsidered for changed intent.
         if (work.submission) work.reworkRequested = true;

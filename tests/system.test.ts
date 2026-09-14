@@ -517,3 +517,26 @@ test('exclusive resource claims serialize across replicas and expired epochs can
     await assert.rejects(engine.execute(worker, 'claim', winner.id, {}, randomUUID()), /Exclusive resources held/);
   } finally { await second.close(); }
 });
+
+test('formal approvals cannot survive a requirement revision on an unchanged commit', async () => {
+  let w = await submitted(); const old = new Date(Date.now() - 10000).toISOString();
+  w = await engine.observe(w.id, w.revision, { ...observation(w), reviews: [{ reviewer: 'reviewer', sha: head, state: 'APPROVED', submittedAt: old }] });
+  assert.equal(w.gates.find(g => g.name === 'review')!.passed, true);
+  await engine.execute(worker, 'release', w.id, { epoch: 1 }, randomUUID());
+  w = await engine.execute(operator, 'requirements', w.id, { expectedPolicyRevision: 1, reason: 'Change the outcome without changing code', criteria: [{ ...w.criteria[0], text: 'The revised intent must be reviewed' }], dependencies: [], plannedFiles: [], exclusiveResources: [] }, randomUUID());
+  assert.ok(w.reviewNotBefore);
+  for (const submittedAt of [undefined, old, w.reviewNotBefore, new Date(Date.now() + 60000).toISOString()]) {
+    w = await engine.observe(w.id, w.revision, { ...observation(w), reviews: [{ reviewer: 'reviewer', sha: head, state: 'APPROVED', submittedAt }] });
+    assert.equal(w.gates.find(g => g.name === 'review')!.passed, false);
+  }
+  await delay(5);
+  w = await engine.observe(w.id, w.revision, { ...observation(w), reviews: [{ reviewer: 'reviewer', sha: head, state: 'APPROVED', submittedAt: new Date().toISOString() }] });
+  assert.equal(w.gates.find(g => g.name === 'review')!.passed, true);
+  w = await engine.execute(operator, 'reviewpolicy', w.id, { provider: 'codex', expectedPolicyRevision: 2, reason: 'Select cloud review' }, randomUUID());
+  const boundary = w.reviewNotBefore!;
+  await delay(5);
+  w = await engine.execute(operator, 'reviewpolicy', w.id, { provider: 'github', expectedPolicyRevision: 3, reason: 'Select formal review again' }, randomUUID());
+  assert.ok(Date.parse(w.reviewNotBefore!) > Date.parse(boundary));
+  w = await engine.observe(w.id, w.revision, { ...observation(w), reviews: [{ reviewer: 'reviewer', sha: head, state: 'APPROVED', submittedAt: boundary }] });
+  assert.equal(w.gates.find(g => g.name === 'review')!.passed, false);
+});

@@ -25,10 +25,10 @@ function fixture() {
   return { github, calls, pr, work, reviews: (r: any[]) => { reviews = r; }, protection: (p: boolean) => { protectedBranch = p; } };
 }
 test('GitHub adapter binds observations to repository, base, current reviews, and producer', async () => {
-  const f = fixture(); f.reviews([{ user: { login: 'reviewer' }, commit_id: head, state: 'APPROVED' }, { user: { login: 'reviewer' }, commit_id: head, state: 'CHANGES_REQUESTED' }]);
+  const f = fixture(); f.reviews([{ user: { login: 'reviewer' }, commit_id: head, state: 'APPROVED' }, { user: { login: 'reviewer' }, commit_id: head, state: 'CHANGES_REQUESTED', submitted_at: '2026-01-01T00:01:00Z' }]);
   const obs = await f.github.observe(f.work);
   assert.deepEqual(obs.checks, [{ name: 'test', result: 'success', appId: 15368 }]);
-  assert.equal(obs.reviews[0].state, 'CHANGES_REQUESTED'); assert.equal(obs.candidate.baseSha, base); assert.equal(obs.protected, true);
+  assert.equal(obs.reviews[0].submittedAt, '2026-01-01T00:01:00Z'); assert.equal(obs.reviews[0].state, 'CHANGES_REQUESTED'); assert.equal(obs.candidate.baseSha, base); assert.equal(obs.protected, true);
   f.pr.base.ref = 'other'; await assert.rejects(f.github.observe(f.work), /unmanaged/);
   f.pr.base.ref = 'main'; f.pr.head.repo.full_name = 'attacker/fork'; await assert.rejects(f.github.observe(f.work), /same-repository/);
 });
