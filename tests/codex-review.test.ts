@@ -51,3 +51,16 @@ test('native approval migration refuses a different, disconnected or unsupported
  assert.doesNotThrow(() => assertReviewServer(status, 'owner/repo', app));
  for (const override of [{github:false}, {repository:'other/repo'}, {githubAppId:987}, {githubInstallationId:8}, {reviewProviders:[]}]) assert.throws(() => assertReviewServer({...status,...override}, 'owner/repo', app), /does not manage/);
 });
+
+ test('automatic reviews use the PR clean result and must complete after candidate binding', async () => {
+  for (const kind of ['PR opened', 'New commits']) {
+    const f = fixture(); f.summary.body = f.summary.body.replace('Manual request', kind);
+    const original = f.source.pages; const paths: string[] = [];
+    f.source.pages = async path => { paths.push(path); return original(path); };
+    assert.equal((await f.run()).approved, true);
+    assert.ok(paths.includes('/issues/1/reactions'));
+    assert.ok(!paths.includes('/issues/comments/12/reactions'));
+    f.request.createdAt = f.trigger.created_at = f.trigger.updated_at = '2026-01-01T00:02:00Z';
+    assert.equal((await f.run()).approved, false);
+  }
+ });

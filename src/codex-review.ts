@@ -16,8 +16,8 @@ export async function observeCodex(source: Source, pr: number, head: string, rev
   const summary = summaries[0];
   const rows = summary.body.split('\n').filter((line: string) => /^\| 📝 \*\*Code Review\*\* \|/.test(line));
   if (rows.length !== 1) return refuse('Codex summary format is unrecognized');
-  const row = /^\| 📝 \*\*Code Review\*\* \| ✅ \*\*Completed\*\* <relative-time datetime="([^"]+)">[^<]+<\/relative-time> \| `([a-f0-9]{7,40})` \| Manual request \|$/.exec(rows[0]);
-  if (!row) return refuse('Codex has not completed a supported manual review; request @codex review');
+  const row = /^\| 📝 \*\*Code Review\*\* \| ✅ \*\*Completed\*\* <relative-time datetime="([^"]+)">[^<]+<\/relative-time> \| `([a-f0-9]{7,40})` \| (Manual request|New commits|PR opened) \|$/.exec(rows[0]);
+  if (!row) return refuse('Codex has not completed a supported review of this candidate');
   const completedAt = Date.parse(row[1]);
   if (!Number.isFinite(completedAt) || completedAt > Date.now() + 5000) return refuse('Invalid Codex completion timestamp');
   const resolved = await source.request(`/commits/${row[2]}`);
@@ -28,13 +28,15 @@ export async function observeCodex(source: Source, pr: number, head: string, rev
     || !Number.isFinite(Date.parse(trigger.created_at)) || Date.parse(trigger.created_at) > completedAt) return refuse('The recorded Graphyard review request is missing, edited, or not yet completed');
   // A new clean run supersedes earlier findings; resolving threads alone never does.
   if (reviews.some(r => isCodex(r) && Date.parse(r.submitted_at) >= Date.parse(trigger.created_at))) return refuse('Codex posted review findings/output for this request; fix them and request a fresh clean review');
-  const reactions = await source.pages(`/issues/comments/${trigger.id}/reactions`);
+  // Automatic reviews report their clean result on the PR, manual reviews on the request.
+  const reactionPath = row[3] === 'Manual request' ? `/issues/comments/${trigger.id}/reactions` : `/issues/${pr}/reactions`;
+  const reactions = await source.pages(reactionPath);
   const clean = reactions.filter(r => isCodex(r) && r.content === '+1' && Date.parse(r.created_at) >= Math.floor(completedAt / 1000) * 1000);
   if (clean.length !== 1 || reactions.some(r => isCodex(r) && r.content === 'eyes')) return refuse('A fresh Codex clean-review reaction is required; review may still be running or have findings');
   // Reread mutable summary/request/reaction state before accepting a snapshot.
   const [summaryAgain, triggerAgain, reactionsAgain, reviewsAgain] = await Promise.all([
     source.request(`/issues/comments/${summary.id}`), source.request(`/issues/comments/${trigger.id}`),
-    source.pages(`/issues/comments/${trigger.id}/reactions`), source.pages(`/pulls/${pr}/reviews`),
+    source.pages(reactionPath), source.pages(`/pulls/${pr}/reviews`),
   ]);
   if (!isCodex(summaryAgain) || summaryAgain.performed_via_github_app?.id !== CODEX_APP_ID || summaryAgain.body !== summary.body || summaryAgain.updated_at !== summary.updated_at
     || triggerAgain.performed_via_github_app?.id !== graphyardAppId || triggerAgain.created_at !== trigger.created_at || triggerAgain.body !== trigger.body || triggerAgain.updated_at !== trigger.updated_at
