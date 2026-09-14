@@ -5,6 +5,15 @@ export const CODEX_APP_ID = 1144995;
 export const CODEX_USER_ID = 199175422;
 const isCodex = (item: any) => item.user?.id === CODEX_USER_ID && item.user?.type === 'Bot';
 interface Source { pages(path: string): Promise<any[]>; request(path: string): Promise<any> }
+// Exact observed provider footer; arbitrary appended prose cannot be treated as approval.
+const cleanFooter = "<details> <summary>ℹ️ About Codex in GitHub</summary> <br/> Codex has been enabled to automatically review pull requests in this repo. Reviews are triggered when you - Open a pull request for review - Mark a draft as ready - Comment \"@codex review\". If Codex has suggestions, it will comment; otherwise it will react with 👍. When you [sign up for Codex through ChatGPT](https://openai.com/codex), Codex can also answer questions or update the PR, like \"@codex address that feedback\". </details>";
+function cleanCommit(body: unknown): string | null {
+  if (typeof body !== 'string') return null;
+  const match = /^Codex Review: Didn't find any major issues\.(?: :(?:\+1|tada):| What shall we delve into next\?)?\n\n\*\*Reviewed commit:\*\* `([a-f0-9]{7,40})`(?=\s|$)/.exec(body);
+  if (!match) return null;
+  const tail = body.slice(match[0].length).trim().replace(/\s+/g, ' ');
+  return !tail || tail === cleanFooter ? match[1] : null;
+}
 /** Conservative adapter for the observed hosted Codex review protocol. Unknown formats refuse. */
 export async function observeCodex(source: Source, pr: number, head: string, reviews: any[], authorId: number, request: ReviewRequest | null | undefined, base: string, policyRevision: number, graphyardAppId: number): Promise<AgentReview> {
   const refuse = (reason: string): AgentReview => ({ provider: 'codex', sha: head, approved: false, reason });
@@ -12,8 +21,7 @@ export async function observeCodex(source: Source, pr: number, head: string, rev
   if (!Number.isSafeInteger(authorId) || authorId === CODEX_USER_ID) return refuse('Reviewer must be independent of the PR author');
   const comments = await source.pages(`/issues/${pr}/comments`);
   // Some hosted runs publish a signed clean-result comment while leaving the summary running.
-  const cleanPattern = /^Codex Review: Didn't find any major issues\.(?: :(?:\+1|tada):| What shall we delve into next\?)?\n\n\*\*Reviewed commit:\*\* `([a-f0-9]{7,40})`(?:\n|$)/;
-  const results = comments.filter(c => isCodex(c) && c.performed_via_github_app?.id === CODEX_APP_ID && cleanPattern.test(c.body ?? '')
+  const results = comments.filter(c => isCodex(c) && c.performed_via_github_app?.id === CODEX_APP_ID && cleanCommit(c.body)
     && Date.parse(c.created_at) > Date.parse(request.createdAt)).sort((a, b) => Date.parse(b.created_at) - Date.parse(a.created_at));
   if (results.length) {
     const result = results[0], completedAt = Date.parse(result.created_at);
@@ -22,7 +30,7 @@ export async function observeCodex(source: Source, pr: number, head: string, rev
       && c.body === request.body && c.created_at === request.createdAt && c.updated_at === c.created_at;
     if (!authenticTrigger(trigger) || !Number.isFinite(completedAt) || completedAt > Date.now() + 5000 || result.updated_at !== result.created_at)
       return refuse('Clean result or recorded request is edited, invalid, or missing');
-    if ((await source.request(`/commits/${cleanPattern.exec(result.body)![1]}`)).sha !== head) return refuse('Codex reviewed a different commit');
+    if ((await source.request(`/commits/${cleanCommit(result.body)!}`)).sha !== head) return refuse('Codex reviewed a different commit');
     const conflictingComments = (rows: any[]) => rows.some(c => isCodex(c) && c.id !== result.id
       && Date.parse(c.updated_at ?? c.created_at) >= completedAt);
     const findings = (rows: any[]) => rows.some(r => isCodex(r) && Date.parse(r.submitted_at) >= Date.parse(request.createdAt));

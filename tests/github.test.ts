@@ -123,3 +123,18 @@ test('Codex dispatch checks candidate and job guard before posting and binds the
   f.work.policy.reviewProvider = 'codex';
   assert.equal((await f.github.observe(f.work)).protected, true);
  });
+
+test('unchanged check output avoids redundant writes while still guarding the snapshot', async () => {
+  const f = fixture(); const original = f.github.request;
+  let saved: any, writes = 0, guards = 0;
+  f.github.request = async (path, method, body) => {
+    if (path.includes('/check-runs?') && saved) return { check_runs: [{ ...saved, id: 77, app: { id: 1234 } }] };
+    if ((method === 'POST' || method === 'PATCH') && path.startsWith('/check-runs')) { saved = structuredClone(body); writes++; return {}; }
+    return original(path, method, body);
+  };
+  await f.github.publish(f.work, undefined, async () => { guards++; });
+  await f.github.publish(f.work, undefined, async () => { guards++; });
+  assert.equal(writes, 1); assert.equal(guards, 2);
+  await f.github.publish(f.work, 'New refusal', async () => { guards++; });
+  assert.equal(writes, 2);
+});

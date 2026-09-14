@@ -113,3 +113,12 @@ test('explicit results refuse stale, edited, spoofed, conflicting and changing e
   const unknown = commentFixture(); unknown.result.body = unknown.result.body.replace(' :+1:', ' However, a critical issue remains.');
   assert.equal((await unknown.run()).approved, false);
  });
+
+ test('clean comments accept the exact provider footer but refuse all unknown trailing output', async () => {
+  const {readFile} = await import('node:fs/promises');
+  const real = await readFile(new URL('./fixtures/codex-clean-result.txt', import.meta.url), 'utf8');
+  const valid = commentFixture(); valid.result.body = real; assert.equal((await valid.run()).approved, true);
+  for (const body of [real + '\nP1: a serious issue', real.replace('Codex can also answer questions', 'Critical bug found. Codex can also answer questions'), commentFixture().result.body + '\nAdditional findings']) {
+    const f = commentFixture(); f.result.body = body; assert.equal((await f.run()).approved, false);
+  }
+ });

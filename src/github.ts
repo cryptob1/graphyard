@@ -10,8 +10,12 @@ export interface GitHubConfig { repository: string; base: string; appId: number;
 export class GitHub {
   private token = '';
   private expires = 0;
+  private blockedUntil = 0;
+  private rateFailures = 0;
+  private cache = new Map<string, { etag: string; value: any }>();
   constructor(public config: GitHubConfig) {}
   async request(path: string, method = 'GET', body?: unknown): Promise<any> {
+    demand(Date.now() >= this.blockedUntil, `GitHub requests paused until ${new Date(this.blockedUntil).toISOString()} after a rate/access refusal`, 502);
     if (this.expires < Date.now() + 60_000) {
       const now = Math.floor(Date.now() / 1000);
       const encode = (x: unknown) => Buffer.from(JSON.stringify(x)).toString('base64url');
@@ -25,12 +29,30 @@ export class GitHub {
       const result: any = await response.json();
       this.token = result.token; this.expires = Date.parse(result.expires_at);
     }
+    const cached = method === 'GET' ? this.cache.get(path) : undefined;
     const response = await fetch(`https://api.github.com/repos/${this.config.repository}${path}`, {
-      method, headers: { Authorization: `Bearer ${this.token}`, Accept: 'application/vnd.github+json', 'Content-Type': 'application/json', 'X-GitHub-Api-Version': '2022-11-28' },
+      method, headers: { Authorization: `Bearer ${this.token}`, Accept: 'application/vnd.github+json', 'Content-Type': 'application/json', 'X-GitHub-Api-Version': '2022-11-28', ...(cached ? { 'If-None-Match': cached.etag } : {}) },
       body: body === undefined ? undefined : JSON.stringify(body), signal: AbortSignal.timeout(15_000),
     });
-    demand(response.ok, `GitHub ${method} ${path} failed (${response.status})`, 502);
-    return response.status === 204 ? null : response.json();
+    if (response.status === 304 && cached) { this.rateFailures = 0; return structuredClone(cached.value); }
+    if (response.status === 403 || response.status === 429) {
+      const retry = Number(response.headers.get('retry-after'));
+      const reset = Number(response.headers.get('x-ratelimit-reset')) * 1000;
+      this.blockedUntil = Math.max(Date.now() + Math.min(3600_000, 60_000 * 2 ** Math.min(this.rateFailures++, 6)), Number.isFinite(retry) && retry > 0 ? Date.now() + retry * 1000 : 0,
+        response.headers.get('x-ratelimit-remaining') === '0' && Number.isFinite(reset) ? reset : 0);
+    }
+    demand(response.ok, `GitHub ${method} ${path} failed (${response.status})${this.blockedUntil > Date.now() ? `; requests paused until ${new Date(this.blockedUntil).toISOString()}` : ''}`, 502);
+    this.rateFailures = 0;
+    const value = response.status === 204 ? null : await response.json();
+    const etag = response.headers.get('etag');
+    if (method === 'GET') {
+      this.cache.delete(path);
+      if (etag) {
+        this.cache.set(path, { etag, value: structuredClone(value) });
+        if (this.cache.size > 256) this.cache.delete(this.cache.keys().next().value!);
+      }
+    }
+    return value;
   }
   async pages(path: string, field?: string): Promise<any[]> {
     const result: any[] = [];
@@ -89,11 +111,13 @@ export class GitHub {
     const reasons = [...work.gates.flatMap(g => g.reasons), ...work.violations, ...(forcedReason ? [forcedReason] : [])];
     const existing = (await this.pages(`/commits/${work.candidate.sha}/check-runs?check_name=${encodeURIComponent(CHECK_NAME)}&filter=latest`, 'check_runs')).find(c => c.app.id === this.config.appId);
     const body = { name: CHECK_NAME, head_sha: work.candidate.sha, status: 'completed', conclusion: reasons.length ? 'failure' : 'success', external_id: work.id,
-      output: { title: reasons.length ? 'REFUSED' : 'All required gates passed', summary: (reasons.length ? reasons.map(r => `- ${r}`).join('\n') : `Candidate ${work.candidate.sha}; base ${work.candidate.baseSha}; policy ${work.policyRevision}; revision ${work.revision}`).slice(0, 60000) } };
+      output: { title: reasons.length ? 'REFUSED' : 'All required gates passed', summary: (reasons.length ? reasons.map(r => `- ${r}`).join('\n') : `Candidate ${work.candidate.sha}; base ${work.candidate.baseSha}; policy ${work.policyRevision}`).slice(0, 60000) } };
     const pr = await this.request(`/pulls/${work.candidate.pr}`);
     if (!reasons.length || !forcedReason) demand(pr.head.sha === work.candidate.sha && pr.base.sha === work.candidate.baseSha, 'PR changed before check publication; retry');
     if (!reasons.length) demand(pr.state === 'open' && !pr.draft && pr.base.ref === this.config.base, 'PR is closed, draft, or retargeted; refusing success');
     await beforeWrite();
+    if (existing?.status === body.status && existing.conclusion === body.conclusion && existing.external_id === body.external_id
+      && existing.output?.title === body.output.title && existing.output?.summary === body.output.summary) return;
     await this.request(existing ? `/check-runs/${existing.id}` : '/check-runs', existing ? 'PATCH' : 'POST', body);
   }
 }
