@@ -10,8 +10,8 @@ In your personal GitHub developer settings, create a GitHub App with:
 
 - Homepage: your Graphyard URL.
 - Webhook: `https://YOUR-HOST/api/github/webhook`, with a random webhook secret.
-- Repository permissions: Metadata read, Contents read, Pull requests read, Checks read/write, and Administration read (to inspect branch protection).
-- Events: Pull request, Pull request review, Check run, Check suite, and Push.
+- Repository permissions: Metadata read, Contents read, Pull requests read/write, Checks read/write, and Administration read (to inspect branch protection).
+- Events: Pull request, Pull request review, Check run, Check suite, Issue comment, and Push.
 - Install only on the repository managed by this Graphyard instance.
 
 Generate a private key. Configure `GITHUB_APP_ID`, `GITHUB_INSTALLATION_ID`, `GITHUB_PRIVATE_KEY` (full PEM, secret), `GITHUB_WEBHOOK_SECRET`, `GITHUB_REPOSITORY`, and `GITHUB_BASE_BRANCH` on the server. Redeploy. A webhook ping alone does not prove the integration is working; submit a test PR and inspect the job and check.
