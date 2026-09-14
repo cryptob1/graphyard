@@ -16,7 +16,7 @@ import { processJob, type GitHub } from '../src/github.js';
 import { exercise } from '../scripts/acceptance-contract.mjs';
 
 const operator: Principal = { id: 'operator', role: 'admin' };
-const worker: Principal = { id: 'agent-a', role: 'worker' };
+const worker: Principal = { id: 'agent-a', role: 'worker', displayName: 'Atlas', runtime: 'Codex' };
 const other: Principal = { id: 'agent-b', role: 'worker' };
 const producer: Principal = { id: 'ci-runner', role: 'producer', proofs: ['integration:claim-safety'] };
 const head = 'a'.repeat(40), base = 'b'.repeat(40);
@@ -290,4 +290,24 @@ test('integration publication discards a passing snapshot superseded by failed e
 test('protected acceptance harness exercises five contracts against the real HTTP server and Postgres', async () => {
   const result = await exercise(url, [{ ...operator, token: 'o'.repeat(32) }, ...probeWorkers]);
   assert.equal(result.length, 5); assert.ok(result.every((c: any) => c.result === 'pass'));
+});
+
+
+test('assignment identity comes from the authenticated principal and survives release and reclaim in history', async () => {
+  const item = await ready();
+  const claim = (data: unknown) => fetch(`${url}/api/work/${item.id}/claim`, { method: 'POST', headers: { Authorization: `Bearer ${'w'.repeat(32)}`, 'Content-Type': 'application/json', 'Idempotency-Key': randomUUID() }, body: JSON.stringify(data) });
+  const spoof = await claim({ owner: 'agent-b', displayName: 'Other worker', runtime: 'Claude' });
+  assert.equal(spoof.status, 400);
+  const response = await claim({}); assert.equal(response.status, 200);
+  let w = await response.json() as Work;
+  assert.equal(w.lease?.owner, worker.id); assert.equal(w.lastAssignment?.displayName, 'Atlas'); assert.equal(w.lastAssignment?.runtime, 'Codex');
+  const first = w.lastAssignment;
+  w = await engine.execute(worker, 'release', w.id, { epoch: 1 }, randomUUID());
+  assert.equal(w.lease, null); assert.deepEqual(w.lastAssignment, first);
+  w = await engine.execute({ ...other, displayName: 'Beacon', runtime: 'Claude' }, 'claim', w.id, {}, randomUUID());
+  assert.equal(w.lastAssignment?.owner, other.id); assert.equal(w.lastAssignment?.epoch, 2); assert.equal(w.lastAssignment?.runtime, 'Claude');
+  const history = (await store.events(w.id)).filter(e => e.kind === 'claim').sort((a, b) => Number(a.seq) - Number(b.seq));
+  assert.equal(history[0].payload.work.lastAssignment.displayName, 'Atlas');
+  assert.equal(history[1].payload.work.lastAssignment.displayName, 'Beacon');
+  await assert.rejects(engine.execute(worker, 'heartbeat', w.id, { epoch: 1 }, randomUUID()), /superseded/);
 });
