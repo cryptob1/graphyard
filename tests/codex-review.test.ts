@@ -49,6 +49,7 @@ test('native approval migration refuses a different, disconnected or unsupported
  const app = { appId: 1234, installationId: 7 };
  const status = { github: true, repository: 'owner/repo', githubAppId: 1234, githubInstallationId: 7, reviewProviders: ['codex'] };
  assert.doesNotThrow(() => assertReviewServer(status, 'owner/repo', app));
+ assert.doesNotThrow(() => assertReviewServer({...status, repository:'OWNER/Repo'}, 'owner/repo', app));
  for (const override of [{github:false}, {repository:'other/repo'}, {githubAppId:987}, {githubInstallationId:8}, {reviewProviders:[]}]) assert.throws(() => assertReviewServer({...status,...override}, 'owner/repo', app), /does not manage/);
 });
 

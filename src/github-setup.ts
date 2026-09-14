@@ -14,7 +14,7 @@ export function appManifest(repository: string, deployment: string, callback: st
   return { name: `Graphyard ${repository.replace('/', '-')}`, url: url.origin, public: false,
     hook_attributes: { url: `${url.origin}/api/github/webhook`, active: true },
     redirect_url: `${callback}/created`, setup_url: `${callback}/installed`,
-    default_permissions: { metadata: 'read', contents: 'read', pull_requests: 'write', checks: 'write', administration: 'read' },
+    default_permissions: { metadata: 'read', contents: 'read', pull_requests: 'write', issues: 'read', checks: 'write', administration: 'read' },
     default_events: ['pull_request', 'pull_request_review', 'issue_comment', 'check_run', 'check_suite', 'push'] };
 }
 export async function startGithubSetup(root: string, repository: string, deployment: string, port = 4311, dependencies: {
