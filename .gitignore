@@ -8,3 +8,5 @@ dist/
 .graphyard/
 coverage/
 *.log
+playwright-report/
+test-results/
