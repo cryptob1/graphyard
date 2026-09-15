@@ -7,7 +7,7 @@ import { execFile, execFileSync } from 'node:child_process';
 import { createServer } from 'node:http';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
-import { assertDispatchable, assertMasterBinding, assertMergeCandidate, assertMergeProtection, buildMasterStatus, continueMergeBatch, currentMergeCandidates, dispatchWork, inspectWorkerCredentials, loadMasterConfig, managedMasterInstructions, mergeWork, observeHerdrAgents, prepareWorkerLaunch, saveWorkerProfile, setupMaster, startMaster, workerProfileSchema } from '../src/master.js';
+import { assertDispatchable, assertMasterBinding, assertMergeCandidate, assertMergeProtection, buildMasterStatus, continueMergeBatch, currentMergeCandidates, dispatchWork, githubProviderDelay, inspectWorkerCredentials, loadMasterConfig, managedMasterInstructions, mergeWork, observeHerdrAgents, prepareWorkerLaunch, saveWorkerProfile, setupMaster, startMaster, workerProfileSchema } from '../src/master.js';
 import type { Work } from '../src/model.js';
 
 const launcher = fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url));
@@ -240,10 +240,11 @@ test('routine merge is exact-candidate, double-checked, and never uses an admin 
   const result = await mergeWork(config, candidate, async () => ({ work: [candidate], now: new Date().toISOString() }), acquire, cancel, verify, (_command, args) => {
     calls.push(args);
     if (args[1] === 'view') return JSON.stringify({ headRefOid: candidate.candidate!.sha, baseRefOid: candidate.candidate!.baseSha, baseRefName: 'main', state: 'OPEN', isDraft: false });
+    if (args.includes('--include')) return `Date: ${new Date().toUTCString()}\n\n{}`;
     return args[1] === '--method' ? JSON.stringify({ merged: true, sha: 'c'.repeat(40) }) : JSON.stringify(validProtection);
   });
   assert.equal(result.result.startsWith('merge requested'), true);
-  assert.deepEqual(calls[3].slice(0, 3), ['api', '--method', 'PUT']); assert.ok(calls[3].includes(`sha=${candidate.candidate!.sha}`)); assert.equal(calls[3].includes('--admin'), false);
+  assert.deepEqual(calls[4].slice(0, 3), ['api', '--method', 'PUT']); assert.ok(calls[4].includes(`sha=${candidate.candidate!.sha}`)); assert.equal(calls[4].includes('--admin'), false);
   assert.doesNotThrow(() => assertMergeProtection(validProtection, config, candidate));
   assert.throws(() => assertMergeProtection({ ...validProtection, required_status_checks: { ...validProtection.required_status_checks, checks: [] } }, config, candidate), /protection changed/);
   assert.throws(() => assertMergeCandidate(work({ gates: [{ name: 'acceptance', passed: false, reasons: ['Human approval required'] }] })), /does not have/);
@@ -254,12 +255,14 @@ test('routine merge is exact-candidate, double-checked, and never uses an admin 
   let cancelled = '';
   await assert.rejects(mergeWork(config, candidate, async () => ({ work: [candidate], now: new Date().toISOString() }), acquire, async (_work, authority) => { cancelled = authority.id; }, verify, (_command, args) => {
     if (args[1] === 'view') return JSON.stringify({ headRefOid: candidate.candidate!.sha, baseRefOid: candidate.candidate!.baseSha, baseRefName: 'main', state: 'OPEN', isDraft: false });
+    if (args.includes('--include')) return `Date: ${new Date().toUTCString()}\n\n{}`;
     if (args[1] !== '--method') return JSON.stringify(validProtection);
     throw new Error('provider response lost');
   }), /outcome is unknown/);
   assert.equal(cancelled, '', 'an unknown provider outcome retains authority');
   await assert.rejects(mergeWork(config, candidate, async () => ({ work: [candidate], now: new Date().toISOString() }), acquire, async (_work, authority) => { cancelled = authority.id; }, verify, (_command, args) => {
     if (args[1] === 'view') return JSON.stringify({ headRefOid: candidate.candidate!.sha, baseRefOid: candidate.candidate!.baseSha, baseRefName: 'main', state: 'OPEN', isDraft: false });
+    if (args.includes('--include')) return `Date: ${new Date().toUTCString()}\n\n{}`;
     if (args[1] !== '--method') return JSON.stringify(validProtection);
     return JSON.stringify({ merged: false, message: 'branch protection refused merge' });
   }), /branch protection refused merge/);
@@ -279,6 +282,7 @@ test('routine merge is exact-candidate, double-checked, and never uses an admin 
   const resumed = work({ observation: candidate.observation, mergeExecution: execution }); let reacquired = false;
   const resumedResult = await mergeWork(config, resumed, async () => ({ work: [resumed], now: new Date().toISOString() }), async () => { reacquired = true; return { execution }; }, cancel, verify, (_command, args) => {
     if (args[1] === 'view') return JSON.stringify({ headRefOid: resumed.candidate!.sha, baseRefOid: resumed.candidate!.baseSha, baseRefName: 'main', state: 'OPEN', isDraft: false });
+    if (args.includes('--include')) return `Date: ${new Date().toUTCString()}\n\n{}`;
     return args[1] === '--method' ? JSON.stringify({ merged: true, sha: 'c'.repeat(40) }) : JSON.stringify(validProtection);
   }, execution.owner);
   assert.equal(reacquired, false, 'the owning coordinator resumes its active authority'); assert.match(resumedResult.result, /merge requested/);
@@ -293,6 +297,21 @@ test('routine merge is exact-candidate, double-checked, and never uses an admin 
     return JSON.stringify(validProtection);
   }, execution.owner), /does not remain valid/);
   assert.equal(cancelled, lateExecution.id, 'a resumed execution uses its actual remaining lifetime');
+});
+
+test('manual merge remains guarded when automatic merge is disabled and GitHub clock skew is covered', async () => {
+  assert.equal(githubProviderDelay(Date.parse('2026-01-01T00:00:05.250Z'), 200, 'HTTP/2 200\r\nDate: Thu, 01 Jan 2026 00:00:02 GMT\r\n\r\n{}'), 4000);
+  assert.equal(githubProviderDelay(Date.parse('2026-01-01T00:00:05.250Z'), 800, 'Date: Thu, 01 Jan 2026 00:00:06 GMT\n\n{}'), 800);
+  assert.throws(() => githubProviderDelay(Date.now(), 0, '{}'), /server time/);
+  const candidate = work({ observation: { at: new Date().toISOString(), candidate: { sha: 'a'.repeat(40), baseSha: 'b'.repeat(40), pr: 42, branch: 'graphyard/gy-42-1', author: 'worker' } } as any });
+  const config = { version: 1 as const, url: 'https://graphyard.example', credentialFile: '/outside/master.token', cliPath: launcher, repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'machine-a', masterAgentName: 'graphyard-master-project', autoMerge: false, mergeMethod: 'merge' as const, workers: [] };
+  const execution = { id: '11111111-1111-4111-8111-111111111111', owner: 'master', sha: candidate.candidate!.sha, baseSha: candidate.candidate!.baseSha, policyRevision: 2, authorizationRevision: candidate.revision, issuedAt: new Date().toISOString(), expiresAt: new Date(Date.now() + 120_000).toISOString() };
+  const result = await mergeWork(config, candidate, async () => ({ work: [candidate], now: new Date().toISOString() }), async () => ({ execution }), async () => ({}), async () => ({ executionId: execution.id, sha: execution.sha, verifiedAt: new Date(Date.now() - 2000).toISOString(), providerDelayMs: 0 }), (_command, args) => {
+    if (args[1] === 'view') return JSON.stringify({ headRefOid: candidate.candidate!.sha, baseRefOid: candidate.candidate!.baseSha, baseRefName: 'main', state: 'OPEN', isDraft: false });
+    if (args.includes('--include')) return `Date: ${new Date().toUTCString()}\n\n{}`;
+    return args[1] === '--method' ? JSON.stringify({ merged: true, sha: 'c'.repeat(40) }) : JSON.stringify(validProtection);
+  });
+  assert.match(result.result, /merge requested/);
 });
 
 test('merge-all selection and execution do not let refusing work starve eligible candidates', async () => {

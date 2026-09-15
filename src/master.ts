@@ -420,8 +420,17 @@ export function assertMergeProtection(protection: any, config: MasterConfig, wor
     && Array.isArray(checks?.checks) && checks.checks.some((check: any) => check?.context === 'Graphyard / merge' && check?.app_id === config.githubAppId);
   if (!protectedBranch) throw new Error(`${work.key} managed-branch protection changed after merge authorization; Graphyard refused the merge`);
 }
+export function githubProviderDelay(verifiedTime: number, serverDelayMs: number, response: string) {
+  const header = /^Date:\s*(.+?)\r?$/gmi.exec(response);
+  const githubTime = header ? Date.parse(header[1]) : Number.NaN;
+  if (!Number.isFinite(verifiedTime) || !Number.isInteger(serverDelayMs) || serverDelayMs < 0 || !Number.isFinite(githubTime)) throw new Error('GitHub did not provide a valid server time for merge ordering');
+  // GitHub's Date and merged_at values have whole-second precision. Waiting from
+  // the lower bound of GitHub's reported second remains conservative when the
+  // database clock is ahead of GitHub's clock.
+  const verifiedBoundary = Math.ceil((verifiedTime + 1) / 1000) * 1000;
+  return Math.max(serverDelayMs, verifiedBoundary - githubTime, 0);
+}
 export async function mergeWork(config: MasterConfig, work: Work, freshSnapshot: () => Promise<{ work: Work[]; now: string }>, acquire: (work: Work, authorization: ReturnType<typeof assertMergeCandidate>) => Promise<{ execution: MergeExecution }>, cancel: (work: Work, execution: MergeExecution, reason: string) => Promise<unknown>, verify: (work: Work, execution: MergeExecution) => Promise<{ executionId: string; sha: string; verifiedAt: string; providerDelayMs: number }>, run: (command: string, args: string[]) => string = (command, args) => execFileSync(command, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 90_000 }), executionOwner?: string) {
-  if (!config.autoMerge) throw new Error('Automatic routine merge is disabled in master configuration');
   const before = await freshSnapshot(); const current = before.work.find(item => item.id === work.id);
   if (!current || current.revision !== work.revision) throw new Error(`${work.key} changed before GitHub verification; retry`);
   const authorization = assertMergeCandidate(current, before.now, executionOwner);
@@ -448,9 +457,9 @@ export async function mergeWork(config: MasterConfig, work: Work, freshSnapshot:
     verificationStarted = true; const verified = await verify(latest, granted.execution); verificationCompleted = true;
     const verifiedTime = Date.parse(verified.verifiedAt);
     if (verified.executionId !== granted.execution.id || verified.sha !== authorization.sha || !Number.isFinite(verifiedTime) || !Number.isInteger(verified.providerDelayMs) || verified.providerDelayMs < 0 || verified.providerDelayMs > 1000) throw new Error(`${work.key} received an invalid final GitHub gate verification`);
-    // GitHub reports mergedAt with whole-second precision. Start the provider call
-    // after the next boundary so the ledger can prove verification preceded merge.
-    if (verified.providerDelayMs) await new Promise(resolve => setTimeout(resolve, verified.providerDelayMs));
+    const githubClock = run('gh', ['api', '--include', 'rate_limit']);
+    const delay = githubProviderDelay(verifiedTime, verified.providerDelayMs, githubClock);
+    if (delay) await new Promise(resolve => setTimeout(resolve, delay));
     const remainingAfterProtection = remainingAtSnapshot - (performance.now() - authorityBudgetStartedAt);
     if (!Number.isFinite(remainingAfterProtection) || remainingAfterProtection <= 90_000) throw new Error(`${work.key} merge execution no longer has enough time for the provider call after verifying branch protection; retry`);
     providerStarted = true;
