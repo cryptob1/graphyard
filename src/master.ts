@@ -1,7 +1,7 @@
 import { execFileSync } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import { chmod, lstat, mkdir, readFile, realpath } from 'node:fs/promises';
-import { isAbsolute, resolve } from 'node:path';
+import { isAbsolute, relative, resolve, sep } from 'node:path';
 import { homedir, hostname } from 'node:os';
 import { z } from 'zod';
 import { assertRepository, discover, localDirectory, saveDiscovery } from './onboarding.js';
@@ -98,8 +98,18 @@ async function readMasterConfig(root: string): Promise<MasterConfig> {
 async function externalCredential(root: string, file: string, label: string) {
   if (!isAbsolute(file)) throw new Error(`${label} credential file must use an absolute path outside the repository`);
   await privateFile(file);
-  const repositoryRoot = await realpath(root), credentialFile = await realpath(file);
-  if (credentialFile === repositoryRoot || credentialFile.startsWith(`${repositoryRoot}/`)) throw new Error(`${label} credential file must be outside the repository`);
+  const credentialFile = await realpath(file);
+  let worktrees: string[];
+  try {
+    const records = execFileSync('git', ['worktree', 'list', '--porcelain', '-z'], { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).split('\0');
+    worktrees = records.filter(record => record.startsWith('worktree ')).map(record => resolve(record.slice('worktree '.length)));
+  } catch { worktrees = [resolve(root)]; }
+  for (const worktree of worktrees) {
+    const repositoryRoot = await realpath(worktree);
+    const fromRoot = relative(repositoryRoot, credentialFile);
+    const inside = fromRoot === '' || fromRoot !== '..' && !fromRoot.startsWith(`..${sep}`) && !isAbsolute(fromRoot);
+    if (inside) throw new Error(`${label} credential file must be outside every worktree of the repository`);
+  }
 }
 export async function loadMasterConfig(root: string): Promise<MasterConfig> {
   const config = await readMasterConfig(root);
@@ -342,14 +352,15 @@ export async function prepareWorkerLaunch(root: string, key: string, profileName
   const base = String(run('git', ['rev-parse', '--verify', `refs/remotes/origin/${config.baseBranch}`], { cwd: root, env })).trim();
   if (!/^[0-9a-f]{40}$/i.test(base)) throw new Error('Worker launcher could not resolve the current managed base branch');
   const claim = JSON.parse(String(run(process.execPath, [config.cliPath, 'claim', key], { cwd: root, env })));
-  if (claim.lease?.owner !== profile.principal || !Number.isSafeInteger(claim.epoch)) throw new Error('Worker launcher acquired an unexpected assignment identity');
+  const claimedEpoch = Number.isSafeInteger(claim.epoch) && claim.epoch > 0 ? claim.epoch as number : null;
   try {
-    const workspace = JSON.parse(String(run(process.execPath, [config.cliPath, 'worktree', key, String(claim.epoch), base], { cwd: root, env, stdio: ['ignore', 'pipe', 'inherit'] })));
+    if (claim.lease?.owner !== profile.principal || claimedEpoch === null) throw new Error('Worker launcher acquired an unexpected assignment identity');
+    const workspace = JSON.parse(String(run(process.execPath, [config.cliPath, 'worktree', key, String(claimedEpoch), base], { cwd: root, env, stdio: ['ignore', 'pipe', 'inherit'] })));
     if (!workspace.path || !isAbsolute(workspace.path)) throw new Error('Worker launcher did not receive an assigned workspace');
-    return { epoch: claim.epoch, path: workspace.path, base };
+    return { epoch: claimedEpoch, path: workspace.path, base };
   } catch (error) {
-    try { run(process.execPath, [config.cliPath, 'release', key, String(claim.epoch)], { cwd: root, env }); }
-    catch { throw new Error(`${error instanceof Error ? error.message : 'Workspace preparation failed'}; Graphyard could not release epoch ${claim.epoch}`); }
+    if (claimedEpoch !== null) try { run(process.execPath, [config.cliPath, 'release', key, String(claimedEpoch)], { cwd: root, env }); }
+    catch { throw new Error(`${error instanceof Error ? error.message : 'Workspace preparation failed'}; Graphyard could not release epoch ${claimedEpoch}`); }
     throw error;
   }
 }

@@ -135,7 +135,7 @@ test('master start creates a visible non-focused coordinator session with no cre
 });
 
 test('launch profiles verify a private worker credential and match its principal', async () => {
-  const root = await repository(); const credentialDirectory = await mkdtemp(join(tmpdir(), 'graphyard-master-credentials-')); const credential = join(credentialDirectory, 'worker.token');
+  const root = await repository(); const credentialDirectory = await mkdtemp(join(tmpdir(), 'graphyard-master-credentials-')); const credential = join(credentialDirectory, 'worker.token'); const siblingParent = await mkdtemp(join(tmpdir(), 'graphyard-sibling-')); const sibling = join(siblingParent, 'worktree');
   try {
     await writeFile(credential, workerToken, { mode: 0o600 });
     await setupMaster(root, { url: 'https://graphyard.example', token: coordinatorToken, cliPath: launcher, credentialDirectory, hostId: 'stable-host', autoMerge: false, mergeMethod: 'squash' }, coordinatorStatus as typeof fetch);
@@ -153,8 +153,12 @@ test('launch profiles verify a private worker credential and match its principal
     await assert.rejects(saveWorkerProfile(root, { name: 'other', principal: 'worker-b', agentName: 'eng-b', mode: 'launch', kind: 'claude', credentialFile: credential }, async () => ({ actor: { id: 'worker-b', role: 'worker' } })), /0600/);
     await chmod(credential, 0o600);
     await writeFile(join(root, 'worker-local.token'), workerToken, { mode: 0o600 });
-    await assert.rejects(saveWorkerProfile(root, { name: 'local', principal: 'worker-c', agentName: 'eng-c', mode: 'launch', kind: 'codex', credentialFile: join(root, 'worker-local.token') }, async () => ({ actor: { id: 'worker-c', role: 'worker' } })), /outside the repository/);
-  } finally { await rm(root, { recursive: true, force: true }); await rm(credentialDirectory, { recursive: true, force: true }); }
+    await assert.rejects(saveWorkerProfile(root, { name: 'local', principal: 'worker-c', agentName: 'eng-c', mode: 'launch', kind: 'codex', credentialFile: join(root, 'worker-local.token') }, async () => ({ actor: { id: 'worker-c', role: 'worker' } })), /outside every worktree/);
+    execFileSync('git', ['-c', 'user.name=Graphyard', '-c', 'user.email=graphyard@example.invalid', 'commit', '--allow-empty', '-qm', 'fixture'], { cwd: root });
+    execFileSync('git', ['worktree', 'add', '--detach', sibling], { cwd: root, stdio: 'ignore' });
+    const siblingCredential = join(sibling, 'worker.token'); await writeFile(siblingCredential, workerToken, { mode: 0o600 });
+    await assert.rejects(saveWorkerProfile(root, { name: 'sibling', principal: 'worker-d', agentName: 'eng-d', mode: 'launch', kind: 'codex', credentialFile: siblingCredential }, async () => ({ actor: { id: 'worker-d', role: 'worker' } })), /every worktree/);
+  } finally { try { execFileSync('git', ['worktree', 'remove', '--force', sibling], { cwd: root, stdio: 'ignore' }); } catch {} await rm(root, { recursive: true, force: true }); await rm(credentialDirectory, { recursive: true, force: true }); await rm(siblingParent, { recursive: true, force: true }); }
 });
 
 test('a launch profile token file overrides ambient Graphyard credentials', async () => {
@@ -192,6 +196,14 @@ test('worker preparation claims and creates the assigned worktree from the curre
       return '{}';
     }), /checkout failed/);
     assert.equal(failed.at(-1)![1], 'release'); assert.equal(failed.at(-1)![3], '6');
+    const changedIdentity: string[][] = [];
+    await assert.rejects(prepareWorkerLaunch(root, 'GY-42', 'launch', (command, args) => {
+      changedIdentity.push(args);
+      if (command === 'git') return args[0] === 'rev-parse' ? `${base}\n` : '';
+      if (args[1] === 'claim') return JSON.stringify({ epoch: 7, lease: { owner: 'rotated-worker' } });
+      return '{}';
+    }), /unexpected assignment identity/);
+    assert.equal(changedIdentity.at(-1)![1], 'release'); assert.equal(changedIdentity.at(-1)![3], '7');
     execFileSync('git', ['remote', 'set-url', 'origin', 'https://github.com/other/project.git'], { cwd: root });
     await assert.rejects(prepareWorkerLaunch(root, 'GY-42', 'launch'), /different repositories/);
   } finally { await rm(root, { recursive: true, force: true }); await rm(credentialDirectory, { recursive: true, force: true }); }

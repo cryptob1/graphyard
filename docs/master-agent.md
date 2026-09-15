@@ -50,7 +50,7 @@ An already-running, already-authenticated Herdr agent can be registered for heal
 }
 ```
 
-A master can also launch a visible agent. Put that worker's Graphyard token alone in a local mode-0600 file, then reference the path:
+A master can also launch a visible agent. Put that worker's Graphyard token alone in a local mode-0600 file outside every linked worktree of the managed repository, then reference the path:
 
 ```json
 {
@@ -130,7 +130,7 @@ For every candidate, the command requires:
 8. a second GitHub read after authority acquisition with the same head, base commit, and managed base-branch name;
 9. GitHub's merge API with the authorized head SHA and normal branch protection. Queue enrollment is treated as a refusal because it cannot complete inside the bounded authority window.
 
-It never uses `--admin`. A human approval represented as required evidence remains a refusing gate until supplied. If GitHub refuses the merge, the master cancels the execution authority. If the client disappears, the authority expires automatically. After the merge command succeeds, the item is still not declared Done by the master; Graphyard keeps the authority active until it observes and reconciles the actual matching merge.
+It never uses `--admin`. A human approval represented as required evidence remains a refusing gate until supplied. If GitHub refuses the merge, the master cancels the execution authority. Replaying an acquisition request can return authority only while that exact execution is still active and all bound gate inputs remain current. If the client disappears, the authority expires automatically. After the merge command succeeds, the item is still not declared Done by the master; Graphyard keeps the authority active until it observes and reconciles the actual matching merge.
 
 The present command uses the local authenticated GitHub CLI for the final provider action. Graphyard's transactional execution authority closes the control-plane mutation race around that external call without holding a database transaction open during network I/O.
 

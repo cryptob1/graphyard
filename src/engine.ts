@@ -172,10 +172,19 @@ export class Engine {
     const fingerprint = createHash('sha256').update(JSON.stringify({ command: 'merge.acquire', id, data })).digest('hex');
     return this.store.transaction(async (db, now) => {
       const receipt = (await db.query('SELECT * FROM receipts WHERE actor=$1 AND key=$2', [actor.id, key])).rows[0];
-      if (receipt) { demand(receipt.fingerprint === fingerprint, 'Idempotency key reused with different input'); return receipt.result; }
       const all: Work[] = (await db.query('SELECT document FROM work_items ORDER BY number')).rows.map(r => r.document);
       const work = all.find(item => item.id === id || item.key === id);
       demand(work, 'Work item not found', 404);
+      if (receipt) {
+        demand(receipt.fingerprint === fingerprint, 'Idempotency key reused with different input');
+        this.evaluate(work, all, now);
+        const execution = receipt.result?.execution;
+        demand(execution && work.revision === receipt.result.revision && work.mergeExecution?.id === execution.id
+          && Date.parse(execution.expiresAt) > now.getTime() && work.stage === 'merge' && work.gates.every(gate => gate.passed)
+          && !work.violations.length && work.candidate?.sha === execution.sha && work.candidate?.baseSha === execution.baseSha
+          && work.policyRevision === execution.policyRevision, 'Replayed merge execution is expired, cancelled, or superseded');
+        return receipt.result;
+      }
       demand(work.revision === data.expectedRevision, 'Task changed before merge execution; retry');
       if (work.mergeExecution && Date.parse(work.mergeExecution.expiresAt) <= now.getTime()) work.mergeExecution = null;
       demand(!work.mergeExecution, 'A merge execution is already active');
