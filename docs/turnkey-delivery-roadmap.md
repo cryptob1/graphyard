@@ -65,7 +65,7 @@ The runner should support an isolated self-hosted execution path and an existing
 
 Isolation must suit untrusted repository code: separate tenants/repositories, fresh workspaces, controlled network access, bounded time/resources and no ambient deployment credentials. A container alone is not a claim of sufficient hostile-code isolation. Specify and test the actual sandbox boundary for each executor. Test accounts and outbound side effects require explicit configuration; do not silently exercise production messaging or payment operations.
 
-Observe target identity before and after execution. If it changes, retain the attempt and behavioral observations but mark attribution invalid. Prefer immutable preview deployments over busy shared staging. The target URL must be configured by an authorized operator and validated against adapter policy, not taken unchecked from arbitrary PR output.
+Require an immutable target for the first supported runner path. Before-and-after identity checks are additional diagnostics, not sufficient proof of continuous attribution: an A → B → A rollout could evade both. If a later adapter supports mutable targets, it must correlate every tested request with artifact identity or provide complete, gap-detecting deployment/instance history covering the entire execution interval. Missing coverage refuses attribution. If any target change is detected, retain the attempt and behavioral observations but mark attribution invalid. Prefer immutable preview deployments over busy shared staging. The target URL must be configured by an authorized operator and validated against adapter policy, not taken unchecked from arbitrary PR output.
 
 Report execution and attribution independently:
 
@@ -84,7 +84,7 @@ Acceptance checks:
 - A user connects an existing supported Playwright suite without writing a custom dispatcher or evidence publisher.
 - A deliberately broken product assertion produces failed acceptance with a useful trace.
 - Missing, skipped, empty and inconsistent reports never produce success.
-- Changed target identity during execution yields an attribution refusal.
+- Changed target identity during execution, including A → B → A between boundary checks, yields an attribution refusal; unknown interval coverage cannot pass.
 - A test attempting to submit its own trusted evidence is refused.
 - Missing required screenshots/traces/reports prevents acceptance even if the runner exits zero.
 - Setup without executable tests says what is missing and does not invent coverage.
