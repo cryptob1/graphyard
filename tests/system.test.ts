@@ -148,6 +148,7 @@ test('single-use merge execution freezes relevant mutations through observed mer
   const merged = { ...observation(w), merged: true, mergeSha: 'c'.repeat(40), mergedAt } as Observation;
   const delivered = await engine.observe(w.id, renewed.revision, merged);
   assert.equal(delivered.stage, 'done', 'a whole-second provider timestamp proves ordering once its lower bound postdates the grant'); assert.equal(delivered.mergeExecution, null);
+  assert.equal(delivered.delivery?.authorizationRevision, second.execution.authorizationRevision, 'delivery cites the authorized snapshot rather than the later heartbeat');
 });
 test('a matching merge from before the execution grant remains an unauthorized violation', async () => {
   let w = await submitted(); w = await engine.observe(w.id, w.revision, observation(w));

@@ -283,7 +283,7 @@ export class Engine {
       demand(work.submission?.pr === observation.candidate.pr, 'Unassigned pull request');
       demand(work.workspaces.some(w => w.epoch === work.submission!.epoch && w.branch === observation.candidate.branch), 'PR branch does not match the assigned workspace');
       if (work.stage === 'done') return work;
-      let authorizedSnapshot: Work | null = null;
+      let authorizedSnapshot: Work | null = null; let authorizationRevision: number | null = null;
       if (observation.merged && observation.mergedAt && Number.isFinite(Date.parse(observation.mergedAt))) {
         const mergedTime = Date.parse(observation.mergedAt);
         // Never allow evidence from after the earliest possible merge instant.
@@ -302,13 +302,17 @@ export class Engine {
           && activeExecution.sha === observation.candidate.sha && activeExecution.baseSha === observation.candidate.baseSha
           && activeExecution.policyRevision === work.policyRevision && work.mergeAuthorization.sha === activeExecution.sha
           && work.mergeAuthorization.baseSha === activeExecution.baseSha && work.mergeAuthorization.policyRevision === activeExecution.policyRevision
-          && work.gates.every(gate => gate.passed) && !work.violations.length) authorizedSnapshot = structuredClone(work);
+          && work.gates.every(gate => gate.passed) && !work.violations.length) {
+          authorizedSnapshot = structuredClone(work); authorizationRevision = activeExecution.authorizationRevision;
+        }
         const past = authorizedSnapshot || !executionValid ? undefined : (await db.query("SELECT payload->'work' AS work FROM events WHERE work_id=$1 AND created_at<$2 AND payload ? 'work' ORDER BY seq DESC LIMIT 1", [id, new Date(cutoff)])).rows[0]?.work as Work | undefined;
         const authorization = past?.mergeAuthorization;
         const evidenceValid = past ? [...new Set(past.criteria.flatMap(criterion => criterion.proofs))].every(proof => !!currentEvidence(past, proof, new Date(mergedTime))) : false;
         if (!authorizedSnapshot && past && authorization && authorization.sha === observation.candidate.sha && authorization.baseSha === observation.candidate.baseSha && authorization.policyRevision === past.policyRevision
           && past.submission?.pr === observation.candidate.pr && past.gates.every(g => g.passed) && !past.violations.length
-          && evidenceValid && past.observation && cutoff - Date.parse(past.observation.at) < 120_000 && Date.parse(authorization.at) < mergedTime) authorizedSnapshot = past;
+          && evidenceValid && past.observation && cutoff - Date.parse(past.observation.at) < 120_000 && Date.parse(authorization.at) < mergedTime) {
+          authorizedSnapshot = past; authorizationRevision = boundedExecution?.authorizationRevision ?? past.revision;
+        }
       }
       work.candidate = observation.candidate;
       work.observation = observation;
@@ -326,7 +330,7 @@ export class Engine {
           if (work.gates.some(g => !g.passed)) work.violations.push('Post-merge checks differ from the recorded authorization; follow-up required');
           work.stage = 'done'; work.stageEnteredAt = now.toISOString();
           work.mergeExecution = null;
-          work.delivery = { mergedAt: observation.mergedAt!, mergeSha: observation.mergeSha, authorizationRevision: authorizedSnapshot.revision };
+          work.delivery = { mergedAt: observation.mergedAt!, mergeSha: observation.mergeSha, authorizationRevision: authorizationRevision! };
           await db.query('DELETE FROM jobs WHERE work_id=$1', [work.id]);
         } else {
           work.mergeExecution = null;

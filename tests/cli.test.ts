@@ -18,6 +18,7 @@ test('master-only commands ignore an unrelated unavailable worker token file', a
   const cwd = await mkdtemp(join(tmpdir(), 'graphyard-master-lazy-token-'));
   try {
     await exec('git', ['init', '-q'], { cwd });
+    await mkdir(join(cwd, '.graphyard')); await writeFile(join(cwd, '.graphyard/connection.json'), '{broken', { mode: 0o644 });
     const result = await exec(process.execPath, [launcher, 'master', 'guide'], { cwd, env: { ...process.env, GRAPHYARD_TOKEN_FILE: join(cwd, 'removed-worker.token') } });
     assert.match(result.stdout, /Master-agent operating mode/);
   } finally { await rm(cwd, { recursive: true, force: true }); }
@@ -130,13 +131,16 @@ test('rework worktree reopens the exact observed PR branch while preserving its 
     await exec('git',['init','-q','--initial-branch',branch],{cwd});
     await writeFile(join(cwd,'feature.txt'),'submitted implementation\n');
     await exec('git',['add','feature.txt'],{cwd});await exec('git',['-c','user.name=Test','-c','user.email=test@localhost','commit','-m','Submitted implementation'],{cwd});
-    candidate=(await exec('git',['rev-parse','HEAD'],{cwd})).stdout.trim();
+    const priorHead=(await exec('git',['rev-parse','HEAD'],{cwd})).stdout.trim();
+    candidate=(await exec('git',['-c','user.name=Test','-c','user.email=test@localhost','commit-tree',`${priorHead}^{tree}`,'-p',priorHead,'-m','Remote candidate'],{cwd})).stdout.trim();
     await exec('git',['remote','add','origin','https://github.com/owner/project.git'],{cwd});
     await exec('git',['update-ref',`refs/remotes/origin/${branch}`,candidate],{cwd});
     const result=JSON.parse((await exec(process.execPath,[launcher,'worktree','GY-1','2','a'.repeat(40)],{cwd,env})).stdout);
     assert.equal(reservations,1);assert.equal(result.branch,branch);
     assert.equal((await exec('git',['-C',result.path,'rev-parse','HEAD'],{cwd})).stdout.trim(),candidate);
     assert.equal((await exec('git',['-C',result.path,'symbolic-ref','--short','HEAD'],{cwd})).stdout.trim(),branch);
+    assert.equal((await exec('git',['rev-parse','HEAD'],{cwd})).stdout.trim(),priorHead,'prior checkout stays at its historical commit');
+    await assert.rejects(exec('git',['symbolic-ref','--short','HEAD'],{cwd}));
     assert.equal((await readFile(join(cwd,'feature.txt'),'utf8')).trim(),'submitted implementation','prior worktree remains intact');
   } finally {await new Promise<void>(r=>http.close(()=>r()));await rm(cwd,{recursive:true,force:true});}
 });

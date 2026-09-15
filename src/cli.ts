@@ -16,7 +16,8 @@ import { assertMasterBinding, buildMasterStatus, continueMergeBatch, currentMerg
 try { process.loadEnvFile(); } catch (error: any) { if (error.code !== 'ENOENT') throw error; }
 const [command, id, ...args] = process.argv.slice(2);
 let connection: Awaited<ReturnType<typeof loadConnection>>;
-try { connection = await loadConnection(process.cwd()); } catch { console.error('Invalid or insecure Graphyard connection file. Inspect local configuration; credential values are omitted.'); process.exit(1); }
+if (command === 'master') connection = null;
+else try { connection = await loadConnection(process.cwd()); } catch { console.error('Invalid or insecure Graphyard connection file. Inspect local configuration; credential values are omitted.'); process.exit(1); }
 const base = process.env.GRAPHYARD_URL ?? connection?.url ?? 'http://127.0.0.1:4310';
 let savedToken: string | undefined;
 try { if (connection && new URL(base).origin === connection.url) savedToken = connection.token; } catch { /* request validation reports an invalid URL */ }
@@ -260,7 +261,14 @@ Never share an operator or producer credential with an implementation agent.`); 
     await mkdir(resolve(root, '.graphyard/worktrees'), { recursive: true });
     const exists = spawnSync('git', ['show-ref', '--verify', '--quiet', `refs/heads/${branch}`]).status === 0;
     try {
-      execFileSync('git', exists ? ['worktree', 'add', ...(work.submission ? ['--force'] : []), path, branch] : ['worktree', 'add', '-b', branch, path, startPoint], { stdio: ['ignore', 'ignore', 'inherit'] });
+      if (work.submission && exists) {
+        const records = execFileSync('git', ['worktree', 'list', '--porcelain', '-z'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'inherit'] }).split('\0\0');
+        for (const record of records) {
+          const fields = record.split('\0'); const priorPath = fields.find(field => field.startsWith('worktree '))?.slice(9);
+          if (priorPath && fields.includes(`branch refs/heads/${branch}`)) execFileSync('git', ['-C', priorPath, 'checkout', '--detach', '--quiet'], { stdio: ['ignore', 'ignore', 'inherit'] });
+        }
+      }
+      execFileSync('git', exists ? ['worktree', 'add', path, branch] : ['worktree', 'add', '-b', branch, path, startPoint], { stdio: ['ignore', 'ignore', 'inherit'] });
       if (work.submission) execFileSync('git', ['-C', path, 'reset', '--hard', startPoint], { stdio: ['ignore', 'ignore', 'inherit'] });
     }
     catch { throw new Error('Git worktree creation failed. Reservation remains for safety; inspect the event and repair locally. Do not reuse the branch for another task.'); }
