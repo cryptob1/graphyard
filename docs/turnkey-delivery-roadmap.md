@@ -146,13 +146,14 @@ These optimizations follow a correct pinned-candidate path. They are not prerequ
 
 Replay deterministic verifiers over sanitized retained artifacts with explicit coverage. A clean replay without required instrumentation is unmeasured; replay does not establish current deployment health.
 
-Consider evidence reuse only with a defensible applicability definition covering dependencies, lockfiles, build inputs, configuration, migrations and relevant services. Missing scope falls back to exact binding. Later compatible failures must supersede earlier passes. Measure avoided work and false reuse before enabling broad reuse policies.
+Consider evidence reuse only with a defensible applicability definition covering dependencies, lockfiles, build inputs, configuration, migrations and relevant services. Missing scope falls back to exact binding. Only the newest compatible attempt may authorize reuse, and it must satisfy every required execution, behavior, attribution, inventory and artifact condition. A newer queued, running, blocked, timed-out, unmeasured or incomplete attempt prevents fallback to an older pass. Order attempts by a durable sequence, not result arrival time; delayed older results cannot regain authority. Measure avoided work and false reuse before enabling broad reuse policies.
 
 Add cost and duration analytics from optional runner-supplied measurements. Distinguish observed cost, estimated cost and unavailable cost; do not rank agents as if workloads were comparable without context.
 
 Acceptance checks:
 
 - Relevant dependency/configuration changes invalidate reuse.
+- Newer blocked, timed-out, unmeasured or artifact-incomplete attempts prevent fallback to older passes; delayed older results cannot override the newest attempt.
 - Unknown scope never widens evidence applicability.
 - Replay reports coverage and cannot authorize current live behavior by itself.
 - Redaction and retention rules apply to replay inputs and exports.
