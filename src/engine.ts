@@ -179,7 +179,7 @@ export class Engine {
         demand(receipt.fingerprint === fingerprint, 'Idempotency key reused with different input');
         this.evaluate(work, all, now);
         const execution = receipt.result?.execution;
-        demand(execution && work.revision === receipt.result.revision && work.mergeExecution?.id === execution.id
+        demand(execution && work.mergeExecution?.id === execution.id
           && Date.parse(execution.expiresAt) > now.getTime() && work.stage === 'merge' && work.gates.every(gate => gate.passed)
           && !work.violations.length && work.candidate?.sha === execution.sha && work.candidate?.baseSha === execution.baseSha
           && work.policyRevision === execution.policyRevision, 'Replayed merge execution is expired, cancelled, or superseded');
@@ -289,13 +289,14 @@ export class Engine {
         // Whole-second timestamps can therefore conservatively refuse same-second authorization.
         const cutoff = mergedTime + (/\.\d+Z$/.test(observation.mergedAt) ? 1 : 1000);
         const acquired = (await db.query("SELECT payload->'work'->'mergeExecution' AS execution FROM events WHERE work_id=$1 AND kind='merge.execution.acquired' AND created_at<$2 ORDER BY seq DESC LIMIT 1", [id, new Date(cutoff)])).rows[0]?.execution as Work['mergeExecution'] | undefined;
-        let boundedExecution = activeExecution ?? acquired ?? null;
+        const boundedExecution = activeExecution ?? acquired ?? null;
+        let cancelledExecution = false;
         if (boundedExecution) {
           const cancellation = (await db.query("SELECT created_at FROM events WHERE work_id=$1 AND kind='merge.execution.cancelled' AND payload->'details'->>'executionId'=$2 AND created_at<$3 ORDER BY seq DESC LIMIT 1", [id, boundedExecution.id, new Date(cutoff)])).rows[0]?.created_at as Date | undefined;
-          if (cancellation && cancellation.getTime() < mergedTime) boundedExecution = null;
+          cancelledExecution = !!cancellation && cancellation.getTime() < mergedTime;
         }
-        const executionValid = !boundedExecution || boundedExecution.sha === observation.candidate.sha && boundedExecution.baseSha === observation.candidate.baseSha
-          && boundedExecution.policyRevision === work.policyRevision && Date.parse(boundedExecution.issuedAt) < mergedTime && mergedTime < Date.parse(boundedExecution.expiresAt);
+        const executionValid = !cancelledExecution && (!boundedExecution || boundedExecution.sha === observation.candidate.sha && boundedExecution.baseSha === observation.candidate.baseSha
+          && boundedExecution.policyRevision === work.policyRevision && Date.parse(boundedExecution.issuedAt) < mergedTime && mergedTime < Date.parse(boundedExecution.expiresAt));
         if (activeExecution && executionValid && work.mergeAuthorization
           && activeExecution.sha === observation.candidate.sha && activeExecution.baseSha === observation.candidate.baseSha
           && activeExecution.policyRevision === work.policyRevision && work.mergeAuthorization.sha === activeExecution.sha

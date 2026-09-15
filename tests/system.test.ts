@@ -139,9 +139,11 @@ test('single-use merge execution freezes relevant mutations through observed mer
   await engine.cancelMerge(coordinator, w.id, { executionId: first.execution.id, reason: 'GitHub refused the merge' }, randomUUID());
   await assert.rejects(engine.acquireMerge(coordinator, w.id, { expectedRevision: w.revision, sha: head, baseSha: base, policyRevision: w.policyRevision }, acquireKey), /expired, cancelled, or superseded/);
   w = (await store.list()).find(item => item.id === w.id)!;
-  const second = await engine.acquireMerge(coordinator, w.id, { expectedRevision: w.revision, sha: head, baseSha: base, policyRevision: w.policyRevision }, randomUUID());
+  const secondKey = randomUUID(); const secondInput = { expectedRevision: w.revision, sha: head, baseSha: base, policyRevision: w.policyRevision };
+  const second = await engine.acquireMerge(coordinator, w.id, secondInput, secondKey);
   const renewed = await engine.execute(worker, 'heartbeat', w.id, { epoch: w.epoch }, randomUUID());
   assert.equal(renewed.mergeExecution?.id, second.execution.id, 'lease renewal cannot replace or cancel merge authority');
+  assert.deepEqual(await engine.acquireMerge(coordinator, w.id, secondInput, secondKey), second, 'the coordinator can recover a lost acquire response after a heartbeat');
   const mergedAt = new Date(Math.ceil((Date.parse(second.execution.issuedAt) + 1) / 1000) * 1000).toISOString().replace(/\.\d+Z$/, 'Z');
   const merged = { ...observation(w), merged: true, mergeSha: 'c'.repeat(40), mergedAt } as Observation;
   const delivered = await engine.observe(w.id, renewed.revision, merged);
@@ -162,6 +164,16 @@ test('a matching merge after the bounded execution deadline remains an unauthori
   const merged = { ...observation(w), merged: true, mergeSha: 'c'.repeat(40), mergedAt: new Date(Date.parse(granted.execution.expiresAt) + 1).toISOString() } as Observation;
   const refused = await engine.observe(w.id, granted.revision, merged);
   assert.notEqual(refused.stage, 'done'); assert.equal(refused.mergeExecution, null); assert.match(refused.violations.join(' '), /without a prior authorization/);
+});
+test('a cancelled merge execution cannot authorize a later matching merge', async () => {
+  let w = await submitted(); w = await engine.observe(w.id, w.revision, observation(w));
+  w = await engine.execute(producer, 'evidence', w.id, proof(), randomUUID());
+  const granted = await engine.acquireMerge(coordinator, w.id, { expectedRevision: w.revision, sha: head, baseSha: base, policyRevision: w.policyRevision }, randomUUID());
+  await engine.cancelMerge(coordinator, w.id, { executionId: granted.execution.id, reason: 'GitHub refused this attempt' }, randomUUID());
+  w = (await store.list()).find(item => item.id === w.id)!;
+  const merged = { ...observation(w), merged: true, mergeSha: 'c'.repeat(40), mergedAt: new Date(Date.now() + 1000).toISOString() } as Observation;
+  const refused = await engine.observe(w.id, w.revision, merged);
+  assert.notEqual(refused.stage, 'done'); assert.match(refused.violations.join(' '), /without a prior authorization/);
 });
 test('periodic reconciliation defers without publishing failure during active merge execution', async () => {
   let w = await submitted(); w = await engine.observe(w.id, w.revision, observation(w));
