@@ -101,6 +101,7 @@ Open the Railway domain and sign in with the operator or reader token. Keep the 
 For a repository in your personal GitHub account, start the guided App registration from a trusted operator checkout:
 
 ```sh
+cd /path/to/your-repository
 node "$GRAPHYARD_CLI" github-setup https://YOUR-GRAPHYARD-HOST
 ```
 
@@ -212,7 +213,7 @@ For the recommended separated topology, the master uses `master status` to selec
 
 ```sh
 node "$GRAPHYARD_CLI" claim GY-1
-node "$GRAPHYARD_CLI" worktree GY-1 EPOCH origin/main
+node "$GRAPHYARD_CLI" worktree GY-1 EPOCH origin/YOUR_CONFIGURED_BASE_BRANCH
 cd .graphyard/worktrees/GY-1-EPOCH
 node "$GRAPHYARD_CLI" watch GY-1 EPOCH -- YOUR_AGENT_COMMAND
 ```
