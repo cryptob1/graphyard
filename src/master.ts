@@ -433,13 +433,13 @@ export async function mergeWork(config: MasterConfig, work: Work, freshSnapshot:
   const resumed = latest.mergeExecution && Date.parse(latest.mergeExecution.expiresAt) > Date.parse(after.now) && latest.mergeExecution.owner === executionOwner;
   const granted = resumed ? { execution: latest.mergeExecution } : await acquire(latest, latestAuthorization);
   if (!granted.execution || granted.execution.sha !== authorization.sha || granted.execution.baseSha !== authorization.baseSha || granted.execution.policyRevision !== authorization.policyRevision || !resumed && granted.execution.authorizationRevision !== authorization.revision) throw new Error(`${work.key} received an invalid merge execution authority`);
+  const remainingAtSnapshot = Date.parse(granted.execution.expiresAt) - Date.parse(after.now);
   let providerStarted = false; let cancelled = false;
   let verificationStarted = false; let verificationCompleted = false;
   try {
     const lockedPr = JSON.parse(run('gh', ['pr', 'view', String(authorization.pr), '--repo', config.repository, '--json', 'headRefOid,baseRefOid,baseRefName,state,isDraft']));
     if (lockedPr.headRefOid !== authorization.sha || lockedPr.baseRefOid !== authorization.baseSha || lockedPr.baseRefName !== config.baseBranch || lockedPr.state !== 'OPEN' || lockedPr.isDraft) throw new Error(`${work.key} changed on GitHub after merge authority was acquired`);
-    const authorityDuration = Date.parse(granted.execution.expiresAt) - Date.parse(granted.execution.issuedAt);
-    const remaining = authorityDuration - (Date.now() - acquireStartedAt);
+    const remaining = remainingAtSnapshot - (Date.now() - acquireStartedAt);
     if (!Number.isFinite(remaining) || remaining <= 90_000) throw new Error(`${work.key} merge execution does not remain valid for the provider timeout; refresh gate inputs and retry`);
     const protection = JSON.parse(run('gh', ['api', `repos/${config.repository}/branches/${encodeURIComponent(config.baseBranch)}/protection`]));
     assertMergeProtection(protection, config, latest);
@@ -449,7 +449,7 @@ export async function mergeWork(config: MasterConfig, work: Work, freshSnapshot:
     // GitHub reports mergedAt with whole-second precision. Start the provider call
     // after the next boundary so the ledger can prove verification preceded merge.
     if (verified.providerDelayMs) await new Promise(resolve => setTimeout(resolve, verified.providerDelayMs));
-    const remainingAfterProtection = authorityDuration - (Date.now() - acquireStartedAt);
+    const remainingAfterProtection = remainingAtSnapshot - (Date.now() - acquireStartedAt);
     if (!Number.isFinite(remainingAfterProtection) || remainingAfterProtection <= 90_000) throw new Error(`${work.key} merge execution no longer has enough time for the provider call after verifying branch protection; retry`);
     providerStarted = true;
     const provider = JSON.parse(run('gh', ['api', '--method', 'PUT', `repos/${config.repository}/pulls/${authorization.pr}/merge`, '-f', `sha=${authorization.sha}`, '-f', `merge_method=${config.mergeMethod}`]));

@@ -87,6 +87,14 @@ node /path/to/graphyard/bin/graphyard.mjs evidence GY-1 evidence.json
 
 Worker-submitted evidence remains an assertion. Naming a runner or setting a pass result does not make it trusted. All required proofs need current matching evidence, a passing result, at least one executed assertion, and zero skipped tests.
 
-After gates pass, merge through GitHub. Graphyard observes the merge and marks the work done. No deployment guarantee is implied in v0.1.
+## 6. Merge through the guarded path
 
-When you move beyond one supervised worker, install the [recommended master-agent operating mode](master-agent.md). The master derives assignments from this same ledger, joins Herdr session health, dispatches workers under their own identities, and can perform routine exact-candidate merges after every configured gate passes.
+Install the [recommended master-agent operating mode](master-agent.md), even for the initial single supervised worker. After every gate passes, run:
+
+```sh
+node /path/to/graphyard/bin/graphyard.mjs master merge GY-1
+```
+
+The command acquires bounded authority, verifies the exact current GitHub candidate and gates, and invokes the protected merge. Graphyard marks the item Done only after independently observing that verified merge. A direct GitHub merge has no verified execution and becomes a visible unauthorized-merge violation. No deployment guarantee is implied in v0.1.
+
+As the worker fleet grows, the same master setup joins Herdr session health, dispatches workers under their own identities, and routes work from Graphyard's ledger.

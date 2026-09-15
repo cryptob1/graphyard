@@ -285,6 +285,13 @@ test('routine merge is exact-candidate, double-checked, and never uses an admin 
   const uncertain = work({ observation: candidate.observation, mergeExecution: { ...execution, verifiedAt: new Date().toISOString() } });
   const recovered = await mergeWork(config, uncertain, async () => ({ work: [uncertain], now: new Date().toISOString() }), async () => { throw new Error('must not reacquire'); }, cancel, verify, () => { throw new Error('must not repeat a possibly attempted provider call'); }, execution.owner);
   assert.match(recovered.result, /already committed/);
+  const lateExecution = { ...execution, issuedAt: new Date(Date.now() - 110_000).toISOString(), expiresAt: new Date(Date.now() + 10_000).toISOString() };
+  const late = work({ observation: candidate.observation, mergeExecution: lateExecution }); cancelled = '';
+  await assert.rejects(mergeWork(config, late, async () => ({ work: [late], now: new Date().toISOString() }), async () => { throw new Error('must not reacquire'); }, async (_work, authority) => { cancelled = authority.id; }, verify, (_command, args) => {
+    if (args[1] === 'view') return JSON.stringify({ headRefOid: late.candidate!.sha, baseRefOid: late.candidate!.baseSha, baseRefName: 'main', state: 'OPEN', isDraft: false });
+    return JSON.stringify(validProtection);
+  }, execution.owner), /does not remain valid/);
+  assert.equal(cancelled, lateExecution.id, 'a resumed execution uses its actual remaining lifetime');
 });
 
 test('merge-all selection and execution do not let refusing work starve eligible candidates', async () => {
