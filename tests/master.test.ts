@@ -7,7 +7,7 @@ import { execFile, execFileSync } from 'node:child_process';
 import { createServer } from 'node:http';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
-import { assertMergeCandidate, buildMasterStatus, dispatchWork, loadMasterConfig, managedMasterInstructions, mergeWork, observeHerdrAgents, prepareWorkerLaunch, saveWorkerProfile, setupMaster, startMaster, workerProfileSchema } from '../src/master.js';
+import { assertMasterBinding, assertMergeCandidate, buildMasterStatus, dispatchWork, loadMasterConfig, managedMasterInstructions, mergeWork, observeHerdrAgents, prepareWorkerLaunch, saveWorkerProfile, setupMaster, startMaster, workerProfileSchema } from '../src/master.js';
 import type { Work } from '../src/model.js';
 
 const launcher = fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url));
@@ -71,6 +71,13 @@ test('master status derives ownership from Graphyard and only joins Herdr health
   assert.equal(unavailable.available, false); assert.deepEqual(unavailable.agents, []); assert.match(unavailable.reason!, /Graphyard work state remains authoritative/);
 });
 
+test('master commands refuse a changed repository or managed base binding', () => {
+  const config = { version: 1 as const, url: 'https://graphyard.example', credentialFile: '/outside/master.token', cliPath: launcher, repository: 'owner/project', baseBranch: 'main', hostId: 'machine-a', masterAgentName: 'graphyard-master-project', autoMerge: true, mergeMethod: 'merge' as const, workers: [] };
+  assert.doesNotThrow(() => assertMasterBinding(config, { actor: { role: 'coordinator' }, repository: 'OWNER/project', baseBranch: 'main' }));
+  assert.throws(() => assertMasterBinding(config, { actor: { role: 'coordinator' }, repository: 'owner/other', baseBranch: 'main' }), /rerun master init/);
+  assert.throws(() => assertMasterBinding(config, { actor: { role: 'coordinator' }, repository: 'owner/project', baseBranch: 'release' }), /rerun master init/);
+});
+
 test('dispatch launches a worker through the supervised claim and worktree bootstrap', async () => {
   const root = await repository(); const credentialDirectory = await mkdtemp(join(tmpdir(), 'graphyard-master-credentials-')); const calls: string[][] = [];
   try {
@@ -84,6 +91,12 @@ test('dispatch launches a worker through the supervised claim and worktree boots
     const failedCalls: string[][] = []; let releasedEpoch = 0;
     await assert.rejects(dispatchWork(root, work({ stage: 'ready', lease: null, submission: null, candidate: null, mergeAuthorization: null }), profile, [], (_command, args) => { failedCalls.push(args); return JSON.stringify({ result: args[0] === 'tab' ? { pane_id: 'late-pane' } : {} }); }, undefined, async () => ({ epoch: 5, path: join(root, 'late'), base: 'd'.repeat(40) }), async (_root, _key, epoch) => { releasedEpoch = epoch; }, 1), /did not become visible/);
     assert.equal(releasedEpoch, 5); assert.deepEqual(failedCalls.at(-1), ['pane', 'close', 'late-pane']);
+    const promptCalls: string[][] = []; let promptRelease = 0;
+    await assert.rejects(dispatchWork(root, work({ stage: 'ready', lease: null, submission: null, candidate: null, mergeAuthorization: null }), profile, [], (_command, args) => {
+      promptCalls.push(args); if (args[1] === 'prompt') throw new Error('prompt refused');
+      return JSON.stringify({ result: args[0] === 'tab' ? { pane_id: 'prompt-pane' } : args[1] === 'get' ? { pane_id: 'prompt-pane', agent_status: 'working' } : {} });
+    }, undefined, async () => ({ epoch: 6, path: join(root, 'prompt'), base: 'e'.repeat(40) }), async (_root, _key, epoch) => { promptRelease = epoch; }), /prompt refused/);
+    assert.equal(promptRelease, 6); assert.deepEqual(promptCalls.at(-1), ['pane', 'close', 'prompt-pane']);
     const existing = { name: 'existing', principal: 'worker-a', agentName: 'existing-a', mode: 'existing' as const, agentArgs: [], environment: {} };
     await assert.rejects(dispatchWork(root, work({ stage: 'ready', lease: null, submission: null, candidate: null, mergeAuthorization: null }), existing, [{ name: 'existing-a', agent_status: 'idle', cwd: root }]), /cannot be safely adopted/);
     const dependency = work({ id: 'dependency', key: 'GY-41', stage: 'build' });

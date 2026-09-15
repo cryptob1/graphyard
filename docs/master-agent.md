@@ -85,6 +85,8 @@ Run this when the master starts, after dispatch, when a worker reports completio
 graphyard master status
 ```
 
+Every master command revalidates the configured coordinator role, repository, and managed base branch against the live control plane. If the binding changes, it refuses and asks the operator to rerun `master init` before any routing or merge action.
+
 The report reads one Graphyard work snapshot and joins configured Herdr sessions by agent name. Its owners, stages, refusals, and merge candidates come only from Graphyard. A missing or stopped session is attention, not proof that an assignment disappeared. A visible session is health information, not proof that it owns work.
 
 For a ready item:

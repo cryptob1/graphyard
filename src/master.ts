@@ -44,6 +44,11 @@ export const masterConfigSchema = z.object({
 }).strict();
 export type MasterConfig = z.infer<typeof masterConfigSchema>;
 
+export function assertMasterBinding(config: MasterConfig, status: any) {
+  if (status.actor?.role !== 'coordinator') throw new Error('Master commands require the configured coordinator identity');
+  if (typeof status.repository !== 'string' || status.repository.toLowerCase() !== config.repository.toLowerCase() || status.baseBranch !== config.baseBranch) throw new Error('The Graphyard repository or managed base branch changed; rerun master init before continuing');
+}
+
 const masterStart = '<!-- graphyard-master -->', masterEnd = '<!-- /graphyard-master -->';
 export function managedMasterInstructions(existing: string) {
   const starts = existing.split(masterStart).length - 1, ends = existing.split(masterEnd).length - 1;
@@ -236,6 +241,7 @@ export async function dispatchWork(root: string, work: Work, profile: WorkerProf
     await readCredentialFile(profile.credentialFile!);
     if (target) throw new Error('Launch profile agent name is already visible in Herdr');
     const prepared = await prepare(root, work.key, profile.name);
+    const prompt = `Implement ${work.key}: ${work.title}. The Graphyard worker launcher has claimed this item under principal ${profile.principal}, created its assigned worktree, and placed this agent under lease supervision. Run node ${config.cliPath} status ${work.key} before editing. Work only in the current assigned worktree, satisfy the stated criteria without weakening them, open a PR, and submit it with complete. Stop immediately if the supervisor reports lease loss. Do not submit trusted evidence or merge the PR.`;
     let pane: string | undefined;
     try {
       const tabArgs = ['tab', 'create', '--cwd', prepared.path, '--label', `${work.key} · ${profile.agentName}`, '--env', `GRAPHYARD_URL=${config.url}`, '--env', `GRAPHYARD_TOKEN_FILE=${profile.credentialFile}`, '--env', `GRAPHYARD_HOST_ID=${config.hostId}`, ...Object.entries(profile.environment).flatMap(([key, value]) => ['--env', `${key}=${value}`]), '--no-focus'];
@@ -245,6 +251,7 @@ export async function dispatchWork(root: string, work: Work, profile: WorkerProf
       herdrJson(['pane', 'run', pane, supervised], run);
       waitForHerdrAgent(pane, run, agentTimeoutMs);
       herdrJson(['agent', 'rename', pane, profile.agentName], run);
+      herdrJson(['agent', 'prompt', profile.agentName, prompt], run);
       target = { name: profile.agentName, pane_id: pane, agent_status: 'idle', cwd: prepared.path };
     } catch (error) {
       if (pane) { try { herdrJson(['pane', 'close', pane], run); } catch { /* best effort after a failed launch */ } }
@@ -253,8 +260,6 @@ export async function dispatchWork(root: string, work: Work, profile: WorkerProf
       throw error;
     }
   }
-  const prompt = `Implement ${work.key}: ${work.title}. The Graphyard worker launcher has claimed this item under principal ${profile.principal}, created its assigned worktree, and placed this agent under lease supervision. Run node ${config.cliPath} status ${work.key} before editing. Work only in the current assigned worktree, satisfy the stated criteria without weakening them, open a PR, and submit it with complete. Stop immediately if the supervisor reports lease loss. Do not submit trusted evidence or merge the PR.`;
-  herdrJson(['agent', 'prompt', profile.agentName, prompt], run);
   return { work: work.key, profile: profile.name, principal: profile.principal, agentName: profile.agentName, pane: target.pane_id ?? null, ownership: 'worker launcher claimed and is supervising the agent process' };
 }
 

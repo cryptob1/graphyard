@@ -11,7 +11,7 @@ import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 import { diagnose, fileConflicts, proofPreview, resourceConflicts } from './coordination.js';
 import { loadConnection, setupRepository, handoff, hostIdSchema } from './repository-setup.js';
-import { buildMasterStatus, dispatchWork, listHerdrAgents, loadMasterConfig, mergeWork, observeHerdrAgents, readCredentialFile, saveWorkerProfile, setupMaster, startMaster, workerProfileSchema } from './master.js';
+import { assertMasterBinding, buildMasterStatus, dispatchWork, listHerdrAgents, loadMasterConfig, mergeWork, observeHerdrAgents, readCredentialFile, saveWorkerProfile, setupMaster, startMaster, workerProfileSchema } from './master.js';
 
 try { process.loadEnvFile(); } catch (error: any) { if (error.code !== 'ENOENT') throw error; }
 const [command, id, ...args] = process.argv.slice(2);
@@ -100,7 +100,7 @@ Never share an operator or producer credential with an implementation agent.`); 
       const response = await fetch(`${master.url}/api/${path}`, { headers: { Authorization: `Bearer ${credential}` }, signal: AbortSignal.timeout(30_000) });
       const body = await response.json(); if (!response.ok) throw new Error(JSON.stringify(body)); return body;
     };
-    const coordinator = await masterApi('status'); if (coordinator.actor?.role !== 'coordinator') throw new Error('Master commands require the configured coordinator identity');
+    const coordinator = await masterApi('status'); assertMasterBinding(master, coordinator);
     if (id === 'start') {
       const kind = workerProfileSchema.shape.kind.safeParse(args[0]); if (!kind.success) throw new Error('Use master start with a supported agent kind such as codex or claude');
       const separator = args.indexOf('--'); const agentArgs = separator < 0 ? [] : args.slice(separator + 1);
