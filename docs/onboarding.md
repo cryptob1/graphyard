@@ -23,6 +23,8 @@ You keep talking directly to the master. The master reads work and gate state fr
 
 The initial setup works with one worker. Add more workers or machines only after the first PR has completed the full loop.
 
+For the recommended security boundary, run the master and its merge-capable GitHub CLI login on a dedicated coordination machine or OS identity. Run implementation agents under separate OS identities or on worker machines, using GitHub identities that can push feature branches and open PRs but cannot merge the protected base branch. A Graphyard worker token prevents control-plane actions; it cannot hide files or GitHub credentials from another process running as the same OS user.
+
 The short version is:
 
 | Step | Operator action | Result |
@@ -191,22 +193,31 @@ node "$GRAPHYARD_CLI" master status
 
 Use a launch profile for new assignments. It lets the master claim immediately before launch, create the Graphyard-assigned worktree, start the agent under lease supervision, and clean up failed launches. An existing-session profile provides health visibility for work that session already owns; Graphyard will not inject new work into an unsupervised process.
 
-Launch profiles run on the master's machine: the master reads the credential file locally, creates a local worktree, and opens a local Herdr tab. Repeat this profile step for each agent account that will run on that host. Provider login and Graphyard identity remain separate. Never reuse a worker token for concurrent sessions.
+Launch profiles run on the master's machine: the master reads the credential file locally, creates a local worktree, and opens a local Herdr tab. Use them only for trusted local dogfooding or inside an isolation boundary that prevents the implementation process from reading the coordinator's GitHub credentials. Same-user file permissions do not provide that boundary. Repeat this profile step for each trusted agent account that will run on that host. Provider login and Graphyard identity remain separate. Never reuse a worker token for concurrent sessions.
 
-For another machine, run step 3 there with its own worker identity and host ID. That worker claims work through the Herdr ledger or Graphyard CLI, creates or registers its worktree on that machine, and runs under `graphyard watch`. The master can join an `existing` profile to the session's health after it already owns work, but version 0.1 does not remotely dispatch a supervised launch profile across Herdr hosts. See [Herdr on many machines](herdr.md#many-machines).
+For the recommended separated setup, run step 3 on each worker machine with its own Graphyard worker identity, host ID, provider login, and non-merge GitHub identity. That worker claims work through the Herdr ledger or Graphyard CLI, creates or registers its worktree on that machine, and runs under `graphyard watch`. The master can join an `existing` profile to a locally visible session's health after it already owns work, but version 0.1 does not remotely dispatch a supervised launch profile across Herdr hosts. Cross-machine assignment therefore requires an operator or remote worker to act on the master's routing decision. See [Herdr on many machines](herdr.md#many-machines).
 
 ## 6. Take the first PR through the graph
 
 Create one small, real work item in the Graphyard UI. Before saving it, compare `.graphyard/project.json` with the check-run names on a real GitHub PR and replace the form defaults with the repository's exact required CI check names. Discovery proposes checks; it does not silently rewrite work policy, and `test` or `typecheck` will never pass if the repository publishes different names. Write acceptance criteria before releasing the item, and name the proof each criterion requires. Start with one worker and one independent review source.
 
-From the master's terminal or session:
+For a trusted local launch profile, the master can dispatch directly:
 
 ```sh
 node "$GRAPHYARD_CLI" master status
 node "$GRAPHYARD_CLI" master dispatch GY-1 codex-primary
 ```
 
-The dispatched worker claims the item, receives a fresh epoch and worktree, implements the change, pushes the assigned branch, opens a PR, and runs `graphyard complete`. Graphyard then waits for current-head review, required CI checks, and trusted acceptance evidence. A worker's statement that it is done does not satisfy those gates.
+For the recommended separated topology, the master uses `master status` to select the ready item and asks the chosen remote worker to claim it. On that worker machine, use the Herdr ledger or:
+
+```sh
+node "$GRAPHYARD_CLI" claim GY-1
+node "$GRAPHYARD_CLI" worktree GY-1 EPOCH origin/main
+cd .graphyard/worktrees/GY-1-EPOCH
+node "$GRAPHYARD_CLI" watch GY-1 EPOCH -- YOUR_AGENT_COMMAND
+```
+
+Use the returned epoch. The worker receives a fresh worktree, implements the change, pushes the assigned branch, opens a PR, and runs `graphyard complete`. Graphyard then waits for current-head review, required CI checks, and trusted acceptance evidence. A worker's statement that it is done does not satisfy those gates.
 
 On a fresh GitHub installation, wait for Graphyard to publish the failing `Graphyard / merge` check on this PR. Return to the base branch protection settings, require that App-owned check with strict up-to-date branches and enforced administration, and confirm Graphyard observes the protection. Do this before attempting the first merge.
 
