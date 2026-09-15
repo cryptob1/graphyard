@@ -64,11 +64,9 @@ railway add --database postgres
 railway add --service graphyard
 railway variable set --service graphyard \
   'DATABASE_URL=${{Postgres.DATABASE_URL}}' HOST=0.0.0.0 PORT=4310
-railway up --service graphyard --detach
-railway domain --service graphyard --port 4310
 ```
 
-Before deployment, set `GRAPHYARD_PRINCIPALS`, `GITHUB_REPOSITORY`, and `GITHUB_BASE_BRANCH` in Railway. Generate a different random token for every entry. A small starting team looks like this; substitute generated values in Railway rather than committing this example:
+Before deploying, set `GRAPHYARD_PRINCIPALS`, `GITHUB_REPOSITORY`, and `GITHUB_BASE_BRANCH` in Railway. Graphyard refuses to start without at least one valid principal. Generate a different random token for every entry. A small starting team looks like this; substitute generated values in Railway rather than committing this example:
 
 ```json
 [
@@ -82,6 +80,17 @@ Before deployment, set `GRAPHYARD_PRINCIPALS`, `GITHUB_REPOSITORY`, and `GITHUB_
 ```
 
 Replace `integration:project-smoke` with a real proof produced by protected code in the target project. Create one worker principal per concurrent agent. Never give a worker the operator, coordinator, or trusted-producer token. Store every value in a password manager. The [deployment guide](deployment.md) covers local Docker Compose, Railway variables, upgrades, backups, and the limits of the checked-in Railway configuration.
+
+The checked-in `.railway/railway.ts` describes Graphyard's own installation. Adapt its project and source identities before using it for a new installation, then preview every infrastructure change:
+
+```sh
+npx @railway/cli config plan
+npx @railway/cli config apply
+railway up --service graphyard --detach
+railway domain --service graphyard --port 4310
+```
+
+Read the plan before applying it. Do not run the unmodified project-specific configuration against a new Railway project.
 
 Open the Railway domain and sign in with the operator or reader token. Keep the operator token out of agent environments.
 
@@ -116,7 +125,7 @@ node "$GRAPHYARD_CLI" init \
 
 Paste or pipe the `worker` token and send EOF. The command verifies the server and repository, discovers scripts and workflows, installs one managed section in `AGENTS.md`, stores the worker connection under ignored `.graphyard/`, and links and enables the native Herdr plugin. Existing `AGENTS.md` instructions are preserved.
 
-Review and commit only the `AGENTS.md` change. Never commit `.graphyard/`. Run this step on every worker machine with a unique host ID and that worker's own token.
+Review and commit the managed `AGENTS.md` update and the generated `.gitignore` rule for `.graphyard/`. Never commit the `.graphyard/` directory itself. Run this step on every worker machine with a unique host ID and that worker's own token.
 
 ## 4. Install the dedicated master
 
@@ -169,7 +178,9 @@ node "$GRAPHYARD_CLI" master status
 
 Use a launch profile for new assignments. It lets the master claim immediately before launch, create the Graphyard-assigned worktree, start the agent under lease supervision, and clean up failed launches. An existing-session profile provides health visibility for work that session already owns; Graphyard will not inject new work into an unsupervised process.
 
-Repeat this step for each agent and machine. Provider login and Graphyard identity remain separate. Never reuse a worker token for concurrent sessions.
+Launch profiles run on the master's machine: the master reads the credential file locally, creates a local worktree, and opens a local Herdr tab. Repeat this profile step for each agent account that will run on that host. Provider login and Graphyard identity remain separate. Never reuse a worker token for concurrent sessions.
+
+For another machine, run step 3 there with its own worker identity and host ID. That worker claims work through the Herdr ledger or Graphyard CLI, creates or registers its worktree on that machine, and runs under `graphyard watch`. The master can join an `existing` profile to the session's health after it already owns work, but version 0.1 does not remotely dispatch a supervised launch profile across Herdr hosts. See [Herdr on many machines](herdr.md#many-machines).
 
 ## 6. Take the first PR through the graph
 
