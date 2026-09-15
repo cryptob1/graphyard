@@ -120,6 +120,9 @@ test('explicit results refuse stale, edited, spoofed, conflicting and changing e
   const {readFile} = await import('node:fs/promises');
   const real = await readFile(new URL('./fixtures/codex-clean-result.txt', import.meta.url), 'utf8');
   const valid = commentFixture(); valid.result.body = real; assert.equal((await valid.run()).approved, true);
+  const currentFooter = `Codex Review: Didn't find any major issues. Bravo.\n\n**Reviewed commit:** \`aaaaaaaaaa\`\n\n<details> <summary>ℹ️ About Codex in GitHub</summary>\n<br/>\n\n[Your team has set up Codex to review pull requests in this repo](https://chatgpt.com/codex/cloud/settings/general). Reviews are triggered when you\n- Open a pull request for review\n- Mark a draft as ready\n- Comment "@codex review".\n\nIf Codex has suggestions, it will comment; otherwise it will react with 👍.\n\nCodex can also answer questions or update the PR. Try commenting "@codex address that feedback".\n</details>`;
+  const current = commentFixture(); current.result.body = currentFooter; assert.equal((await current.run()).approved, true);
+  current.result.body = currentFooter.replace('Try commenting', 'A critical issue remains. Try commenting'); assert.equal((await current.run()).approved, false);
   for (const body of [real + '\nP1: a serious issue', real.replace('Codex can also answer questions', 'Critical bug found. Codex can also answer questions'), commentFixture().result.body + '\nAdditional findings']) {
     const f = commentFixture(); f.result.body = body; assert.equal((await f.run()).approved, false);
   }

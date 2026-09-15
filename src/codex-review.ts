@@ -6,7 +6,10 @@ export const CODEX_USER_ID = 199175422;
 const isCodex = (item: any) => item.user?.id === CODEX_USER_ID && item.user?.type === 'Bot';
 interface Source { pages(path: string): Promise<any[]>; request(path: string): Promise<any> }
 // Exact observed provider footer; arbitrary appended prose cannot be treated as approval.
-const cleanFooter = "<details> <summary>ℹ️ About Codex in GitHub</summary> <br/> Codex has been enabled to automatically review pull requests in this repo. Reviews are triggered when you - Open a pull request for review - Mark a draft as ready - Comment \"@codex review\". If Codex has suggestions, it will comment; otherwise it will react with 👍. When you [sign up for Codex through ChatGPT](https://openai.com/codex), Codex can also answer questions or update the PR, like \"@codex address that feedback\". </details>";
+const cleanFooters = new Set([
+  "<details> <summary>ℹ️ About Codex in GitHub</summary> <br/> Codex has been enabled to automatically review pull requests in this repo. Reviews are triggered when you - Open a pull request for review - Mark a draft as ready - Comment \"@codex review\". If Codex has suggestions, it will comment; otherwise it will react with 👍. When you [sign up for Codex through ChatGPT](https://openai.com/codex), Codex can also answer questions or update the PR, like \"@codex address that feedback\". </details>",
+  "<details> <summary>ℹ️ About Codex in GitHub</summary> <br/> [Your team has set up Codex to review pull requests in this repo](https://chatgpt.com/codex/cloud/settings/general). Reviews are triggered when you - Open a pull request for review - Mark a draft as ready - Comment \"@codex review\". If Codex has suggestions, it will comment; otherwise it will react with 👍. Codex can also answer questions or update the PR. Try commenting \"@codex address that feedback\". </details>",
+]);
 const cleanCourtesies = new Set([
   '', ':+1:', ':tada:', ':rocket:', 'already looking forward to the next diff', 'keep them coming', 'another round soon, please', 'swish', 'you’re on a roll', "you're on a roll", 'what shall we delve into next?', "can't wait for the next one",
   'delightful', 'nice work', 'bravo', 'keep it up', 'well done', 'good job',
@@ -21,7 +24,7 @@ function cleanCommit(body: unknown): string | null {
   const match = /^Codex Review: Didn't find any major issues\.([^\r\n]*)\n\n\*\*Reviewed commit:\*\* `([a-f0-9]{7,40})`(?=\s|$)/.exec(body);
   if (!match || !cleanCourtesies.has(match[1].trim().replace(/[.!]+$/, '').toLowerCase())) return null;
   const tail = body.slice(match[0].length).trim().replace(/\s+/g, ' ');
-  return !tail || tail === cleanFooter ? match[2] : null;
+  return !tail || cleanFooters.has(tail) ? match[2] : null;
 }
 /** Conservative adapter for the observed hosted Codex review protocol. Unknown formats refuse. */
 export async function observeCodex(source: Source, pr: number, head: string, reviews: any[], authorId: number, request: ReviewRequest | null | undefined, base: string, policyRevision: number, graphyardAppId: number): Promise<AgentReview> {
