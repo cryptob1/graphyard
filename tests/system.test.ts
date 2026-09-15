@@ -19,6 +19,7 @@ const operator: Principal = { id: 'operator', role: 'admin' };
 const worker: Principal = { id: 'agent-a', role: 'worker', displayName: 'Atlas', runtime: 'Codex' };
 const other: Principal = { id: 'agent-b', role: 'worker' };
 const coordinator: Principal = { id: 'master', role: 'coordinator' };
+const otherCoordinator: Principal = { id: 'other-master', role: 'coordinator' };
 const producer: Principal = { id: 'ci-runner', role: 'producer', proofs: ['integration:claim-safety'] };
 const head = 'a'.repeat(40), base = 'b'.repeat(40);
 const probeWorkers = Array.from({ length: 32 }, (_, i) => ({ id: `probe-worker-${i}`, role: 'worker' as const, token: `test-probe-${i}-${'x'.repeat(32)}` }));
@@ -128,12 +129,13 @@ test('single-use merge execution freezes relevant mutations through observed mer
   w = await engine.execute(producer, 'evidence', w.id, proof(), randomUUID()); assert.ok(w.gates.every(gate => gate.passed));
   const acquireKey = randomUUID();
   const first = await engine.acquireMerge(coordinator, w.id, { expectedRevision: w.revision, sha: head, baseSha: base, policyRevision: w.policyRevision }, acquireKey);
-  assert.equal(first.execution.authorizationRevision, w.revision);
+  assert.equal(first.execution.authorizationRevision, w.revision); assert.equal(first.execution.owner, coordinator.id);
   assert.deepEqual(await engine.acquireMerge(coordinator, w.id, { expectedRevision: w.revision, sha: head, baseSha: base, policyRevision: w.policyRevision }, acquireKey), first);
   await assert.rejects(engine.execute(producer, 'evidence', w.id, proof(), randomUUID()), /merge execution is active/i);
   await assert.rejects(engine.execute(operator, 'requirements', w.id, { expectedPolicyRevision: w.policyRevision, reason: 'Race the merge', criteria: w.criteria, dependencies: [], plannedFiles: [], exclusiveResources: [] }, randomUUID()), /merge execution is active/i);
   await assert.rejects(engine.acquireMerge(coordinator, w.id, { expectedRevision: first.revision, sha: head, baseSha: base, policyRevision: w.policyRevision }, randomUUID()), /already active/);
-  await assert.rejects(engine.observe(w.id, first.revision, observation(w)), /only its matching merged observation/);
+  await assert.rejects(engine.observe(w.id, first.revision, observation(w)), /reconciliation is deferred/);
+  await assert.rejects(engine.cancelMerge(otherCoordinator, w.id, { executionId: first.execution.id, reason: 'Interfere with another coordinator' }, randomUUID()), /another coordinator/);
   await engine.cancelMerge(coordinator, w.id, { executionId: first.execution.id, reason: 'GitHub refused the merge' }, randomUUID());
   await assert.rejects(engine.acquireMerge(coordinator, w.id, { expectedRevision: w.revision, sha: head, baseSha: base, policyRevision: w.policyRevision }, acquireKey), /expired, cancelled, or superseded/);
   w = (await store.list()).find(item => item.id === w.id)!;
@@ -141,6 +143,19 @@ test('single-use merge execution freezes relevant mutations through observed mer
   const merged = { ...observation(w), merged: true, mergeSha: 'c'.repeat(40), mergedAt: new Date().toISOString().replace(/\.\d+Z$/, 'Z') } as Observation;
   const delivered = await engine.observe(w.id, second.revision, merged);
   assert.equal(delivered.stage, 'done', 'single-use execution proves ordering even with a whole-second provider timestamp'); assert.equal(delivered.mergeExecution, null);
+});
+test('periodic reconciliation defers without publishing failure during active merge execution', async () => {
+  let w = await submitted(); w = await engine.observe(w.id, w.revision, observation(w));
+  w = await engine.execute(producer, 'evidence', w.id, proof(), randomUUID());
+  const granted = await engine.acquireMerge(coordinator, w.id, { expectedRevision: w.revision, sha: head, baseSha: base, policyRevision: w.policyRevision }, randomUUID());
+  await store.pool.query("UPDATE jobs SET available_at=now()+interval '1 hour'");
+  await store.pool.query('UPDATE jobs SET available_at=now(),locked_until=NULL,token=NULL WHERE work_id=$1', [w.id]);
+  let publications = 0;
+  const adapter = { observe: async (current: Work) => observation(current), publish: async () => { publications++; } } as unknown as GitHub;
+  await processJob(engine, adapter);
+  const row = (await store.pool.query('SELECT error,token,available_at FROM jobs WHERE work_id=$1', [w.id])).rows[0];
+  assert.equal(publications, 0); assert.equal(row.error, null); assert.equal(row.token, null);
+  assert.ok(Math.abs(row.available_at.getTime() - Date.parse(granted.execution.expiresAt)) < 1000);
 });
 test('merge execution cannot outlive a required proof or the fresh observation', async () => {
   let w = await submitted(); w = await engine.observe(w.id, w.revision, observation(w));

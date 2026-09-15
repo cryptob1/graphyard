@@ -2,7 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { Store, save, wakeJob } from './store.js';
 import { workspacePath, pathsOverlap, validBranch } from './workspace.js';
-import { activeLease, admin, requireCurrent, createSchema, criterionSchema, currentEvidence, resourcesSchema, demand, evaluate, proofSchema, type Principal, type Work, type Observation, type ReviewRequest } from './model.js';
+import { activeLease, admin, MergeExecutionInProgress, requireCurrent, createSchema, criterionSchema, currentEvidence, resourcesSchema, demand, evaluate, proofSchema, type Principal, type Work, type Observation, type ReviewRequest } from './model.js';
 import { resourceConflicts } from './coordination.js';
 
 const epoch = z.number().int().positive();
@@ -200,9 +200,9 @@ export class Engine {
         ...requiredEvidence.flatMap(evidence => evidence?.expiresAt ? [Date.parse(evidence.expiresAt)] : [])];
       const expiresAt = Math.min(...validityDeadlines);
       demand(Number.isFinite(expiresAt) && expiresAt - now.getTime() > 95_000, 'Required gate inputs expire too soon for a bounded merge execution; refresh them and retry');
-      const execution = { id: randomUUID(), sha: data.sha, baseSha: data.baseSha, policyRevision: data.policyRevision, authorizationRevision: work.revision, issuedAt: now.toISOString(), expiresAt: new Date(expiresAt).toISOString() };
+      const execution = { id: randomUUID(), owner: actor.id, sha: data.sha, baseSha: data.baseSha, policyRevision: data.policyRevision, authorizationRevision: work.revision, issuedAt: now.toISOString(), expiresAt: new Date(expiresAt).toISOString() };
       work.mergeExecution = execution;
-      await save(db, work, actor.id, 'merge.execution.acquired', now, { executionId: execution.id, sha: execution.sha, baseSha: execution.baseSha, policyRevision: execution.policyRevision });
+      await save(db, work, actor.id, 'merge.execution.acquired', now, { executionId: execution.id, owner: execution.owner, sha: execution.sha, baseSha: execution.baseSha, policyRevision: execution.policyRevision });
       const result = { key: work.key, revision: work.revision, execution };
       await db.query('INSERT INTO receipts(actor,key,fingerprint,result) VALUES($1,$2,$3,$4)', [actor.id, key, fingerprint, JSON.stringify(result)]);
       return result;
@@ -219,7 +219,7 @@ export class Engine {
       const all: Work[] = (await db.query('SELECT document FROM work_items ORDER BY number')).rows.map(row => row.document);
       const work = all.find(item => item.id === id || item.key === id);
       demand(work, 'Work item not found', 404);
-      demand(work.mergeExecution?.id === data.executionId, 'Merge execution is missing, expired, or superseded');
+      demand(work.mergeExecution?.id === data.executionId && work.mergeExecution.owner === actor.id, 'Merge execution is missing, expired, superseded, or owned by another coordinator');
       work.mergeExecution = null; this.evaluate(work, all, now);
       await save(db, work, actor.id, 'merge.execution.cancelled', now, { executionId: data.executionId, reason: data.reason });
       const result = { key: work.key, revision: work.revision, cancelled: data.executionId };
@@ -278,7 +278,7 @@ export class Engine {
       const work = all.find(w => w.id === id);
       requireCurrent(work && work.revision === expectedRevision, 'Task changed while GitHub was being observed; retry');
       const activeExecution = work.mergeExecution && Date.parse(work.mergeExecution.expiresAt) > now.getTime() ? work.mergeExecution : null;
-      if (activeExecution) demand(observation.merged && observation.candidate.sha === activeExecution.sha && observation.candidate.baseSha === activeExecution.baseSha, 'Merge execution is active; only its matching merged observation may update the task');
+      if (activeExecution && (!observation.merged || observation.candidate.sha !== activeExecution.sha || observation.candidate.baseSha !== activeExecution.baseSha)) throw new MergeExecutionInProgress('Merge execution is active; reconciliation is deferred unless GitHub observes its matching merge');
       demand(work.submission?.pr === observation.candidate.pr, 'Unassigned pull request');
       demand(work.workspaces.some(w => w.epoch === work.submission!.epoch && w.branch === observation.candidate.branch), 'PR branch does not match the assigned workspace');
       if (work.stage === 'done') return work;

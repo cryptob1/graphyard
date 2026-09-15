@@ -128,11 +128,13 @@ For every candidate, the command requires:
 4. a fresh Graphyard observation, evaluated against the database time in the snapshot;
 5. a GitHub read that sees the same head, base commit, and managed base-branch name on an open, non-draft PR;
 6. a second Graphyard snapshot with the same work revision, fresh observation, and authorization;
-7. a server-issued, single-use merge execution that freezes relevant work, evidence, validation, and observation mutations for the bounded merge attempt, expires no later than its required evidence or observation, and refuses inputs without enough remaining lifetime for the provider timeout;
+7. a server-issued, coordinator-owned, single-use merge execution that freezes relevant work, evidence, validation, and observation mutations for the bounded merge attempt, expires no later than its required evidence or observation, and refuses inputs without enough remaining lifetime for the provider timeout;
 8. a second GitHub read after authority acquisition with the same head, base commit, and managed base-branch name;
 9. GitHub's merge API with the authorized head SHA and normal branch protection. Queue enrollment is treated as a refusal because it cannot complete inside the bounded authority window.
 
 It never uses `--admin`. A human approval represented as required evidence remains a refusing gate until supplied. If GitHub explicitly reports that it did not merge, the master cancels the execution authority. A timeout, lost response, or malformed response has an unknown provider outcome, so the authority stays active until Graphyard observes the matching merge or the bounded execution expires. Replaying an acquisition request can return authority only while that exact execution is still active and all bound gate inputs remain current. After the merge command succeeds, the item is still not declared Done by the master; Graphyard keeps the authority active until it observes and reconciles the actual matching merge.
+
+Only the coordinator that acquired an execution may cancel it. Periodic GitHub reconciliation defers without publishing a failing required check while that execution is active; a webhook generation change still wakes reconciliation immediately so an observed matching merge can complete the item.
 
 The present command uses the local authenticated GitHub CLI for the final provider action. Graphyard's transactional execution authority closes the control-plane mutation race around that external call without holding a database transaction open during network I/O.
 
