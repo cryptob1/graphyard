@@ -7,12 +7,12 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { verifyRunnerReport } from '../src/runner-report.js';
 const run = promisify(execFile), id = 'a'.repeat(64);
-const inventory = { format: 'graphyard-playwright-v1', declared: [{ id, expected: 'passed' }], executions: [], steps: [], errors: 0, overflow: false, status: 'passed' };
+const inventory = { format: 'graphyard-playwright-v1', declared: [{ id, expected: 'passed', location: { file: 'fixture.spec.ts', line: 1, column: 1 } }], executions: [], steps: [], errors: 0, overflow: false, status: 'passed' };
 const execution = { ...inventory, executions: [{ id, status: 'passed', retry: 0 }] };
 test('report verifier refuses empty, skipped, missing, inconsistent, expected-failing and retry reports', () => {
   assert.equal(verifyRunnerReport(inventory, execution).passed, true);
   for (const changed of [{ declared: [] }, { executions: [] }, { executions: [{ id, status: 'skipped', retry: 0 }] }, { executions: [{ id, status: 'passed', retry: 1 }] }, { overflow: true }, { errors: 1 }, { status: 'failed' }, { steps: [{ test: 'b'.repeat(64), sequence: 1, durationMs: 1, failed: false }] }]) assert.equal(verifyRunnerReport(inventory, { ...execution, ...changed }).passed, false);
-  assert.equal(verifyRunnerReport({ ...inventory, declared: [{ id, expected: 'failed' }] }, execution).passed, false);
+  assert.equal(verifyRunnerReport({ ...inventory, declared: [{ ...inventory.declared[0], expected: 'failed' }] }, execution).passed, false);
   assert.throws(() => verifyRunnerReport(inventory, { ...execution, untrusted: 'extra' }));
 });
 test('real Playwright enumeration/execution produces attributable inventory and excludes seeded secrets', async () => {
@@ -29,6 +29,7 @@ test('real Playwright enumeration/execution produces attributable inventory and 
       return { report: JSON.parse(await readFile(path, 'utf8')), failed };
     }
     const listed = await capture('list.json', true), passed = await capture('pass.json', false);
+    assert.equal(passed.report.declared[0].location.file, 'fixture.spec.ts');
     assert.equal(passed.failed, false); assert.equal(verifyRunnerReport(listed.report, passed.report).passed, true);
     const serialized = JSON.stringify(passed.report);
     for (const marker of ['private-title-marker', 'private-stdout-marker', 'private-step-marker']) assert.ok(!serialized.includes(marker));

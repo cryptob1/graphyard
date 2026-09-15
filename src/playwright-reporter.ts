@@ -1,18 +1,24 @@
 import { createHash } from 'node:crypto';
 import { writeFileSync } from 'node:fs';
+import { relative, isAbsolute } from 'node:path';
 import type { Reporter, FullConfig, Suite, TestCase, TestResult, FullResult, TestStep } from '@playwright/test/reporter';
 
 const identifier = (test: TestCase) => createHash('sha256').update(test.id).digest('hex');
 /** Built into the independently approved oracle image, never loaded from candidate code. */
 export default class GraphyardReporter implements Reporter {
-  private declared: { id: string; expected: TestCase['expectedStatus'] }[] = [];
+  private declared: { id: string; expected: TestCase['expectedStatus']; location: { file: string; line: number; column: number } }[] = [];
   private executions: { id: string; status: TestResult['status']; retry: number }[] = [];
   private steps: { test: string; sequence: number; durationMs: number; failed: boolean }[] = [];
   private errors = 0;
   private overflow = false;
   printsToStdio() { return true; }
-  onBegin(_config: FullConfig, suite: Suite) {
-    this.declared = suite.allTests().map(test => ({ id: identifier(test), expected: test.expectedStatus })).sort((a,b) => a.id.localeCompare(b.id));
+  onBegin(config: FullConfig, suite: Suite) {
+    this.declared = suite.allTests().map(test => {
+      const file = relative(config.rootDir, test.location.file).replaceAll('\\', '/');
+      const safe = file && !isAbsolute(file) && !file.split('/').includes('..') && !/[\x00-\x1f\x7f]/.test(file);
+      if (!safe) this.errors++;
+      return { id: identifier(test), expected: test.expectedStatus, location: { file: safe ? file : 'unavailable', line: test.location.line, column: test.location.column } };
+    }).sort((a,b) => a.id.localeCompare(b.id));
     if (this.declared.length > 10_000) { this.declared = this.declared.slice(0, 10_000); this.overflow = true; }
   }
   onTestEnd(test: TestCase, result: TestResult) {

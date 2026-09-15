@@ -4,7 +4,7 @@ const id = z.string().regex(/^[a-f0-9]{64}$/);
 const status = z.enum(['passed', 'failed', 'timedOut', 'skipped', 'interrupted']);
 export const runnerReport = z.object({
   format: z.literal('graphyard-playwright-v1'),
-  declared: z.array(z.object({ id, expected: status }).strict()).max(10_000),
+  declared: z.array(z.object({ id, expected: status, location: z.object({ file: z.string().min(1).max(500).refine(p => !p.startsWith('/') && !p.includes('\\') && !p.split('/').includes('..') && !/[\x00-\x1f\x7f]/.test(p)), line: z.number().int().min(0), column: z.number().int().min(0) }).strict() }).strict()).max(10_000),
   executions: z.array(z.object({ id, status, retry: z.number().int().min(0).max(100) }).strict()).max(10_000),
   steps: z.array(z.object({ test: id, sequence: z.number().int().positive(), durationMs: z.number().finite().min(0), failed: z.boolean() }).strict()).max(10_000),
   errors: z.number().int().min(0), overflow: z.boolean(), status: z.enum(['passed', 'failed', 'timedout', 'interrupted']),
