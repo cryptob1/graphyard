@@ -85,7 +85,9 @@ export async function loadMasterConfig(root: string): Promise<MasterConfig> {
   const file = resolve(root, '.graphyard/master.json'); await privateFile(file);
   const config = masterConfigSchema.parse(JSON.parse(await readFile(file, 'utf8')));
   config.url = serverOrigin(config.url);
-  if (!isAbsolute(config.credentialFile)) throw new Error('Master credential file must be outside the repository and use an absolute path');
+  const repositoryRoot = resolve(root), credentialFile = resolve(config.credentialFile);
+  if (!isAbsolute(config.credentialFile) || credentialFile === repositoryRoot || credentialFile.startsWith(`${repositoryRoot}/`)) throw new Error('Master credential file must be outside the repository and use an absolute path');
+  config.credentialFile = credentialFile;
   await privateFile(config.credentialFile);
   if (!isAbsolute(config.cliPath)) throw new Error('Master CLI path must be absolute');
   try { if (!(await lstat(config.cliPath)).isFile()) throw new Error(); } catch { throw new Error('Configured Graphyard CLI launcher is unavailable'); }
