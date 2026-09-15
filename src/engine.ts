@@ -282,7 +282,9 @@ export class Engine {
       demand(work.submission?.pr === observation.candidate.pr, 'Unassigned pull request');
       demand(work.workspaces.some(w => w.epoch === work.submission!.epoch && w.branch === observation.candidate.branch), 'PR branch does not match the assigned workspace');
       if (work.stage === 'done') return work;
-      let authorizedSnapshot: Work | null = activeExecution && work.mergeAuthorization
+      const executionPredatesMerge = activeExecution && observation.merged && observation.mergedAt && Number.isFinite(Date.parse(observation.mergedAt))
+        && Date.parse(activeExecution.issuedAt) < Date.parse(observation.mergedAt);
+      let authorizedSnapshot: Work | null = executionPredatesMerge && work.mergeAuthorization
         && activeExecution.sha === observation.candidate.sha && activeExecution.baseSha === observation.candidate.baseSha
         && activeExecution.policyRevision === work.policyRevision && work.mergeAuthorization.sha === activeExecution.sha
         && work.mergeAuthorization.baseSha === activeExecution.baseSha && work.mergeAuthorization.policyRevision === activeExecution.policyRevision
@@ -292,7 +294,7 @@ export class Engine {
         // Never allow evidence from after the earliest possible merge instant.
         // Whole-second timestamps can therefore conservatively refuse same-second authorization.
         const cutoff = mergedTime + (/\.\d+Z$/.test(observation.mergedAt) ? 1 : 1000);
-        const past = authorizedSnapshot ? undefined : (await db.query("SELECT payload->'work' AS work FROM events WHERE work_id=$1 AND created_at<$2 AND payload ? 'work' ORDER BY seq DESC LIMIT 1", [id, new Date(cutoff)])).rows[0]?.work as Work | undefined;
+        const past = authorizedSnapshot || activeExecution ? undefined : (await db.query("SELECT payload->'work' AS work FROM events WHERE work_id=$1 AND created_at<$2 AND payload ? 'work' ORDER BY seq DESC LIMIT 1", [id, new Date(cutoff)])).rows[0]?.work as Work | undefined;
         const authorization = past?.mergeAuthorization;
         if (!authorizedSnapshot && past && authorization && authorization.sha === observation.candidate.sha && authorization.baseSha === observation.candidate.baseSha && authorization.policyRevision === past.policyRevision
           && past.submission?.pr === observation.candidate.pr && past.gates.every(g => g.passed) && !past.violations.length
@@ -316,7 +318,10 @@ export class Engine {
           work.mergeExecution = null;
           work.delivery = { mergedAt: observation.mergedAt!, mergeSha: observation.mergeSha, authorizationRevision: authorizedSnapshot.revision };
           await db.query('DELETE FROM jobs WHERE work_id=$1', [work.id]);
-        } else if (!work.violations.includes(violation)) work.violations.push(violation);
+        } else {
+          work.mergeExecution = null;
+          if (!work.violations.includes(violation)) work.violations.push(violation);
+        }
       }
       await save(db, work, 'github', 'github.observed', now);
       return work;
