@@ -199,3 +199,29 @@ test('operators can record revocation after a credential is removed from configu
   await withoutRunner.define(operator, { ...data, expectedRevision: revision, enabled: false }, id());
   const result: any = await withoutRunner.result(collector, report(f, command), id()); assert.equal(result.accepted, false); await cleanup(f);
 });
+
+test('result publication racing revocation across replicas cannot leave accepted current evidence', async () => {
+  const f = await fixture(), command = await start(f), second = new Store(store.pool.options.connectionString!);
+  try {
+    const replica = new Validation(new Engine(second), principals, 'test/repository');
+    const registration = (await validation.list()).definitions.find(d => d.kind === 'registration' && d.id === f.collectorRef.id)!;
+    const { revision, createdAt, createdBy, ...data } = registration;
+    const outcomes = await Promise.allSettled([
+      replica.result(collector, report(f, command), id()),
+      validation.define(operator, { ...data, expectedRevision: revision, enabled: false }, id()),
+    ]);
+    assert.ok(outcomes.every(r => r.status === 'fulfilled'));
+    const w = await current(f.w.id);
+    assert.equal(w.gates.find(g => g.name === 'acceptance')?.passed, false);
+    assert.equal(w.mergeAuthorization, null);
+    assert.equal((await replica.list()).requests.find(r => r.id === f.r.id)?.state, 'superseded');
+    const late: any = await replica.result(collector, report(f, command), id()); assert.equal(late.accepted, false);
+  } finally { await cleanup(f); await second.close(); }
+});
+test('authorized build producers still cannot attest a mismatched source or incomplete manifest', async () => {
+  const f = await fixture();
+  const good = { registration: f.builderRef, workId: f.w.id, expectedWorkRevision: (await current(f.w.id)).revision, sourceSha: sha, baseSha: base, buildInputsDigest: inputs, artifacts: [{ service: 'api', digest }], provenanceUrl: 'https://ci.example.test/build/2' };
+  await assert.rejects(validation.attestBuild(builder, { ...good, sourceSha: 'f'.repeat(40) }, id()), /Build source differs/);
+  await assert.rejects(validation.attestBuild(builder, { ...good, artifacts: [{ service: 'wrong-service', digest }] }, id()), /complete service manifest/);
+  await cleanup(f);
+});
