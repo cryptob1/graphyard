@@ -282,23 +282,31 @@ export class Engine {
       demand(work.submission?.pr === observation.candidate.pr, 'Unassigned pull request');
       demand(work.workspaces.some(w => w.epoch === work.submission!.epoch && w.branch === observation.candidate.branch), 'PR branch does not match the assigned workspace');
       if (work.stage === 'done') return work;
-      const executionPredatesMerge = activeExecution && observation.merged && observation.mergedAt && Number.isFinite(Date.parse(observation.mergedAt))
-        && Date.parse(activeExecution.issuedAt) < Date.parse(observation.mergedAt);
-      let authorizedSnapshot: Work | null = executionPredatesMerge && work.mergeAuthorization
-        && activeExecution.sha === observation.candidate.sha && activeExecution.baseSha === observation.candidate.baseSha
-        && activeExecution.policyRevision === work.policyRevision && work.mergeAuthorization.sha === activeExecution.sha
-        && work.mergeAuthorization.baseSha === activeExecution.baseSha && work.mergeAuthorization.policyRevision === activeExecution.policyRevision
-        && work.gates.every(gate => gate.passed) && !work.violations.length ? structuredClone(work) : null;
+      let authorizedSnapshot: Work | null = null;
       if (observation.merged && observation.mergedAt && Number.isFinite(Date.parse(observation.mergedAt))) {
         const mergedTime = Date.parse(observation.mergedAt);
         // Never allow evidence from after the earliest possible merge instant.
         // Whole-second timestamps can therefore conservatively refuse same-second authorization.
         const cutoff = mergedTime + (/\.\d+Z$/.test(observation.mergedAt) ? 1 : 1000);
-        const past = authorizedSnapshot || activeExecution ? undefined : (await db.query("SELECT payload->'work' AS work FROM events WHERE work_id=$1 AND created_at<$2 AND payload ? 'work' ORDER BY seq DESC LIMIT 1", [id, new Date(cutoff)])).rows[0]?.work as Work | undefined;
+        const acquired = (await db.query("SELECT payload->'work'->'mergeExecution' AS execution FROM events WHERE work_id=$1 AND kind='merge.execution.acquired' AND created_at<$2 ORDER BY seq DESC LIMIT 1", [id, new Date(cutoff)])).rows[0]?.execution as Work['mergeExecution'] | undefined;
+        let boundedExecution = activeExecution ?? acquired ?? null;
+        if (boundedExecution) {
+          const cancellation = (await db.query("SELECT created_at FROM events WHERE work_id=$1 AND kind='merge.execution.cancelled' AND payload->'details'->>'executionId'=$2 AND created_at<$3 ORDER BY seq DESC LIMIT 1", [id, boundedExecution.id, new Date(cutoff)])).rows[0]?.created_at as Date | undefined;
+          if (cancellation && cancellation.getTime() < mergedTime) boundedExecution = null;
+        }
+        const executionValid = !boundedExecution || boundedExecution.sha === observation.candidate.sha && boundedExecution.baseSha === observation.candidate.baseSha
+          && boundedExecution.policyRevision === work.policyRevision && Date.parse(boundedExecution.issuedAt) < mergedTime && mergedTime < Date.parse(boundedExecution.expiresAt);
+        if (activeExecution && executionValid && work.mergeAuthorization
+          && activeExecution.sha === observation.candidate.sha && activeExecution.baseSha === observation.candidate.baseSha
+          && activeExecution.policyRevision === work.policyRevision && work.mergeAuthorization.sha === activeExecution.sha
+          && work.mergeAuthorization.baseSha === activeExecution.baseSha && work.mergeAuthorization.policyRevision === activeExecution.policyRevision
+          && work.gates.every(gate => gate.passed) && !work.violations.length) authorizedSnapshot = structuredClone(work);
+        const past = authorizedSnapshot || !executionValid ? undefined : (await db.query("SELECT payload->'work' AS work FROM events WHERE work_id=$1 AND created_at<$2 AND payload ? 'work' ORDER BY seq DESC LIMIT 1", [id, new Date(cutoff)])).rows[0]?.work as Work | undefined;
         const authorization = past?.mergeAuthorization;
+        const evidenceValid = past ? [...new Set(past.criteria.flatMap(criterion => criterion.proofs))].every(proof => !!currentEvidence(past, proof, new Date(mergedTime))) : false;
         if (!authorizedSnapshot && past && authorization && authorization.sha === observation.candidate.sha && authorization.baseSha === observation.candidate.baseSha && authorization.policyRevision === past.policyRevision
           && past.submission?.pr === observation.candidate.pr && past.gates.every(g => g.passed) && !past.violations.length
-          && past.observation && cutoff - Date.parse(past.observation.at) < 120_000 && Date.parse(authorization.at) < mergedTime) authorizedSnapshot = past;
+          && evidenceValid && past.observation && cutoff - Date.parse(past.observation.at) < 120_000 && Date.parse(authorization.at) < mergedTime) authorizedSnapshot = past;
       }
       work.candidate = observation.candidate;
       work.observation = observation;

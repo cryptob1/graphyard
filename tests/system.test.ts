@@ -155,6 +155,14 @@ test('a matching merge from before the execution grant remains an unauthorized v
   const refused = await engine.observe(w.id, granted.revision, merged);
   assert.notEqual(refused.stage, 'done'); assert.equal(refused.mergeExecution, null); assert.match(refused.violations.join(' '), /without a prior authorization/);
 });
+test('a matching merge after the bounded execution deadline remains an unauthorized violation', async () => {
+  let w = await submitted(); w = await engine.observe(w.id, w.revision, observation(w));
+  w = await engine.execute(producer, 'evidence', w.id, proof(), randomUUID());
+  const granted = await engine.acquireMerge(coordinator, w.id, { expectedRevision: w.revision, sha: head, baseSha: base, policyRevision: w.policyRevision }, randomUUID());
+  const merged = { ...observation(w), merged: true, mergeSha: 'c'.repeat(40), mergedAt: new Date(Date.parse(granted.execution.expiresAt) + 1).toISOString() } as Observation;
+  const refused = await engine.observe(w.id, granted.revision, merged);
+  assert.notEqual(refused.stage, 'done'); assert.equal(refused.mergeExecution, null); assert.match(refused.violations.join(' '), /without a prior authorization/);
+});
 test('periodic reconciliation defers without publishing failure during active merge execution', async () => {
   let w = await submitted(); w = await engine.observe(w.id, w.revision, observation(w));
   w = await engine.execute(producer, 'evidence', w.id, proof(), randomUUID());
