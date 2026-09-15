@@ -240,10 +240,21 @@ Never share an operator or producer credential with an implementation agent.`); 
     const branch = work.submission ? work.workspaces.find((w: any) => w.epoch === work.submission.epoch)?.branch : `graphyard/${work.key.toLowerCase()}-${epoch}`;
     if (!branch) throw new Error('Submitted workspace branch is missing');
     const path = resolve(root, '.graphyard/worktrees', `${work.key}-${epoch}`);
+    let startPoint = args[1] ?? 'HEAD';
+    if (work.submission) {
+      const remoteBranch = `refs/remotes/origin/${branch}`;
+      execFileSync('git', ['fetch', '--quiet', '--no-tags', 'origin', `+refs/heads/${branch}:${remoteBranch}`], { stdio: ['ignore', 'ignore', 'inherit'] });
+      const remoteSha = execFileSync('git', ['rev-parse', '--verify', remoteBranch], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'inherit'] }).trim();
+      if (!work.candidate?.sha || remoteSha !== work.candidate.sha) throw new Error('Submitted PR branch changed; wait for Graphyard to observe its current head before creating the rework workspace');
+      startPoint = remoteBranch;
+    }
     await mutate('workspace', { epoch, host: hostId, path, branch });
     await mkdir(resolve(root, '.graphyard/worktrees'), { recursive: true });
     const exists = spawnSync('git', ['show-ref', '--verify', '--quiet', `refs/heads/${branch}`]).status === 0;
-    try { execFileSync('git', exists ? ['worktree', 'add', path, branch] : ['worktree', 'add', '-b', branch, path, args[1] ?? (work.submission ? `origin/${branch}` : 'HEAD')], { stdio: ['ignore', 'ignore', 'inherit'] }); }
+    try {
+      execFileSync('git', exists ? ['worktree', 'add', ...(work.submission ? ['--force'] : []), path, branch] : ['worktree', 'add', '-b', branch, path, startPoint], { stdio: ['ignore', 'ignore', 'inherit'] });
+      if (work.submission) execFileSync('git', ['-C', path, 'reset', '--hard', startPoint], { stdio: ['ignore', 'ignore', 'inherit'] });
+    }
     catch { throw new Error('Git worktree creation failed. Reservation remains for safety; inspect the event and repair locally. Do not reuse the branch for another task.'); }
     return print({ path, branch, epoch });
   }
