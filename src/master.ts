@@ -212,6 +212,18 @@ function waitForHerdrAgent(target: string, run?: (command: string, args: string[
   throw new Error(`Launched worker did not become visible in Herdr within ${timeoutMs}ms${lastError instanceof Error ? `: ${lastError.message}` : ''}`);
 }
 
+function stopHerdrPane(pane: string, run?: (command: string, args: string[]) => string, timeoutMs = 5_000) {
+  herdrJson(['pane', 'close', pane], run);
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const result = herdrJson(['pane', 'list'], run);
+    if (!Array.isArray(result.panes)) throw new Error('Herdr did not return a pane inventory after close');
+    if (!result.panes.some((candidate: any) => candidate.pane_id === pane)) return;
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 100);
+  }
+  throw new Error(`Herdr still reports pane ${pane} after close`);
+}
+
 export async function startMaster(root: string, kind: WorkerProfile['kind'], agentArgs: string[], agents: HerdrAgent[], run?: (command: string, args: string[]) => string) {
   if (!kind) throw new Error('Choose a supported master agent kind');
   const config = await loadMasterConfig(root);
@@ -219,9 +231,15 @@ export async function startMaster(root: string, kind: WorkerProfile['kind'], age
   const tab = herdrJson(['tab', 'create', '--cwd', root, '--label', `Graphyard master · ${config.repository}`, '--env', 'GRAPHYARD_MASTER=1', '--no-focus'], run);
   const pane = tab.pane_id ?? tab.pane?.id ?? tab.tab?.pane_id;
   if (!pane) throw new Error('Herdr did not return the new master pane');
-  herdrJson(['agent', 'start', config.masterAgentName, '--kind', kind, '--pane', pane, '--', ...agentArgs], run);
-  const prompt = `You are the dedicated Graphyard master agent for ${config.repository}. Do not implement product work, claim worker leases, submit evidence, weaken requirements, or bypass gates. Read AGENTS.md, run node ${config.cliPath} master guide, then run node ${config.cliPath} master status. Use Graphyard as assignment and progression truth and Herdr only for session health and control. Route ready work to configured worker profiles, require workers to claim for themselves, preserve handoffs, surface decisions that need the operator, and invoke routine merge only through graphyard master merge after every exact-candidate gate passes.`;
-  herdrJson(['agent', 'prompt', config.masterAgentName, prompt], run);
+  try {
+    herdrJson(['agent', 'start', config.masterAgentName, '--kind', kind, '--pane', pane, '--', ...agentArgs], run);
+    const prompt = `You are the dedicated Graphyard master agent for ${config.repository}. Do not implement product work, claim worker leases, submit evidence, weaken requirements, or bypass gates. Read AGENTS.md, run node ${config.cliPath} master guide, then run node ${config.cliPath} master status. Use Graphyard as assignment and progression truth and Herdr only for session health and control. Route ready work to configured worker profiles, require workers to claim for themselves, preserve handoffs, surface decisions that need the operator, and invoke routine merge only through graphyard master merge after every exact-candidate gate passes.`;
+    herdrJson(['agent', 'prompt', config.masterAgentName, prompt], run);
+  } catch (error) {
+    try { stopHerdrPane(pane, run); }
+    catch { throw new Error(`${error instanceof Error ? error.message : 'Master startup failed'}; Herdr could not confirm cleanup of pane ${pane}`); }
+    throw error;
+  }
   return { agentName: config.masterAgentName, kind, pane, status: 'started and prompted', focusChanged: false };
 }
 
@@ -254,7 +272,10 @@ export async function dispatchWork(root: string, work: Work, profile: WorkerProf
       herdrJson(['agent', 'prompt', profile.agentName, prompt], run);
       target = { name: profile.agentName, pane_id: pane, agent_status: 'idle', cwd: prepared.path };
     } catch (error) {
-      if (pane) { try { herdrJson(['pane', 'close', pane], run); } catch { /* best effort after a failed launch */ } }
+      if (pane) {
+        try { stopHerdrPane(pane, run); }
+        catch { throw new Error(`${error instanceof Error ? error.message : 'Worker launch failed'}; Herdr could not confirm pane shutdown, so Graphyard retained epoch ${prepared.epoch}`); }
+      }
       try { await release(root, work.key, prepared.epoch, profile.name); }
       catch { throw new Error(`${error instanceof Error ? error.message : 'Worker launch failed'}; the pane was stopped but Graphyard could not release epoch ${prepared.epoch}`); }
       throw error;

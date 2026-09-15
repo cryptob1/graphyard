@@ -89,14 +89,20 @@ test('dispatch launches a worker through the supervised claim and worktree boots
     assert.deepEqual(calls[1].slice(0, 3), ['pane', 'run', 'p1']); assert.match(calls[1][3], /watch' 'GY-42' '4' '--' 'codex'/);
     assert.deepEqual(calls.at(-1)!.slice(0, 3), ['agent', 'prompt', 'eng-a']); assert.doesNotMatch(calls.at(-1)![3], /coordinator-token/);
     const failedCalls: string[][] = []; let releasedEpoch = 0;
-    await assert.rejects(dispatchWork(root, work({ stage: 'ready', lease: null, submission: null, candidate: null, mergeAuthorization: null }), profile, [], (_command, args) => { failedCalls.push(args); return JSON.stringify({ result: args[0] === 'tab' ? { pane_id: 'late-pane' } : {} }); }, undefined, async () => ({ epoch: 5, path: join(root, 'late'), base: 'd'.repeat(40) }), async (_root, _key, epoch) => { releasedEpoch = epoch; }, 1), /did not become visible/);
-    assert.equal(releasedEpoch, 5); assert.deepEqual(failedCalls.at(-1), ['pane', 'close', 'late-pane']);
+    await assert.rejects(dispatchWork(root, work({ stage: 'ready', lease: null, submission: null, candidate: null, mergeAuthorization: null }), profile, [], (_command, args) => { failedCalls.push(args); return JSON.stringify({ result: args[0] === 'tab' ? { pane_id: 'late-pane' } : args[0] === 'pane' && args[1] === 'list' ? { panes: [] } : {} }); }, undefined, async () => ({ epoch: 5, path: join(root, 'late'), base: 'd'.repeat(40) }), async (_root, _key, epoch) => { releasedEpoch = epoch; }, 1), /did not become visible/);
+    assert.equal(releasedEpoch, 5); assert.deepEqual(failedCalls.at(-2), ['pane', 'close', 'late-pane']); assert.deepEqual(failedCalls.at(-1), ['pane', 'list']);
     const promptCalls: string[][] = []; let promptRelease = 0;
     await assert.rejects(dispatchWork(root, work({ stage: 'ready', lease: null, submission: null, candidate: null, mergeAuthorization: null }), profile, [], (_command, args) => {
       promptCalls.push(args); if (args[1] === 'prompt') throw new Error('prompt refused');
-      return JSON.stringify({ result: args[0] === 'tab' ? { pane_id: 'prompt-pane' } : args[1] === 'get' ? { pane_id: 'prompt-pane', agent_status: 'working' } : {} });
+      return JSON.stringify({ result: args[0] === 'tab' ? { pane_id: 'prompt-pane' } : args[1] === 'get' ? { pane_id: 'prompt-pane', agent_status: 'working' } : args[0] === 'pane' && args[1] === 'list' ? { panes: [] } : {} });
     }, undefined, async () => ({ epoch: 6, path: join(root, 'prompt'), base: 'e'.repeat(40) }), async (_root, _key, epoch) => { promptRelease = epoch; }), /prompt refused/);
-    assert.equal(promptRelease, 6); assert.deepEqual(promptCalls.at(-1), ['pane', 'close', 'prompt-pane']);
+    assert.equal(promptRelease, 6); assert.deepEqual(promptCalls.at(-2), ['pane', 'close', 'prompt-pane']); assert.deepEqual(promptCalls.at(-1), ['pane', 'list']);
+    let unsafeRelease = false;
+    await assert.rejects(dispatchWork(root, work({ stage: 'ready', lease: null, submission: null, candidate: null, mergeAuthorization: null }), profile, [], (_command, args) => {
+      if (args[0] === 'pane' && args[1] === 'close') throw new Error('daemon unavailable');
+      return JSON.stringify({ result: args[0] === 'tab' ? { pane_id: 'unsafe-pane' } : {} });
+    }, undefined, async () => ({ epoch: 7, path: join(root, 'unsafe'), base: 'f'.repeat(40) }), async () => { unsafeRelease = true; }, 1), /retained epoch 7/);
+    assert.equal(unsafeRelease, false, 'ownership remains fenced until pane shutdown is confirmed');
     const existing = { name: 'existing', principal: 'worker-a', agentName: 'existing-a', mode: 'existing' as const, agentArgs: [], environment: {} };
     await assert.rejects(dispatchWork(root, work({ stage: 'ready', lease: null, submission: null, candidate: null, mergeAuthorization: null }), existing, [{ name: 'existing-a', agent_status: 'idle', cwd: root }]), /cannot be safely adopted/);
     const dependency = work({ id: 'dependency', key: 'GY-41', stage: 'build' });
@@ -116,6 +122,12 @@ test('master start creates a visible non-focused coordinator session with no cre
     assert.ok(calls[0].includes('--no-focus')); assert.ok(calls[1].includes('codex'));
     assert.match(calls[2].at(-1)!, /dedicated Graphyard master agent/);
     assert.equal(JSON.stringify(calls).includes(coordinatorToken), false);
+    const failedCalls: string[][] = [];
+    await assert.rejects(startMaster(root, 'codex', [], [], (_command, args) => {
+      failedCalls.push(args); if (args[1] === 'prompt') throw new Error('prompt refused');
+      return JSON.stringify({ result: args[0] === 'tab' ? { pane_id: 'failed-master' } : args[0] === 'pane' && args[1] === 'list' ? { panes: [] } : {} });
+    }), /prompt refused/);
+    assert.deepEqual(failedCalls.at(-2), ['pane', 'close', 'failed-master']); assert.deepEqual(failedCalls.at(-1), ['pane', 'list']);
   } finally { await rm(root, { recursive: true, force: true }); await rm(credentialDirectory, { recursive: true, force: true }); }
 });
 
