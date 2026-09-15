@@ -13,6 +13,7 @@ From the repository to be managed:
 ```sh
 node /absolute/path/to/graphyard/bin/graphyard.mjs master init \
   --url https://YOUR-GRAPHYARD-HOST \
+  --herdr-workspace YOUR_HERDR_WORKSPACE_ID \
   --token-stdin
 ```
 
@@ -24,7 +25,7 @@ Paste or pipe the coordinator token, then EOF. Setup verifies the token and GitH
 - enables exact-candidate routine merging by default;
 - prints the next setup action without printing a credential.
 
-Commit the managed `AGENTS.md` update. Never commit `.graphyard/`. Rerun setup after moving the Graphyard CLI. Use `--host-id` to set the stable identity of this worker machine, `--no-auto-merge` for teams that want the coordinator to wait for an operator before every otherwise-routine merge, or `--merge-method squash|rebase` to change the normal merge method. With automatic merge disabled, the operator runs `graphyard master merge GY-N`; this still acquires and verifies bounded authority and is the supported manual approval path. A direct GitHub merge remains unauthorized.
+Commit the managed `AGENTS.md` update. Never commit `.graphyard/`. Rerun setup after moving the Graphyard CLI. Set `--herdr-workspace` to the workspace ID shown by `herdr workspace list`; Graphyard passes it explicitly to every master and worker `tab create`, so a different currently focused repository cannot capture the launch. Existing configurations without this setting retain Herdr's default routing until setup is rerun. Use `--host-id` to set the stable identity of this worker machine, `--no-auto-merge` for teams that want the coordinator to wait for an operator before every otherwise-routine merge, or `--merge-method squash|rebase` to change the normal merge method. With automatic merge disabled, the operator runs `graphyard master merge GY-N`; this still acquires and verifies bounded authority and is the supported manual approval path. A direct GitHub merge remains unauthorized.
 
 Launch the dedicated visible coordinator after setup:
 
@@ -35,7 +36,7 @@ graphyard master start codex
 # or: graphyard master start claude
 ```
 
-This creates a non-focused Herdr tab, starts the selected agent, and prompts it to read the managed instructions, print the packaged guide, and inspect live status. Provider-specific arguments may follow `--`. Setup and start do not create worker assignments.
+This creates a non-focused Herdr tab in the configured workspace, reads the native `tab_created.root_pane.pane_id` response (while retaining supported legacy response shapes), starts the selected agent, and prompts it to read the managed instructions, print the packaged guide, and inspect live status. A malformed creation response fails startup and Graphyard closes the identified tab before returning. Provider-specific arguments may follow `--`. Setup and start do not create worker assignments.
 
 ## Add workers
 
@@ -97,7 +98,7 @@ For a ready item:
 graphyard master dispatch GY-42 claude-primary
 ```
 
-Dispatch uses the same claimability rules as the control plane: the work must be released, unblocked, dependency-safe, resource-safe, and unowned, with no prior submission unless an operator explicitly requested rework. This permits the documented recovery handoff even though preserved submission history keeps its display stage at Build. Dispatch refuses existing-session profiles. For new work, a launch profile's worker-scoped launcher fetches and resolves the current managed base branch, claims immediately before launch, and creates the assigned worktree from that exact base. For rework, it instead fetches the preserved PR branch, verifies its head against Graphyard's observation, detaches any stopped local checkout that still holds the branch so its historical HEAD and files remain stable, and opens a fresh checkout of that branch. It then creates a non-focused visible tab and runs the coding agent as a child of `graphyard watch`. The supervisor renews the lease and terminates the complete child process group on lease loss. Only after Herdr detects the supervised agent does the master name and prompt it. If tab creation, detection, naming, or prompt delivery fails, dispatch closes the pane, confirms it is absent from Herdr, and releases that exact lease epoch. If shutdown cannot be confirmed, the lease remains held so another worker cannot overlap the possibly live process. Prompt delivery itself never becomes ownership.
+Dispatch uses the same claimability rules as the control plane: the work must be released, unblocked, dependency-safe, resource-safe, and unowned, with no prior submission unless an operator explicitly requested rework. This permits the documented recovery handoff even though preserved submission history keeps its display stage at Build. Dispatch refuses existing-session profiles. For new work, a launch profile's worker-scoped launcher fetches and resolves the current managed base branch, claims immediately before launch, and creates the assigned worktree from that exact base. For rework, it instead fetches the preserved PR branch, verifies its head against Graphyard's observation, detaches any stopped local checkout that still holds the branch so its historical HEAD and files remain stable, and opens a fresh checkout of that branch. It then creates a non-focused visible tab in the explicitly configured Herdr workspace, accepts the native `tab_created.root_pane.pane_id` response and supported legacy shapes, and runs the coding agent as a child of `graphyard watch`. The supervisor renews the lease and terminates the complete child process group on lease loss. Only after Herdr detects the supervised agent does the master name and prompt it. If tab creation returns a malformed response, Graphyard closes the identified tab before releasing the lease. If creation, detection, naming, or prompt delivery otherwise fails, dispatch closes the pane, confirms it is absent from Herdr, and releases that exact lease epoch. If shutdown cannot be confirmed, the lease remains held so another worker cannot overlap the possibly live process. Prompt delivery itself never becomes ownership.
 
 An operator may set `GRAPHYARD_REQUEST_ID` to retry the outer dispatch command. The launcher removes that key from the worker environment so claim, workspace registration, heartbeat, submission, and cleanup remain separate idempotent mutations.
 

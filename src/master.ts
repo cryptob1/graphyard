@@ -41,6 +41,7 @@ export const masterConfigSchema = z.object({
   baseBranch: z.string().min(1).max(200),
   githubAppId: z.number().int().positive(),
   hostId: z.string().trim().min(1).max(200),
+  herdrWorkspace: z.string().trim().min(1).max(200).optional(),
   masterAgentName: z.string().trim().regex(/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,99}$/),
   autoMerge: z.boolean().default(true),
   mergeMethod: z.enum(['merge', 'squash', 'rebase']).default('merge'),
@@ -159,7 +160,7 @@ async function atomicPrivateText(file: string, value: string) {
   await writeFile(temporary, value, { mode: 0o600, flag: 'wx' }); await rename(temporary, file); await chmod(file, 0o600);
 }
 
-export async function setupMaster(root: string, input: { url: string; token: string; cliPath: string; hostId?: string; credentialDirectory?: string; autoMerge?: boolean; mergeMethod?: 'merge' | 'squash' | 'rebase' }, fetcher: typeof fetch = fetch) {
+export async function setupMaster(root: string, input: { url: string; token: string; cliPath: string; hostId?: string; herdrWorkspace?: string; credentialDirectory?: string; autoMerge?: boolean; mergeMethod?: 'merge' | 'squash' | 'rebase' }, fetcher: typeof fetch = fetch) {
   const url = serverOrigin(input.url); const token = input.token.trim();
   const workerConnection = await loadConnection(root);
   if (workerConnection && workerConnection.url !== url) throw new Error('Worker connection uses another Graphyard server; migrate the repository connection before master setup');
@@ -188,7 +189,7 @@ export async function setupMaster(root: string, input: { url: string; token: str
   await assertOutsideWorktrees(root, credentialDirectory, 'Coordinator credential directory');
   const identity = createHash('sha256').update(`${url}\0${detected.repository}`).digest('hex').slice(0, 20);
   const credentialFile = resolve(credentialDirectory, `${identity}.token`);
-  const config = masterConfigSchema.parse({ version: 1, url, credentialFile, cliPath: resolve(input.cliPath), repository: detected.repository, baseBranch: status.baseBranch, githubAppId: status.githubAppId, hostId: input.hostId ?? previous?.hostId ?? hostname(), masterAgentName: previous?.masterAgentName ?? `graphyard-master-${repositoryName}`, autoMerge: input.autoMerge ?? previous?.autoMerge ?? true, mergeMethod: input.mergeMethod ?? previous?.mergeMethod ?? 'merge', workers: previous?.workers ?? [] });
+  const config = masterConfigSchema.parse({ version: 1, url, credentialFile, cliPath: resolve(input.cliPath), repository: detected.repository, baseBranch: status.baseBranch, githubAppId: status.githubAppId, hostId: input.hostId ?? previous?.hostId ?? hostname(), herdrWorkspace: input.herdrWorkspace ?? previous?.herdrWorkspace, masterAgentName: previous?.masterAgentName ?? `graphyard-master-${repositoryName}`, autoMerge: input.autoMerge ?? previous?.autoMerge ?? true, mergeMethod: input.mergeMethod ?? previous?.mergeMethod ?? 'merge', workers: previous?.workers ?? [] });
   const instructionsFile = resolve(root, 'AGENTS.md');
   let existing = ''; let mode = 0o644;
   try { const info = await lstat(instructionsFile); if (!info.isFile()) throw new Error('Refusing to replace a non-regular AGENTS.md'); mode = info.mode & 0o777; existing = await readFile(instructionsFile, 'utf8'); }
@@ -280,26 +281,42 @@ function stopHerdrPane(pane: string, run?: (command: string, args: string[]) => 
   throw new Error(`Herdr still reports pane ${pane} after close`);
 }
 
+function createdHerdrTab(result: any) {
+  const pane = result?.root_pane?.pane_id ?? result?.pane_id ?? result?.pane?.id ?? result?.tab?.pane_id;
+  const tab = result?.tab?.tab_id ?? result?.tab_id ?? result?.root_pane?.tab_id;
+  if (typeof pane !== 'string' || !pane.trim()) throw Object.assign(new Error('Herdr did not return a valid new pane'), { herdrTab: typeof tab === 'string' && tab.trim() ? tab : undefined });
+  return { pane, tab: typeof tab === 'string' && tab.trim() ? tab : undefined };
+}
+
+function stopCreatedHerdrTab(pane: string | undefined, tab: string | undefined, run?: (command: string, args: string[]) => string) {
+  if (pane) return stopHerdrPane(pane, run);
+  if (!tab) throw new Error('Herdr did not identify the created tab, so cleanup cannot be confirmed');
+  herdrJson(['tab', 'close', tab], run);
+  const result = herdrJson(['tab', 'list'], run);
+  if (!Array.isArray(result.tabs) || result.tabs.some((candidate: any) => candidate.tab_id === tab)) throw new Error(`Herdr could not confirm cleanup of tab ${tab}`);
+}
+
 export async function startMaster(root: string, kind: WorkerProfile['kind'], agentArgs: string[], agents: HerdrAgent[], run?: (command: string, args: string[]) => string) {
   if (!kind) throw new Error('Choose a supported master agent kind');
   const config = await loadMasterConfig(root);
   if (agents.some(agent => agent.name === config.masterAgentName)) throw new Error(`Master agent ${config.masterAgentName} is already visible in Herdr`);
-  const tab = herdrJson(['tab', 'create', '--cwd', root, '--label', `Graphyard master · ${config.repository}`, '--env', 'GRAPHYARD_MASTER=1', '--no-focus'], run);
-  const pane = tab.pane_id ?? tab.pane?.id ?? tab.tab?.pane_id;
-  if (!pane) throw new Error('Herdr did not return the new master pane');
+  let pane: string | undefined, tabId: string | undefined;
   try {
-    herdrJson(['agent', 'start', config.masterAgentName, '--kind', kind, '--pane', pane, '--', ...agentArgs], run);
+    const created = createdHerdrTab(herdrJson(['tab', 'create', ...(config.herdrWorkspace ? ['--workspace', config.herdrWorkspace] : []), '--cwd', root, '--label', `Graphyard master · ${config.repository}`, '--env', 'GRAPHYARD_MASTER=1', '--no-focus'], run));
+    pane = created.pane; tabId = created.tab;
+    herdrJson(['agent', 'start', config.masterAgentName, '--kind', kind, '--pane', created.pane, '--', ...agentArgs], run);
     const prompt = `You are the dedicated Graphyard master agent for ${config.repository}. Do not implement product work, claim worker leases, submit evidence, weaken requirements, or bypass gates. Read AGENTS.md, run node ${config.cliPath} master guide, then run node ${config.cliPath} master status. Use Graphyard as assignment and progression truth and Herdr only for session health and control. Route ready work to configured worker profiles, require workers to claim for themselves, preserve handoffs, surface decisions that need the operator, and invoke routine merge only through graphyard master merge after every exact-candidate gate passes.`;
     const mergeInstruction = config.autoMerge
       ? 'Automatic routine merging is enabled. Use the guarded merge command when all gates pass.'
       : 'Automatic merging is disabled. Wait for explicit operator approval for each merge. Do not invoke master merge or master merge --all without that approval; the operator can invoke the guarded command directly.';
     herdrJson(['agent', 'prompt', config.masterAgentName, `${prompt} ${mergeInstruction}`], run);
   } catch (error) {
-    try { stopHerdrPane(pane, run); }
-    catch { throw new Error(`${error instanceof Error ? error.message : 'Master startup failed'}; Herdr could not confirm cleanup of pane ${pane}`); }
+    const malformedTab = (error as any)?.herdrTab as string | undefined;
+    if (pane || tabId || malformedTab) try { stopCreatedHerdrTab(pane, tabId ?? malformedTab, run); }
+    catch { throw new Error(`${error instanceof Error ? error.message : 'Master startup failed'}; Herdr could not confirm cleanup of the created tab`); }
     throw error;
   }
-  return { agentName: config.masterAgentName, kind, pane, status: 'started and prompted', focusChanged: false };
+  return { agentName: config.masterAgentName, kind, pane: pane!, status: 'started and prompted', focusChanged: false };
 }
 
 type WorkerCommand = (command: string, args: string[], options?: any) => string | Buffer;
@@ -329,11 +346,10 @@ export async function dispatchWork(root: string, work: Work, profile: WorkerProf
     if (target) throw new Error('Launch profile agent name is already visible in Herdr');
     const prepared = await prepare(root, work.key, profile.name);
     const prompt = `Implement ${work.key}: ${work.title}. The Graphyard worker launcher has claimed this item under principal ${profile.principal}, created its assigned worktree, and placed this agent under lease supervision. Run node ${config.cliPath} status ${work.key} before editing. Work only in the current assigned worktree, satisfy the stated criteria without weakening them, open a PR, and submit it with complete. Stop immediately if the supervisor reports lease loss. Do not submit trusted evidence or merge the PR.`;
-    let pane: string | undefined;
+    let pane: string | undefined, tabId: string | undefined;
     try {
-      const tabArgs = ['tab', 'create', '--cwd', prepared.path, '--label', `${work.key} · ${profile.agentName}`, '--env', `GRAPHYARD_URL=${config.url}`, '--env', `GRAPHYARD_TOKEN_FILE=${profile.credentialFile}`, '--env', `GRAPHYARD_HOST_ID=${config.hostId}`, ...Object.entries(profile.environment).flatMap(([key, value]) => ['--env', `${key}=${value}`]), '--no-focus'];
-      const tab = herdrJson(tabArgs, run); pane = tab.pane_id ?? tab.pane?.id ?? tab.tab?.pane_id;
-      if (!pane) throw new Error('Herdr did not return the new worker pane');
+      const tabArgs = ['tab', 'create', ...(config.herdrWorkspace ? ['--workspace', config.herdrWorkspace] : []), '--cwd', prepared.path, '--label', `${work.key} · ${profile.agentName}`, '--env', `GRAPHYARD_URL=${config.url}`, '--env', `GRAPHYARD_TOKEN_FILE=${profile.credentialFile}`, '--env', `GRAPHYARD_HOST_ID=${config.hostId}`, ...Object.entries(profile.environment).flatMap(([key, value]) => ['--env', `${key}=${value}`]), '--no-focus'];
+      const created = createdHerdrTab(herdrJson(tabArgs, run)); pane = created.pane; tabId = created.tab;
       const supervised = [process.execPath, config.cliPath, 'watch', work.key, String(prepared.epoch), '--', profile.kind!, ...profile.agentArgs].map(shellQuote).join(' ');
       herdrJson(['pane', 'run', pane, supervised], run);
       waitForHerdrAgent(pane, run, agentTimeoutMs);
@@ -341,8 +357,9 @@ export async function dispatchWork(root: string, work: Work, profile: WorkerProf
       herdrJson(['agent', 'prompt', profile.agentName, prompt], run);
       target = { name: profile.agentName, pane_id: pane, agent_status: 'idle', cwd: prepared.path };
     } catch (error) {
-      if (pane) {
-        try { stopHerdrPane(pane, run); }
+      const malformedTab = (error as any)?.herdrTab as string | undefined;
+      if (pane || tabId || malformedTab) {
+        try { stopCreatedHerdrTab(pane, tabId ?? malformedTab, run); }
         catch { throw new Error(`${error instanceof Error ? error.message : 'Worker launch failed'}; Herdr could not confirm pane shutdown, so Graphyard retained epoch ${prepared.epoch}`); }
       }
       try { await release(root, work.key, prepared.epoch, profile.name); }

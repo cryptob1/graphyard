@@ -53,7 +53,8 @@ async function main() {
 
 Environment: GRAPHYARD_URL, GRAPHYARD_TOKEN (individual role-scoped credential)
   init [--url URL] [--herdr] [--token-stdin]  Configure repository instructions and Herdr
-  master init --token-stdin     Install the recommended master-agent operating mode
+  master init --token-stdin [--herdr-workspace ID]
+                                Install the recommended master-agent operating mode
   master start AGENT_KIND       Launch the dedicated visible Herdr master session
   master worker add FILE        Add an existing or launchable Herdr worker profile
   master status                 Join Graphyard work truth with Herdr session health
@@ -96,12 +97,12 @@ Never share an operator or producer credential with an implementation agent.`); 
     const root = execFileSync('git', ['rev-parse', '--show-toplevel'], { encoding: 'utf8' }).trim();
     if (id === 'guide') return console.log(await readFile(fileURLToPath(new URL('../docs/master-agent.md', import.meta.url)), 'utf8'));
     if (id === 'init') {
-      const { values } = parseArgs({ args, options: { url: { type: 'string' }, 'token-stdin': { type: 'boolean' }, 'no-auto-merge': { type: 'boolean' }, 'merge-method': { type: 'string' }, 'cli-path': { type: 'string' }, 'host-id': { type: 'string' } }, allowPositionals: false });
+      const { values } = parseArgs({ args, options: { url: { type: 'string' }, 'token-stdin': { type: 'boolean' }, 'no-auto-merge': { type: 'boolean' }, 'merge-method': { type: 'string' }, 'cli-path': { type: 'string' }, 'host-id': { type: 'string' }, 'herdr-workspace': { type: 'string' } }, allowPositionals: false });
       if (!values['token-stdin']) throw new Error('Use master init --token-stdin so the coordinator credential is not stored in shell history');
       let input = ''; for await (const chunk of process.stdin) { input += chunk; if (input.length > 10_000) throw new Error('Token input is too large'); }
       const masterToken = input.trim(); if (!masterToken) throw new Error('Master coordinator credential is required; setup made no changes');
       const method = values['merge-method']; if (method && !['merge', 'squash', 'rebase'].includes(method)) throw new Error('Merge method must be merge, squash, or rebase');
-      return print(await setupMaster(root, { url: values.url ?? base, token: masterToken, cliPath: resolve(values['cli-path'] ?? await activeCliPath()), hostId: values['host-id'] ?? individualHostId(), ...(values['no-auto-merge'] ? { autoMerge: false } : {}), ...(method ? { mergeMethod: method as 'merge' | 'squash' | 'rebase' } : {}) }));
+      return print(await setupMaster(root, { url: values.url ?? base, token: masterToken, cliPath: resolve(values['cli-path'] ?? await activeCliPath()), hostId: values['host-id'] ?? individualHostId(), herdrWorkspace: values['herdr-workspace'], ...(values['no-auto-merge'] ? { autoMerge: false } : {}), ...(method ? { mergeMethod: method as 'merge' | 'squash' | 'rebase' } : {}) }));
     }
     const master = await loadMasterConfig(root);
     const masterToken = await readCredentialFile(master.credentialFile);
