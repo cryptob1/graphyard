@@ -94,9 +94,10 @@ export class Validation {
     await this.definition(db, 'environment', r.environment);
     return r;
   }
-  private async work(db: pg.PoolClient, id: string, expected?: number): Promise<Work> {
+  private async work(db: pg.PoolClient, id: string, now: Date, expected?: number): Promise<Work> {
     const work = (await db.query('SELECT document FROM work_items WHERE id=$1', [id])).rows[0]?.document as Work | undefined;
     demand(work && work.stage !== 'done' && !work.observation?.merged, 'Work missing or already delivered');
+    demand(!work.mergeExecution || Date.parse(work.mergeExecution.expiresAt) <= now.getTime(), 'A merge execution is active');
     demand(expected === undefined || work.revision === expected, 'Work changed; read current revision');
     return work;
   }
@@ -110,6 +111,8 @@ export class Validation {
   }
   private async persist(db: pg.PoolClient, r: ValidationRequest) { await db.query('UPDATE validation_requests SET document=$2 WHERE id=$1', [r.id, JSON.stringify(r)]); }
   private async changed(db: pg.PoolClient, w: Work, actor: string, kind: string, now: Date, details: unknown) {
+    if (w.mergeExecution && Date.parse(w.mergeExecution.expiresAt) <= now.getTime()) w.mergeExecution = null;
+    demand(!w.mergeExecution, 'A merge execution is active');
     const all: Work[] = (await db.query('SELECT document FROM work_items')).rows.map(r => r.document);
     this.engine.evaluate(w, all.map(x => x.id === w.id ? w : x), now);
     await save(db, w, actor, `validation.${kind}`, now, details); await wakeJob(db, w.id);
@@ -136,7 +139,7 @@ export class Validation {
             const r = await this.request(db, previous.id), a = r.attempts.at(-1), old = previous.attempts.at(-1);
             const registration = await this.registration(db, r.runner, 'runner');
             demand(registration.principalId === actor.id && a && old && a.id === old.id && ['dispatched', 'running'].includes(r.state) && Date.parse(a.expiresAt) > now.getTime() && Date.parse(old.expiresAt) > now.getTime(), 'Replayed execution grant is expired or superseded');
-            const c = await this.candidate(db, r.candidateId), w = await this.work(db, r.workId);
+            const c = await this.candidate(db, r.candidateId), w = await this.work(db, r.workId, now);
             await this.valid(db, c, w); await this.registration(db, r.collector, 'collector');
             demand(w.validation?.[r.proof]?.requestId === r.id, 'Replayed request is superseded');
           }
@@ -177,7 +180,7 @@ export class Validation {
     return this.withReceipt(actor, 'build', data, key, async (db, now) => {
       const r = await this.registration(db, data.registration, 'builder'); demand(r.principalId === actor.id, 'Wrong build principal', 403);
       const e = await this.definition(db, 'environment', r.environment) as Environment;
-      const w = await this.work(db, data.workId, data.expectedWorkRevision);
+      const w = await this.work(db, data.workId, now, data.expectedWorkRevision);
       demand(w.candidate?.sha === data.sourceSha && w.candidate.baseSha === data.baseSha, 'Build source differs from independently observed candidate');
       demand(same([...e.services].sort(), data.artifacts.map(a => a.service).sort()), 'Build must cover the complete service manifest');
       const attestation: BuildAttestation = { ...data, id: randomUUID(), producer: actor.id, at: now.toISOString(), repository: e.repository };
@@ -188,7 +191,7 @@ export class Validation {
   async createCandidate(actor: Principal, input: unknown, key: string) {
     admin(actor); const data = candidateSchema.parse(input);
     return this.withReceipt(actor, 'candidate', data, key, async (db, now) => {
-      const w = await this.work(db, data.workId, data.expectedWorkRevision);
+      const w = await this.work(db, data.workId, now, data.expectedWorkRevision);
       demand(w.candidate && w.observation && w.observation.candidate.sha === w.candidate.sha && w.observation.candidate.baseSha === w.candidate.baseSha, 'Independently observed source required');
       const s = w.scenarioRequirements.find(s => s.proof === data.proof);
       demand(s && w.criteria.some(ac => ac.proofs.includes(data.proof)), 'Proof must be required by current work and pin a registered scenario');
@@ -208,7 +211,7 @@ export class Validation {
   async createRequest(actor: Principal, input: unknown, key: string) {
     admin(actor); const data = requestSchema.parse(input);
     return this.withReceipt(actor, 'request', data, key, async (db, now) => {
-      const c = await this.candidate(db, data.candidateId); const w = await this.work(db, c.workId, data.expectedWorkRevision); await this.valid(db, c, w);
+      const c = await this.candidate(db, data.candidateId); const w = await this.work(db, c.workId, now, data.expectedWorkRevision); await this.valid(db, c, w);
       demand(w.validation?.[c.proof]?.candidateId === c.id, 'Candidate selection superseded');
       const runner = await this.registration(db, data.runner, 'runner'), collector = await this.registration(db, data.collector, 'collector');
       const build = (await db.query('SELECT document FROM validation_builds WHERE id=$1', [c.buildAttestationId])).rows[0]?.document as BuildAttestation;
@@ -229,7 +232,7 @@ export class Validation {
       await this.reconcileWithin(db, now);
       const queued: ValidationRequest[] = (await db.query("SELECT document FROM validation_requests WHERE document->>'state'='queued' ORDER BY document->>'createdAt',id")).rows.map(r => r.document);
       for (const r of queued.filter(r => same(r.runner, data.registration))) {
-        const c = await this.candidate(db, r.candidateId); const w = await this.work(db, r.workId);
+        const c = await this.candidate(db, r.candidateId); const w = await this.work(db, r.workId, now);
         await this.valid(db, c, w); await this.registration(db, r.collector, 'collector');
         const environment = await this.definition(db, 'environment', c.environment) as Environment;
         // Resources are global names, not scoped by an environment version. Revisions
@@ -319,7 +322,7 @@ export class Validation {
       const collector = await this.registration(db, r.collector, 'collector');
       demand(collector.principalId === actor.id && actor.proofs?.includes(r.proof), 'Wrong collector principal or proof scope', 403);
       await this.registration(db, r.runner, 'runner');
-      const c = await this.candidate(db, r.candidateId), w = await this.work(db, r.workId); await this.valid(db, c, w);
+      const c = await this.candidate(db, r.candidateId), w = await this.work(db, r.workId, now); await this.valid(db, c, w);
       demand(c.artifactStorage === 'postgres' && c.requiredArtifacts.includes(data.name), 'Artifact storage or name is not authorized');
       demand(a && a.id === data.attemptId && a.epoch === data.epoch && r.state === 'running' && Date.parse(a.expiresAt) > now.getTime() && Date.parse(r.deadline) > now.getTime() && w.validation?.[r.proof]?.requestId === r.id, 'Artifact attempt authority expired or superseded');
       demand(!(await db.query('SELECT id FROM validation_artifacts WHERE request_id=$1 AND attempt_id=$2 AND name=$3', [r.id, a.id, data.name])).rowCount, 'Artifact name already published; reuse the original idempotency key');
@@ -384,7 +387,7 @@ export class Validation {
         a.settled = true; await db.query('DELETE FROM validation_resources WHERE request_id=$1', [r.id]);
       } else if (command === 'retry') {
         demand(a && a.settled && ['expired', 'completed', 'cancelled'].includes(r.state) && r.attempts.length < r.maxAttempts && Date.parse(r.deadline) > now.getTime(), 'Retry needs settled prior execution, time and attempt budget');
-        const c = await this.candidate(db, r.candidateId), w = await this.work(db, r.workId); await this.valid(db, c, w);
+        const c = await this.candidate(db, r.candidateId), w = await this.work(db, r.workId, now); await this.valid(db, c, w);
         demand(w.validation?.[r.proof]?.requestId === r.id, 'Newer request supersedes retry');
         await this.registration(db, r.runner, 'runner'); await this.registration(db, r.collector, 'collector');
         r.state = 'queued'; delete r.result;

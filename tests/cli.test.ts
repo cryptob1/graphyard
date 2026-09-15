@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { mkdtemp, mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { chmod, mkdtemp, mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir, hostname } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -13,6 +13,16 @@ import { supervise } from '../src/supervisor.js';
 const exec = promisify(execFile);
 const launcher = fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url));
 const renewal = (duration = 2000) => ({ updatedAt: new Date().toISOString(), lease: { epoch: 1, expiresAt: new Date(Date.now() + duration).toISOString() } });
+
+test('master-only commands ignore an unrelated unavailable worker token file', async () => {
+  const cwd = await mkdtemp(join(tmpdir(), 'graphyard-master-lazy-token-'));
+  try {
+    await exec('git', ['init', '-q'], { cwd });
+    await mkdir(join(cwd, '.graphyard')); await writeFile(join(cwd, '.graphyard/connection.json'), '{broken', { mode: 0o644 });
+    const result = await exec(process.execPath, [launcher, 'master', 'guide'], { cwd, env: { ...process.env, GRAPHYARD_TOKEN_FILE: join(cwd, 'removed-worker.token'), GRAPHYARD_HOST_ID: '   ' } });
+    assert.match(result.stdout, /Master-agent operating mode/);
+  } finally { await rm(cwd, { recursive: true, force: true }); }
+});
 
 test('installed CLI resolves its runtime from another repository and includes submitted rework in next using the work snapshot clock', async () => {
   const cwd = await mkdtemp(join(tmpdir(), 'graphyard cli '));
@@ -99,10 +109,41 @@ test('supervisor kills surviving descendants even after their group leader exits
     assert.equal(reservations,0);await assert.rejects(stat(join(cwd,'.graphyard/worktrees/GY-1-1')));
     await assert.rejects(exec('git',['show-ref','--verify','refs/heads/graphyard/gy-1-1'],{cwd}));
     await exec('git',['remote','set-url','origin','ssh://git@github.com/owner/project.git'],{cwd});
-    await exec(process.execPath,[launcher,'worktree','GY-1','1'],{cwd,env});
+    const created=await exec(process.execPath,[launcher,'worktree','GY-1','1'],{cwd,env});
+    assert.equal(JSON.parse(created.stdout).path,join(cwd,'.graphyard/worktrees/GY-1-1'),'worktree stdout remains machine-readable JSON');
     assert.equal(reservations,1);assert.ok((await stat(join(cwd,'.graphyard/worktrees/GY-1-1'))).isDirectory());
   } finally {await new Promise<void>(r=>http.close(()=>r()));await rm(cwd,{recursive:true,force:true});}
  });
+
+test('rework worktree reopens the exact observed PR branch while preserving its prior checkout', async () => {
+  const cwd=await mkdtemp(join(tmpdir(),'graphyard-rework-'));let reservations=0;let candidate='';
+  const branch='graphyard/gy-1-1';
+  const http=createServer((req,res)=>{res.setHeader('Content-Type','application/json');
+    if(req.url==='/api/status')res.end(JSON.stringify({repository:'owner/project',actor:{id:'worker-a',role:'worker'}}));
+    else if(req.method==='POST'){reservations++;res.end('{}');}
+    else res.end(JSON.stringify([{id:'task',key:'GY-1',submission:{epoch:1,pr:1},candidate:{sha:candidate},workspaces:[{epoch:1,branch}],reworkRequested:true}]));
+  });
+  await new Promise<void>(r=>http.listen(0,'127.0.0.1',r));
+  const fakeBin=join(cwd,'fake-bin');await mkdir(fakeBin);const gitBinary=(await exec('which',['git'])).stdout.trim();
+  const gitWrapper=join(fakeBin,'git');await writeFile(gitWrapper,`#!/bin/sh\nif [ "$1" = "fetch" ]; then exit 0; fi\nexec "${gitBinary}" "$@"\n`);await chmod(gitWrapper,0o755);
+  const env={...process.env,PATH:`${fakeBin}:${process.env.PATH}`,GRAPHYARD_TOKEN:'fixture',GRAPHYARD_URL:`http://127.0.0.1:${(http.address() as any).port}`};
+  try {
+    await exec('git',['init','-q','--initial-branch',branch],{cwd});
+    await writeFile(join(cwd,'feature.txt'),'submitted implementation\n');
+    await exec('git',['add','feature.txt'],{cwd});await exec('git',['-c','user.name=Test','-c','user.email=test@localhost','commit','-m','Submitted implementation'],{cwd});
+    const priorHead=(await exec('git',['rev-parse','HEAD'],{cwd})).stdout.trim();
+    candidate=(await exec('git',['-c','user.name=Test','-c','user.email=test@localhost','commit-tree',`${priorHead}^{tree}`,'-p',priorHead,'-m','Remote candidate'],{cwd})).stdout.trim();
+    await exec('git',['remote','add','origin','https://github.com/owner/project.git'],{cwd});
+    await exec('git',['update-ref',`refs/remotes/origin/${branch}`,candidate],{cwd});
+    const result=JSON.parse((await exec(process.execPath,[launcher,'worktree','GY-1','2','a'.repeat(40)],{cwd,env})).stdout);
+    assert.equal(reservations,1);assert.equal(result.branch,branch);
+    assert.equal((await exec('git',['-C',result.path,'rev-parse','HEAD'],{cwd})).stdout.trim(),candidate);
+    assert.equal((await exec('git',['-C',result.path,'symbolic-ref','--short','HEAD'],{cwd})).stdout.trim(),branch);
+    assert.equal((await exec('git',['rev-parse','HEAD'],{cwd})).stdout.trim(),priorHead,'prior checkout stays at its historical commit');
+    await assert.rejects(exec('git',['symbolic-ref','--short','HEAD'],{cwd}));
+    assert.equal((await readFile(join(cwd,'feature.txt'),'utf8')).trim(),'submitted implementation','prior worktree remains intact');
+  } finally {await new Promise<void>(r=>http.close(()=>r()));await rm(cwd,{recursive:true,force:true});}
+});
 
  test('handoff uses the active CLI or explicit override instead of a stale saved launcher', async () => {
   const cwd=await mkdtemp(join(tmpdir(),'graphyard-active-cli-'));

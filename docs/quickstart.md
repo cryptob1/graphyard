@@ -14,7 +14,7 @@ cp .env.example .env
 node -e "console.log(require('node:crypto').randomBytes(32).toString('hex'))"
 ```
 
-Generate a distinct secret for each principal and replace the example tokens in `.env`. The server rejects tokens shorter than 32 characters and duplicate IDs/tokens. Keep an operator credential separate from worker credentials. Give a trusted runner only the proof names it may attest.
+Generate a distinct secret for each principal and replace the example tokens in `.env`. The server rejects tokens shorter than 32 characters and duplicate IDs/tokens. Keep operator, coordinator, and worker credentials separate. Give a trusted runner only the proof names it may attest.
 
 ```sh
 docker compose up -d db
@@ -87,4 +87,14 @@ node /path/to/graphyard/bin/graphyard.mjs evidence GY-1 evidence.json
 
 Worker-submitted evidence remains an assertion. Naming a runner or setting a pass result does not make it trusted. All required proofs need current matching evidence, a passing result, at least one executed assertion, and zero skipped tests.
 
-After gates pass, merge through GitHub. Graphyard observes the merge and marks the work done. No deployment guarantee is implied in v0.1.
+## 6. Merge through the guarded path
+
+Install the [recommended master-agent operating mode](master-agent.md), even for the initial single supervised worker. After every gate passes, run:
+
+```sh
+node /path/to/graphyard/bin/graphyard.mjs master merge GY-1
+```
+
+The command acquires bounded authority, verifies the exact current GitHub candidate and gates, and invokes the protected merge. Graphyard marks the item Done only after independently observing that verified merge. A direct GitHub merge has no verified execution and becomes a visible unauthorized-merge violation. No deployment guarantee is implied in v0.1.
+
+As the worker fleet grows, the same master setup joins Herdr session health, dispatches workers under their own identities, and routes work from Graphyard's ledger.

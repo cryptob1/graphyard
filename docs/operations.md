@@ -32,7 +32,7 @@ Own-App check webhooks are ignored. Other signed webhook deliveries wake jobs, b
 
 ## GitHub or Graphyard outage
 
-The database merge gate refuses observations older than two minutes. GitHub's last successful check may still exist; it does not expire automatically. Suspend merging operationally during an integration outage if this matters to your policy. The future merge-broker design should remove reliance on that manual outage response.
+The database merge gate refuses observations older than two minutes. GitHub's last successful check may still exist; it does not expire automatically. Routine master merges acquire a short-lived server authority, transactionally record a final GitHub verification, and freeze relevant Graphyard mutations around the exact-head provider call. A direct GitHub merge has no verified execution and cannot complete its Graphyard work item. Repository rules must restrict alternative merge identities when the merge itself must also be prevented during an outage.
 
 ## Merge bypass
 
@@ -40,7 +40,7 @@ An observed merge with unsatisfied gates creates a permanent violation. Do not b
 
 ## Credentials
 
-Add or rotate principals in `GRAPHYARD_PRINCIPALS`, then redeploy. Use a unique ID for each worker identity and a unique secret for every principal. Rotation invalidates the old credential on restarted replicas; coordinate rolling replicas so old credentials do not remain accepted indefinitely. Revoke GitHub App keys separately from worker credentials.
+Add or rotate principals in `GRAPHYARD_PRINCIPALS`, then redeploy. Use a unique ID for each coordinator and worker identity and a unique secret for every principal. Rotation invalidates the old credential on restarted replicas; coordinate rolling replicas so old credentials do not remain accepted indefinitely. Revoke GitHub App keys separately from worker credentials. A coordinator is read-only at the Graphyard API boundary; its local GitHub CLI access separately controls whether it can invoke the guarded routine-merge flow.
 
 The UI keeps its token in session storage. Sign out on shared machines. Producer credentials should be held by trusted reporters, never by arbitrary PR code. Logs intentionally omit tokens, but operator-provided blocker text and evidence URLs can still contain sensitive data; avoid submitting secrets as engineering metadata.
 

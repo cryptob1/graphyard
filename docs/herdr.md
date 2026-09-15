@@ -2,6 +2,8 @@
 
 Herdr is Graphyard's first launch integration. The root `herdr-plugin.toml` follows the installed Herdr plugin format and declares a ledger pane and an action to open it. The adapter uses the public HTTP API; Graphyard does not depend on Herdr internals to enforce ownership.
 
+For repositories using several workers, the recommended entry point is the [master-agent operating mode](master-agent.md). It adds capacity routing, visible dispatch, session-health joins, and guarded routine merging while keeping Graphyard as the source of ownership truth. The worker setup below remains the protocol used by each individual agent.
+
 ## Install
 
 Requires Node 24 and Herdr with native plugin support (manifest minimum 0.7.1). From the repository you want to manage, invoke a local Graphyard checkout:
