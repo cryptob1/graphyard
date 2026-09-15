@@ -102,7 +102,7 @@ The runner polls `dispatch` with `{"registration":{"id":"preview-runner","revisi
 
 An attempt has a unique ID and monotonic epoch. Send `{requestId, attemptId, epoch}` to `ack` **before any execution**. The initial ACK window is 30 seconds; after ACK, heartbeats extend the lease up to 60 seconds, bounded by the request deadline. Renew at least every 20 seconds. Stop on refusal and never infer permission from an old receipt. A runner must implement external fencing/isolation: a database lease cannot physically stop a partitioned process.
 
-An unacknowledged timeout is recoverable because no execution was authorized and late ACKs fail. A running timeout retains its resource barrier. Server restarts preserve requests, epochs, receipts and reservations. Reconciliation checks active request deadlines and authority every two seconds. Completed current evidence is rechecked on configuration changes and server startup, rather than rescanning all completed history on each tick. Build provenance is stored in an indexed immutable table as well as the event ledger. Source/policy changes immediately make old evidence inapplicable through the gate evaluator.
+An unacknowledged timeout, cancellation or supersession releases its reservations because no execution was authorized and late ACKs fail. A running timeout retains its resource barrier. Server restarts preserve requests, epochs, receipts and reservations. Reconciliation checks active request deadlines and authority every two seconds. Completed current evidence is rechecked on configuration changes and server startup, rather than rescanning all completed history on each tick. Build provenance is stored in an indexed immutable table as well as the event ledger. Source/policy changes immediately make old evidence inapplicable through the gate evaluator.
 
 ## Trusted results
 
@@ -127,7 +127,7 @@ Expired, revoked, cancelled or superseded results return `{accepted: false, pass
 
 Operator commands use `{requestId, epoch, reason}`:
 
-- `cancel` stops authorization but does not claim the external process stopped. Reservations remain.
+- `cancel` stops authorization but does not claim a running process stopped. Running reservations remain. Never-ACKed dispatches are safely settled because a late ACK cannot authorize execution. Cancelling a queued retry preserves its prior attempt history.
 - `settle` also requires `settlementEvidence`, a URL referencing independent termination/operation-settlement proof. Only use it after confirming the process and its external operations are stopped/fenced. This is an explicit manual recovery attestation in D1, not an automatic kill command.
 - `retry` requires a settled prior attempt, an unexpired deadline, remaining attempt budget and current candidate/registration authority. It queues another attempt and invalidates any earlier pass.
 

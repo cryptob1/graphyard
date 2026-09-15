@@ -292,13 +292,25 @@ export class Validation {
         r.state = 'queued'; delete r.result;
       } else {
         demand(['queued', 'dispatched', 'running'].includes(r.state), 'Request is already terminal');
-        r.state = 'cancelled'; if (a) { a.state = 'cancelled'; a.finishedAt = now.toISOString(); }
-        // Cancellation is not physical termination. Retain resource reservations.
+        await this.endActiveAttempt(db, r, 'cancelled', now);
+        r.state = 'cancelled';
+        // Running cancellation is not physical termination. Only never-ACKed
+        // attempts can be settled here; prior retry history stays untouched.
       }
       await this.persist(db, r); await this.event(db, actor.id, command, { request: r, reason: data.reason, settlementEvidence: data.settlementEvidence }, r.workId);
       if (command !== 'settle') await this.invalidateBinding(db, r, now, actor.id);
       return r;
     });
+  }
+  private async endActiveAttempt(db: pg.PoolClient, r: ValidationRequest, state: 'cancelled' | 'expired' | 'superseded', now: Date) {
+    const a = r.attempts.at(-1);
+    if (!a || !['dispatched', 'running'].includes(r.state)) return;
+    if (r.state === 'dispatched') {
+      // ACK and revocation/termination serialize on the same coordination lock.
+      // A later ACK cannot succeed, so this attempt never acquired execution authority.
+      a.settled = true; await db.query('DELETE FROM validation_resources WHERE request_id=$1', [r.id]);
+    }
+    a.state = state; a.finishedAt = now.toISOString();
   }
   private async invalidateBinding(db: pg.PoolClient, r: ValidationRequest, now: Date, actor: string) {
     const w = (await db.query('SELECT document FROM work_items WHERE id=$1', [r.workId])).rows[0]?.document as Work;
@@ -331,12 +343,11 @@ export class Validation {
       try { await this.valid(db, c, w); await this.registration(db, r.runner, 'runner'); await this.registration(db, r.collector, 'collector'); } catch { invalid = true; }
       const a = r.attempts.at(-1);
       if (invalid) {
-        r.state = 'superseded'; if (a) { a.state = 'superseded'; a.finishedAt ??= now.toISOString(); }
+        await this.endActiveAttempt(db, r, 'superseded', now); r.state = 'superseded';
       } else if (r.state !== 'completed' && (Date.parse(r.deadline) <= now.getTime() || a && ['dispatched', 'running'].includes(r.state) && Date.parse(a.expiresAt) <= now.getTime())) {
         // Unacknowledged runners are prohibited from starting. Their expired ACK
         // cannot succeed; no execution was authorized, so those slots are reusable.
-        if (a && r.state === 'dispatched') { a.settled = true; await db.query('DELETE FROM validation_resources WHERE request_id=$1', [r.id]); }
-        r.state = 'expired'; if (a) { a.state = 'expired'; a.finishedAt = now.toISOString(); }
+        await this.endActiveAttempt(db, r, 'expired', now); r.state = 'expired';
       } else continue;
       await this.persist(db, r); await this.event(db, 'graphyard', r.state, { request: r }, r.workId); await this.invalidateBinding(db, r, now, 'graphyard');
     }

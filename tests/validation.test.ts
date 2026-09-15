@@ -246,3 +246,24 @@ test('completed evidence is retained across idle ticks but revoked on definition
   assert.equal((await current(f.w.id)).gates.find(g => g.name === 'acceptance')?.passed, false);
   assert.equal((await validation.list()).requests.find(r => r.id === f.r.id)?.state, 'superseded'); await cleanup(f);
 });
+
+test('cancelling or expiring a queued retry preserves its settled attempt outcome', async () => {
+  for (const terminate of ['cancel', 'expire'] as const) {
+    const f = await fixture(), command = await start(f); await validation.result(collector, report(f, command), id());
+    const previous = (await validation.list()).requests.find(r => r.id === f.r.id)!.attempts[0];
+    await validation.operatorCommand(operator, 'retry', { requestId: f.r.id, epoch: 1, reason: 'Rerun' }, id());
+    if (terminate === 'cancel') await validation.operatorCommand(operator, 'cancel', { requestId: f.r.id, epoch: 1, reason: 'Cancel queued retry' }, id());
+    else { await store.pool.query("UPDATE validation_requests SET document=jsonb_set(document,'{deadline}',to_jsonb('2000-01-01T00:00:00Z'::text)) WHERE id=$1", [f.r.id]); await validation.reconcile(); }
+    assert.deepEqual((await validation.list()).requests.find(r => r.id === f.r.id)!.attempts[0], previous); await cleanup(f);
+  }
+});
+test('superseding a never-ACKed dispatch releases resources and refuses late ACK', async () => {
+  const f = await fixture(), d: any = await validation.dispatch(runner, { registration: f.runnerRef }, id());
+  const registration = (await validation.list()).definitions.find(d => d.kind === 'registration' && d.id === f.runnerRef.id)!;
+  const { revision, createdAt, createdBy, ...data } = registration;
+  await validation.define(operator, { ...data, expectedRevision: revision, enabled: false }, id());
+  const r = (await validation.list()).requests.find(r => r.id === f.r.id)!;
+  assert.equal(r.attempts[0].settled, true); assert.equal(r.state, 'superseded');
+  assert.equal((await store.pool.query('SELECT * FROM validation_resources WHERE request_id=$1', [r.id])).rowCount, 0);
+  await assert.rejects(validation.runnerCommand(runner, 'ack', { requestId: r.id, attemptId: d.attempt.id, epoch: 1 }, id()), /superseded|revoked/); await cleanup(f);
+});
