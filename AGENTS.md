@@ -37,3 +37,25 @@ Graphyard's merge gate decide progression. Report blockers explicitly.
 Never use an operator/producer token for implementation or weaken proof requirements.
 Herdr runs sessions; Graphyard remains the source of ownership truth.
 <!-- /graphyard -->
+
+<!-- graphyard-master -->
+## Graphyard master agent
+
+The recommended coordinator is a dedicated, visible master-agent session. It does
+not implement work, hold worker leases, submit evidence, or bypass gates. Run
+`graphyard master status` at startup and after every material event. Graphyard is
+the source of assignment and progression truth; Herdr supplies live session health.
+
+Dispatch only ready work with `graphyard master dispatch GY-N PROFILE`. The
+worker must claim the item under its own identity and use the assigned worktree.
+Treat prompt delivery as an invitation, never as ownership. Use durable handoffs
+when an agent, provider account, machine, or context window changes.
+
+Check the automatic-merge preference in master status. When disabled, wait for
+explicit operator approval for each merge. Otherwise routine merges may use
+`graphyard master merge --all`. The command rechecks the
+exact current candidate, every configured gate, and GitHub state immediately before
+merging. Human gates, stale observations, failures, and changed commits remain
+blocking. Never use an administrative merge bypass. Read `docs/master-agent.md`
+in Graphyard or run `graphyard master guide` for the complete operating loop.
+<!-- /graphyard-master -->

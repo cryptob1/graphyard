@@ -87,7 +87,7 @@ export async function setupRepository(root: string, input: Connection, options: 
     try { response = await (options.fetcher ?? fetch)(`${connection.url}/api/status`, { headers: { Authorization: `Bearer ${connection.token}` }, signal: AbortSignal.timeout(15000) }); } catch { throw new Error('Cannot reach Graphyard; setup has not saved credentials'); }
     if (!response.ok) throw new Error(`Graphyard rejected the credential (${response.status}); setup has not saved it`);
     const status = await response.json();
-    if (status.actor?.role !== 'worker') throw new Error('Repository worker setup requires a worker credential; operator, producer, and reader tokens are not suitable for launching workers');
+    if (status.actor?.role !== 'worker') throw new Error('Repository worker setup requires a worker credential; operator, coordinator, producer, and reader tokens are not suitable for launching workers');
     assertRepository(detected.repository, status.repository);
     connection.principal = status.actor.id;
   }

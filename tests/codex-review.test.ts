@@ -83,6 +83,23 @@ function commentFixture() {
 test('authenticated explicit clean result supersedes an older stuck summary', async () => {
   const f = commentFixture(); const result = await f.run(); assert.equal(result.approved, true); assert.equal(result.resultId, 15);
 });
+test('explicit clean result permits only its matching connector summary completion', async () => {
+  const f = commentFixture();
+  f.summary.body = `<!-- codex-pull-request-review-summary -->\n| 📝 **Code Review** | ✅ **Completed** <relative-time datetime="2026-01-01T00:02:01.250Z">now</relative-time> | \`aaaaaaaaaa\` | Manual request |`;
+  f.summary.updated_at = '2026-01-01T00:02:02Z';
+  assert.equal((await f.run()).approved, true);
+  for (const mutate of [
+    (g: ReturnType<typeof commentFixture>) => { g.summary.body = g.summary.body.replace('aaaaaaaaaa', 'bbbbbbbbbb'); },
+    (g: ReturnType<typeof commentFixture>) => { g.summary.body = g.summary.body.replace('Manual request', 'New commits'); },
+    (g: ReturnType<typeof commentFixture>) => { g.summary.body = g.summary.body.replace('00:02:01.250Z', '00:02:11.250Z'); },
+    (g: ReturnType<typeof commentFixture>) => { g.summary.updated_at = '2026-01-01T00:02:11Z'; },
+  ]) {
+    const g = commentFixture();
+    g.summary.body = `<!-- codex-pull-request-review-summary -->\n| 📝 **Code Review** | ✅ **Completed** <relative-time datetime="2026-01-01T00:02:01.250Z">now</relative-time> | \`aaaaaaaaaa\` | Manual request |`;
+    g.summary.updated_at = '2026-01-01T00:02:02Z'; mutate(g);
+    assert.equal((await g.run()).approved, false);
+  }
+});
 test('explicit results refuse stale, edited, spoofed, conflicting and changing evidence', async () => {
   const changes = [
     (f: ReturnType<typeof commentFixture>) => { f.result.user.id = 99; },
@@ -120,6 +137,9 @@ test('explicit results refuse stale, edited, spoofed, conflicting and changing e
   const {readFile} = await import('node:fs/promises');
   const real = await readFile(new URL('./fixtures/codex-clean-result.txt', import.meta.url), 'utf8');
   const valid = commentFixture(); valid.result.body = real; assert.equal((await valid.run()).approved, true);
+  const currentFooter = `Codex Review: Didn't find any major issues. Bravo.\n\n**Reviewed commit:** \`aaaaaaaaaa\`\n\n<details> <summary>ℹ️ About Codex in GitHub</summary>\n<br/>\n\n[Your team has set up Codex to review pull requests in this repo](https://chatgpt.com/codex/cloud/settings/general). Reviews are triggered when you\n- Open a pull request for review\n- Mark a draft as ready\n- Comment "@codex review".\n\nIf Codex has suggestions, it will comment; otherwise it will react with 👍.\n\nCodex can also answer questions or update the PR. Try commenting "@codex address that feedback".\n</details>`;
+  const current = commentFixture(); current.result.body = currentFooter; assert.equal((await current.run()).approved, true);
+  current.result.body = currentFooter.replace('Try commenting', 'A critical issue remains. Try commenting'); assert.equal((await current.run()).approved, false);
   for (const body of [real + '\nP1: a serious issue', real.replace('Codex can also answer questions', 'Critical bug found. Codex can also answer questions'), commentFixture().result.body + '\nAdditional findings']) {
     const f = commentFixture(); f.result.body = body; assert.equal((await f.run()).approved, false);
   }
