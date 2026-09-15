@@ -128,7 +128,7 @@ Acceptance needs its own identity boundary. Add a `producer` principal whose `pr
 
 ## 3. Install repository instructions and the Herdr plugin
 
-From the repository you are onboarding, use the first worker's credential:
+On the first worker machine, use a worker-only checkout of the repository and the first worker's credential:
 
 ```sh
 cd /path/to/your-repository
@@ -141,11 +141,11 @@ node "$GRAPHYARD_CLI" init \
 
 Paste or pipe the `worker` token and send EOF. The command verifies the server and repository, discovers scripts and workflows, installs one managed section in `AGENTS.md`, stores the worker connection under ignored `.graphyard/`, and links and enables the native Herdr plugin. Existing `AGENTS.md` instructions are preserved.
 
-Review and commit the managed `AGENTS.md` update and the generated `.gitignore` rule for `.graphyard/`. Never commit the `.graphyard/` directory itself. Run this step on every worker machine with a unique host ID and that worker's own token.
+Review and commit the managed `AGENTS.md` update and the generated `.gitignore` rule for `.graphyard/`. Never commit the `.graphyard/` directory itself. Run this step on every worker machine with a unique host ID and that worker's own token. Do not reuse this credential-bearing checkout for the dedicated coordinator.
 
 ## 4. Install the dedicated master
 
-On the coordinator machine, still inside the managed repository:
+On the dedicated coordinator machine or OS identity, use a clean checkout of the managed repository that has never stored a worker connection in `.graphyard/connection.json`:
 
 ```sh
 node "$GRAPHYARD_CLI" master init \
@@ -215,6 +215,7 @@ For the recommended separated topology, the master uses `master status` to selec
 
 ```sh
 node "$GRAPHYARD_CLI" claim GY-1
+git fetch origin YOUR_CONFIGURED_BASE_BRANCH
 node "$GRAPHYARD_CLI" worktree GY-1 EPOCH origin/YOUR_CONFIGURED_BASE_BRANCH
 cd .graphyard/worktrees/GY-1-EPOCH
 node "$GRAPHYARD_CLI" watch GY-1 EPOCH -- YOUR_AGENT_COMMAND
