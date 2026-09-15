@@ -222,6 +222,7 @@ export class Engine {
       demand(work.mergeExecution?.id === data.executionId && work.mergeExecution.owner === actor.id, 'Merge execution is missing, expired, superseded, or owned by another coordinator');
       work.mergeExecution = null; this.evaluate(work, all, now);
       await save(db, work, actor.id, 'merge.execution.cancelled', now, { executionId: data.executionId, reason: data.reason });
+      await wakeJob(db, work.id);
       const result = { key: work.key, revision: work.revision, cancelled: data.executionId };
       await db.query('INSERT INTO receipts(actor,key,fingerprint,result) VALUES($1,$2,$3,$4)', [actor.id, key, fingerprint, JSON.stringify(result)]);
       return result;

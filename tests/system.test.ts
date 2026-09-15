@@ -188,6 +188,20 @@ test('periodic reconciliation defers without publishing failure during active me
   assert.equal(publications, 0); assert.equal(row.error, null); assert.equal(row.token, null);
   assert.ok(Math.abs(row.available_at.getTime() - Date.parse(granted.execution.expiresAt)) < 1000);
 });
+test('reconciliation that became stale during merge acquisition defers without replacing the passing check', async () => {
+  let w = await submitted(); w = await engine.observe(w.id, w.revision, observation(w));
+  w = await engine.execute(producer, 'evidence', w.id, proof(), randomUUID());
+  await store.pool.query('UPDATE jobs SET available_at=now(),locked_until=NULL,token=NULL WHERE work_id=$1', [w.id]);
+  let observed!: () => void, resume!: () => void; const started = new Promise<void>(resolve => { observed = resolve; }); const paused = new Promise<void>(resolve => { resume = resolve; });
+  let publications = 0;
+  const adapter = { observe: async (current: Work) => { observed(); await paused; return observation(current); }, publish: async () => { publications++; } } as unknown as GitHub;
+  const processing = processJob(engine, adapter); await started;
+  const granted = await engine.acquireMerge(coordinator, w.id, { expectedRevision: w.revision, sha: head, baseSha: base, policyRevision: w.policyRevision }, randomUUID());
+  resume(); await processing;
+  const row = (await store.pool.query('SELECT error,token,available_at FROM jobs WHERE work_id=$1', [w.id])).rows[0];
+  assert.equal(publications, 0); assert.equal(row.error, null); assert.equal(row.token, null);
+  assert.ok(Math.abs(row.available_at.getTime() - Date.parse(granted.execution.expiresAt)) < 1000);
+});
 test('merge execution cannot outlive a required proof or the fresh observation', async () => {
   let w = await submitted(); w = await engine.observe(w.id, w.revision, observation(w));
   w = await engine.execute(producer, 'evidence', w.id, proof(), randomUUID());
