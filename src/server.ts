@@ -8,6 +8,7 @@ import { Store } from './store.js';
 import { Engine, type Command } from './engine.js';
 import { Refusal, demand, type Principal } from './model.js';
 import { githubFromEnv, processJob, type GitHub } from './github.js';
+import { Validation } from './validation.js';
 import { defineScenario, scenarios } from './scenarios.js';
 
 export const principalSchema = z.array(z.object({ id: z.string().min(1), role: z.enum(['admin', 'worker', 'producer', 'reader']), token: z.string().min(32), proofs: z.array(z.string()).optional(), displayName: z.string().trim().min(1).max(100).regex(/^[^\u0000-\u001f\u007f]+$/).optional(), runtime: z.string().trim().min(1).max(80).regex(/^[^\u0000-\u001f\u007f]+$/).optional() }).strict()).min(1);
@@ -19,6 +20,7 @@ async function body(req: IncomingMessage) {
 }
 export function server(engine: Engine, credentials: Credential[], github: GitHub | null = null) {
   const principals = credentials.map(({ token, ...actor }) => ({ actor, hash: createHash('sha256').update(token).digest() }));
+  const validation = new Validation(engine, principals.map(p => p.actor), github?.config.repository ?? process.env.GITHUB_REPOSITORY ?? '');
   return createServer(async (req, res) => {
     res.setHeader('X-Content-Type-Options', 'nosniff');
     res.setHeader('Referrer-Policy', 'no-referrer');
@@ -50,6 +52,23 @@ export function server(engine: Engine, credentials: Credential[], github: GitHub
         const hash = createHash('sha256').update(token).digest();
         const actor = principals.find(p => timingSafeEqual(p.hash, hash))?.actor;
         demand(actor, 'A valid Graphyard bearer token is required', 401);
+        if (url.pathname === '/api/validation' && req.method === 'GET') return send(200, await validation.list(url.searchParams.get('cursor') ?? undefined));
+        if (url.pathname === '/api/validation/definitions' && req.method === 'GET') return send(200, await validation.definitions(url.searchParams.get('cursor') ?? undefined));
+        const candidateRead = url.pathname.match(/^\/api\/validation\/candidate\/([^/]+)$/);
+        if (candidateRead && req.method === 'GET') return send(200, await validation.readCandidate(candidateRead[1]));
+        const validationRoute = url.pathname.match(/^\/api\/validation\/(define|build|candidate|request|dispatch|ack|heartbeat|result|cancel|settle|retry)$/);
+        if (validationRoute && req.method === 'POST') {
+          const command = validationRoute[1], data = JSON.parse((await body(req)).toString()), key = String(req.headers['idempotency-key'] ?? '');
+          const result = command === 'define' ? await validation.define(actor, data, key)
+            : command === 'build' ? await validation.attestBuild(actor, data, key)
+            : command === 'candidate' ? await validation.createCandidate(actor, data, key)
+            : command === 'request' ? await validation.createRequest(actor, data, key)
+            : command === 'dispatch' ? await validation.dispatch(actor, data, key)
+            : command === 'result' ? await validation.result(actor, data, key)
+            : command === 'ack' || command === 'heartbeat' ? await validation.runnerCommand(actor, command, data, key)
+            : await validation.operatorCommand(actor, command as 'cancel' | 'settle' | 'retry', data, key);
+          return send(200, result);
+        }
         if (url.pathname === '/api/scenarios') {
           if (req.method === 'GET') return send(200, await scenarios(engine.store));
           if (req.method === 'POST') return send(200, await defineScenario(engine.store, actor, JSON.parse((await body(req)).toString()), String(req.headers['idempotency-key'] ?? '')));
@@ -103,10 +122,12 @@ async function main() {
   const engine = new Engine(store, (process.env.GITHUB_CI_APP_IDS ?? '15368').split(',').map(Number));
   const github = await githubFromEnv();
   const http = server(engine, credentials, github);
+  const validation = new Validation(engine, credentials.map(({ token, ...actor }) => actor), github?.config.repository ?? process.env.GITHUB_REPOSITORY ?? '');
+  await validation.reconcile(true);
   let running = false;
   const timer = setInterval(async () => {
     if (running) return; running = true;
-    try { await engine.reconcile(); if (github) await Promise.all(Array.from({ length: 4 }, () => processJob(engine, github))); }
+    try { await validation.reconcile(); await engine.reconcile(); if (github) await Promise.all(Array.from({ length: 4 }, () => processJob(engine, github))); }
     catch (error) { console.error('reconciliation failed', error instanceof Error ? error.message : 'unknown'); }
     finally { running = false; }
   }, 2000);

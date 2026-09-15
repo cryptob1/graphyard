@@ -31,6 +31,7 @@ export interface Evidence {
   producer: string; trusted: boolean; result: 'pass' | 'fail';
   executed: number; skipped: number; url?: string; at: string;
   scenarioRevision?: number; environment?: string;
+  validation?: { candidateId: string; requestId: string; attemptId: string };
 }
 export interface ReviewRequest { commentId: number; sha: string; baseSha: string; policyRevision: number; body: string; createdAt: string }
 export interface AgentReview { provider: 'codex'; sha: string; approved: boolean; reason: string; summaryId?: number; resultId?: number; requestId?: number; reactionId?: number; completedAt?: string }
@@ -45,6 +46,7 @@ export interface Observation {
 }
 export interface Gate { name: string; passed: boolean; reasons: string[] }
 export interface Work extends Create {
+  validation?: Record<string, { candidateId: string; requestId?: string; attemptId?: string }>;
   retiredCriterionIds?: string[];
   formalReviewResetRequired?: boolean;
   formalReviewBaseline?: { pr: number; policyRevision: number; reviewIds: number[] };
@@ -73,6 +75,15 @@ export function demand(value: unknown, message: string, status = 409): asserts v
 export function admin(actor: Principal) { demand(actor.role === 'admin', 'Operator permission required', 403); }
 export function activeLease(work: Work, actor: Principal, epoch: number, now: Date) {
   demand(work.lease && work.lease.owner === actor.id && work.lease.epoch === epoch && Date.parse(work.lease.expiresAt) > now.getTime(), 'Lease missing, expired, or superseded; claim the task again');
+}
+
+// Shared by gates and human-facing proof previews.
+export function currentEvidence(work: Work, proof: string): Evidence | undefined {
+  const scenario = work.scenarioRequirements?.find(s => s.proof === proof);
+  const validation = work.validation?.[proof];
+  return work.evidence.filter(e => e.proof === proof && e.trusted && e.sha === work.candidate?.sha && e.baseSha === work.candidate?.baseSha && e.policyRevision === work.policyRevision
+    && (!validation || !!validation.attemptId && e.validation?.candidateId === validation.candidateId && e.validation?.requestId === validation.requestId && e.validation?.attemptId === validation.attemptId)
+    && (!scenario || e.scenarioRevision === scenario.revision && e.environment === scenario.environment)).at(-1);
 }
 
 // Pure evaluation: neither worker assertions nor UI state can authorize progression.
@@ -104,7 +115,7 @@ export function evaluate(work: Work, all: Work[], now: Date, ciAppIds: number[])
   const reasons: string[] = [];
   for (const ac of work.criteria) for (const proof of ac.proofs) {
     const scenario = work.scenarioRequirements?.find(s => s.proof === proof);
-    const evidence = work.evidence.filter(e => e.proof === proof && e.trusted && e.sha === candidate?.sha && e.baseSha === candidate?.baseSha && e.policyRevision === work.policyRevision && (!scenario || e.scenarioRevision === scenario.revision && e.environment === scenario.environment)).at(-1);
+    const evidence = currentEvidence(work, proof);
     if (!evidence || evidence.result !== 'pass' || evidence.executed < 1 || evidence.skipped !== 0) reasons.push(`${ac.id}: ${proof} needs trusted passing evidence, with executed > 0 and skipped = 0, for this candidate and policy${scenario ? `; scenario v${scenario.revision} in ${scenario.environment}` : ''}`);
   }
   add('acceptance', reasons);

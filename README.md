@@ -61,10 +61,11 @@ For example, “send a confirmation SMS after booking” might require proof tha
 | **GitHub enforcement** | Independent PR, review, CI, and merge observation; an App-owned required merge check when branch protection is configured. |
 | **A live delivery view** | Delivery graph and Kanban board with ownership, gate refusals, evidence, integration errors, and history. |
 | **Versioned E2E definitions** | Scenario purpose, steps, expected outcomes, environment, and links to executable tests. Work pins the required scenario revision. |
+| **Validation runner protocol** | Immutable candidates, approved test bundles, separate runner/collector identities, explicit ACKs, fenced attempts and recovery. External execution remains a separate integration. |
 | **Recovery between steps** | Durable reconciliation jobs, deduplicated webhooks, retry-safe commands, and periodic reconciliation. |
 | **Herdr integration** | A native plugin to inspect work and manage claims, with CLI supervision for worker processes. |
 
-A test-case definition is a requirement, not a passing test. Executable tests stay in Git; runners execute them; Graphyard records and evaluates their evidence. Large artifacts stay in CI or object storage. See the [test-case registry](docs/test-cases.md).
+A test-case definition is a requirement, not a passing test. Executable tests stay in Git; runners execute them; Graphyard records and evaluates their evidence. Large artifacts stay in CI or object storage. See the [test-case registry](docs/test-cases.md) and [validation protocol](docs/validation.md).
 
 ## Bring your agents
 
