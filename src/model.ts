@@ -29,7 +29,7 @@ export interface Candidate { sha: string; baseSha: string; pr: number; branch: s
 export interface Evidence {
   id: string; proof: string; sha: string; baseSha: string; policyRevision: number;
   producer: string; trusted: boolean; result: 'pass' | 'fail';
-  executed: number; skipped: number; url?: string; at: string;
+  executed: number; skipped: number; url?: string; at: string; expiresAt?: string;
   scenarioRevision?: number; environment?: string;
   validation?: { candidateId: string; requestId: string; attemptId: string };
 }
@@ -78,12 +78,13 @@ export function activeLease(work: Work, actor: Principal, epoch: number, now: Da
 }
 
 // Shared by gates and human-facing proof previews.
-export function currentEvidence(work: Work, proof: string): Evidence | undefined {
+export function currentEvidence(work: Work, proof: string, now = new Date()): Evidence | undefined {
   const scenario = work.scenarioRequirements?.find(s => s.proof === proof);
   const validation = work.validation?.[proof];
-  return work.evidence.filter(e => e.proof === proof && e.trusted && e.sha === work.candidate?.sha && e.baseSha === work.candidate?.baseSha && e.policyRevision === work.policyRevision
+  const latest = work.evidence.filter(e => e.proof === proof && e.trusted && e.sha === work.candidate?.sha && e.baseSha === work.candidate?.baseSha && e.policyRevision === work.policyRevision
     && (!validation || !!validation.attemptId && e.validation?.candidateId === validation.candidateId && e.validation?.requestId === validation.requestId && e.validation?.attemptId === validation.attemptId)
     && (!scenario || e.scenarioRevision === scenario.revision && e.environment === scenario.environment)).at(-1);
+  return latest && (!latest.expiresAt || Date.parse(latest.expiresAt) > now.getTime()) ? latest : undefined;
 }
 
 // Pure evaluation: neither worker assertions nor UI state can authorize progression.
@@ -115,7 +116,7 @@ export function evaluate(work: Work, all: Work[], now: Date, ciAppIds: number[])
   const reasons: string[] = [];
   for (const ac of work.criteria) for (const proof of ac.proofs) {
     const scenario = work.scenarioRequirements?.find(s => s.proof === proof);
-    const evidence = currentEvidence(work, proof);
+    const evidence = currentEvidence(work, proof, now);
     if (!evidence || evidence.result !== 'pass' || evidence.executed < 1 || evidence.skipped !== 0) reasons.push(`${ac.id}: ${proof} needs trusted passing evidence, with executed > 0 and skipped = 0, for this candidate and policy${scenario ? `; scenario v${scenario.revision} in ${scenario.environment}` : ''}`);
   }
   add('acceptance', reasons);

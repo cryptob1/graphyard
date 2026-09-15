@@ -1,9 +1,10 @@
-import { readFile, mkdir, realpath, stat } from 'node:fs/promises';
+import { readFile, mkdir, realpath, stat, writeFile } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import { hostname } from 'node:os';
 import { resolve } from 'node:path';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { supervise } from './supervisor.js';
+import { inspectRunnerRepository, snapshotRunnerSources } from './runner-setup.js';
 import { assertRepository, discover } from './onboarding.js';
 import { startGithubSetup } from './github-setup.js';
 import { fileURLToPath } from 'node:url';
@@ -50,6 +51,8 @@ Environment: GRAPHYARD_URL, GRAPHYARD_TOKEN (individual role-scoped credential)
   list | next                  List all work / claimable work
   create path/to/work.json      Create work with acceptance criteria (operator)
   validation [ACTION file.json] List validation state or submit a protocol command
+  runner inspect [DIRECTORY]   Discover Playwright inputs without executing repository code
+  runner snapshot file.json    Snapshot an explicit source-file list for review (not approval)
   scenarios                    List versioned E2E test-case definitions
   scenario file.json           Publish a scenario version (operator)
   ready GY-N                   Release backlog item (operator)
@@ -72,8 +75,23 @@ Environment: GRAPHYARD_URL, GRAPHYARD_TOKEN (individual role-scoped credential)
 Use GRAPHYARD_REQUEST_ID to safely retry an identical command after a network timeout.
 Never share an operator or producer credential with an implementation agent.`); return;
   }
+  if (command === 'runner') {
+    if (id === 'inspect' && args.length <= 1) return print(await inspectRunnerRepository(resolve(args[0] ?? '.')));
+    if (id === 'snapshot' && args.length === 1) return print(await snapshotRunnerSources(process.cwd(), JSON.parse(await readFile(args[0], 'utf8'))));
+    throw new Error('Use runner inspect [DIRECTORY] or runner snapshot file.json');
+  }
   if (command === 'validation') {
     if (!id || id === 'requests') return print(await api('validation' + (args[0] ? `?cursor=${encodeURIComponent(args[0])}` : '')));
+    if (id === 'artifact-upload' && args.length === 1) return print(await api('validation/artifacts', JSON.parse(await readFile(args[0], 'utf8'))));
+    if (id === 'artifact-download' && args.length === 3) {
+      if (!token) throw new Error('An individual Graphyard credential is required');
+      const response = await fetch(`${base}/api/validation/artifacts/${encodeURIComponent(args[0])}/${encodeURIComponent(args[1])}`, { headers: { Authorization: `Bearer ${token}` }, redirect: 'error', signal: AbortSignal.timeout(30_000) });
+      if (!response.ok) throw new Error(`Artifact download refused (${response.status})`);
+      const bytes = Buffer.from(await response.arrayBuffer());
+      if (bytes.length > 8_388_608) throw new Error('Artifact exceeds the supported size limit');
+      await writeFile(args[2], bytes, { flag: 'wx', mode: 0o600 });
+      return print({ saved: args[2], bytes: bytes.length });
+    }
     if (id === 'definitions') return print(await api('validation/definitions' + (args[0] ? `?cursor=${encodeURIComponent(args[0])}` : '')));
     if (id === 'show-candidate' && args[0]) return print(await api(`validation/candidate/${encodeURIComponent(args[0])}`));
     if (!['define','build','candidate','request','dispatch','ack','heartbeat','result','cancel','settle','retry'].includes(id) || !args[0]) throw new Error('Use validation ACTION file.json');

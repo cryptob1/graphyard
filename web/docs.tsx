@@ -6,7 +6,7 @@ const pages = [
   ['github', 'GitHub enforcement'], ['protocol', 'Agent protocol & API'], ['herdr', 'Herdr integration'],
   ['operations', 'Operations & recovery'], ['development', 'Development & dogfooding'],
   ['coordination', 'Coordination & recovery drills'],
-  ['test-cases', 'E2E test cases'], ['validation', 'Validation runner protocol'],
+  ['test-cases', 'E2E test cases'], ['validation', 'Validation runner protocol'], ['runner-setup', 'Runner preparation & artifacts'],
   ['first-pr', 'First enforced PR'],
   ['implementation-audit', 'Implementation audit'],
   ['turnkey-delivery-roadmap', 'Turnkey E2E & delivery roadmap'],

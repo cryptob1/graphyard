@@ -27,7 +27,7 @@ type Registration = Definition & { kind: 'registration' };
 type Bundle = Definition & { kind: 'bundle' };
 const attestationSchema = z.object({ registration: ref, workId: z.uuid(), expectedWorkRevision: revision, sourceSha: sha, baseSha: sha, buildInputsDigest: digest, artifacts, provenanceUrl: z.url().max(2000) }).strict();
 export type BuildAttestation = z.infer<typeof attestationSchema> & { id: string; producer: string; at: string; repository: string };
-const candidateSchema = z.object({ workId: z.uuid(), expectedWorkRevision: revision, proof: proofSchema, environment: ref, bundle: ref, buildAttestationId: z.uuid(), requiredArtifacts: resourceNames }).strict();
+const candidateSchema = z.object({ workId: z.uuid(), expectedWorkRevision: revision, proof: proofSchema, environment: ref, bundle: ref, buildAttestationId: z.uuid(), requiredArtifacts: resourceNames, artifactStorage: z.enum(['external', 'postgres']).default('external') }).strict();
 export type ValidationCandidate = z.infer<typeof candidateSchema> & { id: string; sourceSha: string; baseSha: string; policyRevision: number; scenario: { revision: number; hash: string; environment: string }; createdAt: string; createdBy: string };
 const requestSchema = z.object({ candidateId: z.uuid(), expectedWorkRevision: revision, runner: ref, collector: ref, deadline: z.iso.datetime(), maxAttempts: z.number().int().min(1).max(5) }).strict();
 export type Attempt = { id: string; epoch: number; dispatchedAt: string; expiresAt: string; acknowledgedAt?: string; finishedAt?: string; state: 'dispatched' | 'running' | 'completed' | 'expired' | 'cancelled' | 'superseded'; settled: boolean };
@@ -117,7 +117,8 @@ export class Validation {
   private compatible(w: Work, c: ValidationCandidate) { return w.stage !== 'done' && !w.observation?.merged && w.candidate?.sha === c.sourceSha && w.candidate.baseSha === c.baseSha && w.policyRevision === c.policyRevision && w.scenarioRequirements.some(s => s.proof === c.proof && s.revision === c.scenario.revision && s.hash === c.scenario.hash && s.environment === c.scenario.environment); }
   private async valid(db: pg.PoolClient, c: ValidationCandidate, w: Work) {
     demand(this.compatible(w, c), 'Candidate no longer matches current work or requirements');
-    await this.definition(db, 'environment', c.environment);
+    const environment = await this.definition(db, 'environment', c.environment) as Environment;
+    demand(environment.repository === this.repository, 'Validation repository scope differs', 403);
     await this.definition(db, 'bundle', c.bundle);
     const build = (await db.query('SELECT document AS attestation FROM validation_builds WHERE id=$1', [c.buildAttestationId])).rows[0]?.attestation as BuildAttestation | undefined;
     demand(build, 'Missing trusted build provenance'); await this.registration(db, build.registration, 'builder');
@@ -280,12 +281,82 @@ export class Validation {
         await this.event(db, actor.id, 'result-rejected', { requestId: r.id, attemptId: data.attemptId, epoch: data.epoch, reportHash: hash(data), result }, r.workId); return result;
       }
       const reasons = await this.reportReasons(db, c, data);
+      let expiresAt: string | undefined;
+      if (c.artifactStorage === 'postgres') {
+        const stored = (await db.query('SELECT id,name,digest,expires_at FROM validation_artifacts WHERE request_id=$1 AND attempt_id=$2 AND bytes IS NOT NULL AND expires_at>$3', [r.id, a!.id, now])).rows;
+        for (const required of c.requiredArtifacts) {
+          const supplied = data.artifacts.find(x => x.name === required);
+          const actual = stored.find(x => x.name === required && supplied?.digest === x.digest && supplied?.url === this.artifactUrl(r.id, x.id));
+          if (!actual) reasons.push(`Private artifact ${required} is missing, expired or mismatched`);
+          else if (!expiresAt || actual.expires_at.toISOString() < expiresAt) expiresAt = actual.expires_at.toISOString();
+        }
+      }
       const result = { accepted: true, passed: reasons.length === 0, reasons };
       current.state = 'completed'; current.result = result; a!.state = 'completed'; a!.finishedAt = now.toISOString(); a!.settled = data.executionSettled;
       if (a!.settled) await db.query('DELETE FROM validation_resources WHERE request_id=$1', [r.id]);
       await this.persist(db, current);
-      w.evidence.push({ id: randomUUID(), proof: c.proof, sha: c.sourceSha, baseSha: c.baseSha, policyRevision: c.policyRevision, producer: actor.id, trusted: true, result: result.passed ? 'pass' : 'fail', executed: data.executed, skipped: data.skipped, at: now.toISOString(), scenarioRevision: c.scenario.revision, environment: c.scenario.environment, validation: { candidateId: c.id, requestId: r.id, attemptId: a!.id } });
+      w.evidence.push({ id: randomUUID(), proof: c.proof, sha: c.sourceSha, baseSha: c.baseSha, policyRevision: c.policyRevision, producer: actor.id, trusted: true, result: result.passed ? 'pass' : 'fail', executed: data.executed, skipped: data.skipped, at: now.toISOString(), ...(expiresAt ? { expiresAt } : {}), scenarioRevision: c.scenario.revision, environment: c.scenario.environment, validation: { candidateId: c.id, requestId: r.id, attemptId: a!.id } });
       await this.changed(db, w, actor.id, 'result', now, { requestId: r.id, attemptId: a!.id, report: data, result }); return result;
+    });
+  }
+  private artifactUrl(requestId: string, artifactId: string) {
+    // A route identifier, not a bearer URL: the HTTP API always requires authentication.
+    return `graphyard-artifact://${this.repository}/${requestId}/${artifactId}`;
+  }
+  async uploadArtifact(actor: Principal, input: unknown, key: string) {
+    demand(actor.role === 'producer', 'A separate trusted collector is required', 403);
+    const data = commandSchema.extend({ name, mediaType: z.enum(['application/json', 'application/zip', 'image/png']),
+      bytes: z.string().min(4).max(11_184_812).regex(/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/),
+      capturePolicy: z.literal('approved-test-data-only') }).strict().parse(input);
+    const bytes = Buffer.from(data.bytes, 'base64');
+    demand(bytes.length > 0 && bytes.length <= 8_388_608, 'Artifact must be nonempty and at most 8 MiB', 413);
+    const digest = `sha256:${createHash('sha256').update(bytes).digest('hex')}`;
+    // Never copy uploaded bytes into the immutable event ledger or an idempotency receipt.
+    const { bytes: _encoded, ...metadata } = data;
+    return this.withReceipt(actor, 'artifact', { ...metadata, digest }, key, async (db, now) => {
+      const r = await this.request(db, data.requestId), a = r.attempts.at(-1);
+      const collector = await this.registration(db, r.collector, 'collector');
+      demand(collector.principalId === actor.id && actor.proofs?.includes(r.proof), 'Wrong collector principal or proof scope', 403);
+      await this.registration(db, r.runner, 'runner');
+      const c = await this.candidate(db, r.candidateId), w = await this.work(db, r.workId); await this.valid(db, c, w);
+      demand(c.artifactStorage === 'postgres' && c.requiredArtifacts.includes(data.name), 'Artifact storage or name is not authorized');
+      demand(a && a.id === data.attemptId && a.epoch === data.epoch && r.state === 'running' && Date.parse(a.expiresAt) > now.getTime() && Date.parse(r.deadline) > now.getTime() && w.validation?.[r.proof]?.requestId === r.id, 'Artifact attempt authority expired or superseded');
+      demand(!(await db.query('SELECT id FROM validation_artifacts WHERE request_id=$1 AND attempt_id=$2 AND name=$3', [r.id, a.id, data.name])).rowCount, 'Artifact name already published; reuse the original idempotency key');
+      const id = randomUUID(), expiresAt = new Date(now.getTime() + 7 * 86_400_000).toISOString();
+      await db.query('INSERT INTO validation_artifacts(id,request_id,attempt_id,name,digest,created_at,expires_at,media_type,bytes) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)', [id, r.id, a.id, data.name, digest, now, expiresAt, data.mediaType, bytes]);
+      const result = { id, requestId: r.id, attemptId: a.id, name: data.name, digest, size: bytes.length, expiresAt, url: this.artifactUrl(r.id, id) };
+      await this.event(db, actor.id, 'artifact-stored', { ...result, capturePolicy: data.capturePolicy }, r.workId); return result;
+    });
+  }
+  async readArtifact(actor: Principal, requestId: string, artifactId: string) {
+    z.uuid().parse(requestId); z.uuid().parse(artifactId);
+    return this.store.transaction(async (db, now) => {
+      const r = await this.request(db, requestId);
+      const w = (await db.query('SELECT document FROM work_items WHERE id=$1', [r.workId])).rows[0]?.document as Work | undefined;
+      const collector = await this.definition(db, 'registration', r.collector, false) as Registration;
+      const c = await this.candidate(db, r.candidateId), environment = await this.definition(db, 'environment', c.environment, false) as Environment;
+      demand(environment.repository === this.repository, 'Artifact repository scope differs', 403);
+      if (actor.role === 'producer') await this.registration(db, r.collector, 'collector');
+      // This single-repository server grants readers repository-wide audit access.
+      // Workers see only their assigned work; producers see only their collection request.
+      demand(actor.role === 'admin' || actor.role === 'reader' || actor.role === 'worker' && w?.lastAssignment?.owner === actor.id || actor.role === 'producer' && collector.principalId === actor.id && actor.proofs?.includes(r.proof), 'Artifact access is not authorized for this request', 403);
+      const row = (await db.query('SELECT digest,expires_at,media_type,bytes FROM validation_artifacts WHERE id=$1 AND request_id=$2', [artifactId, requestId])).rows[0];
+      demand(row, 'Artifact not found for this request', 404);
+      demand(row.bytes && row.expires_at > now, 'Artifact retention expired', 410);
+      demand(`sha256:${createHash('sha256').update(row.bytes).digest('hex')}` === row.digest, 'Artifact integrity check failed', 503);
+      await this.event(db, actor.id, 'artifact-read', { requestId, artifactId }, r.workId);
+      return { bytes: row.bytes as Buffer, mediaType: row.media_type as string, digest: row.digest as string };
+    });
+  }
+  async expireArtifacts() {
+    return this.store.transaction(async (db, now) => {
+      const expired = (await db.query('SELECT id,request_id FROM validation_artifacts WHERE expires_at<=$1 AND bytes IS NOT NULL ORDER BY expires_at,id LIMIT 50', [now])).rows;
+      for (const row of expired) {
+        await db.query('UPDATE validation_artifacts SET bytes=NULL,deleted_at=$2 WHERE id=$1', [row.id, now]);
+        const r = await this.request(db, row.request_id);
+        await this.event(db, 'system', 'artifact-expired', { requestId: r.id, artifactId: row.id }, r.workId);
+      }
+      return expired.length;
     });
   }
   private async reportReasons(db: pg.PoolClient, c: ValidationCandidate, data: Report) {
