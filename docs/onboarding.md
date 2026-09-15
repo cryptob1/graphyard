@@ -61,10 +61,12 @@ export GRAPHYARD_CLI=/absolute/path/to/graphyard/bin/graphyard.mjs
 For a team that needs access from several machines, Railway is the recommended current path. Clone Graphyard, create a Railway project with an application service and Postgres, and deploy the root `Dockerfile`:
 
 ```sh
-railway init --name graphyard --workspace YOUR_WORKSPACE_ID
-railway add --database postgres
-railway add --service graphyard
-railway variable set --service graphyard \
+cd /absolute/path/to/graphyard
+npm ci
+npx @railway/cli init --name graphyard --workspace YOUR_WORKSPACE_ID
+npx @railway/cli add --database postgres
+npx @railway/cli add --service graphyard
+npx @railway/cli variable set --service graphyard \
   'DATABASE_URL=${{Postgres.DATABASE_URL}}' HOST=0.0.0.0 PORT=4310
 ```
 
@@ -88,8 +90,8 @@ The checked-in `.railway/railway.ts` describes Graphyard's own installation. Ada
 ```sh
 npx @railway/cli config plan
 npx @railway/cli config apply
-railway up --service graphyard --detach
-railway domain --service graphyard --port 4310
+npx @railway/cli up --service graphyard --detach
+npx @railway/cli domain --service graphyard --port 4310
 ```
 
 Read the plan before applying it. Do not run the unmodified project-specific configuration against a new Railway project.
