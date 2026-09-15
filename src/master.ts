@@ -250,6 +250,9 @@ function herdrJson(args: string[], run: (command: string, args: string[]) => str
   if (parsed.error) throw new Error(`Herdr refused the operation: ${parsed.error.message ?? parsed.error}`);
   return parsed.result ?? parsed;
 }
+function herdrRun(args: string[], run: (command: string, args: string[]) => string = (command, commandArgs) => execFileSync(command, commandArgs, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] })) {
+  run('herdr', args);
+}
 export function listHerdrAgents(run?: (command: string, args: string[]) => string): HerdrAgent[] { return herdrJson(['agent', 'list'], run).agents ?? []; }
 export function observeHerdrAgents(run?: (command: string, args: string[]) => string) {
   try { return { agents: listHerdrAgents(run), available: true, reason: null }; }
@@ -351,7 +354,7 @@ export async function dispatchWork(root: string, work: Work, profile: WorkerProf
       const tabArgs = ['tab', 'create', ...(config.herdrWorkspace ? ['--workspace', config.herdrWorkspace] : []), '--cwd', prepared.path, '--label', `${work.key} · ${profile.agentName}`, '--env', `GRAPHYARD_URL=${config.url}`, '--env', `GRAPHYARD_TOKEN_FILE=${profile.credentialFile}`, '--env', `GRAPHYARD_HOST_ID=${config.hostId}`, ...Object.entries(profile.environment).flatMap(([key, value]) => ['--env', `${key}=${value}`]), '--no-focus'];
       const created = createdHerdrTab(herdrJson(tabArgs, run)); pane = created.pane; tabId = created.tab;
       const supervised = [process.execPath, config.cliPath, 'watch', work.key, String(prepared.epoch), '--', profile.kind!, ...profile.agentArgs].map(shellQuote).join(' ');
-      herdrJson(['pane', 'run', pane, supervised], run);
+      herdrRun(['pane', 'run', pane, supervised], run);
       waitForHerdrAgent(pane, run, agentTimeoutMs);
       herdrJson(['agent', 'rename', pane, profile.agentName], run);
       herdrJson(['agent', 'prompt', profile.agentName, prompt], run);
