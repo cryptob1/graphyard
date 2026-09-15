@@ -118,6 +118,8 @@ graphyard master merge GY-42
 graphyard master merge --all
 ```
 
+`--all` processes only candidates with a current all-gates-passing authorization. A stale or refusing merge-stage item remains visible in status but does not prevent another authorized item from merging.
+
 For every candidate, the command requires:
 
 1. stage `merge` and every Graphyard gate passing;

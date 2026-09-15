@@ -7,7 +7,7 @@ import { execFile, execFileSync } from 'node:child_process';
 import { createServer } from 'node:http';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
-import { assertMasterBinding, assertMergeCandidate, buildMasterStatus, dispatchWork, inspectWorkerCredentials, loadMasterConfig, managedMasterInstructions, mergeWork, observeHerdrAgents, prepareWorkerLaunch, saveWorkerProfile, setupMaster, startMaster, workerProfileSchema } from '../src/master.js';
+import { assertMasterBinding, assertMergeCandidate, buildMasterStatus, currentMergeCandidates, dispatchWork, inspectWorkerCredentials, loadMasterConfig, managedMasterInstructions, mergeWork, observeHerdrAgents, prepareWorkerLaunch, saveWorkerProfile, setupMaster, startMaster, workerProfileSchema } from '../src/master.js';
 import type { Work } from '../src/model.js';
 
 const launcher = fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url));
@@ -242,4 +242,12 @@ test('routine merge is exact-candidate, double-checked, and never uses an admin 
     throw new Error('merge refused');
   }), /merge refused/);
   assert.equal(cancelled, execution.id);
+});
+
+test('merge-all selection skips stale or refusing work without starving eligible candidates', () => {
+  const now = new Date().toISOString();
+  const eligible = work({ observation: { at: now } as any });
+  const stale = work({ id: 'stale', key: 'GY-43', observation: { at: '2000-01-01T00:00:00Z' } as any });
+  const refusing = work({ id: 'refusing', key: 'GY-44', gates: [{ name: 'merge', passed: false, reasons: ['Protection missing'] }] });
+  assert.deepEqual(currentMergeCandidates([stale, eligible, refusing], now).map(item => item.key), ['GY-42']);
 });
