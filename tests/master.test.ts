@@ -7,7 +7,7 @@ import { execFile, execFileSync } from 'node:child_process';
 import { createServer } from 'node:http';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
-import { assertMergeCandidate, buildMasterStatus, dispatchWork, loadMasterConfig, managedMasterInstructions, mergeWork, runWorkerBootstrap, saveWorkerProfile, setupMaster, startMaster, workerProfileSchema } from '../src/master.js';
+import { assertMergeCandidate, buildMasterStatus, dispatchWork, loadMasterConfig, managedMasterInstructions, mergeWork, observeHerdrAgents, runWorkerBootstrap, saveWorkerProfile, setupMaster, startMaster, workerProfileSchema } from '../src/master.js';
 import type { Work } from '../src/model.js';
 
 const launcher = fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url));
@@ -67,6 +67,8 @@ test('master status derives ownership from Graphyard and only joins Herdr health
   assert.equal(result.work[0].owner, 'worker-a'); assert.equal(result.work[0].session, 'working'); assert.equal(result.counts.active, 1);
   const spoofed = buildMasterStatus({ work: [active], now: '2030-01-01T00:20:00Z' }, [], [{ name: 'worker-a', agent_status: 'working' }]);
   assert.equal(spoofed.work[0].owner, null, 'Herdr cannot extend an expired Graphyard assignment');
+  const unavailable = observeHerdrAgents(() => { throw new Error('daemon unavailable'); });
+  assert.equal(unavailable.available, false); assert.deepEqual(unavailable.agents, []); assert.match(unavailable.reason!, /Graphyard work state remains authoritative/);
 });
 
 test('dispatch launches a worker through the supervised claim and worktree bootstrap', async () => {
@@ -131,11 +133,13 @@ test('worker bootstrap claims, creates the assigned worktree, and launches the a
     await writeFile(credential, workerToken, { mode: 0o600 });
     await setupMaster(root, { url: 'https://graphyard.example', token: coordinatorToken, cliPath: launcher, credentialDirectory }, coordinatorStatus as typeof fetch);
     await saveWorkerProfile(root, { name: 'launch', principal: 'worker-a', agentName: 'eng-a', mode: 'launch', kind: 'codex', credentialFile: credential }, async () => ({ actor: { id: 'worker-a', role: 'worker' } }));
-    const code = await runWorkerBootstrap(root, 'GY-42', 'launch', (_command, args, options) => {
+    const base = 'c'.repeat(40);
+    const code = await runWorkerBootstrap(root, 'GY-42', 'launch', (command, args, options) => {
       calls.push({ args, options });
+      if (command === 'git') return args[0] === 'rev-parse' ? `${base}\n` : '';
       return args[1] === 'claim' ? JSON.stringify({ epoch: 4, lease: { owner: 'worker-a' } }) : JSON.stringify({ path: join(root, 'assigned') });
     }, (_command, args, options) => { launch = { args, options }; return 0; });
-    assert.equal(code, 0); assert.equal(calls[0].args[1], 'claim'); assert.equal(calls[1].args[1], 'worktree');
+    assert.equal(code, 0); assert.deepEqual(calls[0].args.slice(0, 5), ['fetch', '--quiet', '--no-tags', 'origin', '+refs/heads/main:refs/remotes/origin/main']); assert.equal(calls[2].args[1], 'claim'); assert.equal(calls[3].args[1], 'worktree'); assert.equal(calls[3].args[4], base);
     assert.deepEqual(launch.args.slice(0, 6), [launcher, 'watch', 'GY-42', '4', '--', 'codex']);
     assert.equal(launch.options.cwd, join(root, 'assigned')); assert.equal(launch.options.env.GRAPHYARD_TOKEN, undefined); assert.equal(launch.options.env.GRAPHYARD_TOKEN_FILE, credential);
   } finally { await rm(root, { recursive: true, force: true }); await rm(credentialDirectory, { recursive: true, force: true }); }

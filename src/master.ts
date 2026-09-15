@@ -189,6 +189,10 @@ function herdrJson(args: string[], run: (command: string, args: string[]) => str
   return parsed.result ?? parsed;
 }
 export function listHerdrAgents(run?: (command: string, args: string[]) => string): HerdrAgent[] { return herdrJson(['agent', 'list'], run).agents ?? []; }
+export function observeHerdrAgents(run?: (command: string, args: string[]) => string) {
+  try { return { agents: listHerdrAgents(run), available: true, reason: null }; }
+  catch { return { agents: [] as HerdrAgent[], available: false, reason: 'Herdr session health is unavailable; Graphyard work state remains authoritative' }; }
+}
 
 function waitForHerdrAgent(target: string, run?: (command: string, args: string[]) => string, timeoutMs = 30_000) {
   const deadline = Date.now() + timeoutMs;
@@ -249,9 +253,12 @@ export async function runWorkerBootstrap(root: string, key: string, profileName:
   await readCredentialFile(profile.credentialFile);
   const env: NodeJS.ProcessEnv = { ...process.env, GRAPHYARD_URL: config.url, GRAPHYARD_TOKEN_FILE: profile.credentialFile, GRAPHYARD_HOST_ID: config.hostId };
   delete env.GRAPHYARD_TOKEN; delete env.GRAPHYARD_MASTER_TOKEN;
+  run('git', ['fetch', '--quiet', '--no-tags', 'origin', `+refs/heads/${config.baseBranch}:refs/remotes/origin/${config.baseBranch}`], { cwd: root, env, stdio: ['ignore', 'ignore', 'inherit'] });
+  const base = String(run('git', ['rev-parse', '--verify', `refs/remotes/origin/${config.baseBranch}`], { cwd: root, env })).trim();
+  if (!/^[0-9a-f]{40}$/i.test(base)) throw new Error('Worker launcher could not resolve the current managed base branch');
   const claim = JSON.parse(String(run(process.execPath, [config.cliPath, 'claim', key], { cwd: root, env })));
   if (claim.lease?.owner !== profile.principal || !Number.isSafeInteger(claim.epoch)) throw new Error('Worker launcher acquired an unexpected assignment identity');
-  const workspace = JSON.parse(String(run(process.execPath, [config.cliPath, 'worktree', key, String(claim.epoch)], { cwd: root, env, stdio: ['ignore', 'pipe', 'inherit'] })));
+  const workspace = JSON.parse(String(run(process.execPath, [config.cliPath, 'worktree', key, String(claim.epoch), base], { cwd: root, env, stdio: ['ignore', 'pipe', 'inherit'] })));
   if (!workspace.path || !isAbsolute(workspace.path)) throw new Error('Worker launcher did not receive an assigned workspace');
   return launch(process.execPath, [config.cliPath, 'watch', key, String(claim.epoch), '--', profile.kind, ...profile.agentArgs], { cwd: workspace.path, env, stdio: 'inherit' });
 }

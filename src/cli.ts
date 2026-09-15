@@ -11,7 +11,7 @@ import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 import { diagnose, fileConflicts, proofPreview, resourceConflicts } from './coordination.js';
 import { loadConnection, setupRepository, handoff, hostIdSchema } from './repository-setup.js';
-import { buildMasterStatus, dispatchWork, listHerdrAgents, loadMasterConfig, mergeWork, readCredentialFile, runWorkerBootstrap, saveWorkerProfile, setupMaster, startMaster, workerProfileSchema } from './master.js';
+import { buildMasterStatus, dispatchWork, listHerdrAgents, loadMasterConfig, mergeWork, observeHerdrAgents, readCredentialFile, runWorkerBootstrap, saveWorkerProfile, setupMaster, startMaster, workerProfileSchema } from './master.js';
 
 try { process.loadEnvFile(); } catch (error: any) { if (error.code !== 'ENOENT') throw error; }
 const [command, id, ...args] = process.argv.slice(2);
@@ -112,7 +112,10 @@ Never share an operator or producer credential with an implementation agent.`); 
       return print(await startMaster(root, kind.data, agentArgs, listHerdrAgents()));
     }
     if (id === 'worker' && args[0] === 'add' && args[1]) return print(await saveWorkerProfile(root, JSON.parse(await readFile(args[1], 'utf8')), credential => masterApi('status', credential)));
-    if (id === 'status') return print(buildMasterStatus(await masterApi('work-snapshot'), master.workers, listHerdrAgents()));
+    if (id === 'status') {
+      const runtime = observeHerdrAgents();
+      return print({ ...buildMasterStatus(await masterApi('work-snapshot'), master.workers, runtime.agents), runtime: { herdr: { available: runtime.available, reason: runtime.reason } } });
+    }
     if (id === 'dispatch') {
       if (!args[0]) throw new Error('Use master dispatch GY-N PROFILE');
       const snapshot = await masterApi('work-snapshot');

@@ -93,7 +93,7 @@ For a ready item:
 graphyard master dispatch GY-42 claude-primary
 ```
 
-Dispatch refuses assigned, dependency-blocked, resource-blocked, non-ready, and existing-session profiles. For a launch profile it creates a non-focused visible tab and starts a worker-scoped bootstrap. That bootstrap claims immediately before launch, creates the assigned worktree, and runs the coding agent as a child of `graphyard watch`. The supervisor renews the lease and terminates the complete child process group on lease loss. Only after Herdr detects the supervised agent does the master name and prompt it. Prompt delivery itself never becomes ownership.
+Dispatch refuses assigned, dependency-blocked, resource-blocked, non-ready, and existing-session profiles. For a launch profile it creates a non-focused visible tab and starts a worker-scoped bootstrap. That bootstrap fetches and resolves the current managed base branch, claims immediately before launch, creates the assigned worktree from that exact base, and runs the coding agent as a child of `graphyard watch`. The supervisor renews the lease and terminates the complete child process group on lease loss. Only after Herdr detects the supervised agent does the master name and prompt it. Prompt delivery itself never becomes ownership.
 
 The master then watches for:
 
@@ -103,6 +103,8 @@ The master then watches for:
 - gate refusals with a concrete next action;
 - submitted work that needs an operator-authorized rework;
 - merge-authorized candidates.
+
+If Herdr is unavailable, `master status` still returns the Graphyard work snapshot and marks Herdr health unavailable. Runtime telemetry may disappear; ownership, gate, and progression truth do not.
 
 The master does not clear blockers or revise intent on its own. It asks the operator for a narrow decision when requirements, human acceptance, destructive operations, or policy changes are involved.
 
