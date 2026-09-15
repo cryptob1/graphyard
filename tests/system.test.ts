@@ -265,7 +265,7 @@ test('only an independently observed merge with a verified execution completes w
   w = await engine.execute(producer, 'evidence', w.id, proof(), randomUUID()); assert.equal(w.stage, 'merge');
   const granted = await engine.acquireMerge(coordinator, w.id, { expectedRevision: w.revision, sha: head, baseSha: base, policyRevision: w.policyRevision }, randomUUID());
   const verified = await engine.verifyMerge(coordinator, w.id, { executionId: granted.execution.id }, { ...observation(w), prState: 'open', draft: false }, randomUUID());
-  const mergedAt = new Date(Date.parse(verified.verifiedAt) + 1).toISOString(); await delay(5);
+  await delay(5); const mergedAt = ((await store.pool.query('SELECT clock_timestamp() AS now')).rows[0].now as Date).toISOString(); await delay(5);
   w = await engine.observe(w.id, verified.revision, { ...observation(w), merged: true, mergedAt, mergeSha: 'e'.repeat(40) }); assert.equal(w.stage, 'done');
   assert.ok(w.delivery?.authorizationRevision);
   assert.equal((await store.pool.query('SELECT 1 FROM jobs WHERE work_id=$1', [w.id])).rowCount, 0);
@@ -378,7 +378,7 @@ test('a delayed merge uses historical authorization despite an outage and later 
   const granted = await engine.acquireMerge(coordinator, w.id, { expectedRevision: w.revision, sha: head, baseSha: base, policyRevision: w.policyRevision }, randomUUID());
   const verified = await engine.verifyMerge(coordinator, w.id, { executionId: granted.execution.id }, { ...observation(w), prState: 'open', draft: false }, randomUUID());
   const authorizedRevision = granted.execution.authorizationRevision;
-  const mergedAt = new Date(Date.parse(verified.verifiedAt) + 1).toISOString(); await delay(5);
+  await delay(5); const mergedAt = ((await store.pool.query('SELECT clock_timestamp() AS now')).rows[0].now as Date).toISOString(); await delay(5);
   await store.pool.query("UPDATE work_items SET document=jsonb_set(document,'{mergeExecution,expiresAt}',to_jsonb('2000-01-01T00:00:00Z'::text)) WHERE id=$1", [w.id]);
   await store.pool.query("UPDATE work_items SET document=jsonb_set(document,'{observation,at}',to_jsonb('2000-01-01T00:00:00Z'::text)) WHERE id=$1", [w.id]);
   await engine.reconcile();
@@ -533,7 +533,7 @@ test('concurrent task changes schedule a prompt retry without an operator error'
   const granted = await engine.acquireMerge(coordinator, w.id, { expectedRevision: w.revision, sha: head, baseSha: base, policyRevision: w.policyRevision }, randomUUID());
   const verified = await engine.verifyMerge(coordinator, w.id, { executionId: granted.execution.id }, { ...observation(w), prState: 'open', draft: false }, randomUUID());
   const authorizedRevision = granted.execution.authorizationRevision;
-  const mergedAt = new Date(Date.parse(verified.verifiedAt) + 1).toISOString(); await delay(5);
+  await delay(5); const mergedAt = ((await store.pool.query('SELECT clock_timestamp() AS now')).rows[0].now as Date).toISOString(); await delay(5);
   await store.pool.query("UPDATE work_items SET document=jsonb_set(document,'{mergeExecution,expiresAt}',to_jsonb('2000-01-01T00:00:00Z'::text)) WHERE id=$1", [w.id]);
   await engine.reconcile();
   w = (await store.list()).find(item => item.id === w.id)!;
