@@ -1,5 +1,7 @@
 # Quickstart
 
+For the complete recommended setup of a new GitHub repository—including Railway, GitHub enforcement, Herdr, the dedicated master, and worker profiles—start with [Repository onboarding](onboarding.md).
+
 For repository discovery, guided GitHub registration, and the first independently proven PR, follow [First enforced PR](first-pr.md).
 
 This guide starts one control plane and registers a worker. Run one shared server for all machines; do not give every machine a separate ledger.

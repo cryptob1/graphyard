@@ -75,6 +75,8 @@ Add either profile with:
 graphyard master worker add /path/to/profile.json
 ```
 
+Copyable starter profiles are available for a [Codex worker](../examples/master/codex-worker.json), [Claude worker](../examples/master/claude-worker.json), and [existing Herdr session](../examples/master/existing-worker.json). Replace principal IDs, agent names, credential paths, and provider-specific directories for the installation. The templates contain no credentials.
+
 For launch profiles, Graphyard verifies the credential is a worker token for the stated principal. The explicit `GRAPHYARD_TOKEN_FILE` supplied to that session takes precedence over ambient `GRAPHYARD_TOKEN` values and repository `.env` files, preventing a coordinator or operator shell identity from leaking into worker actions. Provider/account routing uses the agent kind, arguments, and non-secret profile locators in `environment`. All `GRAPHYARD_` keys and keys that look like passwords, tokens, private keys, or API credentials are rejected; the launcher owns its control variables. Authenticate Codex, Claude, or another runtime locally using its normal login flow; do not copy provider secrets into the profile.
 
 Existing profiles are suitable for joining Herdr health to work the session already owns. Graphyard deliberately refuses to dispatch new work into an existing interactive process because it cannot retroactively make that process a child of the lease supervisor. Use a launch profile for new assignments. The worker launch wrapper's Graphyard claim is the authoritative identity check.
