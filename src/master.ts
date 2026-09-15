@@ -345,7 +345,7 @@ export async function dispatchWork(root: string, work: Work, profile: WorkerProf
 const shellQuote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
 function workerEnvironment(config: MasterConfig, profile: WorkerProfile) {
   const env: NodeJS.ProcessEnv = { ...process.env, GRAPHYARD_URL: config.url, GRAPHYARD_TOKEN_FILE: profile.credentialFile, GRAPHYARD_HOST_ID: config.hostId };
-  delete env.GRAPHYARD_TOKEN; delete env.GRAPHYARD_MASTER_TOKEN;
+  delete env.GRAPHYARD_TOKEN; delete env.GRAPHYARD_MASTER_TOKEN; delete env.GRAPHYARD_REQUEST_ID;
   return env;
 }
 const workerCommand: WorkerCommand = (command, args, options = {}) => execFileSync(command, args, { ...options, encoding: 'utf8', stdio: options.stdio ?? ['ignore', 'pipe', 'pipe'] });

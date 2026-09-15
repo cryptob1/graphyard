@@ -97,6 +97,8 @@ graphyard master dispatch GY-42 claude-primary
 
 Dispatch uses the same claimability rules as the control plane: the work must be released, unblocked, dependency-safe, resource-safe, and unowned, with no prior submission unless an operator explicitly requested rework. This permits the documented recovery handoff even though preserved submission history keeps its display stage at Build. Dispatch refuses existing-session profiles. For new work, a launch profile's worker-scoped launcher fetches and resolves the current managed base branch, claims immediately before launch, and creates the assigned worktree from that exact base. For rework, it instead fetches the preserved PR branch, verifies its head against Graphyard's observation, and opens a fresh checkout of that branch even when the stopped worker's prior worktree remains for audit. It then creates a non-focused visible tab and runs the coding agent as a child of `graphyard watch`. The supervisor renews the lease and terminates the complete child process group on lease loss. Only after Herdr detects the supervised agent does the master name and prompt it. If tab creation, detection, naming, or prompt delivery fails, dispatch closes the pane, confirms it is absent from Herdr, and releases that exact lease epoch. If shutdown cannot be confirmed, the lease remains held so another worker cannot overlap the possibly live process. Prompt delivery itself never becomes ownership.
 
+An operator may set `GRAPHYARD_REQUEST_ID` to retry the outer dispatch command. The launcher removes that key from the worker environment so claim, workspace registration, heartbeat, submission, and cleanup remain separate idempotent mutations.
+
 The master then watches for:
 
 - ready work with no suitable idle worker;
