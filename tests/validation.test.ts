@@ -11,6 +11,8 @@ import { Validation, type ValidationRequest, type ValidationCandidate } from '..
 import { defineScenario } from '../src/scenarios.js';
 import { type Principal, type Work, evaluate } from '../src/model.js';
 import { server } from '../src/server.js';
+import { proofPreview } from '../src/coordination.js';
+import type { Definition } from '../src/validation.js';
 const operator: Principal = { id: 'operator', role: 'admin' };
 const worker: Principal = { id: 'implementer', role: 'worker' };
 const runner: Principal = { id: 'runner', role: 'worker' };
@@ -21,12 +23,14 @@ const sha = 'a'.repeat(40), base = 'b'.repeat(40), digest = `sha256:${'c'.repeat
 let pg: EmbeddedPostgres, store: Store, engine: Engine, validation: Validation;
 let serial = 0;
 before(async () => {
-  pg = new EmbeddedPostgres({ databaseDir: await mkdtemp(join(tmpdir(), 'graphyard-validation-')), user: 'graphyard', password: 'testing-only', port: 15439, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
+  const port = Number(process.env.GRAPHYARD_VALIDATION_TEST_PORT ?? Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 1);
+  pg = new EmbeddedPostgres({ databaseDir: await mkdtemp(join(tmpdir(), 'graphyard-validation-')), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await pg.initialise(); await pg.start(); await pg.createDatabase('validation_test');
-  store = new Store('postgres://graphyard:testing-only@127.0.0.1:15439/validation_test'); await store.init(); engine = new Engine(store); validation = new Validation(engine, principals, 'test/repository');
+  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/validation_test`); await store.init(); engine = new Engine(store); validation = new Validation(engine, principals, 'test/repository');
 });
 after(async () => { if (store) await store.close(); if (pg) await pg.stop(); });
 const id = () => randomUUID();
+async function definitions(): Promise<Definition[]> { return (await store.pool.query('SELECT document FROM validation_definitions ORDER BY kind,id,revision DESC')).rows.map(r => r.document); }
 async function current(workId: string) { return (await store.list()).find(w => w.id === workId)!; }
 async function fixture() {
   const n = ++serial, environment = { id: `preview-${n}`, revision: 1 }, runnerRef = { id: `runner-${n}`, revision: 1 }, collectorRef = { id: `collector-${n}`, revision: 1 }, builderRef = { id: `builder-${n}`, revision: 1 }, bundle = { id: `bundle-${n}`, revision: 1 }, proof = `e2e:scenario-${n}`;
@@ -70,7 +74,7 @@ test('authority creation rejects workers, stale config, invalid provenance and w
   await assert.rejects(validation.createRequest(worker, f.requestInput, id()), /Operator/);
   await assert.rejects(validation.attestBuild(worker, {}, id()), /separately authorized/);
   await assert.rejects(validation.define(worker, {}, id()), /Operator/);
-  const env = (await validation.list()).definitions.find(d => d.kind === 'environment' && d.id === f.environment.id)!;
+  const env = (await definitions()).find(d => d.kind === 'environment' && d.id === f.environment.id)!;
   const { revision: rev, createdAt, createdBy, ...data } = env;
   await assert.rejects(validation.define(operator, data, id()), /generation changed/);
   for (const override of [{ buildAttestationId: id() }, { proof: 'e2e:unrequired' }, { environment: { id: 'not-approved', revision: 1 } }]) await assert.rejects(validation.createCandidate(operator, { ...f.candidateInput, expectedWorkRevision: (await current(f.w.id)).revision, ...override }, id()));
@@ -82,7 +86,7 @@ test('independent pools race one runner slot and restart preserves dispatch/ACK/
     const replica = new Validation(new Engine(second), principals, 'test/repository');
     const results: any[] = await Promise.all(Array.from({ length: 12 }, (_, i) => (i % 2 ? validation : replica).dispatch(runner, { registration: f.runnerRef }, id())));
     assert.equal(results.filter(r => r.request).length, 1);
-    const d = results.find(r => r.request); const command = { requestId: f.r.id, attemptId: d.attempt.id, epoch: 1 };
+    const d = results.find(r => r.request); assert.deepEqual(d.build.artifacts, [{ service: 'api', digest }]); assert.equal(d.build.producer, builder.id); const command = { requestId: f.r.id, attemptId: d.attempt.id, epoch: 1 };
     await assert.rejects(replica.runnerCommand(worker, 'ack', command, id()), /Wrong runner/);
     await assert.rejects(replica.runnerCommand(runner, 'heartbeat', command, id()), /ACK/);
     const receipt = id(); const ack = await replica.runnerCommand(runner, 'ack', command, receipt);
@@ -124,7 +128,7 @@ test('lost running lease blocks resource reassignment until independently settle
 });
 test('revocation invalidates current and completed authority across replicas without dropping resources', async () => {
   const f = await fixture(), command = await start(f);
-  const registration = (await validation.list()).definitions.find(d => d.kind === 'registration' && d.id === f.runnerRef.id)!;
+  const registration = (await definitions()).find(d => d.kind === 'registration' && d.id === f.runnerRef.id)!;
   const { revision, createdAt, createdBy, ...data } = registration;
   await validation.define(operator, { ...data, expectedRevision: revision, enabled: false }, id());
   assert.equal((await validation.list()).requests.find(r => r.id === f.r.id)?.state, 'superseded');
@@ -186,7 +190,7 @@ test('requirement revisions invalidate reports and completed evidence; changing 
   await validation.reconcile();
   assert.equal((await validation.list()).requests.find(r => r.id === f.r.id)?.state, 'superseded');
   assert.equal((await current(w.id)).gates.find(g => g.name === 'acceptance')?.passed, false);
-  const bundle = (await validation.list()).definitions.find(d => d.kind === 'bundle' && d.id === f.c.bundle.id)!;
+  const bundle = (await definitions()).find(d => d.kind === 'bundle' && d.id === f.c.bundle.id)!;
   const { revision, createdAt, createdBy, ...data } = bundle;
   await assert.rejects(validation.define(operator, { ...data, expectedRevision: revision, digest: inputs }, id()), /new scenario/); await cleanup(f);
 });
@@ -194,7 +198,7 @@ test('requirement revisions invalidate reports and completed evidence; changing 
 test('operators can record revocation after a credential is removed from configuration', async () => {
   const f = await fixture(), command = await start(f);
   const withoutRunner = new Validation(engine, principals.filter(p => p.id !== runner.id), 'test/repository');
-  const registration = (await validation.list()).definitions.find(d => d.kind === 'registration' && d.id === f.runnerRef.id)!;
+  const registration = (await definitions()).find(d => d.kind === 'registration' && d.id === f.runnerRef.id)!;
   const { revision, createdAt, createdBy, ...data } = registration;
   await withoutRunner.define(operator, { ...data, expectedRevision: revision, enabled: false }, id());
   const result: any = await withoutRunner.result(collector, report(f, command), id()); assert.equal(result.accepted, false); await cleanup(f);
@@ -204,7 +208,7 @@ test('result publication racing revocation across replicas cannot leave accepted
   const f = await fixture(), command = await start(f), second = new Store(store.pool.options.connectionString!);
   try {
     const replica = new Validation(new Engine(second), principals, 'test/repository');
-    const registration = (await validation.list()).definitions.find(d => d.kind === 'registration' && d.id === f.collectorRef.id)!;
+    const registration = (await definitions()).find(d => d.kind === 'registration' && d.id === f.collectorRef.id)!;
     const { revision, createdAt, createdBy, ...data } = registration;
     const outcomes = await Promise.allSettled([
       replica.result(collector, report(f, command), id()),
@@ -240,7 +244,7 @@ test('completed evidence is retained across idle ticks but revoked on definition
   await validation.reconcile(); await validation.reconcile();
   assert.equal((await store.events(f.w.id)).length, before);
   assert.equal((await validation.list()).requests.find(r => r.id === f.r.id)?.state, 'completed');
-  const registration = (await validation.list()).definitions.find(d => d.kind === 'registration' && d.id === f.builderRef.id)!;
+  const registration = (await definitions()).find(d => d.kind === 'registration' && d.id === f.builderRef.id)!;
   const { revision, createdAt, createdBy, ...data } = registration;
   await validation.define(operator, { ...data, expectedRevision: revision, enabled: false }, id());
   assert.equal((await current(f.w.id)).gates.find(g => g.name === 'acceptance')?.passed, false);
@@ -259,11 +263,38 @@ test('cancelling or expiring a queued retry preserves its settled attempt outcom
 });
 test('superseding a never-ACKed dispatch releases resources and refuses late ACK', async () => {
   const f = await fixture(), d: any = await validation.dispatch(runner, { registration: f.runnerRef }, id());
-  const registration = (await validation.list()).definitions.find(d => d.kind === 'registration' && d.id === f.runnerRef.id)!;
+  const registration = (await definitions()).find(d => d.kind === 'registration' && d.id === f.runnerRef.id)!;
   const { revision, createdAt, createdBy, ...data } = registration;
   await validation.define(operator, { ...data, expectedRevision: revision, enabled: false }, id());
   const r = (await validation.list()).requests.find(r => r.id === f.r.id)!;
   assert.equal(r.attempts[0].settled, true); assert.equal(r.state, 'superseded');
   assert.equal((await store.pool.query('SELECT * FROM validation_resources WHERE request_id=$1', [r.id])).rowCount, 0);
   await assert.rejects(validation.runnerCommand(runner, 'ack', { requestId: r.id, attemptId: d.attempt.id, epoch: 1 }, id()), /superseded|revoked/); await cleanup(f);
+});
+
+test('request and definition pages are bounded and stable under newer inserts', async () => {
+  const f = await fixture();
+  for (let i = 0; i < 24; i++) await validation.createRequest(operator, { ...f.requestInput, expectedWorkRevision: (await current(f.w.id)).revision }, id());
+  const first = await validation.list(); assert.equal(first.requests.length, 20); assert.ok(first.nextCursor);
+  assert.ok(first.candidates.length <= first.requests.length);
+  await validation.createRequest(operator, { ...f.requestInput, expectedWorkRevision: (await current(f.w.id)).revision }, id());
+  const second = await validation.list(first.nextCursor!);
+  assert.ok(second.requests.length <= 20); assert.ok(second.requests.every(r => !first.requests.some(x => x.id === r.id)));
+  const a = await validation.definitions(); assert.equal(a.definitions.length, 50); assert.ok(a.nextCursor);
+  const b = await validation.definitions(a.nextCursor!);
+  assert.ok(b.definitions.length <= 50);
+  assert.ok(b.definitions.every(r => !a.definitions.some(x => x.kind === r.kind && x.id === r.id && x.revision === r.revision)));
+  const detail = await validation.readCandidate(f.c.id); assert.equal(detail.id, f.c.id); assert.equal(detail.build.sourceSha, sha);
+  await assert.rejects(validation.list('invalid-cursor'));
+});
+test('proof previews reject generic and superseded validation passes just like gates', async () => {
+  const f = await fixture();
+  let w = await current(f.w.id);
+  w = await engine.execute(collector, 'evidence', w.id, { proof: f.proof, sha, baseSha: base, policyRevision: 1, result: 'pass', executed: 1, skipped: 0, scenarioRevision: 1, environment: f.environment.id }, id());
+  assert.equal(proofPreview(w)[0].status, 'unmeasured');
+  const command = await start(f); await validation.result(collector, report(f, command), id());
+  w = await current(f.w.id); assert.equal(proofPreview(w)[0].status, 'passed');
+  await validation.createRequest(operator, { ...f.requestInput, expectedWorkRevision: w.revision }, id());
+  w = await current(f.w.id); assert.equal(proofPreview(w)[0].status, 'unmeasured');
+  assert.equal(w.gates.find(g => g.name === 'acceptance')?.passed, false); await cleanup(f);
 });

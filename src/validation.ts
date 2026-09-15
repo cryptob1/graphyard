@@ -49,9 +49,34 @@ const same = isDeepStrictEqual;
 export class Validation {
   constructor(readonly engine: Engine, readonly principals: Principal[], readonly repository: string) {}
   get store() { return this.engine.store; }
-  async list() {
-    const result = await this.store.pool.query("SELECT (SELECT COALESCE(jsonb_agg(document ORDER BY kind,id,revision),'[]') FROM validation_definitions) AS definitions, (SELECT COALESCE(jsonb_agg(document),'[]') FROM validation_candidates) AS candidates, (SELECT COALESCE(jsonb_agg(document ORDER BY document->>'createdAt'),'[]') FROM validation_requests) AS requests");
-    return result.rows[0] as { definitions: Definition[]; candidates: ValidationCandidate[]; requests: ValidationRequest[] };
+  async list(cursor?: string) {
+    let before: string | null = null;
+    if (cursor) {
+      z.uuid().parse(cursor);
+      before = (await this.store.pool.query("SELECT document->>'createdAt' AS at FROM validation_requests WHERE id=$1", [cursor])).rows[0]?.at;
+      demand(before, 'Request cursor not found', 404);
+    }
+    const rows: ValidationRequest[] = (await this.store.pool.query(`SELECT document FROM validation_requests
+      WHERE $1::text IS NULL OR (document->>'createdAt',id)<($1::text,$2::uuid)
+      ORDER BY document->>'createdAt' DESC,id DESC LIMIT 21`, [before, cursor ?? null])).rows.map(r => r.document);
+    const requests = rows.slice(0,20);
+    const candidates: ValidationCandidate[] = (await this.store.pool.query('SELECT document FROM validation_candidates WHERE id=ANY($1::uuid[])', [requests.map(r => r.candidateId)])).rows.map(r => r.document);
+    return { requests, candidates, nextCursor: rows.length > 20 ? requests.at(-1)!.id : null };
+  }
+  async definitions(cursor?: string) {
+    const position = cursor ? z.object({ at: z.iso.datetime(), kind: z.enum(['environment','registration','bundle']), id: name, revision }).strict().parse(JSON.parse(Buffer.from(z.string().max(1000).parse(cursor), 'base64url').toString('utf8'))) : null;
+    const rows: Definition[] = (await this.store.pool.query(`SELECT document FROM validation_definitions
+      WHERE $1::text IS NULL OR (document->>'createdAt',kind,id,revision)<($1::text,$2::text,$3::text,$4::int)
+      ORDER BY document->>'createdAt' DESC,kind DESC,id DESC,revision DESC LIMIT 51`, [position?.at ?? null, position?.kind ?? null, position?.id ?? null, position?.revision ?? null])).rows.map(r => r.document);
+    const definitions = rows.slice(0,50), last = definitions.at(-1);
+    return { definitions, nextCursor: rows.length > 50 && last ? Buffer.from(JSON.stringify({ at: last.createdAt, kind: last.kind, id: last.id, revision: last.revision })).toString('base64url') : null };
+  }
+  async readCandidate(id: string) {
+    z.uuid().parse(id);
+    const candidate = (await this.store.pool.query('SELECT document FROM validation_candidates WHERE id=$1', [id])).rows[0]?.document as ValidationCandidate | undefined;
+    demand(candidate, 'Candidate not found', 404);
+    const build = (await this.store.pool.query('SELECT document FROM validation_builds WHERE id=$1', [candidate.buildAttestationId])).rows[0]?.document as BuildAttestation;
+    return { ...candidate, build };
   }
   private async event(db: pg.PoolClient, actor: string, kind: string, payload: unknown, workId?: string) { await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [workId ?? null, actor, `validation.${kind}`, JSON.stringify(payload)]); }
   private async definition(db: pg.PoolClient, kind: Definition['kind'], selected: { id: string; revision: number }, current = true): Promise<Definition> {
@@ -217,7 +242,8 @@ export class Validation {
         for (const resource of resources) await db.query('INSERT INTO validation_resources VALUES($1,$2)', [resource, r.id]);
         w.validation![c.proof] = { candidateId: c.id, requestId: r.id, attemptId: attempt.id };
         await this.changed(db, w, actor.id, 'dispatched', now, { requestId: r.id, attempt, resources });
-        return { request: r, candidate: c, environment, bundle: await this.definition(db, 'bundle', c.bundle), attempt };
+        const build = (await db.query('SELECT document FROM validation_builds WHERE id=$1', [c.buildAttestationId])).rows[0].document as BuildAttestation;
+        return { request: r, candidate: c, build, environment, bundle: await this.definition(db, 'bundle', c.bundle), attempt };
       }
       return { request: null, reason: 'No eligible request or protected resources are still reserved' };
     });

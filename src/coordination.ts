@@ -1,4 +1,4 @@
-import type { Work } from './model.js';
+import { currentEvidence, type Work } from './model.js';
 
 export interface IntegrationJob { work_id: string; available_at: string; locked_until: string | null; error: string | null }
 export interface Diagnostic { kind: string; message: string; next: string }
@@ -59,8 +59,7 @@ export function diagnose(work: Work, all: Work[], now: number, jobs: Integration
 export function proofPreview(work: Work) {
   return work.criteria.flatMap(ac => ac.proofs.map(proof => {
     const pin = work.scenarioRequirements.find(s => s.proof === proof);
-    const matching = work.evidence.filter(e => e.proof === proof && e.trusted && e.sha === work.candidate?.sha && e.baseSha === work.candidate?.baseSha && e.policyRevision === work.policyRevision && (!pin || e.scenarioRevision === pin.revision && e.environment === pin.environment));
-    const evidence = matching.at(-1);
+    const evidence = currentEvidence(work, proof);
     const status = !evidence ? 'unmeasured' : evidence.executed < 1 || evidence.skipped > 0 ? 'incomplete' : evidence.result === 'fail' ? 'failed' : 'passed';
     return { criterion: ac.id, proof, status, scenario: pin, producer: evidence?.producer, evidenceId: evidence?.id };
   }));

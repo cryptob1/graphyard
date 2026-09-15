@@ -225,7 +225,12 @@ test('work details explain missing proof and operator can revise explicit criter
 
 test('validation view reports failures honestly and bounds request history', async ({ page }) => {
   await fixture(page); let fail = true;
-  await page.route('**/api/validation', route => route.fulfill(fail ? { status: 503, json: { error: 'Validation unavailable' } } : { json: { candidates: [], requests: Array.from({ length: 25 }, (_, i) => ({ id: `request-${i}`, workId: work.id, proof: 'e2e:behavior', candidateId: 'candidate', runner: { id: 'runner' }, collector: { id: 'collector' }, state: 'expired', attempts: [{ id: `attempt-${i}`, epoch: 1, state: 'expired', settled: false, dispatchedAt: '2026-01-01T00:00:00Z' }], maxAttempts: 2, deadline: '2026-01-01T01:00:00Z', createdAt: '2026-01-01T00:00:00Z' })) } }));
+  const requests = Array.from({ length: 25 }, (_, i) => ({ id: `request-${i}`, workId: work.id, proof: 'e2e:behavior', candidateId: 'candidate', runner: { id: 'runner' }, collector: { id: 'collector' }, state: 'expired', attempts: [{ id: `attempt-${i}`, epoch: 1, state: 'expired', settled: false, dispatchedAt: '2026-01-01T00:00:00Z' }], maxAttempts: 2, deadline: '2026-01-01T01:00:00Z', createdAt: '2026-01-01T00:00:00Z' }));
+  let olderReads = 0;
+  await page.route('**/api/validation*', route => {
+    const older = new URL(route.request().url()).searchParams.has('cursor'); if (older) olderReads++;
+    return route.fulfill(fail ? { status: 503, json: { error: 'Validation unavailable' } } : { json: { candidates: [], requests: older ? requests.slice(20) : requests.slice(0,20), nextCursor: older ? null : 'page-two' } });
+  });
   await login(page); await page.getByRole('button', { name: '↻ Validation' }).click();
   await expect(page.getByRole('heading', { name: 'Validation requests' })).toBeVisible();
   await expect(page.getByRole('alert')).toContainText('Validation unavailable');
@@ -233,6 +238,11 @@ test('validation view reports failures honestly and bounds request history', asy
   fail = false; await page.getByRole('button', { name: 'Retry validation requests' }).click();
   await expect(page.locator('.scenario-card')).toHaveCount(20);
   await expect(page.getByText('Resources remain reserved.', { exact: false })).toHaveCount(20);
-  await page.getByRole('button', { name: /Show 20 older requests/ }).click();
+  expect(olderReads).toBe(0);
+  await page.getByRole('button', { name: 'Load older requests' }).click();
   await expect(page.locator('.scenario-card')).toHaveCount(25);
+  expect(olderReads).toBe(1);
+  await expect(page.getByText('Browsing history; live updates paused.', { exact: false })).toBeVisible();
+  await page.getByRole('button', { name: 'Return to latest' }).click();
+  await expect(page.locator('.scenario-card')).toHaveCount(20);
 });

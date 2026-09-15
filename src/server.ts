@@ -52,7 +52,10 @@ export function server(engine: Engine, credentials: Credential[], github: GitHub
         const hash = createHash('sha256').update(token).digest();
         const actor = principals.find(p => timingSafeEqual(p.hash, hash))?.actor;
         demand(actor, 'A valid Graphyard bearer token is required', 401);
-        if (url.pathname === '/api/validation' && req.method === 'GET') return send(200, await validation.list());
+        if (url.pathname === '/api/validation' && req.method === 'GET') return send(200, await validation.list(url.searchParams.get('cursor') ?? undefined));
+        if (url.pathname === '/api/validation/definitions' && req.method === 'GET') return send(200, await validation.definitions(url.searchParams.get('cursor') ?? undefined));
+        const candidateRead = url.pathname.match(/^\/api\/validation\/candidate\/([^/]+)$/);
+        if (candidateRead && req.method === 'GET') return send(200, await validation.readCandidate(candidateRead[1]));
         const validationRoute = url.pathname.match(/^\/api\/validation\/(define|build|candidate|request|dispatch|ack|heartbeat|result|cancel|settle|retry)$/);
         if (validationRoute && req.method === 'POST') {
           const command = validationRoute[1], data = JSON.parse((await body(req)).toString()), key = String(req.headers['idempotency-key'] ?? '');

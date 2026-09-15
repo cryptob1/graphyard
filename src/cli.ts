@@ -73,7 +73,9 @@ Use GRAPHYARD_REQUEST_ID to safely retry an identical command after a network ti
 Never share an operator or producer credential with an implementation agent.`); return;
   }
   if (command === 'validation') {
-    if (!id) return print(await api('validation'));
+    if (!id || id === 'requests') return print(await api('validation' + (args[0] ? `?cursor=${encodeURIComponent(args[0])}` : '')));
+    if (id === 'definitions') return print(await api('validation/definitions' + (args[0] ? `?cursor=${encodeURIComponent(args[0])}` : '')));
+    if (id === 'show-candidate' && args[0]) return print(await api(`validation/candidate/${encodeURIComponent(args[0])}`));
     if (!['define','build','candidate','request','dispatch','ack','heartbeat','result','cancel','settle','retry'].includes(id) || !args[0]) throw new Error('Use validation ACTION file.json');
     return print(await api(`validation/${id}`, JSON.parse(await readFile(args[0], 'utf8'))));
   }

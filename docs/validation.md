@@ -24,10 +24,14 @@ For this first increment all authority-definition commands are operator-only. De
 
 ## Inspect and invoke
 
-The dashboard's **Validation** view shows requests, attempts, refusal reasons and unsettled resources. It refreshes every five seconds and displays 20 requests at a time. Failed loads remain visibly failed rather than appearing as an empty queue.
+The dashboard's **Validation** view shows requests, attempts, refusal reasons and unsettled resources. It polls the latest server-side page of 20 requests every five seconds. Older pages are fetched only on demand; live polling pauses while browsing history, with a **Return to latest** control. Definitions have a separate paginated API, so polling does not download the registry or all candidate history. Failed loads remain visibly failed rather than appearing as an empty queue.
 
 ```bash
 graphyard validation
+graphyard validation requests NEXT_CURSOR
+graphyard validation definitions
+graphyard validation definitions NEXT_CURSOR
+graphyard validation show-candidate CANDIDATE_UUID
 graphyard validation define environment.json
 graphyard validation build attestation.json
 graphyard validation candidate candidate.json
@@ -38,7 +42,7 @@ graphyard validation heartbeat attempt.json
 graphyard validation result result.json
 ```
 
-These map to `GET /api/validation` and `POST /api/validation/ACTION`. Use the appropriate identity for each command. Every mutation requires an `Idempotency-Key`; the CLI generates one. Set `GRAPHYARD_REQUEST_ID` only when retrying the exact same command after a network failure. Heartbeats and new polling attempts need new keys. Replayed execution grants are rejected after their original authority expires or is superseded; a receipt never extends a lease.
+Request pages use `GET /api/validation?cursor=REQUEST_UUID` (20 per page, candidate records only for that page). Definition history uses `GET /api/validation/definitions?cursor=OPAQUE_CURSOR` (50 per page). Both return `nextCursor`, or null when finished. Read a known candidate with `GET /api/validation/candidate/UUID`. Mutations use `POST /api/validation/ACTION`. Cursors preserve ordering even when new requests arrive between page reads. Use the appropriate identity for each command. Every mutation requires an `Idempotency-Key`; the CLI generates one. Set `GRAPHYARD_REQUEST_ID` only when retrying the exact same command after a network failure. Heartbeats and new polling attempts need new keys. Replayed execution grants are rejected after their original authority expires or is superseded; a receipt never extends a lease.
 
 Read the current work `revision` immediately before commands requiring `expectedWorkRevision`. Concurrent heartbeats or GitHub observations can change it; a conflict requires reading again, not dropping the precondition.
 
@@ -98,7 +102,7 @@ Create the candidate as operator with `workId`, `expectedWorkRevision`, required
 
 Create a request with `candidateId`, `expectedWorkRevision`, versioned `runner` and `collector` references, an absolute ISO UTC `deadline` within the next hour, and `maxAttempts` from 1 to 5. The selected collector must be authorized for the candidate's proof and environment. A newer request prevents fallback to an older pass while it is queued, running, cancelled or incomplete.
 
-The runner polls `dispatch` with `{"registration":{"id":"preview-runner","revision":1}}`. An eligible response includes the pinned request, candidate, environment, bundle and attempt; an unavailable queue returns `request: null` with a reason. At most one request holds a runner principal's slot. Global test-resource reservations prevent conflicting assignments across replicas.
+The runner polls `dispatch` with `{"registration":{"id":"preview-runner","revision":1}}`. An eligible response includes the pinned request, candidate, trusted build attestation/artifact manifest, environment, bundle and attempt; an unavailable queue returns `request: null` with a reason. At most one request holds a runner principal's slot. Global test-resource reservations prevent conflicting assignments across replicas.
 
 An attempt has a unique ID and monotonic epoch. Send `{requestId, attemptId, epoch}` to `ack` **before any execution**. The initial ACK window is 30 seconds; after ACK, heartbeats extend the lease up to 60 seconds, bounded by the request deadline. Renew at least every 20 seconds. Stop on refusal and never infer permission from an old receipt. A runner must implement external fencing/isolation: a database lease cannot physically stop a partitioned process.
 
@@ -136,3 +140,5 @@ Revoked definitions require newly authorized configuration and a new request. Do
 ## Verification
 
 `npm test` runs disposable real Postgres tests for independent-pool races, restart persistence, explicit ACK, stale epochs/receipts, revocation, cancellation, requirement changes, forged-role reports, artifact/target mismatches and no old-pass fallback. Browser checks cover failure states and bounded request display. Production data is never used by these tests.
+
+For parallel local worktrees, give each test run a distinct `GRAPHYARD_TEST_PORT`; the validation suite uses the next port by default, or an explicit `GRAPHYARD_VALIDATION_TEST_PORT`. Both databases remain disposable.
