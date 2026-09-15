@@ -50,6 +50,8 @@ Candidate declarations do not establish source-to-artifact provenance. Require a
 
 The request lifecycle separates queued, dispatched, acknowledged, running, completed, cancelled and expired. A dispatch success is not an acknowledgment. Attempts have distinct IDs, lease epochs and idempotency keys. Late results remain auditable but cannot revive superseded authority or advance a different candidate. Cancellation does not assert that an external process has physically stopped.
 
+Runner and collector registrations have revocable authorization generations separate from immutable version history. Bind each attempt to both current registrations and check authenticated principal, scope, active generation and attempt epoch transactionally at dispatch, ACK, heartbeat and result ingestion. Rotation, revocation or scope reduction advances authorization generation and invalidates outstanding authority atomically; late results remain non-authoritative audit. Immutable request pins do not preserve revoked trust. Revocation does not assert physical termination, so execution-resource barriers remain until external fencing or verified settlement makes reassignment safe.
+
 Reuse the transactional ledger and durable jobs for scheduling. Perform provider and runner I/O outside coordination transactions. Define per-adapter idempotency behavior before enabling retries of external side effects.
 
 Acceptance checks:
@@ -57,13 +59,14 @@ Acceptance checks:
 - Duplicate dispatch and duplicate results do not create duplicate authoritative execution or progression.
 - A runner that never acknowledges produces a visible timeout and recoverable request.
 - Results from a wrong runner, expired epoch, old requirement revision or different artifact do not count.
+- Revoking/rotating a runner or collector between dispatch and result ingestion invalidates that attempt authority across replicas; racing results cannot bypass the registration generation check.
 - Restarting the server preserves queued requests and observed attempt history.
 - Failure to identify the deployed target refuses attributable success.
 - An artifact with no trusted source/build-input mapping, a forged attestation or a mismatched output digest cannot authorize validation or delivery.
 
 ## D2 — One turnkey Playwright path
 
-Ship a supported runner integration and setup flow, not merely a protocol document. Start by discovering repository configuration and enumerating proposed tests. Let the operator review required scenarios, test inventory, target URL and proof mapping. An independently approved, digest-pinned test/oracle bundle is the executable authority; discovered package names and candidate-controlled commands are only suggestions. The runner verifies the bytes of the approved bundle, including transitive test helpers, fixtures, configuration, lockfiles and runner image/version, before execution. It must not silently substitute tests from the implementation checkout. New or changed executable assertions require separately authorized bundle approval and an explicit scenario/requirement revision that pins that bundle; implementation-worker credentials cannot authorize this revision. The approved harness exercises the candidate artifact, so test authority remains separate from the product code under test.
+Ship a supported runner integration and setup flow, not merely a protocol document. Start by discovering repository configuration and enumerating proposed tests. Let the operator review required scenarios, test inventory, target URL and proof mapping. An independently approved, digest-pinned test/oracle bundle is the executable authority; discovered package names and candidate-controlled commands are only suggestions. The runner verifies the bytes of the approved bundle, including transitive test helpers, fixtures, configuration, lockfiles and runner image/version, before execution. Execute that content-addressed bundle from a read-only boundary inaccessible to candidate-controlled build/setup/test-target processes for the entire attempt, with separately isolated scratch/output paths. Candidate code cannot replace imports, configuration, interpreters or approved runtime dependencies after verification; no shared writable filesystem or candidate-selected module/search path may supply executable oracle bytes. Validate these isolation properties in the supported adapter. It must not silently substitute tests from the implementation checkout. New or changed executable assertions require separately authorized bundle approval and an explicit scenario/requirement revision that pins that bundle; implementation-worker credentials cannot authorize this revision. The approved harness exercises the candidate artifact, so test authority remains separate from the product code under test.
 
 The runner should support an isolated self-hosted execution path and an existing CI execution path. Candidate code must not receive operator credentials or a generic trusted producer token. Separate test execution from the trusted collector that verifies request identity, test inventory, target attribution and artifacts. Scope any execution capability to one request/attempt. The collector must not treat arbitrary candidate-authored JSON as proof that a command ran or that the complete inventory executed.
 
@@ -92,7 +95,7 @@ Acceptance checks:
 - Missing, skipped, empty and inconsistent reports never produce success.
 - Changed target identity during execution, including A → B → A between boundary checks, yields an attribution refusal; unknown interval coverage cannot pass.
 - A test attempting to submit its own trusted evidence is refused.
-- A candidate that weakens an assertion, substitutes a helper/configuration or changes a pinned test bundle cannot produce accepted evidence without an independently authorized bundle and requirement revision.
+- A candidate that weakens an assertion, substitutes a helper/configuration or changes a pinned test bundle cannot produce accepted evidence without an independently authorized bundle and requirement revision. Attempts to mutate the approved bundle or redirect imports after preflight verification fail at the execution boundary.
 - Missing required screenshots/traces/reports prevents acceptance even if the runner exits zero.
 - Unauthorized and cross-repository artifact reads fail; public PRs expose no private evidence. Seeded sensitive data is redacted/excluded under the configured capture policy, retention deletion is verified, and storage failure cannot silently publish unsafe or incomplete evidence.
 - Setup without executable tests says what is missing and does not invent coverage.
