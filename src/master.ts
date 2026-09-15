@@ -104,10 +104,24 @@ async function externalCredential(root: string, file: string, label: string) {
 export async function loadMasterConfig(root: string): Promise<MasterConfig> {
   const config = await readMasterConfig(root);
   await externalCredential(root, config.credentialFile, 'Master');
-  for (const profile of config.workers) if (profile.credentialFile) await externalCredential(root, profile.credentialFile, 'Worker');
   if (!isAbsolute(config.cliPath)) throw new Error('Master CLI path must be absolute');
   try { if (!(await lstat(config.cliPath)).isFile()) throw new Error(); } catch { throw new Error('Configured Graphyard CLI launcher is unavailable'); }
   return config;
+}
+
+export async function readWorkerCredential(root: string, file: string) {
+  await externalCredential(root, file, 'Worker');
+  return readCredentialFile(file);
+}
+
+export async function inspectWorkerCredentials(root: string, profiles: WorkerProfile[]) {
+  const health: Record<string, { available: boolean; reason: string | null }> = {};
+  for (const profile of profiles) {
+    if (profile.mode === 'existing') health[profile.name] = { available: true, reason: null };
+    else try { await readWorkerCredential(root, profile.credentialFile!); health[profile.name] = { available: true, reason: null }; }
+    catch (error) { health[profile.name] = { available: false, reason: error instanceof Error ? error.message : 'Worker credential is unavailable' }; }
+  }
+  return health;
 }
 
 async function atomicPrivateWrite(file: string, value: unknown) {
@@ -179,11 +193,12 @@ export async function saveWorkerProfile(root: string, profileInput: unknown, ver
 }
 
 type HerdrAgent = { name?: string; pane_id?: string; agent?: string; agent_status?: string; cwd?: string; foreground_cwd?: string; tokens?: Record<string, string> };
-export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profiles: WorkerProfile[], agents: HerdrAgent[]) {
+export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profiles: WorkerProfile[], agents: HerdrAgent[], credentialHealth: Record<string, { available: boolean; reason: string | null }> = {}) {
   const now = Date.parse(snapshot.now);
   const sessions = profiles.map(profile => {
     const agent = agents.find(candidate => candidate.name === profile.agentName);
-    return { profile: profile.name, principal: profile.principal, agentName: profile.agentName, mode: profile.mode, state: agent?.agent_status ?? 'offline', pane: agent?.pane_id ?? null, cwd: agent?.foreground_cwd ?? agent?.cwd ?? null, contextPercent: agent?.tokens?.agent_watcher_context_pct ? Number(agent.tokens.agent_watcher_context_pct) : null };
+    const credential = credentialHealth[profile.name] ?? { available: true, reason: null };
+    return { profile: profile.name, principal: profile.principal, agentName: profile.agentName, mode: profile.mode, state: agent?.agent_status ?? 'offline', pane: agent?.pane_id ?? null, cwd: agent?.foreground_cwd ?? agent?.cwd ?? null, contextPercent: agent?.tokens?.agent_watcher_context_pct ? Number(agent.tokens.agent_watcher_context_pct) : null, credential };
   });
   const rows = snapshot.work.filter(work => work.stage !== 'done').map(work => {
     const active = !!work.lease && Date.parse(work.lease.expiresAt) > now;
@@ -311,14 +326,14 @@ const workerCommand: WorkerCommand = (command, args, options = {}) => execFileSy
 export async function releaseWorkerLaunch(root: string, key: string, epoch: number, profileName: string, run: WorkerCommand = workerCommand) {
   const config = await loadMasterConfig(root); const profile = config.workers.find(worker => worker.name === profileName);
   if (!profile || profile.mode !== 'launch' || !profile.kind || !profile.credentialFile) throw new Error('A complete launch profile is required');
-  await readCredentialFile(profile.credentialFile);
+  await readWorkerCredential(root, profile.credentialFile);
   run(process.execPath, [config.cliPath, 'release', key, String(epoch)], { cwd: root, env: workerEnvironment(config, profile) });
 }
 
 export async function prepareWorkerLaunch(root: string, key: string, profileName: string, run: WorkerCommand = workerCommand): Promise<PreparedWorker> {
   const config = await loadMasterConfig(root); const profile = config.workers.find(worker => worker.name === profileName);
   if (!profile || profile.mode !== 'launch' || !profile.kind || !profile.credentialFile) throw new Error('A complete launch profile is required');
-  await readCredentialFile(profile.credentialFile);
+  await readWorkerCredential(root, profile.credentialFile);
   const detected = await discover(root);
   if (!detected.repository) throw new Error('Worker launcher requires a recognized GitHub origin');
   assertRepository(detected.repository, config.repository);

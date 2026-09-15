@@ -107,6 +107,7 @@ The master then watches for:
 - merge-authorized candidates.
 
 If Herdr is unavailable, `master status` still returns the Graphyard work snapshot and marks Herdr health unavailable. Runtime telemetry may disappear; ownership, gate, and progression truth do not.
+If one launch profile's credential is missing, insecure, or temporarily unmounted, status marks that worker credential unavailable without disabling coordinator status or routine merges. Dispatch validates the selected worker immediately before claiming work.
 
 The master does not clear blockers or revise intent on its own. It asks the operator for a narrow decision when requirements, human acceptance, destructive operations, or policy changes are involved.
 

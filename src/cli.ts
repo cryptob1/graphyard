@@ -11,7 +11,7 @@ import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 import { diagnose, fileConflicts, proofPreview, resourceConflicts } from './coordination.js';
 import { loadConnection, setupRepository, handoff, hostIdSchema } from './repository-setup.js';
-import { assertMasterBinding, buildMasterStatus, dispatchWork, listHerdrAgents, loadMasterConfig, mergeWork, observeHerdrAgents, readCredentialFile, saveWorkerProfile, setupMaster, startMaster, workerProfileSchema } from './master.js';
+import { assertMasterBinding, buildMasterStatus, dispatchWork, inspectWorkerCredentials, listHerdrAgents, loadMasterConfig, mergeWork, observeHerdrAgents, readCredentialFile, readWorkerCredential, saveWorkerProfile, setupMaster, startMaster, workerProfileSchema } from './master.js';
 
 try { process.loadEnvFile(); } catch (error: any) { if (error.code !== 'ENOENT') throw error; }
 const [command, id, ...args] = process.argv.slice(2);
@@ -114,7 +114,8 @@ Never share an operator or producer credential with an implementation agent.`); 
     if (id === 'worker' && args[0] === 'add' && args[1]) return print(await saveWorkerProfile(root, JSON.parse(await readFile(args[1], 'utf8')), credential => masterApi('status', credential)));
     if (id === 'status') {
       const runtime = observeHerdrAgents();
-      return print({ ...buildMasterStatus(await masterApi('work-snapshot'), master.workers, runtime.agents), runtime: { herdr: { available: runtime.available, reason: runtime.reason } } });
+      const credentials = await inspectWorkerCredentials(root, master.workers);
+      return print({ ...buildMasterStatus(await masterApi('work-snapshot'), master.workers, runtime.agents, credentials), runtime: { herdr: { available: runtime.available, reason: runtime.reason } } });
     }
     if (id === 'dispatch') {
       if (!args[0]) throw new Error('Use master dispatch GY-N PROFILE');
@@ -124,7 +125,7 @@ Never share an operator or producer credential with an implementation agent.`); 
       if (!work) throw new Error(`Unknown work item ${args[0]}`); if (!profile) throw new Error(`Unknown worker profile ${args[1]}`);
       const conflicts = resourceConflicts(work, snapshot.work, Date.parse(snapshot.now)); if (conflicts.length) throw new Error(`Dispatch blocked by exclusive resources: ${conflicts.map((conflict: any) => `${conflict.resource} held by ${conflict.key}`).join(', ')}`);
       if (profile.credentialFile) {
-        const workerStatus = await masterApi('status', await readCredentialFile(profile.credentialFile));
+        const workerStatus = await masterApi('status', await readWorkerCredential(root, profile.credentialFile));
         if (workerStatus.actor?.role !== 'worker' || workerStatus.actor.id !== profile.principal) throw new Error('Worker credential no longer matches the configured principal; update the profile before dispatch');
       }
       return print(await dispatchWork(root, work, profile, listHerdrAgents(), undefined, snapshot.work));
