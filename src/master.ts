@@ -141,9 +141,12 @@ export async function setupMaster(root: string, input: { url: string; token: str
   try { previous = await readMasterConfig(root); } catch (error: any) { if (error.code !== 'ENOENT' && !/ENOENT/.test(error.message)) throw error; }
   if (previous && (previous.url !== url || previous.repository.toLowerCase() !== detected.repository.toLowerCase())) throw new Error('Existing master configuration belongs to another server or repository');
   const repositoryName = detected.repository.split('/').at(-1)!.replace(/[^a-zA-Z0-9._-]/g, '-');
-  const credentialDirectory = resolve(input.credentialDirectory ?? process.env.GRAPHYARD_CONFIG_HOME ?? resolve(homedir(), '.config/graphyard'), 'masters');
-  if (credentialDirectory === root || credentialDirectory.startsWith(`${root}/`)) throw new Error('Coordinator credentials must be stored outside the managed repository');
-  await mkdir(credentialDirectory, { recursive: true, mode: 0o700 });
+  const requestedCredentialDirectory = resolve(input.credentialDirectory ?? process.env.GRAPHYARD_CONFIG_HOME ?? resolve(homedir(), '.config/graphyard'), 'masters');
+  const repositoryRoot = await realpath(root);
+  if (requestedCredentialDirectory === resolve(root) || requestedCredentialDirectory.startsWith(`${resolve(root)}/`)) throw new Error('Coordinator credentials must be stored outside the managed repository');
+  await mkdir(requestedCredentialDirectory, { recursive: true, mode: 0o700 });
+  const credentialDirectory = await realpath(requestedCredentialDirectory);
+  if (credentialDirectory === repositoryRoot || credentialDirectory.startsWith(`${repositoryRoot}/`)) throw new Error('Coordinator credentials must be stored outside the managed repository');
   const identity = createHash('sha256').update(`${url}\0${detected.repository}`).digest('hex').slice(0, 20);
   const credentialFile = resolve(credentialDirectory, `${identity}.token`);
   const config = masterConfigSchema.parse({ version: 1, url, credentialFile, cliPath: resolve(input.cliPath), repository: detected.repository, baseBranch: status.baseBranch, hostId: input.hostId ?? previous?.hostId ?? hostname(), masterAgentName: previous?.masterAgentName ?? `graphyard-master-${repositoryName}`, autoMerge: input.autoMerge ?? previous?.autoMerge ?? true, mergeMethod: input.mergeMethod ?? previous?.mergeMethod ?? 'merge', workers: previous?.workers ?? [] });
