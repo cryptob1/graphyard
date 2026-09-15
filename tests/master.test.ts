@@ -44,6 +44,7 @@ test('master init verifies a coordinator and repository before writing private l
     await setupMaster(root, { url: 'https://graphyard.example', token: coordinatorToken, cliPath: launcher }, coordinatorStatus as typeof fetch);
     assert.equal(await readFile(join(root, '.graphyard/connection.json'), 'utf8'), workerConnection, 'master setup must not replace a worker connection');
     await assert.rejects(setupMaster(root, { url: 'https://graphyard.example', token: workerToken, cliPath: launcher }, (async () => new Response(JSON.stringify({ actor: { id: 'worker', role: 'worker' }, repository: 'owner/project' }))) as typeof fetch), /coordinator credential/);
+    await assert.rejects(setupMaster(root, { url: 'https://graphyard.example', token: coordinatorToken, cliPath: launcher }, (async () => new Response(JSON.stringify({ actor: { id: 'master', role: 'coordinator' }, repository: null }))) as typeof fetch), /bound to a GitHub repository/);
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
@@ -71,6 +72,8 @@ test('dispatch prompts an existing worker to claim for itself and never records 
     assert.equal(result.ownership, 'pending worker claim');
     assert.deepEqual(calls[0].slice(0, 3), ['agent', 'prompt', 'eng-a']);
     assert.match(calls[0][3], /First run .* claim GY-42/); assert.doesNotMatch(calls[0][3], /coordinator-token/);
+    const dependency = work({ id: 'dependency', key: 'GY-41', stage: 'build' });
+    await assert.rejects(dispatchWork(root, work({ stage: 'ready', lease: null, submission: null, candidate: null, mergeAuthorization: null, dependencies: [dependency.id] }), profile, [{ name: 'eng-a', agent_status: 'idle', pane_id: 'p1', cwd: root }], undefined, [dependency]), /unfinished dependencies/);
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 

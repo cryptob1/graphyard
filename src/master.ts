@@ -106,6 +106,7 @@ export async function setupMaster(root: string, input: { url: string; token: str
   if (!response.ok) throw new Error(`Graphyard rejected the coordinator credential (${response.status}); master setup made no changes`);
   const status = await response.json();
   if (status.actor?.role !== 'coordinator') throw new Error('Master setup requires a coordinator credential; worker, operator, producer, and reader credentials are not suitable');
+  if (typeof status.repository !== 'string' || !status.repository) throw new Error('Master setup requires the control plane to be bound to a GitHub repository');
   assertRepository(detected.repository, status.repository);
   if (!detected.repository) throw new Error('Master setup requires a recognized GitHub origin');
   try { if (!(await lstat(resolve(input.cliPath))).isFile()) throw new Error(); } catch { throw new Error('Master setup requires an existing Graphyard CLI launcher'); }
@@ -184,8 +185,10 @@ export async function startMaster(root: string, kind: WorkerProfile['kind'], age
   return { agentName: config.masterAgentName, kind, pane, status: 'started and prompted', focusChanged: false };
 }
 
-export async function dispatchWork(root: string, work: Work, profile: WorkerProfile, agents: HerdrAgent[], run?: (command: string, args: string[]) => string) {
+export async function dispatchWork(root: string, work: Work, profile: WorkerProfile, agents: HerdrAgent[], run?: (command: string, args: string[]) => string, allWork: Work[] = [work]) {
   if (work.stage !== 'ready' || !work.ready || work.blocker) throw new Error('Dispatch requires an unassigned work item at Ready');
+  const unfinished = work.dependencies.map(id => allWork.find(item => item.id === id)).filter(dependency => !dependency || dependency.stage !== 'done');
+  if (unfinished.length) throw new Error(`Dispatch blocked by unfinished dependencies: ${unfinished.map(dependency => dependency?.key ?? 'unknown').join(', ')}`);
   const config = await loadMasterConfig(root);
   let target = agents.find(agent => agent.name === profile.agentName);
   if (profile.mode === 'existing') {
