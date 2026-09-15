@@ -313,10 +313,10 @@ export class Engine {
         let cancelledExecution = false;
         if (boundedExecution) {
           const cancellation = (await db.query("SELECT created_at FROM events WHERE work_id=$1 AND kind='merge.execution.cancelled' AND payload->'details'->>'executionId'=$2 AND created_at<$3 ORDER BY seq DESC LIMIT 1", [id, boundedExecution.id, new Date(cutoff)])).rows[0]?.created_at as Date | undefined;
-          cancelledExecution = !!cancellation && cancellation.getTime() < mergedTime;
+          cancelledExecution = !!cancellation && cancellation.getTime() < cutoff;
         }
         const executionValid = !cancelledExecution && (!boundedExecution || boundedExecution.sha === observation.candidate.sha && boundedExecution.baseSha === observation.candidate.baseSha
-          && boundedExecution.policyRevision === work.policyRevision && Date.parse(boundedExecution.issuedAt) < mergedTime && mergedTime < Date.parse(boundedExecution.expiresAt));
+          && boundedExecution.policyRevision === work.policyRevision && Date.parse(boundedExecution.issuedAt) < mergedTime && cutoff <= Date.parse(boundedExecution.expiresAt));
         if (activeExecution && executionValid && work.mergeAuthorization
           && activeExecution.sha === observation.candidate.sha && activeExecution.baseSha === observation.candidate.baseSha
           && activeExecution.policyRevision === work.policyRevision && work.mergeAuthorization.sha === activeExecution.sha
@@ -326,7 +326,7 @@ export class Engine {
         }
         const past = authorizedSnapshot || !executionValid ? undefined : (await db.query("SELECT payload->'work' AS work FROM events WHERE work_id=$1 AND created_at<$2 AND payload ? 'work' ORDER BY seq DESC LIMIT 1", [id, new Date(cutoff)])).rows[0]?.work as Work | undefined;
         const authorization = past?.mergeAuthorization;
-        const evidenceValid = past ? [...new Set(past.criteria.flatMap(criterion => criterion.proofs))].every(proof => !!currentEvidence(past, proof, new Date(mergedTime))) : false;
+        const evidenceValid = past ? [...new Set(past.criteria.flatMap(criterion => criterion.proofs))].every(proof => !!currentEvidence(past, proof, new Date(cutoff - 1))) : false;
         if (!authorizedSnapshot && past && authorization && authorization.sha === observation.candidate.sha && authorization.baseSha === observation.candidate.baseSha && authorization.policyRevision === past.policyRevision
           && past.submission?.pr === observation.candidate.pr && past.gates.every(g => g.passed) && !past.violations.length
           && evidenceValid && past.observation && cutoff - Date.parse(past.observation.at) < 120_000 && Date.parse(authorization.at) < mergedTime) {
