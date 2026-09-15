@@ -128,7 +128,7 @@ Never share an operator or producer credential with an implementation agent.`); 
         const workerStatus = await masterApi('status', await readWorkerCredential(root, profile.credentialFile));
         if (workerStatus.actor?.role !== 'worker' || workerStatus.actor.id !== profile.principal) throw new Error('Worker credential no longer matches the configured principal; update the profile before dispatch');
       }
-      return print(await dispatchWork(root, work, profile, listHerdrAgents(), undefined, snapshot.work));
+      return print(await dispatchWork(root, work, profile, listHerdrAgents(), undefined, snapshot.work, undefined, undefined, undefined, snapshot.now));
     }
     if (id === 'merge') {
       if (!args[0]) throw new Error('Use master merge GY-N or master merge --all');
