@@ -108,6 +108,15 @@ For an organization-owned repository, the guided command's personal-account regi
 
 Configure the base branch's normal CI and selected review policy now. The new App-owned `Graphyard / merge` check may not appear in GitHub's protection selector until Graphyard has published it on the first linked PR. If it is available, require it with strict up-to-date branches and enforced administration. Otherwise finish that rule during step 6 immediately after the first failing check appears and before any merge. Until protection is complete, Graphyard can coordinate work but must keep merge gates closed.
 
+Graphyard also binds CI evidence to trusted GitHub App IDs. Inspect a representative commit's check runs before the first work item:
+
+```sh
+gh api repos/OWNER/REPOSITORY/commits/COMMIT_SHA/check-runs \
+  --jq '.check_runs[] | [.name, .app.id, .app.name] | @tsv'
+```
+
+Set `GITHUB_CI_APP_IDS` on the Graphyard service to the comma-separated App IDs that are allowed to supply required CI checks, and preserve that variable in Railway IaC. GitHub Actions uses App ID `15368`; do not assume that default for another CI provider.
+
 Choose the review source deliberately. Native GitHub approval requires an eligible reviewer on the current head. Codex review requires the Codex GitHub integration to be installed and the work policy to select `reviewProvider: "codex"`; Graphyard requests and verifies that result, but does not impersonate the reviewer or run Codex itself.
 
 Acceptance needs its own identity boundary. Add a `producer` principal whose `proofs` list contains only the proof names that runner may submit, store that token in a protected CI environment, and keep it unavailable to pull-request code. A general-purpose automatic runner is not shipped in version 0.1. Graphyard's protected acceptance workflow is a working example for this repository, while a new project must connect its own runner or use operator-submitted manual evidence for an explicitly manual criterion. See [test cases](test-cases.md) and [validation](validation.md).
@@ -152,9 +161,9 @@ This creates a dedicated, non-focused Herdr tab and prompts the master to read G
 
 ## 5. Add the worker cluster
 
-For each launchable worker, put only that worker's Graphyard token in a local mode-0600 file outside the repository and every linked worktree:
+For each launchable worker, put only that worker's Graphyard token in a local mode-0600 file outside the repository and every linked worktree. Run this block in Bash so the prompt can disable terminal echo:
 
-```sh
+```bash
 mkdir -p ~/.config/graphyard/workers
 chmod 700 ~/.config/graphyard ~/.config/graphyard/workers
 umask 077
