@@ -214,8 +214,8 @@ node "$GRAPHYARD_CLI" master dispatch GY-1 codex-primary
 For the recommended separated topology, the master uses `master status` to select the ready item and asks the chosen remote worker to claim it. On that worker machine, use the Herdr ledger or:
 
 ```sh
-node "$GRAPHYARD_CLI" claim GY-1
 git fetch origin YOUR_CONFIGURED_BASE_BRANCH
+node "$GRAPHYARD_CLI" claim GY-1
 node "$GRAPHYARD_CLI" worktree GY-1 EPOCH origin/YOUR_CONFIGURED_BASE_BRANCH
 cd .graphyard/worktrees/GY-1-EPOCH
 node "$GRAPHYARD_CLI" watch GY-1 EPOCH -- YOUR_AGENT_COMMAND
