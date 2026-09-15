@@ -96,7 +96,7 @@ Open the Railway domain and sign in with the operator or reader token. Keep the 
 
 ## 2. Connect Graphyard to GitHub
 
-From a trusted operator checkout, start the guided GitHub App registration:
+For a repository in your personal GitHub account, start the guided App registration from a trusted operator checkout:
 
 ```sh
 node "$GRAPHYARD_CLI" github-setup https://YOUR-GRAPHYARD-HOST
@@ -104,7 +104,9 @@ node "$GRAPHYARD_CLI" github-setup https://YOUR-GRAPHYARD-HOST
 
 Open the printed local URL, register the App, and install it only on the repository being managed. If the command runs over SSH, forward port 4311 from your browser machine. Copy the resulting App values into the Graphyard service's private Railway variables and redeploy.
 
-Then configure the base branch to require the Graphyard App's `Graphyard / merge` check, strict up-to-date branches, normal CI checks, and the selected review policy. Follow [GitHub enforcement](github.md) for the exact permissions and branch rules. Until this is complete, Graphyard can coordinate work but must keep merge gates closed.
+For an organization-owned repository, the guided command's personal-account registration endpoint is not suitable. Create the private App under the organization, install it only on the managed repository, and configure its credentials manually by following [GitHub enforcement](github.md#github-app). Do not move App private keys through the repository or agent sessions.
+
+Configure the base branch's normal CI and selected review policy now. The new App-owned `Graphyard / merge` check may not appear in GitHub's protection selector until Graphyard has published it on the first linked PR. If it is available, require it with strict up-to-date branches and enforced administration. Otherwise finish that rule during step 6 immediately after the first failing check appears and before any merge. Until protection is complete, Graphyard can coordinate work but must keep merge gates closed.
 
 Choose the review source deliberately. Native GitHub approval requires an eligible reviewer on the current head. Codex review requires the Codex GitHub integration to be installed and the work policy to select `reviewProvider: "codex"`; Graphyard requests and verifies that result, but does not impersonate the reviewer or run Codex itself.
 
@@ -194,6 +196,8 @@ node "$GRAPHYARD_CLI" master dispatch GY-1 codex-primary
 ```
 
 The dispatched worker claims the item, receives a fresh epoch and worktree, implements the change, pushes the assigned branch, opens a PR, and runs `graphyard complete`. Graphyard then waits for current-head review, required CI checks, and trusted acceptance evidence. A worker's statement that it is done does not satisfy those gates.
+
+On a fresh GitHub installation, wait for Graphyard to publish the failing `Graphyard / merge` check on this PR. Return to the base branch protection settings, require that App-owned check with strict up-to-date branches and enforced administration, and confirm Graphyard observes the protection. Do this before attempting the first merge.
 
 When every gate passes, the master can perform the supported guarded merge:
 
