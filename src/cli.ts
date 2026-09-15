@@ -11,6 +11,7 @@ import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 import { diagnose, fileConflicts, proofPreview, resourceConflicts } from './coordination.js';
 import { loadConnection, setupRepository, handoff, hostIdSchema } from './repository-setup.js';
+import { buildMasterStatus, dispatchWork, listHerdrAgents, loadMasterConfig, mergeWork, readCredentialFile, saveWorkerProfile, setupMaster, startMaster, workerProfileSchema } from './master.js';
 
 try { process.loadEnvFile(); } catch (error: any) { if (error.code !== 'ENOENT') throw error; }
 const [command, id, ...args] = process.argv.slice(2);
@@ -19,7 +20,7 @@ try { connection = await loadConnection(process.cwd()); } catch { console.error(
 const base = process.env.GRAPHYARD_URL ?? connection?.url ?? 'http://127.0.0.1:4310';
 let savedToken: string | undefined;
 try { if (connection && new URL(base).origin === connection.url) savedToken = connection.token; } catch { /* request validation reports an invalid URL */ }
-const token = process.env.GRAPHYARD_TOKEN ?? savedToken;
+const token = process.env.GRAPHYARD_TOKEN ?? (process.env.GRAPHYARD_TOKEN_FILE ? await readCredentialFile(resolve(process.env.GRAPHYARD_TOKEN_FILE)) : savedToken);
 const hostId = hostIdSchema.parse(process.env.GRAPHYARD_HOST_ID ?? connection?.hostId ?? hostname());
 const cliPath = fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url));
 async function activeCliPath() {
@@ -43,6 +44,13 @@ async function main() {
 
 Environment: GRAPHYARD_URL, GRAPHYARD_TOKEN (individual role-scoped credential)
   init [--url URL] [--herdr] [--token-stdin]  Configure repository instructions and Herdr
+  master init --token-stdin     Install the recommended master-agent operating mode
+  master start AGENT_KIND       Launch the dedicated visible Herdr master session
+  master worker add FILE        Add an existing or launchable Herdr worker profile
+  master status                 Join Graphyard work truth with Herdr session health
+  master dispatch GY-N PROFILE  Invite a worker to claim ready work in a visible tab
+  master merge GY-N|--all       Merge exact authorized candidates without bypasses
+  master guide                  Print the complete master-agent operating guide
   doctor                       Inspect local discovery and live integration readiness
   github-setup HTTPS_URL        Register a GitHub App through a local browser flow
   status [GY-N]                Control-plane or work status
@@ -74,6 +82,48 @@ Environment: GRAPHYARD_URL, GRAPHYARD_TOKEN (individual role-scoped credential)
 
 Use GRAPHYARD_REQUEST_ID to safely retry an identical command after a network timeout.
 Never share an operator or producer credential with an implementation agent.`); return;
+  }
+  if (command === 'master') {
+    const root = execFileSync('git', ['rev-parse', '--show-toplevel'], { encoding: 'utf8' }).trim();
+    if (id === 'guide') return console.log(await readFile(fileURLToPath(new URL('../docs/master-agent.md', import.meta.url)), 'utf8'));
+    if (id === 'init') {
+      const { values } = parseArgs({ args, options: { url: { type: 'string' }, 'token-stdin': { type: 'boolean' }, 'no-auto-merge': { type: 'boolean' }, 'merge-method': { type: 'string' }, 'cli-path': { type: 'string' }, 'host-id': { type: 'string' } }, allowPositionals: false });
+      if (!values['token-stdin']) throw new Error('Use master init --token-stdin so the coordinator credential is not stored in shell history');
+      let input = ''; for await (const chunk of process.stdin) { input += chunk; if (input.length > 10_000) throw new Error('Token input is too large'); }
+      const masterToken = input.trim(); if (!masterToken) throw new Error('Master coordinator credential is required; setup made no changes');
+      const method = values['merge-method']; if (method && !['merge', 'squash', 'rebase'].includes(method)) throw new Error('Merge method must be merge, squash, or rebase');
+      return print(await setupMaster(root, { url: values.url ?? base, token: masterToken, cliPath: resolve(values['cli-path'] ?? await activeCliPath()), hostId: values['host-id'] ?? hostId, ...(values['no-auto-merge'] ? { autoMerge: false } : {}), ...(method ? { mergeMethod: method as 'merge' | 'squash' | 'rebase' } : {}) }));
+    }
+    const master = await loadMasterConfig(root);
+    const masterApi = async (path: string, credential = master.token) => {
+      const response = await fetch(`${master.url}/api/${path}`, { headers: { Authorization: `Bearer ${credential}` }, signal: AbortSignal.timeout(30_000) });
+      const body = await response.json(); if (!response.ok) throw new Error(JSON.stringify(body)); return body;
+    };
+    if (id === 'start') {
+      const kind = workerProfileSchema.shape.kind.safeParse(args[0]); if (!kind.success) throw new Error('Use master start with a supported agent kind such as codex or claude');
+      const separator = args.indexOf('--'); const agentArgs = separator < 0 ? [] : args.slice(separator + 1);
+      if (separator > 1 || separator < 0 && args.length > 1) throw new Error('Put agent-specific arguments after --');
+      return print(await startMaster(root, kind.data, agentArgs, listHerdrAgents()));
+    }
+    if (id === 'worker' && args[0] === 'add' && args[1]) return print(await saveWorkerProfile(root, JSON.parse(await readFile(args[1], 'utf8')), credential => masterApi('status', credential)));
+    if (id === 'status') return print(buildMasterStatus(await masterApi('work-snapshot'), master.workers, listHerdrAgents()));
+    if (id === 'dispatch') {
+      if (!args[0]) throw new Error('Use master dispatch GY-N PROFILE');
+      const snapshot = await masterApi('work-snapshot');
+      const work = snapshot.work.find((item: any) => item.id === args[0] || item.key === args[0]);
+      const profile = master.workers.find(item => item.name === args[1]);
+      if (!work) throw new Error(`Unknown work item ${args[0]}`); if (!profile) throw new Error(`Unknown worker profile ${args[1]}`);
+      return print(await dispatchWork(root, work, profile, listHerdrAgents()));
+    }
+    if (id === 'merge') {
+      if (!args[0]) throw new Error('Use master merge GY-N or master merge --all');
+      const snapshot = await masterApi('work-snapshot');
+      const selected = args[0] === '--all' ? snapshot.work.filter((item: any) => item.stage === 'merge') : snapshot.work.filter((item: any) => item.id === args[0] || item.key === args[0]);
+      if (!selected.length) throw new Error(args[0] === '--all' ? 'No work is at the merge gate' : `Unknown work item ${args[0]}`);
+      const results = []; for (const item of selected) results.push(await mergeWork(master, item, () => masterApi('work-snapshot')));
+      return print(results);
+    }
+    throw new Error('Use master init, start, worker add, status, dispatch, merge, or guide');
   }
   if (command === 'runner') {
     if (id === 'inspect' && args.length <= 1) return print(await inspectRunnerRepository(resolve(args[0] ?? '.')));

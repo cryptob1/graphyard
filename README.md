@@ -10,7 +10,7 @@ Herdr is the first integration. Your agent tools run the workers; Graphyard give
 
 **Available today:** coordination through an evidence-backed GitHub merge. **Next:** staging, E2E execution, production observations, and verification after deployment. This is v0.1, built for supervised dogfooding.
 
-[Get started](docs/quickstart.md) · [First enforced PR](docs/first-pr.md) · [Connect Herdr](docs/herdr.md) · [Deploy](docs/deployment.md) · [Architecture](docs/architecture.md)
+[Get started](docs/quickstart.md) · [Master-agent setup](docs/master-agent.md) · [First enforced PR](docs/first-pr.md) · [Connect Herdr](docs/herdr.md) · [Deploy](docs/deployment.md) · [Architecture](docs/architecture.md)
 
 ## More agents should mean more progress
 
@@ -64,6 +64,7 @@ For example, “send a confirmation SMS after booking” might require proof tha
 | **Validation runner protocol** | Immutable candidates, approved test bundles, separate runner/collector identities, explicit ACKs, fenced attempts and recovery. External execution remains a separate integration. |
 | **Recovery between steps** | Durable reconciliation jobs, deduplicated webhooks, retry-safe commands, and periodic reconciliation. |
 | **Herdr integration** | A native plugin to inspect work and manage claims, with CLI supervision for worker processes. |
+| **Recommended master agent** | One visible coordinator joins Graphyard work truth with Herdr health, routes individually authenticated workers, and performs exact-candidate routine merges. |
 
 A test-case definition is a requirement, not a passing test. Executable tests stay in Git; runners execute them; Graphyard records and evaluates their evidence. Large artifacts stay in CI or object storage. See the [test-case registry](docs/test-cases.md) and [validation protocol](docs/validation.md).
 
@@ -74,6 +75,16 @@ Graphyard owns workflow truth. Git owns source truth. GitHub supplies PR and mer
 Use the native [Herdr plugin](docs/herdr.md), or integrate an external worker through the [CLI and HTTP API](docs/protocol.md). Workers can use Claude Code, Codex, OpenCode, other runtimes, or human-operated tools without moving ownership into those runtimes. Herdr is the first packaged integration; other runtimes use the common protocol.
 
 Run one shared Graphyard server. Point workers on each machine at it with individual credentials and stable host IDs. Worktrees stay on worker machines; the control plane does not need their filesystems mounted or SSH access.
+
+For several concurrent agents, use the [recommended master-agent operating mode](docs/master-agent.md). It works with existing authenticated Herdr sessions and optional Codex, Claude, or other launch profiles. The master observes and routes; workers claim for themselves, and Graphyard remains authoritative.
+
+```sh
+graphyard master init --url https://YOUR-GRAPHYARD-HOST --token-stdin
+graphyard master start codex
+graphyard master status
+```
+
+Initialization preserves your repository instructions, keeps coordinator configuration local and ignored, and leaves existing worker connections intact.
 
 ## Run it locally
 
@@ -130,6 +141,7 @@ A lease fences Graphyard commands; it cannot revoke filesystem access or Git cre
 | Integrate workers and trusted producers | [Agent protocol and API](docs/protocol.md) |
 | Define and version E2E scenarios | [Test-case registry](docs/test-cases.md) |
 | Use Graphyard inside Herdr | [Herdr plugin](docs/herdr.md) |
+| Coordinate a fleet with one master agent | [Master-agent operating mode](docs/master-agent.md) |
 | Diagnose blocked or abandoned work | [Operations](docs/operations.md) |
 | Build Graphyard with Graphyard | [Development and dogfooding](docs/development.md) |
 | Inspect current coverage against the spec | [Implementation audit](docs/implementation-audit.md) |
