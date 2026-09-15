@@ -10,7 +10,9 @@ import { resourceConflicts } from './coordination.js';
 import type { Work } from './model.js';
 
 const safeEnvironment = z.record(
-  z.string().regex(/^[A-Z_][A-Z0-9_]*$/).refine(name => !/(TOKEN|SECRET|PASSWORD|PRIVATE|API_KEY|CREDENTIAL)/.test(name), 'Put secrets in the worker credential file or the agent runtime login, not master profile environment'),
+  z.string().regex(/^[A-Z_][A-Z0-9_]*$/)
+    .refine(name => !name.startsWith('GRAPHYARD_'), 'GRAPHYARD_ variables are owned by the launcher and cannot be set in a worker profile')
+    .refine(name => !/(TOKEN|SECRET|PASSWORD|PRIVATE|API_KEY|CREDENTIAL)/.test(name), 'Put secrets in the worker credential file or the agent runtime login, not master profile environment'),
   z.string().min(1).max(1000).refine(value => !/[\u0000-\u001f\u007f]/.test(value), 'Profile environment values cannot contain control characters'),
 ).default({});
 

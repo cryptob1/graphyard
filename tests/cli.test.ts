@@ -19,7 +19,7 @@ test('master-only commands ignore an unrelated unavailable worker token file', a
   try {
     await exec('git', ['init', '-q'], { cwd });
     await mkdir(join(cwd, '.graphyard')); await writeFile(join(cwd, '.graphyard/connection.json'), '{broken', { mode: 0o644 });
-    const result = await exec(process.execPath, [launcher, 'master', 'guide'], { cwd, env: { ...process.env, GRAPHYARD_TOKEN_FILE: join(cwd, 'removed-worker.token') } });
+    const result = await exec(process.execPath, [launcher, 'master', 'guide'], { cwd, env: { ...process.env, GRAPHYARD_TOKEN_FILE: join(cwd, 'removed-worker.token'), GRAPHYARD_HOST_ID: '   ' } });
     assert.match(result.stdout, /Master-agent operating mode/);
   } finally { await rm(cwd, { recursive: true, force: true }); }
 });

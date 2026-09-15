@@ -29,7 +29,7 @@ async function individualToken() {
   }
   return resolvedToken;
 }
-const hostId = hostIdSchema.parse(process.env.GRAPHYARD_HOST_ID ?? connection?.hostId ?? hostname());
+const individualHostId = () => hostIdSchema.parse(process.env.GRAPHYARD_HOST_ID ?? connection?.hostId ?? hostname());
 const cliPath = fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url));
 async function activeCliPath() {
   const selected = process.env.GRAPHYARD_CLI ?? cliPath;
@@ -101,7 +101,7 @@ Never share an operator or producer credential with an implementation agent.`); 
       let input = ''; for await (const chunk of process.stdin) { input += chunk; if (input.length > 10_000) throw new Error('Token input is too large'); }
       const masterToken = input.trim(); if (!masterToken) throw new Error('Master coordinator credential is required; setup made no changes');
       const method = values['merge-method']; if (method && !['merge', 'squash', 'rebase'].includes(method)) throw new Error('Merge method must be merge, squash, or rebase');
-      return print(await setupMaster(root, { url: values.url ?? base, token: masterToken, cliPath: resolve(values['cli-path'] ?? await activeCliPath()), hostId: values['host-id'] ?? hostId, ...(values['no-auto-merge'] ? { autoMerge: false } : {}), ...(method ? { mergeMethod: method as 'merge' | 'squash' | 'rebase' } : {}) }));
+      return print(await setupMaster(root, { url: values.url ?? base, token: masterToken, cliPath: resolve(values['cli-path'] ?? await activeCliPath()), hostId: values['host-id'] ?? individualHostId(), ...(values['no-auto-merge'] ? { autoMerge: false } : {}), ...(method ? { mergeMethod: method as 'merge' | 'squash' | 'rebase' } : {}) }));
     }
     const master = await loadMasterConfig(root);
     const masterToken = await readCredentialFile(master.credentialFile);
@@ -190,7 +190,7 @@ Never share an operator or producer credential with an implementation agent.`); 
     const selectedUrl = values.url ?? base;
     // Never silently send a saved credential to a newly selected server.
     if (values.url && connection && new URL(values.url).origin !== connection.url && !process.env.GRAPHYARD_TOKEN && !values['token-stdin']) workerToken = undefined;
-    return print(await setupRepository(root, { url: selectedUrl, cliPath: resolve(values['cli-path'] ?? await activeCliPath()), hostId: values['host-id'] ?? hostId, ...(workerToken ? { token: workerToken } : {}) }, { herdr: values.herdr }));
+    return print(await setupRepository(root, { url: selectedUrl, cliPath: resolve(values['cli-path'] ?? await activeCliPath()), hostId: values['host-id'] ?? individualHostId(), ...(workerToken ? { token: workerToken } : {}) }, { herdr: values.herdr }));
   }
   if (command === 'github-setup' || command === 'doctor') {
     const root = execFileSync('git', ['rev-parse', '--show-toplevel'], { encoding: 'utf8' }).trim();
@@ -203,7 +203,7 @@ Never share an operator or producer credential with an implementation agent.`); 
     }
     let live: any = null, failure: string | undefined;
     try { live = await api('status'); } catch (error: any) { failure = error.message; }
-    return print({ discovered, server: base, cliPath: await activeCliPath(), hostId, connected: !!live, githubConfigured: !!live?.github, role: live?.actor?.role, failure,
+    return print({ discovered, server: base, cliPath: await activeCliPath(), hostId: individualHostId(), connected: !!live, githubConfigured: !!live?.github, role: live?.actor?.role, failure,
       next: !live ? 'Configure GRAPHYARD_URL and an individual token' : !live.github ? 'Complete github-setup and configure the server App credentials' : 'Submit a real PR and inspect every gate; configured is not proof of enforcement',
       limits: ['CI discovery is a proposal, not executed-test inventory', 'Herdr two-host recovery and GitHub refusal-to-acceptance must be demonstrated'] });
   }
@@ -224,7 +224,7 @@ Never share an operator or producer credential with an implementation agent.`); 
     const [snapshot, status] = await Promise.all([api('work-snapshot'), api('status')]);
     const work = snapshot.work.find((w: any) => w.id === id || w.key === id);
     if (!work) throw new Error(`Unknown work item ${id}`);
-    return print(handoff(work, { ...status, now: snapshot.now }, hostId, await activeCliPath()));
+    return print(handoff(work, { ...status, now: snapshot.now }, individualHostId(), await activeCliPath()));
   }
   const items = await api('work'); const work = items.find((w: any) => w.id === id || w.key === id);
   if (command === 'events' && !id) return print(await api('events'));
@@ -260,6 +260,7 @@ Never share an operator or producer credential with an implementation agent.`); 
       if (!work.candidate?.sha || remoteSha !== work.candidate.sha) throw new Error('Submitted PR branch changed; wait for Graphyard to observe its current head before creating the rework workspace');
       startPoint = remoteBranch;
     }
+    const hostId = individualHostId();
     await mutate('workspace', { epoch, host: hostId, path, branch });
     await mkdir(resolve(root, '.graphyard/worktrees'), { recursive: true });
     const exists = spawnSync('git', ['show-ref', '--verify', '--quiet', `refs/heads/${branch}`]).status === 0;
@@ -281,6 +282,7 @@ Never share an operator or producer credential with an implementation agent.`); 
     const epoch = Number(args[0]); const separator = args.indexOf('--');
     if (separator < 0 || !args[separator + 1]) throw new Error('Usage: watch GY-N EPOCH -- command args');
     const workspace = work.workspaces.find((w: any) => w.epoch === epoch);
+    const hostId = individualHostId();
     if (!workspace || workspace.host !== hostId || await realpath(process.cwd()) !== await realpath(workspace.path)) throw new Error('Run watch from the assigned workspace on its registered host');
     if ((await api('status')).actor?.role !== 'worker') throw new Error('watch requires a worker credential; never pass operator or producer credentials to implementation processes');
     const watchToken = await individualToken();
