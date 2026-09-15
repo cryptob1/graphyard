@@ -40,6 +40,7 @@ Add first-class `Environment`, `ReleaseCandidate`, `ValidationRequest`, `Validat
 Each request pins:
 
 - Work item and requirement revision, scenario ID/revision/hash, required proof names.
+- Independently approved executable test/oracle bundle identity and digest, including its transitive helpers, fixtures, configuration, lockfiles and runner image/version.
 - Repository and full head/base source identity, immutable artifact digest or provider build ID.
 - Target environment and concrete environment instance or deployment.
 - Expected services/configuration identity where behavior depends on them.
@@ -59,7 +60,7 @@ Acceptance checks:
 
 ## D2 — One turnkey Playwright path
 
-Ship a supported runner integration and setup flow, not merely a protocol document. Start by discovering repository configuration and enumerating proposed tests. Let the operator review required scenarios, test inventory, target URL and proof mapping. An explicit supported command/configuration is the executable authority; discovered package names are only suggestions.
+Ship a supported runner integration and setup flow, not merely a protocol document. Start by discovering repository configuration and enumerating proposed tests. Let the operator review required scenarios, test inventory, target URL and proof mapping. An independently approved, digest-pinned test/oracle bundle is the executable authority; discovered package names and candidate-controlled commands are only suggestions. The runner verifies the bytes of the approved bundle, including transitive test helpers, fixtures, configuration, lockfiles and runner image/version, before execution. It must not silently substitute tests from the implementation checkout. New or changed executable assertions require separately authorized bundle approval and an explicit scenario/requirement revision that pins that bundle; implementation-worker credentials cannot authorize this revision. The approved harness exercises the candidate artifact, so test authority remains separate from the product code under test.
 
 The runner should support an isolated self-hosted execution path and an existing CI execution path. Candidate code must not receive operator credentials or a generic trusted producer token. Separate test execution from the trusted collector that verifies request identity, test inventory, target attribution and artifacts. Scope any execution capability to one request/attempt. The collector must not treat arbitrary candidate-authored JSON as proof that a command ran or that the complete inventory executed.
 
@@ -86,12 +87,15 @@ Acceptance checks:
 - Missing, skipped, empty and inconsistent reports never produce success.
 - Changed target identity during execution, including A → B → A between boundary checks, yields an attribution refusal; unknown interval coverage cannot pass.
 - A test attempting to submit its own trusted evidence is refused.
+- A candidate that weakens an assertion, substitutes a helper/configuration or changes a pinned test bundle cannot produce accepted evidence without an independently authorized bundle and requirement revision.
 - Missing required screenshots/traces/reports prevents acceptance even if the runner exits zero.
 - Setup without executable tests says what is missing and does not invent coverage.
 
 ## D3 — Releases and observed production delivery
 
 Add `Release`, explicit release membership, expected service manifests and append-only deployment observations. Keep desired state separate from provider-reported deployment success and independently observed runtime state. Record deployment time, observation time and receipt time separately.
+
+Deployment observers use individually authenticated, environment/service-scoped identities. The ingestion transaction derives the actor and scope from credentials, verifies the current adapter/job lease epoch and selected release generation, and enforces idempotency before changing authoritative environment state. External reads happen outside that transaction and must be fenced again when applying their results. Raw webhook payloads are notifications to refetch through a trusted adapter, not production proof. Superseded-lease, unauthorized and out-of-generation observations cannot authorize gates; retain safe rejection metadata as explicitly non-authoritative history. Duplicate receipts cannot refresh the original observation time or advance work twice.
 
 Use provider-specific adapters for deployment identity and health; do not put Railway-specific assumptions in the core gate engine. In the first supported Railway path, verify which available provider/runtime facts establish artifact identity before promising that every process runs the expected code. Where runtime identity cannot be observed, show unknown and require an appropriate runtime probe.
 
@@ -102,6 +106,7 @@ Bounded sweeps require continuation cursors. Missing webhooks, coalesced workflo
 Acceptance checks:
 
 - A mixed-version deployment does not pass expected-service verification.
+- Wrong-scope observers, superseded lease epochs, stale release generations and raw webhook assertions cannot change authoritative runtime state or authorize production; duplicate observations are idempotent.
 - A green deployment job with unknown runtime identity remains unverified.
 - A dropped webhook is recovered by polling/sweep without manual lifecycle changes.
 - A release containing multiple PRs attributes all applicable work, with visible membership.
