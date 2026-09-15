@@ -83,6 +83,23 @@ function commentFixture() {
 test('authenticated explicit clean result supersedes an older stuck summary', async () => {
   const f = commentFixture(); const result = await f.run(); assert.equal(result.approved, true); assert.equal(result.resultId, 15);
 });
+test('explicit clean result permits only its matching connector summary completion', async () => {
+  const f = commentFixture();
+  f.summary.body = `<!-- codex-pull-request-review-summary -->\n| 📝 **Code Review** | ✅ **Completed** <relative-time datetime="2026-01-01T00:02:01.250Z">now</relative-time> | \`aaaaaaaaaa\` | Manual request |`;
+  f.summary.updated_at = '2026-01-01T00:02:02Z';
+  assert.equal((await f.run()).approved, true);
+  for (const mutate of [
+    (g: ReturnType<typeof commentFixture>) => { g.summary.body = g.summary.body.replace('aaaaaaaaaa', 'bbbbbbbbbb'); },
+    (g: ReturnType<typeof commentFixture>) => { g.summary.body = g.summary.body.replace('Manual request', 'New commits'); },
+    (g: ReturnType<typeof commentFixture>) => { g.summary.body = g.summary.body.replace('00:02:01.250Z', '00:02:11.250Z'); },
+    (g: ReturnType<typeof commentFixture>) => { g.summary.updated_at = '2026-01-01T00:02:11Z'; },
+  ]) {
+    const g = commentFixture();
+    g.summary.body = `<!-- codex-pull-request-review-summary -->\n| 📝 **Code Review** | ✅ **Completed** <relative-time datetime="2026-01-01T00:02:01.250Z">now</relative-time> | \`aaaaaaaaaa\` | Manual request |`;
+    g.summary.updated_at = '2026-01-01T00:02:02Z'; mutate(g);
+    assert.equal((await g.run()).approved, false);
+  }
+});
 test('explicit results refuse stale, edited, spoofed, conflicting and changing evidence', async () => {
   const changes = [
     (f: ReturnType<typeof commentFixture>) => { f.result.user.id = 99; },
