@@ -415,7 +415,7 @@ export function assertMergeProtection(protection: any, config: MasterConfig, wor
     && Array.isArray(checks?.checks) && checks.checks.some((check: any) => check?.context === 'Graphyard / merge' && check?.app_id === config.githubAppId);
   if (!protectedBranch) throw new Error(`${work.key} managed-branch protection changed after merge authorization; Graphyard refused the merge`);
 }
-export async function mergeWork(config: MasterConfig, work: Work, freshSnapshot: () => Promise<{ work: Work[]; now: string }>, acquire: (work: Work, authorization: ReturnType<typeof assertMergeCandidate>) => Promise<{ execution: MergeExecution }>, cancel: (work: Work, execution: MergeExecution, reason: string) => Promise<unknown>, run: (command: string, args: string[]) => string = (command, args) => execFileSync(command, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 90_000 })) {
+export async function mergeWork(config: MasterConfig, work: Work, freshSnapshot: () => Promise<{ work: Work[]; now: string }>, acquire: (work: Work, authorization: ReturnType<typeof assertMergeCandidate>) => Promise<{ execution: MergeExecution }>, cancel: (work: Work, execution: MergeExecution, reason: string) => Promise<unknown>, verify: (work: Work, execution: MergeExecution) => Promise<{ executionId: string; sha: string }>, run: (command: string, args: string[]) => string = (command, args) => execFileSync(command, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 90_000 })) {
   if (!config.autoMerge) throw new Error('Automatic routine merge is disabled in master configuration');
   const before = await freshSnapshot(); const current = before.work.find(item => item.id === work.id);
   if (!current || current.revision !== work.revision) throw new Error(`${work.key} changed before GitHub verification; retry`);
@@ -437,6 +437,8 @@ export async function mergeWork(config: MasterConfig, work: Work, freshSnapshot:
     if (!Number.isFinite(remaining) || remaining <= 90_000) throw new Error(`${work.key} merge execution does not remain valid for the provider timeout; refresh gate inputs and retry`);
     const protection = JSON.parse(run('gh', ['api', `repos/${config.repository}/branches/${encodeURIComponent(config.baseBranch)}/protection`]));
     assertMergeProtection(protection, config, latest);
+    const verified = await verify(latest, granted.execution);
+    if (verified.executionId !== granted.execution.id || verified.sha !== authorization.sha) throw new Error(`${work.key} received an invalid final GitHub gate verification`);
     const remainingAfterProtection = authorityDuration - (Date.now() - acquireStartedAt);
     if (!Number.isFinite(remainingAfterProtection) || remainingAfterProtection <= 90_000) throw new Error(`${work.key} merge execution no longer has enough time for the provider call after verifying branch protection; retry`);
     providerStarted = true;

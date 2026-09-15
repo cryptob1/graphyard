@@ -146,7 +146,8 @@ Never share an operator or producer credential with an implementation agent.`); 
       if (!selected.length) throw new Error(args[0] === '--all' ? 'No work has a current all-gates-passing merge authorization' : `Unknown work item ${args[0]}`);
       const mergeOne = (item: any) => mergeWork(master, item, () => masterApi('work-snapshot'),
         (latest, authorization) => masterMutation(`work/${latest.id}/merge-acquire`, { expectedRevision: authorization.revision, sha: authorization.sha, baseSha: authorization.baseSha, policyRevision: authorization.policyRevision }),
-        (latest, execution, reason) => masterMutation(`work/${latest.id}/merge-cancel`, { executionId: execution.id, reason }));
+        (latest, execution, reason) => masterMutation(`work/${latest.id}/merge-cancel`, { executionId: execution.id, reason }),
+        (latest, execution) => masterMutation(`work/${latest.id}/merge-verify`, { executionId: execution.id }));
       const results = args[0] === '--all' ? await continueMergeBatch(selected, mergeOne) : [await mergeOne(selected[0])];
       return print(results);
     }

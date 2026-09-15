@@ -235,8 +235,8 @@ test('routine merge is exact-candidate, double-checked, and never uses an admin 
   const candidate = work({ observation: { at: new Date().toISOString(), candidate: { sha: 'a'.repeat(40), baseSha: 'b'.repeat(40), pr: 42, branch: 'graphyard/gy-42-1', author: 'worker' } } as any }); const config = { version: 1 as const, url: 'https://graphyard.example', credentialFile: '/outside/master.token', cliPath: launcher, repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'machine-a', masterAgentName: 'graphyard-master-project', autoMerge: true, mergeMethod: 'merge' as const, workers: [] };
   const calls: string[][] = [];
   const execution = { id: '11111111-1111-4111-8111-111111111111', owner: 'master', sha: candidate.candidate!.sha, baseSha: candidate.candidate!.baseSha, policyRevision: 2, authorizationRevision: candidate.revision, issuedAt: new Date().toISOString(), expiresAt: new Date(Date.now() + 120_000).toISOString() };
-  const acquire = async () => ({ execution }); const cancel = async () => ({});
-  const result = await mergeWork(config, candidate, async () => ({ work: [candidate], now: new Date().toISOString() }), acquire, cancel, (_command, args) => {
+  const acquire = async () => ({ execution }); const cancel = async () => ({}); const verify = async () => ({ executionId: execution.id, sha: execution.sha });
+  const result = await mergeWork(config, candidate, async () => ({ work: [candidate], now: new Date().toISOString() }), acquire, cancel, verify, (_command, args) => {
     calls.push(args);
     if (args[1] === 'view') return JSON.stringify({ headRefOid: candidate.candidate!.sha, baseRefOid: candidate.candidate!.baseSha, baseRefName: 'main', state: 'OPEN', isDraft: false });
     return args[1] === '--method' ? JSON.stringify({ merged: true, sha: 'c'.repeat(40) }) : JSON.stringify(validProtection);
@@ -246,18 +246,18 @@ test('routine merge is exact-candidate, double-checked, and never uses an admin 
   assert.doesNotThrow(() => assertMergeProtection(validProtection, config, candidate));
   assert.throws(() => assertMergeProtection({ ...validProtection, required_status_checks: { ...validProtection.required_status_checks, checks: [] } }, config, candidate), /protection changed/);
   assert.throws(() => assertMergeCandidate(work({ gates: [{ name: 'acceptance', passed: false, reasons: ['Human approval required'] }] })), /does not have/);
-  let reads = 0; await assert.rejects(mergeWork(config, candidate, async () => ({ work: [reads++ ? work({ revision: 10 }) : candidate], now: new Date().toISOString() }), acquire, cancel, () => JSON.stringify({ headRefOid: candidate.candidate!.sha, baseRefOid: candidate.candidate!.baseSha, baseRefName: 'main', state: 'OPEN', isDraft: false })), /changed after/);
-  await assert.rejects(mergeWork(config, candidate, async () => ({ work: [candidate], now: new Date().toISOString() }), acquire, cancel, () => JSON.stringify({ headRefOid: candidate.candidate!.sha, baseRefOid: candidate.candidate!.baseSha, baseRefName: 'release', state: 'OPEN', isDraft: false })), /changed on GitHub/);
+  let reads = 0; await assert.rejects(mergeWork(config, candidate, async () => ({ work: [reads++ ? work({ revision: 10 }) : candidate], now: new Date().toISOString() }), acquire, cancel, verify, () => JSON.stringify({ headRefOid: candidate.candidate!.sha, baseRefOid: candidate.candidate!.baseSha, baseRefName: 'main', state: 'OPEN', isDraft: false })), /changed after/);
+  await assert.rejects(mergeWork(config, candidate, async () => ({ work: [candidate], now: new Date().toISOString() }), acquire, cancel, verify, () => JSON.stringify({ headRefOid: candidate.candidate!.sha, baseRefOid: candidate.candidate!.baseSha, baseRefName: 'release', state: 'OPEN', isDraft: false })), /changed on GitHub/);
   const stale = work({ observation: { at: '2000-01-01T00:00:00Z' } as any });
-  await assert.rejects(mergeWork(config, stale, async () => ({ work: [stale], now: new Date().toISOString() }), acquire, cancel), /does not have/);
+  await assert.rejects(mergeWork(config, stale, async () => ({ work: [stale], now: new Date().toISOString() }), acquire, cancel, verify), /does not have/);
   let cancelled = '';
-  await assert.rejects(mergeWork(config, candidate, async () => ({ work: [candidate], now: new Date().toISOString() }), acquire, async (_work, authority) => { cancelled = authority.id; }, (_command, args) => {
+  await assert.rejects(mergeWork(config, candidate, async () => ({ work: [candidate], now: new Date().toISOString() }), acquire, async (_work, authority) => { cancelled = authority.id; }, verify, (_command, args) => {
     if (args[1] === 'view') return JSON.stringify({ headRefOid: candidate.candidate!.sha, baseRefOid: candidate.candidate!.baseSha, baseRefName: 'main', state: 'OPEN', isDraft: false });
     if (args[1] !== '--method') return JSON.stringify(validProtection);
     throw new Error('provider response lost');
   }), /outcome is unknown/);
   assert.equal(cancelled, '', 'an unknown provider outcome retains authority');
-  await assert.rejects(mergeWork(config, candidate, async () => ({ work: [candidate], now: new Date().toISOString() }), acquire, async (_work, authority) => { cancelled = authority.id; }, (_command, args) => {
+  await assert.rejects(mergeWork(config, candidate, async () => ({ work: [candidate], now: new Date().toISOString() }), acquire, async (_work, authority) => { cancelled = authority.id; }, verify, (_command, args) => {
     if (args[1] === 'view') return JSON.stringify({ headRefOid: candidate.candidate!.sha, baseRefOid: candidate.candidate!.baseSha, baseRefName: 'main', state: 'OPEN', isDraft: false });
     if (args[1] !== '--method') return JSON.stringify(validProtection);
     return JSON.stringify({ merged: false, message: 'branch protection refused merge' });

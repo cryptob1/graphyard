@@ -123,6 +123,16 @@ test('coordinator can observe but cannot mutate work, claim leases, or submit ev
   await assert.rejects(engine.execute(coordinator, 'ready', w.id, {}, randomUUID()), /Operator permission/);
   await assert.rejects(engine.execute(coordinator, 'evidence', w.id, proof(), randomUUID()), /not permitted/);
 });
+test('final merge verification re-evaluates mutable GitHub gates under the active execution', async () => {
+  let w = await submitted(); w = await engine.observe(w.id, w.revision, observation(w));
+  w = await engine.execute(producer, 'evidence', w.id, proof(), randomUUID());
+  const granted = await engine.acquireMerge(coordinator, w.id, { expectedRevision: w.revision, sha: head, baseSha: base, policyRevision: w.policyRevision }, randomUUID());
+  const current = { ...observation(w), prState: 'open' as const, draft: false };
+  const verified = await engine.verifyMerge(coordinator, w.id, { executionId: granted.execution.id }, current);
+  assert.equal(verified.executionId, granted.execution.id); assert.equal(verified.sha, head);
+  await assert.rejects(engine.verifyMerge(coordinator, w.id, { executionId: granted.execution.id }, { ...current, checks: current.checks.map(check => ({ ...check, result: 'failure' })) }), /GitHub gates changed/);
+  await assert.rejects(engine.verifyMerge(worker, w.id, { executionId: granted.execution.id }, current), /Coordinator permission/);
+});
 
 test('single-use merge execution freezes relevant mutations through observed merge', async () => {
   let w = await submitted(); w = await engine.observe(w.id, w.revision, observation(w));

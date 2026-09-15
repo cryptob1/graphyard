@@ -25,6 +25,7 @@ const commands = {
 } as const;
 const mergeAcquireSchema = z.object({ expectedRevision: z.number().int().positive(), sha, baseSha: sha, policyRevision: z.number().int().positive() }).strict();
 const mergeCancelSchema = z.object({ executionId: z.string().uuid(), reason: z.string().trim().min(1).max(2000) }).strict();
+const mergeVerifySchema = z.object({ executionId: z.string().uuid() }).strict();
 export type Command = keyof typeof commands;
 
 // Old deployments did not persist assignment labels. Preserve the known owner/epoch
@@ -226,6 +227,24 @@ export class Engine {
       const result = { key: work.key, revision: work.revision, cancelled: data.executionId };
       await db.query('INSERT INTO receipts(actor,key,fingerprint,result) VALUES($1,$2,$3,$4)', [actor.id, key, fingerprint, JSON.stringify(result)]);
       return result;
+    });
+  }
+  async verifyMerge(actor: Principal, id: string, input: unknown, observation: Observation) {
+    demand(actor.role === 'coordinator' || actor.role === 'admin', 'Coordinator permission required', 403);
+    const data = mergeVerifySchema.parse(input);
+    return this.store.transaction(async (db, now) => {
+      const all: Work[] = (await db.query('SELECT document FROM work_items ORDER BY number')).rows.map(row => row.document);
+      const work = all.find(item => item.id === id || item.key === id); demand(work, 'Work item not found', 404);
+      const execution = work.mergeExecution;
+      demand(execution?.id === data.executionId && execution.owner === actor.id && Date.parse(execution.expiresAt) > now.getTime(), 'Merge execution is missing, expired, superseded, or owned by another coordinator');
+      demand(!observation.merged && observation.prState === 'open' && observation.draft === false, 'Pull request is no longer open and ready for merge');
+      demand(observation.candidate.sha === execution.sha && observation.candidate.baseSha === execution.baseSha && observation.candidate.pr === work.submission?.pr
+        && work.workspaces.some(workspace => workspace.epoch === work.submission!.epoch && workspace.branch === observation.candidate.branch), 'GitHub candidate changed during merge execution');
+      const probe = structuredClone(work); probe.candidate = observation.candidate; probe.observation = observation;
+      this.evaluate(probe, all.map(item => item.id === probe.id ? probe : item), now);
+      demand(probe.stage === 'merge' && probe.gates.every(gate => gate.passed) && !probe.violations.length, `GitHub gates changed during merge execution: ${probe.gates.flatMap(gate => gate.reasons).concat(probe.violations).join('; ')}`);
+      await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, actor.id, 'merge.execution.verified', JSON.stringify({ details: { executionId: execution.id, sha: execution.sha, verifiedAt: now.toISOString() } })]);
+      return { key: work.key, executionId: execution.id, sha: execution.sha, verifiedAt: now.toISOString() };
     });
   }
   async bindReviewRequest(id: string, expectedRevision: number, request: ReviewRequest, jobToken: string) {
