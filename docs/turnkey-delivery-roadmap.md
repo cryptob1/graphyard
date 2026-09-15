@@ -37,6 +37,8 @@ Implement one vertical path before building an extensible framework around imagi
 
 Add first-class `Environment`, `ReleaseCandidate`, `ValidationRequest`, `ValidationAttempt` and trusted runner registration. A candidate must identify source and built artifacts, including service membership when multiple services ship together. An environment name is not an immutable target identity.
 
+Creation/revision of environments, candidates, validation requests, oracle approvals and runner/collector registrations is an authority boundary. Only an operator or explicitly delegated policy principal with repository/environment scope may perform it; derive identity and scope from authentication, never request fields. In one transaction, check the expected configuration generation and any delegated lease epoch, validate against current independently observed work/source, requirements and selected delivery profile, append history and publish an immutable version/selection. Derive required proofs, scenario/bundle pins and allowed targets from that authorized state rather than client-selected substitutes. Stale generations, reduced proof coverage or unapproved targets refuse. Implementation workers may request scheduling of already-authorized validation through their current work lease; they cannot define trusted authority. No client-controlled lifecycle state is accepted.
+
 Each request pins:
 
 - Work item and requirement revision, scenario ID/revision/hash, required proof names.
@@ -56,6 +58,7 @@ Reuse the transactional ledger and durable jobs for scheduling. Perform provider
 
 Acceptance checks:
 
+- Unauthorized creation/revision of environments, candidates, requests, oracle approvals or trusted registrations fails. Stale configuration/delegate epochs and client-selected weakened proof/target substitutions fail without changing authoritative state.
 - Duplicate dispatch and duplicate results do not create duplicate authoritative execution or progression.
 - A runner that never acknowledges produces a visible timeout and recoverable request.
 - Results from a wrong runner, expired epoch, old requirement revision or different artifact do not count.
