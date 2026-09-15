@@ -102,6 +102,8 @@ Deployment observers use individually authenticated, environment/service-scoped 
 
 Use provider-specific adapters for deployment identity and health; do not put Railway-specific assumptions in the core gate engine. In the first supported Railway path, verify which available provider/runtime facts establish artifact identity before promising that every process runs the expected code. Where runtime identity cannot be observed, show unknown and require an appropriate runtime probe.
 
+Production authorization requires a coherent observation window across every required service, including every required instance during rolling deployments. Use an atomic provider snapshot or overlapping, gap-free identity/health validity histories establishing a common interval for the entire expected manifest and any required behavioral checks. Independently sampled latest observations, even recent sequential probes, cannot prove simultaneity. Pin the selected release generation and policy, apply configured freshness bounds using trusted observation times, and refuse when coverage, membership, freshness or common-interval attribution is unknown. A later change invalidates current health without rewriting the historical authorization.
+
 Reconcile the range between successful release anchors and what is actually observed running. Deployments can include several PRs, skip intermediate builds or supersede an earlier rollout. Release membership must account for reverts and explicit artifact contents; ancestry alone does not prove that an intended behavior survived.
 
 Bounded sweeps require continuation cursors. Missing webhooks, coalesced workflow runs and late observations must converge through periodic reconciliation. A newer release superseding an old one is different from the old release being unhealthy. Do not mark work complete twice when it belongs to multiple observed releases.
@@ -109,6 +111,7 @@ Bounded sweeps require continuation cursors. Missing webhooks, coalesced workflo
 Acceptance checks:
 
 - A mixed-version deployment does not pass expected-service verification.
+- Staggered observations where A matches only before B matches cannot pass production. Missing instances, coverage gaps and stale snapshots also refuse; a common verified interval must cover the complete required manifest and checks.
 - Wrong-scope observers, superseded lease epochs, stale release generations and raw webhook assertions cannot change authoritative runtime state or authorize production; duplicate observations are idempotent.
 - A green deployment job with unknown runtime identity remains unverified.
 - A dropped webhook is recovered by polling/sweep without manual lifecycle changes.
