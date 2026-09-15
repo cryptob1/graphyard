@@ -31,6 +31,7 @@ export interface Evidence {
   producer: string; trusted: boolean; result: 'pass' | 'fail';
   executed: number; skipped: number; url?: string; at: string;
   scenarioRevision?: number; environment?: string;
+  validation?: { candidateId: string; requestId: string; attemptId: string };
 }
 export interface ReviewRequest { commentId: number; sha: string; baseSha: string; policyRevision: number; body: string; createdAt: string }
 export interface AgentReview { provider: 'codex'; sha: string; approved: boolean; reason: string; summaryId?: number; resultId?: number; requestId?: number; reactionId?: number; completedAt?: string }
@@ -45,6 +46,7 @@ export interface Observation {
 }
 export interface Gate { name: string; passed: boolean; reasons: string[] }
 export interface Work extends Create {
+  validation?: Record<string, { candidateId: string; requestId?: string; attemptId?: string }>;
   retiredCriterionIds?: string[];
   formalReviewResetRequired?: boolean;
   formalReviewBaseline?: { pr: number; policyRevision: number; reviewIds: number[] };
@@ -104,7 +106,8 @@ export function evaluate(work: Work, all: Work[], now: Date, ciAppIds: number[])
   const reasons: string[] = [];
   for (const ac of work.criteria) for (const proof of ac.proofs) {
     const scenario = work.scenarioRequirements?.find(s => s.proof === proof);
-    const evidence = work.evidence.filter(e => e.proof === proof && e.trusted && e.sha === candidate?.sha && e.baseSha === candidate?.baseSha && e.policyRevision === work.policyRevision && (!scenario || e.scenarioRevision === scenario.revision && e.environment === scenario.environment)).at(-1);
+    const validation = work.validation?.[proof];
+    const evidence = work.evidence.filter(e => e.proof === proof && e.trusted && e.sha === candidate?.sha && e.baseSha === candidate?.baseSha && e.policyRevision === work.policyRevision && (!validation || !!validation.attemptId && e.validation?.candidateId === validation.candidateId && e.validation?.requestId === validation.requestId && e.validation?.attemptId === validation.attemptId) && (!scenario || e.scenarioRevision === scenario.revision && e.environment === scenario.environment)).at(-1);
     if (!evidence || evidence.result !== 'pass' || evidence.executed < 1 || evidence.skipped !== 0) reasons.push(`${ac.id}: ${proof} needs trusted passing evidence, with executed > 0 and skipped = 0, for this candidate and policy${scenario ? `; scenario v${scenario.revision} in ${scenario.environment}` : ''}`);
   }
   add('acceptance', reasons);

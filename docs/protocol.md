@@ -109,3 +109,7 @@ All required proof names must pass. Evidence is selected for the exact head/base
 `POST /api/work/:id/rereview` queues a fresh Codex request. Operators send `{}`; workers send `{ "epoch": 1 }` and must own the active lease. The caller never supplies a verdict, reviewer identity, or comment ID. Only the trusted integration job records the actual dispatched request. Both endpoints require normal idempotency headers and append history. See the GitHub guide for deployment and branch-protection prerequisites.
 
 `GET /api/work-snapshot` returns `{ work: WorkItem[], now: ISO8601 }` from a single Postgres statement snapshot, ordered by work number. Use its timestamp for lease display and preserve it with the returned work. `/api/work` retains its array response for existing clients; `/api/status.now` is a separate observation and must not be used to age another snapshot.
+
+## Validation runner API
+
+The [validation protocol](validation.md) documents versioned environments, trusted registrations, immutable candidates, explicit dispatch/ACK, result collection and recovery. Use `graphyard validation` to inspect requests. Automatic runner execution is a later increment.

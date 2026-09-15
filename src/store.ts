@@ -28,6 +28,17 @@ CREATE TABLE IF NOT EXISTS jobs (
 ALTER TABLE jobs ADD COLUMN IF NOT EXISTS generation bigint NOT NULL DEFAULT 0;
 ALTER TABLE jobs ADD COLUMN IF NOT EXISTS claimed_generation bigint NOT NULL DEFAULT 0;
 CREATE TABLE IF NOT EXISTS webhook_receipts (id text PRIMARY KEY, created_at timestamptz NOT NULL DEFAULT now());
+CREATE TABLE IF NOT EXISTS validation_definitions (
+  kind text NOT NULL, id text NOT NULL, revision int NOT NULL, document jsonb NOT NULL,
+  PRIMARY KEY(kind,id,revision)
+);
+DROP TRIGGER IF EXISTS immutable_validation_definitions ON validation_definitions;
+CREATE TRIGGER immutable_validation_definitions BEFORE UPDATE OR DELETE ON validation_definitions FOR EACH ROW EXECUTE FUNCTION graphyard_immutable();
+CREATE TABLE IF NOT EXISTS validation_candidates (id uuid PRIMARY KEY, document jsonb NOT NULL);
+DROP TRIGGER IF EXISTS immutable_validation_candidates ON validation_candidates;
+CREATE TRIGGER immutable_validation_candidates BEFORE UPDATE OR DELETE ON validation_candidates FOR EACH ROW EXECUTE FUNCTION graphyard_immutable();
+CREATE TABLE IF NOT EXISTS validation_requests (id uuid PRIMARY KEY, document jsonb NOT NULL);
+CREATE TABLE IF NOT EXISTS validation_resources (resource text PRIMARY KEY, request_id uuid NOT NULL REFERENCES validation_requests(id));
 CREATE TABLE IF NOT EXISTS scenarios (id text NOT NULL, revision int NOT NULL, document jsonb NOT NULL, PRIMARY KEY(id,revision));
 DROP TRIGGER IF EXISTS immutable_scenarios ON scenarios;
 CREATE TRIGGER immutable_scenarios BEFORE UPDATE OR DELETE ON scenarios FOR EACH ROW EXECUTE FUNCTION graphyard_immutable();

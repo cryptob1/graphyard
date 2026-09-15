@@ -222,3 +222,17 @@ test('work details explain missing proof and operator can revise explicit criter
   expect(body.expectedPolicyRevision).toBe(1); expect(body.criteria[1]).toEqual({ id: 'AC-2', text: 'An explicit second outcome', proofs: ['integration:second'] });
   expect(body.reason).toBe('New behavior discovered during planning'); expect(state.writes).toBe(0);
 });
+
+test('validation view reports failures honestly and bounds request history', async ({ page }) => {
+  await fixture(page); let fail = true;
+  await page.route('**/api/validation', route => route.fulfill(fail ? { status: 503, json: { error: 'Validation unavailable' } } : { json: { candidates: [], requests: Array.from({ length: 25 }, (_, i) => ({ id: `request-${i}`, workId: work.id, proof: 'e2e:behavior', candidateId: 'candidate', runner: { id: 'runner' }, collector: { id: 'collector' }, state: 'expired', attempts: [{ id: `attempt-${i}`, epoch: 1, state: 'expired', settled: false, dispatchedAt: '2026-01-01T00:00:00Z' }], maxAttempts: 2, deadline: '2026-01-01T01:00:00Z', createdAt: '2026-01-01T00:00:00Z' })) } }));
+  await login(page); await page.getByRole('button', { name: '↻ Validation' }).click();
+  await expect(page.getByRole('heading', { name: 'Validation requests' })).toBeVisible();
+  await expect(page.getByRole('alert')).toContainText('Validation unavailable');
+  await expect(page.getByText('No validation requested yet.')).toHaveCount(0);
+  fail = false; await page.getByRole('button', { name: 'Retry validation requests' }).click();
+  await expect(page.locator('.scenario-card')).toHaveCount(20);
+  await expect(page.getByText('Resources remain reserved.', { exact: false })).toHaveCount(20);
+  await page.getByRole('button', { name: /Show 20 older requests/ }).click();
+  await expect(page.locator('.scenario-card')).toHaveCount(25);
+});

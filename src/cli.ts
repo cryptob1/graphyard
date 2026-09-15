@@ -49,6 +49,7 @@ Environment: GRAPHYARD_URL, GRAPHYARD_TOKEN (individual role-scoped credential)
   requirements GY-N file.json  Revise requirements with an audit reason (operator)
   list | next                  List all work / claimable work
   create path/to/work.json      Create work with acceptance criteria (operator)
+  validation [ACTION file.json] List validation state or submit a protocol command
   scenarios                    List versioned E2E test-case definitions
   scenario file.json           Publish a scenario version (operator)
   ready GY-N                   Release backlog item (operator)
@@ -70,6 +71,11 @@ Environment: GRAPHYARD_URL, GRAPHYARD_TOKEN (individual role-scoped credential)
 
 Use GRAPHYARD_REQUEST_ID to safely retry an identical command after a network timeout.
 Never share an operator or producer credential with an implementation agent.`); return;
+  }
+  if (command === 'validation') {
+    if (!id) return print(await api('validation'));
+    if (!['define','build','candidate','request','dispatch','ack','heartbeat','result','cancel','settle','retry'].includes(id) || !args[0]) throw new Error('Use validation ACTION file.json');
+    return print(await api(`validation/${id}`, JSON.parse(await readFile(args[0], 'utf8'))));
   }
   if (command === 'init') {
     const root = execFileSync('git', ['rev-parse', '--show-toplevel'], { encoding: 'utf8' }).trim();
