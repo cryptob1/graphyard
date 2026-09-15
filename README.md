@@ -76,7 +76,7 @@ Use the native [Herdr plugin](docs/herdr.md), or integrate an external worker th
 
 Run one shared Graphyard server. Point workers on each machine at it with individual credentials and stable host IDs. Worktrees stay on worker machines; the control plane does not need their filesystems mounted or SSH access.
 
-For several concurrent agents, use the [recommended master-agent operating mode](docs/master-agent.md). It works with existing authenticated Herdr sessions and optional Codex, Claude, or other launch profiles. The master observes and routes; workers claim for themselves, and Graphyard remains authoritative.
+For several concurrent agents, use the [recommended master-agent operating mode](docs/master-agent.md). It observes existing authenticated Herdr sessions and dispatches new work through supervised Codex, Claude, or other launch profiles. The master observes and routes; worker-scoped launchers claim immediately before starting the agent, and Graphyard remains authoritative.
 
 ```sh
 graphyard master init --url https://YOUR-GRAPHYARD-HOST --token-stdin

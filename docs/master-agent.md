@@ -20,7 +20,7 @@ Paste or pipe the coordinator token, then EOF. Setup verifies the token and GitH
 
 - discovers the repository and proposed checks;
 - preserves existing `AGENTS.md` content and installs managed worker and master sections;
-- writes `.graphyard/master.json` with mode 0600 inside the Git-ignored local directory;
+- writes non-secret repository routing settings to ignored `.graphyard/master.json` and the coordinator token to a mode-0600 file under the operator's Graphyard configuration directory, outside the managed repository;
 - enables exact-candidate routine merging by default;
 - prints the next setup action without printing a credential.
 
@@ -39,7 +39,7 @@ This creates a non-focused Herdr tab, starts the selected agent, and prompts it 
 
 Each concurrent worker needs its own Graphyard `worker` principal. Agent-provider login and Graphyard identity are separate concerns.
 
-An already-running, already-authenticated Herdr agent can be adopted without storing its credential in the master configuration:
+An already-running, already-authenticated Herdr agent can be registered for health and assignment observation without storing its credential in the master configuration:
 
 ```json
 {
@@ -75,7 +75,7 @@ graphyard master worker add /path/to/profile.json
 
 For launch profiles, Graphyard verifies the credential is a worker token for the stated principal. The explicit `GRAPHYARD_TOKEN_FILE` supplied to that session takes precedence over ambient `GRAPHYARD_TOKEN` values and repository `.env` files, preventing a coordinator or operator shell identity from leaking into worker actions. Provider/account routing uses the agent kind, arguments, and non-secret profile locators in `environment`. Keys that look like passwords, tokens, private keys, or API credentials are rejected. Authenticate Codex, Claude, or another runtime locally using its normal login flow; do not copy provider secrets into the profile.
 
-Existing profiles are suitable when Herdr or another operator already launched the session with the correct identity. The worker's subsequent Graphyard claim is the authoritative identity check.
+Existing profiles are suitable for joining Herdr health to work the session already owns. Graphyard deliberately refuses to dispatch new work into an existing interactive process because it cannot retroactively make that process a child of the lease supervisor. Use a launch profile for new assignments. The worker launch wrapper's Graphyard claim is the authoritative identity check.
 
 ## Operating loop
 
@@ -90,10 +90,10 @@ The report reads one Graphyard work snapshot and joins configured Herdr sessions
 For a ready item:
 
 ```sh
-graphyard master dispatch GY-42 codex-existing
+graphyard master dispatch GY-42 claude-primary
 ```
 
-Dispatch refuses an assigned or non-ready item. It prompts an existing idle Herdr agent or creates a non-focused visible tab for a launch profile. The prompt requires the worker to claim under its own credential, use Graphyard's worktree, supervise its lease, and submit rather than merge. The response says `ownership: pending worker claim`; prompt delivery never becomes ownership.
+Dispatch refuses assigned, dependency-blocked, resource-blocked, non-ready, and existing-session profiles. For a launch profile it creates a non-focused visible tab and starts a worker-scoped bootstrap. That bootstrap claims immediately before launch, creates the assigned worktree, and runs the coding agent as a child of `graphyard watch`. The supervisor renews the lease and terminates the complete child process group on lease loss. Only after Herdr detects the supervised agent does the master name and prompt it. Prompt delivery itself never becomes ownership.
 
 The master then watches for:
 
@@ -118,9 +118,10 @@ For every candidate, the command requires:
 1. stage `merge` and every Graphyard gate passing;
 2. no recorded violation;
 3. a merge authorization matching head SHA, base SHA, and policy revision;
-4. a fresh GitHub read that sees the same head and base on an open, non-draft PR;
-5. a second Graphyard snapshot with the same work revision and authorization;
-6. GitHub's `--match-head-commit` guard and normal branch protection.
+4. a fresh Graphyard observation, evaluated against the database time in the snapshot;
+5. a GitHub read that sees the same head, base commit, and managed base-branch name on an open, non-draft PR;
+6. a second Graphyard snapshot with the same work revision, fresh observation, and authorization;
+7. GitHub's `--match-head-commit` guard and normal branch protection.
 
 It never uses `--admin`. A human approval represented as required evidence remains a refusing gate until supplied. After the merge command succeeds, the item is still not declared Done by the master; Graphyard waits to observe and reconcile the actual merge.
 
@@ -138,6 +139,8 @@ Provider changes, account quota changes, machine changes, and context-window rep
 6. preserve the earlier worktree and events for audit.
 
 The master may summarize a handoff in the work item or PR, but Graphyard state and Git history remain the proof. Never share one worker token across concurrent sessions. On multiple machines, use distinct principals and stable host IDs, and keep credential files local to the machine that launches that worker.
+
+The coordinator token is read-only and is stored outside the repository. File modes do not isolate processes running as the same OS user. Run the master under a separate OS account or on a dedicated coordination machine when implementation agents are not trusted with same-user filesystem visibility. Graphyard's gates and GitHub protection remain the merge authority even for trusted same-machine workers; the master token cannot mutate work or submit evidence.
 
 ## Recommended boundaries
 

@@ -11,7 +11,7 @@ import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 import { diagnose, fileConflicts, proofPreview, resourceConflicts } from './coordination.js';
 import { loadConnection, setupRepository, handoff, hostIdSchema } from './repository-setup.js';
-import { buildMasterStatus, dispatchWork, listHerdrAgents, loadMasterConfig, mergeWork, readCredentialFile, saveWorkerProfile, setupMaster, startMaster, workerProfileSchema } from './master.js';
+import { buildMasterStatus, dispatchWork, listHerdrAgents, loadMasterConfig, mergeWork, readCredentialFile, runWorkerBootstrap, saveWorkerProfile, setupMaster, startMaster, workerProfileSchema } from './master.js';
 
 try { process.loadEnvFile(); } catch (error: any) { if (error.code !== 'ENOENT') throw error; }
 const [command, id, ...args] = process.argv.slice(2);
@@ -95,10 +95,16 @@ Never share an operator or producer credential with an implementation agent.`); 
       return print(await setupMaster(root, { url: values.url ?? base, token: masterToken, cliPath: resolve(values['cli-path'] ?? await activeCliPath()), hostId: values['host-id'] ?? hostId, ...(values['no-auto-merge'] ? { autoMerge: false } : {}), ...(method ? { mergeMethod: method as 'merge' | 'squash' | 'rebase' } : {}) }));
     }
     const master = await loadMasterConfig(root);
-    const masterApi = async (path: string, credential = master.token) => {
+    if (id === 'worker-run') {
+      if (!args[0] || !args[1]) throw new Error('The internal worker launcher requires a work key and launch profile');
+      process.exitCode = await runWorkerBootstrap(root, args[0], args[1]); return;
+    }
+    const masterToken = await readCredentialFile(master.credentialFile);
+    const masterApi = async (path: string, credential = masterToken) => {
       const response = await fetch(`${master.url}/api/${path}`, { headers: { Authorization: `Bearer ${credential}` }, signal: AbortSignal.timeout(30_000) });
       const body = await response.json(); if (!response.ok) throw new Error(JSON.stringify(body)); return body;
     };
+    const coordinator = await masterApi('status'); if (coordinator.actor?.role !== 'coordinator') throw new Error('Master commands require the configured coordinator identity');
     if (id === 'start') {
       const kind = workerProfileSchema.shape.kind.safeParse(args[0]); if (!kind.success) throw new Error('Use master start with a supported agent kind such as codex or claude');
       const separator = args.indexOf('--'); const agentArgs = separator < 0 ? [] : args.slice(separator + 1);

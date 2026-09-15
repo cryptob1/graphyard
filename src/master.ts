@@ -1,8 +1,8 @@
-import { execFileSync } from 'node:child_process';
-import { randomUUID } from 'node:crypto';
-import { chmod, lstat, readFile } from 'node:fs/promises';
+import { execFileSync, spawnSync } from 'node:child_process';
+import { createHash, randomUUID } from 'node:crypto';
+import { chmod, lstat, mkdir, readFile } from 'node:fs/promises';
 import { isAbsolute, resolve } from 'node:path';
-import { hostname } from 'node:os';
+import { homedir, hostname } from 'node:os';
 import { z } from 'zod';
 import { assertRepository, discover, localDirectory, saveDiscovery } from './onboarding.js';
 import { managedInstructions, serverOrigin } from './repository-setup.js';
@@ -32,9 +32,10 @@ export type WorkerProfile = z.infer<typeof workerProfileSchema>;
 export const masterConfigSchema = z.object({
   version: z.literal(1),
   url: z.string(),
-  token: z.string().min(32),
+  credentialFile: z.string(),
   cliPath: z.string(),
   repository: z.string().min(1),
+  baseBranch: z.string().min(1).max(200),
   hostId: z.string().trim().min(1).max(200),
   masterAgentName: z.string().trim().regex(/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,99}$/),
   autoMerge: z.boolean().default(true),
@@ -84,6 +85,8 @@ export async function loadMasterConfig(root: string): Promise<MasterConfig> {
   const file = resolve(root, '.graphyard/master.json'); await privateFile(file);
   const config = masterConfigSchema.parse(JSON.parse(await readFile(file, 'utf8')));
   config.url = serverOrigin(config.url);
+  if (!isAbsolute(config.credentialFile)) throw new Error('Master credential file must be outside the repository and use an absolute path');
+  await privateFile(config.credentialFile);
   if (!isAbsolute(config.cliPath)) throw new Error('Master CLI path must be absolute');
   try { if (!(await lstat(config.cliPath)).isFile()) throw new Error(); } catch { throw new Error('Configured Graphyard CLI launcher is unavailable'); }
   return config;
@@ -95,8 +98,13 @@ async function atomicPrivateWrite(file: string, value: unknown) {
   await writeFile(temporary, JSON.stringify(value, null, 2), { mode: 0o600, flag: 'wx' });
   await rename(temporary, file); await chmod(file, 0o600);
 }
+async function atomicPrivateText(file: string, value: string) {
+  const temporary = `${file}.${randomUUID()}.tmp`;
+  const { writeFile, rename } = await import('node:fs/promises');
+  await writeFile(temporary, value, { mode: 0o600, flag: 'wx' }); await rename(temporary, file); await chmod(file, 0o600);
+}
 
-export async function setupMaster(root: string, input: { url: string; token: string; cliPath: string; hostId?: string; autoMerge?: boolean; mergeMethod?: 'merge' | 'squash' | 'rebase' }, fetcher: typeof fetch = fetch) {
+export async function setupMaster(root: string, input: { url: string; token: string; cliPath: string; hostId?: string; credentialDirectory?: string; autoMerge?: boolean; mergeMethod?: 'merge' | 'squash' | 'rebase' }, fetcher: typeof fetch = fetch) {
   const url = serverOrigin(input.url); const token = input.token.trim();
   if (token.length < 32) throw new Error('Master initialization requires a coordinator credential over stdin');
   const detected = await discover(root);
@@ -107,6 +115,7 @@ export async function setupMaster(root: string, input: { url: string; token: str
   const status = await response.json();
   if (status.actor?.role !== 'coordinator') throw new Error('Master setup requires a coordinator credential; worker, operator, producer, and reader credentials are not suitable');
   if (typeof status.repository !== 'string' || !status.repository) throw new Error('Master setup requires the control plane to be bound to a GitHub repository');
+  if (typeof status.baseBranch !== 'string' || !status.baseBranch) throw new Error('Master setup requires the control plane to identify its managed base branch');
   assertRepository(detected.repository, status.repository);
   if (!detected.repository) throw new Error('Master setup requires a recognized GitHub origin');
   try { if (!(await lstat(resolve(input.cliPath))).isFile()) throw new Error(); } catch { throw new Error('Master setup requires an existing Graphyard CLI launcher'); }
@@ -114,13 +123,19 @@ export async function setupMaster(root: string, input: { url: string; token: str
   try { previous = await loadMasterConfig(root); } catch (error: any) { if (error.code !== 'ENOENT' && !/ENOENT/.test(error.message)) throw error; }
   if (previous && (previous.url !== url || previous.repository.toLowerCase() !== detected.repository.toLowerCase())) throw new Error('Existing master configuration belongs to another server or repository');
   const repositoryName = detected.repository.split('/').at(-1)!.replace(/[^a-zA-Z0-9._-]/g, '-');
-  const config = masterConfigSchema.parse({ version: 1, url, token, cliPath: resolve(input.cliPath), repository: detected.repository, hostId: input.hostId ?? previous?.hostId ?? hostname(), masterAgentName: previous?.masterAgentName ?? `graphyard-master-${repositoryName}`, autoMerge: input.autoMerge ?? previous?.autoMerge ?? true, mergeMethod: input.mergeMethod ?? previous?.mergeMethod ?? 'merge', workers: previous?.workers ?? [] });
+  const credentialDirectory = resolve(input.credentialDirectory ?? process.env.GRAPHYARD_CONFIG_HOME ?? resolve(homedir(), '.config/graphyard'), 'masters');
+  if (credentialDirectory === root || credentialDirectory.startsWith(`${root}/`)) throw new Error('Coordinator credentials must be stored outside the managed repository');
+  await mkdir(credentialDirectory, { recursive: true, mode: 0o700 });
+  const identity = createHash('sha256').update(`${url}\0${detected.repository}`).digest('hex').slice(0, 20);
+  const credentialFile = resolve(credentialDirectory, `${identity}.token`);
+  const config = masterConfigSchema.parse({ version: 1, url, credentialFile, cliPath: resolve(input.cliPath), repository: detected.repository, baseBranch: status.baseBranch, hostId: input.hostId ?? previous?.hostId ?? hostname(), masterAgentName: previous?.masterAgentName ?? `graphyard-master-${repositoryName}`, autoMerge: input.autoMerge ?? previous?.autoMerge ?? true, mergeMethod: input.mergeMethod ?? previous?.mergeMethod ?? 'merge', workers: previous?.workers ?? [] });
   const instructionsFile = resolve(root, 'AGENTS.md');
   let existing = ''; let mode = 0o644;
   try { const info = await lstat(instructionsFile); if (!info.isFile()) throw new Error('Refusing to replace a non-regular AGENTS.md'); mode = info.mode & 0o777; existing = await readFile(instructionsFile, 'utf8'); }
   catch (error: any) { if (error.code !== 'ENOENT') throw error; }
   const instructions = managedMasterInstructions(managedInstructions(existing, url));
   const directory = await localDirectory(root);
+  await atomicPrivateText(credentialFile, token);
   await atomicPrivateWrite(resolve(directory, 'master.json'), config);
   const temporary = `${instructionsFile}.${randomUUID()}.tmp`;
   const { writeFile, rename } = await import('node:fs/promises');
@@ -153,7 +168,8 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
     const profile = active ? profiles.find(item => item.principal === work.lease!.owner) : undefined;
     const session = profile ? sessions.find(item => item.profile === profile.name) : undefined;
     const first = work.gates.find(gate => !gate.passed);
-    const mergeable = work.stage === 'merge' && !!work.candidate && !!work.mergeAuthorization
+    const freshObservation = !!work.observation && now - Date.parse(work.observation.at) >= 0 && now - Date.parse(work.observation.at) < 120_000;
+    const mergeable = freshObservation && work.stage === 'merge' && !!work.candidate && !!work.mergeAuthorization
       && work.mergeAuthorization.sha === work.candidate.sha && work.mergeAuthorization.baseSha === work.candidate.baseSha
       && work.mergeAuthorization.policyRevision === work.policyRevision
       && work.gates.every(gate => gate.passed) && !work.violations.length;
@@ -171,6 +187,19 @@ function herdrJson(args: string[], run: (command: string, args: string[]) => str
   return parsed.result ?? parsed;
 }
 export function listHerdrAgents(run?: (command: string, args: string[]) => string): HerdrAgent[] { return herdrJson(['agent', 'list'], run).agents ?? []; }
+
+function waitForHerdrAgent(target: string, run?: (command: string, args: string[]) => string, timeoutMs = 30_000) {
+  const deadline = Date.now() + timeoutMs;
+  let lastError: unknown;
+  while (Date.now() < deadline) {
+    try {
+      const agent = herdrJson(['agent', 'get', target], run);
+      if (agent?.pane_id || agent?.name || agent?.agent_status) return agent as HerdrAgent;
+    } catch (error) { lastError = error; }
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 250);
+  }
+  throw new Error(`Launched worker did not become visible in Herdr within ${timeoutMs}ms${lastError instanceof Error ? `: ${lastError.message}` : ''}`);
+}
 
 export async function startMaster(root: string, kind: WorkerProfile['kind'], agentArgs: string[], agents: HerdrAgent[], run?: (command: string, args: string[]) => string) {
   if (!kind) throw new Error('Choose a supported master agent kind');
@@ -192,35 +221,55 @@ export async function dispatchWork(root: string, work: Work, profile: WorkerProf
   const config = await loadMasterConfig(root);
   let target = agents.find(agent => agent.name === profile.agentName);
   if (profile.mode === 'existing') {
-    if (!target || !['idle', 'done'].includes(target.agent_status ?? '')) throw new Error('Existing worker must be visible and idle in Herdr');
-    const cwd = resolve(target.foreground_cwd ?? target.cwd ?? '/');
-    if (cwd !== root && !cwd.startsWith(`${root}/`)) throw new Error('Existing worker is visible in a different repository');
+    if (!target) throw new Error('Existing worker is not visible in Herdr');
+    throw new Error('Existing sessions are observable but cannot be safely adopted for new work; use a launch profile so Graphyard supervises the agent process');
   } else {
     await readCredentialFile(profile.credentialFile!);
     if (target) throw new Error('Launch profile agent name is already visible in Herdr');
     const tabArgs = ['tab', 'create', '--cwd', root, '--label', `${work.key} · ${profile.agentName}`, '--env', `GRAPHYARD_URL=${config.url}`, '--env', `GRAPHYARD_TOKEN_FILE=${profile.credentialFile}`, '--env', `GRAPHYARD_HOST_ID=${config.hostId}`, ...Object.entries(profile.environment).flatMap(([key, value]) => ['--env', `${key}=${value}`]), '--no-focus'];
     const tab = herdrJson(tabArgs, run); const pane = tab.pane_id ?? tab.pane?.id ?? tab.tab?.pane_id;
     if (!pane) throw new Error('Herdr did not return the new worker pane');
-    herdrJson(['agent', 'start', profile.agentName, '--kind', profile.kind!, '--pane', pane, '--', ...profile.agentArgs], run);
+    const bootstrap = `${shellQuote(process.execPath)} ${shellQuote(config.cliPath)} master worker-run ${shellQuote(work.key)} ${shellQuote(profile.name)}`;
+    herdrJson(['pane', 'run', pane, bootstrap], run);
+    waitForHerdrAgent(pane, run);
+    herdrJson(['agent', 'rename', pane, profile.agentName], run);
     target = { name: profile.agentName, pane_id: pane, agent_status: 'idle', cwd: root };
   }
-  const prompt = `Implement ${work.key}: ${work.title}. Graphyard owns the assignment. First run node ${config.cliPath} claim ${work.key}; only continue if the claim succeeds under principal ${profile.principal}. Then run worktree and handoff as instructed, work only in the assigned worktree, keep the lease alive with watch, satisfy the stated criteria without weakening them, open a PR, and submit it with complete. Stop immediately if the lease is lost. Do not submit trusted evidence or merge the PR.`;
+  const prompt = `Implement ${work.key}: ${work.title}. The Graphyard worker launcher has claimed this item under principal ${profile.principal}, created its assigned worktree, and placed this agent under lease supervision. Run node ${config.cliPath} status ${work.key} before editing. Work only in the current assigned worktree, satisfy the stated criteria without weakening them, open a PR, and submit it with complete. Stop immediately if the supervisor reports lease loss. Do not submit trusted evidence or merge the PR.`;
   herdrJson(['agent', 'prompt', profile.agentName, prompt], run);
-  return { work: work.key, profile: profile.name, principal: profile.principal, agentName: profile.agentName, pane: target.pane_id ?? null, ownership: 'pending worker claim' };
+  return { work: work.key, profile: profile.name, principal: profile.principal, agentName: profile.agentName, pane: target.pane_id ?? null, ownership: 'worker launcher claimed and is supervising the agent process' };
 }
 
-export function assertMergeCandidate(work: Work) {
-  if (work.stage !== 'merge' || !work.candidate || !work.mergeAuthorization || work.mergeAuthorization.sha !== work.candidate.sha || work.mergeAuthorization.baseSha !== work.candidate.baseSha || work.mergeAuthorization.policyRevision !== work.policyRevision || work.gates.some(gate => !gate.passed) || work.violations.length) throw new Error(`${work.key} does not have a current all-gates-passing merge authorization`);
+const shellQuote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
+export async function runWorkerBootstrap(root: string, key: string, profileName: string, run = (command: string, args: string[], options: any = {}) => execFileSync(command, args, { ...options, encoding: 'utf8', stdio: options.stdio ?? ['ignore', 'pipe', 'pipe'] }), launch = (command: string, args: string[], options: any) => spawnSync(command, args, options).status ?? 1) {
+  const config = await loadMasterConfig(root); const profile = config.workers.find(worker => worker.name === profileName);
+  if (!profile || profile.mode !== 'launch' || !profile.kind || !profile.credentialFile) throw new Error('A complete launch profile is required');
+  await readCredentialFile(profile.credentialFile);
+  const env: NodeJS.ProcessEnv = { ...process.env, GRAPHYARD_URL: config.url, GRAPHYARD_TOKEN_FILE: profile.credentialFile, GRAPHYARD_HOST_ID: config.hostId };
+  delete env.GRAPHYARD_TOKEN; delete env.GRAPHYARD_MASTER_TOKEN;
+  const claim = JSON.parse(String(run(process.execPath, [config.cliPath, 'claim', key], { cwd: root, env })));
+  if (claim.lease?.owner !== profile.principal || !Number.isSafeInteger(claim.epoch)) throw new Error('Worker launcher acquired an unexpected assignment identity');
+  const workspace = JSON.parse(String(run(process.execPath, [config.cliPath, 'worktree', key, String(claim.epoch)], { cwd: root, env, stdio: ['ignore', 'pipe', 'inherit'] })));
+  if (!workspace.path || !isAbsolute(workspace.path)) throw new Error('Worker launcher did not receive an assigned workspace');
+  return launch(process.execPath, [config.cliPath, 'watch', key, String(claim.epoch), '--', profile.kind, ...profile.agentArgs], { cwd: workspace.path, env, stdio: 'inherit' });
+}
+
+export function assertMergeCandidate(work: Work, observedAt?: string) {
+  const age = observedAt && work.observation ? Date.parse(observedAt) - Date.parse(work.observation.at) : 0;
+  const fresh = !observedAt || !!work.observation && Number.isFinite(age) && age >= 0 && age < 120_000;
+  if (!fresh || work.stage !== 'merge' || !work.candidate || !work.mergeAuthorization || work.mergeAuthorization.sha !== work.candidate.sha || work.mergeAuthorization.baseSha !== work.candidate.baseSha || work.mergeAuthorization.policyRevision !== work.policyRevision || work.gates.some(gate => !gate.passed) || work.violations.length) throw new Error(`${work.key} does not have a current all-gates-passing merge authorization`);
   return { key: work.key, revision: work.revision, pr: work.candidate.pr, sha: work.candidate.sha, baseSha: work.candidate.baseSha, policyRevision: work.policyRevision };
 }
 export async function mergeWork(config: MasterConfig, work: Work, freshSnapshot: () => Promise<{ work: Work[]; now: string }>, run: (command: string, args: string[]) => string = (command, args) => execFileSync(command, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] })) {
   if (!config.autoMerge) throw new Error('Automatic routine merge is disabled in master configuration');
-  const authorization = assertMergeCandidate(work);
-  const pr = JSON.parse(run('gh', ['pr', 'view', String(authorization.pr), '--repo', config.repository, '--json', 'headRefOid,baseRefOid,state,isDraft']));
-  if (pr.headRefOid !== authorization.sha || pr.baseRefOid !== authorization.baseSha || pr.state !== 'OPEN' || pr.isDraft) throw new Error(`${work.key} changed on GitHub before merge`);
-  const latest = (await freshSnapshot()).work.find(item => item.id === work.id);
+  const before = await freshSnapshot(); const current = before.work.find(item => item.id === work.id);
+  if (!current || current.revision !== work.revision) throw new Error(`${work.key} changed before GitHub verification; retry`);
+  const authorization = assertMergeCandidate(current, before.now);
+  const pr = JSON.parse(run('gh', ['pr', 'view', String(authorization.pr), '--repo', config.repository, '--json', 'headRefOid,baseRefOid,baseRefName,state,isDraft']));
+  if (pr.headRefOid !== authorization.sha || pr.baseRefOid !== authorization.baseSha || pr.baseRefName !== config.baseBranch || pr.state !== 'OPEN' || pr.isDraft) throw new Error(`${work.key} changed on GitHub before merge`);
+  const after = await freshSnapshot(); const latest = after.work.find(item => item.id === work.id);
   if (!latest || latest.revision !== authorization.revision) throw new Error(`${work.key} changed after GitHub verification; retry`);
-  assertMergeCandidate(latest);
+  assertMergeCandidate(latest, after.now);
   const method = `--${config.mergeMethod}`;
   run('gh', ['pr', 'merge', String(authorization.pr), '--repo', config.repository, method, '--match-head-commit', authorization.sha]);
   return { key: authorization.key, pr: authorization.pr, sha: authorization.sha, method: config.mergeMethod, result: 'merge requested; Graphyard will mark Done only after observing the merge' };
