@@ -3,7 +3,9 @@ import assert from 'node:assert/strict';
 import { chmod, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { execFileSync } from 'node:child_process';
+import { execFile, execFileSync } from 'node:child_process';
+import { createServer } from 'node:http';
+import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
 import { assertMergeCandidate, buildMasterStatus, dispatchWork, loadMasterConfig, managedMasterInstructions, mergeWork, saveWorkerProfile, setupMaster, startMaster, workerProfileSchema } from '../src/master.js';
 import type { Work } from '../src/model.js';
@@ -102,6 +104,18 @@ test('launch profiles verify a private worker credential and match its principal
     await chmod(credential, 0o644);
     await assert.rejects(saveWorkerProfile(root, { name: 'other', principal: 'worker-b', agentName: 'eng-b', mode: 'launch', kind: 'claude', credentialFile: credential }, async () => ({ actor: { id: 'worker-b', role: 'worker' } })), /0600/);
   } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test('a launch profile token file overrides ambient Graphyard credentials', async () => {
+  const root = await repository(); const credential = join(root, 'worker.token'); let authorization = '';
+  const http = createServer((request, response) => { authorization = String(request.headers.authorization ?? ''); response.setHeader('Content-Type', 'application/json'); response.end(JSON.stringify({ actor: { id: 'worker-a', role: 'worker' } })); });
+  await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));
+  try {
+    await writeFile(credential, workerToken, { mode: 0o600 });
+    const url = `http://127.0.0.1:${(http.address() as any).port}`;
+    await promisify(execFile)(process.execPath, [launcher, 'status'], { cwd: root, env: { ...process.env, GRAPHYARD_URL: url, GRAPHYARD_TOKEN: 'ambient-admin-token-'.padEnd(40, 'x'), GRAPHYARD_TOKEN_FILE: credential } });
+    assert.equal(authorization, `Bearer ${workerToken}`);
+  } finally { await new Promise<void>(resolve => http.close(() => resolve())); await rm(root, { recursive: true, force: true }); }
 });
 
 test('routine merge is exact-candidate, double-checked, and never uses an admin bypass', async () => {

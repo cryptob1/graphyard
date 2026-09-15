@@ -73,7 +73,7 @@ Add either profile with:
 graphyard master worker add /path/to/profile.json
 ```
 
-For launch profiles, Graphyard verifies the credential is a worker token for the stated principal. Provider/account routing uses the agent kind, arguments, and non-secret profile locators in `environment`. Keys that look like passwords, tokens, private keys, or API credentials are rejected. Authenticate Codex, Claude, or another runtime locally using its normal login flow; do not copy provider secrets into the profile.
+For launch profiles, Graphyard verifies the credential is a worker token for the stated principal. The explicit `GRAPHYARD_TOKEN_FILE` supplied to that session takes precedence over ambient `GRAPHYARD_TOKEN` values and repository `.env` files, preventing a coordinator or operator shell identity from leaking into worker actions. Provider/account routing uses the agent kind, arguments, and non-secret profile locators in `environment`. Keys that look like passwords, tokens, private keys, or API credentials are rejected. Authenticate Codex, Claude, or another runtime locally using its normal login flow; do not copy provider secrets into the profile.
 
 Existing profiles are suitable when Herdr or another operator already launched the session with the correct identity. The worker's subsequent Graphyard claim is the authoritative identity check.
 

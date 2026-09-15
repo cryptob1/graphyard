@@ -20,7 +20,7 @@ try { connection = await loadConnection(process.cwd()); } catch { console.error(
 const base = process.env.GRAPHYARD_URL ?? connection?.url ?? 'http://127.0.0.1:4310';
 let savedToken: string | undefined;
 try { if (connection && new URL(base).origin === connection.url) savedToken = connection.token; } catch { /* request validation reports an invalid URL */ }
-const token = process.env.GRAPHYARD_TOKEN ?? (process.env.GRAPHYARD_TOKEN_FILE ? await readCredentialFile(resolve(process.env.GRAPHYARD_TOKEN_FILE)) : savedToken);
+const token = process.env.GRAPHYARD_TOKEN_FILE ? await readCredentialFile(resolve(process.env.GRAPHYARD_TOKEN_FILE)) : process.env.GRAPHYARD_TOKEN ?? savedToken;
 const hostId = hostIdSchema.parse(process.env.GRAPHYARD_HOST_ID ?? connection?.hostId ?? hostname());
 const cliPath = fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url));
 async function activeCliPath() {
