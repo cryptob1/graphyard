@@ -236,7 +236,7 @@ Never share an operator or producer credential with an implementation agent.`); 
     await mutate('workspace', { epoch, host: hostId, path, branch });
     await mkdir(resolve(root, '.graphyard/worktrees'), { recursive: true });
     const exists = spawnSync('git', ['show-ref', '--verify', '--quiet', `refs/heads/${branch}`]).status === 0;
-    try { execFileSync('git', exists ? ['worktree', 'add', path, branch] : ['worktree', 'add', '-b', branch, path, args[1] ?? (work.submission ? `origin/${branch}` : 'HEAD')], { stdio: 'inherit' }); }
+    try { execFileSync('git', exists ? ['worktree', 'add', path, branch] : ['worktree', 'add', '-b', branch, path, args[1] ?? (work.submission ? `origin/${branch}` : 'HEAD')], { stdio: ['ignore', 'ignore', 'inherit'] }); }
     catch { throw new Error('Git worktree creation failed. Reservation remains for safety; inspect the event and repair locally. Do not reuse the branch for another task.'); }
     return print({ path, branch, epoch });
   }

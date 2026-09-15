@@ -99,7 +99,8 @@ test('supervisor kills surviving descendants even after their group leader exits
     assert.equal(reservations,0);await assert.rejects(stat(join(cwd,'.graphyard/worktrees/GY-1-1')));
     await assert.rejects(exec('git',['show-ref','--verify','refs/heads/graphyard/gy-1-1'],{cwd}));
     await exec('git',['remote','set-url','origin','ssh://git@github.com/owner/project.git'],{cwd});
-    await exec(process.execPath,[launcher,'worktree','GY-1','1'],{cwd,env});
+    const created=await exec(process.execPath,[launcher,'worktree','GY-1','1'],{cwd,env});
+    assert.equal(JSON.parse(created.stdout).path,join(cwd,'.graphyard/worktrees/GY-1-1'),'worktree stdout remains machine-readable JSON');
     assert.equal(reservations,1);assert.ok((await stat(join(cwd,'.graphyard/worktrees/GY-1-1'))).isDirectory());
   } finally {await new Promise<void>(r=>http.close(()=>r()));await rm(cwd,{recursive:true,force:true});}
  });
