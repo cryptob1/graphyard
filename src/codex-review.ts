@@ -8,7 +8,7 @@ interface Source { pages(path: string): Promise<any[]>; request(path: string): P
 // Exact observed provider footer; arbitrary appended prose cannot be treated as approval.
 const cleanFooter = "<details> <summary>ℹ️ About Codex in GitHub</summary> <br/> Codex has been enabled to automatically review pull requests in this repo. Reviews are triggered when you - Open a pull request for review - Mark a draft as ready - Comment \"@codex review\". If Codex has suggestions, it will comment; otherwise it will react with 👍. When you [sign up for Codex through ChatGPT](https://openai.com/codex), Codex can also answer questions or update the PR, like \"@codex address that feedback\". </details>";
 const cleanCourtesies = new Set([
-  '', ':+1:', ':tada:', 'already looking forward to the next diff', 'keep them coming', 'another round soon, please', 'swish', 'you’re on a roll', "you're on a roll", 'what shall we delve into next?', "can't wait for the next one",
+  '', ':+1:', ':tada:', ':rocket:', 'already looking forward to the next diff', 'keep them coming', 'another round soon, please', 'swish', 'you’re on a roll', "you're on a roll", 'what shall we delve into next?', "can't wait for the next one",
   'delightful', 'nice work', 'bravo', 'keep it up', 'well done', 'good job',
   'great work', 'great job', 'looks good', 'looking good', 'excellent', 'splendid',
   'wonderful', 'fantastic', 'awesome', 'nice', 'cheers', 'all good', 'all clear',
