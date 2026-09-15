@@ -46,6 +46,8 @@ Each request pins:
 - Expected services/configuration identity where behavior depends on them.
 - Allowed runner identity, adapter version, deadline and artifact requirements.
 
+Candidate declarations do not establish source-to-artifact provenance. Require a build attestation from an authenticated, authorized build producer, or an independently verified provider mapping, binding the repository, full source identity, declared build inputs and immutable output digest. Verify issuer scope and integrity before accepting that relationship; implementation workers cannot attest their own artifacts. A provider build ID is usable only when its immutable contents and this provenance can be resolved. Unknown or conflicting provenance refuses candidate validation and delivery rather than trusting a SHA supplied alongside a digest.
+
 The request lifecycle separates queued, dispatched, acknowledged, running, completed, cancelled and expired. A dispatch success is not an acknowledgment. Attempts have distinct IDs, lease epochs and idempotency keys. Late results remain auditable but cannot revive superseded authority or advance a different candidate. Cancellation does not assert that an external process has physically stopped.
 
 Reuse the transactional ledger and durable jobs for scheduling. Perform provider and runner I/O outside coordination transactions. Define per-adapter idempotency behavior before enabling retries of external side effects.
@@ -57,6 +59,7 @@ Acceptance checks:
 - Results from a wrong runner, expired epoch, old requirement revision or different artifact do not count.
 - Restarting the server preserves queued requests and observed attempt history.
 - Failure to identify the deployed target refuses attributable success.
+- An artifact with no trusted source/build-input mapping, a forged attestation or a mismatched output digest cannot authorize validation or delivery.
 
 ## D2 — One turnkey Playwright path
 
@@ -119,7 +122,7 @@ Add capacity reporting, backpressure, queue dwell and dispatch/heartbeat diagnos
 
 Artifacts need a documented storage interface, a usable default backend, private access controls, hashes, retention and redaction. Docker/self-hosted deployments should have an explicit persistent-storage or S3-compatible configuration path; no essential evidence should silently disappear with an ephemeral server filesystem. Artifact access must not expose tokens or customer data to everyone who can view a public PR.
 
-Rollback is a supported integration workflow, not an arbitrary shell command. Record the failed candidate, approved rollback target, provider operation, resulting observations and linked repair work. Automatic rollback should be opt-in and constrained to tested reversible actions. Database migrations and external side effects require an explicit recovery plan; the system must not claim they are undone because an application image changed.
+Rollback is a supported integration workflow, not an arbitrary shell command. Record the failed candidate, approved rollback target, provider operation, resulting observations and linked repair work. Authenticate rollback executors with environment/service-scoped authority. Authorize each operation transactionally against the selected rollback target, current release generation and executor lease epoch, retaining its operation identity across retries. The external mutation itself must enforce a provider-side generation/precondition or equivalent fencing. A local check before and after an API call does not close the race with a superseding decision. Where a provider cannot fence writes, require a serialized in-flight operation barrier: lease expiry alone cannot release it, authorize a successor mutation or supersede its target until the previous operation is proven settled or cancelled. Unknown outcomes block further mutations pending reconciliation. Adapters that cannot establish either guarantee must not offer automatic rollback. Automatic rollback should be opt-in and constrained to tested reversible actions. Database migrations and external side effects require an explicit recovery plan; the system must not claim they are undone because an application image changed.
 
 Acceptance checks:
 
@@ -128,6 +131,7 @@ Acceptance checks:
 - Artifact upload failure and expired artifact retention are visible proof states.
 - A requested rollback is not complete until the target deployment is observed and required checks pass.
 - Recovery after server restart preserves the external operation identity and avoids duplicate side effects.
+- A partitioned rollback executor cannot apply an obsolete target after authority changes; tests cover delayed provider calls, lease expiry, target supersession and ambiguous outcomes. An unfenced adapter refuses automatic rollback, and an unresolved serialized operation blocks successors.
 
 ## D5 — Generalized reports, runners and installation
 
