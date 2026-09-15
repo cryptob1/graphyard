@@ -225,3 +225,24 @@ test('authorized build producers still cannot attest a mismatched source or inco
   await assert.rejects(validation.attestBuild(builder, { ...good, artifacts: [{ service: 'wrong-service', digest }] }, id()), /complete service manifest/);
   await cleanup(f);
 });
+
+test('builder and collector registrations cannot collapse onto one producer principal', async () => {
+  const f = await fixture();
+  const shared = { id: `shared-builder-${f.n}`, revision: 1 };
+  await validation.define(operator, { kind: 'registration', id: shared.id, expectedRevision: 0, principalId: collector.id, role: 'builder', environment: f.environment, adapterVersion: 'test-v1', proofs: [], enabled: true }, id());
+  const build: any = await validation.attestBuild(collector, { registration: shared, workId: f.w.id, expectedWorkRevision: (await current(f.w.id)).revision, sourceSha: sha, baseSha: base, buildInputsDigest: inputs, artifacts: [{ service: 'api', digest }], provenanceUrl: 'https://ci.example.test/build/shared' }, id());
+  const c: any = await validation.createCandidate(operator, { ...f.candidateInput, expectedWorkRevision: (await current(f.w.id)).revision, buildAttestationId: build.id }, id());
+  await assert.rejects(validation.createRequest(operator, { ...f.requestInput, candidateId: c.id, expectedWorkRevision: (await current(f.w.id)).revision }, id()), /distinct principals/); await cleanup(f);
+});
+test('completed evidence is retained across idle ticks but revoked on definition changes', async () => {
+  const f = await fixture(), command = await start(f); await validation.result(collector, report(f, command), id());
+  const before = (await store.events(f.w.id)).length;
+  await validation.reconcile(); await validation.reconcile();
+  assert.equal((await store.events(f.w.id)).length, before);
+  assert.equal((await validation.list()).requests.find(r => r.id === f.r.id)?.state, 'completed');
+  const registration = (await validation.list()).definitions.find(d => d.kind === 'registration' && d.id === f.builderRef.id)!;
+  const { revision, createdAt, createdBy, ...data } = registration;
+  await validation.define(operator, { ...data, expectedRevision: revision, enabled: false }, id());
+  assert.equal((await current(f.w.id)).gates.find(g => g.name === 'acceptance')?.passed, false);
+  assert.equal((await validation.list()).requests.find(r => r.id === f.r.id)?.state, 'superseded'); await cleanup(f);
+});

@@ -94,7 +94,7 @@ export class Validation {
     demand(this.compatible(w, c), 'Candidate no longer matches current work or requirements');
     await this.definition(db, 'environment', c.environment);
     await this.definition(db, 'bundle', c.bundle);
-    const build = (await db.query("SELECT payload->'attestation' AS attestation FROM events WHERE kind='validation.build' AND payload->'attestation'->>'id'=$1", [c.buildAttestationId])).rows[0]?.attestation as BuildAttestation | undefined;
+    const build = (await db.query('SELECT document AS attestation FROM validation_builds WHERE id=$1', [c.buildAttestationId])).rows[0]?.attestation as BuildAttestation | undefined;
     demand(build, 'Missing trusted build provenance'); await this.registration(db, build.registration, 'builder');
   }
   private async withReceipt(actor: Principal, command: string, data: unknown, key: string, fn: (db: pg.PoolClient, now: Date) => Promise<unknown>) {
@@ -142,7 +142,7 @@ export class Validation {
       const definition: Definition = { ...data, revision: latest + 1, createdAt: now.toISOString(), createdBy: actor.id };
       await db.query('INSERT INTO validation_definitions VALUES($1,$2,$3,$4)', [data.kind, data.id, definition.revision, JSON.stringify(definition)]);
       await this.event(db, actor.id, 'defined', { definition });
-      await this.reconcileWithin(db, now); return definition;
+      await this.reconcileWithin(db, now, true); return definition;
     });
   }
   async attestBuild(actor: Principal, input: unknown, key: string) {
@@ -155,6 +155,7 @@ export class Validation {
       demand(w.candidate?.sha === data.sourceSha && w.candidate.baseSha === data.baseSha, 'Build source differs from independently observed candidate');
       demand(same([...e.services].sort(), data.artifacts.map(a => a.service).sort()), 'Build must cover the complete service manifest');
       const attestation: BuildAttestation = { ...data, id: randomUUID(), producer: actor.id, at: now.toISOString(), repository: e.repository };
+      await db.query('INSERT INTO validation_builds VALUES($1,$2)', [attestation.id, JSON.stringify(attestation)]);
       await this.event(db, actor.id, 'build', { attestation }, w.id); return attestation;
     });
   }
@@ -168,7 +169,7 @@ export class Validation {
       const e = await this.definition(db, 'environment', data.environment) as Environment;
       const b = await this.definition(db, 'bundle', data.bundle) as Bundle;
       demand(e.id === s.environment && b.scenario === data.proof.replace(/^e2e:/, '') && b.scenarioRevision === s.revision && b.scenarioHash === s.hash, 'Environment or approved bundle differs from required scenario');
-      const build = (await db.query("SELECT payload->'attestation' AS attestation FROM events WHERE kind='validation.build' AND payload->'attestation'->>'id'=$1", [data.buildAttestationId])).rows[0]?.attestation as BuildAttestation | undefined;
+      const build = (await db.query('SELECT document AS attestation FROM validation_builds WHERE id=$1', [data.buildAttestationId])).rows[0]?.attestation as BuildAttestation | undefined;
       demand(build && build.workId === w.id && build.repository === this.repository && build.sourceSha === w.candidate.sha && build.baseSha === w.candidate.baseSha, 'Missing or mismatched trusted build provenance');
       const builder = await this.registration(db, build.registration, 'builder'); demand(same(builder.environment, data.environment), 'Build environment differs');
       const c: ValidationCandidate = { ...data, id: randomUUID(), sourceSha: w.candidate.sha, baseSha: w.candidate.baseSha, policyRevision: w.policyRevision, scenario: s, createdAt: now.toISOString(), createdBy: actor.id };
@@ -184,6 +185,8 @@ export class Validation {
       const c = await this.candidate(db, data.candidateId); const w = await this.work(db, c.workId, data.expectedWorkRevision); await this.valid(db, c, w);
       demand(w.validation?.[c.proof]?.candidateId === c.id, 'Candidate selection superseded');
       const runner = await this.registration(db, data.runner, 'runner'), collector = await this.registration(db, data.collector, 'collector');
+      const build = (await db.query('SELECT document FROM validation_builds WHERE id=$1', [c.buildAttestationId])).rows[0]?.document as BuildAttestation;
+      demand(build && collector.principalId !== build.producer, 'Build producer and result collector must be distinct principals');
       demand(same(runner.environment, c.environment) && same(collector.environment, c.environment) && collector.proofs.includes(c.proof), 'Runner/collector environment or proof scope differs');
       demand(Date.parse(data.deadline) > now.getTime() && Date.parse(data.deadline) <= now.getTime() + 3_600_000, 'Deadline must be within the next hour');
       const r: ValidationRequest = { ...data, id: randomUUID(), workId: w.id, proof: c.proof, state: 'queued', attempts: [], createdAt: now.toISOString(), createdBy: actor.id };
@@ -261,7 +264,7 @@ export class Validation {
   }
   private async reportReasons(db: pg.PoolClient, c: ValidationCandidate, data: Report) {
     const e = await this.definition(db, 'environment', c.environment) as Environment, b = await this.definition(db, 'bundle', c.bundle) as Bundle;
-    const build = (await db.query("SELECT payload->'attestation' AS attestation FROM events WHERE kind='validation.build' AND payload->'attestation'->>'id'=$1", [c.buildAttestationId])).rows[0].attestation as BuildAttestation;
+    const build = (await db.query('SELECT document AS attestation FROM validation_builds WHERE id=$1', [c.buildAttestationId])).rows[0].attestation as BuildAttestation;
     const reasons: string[] = [];
     if (data.execution !== 'completed' || data.behavior !== 'passed') reasons.push('Execution and behavior must both pass');
     if (!data.inventoryComplete || data.executed < 1 || data.skipped !== 0) reasons.push('Required inventory is missing, empty or skipped');
@@ -304,8 +307,24 @@ export class Validation {
       await this.changed(db, w, actor, 'invalidated', now, { requestId: r.id });
     }
   }
-  private async reconcileWithin(db: pg.PoolClient, now: Date) {
-    const requests: ValidationRequest[] = (await db.query("SELECT document FROM validation_requests WHERE document->>'state' NOT IN ('cancelled','expired','superseded')")).rows.map(r => r.document);
+  private async reconcileWithin(db: pg.PoolClient, now: Date, includeCompleted = false) {
+    // Enumerate current proof selections first, then look up those request IDs.
+    // Historical completed attempts never enter the authority verification loop.
+    const requests: ValidationRequest[] = (await db.query(`
+      WITH selected AS MATERIALIZED (
+        SELECT w.document AS work, (v.value->>'requestId')::uuid AS request_id
+        FROM work_items w CROSS JOIN LATERAL jsonb_each(COALESCE(w.document->'validation','{}'::jsonb)) v
+        WHERE w.document->>'stage'<>'done' AND v.value ? 'requestId'
+      )
+      SELECT document FROM validation_requests WHERE document->>'state' IN ('queued','dispatched','running')
+      UNION ALL
+      SELECT r.document FROM selected s JOIN validation_requests r ON r.id=s.request_id
+      JOIN validation_candidates c ON c.id=(r.document->>'candidateId')::uuid
+      WHERE r.document->>'state'='completed' AND ($1::boolean
+        OR c.document->>'policyRevision' IS DISTINCT FROM s.work->>'policyRevision'
+        OR c.document->>'sourceSha' IS DISTINCT FROM s.work->'candidate'->>'sha'
+        OR c.document->>'baseSha' IS DISTINCT FROM s.work->'candidate'->>'baseSha')
+    `, [includeCompleted])).rows.map(r => r.document);
     for (const r of requests) {
       const c = await this.candidate(db, r.candidateId), w = (await db.query('SELECT document FROM work_items WHERE id=$1', [r.workId])).rows[0]?.document as Work;
       let invalid = !w || w.validation?.[r.proof]?.requestId !== r.id || w.validation[r.proof].candidateId !== c.id;
@@ -322,5 +341,5 @@ export class Validation {
       await this.persist(db, r); await this.event(db, 'graphyard', r.state, { request: r }, r.workId); await this.invalidateBinding(db, r, now, 'graphyard');
     }
   }
-  async reconcile() { await this.store.transaction((db, now) => this.reconcileWithin(db, now)); }
+  async reconcile(includeCompleted = false) { await this.store.transaction((db, now) => this.reconcileWithin(db, now, includeCompleted)); }
 }

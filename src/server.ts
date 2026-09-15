@@ -120,6 +120,7 @@ async function main() {
   const github = await githubFromEnv();
   const http = server(engine, credentials, github);
   const validation = new Validation(engine, credentials.map(({ token, ...actor }) => actor), github?.config.repository ?? process.env.GITHUB_REPOSITORY ?? '');
+  await validation.reconcile(true);
   let running = false;
   const timer = setInterval(async () => {
     if (running) return; running = true;

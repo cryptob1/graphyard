@@ -34,10 +34,14 @@ CREATE TABLE IF NOT EXISTS validation_definitions (
 );
 DROP TRIGGER IF EXISTS immutable_validation_definitions ON validation_definitions;
 CREATE TRIGGER immutable_validation_definitions BEFORE UPDATE OR DELETE ON validation_definitions FOR EACH ROW EXECUTE FUNCTION graphyard_immutable();
+CREATE TABLE IF NOT EXISTS validation_builds (id uuid PRIMARY KEY, document jsonb NOT NULL);
+DROP TRIGGER IF EXISTS immutable_validation_builds ON validation_builds;
+CREATE TRIGGER immutable_validation_builds BEFORE UPDATE OR DELETE ON validation_builds FOR EACH ROW EXECUTE FUNCTION graphyard_immutable();
 CREATE TABLE IF NOT EXISTS validation_candidates (id uuid PRIMARY KEY, document jsonb NOT NULL);
 DROP TRIGGER IF EXISTS immutable_validation_candidates ON validation_candidates;
 CREATE TRIGGER immutable_validation_candidates BEFORE UPDATE OR DELETE ON validation_candidates FOR EACH ROW EXECUTE FUNCTION graphyard_immutable();
 CREATE TABLE IF NOT EXISTS validation_requests (id uuid PRIMARY KEY, document jsonb NOT NULL);
+CREATE INDEX IF NOT EXISTS validation_request_state ON validation_requests ((document->>'state'));
 CREATE TABLE IF NOT EXISTS validation_resources (resource text PRIMARY KEY, request_id uuid NOT NULL REFERENCES validation_requests(id));
 CREATE TABLE IF NOT EXISTS scenarios (id text NOT NULL, revision int NOT NULL, document jsonb NOT NULL, PRIMARY KEY(id,revision));
 DROP TRIGGER IF EXISTS immutable_scenarios ON scenarios;
