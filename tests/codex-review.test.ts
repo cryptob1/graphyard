@@ -144,7 +144,7 @@ test('migration refuses required code-owner review before making any external ch
     const f = commentFixture(); f.result.body = f.result.body.replace(':+1:', suffix);
     assert.equal((await f.run()).approved, true, suffix);
   }
-  for (const suffix of ['P1: fix authentication', 'Nice work! However, a bug remains.', 'Critical!', 'Please fix the review findings.', 'Unknown protocol payload']) {
+  for (const suffix of ['P1: fix authentication', 'Nice work! However, a bug remains.', 'Critical!', 'Please fix the review findings.', 'Unknown protocol payload', "Can't wait for the next one! However, a critical bug remains."]) {
     const f = commentFixture(); f.result.body = f.result.body.replace(':+1:', suffix);
     assert.equal((await f.run()).approved, false, suffix);
   }
@@ -184,7 +184,7 @@ test('migration refuses required code-owner review before making any external ch
  });
 
 test('dogfood clean-result variants do not require redundant reviews and unknown results explain refusal', async () => {
-  for (const suffix of ['Already looking forward to the next diff.', 'Keep them coming!', 'Another round soon, please!', 'Swish!', 'You’re on a roll!', "You're on a roll!"]) {
+  for (const suffix of ['Already looking forward to the next diff.', 'Keep them coming!', 'Another round soon, please!', 'Swish!', 'You’re on a roll!', "You're on a roll!", "Can't wait for the next one!"]) {
     const f = commentFixture(); f.result.body = f.result.body.replace(':+1:', suffix);
     assert.equal((await f.run()).approved, true, suffix);
     f.result.updated_at = '2026-01-01T00:03:00Z'; assert.equal((await f.run()).approved, false);
