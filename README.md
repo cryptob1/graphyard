@@ -145,3 +145,5 @@ npm test
 Tests start a real, isolated Postgres instance and exercise concurrent claims, lease expiry, stale evidence, producer identity, workspace reservations, durable jobs, history, and the API boundary. They require local socket access and a non-root account.
 
 Graphyard is licensed under [Apache 2.0](LICENSE).
+
+Read the [turnkey E2E and verified delivery roadmap](docs/turnkey-delivery-roadmap.md) for the planned runner integrations, deployment verification, recovery and self-hosted setup path. It distinguishes shipped behavior from the work still required.

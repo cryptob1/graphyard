@@ -9,6 +9,7 @@ const pages = [
   ['test-cases', 'E2E test cases'],
   ['first-pr', 'First enforced PR'],
   ['implementation-audit', 'Implementation audit'],
+  ['turnkey-delivery-roadmap', 'Turnkey E2E & delivery roadmap'],
   ['huck-engineer-comparison', 'Huck Engineer investigation'],
 ];
 const sources = import.meta.glob('../docs/*.md', { query: '?raw', import: 'default', eager: true }) as Record<string, string>;
