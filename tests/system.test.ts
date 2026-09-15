@@ -18,6 +18,7 @@ import { exercise } from '../scripts/acceptance-contract.mjs';
 const operator: Principal = { id: 'operator', role: 'admin' };
 const worker: Principal = { id: 'agent-a', role: 'worker', displayName: 'Atlas', runtime: 'Codex' };
 const other: Principal = { id: 'agent-b', role: 'worker' };
+const coordinator: Principal = { id: 'master', role: 'coordinator' };
 const producer: Principal = { id: 'ci-runner', role: 'producer', proofs: ['integration:claim-safety'] };
 const head = 'a'.repeat(40), base = 'b'.repeat(40);
 const probeWorkers = Array.from({ length: 32 }, (_, i) => ({ id: `probe-worker-${i}`, role: 'worker' as const, token: `test-probe-${i}-${'x'.repeat(32)}` }));
@@ -114,6 +115,12 @@ test('worker cannot self-certify CI, change policy, or mark done', async () => {
   await assert.rejects(engine.execute(worker, 'evidence', w.id, { ...proof(), trusted: true }, randomUUID()));
   await assert.rejects(engine.execute(worker, 'done' as any, w.id, {}, randomUUID()), /Unknown/);
   await assert.rejects(engine.execute(worker, 'ready', w.id, {}, randomUUID()), /permission/);
+});
+test('coordinator can observe but cannot mutate work, claim leases, or submit evidence', async () => {
+  const w = await ready();
+  await assert.rejects(engine.execute(coordinator, 'claim', w.id, {}, randomUUID()), /Worker permission/);
+  await assert.rejects(engine.execute(coordinator, 'ready', w.id, {}, randomUUID()), /Operator permission/);
+  await assert.rejects(engine.execute(coordinator, 'evidence', w.id, proof(), randomUUID()), /not permitted/);
 });
 test('assertions, skipped suites, zero executed, stale base, stale head, and stale policy never satisfy acceptance', async () => {
   let w = await submitted(); w = await engine.observe(w.id, w.revision, observation(w)); assert.equal(w.stage, 'acceptance');

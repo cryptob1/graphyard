@@ -21,7 +21,7 @@ export const createSchema = z.object({
   exclusiveResources: resourcesSchema.optional(),
 }).strict();
 export type Create = z.infer<typeof createSchema>;
-export interface Principal { id: string; role: 'admin' | 'worker' | 'producer' | 'reader'; proofs?: string[]; displayName?: string; runtime?: string }
+export interface Principal { id: string; role: 'admin' | 'coordinator' | 'worker' | 'producer' | 'reader'; proofs?: string[]; displayName?: string; runtime?: string }
 export interface AssignmentIdentity { owner: string; epoch: number; displayName?: string; runtime?: string; claimedAt?: string }
 export interface Lease { owner: string; epoch: number; expiresAt: string }
 export interface Workspace { host: string; path: string; branch: string; epoch: number; owner: string }

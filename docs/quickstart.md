@@ -14,7 +14,7 @@ cp .env.example .env
 node -e "console.log(require('node:crypto').randomBytes(32).toString('hex'))"
 ```
 
-Generate a distinct secret for each principal and replace the example tokens in `.env`. The server rejects tokens shorter than 32 characters and duplicate IDs/tokens. Keep an operator credential separate from worker credentials. Give a trusted runner only the proof names it may attest.
+Generate a distinct secret for each principal and replace the example tokens in `.env`. The server rejects tokens shorter than 32 characters and duplicate IDs/tokens. Keep operator, coordinator, and worker credentials separate. Give a trusted runner only the proof names it may attest.
 
 ```sh
 docker compose up -d db
@@ -88,3 +88,5 @@ node /path/to/graphyard/bin/graphyard.mjs evidence GY-1 evidence.json
 Worker-submitted evidence remains an assertion. Naming a runner or setting a pass result does not make it trusted. All required proofs need current matching evidence, a passing result, at least one executed assertion, and zero skipped tests.
 
 After gates pass, merge through GitHub. Graphyard observes the merge and marks the work done. No deployment guarantee is implied in v0.1.
+
+When you move beyond one supervised worker, install the [recommended master-agent operating mode](master-agent.md). The master derives assignments from this same ledger, joins Herdr session health, dispatches workers under their own identities, and can perform routine exact-candidate merges after every configured gate passes.
