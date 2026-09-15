@@ -10,7 +10,7 @@ Herdr is the first integration. Your agent tools run the workers; Graphyard give
 
 **Available today:** coordination through an evidence-backed GitHub merge. **Next:** staging, E2E execution, production observations, and verification after deployment. This is v0.1, built for supervised dogfooding.
 
-[Get started](docs/quickstart.md) · [Master-agent setup](docs/master-agent.md) · [First enforced PR](docs/first-pr.md) · [Connect Herdr](docs/herdr.md) · [Deploy](docs/deployment.md) · [Architecture](docs/architecture.md)
+[Onboard a repository](docs/onboarding.md) · [Quickstart](docs/quickstart.md) · [Master-agent setup](docs/master-agent.md) · [First enforced PR](docs/first-pr.md) · [Deploy](docs/deployment.md) · [Architecture](docs/architecture.md)
 
 ## More agents should mean more progress
 
@@ -103,6 +103,8 @@ npm start
 
 Open `http://localhost:4310` and sign in with your individual access token. The [quickstart](docs/quickstart.md) walks through creating work, claiming an assignment, creating its worktree, supervising a worker, and submitting a PR.
 
+For the recommended complete setup—shared hosting, GitHub enforcement, repository instructions, the Herdr plugin, a dedicated master, and separately authenticated Codex or Claude workers—follow [Onboard a repository to Graphyard and Herdr](docs/onboarding.md).
+
 For repository discovery, agent instructions, GitHub App setup, and a real refusal-to-acceptance loop, follow [Your first enforced PR](docs/first-pr.md). GitHub merge gates remain closed until the integration and protection are configured.
 
 The package is not published to npm yet. Use `npm run cli -- ...` or `node /path/to/graphyard/bin/graphyard.mjs ...` from a checkout.
@@ -133,6 +135,7 @@ A lease fences Graphyard commands; it cannot revoke filesystem access or Git cre
 
 | You want to… | Read |
 | --- | --- |
+| Set up a new repository, Herdr, master, and worker cluster | [Repository onboarding](docs/onboarding.md) |
 | Run locally and complete your first task | [Quickstart](docs/quickstart.md) |
 | Connect the first enforced PR | [Guided onboarding and acceptance](docs/first-pr.md) |
 | Understand decisions, evidence, and recovery | [Architecture](docs/architecture.md) |
