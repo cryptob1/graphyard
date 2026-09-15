@@ -100,6 +100,10 @@ Never share an operator or producer credential with an implementation agent.`); 
       const response = await fetch(`${master.url}/api/${path}`, { headers: { Authorization: `Bearer ${credential}` }, signal: AbortSignal.timeout(30_000) });
       const body = await response.json(); if (!response.ok) throw new Error(JSON.stringify(body)); return body;
     };
+    const masterMutation = async (path: string, data: unknown) => {
+      const response = await fetch(`${master.url}/api/${path}`, { method: 'POST', headers: { Authorization: `Bearer ${masterToken}`, 'Content-Type': 'application/json', 'Idempotency-Key': randomUUID() }, body: JSON.stringify(data), signal: AbortSignal.timeout(30_000) });
+      const result = await response.json(); if (!response.ok) throw new Error(JSON.stringify(result)); return result;
+    };
     const coordinator = await masterApi('status'); assertMasterBinding(master, coordinator);
     if (id === 'start') {
       const kind = workerProfileSchema.shape.kind.safeParse(args[0]); if (!kind.success) throw new Error('Use master start with a supported agent kind such as codex or claude');
@@ -130,7 +134,9 @@ Never share an operator or producer credential with an implementation agent.`); 
       const snapshot = await masterApi('work-snapshot');
       const selected = args[0] === '--all' ? snapshot.work.filter((item: any) => item.stage === 'merge') : snapshot.work.filter((item: any) => item.id === args[0] || item.key === args[0]);
       if (!selected.length) throw new Error(args[0] === '--all' ? 'No work is at the merge gate' : `Unknown work item ${args[0]}`);
-      const results = []; for (const item of selected) results.push(await mergeWork(master, item, () => masterApi('work-snapshot')));
+      const results = []; for (const item of selected) results.push(await mergeWork(master, item, () => masterApi('work-snapshot'),
+        (latest, authorization) => masterMutation(`work/${latest.id}/merge-acquire`, { expectedRevision: authorization.revision, sha: authorization.sha, baseSha: authorization.baseSha, policyRevision: authorization.policyRevision }),
+        (latest, execution, reason) => masterMutation(`work/${latest.id}/merge-cancel`, { executionId: execution.id, reason })));
       return print(results);
     }
     throw new Error('Use master init, start, worker add, status, dispatch, merge, or guide');

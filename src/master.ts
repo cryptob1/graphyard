@@ -1,6 +1,6 @@
 import { execFileSync } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
-import { chmod, lstat, mkdir, readFile } from 'node:fs/promises';
+import { chmod, lstat, mkdir, readFile, realpath } from 'node:fs/promises';
 import { isAbsolute, resolve } from 'node:path';
 import { homedir, hostname } from 'node:os';
 import { z } from 'zod';
@@ -86,14 +86,25 @@ export async function readCredentialFile(file: string) {
   if (value.length < 32 || value.length > 10_000) throw new Error('Worker credential file must contain one valid token');
   return value;
 }
-export async function loadMasterConfig(root: string): Promise<MasterConfig> {
+async function readMasterConfig(root: string): Promise<MasterConfig> {
   const file = resolve(root, '.graphyard/master.json'); await privateFile(file);
   const config = masterConfigSchema.parse(JSON.parse(await readFile(file, 'utf8')));
   config.url = serverOrigin(config.url);
   const repositoryRoot = resolve(root), credentialFile = resolve(config.credentialFile);
   if (!isAbsolute(config.credentialFile) || credentialFile === repositoryRoot || credentialFile.startsWith(`${repositoryRoot}/`)) throw new Error('Master credential file must be outside the repository and use an absolute path');
   config.credentialFile = credentialFile;
-  await privateFile(config.credentialFile);
+  return config;
+}
+async function externalCredential(root: string, file: string, label: string) {
+  if (!isAbsolute(file)) throw new Error(`${label} credential file must use an absolute path outside the repository`);
+  await privateFile(file);
+  const repositoryRoot = await realpath(root), credentialFile = await realpath(file);
+  if (credentialFile === repositoryRoot || credentialFile.startsWith(`${repositoryRoot}/`)) throw new Error(`${label} credential file must be outside the repository`);
+}
+export async function loadMasterConfig(root: string): Promise<MasterConfig> {
+  const config = await readMasterConfig(root);
+  await externalCredential(root, config.credentialFile, 'Master');
+  for (const profile of config.workers) if (profile.credentialFile) await externalCredential(root, profile.credentialFile, 'Worker');
   if (!isAbsolute(config.cliPath)) throw new Error('Master CLI path must be absolute');
   try { if (!(await lstat(config.cliPath)).isFile()) throw new Error(); } catch { throw new Error('Configured Graphyard CLI launcher is unavailable'); }
   return config;
@@ -127,7 +138,7 @@ export async function setupMaster(root: string, input: { url: string; token: str
   if (!detected.repository) throw new Error('Master setup requires a recognized GitHub origin');
   try { if (!(await lstat(resolve(input.cliPath))).isFile()) throw new Error(); } catch { throw new Error('Master setup requires an existing Graphyard CLI launcher'); }
   let previous: MasterConfig | undefined;
-  try { previous = await loadMasterConfig(root); } catch (error: any) { if (error.code !== 'ENOENT' && !/ENOENT/.test(error.message)) throw error; }
+  try { previous = await readMasterConfig(root); } catch (error: any) { if (error.code !== 'ENOENT' && !/ENOENT/.test(error.message)) throw error; }
   if (previous && (previous.url !== url || previous.repository.toLowerCase() !== detected.repository.toLowerCase())) throw new Error('Existing master configuration belongs to another server or repository');
   const repositoryName = detected.repository.split('/').at(-1)!.replace(/[^a-zA-Z0-9._-]/g, '-');
   const credentialDirectory = resolve(input.credentialDirectory ?? process.env.GRAPHYARD_CONFIG_HOME ?? resolve(homedir(), '.config/graphyard'), 'masters');
@@ -153,11 +164,12 @@ export async function setupMaster(root: string, input: { url: string; token: str
 
 export async function saveWorkerProfile(root: string, profileInput: unknown, verify: (token: string) => Promise<any>) {
   const profile = workerProfileSchema.parse(profileInput);
+  const config = await loadMasterConfig(root);
   if (profile.credentialFile) {
+    await externalCredential(root, profile.credentialFile, 'Worker');
     const status = await verify(await readCredentialFile(profile.credentialFile));
     if (status.actor?.role !== 'worker' || status.actor.id !== profile.principal) throw new Error('Worker credential does not match the profile principal and worker role');
   }
-  const config = await loadMasterConfig(root);
   if (config.workers.some(worker => worker.name === profile.name || worker.agentName === profile.agentName || worker.principal === profile.principal)) throw new Error('Worker profile name, agent name, and principal must be unique');
   config.workers.push(profile); await atomicPrivateWrite(resolve(root, '.graphyard/master.json'), config);
   return { added: profile.name, principal: profile.principal, mode: profile.mode, workers: config.workers.length };
@@ -176,7 +188,8 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
     const session = profile ? sessions.find(item => item.profile === profile.name) : undefined;
     const first = work.gates.find(gate => !gate.passed);
     const freshObservation = !!work.observation && now - Date.parse(work.observation.at) >= 0 && now - Date.parse(work.observation.at) < 120_000;
-    const mergeable = freshObservation && work.stage === 'merge' && !!work.candidate && !!work.mergeAuthorization
+    const activeMerge = !!work.mergeExecution && Date.parse(work.mergeExecution.expiresAt) > now;
+    const mergeable = !activeMerge && freshObservation && work.stage === 'merge' && !!work.candidate && !!work.mergeAuthorization
       && work.mergeAuthorization.sha === work.candidate.sha && work.mergeAuthorization.baseSha === work.candidate.baseSha
       && work.mergeAuthorization.policyRevision === work.policyRevision
       && work.gates.every(gate => gate.passed) && !work.violations.length;
@@ -323,10 +336,12 @@ export async function prepareWorkerLaunch(root: string, key: string, profileName
 export function assertMergeCandidate(work: Work, observedAt?: string) {
   const age = observedAt && work.observation ? Date.parse(observedAt) - Date.parse(work.observation.at) : 0;
   const fresh = !observedAt || !!work.observation && Number.isFinite(age) && age >= 0 && age < 120_000;
-  if (!fresh || work.stage !== 'merge' || !work.candidate || !work.mergeAuthorization || work.mergeAuthorization.sha !== work.candidate.sha || work.mergeAuthorization.baseSha !== work.candidate.baseSha || work.mergeAuthorization.policyRevision !== work.policyRevision || work.gates.some(gate => !gate.passed) || work.violations.length) throw new Error(`${work.key} does not have a current all-gates-passing merge authorization`);
+  const activeMerge = !!observedAt && !!work.mergeExecution && Date.parse(work.mergeExecution.expiresAt) > Date.parse(observedAt);
+  if (activeMerge || !fresh || work.stage !== 'merge' || !work.candidate || !work.mergeAuthorization || work.mergeAuthorization.sha !== work.candidate.sha || work.mergeAuthorization.baseSha !== work.candidate.baseSha || work.mergeAuthorization.policyRevision !== work.policyRevision || work.gates.some(gate => !gate.passed) || work.violations.length) throw new Error(`${work.key} does not have a current all-gates-passing merge authorization`);
   return { key: work.key, revision: work.revision, pr: work.candidate.pr, sha: work.candidate.sha, baseSha: work.candidate.baseSha, policyRevision: work.policyRevision };
 }
-export async function mergeWork(config: MasterConfig, work: Work, freshSnapshot: () => Promise<{ work: Work[]; now: string }>, run: (command: string, args: string[]) => string = (command, args) => execFileSync(command, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] })) {
+type MergeExecution = { id: string; sha: string; baseSha: string; policyRevision: number; authorizationRevision: number; issuedAt: string; expiresAt: string };
+export async function mergeWork(config: MasterConfig, work: Work, freshSnapshot: () => Promise<{ work: Work[]; now: string }>, acquire: (work: Work, authorization: ReturnType<typeof assertMergeCandidate>) => Promise<{ execution: MergeExecution }>, cancel: (work: Work, execution: MergeExecution, reason: string) => Promise<unknown>, run: (command: string, args: string[]) => string = (command, args) => execFileSync(command, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 90_000 })) {
   if (!config.autoMerge) throw new Error('Automatic routine merge is disabled in master configuration');
   const before = await freshSnapshot(); const current = before.work.find(item => item.id === work.id);
   if (!current || current.revision !== work.revision) throw new Error(`${work.key} changed before GitHub verification; retry`);
@@ -335,8 +350,19 @@ export async function mergeWork(config: MasterConfig, work: Work, freshSnapshot:
   if (pr.headRefOid !== authorization.sha || pr.baseRefOid !== authorization.baseSha || pr.baseRefName !== config.baseBranch || pr.state !== 'OPEN' || pr.isDraft) throw new Error(`${work.key} changed on GitHub before merge`);
   const after = await freshSnapshot(); const latest = after.work.find(item => item.id === work.id);
   if (!latest || latest.revision !== authorization.revision) throw new Error(`${work.key} changed after GitHub verification; retry`);
-  assertMergeCandidate(latest, after.now);
-  const method = `--${config.mergeMethod}`;
-  run('gh', ['pr', 'merge', String(authorization.pr), '--repo', config.repository, method, '--match-head-commit', authorization.sha]);
+  const latestAuthorization = assertMergeCandidate(latest, after.now);
+  const granted = await acquire(latest, latestAuthorization);
+  if (!granted.execution || granted.execution.sha !== authorization.sha || granted.execution.baseSha !== authorization.baseSha || granted.execution.policyRevision !== authorization.policyRevision || granted.execution.authorizationRevision !== authorization.revision) throw new Error(`${work.key} received an invalid merge execution authority`);
+  try {
+    const lockedPr = JSON.parse(run('gh', ['pr', 'view', String(authorization.pr), '--repo', config.repository, '--json', 'headRefOid,baseRefOid,baseRefName,state,isDraft']));
+    if (lockedPr.headRefOid !== authorization.sha || lockedPr.baseRefOid !== authorization.baseSha || lockedPr.baseRefName !== config.baseBranch || lockedPr.state !== 'OPEN' || lockedPr.isDraft) throw new Error(`${work.key} changed on GitHub after merge authority was acquired`);
+    const provider = JSON.parse(run('gh', ['api', '--method', 'PUT', `repos/${config.repository}/pulls/${authorization.pr}/merge`, '-f', `sha=${authorization.sha}`, '-f', `merge_method=${config.mergeMethod}`]));
+    if (provider.merged !== true || typeof provider.sha !== 'string') throw new Error(provider.message || 'GitHub did not confirm the merge');
+  }
+  catch (error) {
+    try { await cancel(latest, granted.execution, error instanceof Error ? error.message : 'GitHub merge failed'); }
+    catch { throw new Error(`${work.key} GitHub merge failed and Graphyard could not cancel execution ${granted.execution.id}`); }
+    throw error;
+  }
   return { key: authorization.key, pr: authorization.pr, sha: authorization.sha, method: config.mergeMethod, result: 'merge requested; Graphyard will mark Done only after observing the merge' };
 }

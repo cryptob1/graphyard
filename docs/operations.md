@@ -32,7 +32,7 @@ Own-App check webhooks are ignored. Other signed webhook deliveries wake jobs, b
 
 ## GitHub or Graphyard outage
 
-The database merge gate refuses observations older than two minutes. GitHub's last successful check may still exist; it does not expire automatically. Suspend merging operationally during an integration outage if this matters to your policy. The future merge-broker design should remove reliance on that manual outage response.
+The database merge gate refuses observations older than two minutes. GitHub's last successful check may still exist; it does not expire automatically. Routine master merges acquire a short-lived server authority that rechecks freshness and freezes relevant Graphyard mutations around the exact-head provider call. Direct human GitHub merges remain outside that broker, so suspend those operationally during an integration outage if this matters to your policy.
 
 ## Merge bypass
 

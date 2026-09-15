@@ -30,7 +30,7 @@ before(async () => {
   database = new EmbeddedPostgres({ databaseDir: await mkdtemp(join(tmpdir(), 'graphyard-test-')), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('graphyard_test');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/graphyard_test`); await store.init(); engine = new Engine(store);
-  http = server(engine, [{ ...operator, token: 'o'.repeat(32) }, { ...worker, token: 'w'.repeat(32) }, ...probeWorkers]);
+  http = server(engine, [{ ...operator, token: 'o'.repeat(32) }, { ...worker, token: 'w'.repeat(32) }, { ...coordinator, token: 'm'.repeat(32) }, ...probeWorkers]);
   await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));
   url = `http://127.0.0.1:${(http.address() as any).port}`;
 });
@@ -122,6 +122,23 @@ test('coordinator can observe but cannot mutate work, claim leases, or submit ev
   await assert.rejects(engine.execute(coordinator, 'ready', w.id, {}, randomUUID()), /Operator permission/);
   await assert.rejects(engine.execute(coordinator, 'evidence', w.id, proof(), randomUUID()), /not permitted/);
 });
+
+test('single-use merge execution freezes relevant mutations through observed merge', async () => {
+  let w = await submitted(); w = await engine.observe(w.id, w.revision, observation(w));
+  w = await engine.execute(producer, 'evidence', w.id, proof(), randomUUID()); assert.ok(w.gates.every(gate => gate.passed));
+  const first = await engine.acquireMerge(coordinator, w.id, { expectedRevision: w.revision, sha: head, baseSha: base, policyRevision: w.policyRevision }, randomUUID());
+  assert.equal(first.execution.authorizationRevision, w.revision);
+  await assert.rejects(engine.execute(producer, 'evidence', w.id, proof(), randomUUID()), /merge execution is active/i);
+  await assert.rejects(engine.execute(operator, 'requirements', w.id, { expectedPolicyRevision: w.policyRevision, reason: 'Race the merge', criteria: w.criteria, dependencies: [], plannedFiles: [], exclusiveResources: [] }, randomUUID()), /merge execution is active/i);
+  await assert.rejects(engine.acquireMerge(coordinator, w.id, { expectedRevision: first.revision, sha: head, baseSha: base, policyRevision: w.policyRevision }, randomUUID()), /already active/);
+  await assert.rejects(engine.observe(w.id, first.revision, observation(w)), /only its matching merged observation/);
+  await engine.cancelMerge(coordinator, w.id, { executionId: first.execution.id, reason: 'GitHub refused the merge' }, randomUUID());
+  w = (await store.list()).find(item => item.id === w.id)!;
+  const second = await engine.acquireMerge(coordinator, w.id, { expectedRevision: w.revision, sha: head, baseSha: base, policyRevision: w.policyRevision }, randomUUID());
+  const merged = { ...observation(w), merged: true, mergeSha: 'c'.repeat(40), mergedAt: new Date().toISOString().replace(/\.\d+Z$/, 'Z') } as Observation;
+  const delivered = await engine.observe(w.id, second.revision, merged);
+  assert.equal(delivered.stage, 'done', 'single-use execution proves ordering even with a whole-second provider timestamp'); assert.equal(delivered.mergeExecution, null);
+});
 test('assertions, skipped suites, zero executed, stale base, stale head, and stale policy never satisfy acceptance', async () => {
   let w = await submitted(); w = await engine.observe(w.id, w.revision, observation(w)); assert.equal(w.stage, 'acceptance');
   w = await engine.execute(worker, 'evidence', w.id, proof(), randomUUID()); assert.equal(w.stage, 'acceptance');
@@ -187,6 +204,8 @@ test('HTTP API authenticates, validates, and preserves command idempotency', asy
   const headers = { Authorization: `Bearer ${'o'.repeat(32)}`, 'Content-Type': 'application/json', 'Idempotency-Key': randomUUID() };
   const send = () => fetch(`${url}/api/work`, { method: 'POST', headers, body: JSON.stringify(workInput) });
   const a: any = await (await send()).json(), b: any = await (await send()).json(); assert.equal(a.id, b.id);
+  const mergeResponse = await fetch(`${url}/api/work/${a.id}/merge-acquire`, { method: 'POST', headers: { ...headers, Authorization: `Bearer ${'m'.repeat(32)}`, 'Idempotency-Key': randomUUID() }, body: JSON.stringify({ expectedRevision: a.revision, sha: head, baseSha: base, policyRevision: a.policyRevision }) });
+  assert.equal(mergeResponse.status, 409, 'coordinator merge route exists and refuses an unauthorized candidate');
   assert.equal((await fetch(`${url}/api/work`, { method: 'POST', headers, body: '{' })).status, 400);
   assert.equal((await fetch(`${url}/api/events?work=invalid`, { headers })).status, 400);
 });

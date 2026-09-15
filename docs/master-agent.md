@@ -6,7 +6,7 @@ This is an operating pattern, not a new source of truth. Graphyard owns work, de
 
 ## The first-run experience
 
-The control-plane operator first creates a distinct `coordinator` principal in the server's private `GRAPHYARD_PRINCIPALS` value. A coordinator can read the authenticated control-plane APIs. It cannot claim work, revise requirements, submit evidence, or exercise operator powers.
+The control-plane operator first creates a distinct `coordinator` principal in the server's private `GRAPHYARD_PRINCIPALS` value. A coordinator can read the authenticated control-plane APIs and acquire or cancel the engine's bounded merge execution authority. It cannot claim work, revise requirements, submit evidence, or exercise other operator powers.
 
 From the repository to be managed:
 
@@ -125,11 +125,13 @@ For every candidate, the command requires:
 4. a fresh Graphyard observation, evaluated against the database time in the snapshot;
 5. a GitHub read that sees the same head, base commit, and managed base-branch name on an open, non-draft PR;
 6. a second Graphyard snapshot with the same work revision, fresh observation, and authorization;
-7. GitHub's `--match-head-commit` guard and normal branch protection.
+7. a server-issued, single-use merge execution that freezes relevant work, evidence, validation, and observation mutations for the bounded merge attempt;
+8. a second GitHub read after authority acquisition with the same head, base commit, and managed base-branch name;
+9. GitHub's merge API with the authorized head SHA and normal branch protection. Queue enrollment is treated as a refusal because it cannot complete inside the bounded authority window.
 
-It never uses `--admin`. A human approval represented as required evidence remains a refusing gate until supplied. After the merge command succeeds, the item is still not declared Done by the master; Graphyard waits to observe and reconcile the actual merge.
+It never uses `--admin`. A human approval represented as required evidence remains a refusing gate until supplied. If GitHub refuses the merge, the master cancels the execution authority. If the client disappears, the authority expires automatically. After the merge command succeeds, the item is still not declared Done by the master; Graphyard keeps the authority active until it observes and reconciles the actual matching merge.
 
-The present command uses the local authenticated GitHub CLI. A future server-side merge broker can move the final action behind a single-use authorization, but the current double-read and exact-head checks provide a safe supervised path without weakening GitHub protection.
+The present command uses the local authenticated GitHub CLI for the final provider action. Graphyard's transactional execution authority closes the control-plane mutation race around that external call without holding a database transaction open during network I/O.
 
 ## Handoffs and recovery
 
@@ -144,7 +146,7 @@ Provider changes, account quota changes, machine changes, and context-window rep
 
 The master may summarize a handoff in the work item or PR, but Graphyard state and Git history remain the proof. Never share one worker token across concurrent sessions. On multiple machines, use distinct principals and stable host IDs, and keep credential files local to the machine that launches that worker.
 
-The coordinator token is read-only and is stored outside the repository. File modes do not isolate processes running as the same OS user. Run the master under a separate OS account or on a dedicated coordination machine when implementation agents are not trusted with same-user filesystem visibility. Graphyard's gates and GitHub protection remain the merge authority even for trusted same-machine workers; the master token cannot mutate work or submit evidence.
+The coordinator token has only read and bounded merge-execution authority and is stored outside the repository. File modes do not isolate processes running as the same OS user. Run the master under a separate OS account or on a dedicated coordination machine when implementation agents are not trusted with same-user filesystem visibility. Graphyard's gates and GitHub protection remain the merge authority even for trusted same-machine workers; the master token cannot claim work, revise requirements, or submit evidence.
 
 ## Recommended boundaries
 
@@ -152,7 +154,7 @@ Use the master for observation, capacity routing, stall detection, handoffs, and
 
 | Identity | Allowed responsibility |
 | --- | --- |
-| `coordinator` | Read work truth, route Herdr sessions, invoke guarded local merge flow |
+| `coordinator` | Read work truth, route Herdr sessions, acquire/cancel bounded merge execution, invoke the exact-head provider call |
 | `worker` | Claim, heartbeat, register its workspace, implement, block, submit assertions |
 | `producer` | Submit only its configured trusted proofs |
 | `admin` | Define/revise intent, release work, authorize rework, supply manual evidence |

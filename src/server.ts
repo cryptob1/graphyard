@@ -95,6 +95,11 @@ export function server(engine: Engine, credentials: Credential[], github: GitHub
           if (id) z.string().uuid().parse(id);
           return send(200, await engine.store.events(id));
         }
+        const mergeRoute = url.pathname.match(/^\/api\/work\/([^/]+)\/merge-(acquire|cancel)$/);
+        if (req.method === 'POST' && mergeRoute) {
+          const data = JSON.parse((await body(req)).toString() || '{}'), key = String(req.headers['idempotency-key'] ?? '');
+          return send(200, mergeRoute[2] === 'acquire' ? await engine.acquireMerge(actor, mergeRoute[1], data, key) : await engine.cancelMerge(actor, mergeRoute[1], data, key));
+        }
         const match = url.pathname.match(/^\/api\/work(?:\/([^/]+)\/([a-z]+))?$/);
         if (req.method === 'POST' && match) {
           const raw = await body(req);

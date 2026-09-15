@@ -23,6 +23,8 @@ const commands = {
   blocked: z.object({ epoch, reason: z.string().max(2000).nullable() }).strict(),
   evidence: z.object({ proof: proofSchema, sha, baseSha: sha, policyRevision: z.number().int().positive(), result: z.enum(['pass', 'fail']), executed: z.number().int().min(0), skipped: z.number().int().min(0), url: z.string().url().max(2000).optional(), scenarioRevision: z.number().int().positive().optional(), environment: z.string().min(1).max(100).optional() }).strict(),
 } as const;
+const mergeAcquireSchema = z.object({ expectedRevision: z.number().int().positive(), sha, baseSha: sha, policyRevision: z.number().int().positive() }).strict();
+const mergeCancelSchema = z.object({ executionId: z.string().uuid(), reason: z.string().trim().min(1).max(2000) }).strict();
 export type Command = keyof typeof commands;
 
 // Old deployments did not persist assignment labels. Preserve the known owner/epoch
@@ -63,6 +65,8 @@ export class Engine {
       }
       demand(work, 'Work item not found', 404);
       preserveAssignment(work);
+      if (work.mergeExecution && Date.parse(work.mergeExecution.expiresAt) <= now.getTime()) work.mergeExecution = null;
+      demand(!work.mergeExecution, 'A merge execution is active; retry after it completes or expires');
       if (command !== 'create') demand(work.stage !== 'done', 'Delivered work is immutable; create a follow-up task');
       if (command === 'rereview') {
         if (actor.role !== 'admin') { demand(actor.role === 'worker', 'Worker or operator required', 403); activeLease(work, actor, data.epoch, now); }
@@ -161,6 +165,54 @@ export class Engine {
       return work;
     });
   }
+  async acquireMerge(actor: Principal, id: string, input: unknown, key: string) {
+    demand(actor.role === 'coordinator' || actor.role === 'admin', 'Coordinator permission required', 403);
+    demand(key && key.length <= 200, 'An Idempotency-Key is required', 400);
+    const data = mergeAcquireSchema.parse(input);
+    const fingerprint = createHash('sha256').update(JSON.stringify({ command: 'merge.acquire', id, data })).digest('hex');
+    return this.store.transaction(async (db, now) => {
+      const receipt = (await db.query('SELECT * FROM receipts WHERE actor=$1 AND key=$2', [actor.id, key])).rows[0];
+      if (receipt) { demand(receipt.fingerprint === fingerprint, 'Idempotency key reused with different input'); return receipt.result; }
+      const all: Work[] = (await db.query('SELECT document FROM work_items ORDER BY number')).rows.map(r => r.document);
+      const work = all.find(item => item.id === id || item.key === id);
+      demand(work, 'Work item not found', 404);
+      demand(work.revision === data.expectedRevision, 'Task changed before merge execution; retry');
+      if (work.mergeExecution && Date.parse(work.mergeExecution.expiresAt) <= now.getTime()) work.mergeExecution = null;
+      demand(!work.mergeExecution, 'A merge execution is already active');
+      this.evaluate(work, all, now);
+      const authorization = work.mergeAuthorization;
+      const age = work.observation ? now.getTime() - Date.parse(work.observation.at) : NaN;
+      demand(work.stage === 'merge' && work.gates.every(gate => gate.passed) && !work.violations.length && authorization
+        && authorization.sha === data.sha && authorization.baseSha === data.baseSha && authorization.policyRevision === data.policyRevision
+        && work.candidate?.sha === data.sha && work.candidate.baseSha === data.baseSha && Number.isFinite(age) && age >= 0 && age < 120_000,
+      'Merge authorization is no longer current');
+      const execution = { id: randomUUID(), sha: data.sha, baseSha: data.baseSha, policyRevision: data.policyRevision, authorizationRevision: work.revision, issuedAt: now.toISOString(), expiresAt: new Date(now.getTime() + 120_000).toISOString() };
+      work.mergeExecution = execution;
+      await save(db, work, actor.id, 'merge.execution.acquired', now, { executionId: execution.id, sha: execution.sha, baseSha: execution.baseSha, policyRevision: execution.policyRevision });
+      const result = { key: work.key, revision: work.revision, execution };
+      await db.query('INSERT INTO receipts(actor,key,fingerprint,result) VALUES($1,$2,$3,$4)', [actor.id, key, fingerprint, JSON.stringify(result)]);
+      return result;
+    });
+  }
+  async cancelMerge(actor: Principal, id: string, input: unknown, key: string) {
+    demand(actor.role === 'coordinator' || actor.role === 'admin', 'Coordinator permission required', 403);
+    demand(key && key.length <= 200, 'An Idempotency-Key is required', 400);
+    const data = mergeCancelSchema.parse(input);
+    const fingerprint = createHash('sha256').update(JSON.stringify({ command: 'merge.cancel', id, data })).digest('hex');
+    return this.store.transaction(async (db, now) => {
+      const receipt = (await db.query('SELECT * FROM receipts WHERE actor=$1 AND key=$2', [actor.id, key])).rows[0];
+      if (receipt) { demand(receipt.fingerprint === fingerprint, 'Idempotency key reused with different input'); return receipt.result; }
+      const all: Work[] = (await db.query('SELECT document FROM work_items ORDER BY number')).rows.map(row => row.document);
+      const work = all.find(item => item.id === id || item.key === id);
+      demand(work, 'Work item not found', 404);
+      demand(work.mergeExecution?.id === data.executionId, 'Merge execution is missing, expired, or superseded');
+      work.mergeExecution = null; this.evaluate(work, all, now);
+      await save(db, work, actor.id, 'merge.execution.cancelled', now, { executionId: data.executionId, reason: data.reason });
+      const result = { key: work.key, revision: work.revision, cancelled: data.executionId };
+      await db.query('INSERT INTO receipts(actor,key,fingerprint,result) VALUES($1,$2,$3,$4)', [actor.id, key, fingerprint, JSON.stringify(result)]);
+      return result;
+    });
+  }
   async bindReviewRequest(id: string, expectedRevision: number, request: ReviewRequest, jobToken: string) {
     return this.store.transaction(async (db, now) => {
       const job = (await db.query('SELECT 1 FROM jobs WHERE work_id=$1 AND token=$2 AND locked_until>$3', [id, jobToken, now])).rows[0];
@@ -168,6 +220,7 @@ export class Engine {
       const all: Work[] = (await db.query('SELECT document FROM work_items ORDER BY number')).rows.map(r => r.document);
       const work = all.find(w => w.id === id);
       requireCurrent(work && work.revision === expectedRevision && work.stage !== 'done' && !work.observation?.merged, 'Task changed during review dispatch');
+      demand(!work.mergeExecution || Date.parse(work.mergeExecution.expiresAt) <= now.getTime(), 'Merge execution is active');
       demand(work.policy.review && work.policy.reviewProvider === 'codex' && request.sha === work.candidate?.sha && request.baseSha === work.candidate?.baseSha && request.policyRevision === work.policyRevision, 'Review request candidate or policy changed');
       work.reviewRequest = request;
       if (work.observation) work.observation.agentReview = { provider: 'codex', sha: request.sha, approved: false, reason: 'Waiting for dispatched Codex review' };
@@ -190,6 +243,8 @@ export class Engine {
         if (work.stage === 'done') continue;
         const before = JSON.stringify(work);
         preserveAssignment(work);
+        if (work.mergeExecution && Date.parse(work.mergeExecution.expiresAt) > now.getTime()) continue;
+        if (work.mergeExecution) work.mergeExecution = null;
         if (work.lease && Date.parse(work.lease.expiresAt) <= now.getTime()) work.lease = null;
         this.evaluate(work, all, now);
         if (JSON.stringify(work) !== before) {
@@ -208,18 +263,24 @@ export class Engine {
       const all: Work[] = (await db.query('SELECT document FROM work_items ORDER BY number')).rows.map(r => r.document);
       const work = all.find(w => w.id === id);
       requireCurrent(work && work.revision === expectedRevision, 'Task changed while GitHub was being observed; retry');
+      const activeExecution = work.mergeExecution && Date.parse(work.mergeExecution.expiresAt) > now.getTime() ? work.mergeExecution : null;
+      if (activeExecution) demand(observation.merged && observation.candidate.sha === activeExecution.sha && observation.candidate.baseSha === activeExecution.baseSha, 'Merge execution is active; only its matching merged observation may update the task');
       demand(work.submission?.pr === observation.candidate.pr, 'Unassigned pull request');
       demand(work.workspaces.some(w => w.epoch === work.submission!.epoch && w.branch === observation.candidate.branch), 'PR branch does not match the assigned workspace');
       if (work.stage === 'done') return work;
-      let authorizedSnapshot: Work | null = null;
+      let authorizedSnapshot: Work | null = activeExecution && work.mergeAuthorization
+        && activeExecution.sha === observation.candidate.sha && activeExecution.baseSha === observation.candidate.baseSha
+        && activeExecution.policyRevision === work.policyRevision && work.mergeAuthorization.sha === activeExecution.sha
+        && work.mergeAuthorization.baseSha === activeExecution.baseSha && work.mergeAuthorization.policyRevision === activeExecution.policyRevision
+        && work.gates.every(gate => gate.passed) && !work.violations.length ? structuredClone(work) : null;
       if (observation.merged && observation.mergedAt && Number.isFinite(Date.parse(observation.mergedAt))) {
         const mergedTime = Date.parse(observation.mergedAt);
         // Never allow evidence from after the earliest possible merge instant.
         // Whole-second timestamps can therefore conservatively refuse same-second authorization.
         const cutoff = mergedTime + (/\.\d+Z$/.test(observation.mergedAt) ? 1 : 1000);
-        const past = (await db.query("SELECT payload->'work' AS work FROM events WHERE work_id=$1 AND created_at<$2 AND payload ? 'work' ORDER BY seq DESC LIMIT 1", [id, new Date(cutoff)])).rows[0]?.work as Work | undefined;
+        const past = authorizedSnapshot ? undefined : (await db.query("SELECT payload->'work' AS work FROM events WHERE work_id=$1 AND created_at<$2 AND payload ? 'work' ORDER BY seq DESC LIMIT 1", [id, new Date(cutoff)])).rows[0]?.work as Work | undefined;
         const authorization = past?.mergeAuthorization;
-        if (past && authorization && authorization.sha === observation.candidate.sha && authorization.baseSha === observation.candidate.baseSha && authorization.policyRevision === past.policyRevision
+        if (!authorizedSnapshot && past && authorization && authorization.sha === observation.candidate.sha && authorization.baseSha === observation.candidate.baseSha && authorization.policyRevision === past.policyRevision
           && past.submission?.pr === observation.candidate.pr && past.gates.every(g => g.passed) && !past.violations.length
           && past.observation && cutoff - Date.parse(past.observation.at) < 120_000 && Date.parse(authorization.at) < mergedTime) authorizedSnapshot = past;
       }
@@ -238,6 +299,7 @@ export class Engine {
         if (authorizedSnapshot && observation.mergeSha) {
           if (work.gates.some(g => !g.passed)) work.violations.push('Post-merge checks differ from the recorded authorization; follow-up required');
           work.stage = 'done'; work.stageEnteredAt = now.toISOString();
+          work.mergeExecution = null;
           work.delivery = { mergedAt: observation.mergedAt!, mergeSha: observation.mergeSha, authorizationRevision: authorizedSnapshot.revision };
           await db.query('DELETE FROM jobs WHERE work_id=$1', [work.id]);
         } else if (!work.violations.includes(violation)) work.violations.push(violation);
