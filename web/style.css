@@ -10,3 +10,5 @@
 .history-scroll{max-height:320px;overflow:auto;overscroll-behavior:contain;margin:12px 0}.history-scroll:focus-visible{outline:2px solid #b7d78d;outline-offset:3px}.history-option{display:flex;align-items:center;gap:8px;margin:12px 0}.history-option input{width:auto}.history-scroll .timeline>div{flex-wrap:wrap;overflow-wrap:anywhere}
 
 .card-meta .assignment-label{min-width:0;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.card-meta .dot,.card-meta .push{flex-shrink:0}.card-meta .push{padding-left:8px}.assignment-details{overflow-wrap:anywhere}
+
+img.mark{display:block;width:32px;height:36px;border:0;border-radius:0;object-fit:contain;flex-shrink:0}
