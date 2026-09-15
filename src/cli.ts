@@ -290,7 +290,7 @@ Never share an operator or producer credential with an implementation agent.`); 
     process.env.GRAPHYARD_URL = base; process.env.GRAPHYARD_TOKEN = watchToken;
     process.env.GRAPHYARD_CLI = await activeCliPath(); process.env.GRAPHYARD_HOST_ID = hostId;
     process.exitCode = await supervise(args[separator + 1], args.slice(separator + 2), epoch,
-      () => api(`work/${work.id}/heartbeat`, { epoch }, randomUUID()));
+      () => api(`work/${work.id}/heartbeat`, { epoch }, randomUUID()), { detached: !(process.env.HERDR_ENV === '1' && process.env.GRAPHYARD_HERDR_AGENT_KIND) });
     return;
   }
   throw new Error(`Unknown command: ${command}`);

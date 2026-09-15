@@ -250,9 +250,7 @@ function herdrJson(args: string[], run: (command: string, args: string[]) => str
   if (parsed.error) throw new Error(`Herdr refused the operation: ${parsed.error.message ?? parsed.error}`);
   return parsed.result ?? parsed;
 }
-function herdrRun(args: string[], run: (command: string, args: string[]) => string = (command, commandArgs) => execFileSync(command, commandArgs, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] })) {
-  run('herdr', args);
-}
+function herdrRun(args: string[], run: (command: string, args: string[]) => string = (command, commandArgs) => execFileSync(command, commandArgs, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] })) { run('herdr', args); }
 export function listHerdrAgents(run?: (command: string, args: string[]) => string): HerdrAgent[] { return herdrJson(['agent', 'list'], run).agents ?? []; }
 export function observeHerdrAgents(run?: (command: string, args: string[]) => string) {
   try { return { agents: listHerdrAgents(run), available: true, reason: null }; }
@@ -265,7 +263,8 @@ function waitForHerdrAgent(target: string, run?: (command: string, args: string[
   while (Date.now() < deadline) {
     try {
       const agent = herdrJson(['agent', 'get', target], run);
-      if (agent?.pane_id || agent?.name || agent?.agent_status) return agent as HerdrAgent;
+      if (agent?.agent_status === 'blocked') throw new Error('Launched worker is blocked before it is ready for a prompt');
+      if (['idle', 'done'].includes(agent?.agent_status)) return agent as HerdrAgent;
     } catch (error) { lastError = error; }
     Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 250);
   }
@@ -351,7 +350,7 @@ export async function dispatchWork(root: string, work: Work, profile: WorkerProf
     const prompt = `Implement ${work.key}: ${work.title}. The Graphyard worker launcher has claimed this item under principal ${profile.principal}, created its assigned worktree, and placed this agent under lease supervision. Run node ${config.cliPath} status ${work.key} before editing. Work only in the current assigned worktree, satisfy the stated criteria without weakening them, open a PR, and submit it with complete. Stop immediately if the supervisor reports lease loss. Do not submit trusted evidence or merge the PR.`;
     let pane: string | undefined, tabId: string | undefined;
     try {
-      const tabArgs = ['tab', 'create', ...(config.herdrWorkspace ? ['--workspace', config.herdrWorkspace] : []), '--cwd', prepared.path, '--label', `${work.key} · ${profile.agentName}`, '--env', `GRAPHYARD_URL=${config.url}`, '--env', `GRAPHYARD_TOKEN_FILE=${profile.credentialFile}`, '--env', `GRAPHYARD_HOST_ID=${config.hostId}`, ...Object.entries(profile.environment).flatMap(([key, value]) => ['--env', `${key}=${value}`]), '--no-focus'];
+      const tabArgs = ['tab', 'create', ...(config.herdrWorkspace ? ['--workspace', config.herdrWorkspace] : []), '--cwd', prepared.path, '--label', `${work.key} · ${profile.agentName}`, '--env', `GRAPHYARD_URL=${config.url}`, '--env', `GRAPHYARD_TOKEN_FILE=${profile.credentialFile}`, '--env', `GRAPHYARD_HOST_ID=${config.hostId}`, '--env', `GRAPHYARD_HERDR_AGENT_KIND=${profile.kind}`, ...Object.entries(profile.environment).flatMap(([key, value]) => ['--env', `${key}=${value}`]), '--no-focus'];
       const created = createdHerdrTab(herdrJson(tabArgs, run)); pane = created.pane; tabId = created.tab;
       const supervised = [process.execPath, config.cliPath, 'watch', work.key, String(prepared.epoch), '--', profile.kind!, ...profile.agentArgs].map(shellQuote).join(' ');
       herdrRun(['pane', 'run', pane, supervised], run);

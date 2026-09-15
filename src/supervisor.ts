@@ -1,9 +1,9 @@
-import { spawn } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 
 interface Renewal { lease: { epoch: number; expiresAt: string } | null; updatedAt: string }
 
 // The deadline uses elapsed local time and server-reported duration, not synchronized clocks.
-export async function supervise(command: string, args: string[], epoch: number, renew: () => Promise<Renewal>, options: { intervalMs?: number; graceMs?: number } = {}) {
+export async function supervise(command: string, args: string[], epoch: number, renew: () => Promise<Renewal>, options: { intervalMs?: number; graceMs?: number; detached?: boolean } = {}) {
   let deadline = 0;
   async function heartbeat() {
     const started = performance.now();
@@ -16,13 +16,22 @@ export async function supervise(command: string, args: string[], epoch: number, 
   await heartbeat();
   const env = { ...process.env };
   for (const key of ['GRAPHYARD_PRINCIPALS', 'DATABASE_URL', 'GITHUB_PRIVATE_KEY', 'GITHUB_PRIVATE_KEY_FILE', 'GITHUB_WEBHOOK_SECRET']) delete env[key];
-  const child = spawn(command, args, { stdio: 'inherit', detached: process.platform !== 'win32', env });
+  const detached = options.detached ?? process.platform !== 'win32';
+  const child = spawn(command, args, { stdio: 'inherit', detached, env });
   return new Promise<number>(resolve => {
     let stopping = false, pending = false;
     let expiry: ReturnType<typeof setTimeout>;
     const signalGroup = (signal: NodeJS.Signals) => {
       if (!child.pid) return;
-      try { if (process.platform === 'win32') child.kill(signal); else process.kill(-child.pid, signal); } catch { /* group already gone */ }
+      if (detached && process.platform !== 'win32') { try { process.kill(-child.pid, signal); } catch {} return; }
+      let descendants: number[] = [];
+      if (process.platform !== 'win32') try {
+        const rows = execFileSync('ps', ['-eo', 'pid=,ppid='], { encoding: 'utf8' }).trim().split('\n').map(row => row.trim().split(/\s+/).map(Number));
+        const pending = [child.pid];
+        while (pending.length) { const parent = pending.shift()!; for (const [pid, ppid] of rows) if (ppid === parent) { descendants.push(pid); pending.push(pid); } }
+      } catch {}
+      for (const pid of descendants.reverse()) try { process.kill(pid, signal); } catch {}
+      try { child.kill(signal); } catch { /* process already gone */ }
     };
     const interrupted = () => stop(1);
     function stop(code: number) {

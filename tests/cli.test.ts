@@ -66,6 +66,7 @@ test('implementation subprocesses do not inherit Graphyard server credentials', 
   } finally { if (previous === undefined) delete process.env.GRAPHYARD_PRINCIPALS; else process.env.GRAPHYARD_PRINCIPALS = previous; }
 });
 
+
 test('supervisor stops a worker when renewal hangs beyond the granted lease', async () => {
   let count = 0; const started = performance.now();
   const code = await supervise(process.execPath, ['-e', "process.on('SIGTERM',()=>{}); setInterval(()=>{},20)"], 1,
@@ -79,6 +80,18 @@ test('supervisor kills surviving descendants even after their group leader exits
   const leader = `const c=require('node:child_process').spawn(process.execPath,['-e',${JSON.stringify(descendant)}],{stdio:['ignore','ignore','ignore','ipc']}); c.on('message',()=>process.exit(0))`;
   try {
     assert.equal(await supervise(process.execPath, ['-e', leader], 1, async () => renewal(), { intervalMs: 100, graceMs: 75 }), 0);
+    await delay(50); const stopped = await readFile(output, 'utf8'); await delay(75);
+    assert.equal(await readFile(output, 'utf8'), stopped);
+  } finally { await rm(cwd, { recursive: true, force: true }); }
+});
+
+test('foreground Herdr supervision kills the complete child tree without detaching the agent', async () => {
+  const cwd = await mkdtemp(join(tmpdir(), 'graphyard-foreground-descendants-')), output = join(cwd, 'ticks');
+  const descendant = `const fs=require('node:fs'); process.on('SIGTERM',()=>{}); fs.appendFileSync(${JSON.stringify(output)},'.'); setInterval(()=>fs.appendFileSync(${JSON.stringify(output)},'.'),10)`;
+  const leader = `require('node:child_process').spawn(process.execPath,['-e',${JSON.stringify(descendant)}],{stdio:'ignore'}); process.on('SIGTERM',()=>{}); setInterval(()=>{},20)`;
+  try {
+    let renewals = 0;
+    assert.equal(await supervise(process.execPath, ['-e', leader], 1, async () => ++renewals === 1 ? renewal(150) : new Promise(() => {}), { detached: false, intervalMs: 25, graceMs: 75 }), 1);
     await delay(50); const stopped = await readFile(output, 'utf8'); await delay(75);
     assert.equal(await readFile(output, 'utf8'), stopped);
   } finally { await rm(cwd, { recursive: true, force: true }); }
