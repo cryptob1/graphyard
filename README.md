@@ -108,9 +108,9 @@ Graphyard does not require LangGraph, Temporal, Redis, or Kubernetes. Its curren
 The full engineering lifecycle extends beyond merge. The next capabilities follow that path:
 
 - **Deployed behavior:** model environments and deployed versions, request E2E runs, and verify the candidate that is actually running.
-- **Safer parallel work:** add file-overlap warnings, then investigate API and semantic conflicts beyond branch isolation.
+- **Safer parallel work:** build on advisory file-overlap warnings and declared-resource reservations to investigate API and semantic conflicts beyond branch isolation.
 - **Easier first value:** improve repository discovery, proof selection, and the first real PR flowing through gates.
-- **Evolving requirements:** introduce explicit, audited revisions with evidence invalidation.
+- **Evolving requirements:** build on operator-only audited revisions with finer-grained evidence applicability.
 - **Broader delivery:** extend toward configurable graphs, release and rollback workflows, and multiple repositories.
 
 These are directions, not features available in v0.1. The current control plane supports one GitHub repository and one protected base branch, with multiple workers, machines, and worktrees. Fleet-scale throughput and recovery need measured validation before claiming support for hundreds of concurrent agents.

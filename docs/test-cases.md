@@ -52,7 +52,7 @@ This is definition versioning, not automatic Git synchronization. If executable 
 
 Add `e2e:confirmed-booking-sends-sms` to an acceptance criterion's required proofs. The scenario must already exist. Work creation pins the latest published revision, content hash, and environment. Later scenario edits do not silently change existing work's requirements.
 
-In v0.1, changing a work item's acceptance requirements after creation is not supported. A newly required scenario version needs a new work item, with the previous one retained for history.
+Operators can revise a work item's acceptance criteria and dependencies through the audited [requirement revision workflow](coordination.md#revise-requirements-explicitly). Release active ownership first; a revision invalidates previous acceptance evidence and review authorization, and submitted implementation requires a new attempt. Existing E2E proof names retain their pinned scenario versions; newly added E2E proofs pin the latest registered definition. Selecting a newer version for an existing scenario pin is not supported by this command—use a follow-up work item for that version, retaining the previous item for history.
 
 ## Report an execution
 
@@ -68,3 +68,7 @@ A trusted producer with permission for that exact proof name submits ordinary ev
 Include the exact tested head SHA, base SHA, policy revision, result, counts, and artifact URL described in the [agent protocol](protocol.md#evidence). The evidence must match the pinned scenario revision and environment, in addition to the candidate and policy. A passed staging run cannot satisfy a production requirement. An older or newer scenario run cannot satisfy the pinned version accidentally.
 
 Defining a case does not count as running it. Running it does not count as passing it. A worker reporting pass does not make the result independently trusted.
+
+## Loading and revised work
+
+The library distinguishes loading, failed reads and a confirmed empty result. Retry a failed read; previously loaded definitions are labeled potentially stale. Adding a definition does not run tests. Work requirements can be revised by an operator using the [coordination guide](coordination.md), while existing scenario pins remain unchanged.

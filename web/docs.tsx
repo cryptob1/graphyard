@@ -5,6 +5,7 @@ const pages = [
   ['quickstart', 'Quickstart'], ['architecture', 'How Graphyard works'], ['deployment', 'Deploy Graphyard'],
   ['github', 'GitHub enforcement'], ['protocol', 'Agent protocol & API'], ['herdr', 'Herdr integration'],
   ['operations', 'Operations & recovery'], ['development', 'Development & dogfooding'],
+  ['coordination', 'Coordination & recovery drills'],
   ['test-cases', 'E2E test cases'],
   ['first-pr', 'First enforced PR'],
   ['implementation-audit', 'Implementation audit'],
