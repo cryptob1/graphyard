@@ -262,7 +262,8 @@ function waitForHerdrAgent(target: string, run?: (command: string, args: string[
   let lastError: unknown;
   while (Date.now() < deadline) {
     try {
-      const agent = herdrJson(['agent', 'get', target], run);
+      const raw = herdrJson(['agent', 'get', target], run);
+      const agent = raw?.agent ?? raw;
       if (agent?.agent_status === 'blocked') throw new Error('Launched worker is blocked before it is ready for a prompt');
       if (['idle', 'done'].includes(agent?.agent_status)) return agent as HerdrAgent;
     } catch (error) { lastError = error; }
