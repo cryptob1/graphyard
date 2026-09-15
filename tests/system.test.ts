@@ -140,9 +140,11 @@ test('single-use merge execution freezes relevant mutations through observed mer
   await assert.rejects(engine.acquireMerge(coordinator, w.id, { expectedRevision: w.revision, sha: head, baseSha: base, policyRevision: w.policyRevision }, acquireKey), /expired, cancelled, or superseded/);
   w = (await store.list()).find(item => item.id === w.id)!;
   const second = await engine.acquireMerge(coordinator, w.id, { expectedRevision: w.revision, sha: head, baseSha: base, policyRevision: w.policyRevision }, randomUUID());
+  const renewed = await engine.execute(worker, 'heartbeat', w.id, { epoch: w.epoch }, randomUUID());
+  assert.equal(renewed.mergeExecution?.id, second.execution.id, 'lease renewal cannot replace or cancel merge authority');
   const mergedAt = new Date(Math.ceil((Date.parse(second.execution.issuedAt) + 1) / 1000) * 1000).toISOString().replace(/\.\d+Z$/, 'Z');
   const merged = { ...observation(w), merged: true, mergeSha: 'c'.repeat(40), mergedAt } as Observation;
-  const delivered = await engine.observe(w.id, second.revision, merged);
+  const delivered = await engine.observe(w.id, renewed.revision, merged);
   assert.equal(delivered.stage, 'done', 'a whole-second provider timestamp proves ordering once its lower bound postdates the grant'); assert.equal(delivered.mergeExecution, null);
 });
 test('a matching merge from before the execution grant remains an unauthorized violation', async () => {
