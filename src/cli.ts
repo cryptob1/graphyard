@@ -113,6 +113,11 @@ Never share an operator or producer credential with an implementation agent.`); 
       const work = snapshot.work.find((item: any) => item.id === args[0] || item.key === args[0]);
       const profile = master.workers.find(item => item.name === args[1]);
       if (!work) throw new Error(`Unknown work item ${args[0]}`); if (!profile) throw new Error(`Unknown worker profile ${args[1]}`);
+      const conflicts = resourceConflicts(work, snapshot.work, Date.parse(snapshot.now)); if (conflicts.length) throw new Error(`Dispatch blocked by exclusive resources: ${conflicts.map((conflict: any) => `${conflict.resource} held by ${conflict.key}`).join(', ')}`);
+      if (profile.credentialFile) {
+        const workerStatus = await masterApi('status', await readCredentialFile(profile.credentialFile));
+        if (workerStatus.actor?.role !== 'worker' || workerStatus.actor.id !== profile.principal) throw new Error('Worker credential no longer matches the configured principal; update the profile before dispatch');
+      }
       return print(await dispatchWork(root, work, profile, listHerdrAgents()));
     }
     if (id === 'merge') {

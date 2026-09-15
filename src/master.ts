@@ -10,7 +10,7 @@ import type { Work } from './model.js';
 
 const safeEnvironment = z.record(
   z.string().regex(/^[A-Z_][A-Z0-9_]*$/).refine(name => !/(TOKEN|SECRET|PASSWORD|PRIVATE|API_KEY|CREDENTIAL)/.test(name), 'Put secrets in the worker credential file or the agent runtime login, not master profile environment'),
-  z.string().min(1).max(1000),
+  z.string().min(1).max(1000).refine(value => !/[\u0000-\u001f\u007f]/.test(value), 'Profile environment values cannot contain control characters'),
 ).default({});
 
 export const workerProfileSchema = z.object({
@@ -154,6 +154,7 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
     const first = work.gates.find(gate => !gate.passed);
     const mergeable = work.stage === 'merge' && !!work.candidate && !!work.mergeAuthorization
       && work.mergeAuthorization.sha === work.candidate.sha && work.mergeAuthorization.baseSha === work.candidate.baseSha
+      && work.mergeAuthorization.policyRevision === work.policyRevision
       && work.gates.every(gate => gate.passed) && !work.violations.length;
     const dwellMs = now - Date.parse(work.stageEnteredAt);
     const attention = active && (!session || !['working', 'idle'].includes(session.state)) ? `Assigned worker session is ${session?.state ?? 'offline'}`
