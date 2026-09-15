@@ -7,7 +7,7 @@ import { execFile, execFileSync } from 'node:child_process';
 import { createServer } from 'node:http';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
-import { assertMasterBinding, assertMergeCandidate, buildMasterStatus, currentMergeCandidates, dispatchWork, inspectWorkerCredentials, loadMasterConfig, managedMasterInstructions, mergeWork, observeHerdrAgents, prepareWorkerLaunch, saveWorkerProfile, setupMaster, startMaster, workerProfileSchema } from '../src/master.js';
+import { assertMasterBinding, assertMergeCandidate, buildMasterStatus, continueMergeBatch, currentMergeCandidates, dispatchWork, inspectWorkerCredentials, loadMasterConfig, managedMasterInstructions, mergeWork, observeHerdrAgents, prepareWorkerLaunch, saveWorkerProfile, setupMaster, startMaster, workerProfileSchema } from '../src/master.js';
 import type { Work } from '../src/model.js';
 
 const launcher = fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url));
@@ -239,15 +239,25 @@ test('routine merge is exact-candidate, double-checked, and never uses an admin 
   let cancelled = '';
   await assert.rejects(mergeWork(config, candidate, async () => ({ work: [candidate], now: new Date().toISOString() }), acquire, async (_work, authority) => { cancelled = authority.id; }, (_command, args) => {
     if (args[1] === 'view') return JSON.stringify({ headRefOid: candidate.candidate!.sha, baseRefOid: candidate.candidate!.baseSha, baseRefName: 'main', state: 'OPEN', isDraft: false });
-    throw new Error('merge refused');
-  }), /merge refused/);
+    throw new Error('provider response lost');
+  }), /outcome is unknown/);
+  assert.equal(cancelled, '', 'an unknown provider outcome retains authority');
+  await assert.rejects(mergeWork(config, candidate, async () => ({ work: [candidate], now: new Date().toISOString() }), acquire, async (_work, authority) => { cancelled = authority.id; }, (_command, args) => {
+    if (args[1] === 'view') return JSON.stringify({ headRefOid: candidate.candidate!.sha, baseRefOid: candidate.candidate!.baseSha, baseRefName: 'main', state: 'OPEN', isDraft: false });
+    return JSON.stringify({ merged: false, message: 'branch protection refused merge' });
+  }), /branch protection refused merge/);
   assert.equal(cancelled, execution.id);
 });
 
-test('merge-all selection skips stale or refusing work without starving eligible candidates', () => {
+test('merge-all selection and execution do not let refusing work starve eligible candidates', async () => {
   const now = new Date().toISOString();
   const eligible = work({ observation: { at: now } as any });
   const stale = work({ id: 'stale', key: 'GY-43', observation: { at: '2000-01-01T00:00:00Z' } as any });
   const refusing = work({ id: 'refusing', key: 'GY-44', gates: [{ name: 'merge', passed: false, reasons: ['Protection missing'] }] });
   assert.deepEqual(currentMergeCandidates([stale, eligible, refusing], now).map(item => item.key), ['GY-42']);
+  const batch = await continueMergeBatch([{ key: 'GY-50' }, { key: 'GY-51' }], async item => {
+    if (item.key === 'GY-50') throw new Error('candidate changed');
+    return { key: item.key, result: 'merged' };
+  });
+  assert.deepEqual(batch, [{ key: 'GY-50', result: 'refused', reason: 'candidate changed' }, { key: 'GY-51', result: 'merged' }]);
 });

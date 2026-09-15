@@ -100,7 +100,8 @@ async function repositoryWorktrees(root: string) {
   try {
     const records = execFileSync('git', ['worktree', 'list', '--porcelain', '-z'], { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).split('\0');
     worktrees = records.filter(record => record.startsWith('worktree ')).map(record => resolve(record.slice('worktree '.length)));
-  } catch { worktrees = [resolve(root)]; }
+  } catch { throw new Error('Cannot verify credential location because the complete Git worktree inventory is unavailable'); }
+  if (!worktrees.length) throw new Error('Cannot verify credential location because Git returned an empty worktree inventory');
   return Promise.all(worktrees.map(worktree => realpath(worktree)));
 }
 async function assertOutsideWorktrees(root: string, target: string, label: string) {
@@ -383,6 +384,14 @@ export function currentMergeCandidates(work: Work[], observedAt: string) {
     catch { return false; }
   });
 }
+export async function continueMergeBatch<T extends { key: string }, R>(items: T[], action: (item: T) => Promise<R>) {
+  const results: (R | { key: string; result: 'refused'; reason: string })[] = [];
+  for (const item of items) {
+    try { results.push(await action(item)); }
+    catch (error) { results.push({ key: item.key, result: 'refused', reason: error instanceof Error ? error.message : 'Merge attempt failed' }); }
+  }
+  return results;
+}
 type MergeExecution = { id: string; sha: string; baseSha: string; policyRevision: number; authorizationRevision: number; issuedAt: string; expiresAt: string };
 export async function mergeWork(config: MasterConfig, work: Work, freshSnapshot: () => Promise<{ work: Work[]; now: string }>, acquire: (work: Work, authorization: ReturnType<typeof assertMergeCandidate>) => Promise<{ execution: MergeExecution }>, cancel: (work: Work, execution: MergeExecution, reason: string) => Promise<unknown>, run: (command: string, args: string[]) => string = (command, args) => execFileSync(command, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 90_000 })) {
   if (!config.autoMerge) throw new Error('Automatic routine merge is disabled in master configuration');
@@ -397,18 +406,24 @@ export async function mergeWork(config: MasterConfig, work: Work, freshSnapshot:
   const acquireStartedAt = Date.now();
   const granted = await acquire(latest, latestAuthorization);
   if (!granted.execution || granted.execution.sha !== authorization.sha || granted.execution.baseSha !== authorization.baseSha || granted.execution.policyRevision !== authorization.policyRevision || granted.execution.authorizationRevision !== authorization.revision) throw new Error(`${work.key} received an invalid merge execution authority`);
+  let providerStarted = false; let cancelled = false;
   try {
     const lockedPr = JSON.parse(run('gh', ['pr', 'view', String(authorization.pr), '--repo', config.repository, '--json', 'headRefOid,baseRefOid,baseRefName,state,isDraft']));
     if (lockedPr.headRefOid !== authorization.sha || lockedPr.baseRefOid !== authorization.baseSha || lockedPr.baseRefName !== config.baseBranch || lockedPr.state !== 'OPEN' || lockedPr.isDraft) throw new Error(`${work.key} changed on GitHub after merge authority was acquired`);
     const authorityDuration = Date.parse(granted.execution.expiresAt) - Date.parse(granted.execution.issuedAt);
     const remaining = authorityDuration - (Date.now() - acquireStartedAt);
     if (!Number.isFinite(remaining) || remaining <= 90_000) throw new Error(`${work.key} merge execution does not remain valid for the provider timeout; refresh gate inputs and retry`);
+    providerStarted = true;
     const provider = JSON.parse(run('gh', ['api', '--method', 'PUT', `repos/${config.repository}/pulls/${authorization.pr}/merge`, '-f', `sha=${authorization.sha}`, '-f', `merge_method=${config.mergeMethod}`]));
-    if (provider.merged !== true || typeof provider.sha !== 'string') throw new Error(provider.message || 'GitHub did not confirm the merge');
+    if (provider.merged !== true || typeof provider.sha !== 'string') {
+      await cancel(latest, granted.execution, provider.message || 'GitHub confirmed that it did not merge the candidate'); cancelled = true;
+      throw new Error(provider.message || 'GitHub did not merge the candidate');
+    }
   }
   catch (error) {
-    try { await cancel(latest, granted.execution, error instanceof Error ? error.message : 'GitHub merge failed'); }
-    catch { throw new Error(`${work.key} GitHub merge failed and Graphyard could not cancel execution ${granted.execution.id}`); }
+    if (!providerStarted) try { await cancel(latest, granted.execution, error instanceof Error ? error.message : 'GitHub merge failed before provider invocation'); }
+    catch { throw new Error(`${work.key} GitHub merge failed before provider invocation and Graphyard could not cancel execution ${granted.execution.id}`); }
+    if (providerStarted && !cancelled) throw new Error(`${error instanceof Error ? error.message : 'GitHub merge call failed'}; the merge outcome is unknown, so Graphyard retained execution ${granted.execution.id} until observation or expiry`);
     throw error;
   }
   return { key: authorization.key, pr: authorization.pr, sha: authorization.sha, method: config.mergeMethod, result: 'merge requested; Graphyard will mark Done only after observing the merge' };

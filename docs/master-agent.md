@@ -118,7 +118,7 @@ graphyard master merge GY-42
 graphyard master merge --all
 ```
 
-`--all` processes only candidates with a current all-gates-passing authorization. A stale or refusing merge-stage item remains visible in status but does not prevent another authorized item from merging.
+`--all` processes only candidates with a current all-gates-passing authorization. It records a per-item refusal and continues if a selected candidate changes during its final checks. A stale, changed, or refusing item remains visible in status but does not prevent another authorized item from merging.
 
 For every candidate, the command requires:
 
@@ -132,7 +132,7 @@ For every candidate, the command requires:
 8. a second GitHub read after authority acquisition with the same head, base commit, and managed base-branch name;
 9. GitHub's merge API with the authorized head SHA and normal branch protection. Queue enrollment is treated as a refusal because it cannot complete inside the bounded authority window.
 
-It never uses `--admin`. A human approval represented as required evidence remains a refusing gate until supplied. If GitHub refuses the merge, the master cancels the execution authority. Replaying an acquisition request can return authority only while that exact execution is still active and all bound gate inputs remain current. If the client disappears, the authority expires automatically. After the merge command succeeds, the item is still not declared Done by the master; Graphyard keeps the authority active until it observes and reconciles the actual matching merge.
+It never uses `--admin`. A human approval represented as required evidence remains a refusing gate until supplied. If GitHub explicitly reports that it did not merge, the master cancels the execution authority. A timeout, lost response, or malformed response has an unknown provider outcome, so the authority stays active until Graphyard observes the matching merge or the bounded execution expires. Replaying an acquisition request can return authority only while that exact execution is still active and all bound gate inputs remain current. After the merge command succeeds, the item is still not declared Done by the master; Graphyard keeps the authority active until it observes and reconciles the actual matching merge.
 
 The present command uses the local authenticated GitHub CLI for the final provider action. Graphyard's transactional execution authority closes the control-plane mutation race around that external call without holding a database transaction open during network I/O.
 
