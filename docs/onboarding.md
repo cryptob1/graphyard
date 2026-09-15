@@ -158,12 +158,14 @@ For each launchable worker, put only that worker's Graphyard token in a local mo
 mkdir -p ~/.config/graphyard/workers
 chmod 700 ~/.config/graphyard ~/.config/graphyard/workers
 umask 077
-echo 'Paste the worker token, then send EOF:'
-cat > ~/.config/graphyard/workers/codex-1.token
+IFS= read -r -s -p 'Worker token: ' GRAPHYARD_WORKER_CREDENTIAL
+printf '\n'
+printf '%s' "$GRAPHYARD_WORKER_CREDENTIAL" > ~/.config/graphyard/workers/codex-1.token
+unset GRAPHYARD_WORKER_CREDENTIAL
 chmod 600 ~/.config/graphyard/workers/codex-1.token
 ```
 
-The token is read from standard input and does not enter shell history.
+The token is read without terminal echo and does not enter shell history.
 
 Copy and edit a profile template:
 
