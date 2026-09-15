@@ -7,7 +7,7 @@ import { execFile, execFileSync } from 'node:child_process';
 import { createServer } from 'node:http';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
-import { assertMergeCandidate, buildMasterStatus, dispatchWork, loadMasterConfig, managedMasterInstructions, mergeWork, observeHerdrAgents, runWorkerBootstrap, saveWorkerProfile, setupMaster, startMaster, workerProfileSchema } from '../src/master.js';
+import { assertMergeCandidate, buildMasterStatus, dispatchWork, loadMasterConfig, managedMasterInstructions, mergeWork, observeHerdrAgents, prepareWorkerLaunch, saveWorkerProfile, setupMaster, startMaster, workerProfileSchema } from '../src/master.js';
 import type { Work } from '../src/model.js';
 
 const launcher = fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url));
@@ -77,10 +77,13 @@ test('dispatch launches a worker through the supervised claim and worktree boots
     const credential = join(root, 'worker.token'); await writeFile(credential, workerToken, { mode: 0o600 });
     await setupMaster(root, { url: 'https://graphyard.example', token: coordinatorToken, cliPath: launcher, credentialDirectory }, coordinatorStatus as typeof fetch);
     const profile = { name: 'launch', principal: 'worker-a', agentName: 'eng-a', mode: 'launch' as const, kind: 'codex' as const, credentialFile: credential, agentArgs: [], environment: {} };
-    const result = await dispatchWork(root, work({ stage: 'ready', lease: null, submission: null, candidate: null, mergeAuthorization: null }), profile, [], (_command, args) => { calls.push(args); return JSON.stringify({ result: args[0] === 'tab' ? { pane_id: 'p1' } : args[1] === 'get' ? { pane_id: 'p1', agent_status: 'working' } : {} }); });
+    const result = await dispatchWork(root, work({ stage: 'ready', lease: null, submission: null, candidate: null, mergeAuthorization: null }), profile, [], (_command, args) => { calls.push(args); return JSON.stringify({ result: args[0] === 'tab' ? { pane_id: 'p1' } : args[1] === 'get' ? { pane_id: 'p1', agent_status: 'working' } : {} }); }, undefined, async () => ({ epoch: 4, path: join(root, 'assigned'), base: 'c'.repeat(40) }));
     assert.match(result.ownership, /supervising/);
-    assert.deepEqual(calls[1].slice(0, 3), ['pane', 'run', 'p1']); assert.match(calls[1][3], /master worker-run 'GY-42' 'launch'/);
+    assert.deepEqual(calls[1].slice(0, 3), ['pane', 'run', 'p1']); assert.match(calls[1][3], /watch' 'GY-42' '4' '--' 'codex'/);
     assert.deepEqual(calls.at(-1)!.slice(0, 3), ['agent', 'prompt', 'eng-a']); assert.doesNotMatch(calls.at(-1)![3], /coordinator-token/);
+    const failedCalls: string[][] = []; let releasedEpoch = 0;
+    await assert.rejects(dispatchWork(root, work({ stage: 'ready', lease: null, submission: null, candidate: null, mergeAuthorization: null }), profile, [], (_command, args) => { failedCalls.push(args); return JSON.stringify({ result: args[0] === 'tab' ? { pane_id: 'late-pane' } : {} }); }, undefined, async () => ({ epoch: 5, path: join(root, 'late'), base: 'd'.repeat(40) }), async (_root, _key, epoch) => { releasedEpoch = epoch; }, 1), /did not become visible/);
+    assert.equal(releasedEpoch, 5); assert.deepEqual(failedCalls.at(-1), ['pane', 'close', 'late-pane']);
     const existing = { name: 'existing', principal: 'worker-a', agentName: 'existing-a', mode: 'existing' as const, agentArgs: [], environment: {} };
     await assert.rejects(dispatchWork(root, work({ stage: 'ready', lease: null, submission: null, candidate: null, mergeAuthorization: null }), existing, [{ name: 'existing-a', agent_status: 'idle', cwd: root }]), /cannot be safely adopted/);
     const dependency = work({ id: 'dependency', key: 'GY-41', stage: 'build' });
@@ -127,21 +130,29 @@ test('a launch profile token file overrides ambient Graphyard credentials', asyn
   } finally { await new Promise<void>(resolve => http.close(() => resolve())); await rm(root, { recursive: true, force: true }); }
 });
 
-test('worker bootstrap claims, creates the assigned worktree, and launches the agent under watch', async () => {
-  const root = await repository(); const credential = join(root, 'worker.token'); const credentialDirectory = await mkdtemp(join(tmpdir(), 'graphyard-master-credentials-')); const calls: { args: string[]; options: any }[] = []; let launch: any;
+test('worker preparation claims and creates the assigned worktree from the current managed base', async () => {
+  const root = await repository(); const credential = join(root, 'worker.token'); const credentialDirectory = await mkdtemp(join(tmpdir(), 'graphyard-master-credentials-')); const calls: { args: string[]; options: any }[] = [];
   try {
     await writeFile(credential, workerToken, { mode: 0o600 });
     await setupMaster(root, { url: 'https://graphyard.example', token: coordinatorToken, cliPath: launcher, credentialDirectory }, coordinatorStatus as typeof fetch);
     await saveWorkerProfile(root, { name: 'launch', principal: 'worker-a', agentName: 'eng-a', mode: 'launch', kind: 'codex', credentialFile: credential }, async () => ({ actor: { id: 'worker-a', role: 'worker' } }));
     const base = 'c'.repeat(40);
-    const code = await runWorkerBootstrap(root, 'GY-42', 'launch', (command, args, options) => {
+    const prepared = await prepareWorkerLaunch(root, 'GY-42', 'launch', (command, args, options) => {
       calls.push({ args, options });
       if (command === 'git') return args[0] === 'rev-parse' ? `${base}\n` : '';
       return args[1] === 'claim' ? JSON.stringify({ epoch: 4, lease: { owner: 'worker-a' } }) : JSON.stringify({ path: join(root, 'assigned') });
-    }, (_command, args, options) => { launch = { args, options }; return 0; });
-    assert.equal(code, 0); assert.deepEqual(calls[0].args.slice(0, 5), ['fetch', '--quiet', '--no-tags', 'origin', '+refs/heads/main:refs/remotes/origin/main']); assert.equal(calls[2].args[1], 'claim'); assert.equal(calls[3].args[1], 'worktree'); assert.equal(calls[3].args[4], base);
-    assert.deepEqual(launch.args.slice(0, 6), [launcher, 'watch', 'GY-42', '4', '--', 'codex']);
-    assert.equal(launch.options.cwd, join(root, 'assigned')); assert.equal(launch.options.env.GRAPHYARD_TOKEN, undefined); assert.equal(launch.options.env.GRAPHYARD_TOKEN_FILE, credential);
+    });
+    assert.equal(prepared.epoch, 4); assert.equal(prepared.path, join(root, 'assigned')); assert.deepEqual(calls[0].args.slice(0, 5), ['fetch', '--quiet', '--no-tags', 'origin', '+refs/heads/main:refs/remotes/origin/main']); assert.equal(calls[2].args[1], 'claim'); assert.equal(calls[3].args[1], 'worktree'); assert.equal(calls[3].args[4], base);
+    assert.equal(calls[2].options.env.GRAPHYARD_TOKEN, undefined); assert.equal(calls[2].options.env.GRAPHYARD_TOKEN_FILE, credential);
+    const failed: string[][] = [];
+    await assert.rejects(prepareWorkerLaunch(root, 'GY-42', 'launch', (command, args) => {
+      failed.push(args);
+      if (command === 'git') return args[0] === 'rev-parse' ? `${base}\n` : '';
+      if (args[1] === 'claim') return JSON.stringify({ epoch: 6, lease: { owner: 'worker-a' } });
+      if (args[1] === 'worktree') throw new Error('checkout failed');
+      return '{}';
+    }), /checkout failed/);
+    assert.equal(failed.at(-1)![1], 'release'); assert.equal(failed.at(-1)![3], '6');
   } finally { await rm(root, { recursive: true, force: true }); await rm(credentialDirectory, { recursive: true, force: true }); }
 });
 

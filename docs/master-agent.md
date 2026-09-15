@@ -93,7 +93,7 @@ For a ready item:
 graphyard master dispatch GY-42 claude-primary
 ```
 
-Dispatch refuses assigned, dependency-blocked, resource-blocked, non-ready, and existing-session profiles. For a launch profile it creates a non-focused visible tab and starts a worker-scoped bootstrap. That bootstrap fetches and resolves the current managed base branch, claims immediately before launch, creates the assigned worktree from that exact base, and runs the coding agent as a child of `graphyard watch`. The supervisor renews the lease and terminates the complete child process group on lease loss. Only after Herdr detects the supervised agent does the master name and prompt it. Prompt delivery itself never becomes ownership.
+Dispatch refuses assigned, dependency-blocked, resource-blocked, non-ready, and existing-session profiles. For a launch profile its worker-scoped launcher fetches and resolves the current managed base branch, claims immediately before launch, and creates the assigned worktree from that exact base. It then creates a non-focused visible tab and runs the coding agent as a child of `graphyard watch`. The supervisor renews the lease and terminates the complete child process group on lease loss. Only after Herdr detects the supervised agent does the master name and prompt it. If tab creation, detection, naming, or prompt delivery fails, dispatch closes the pane and releases that exact lease epoch so an unprompted late worker cannot retain ownership. Prompt delivery itself never becomes ownership.
 
 The master then watches for:
 

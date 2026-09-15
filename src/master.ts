@@ -1,4 +1,4 @@
-import { execFileSync, spawnSync } from 'node:child_process';
+import { execFileSync } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import { chmod, lstat, mkdir, readFile } from 'node:fs/promises';
 import { isAbsolute, resolve } from 'node:path';
@@ -220,7 +220,10 @@ export async function startMaster(root: string, kind: WorkerProfile['kind'], age
   return { agentName: config.masterAgentName, kind, pane, status: 'started and prompted', focusChanged: false };
 }
 
-export async function dispatchWork(root: string, work: Work, profile: WorkerProfile, agents: HerdrAgent[], run?: (command: string, args: string[]) => string, allWork: Work[] = [work]) {
+type WorkerCommand = (command: string, args: string[], options?: any) => string | Buffer;
+type PreparedWorker = { epoch: number; path: string; base: string };
+
+export async function dispatchWork(root: string, work: Work, profile: WorkerProfile, agents: HerdrAgent[], run?: (command: string, args: string[]) => string, allWork: Work[] = [work], prepare: (root: string, key: string, profileName: string) => Promise<PreparedWorker> = prepareWorkerLaunch, release: (root: string, key: string, epoch: number, profileName: string) => Promise<void> = releaseWorkerLaunch, agentTimeoutMs = 30_000) {
   if (work.stage !== 'ready' || !work.ready || work.blocker) throw new Error('Dispatch requires an unassigned work item at Ready');
   const unfinished = work.dependencies.map(id => allWork.find(item => item.id === id)).filter(dependency => !dependency || dependency.stage !== 'done');
   if (unfinished.length) throw new Error(`Dispatch blocked by unfinished dependencies: ${unfinished.map(dependency => dependency?.key ?? 'unknown').join(', ')}`);
@@ -232,14 +235,23 @@ export async function dispatchWork(root: string, work: Work, profile: WorkerProf
   } else {
     await readCredentialFile(profile.credentialFile!);
     if (target) throw new Error('Launch profile agent name is already visible in Herdr');
-    const tabArgs = ['tab', 'create', '--cwd', root, '--label', `${work.key} · ${profile.agentName}`, '--env', `GRAPHYARD_URL=${config.url}`, '--env', `GRAPHYARD_TOKEN_FILE=${profile.credentialFile}`, '--env', `GRAPHYARD_HOST_ID=${config.hostId}`, ...Object.entries(profile.environment).flatMap(([key, value]) => ['--env', `${key}=${value}`]), '--no-focus'];
-    const tab = herdrJson(tabArgs, run); const pane = tab.pane_id ?? tab.pane?.id ?? tab.tab?.pane_id;
-    if (!pane) throw new Error('Herdr did not return the new worker pane');
-    const bootstrap = `${shellQuote(process.execPath)} ${shellQuote(config.cliPath)} master worker-run ${shellQuote(work.key)} ${shellQuote(profile.name)}`;
-    herdrJson(['pane', 'run', pane, bootstrap], run);
-    waitForHerdrAgent(pane, run);
-    herdrJson(['agent', 'rename', pane, profile.agentName], run);
-    target = { name: profile.agentName, pane_id: pane, agent_status: 'idle', cwd: root };
+    const prepared = await prepare(root, work.key, profile.name);
+    let pane: string | undefined;
+    try {
+      const tabArgs = ['tab', 'create', '--cwd', prepared.path, '--label', `${work.key} · ${profile.agentName}`, '--env', `GRAPHYARD_URL=${config.url}`, '--env', `GRAPHYARD_TOKEN_FILE=${profile.credentialFile}`, '--env', `GRAPHYARD_HOST_ID=${config.hostId}`, ...Object.entries(profile.environment).flatMap(([key, value]) => ['--env', `${key}=${value}`]), '--no-focus'];
+      const tab = herdrJson(tabArgs, run); pane = tab.pane_id ?? tab.pane?.id ?? tab.tab?.pane_id;
+      if (!pane) throw new Error('Herdr did not return the new worker pane');
+      const supervised = [process.execPath, config.cliPath, 'watch', work.key, String(prepared.epoch), '--', profile.kind!, ...profile.agentArgs].map(shellQuote).join(' ');
+      herdrJson(['pane', 'run', pane, supervised], run);
+      waitForHerdrAgent(pane, run, agentTimeoutMs);
+      herdrJson(['agent', 'rename', pane, profile.agentName], run);
+      target = { name: profile.agentName, pane_id: pane, agent_status: 'idle', cwd: prepared.path };
+    } catch (error) {
+      if (pane) { try { herdrJson(['pane', 'close', pane], run); } catch { /* best effort after a failed launch */ } }
+      try { await release(root, work.key, prepared.epoch, profile.name); }
+      catch { throw new Error(`${error instanceof Error ? error.message : 'Worker launch failed'}; the pane was stopped but Graphyard could not release epoch ${prepared.epoch}`); }
+      throw error;
+    }
   }
   const prompt = `Implement ${work.key}: ${work.title}. The Graphyard worker launcher has claimed this item under principal ${profile.principal}, created its assigned worktree, and placed this agent under lease supervision. Run node ${config.cliPath} status ${work.key} before editing. Work only in the current assigned worktree, satisfy the stated criteria without weakening them, open a PR, and submit it with complete. Stop immediately if the supervisor reports lease loss. Do not submit trusted evidence or merge the PR.`;
   herdrJson(['agent', 'prompt', profile.agentName, prompt], run);
@@ -247,20 +259,39 @@ export async function dispatchWork(root: string, work: Work, profile: WorkerProf
 }
 
 const shellQuote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
-export async function runWorkerBootstrap(root: string, key: string, profileName: string, run = (command: string, args: string[], options: any = {}) => execFileSync(command, args, { ...options, encoding: 'utf8', stdio: options.stdio ?? ['ignore', 'pipe', 'pipe'] }), launch = (command: string, args: string[], options: any) => spawnSync(command, args, options).status ?? 1) {
+function workerEnvironment(config: MasterConfig, profile: WorkerProfile) {
+  const env: NodeJS.ProcessEnv = { ...process.env, GRAPHYARD_URL: config.url, GRAPHYARD_TOKEN_FILE: profile.credentialFile, GRAPHYARD_HOST_ID: config.hostId };
+  delete env.GRAPHYARD_TOKEN; delete env.GRAPHYARD_MASTER_TOKEN;
+  return env;
+}
+const workerCommand: WorkerCommand = (command, args, options = {}) => execFileSync(command, args, { ...options, encoding: 'utf8', stdio: options.stdio ?? ['ignore', 'pipe', 'pipe'] });
+
+export async function releaseWorkerLaunch(root: string, key: string, epoch: number, profileName: string, run: WorkerCommand = workerCommand) {
   const config = await loadMasterConfig(root); const profile = config.workers.find(worker => worker.name === profileName);
   if (!profile || profile.mode !== 'launch' || !profile.kind || !profile.credentialFile) throw new Error('A complete launch profile is required');
   await readCredentialFile(profile.credentialFile);
-  const env: NodeJS.ProcessEnv = { ...process.env, GRAPHYARD_URL: config.url, GRAPHYARD_TOKEN_FILE: profile.credentialFile, GRAPHYARD_HOST_ID: config.hostId };
-  delete env.GRAPHYARD_TOKEN; delete env.GRAPHYARD_MASTER_TOKEN;
+  run(process.execPath, [config.cliPath, 'release', key, String(epoch)], { cwd: root, env: workerEnvironment(config, profile) });
+}
+
+export async function prepareWorkerLaunch(root: string, key: string, profileName: string, run: WorkerCommand = workerCommand): Promise<PreparedWorker> {
+  const config = await loadMasterConfig(root); const profile = config.workers.find(worker => worker.name === profileName);
+  if (!profile || profile.mode !== 'launch' || !profile.kind || !profile.credentialFile) throw new Error('A complete launch profile is required');
+  await readCredentialFile(profile.credentialFile);
+  const env = workerEnvironment(config, profile);
   run('git', ['fetch', '--quiet', '--no-tags', 'origin', `+refs/heads/${config.baseBranch}:refs/remotes/origin/${config.baseBranch}`], { cwd: root, env, stdio: ['ignore', 'ignore', 'inherit'] });
   const base = String(run('git', ['rev-parse', '--verify', `refs/remotes/origin/${config.baseBranch}`], { cwd: root, env })).trim();
   if (!/^[0-9a-f]{40}$/i.test(base)) throw new Error('Worker launcher could not resolve the current managed base branch');
   const claim = JSON.parse(String(run(process.execPath, [config.cliPath, 'claim', key], { cwd: root, env })));
   if (claim.lease?.owner !== profile.principal || !Number.isSafeInteger(claim.epoch)) throw new Error('Worker launcher acquired an unexpected assignment identity');
-  const workspace = JSON.parse(String(run(process.execPath, [config.cliPath, 'worktree', key, String(claim.epoch), base], { cwd: root, env, stdio: ['ignore', 'pipe', 'inherit'] })));
-  if (!workspace.path || !isAbsolute(workspace.path)) throw new Error('Worker launcher did not receive an assigned workspace');
-  return launch(process.execPath, [config.cliPath, 'watch', key, String(claim.epoch), '--', profile.kind, ...profile.agentArgs], { cwd: workspace.path, env, stdio: 'inherit' });
+  try {
+    const workspace = JSON.parse(String(run(process.execPath, [config.cliPath, 'worktree', key, String(claim.epoch), base], { cwd: root, env, stdio: ['ignore', 'pipe', 'inherit'] })));
+    if (!workspace.path || !isAbsolute(workspace.path)) throw new Error('Worker launcher did not receive an assigned workspace');
+    return { epoch: claim.epoch, path: workspace.path, base };
+  } catch (error) {
+    try { run(process.execPath, [config.cliPath, 'release', key, String(claim.epoch)], { cwd: root, env }); }
+    catch { throw new Error(`${error instanceof Error ? error.message : 'Workspace preparation failed'}; Graphyard could not release epoch ${claim.epoch}`); }
+    throw error;
+  }
 }
 
 export function assertMergeCandidate(work: Work, observedAt?: string) {
