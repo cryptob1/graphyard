@@ -20,7 +20,14 @@ try { connection = await loadConnection(process.cwd()); } catch { console.error(
 const base = process.env.GRAPHYARD_URL ?? connection?.url ?? 'http://127.0.0.1:4310';
 let savedToken: string | undefined;
 try { if (connection && new URL(base).origin === connection.url) savedToken = connection.token; } catch { /* request validation reports an invalid URL */ }
-const token = process.env.GRAPHYARD_TOKEN_FILE ? await readCredentialFile(resolve(process.env.GRAPHYARD_TOKEN_FILE)) : process.env.GRAPHYARD_TOKEN ?? savedToken;
+let resolvedToken: string | undefined; let tokenResolved = false;
+async function individualToken() {
+  if (!tokenResolved) {
+    resolvedToken = process.env.GRAPHYARD_TOKEN_FILE ? await readCredentialFile(resolve(process.env.GRAPHYARD_TOKEN_FILE)) : process.env.GRAPHYARD_TOKEN ?? savedToken;
+    tokenResolved = true;
+  }
+  return resolvedToken;
+}
 const hostId = hostIdSchema.parse(process.env.GRAPHYARD_HOST_ID ?? connection?.hostId ?? hostname());
 const cliPath = fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url));
 async function activeCliPath() {
@@ -33,6 +40,7 @@ async function activeCliPath() {
   } catch { throw new Error('The active Graphyard CLI launcher is unavailable; select an existing launcher'); }
 }
 async function api(path: string, data?: unknown, requestId = process.env.GRAPHYARD_REQUEST_ID ?? randomUUID()) {
+  const token = await individualToken();
   if (!token) throw new Error('Set GRAPHYARD_TOKEN to your individual credential');
   const response = await fetch(`${base}/api/${path}`, { method: data === undefined ? 'GET' : 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', 'Idempotency-Key': requestId }, body: data === undefined ? undefined : JSON.stringify(data), signal: AbortSignal.timeout(30_000) });
   const body = await response.json(); if (!response.ok) throw new Error(JSON.stringify(body)); return body;
@@ -152,7 +160,7 @@ Never share an operator or producer credential with an implementation agent.`); 
     if (!id || id === 'requests') return print(await api('validation' + (args[0] ? `?cursor=${encodeURIComponent(args[0])}` : '')));
     if (id === 'artifact-upload' && args.length === 1) return print(await api('validation/artifacts', JSON.parse(await readFile(args[0], 'utf8'))));
     if (id === 'artifact-download' && args.length === 3) {
-      if (!token) throw new Error('An individual Graphyard credential is required');
+      const token = await individualToken(); if (!token) throw new Error('An individual Graphyard credential is required');
       const response = await fetch(`${base}/api/validation/artifacts/${encodeURIComponent(args[0])}/${encodeURIComponent(args[1])}`, { headers: { Authorization: `Bearer ${token}` }, redirect: 'error', signal: AbortSignal.timeout(30_000) });
       if (!response.ok) throw new Error(`Artifact download refused (${response.status})`);
       const bytes = Buffer.from(await response.arrayBuffer());
@@ -168,7 +176,7 @@ Never share an operator or producer credential with an implementation agent.`); 
   if (command === 'init') {
     const root = execFileSync('git', ['rev-parse', '--show-toplevel'], { encoding: 'utf8' }).trim();
     const { values } = parseArgs({ args: process.argv.slice(3), options: { url: { type: 'string' }, herdr: { type: 'boolean' }, 'token-stdin': { type: 'boolean' }, 'host-id': { type: 'string' }, 'cli-path': { type: 'string' } }, allowPositionals: false });
-    let workerToken = token;
+    let workerToken = await individualToken();
     if (values['token-stdin']) {
       let input = ''; for await (const chunk of process.stdin) { input += chunk; if (input.length > 10000) throw new Error('Token input is too large'); }
       workerToken = input.trim();
@@ -264,7 +272,8 @@ Never share an operator or producer credential with an implementation agent.`); 
     const workspace = work.workspaces.find((w: any) => w.epoch === epoch);
     if (!workspace || workspace.host !== hostId || await realpath(process.cwd()) !== await realpath(workspace.path)) throw new Error('Run watch from the assigned workspace on its registered host');
     if ((await api('status')).actor?.role !== 'worker') throw new Error('watch requires a worker credential; never pass operator or producer credentials to implementation processes');
-    process.env.GRAPHYARD_URL = base; process.env.GRAPHYARD_TOKEN = token;
+    const watchToken = await individualToken();
+    process.env.GRAPHYARD_URL = base; process.env.GRAPHYARD_TOKEN = watchToken;
     process.env.GRAPHYARD_CLI = await activeCliPath(); process.env.GRAPHYARD_HOST_ID = hostId;
     process.exitCode = await supervise(args[separator + 1], args.slice(separator + 2), epoch,
       () => api(`work/${work.id}/heartbeat`, { epoch }, randomUUID()));

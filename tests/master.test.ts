@@ -7,7 +7,7 @@ import { execFile, execFileSync } from 'node:child_process';
 import { createServer } from 'node:http';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
-import { assertDispatchable, assertMasterBinding, assertMergeCandidate, buildMasterStatus, continueMergeBatch, currentMergeCandidates, dispatchWork, inspectWorkerCredentials, loadMasterConfig, managedMasterInstructions, mergeWork, observeHerdrAgents, prepareWorkerLaunch, saveWorkerProfile, setupMaster, startMaster, workerProfileSchema } from '../src/master.js';
+import { assertDispatchable, assertMasterBinding, assertMergeCandidate, assertMergeProtection, buildMasterStatus, continueMergeBatch, currentMergeCandidates, dispatchWork, inspectWorkerCredentials, loadMasterConfig, managedMasterInstructions, mergeWork, observeHerdrAgents, prepareWorkerLaunch, saveWorkerProfile, setupMaster, startMaster, workerProfileSchema } from '../src/master.js';
 import type { Work } from '../src/model.js';
 
 const launcher = fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url));
@@ -19,7 +19,8 @@ async function repository() {
   execFileSync('git', ['remote', 'add', 'origin', 'https://github.com/owner/project.git'], { cwd: root });
   return root;
 }
-const coordinatorStatus = async () => new Response(JSON.stringify({ actor: { id: 'master', role: 'coordinator' }, repository: 'owner/project', baseBranch: 'main' }));
+const coordinatorStatus = async () => new Response(JSON.stringify({ actor: { id: 'master', role: 'coordinator' }, repository: 'owner/project', baseBranch: 'main', githubAppId: 1234 }));
+const validProtection = { required_pull_request_reviews: { required_approving_review_count: 1, dismiss_stale_reviews: true, require_last_push_approval: true }, required_status_checks: { strict: true, checks: [{ context: 'Graphyard / merge', app_id: 1234 }] }, enforce_admins: { enabled: true }, allow_force_pushes: { enabled: false }, allow_deletions: { enabled: false } };
 function work(overrides: Partial<Work> = {}) {
   const candidate = { sha: 'a'.repeat(40), baseSha: 'b'.repeat(40), pr: 42, branch: 'graphyard/gy-42-1', author: 'worker' };
   return { id: 'work-id', key: 'GY-42', title: 'Prove the master flow', description: '', type: 'feature', priority: 1, dependencies: [], criteria: [{ id: 'AC-1', text: 'Works', proofs: ['integration:master'] }], policy: { checks: ['test'], review: true }, plannedFiles: [], stage: 'merge', revision: 9, policyRevision: 2, createdAt: '', updatedAt: '', stageEnteredAt: '', ready: true, epoch: 1, lease: null, workspaces: [], candidate, submission: { epoch: 1, pr: 42 }, reworkRequested: false, scenarioRequirements: [], evidence: [], observation: null, blocker: null, gates: [{ name: 'merge', passed: true, reasons: [] }], violations: [], mergeAuthorization: { sha: candidate.sha, baseSha: candidate.baseSha, policyRevision: 2, at: new Date().toISOString() }, ...overrides } as Work;
@@ -46,8 +47,8 @@ test('master init verifies a coordinator and repository before writing private l
     await writeFile(join(root, '.graphyard/connection.json'), workerConnection, { mode: 0o600 });
     await setupMaster(root, { url: 'https://graphyard.example', token: coordinatorToken, cliPath: launcher, credentialDirectory }, coordinatorStatus as typeof fetch);
     assert.equal(await readFile(join(root, '.graphyard/connection.json'), 'utf8'), workerConnection, 'master setup must not replace a worker connection');
-    await assert.rejects(setupMaster(root, { url: 'https://graphyard.example', token: workerToken, cliPath: launcher, credentialDirectory }, (async () => new Response(JSON.stringify({ actor: { id: 'worker', role: 'worker' }, repository: 'owner/project', baseBranch: 'main' }))) as typeof fetch), /coordinator credential/);
-    await assert.rejects(setupMaster(root, { url: 'https://graphyard.example', token: coordinatorToken, cliPath: launcher, credentialDirectory }, (async () => new Response(JSON.stringify({ actor: { id: 'master', role: 'coordinator' }, repository: null, baseBranch: 'main' }))) as typeof fetch), /bound to a GitHub repository/);
+    await assert.rejects(setupMaster(root, { url: 'https://graphyard.example', token: workerToken, cliPath: launcher, credentialDirectory }, (async () => new Response(JSON.stringify({ actor: { id: 'worker', role: 'worker' }, repository: 'owner/project', baseBranch: 'main', githubAppId: 1234 }))) as typeof fetch), /coordinator credential/);
+    await assert.rejects(setupMaster(root, { url: 'https://graphyard.example', token: coordinatorToken, cliPath: launcher, credentialDirectory }, (async () => new Response(JSON.stringify({ actor: { id: 'master', role: 'coordinator' }, repository: null, baseBranch: 'main', githubAppId: 1234 }))) as typeof fetch), /bound to a GitHub repository/);
     const linkedConfig = join(credentialDirectory, 'linked-inside'); await symlink(root, linkedConfig, 'dir');
     await assert.rejects(setupMaster(root, { url: 'https://graphyard.example', token: `${coordinatorToken}-symlink`, cliPath: launcher, credentialDirectory: linkedConfig }, coordinatorStatus as typeof fetch), /outside every worktree/);
     assert.deepEqual(await readdir(join(root, 'masters')), [], 'canonical-path refusal occurs before credential bytes are written');
@@ -86,10 +87,11 @@ test('master status derives ownership from Graphyard and only joins Herdr health
 });
 
 test('master commands refuse a changed repository or managed base binding', () => {
-  const config = { version: 1 as const, url: 'https://graphyard.example', credentialFile: '/outside/master.token', cliPath: launcher, repository: 'owner/project', baseBranch: 'main', hostId: 'machine-a', masterAgentName: 'graphyard-master-project', autoMerge: true, mergeMethod: 'merge' as const, workers: [] };
-  assert.doesNotThrow(() => assertMasterBinding(config, { actor: { role: 'coordinator' }, repository: 'OWNER/project', baseBranch: 'main' }));
-  assert.throws(() => assertMasterBinding(config, { actor: { role: 'coordinator' }, repository: 'owner/other', baseBranch: 'main' }), /rerun master init/);
-  assert.throws(() => assertMasterBinding(config, { actor: { role: 'coordinator' }, repository: 'owner/project', baseBranch: 'release' }), /rerun master init/);
+  const config = { version: 1 as const, url: 'https://graphyard.example', credentialFile: '/outside/master.token', cliPath: launcher, repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'machine-a', masterAgentName: 'graphyard-master-project', autoMerge: true, mergeMethod: 'merge' as const, workers: [] };
+  assert.doesNotThrow(() => assertMasterBinding(config, { actor: { role: 'coordinator' }, repository: 'OWNER/project', baseBranch: 'main', githubAppId: 1234 }));
+  assert.throws(() => assertMasterBinding(config, { actor: { role: 'coordinator' }, repository: 'owner/other', baseBranch: 'main', githubAppId: 1234 }), /rerun master init/);
+  assert.throws(() => assertMasterBinding(config, { actor: { role: 'coordinator' }, repository: 'owner/project', baseBranch: 'release', githubAppId: 1234 }), /rerun master init/);
+  assert.throws(() => assertMasterBinding(config, { actor: { role: 'coordinator' }, repository: 'owner/project', baseBranch: 'main', githubAppId: 9999 }), /rerun master init/);
 });
 
 test('dispatch launches a worker through the supervised claim and worktree bootstrap', async () => {
@@ -230,16 +232,19 @@ test('worker preparation claims and creates the assigned worktree from the curre
 });
 
 test('routine merge is exact-candidate, double-checked, and never uses an admin bypass', async () => {
-  const candidate = work({ observation: { at: new Date().toISOString(), candidate: { sha: 'a'.repeat(40), baseSha: 'b'.repeat(40), pr: 42, branch: 'graphyard/gy-42-1', author: 'worker' } } as any }); const config = { version: 1 as const, url: 'https://graphyard.example', credentialFile: '/outside/master.token', cliPath: launcher, repository: 'owner/project', baseBranch: 'main', hostId: 'machine-a', masterAgentName: 'graphyard-master-project', autoMerge: true, mergeMethod: 'merge' as const, workers: [] };
+  const candidate = work({ observation: { at: new Date().toISOString(), candidate: { sha: 'a'.repeat(40), baseSha: 'b'.repeat(40), pr: 42, branch: 'graphyard/gy-42-1', author: 'worker' } } as any }); const config = { version: 1 as const, url: 'https://graphyard.example', credentialFile: '/outside/master.token', cliPath: launcher, repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'machine-a', masterAgentName: 'graphyard-master-project', autoMerge: true, mergeMethod: 'merge' as const, workers: [] };
   const calls: string[][] = [];
   const execution = { id: '11111111-1111-4111-8111-111111111111', owner: 'master', sha: candidate.candidate!.sha, baseSha: candidate.candidate!.baseSha, policyRevision: 2, authorizationRevision: candidate.revision, issuedAt: new Date().toISOString(), expiresAt: new Date(Date.now() + 120_000).toISOString() };
   const acquire = async () => ({ execution }); const cancel = async () => ({});
   const result = await mergeWork(config, candidate, async () => ({ work: [candidate], now: new Date().toISOString() }), acquire, cancel, (_command, args) => {
     calls.push(args);
-    return args[1] === 'view' ? JSON.stringify({ headRefOid: candidate.candidate!.sha, baseRefOid: candidate.candidate!.baseSha, baseRefName: 'main', state: 'OPEN', isDraft: false }) : JSON.stringify({ merged: true, sha: 'c'.repeat(40) });
+    if (args[1] === 'view') return JSON.stringify({ headRefOid: candidate.candidate!.sha, baseRefOid: candidate.candidate!.baseSha, baseRefName: 'main', state: 'OPEN', isDraft: false });
+    return args[1] === '--method' ? JSON.stringify({ merged: true, sha: 'c'.repeat(40) }) : JSON.stringify(validProtection);
   });
   assert.equal(result.result.startsWith('merge requested'), true);
-  assert.deepEqual(calls[2].slice(0, 3), ['api', '--method', 'PUT']); assert.ok(calls[2].includes(`sha=${candidate.candidate!.sha}`)); assert.equal(calls[2].includes('--admin'), false);
+  assert.deepEqual(calls[3].slice(0, 3), ['api', '--method', 'PUT']); assert.ok(calls[3].includes(`sha=${candidate.candidate!.sha}`)); assert.equal(calls[3].includes('--admin'), false);
+  assert.doesNotThrow(() => assertMergeProtection(validProtection, config, candidate));
+  assert.throws(() => assertMergeProtection({ ...validProtection, required_status_checks: { ...validProtection.required_status_checks, checks: [] } }, config, candidate), /protection changed/);
   assert.throws(() => assertMergeCandidate(work({ gates: [{ name: 'acceptance', passed: false, reasons: ['Human approval required'] }] })), /does not have/);
   let reads = 0; await assert.rejects(mergeWork(config, candidate, async () => ({ work: [reads++ ? work({ revision: 10 }) : candidate], now: new Date().toISOString() }), acquire, cancel, () => JSON.stringify({ headRefOid: candidate.candidate!.sha, baseRefOid: candidate.candidate!.baseSha, baseRefName: 'main', state: 'OPEN', isDraft: false })), /changed after/);
   await assert.rejects(mergeWork(config, candidate, async () => ({ work: [candidate], now: new Date().toISOString() }), acquire, cancel, () => JSON.stringify({ headRefOid: candidate.candidate!.sha, baseRefOid: candidate.candidate!.baseSha, baseRefName: 'release', state: 'OPEN', isDraft: false })), /changed on GitHub/);
@@ -248,11 +253,13 @@ test('routine merge is exact-candidate, double-checked, and never uses an admin 
   let cancelled = '';
   await assert.rejects(mergeWork(config, candidate, async () => ({ work: [candidate], now: new Date().toISOString() }), acquire, async (_work, authority) => { cancelled = authority.id; }, (_command, args) => {
     if (args[1] === 'view') return JSON.stringify({ headRefOid: candidate.candidate!.sha, baseRefOid: candidate.candidate!.baseSha, baseRefName: 'main', state: 'OPEN', isDraft: false });
+    if (args[1] !== '--method') return JSON.stringify(validProtection);
     throw new Error('provider response lost');
   }), /outcome is unknown/);
   assert.equal(cancelled, '', 'an unknown provider outcome retains authority');
   await assert.rejects(mergeWork(config, candidate, async () => ({ work: [candidate], now: new Date().toISOString() }), acquire, async (_work, authority) => { cancelled = authority.id; }, (_command, args) => {
     if (args[1] === 'view') return JSON.stringify({ headRefOid: candidate.candidate!.sha, baseRefOid: candidate.candidate!.baseSha, baseRefName: 'main', state: 'OPEN', isDraft: false });
+    if (args[1] !== '--method') return JSON.stringify(validProtection);
     return JSON.stringify({ merged: false, message: 'branch protection refused merge' });
   }), /branch protection refused merge/);
   assert.equal(cancelled, execution.id);

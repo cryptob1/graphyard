@@ -37,6 +37,7 @@ export const masterConfigSchema = z.object({
   cliPath: z.string(),
   repository: z.string().min(1),
   baseBranch: z.string().min(1).max(200),
+  githubAppId: z.number().int().positive(),
   hostId: z.string().trim().min(1).max(200),
   masterAgentName: z.string().trim().regex(/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,99}$/),
   autoMerge: z.boolean().default(true),
@@ -47,7 +48,7 @@ export type MasterConfig = z.infer<typeof masterConfigSchema>;
 
 export function assertMasterBinding(config: MasterConfig, status: any) {
   if (status.actor?.role !== 'coordinator') throw new Error('Master commands require the configured coordinator identity');
-  if (typeof status.repository !== 'string' || status.repository.toLowerCase() !== config.repository.toLowerCase() || status.baseBranch !== config.baseBranch) throw new Error('The Graphyard repository or managed base branch changed; rerun master init before continuing');
+  if (typeof status.repository !== 'string' || status.repository.toLowerCase() !== config.repository.toLowerCase() || status.baseBranch !== config.baseBranch || status.githubAppId !== config.githubAppId) throw new Error('The Graphyard repository, managed base branch, or GitHub App changed; rerun master init before continuing');
 }
 
 const masterStart = '<!-- graphyard-master -->', masterEnd = '<!-- /graphyard-master -->';
@@ -166,6 +167,7 @@ export async function setupMaster(root: string, input: { url: string; token: str
   if (status.actor?.role !== 'coordinator') throw new Error('Master setup requires a coordinator credential; worker, operator, producer, and reader credentials are not suitable');
   if (typeof status.repository !== 'string' || !status.repository) throw new Error('Master setup requires the control plane to be bound to a GitHub repository');
   if (typeof status.baseBranch !== 'string' || !status.baseBranch) throw new Error('Master setup requires the control plane to identify its managed base branch');
+  if (!Number.isSafeInteger(status.githubAppId) || status.githubAppId <= 0) throw new Error('Master setup requires the control plane to identify its GitHub App');
   assertRepository(detected.repository, status.repository);
   if (!detected.repository) throw new Error('Master setup requires a recognized GitHub origin');
   try { if (!(await lstat(resolve(input.cliPath))).isFile()) throw new Error(); } catch { throw new Error('Master setup requires an existing Graphyard CLI launcher'); }
@@ -180,7 +182,7 @@ export async function setupMaster(root: string, input: { url: string; token: str
   await assertOutsideWorktrees(root, credentialDirectory, 'Coordinator credential directory');
   const identity = createHash('sha256').update(`${url}\0${detected.repository}`).digest('hex').slice(0, 20);
   const credentialFile = resolve(credentialDirectory, `${identity}.token`);
-  const config = masterConfigSchema.parse({ version: 1, url, credentialFile, cliPath: resolve(input.cliPath), repository: detected.repository, baseBranch: status.baseBranch, hostId: input.hostId ?? previous?.hostId ?? hostname(), masterAgentName: previous?.masterAgentName ?? `graphyard-master-${repositoryName}`, autoMerge: input.autoMerge ?? previous?.autoMerge ?? true, mergeMethod: input.mergeMethod ?? previous?.mergeMethod ?? 'merge', workers: previous?.workers ?? [] });
+  const config = masterConfigSchema.parse({ version: 1, url, credentialFile, cliPath: resolve(input.cliPath), repository: detected.repository, baseBranch: status.baseBranch, githubAppId: status.githubAppId, hostId: input.hostId ?? previous?.hostId ?? hostname(), masterAgentName: previous?.masterAgentName ?? `graphyard-master-${repositoryName}`, autoMerge: input.autoMerge ?? previous?.autoMerge ?? true, mergeMethod: input.mergeMethod ?? previous?.mergeMethod ?? 'merge', workers: previous?.workers ?? [] });
   const instructionsFile = resolve(root, 'AGENTS.md');
   let existing = ''; let mode = 0o644;
   try { const info = await lstat(instructionsFile); if (!info.isFile()) throw new Error('Refusing to replace a non-regular AGENTS.md'); mode = info.mode & 0o777; existing = await readFile(instructionsFile, 'utf8'); }
@@ -404,6 +406,15 @@ export async function continueMergeBatch<T extends { key: string }, R>(items: T[
   return results;
 }
 type MergeExecution = { id: string; owner: string; sha: string; baseSha: string; policyRevision: number; authorizationRevision: number; issuedAt: string; expiresAt: string };
+export function assertMergeProtection(protection: any, config: MasterConfig, work: Work) {
+  const nativeReview = !!work.policy.review && (work.policy.reviewProvider ?? 'github') !== 'codex';
+  const reviews = protection?.required_pull_request_reviews;
+  const checks = protection?.required_status_checks;
+  const protectedBranch = (!nativeReview || reviews?.required_approving_review_count >= 1 && reviews?.dismiss_stale_reviews === true && reviews?.require_last_push_approval === true)
+    && checks?.strict === true && protection?.enforce_admins?.enabled === true && protection?.allow_force_pushes?.enabled !== true && protection?.allow_deletions?.enabled !== true
+    && Array.isArray(checks?.checks) && checks.checks.some((check: any) => check?.context === 'Graphyard / merge' && check?.app_id === config.githubAppId);
+  if (!protectedBranch) throw new Error(`${work.key} managed-branch protection changed after merge authorization; Graphyard refused the merge`);
+}
 export async function mergeWork(config: MasterConfig, work: Work, freshSnapshot: () => Promise<{ work: Work[]; now: string }>, acquire: (work: Work, authorization: ReturnType<typeof assertMergeCandidate>) => Promise<{ execution: MergeExecution }>, cancel: (work: Work, execution: MergeExecution, reason: string) => Promise<unknown>, run: (command: string, args: string[]) => string = (command, args) => execFileSync(command, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 90_000 })) {
   if (!config.autoMerge) throw new Error('Automatic routine merge is disabled in master configuration');
   const before = await freshSnapshot(); const current = before.work.find(item => item.id === work.id);
@@ -424,6 +435,8 @@ export async function mergeWork(config: MasterConfig, work: Work, freshSnapshot:
     const authorityDuration = Date.parse(granted.execution.expiresAt) - Date.parse(granted.execution.issuedAt);
     const remaining = authorityDuration - (Date.now() - acquireStartedAt);
     if (!Number.isFinite(remaining) || remaining <= 90_000) throw new Error(`${work.key} merge execution does not remain valid for the provider timeout; refresh gate inputs and retry`);
+    const protection = JSON.parse(run('gh', ['api', `repos/${config.repository}/branches/${encodeURIComponent(config.baseBranch)}/protection`]));
+    assertMergeProtection(protection, config, latest);
     providerStarted = true;
     const provider = JSON.parse(run('gh', ['api', '--method', 'PUT', `repos/${config.repository}/pulls/${authorization.pr}/merge`, '-f', `sha=${authorization.sha}`, '-f', `merge_method=${config.mergeMethod}`]));
     if (provider.merged !== true || typeof provider.sha !== 'string') {

@@ -14,6 +14,15 @@ const exec = promisify(execFile);
 const launcher = fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url));
 const renewal = (duration = 2000) => ({ updatedAt: new Date().toISOString(), lease: { epoch: 1, expiresAt: new Date(Date.now() + duration).toISOString() } });
 
+test('master-only commands ignore an unrelated unavailable worker token file', async () => {
+  const cwd = await mkdtemp(join(tmpdir(), 'graphyard-master-lazy-token-'));
+  try {
+    await exec('git', ['init', '-q'], { cwd });
+    const result = await exec(process.execPath, [launcher, 'master', 'guide'], { cwd, env: { ...process.env, GRAPHYARD_TOKEN_FILE: join(cwd, 'removed-worker.token') } });
+    assert.match(result.stdout, /Master-agent operating mode/);
+  } finally { await rm(cwd, { recursive: true, force: true }); }
+});
+
 test('installed CLI resolves its runtime from another repository and includes submitted rework in next using the work snapshot clock', async () => {
   const cwd = await mkdtemp(join(tmpdir(), 'graphyard cli '));
   const http = createServer((req, res) => { res.setHeader('Content-Type', 'application/json'); res.end(JSON.stringify({now:'2026-01-01T00:01:00Z',work:[{ id: 'rework', stage: 'build', ready: true, reworkRequested: true, submission: { pr: 1 }, dependencies: [], priority: 1 },{id:'active',stage:'build',ready:true,dependencies:[],priority:1,lease:{expiresAt:'2026-01-01T00:02:00Z'}},{id:'expired',stage:'build',ready:true,dependencies:[],priority:1,lease:{expiresAt:'2026-01-01T00:00:00Z'}}]})); });
