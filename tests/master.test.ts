@@ -187,6 +187,8 @@ test('worker preparation claims and creates the assigned worktree from the curre
       return '{}';
     }), /checkout failed/);
     assert.equal(failed.at(-1)![1], 'release'); assert.equal(failed.at(-1)![3], '6');
+    execFileSync('git', ['remote', 'set-url', 'origin', 'https://github.com/other/project.git'], { cwd: root });
+    await assert.rejects(prepareWorkerLaunch(root, 'GY-42', 'launch'), /different repositories/);
   } finally { await rm(root, { recursive: true, force: true }); await rm(credentialDirectory, { recursive: true, force: true }); }
 });
 

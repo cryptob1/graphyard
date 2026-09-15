@@ -2,7 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { Store, save, wakeJob } from './store.js';
 import { workspacePath, pathsOverlap, validBranch } from './workspace.js';
-import { activeLease, admin, requireCurrent, createSchema, criterionSchema, resourcesSchema, demand, evaluate, proofSchema, type Principal, type Work, type Observation, type ReviewRequest } from './model.js';
+import { activeLease, admin, requireCurrent, createSchema, criterionSchema, currentEvidence, resourcesSchema, demand, evaluate, proofSchema, type Principal, type Work, type Observation, type ReviewRequest } from './model.js';
 import { resourceConflicts } from './coordination.js';
 
 const epoch = z.number().int().positive();
@@ -186,7 +186,12 @@ export class Engine {
         && authorization.sha === data.sha && authorization.baseSha === data.baseSha && authorization.policyRevision === data.policyRevision
         && work.candidate?.sha === data.sha && work.candidate.baseSha === data.baseSha && Number.isFinite(age) && age >= 0 && age < 120_000,
       'Merge authorization is no longer current');
-      const execution = { id: randomUUID(), sha: data.sha, baseSha: data.baseSha, policyRevision: data.policyRevision, authorizationRevision: work.revision, issuedAt: now.toISOString(), expiresAt: new Date(now.getTime() + 120_000).toISOString() };
+      const requiredEvidence = [...new Set(work.criteria.flatMap(criterion => criterion.proofs))].map(proof => currentEvidence(work, proof, now));
+      const validityDeadlines = [now.getTime() + 120_000, Date.parse(work.observation!.at) + 120_000,
+        ...requiredEvidence.flatMap(evidence => evidence?.expiresAt ? [Date.parse(evidence.expiresAt)] : [])];
+      const expiresAt = Math.min(...validityDeadlines);
+      demand(Number.isFinite(expiresAt) && expiresAt - now.getTime() > 95_000, 'Required gate inputs expire too soon for a bounded merge execution; refresh them and retry');
+      const execution = { id: randomUUID(), sha: data.sha, baseSha: data.baseSha, policyRevision: data.policyRevision, authorizationRevision: work.revision, issuedAt: now.toISOString(), expiresAt: new Date(expiresAt).toISOString() };
       work.mergeExecution = execution;
       await save(db, work, actor.id, 'merge.execution.acquired', now, { executionId: execution.id, sha: execution.sha, baseSha: execution.baseSha, policyRevision: execution.policyRevision });
       const result = { key: work.key, revision: work.revision, execution };

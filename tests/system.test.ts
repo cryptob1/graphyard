@@ -139,6 +139,15 @@ test('single-use merge execution freezes relevant mutations through observed mer
   const delivered = await engine.observe(w.id, second.revision, merged);
   assert.equal(delivered.stage, 'done', 'single-use execution proves ordering even with a whole-second provider timestamp'); assert.equal(delivered.mergeExecution, null);
 });
+test('merge execution cannot outlive a required proof or the fresh observation', async () => {
+  let w = await submitted(); w = await engine.observe(w.id, w.revision, observation(w));
+  w = await engine.execute(producer, 'evidence', w.id, proof(), randomUUID());
+  const expiresAt = new Date(Date.now() + 94_000).toISOString();
+  await store.pool.query("UPDATE work_items SET document=jsonb_set(document,'{evidence,0,expiresAt}',to_jsonb($2::text)) WHERE id=$1", [w.id, expiresAt]);
+  w = (await store.list()).find(item => item.id === w.id)!;
+  assert.ok(w.gates.every(gate => gate.passed));
+  await assert.rejects(engine.acquireMerge(coordinator, w.id, { expectedRevision: w.revision, sha: head, baseSha: base, policyRevision: w.policyRevision }, randomUUID()), /expire too soon/);
+});
 test('assertions, skipped suites, zero executed, stale base, stale head, and stale policy never satisfy acceptance', async () => {
   let w = await submitted(); w = await engine.observe(w.id, w.revision, observation(w)); assert.equal(w.stage, 'acceptance');
   w = await engine.execute(worker, 'evidence', w.id, proof(), randomUUID()); assert.equal(w.stage, 'acceptance');

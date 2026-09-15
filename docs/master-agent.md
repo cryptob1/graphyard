@@ -125,7 +125,7 @@ For every candidate, the command requires:
 4. a fresh Graphyard observation, evaluated against the database time in the snapshot;
 5. a GitHub read that sees the same head, base commit, and managed base-branch name on an open, non-draft PR;
 6. a second Graphyard snapshot with the same work revision, fresh observation, and authorization;
-7. a server-issued, single-use merge execution that freezes relevant work, evidence, validation, and observation mutations for the bounded merge attempt;
+7. a server-issued, single-use merge execution that freezes relevant work, evidence, validation, and observation mutations for the bounded merge attempt, expires no later than its required evidence or observation, and refuses inputs without enough remaining lifetime for the provider timeout;
 8. a second GitHub read after authority acquisition with the same head, base commit, and managed base-branch name;
 9. GitHub's merge API with the authorized head SHA and normal branch protection. Queue enrollment is treated as a refusal because it cannot complete inside the bounded authority window.
 

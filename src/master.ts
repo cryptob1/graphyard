@@ -319,6 +319,9 @@ export async function prepareWorkerLaunch(root: string, key: string, profileName
   const config = await loadMasterConfig(root); const profile = config.workers.find(worker => worker.name === profileName);
   if (!profile || profile.mode !== 'launch' || !profile.kind || !profile.credentialFile) throw new Error('A complete launch profile is required');
   await readCredentialFile(profile.credentialFile);
+  const detected = await discover(root);
+  if (!detected.repository) throw new Error('Worker launcher requires a recognized GitHub origin');
+  assertRepository(detected.repository, config.repository);
   const env = workerEnvironment(config, profile);
   run('git', ['fetch', '--quiet', '--no-tags', 'origin', `+refs/heads/${config.baseBranch}:refs/remotes/origin/${config.baseBranch}`], { cwd: root, env, stdio: ['ignore', 'ignore', 'inherit'] });
   const base = String(run('git', ['rev-parse', '--verify', `refs/remotes/origin/${config.baseBranch}`], { cwd: root, env })).trim();
@@ -354,11 +357,15 @@ export async function mergeWork(config: MasterConfig, work: Work, freshSnapshot:
   const after = await freshSnapshot(); const latest = after.work.find(item => item.id === work.id);
   if (!latest || latest.revision !== authorization.revision) throw new Error(`${work.key} changed after GitHub verification; retry`);
   const latestAuthorization = assertMergeCandidate(latest, after.now);
+  const acquireStartedAt = Date.now();
   const granted = await acquire(latest, latestAuthorization);
   if (!granted.execution || granted.execution.sha !== authorization.sha || granted.execution.baseSha !== authorization.baseSha || granted.execution.policyRevision !== authorization.policyRevision || granted.execution.authorizationRevision !== authorization.revision) throw new Error(`${work.key} received an invalid merge execution authority`);
   try {
     const lockedPr = JSON.parse(run('gh', ['pr', 'view', String(authorization.pr), '--repo', config.repository, '--json', 'headRefOid,baseRefOid,baseRefName,state,isDraft']));
     if (lockedPr.headRefOid !== authorization.sha || lockedPr.baseRefOid !== authorization.baseSha || lockedPr.baseRefName !== config.baseBranch || lockedPr.state !== 'OPEN' || lockedPr.isDraft) throw new Error(`${work.key} changed on GitHub after merge authority was acquired`);
+    const authorityDuration = Date.parse(granted.execution.expiresAt) - Date.parse(granted.execution.issuedAt);
+    const remaining = authorityDuration - (Date.now() - acquireStartedAt);
+    if (!Number.isFinite(remaining) || remaining <= 90_000) throw new Error(`${work.key} merge execution does not remain valid for the provider timeout; refresh gate inputs and retry`);
     const provider = JSON.parse(run('gh', ['api', '--method', 'PUT', `repos/${config.repository}/pulls/${authorization.pr}/merge`, '-f', `sha=${authorization.sha}`, '-f', `merge_method=${config.mergeMethod}`]));
     if (provider.merged !== true || typeof provider.sha !== 'string') throw new Error(provider.message || 'GitHub did not confirm the merge');
   }
