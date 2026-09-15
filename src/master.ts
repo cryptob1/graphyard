@@ -95,21 +95,27 @@ async function readMasterConfig(root: string): Promise<MasterConfig> {
   config.credentialFile = credentialFile;
   return config;
 }
-async function externalCredential(root: string, file: string, label: string) {
-  if (!isAbsolute(file)) throw new Error(`${label} credential file must use an absolute path outside the repository`);
-  await privateFile(file);
-  const credentialFile = await realpath(file);
+async function repositoryWorktrees(root: string) {
   let worktrees: string[];
   try {
     const records = execFileSync('git', ['worktree', 'list', '--porcelain', '-z'], { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).split('\0');
     worktrees = records.filter(record => record.startsWith('worktree ')).map(record => resolve(record.slice('worktree '.length)));
   } catch { worktrees = [resolve(root)]; }
+  return Promise.all(worktrees.map(worktree => realpath(worktree)));
+}
+async function assertOutsideWorktrees(root: string, target: string, label: string) {
+  const canonicalTarget = await realpath(target);
+  const worktrees = await repositoryWorktrees(root);
   for (const worktree of worktrees) {
-    const repositoryRoot = await realpath(worktree);
-    const fromRoot = relative(repositoryRoot, credentialFile);
+    const fromRoot = relative(worktree, canonicalTarget);
     const inside = fromRoot === '' || fromRoot !== '..' && !fromRoot.startsWith(`..${sep}`) && !isAbsolute(fromRoot);
-    if (inside) throw new Error(`${label} credential file must be outside every worktree of the repository`);
+    if (inside) throw new Error(`${label} must be outside every worktree of the repository`);
   }
+}
+async function externalCredential(root: string, file: string, label: string) {
+  if (!isAbsolute(file)) throw new Error(`${label} credential file must use an absolute path outside the repository`);
+  await privateFile(file);
+  await assertOutsideWorktrees(root, file, `${label} credential file`);
 }
 export async function loadMasterConfig(root: string): Promise<MasterConfig> {
   const config = await readMasterConfig(root);
@@ -166,11 +172,10 @@ export async function setupMaster(root: string, input: { url: string; token: str
   if (previous && (previous.url !== url || previous.repository.toLowerCase() !== detected.repository.toLowerCase())) throw new Error('Existing master configuration belongs to another server or repository');
   const repositoryName = detected.repository.split('/').at(-1)!.replace(/[^a-zA-Z0-9._-]/g, '-');
   const requestedCredentialDirectory = resolve(input.credentialDirectory ?? process.env.GRAPHYARD_CONFIG_HOME ?? resolve(homedir(), '.config/graphyard'), 'masters');
-  const repositoryRoot = await realpath(root);
   if (requestedCredentialDirectory === resolve(root) || requestedCredentialDirectory.startsWith(`${resolve(root)}/`)) throw new Error('Coordinator credentials must be stored outside the managed repository');
   await mkdir(requestedCredentialDirectory, { recursive: true, mode: 0o700 });
   const credentialDirectory = await realpath(requestedCredentialDirectory);
-  if (credentialDirectory === repositoryRoot || credentialDirectory.startsWith(`${repositoryRoot}/`)) throw new Error('Coordinator credentials must be stored outside the managed repository');
+  await assertOutsideWorktrees(root, credentialDirectory, 'Coordinator credential directory');
   const identity = createHash('sha256').update(`${url}\0${detected.repository}`).digest('hex').slice(0, 20);
   const credentialFile = resolve(credentialDirectory, `${identity}.token`);
   const config = masterConfigSchema.parse({ version: 1, url, credentialFile, cliPath: resolve(input.cliPath), repository: detected.repository, baseBranch: status.baseBranch, hostId: input.hostId ?? previous?.hostId ?? hostname(), masterAgentName: previous?.masterAgentName ?? `graphyard-master-${repositoryName}`, autoMerge: input.autoMerge ?? previous?.autoMerge ?? true, mergeMethod: input.mergeMethod ?? previous?.mergeMethod ?? 'merge', workers: previous?.workers ?? [] });
