@@ -1,7 +1,7 @@
 import { test, expect, type Page } from '@playwright/test';
 
 // Browser-only API fixtures: no production requests, credentials, or writes.
-const work = { id: 'fixture-work', key: 'GY-1', title: 'Browser fixture', description: 'Isolated UI audit', type: 'feature', priority: 1, stage: 'review', stageEnteredAt: '2026-01-01T00:00:00Z', ready: true, policy: { review: true, reviewProvider: 'github', checks: ['test'] }, policyRevision: 1, revision: 1, violations: [], workspaces: [], criteria: [{ id: 'AC-1', text: 'Observable behavior', proofs: ['manual:browser'] }], evidence: [], gates: [{ name: 'review', passed: false, reasons: ['Independent review required'] }], submission: { epoch: 1 }, candidate: { pr: 1, sha: 'abcdef123456' } };
+const work = { dependencies: [], plannedFiles: [], scenarioRequirements: [], id: 'fixture-work', key: 'GY-1', title: 'Browser fixture', description: 'Isolated UI audit', type: 'feature', priority: 1, stage: 'review', stageEnteredAt: '2026-01-01T00:00:00Z', ready: true, policy: { review: true, reviewProvider: 'github', checks: ['test'] }, policyRevision: 1, revision: 1, violations: [], workspaces: [], criteria: [{ id: 'AC-1', text: 'Observable behavior', proofs: ['manual:browser'] }], evidence: [], gates: [{ name: 'review', passed: false, reasons: ['Independent review required'] }], submission: { epoch: 1 }, candidate: { pr: 1, sha: 'abcdef123456' } };
 async function fixture(page: Page, role = 'admin') {
   const state = { offline: false, unauthorized: false, writes: 0, pause: false };
   await page.route('**/api/**', async route => {
@@ -187,3 +187,38 @@ test('history groups observation noise and bounds expanded rows without losing o
   await expect(details).toHaveText(identity);
   expect(await details.evaluate(e=>e.scrollWidth<=e.clientWidth)).toBe(true);
  });
+
+test('scenario loading, failure, retry and real empty library are distinct', async ({ page }) => {
+  await fixture(page); let release: () => void = () => {}; let failing = true;
+  const pending = new Promise<void>(resolve => { release = resolve; });
+  await page.route('**/api/scenarios', async route => {
+    await pending;
+    return route.fulfill(failing ? { status: 503, json: { error: 'Runner catalog unavailable' } } : { json: [] });
+  });
+  await login(page); await page.getByRole('button', { name: 'Test cases', exact: false }).click();
+  await expect(page.getByRole('status')).toHaveText('Loading test cases…');
+  await expect(page.getByText('Describe the behavior you need to prove.')).toHaveCount(0);
+  release(); await expect(page.getByRole('alert')).toContainText('unavailable');
+  await expect(page.getByText('Describe the behavior you need to prove.')).toHaveCount(0);
+  failing = false; await page.getByRole('button', { name: 'Retry loading test cases' }).click();
+  await expect(page.getByText('Describe the behavior you need to prove.')).toBeVisible();
+  await expect(page.getByRole('alert')).toHaveCount(0);
+});
+
+test('work details explain missing proof and operator can revise explicit criteria', async ({ page }) => {
+  const state = await fixture(page); await login(page);
+  await page.getByRole('button', { name: /GY-1.*Browser fixture/ }).click();
+  await expect(page.getByText('AC-1 · manual:browser · unmeasured')).toBeVisible();
+  await page.getByRole('button', { name: 'Revise requirements', exact: true }).click();
+  const form = page.getByRole('form', { name: 'Revise requirements' });
+  await form.getByRole('button', { name: 'Add criterion' }).click();
+  await form.getByLabel('Observable outcome').nth(1).fill('An explicit second outcome');
+  await form.getByLabel('Required proofs (comma separated)').nth(1).fill('integration:second');
+  await form.getByLabel('Reason for revision').fill('New behavior discovered during planning');
+  let body: any;
+  await page.route('**/api/work/fixture-work/requirements', async route => { body = route.request().postDataJSON(); await route.fulfill({ json: work }); });
+  await form.getByRole('button', { name: 'Save requirement revision' }).click();
+  await expect(form).toHaveCount(0);
+  expect(body.expectedPolicyRevision).toBe(1); expect(body.criteria[1]).toEqual({ id: 'AC-2', text: 'An explicit second outcome', proofs: ['integration:second'] });
+  expect(body.reason).toBe('New behavior discovered during planning'); expect(state.writes).toBe(0);
+});

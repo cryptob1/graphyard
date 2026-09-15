@@ -1,6 +1,7 @@
 import pg from 'pg';
 import { randomUUID } from 'node:crypto';
 import type { Work } from './model.js';
+import type { IntegrationJob } from './coordination.js';
 
 export const migration = `
 CREATE TABLE IF NOT EXISTS work_items (
@@ -54,9 +55,9 @@ export class Store {
   async list(): Promise<Work[]> {
     return (await this.pool.query('SELECT document FROM work_items ORDER BY number')).rows.map(r => r.document);
   }
-  async workSnapshot(): Promise<{ work: Work[]; now: string }> {
-    const row = (await this.pool.query("SELECT COALESCE(jsonb_agg(document ORDER BY number), '[]'::jsonb) AS work, statement_timestamp() AS observed_at FROM work_items")).rows[0];
-    return { work: row.work, now: row.observed_at.toISOString() };
+  async workSnapshot(): Promise<{ work: Work[]; now: string; jobs: IntegrationJob[] }> {
+    const row = (await this.pool.query("SELECT COALESCE(jsonb_agg(document ORDER BY number), '[]'::jsonb) AS work, statement_timestamp() AS observed_at, (SELECT COALESCE(jsonb_agg(jsonb_build_object('work_id',work_id,'available_at',available_at,'locked_until',locked_until,'error',error)), '[]'::jsonb) FROM jobs) AS jobs FROM work_items")).rows[0];
+    return { work: row.work, now: row.observed_at.toISOString(), jobs: row.jobs };
   }
   async events(id?: string) {
     return (await this.pool.query('SELECT * FROM events WHERE ($1::uuid IS NULL OR work_id=$1) ORDER BY seq DESC LIMIT 300', [id ?? null])).rows;

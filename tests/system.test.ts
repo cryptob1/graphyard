@@ -456,3 +456,92 @@ test('draft and closed submissions wait normally and dispatch after becoming rea
   w=await engine.execute(worker,'heartbeat',w.id,{epoch:1},randomUUID());assert.ok(captured.revision<w.revision);
   const denied=await fetch(`${url}/api/work-snapshot`);assert.equal(denied.status,401);
  });
+
+test('requirement revisions require stopped ownership, preserve history, and invalidate prior proof', async () => {
+  let w = await submitted(); w = await engine.observe(w.id, w.revision, observation(w));
+  w = await engine.execute(producer, 'evidence', w.id, proof(), randomUUID());
+  const revision = { expectedPolicyRevision: 1, reason: 'Clarify the independent acceptance obligation', criteria: [{ id: 'AC-1', text: 'Revised outcome', proofs: ['integration:claim-safety'] }], dependencies: [], plannedFiles: ['src/'], exclusiveResources: ['staging:account'] };
+  await assert.rejects(engine.execute(worker, 'requirements', w.id, revision, randomUUID()), /Operator/);
+  await assert.rejects(engine.execute(operator, 'requirements', w.id, revision, randomUUID()), /release/);
+  await engine.execute(worker, 'release', w.id, { epoch: 1 }, randomUUID());
+  const key = randomUUID(); w = await engine.execute(operator, 'requirements', w.id, revision, key);
+  assert.equal(w.policyRevision, 2); assert.equal(w.reworkRequested, true); assert.equal(w.observation, null); assert.equal(w.mergeAuthorization, null); assert.equal(w.reviewRequest, null);
+  assert.equal(w.evidence.length, 1); assert.equal(w.evidence[0].policyRevision, 1); assert.equal(w.gates.find(g => g.name === 'acceptance')!.passed, false);
+  assert.equal((await engine.execute(operator, 'requirements', w.id, revision, key)).policyRevision, 2);
+  await assert.rejects(engine.execute(operator, 'requirements', w.id, revision, randomUUID()), /revision changed/);
+  const event = (await store.events(w.id)).find(e => e.kind === 'requirements'); assert.equal(event.payload.details.reason, revision.reason);
+  assert.ok((await store.events(w.id)).some(e => e.payload.work.criteria[0].text === workInput.criteria[0].text));
+  w = await engine.execute(other, 'claim', w.id, {}, randomUUID()); assert.equal(w.epoch, 2);
+  await assert.rejects(engine.execute(worker, 'heartbeat', w.id, { epoch: 1 }, randomUUID()), /superseded/);
+});
+
+test('requirement changes reject dependency cycles and reused retired criterion IDs', async () => {
+  let a = await create(); const b = await create([a.id]);
+  const input = { expectedPolicyRevision: 1, reason: 'Discovered prerequisite', criteria: a.criteria, dependencies: [b.id], plannedFiles: [], exclusiveResources: [] };
+  await assert.rejects(engine.execute(operator, 'requirements', a.id, input, randomUUID()), /cycle/);
+  await assert.rejects(engine.execute(operator, 'requirements', a.id, { ...input, dependencies: [a.id] }, randomUUID()), /cycle/);
+  a = await engine.execute(operator, 'requirements', a.id, { ...input, dependencies: [], criteria: [{ ...a.criteria[0], id: 'AC-2' }] }, randomUUID());
+  assert.deepEqual(a.retiredCriterionIds, ['AC-1']);
+  await assert.rejects(engine.execute(operator, 'requirements', a.id, { ...input, expectedPolicyRevision: 2, dependencies: [] }, randomUUID()), /Retired/);
+});
+
+test('requirement revisions preserve existing scenario pins and require known new scenarios', async () => {
+  const id = `revision-${randomUUID()}`;
+  const definition = { id, title: 'Pinned scenario', purpose: 'Target attribution', steps: ['Run'], expected: ['Pass'], environment: 'staging', runner: 'external', testPath: 'test.ts' };
+  await defineScenario(store, operator, definition, randomUUID());
+  let w = await engine.execute(operator, 'create', null, { ...workInput, criteria: [{ id: 'AC-1', text: 'Pinned behavior', proofs: [`e2e:${id}`] }] }, randomUUID());
+  await defineScenario(store, operator, { ...definition, expectedRevision: 1, expected: ['Different result'] }, randomUUID());
+  const revision = { expectedPolicyRevision: 1, reason: 'Clarify outcome without silently updating scenario', criteria: w.criteria, dependencies: [], plannedFiles: [], exclusiveResources: [] };
+  w = await engine.execute(operator, 'requirements', w.id, revision, randomUUID());
+  assert.equal(w.scenarioRequirements[0].revision, 1);
+  await assert.rejects(engine.execute(operator, 'requirements', w.id, { ...revision, expectedPolicyRevision: 2, criteria: [{ id: 'AC-1', text: 'Missing', proofs: ['e2e:not-registered'] }] }, randomUUID()), /Register E2E/);
+});
+
+test('exclusive resource claims serialize across replicas and expired epochs cannot regain them', async () => {
+  const resource = `staging:${randomUUID()}`;
+  const tasks = await Promise.all(Array.from({ length: 2 }, () => engine.execute(operator, 'create', null, { ...workInput, exclusiveResources: [resource] }, randomUUID())));
+  for (const w of tasks) await engine.execute(operator, 'ready', w.id, {}, randomUUID());
+  const second = new Store(store.pool.options.connectionString!); const replica = new Engine(second);
+  try {
+    const results = await Promise.allSettled(tasks.map((w, i) => (i ? replica : engine).execute(i ? other : worker, 'claim', w.id, {}, randomUUID())));
+    assert.equal(results.filter(r => r.status === 'fulfilled').length, 1);
+    const winner = (results.find(r => r.status === 'fulfilled') as PromiseFulfilledResult<Work>).value;
+    const loser = tasks.find(w => w.id !== winner.id)!;
+    // Completion can precede the implementation worker's last lease expiry.
+    await store.pool.query("UPDATE work_items SET document=jsonb_set(document,'{stage}',to_jsonb('done'::text)) WHERE id=$1", [winner.id]);
+    await assert.rejects(engine.execute(other, 'claim', loser.id, {}, randomUUID()), /Exclusive resources held/);
+    await store.pool.query("UPDATE work_items SET document=jsonb_set(document,'{stage}',to_jsonb('build'::text)) WHERE id=$1", [winner.id]);
+    await store.pool.query("UPDATE work_items SET document=jsonb_set(document,'{lease,expiresAt}',to_jsonb('2000-01-01T00:00:00Z'::text)) WHERE id=$1", [winner.id]);
+    await engine.execute(other, 'claim', loser.id, {}, randomUUID());
+    await assert.rejects(engine.execute({ id: winner.lease!.owner, role: 'worker' }, 'heartbeat', winner.id, { epoch: winner.epoch }, randomUUID()), /expired/);
+    await assert.rejects(engine.execute(worker, 'claim', winner.id, {}, randomUUID()), /Exclusive resources held/);
+  } finally { await second.close(); }
+});
+
+test('formal review identities stay excluded after revisions regardless of clock skew', async () => {
+  let w = await submitted();
+  const existing = { id: 100, reviewer: 'reviewer', sha: head, state: 'APPROVED', submittedAt: new Date(Date.now() + 60000).toISOString() };
+  w = await engine.observe(w.id, w.revision, { ...observation(w), reviewIds: [100], reviews: [existing] });
+  await engine.execute(worker, 'release', w.id, { epoch: 1 }, randomUUID());
+  w = await engine.execute(operator, 'requirements', w.id, { expectedPolicyRevision: 1, reason: 'Change intent without changing code', criteria: [{ ...w.criteria[0], text: 'Revised intent' }], dependencies: [], plannedFiles: [], exclusiveResources: [] }, randomUUID());
+  assert.equal(w.formalReviewResetRequired, true); assert.equal(w.formalReviewBaseline, undefined);
+  w = await engine.observe(w.id, w.revision, { ...observation(w), reviews: [existing] });
+  assert.equal(w.gates.find(g => g.name === 'review')!.passed, false); assert.equal(w.formalReviewBaseline, undefined);
+  w = await engine.observe(w.id, w.revision, { ...observation(w), reviewIds: [100, 101], reviews: [existing] });
+  assert.deepEqual(w.formalReviewBaseline!.reviewIds, [100, 101]);
+  assert.equal(w.gates.find(g => g.name === 'review')!.passed, false);
+  // A later database evaluation cannot make the same immutable identity fresh.
+  const { evaluate } = await import('../src/model.js');
+  assert.equal(evaluate(w, [w], new Date(Date.now() + 120000), [15368]).gates.find(g => g.name === 'review')!.passed, false);
+  for (const id of [undefined, 100, 101]) {
+    w = await engine.observe(w.id, w.revision, { ...observation(w), reviewIds: [100, 101], reviews: [{ ...existing, id }] });
+    assert.equal(w.gates.find(g => g.name === 'review')!.passed, false);
+  }
+  w = await engine.observe(w.id, w.revision, { ...observation(w), reviewIds: [100, 101, 102], reviews: [{ ...existing, id: 102 }] });
+  assert.equal(w.gates.find(g => g.name === 'review')!.passed, true);
+  w = await engine.execute(operator, 'reviewpolicy', w.id, { provider: 'codex', expectedPolicyRevision: 2, reason: 'Cloud review' }, randomUUID());
+  w = await engine.execute(operator, 'reviewpolicy', w.id, { provider: 'github', expectedPolicyRevision: 3, reason: 'Formal review again' }, randomUUID());
+  assert.equal(w.formalReviewBaseline, undefined);
+  w = await engine.observe(w.id, w.revision, { ...observation(w), reviewIds: [100, 101, 102], reviews: [{ ...existing, id: 102 }] });
+  assert.equal(w.gates.find(g => g.name === 'review')!.passed, false);
+});

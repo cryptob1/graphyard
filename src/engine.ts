@@ -2,13 +2,15 @@ import { createHash, randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { Store, save, wakeJob } from './store.js';
 import { workspacePath, pathsOverlap, validBranch } from './workspace.js';
-import { activeLease, admin, requireCurrent, createSchema, demand, evaluate, proofSchema, type Principal, type Work, type Observation, type ReviewRequest } from './model.js';
+import { activeLease, admin, requireCurrent, createSchema, criterionSchema, resourcesSchema, demand, evaluate, proofSchema, type Principal, type Work, type Observation, type ReviewRequest } from './model.js';
+import { resourceConflicts } from './coordination.js';
 
 const epoch = z.number().int().positive();
 const sha = z.string().regex(/^[a-f0-9]{40}$/);
 const commands = {
   create: createSchema,
   ready: z.object({}).strict(),
+  requirements: z.object({ expectedPolicyRevision: z.number().int().positive(), reason: z.string().trim().min(1).max(2000), criteria: z.array(criterionSchema).min(1).max(50), dependencies: z.array(z.string().uuid()).max(50), plannedFiles: createSchema.shape.plannedFiles, exclusiveResources: resourcesSchema }).strict(),
   reviewpolicy: z.object({ provider: z.enum(['github', 'codex']), expectedPolicyRevision: z.number().int().positive(), reason: z.string().trim().min(1).max(2000) }).strict(),
   unblock: z.object({ reason: z.string().min(1).max(2000) }).strict(),
   rework: z.object({ reason: z.string().min(1).max(2000), previousWorkerStopped: z.literal(true) }).strict(),
@@ -75,7 +77,40 @@ export class Engine {
         demand((work.policy.reviewProvider ?? 'github') !== data.provider, 'Review provider is already selected');
         work.policy = { ...work.policy, reviewProvider: data.provider };
         work.policyRevision++;
+        work.formalReviewResetRequired = true; work.formalReviewBaseline = undefined;
         work.observation = null; work.mergeAuthorization = null; work.reviewRequest = null;
+      }
+      if (command === 'requirements') {
+        admin(actor);
+        demand(!work.observation?.merged, 'Merged work requires a follow-up task');
+        demand(!work.lease || Date.parse(work.lease.expiresAt) <= now.getTime(), 'Stop and release the active worker before revising requirements');
+        demand(data.expectedPolicyRevision === work.policyRevision, 'Policy revision changed; reload before revising');
+        demand(new Set(data.criteria.map((ac: { id: string }) => ac.id)).size === data.criteria.length, 'Criterion IDs must be unique');
+        demand(data.criteria.every((ac: { id: string }) => !work!.retiredCriterionIds?.includes(ac.id)), 'Retired criterion IDs cannot be reused');
+        demand(new Set(data.dependencies).size === data.dependencies.length && data.dependencies.every((dep: string) => all.some(w => w.id === dep)), 'Unknown or duplicate dependency');
+        const reachesWork = (id: string, visited = new Set<string>()): boolean => {
+          if (id === work!.id) return true;
+          if (visited.has(id)) return false;
+          visited.add(id);
+          return all.find(w => w.id === id)!.dependencies.some(dep => reachesWork(dep, visited));
+        };
+        demand(!data.dependencies.some((dep: string) => reachesWork(dep)), 'Dependencies would create a cycle');
+        const pins: Work['scenarioRequirements'] = [];
+        const proofs = [...new Set<string>(data.criteria.flatMap((ac: { proofs: string[] }) => ac.proofs))];
+        for (const proof of proofs.filter(p => p.startsWith('e2e:'))) {
+          const pinned = work.scenarioRequirements.find(s => s.proof === proof);
+          if (pinned) { pins.push(pinned); continue; }
+          const scenario = (await db.query('SELECT document FROM scenarios WHERE id=$1 ORDER BY revision DESC LIMIT 1', [proof.slice(4)])).rows[0]?.document;
+          demand(scenario, `Register E2E scenario ${proof.slice(4)} first`);
+          pins.push({ proof, revision: scenario.revision, environment: scenario.environment, hash: scenario.hash });
+        }
+        work.retiredCriterionIds = [...(work.retiredCriterionIds ?? []), ...work.criteria.filter(ac => !data.criteria.some((next: { id: string }) => next.id === ac.id)).map(ac => ac.id)];
+        work.criteria = data.criteria; work.dependencies = data.dependencies; work.plannedFiles = data.plannedFiles; work.exclusiveResources = data.exclusiveResources;
+        work.scenarioRequirements = pins; work.policyRevision++;
+        work.formalReviewResetRequired = true; work.formalReviewBaseline = undefined;
+        work.lease = null; work.observation = null; work.mergeAuthorization = null; work.reviewRequest = null;
+        // A submitted implementation must be explicitly reconsidered for changed intent.
+        if (work.submission) work.reworkRequested = true;
       }
       if (command === 'ready') { admin(actor); work.ready = true; }
       if (command === 'unblock') { admin(actor); work.blocker = null; }
@@ -91,6 +126,8 @@ export class Engine {
         demand(work.dependencies.every(dep => all.find(w => w.id === dep)?.stage === 'done'), 'Unfinished dependencies');
         demand(!work.lease || Date.parse(work.lease.expiresAt) <= now.getTime(), 'Task already has an active owner');
         demand(!work.submission || work.reworkRequested, 'Implementation is submitted; an operator must request rework before reassignment');
+        const resources = resourceConflicts(work, all, now.getTime());
+        demand(!resources.length, `Exclusive resources held: ${resources.map(r => `${r.resource} by ${r.key}`).join(', ')}`);
         work.epoch++;
         work.lastAssignment = { owner: actor.id, epoch: work.epoch, claimedAt: now.toISOString(), ...(actor.displayName ? { displayName: actor.displayName } : {}), ...(actor.runtime ? { runtime: actor.runtime } : {}) };
         work.lease = { owner: actor.id, epoch: work.epoch, expiresAt: new Date(now.getTime() + this.leaseSeconds * 1000).toISOString() };
@@ -188,6 +225,13 @@ export class Engine {
       }
       work.candidate = observation.candidate;
       work.observation = observation;
+      // Snapshot all provider review identities after the revision. Approvals in this
+      // first observation never count, regardless of clock skew or future reevaluation.
+      if (work.formalReviewResetRequired && work.policy.reviewProvider !== 'codex' && !work.formalReviewBaseline && observation.reviewIds
+        && observation.reviewIds.every(id => Number.isSafeInteger(id) && id > 0)
+        && observation.reviews.every(r => Number.isSafeInteger(r.id) && observation.reviewIds!.includes(r.id!))) {
+        work.formalReviewBaseline = { pr: observation.candidate.pr, policyRevision: work.policyRevision, reviewIds: [...observation.reviewIds] };
+      }
       this.evaluate(work, all, now);
       if (observation.merged) {
         const violation = 'Merge observed without a prior authorization for this candidate';

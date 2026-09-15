@@ -31,7 +31,7 @@ Database triggers reject updates and deletes to the event ledger. This is an app
 
 All short domain mutations acquire one Postgres transaction advisory lock. This deliberately serializes cross-item decisions, including dependency readiness and workspace reservations, across API replicas. Remote calls never hold that lock. The first implementation chooses an easily audited concurrency model; measure contention before replacing it with finer-grained locking.
 
-Work requirements and dependency edges are fixed at creation, and dependencies must already exist. This construction prevents dependency cycles. A future policy-edit command must add explicit revisions and invalidate affected evaluations atomically; editing JSON directly is unsupported.
+Work requirements and dependency edges are operator-revisable with an expected policy revision and audit reason. Revisions refuse active ownership and dependency cycles, preserve history, retire removed criterion IDs, and invalidate old acceptance and review authorization. Submitted work requires a new attempt. See [coordination](coordination.md); editing stored JSON directly is unsupported.
 
 ## Assignments and workspaces
 
@@ -43,7 +43,7 @@ The CLI reserves before creating a worktree. A failed filesystem operation leave
 
 ## Candidates and evidence
 
-A candidate is `(PR, head SHA, base SHA)`, independently read from GitHub and checked against the assigned branch. Gates evaluate the candidate together with immutable policy revision 1 and the criterion definitions. A push or base change invalidates matching requirements automatically because old evidence no longer matches the tuple.
+A candidate is `(PR, head SHA, base SHA)`, independently read from GitHub and checked against the assigned branch. Gates evaluate the candidate together with the current policy revision and the criterion definitions. A push or base change invalidates matching requirements automatically because old evidence no longer matches the tuple.
 
 Evidence carries producer identity derived from authentication. A worker cannot self-assign trust. A producer credential has an allowlist of exact proof names. Operators may attest `manual:` proofs, but cannot use an operator token to mint trusted automated test evidence. Latest submitted trusted evidence for each matching proof/candidate/policy wins, including a later failure. Historical and stale evidence remains visible.
 
