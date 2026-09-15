@@ -94,7 +94,7 @@ railway domain --service graphyard --port 4310
 
 Read the plan before applying it. Do not run the unmodified project-specific configuration against a new Railway project.
 
-Open the Railway domain and sign in with the operator or reader token. Keep the operator token out of agent environments.
+Open the Railway domain and sign in with the operator token for setup and first-work creation. Use the reader token later for dashboards that must not mutate work. Keep the operator token out of agent environments.
 
 ## 2. Connect Graphyard to GitHub
 
