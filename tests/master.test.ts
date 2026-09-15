@@ -235,7 +235,7 @@ test('routine merge is exact-candidate, double-checked, and never uses an admin 
   const candidate = work({ observation: { at: new Date().toISOString(), candidate: { sha: 'a'.repeat(40), baseSha: 'b'.repeat(40), pr: 42, branch: 'graphyard/gy-42-1', author: 'worker' } } as any }); const config = { version: 1 as const, url: 'https://graphyard.example', credentialFile: '/outside/master.token', cliPath: launcher, repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'machine-a', masterAgentName: 'graphyard-master-project', autoMerge: true, mergeMethod: 'merge' as const, workers: [] };
   const calls: string[][] = [];
   const execution = { id: '11111111-1111-4111-8111-111111111111', owner: 'master', sha: candidate.candidate!.sha, baseSha: candidate.candidate!.baseSha, policyRevision: 2, authorizationRevision: candidate.revision, issuedAt: new Date().toISOString(), expiresAt: new Date(Date.now() + 120_000).toISOString() };
-  const acquire = async () => ({ execution }); const cancel = async () => ({}); const verify = async () => ({ executionId: execution.id, sha: execution.sha });
+  const acquire = async () => ({ execution }); const cancel = async () => ({}); const verify = async () => ({ executionId: execution.id, sha: execution.sha, verifiedAt: new Date(Date.now() - 2000).toISOString(), providerDelayMs: 0 });
   const result = await mergeWork(config, candidate, async () => ({ work: [candidate], now: new Date().toISOString() }), acquire, cancel, verify, (_command, args) => {
     calls.push(args);
     if (args[1] === 'view') return JSON.stringify({ headRefOid: candidate.candidate!.sha, baseRefOid: candidate.candidate!.baseSha, baseRefName: 'main', state: 'OPEN', isDraft: false });
@@ -263,6 +263,28 @@ test('routine merge is exact-candidate, double-checked, and never uses an admin 
     return JSON.stringify({ merged: false, message: 'branch protection refused merge' });
   }), /branch protection refused merge/);
   assert.equal(cancelled, execution.id);
+  cancelled = '';
+  await assert.rejects(mergeWork(config, candidate, async () => ({ work: [candidate], now: new Date().toISOString() }), acquire, async (_work, authority) => { cancelled = authority.id; }, async () => { throw new Error('verification response lost'); }, (_command, args) => {
+    if (args[1] === 'view') return JSON.stringify({ headRefOid: candidate.candidate!.sha, baseRefOid: candidate.candidate!.baseSha, baseRefName: 'main', state: 'OPEN', isDraft: false });
+    return JSON.stringify(validProtection);
+  }), /retained execution/);
+  assert.equal(cancelled, '', 'an unknown verification outcome retains authority for replay');
+  const confirmed = Object.assign(new Error('verification refused'), { confirmedRefusal: true });
+  await assert.rejects(mergeWork(config, candidate, async () => ({ work: [candidate], now: new Date().toISOString() }), acquire, async (_work, authority) => { cancelled = authority.id; }, async () => { throw confirmed; }, (_command, args) => {
+    if (args[1] === 'view') return JSON.stringify({ headRefOid: candidate.candidate!.sha, baseRefOid: candidate.candidate!.baseSha, baseRefName: 'main', state: 'OPEN', isDraft: false });
+    return JSON.stringify(validProtection);
+  }), /verification refused/);
+  assert.equal(cancelled, execution.id, 'a confirmed verification refusal cancels authority');
+  const resumed = work({ observation: candidate.observation, mergeExecution: execution }); let reacquired = false;
+  const resumedResult = await mergeWork(config, resumed, async () => ({ work: [resumed], now: new Date().toISOString() }), async () => { reacquired = true; return { execution }; }, cancel, verify, (_command, args) => {
+    if (args[1] === 'view') return JSON.stringify({ headRefOid: resumed.candidate!.sha, baseRefOid: resumed.candidate!.baseSha, baseRefName: 'main', state: 'OPEN', isDraft: false });
+    return args[1] === '--method' ? JSON.stringify({ merged: true, sha: 'c'.repeat(40) }) : JSON.stringify(validProtection);
+  }, execution.owner);
+  assert.equal(reacquired, false, 'the owning coordinator resumes its active authority'); assert.match(resumedResult.result, /merge requested/);
+  assert.throws(() => assertMergeCandidate(resumed, new Date().toISOString(), 'different-master'), /does not have/);
+  const uncertain = work({ observation: candidate.observation, mergeExecution: { ...execution, verifiedAt: new Date().toISOString() } });
+  const recovered = await mergeWork(config, uncertain, async () => ({ work: [uncertain], now: new Date().toISOString() }), async () => { throw new Error('must not reacquire'); }, cancel, verify, () => { throw new Error('must not repeat a possibly attempted provider call'); }, execution.owner);
+  assert.match(recovered.result, /already committed/);
 });
 
 test('merge-all selection and execution do not let refusing work starve eligible candidates', async () => {

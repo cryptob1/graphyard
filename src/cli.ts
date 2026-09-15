@@ -1,5 +1,5 @@
 import { readFile, mkdir, realpath, stat, writeFile } from 'node:fs/promises';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { hostname } from 'node:os';
 import { resolve } from 'node:path';
 import { execFileSync, spawnSync } from 'node:child_process';
@@ -109,9 +109,9 @@ Never share an operator or producer credential with an implementation agent.`); 
       const response = await fetch(`${master.url}/api/${path}`, { headers: { Authorization: `Bearer ${credential}` }, signal: AbortSignal.timeout(30_000) });
       const body = await response.json(); if (!response.ok) throw new Error(JSON.stringify(body)); return body;
     };
-    const masterMutation = async (path: string, data: unknown) => {
-      const response = await fetch(`${master.url}/api/${path}`, { method: 'POST', headers: { Authorization: `Bearer ${masterToken}`, 'Content-Type': 'application/json', 'Idempotency-Key': randomUUID() }, body: JSON.stringify(data), signal: AbortSignal.timeout(30_000) });
-      const result = await response.json(); if (!response.ok) throw new Error(JSON.stringify(result)); return result;
+    const masterMutation = async (path: string, data: unknown, requestId: string = randomUUID()) => {
+      const response = await fetch(`${master.url}/api/${path}`, { method: 'POST', headers: { Authorization: `Bearer ${masterToken}`, 'Content-Type': 'application/json', 'Idempotency-Key': requestId }, body: JSON.stringify(data), signal: AbortSignal.timeout(30_000) });
+      const result = await response.json(); if (!response.ok) { const error = new Error(JSON.stringify(result)); (error as any).confirmedRefusal = response.status >= 400 && response.status < 500; throw error; } return result;
     };
     const coordinator = await masterApi('status'); assertMasterBinding(master, coordinator);
     if (id === 'start') {
@@ -142,14 +142,16 @@ Never share an operator or producer credential with an implementation agent.`); 
     if (id === 'merge') {
       if (!args[0]) throw new Error('Use master merge GY-N or master merge --all');
       const snapshot = await masterApi('work-snapshot');
-      const selected = args[0] === '--all' ? currentMergeCandidates(snapshot.work, snapshot.now) : snapshot.work.filter((item: any) => item.id === args[0] || item.key === args[0]);
+      const selected = args[0] === '--all' ? currentMergeCandidates(snapshot.work, snapshot.now, coordinator.actor.id) : snapshot.work.filter((item: any) => item.id === args[0] || item.key === args[0]);
       if (!selected.length) throw new Error(args[0] === '--all' ? 'No work has a current all-gates-passing merge authorization' : `Unknown work item ${args[0]}`);
+      const outerRequest = process.env.GRAPHYARD_REQUEST_ID ?? randomUUID();
+      const stepKey = (item: any, step: string, executionId = '') => createHash('sha256').update(`${outerRequest}\0master-merge\0${item.id}\0${item.candidate?.sha ?? ''}\0${step}\0${executionId}`).digest('hex');
       const mergeOne = (item: any) => mergeWork(master, item, () => masterApi('work-snapshot'),
-        (latest, authorization) => masterMutation(`work/${latest.id}/merge-acquire`, { expectedRevision: authorization.revision, sha: authorization.sha, baseSha: authorization.baseSha, policyRevision: authorization.policyRevision }),
-        (latest, execution, reason) => masterMutation(`work/${latest.id}/merge-cancel`, { executionId: execution.id, reason }),
-        (latest, execution) => masterMutation(`work/${latest.id}/merge-verify`, { executionId: execution.id }));
+        (latest, authorization) => masterMutation(`work/${latest.id}/merge-acquire`, { expectedRevision: authorization.revision, sha: authorization.sha, baseSha: authorization.baseSha, policyRevision: authorization.policyRevision }, stepKey(latest, 'acquire')),
+        (latest, execution, reason) => masterMutation(`work/${latest.id}/merge-cancel`, { executionId: execution.id, reason }, stepKey(latest, 'cancel', execution.id)),
+        (latest, execution) => masterMutation(`work/${latest.id}/merge-verify`, { executionId: execution.id }, stepKey(latest, 'verify', execution.id)), undefined, coordinator.actor.id);
       const results = args[0] === '--all' ? await continueMergeBatch(selected, mergeOne) : [await mergeOne(selected[0])];
-      return print(results);
+      return print({ requestId: outerRequest, results });
     }
     throw new Error('Use master init, start, worker add, status, dispatch, merge, or guide');
   }

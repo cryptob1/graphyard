@@ -7,7 +7,7 @@ All control-plane endpoints except `/healthz` require `Authorization: Bearer TOK
 | Role | Permissions |
 | --- | --- |
 | `admin` | Create/release work, participate as a worker, attest manual proofs |
-| `coordinator` | Read work and integration state for master-agent routing; acquire/cancel only the engine's bounded merge execution authority |
+| `coordinator` | Read work and integration state for master-agent routing; acquire, verify, or cancel only the engine's bounded merge execution authority |
 | `worker` | Claim work, renew/release own lease, register workspace, report blockers, submit implementation, submit untrusted assertions |
 | `producer` | Submit evidence; only configured `proofs` are trusted |
 | `reader` | Inspect work, status, events |

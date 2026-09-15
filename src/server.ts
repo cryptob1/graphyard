@@ -103,7 +103,8 @@ export function server(engine: Engine, credentials: Credential[], github: GitHub
           demand(actor.role === 'coordinator' || actor.role === 'admin', 'Coordinator permission required', 403);
           demand(github, 'GitHub integration is required for merge verification', 503);
           const work = (await engine.store.list()).find(item => item.id === mergeRoute[1] || item.key === mergeRoute[1]); demand(work?.submission, 'Submitted work item required', 404);
-          return send(200, await engine.verifyMerge(actor, work.id, data, await github.observe(work)));
+          const replay = await engine.replayMergeVerification(actor, work.id, data, key); if (replay) return send(200, replay);
+          return send(200, await engine.verifyMerge(actor, work.id, data, await github.observe(work), key));
         }
         const match = url.pathname.match(/^\/api\/work(?:\/([^/]+)\/([a-z]+))?$/);
         if (req.method === 'POST' && match) {
