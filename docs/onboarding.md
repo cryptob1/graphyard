@@ -81,7 +81,7 @@ Before deploying, set `GRAPHYARD_PRINCIPALS`, `GITHUB_REPOSITORY`, and `GITHUB_B
 
 Replace `integration:project-smoke` with a real proof produced by protected code in the target project. Create one worker principal per concurrent agent. Never give a worker the operator, coordinator, or trusted-producer token. Store every value in a password manager. The [deployment guide](deployment.md) covers local Docker Compose, Railway variables, upgrades, backups, and the limits of the checked-in Railway configuration.
 
-The checked-in `.railway/railway.ts` describes Graphyard's own installation. Adapt its project and source identities before using it for a new installation, then preview every infrastructure change:
+The checked-in `.railway/railway.ts` describes Graphyard's own installation. Adapt its project and source identities before using it for a new installation. Its environment map uses omit-means-delete semantics, so preserve every private or externally configured variable that must survive apply, including `GITHUB_BASE_BRANCH: preserve()` when the managed branch is not `main`. Then preview every infrastructure change:
 
 ```sh
 npx @railway/cli config plan
@@ -186,7 +186,7 @@ For another machine, run step 3 there with its own worker identity and host ID. 
 
 ## 6. Take the first PR through the graph
 
-Create one small, real work item in the Graphyard UI. Write acceptance criteria before releasing it, and name the proof each criterion requires. Start with one worker and one independent review source.
+Create one small, real work item in the Graphyard UI. Before saving it, compare `.graphyard/project.json` with the check-run names on a real GitHub PR and replace the form defaults with the repository's exact required CI check names. Discovery proposes checks; it does not silently rewrite work policy, and `test` or `typecheck` will never pass if the repository publishes different names. Write acceptance criteria before releasing the item, and name the proof each criterion requires. Start with one worker and one independent review source.
 
 From the master's terminal or session:
 
