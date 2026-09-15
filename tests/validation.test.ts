@@ -360,3 +360,11 @@ test('artifact HTTP routes require authentication and return private attachments
     assert.equal((await fetch(`${origin}/api/validation/artifacts`, { method: 'POST', headers: { ...headers, 'Content-Type': 'application/json', 'Idempotency-Key': id() }, body: '{}' })).status, 403);
   } finally { await new Promise<void>(r => http.close(() => r())); await cleanup(f); }
 });
+
+test('artifact boundary accepts 8 MiB without regex stack overflow and rejects malformed encoding', async () => {
+  const f = await fixture('postgres'), command = await start(f);
+  const input = { ...command, name: 'report', mediaType: 'application/zip', capturePolicy: 'approved-test-data-only' };
+  await assert.rejects(validation.uploadArtifact(collector, { ...input, bytes: 'YQ= ' }, id()), /canonical base64/);
+  const artifact: any = await validation.uploadArtifact(collector, { ...input, bytes: Buffer.alloc(8_388_608).toString('base64') }, id());
+  assert.equal(artifact.size, 8_388_608); assert.equal((await validation.readArtifact(operator, f.r.id, artifact.id)).bytes.length, 8_388_608); await cleanup(f);
+});

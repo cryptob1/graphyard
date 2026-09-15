@@ -306,10 +306,11 @@ export class Validation {
   async uploadArtifact(actor: Principal, input: unknown, key: string) {
     demand(actor.role === 'producer', 'A separate trusted collector is required', 403);
     const data = commandSchema.extend({ name, mediaType: z.enum(['application/json', 'application/zip', 'image/png']),
-      bytes: z.string().min(4).max(11_184_812).regex(/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/),
+      bytes: z.string().min(4).max(11_184_812),
       capturePolicy: z.literal('approved-test-data-only') }).strict().parse(input);
     const bytes = Buffer.from(data.bytes, 'base64');
     demand(bytes.length > 0 && bytes.length <= 8_388_608, 'Artifact must be nonempty and at most 8 MiB', 413);
+    demand(bytes.toString('base64') === data.bytes, 'Artifact bytes must use canonical base64', 400);
     const digest = `sha256:${createHash('sha256').update(bytes).digest('hex')}`;
     // Never copy uploaded bytes into the immutable event ledger or an idempotency receipt.
     const { bytes: _encoded, ...metadata } = data;
