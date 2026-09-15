@@ -32,7 +32,7 @@ after(async () => { if (store) await store.close(); if (pg) await pg.stop(); });
 const id = () => randomUUID();
 async function definitions(): Promise<Definition[]> { return (await store.pool.query('SELECT document FROM validation_definitions ORDER BY kind,id,revision DESC')).rows.map(r => r.document); }
 async function current(workId: string) { return (await store.list()).find(w => w.id === workId)!; }
-async function fixture() {
+async function fixture(artifactStorage: 'external' | 'postgres' = 'external') {
   const n = ++serial, environment = { id: `preview-${n}`, revision: 1 }, runnerRef = { id: `runner-${n}`, revision: 1 }, collectorRef = { id: `collector-${n}`, revision: 1 }, builderRef = { id: `builder-${n}`, revision: 1 }, bundle = { id: `bundle-${n}`, revision: 1 }, proof = `e2e:scenario-${n}`;
   collector.proofs!.push(proof);
   const scenario = await defineScenario(store, operator, { id: `scenario-${n}`, title: 'Behavior', purpose: 'Prove behavior', steps: ['Execute'], expected: ['Correct'], environment: environment.id, runner: 'playwright', testPath: 'tests/behavior.spec.ts' }, id());
@@ -45,7 +45,7 @@ async function fixture() {
   w = await engine.execute(worker, 'submit', w.id, { epoch: 1, pr: n }, id());
   w = await engine.observe(w.id, w.revision, { candidate: { sha, baseSha: base, pr: n, branch: `graphyard/validation-${n}`, author: 'implementer' }, checks: [{ name: 'test', appId: 15368, result: 'success' }, { name: 'typecheck', appId: 15368, result: 'success' }], reviews: [{ reviewer: 'other', sha, state: 'APPROVED' }], merged: false, mergeSha: null, protected: true, mergeable: true, files: [], at: new Date().toISOString() });
   const build: any = await validation.attestBuild(builder, { registration: builderRef, workId: w.id, expectedWorkRevision: w.revision, sourceSha: sha, baseSha: base, buildInputsDigest: inputs, artifacts: [{ service: 'api', digest }], provenanceUrl: 'https://ci.example.test/build/1' }, id());
-  const candidateInput = { workId: w.id, expectedWorkRevision: w.revision, proof, environment, bundle, buildAttestationId: build.id, requiredArtifacts: ['report'] };
+  const candidateInput = { workId: w.id, expectedWorkRevision: w.revision, proof, environment, bundle, buildAttestationId: build.id, requiredArtifacts: ['report'], artifactStorage };
   const c = await validation.createCandidate(operator, candidateInput, id()) as ValidationCandidate;
   const requestInput = { candidateId: c.id, expectedWorkRevision: (await current(w.id)).revision, runner: runnerRef, collector: collectorRef, deadline: new Date(Date.now() + 600_000).toISOString(), maxAttempts: 3 };
   const r = await validation.createRequest(operator, requestInput, id()) as ValidationRequest;
@@ -297,4 +297,74 @@ test('proof previews reject generic and superseded validation passes just like g
   await validation.createRequest(operator, { ...f.requestInput, expectedWorkRevision: w.revision }, id());
   w = await current(f.w.id); assert.equal(proofPreview(w)[0].status, 'unmeasured');
   assert.equal(w.gates.find(g => g.name === 'acceptance')?.passed, false); await cleanup(f);
+});
+
+
+test('private artifacts bind request/attempt, authenticate reads and never enter audit bytes', async () => {
+  const f = await fixture('postgres'), command = await start(f), key = id();
+  const bytes = Buffer.from(JSON.stringify({ tests: 2, outcome: 'passed', marker: 'private-fixture-marker' }));
+  const input = { ...command, name: 'report', mediaType: 'application/json', bytes: bytes.toString('base64'), capturePolicy: 'approved-test-data-only' };
+  await assert.rejects(validation.uploadArtifact(worker, input, id()), /separate trusted/);
+  await assert.rejects(validation.uploadArtifact({ ...collector, id: 'wrong-collector' }, input, id()), /Wrong collector/);
+  const artifact: any = await validation.uploadArtifact(collector, input, key);
+  assert.deepEqual(await validation.uploadArtifact(collector, input, key), artifact);
+  await assert.rejects(validation.uploadArtifact(collector, input, id()), /already published/);
+  assert.equal((await validation.readArtifact(worker, f.r.id, artifact.id)).bytes.toString(), bytes.toString());
+  await assert.rejects(validation.readArtifact({ id: 'unassigned-worker', role: 'worker' }, f.r.id, artifact.id), /not authorized/);
+  const otherRepo = new Validation(engine, principals, 'other/repository');
+  await assert.rejects(otherRepo.readArtifact(operator, f.r.id, artifact.id), /repository scope/);
+  const events = (await store.pool.query("SELECT payload FROM events WHERE work_id=$1 AND kind LIKE 'validation.artifact%'", [f.w.id])).rows;
+  assert.ok(!JSON.stringify(events).includes('private-fixture-marker')); assert.ok(!JSON.stringify(events).includes(input.bytes));
+  const result: any = await validation.result(collector, { ...report(f, command), artifacts: [{ name: 'report', digest: artifact.digest, url: artifact.url }] }, id());
+  assert.equal(result.passed, true);
+  const w = await current(f.w.id);
+  assert.equal(w.evidence.at(-1)?.expiresAt, artifact.expiresAt);
+  assert.equal(evaluate(w, [w], new Date(Date.now() + 8 * 86_400_000), [15368]).gates.find(g => g.name === 'acceptance')?.passed, false);
+  await store.pool.query("UPDATE validation_artifacts SET expires_at='2000-01-01' WHERE id=$1", [artifact.id]);
+  await assert.rejects(validation.readArtifact(operator, f.r.id, artifact.id), /retention expired/);
+  assert.equal(await validation.expireArtifacts(), 1); assert.equal(await validation.expireArtifacts(), 0);
+  assert.equal((await store.pool.query('SELECT bytes FROM validation_artifacts WHERE id=$1', [artifact.id])).rows[0].bytes, null);
+  assert.equal((await store.pool.query("SELECT count(*) FROM events WHERE work_id=$1 AND kind='validation.artifact-expired'", [f.w.id])).rows[0].count, '1');
+  await cleanup(f);
+});
+test('private artifact requirements cannot pass with a caller-authored URL or missing bytes', async () => {
+  const f = await fixture('postgres'), command = await start(f);
+  const result: any = await validation.result(collector, report(f, command), id());
+  assert.equal(result.passed, false); assert.ok(result.reasons.some((s: string) => s.includes('Private artifact report'))); await cleanup(f);
+});
+test('revocation and expired epochs refuse artifact uploads before storing bytes', async () => {
+  const f = await fixture('postgres'), command = await start(f);
+  const input = { ...command, name: 'report', mediaType: 'application/json', bytes: Buffer.from('{}').toString('base64'), capturePolicy: 'approved-test-data-only' };
+  await assert.rejects(validation.uploadArtifact(collector, { ...input, epoch: command.epoch + 1 }, id()), /authority/);
+  const registration = (await definitions()).find(d => d.kind === 'registration' && d.id === f.collectorRef.id)!;
+  const { revision, createdAt, createdBy, ...data } = registration;
+  await validation.define(operator, { ...data, expectedRevision: revision, enabled: false }, id());
+  await assert.rejects(validation.uploadArtifact(collector, input, id()), /superseded|revoked/);
+  assert.equal((await store.pool.query('SELECT count(*) FROM validation_artifacts WHERE request_id=$1', [f.r.id])).rows[0].count, '0'); await cleanup(f);
+});
+
+test('artifact HTTP routes require authentication and return private attachments', async () => {
+  const f = await fixture('postgres'), command = await start(f);
+  const artifact: any = await validation.uploadArtifact(collector, { ...command, name: 'report', mediaType: 'application/json', bytes: Buffer.from('{"private":true}').toString('base64'), capturePolicy: 'approved-test-data-only' }, id());
+  const previousRepository = process.env.GITHUB_REPOSITORY; process.env.GITHUB_REPOSITORY = 'test/repository';
+  const http = server(engine, principals.map((p, i) => ({ ...p, token: String(i).repeat(32) })));
+  if (previousRepository === undefined) delete process.env.GITHUB_REPOSITORY; else process.env.GITHUB_REPOSITORY = previousRepository;
+  await new Promise<void>(r => http.listen(0, '127.0.0.1', r));
+  try {
+    const origin = `http://127.0.0.1:${(http.address() as any).port}`, url = `${origin}/api/validation/artifacts/${f.r.id}/${artifact.id}`;
+    assert.equal((await fetch(url)).status, 401);
+    const headers = { Authorization: `Bearer ${'1'.repeat(32)}` };
+    const response = await fetch(url, { headers });
+    assert.equal(response.status, 200); assert.match(response.headers.get('content-disposition')!, /^attachment/); assert.equal(response.headers.get('cache-control'), 'no-store');
+    assert.equal(await response.text(), '{"private":true}');
+    assert.equal((await fetch(`${origin}/api/validation/artifacts`, { method: 'POST', headers: { ...headers, 'Content-Type': 'application/json', 'Idempotency-Key': id() }, body: '{}' })).status, 403);
+  } finally { await new Promise<void>(r => http.close(() => r())); await cleanup(f); }
+});
+
+test('artifact boundary accepts 8 MiB without regex stack overflow and rejects malformed encoding', async () => {
+  const f = await fixture('postgres'), command = await start(f);
+  const input = { ...command, name: 'report', mediaType: 'application/zip', capturePolicy: 'approved-test-data-only' };
+  await assert.rejects(validation.uploadArtifact(collector, { ...input, bytes: 'YQ= ' }, id()), /canonical base64/);
+  const artifact: any = await validation.uploadArtifact(collector, { ...input, bytes: Buffer.alloc(8_388_608).toString('base64') }, id());
+  assert.equal(artifact.size, 8_388_608); assert.equal((await validation.readArtifact(operator, f.r.id, artifact.id)).bytes.length, 8_388_608); await cleanup(f);
 });

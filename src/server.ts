@@ -13,9 +13,9 @@ import { defineScenario, scenarios } from './scenarios.js';
 
 export const principalSchema = z.array(z.object({ id: z.string().min(1), role: z.enum(['admin', 'worker', 'producer', 'reader']), token: z.string().min(32), proofs: z.array(z.string()).optional(), displayName: z.string().trim().min(1).max(100).regex(/^[^\u0000-\u001f\u007f]+$/).optional(), runtime: z.string().trim().min(1).max(80).regex(/^[^\u0000-\u001f\u007f]+$/).optional() }).strict()).min(1);
 export type Credential = Principal & { token: string };
-async function body(req: IncomingMessage) {
+async function body(req: IncomingMessage, limit = 1_000_000) {
   const chunks: Buffer[] = []; let size = 0;
-  for await (const chunk of req) { size += chunk.length; demand(size <= 1_000_000, 'Request exceeds 1 MB', 413); chunks.push(chunk); }
+  for await (const chunk of req) { size += chunk.length; demand(size <= limit, 'Request exceeds size limit', 413); chunks.push(chunk); }
   return Buffer.concat(chunks);
 }
 export function server(engine: Engine, credentials: Credential[], github: GitHub | null = null) {
@@ -52,6 +52,13 @@ export function server(engine: Engine, credentials: Credential[], github: GitHub
         const hash = createHash('sha256').update(token).digest();
         const actor = principals.find(p => timingSafeEqual(p.hash, hash))?.actor;
         demand(actor, 'A valid Graphyard bearer token is required', 401);
+        if (url.pathname === '/api/validation/artifacts' && req.method === 'POST') return send(200, await validation.uploadArtifact(actor, JSON.parse((await body(req, 11_200_000)).toString()), String(req.headers['idempotency-key'] ?? '')));
+        const artifactRead = url.pathname.match(/^\/api\/validation\/artifacts\/([^/]+)\/([^/]+)$/);
+        if (artifactRead && req.method === 'GET') {
+          const artifact = await validation.readArtifact(actor, artifactRead[1], artifactRead[2]);
+          res.writeHead(200, { 'Content-Type': 'application/octet-stream', 'Content-Disposition': 'attachment; filename="graphyard-artifact"', 'Content-Length': artifact.bytes.length });
+          return res.end(artifact.bytes);
+        }
         if (url.pathname === '/api/validation' && req.method === 'GET') return send(200, await validation.list(url.searchParams.get('cursor') ?? undefined));
         if (url.pathname === '/api/validation/definitions' && req.method === 'GET') return send(200, await validation.definitions(url.searchParams.get('cursor') ?? undefined));
         const candidateRead = url.pathname.match(/^\/api\/validation\/candidate\/([^/]+)$/);
@@ -123,11 +130,12 @@ async function main() {
   const github = await githubFromEnv();
   const http = server(engine, credentials, github);
   const validation = new Validation(engine, credentials.map(({ token, ...actor }) => actor), github?.config.repository ?? process.env.GITHUB_REPOSITORY ?? '');
+  await validation.expireArtifacts();
   await validation.reconcile(true);
   let running = false;
   const timer = setInterval(async () => {
     if (running) return; running = true;
-    try { await validation.reconcile(); await engine.reconcile(); if (github) await Promise.all(Array.from({ length: 4 }, () => processJob(engine, github))); }
+    try { await validation.expireArtifacts(); await validation.reconcile(); await engine.reconcile(); if (github) await Promise.all(Array.from({ length: 4 }, () => processJob(engine, github))); }
     catch (error) { console.error('reconciliation failed', error instanceof Error ? error.message : 'unknown'); }
     finally { running = false; }
   }, 2000);

@@ -22,6 +22,8 @@ Definitions have immutable revisions. Updating a registration requires its curre
 
 For this first increment all authority-definition commands are operator-only. Delegated policy principals and worker-requested scheduling are not implemented. There is no arbitrary lifecycle setter.
 
+For the in-development packaged path, see [runner preparation and private artifacts](runner-setup.md). Source preparation does not enable execution.
+
 ## Inspect and invoke
 
 The dashboard's **Validation** view shows requests, attempts, refusal reasons and unsettled resources. It polls the latest server-side page of 20 requests every five seconds. Older pages are fetched only on demand; live polling pauses while browsing history, with a **Return to latest** control. Definitions have a separate paginated API, so polling does not download the registry or all candidate history. Failed loads remain visibly failed rather than appearing as an empty queue.
