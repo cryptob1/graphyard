@@ -45,6 +45,7 @@ test('master init verifies a coordinator and repository before writing private l
     assert.equal((await readFile(join(root, '.graphyard/master.json'), 'utf8')).includes(coordinatorToken), false);
     const workerConnection = JSON.stringify({ url: 'https://graphyard.example', token: workerToken, cliPath: launcher, hostId: 'machine-a' });
     await writeFile(join(root, '.graphyard/connection.json'), workerConnection, { mode: 0o600 });
+    await assert.rejects(setupMaster(root, { url: 'https://other.example', token: coordinatorToken, cliPath: launcher, credentialDirectory }, coordinatorStatus as typeof fetch), /another Graphyard server/);
     await setupMaster(root, { url: 'https://graphyard.example', token: coordinatorToken, cliPath: launcher, credentialDirectory }, coordinatorStatus as typeof fetch);
     assert.equal(await readFile(join(root, '.graphyard/connection.json'), 'utf8'), workerConnection, 'master setup must not replace a worker connection');
     await assert.rejects(setupMaster(root, { url: 'https://graphyard.example', token: workerToken, cliPath: launcher, credentialDirectory }, (async () => new Response(JSON.stringify({ actor: { id: 'worker', role: 'worker' }, repository: 'owner/project', baseBranch: 'main', githubAppId: 1234 }))) as typeof fetch), /coordinator credential/);
@@ -146,6 +147,10 @@ test('master start creates a visible non-focused coordinator session with no cre
     assert.ok(calls[0].includes('--no-focus')); assert.ok(calls[1].includes('codex'));
     assert.match(calls[2].at(-1)!, /dedicated Graphyard master agent/);
     assert.equal(JSON.stringify(calls).includes(coordinatorToken), false);
+    await setupMaster(root, { url: 'https://graphyard.example', token: coordinatorToken, cliPath: launcher, credentialDirectory, autoMerge: false }, coordinatorStatus as typeof fetch);
+    const manualCalls: string[][] = [];
+    await startMaster(root, 'codex', [], [], (_command, args) => { manualCalls.push(args); return JSON.stringify({ result: args[0] === 'tab' ? { pane_id: 'manual-master' } : {} }); });
+    assert.match(manualCalls[2].at(-1)!, /Automatic merging is disabled.*explicit operator approval/);
     const failedCalls: string[][] = [];
     await assert.rejects(startMaster(root, 'codex', [], [], (_command, args) => {
       failedCalls.push(args); if (args[1] === 'prompt') throw new Error('prompt refused');

@@ -36,6 +36,7 @@ export interface Evidence {
 export interface ReviewRequest { commentId: number; sha: string; baseSha: string; policyRevision: number; body: string; createdAt: string }
 export interface AgentReview { provider: 'codex'; sha: string; approved: boolean; reason: string; summaryId?: number; resultId?: number; requestId?: number; reactionId?: number; completedAt?: string }
 export interface Observation {
+  clockOffset?: { min: number; max: number };
   reviewIds?: number[];
   agentReview?: AgentReview;
   prState?: 'open' | 'closed'; draft?: boolean;
@@ -58,7 +59,7 @@ export interface Work extends Create {
   scenarioRequirements: { proof: string; revision: number; environment: string; hash: string }[];
   reviewRequest?: ReviewRequest | null;
   mergeAuthorization?: { sha: string; baseSha: string; policyRevision: number; at: string } | null;
-  mergeExecution?: { id: string; owner: string; sha: string; baseSha: string; policyRevision: number; authorizationRevision: number; issuedAt: string; expiresAt: string; verifiedAt?: string } | null;
+  mergeExecution?: { id: string; owner: string; sha: string; baseSha: string; policyRevision: number; authorizationRevision: number; issuedAt: string; expiresAt: string; verifiedAt?: string; clockOffset?: { min: number; max: number } } | null;
   delivery?: { mergedAt: string; mergeSha: string; authorizationRevision: number };
   evidence: Evidence[]; observation: Observation | null; blocker: string | null;
   gates: Gate[]; violations: string[];

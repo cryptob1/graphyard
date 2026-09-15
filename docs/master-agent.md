@@ -28,6 +28,8 @@ Commit the managed `AGENTS.md` update. Never commit `.graphyard/`. Rerun setup a
 
 Launch the dedicated visible coordinator after setup:
 
+Setup refuses a server that differs from the repository's existing worker connection. Migrate that connection deliberately before switching control planes. Master status displays the automatic-merge preference, and the startup prompt tells the coordinator to wait for operator approval when automatic merging is disabled.
+
 ```sh
 graphyard master start codex
 # or: graphyard master start claude
@@ -142,6 +144,8 @@ It never uses `--admin`. A human approval represented as required evidence remai
 Only the coordinator that acquired an execution may cancel it. Periodic GitHub reconciliation defers without publishing a failing required check while that execution is active, including a reconciliation read that began before acquisition and became stale during its provider call. A webhook generation change still wakes reconciliation immediately so an observed matching merge can complete the item. Cancelling an execution also wakes the durable job immediately instead of waiting for the cancelled deadline.
 
 The present command uses the local authenticated GitHub CLI for the final provider action. Graphyard's transactional execution authority closes the control-plane mutation race around that external call without holding a database transaction open during network I/O.
+
+Final verification compares two complete GitHub observations and refuses changed gate inputs. It also brackets a GitHub server-time request with database clock reads, records a bounded clock offset on the execution, and translates the entire merge timestamp interval to database time before checking verification, cancellation, evidence, and execution deadlines. Missing or overly uncertain clock measurements refuse verification. This assumes neither provider nor database clock jumps during the bounded execution; arbitrary clock discontinuities and changes after the final provider read cannot be eliminated by polling across independent systems.
 
 ## Handoffs and recovery
 

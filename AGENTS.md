@@ -51,7 +51,9 @@ worker must claim the item under its own identity and use the assigned worktree.
 Treat prompt delivery as an invitation, never as ownership. Use durable handoffs
 when an agent, provider account, machine, or context window changes.
 
-Routine merges may use `graphyard master merge --all`. The command rechecks the
+Check the automatic-merge preference in master status. When disabled, wait for
+explicit operator approval for each merge. Otherwise routine merges may use
+`graphyard master merge --all`. The command rechecks the
 exact current candidate, every configured gate, and GitHub state immediately before
 merging. Human gates, stale observations, failures, and changed commits remain
 blocking. Never use an administrative merge bypass. Read `docs/master-agent.md`

@@ -104,7 +104,14 @@ export function server(engine: Engine, credentials: Credential[], github: GitHub
           demand(github, 'GitHub integration is required for merge verification', 503);
           const work = (await engine.store.list()).find(item => item.id === mergeRoute[1] || item.key === mergeRoute[1]); demand(work?.submission, 'Submitted work item required', 404);
           const replay = await engine.replayMergeVerification(actor, work.id, data, key); if (replay) return send(200, replay);
-          return send(200, await engine.verifyMerge(actor, work.id, data, await github.observe(work), key));
+          const observation = await github.verify(work);
+          const before = (await engine.store.pool.query('SELECT clock_timestamp() AS now')).rows[0].now as Date;
+          const providerTime = await github.serverTime();
+          const after = (await engine.store.pool.query('SELECT clock_timestamp() AS now')).rows[0].now as Date;
+          // Bound DB minus GitHub time using the request interval and GitHub's
+          // whole-second Date precision. Keep all network I/O outside transactions.
+          observation.clockOffset = { min: before.getTime() - providerTime - 1000, max: after.getTime() - providerTime };
+          return send(200, await engine.verifyMerge(actor, work.id, data, observation, key));
         }
         const match = url.pathname.match(/^\/api\/work(?:\/([^/]+)\/([a-z]+))?$/);
         if (req.method === 'POST' && match) {

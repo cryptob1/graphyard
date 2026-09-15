@@ -32,6 +32,15 @@ test('GitHub adapter binds observations to repository, base, current reviews, an
   f.pr.base.ref = 'other'; await assert.rejects(f.github.observe(f.work), /unmanaged/);
   f.pr.base.ref = 'main'; f.pr.head.repo.full_name = 'attacker/fork'; await assert.rejects(f.github.observe(f.work), /same-repository/);
 });
+test('final verification refuses gate changes after the initial collection', async () => {
+  const f = fixture(), request = f.github.request.bind(f.github); let reads = 0;
+  f.github.request = async (path, method, body) => {
+    const result = structuredClone(await request(path, method, body));
+    if (path.includes('/check-runs') && ++reads > 1) result.check_runs[0].conclusion = 'failure';
+    return result;
+  };
+  await assert.rejects(f.github.verify(f.work), /gates changed/);
+});
 test('App binding is mandatory even when a check with the correct name is required', async () => {
   const f = fixture(); f.protection(false); assert.equal(await f.github.protection(), false);
 });

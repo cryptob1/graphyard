@@ -268,8 +268,11 @@ export class Engine {
       this.evaluate(probe, all.map(item => item.id === probe.id ? probe : item), now);
       demand(probe.stage === 'merge' && probe.gates.every(gate => gate.passed) && !probe.violations.length, `GitHub gates changed during merge execution: ${probe.gates.flatMap(gate => gate.reasons).concat(probe.violations).join('; ')}`);
       execution.verifiedAt = now.toISOString();
+      const offset = observation.clockOffset;
+      demand(offset && Number.isFinite(offset.min) && Number.isFinite(offset.max) && offset.min <= offset.max && offset.max - offset.min <= 20_000, 'A bounded GitHub/database clock observation is required');
+      execution.clockOffset = offset;
       await save(db, work, actor.id, 'merge.execution.verified', now, { executionId: execution.id, sha: execution.sha, verifiedAt: execution.verifiedAt });
-      const providerDelayMs = Math.ceil((now.getTime() + 1) / 1000) * 1000 - now.getTime();
+      const providerDelayMs = Math.ceil((now.getTime() + 1) / 1000) * 1000 - now.getTime() + Math.ceil(offset.max - offset.min);
       const result = { key: work.key, executionId: execution.id, sha: execution.sha, verifiedAt: execution.verifiedAt, providerDelayMs, revision: work.revision };
       await db.query('INSERT INTO receipts(actor,key,fingerprint,result) VALUES($1,$2,$3,$4)', [actor.id, key, fingerprint, JSON.stringify(result)]);
       return result;
@@ -332,18 +335,20 @@ export class Engine {
       if (work.stage === 'done') return work;
       let authorizedSnapshot: Work | null = null; let authorizationRevision: number | null = null;
       if (observation.merged && observation.mergedAt && Number.isFinite(Date.parse(observation.mergedAt))) {
-        const mergedTime = Date.parse(observation.mergedAt);
+        const providerMergedTime = Date.parse(observation.mergedAt);
         // Never allow evidence from after the earliest possible merge instant.
         // Whole-second timestamps can therefore conservatively refuse same-second authorization.
-        const cutoff = mergedTime + (/\.\d+Z$/.test(observation.mergedAt) ? 1 : 1000);
-        const acquired = (await db.query("SELECT payload->'work'->'mergeExecution' AS execution FROM events WHERE work_id=$1 AND kind IN ('merge.execution.acquired','merge.execution.verified') AND created_at<$2 ORDER BY seq DESC LIMIT 1", [id, new Date(cutoff)])).rows[0]?.execution as Work['mergeExecution'] | undefined;
+        const acquired = (await db.query("SELECT payload->'work'->'mergeExecution' AS execution FROM events WHERE work_id=$1 AND kind IN ('merge.execution.acquired','merge.execution.verified') ORDER BY seq DESC LIMIT 1", [id])).rows[0]?.execution as Work['mergeExecution'] | undefined;
         const boundedExecution = activeExecution ?? acquired ?? null;
+        const offset = boundedExecution?.clockOffset;
+        const mergedTime = providerMergedTime + (offset?.min ?? 0);
+        const cutoff = providerMergedTime + (/\.\d+Z$/.test(observation.mergedAt) ? 1 : 1000) + (offset?.max ?? 0);
         let cancelledExecution = false;
         if (boundedExecution) {
           const cancellation = (await db.query("SELECT created_at FROM events WHERE work_id=$1 AND kind='merge.execution.cancelled' AND payload->'details'->>'executionId'=$2 AND created_at<$3 ORDER BY seq DESC LIMIT 1", [id, boundedExecution.id, new Date(cutoff)])).rows[0]?.created_at as Date | undefined;
           cancelledExecution = !!cancellation && cancellation.getTime() < cutoff;
         }
-        const executionValid = !!boundedExecution && !cancelledExecution && boundedExecution.sha === observation.candidate.sha && boundedExecution.baseSha === observation.candidate.baseSha
+        const executionValid = !!boundedExecution && !!offset && !cancelledExecution && boundedExecution.sha === observation.candidate.sha && boundedExecution.baseSha === observation.candidate.baseSha
           && !!boundedExecution.verifiedAt && Date.parse(boundedExecution.issuedAt) <= Date.parse(boundedExecution.verifiedAt)
           && Date.parse(boundedExecution.verifiedAt) < mergedTime && cutoff <= Date.parse(boundedExecution.expiresAt);
         if (activeExecution && executionValid && work.mergeAuthorization

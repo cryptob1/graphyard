@@ -45,7 +45,7 @@ async function submitted() {
   return engine.execute(worker, 'submit', w.id, { epoch: 1, pr: Number(w.key.slice(3)) }, randomUUID());
 }
 function observation(w: Work): Observation {
-  return { candidate: { sha: head, baseSha: base, pr: w.submission!.pr, branch: w.workspaces[0].branch, author: 'implementer' },
+  return { clockOffset: { min: 0, max: 0 }, candidate: { sha: head, baseSha: base, pr: w.submission!.pr, branch: w.workspaces[0].branch, author: 'implementer' },
     checks: [{ name: 'test', result: 'success', appId: 15368 }, { name: 'typecheck', result: 'success', appId: 15368 }],
     reviews: [{ reviewer: 'reviewer', sha: head, state: 'APPROVED' }], protected: true, mergeable: true,
     merged: false, mergeSha: null, files: ['src/claims.ts'], at: new Date().toISOString() };
@@ -181,6 +181,15 @@ test('a matching merge after the bounded execution deadline remains an unauthori
   const merged = { ...observation(w), merged: true, mergeSha: 'c'.repeat(40), mergedAt: new Date(Date.parse(granted.execution.expiresAt) + 1).toISOString() } as Observation;
   const refused = await engine.observe(w.id, granted.revision, merged);
   assert.notEqual(refused.stage, 'done'); assert.equal(refused.mergeExecution, null); assert.match(refused.violations.join(' '), /without a prior authorization/);
+});
+test('database clock ahead of GitHub cannot authorize a merge after the database deadline', async () => {
+  let w = await submitted(); w = await engine.observe(w.id, w.revision, observation(w));
+  w = await engine.execute(producer, 'evidence', w.id, proof(), randomUUID());
+  const granted = await engine.acquireMerge(coordinator, w.id, { expectedRevision: w.revision, sha: head, baseSha: base, policyRevision: w.policyRevision }, randomUUID());
+  const verified = await engine.verifyMerge(coordinator, w.id, { executionId: granted.execution.id }, { ...observation(w), prState: 'open', draft: false, clockOffset: { min: 5000, max: 6000 } }, randomUUID());
+  const merged = { ...observation(w), merged: true, mergeSha: 'c'.repeat(40), mergedAt: new Date(Date.parse(granted.execution.expiresAt) - 4000).toISOString() };
+  const refused = await engine.observe(w.id, verified.revision, merged);
+  assert.notEqual(refused.stage, 'done'); assert.match(refused.violations.join(' '), /without a prior authorization/);
 });
 test('whole-second merge timestamps require authority through the entire reported interval', async () => {
   let w = await submitted(); w = await engine.observe(w.id, w.revision, observation(w));

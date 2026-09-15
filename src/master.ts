@@ -5,7 +5,7 @@ import { isAbsolute, relative, resolve, sep } from 'node:path';
 import { homedir, hostname } from 'node:os';
 import { z } from 'zod';
 import { assertRepository, discover, localDirectory, saveDiscovery } from './onboarding.js';
-import { managedInstructions, serverOrigin } from './repository-setup.js';
+import { loadConnection, managedInstructions, serverOrigin } from './repository-setup.js';
 import { resourceConflicts } from './coordination.js';
 import type { Work } from './model.js';
 
@@ -70,7 +70,9 @@ worker must claim the item under its own identity and use the assigned worktree.
 Treat prompt delivery as an invitation, never as ownership. Use durable handoffs
 when an agent, provider account, machine, or context window changes.
 
-Routine merges may use \`graphyard master merge --all\`. The command rechecks the
+Check the automatic-merge preference in master status. When disabled, wait for
+explicit operator approval for each merge. Otherwise routine merges may use
+\`graphyard master merge --all\`. The command rechecks the
 exact current candidate, every configured gate, and GitHub state immediately before
 merging. Human gates, stale observations, failures, and changed commits remain
 blocking. Never use an administrative merge bypass. Read \`docs/master-agent.md\`
@@ -159,6 +161,8 @@ async function atomicPrivateText(file: string, value: string) {
 
 export async function setupMaster(root: string, input: { url: string; token: string; cliPath: string; hostId?: string; credentialDirectory?: string; autoMerge?: boolean; mergeMethod?: 'merge' | 'squash' | 'rebase' }, fetcher: typeof fetch = fetch) {
   const url = serverOrigin(input.url); const token = input.token.trim();
+  const workerConnection = await loadConnection(root);
+  if (workerConnection && workerConnection.url !== url) throw new Error('Worker connection uses another Graphyard server; migrate the repository connection before master setup');
   if (token.length < 32) throw new Error('Master initialization requires a coordinator credential over stdin');
   const detected = await discover(root);
   let response: Response;
@@ -286,7 +290,10 @@ export async function startMaster(root: string, kind: WorkerProfile['kind'], age
   try {
     herdrJson(['agent', 'start', config.masterAgentName, '--kind', kind, '--pane', pane, '--', ...agentArgs], run);
     const prompt = `You are the dedicated Graphyard master agent for ${config.repository}. Do not implement product work, claim worker leases, submit evidence, weaken requirements, or bypass gates. Read AGENTS.md, run node ${config.cliPath} master guide, then run node ${config.cliPath} master status. Use Graphyard as assignment and progression truth and Herdr only for session health and control. Route ready work to configured worker profiles, require workers to claim for themselves, preserve handoffs, surface decisions that need the operator, and invoke routine merge only through graphyard master merge after every exact-candidate gate passes.`;
-    herdrJson(['agent', 'prompt', config.masterAgentName, prompt], run);
+    const mergeInstruction = config.autoMerge
+      ? 'Automatic routine merging is enabled. Use the guarded merge command when all gates pass.'
+      : 'Automatic merging is disabled. Wait for explicit operator approval for each merge. Do not invoke master merge or master merge --all without that approval; the operator can invoke the guarded command directly.';
+    herdrJson(['agent', 'prompt', config.masterAgentName, `${prompt} ${mergeInstruction}`], run);
   } catch (error) {
     try { stopHerdrPane(pane, run); }
     catch { throw new Error(`${error instanceof Error ? error.message : 'Master startup failed'}; Herdr could not confirm cleanup of pane ${pane}`); }
@@ -456,9 +463,10 @@ export async function mergeWork(config: MasterConfig, work: Work, freshSnapshot:
     assertMergeProtection(protection, config, latest);
     verificationStarted = true; const verified = await verify(latest, granted.execution); verificationCompleted = true;
     const verifiedTime = Date.parse(verified.verifiedAt);
-    if (verified.executionId !== granted.execution.id || verified.sha !== authorization.sha || !Number.isFinite(verifiedTime) || !Number.isInteger(verified.providerDelayMs) || verified.providerDelayMs < 0 || verified.providerDelayMs > 1000) throw new Error(`${work.key} received an invalid final GitHub gate verification`);
+    if (verified.executionId !== granted.execution.id || verified.sha !== authorization.sha || !Number.isFinite(verifiedTime) || !Number.isInteger(verified.providerDelayMs) || verified.providerDelayMs < 0 || verified.providerDelayMs > 21_000) throw new Error(`${work.key} received an invalid final GitHub gate verification`);
     const githubClock = run('gh', ['api', '--include', 'rate_limit']);
     const delay = githubProviderDelay(verifiedTime, verified.providerDelayMs, githubClock);
+    if (delay > 21_000 || remainingAtSnapshot - (performance.now() - authorityBudgetStartedAt) - delay <= 90_000) throw new Error('Clock uncertainty leaves insufficient merge authority; refresh and retry');
     if (delay) await new Promise(resolve => setTimeout(resolve, delay));
     const remainingAfterProtection = remainingAtSnapshot - (performance.now() - authorityBudgetStartedAt);
     if (!Number.isFinite(remainingAfterProtection) || remainingAfterProtection <= 90_000) throw new Error(`${work.key} merge execution no longer has enough time for the provider call after verifying branch protection; retry`);

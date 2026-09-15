@@ -124,7 +124,7 @@ Never share an operator or producer credential with an implementation agent.`); 
     if (id === 'status') {
       const runtime = observeHerdrAgents();
       const credentials = await inspectWorkerCredentials(root, master.workers);
-      return print({ ...buildMasterStatus(await masterApi('work-snapshot'), master.workers, runtime.agents, credentials), runtime: { herdr: { available: runtime.available, reason: runtime.reason } } });
+      return print({ ...buildMasterStatus(await masterApi('work-snapshot'), master.workers, runtime.agents, credentials), autoMerge: master.autoMerge, mergeApproval: master.autoMerge ? 'routine merges permitted after gates pass' : 'explicit operator approval required for each merge', runtime: { herdr: { available: runtime.available, reason: runtime.reason } } });
     }
     if (id === 'dispatch') {
       if (!args[0]) throw new Error('Use master dispatch GY-N PROFILE');
