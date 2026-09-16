@@ -37,7 +37,9 @@ for (const file of files) {
     const hash = link.indexOf('#');
     const target = hash < 0 ? link : link.slice(0, hash);
     const anchor = hash < 0 ? '' : link.slice(hash + 1).toLowerCase();
-    const destination = resolve(dirname(file), target || file.split('/').at(-1));
+    const destination = target.startsWith('/docs/')
+      ? resolve(`${target.slice(1)}${target.endsWith('.md') ? '' : '.md'}`)
+      : resolve(dirname(file), target || file.split('/').at(-1));
     try {
       if (!statSync(destination).isFile()) throw new Error('not a file');
     } catch {

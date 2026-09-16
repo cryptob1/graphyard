@@ -1,6 +1,6 @@
 # Huck Engineer investigation: lessons for Graphyard
 
-> **Historical research.** Commit references and implementation status below are preserved for context. Use the [current documentation index](../README.md) for shipped behavior.
+> **Historical research.** Commit references and implementation status below are preserved for context. Use the [current documentation index](/docs/README) for shipped behavior.
 
 Huck Engineer is a QA and delivery system built around one product ecosystem. Graphyard is a runtime-independent coordination and authorization system. Their strongest capabilities are complementary.
 

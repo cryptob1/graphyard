@@ -6,11 +6,13 @@ Graphyard remains the source of truth. Herdr only reports live session health.
 
 ## Install
 
-Create a `coordinator` principal on the Graphyard server. From a clean coordinator checkout:
+Create a `coordinator` principal on the Graphyard server. From a clean coordinator checkout, list Herdr workspaces and bind the master to this repository's workspace:
 
 ```sh
+herdr workspace list
 graphyard master init \
   --url https://YOUR-GRAPHYARD-HOST \
+  --herdr-workspace HERDR_WORKSPACE_ID \
   --token-stdin
 graphyard master start codex
 ```

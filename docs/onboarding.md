@@ -84,8 +84,10 @@ Use a clean checkout under a dedicated coordinator OS identity or machine. It mu
 
 ```sh
 cd /path/to/coordinator-checkout
+herdr workspace list
 node "$GRAPHYARD_CLI" master init \
   --url https://YOUR-GRAPHYARD-HOST \
+  --herdr-workspace HERDR_WORKSPACE_ID \
   --token-stdin
 node "$GRAPHYARD_CLI" master start codex
 ```

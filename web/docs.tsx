@@ -16,7 +16,7 @@ const pages = [
 const sources = import.meta.glob('../docs/**/*.md', { query: '?raw', import: 'default', eager: true }) as Record<string, string>;
 function docLink(href: string | undefined) {
   if (!href) return '#';
-  if (href.startsWith('http') || href.startsWith('#')) return href;
+  if (href.startsWith('http') || href.startsWith('#') || href.startsWith('/')) return href;
   const [path, anchor] = href.split('#');
   if (path.startsWith('../')) return `https://github.com/cryptob1/graphyard/blob/main/${path.slice(3)}${anchor ? `#${anchor}` : ''}`;
   return `/docs/${path.replace(/\.md$/, '')}${anchor ? `#${anchor}` : ''}`;
