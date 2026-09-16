@@ -18,7 +18,7 @@ An `operator-agent` is not an administrator. Its server-loaded identity contains
 | `policy:requirements` | Add requirements or containment, never remove or rewrite them |
 | `policy:review-provider` | Select a supported required review provider, creating a new policy revision |
 
-Every permitted write requires an idempotency key, validates bounded schemas and current revisions (`expectedRevision` for ready/unblock and `expectedPolicyRevision` for policy changes), runs in the coordination transaction, attributes the authenticated principal, and appends before/after work state and the reason to immutable history. External I/O remains outside that transaction.
+Every permitted write requires an explicit reason and idempotency key, validates bounded schemas and current revisions (`expectedRevision` for ready/unblock and `expectedPolicyRevision` for policy changes), runs in the coordination transaction, attributes the authenticated principal, and appends before/after work state and the reason to immutable history. Operator-created work always requires independent review; `intent:create` cannot disable that gate. External I/O remains outside that transaction.
 
 Operator agents cannot claim, heartbeat, register, release, implement, or submit work; create or submit evidence; use validation producer/runner routes; administer identities or their own scope; acquire coordinator merge authority; or call an administrative merge path. They cannot remove requirements, dependencies, planned-file containment, or exclusive resources. Credential status and route authorization are checked on every request.
 

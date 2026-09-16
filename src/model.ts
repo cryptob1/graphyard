@@ -23,11 +23,13 @@ export const createSchema = z.object({
 export type Create = z.infer<typeof createSchema>;
 export const operatorCapabilities = ['intent:create', 'intent:ready', 'intent:unblock', 'policy:requirements', 'policy:review-provider'] as const;
 export type OperatorCapability = typeof operatorCapabilities[number];
+export const operatorCredentialHash = Symbol('operatorCredentialHash');
 export interface Principal {
   id: string; role: 'admin' | 'operator-agent' | 'coordinator' | 'worker' | 'producer' | 'reader';
   proofs?: string[]; displayName?: string; runtime?: string;
   capabilities?: OperatorCapability[];
   scope?: { repositories: string[]; workItems: string[] };
+  [operatorCredentialHash]?: string;
 }
 export interface AssignmentIdentity { owner: string; epoch: number; displayName?: string; runtime?: string; claimedAt?: string }
 export interface Lease { owner: string; epoch: number; expiresAt: string }

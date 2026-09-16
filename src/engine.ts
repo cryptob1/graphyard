@@ -10,8 +10,8 @@ const sha = z.string().regex(/^[a-f0-9]{40}$/);
 // Longer than acknowledgeContainment's three 30-second HTTP attempts plus retry delays.
 export const launchFenceMs = 120_000;
 const commands = {
-  create: createSchema,
-  ready: z.object({ expectedRevision: z.number().int().positive().optional() }).strict(),
+  create: createSchema.extend({ reason: z.string().trim().min(1).max(2000).optional() }),
+  ready: z.object({ expectedRevision: z.number().int().positive().optional(), reason: z.string().trim().min(1).max(2000).optional() }).strict(),
   requirements: z.object({ expectedPolicyRevision: z.number().int().positive(), reason: z.string().trim().min(1).max(2000), criteria: z.array(criterionSchema).min(1).max(50), dependencies: z.array(z.string().uuid()).max(50), plannedFiles: createSchema.shape.plannedFiles, exclusiveResources: resourcesSchema }).strict(),
   reviewpolicy: z.object({ provider: z.enum(['github', 'codex']), expectedPolicyRevision: z.number().int().positive(), reason: z.string().trim().min(1).max(2000) }).strict(),
   unblock: z.object({ reason: z.string().min(1).max(2000), expectedRevision: z.number().int().positive().optional() }).strict(),
@@ -41,6 +41,7 @@ function preserveAssignment(work: Work) {
     work.lastAssignment = { owner: work.lease.owner, epoch: work.lease.epoch };
 }
 export class Engine {
+  operatorAuthorizer?: (db: any, now: Date, actor: Principal) => Promise<Principal>;
   constructor(public store: Store, public ciAppIds: number[] = [15368], public leaseSeconds = 120, public repository = process.env.GITHUB_REPOSITORY ?? '') {}
   async execute(actor: Principal, command: Command, id: string | null, input: unknown, key: string) {
     demand(Object.hasOwn(commands, command), 'Unknown command', 404);
@@ -48,13 +49,22 @@ export class Engine {
     const data: any = commands[command].parse(input);
     const fingerprint = createHash('sha256').update(JSON.stringify({ command, id, data })).digest('hex');
     return this.store.transaction(async (db, now) => {
+      if (actor.role === 'operator-agent') {
+        demand(this.operatorAuthorizer, 'Operator-agent authorization is unavailable', 503);
+        actor = await this.operatorAuthorizer(db, now, actor);
+      }
       const receipt = (await db.query('SELECT * FROM receipts WHERE actor=$1 AND key=$2', [actor.id, key])).rows[0];
       if (receipt) { demand(receipt.fingerprint === fingerprint, 'Idempotency key reused with different input'); return receipt.result as Work; }
       const all: Work[] = (await db.query('SELECT document FROM work_items ORDER BY number')).rows.map(r => r.document);
       let work = all.find(w => w.id === id || w.key === id);
       const before = work ? structuredClone(work) : null;
       if (command === 'create') {
-        if (actor.role === 'operator-agent') { operatorCapability(actor, 'intent:create', undefined, this.repository); demand(actor.scope?.workItems.includes('*'), 'Creating work requires wildcard work scope', 403); } else admin(actor);
+        if (actor.role === 'operator-agent') {
+          operatorCapability(actor, 'intent:create', undefined, this.repository);
+          demand(actor.scope?.workItems.includes('*'), 'Creating work requires wildcard work scope', 403);
+          demand(data.reason, 'Operator-agent mutations require a reason', 400);
+          demand(data.policy.review, 'Operator-created work must require independent review');
+        } else admin(actor);
         demand(data.dependencies.every((dep: string) => all.some(w => w.id === dep)), 'Unknown dependency');
         demand(new Set(data.criteria.map((ac: { id: string }) => ac.id)).size === data.criteria.length, 'Criterion IDs must be unique');
         const scenarioRequirements: Work['scenarioRequirements'] = [];
@@ -65,7 +75,8 @@ export class Engine {
           scenarioRequirements.push({ proof, revision: scenario.revision, environment: scenario.environment, hash: scenario.hash });
         }
         const created = now.toISOString();
-        work = { ...data, id: randomUUID(), key: '', stage: 'backlog', revision: 0, policyRevision: 1, createdAt: created, updatedAt: created, stageEnteredAt: created,
+        const { reason: _reason, ...intent } = data;
+        work = { ...intent, id: randomUUID(), key: '', stage: 'backlog', revision: 0, policyRevision: 1, createdAt: created, updatedAt: created, stageEnteredAt: created,
           ready: false, epoch: 0, lease: null, workspaces: [], candidate: null, submission: null, reworkRequested: false, scenarioRequirements, evidence: [], observation: null, blocker: null, gates: [], violations: [] };
         const inserted = await db.query('INSERT INTO work_items(id,document) VALUES($1,$2) RETURNING number', [work!.id, JSON.stringify(work)]);
         work!.key = `GY-${inserted.rows[0].number}`;
@@ -76,6 +87,7 @@ export class Engine {
       if (actor.role === 'operator-agent') {
         const capability = capabilities[command]; demand(capability, 'This operation is not available to operator agents', 403);
         operatorCapability(actor, capability, work, this.repository);
+        demand(data.reason, 'Operator-agent mutations require a reason', 400);
         if (command === 'ready' || command === 'unblock') demand(data.expectedRevision === work.revision, 'Task revision changed; reload before mutating');
       }
       const deliveredContainmentCleanup = work.stage === 'done' && (command === 'settle' || command === 'recover');
