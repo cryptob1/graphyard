@@ -6,6 +6,8 @@ Graphyard remains the source of truth. Herdr only reports live session health.
 
 ## Install
 
+Requires Node 24, Herdr 0.7.1 or newer, a Graphyard checkout, and GitHub CLI authenticated as an identity allowed to merge the protected base branch.
+
 Create a `coordinator` principal on the Graphyard server. From a clean coordinator checkout, list Herdr workspaces and bind the master to this repository's workspace:
 
 ```sh

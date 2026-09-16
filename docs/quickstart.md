@@ -4,7 +4,7 @@ Use this path to evaluate Graphyard on one machine. For a real repository and He
 
 ## Start Graphyard
 
-Requires Node 24, Docker Engine, and Docker Compose.
+Requires Node 24, Git, Docker Engine, and Docker Compose.
 
 ```sh
 git clone https://github.com/cryptob1/graphyard.git
