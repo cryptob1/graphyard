@@ -14,6 +14,7 @@ on:
         default: '1'
 permissions:
   contents: read
+  actions: read
 jobs:
   exercise:
     if: github.ref == 'refs/heads/main'
@@ -64,3 +65,4 @@ jobs:
           GRAPHYARD_PR: ${{ inputs.pr }}
           GRAPHYARD_WORK_ID: ${{ inputs.work_id }}
           GRAPHYARD_POLICY_REVISION: ${{ inputs.policy_revision }}
+          GITHUB_TOKEN: ${{ github.token }}

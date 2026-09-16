@@ -12,7 +12,7 @@ const metadata = JSON.parse(await readFile(metadataFile, 'utf8'));
 const scratch = await mkdtemp(join(tmpdir(), 'graphyard-acceptance-'));
 const suffix = randomBytes(6).toString('hex'), network = `gy-${suffix}`, db = `${network}-db`, app = `${network}-app`;
 const docker = (...args) => execFileSync('docker', args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
-let result = { ...metadata, schema: 1, proof: 'integration:claim-safety', result: 'fail', cases: requiredCases.map(id => ({ id, result: 'fail' })), executed: 0, skipped: 0 };
+let result = { ...metadata, schema: 1, proof: 'integration:claim-safety', result: 'fail', cases: requiredCases.map(id => ({ id, result: 'skipped' })), executed: 0, skipped: requiredCases.length };
 try {
   docker('network', 'create', network);
   docker('run', '-d', '--name', db, '--network', network, '--network-alias', 'database', '-e', 'POSTGRES_PASSWORD=acceptance-only', '-e', 'POSTGRES_DB=graphyard', 'postgres:17-alpine');
@@ -36,7 +36,7 @@ try {
   }
   if (!ready) throw new Error('Candidate did not become healthy');
   const cases = await exercise(url, principals);
-  result = { ...result, result: 'pass', cases, executed: cases.length }; console.log(`Trusted acceptance completed: ${cases.length} cases passed.`);
+  result = { ...result, result: 'pass', cases, executed: cases.length, skipped: 0 }; console.log(`Trusted acceptance completed: ${cases.length} cases passed.`);
 } catch { console.error('Trusted acceptance failed. No passing evidence was produced.'); process.exitCode = 1; }
 finally {
   // Do not print candidate logs: candidate-controlled output may contain test credentials.

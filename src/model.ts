@@ -40,6 +40,11 @@ export interface Evidence {
   producer: string; trusted: boolean; result: 'pass' | 'fail';
   executed: number; skipped: number; url?: string; at: string; expiresAt?: string;
   scenarioRevision?: number; environment?: string;
+  provenance?: {
+    provider: 'github-actions'; repository: string; workflowCommit: string;
+    runId: string; runAttempt: number;
+    artifact: { id: number; name: string; digest: string; url: string; createdAt: string };
+  };
   validation?: { candidateId: string; requestId: string; attemptId: string };
 }
 export interface ReviewRequest { commentId: number; sha: string; baseSha: string; policyRevision: number; body: string; createdAt: string }

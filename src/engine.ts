@@ -27,7 +27,11 @@ const commands = {
   workspace: z.object({ epoch, host: z.string().trim().min(1).max(200), path: z.string().startsWith('/').max(1000).refine(p => !/[\u0000-\u001f]/.test(p), 'Invalid path').transform(workspacePath), branch: z.string().max(200).refine(validBranch, 'Invalid Graphyard branch name') }).strict(),
   submit: z.object({ epoch, pr: z.number().int().positive() }).strict(),
   blocked: z.object({ epoch, reason: z.string().max(2000).nullable() }).strict(),
-  evidence: z.object({ proof: proofSchema, sha, baseSha: sha, policyRevision: z.number().int().positive(), result: z.enum(['pass', 'fail']), executed: z.number().int().min(0), skipped: z.number().int().min(0), url: z.string().url().max(2000).optional(), scenarioRevision: z.number().int().positive().optional(), environment: z.string().min(1).max(100).optional() }).strict(),
+  evidence: z.object({ proof: proofSchema, sha, baseSha: sha, policyRevision: z.number().int().positive(), result: z.enum(['pass', 'fail']), executed: z.number().int().min(0), skipped: z.number().int().min(0), url: z.string().url().max(2000).optional(), scenarioRevision: z.number().int().positive().optional(), environment: z.string().min(1).max(100).optional(), provenance: z.object({
+    provider: z.literal('github-actions'), repository: z.string().regex(/^[\w.-]+\/[\w.-]+$/), workflowCommit: sha,
+    runId: z.string().regex(/^[1-9]\d*$/), runAttempt: z.number().int().positive(),
+    artifact: z.object({ id: z.number().int().positive(), name: z.string().min(1).max(200), digest: z.string().regex(/^sha256:[a-f0-9]{64}$/), url: z.string().url().max(2000), createdAt: z.iso.datetime() }).strict(),
+  }).strict().optional() }).strict(),
 } as const;
 const mergeAcquireSchema = z.object({ expectedRevision: z.number().int().positive(), sha, baseSha: sha, policyRevision: z.number().int().positive() }).strict();
 const mergeCancelSchema = z.object({ executionId: z.string().uuid(), reason: z.string().trim().min(1).max(2000) }).strict();

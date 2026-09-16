@@ -49,9 +49,9 @@ By default the configured CI App ID is `15368`; verify the actual app IDs return
 
 ## Trusted test producers
 
-A green GitHub job does not prove every behavioral criterion. A dedicated producer reads the actual test report, verifies the code under test, and sends Graphyard evidence with its credential and an artifact link. Give it only the proof names it can produce.
+A green GitHub job does not prove every behavioral criterion. A dedicated producer reads the actual test report, verifies the code under test, and sends Graphyard evidence with its credential. Give it only the proof names it can produce. The included protected acceptance publisher also resolves its workflow invocation and its single, nonempty, unexpired artifact through GitHub's API. It preserves the workflow commit, run ID and attempt, candidate head/base, executed/skipped counts, and the artifact ID, name, digest, creation time, and authenticated archive URL in the evidence ledger. A missing digest, duplicate artifact, stale candidate, empty inventory, or skipped test refuses passing publication; a complete failed inventory is retained as failing evidence.
 
-Do not expose that credential to arbitrary PR code. Running untrusted code in a job that can read the producer secret lets that code forge evidence. Use a separately controlled reporter or trusted workflow and artifact verification appropriate to your threat model. This MVP authenticates producers; it does not implement GitHub OIDC attestations or cryptographically inspect uploaded artifacts.
+Do not expose that credential to arbitrary PR code. Running untrusted code in a job that can read the producer secret lets that code forge evidence. The `graphyard-reporting` environment must remain restricted to the default branch; the exercise job receives no producer token, and the publishing job checks out the default-branch reporter. Artifact metadata proves which GitHub object was consumed, not that candidate-authored report bytes are truthful. Keep the executable inventory and its assertions in the independently controlled harness, as the bundled acceptance workflow does. This MVP authenticates producers; it does not implement GitHub OIDC attestations or cryptographically inspect uploaded artifacts.
 
 ## Enforcement boundary
 
