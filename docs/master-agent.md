@@ -9,12 +9,13 @@ Graphyard remains the source of truth. Herdr only reports live session health.
 Create a `coordinator` principal on the Graphyard server. From a clean coordinator checkout, list Herdr workspaces and bind the master to this repository's workspace:
 
 ```sh
+export GRAPHYARD_CLI=/absolute/path/to/graphyard/bin/graphyard.mjs
 herdr workspace list
-graphyard master init \
+node "$GRAPHYARD_CLI" master init \
   --url https://YOUR-GRAPHYARD-HOST \
   --herdr-workspace HERDR_WORKSPACE_ID \
   --token-stdin
-graphyard master start codex
+node "$GRAPHYARD_CLI" master start codex
 ```
 
 Use `master start claude` if preferred. Setup preserves existing repository instructions and stores the coordinator token outside the repository.
@@ -32,8 +33,8 @@ Use a template:
 A launch profile points to a mode-0600 worker-token file outside every repository worktree:
 
 ```sh
-graphyard master worker add /path/to/profile.json
-graphyard master status
+node "$GRAPHYARD_CLI" master worker add /path/to/profile.json
+node "$GRAPHYARD_CLI" master status
 ```
 
 Provider login and Graphyard identity are separate. Profiles cannot contain Graphyard variables or secret-looking environment values.
@@ -43,10 +44,10 @@ Provider login and Graphyard identity are separate. Profiles cannot contain Grap
 ## Operate
 
 ```sh
-graphyard master status
-graphyard master dispatch GY-42 codex-primary
-graphyard master merge GY-42
-graphyard master merge --all
+node "$GRAPHYARD_CLI" master status
+node "$GRAPHYARD_CLI" master dispatch GY-42 codex-primary
+node "$GRAPHYARD_CLI" master merge GY-42
+node "$GRAPHYARD_CLI" master merge --all
 ```
 
 Run `status` at startup, after dispatch, when a worker reports completion, and when an integration event arrives. Owners, stages, refusals, and merge candidates come from Graphyard. Missing Herdr telemetry never erases an assignment.

@@ -48,7 +48,7 @@ Herdr is the first packaged runtime integration. Codex, Claude, OpenCode, custom
 
 ## Try it locally
 
-Requires Node 24, Git, and Docker.
+Requires Node 24, Git, Docker Engine, and Docker Compose.
 
 ```sh
 git clone https://github.com/cryptob1/graphyard.git
