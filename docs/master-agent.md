@@ -1,182 +1,100 @@
 # Master-agent operating mode
 
-Graphyard recommends one dedicated master agent when a repository has several coding agents. The master watches the engineering system, routes ready work, notices stalls, requests recovery, and performs routine merges after Graphyard authorizes the exact candidate. It does not write product code.
+The master is a dedicated coordinator session. It reads Graphyard, watches Herdr health, routes ready work, handles handoffs, and requests guarded merges. It does not implement work, hold worker leases, or produce evidence.
 
-This is an operating pattern, not a new source of truth. Graphyard owns work, dependencies, leases, evidence, and progression. Git owns code. GitHub owns pull-request and merge facts. Herdr owns visible sessions. The master joins these views and acts on them; it never keeps a parallel assignment ledger.
+Graphyard remains the source of truth. Herdr only reports live session health.
 
-## The first-run experience
+## Install
 
-The control-plane operator first creates a distinct `coordinator` principal in the server's private `GRAPHYARD_PRINCIPALS` value. A coordinator can read the authenticated control-plane APIs and acquire, verify, or cancel the engine's bounded merge execution authority. It cannot claim work, revise requirements, submit evidence, or exercise other operator powers.
-
-From the repository to be managed:
+Create a `coordinator` principal on the Graphyard server. From a clean coordinator checkout:
 
 ```sh
-node /absolute/path/to/graphyard/bin/graphyard.mjs master init \
+graphyard master init \
   --url https://YOUR-GRAPHYARD-HOST \
-  --herdr-workspace YOUR_HERDR_WORKSPACE_ID \
   --token-stdin
-```
-
-Paste or pipe the coordinator token, then EOF. Setup verifies the token and GitHub repository before writing anything. It:
-
-- discovers the repository and proposed checks;
-- preserves existing `AGENTS.md` content and installs managed worker and master sections;
-- writes non-secret repository routing settings to ignored `.graphyard/master.json` and the coordinator token to a mode-0600 file under the operator's Graphyard configuration directory, outside the managed repository;
-- enables exact-candidate routine merging by default;
-- prints the next setup action without printing a credential.
-
-Commit the managed `AGENTS.md` update. Never commit `.graphyard/`. Rerun setup after moving the Graphyard CLI. Set `--herdr-workspace` to the workspace ID shown by `herdr workspace list`; Graphyard passes it explicitly to every master and worker `tab create`, so a different currently focused repository cannot capture the launch. Existing configurations without this setting retain Herdr's default routing until setup is rerun. Use `--host-id` to set the stable identity of this worker machine, `--no-auto-merge` for teams that want the coordinator to wait for an operator before every otherwise-routine merge, or `--merge-method squash|rebase` to change the normal merge method. With automatic merge disabled, the operator runs `graphyard master merge GY-N`; this still acquires and verifies bounded authority and is the supported manual approval path. A direct GitHub merge remains unauthorized.
-
-Launch the dedicated visible coordinator after setup:
-
-Setup refuses a server that differs from the repository's existing worker connection. Migrate that connection deliberately before switching control planes. Master status displays the automatic-merge preference, and the startup prompt tells the coordinator to wait for operator approval when automatic merging is disabled.
-
-```sh
 graphyard master start codex
-# or: graphyard master start claude
 ```
 
-This creates a non-focused Herdr tab in the configured workspace, reads the native `tab_created.root_pane.pane_id` response (while retaining supported legacy response shapes), starts the selected agent, and prompts it to read the managed instructions, print the packaged guide, and inspect live status. A malformed creation response fails startup and Graphyard closes the identified tab before returning, polling the Herdr inventory for bounded confirmation when removal is asynchronous. Provider-specific arguments may follow `--`. Setup and start do not create worker assignments.
+Use `master start claude` if preferred. Setup preserves existing repository instructions and stores the coordinator token outside the repository.
 
-## Add workers
+Run the coordinator under a dedicated OS identity or machine. Implementation agents running as the same OS user may read its GitHub CLI credentials; Graphyard tokens cannot create a filesystem boundary.
 
-Each concurrent worker needs its own Graphyard `worker` principal. Agent-provider login and Graphyard identity are separate concerns.
+## Add a worker
 
-An already-running, already-authenticated Herdr agent can be registered for health and assignment observation without storing its credential in the master configuration:
+Use a template:
 
-```json
-{
-  "name": "codex-existing",
-  "principal": "worker-codex-1",
-  "agentName": "eng-codex-1",
-  "mode": "existing"
-}
-```
+- [Codex](../examples/master/codex-worker.json)
+- [Claude](../examples/master/claude-worker.json)
+- [existing session](../examples/master/existing-worker.json)
 
-A master can also launch a visible agent. Put that worker's Graphyard token alone in a local mode-0600 file outside every linked worktree of the managed repository, then reference the path:
-
-```json
-{
-  "name": "claude-primary",
-  "principal": "worker-claude-1",
-  "agentName": "eng-claude-1",
-  "mode": "launch",
-  "kind": "claude",
-  "credentialFile": "/home/operator/.config/graphyard/workers/claude-1.token",
-  "agentArgs": [],
-  "environment": {
-    "CLAUDE_CONFIG_DIR": "/home/operator/.config/claude-primary"
-  }
-}
-```
-
-Add either profile with:
+A launch profile points to a mode-0600 worker-token file outside every repository worktree:
 
 ```sh
 graphyard master worker add /path/to/profile.json
-```
-
-Copyable starter profiles are available for a [Codex worker](../examples/master/codex-worker.json), [Claude worker](../examples/master/claude-worker.json), and [existing Herdr session](../examples/master/existing-worker.json). Replace principal IDs, agent names, credential paths, and provider-specific directories for the installation. The templates contain no credentials.
-
-For launch profiles, Graphyard verifies the credential is a worker token for the stated principal. The explicit `GRAPHYARD_TOKEN_FILE` supplied to that session takes precedence over ambient `GRAPHYARD_TOKEN` values and repository `.env` files, preventing a coordinator or operator shell identity from leaking into worker actions. Provider/account routing uses the agent kind, arguments, and non-secret profile locators in `environment`. All `GRAPHYARD_` keys and keys that look like passwords, tokens, private keys, or API credentials are rejected; the launcher owns its control variables. Authenticate Codex, Claude, or another runtime locally using its normal login flow; do not copy provider secrets into the profile.
-
-Existing profiles are suitable for joining Herdr health to work the session already owns. Graphyard deliberately refuses to dispatch new work into an existing interactive process because it cannot retroactively make that process a child of the lease supervisor. Use a launch profile for new assignments. The worker launch wrapper's Graphyard claim is the authoritative identity check.
-
-## Operating loop
-
-Run this when the master starts, after dispatch, when a worker reports completion, and whenever an integration event arrives:
-
-```sh
 graphyard master status
 ```
 
-Every master command revalidates the configured coordinator role, repository, managed base branch, and GitHub App identity against the live control plane. If the binding changes, it refuses and asks the operator to rerun `master init` before any routing or merge action. Master commands resolve only the dedicated coordinator configuration and credential; malformed or unavailable worker connection state and unrelated worker token files in the surrounding shell cannot disable them.
+Provider login and Graphyard identity are separate. Profiles cannot contain Graphyard variables or secret-looking environment values.
 
-The report reads one Graphyard work snapshot and joins configured Herdr sessions by agent name. Its owners, stages, refusals, and merge candidates come only from Graphyard. A missing or stopped session is attention, not proof that an assignment disappeared. A visible session is health information, not proof that it owns work.
+`launch` profiles are supervised and can receive new work. `existing` profiles add health visibility for a session that already owns work; Graphyard will not inject a new assignment into an unsupervised process.
 
-For a ready item:
-
-```sh
-graphyard master dispatch GY-42 claude-primary
-```
-
-Dispatch uses the same claimability rules as the control plane: the work must be released, unblocked, dependency-safe, resource-safe, and unowned, with no prior submission unless an operator explicitly requested rework. This permits the documented recovery handoff even though preserved submission history keeps its display stage at Build. Dispatch refuses existing-session profiles. For new work, a launch profile's worker-scoped launcher fetches and resolves the current managed base branch, claims immediately before launch, and creates the assigned worktree from that exact base. For rework, it instead fetches the preserved PR branch, verifies its head against Graphyard's observation, detaches any stopped local checkout that still holds the branch so its historical HEAD and files remain stable, and opens a fresh checkout of that branch. It then creates a non-focused visible tab in the explicitly configured Herdr workspace, accepts the native `tab_created.root_pane.pane_id` response and supported legacy shapes, and runs the coding agent as a child of `graphyard watch`. In Herdr, the child remains in the pane's foreground process group so native detection and prompting work; the supervisor explicitly terminates the complete child process tree on lease loss. Outside Herdr, the existing detached process-group containment remains in use. The master requires Herdr to report the supervised agent as ready before it names and prompts it; a raw pane is not accepted as detection. If tab creation returns a malformed response, Graphyard closes the identified tab before releasing the lease. If creation, detection, naming, or prompt delivery otherwise fails, dispatch closes the pane, confirms it is absent from Herdr, and releases that exact lease epoch. If shutdown cannot be confirmed, the lease remains held so another worker cannot overlap the possibly live process. Prompt delivery itself never becomes ownership.
-
-An operator may set `GRAPHYARD_REQUEST_ID` to retry the outer dispatch command. The launcher removes that key from the worker environment so claim, workspace registration, heartbeat, submission, and cleanup remain separate idempotent mutations.
-
-Watch records an epoch-bound durable launch acknowledgement before final contained process creation. The returned acknowledgement must still name the authenticated worker and exact lease epoch, and both its lease and 120-second launch authority must have enough server-reported lifetime remaining to cover the request's monotonic elapsed time. Rework cannot clear the launch fence while its lease is live, including while the acknowledgement response is in flight, eliminating the stale response-to-spawn race. Failed, delayed, replayed, or ambiguous acknowledgement never spawns; after lease and launch-authority expiry, stopped-supervisor recovery remains available through the operator attestation.
-
-The master then watches for:
-
-- ready work with no suitable idle worker;
-- active leases whose configured session is offline or blocked;
-- context pressure that needs a deliberate handoff;
-- gate refusals with a concrete next action;
-- submitted work that needs an operator-authorized rework;
-- merge-authorized candidates.
-
-If Herdr is unavailable, `master status` still returns the Graphyard work snapshot and marks Herdr health unavailable. Runtime telemetry may disappear; ownership, gate, and progression truth do not.
-If one launch profile's credential is missing, insecure, or temporarily unmounted, status marks that worker credential unavailable without disabling coordinator status or routine merges. Dispatch validates the selected worker immediately before claiming work.
-
-The master does not clear blockers or revise intent on its own. It asks the operator for a narrow decision when requirements, human acceptance, destructive operations, or policy changes are involved.
-
-## Routine merges
+## Operate
 
 ```sh
+graphyard master status
+graphyard master dispatch GY-42 codex-primary
 graphyard master merge GY-42
 graphyard master merge --all
 ```
 
-`--all` processes only candidates with a current all-gates-passing authorization. It records a per-item refusal and continues if a selected candidate changes during its final checks. A stale, changed, or refusing item remains visible in status but does not prevent another authorized item from merging.
+Run `status` at startup, after dispatch, when a worker reports completion, and when an integration event arrives. Owners, stages, refusals, and merge candidates come from Graphyard. Missing Herdr telemetry never erases an assignment.
 
-For every candidate, the command requires:
+Dispatch:
 
-1. stage `merge` and every Graphyard gate passing;
-2. no recorded violation;
-3. a merge authorization matching head SHA, base SHA, and policy revision;
-4. a fresh Graphyard observation, evaluated against the database time in the snapshot;
-5. a GitHub read that sees the same head, base commit, and managed base-branch name on an open, non-draft PR;
-6. a second Graphyard snapshot with the same work revision, fresh observation, and authorization;
-7. a server-issued, coordinator-owned, single-use merge execution that freezes gate-affecting work, evidence, validation, and observation mutations for the bounded merge attempt, while allowing the assigned worker's existing lease supervisor to keep heartbeating, expires no later than its required evidence or observation, and refuses inputs without enough remaining lifetime for the provider timeout;
-8. a second GitHub read after authority acquisition with the same head, base commit, and managed base-branch name;
-9. a fresh branch-protection read that still requires strict checks, enforced administration, the Graphyard App's own merge check, no force pushes or deletion, and the configured native review rules when applicable;
-10. a transactional, idempotent Graphyard App verification that re-reads and re-evaluates every mutable GitHub gate, including configured CI producer results, review state, Codex review evidence, mergeability, and branch protection, against the active execution and durably records the final verification without advancing lifecycle state;
-11. a server-derived wait combined with GitHub's authenticated `Date` response, followed by a second execution-lifetime check, so database, host, and GitHub clock skew cannot shorten the interval and Graphyard can prove final verification preceded GitHub's whole-second merge interval;
-12. GitHub's merge API with the authorized head SHA and normal branch protection. Queue enrollment is treated as a refusal because it cannot complete inside the bounded authority window.
+1. verifies the item is claimable;
+2. authenticates the selected worker profile;
+3. fetches the current base;
+4. claims under the worker's identity;
+5. creates the assigned worktree;
+6. launches the agent under `graphyard watch`;
+7. cleans up and releases only when failed launch shutdown is confirmed.
 
-It never uses `--admin`. A human approval represented as required evidence remains a refusing gate until supplied. If GitHub explicitly reports that it did not merge, the master cancels the execution authority; that cancelled attempt cannot authorize a later merge, and retrying requires a new execution. A timeout, lost response, or malformed response has an unknown outcome, so the authority stays active until Graphyard observes the matching merge or the bounded execution expires. The command prints its outer request ID, which derives stable keys for acquire, verify, and cancel; pass that value as `GRAPHYARD_REQUEST_ID` when retrying an uncertain command. Replaying an acquisition or uncommitted verification safely resumes the same authority. If the snapshot shows that final verification was already committed, the master does not repeat the possibly attempted provider call; it waits for reconciliation or expiry. After the merge command succeeds, the item is still not declared Done by the master; Graphyard keeps the authority active until it observes a matching merge whose provider timestamp proves it occurred after final verification and before the execution and required evidence expired. Whole-second provider timestamps are treated as intervals: authority and evidence must remain valid through the full reported second, and a cancellation anywhere in that interval refuses delivery. An unverified, earlier, late, cancelled, or ambiguously ordered merge remains a visible violation.
+Prompt delivery is an invitation, not ownership.
 
-Only the coordinator that acquired an execution may cancel it. Periodic GitHub reconciliation defers without publishing a failing required check while that execution is active, including a reconciliation read that began before acquisition and became stale during its provider call. A webhook generation change still wakes reconciliation immediately so an observed matching merge can complete the item. Cancelling an execution also wakes the durable job immediately instead of waiting for the cancelled deadline.
+## Secure multi-machine topology
 
-The present command uses the local authenticated GitHub CLI for the final provider action. Graphyard's transactional execution authority closes the control-plane mutation race around that external call without holding a database transaction open during network I/O.
+The recommended boundary is:
 
-Final verification compares two complete GitHub observations and refuses changed gate inputs. It also brackets a GitHub server-time request with database clock reads, records a bounded clock offset on the execution, and translates the entire merge timestamp interval to database time before checking verification, cancellation, evidence, and execution deadlines. Missing or overly uncertain clock measurements refuse verification. This assumes neither provider nor database clock jumps during the bounded execution; arbitrary clock discontinuities and changes after the final provider read cannot be eliminated by polling across independent systems.
+- master and merge-capable GitHub CLI on a coordinator machine or OS identity;
+- workers on separate machines or identities;
+- worker GitHub credentials can push and open PRs but cannot merge the protected branch.
 
-## Handoffs and recovery
+Version 0.1 cannot remotely launch a supervised Herdr tab on another host. The master selects the item; the remote worker claims it through its local plugin or CLI. Local launch profiles are for trusted dogfooding or a real isolation boundary.
 
-Provider changes, account quota changes, machine changes, and context-window replacement all use the same recovery model:
+## Guarded merges
 
-1. stop the previous worker and its supervisor;
-2. let the lease expire or release it explicitly;
-3. have an operator request rework when implementation was already submitted;
-4. dispatch a different profile;
-5. let that worker claim a higher epoch and register a fresh workspace;
-6. preserve the earlier worktree and events for audit.
+A master merge succeeds only when Graphyard has a current authorization for the exact PR head, base, and policy. Immediately before the GitHub call, Graphyard rechecks:
 
-The master may summarize a handoff in the work item or PR, but Graphyard state and Git history remain the proof. Never share one worker token across concurrent sessions. On multiple machines, use distinct principals and stable host IDs, and keep credential files local to the machine that launches that worker.
+- every gate and current evidence;
+- PR head, base, draft state, and mergeability;
+- CI producer identity and current-head review;
+- strict branch protection and the App-owned required check;
+- a short-lived, single-use merge execution.
 
-The coordinator token has only read and bounded merge-execution authority and is stored outside the repository. File modes do not isolate processes running as the same OS user. Run the master under a separate OS account or on a dedicated coordination machine when implementation agents are not trusted with same-user filesystem visibility. Graphyard's gates and GitHub protection remain the merge authority even for trusted same-machine workers; the master token cannot claim work, revise requirements, or submit evidence.
+The command never uses an admin bypass. Graphyard marks Done only after independently observing the matching merge. Direct or late merges remain visible violations.
 
-## Recommended boundaries
+Use `master init --no-auto-merge` when an operator must approve each merge request. This preference does not weaken the checks.
 
-Use the master for observation, capacity routing, stall detection, handoffs, and routine exact-candidate merges. Keep these authorities separate:
+For the full correctness model, see [GitHub enforcement](github.md) and [architecture](architecture.md).
 
-| Identity | Allowed responsibility |
-| --- | --- |
-| `coordinator` | Read work truth, route Herdr sessions, acquire/verify/cancel bounded merge execution, invoke the exact-head provider call |
-| `worker` | Claim, heartbeat, register its workspace, implement, block, submit assertions |
-| `producer` | Submit only its configured trusted proofs |
-| `admin` | Define/revise intent, release work, authorize rework, supply manual evidence |
-| `reader` | Inspect state |
+## Recovery
 
-For a single task or initial bootstrap, one supervised worker remains supported. Add a dedicated master when concurrency makes work discovery, recovery, and merge follow-through a recurring responsibility.
+For a dead worker or provider change:
+
+1. stop the old worker and supervisor;
+2. release or let the lease expire;
+3. request operator rework if a candidate was already submitted;
+4. claim with the replacement worker at a higher epoch;
+5. create a fresh workspace and preserve the old attempt.
+
+The master does not clear blockers, revise requirements, or satisfy human gates on its own. See [operations](operations.md) for recovery commands.

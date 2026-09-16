@@ -43,6 +43,7 @@ jobs:
         with: { node-version: '24', cache: npm }
       - run: npm ci
       - run: npm run build
+      - run: npm run docs:check
   test:
     runs-on: ubuntu-latest
     steps:
