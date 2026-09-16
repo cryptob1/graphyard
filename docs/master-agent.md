@@ -41,6 +41,8 @@ Provider login and Graphyard identity are separate. Profiles cannot contain Grap
 
 `launch` profiles are supervised and can receive new work. `existing` profiles add health visibility for a session that already owns work; Graphyard will not inject a new assignment into an unsupervised process.
 
+Local dispatch requires Linux with a working systemd user manager for durable containment. On macOS or Linux without user systemd, route work to a separately supervised remote worker instead.
+
 ## Operate
 
 ```sh
