@@ -73,7 +73,7 @@ Released and expired assignments are described as no longer authoritative; the U
 
 ## Two-machine operational drill
 
-Run this with two real hosts, two distinct worker principals, and an operator. Isolated tests using independent connection pools are useful but are **not** evidence that this drill ran.
+Run this with two real hosts, two distinct worker principals, and an operator. Isolated tests using independent connection pools are useful but are **not** evidence that this drill ran. The trusted [`integration:herdr-recovery` contract](herdr.md#automated-recovery-contract) proves the same refusals automatically, but it is evidence about the coordination API, not about two real hosts.
 
 1. Connect both hosts with `graphyard init --herdr --token-stdin`; check distinct host IDs and principal IDs. Keep operator and producer credentials off both worker environments.
 2. Create a small real work item with a repository test as its acceptance proof. Concurrently claim it from both hosts. Record one winner and one refusal, then register the winner's worktree.

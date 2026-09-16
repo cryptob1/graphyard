@@ -76,4 +76,22 @@ Before scaling:
 4. submit stale evidence and confirm acceptance stays closed;
 5. supply current review and proof, merge through the master, and observe Done.
 
+## Automated recovery contract
+
+`integration:herdr-recovery` is the trusted contract behind steps 1 to 3 of that check. It runs from protected source in `scripts/herdr-recovery-contract.mjs` against a candidate container that holds no producer credential, and it drives only the public HTTP API with the identities Graphyard authenticates: two worker principals, two host IDs, and two non-overlapping worktree reservations.
+
+Its fixed inventory is:
+
+| Case | What it establishes |
+| --- | --- |
+| `exclusive-claim` | Sixteen concurrent claims from two machine identities produce one lease and one claim event. |
+| `expiry-recovery` | The lease expires without a heartbeat, the stopped machine cannot renew it, and the second machine claims the next epoch. |
+| `stale-owner-refused` | Heartbeat, release, workspace, submit, blocked, quarantine, launch, and a fresh claim all refuse for the superseded owner. |
+| `isolated-worktrees` | The replacement cannot reserve the stopped machine's branch or an overlapping path, registers its own worktree, and the earlier reservation is retained. |
+| `supervised-fence-recovery` | A supervised worker that quarantined containment and stopped without settling keeps the item fenced until operator rework; afterwards its settlement capability no longer applies and the second machine owns the work. |
+
+The contract waits on the lease and launch fences the candidate itself reports, measured by the candidate's clock, so it exercises the shipped two-minute defaults rather than a test-only timeout. Dispatch it as described in [repository bootstrap](first-pr.md#bootstrap-sequence).
+
+This proves the control-plane contract for cross-machine recovery. It does not start Herdr, does not run two physical hosts, and does not prove that a disconnected agent process stopped. The [two-machine operational drill](coordination.md#two-machine-operational-drill) remains the procedure for real hosts, and [operations](operations.md#lost-worker-before-submission) covers recovery in production.
+
 For exact API behavior, read the [agent protocol](protocol.md). For the complete installation path, read [onboarding](onboarding.md).

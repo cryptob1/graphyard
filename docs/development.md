@@ -11,7 +11,7 @@
 | `src/server.ts` | HTTP authentication, validation, webhook, static UI, worker loop |
 | `src/cli.ts` | Worker protocol, local worktrees, process supervision |
 | `src/onboarding.ts`, `src/github-setup.ts` | Repository discovery and local GitHub App registration |
-| `scripts/*acceptance*.mjs` | Protected HTTP contract harness and separate evidence publisher |
+| `scripts/contracts.mjs`, `scripts/*contract*.mjs`, `scripts/*acceptance*.mjs` | Trusted contract registry, protected HTTP harnesses, and separate evidence publisher |
 | `web/` | React graph, board, work form, details and history |
 | `integrations/herdr/` | Native Herdr ledger pane and open action |
 | `tests/` | Real Postgres integration and HTTP tests |
@@ -25,7 +25,9 @@ npm run build
 npm test
 ```
 
-The tests run isolated Postgres on port 15438, with a temporary database directory. Override `GRAPHYARD_TEST_PORT` if needed. Do not point tests at production. Tests start local processes and sockets, so a restricted execution sandbox may require explicit local-network permission. Run as a non-root user; the test runtime does not create system users.
+The tests run isolated Postgres on ports 15438 to 15440, with temporary database directories. Override `GRAPHYARD_TEST_PORT` to move the whole range, or `GRAPHYARD_VALIDATION_TEST_PORT` and `GRAPHYARD_RECOVERY_TEST_PORT` individually. Do not point tests at production. Tests start local processes and sockets, so a restricted execution sandbox may require explicit local-network permission. Run as a non-root user; the test runtime does not create system users.
+
+The cross-machine recovery suite shortens the lease and launch fences of its own engine instance so the protected recovery contract runs unchanged in seconds; the shipped defaults stay in `src/engine.ts` and in CI's container jobs.
 
 Test behavioral invariants, not implementation details: conflicting claims, stale epochs, replayed requests, missing/skipped/stale evidence, authenticated producer scope, external observation races, and side-effect retries. Keep GitHub calls outside domain transactions. A UI change must not introduce an arbitrary state-write endpoint.
 

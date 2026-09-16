@@ -55,7 +55,8 @@ function preserveAssignment(work: Work) {
 }
 export class Engine {
   operatorAuthorizer?: (db: any, now: Date, actor: Principal) => Promise<Principal>;
-  constructor(public store: Store, public ciAppIds: number[] = [15368], public leaseSeconds = 120, public repository = process.env.GITHUB_REPOSITORY ?? '') {}
+  // The launch fence is a deployment-independent safety default; only tests shorten it.
+  constructor(public store: Store, public ciAppIds: number[] = [15368], public leaseSeconds = 120, public repository = process.env.GITHUB_REPOSITORY ?? '', public launchFence = launchFenceMs) {}
   async execute(actor: Principal, command: Command, id: string | null, input: unknown, key: string) {
     demand(Object.hasOwn(commands, command), 'Unknown command', 404);
     demand(key && key.length <= 200, 'An Idempotency-Key is required', 400);
@@ -206,7 +207,7 @@ export class Engine {
           && work.containmentQuarantine.settlementHash === data.settlementHash,
         'Containment quarantine is missing, superseded, or does not match this launch');
         work.containmentQuarantine.launchAcknowledgedAt ??= now.toISOString();
-        work.containmentQuarantine.launchExpiresAt ??= new Date(now.getTime() + launchFenceMs).toISOString();
+        work.containmentQuarantine.launchExpiresAt ??= new Date(now.getTime() + this.launchFence).toISOString();
       }
       if (command === 'settle') {
         demand(actor.role === 'worker' && work.containmentQuarantine?.owner === actor.id && work.containmentQuarantine.epoch === data.epoch,

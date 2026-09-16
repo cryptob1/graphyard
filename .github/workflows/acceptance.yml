@@ -12,13 +12,22 @@ on:
         description: Required policy revision
         required: true
         default: '1'
+      proof:
+        description: Trusted contract to execute
+        required: true
+        type: choice
+        default: integration:claim-safety
+        options:
+          - integration:claim-safety
+          - integration:herdr-recovery
 permissions:
   contents: read
 jobs:
   exercise:
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    # Recovery contracts wait out the candidate's real lease and launch fences.
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
         with: { ref: '${{ github.sha }}', persist-credentials: false }
@@ -34,7 +43,9 @@ jobs:
       - name: Build isolated candidate
         run: docker build --tag graphyard-acceptance candidate
       - name: Execute protected HTTP contract against candidate
-        run: node scripts/run-acceptance.mjs candidate.json graphyard-acceptance acceptance.json
+        run: node scripts/run-acceptance.mjs candidate.json graphyard-acceptance acceptance.json "$GRAPHYARD_PROOF"
+        env:
+          GRAPHYARD_PROOF: ${{ inputs.proof }}
       - uses: actions/upload-artifact@v4
         if: always() && hashFiles('acceptance.json') != ''
         with:
@@ -64,3 +75,4 @@ jobs:
           GRAPHYARD_PR: ${{ inputs.pr }}
           GRAPHYARD_WORK_ID: ${{ inputs.work_id }}
           GRAPHYARD_POLICY_REVISION: ${{ inputs.policy_revision }}
+          GRAPHYARD_PROOF: ${{ inputs.proof }}
