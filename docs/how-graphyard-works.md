@@ -31,7 +31,7 @@ Every box is a checkpoint. A blocked box explains what is missing; it is not an 
 
 ## Who does what
 
-In this installation, the operational roles below are separate **AI-agent duties**. The human user supplies goals and oversight, but is not expected to manually perform the Operator, Master, Worker, or Reviewer/proof-producer roles.
+After the initial single-agent bootstrap is complete and Graphyard's gates are active, the operational roles below are separate **AI-agent duties** in this installation. During bootstrap, one agent works under operator supervision to connect the repository and activate its gates; do not launch the additional operational agents before that boundary is established. The human user supplies goals and oversight, but is not expected to manually perform the Operator, Master, Worker, or Reviewer/proof-producer roles.
 
 | AI-agent duty | Responsible for | Boundary |
 | --- | --- | --- |
@@ -40,7 +40,7 @@ In this installation, the operational roles below are separate **AI-agent duties
 | **Worker agent** | Claims under its own identity; uses the assigned worktree; builds, tests, opens the PR, and submits the candidate. | Must stop after lease loss. Never receives operator or trusted evidence-producer credentials, cannot self-review, and cannot change requirements merely to pass. |
 | **Reviewer/proof-producer agent** | Independently reviews the candidate or runs an approved proof and reports evidence for its allowlisted proof name. | Does not inherit trust from the worker. Evidence must match the exact candidate and requirements; it cannot authorize unrelated work. |
 
-Even when agents share an underlying provider or account, separation is enforced by identities, credentials, authority, and independent sessions. An implementation session never becomes an operator or trusted evidence producer just because it ran a test. Graphyard remains the source of ownership and progression truth: CI, trusted evidence, independent review, and the merge gate decide progression, and no client-controlled lifecycle-state bypass exists.
+Even when agents share an underlying provider or account, Graphyard enforces separation through authenticated principal identities, scoped credentials, and authority checks. The runtime and deployment must run these duties in independent sessions—for example, under Herdr session supervision—but Graphyard does not verify that runtime isolation. An implementation session never becomes an operator or trusted evidence producer just because it ran a test. Graphyard remains the source of ownership and progression truth: CI, trusted evidence, independent review, and the merge gate decide progression, and no client-controlled lifecycle-state bypass exists.
 
 ## Graphyard and Herdr answer different questions
 
