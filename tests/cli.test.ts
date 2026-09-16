@@ -41,15 +41,38 @@ test('quarantine establishment never confirms a mismatched fence or retries a se
 
 test('launch acknowledgement reconciles a committed lost response with one durable request', async () => {
   const credentials = containmentCredentials();
-  const expected = { epoch: 7, settlementHash: credentials.settlementHash, exclusiveResources: ['staging'], requestId: credentials.requestId };
+  const expected = { principal: 'worker-a', epoch: 7, settlementHash: credentials.settlementHash, exclusiveResources: ['staging'], requestId: credentials.requestId };
   const keys: string[] = []; let calls = 0;
-  const acknowledged = { updatedAt: '2030-01-01T00:00:00Z', exclusiveResources: ['staging'], containmentQuarantine: { epoch: 7, settlementHash: credentials.settlementHash, launchAcknowledgedAt: '2030-01-01T00:00:00Z', launchExpiresAt: '2030-01-01T00:02:00Z' } };
+  const acknowledged = { updatedAt: '2030-01-01T00:00:00Z', lease: { owner: 'worker-a', epoch: 7, expiresAt: '2030-01-01T00:01:00Z' }, exclusiveResources: ['staging'], containmentQuarantine: { epoch: 7, settlementHash: credentials.settlementHash, launchAcknowledgedAt: '2030-01-01T00:00:00Z', launchExpiresAt: '2030-01-01T00:02:00Z' } };
   const result = await acknowledgeContainment(async key => {
     keys.push(key);
     if (++calls === 1) throw new TypeError('response lost after commit');
     return acknowledged;
   }, expected, { attempts: 2, retryMs: 0 });
   assert.equal(result, acknowledged); assert.deepEqual(keys, [expected.requestId, expected.requestId]);
+});
+
+test('launch acknowledgement binds owner and epoch and requires lease lifetime through response arrival', async () => {
+  const credentials = containmentCredentials();
+  const expected = { principal: 'worker-a', epoch: 17, settlementHash: credentials.settlementHash, exclusiveResources: [], requestId: credentials.requestId };
+  const healthy = { updatedAt: '2030-01-01T00:00:00.000Z', lease: { owner: 'worker-a', epoch: 17, expiresAt: '2030-01-01T00:00:01.000Z' }, exclusiveResources: [], containmentQuarantine: { epoch: 17, settlementHash: credentials.settlementHash, launchAcknowledgedAt: '2030-01-01T00:00:00.000Z', launchExpiresAt: '2030-01-01T00:02:00.000Z' } };
+  for (const response of [
+    { ...healthy, lease: { ...healthy.lease, owner: 'worker-b' } },
+    { ...healthy, lease: { ...healthy.lease, epoch: 16 } },
+  ]) await assert.rejects(acknowledgeContainment(async () => response, expected, { attempts: 1 }), /mismatched/);
+  for (const [expiresAt, elapsed] of [['2030-01-01T00:00:00.000Z', 0], ['2030-01-01T00:00:01.000Z', 1000]] as const) {
+    let monotonic = 0;
+    await assert.rejects(acknowledgeContainment(async () => { monotonic = elapsed; return { ...healthy, lease: { ...healthy.lease, expiresAt } }; }, expected,
+      { attempts: 1, monotonicNow: () => monotonic }), /worker lease expired/);
+  }
+  let monotonic = 0;
+  const result = await acknowledgeContainment(async () => { monotonic = 999; return healthy; }, expected, { attempts: 1, monotonicNow: () => monotonic });
+  assert.equal(result, healthy);
+  monotonic = 0;
+  await assert.rejects(acknowledgeContainment(async () => {
+    monotonic = 120_000;
+    return { ...healthy, lease: { ...healthy.lease, expiresAt: '2030-01-01T00:03:20.000Z' } };
+  }, expected, { attempts: 1, monotonicNow: () => monotonic }), /launch authority expired/);
 });
 
 test('fresh prelaunch state rejects stale receipt replay, expiry, workspace and resource mutation', () => {

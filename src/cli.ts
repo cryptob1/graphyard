@@ -320,7 +320,7 @@ Never share an operator or producer credential with an implementation agent.`); 
           }),
           acknowledge: () => acknowledgeContainment(
             requestId => api(`work/${work.id}/launch`, { epoch, settlementHash: containment!.settlementHash }, requestId),
-            { epoch, settlementHash: containment!.settlementHash, exclusiveResources, requestId: launchRequestId },
+            { principal: workerStatus.actor.id, epoch, settlementHash: containment!.settlementHash, exclusiveResources, requestId: launchRequestId },
           ),
           settle: () => settleContainment(
             (requestId, body) => api(`work/${work.id}/settle`, body, requestId),

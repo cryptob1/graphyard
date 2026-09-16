@@ -119,10 +119,11 @@ test('transactional launch acknowledgement races rework without a stale start or
       { containment, detached: false, graceMs: 1, quarantine: {
         establish: async () => {}, revalidate: async () => {},
         acknowledge: () => acknowledgeContainment(async () => {
+          await store.pool.query("UPDATE work_items SET document=jsonb_set(document,'{lease,expiresAt}',to_jsonb((clock_timestamp() + interval '1 second')::text)) WHERE id=$1", [w.id]);
           const result = await engine.execute(worker, 'launch', w.id, { epoch: 1, settlementHash }, randomUUID());
           acknowledgementCommitted(); await responseGate;
           return result; // committed response held beyond both server deadlines
-        }, { epoch: 1, settlementHash, exclusiveResources: [], requestId: randomUUID() }, { attempts: 1, monotonicNow: () => monotonic }),
+        }, { principal: worker.id, epoch: 1, settlementHash, exclusiveResources: [], requestId: randomUUID() }, { attempts: 1, monotonicNow: () => monotonic }),
         settle: () => engine.execute(worker, 'settle', w.id, { epoch: 1, settlementToken }, randomUUID()),
       } });
     await committed;
@@ -133,8 +134,8 @@ test('transactional launch acknowledgement races rework without a stale start or
     await store.pool.query("UPDATE work_items SET document=jsonb_set(document,'{containmentQuarantine,launchExpiresAt}',to_jsonb('2000-01-01T00:00:00Z'::text)) WHERE id=$1", [w.id]);
     w = await engine.execute(operator, 'rework', w.id, { reason: 'bounded fence expired and supervisor is stopped', previousWorkerStopped: true }, randomUUID());
     assert.equal((await engine.execute(other, 'claim', w.id, {}, randomUUID())).epoch, 2);
-    monotonic = 121_000; releaseResponse();
-    await assert.rejects(running, /launch authority expired/);
+    monotonic = 1_001; releaseResponse();
+    await assert.rejects(running, /worker lease expired/);
     await assert.rejects(stat(marker), { code: 'ENOENT' }, 'stale ACK response must never spawn after recovery');
   } finally { releaseResponse(); await rm(dir, { recursive: true, force: true }); }
 });

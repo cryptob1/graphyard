@@ -104,7 +104,7 @@ Dispatch uses the same claimability rules as the control plane: the work must be
 
 An operator may set `GRAPHYARD_REQUEST_ID` to retry the outer dispatch command. The launcher removes that key from the worker environment so claim, workspace registration, heartbeat, submission, and cleanup remain separate idempotent mutations.
 
-Watch records an epoch-bound durable launch acknowledgement before final contained process creation. Rework cannot clear that fence while its lease is live, including while the acknowledgement response is in flight, eliminating the stale response-to-spawn race. Failed or ambiguous acknowledgement never spawns; after lease expiry, stopped-supervisor recovery remains available through the operator attestation.
+Watch records an epoch-bound durable launch acknowledgement before final contained process creation. The returned acknowledgement must still name the authenticated worker and exact lease epoch, and both its lease and 120-second launch authority must have enough server-reported lifetime remaining to cover the request's monotonic elapsed time. Rework cannot clear the launch fence while its lease is live, including while the acknowledgement response is in flight, eliminating the stale response-to-spawn race. Failed, delayed, replayed, or ambiguous acknowledgement never spawns; after lease and launch-authority expiry, stopped-supervisor recovery remains available through the operator attestation.
 
 The master then watches for:
 

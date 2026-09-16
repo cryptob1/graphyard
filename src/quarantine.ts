@@ -70,7 +70,7 @@ export async function establishContainment(
 
 export async function acknowledgeContainment(
   mutate: (requestId: string) => Promise<any>,
-  expected: { epoch: number; settlementHash: string; exclusiveResources: string[]; requestId: string },
+  expected: { principal: string; epoch: number; settlementHash: string; exclusiveResources: string[]; requestId: string },
   options: { attempts?: number; retryMs?: number; monotonicNow?: () => number } = {},
 ) {
   const attempts = options.attempts ?? 3;
@@ -81,14 +81,20 @@ export async function acknowledgeContainment(
     try {
       const result = await mutate(expected.requestId);
       const quarantine = result?.containmentQuarantine;
-      if (quarantine?.epoch !== expected.epoch || quarantine?.settlementHash !== expected.settlementHash
+      if (result?.lease?.owner !== expected.principal || result?.lease?.epoch !== expected.epoch
+        || quarantine?.epoch !== expected.epoch || quarantine?.settlementHash !== expected.settlementHash
         || typeof quarantine?.launchAcknowledgedAt !== 'string'
         || typeof quarantine?.launchExpiresAt !== 'string'
+        || typeof result?.lease?.expiresAt !== 'string'
         || JSON.stringify(result?.exclusiveResources ?? []) !== JSON.stringify(expected.exclusiveResources))
         throw new Error('Graphyard returned a mismatched containment launch acknowledgement');
       const authorityMs = Date.parse(quarantine.launchExpiresAt) - Date.parse(result.updatedAt);
-      if (!Number.isFinite(authorityMs) || authorityMs <= 0 || monotonicNow() - started >= authorityMs)
+      const leaseMs = Date.parse(result.lease.expiresAt) - Date.parse(result.updatedAt);
+      const elapsedMs = monotonicNow() - started;
+      if (!Number.isFinite(authorityMs) || authorityMs <= 0 || elapsedMs >= authorityMs)
         throw new PrelaunchContainmentError('Graphyard launch authority expired before its acknowledgement response arrived', false);
+      if (!Number.isFinite(leaseMs) || leaseMs <= 0 || elapsedMs >= leaseMs)
+        throw new PrelaunchContainmentError('Graphyard worker lease expired before its acknowledgement response arrived', false);
       return result;
     } catch (error) {
       if ((error as any)?.confirmedRefusal) throw error;
