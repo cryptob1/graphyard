@@ -20,29 +20,33 @@ npm start
 
 Open `http://localhost:4310` and sign in with the operator token from `.env`.
 
-Keep this Graphyard checkout running. Clone the configured writable repository separately; worker and worktree commands run there. Graphyard does not accept a pull request whose head belongs to a different repository.
+Keep this Graphyard checkout running. Clone the configured writable repository separately; Graphyard does not accept a pull request whose head belongs to a different repository.
 
-## Create work
+## Prepare the repository
 
-Use the UI, or:
+From the writable repository, connect a worker and install the `.graphyard/` ignore rule:
 
 ```sh
 export GRAPHYARD_URL=http://localhost:4310
-export GRAPHYARD_TOKEN=YOUR_OPERATOR_TOKEN
 export GRAPHYARD_CLI=/absolute/path/to/graphyard/bin/graphyard.mjs
-node "$GRAPHYARD_CLI" create /absolute/path/to/graphyard/examples/work.json
-node "$GRAPHYARD_CLI" ready GY-1
+cd /path/to/your-writable-repository
+node "$GRAPHYARD_CLI" init \
+  --url "$GRAPHYARD_URL" \
+  --host-id local-evaluation \
+  --token-stdin
 ```
 
-Acceptance criteria name the proof required. All listed proofs must pass. Operators may revise requirements with `npm run cli -- requirements`; workers cannot weaken their own task.
+Paste the worker token, press Enter, then press Ctrl-D. Commit the generated `AGENTS.md` and `.gitignore` changes before starting product work.
+
+## Create work
+
+In the UI, create a small task for this repository, add its acceptance criteria, and move it to Ready. All listed proofs must pass. To revise requirements later, an operator runs `node "$GRAPHYARD_CLI" requirements GY-1 revision.json`; workers cannot weaken their own task.
 
 ## Claim and launch a worker
 
 Use a distinct worker token:
 
 ```sh
-cd /path/to/your-writable-repository
-export GRAPHYARD_TOKEN=YOUR_WORKER_TOKEN
 node "$GRAPHYARD_CLI" claim GY-1
 node "$GRAPHYARD_CLI" worktree GY-1 EPOCH origin/main
 cd .graphyard/worktrees/GY-1-EPOCH
