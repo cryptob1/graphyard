@@ -14,7 +14,7 @@ flowchart LR
 
 ## Before you start
 
-You need Node 24, Git, Docker, Herdr 0.7.1+, a Graphyard checkout, a GitHub repository, and a Railway account or another Docker host. Agent providers such as Codex or Claude must already be authenticated on the machine that runs them.
+You need Node 24, Git, Docker, Herdr 0.7.1+, a Graphyard checkout, a GitHub repository, and a Railway account or another Docker host. Agent providers such as Codex or Claude must already be authenticated on the machine that runs them. The coordinator also needs GitHub CLI authenticated as an identity allowed to merge the protected base branch.
 
 Graphyard is not published to npm yet. In the commands below:
 
@@ -111,7 +111,7 @@ node "$GRAPHYARD_CLI" master worker add /path/to/profile.json
 node "$GRAPHYARD_CLI" master status
 ```
 
-Local launch profiles share the coordinator host. Use them only for trusted dogfooding or inside a real OS/container boundary that hides coordinator GitHub credentials.
+Local launch profiles share the coordinator host. They require Linux with a working systemd user manager for durable containment. Use them only for trusted dogfooding or inside a real OS/container boundary that hides coordinator GitHub credentials. On macOS or a Linux host without user systemd, use the remote-worker flow below.
 
 For the recommended separated setup, workers run on other machines with GitHub identities that can push branches and open PRs but cannot merge the protected base branch. Version 0.1 does not remotely launch supervised Herdr tabs across hosts; the master selects work and the remote worker claims it.
 
@@ -135,7 +135,9 @@ cd .graphyard/worktrees/GY-1-EPOCH
 node "$GRAPHYARD_CLI" watch GY-1 EPOCH -- YOUR_AGENT_COMMAND
 ```
 
-The worker pushes the assigned branch, opens a PR, and runs `graphyard complete`. Graphyard waits for current-head review, CI, and trusted acceptance evidence.
+The worker pushes the assigned branch, opens a PR, and runs `node "$GRAPHYARD_CLI" complete GY-1 EPOCH PR_NUMBER`. Graphyard waits for current-head review, CI, and trusted acceptance evidence.
+
+Connect that evidence before merging. Version 0.1 has no general-purpose runner: put a narrowly scoped `producer` token in protected CI that pull-request code cannot read, then submit the current candidate's actual result. For a criterion explicitly defined with a `manual:` proof, an admin may inspect it and run `node "$GRAPHYARD_CLI" evidence GY-1 evidence.json`. An admin cannot certify automated proof names. See [evidence submission](protocol.md#evidence).
 
 When `Graphyard / merge` first appears, add it to strict branch protection. After every gate passes:
 
