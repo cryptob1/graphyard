@@ -8,7 +8,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createServer } from 'node:http';
 import { setTimeout as delay } from 'node:timers/promises';
-import { signalTrackedProcesses, supervise } from '../src/supervisor.js';
+import { signalTrackedProcesses, supervise, systemdContainment } from '../src/supervisor.js';
 
 const exec = promisify(execFile);
 const launcher = fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url));
@@ -104,6 +104,45 @@ test('foreground fallback does not signal a reused descendant PID', () => {
   assert.deepEqual(signalled, [101, 100]); signalled.length = 0;
   signalTrackedProcesses(100, tracked, new Map([[101, { ppid: 55, identity: 'unrelated-start' }]]), 'SIGKILL', pid => { signalled.push(pid); });
   assert.deepEqual(signalled, []); assert.equal(tracked.has(101), false);
+});
+
+test('systemd containment propagates unavailable or failing scope kills', () => {
+  const calls: string[][] = [];
+  const containment = systemdContainment('worker', [], ((command: string, args: string[]) => {
+    calls.push([command, ...args]);
+    if (args.includes('kill')) throw new Error('systemctl unavailable');
+    return '';
+  }) as any);
+  assert.throws(() => containment.signal('SIGKILL'), /systemctl unavailable/);
+  assert.ok(calls.some(call => call.includes('kill')));
+});
+
+test('supervisor fails closed when a scope kill fails and shutdown cannot be verified', async () => {
+  const containment = {
+    command: process.execPath,
+    args: ['-e', 'process.exit(0)'],
+    signal: () => { throw new Error('scope kill failed'); },
+    empty: () => false,
+  };
+  await assert.rejects(supervise('ignored', [], 1, async () => renewal(), { containment, detached: false, graceMs: 10 }), /shutdown could not be verified: scope kill failed/);
+});
+
+test('supervisor accepts a failed scope signal only when the scope is verified empty', async () => {
+  const containment = {
+    command: process.execPath,
+    args: ['-e', 'process.exit(0)'],
+    signal: () => { throw new Error('scope already gone'); },
+    empty: () => true,
+  };
+  assert.equal(await supervise('ignored', [], 1, async () => renewal(), { containment, detached: false, graceMs: 10 }), 0);
+});
+
+test('macOS foreground Herdr supervision refuses before launch without durable containment', async () => {
+  const cwd = await mkdtemp(join(tmpdir(), 'graphyard-darwin-refusal-')), marker = join(cwd, 'launched');
+  try {
+    await assert.rejects(supervise(process.execPath, ['-e', `require('node:fs').writeFileSync(${JSON.stringify(marker)},'yes')`], 1, async () => renewal(), { detached: false, platform: 'darwin' }), /not supported on darwin/);
+    await assert.rejects(stat(marker), { code: 'ENOENT' });
+  } finally { await rm(cwd, { recursive: true, force: true }); }
 });
 
  test('handoff pairs ownership with its work observation rather than a later status clock', async () => {

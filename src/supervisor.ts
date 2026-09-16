@@ -3,10 +3,11 @@ import { randomUUID } from 'node:crypto';
 
 interface Renewal { lease: { epoch: number; expiresAt: string } | null; updatedAt: string }
 
-interface Containment {
+export interface Containment {
   command: string;
   args: string[];
   signal: (signal: NodeJS.Signals) => void;
+  empty: () => boolean;
 }
 
 export function systemdContainment(command: string, args: string[], run: typeof execFileSync = execFileSync): Containment {
@@ -15,7 +16,11 @@ export function systemdContainment(command: string, args: string[], run: typeof 
   return {
     command: 'systemd-run',
     args: ['--user', '--scope', '--quiet', `--unit=${unit}`, '--', command, ...args],
-    signal: signal => { try { run('systemctl', ['--user', 'kill', '--kill-whom=all', `--signal=${signal}`, unit], { stdio: 'ignore' }); } catch {} },
+    signal: signal => { run('systemctl', ['--user', 'kill', '--kill-whom=all', `--signal=${signal}`, unit], { stdio: 'ignore' }); },
+    empty: () => {
+      const state = String(run('systemctl', ['--user', 'show', '--property=ActiveState', '--value', unit], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] })).trim();
+      return state === 'inactive' || state === 'failed';
+    },
   };
 }
 
@@ -50,7 +55,7 @@ export function signalTrackedProcesses(rootPid: number, supervisedPids: Map<numb
 }
 
 // The deadline uses elapsed local time and server-reported duration, not synchronized clocks.
-export async function supervise(command: string, args: string[], epoch: number, renew: () => Promise<Renewal>, options: { intervalMs?: number; graceMs?: number; detached?: boolean; containment?: Containment } = {}) {
+export async function supervise(command: string, args: string[], epoch: number, renew: () => Promise<Renewal>, options: { intervalMs?: number; graceMs?: number; detached?: boolean; containment?: Containment; platform?: NodeJS.Platform } = {}) {
   let deadline = 0;
   async function heartbeat() {
     const started = performance.now();
@@ -63,18 +68,24 @@ export async function supervise(command: string, args: string[], epoch: number, 
   await heartbeat();
   const env = { ...process.env };
   for (const key of ['GRAPHYARD_PRINCIPALS', 'DATABASE_URL', 'GITHUB_PRIVATE_KEY', 'GITHUB_PRIVATE_KEY_FILE', 'GITHUB_WEBHOOK_SECRET']) delete env[key];
-  const detached = options.detached ?? process.platform !== 'win32';
-  const containment = options.containment ?? (!detached && process.platform === 'linux' ? systemdContainment(command, args) : undefined);
+  const platform = options.platform ?? process.platform;
+  const detached = options.detached ?? platform !== 'win32';
+  if (!detached && platform !== 'linux' && !options.containment) throw new Error(`Foreground worker supervision requires durable containment and is not supported on ${platform}`);
+  const containment = options.containment ?? (!detached && platform === 'linux' ? systemdContainment(command, args) : undefined);
   const child = spawn(containment?.command ?? command, containment?.args ?? args, { stdio: 'inherit', detached, env });
-  return new Promise<number>(resolve => {
+  return new Promise<number>((resolve, reject) => {
     let stopping = false, pending = false;
     const supervisedPids = new Map<number, string>();
+    let containmentFailure: unknown;
     let expiry: ReturnType<typeof setTimeout>;
     const signalGroup = (signal: NodeJS.Signals) => {
       if (!child.pid) return;
-      if (containment) { containment.signal(signal); return; }
-      if (detached && process.platform !== 'win32') { try { process.kill(-child.pid, signal); } catch {} return; }
-      if (process.platform === 'win32') { try { child.kill(signal); } catch {} return; }
+      if (containment) {
+        try { containment.signal(signal); return; }
+        catch (error) { containmentFailure ??= error; }
+      }
+      if (detached && platform !== 'win32') { try { process.kill(-child.pid, signal); } catch {} return; }
+      if (platform === 'win32') { try { child.kill(signal); } catch {} return; }
       const rows = processTable();
       signalTrackedProcesses(child.pid, supervisedPids, rows, signal);
     };
@@ -87,6 +98,11 @@ export async function supervise(command: string, args: string[], epoch: number, 
       setTimeout(() => {
         signalGroup('SIGKILL');
         process.off('SIGTERM', interrupted); process.off('SIGINT', interrupted);
+        if (containment) {
+          let empty = false;
+          try { empty = containment.empty(); } catch (error) { containmentFailure ??= error; }
+          if (!empty) { reject(new Error(`Worker containment shutdown could not be verified${containmentFailure instanceof Error ? `: ${containmentFailure.message}` : ''}`)); return; }
+        }
         resolve(code);
       }, options.graceMs ?? 5000);
     }
