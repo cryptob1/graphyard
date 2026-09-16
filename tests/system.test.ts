@@ -75,6 +75,22 @@ test('expired lease is recoverable and all stale-owner commands are fenced', asy
   for (const command of ['heartbeat', 'release'] as const) await assert.rejects(engine.execute(worker, command, w.id, { epoch: 1 }, randomUUID()), /superseded/);
   await assert.rejects(engine.execute(worker, 'submit', w.id, { epoch: 1, pr: 33 }, randomUUID()), /superseded/);
 });
+test('containment quarantine survives lease expiry and blocks overlap until verified settlement', async () => {
+  let w = await claimed();
+  const settlementToken = 'a'.repeat(64), settlementHash = 'ffe054fe7ae0cb6dc65c3af9b61d5209f439851db43d0ba5997337df154668eb';
+  w = await engine.execute(worker, 'quarantine', w.id, { epoch: 1, settlementHash }, randomUUID());
+  assert.deepEqual(w.containmentQuarantine && { owner: w.containmentQuarantine.owner, epoch: w.containmentQuarantine.epoch }, { owner: worker.id, epoch: 1 });
+  await assert.rejects(engine.execute(worker, 'quarantine', w.id, { epoch: 1, settlementHash: 'b'.repeat(64) }, randomUUID()), /cannot be replaced/);
+  await store.pool.query("UPDATE work_items SET document=jsonb_set(document,'{lease,expiresAt}',to_jsonb('2000-01-01T00:00:00Z'::text)) WHERE id=$1", [w.id]);
+  await engine.reconcile();
+  await assert.rejects(engine.execute(other, 'claim', w.id, {}, randomUUID()), /quarantined.*epoch 1/);
+  await assert.rejects(engine.execute(other, 'settle', w.id, { epoch: 1, settlementToken }, randomUUID()), /another worker/);
+  await assert.rejects(engine.execute(worker, 'settle', w.id, { epoch: 1, settlementToken: 'b'.repeat(64) }, randomUUID()), /capability is invalid/);
+  w = await engine.execute(worker, 'settle', w.id, { epoch: 1, settlementToken }, randomUUID());
+  assert.equal(w.containmentQuarantine, null);
+  assert.deepEqual((await store.events(w.id)).find(event => event.kind === 'settle').payload.details, { epoch: 1 }, 'settlement capability is not retained in history');
+  w = await engine.execute(other, 'claim', w.id, {}, randomUUID()); assert.equal(w.epoch, 2);
+});
 test('dependencies and explicit blockers refuse claims', async () => {
   const parent = await create(); let child = await create([parent.id]); child = await engine.execute(operator, 'ready', child.id, {}, randomUUID());
   await assert.rejects(engine.execute(worker, 'claim', child.id, {}, randomUUID()), /dependencies/);

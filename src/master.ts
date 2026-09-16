@@ -336,6 +336,7 @@ export function assertDispatchable(work: Work, allWork: Work[], observedAt: stri
   const now = Date.parse(observedAt);
   if (!Number.isFinite(now)) throw new Error('Dispatch requires a valid Graphyard snapshot clock');
   if (!work.ready || work.blocker) throw new Error('Dispatch requires released work without a blocker');
+  if (work.containmentQuarantine) throw new Error(`Dispatch blocked by unverified worker containment from epoch ${work.containmentQuarantine.epoch}`);
   const unfinished = work.dependencies.map(id => allWork.find(item => item.id === id)).filter(dependency => !dependency || dependency.stage !== 'done');
   if (unfinished.length) throw new Error(`Dispatch blocked by unfinished dependencies: ${unfinished.map(dependency => dependency?.key ?? 'unknown').join(', ')}`);
   if (work.lease && Date.parse(work.lease.expiresAt) > now) throw new Error(`Dispatch blocked by active owner ${work.lease.owner}`);

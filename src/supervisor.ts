@@ -1,5 +1,6 @@
 import { execFileSync, spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
+import { readdirSync, readFileSync } from 'node:fs';
 
 interface Renewal { lease: { epoch: number; expiresAt: string } | null; updatedAt: string }
 
@@ -26,13 +27,24 @@ export function systemdContainment(command: string, args: string[], run: typeof 
 
 export type ProcessRecord = { ppid: number; identity: string };
 
+export function linuxProcessRecord(stat: string): ProcessRecord | null {
+  const end = stat.lastIndexOf(') ');
+  if (end < 0) return null;
+  const fields = stat.slice(end + 2).trim().split(/\s+/);
+  const ppid = Number(fields[1]), starttime = fields[19];
+  return Number.isSafeInteger(ppid) && ppid >= 0 && /^\d+$/.test(starttime ?? '') ? { ppid, identity: starttime } : null;
+}
+
 function processTable(): Map<number, ProcessRecord> {
   const records = new Map<number, ProcessRecord>();
+  if (process.platform !== 'linux') return records;
   try {
-    const output = execFileSync('ps', ['-eo', 'pid=,ppid=,lstart='], { encoding: 'utf8' });
-    for (const row of output.trim().split('\n')) {
-      const match = row.trim().match(/^(\d+)\s+(\d+)\s+(.+)$/);
-      if (match) records.set(Number(match[1]), { ppid: Number(match[2]), identity: match[3] });
+    for (const name of readdirSync('/proc')) {
+      if (!/^\d+$/.test(name)) continue;
+      try {
+        const record = linuxProcessRecord(readFileSync(`/proc/${name}/stat`, 'utf8'));
+        if (record) records.set(Number(name), record);
+      } catch {}
     }
   } catch {}
   return records;
@@ -55,7 +67,7 @@ export function signalTrackedProcesses(rootPid: number, supervisedPids: Map<numb
 }
 
 // The deadline uses elapsed local time and server-reported duration, not synchronized clocks.
-export async function supervise(command: string, args: string[], epoch: number, renew: () => Promise<Renewal>, options: { intervalMs?: number; graceMs?: number; detached?: boolean; containment?: Containment; platform?: NodeJS.Platform } = {}) {
+export async function supervise(command: string, args: string[], epoch: number, renew: () => Promise<Renewal>, options: { intervalMs?: number; graceMs?: number; detached?: boolean; containment?: Containment; platform?: NodeJS.Platform; quarantine?: { establish: () => Promise<unknown>; settle: () => Promise<unknown> } } = {}) {
   let deadline = 0;
   async function heartbeat() {
     const started = performance.now();
@@ -72,6 +84,8 @@ export async function supervise(command: string, args: string[], epoch: number, 
   const detached = options.detached ?? platform !== 'win32';
   if (!detached && platform !== 'linux' && !options.containment) throw new Error(`Foreground worker supervision requires durable containment and is not supported on ${platform}`);
   const containment = options.containment ?? (!detached && platform === 'linux' ? systemdContainment(command, args) : undefined);
+  if (containment && !options.quarantine) throw new Error('Foreground worker supervision requires a durable Graphyard containment quarantine');
+  if (containment) await options.quarantine!.establish();
   const child = spawn(containment?.command ?? command, containment?.args ?? args, { stdio: 'inherit', detached, env });
   return new Promise<number>((resolve, reject) => {
     let stopping = false, pending = false;
@@ -95,13 +109,15 @@ export async function supervise(command: string, args: string[], epoch: number, 
       stopping = true; clearInterval(timer); clearTimeout(expiry);
       signalGroup('SIGTERM');
       // Keep this timer referenced even if the group leader exits first.
-      setTimeout(() => {
+      setTimeout(async () => {
         signalGroup('SIGKILL');
         process.off('SIGTERM', interrupted); process.off('SIGINT', interrupted);
         if (containment) {
           let empty = false;
           try { empty = containment.empty(); } catch (error) { containmentFailure ??= error; }
           if (!empty) { reject(new Error(`Worker containment shutdown could not be verified${containmentFailure instanceof Error ? `: ${containmentFailure.message}` : ''}`)); return; }
+          try { await options.quarantine!.settle(); }
+          catch (error) { reject(new Error(`Worker containment shutdown was verified but its Graphyard quarantine could not be settled: ${error instanceof Error ? error.message : String(error)}`)); return; }
         }
         resolve(code);
       }, options.graceMs ?? 5000);

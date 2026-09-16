@@ -1,5 +1,5 @@
 import { readFile, mkdir, realpath, stat, writeFile } from 'node:fs/promises';
-import { createHash, randomUUID } from 'node:crypto';
+import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { hostname } from 'node:os';
 import { resolve } from 'node:path';
 import { execFileSync, spawnSync } from 'node:child_process';
@@ -213,7 +213,7 @@ Never share an operator or producer credential with an implementation agent.`); 
   if (command === 'scenario') return print(await api('scenarios', JSON.parse(await readFile(id, 'utf8'))));
   if (command === 'list' || command === 'next') {
     const snapshot = await api('work-snapshot'); const items = snapshot.work;
-    return print(command === 'list' ? items : items.filter((w: any) => w.stage !== 'done' && w.ready && !w.blocker && (!w.submission || w.reworkRequested) && (!w.lease || Date.parse(w.lease.expiresAt) <= Date.parse(snapshot.now)) && !resourceConflicts(w, items, Date.parse(snapshot.now)).length && w.dependencies.every((d: string) => items.some((x: any) => x.id === d && x.stage === 'done'))).sort((a: any, b: any) => a.priority - b.priority));
+    return print(command === 'list' ? items : items.filter((w: any) => w.stage !== 'done' && w.ready && !w.blocker && !w.containmentQuarantine && (!w.submission || w.reworkRequested) && (!w.lease || Date.parse(w.lease.expiresAt) <= Date.parse(snapshot.now)) && !resourceConflicts(w, items, Date.parse(snapshot.now)).length && w.dependencies.every((d: string) => items.some((x: any) => x.id === d && x.stage === 'done'))).sort((a: any, b: any) => a.priority - b.priority));
   }
   if (command === 'create') return print(await api('work', JSON.parse(await readFile(id, 'utf8'))));
   if (command === 'diagnose') {
@@ -289,8 +289,16 @@ Never share an operator or producer credential with an implementation agent.`); 
     const watchToken = await individualToken();
     process.env.GRAPHYARD_URL = base; process.env.GRAPHYARD_TOKEN = watchToken;
     process.env.GRAPHYARD_CLI = await activeCliPath(); process.env.GRAPHYARD_HOST_ID = hostId;
+    const foreground = !!(process.env.HERDR_ENV === '1' && process.env.GRAPHYARD_HERDR_AGENT_KIND);
+    const settlementToken = foreground ? randomBytes(32).toString('hex') : '';
     process.exitCode = await supervise(args[separator + 1], args.slice(separator + 2), epoch,
-      () => api(`work/${work.id}/heartbeat`, { epoch }, randomUUID()), { detached: !(process.env.HERDR_ENV === '1' && process.env.GRAPHYARD_HERDR_AGENT_KIND) });
+      () => api(`work/${work.id}/heartbeat`, { epoch }, randomUUID()), {
+        detached: !foreground,
+        quarantine: foreground ? {
+          establish: () => api(`work/${work.id}/quarantine`, { epoch, settlementHash: createHash('sha256').update(settlementToken).digest('hex') }, randomUUID()),
+          settle: () => api(`work/${work.id}/settle`, { epoch, settlementToken }, randomUUID()),
+        } : undefined,
+      });
     return;
   }
   throw new Error(`Unknown command: ${command}`);

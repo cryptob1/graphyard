@@ -8,7 +8,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createServer } from 'node:http';
 import { setTimeout as delay } from 'node:timers/promises';
-import { signalTrackedProcesses, supervise, systemdContainment } from '../src/supervisor.js';
+import { linuxProcessRecord, signalTrackedProcesses, supervise, systemdContainment } from '../src/supervisor.js';
 
 const exec = promisify(execFile);
 const launcher = fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url));
@@ -92,7 +92,7 @@ test('foreground Herdr containment kills a descendant forked after SIGTERM and r
   const leader = `process.on('SIGTERM',()=>{require('node:child_process').spawn(process.execPath,['-e',${JSON.stringify(descendant)}],{stdio:'ignore'});process.exit(0)});setInterval(()=>{},20)`;
   try {
     let renewals = 0;
-    assert.equal(await supervise(process.execPath, ['-e', leader], 1, async () => ++renewals === 1 ? renewal(150) : new Promise(() => {}), { detached: false, intervalMs: 25, graceMs: 75 }), 1);
+    assert.equal(await supervise(process.execPath, ['-e', leader], 1, async () => ++renewals === 1 ? renewal(150) : new Promise(() => {}), { detached: false, intervalMs: 25, graceMs: 75, quarantine: { establish: async () => {}, settle: async () => {} } }), 1);
     await delay(50); const stopped = await readFile(output, 'utf8'); await delay(75);
     assert.equal(await readFile(output, 'utf8'), stopped);
   } finally { await rm(cwd, { recursive: true, force: true }); }
@@ -104,6 +104,13 @@ test('foreground fallback does not signal a reused descendant PID', () => {
   assert.deepEqual(signalled, [101, 100]); signalled.length = 0;
   signalTrackedProcesses(100, tracked, new Map([[101, { ppid: 55, identity: 'unrelated-start' }]]), 'SIGKILL', pid => { signalled.push(pid); });
   assert.deepEqual(signalled, []); assert.equal(tracked.has(101), false);
+});
+
+test('Linux process identity uses the kernel start-time field without one-second collisions', () => {
+  const stat = (start: string, name = 'worker (nested) name') => `123 (${name}) S 42 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 ${start} 0`;
+  assert.deepEqual(linuxProcessRecord(stat('987654321')), { ppid: 42, identity: '987654321' });
+  assert.notEqual(linuxProcessRecord(stat('987654321'))?.identity, linuxProcessRecord(stat('987654322'))?.identity);
+  assert.equal(linuxProcessRecord('malformed'), null);
 });
 
 test('systemd containment propagates unavailable or failing scope kills', () => {
@@ -124,7 +131,9 @@ test('supervisor fails closed when a scope kill fails and shutdown cannot be ver
     signal: () => { throw new Error('scope kill failed'); },
     empty: () => false,
   };
-  await assert.rejects(supervise('ignored', [], 1, async () => renewal(), { containment, detached: false, graceMs: 10 }), /shutdown could not be verified: scope kill failed/);
+  let established = 0, settled = 0;
+  await assert.rejects(supervise('ignored', [], 1, async () => renewal(), { containment, detached: false, graceMs: 10, quarantine: { establish: async () => { established++; }, settle: async () => { settled++; } } }), /shutdown could not be verified: scope kill failed/);
+  assert.equal(established, 1); assert.equal(settled, 0, 'an unverifiable shutdown must retain its durable quarantine');
 });
 
 test('supervisor accepts a failed scope signal only when the scope is verified empty', async () => {
@@ -134,7 +143,14 @@ test('supervisor accepts a failed scope signal only when the scope is verified e
     signal: () => { throw new Error('scope already gone'); },
     empty: () => true,
   };
-  assert.equal(await supervise('ignored', [], 1, async () => renewal(), { containment, detached: false, graceMs: 10 }), 0);
+  let established = 0, settled = 0;
+  assert.equal(await supervise('ignored', [], 1, async () => renewal(), { containment, detached: false, graceMs: 10, quarantine: { establish: async () => { established++; }, settle: async () => { settled++; } } }), 0);
+  assert.equal(established, 1); assert.equal(settled, 1);
+});
+
+test('foreground containment refuses to launch before a durable quarantine exists', async () => {
+  const containment = { command: process.execPath, args: ['-e', 'process.exit(0)'], signal: () => {}, empty: () => true };
+  await assert.rejects(supervise('ignored', [], 1, async () => renewal(), { containment, detached: false }), /durable Graphyard containment quarantine/);
 });
 
 test('macOS foreground Herdr supervision refuses before launch without durable containment', async () => {

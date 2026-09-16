@@ -17,6 +17,8 @@ const commands = {
   claim: z.object({}).strict(),
   rereview: z.object({ epoch: epoch.optional() }).strict(),
   heartbeat: z.object({ epoch }).strict(),
+  quarantine: z.object({ epoch, settlementHash: z.string().regex(/^[a-f0-9]{64}$/) }).strict(),
+  settle: z.object({ epoch, settlementToken: z.string().regex(/^[a-f0-9]{64}$/) }).strict(),
   release: z.object({ epoch }).strict(),
   workspace: z.object({ epoch, host: z.string().trim().min(1).max(200), path: z.string().startsWith('/').max(1000).refine(p => !/[\u0000-\u001f]/.test(p), 'Invalid path').transform(workspacePath), branch: z.string().max(200).refine(validBranch, 'Invalid Graphyard branch name') }).strict(),
   submit: z.object({ epoch, pr: z.number().int().positive() }).strict(),
@@ -123,11 +125,13 @@ export class Engine {
         admin(actor);
         demand(!work.observation?.merged, 'Merged work requires a follow-up task');
         work.reworkRequested = true;
+        work.containmentQuarantine = null;
         work.lease = null;
       }
       if (command === 'claim') {
         demand(actor.role === 'worker' || actor.role === 'admin', 'Worker permission required', 403);
         demand(work.ready && !work.blocker, 'Task is not ready or has a blocker');
+        demand(!work.containmentQuarantine, `Task is quarantined by unverified containment from epoch ${work.containmentQuarantine?.epoch}`);
         demand(work.dependencies.every(dep => all.find(w => w.id === dep)?.stage === 'done'), 'Unfinished dependencies');
         demand(!work.lease || Date.parse(work.lease.expiresAt) <= now.getTime(), 'Task already has an active owner');
         demand(!work.submission || work.reworkRequested, 'Implementation is submitted; an operator must request rework before reassignment');
@@ -137,8 +141,20 @@ export class Engine {
         work.lastAssignment = { owner: actor.id, epoch: work.epoch, claimedAt: now.toISOString(), ...(actor.displayName ? { displayName: actor.displayName } : {}), ...(actor.runtime ? { runtime: actor.runtime } : {}) };
         work.lease = { owner: actor.id, epoch: work.epoch, expiresAt: new Date(now.getTime() + this.leaseSeconds * 1000).toISOString() };
       }
-      if (['heartbeat', 'release', 'workspace', 'submit', 'blocked'].includes(command)) activeLease(work, actor, data.epoch, now);
+      if (['heartbeat', 'release', 'workspace', 'submit', 'blocked', 'quarantine'].includes(command)) activeLease(work, actor, data.epoch, now);
       if (command === 'heartbeat') work.lease!.expiresAt = new Date(now.getTime() + this.leaseSeconds * 1000).toISOString();
+      if (command === 'quarantine') {
+        demand(!work.containmentQuarantine || work.containmentQuarantine.owner === actor.id && work.containmentQuarantine.epoch === data.epoch
+          && work.containmentQuarantine.settlementHash === data.settlementHash, 'Containment quarantine already exists and cannot be replaced');
+        work.containmentQuarantine ??= { owner: actor.id, epoch: data.epoch, at: now.toISOString(), settlementHash: data.settlementHash };
+      }
+      if (command === 'settle') {
+        demand(actor.role === 'worker' && work.containmentQuarantine?.owner === actor.id && work.containmentQuarantine.epoch === data.epoch,
+          'Containment quarantine is missing, superseded, or owned by another worker');
+        demand(createHash('sha256').update(data.settlementToken).digest('hex') === work.containmentQuarantine.settlementHash,
+          'Containment settlement capability is invalid');
+        work.containmentQuarantine = null;
+      }
       if (command === 'release') work.lease = null;
       if (command === 'blocked') work.blocker = data.reason;
       if (command === 'workspace') {
@@ -160,7 +176,7 @@ export class Engine {
         work.evidence.push({ ...data, id: randomUUID(), producer: actor.id, trusted, at: now.toISOString() });
       }
       this.evaluate(work, all, now);
-      await save(db, work, actor.id, command, now, data);
+      await save(db, work, actor.id, command, now, command === 'settle' ? { epoch: data.epoch } : data);
       if (work.submission && !['heartbeat', 'release', 'claim', 'workspace'].includes(command)) await wakeJob(db, work.id);
       await db.query('INSERT INTO receipts(actor,key,fingerprint,result) VALUES($1,$2,$3,$4)', [actor.id, key, fingerprint, JSON.stringify(work)]);
       return work;

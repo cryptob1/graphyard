@@ -54,6 +54,7 @@ export interface Work extends Create {
   id: string; key: string; stage: Stage; revision: number; policyRevision: number;
   createdAt: string; updatedAt: string; stageEnteredAt: string; ready: boolean;
   epoch: number; lease: Lease | null; lastAssignment?: AssignmentIdentity; workspaces: Workspace[]; candidate: Candidate | null;
+  containmentQuarantine?: { owner: string; epoch: number; at: string; settlementHash: string } | null;
   submission: { epoch: number; pr: number } | null;
   reworkRequested: boolean;
   scenarioRequirements: { proof: string; revision: number; environment: string; hash: string }[];
