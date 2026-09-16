@@ -9,7 +9,7 @@ import { fileURLToPath } from 'node:url';
 import { createServer } from 'node:http';
 import { setTimeout as delay } from 'node:timers/promises';
 import { linuxProcessRecord, signalTrackedProcesses, supervise, systemdContainment } from '../src/supervisor.js';
-import { containmentCredentials, establishContainment } from '../src/quarantine.js';
+import { containmentCredentials, establishContainment, settleContainment } from '../src/quarantine.js';
 
 const exec = promisify(execFile);
 const launcher = fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url));
@@ -37,6 +37,52 @@ test('quarantine establishment never confirms a mismatched fence or retries a se
   const refusal = Object.assign(new Error('lease expired'), { confirmedRefusal: true });
   await assert.rejects(establishContainment(async () => { calls++; throw refusal; }, expected), /lease expired/);
   assert.equal(calls, 1);
+});
+
+test('containment settlement replays a committed lost response with an identical key and body', async () => {
+  const credentials = containmentCredentials(); const keys: string[] = []; const bodies: unknown[] = []; let calls = 0;
+  const settled = { epoch: 7, exclusiveResources: ['staging'], containmentQuarantine: null };
+  assert.equal(await settleContainment(async (key, body) => {
+    keys.push(key); bodies.push(body); calls++;
+    if (calls === 1) throw new TypeError('response terminated after commit');
+    return settled;
+  }, { epoch: 7, settlementToken: credentials.settlementToken, settlementHash: credentials.settlementHash, exclusiveResources: ['staging'], requestId: credentials.requestId }, { attempts: 2, retryMs: 0 }), settled);
+  assert.deepEqual(keys, [credentials.requestId, credentials.requestId]);
+  assert.equal(bodies[0], bodies[1]);
+  assert.deepEqual(bodies[0], { epoch: 7, settlementToken: credentials.settlementToken });
+});
+
+test('containment settlement retries a transient pre-commit failure with an identical request', async () => {
+  const credentials = containmentCredentials(); const observations: Array<[string, unknown]> = []; let calls = 0;
+  await settleContainment(async (key, body) => {
+    observations.push([key, body]);
+    if (++calls === 1) throw new TypeError('connection refused before commit');
+    return { epoch: 4, exclusiveResources: ['database'], containmentQuarantine: null };
+  }, { epoch: 4, settlementToken: credentials.settlementToken, settlementHash: credentials.settlementHash, exclusiveResources: ['database'], requestId: credentials.requestId }, { attempts: 2, retryMs: 0 });
+  assert.equal(observations.length, 2); assert.equal(observations[0][0], observations[1][0]); assert.equal(observations[0][1], observations[1][1]);
+});
+
+test('containment settlement does not retry confirmed refusal and fails closed on mismatched reconciliation', async () => {
+  const credentials = containmentCredentials(); const expected = { epoch: 3, settlementToken: credentials.settlementToken, settlementHash: credentials.settlementHash, exclusiveResources: ['staging'], requestId: credentials.requestId };
+  let calls = 0; const refusal = Object.assign(new Error('capability refused'), { confirmedRefusal: true });
+  await assert.rejects(settleContainment(async () => { calls++; throw refusal; }, expected), /capability refused/);
+  assert.equal(calls, 1);
+  await assert.rejects(settleContainment(async () => ({ epoch: 2, exclusiveResources: [], containmentQuarantine: null }), expected, { attempts: 2, retryMs: 0 }), /could not confirm.*mismatched/);
+  await assert.rejects(settleContainment(async () => ({ epoch: 3, exclusiveResources: ['staging'], containmentQuarantine: null }), { ...expected, settlementHash: 'f'.repeat(64) }), /capability does not match/);
+});
+
+test('containment settlement bounds persistent ambiguity after one child launch without capability leakage', async () => {
+  const credentials = containmentCredentials(); const cwd = await mkdtemp(join(tmpdir(), 'graphyard-settlement-')); const launches = join(cwd, 'launches'); let attempts = 0;
+  const child = `const fs=require('node:fs'),crypto=require('node:crypto');const hash=${JSON.stringify(credentials.settlementHash)};if(Object.values(process.env).some(value=>crypto.createHash('sha256').update(value??'').digest('hex')===hash))process.exit(91);fs.appendFileSync(${JSON.stringify(launches)},'launched\\n')`;
+  const containment = { command: process.execPath, args: ['-e', child], signal: () => {}, empty: () => true };
+  try {
+    await assert.rejects(supervise('ignored', [], 9, async () => ({ ...renewal(), lease: { ...renewal().lease, epoch: 9 } }), { containment, detached: false, graceMs: 1, quarantine: {
+      establish: async () => {},
+      settle: () => settleContainment(async (_key, body) => { attempts++; assert.equal(body.settlementToken, credentials.settlementToken); throw new TypeError('response unavailable'); },
+        { epoch: 9, settlementToken: credentials.settlementToken, settlementHash: credentials.settlementHash, exclusiveResources: [], requestId: credentials.requestId }, { attempts: 3, retryMs: 0 }),
+    } }), /could not confirm containment settlement after 3 attempts/);
+    assert.equal(attempts, 3); assert.equal(await readFile(launches, 'utf8'), 'launched\n');
+  } finally { await rm(cwd, { recursive: true, force: true }); }
 });
 
 test('master-only commands ignore an unrelated unavailable worker token file', async () => {

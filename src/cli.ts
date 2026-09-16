@@ -12,7 +12,7 @@ import { parseArgs } from 'node:util';
 import { diagnose, fileConflicts, proofPreview, resourceConflicts } from './coordination.js';
 import { loadConnection, setupRepository, handoff, hostIdSchema } from './repository-setup.js';
 import { assertMasterBinding, buildMasterStatus, continueMergeBatch, currentMergeCandidates, dispatchWork, inspectWorkerCredentials, listHerdrAgents, loadMasterConfig, mergeWork, observeHerdrAgents, readCredentialFile, readWorkerCredential, saveWorkerProfile, setupMaster, startMaster, workerProfileSchema } from './master.js';
-import { containmentCredentials, establishContainment } from './quarantine.js';
+import { containmentCredentials, establishContainment, settleContainment } from './quarantine.js';
 
 try { process.loadEnvFile(); } catch (error: any) { if (error.code !== 'ENOENT') throw error; }
 const [command, id, ...args] = process.argv.slice(2);
@@ -297,6 +297,7 @@ Never share an operator or producer credential with an implementation agent.`); 
     // placed in the child environment, request history, or quarantine document.
     const containment = foreground ? containmentCredentials() : null;
     const exclusiveResources = [...(work.exclusiveResources ?? [])];
+    const settlementRequestId = foreground ? randomUUID() : '';
     process.exitCode = await supervise(args[separator + 1], args.slice(separator + 2), epoch,
       () => api(`work/${work.id}/heartbeat`, { epoch }, randomUUID()), {
         detached: !foreground,
@@ -305,7 +306,10 @@ Never share an operator or producer credential with an implementation agent.`); 
             requestId => api(`work/${work.id}/quarantine`, { epoch, settlementHash: containment!.settlementHash }, requestId),
             { epoch, settlementHash: containment!.settlementHash, exclusiveResources, requestId: containment!.requestId },
           ),
-          settle: () => api(`work/${work.id}/settle`, { epoch, settlementToken: containment!.settlementToken }, randomUUID()),
+          settle: () => settleContainment(
+            (requestId, body) => api(`work/${work.id}/settle`, body, requestId),
+            { epoch, settlementToken: containment!.settlementToken, settlementHash: containment!.settlementHash, exclusiveResources, requestId: settlementRequestId },
+          ),
         } : undefined,
       });
     return;

@@ -31,3 +31,29 @@ export async function establishContainment(
   }
   throw new Error(`Graphyard could not confirm containment quarantine establishment after ${attempts} attempts: ${lastError instanceof Error ? lastError.message : String(lastError)}`);
 }
+
+export async function settleContainment(
+  mutate: (requestId: string, body: Readonly<{ epoch: number; settlementToken: string }>) => Promise<any>,
+  expected: { epoch: number; settlementToken: string; settlementHash: string; exclusiveResources: string[]; requestId: string },
+  options: { attempts?: number; retryMs?: number } = {},
+) {
+  if (createHash('sha256').update(expected.settlementToken).digest('hex') !== expected.settlementHash)
+    throw new Error('Containment settlement capability does not match the established quarantine');
+  const body = Object.freeze({ epoch: expected.epoch, settlementToken: expected.settlementToken });
+  const attempts = options.attempts ?? 3;
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    try {
+      const result = await mutate(expected.requestId, body);
+      if (result?.epoch !== expected.epoch || result?.containmentQuarantine != null
+        || JSON.stringify(result?.exclusiveResources ?? []) !== JSON.stringify(expected.exclusiveResources))
+        throw new Error('Graphyard returned a mismatched containment settlement');
+      return result;
+    } catch (error) {
+      if ((error as any)?.confirmedRefusal) throw error;
+      lastError = error;
+      if (attempt < attempts) await delay(options.retryMs ?? 100);
+    }
+  }
+  throw new Error(`Graphyard could not confirm containment settlement after ${attempts} attempts: ${lastError instanceof Error ? lastError.message : String(lastError)}`);
+}
