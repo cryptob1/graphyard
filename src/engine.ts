@@ -4,6 +4,7 @@ import { Store, save, wakeJob } from './store.js';
 import { workspacePath, pathsOverlap, validBranch } from './workspace.js';
 import { activeLease, admin, operatorCapability, MergeExecutionInProgress, requireCurrent, createSchema, criterionSchema, currentEvidence, resourcesSchema, demand, evaluate, proofSchema, type Principal, type Work, type Observation, type ReviewRequest, type OperatorCapability } from './model.js';
 import { resourceConflicts } from './coordination.js';
+import { delegationLimits } from './delegation.js';
 
 const epoch = z.number().int().positive();
 const sha = z.string().regex(/^[a-f0-9]{40}$/);
@@ -190,6 +191,11 @@ export class Engine {
         demand(!work.submission || work.reworkRequested, 'Implementation is submitted; an operator must request rework before reassignment');
         const resources = resourceConflicts(work, all, now.getTime());
         demand(!resources.length, `Exclusive resources held: ${resources.map(r => `${r.resource} by ${r.key}`).join(', ')}`);
+        if (work.slice) {
+          const activeInSlice = all.filter(item => item.id !== work!.id && item.slice === work!.slice && item.lease && Date.parse(item.lease.expiresAt) > now.getTime()).length;
+          const limit = delegationLimits().maxEngineersPerLead;
+          demand(activeInSlice < limit, `Engineer limit for ${work.slice} exceeded: ${activeInSlice}/${limit}`);
+        }
         work.epoch++;
         work.lastAssignment = { owner: actor.id, epoch: work.epoch, claimedAt: now.toISOString(), ...(actor.displayName ? { displayName: actor.displayName } : {}), ...(actor.runtime ? { runtime: actor.runtime } : {}) };
         work.lease = { owner: actor.id, epoch: work.epoch, expiresAt: new Date(now.getTime() + this.leaseSeconds * 1000).toISOString() };
@@ -232,8 +238,9 @@ export class Engine {
       }
       if (command === 'evidence') {
         demand(actor.role === 'producer' || actor.role === 'worker' || actor.role === 'admin', 'Evidence submission is not permitted', 403);
-        const trusted = actor.role === 'producer' && !!actor.proofs?.includes(data.proof) || actor.role === 'admin' && data.proof.startsWith('manual:');
+        const trusted = actor.role === 'producer' && actor.id !== work.lastAssignment?.owner && !!actor.proofs?.includes(data.proof) || actor.role === 'admin' && data.proof.startsWith('manual:');
         work.evidence.push({ ...data, id: randomUUID(), producer: actor.id, trusted, at: now.toISOString() });
+        if (trusted && data.policyRevision !== work.policyRevision) work.escalation = { trigger: 'evidence-policy-conflict', reason: `Evidence policy v${data.policyRevision} conflicts with current policy v${work.policyRevision}`, at: now.toISOString(), actor: actor.id };
       }
       // Delivery is an immutable snapshot. A late containment cleanup may append
       // its audit/revision metadata, but stale inputs must not re-evaluate it.
@@ -388,7 +395,10 @@ export class Engine {
         preserveAssignment(work);
         if (work.mergeExecution && Date.parse(work.mergeExecution.expiresAt) > now.getTime()) continue;
         if (work.mergeExecution) work.mergeExecution = null;
-        if (work.lease && Date.parse(work.lease.expiresAt) <= now.getTime()) work.lease = null;
+        if (work.lease && Date.parse(work.lease.expiresAt) <= now.getTime()) {
+          const lost = work.lease; work.lease = null;
+          work.escalation ??= { trigger: 'lease-loss', reason: `Worker ${lost.owner} lost lease epoch ${lost.epoch}`, at: now.toISOString(), actor: 'graphyard' };
+        }
         this.evaluate(work, all, now);
         if (JSON.stringify(work) !== before) {
           await save(db, work, 'graphyard', 'reconciled', now);

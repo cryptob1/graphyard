@@ -10,7 +10,7 @@ async function fixture(page: Page, role = 'admin') {
     if (route.request().headers().authorization !== 'Bearer browser-fixture' || state.unauthorized) return route.fulfill({ status: 401, json: { error: 'Rejected' } });
     if (route.request().method() !== 'GET') state.writes++;
     const path = new URL(route.request().url()).pathname;
-    return route.fulfill({ json: path.endsWith('/status') ? { actor: { id: 'fixture', role }, github: true, reviewProviders: ['github','codex'], repository: 'fixture/repository', jobs: [] } : path.endsWith('/work-snapshot') ? {work:[work],now:'2026-01-01T00:00:00Z'} : path.endsWith('/work') ? [work] : [] });
+    return route.fulfill({ json: path.endsWith('/status') ? { actor: { id: 'fixture', role, sessionKind: role === 'admin' ? 'human' : 'ai' }, github: true, reviewProviders: ['github','codex'], repository: 'fixture/repository', jobs: [], delegation: { limits: { maxLeads: 3, maxEngineersPerLead: 2, minReviewers: 1, maxReviewers: 2 }, slices: [{ id: 'product', name: 'Product', lead: { id: 'product-lead', displayName: 'Pine', sessionKind: 'ai' }, workers: [{ key: 'GY-1', principal: 'engineer-a' }], bottlenecks: ['GY-1'] }, { id: 'infrastructure', name: 'Infrastructure', lead: null, workers: [], bottlenecks: [] }, { id: 'docs-experience', name: 'Docs/experience', lead: null, workers: [], bottlenecks: [] }], reviewers: [{ id: 'reviewer-a', sessionKind: 'ai' }] } } : path.endsWith('/work-snapshot') ? {work:[work],now:'2026-01-01T00:00:00Z'} : path.endsWith('/work') ? [work] : [] });
   });
   await page.goto('/'); return state;
 }
@@ -101,6 +101,17 @@ test('reader has no creation controls; graph filters and search still work', asy
   await page.getByRole('button', { name: '✓ Test cases' }).click();
   await expect(page.getByRole('heading', { name: 'Test-case library' })).toBeVisible();
   await expect(page.getByRole('button', { name: '＋ New test case' })).toHaveCount(0);
+});
+
+test('slice view distinguishes human and AI sessions and exposes roles and bottlenecks', async ({ page }) => {
+  await fixture(page); await login(page);
+  const slices = page.getByRole('region', { name: 'Delivery slices' });
+  await expect(slices.getByText('Product', { exact: true })).toBeVisible();
+  await expect(slices.getByText('Pine')).toBeVisible();
+  await expect(slices.getByText('AI lead', { exact: true }).first()).toBeVisible();
+  await expect(slices.getByText('Human', { exact: true })).toBeVisible();
+  await expect(slices.getByText(/1\/2 active engineers · 1 bottlenecks/)).toBeVisible();
+  await expect(slices.getByText(/independent reviewer\/proof session/)).toBeVisible();
 });
 
 test('a delayed post-create refresh cannot restore the signed-out session or leak into a new login', async ({ page }) => {

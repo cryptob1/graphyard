@@ -10,6 +10,8 @@ export const policySchema = z.object({
   reviewProvider: z.enum(['github', 'codex']).optional(),
 }).strict();
 export const resourcesSchema = z.array(z.string().regex(/^[a-z0-9][a-z0-9._:/-]*$/).max(200)).max(30).refine(v => new Set(v).size === v.length, 'Resource names must be unique');
+export const sliceIds = ['product', 'infrastructure', 'docs-experience'] as const;
+export type SliceId = typeof sliceIds[number];
 export const createSchema = z.object({
   title: z.string().min(1).max(200), description: z.string().max(20000).default(''),
   type: z.enum(['feature', 'bug', 'chore']).default('feature'),
@@ -19,14 +21,16 @@ export const createSchema = z.object({
   policy: policySchema.default({ checks: ['test', 'typecheck'], review: true }),
   plannedFiles: z.array(z.string().min(1).max(500)).max(100).default([]),
   exclusiveResources: resourcesSchema.optional(),
+  slice: z.enum(sliceIds).optional(),
 }).strict();
 export type Create = z.infer<typeof createSchema>;
 export const operatorCapabilities = ['intent:create', 'intent:ready', 'intent:unblock', 'policy:requirements', 'policy:review-provider'] as const;
 export type OperatorCapability = typeof operatorCapabilities[number];
 export const operatorCredentialHash = Symbol('operatorCredentialHash');
 export interface Principal {
-  id: string; role: 'admin' | 'operator-agent' | 'coordinator' | 'worker' | 'producer' | 'reader';
+  id: string; role: 'admin' | 'operator-agent' | 'coordinator' | 'slice-lead' | 'worker' | 'producer' | 'reader';
   proofs?: string[]; displayName?: string; runtime?: string;
+  slice?: SliceId; sessionKind?: 'human' | 'ai';
   capabilities?: OperatorCapability[];
   scope?: { repositories: string[]; workItems: string[] };
   [operatorCredentialHash]?: string;
@@ -72,6 +76,7 @@ export interface Work extends Create {
   mergeExecution?: { id: string; owner: string; sha: string; baseSha: string; policyRevision: number; authorizationRevision: number; issuedAt: string; expiresAt: string; verifiedAt?: string; clockOffset?: { min: number; max: number } } | null;
   delivery?: { mergedAt: string; mergeSha: string; authorizationRevision: number };
   evidence: Evidence[]; observation: Observation | null; blocker: string | null;
+  escalation?: { trigger: 'lease-loss' | 'evidence-policy-conflict' | 'security-concern' | 'requirement-weakening'; reason: string; at: string; actor: string } | null;
   gates: Gate[]; violations: string[];
 }
 export class Refusal extends Error {
