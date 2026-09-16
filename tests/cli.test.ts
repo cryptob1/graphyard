@@ -105,15 +105,22 @@ test('containment settlement does not retry confirmed refusal and fails closed o
 
 test('containment settlement bounds persistent ambiguity after one child launch without capability leakage', async () => {
   const credentials = containmentCredentials(); const cwd = await mkdtemp(join(tmpdir(), 'graphyard-settlement-')); const launches = join(cwd, 'launches'); let attempts = 0;
+  const baselineInt = process.listenerCount('SIGINT'), baselineTerm = process.listenerCount('SIGTERM');
   const child = `const fs=require('node:fs'),crypto=require('node:crypto');const hash=${JSON.stringify(credentials.settlementHash)};if(Object.values(process.env).some(value=>crypto.createHash('sha256').update(value??'').digest('hex')===hash))process.exit(91);fs.appendFileSync(${JSON.stringify(launches)},'launched\\n')`;
   const containment = { command: process.execPath, args: ['-e', child], signal: () => {}, empty: () => true };
   try {
     await assert.rejects(supervise('ignored', [], 9, async () => ({ ...renewal(), lease: { ...renewal().lease, epoch: 9 } }), { containment, detached: false, graceMs: 1, quarantine: {
       establish: async () => {},
-      settle: () => settleContainment(async (_key, body) => { attempts++; assert.equal(body.settlementToken, credentials.settlementToken); throw new TypeError('response unavailable'); },
+      settle: () => settleContainment(async (_key, body) => {
+        attempts++; assert.equal(body.settlementToken, credentials.settlementToken);
+        assert.equal(process.listenerCount('SIGINT'), baselineInt + 1); assert.equal(process.listenerCount('SIGTERM'), baselineTerm + 1);
+        process.emit(attempts % 2 ? 'SIGINT' : 'SIGTERM', attempts % 2 ? 'SIGINT' : 'SIGTERM');
+        throw new TypeError('response unavailable');
+      },
         { epoch: 9, settlementToken: credentials.settlementToken, settlementHash: credentials.settlementHash, exclusiveResources: [], requestId: credentials.requestId }, { attempts: 3, retryMs: 0 }),
     } }), /could not confirm containment settlement after 3 attempts/);
     assert.equal(attempts, 3); assert.equal(await readFile(launches, 'utf8'), 'launched\n');
+    assert.equal(process.listenerCount('SIGINT'), baselineInt); assert.equal(process.listenerCount('SIGTERM'), baselineTerm);
   } finally { await rm(cwd, { recursive: true, force: true }); }
 });
 
@@ -293,6 +300,33 @@ test('supervisor polls a stopping scope after SIGKILL before settling quarantine
   };
   assert.equal(await supervise('ignored', [], 1, async () => renewal(), { containment, detached: false, graceMs: 10, shutdownPollMs: 1, shutdownTimeoutMs: 100, quarantine: { establish: async () => {}, settle: async () => { settled++; } } }), 0);
   assert.equal(reads, 3); assert.equal(settled, 1);
+});
+
+test('supervisor retains signal handlers through verification and settlement, then removes them', async () => {
+  const baselineInt = process.listenerCount('SIGINT'), baselineTerm = process.listenerCount('SIGTERM');
+  let reads = 0, settlements = 0, signals = 0;
+  const containment = {
+    command: process.execPath,
+    args: ['-e', 'process.exit(0)'],
+    signal: () => { signals++; },
+    empty: () => {
+      assert.equal(process.listenerCount('SIGINT'), baselineInt + 1);
+      assert.equal(process.listenerCount('SIGTERM'), baselineTerm + 1);
+      if (++reads === 1) { process.emit('SIGINT', 'SIGINT'); process.emit('SIGTERM', 'SIGTERM'); }
+      return reads >= 2;
+    },
+  };
+  assert.equal(await supervise('ignored', [], 1, async () => renewal(), { containment, detached: false, graceMs: 1, shutdownPollMs: 1, shutdownTimeoutMs: 100, quarantine: {
+    establish: async () => {},
+    settle: async () => {
+      settlements++;
+      assert.equal(process.listenerCount('SIGINT'), baselineInt + 1);
+      assert.equal(process.listenerCount('SIGTERM'), baselineTerm + 1);
+      process.emit('SIGINT', 'SIGINT'); process.emit('SIGTERM', 'SIGTERM');
+    },
+  } }), 0);
+  assert.equal(settlements, 1); assert.ok(signals >= 2, 'repeated signals continue targeting the existing containment');
+  assert.equal(process.listenerCount('SIGINT'), baselineInt); assert.equal(process.listenerCount('SIGTERM'), baselineTerm);
 });
 
 test('supervisor retains quarantine only after bounded scope shutdown verification times out', async () => {

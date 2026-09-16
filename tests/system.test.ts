@@ -342,6 +342,34 @@ test('only an independently observed merge with a verified execution completes w
   assert.equal((await store.pool.query('SELECT 1 FROM jobs WHERE work_id=$1', [w.id])).rowCount, 0);
   await assert.rejects(engine.execute(worker, 'claim', w.id, {}, randomUUID()), /immutable/);
 });
+test('capability settlement preserves active and expired merge executions while refusing forged authority', async () => {
+  const prepare = async (suffix: string) => {
+    let item = await engine.execute(operator, 'create', null, { ...workInput, exclusiveResources: [`merge-settlement:${suffix}:${randomUUID()}`] }, randomUUID());
+    item = await engine.execute(operator, 'ready', item.id, {}, randomUUID());
+    item = await engine.execute(worker, 'claim', item.id, {}, randomUUID());
+    const settlementToken = suffix.repeat(64), settlementHash = createHash('sha256').update(settlementToken).digest('hex');
+    item = await engine.execute(worker, 'quarantine', item.id, { epoch: 1, settlementHash }, randomUUID());
+    item = await engine.execute(worker, 'workspace', item.id, { epoch: 1, host: `merge-settlement-${suffix}`, path: `/tmp/${item.id}-${suffix}`, branch: `graphyard/${item.id}-${suffix}` }, randomUUID());
+    item = await engine.execute(worker, 'submit', item.id, { epoch: 1, pr: Number(item.key.slice(3)) }, randomUUID());
+    item = await engine.observe(item.id, item.revision, observation(item));
+    item = await engine.execute(producer, 'evidence', item.id, proof(), randomUUID());
+    await engine.acquireMerge(coordinator, item.id, { expectedRevision: item.revision, sha: head, baseSha: base, policyRevision: item.policyRevision }, randomUUID());
+    return { item, settlementToken };
+  };
+
+  for (const [suffix, expire] of [['a', false], ['b', true]] as const) {
+    const prepared = await prepare(suffix);
+    if (expire) await store.pool.query("UPDATE work_items SET document=jsonb_set(document,'{mergeExecution,expiresAt}',to_jsonb('2000-01-01T00:00:00Z'::text)) WHERE id=$1", [prepared.item.id]);
+    const before = (await store.pool.query('SELECT document FROM work_items WHERE id=$1', [prepared.item.id])).rows[0].document as Work; const gates = structuredClone(before.gates);
+    const mergeHistory = (await store.events(prepared.item.id)).filter(event => event.kind.startsWith('merge.'));
+    await assert.rejects(engine.execute(other, 'settle', prepared.item.id, { epoch: 1, settlementToken: prepared.settlementToken }, randomUUID()), /another worker/);
+    await assert.rejects(engine.execute(worker, 'settle', prepared.item.id, { epoch: 1, settlementToken: 'f'.repeat(64) }, randomUUID()), /capability is invalid/);
+    const settled = await engine.execute(worker, 'settle', prepared.item.id, { epoch: 1, settlementToken: prepared.settlementToken }, randomUUID());
+    assert.deepEqual(settled.mergeExecution, before.mergeExecution, `${expire ? 'expired' : 'active'} merge execution must be preserved`);
+    assert.deepEqual(settled.gates, gates); assert.deepEqual((await store.events(prepared.item.id)).filter(event => event.kind.startsWith('merge.')), mergeHistory);
+    assert.equal(settled.containmentQuarantine, null);
+  }
+});
 test('capability settlement survives the merge-to-done race without weakening delivered immutability', async () => {
   const resource = `delivery-race:${randomUUID()}`;
   let w = await engine.execute(operator, 'create', null, { ...workInput, exclusiveResources: [resource] }, randomUUID());

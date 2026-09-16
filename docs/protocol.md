@@ -115,3 +115,7 @@ All required proof names must pass. Evidence is selected for the exact head/base
 ## Validation runner API
 
 The [validation protocol](validation.md) documents versioned environments, trusted registrations, immutable candidates, explicit dispatch/ACK, result collection and recovery. Use `graphyard validation` to inspect requests. Automatic runner execution is a later increment.
+
+## Supervised shutdown invariants
+
+During shutdown, the supervisor retains its SIGINT and SIGTERM handlers through bounded containment verification and quarantine settlement. Repeated signals continue to target the already-started containment instead of killing the capability-holding parent; handlers are removed only immediately before the supervisor finally resolves or rejects. Capability-authorized settlement is permitted while a merge execution is active or expired, but clears only the containment quarantine and preserves merge authority, gates, and merge history.

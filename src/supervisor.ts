@@ -109,6 +109,10 @@ export async function supervise(command: string, args: string[], epoch: number, 
     const supervisedPids = new Map<number, string>();
     let containmentFailure: unknown;
     let expiry: ReturnType<typeof setTimeout>;
+    const finish = (error: unknown, code?: number) => {
+      process.off('SIGTERM', interrupted); process.off('SIGINT', interrupted);
+      if (error) reject(error); else resolve(code!);
+    };
     const signalGroup = (signal: NodeJS.Signals) => {
       if (!child.pid) return;
       if (containment) {
@@ -128,7 +132,6 @@ export async function supervise(command: string, args: string[], epoch: number, 
       // Keep this timer referenced even if the group leader exits first.
       setTimeout(async () => {
         signalGroup('SIGKILL');
-        process.off('SIGTERM', interrupted); process.off('SIGINT', interrupted);
         if (containment) {
           let empty = false, lastVerificationFailure: unknown;
           const shutdownDeadline = performance.now() + (options.shutdownTimeoutMs ?? 2000);
@@ -140,11 +143,11 @@ export async function supervise(command: string, args: string[], epoch: number, 
             await delay(Math.min(options.shutdownPollMs ?? 50, remaining));
           } while (performance.now() < shutdownDeadline);
           containmentFailure ??= lastVerificationFailure;
-          if (!empty) { reject(new Error(`Worker containment shutdown could not be verified${containmentFailure instanceof Error ? `: ${containmentFailure.message}` : ''}`)); return; }
+          if (!empty) { finish(new Error(`Worker containment shutdown could not be verified${containmentFailure instanceof Error ? `: ${containmentFailure.message}` : ''}`)); return; }
           try { await options.quarantine!.settle(); }
-          catch (error) { reject(new Error(`Worker containment shutdown was verified but its Graphyard quarantine could not be settled: ${error instanceof Error ? error.message : String(error)}`)); return; }
+          catch (error) { finish(new Error(`Worker containment shutdown was verified but its Graphyard quarantine could not be settled: ${error instanceof Error ? error.message : String(error)}`)); return; }
         }
-        resolve(code);
+        finish(null, code);
       }, options.graceMs ?? 5000);
     }
     const armDeadline = () => { clearTimeout(expiry); expiry = setTimeout(() => stop(1), Math.max(0, deadline - performance.now())); };
