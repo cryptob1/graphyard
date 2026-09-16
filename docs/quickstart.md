@@ -36,17 +36,18 @@ node "$GRAPHYARD_CLI" init \
   --token-stdin
 ```
 
-Paste the worker token, press Enter, then press Ctrl-D. Commit the generated `AGENTS.md` and `.gitignore` changes before starting product work.
+Paste the worker token, press Enter, then press Ctrl-D. Commit the generated `AGENTS.md` and `.gitignore` changes, push or merge that commit into the configured base branch, and fetch it before starting product work.
 
 ## Create work
 
-In the UI, create a small task for this repository, add its acceptance criteria, and move it to Ready. All listed proofs must pass. To revise requirements later, an operator runs `node "$GRAPHYARD_CLI" requirements GY-1 revision.json`; workers cannot weaken their own task.
+In the UI, create a small task for this repository, add its acceptance criteria, and move it to Ready. All listed proofs must pass. Only an admin can [revise requirements](coordination.md#revise-requirements-explicitly); workers cannot weaken their own task.
 
 ## Claim and launch a worker
 
 Use a distinct worker token:
 
 ```sh
+git fetch origin
 node "$GRAPHYARD_CLI" claim GY-1
 node "$GRAPHYARD_CLI" worktree GY-1 EPOCH origin/main
 cd .graphyard/worktrees/GY-1-EPOCH
