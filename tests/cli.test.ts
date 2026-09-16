@@ -639,3 +639,39 @@ test('rework worktree reopens the exact observed PR branch while preserving its 
     for(const invalid of ['',join(cwd,'missing.mjs')])await assert.rejects(commands({...env,GRAPHYARD_CLI:invalid}),/launcher/);
   } finally {await new Promise<void>(r=>http.close(()=>r()));await rm(cwd,{recursive:true,force:true});}
  });
+
+test('the packaged runner path is usable from the CLI and refuses evidence-producer credentials', async () => {
+  const cwd = await mkdtemp(join(tmpdir(), 'graphyard-runner-cli-'));
+  let role = 'producer';
+  const posts: string[] = [];
+  const http = createServer((req, res) => {
+    res.setHeader('Content-Type', 'application/json');
+    if (req.url === '/api/status') { res.end(JSON.stringify({ actor: { id: 'preview-runner', role, ...(role === 'producer' ? { proofs: ['e2e:booking'] } : {}) } })); return; }
+    posts.push(String(req.url)); res.end('{}');
+  });
+  await new Promise<void>(r => http.listen(0, '127.0.0.1', r));
+  const env = { ...process.env, GRAPHYARD_TOKEN: 'test-only', GRAPHYARD_URL: `http://127.0.0.1:${(http.address() as any).port}` };
+  try {
+    const oracle = join(cwd, 'oracle'); await mkdir(oracle); await mkdir(join(cwd, 'out'), { mode: 0o700 });
+    await writeFile(join(oracle, 'suite.spec.ts'), 'approved assertion');
+    const bundle = JSON.parse((await exec(process.execPath, [launcher, 'runner', 'bundle-digest', oracle], { cwd, env })).stdout);
+    assert.match(bundle.digest, /^sha256:[a-f0-9]{64}$/);
+    assert.deepEqual(bundle.files.map((f: any) => f.path), ['suite.spec.ts']);
+
+    const plan = join(cwd, 'runner.json');
+    await writeFile(plan, JSON.stringify({ registration: { id: 'preview-runner', revision: 1 }, imageRepository: 'example/graphyard-runner',
+      oraclePath: oracle, outputPath: join(cwd, 'out'), network: 'gy-test', timeoutMs: 60_000 }));
+    // A producer credential could publish evidence about its own execution.
+    await assert.rejects(exec(process.execPath, [launcher, 'runner', 'attempt', plan], { cwd, env }), /worker-scoped runner credential/);
+    assert.deepEqual(posts, []);
+    role = 'worker';
+    // A worker credential proceeds to dispatch; the stub offers no eligible request.
+    assert.equal(JSON.parse((await exec(process.execPath, [launcher, 'runner', 'attempt', plan], { cwd, env })).stdout).dispatched, false);
+    assert.deepEqual(posts, ['/api/validation/dispatch']);
+
+    await writeFile(join(cwd, 'collect.json'), JSON.stringify({ grant: {}, record: {}, outputPath: join(cwd, 'out'), requiredArtifacts: ['report'], expected: { instance: 'x', artifacts: [] }, observations: [] }));
+    await assert.rejects(exec(process.execPath, [launcher, 'runner', 'collect', join(cwd, 'collect.json')], { cwd, env }));
+    assert.deepEqual(posts, ['/api/validation/dispatch']);
+    await assert.rejects(exec(process.execPath, [launcher, 'runner', 'nonsense'], { cwd, env }), /Use runner inspect/);
+  } finally { await new Promise<void>(r => http.close(() => r())); await rm(cwd, { recursive: true, force: true }); }
+});

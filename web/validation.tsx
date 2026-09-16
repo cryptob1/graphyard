@@ -44,7 +44,7 @@ export default function ValidationView({ api, work }: { api: (path: string) => P
   const recent = [...requests].sort((a,b) => b.createdAt.localeCompare(a.createdAt) || b.id.localeCompare(a.id));
   return <><header><div className="breadcrumb">Verification <span>/</span> Validation requests</div><a href="/docs/validation">Protocol guide ↗</a></header>
     <div className="page-heading"><div><div className="eyebrow">FROM REQUIREMENT TO PROOF</div><h1>Validation requests</h1><p>See which candidate is queued, running, or waiting for a verified result.</p></div></div>
-    <div className="notice">This release coordinates external runners. The packaged Playwright runner and guided execution setup are still planned.</div>
+    <div className="notice">The packaged Playwright runner and separate collector ship in this release. Rich captures (traces, screenshots, videos) stay disabled until their protection policy is implemented, and the runner still needs an independently approved bundle and runner image.</div>
     {!following && <div className="notice">Browsing history; live updates paused. <button onClick={() => { viewEpoch.current++; setLoadingOlder(false); setFollowing(true); setRetry(n => n + 1); setLoaded(false); setRequests([]); setNextCursor(null); setError(''); }}>Return to latest</button></div>}
     {error && <div role="alert" className="notice danger">{error} {loaded && 'Previously loaded data may be stale.'} <button disabled={loadingOlder} onClick={() => following ? setRetry(n => n + 1) : void older()}>Retry validation requests</button></div>}
     {!loaded && !error && <p role="status">Loading validation requests…</p>}

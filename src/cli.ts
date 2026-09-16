@@ -4,11 +4,14 @@ import { hostname } from 'node:os';
 import { resolve } from 'node:path';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { supervise } from './supervisor.js';
-import { inspectRunnerRepository, snapshotRunnerSources } from './runner-setup.js';
+import { inspectRunnerRepository, oracleBundleDigest, snapshotRunnerSources } from './runner-setup.js';
+import { assertRunnerCredentialScope, attemptGrantSchema, executeAttempt, executionPlanSchema, executionRecordSchema } from './runner-executor.js';
+import { assembleResult, collectArtifacts, targetObservationSchema } from './runner-collector.js';
 import { assertRepository, discover } from './onboarding.js';
 import { startGithubSetup } from './github-setup.js';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
+import { z } from 'zod';
 import { diagnose, fileConflicts, proofPreview, resourceConflicts } from './coordination.js';
 import { loadConnection, setupRepository, handoff, hostIdSchema } from './repository-setup.js';
 import { assertMasterBinding, buildMasterStatus, continueMergeBatch, currentMergeCandidates, dispatchWork, inspectWorkerCredentials, listHerdrAgents, loadMasterConfig, mergeWork, observeHerdrAgents, readCredentialFile, readWorkerCredential, saveWorkerProfile, setupMaster, startMaster, workerProfileSchema } from './master.js';
@@ -74,6 +77,9 @@ Environment: GRAPHYARD_URL, GRAPHYARD_TOKEN (individual role-scoped credential)
   validation [ACTION file.json] List validation state or submit a protocol command
   runner inspect [DIRECTORY]   Discover Playwright inputs without executing repository code
   runner snapshot file.json    Snapshot an explicit source-file list for review (not approval)
+  runner bundle-digest DIR      Content identity of an executable oracle bundle for approval
+  runner attempt file.json      Execute one dispatched attempt in the isolated boundary
+  runner collect file.json      Verify one attempt and publish a trusted result (collector)
   scenarios                    List versioned E2E test-case definitions
   scenario file.json           Publish a scenario version (operator)
   ready GY-N REASON            Release backlog item with an audit reason (operator)
@@ -169,7 +175,50 @@ Never share an operator or producer credential with an implementation agent.`); 
   if (command === 'runner') {
     if (id === 'inspect' && args.length <= 1) return print(await inspectRunnerRepository(resolve(args[0] ?? '.')));
     if (id === 'snapshot' && args.length === 1) return print(await snapshotRunnerSources(process.cwd(), JSON.parse(await readFile(args[0], 'utf8'))));
-    throw new Error('Use runner inspect [DIRECTORY] or runner snapshot file.json');
+    if (id === 'bundle-digest' && args.length === 1) return print(await oracleBundleDigest(resolve(args[0])));
+    if (id === 'attempt' && args.length === 1) {
+      // Runner path. This credential is a worker registration: it can acknowledge and
+      // execute, and it can never publish evidence about its own execution.
+      const { registration, ...plan } = executionPlanSchema.omit({ grant: true })
+        .extend({ registration: z.object({ id: z.string(), revision: z.number().int().positive() }).strict() }).strict()
+        .parse(JSON.parse(await readFile(args[0], 'utf8')));
+      assertRunnerCredentialScope(await api('status'));
+      const dispatched = await api('validation/dispatch', { registration });
+      if (!dispatched.request) return print({ dispatched: false, reason: dispatched.reason });
+      const grant = attemptGrantSchema.parse({ requestId: dispatched.request.id, attemptId: dispatched.attempt.id, epoch: dispatched.attempt.epoch,
+        runner: registration, bundleDigest: dispatched.bundle.digest, runnerImageDigest: dispatched.bundle.runnerImageDigest,
+        targetUrl: dispatched.environment.url, deadline: dispatched.request.deadline });
+      const attemptCommand = { requestId: grant.requestId, attemptId: grant.attemptId, epoch: grant.epoch };
+      await api('validation/ack', attemptCommand, `${grant.attemptId}-ack`);
+      let beat = 0;
+      const heartbeat = setInterval(() => { void api('validation/heartbeat', attemptCommand, `${grant.attemptId}-beat-${++beat}`).catch(() => { /* reconciliation decides authority; execution is fenced by the container boundary */ }); }, 20_000);
+      try { return print({ dispatched: true, environment: { instance: dispatched.environment.instance, url: dispatched.environment.url }, expected: { instance: dispatched.environment.instance, artifacts: dispatched.build.artifacts }, record: await executeAttempt({ ...plan, grant }) }); }
+      finally { clearInterval(heartbeat); }
+    }
+    if (id === 'collect' && args.length === 1) {
+      // Collector path. Separate credential, separate host: it re-reads the authority,
+      // measures the target itself and never trusts candidate-authored JSON.
+      const input = z.object({ grant: attemptGrantSchema, record: executionRecordSchema, outputPath: z.string(), requiredArtifacts: z.array(z.string()).min(1).max(30),
+        expected: z.object({ instance: z.string(), artifacts: z.array(z.object({ service: z.string(), digest: z.string() }).strict()).min(1) }).strict(),
+        observations: z.array(targetObservationSchema).max(5000), maxGapMs: z.number().int().min(1000).max(600_000).default(30_000), cancelled: z.boolean().default(false) })
+        .strict().parse(JSON.parse(await readFile(args[0], 'utf8')));
+      const collected = await collectArtifacts(resolve(input.outputPath), input.requiredArtifacts);
+      const uploaded: { name: string; digest: string; url: string }[] = [];
+      const failures: string[] = [];
+      for (const artifact of collected.artifacts) {
+        try {
+          const stored = await api('validation/artifacts', { requestId: input.grant.requestId, attemptId: input.grant.attemptId, epoch: input.grant.epoch,
+            name: artifact.name, mediaType: artifact.mediaType, bytes: artifact.bytes.toString('base64'), capturePolicy: 'approved-test-data-only' }, `${input.grant.attemptId}-artifact-${artifact.name}`);
+          uploaded.push({ name: artifact.name, digest: stored.digest, url: stored.url });
+        } catch { failures.push(`Private storage rejected required artifact ${artifact.name}`); }
+      }
+      const assembled = assembleResult({ grant: input.grant, execution: input.record, expected: input.expected, observations: input.observations,
+        maxGapMs: input.maxGapMs, requiredArtifacts: input.requiredArtifacts, cancelled: input.cancelled,
+        collected: { artifacts: collected.artifacts, reasons: [...collected.reasons, ...failures] }, uploaded });
+      if (!assembled.report) throw new Error(`Collection refused: ${assembled.refusals.join('; ')}`);
+      return print({ refusals: assembled.refusals, report: assembled.report, result: await api('validation/result', assembled.report, `${input.grant.attemptId}-result`) });
+    }
+    throw new Error('Use runner inspect|snapshot|bundle-digest|attempt|collect');
   }
   if (command === 'validation') {
     if (!id || id === 'requests') return print(await api('validation' + (args[0] ? `?cursor=${encodeURIComponent(args[0])}` : '')));

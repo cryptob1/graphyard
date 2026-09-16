@@ -36,10 +36,10 @@ const commandSchema = z.object({ requestId: z.uuid(), attemptId: z.uuid(), epoch
 const reportSchema = commandSchema.extend({
   execution: z.enum(['completed', 'cancelled', 'timed_out']), behavior: z.enum(['passed', 'failed', 'blocked', 'unmeasured']),
   executed: z.number().int().min(0).max(1_000_000), skipped: z.number().int().min(0).max(1_000_000), inventoryComplete: z.boolean(),
-  target: z.object({ instance: name, artifacts, measurement: z.enum(['provider', 'host-attestation', 'unknown']), coversEntireRun: z.boolean() }).strict(),
+  target: z.object({ instance: name, artifacts, measurement: z.enum(['provider', 'host-attestation', 'unknown']), coversEntireRun: z.boolean(), attribution: z.enum(['matched', 'mismatched', 'changed', 'unknown']) }).strict(),
   bundleDigest: digest, runnerImageDigest: digest,
   artifacts: z.array(z.object({ name, digest, url: z.url().max(2000) }).strict()).max(30),
-  executionSettled: z.boolean(),
+  artifactState: z.enum(['verified', 'missing', 'upload-failed', 'expired']), executionSettled: z.boolean(),
 }).strict();
 type Report = z.infer<typeof reportSchema>;
 const hash = (v: unknown) => createHash('sha256').update(JSON.stringify(v)).digest('hex');
@@ -369,9 +369,9 @@ export class Validation {
     const reasons: string[] = [];
     if (data.execution !== 'completed' || data.behavior !== 'passed') reasons.push('Execution and behavior must both pass');
     if (!data.inventoryComplete || data.executed < 1 || data.skipped !== 0) reasons.push('Required inventory is missing, empty or skipped');
-    if (data.target.measurement === 'unknown' || !data.target.coversEntireRun || data.target.instance !== e.instance || !same([...data.target.artifacts].sort((a,b) => a.service.localeCompare(b.service)), [...build.artifacts].sort((a,b) => a.service.localeCompare(b.service)))) reasons.push('Independent whole-run target attribution is missing or mismatched');
+    if (data.target.attribution !== 'matched' || data.target.measurement === 'unknown' || !data.target.coversEntireRun || data.target.instance !== e.instance || !same([...data.target.artifacts].sort((a,b) => a.service.localeCompare(b.service)), [...build.artifacts].sort((a,b) => a.service.localeCompare(b.service)))) reasons.push('Independent whole-run target attribution is missing or mismatched');
     if (data.bundleDigest !== b.digest || data.runnerImageDigest !== b.runnerImageDigest) reasons.push('Executed oracle bundle or runner image differs from approval');
-    if (new Set(data.artifacts.map(a => a.name)).size !== data.artifacts.length || c.requiredArtifacts.some(n => !data.artifacts.some(a => a.name === n))) reasons.push('Required execution artifacts are missing or ambiguous');
+    if (data.artifactState !== 'verified' || new Set(data.artifacts.map(a => a.name)).size !== data.artifacts.length || c.requiredArtifacts.some(n => !data.artifacts.some(a => a.name === n))) reasons.push('Required execution artifacts are missing or ambiguous');
     if (!data.executionSettled) reasons.push('Execution settlement is unverified; resources remain reserved');
     return reasons;
   }

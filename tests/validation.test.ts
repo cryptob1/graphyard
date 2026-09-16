@@ -57,7 +57,7 @@ async function start(f: Awaited<ReturnType<typeof fixture>>) {
   await validation.runnerCommand(runner, 'ack', command, id()); return command;
 }
 function report(f: Awaited<ReturnType<typeof fixture>>, command: { requestId: string; attemptId: string; epoch: number }) {
-  return { ...command, execution: 'completed', behavior: 'passed', executed: 2, skipped: 0, inventoryComplete: true, target: { instance: `instance-${f.n}`, artifacts: [{ service: 'api', digest }], measurement: 'provider', coversEntireRun: true }, bundleDigest: digest, runnerImageDigest: inputs, artifacts: [{ name: 'report', digest, url: 'https://private.example.test/report' }], executionSettled: true };
+  return { ...command, execution: 'completed', behavior: 'passed', executed: 2, skipped: 0, inventoryComplete: true, target: { instance: `instance-${f.n}`, artifacts: [{ service: 'api', digest }], measurement: 'provider', coversEntireRun: true, attribution: 'matched' }, bundleDigest: digest, runnerImageDigest: inputs, artifacts: [{ name: 'report', digest, url: 'https://private.example.test/report' }], artifactState: 'verified', executionSettled: true };
 }
 async function expire(f: Awaited<ReturnType<typeof fixture>>) {
   await store.pool.query("UPDATE validation_requests SET document=jsonb_set(document,'{attempts,0,expiresAt}',to_jsonb('2000-01-01T00:00:00Z'::text)) WHERE id=$1", [f.r.id]); await validation.reconcile();
@@ -145,12 +145,12 @@ test('cancellation preserves history and rejects late success without losing its
   assert.equal((await store.events(f.w.id)).filter(e => e.kind === 'validation.result-rejected').length, 1); await cleanup(f);
 });
 test('empty, skipped, mismatched, unknown and incomplete reports never pass', async () => {
-  for (const change of [{ executed: 0 }, { skipped: 1 }, { artifacts: [] }, { inventoryComplete: false }, { bundleDigest: inputs }, { executionSettled: false }, { behavior: 'blocked' }]) {
+  for (const change of [{ executed: 0 }, { skipped: 1 }, { artifacts: [] }, { artifactState: 'upload-failed' }, { artifactState: 'expired' }, { inventoryComplete: false }, { bundleDigest: inputs }, { executionSettled: false }, { behavior: 'blocked' }]) {
     const f = await fixture(), command = await start(f);
     const result: any = await validation.result(collector, { ...report(f, command), ...change }, id()); assert.equal(result.accepted, true); assert.equal(result.passed, false);
     assert.equal((await current(f.w.id)).gates.find(g => g.name === 'acceptance')?.passed, false); await cleanup(f);
   }
-  for (const change of [{ measurement: 'unknown' }, { coversEntireRun: false }, { instance: 'wrong' }, { artifacts: [{ service: 'api', digest: inputs }] }]) {
+  for (const change of [{ measurement: 'unknown' }, { coversEntireRun: false }, { attribution: 'changed' }, { attribution: 'mismatched' }, { attribution: 'unknown' }, { instance: 'wrong' }, { artifacts: [{ service: 'api', digest: inputs }] }]) {
     const f = await fixture(), command = await start(f), good = report(f, command);
     const result: any = await validation.result(collector, { ...good, target: { ...good.target, ...change } }, id()); assert.equal(result.passed, false); await cleanup(f);
   }
