@@ -41,7 +41,7 @@ quit
 node "$GRAPHYARD_CLI" watch GY-1 EPOCH -- YOUR_AGENT_COMMAND
 ```
 
-`watch` renews the lease and stops the process when ownership is lost. See [operations](operations.md) for containment failures and recovery.
+Durable `watch` containment requires Linux with a working systemd user manager. On Windows it can stop only the direct child, and macOS foreground supervision is refused; use a Linux VM/container or an external supervisor that terminates the full process tree. See [operations](operations.md) for recovery.
 
 ## Master mode
 

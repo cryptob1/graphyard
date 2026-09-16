@@ -49,7 +49,7 @@ Use a distinct worker token:
 ```sh
 git fetch origin
 node "$GRAPHYARD_CLI" claim GY-1
-node "$GRAPHYARD_CLI" worktree GY-1 EPOCH origin/main
+node "$GRAPHYARD_CLI" worktree GY-1 EPOCH origin/YOUR_BASE_BRANCH
 cd .graphyard/worktrees/GY-1-EPOCH
 node "$GRAPHYARD_CLI" watch GY-1 EPOCH -- YOUR_AGENT_COMMAND
 ```
