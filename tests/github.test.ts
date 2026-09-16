@@ -2,6 +2,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { CODEX_APP_ID, CODEX_USER_ID } from '../src/codex-review.js';
 import { GitHub, CHECK_NAME } from '../src/github.js';
+// @ts-expect-error Dependency-free inspection script.
+import { evaluateEnforcement } from '../scripts/verify-enforcement.mjs';
 import type { Work } from '../src/model.js';
 const head = 'a'.repeat(40), base = 'b'.repeat(40);
 function fixture() {
@@ -156,4 +158,70 @@ test('draft and closed PRs expose actionable review waits without requesting pro
     assert.equal(observed.agentReview?.approved,false); assert.match(observed.agentReview!.reason,/mark it ready|reopen/);
     assert.ok(!f.calls.some(c=>c.path.includes('/comments')));
   }
+});
+
+
+function enforcement(overrides: any = {}) {
+  return {
+    repository: 'owner/repo', baseBranch: 'main', appId: 1234,
+    protection: { required_status_checks: { strict: true, checks: [{ context: CHECK_NAME, app_id: 1234 }, { context: 'test', app_id: 15368 }] },
+      required_pull_request_reviews: { required_approving_review_count: 1, dismiss_stale_reviews: true, require_last_push_approval: true },
+      enforce_admins: { enabled: true }, allow_force_pushes: { enabled: false }, allow_deletions: { enabled: false } },
+    rulesets: [],
+    pull: { number: 10, head: { sha: head }, base: { sha: base, ref: 'main' }, state: 'open', draft: false, merged: false, mergeable: true, mergeable_state: 'clean' },
+    checkRuns: [{ name: CHECK_NAME, status: 'completed', conclusion: 'success', app: { id: 1234, slug: 'graphyard' }, pull_requests: [{ number: 10 }] }],
+    work: { key: 'GY-1', stage: 'merge', policyRevision: 1, policy: { review: true, reviewProvider: 'codex', checks: ['test'] }, gates: [{ name: 'acceptance', passed: true, reasons: [] }, { name: 'merge', passed: true, reasons: [] }] },
+    ...overrides,
+  };
+}
+
+test('enforcement inspection permits only a fully proven candidate under App-bound protection', () => {
+  const permitted = evaluateEnforcement(enforcement());
+  assert.equal(permitted.verdict, 'permitted');
+  assert.deepEqual(permitted.refusals, []);
+  assert.equal(permitted.app.publishedCheck.appId, 1234);
+
+  const unproven = evaluateEnforcement(enforcement({ work: { ...enforcement().work, stage: 'acceptance', gates: [{ name: 'acceptance', passed: false, reasons: ['AC-1: manual:github-enforcement needs trusted passing evidence'] }] } }));
+  assert.equal(unproven.verdict, 'refused');
+  assert.match(unproven.refusals.join('\n'), /acceptance gate: AC-1/);
+
+  const unlinked = evaluateEnforcement(enforcement({ checkRuns: [{ name: 'test', status: 'completed', conclusion: 'success', app: { id: 15368 } }] }));
+  assert.equal(unlinked.verdict, 'refused');
+  assert.match(unlinked.refusals.join('\n'), new RegExp(`${CHECK_NAME} has not been published`));
+});
+
+test('enforcement inspection refuses unbound, unenforced or foreign-App protection', () => {
+  const cases: [any, RegExp][] = [
+    [{ required_status_checks: { strict: true, checks: [{ context: 'test', app_id: 15368 }] } }, /do not include/],
+    [{ required_status_checks: { strict: true, checks: [{ context: CHECK_NAME, app_id: 999 }] } }, /bound to App 999/],
+    [{ required_status_checks: { strict: false, checks: [{ context: CHECK_NAME, app_id: 1234 }] } }, /up to date/],
+    [{ enforce_admins: { enabled: false } }, /administrators/],
+    [{ allow_force_pushes: { enabled: true } }, /Force pushes/],
+    [{ allow_deletions: { enabled: true } }, /Deletion/],
+  ];
+  for (const [override, expected] of cases) {
+    const report = evaluateEnforcement(enforcement({ protection: { ...enforcement().protection, ...override } }));
+    assert.equal(report.verdict, 'refused');
+    assert.match(report.refusals.join('\n'), expected);
+  }
+  assert.equal(evaluateEnforcement(enforcement({ protection: null })).verdict, 'refused');
+
+  // A check published by another App with the right name cannot satisfy the gate.
+  const foreign = evaluateEnforcement(enforcement({ checkRuns: [{ name: CHECK_NAME, status: 'completed', conclusion: 'success', app: { id: 999, slug: 'other' } }] }));
+  assert.match(foreign.refusals.join('\n'), /published by App 999/);
+});
+
+test('enforcement inspection reports the native-review migration boundary and commit-scoped inheritance', () => {
+  const native = enforcement();
+  native.work.policy.reviewProvider = 'github';
+  native.protection.required_pull_request_reviews = { required_approving_review_count: 0, dismiss_stale_reviews: true, require_last_push_approval: false };
+  const report = evaluateEnforcement(native);
+  assert.equal(report.protection.nativeReviewRequired, true);
+  assert.equal(report.verdict, 'refused');
+  assert.match(report.refusals.join('\n'), /native GitHub review/);
+
+  const inherited = evaluateEnforcement(enforcement({ checkRuns: [{ name: CHECK_NAME, status: 'completed', conclusion: 'success', app: { id: 1234 }, pull_requests: [{ number: 11 }] }] }));
+  assert.equal(inherited.verdict, 'permitted');
+  assert.match(inherited.notes.join('\n'), /commit-scoped and can be inherited/);
+  assert.match(evaluateEnforcement(enforcement({ rulesets: null })).notes.join('\n'), /rulesets could not be read/);
 });
