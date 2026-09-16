@@ -1,6 +1,6 @@
 # Implementation audit — September 13, 2026
 
-> **Historical snapshot.** This audit describes the repository at the listed date. Use the [current documentation index](/docs/README) for setup and operations.
+> **Historical snapshot.** This audit describes the repository at the listed date. Use the [current documentation index](../README.md) for setup and operations.
 
 This review compares the bootstrap implementation with the original Graphyard specification and the subsequent requests for distributed ownership, Herdr integration, Railway deployment, public source, documentation, and E2E case storage. It covers the domain engine, persistence, HTTP boundary, GitHub adapter, CLI, Herdr plugin, UI, deployment files, documentation, tests, and repository history.
 

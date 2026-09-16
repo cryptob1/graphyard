@@ -14,16 +14,23 @@ const pages = [
   ['history/huck-engineer-comparison', 'Historical Huck investigation'],
 ];
 const sources = import.meta.glob('../docs/**/*.md', { query: '?raw', import: 'default', eager: true }) as Record<string, string>;
-function docLink(href: string | undefined) {
+function docLink(href: string | undefined, slug: string) {
   if (!href) return '#';
   if (href.startsWith('http') || href.startsWith('#') || href.startsWith('/')) return href;
   const [path, anchor] = href.split('#');
-  if (path.startsWith('../')) return `https://github.com/cryptob1/graphyard/blob/main/${path.slice(3)}${anchor ? `#${anchor}` : ''}`;
-  return `/docs/${path.replace(/\.md$/, '')}${anchor ? `#${anchor}` : ''}`;
+  const repositoryPath = ['docs', ...slug.split('/').slice(0, -1), ...path.split('/')].reduce<string[]>((parts, part) => {
+    if (part === '..') parts.pop();
+    else if (part !== '.' && part) parts.push(part);
+    return parts;
+  }, []).join('/');
+  if (repositoryPath.startsWith('docs/') && repositoryPath.endsWith('.md')) {
+    return `/${repositoryPath.replace(/\.md$/, '')}${anchor ? `#${anchor}` : ''}`;
+  }
+  return `https://github.com/cryptob1/graphyard/blob/main/${repositoryPath}${anchor ? `#${anchor}` : ''}`;
 }
 const headingId = (children: unknown) => String(children).toLowerCase().replace(/[^a-z0-9\s-]/g, '').trim().replace(/\s+/g, '-');
 export default function Docs() {
   const slug = location.pathname.split('/').slice(2).filter(Boolean).join('/') || 'README';
   const source = sources[`../docs/${slug}.md`];
-  return <div className="docs-shell"><aside className="docs-nav"><a href="/" className="brand"><span className="mark">g</span> graphyard</a><div className="workspace-label">DOCUMENTATION</div>{pages.map(([id, title]) => <a key={id} className={`nav ${slug === id ? 'active' : ''}`} href={`/docs/${id}`}>{title}</a>)}<a className="nav docs-back" href="/">← Open control plane</a></aside><main className={`docs-content${slug === 'how-graphyard-works' ? ' how-guide' : ''}`}><div className="eyebrow">GRAPHYARD / V0.1</div><ReactMarkdown remarkPlugins={[remarkGfm]} components={{ a: ({ href, children }) => <a href={docLink(href)}>{children}</a>, h2: ({ children }) => <h2 id={headingId(children)}>{children}</h2>, h3: ({ children }) => <h3 id={headingId(children)}>{children}</h3> }}>{source ?? '# Page not found\n\nChoose a guide from the navigation.'}</ReactMarkdown><footer>Graphyard documentation <a href={`https://github.com/cryptob1/graphyard/blob/main/docs/${slug}.md`}>View source ↗</a></footer></main></div>;
+  return <div className="docs-shell"><aside className="docs-nav"><a href="/" className="brand"><span className="mark">g</span> graphyard</a><div className="workspace-label">DOCUMENTATION</div>{pages.map(([id, title]) => <a key={id} className={`nav ${slug === id ? 'active' : ''}`} href={`/docs/${id}`}>{title}</a>)}<a className="nav docs-back" href="/">← Open control plane</a></aside><main className={`docs-content${slug === 'how-graphyard-works' ? ' how-guide' : ''}`}><div className="eyebrow">GRAPHYARD / V0.1</div><ReactMarkdown remarkPlugins={[remarkGfm]} components={{ a: ({ href, children }) => <a href={docLink(href, slug)}>{children}</a>, h2: ({ children }) => <h2 id={headingId(children)}>{children}</h2>, h3: ({ children }) => <h3 id={headingId(children)}>{children}</h3> }}>{source ?? '# Page not found\n\nChoose a guide from the navigation.'}</ReactMarkdown><footer>Graphyard documentation <a href={`https://github.com/cryptob1/graphyard/blob/main/docs/${slug}.md`}>View source ↗</a></footer></main></div>;
 }
