@@ -12,6 +12,7 @@ cd graphyard
 npm ci
 cp .env.example .env
 # Replace every example token with a distinct random secret.
+# Set GITHUB_REPOSITORY=cryptob1/graphyard to match this checkout.
 docker compose up -d db
 npm run build
 npm start
@@ -30,7 +31,7 @@ npm run cli -- create examples/work.json
 npm run cli -- ready GY-1
 ```
 
-Acceptance criteria name the proof required. All listed proofs must pass. Operators may revise requirements with `graphyard requirements`; workers cannot weaken their own task.
+Acceptance criteria name the proof required. All listed proofs must pass. Operators may revise requirements with `npm run cli -- requirements`; workers cannot weaken their own task.
 
 ## Claim and launch a worker
 
