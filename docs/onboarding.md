@@ -28,7 +28,7 @@ For every `--token-stdin` prompt, paste the token, press Enter, then press Ctrl-
 
 Use one Graphyard server and one Postgres database for all workers. Follow [deployment](deployment.md) for Railway or Docker Compose.
 
-Create separate credentials for these roles:
+Create a separate cryptographically random token of at least 32 characters for each role:
 
 | Role | Use |
 | --- | --- |
