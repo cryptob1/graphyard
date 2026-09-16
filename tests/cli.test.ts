@@ -298,6 +298,28 @@ test('installed CLI resolves its runtime from another repository and includes su
   } finally { await new Promise<void>(r => http.close(() => r())); await rm(cwd, { recursive: true, force: true }); }
 });
 
+test('operator CLI sends the current revision and audit reason for scoped ready and unblock mutations', async () => {
+  const cwd = await mkdtemp(join(tmpdir(), 'graphyard-operator-cli-'));
+  const requests: { url: string; body: any }[] = [];
+  const work = { id: 'task-id', key: 'GY-7', revision: 12 };
+  const http = createServer(async (req, res) => {
+    res.setHeader('Content-Type', 'application/json');
+    if (req.method === 'GET') return res.end(JSON.stringify([work]));
+    let raw = ''; for await (const chunk of req) raw += chunk;
+    requests.push({ url: req.url!, body: JSON.parse(raw) }); res.end(JSON.stringify(work));
+  });
+  await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));
+  const env = { ...process.env, GRAPHYARD_TOKEN: 'operator-token', GRAPHYARD_URL: `http://127.0.0.1:${(http.address() as any).port}` };
+  try {
+    await exec(process.execPath, [launcher, 'ready', 'GY-7', 'Requirements', 'approved'], { cwd, env });
+    await exec(process.execPath, [launcher, 'unblock', 'GY-7', 'Dependency', 'resolved'], { cwd, env });
+    assert.deepEqual(requests, [
+      { url: '/api/work/task-id/ready', body: { expectedRevision: 12, reason: 'Requirements approved' } },
+      { url: '/api/work/task-id/unblock', body: { expectedRevision: 12, reason: 'Dependency resolved' } },
+    ]);
+  } finally { await new Promise<void>(resolve => http.close(() => resolve())); await rm(cwd, { recursive: true, force: true }); }
+});
+
 test('watch refuses the wrong workspace and uses a fresh heartbeat key despite command retry configuration', async () => {
   const cwd = await mkdtemp(join(tmpdir(), 'graphyard-watch-'));
   let registeredPath = tmpdir(), role = 'worker'; const keys: string[] = [];

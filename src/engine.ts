@@ -89,6 +89,8 @@ export class Engine {
         operatorCapability(actor, capability, work, this.repository);
         demand(data.reason, 'Operator-agent mutations require a reason', 400);
         if (command === 'ready' || command === 'unblock') demand(data.expectedRevision === work.revision, 'Task revision changed; reload before mutating');
+        if (command === 'ready') demand(work.stage === 'backlog' && !work.ready, 'Only unreleased backlog work can be released');
+        if (command === 'unblock') demand(work.blocker, 'Task has no blocker to clear');
       }
       const deliveredContainmentCleanup = work.stage === 'done' && (command === 'settle' || command === 'recover');
       preserveAssignment(work);

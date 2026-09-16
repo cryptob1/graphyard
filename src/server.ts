@@ -26,7 +26,7 @@ export function server(engine: Engine, credentials: Credential[], github: GitHub
   // authorized to coordinate.  GITHUB_REPOSITORY is merely a process default
   // (and is automatically set to the CI checkout), so it must not override an
   // explicit engine binding or scope validation becomes environment-dependent.
-  const repository = github?.config.repository ?? engine.repository ?? process.env.GITHUB_REPOSITORY ?? '';
+  const repository = engine.repository || github?.config.repository || process.env.GITHUB_REPOSITORY || '';
   const operatorAgents = new OperatorAgents(engine.store, repository, credentials.map(credential => ({ id: credential.id, tokenHash: createHash('sha256').update(credential.token).digest('hex') })));
   engine.operatorAuthorizer = operatorAgents.revalidate.bind(operatorAgents);
   return createServer(async (req, res) => {
@@ -58,8 +58,11 @@ export function server(engine: Engine, credentials: Credential[], github: GitHub
       if (url.pathname.startsWith('/api/')) {
         const token = String(req.headers.authorization ?? '').replace(/^Bearer /, '');
         const hash = createHash('sha256').update(token).digest();
-        const actor = principals.find(p => timingSafeEqual(p.hash, hash))?.actor ?? await operatorAgents.authenticate(token);
+        const configured = principals.find(p => timingSafeEqual(p.hash, hash));
+        if (configured) await operatorAgents.assertConfiguredPrincipalSafe({ id: configured.actor.id, tokenHash: hash.toString('hex') });
+        const actor = configured?.actor ?? await operatorAgents.authenticate(token);
         demand(actor, 'A valid Graphyard bearer token is required', 401);
+        if (actor.role === 'operator-agent') demand(actor.scope?.repositories.includes(repository), 'Repository is outside operator-agent scope', 403);
         if (url.pathname === '/api/operator-agents' && req.method === 'GET') return send(200, await operatorAgents.list(actor));
         if (url.pathname === '/api/operator-agents' && req.method === 'POST') return send(200, await operatorAgents.setup(actor, JSON.parse((await body(req)).toString()), String(req.headers['idempotency-key'] ?? '')));
         const operatorRoute = url.pathname.match(/^\/api\/operator-agents\/([^/]+)\/(configure|rotate|revoke)$/);

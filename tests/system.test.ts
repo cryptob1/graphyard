@@ -547,7 +547,7 @@ test('scoped operator-agent credentials are deny-by-default, auditable, rotation
   const adminHeaders = { Authorization: `Bearer ${'o'.repeat(32)}`, 'Content-Type': 'application/json' };
   const post = (path: string, value: unknown, token = 'o'.repeat(32), key = randomUUID()) => fetch(`${url}/api/${path}`, { method: 'POST', headers: { ...adminHeaders, Authorization: `Bearer ${token}`, 'Idempotency-Key': key }, body: JSON.stringify(value) });
   const firstToken = `operator-first-${'x'.repeat(32)}`, secondToken = `operator-second-${'y'.repeat(32)}`;
-  const setup = { id: `planner-${randomUUID()}`, displayName: 'Planning agent', capabilities: ['intent:create', 'intent:ready', 'policy:requirements'], scope: { repositories: ['owner/project'], workItems: ['*'] }, token: firstToken, reason: 'Human enabled bounded planning automation' };
+  const setup = { id: `planner-${randomUUID()}`, displayName: 'Planning agent', capabilities: ['intent:create', 'intent:ready', 'intent:unblock', 'policy:requirements'], scope: { repositories: ['owner/project'], workItems: ['*'] }, token: firstToken, reason: 'Human enabled bounded planning automation' };
   const setupKey = randomUUID();
   const status: any = await (await fetch(`${url}/api/status`, { headers: adminHeaders })).json();
   assert.equal(status.repository, 'owner/project', 'the explicitly bound repository wins over ambient CI metadata');
@@ -555,6 +555,9 @@ test('scoped operator-agent credentials are deny-by-default, auditable, rotation
   assert.equal((await post('operator-agents', { ...setup, id: `collision-${randomUUID()}`, token: 'w'.repeat(32) }, 'o'.repeat(32))).status, 409, 'dynamic credential cannot inherit a configured principal role');
   const configured: any = await (await post('operator-agents', setup, 'o'.repeat(32), setupKey)).json();
   assert.equal(configured.role, 'operator-agent'); assert.deepEqual(configured.fingerprints, [createHash('sha256').update(firstToken).digest('hex').slice(0, 16)]); assert.equal(JSON.stringify(configured).includes(firstToken), false);
+  const persistedCollision = new OperatorAgents(store, 'owner/project', [{ id: setup.id, tokenHash: createHash('sha256').update('different-static-token').digest('hex') }]);
+  await assert.rejects(persistedCollision.authenticate(firstToken), /collides with a configured principal/, 'persisted identities are rechecked against deployment principals');
+  await assert.rejects(new OperatorAgents(store, 'owner/project').assertConfiguredPrincipalSafe({ id: 'static-new', tokenHash: createHash('sha256').update(firstToken).digest('hex') }), /collides with a persisted operator agent/, 'persisted tokens cannot acquire a newly configured role');
   assert.deepEqual(await (await post('operator-agents', setup, 'o'.repeat(32), setupKey)).json(), configured, 'setup retry is idempotent');
   assert.equal((await fetch(`${url}/api/operator-agents`, { headers: { Authorization: `Bearer ${firstToken}` } })).status, 403, 'agent cannot administer identities');
   assert.equal((await post('work', workInput, firstToken)).status, 400, 'operator-agent intent requires an audit reason');
@@ -565,6 +568,13 @@ test('scoped operator-agent credentials are deny-by-default, auditable, rotation
   assert.equal((await post(`work/${created.id}/ready`, { expectedRevision: created.revision }, firstToken)).status, 400, 'operator-agent release requires an audit reason');
   assert.equal((await post(`work/${created.id}/ready`, { reason: 'Release using stale state' }, firstToken)).status, 409, 'operator-agent mutations require a current revision');
   const releasedResponse = await post(`work/${created.id}/ready`, { expectedRevision: created.revision, reason: 'Requirements are ready for implementation' }, firstToken); assert.equal(releasedResponse.status, 200);
+  const released: any = await releasedResponse.json();
+  assert.equal((await post(`work/${created.id}/ready`, { expectedRevision: released.revision, reason: 'Release again' }, firstToken)).status, 409, 'operator agents cannot churn revisions by re-releasing work');
+  assert.equal((await post(`work/${created.id}/unblock`, { expectedRevision: released.revision, reason: 'Clear nothing' }, firstToken)).status, 409, 'operator agents cannot churn revisions by clearing no blocker');
+  const priorDocument = (await store.pool.query('SELECT document FROM operator_agents WHERE id=$1', [setup.id])).rows[0].document;
+  await store.pool.query(`UPDATE operator_agents SET document=jsonb_set(document,'{scope,repositories}', '["other/project"]'::jsonb) WHERE id=$1`, [setup.id]);
+  assert.equal((await fetch(`${url}/api/work`, { headers: { Authorization: `Bearer ${firstToken}` } })).status, 403, 'operator-agent reads require the current repository scope');
+  await store.pool.query('UPDATE operator_agents SET document=$2 WHERE id=$1', [setup.id, JSON.stringify(priorDocument)]);
   assert.equal((await post(`work/${created.id}/claim`, {}, firstToken)).status, 403);
   assert.equal((await post(`work/${created.id}/evidence`, proof(), firstToken)).status, 403);
   assert.equal((await post(`work/${created.id}/merge-acquire`, {}, firstToken)).status, 403);

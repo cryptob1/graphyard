@@ -14,7 +14,7 @@ The lease expires after 120 seconds without a heartbeat. Reconciliation clears t
 
 ## Blocked item with no owner
 
-An operator can clear the blocker with `graphyard unblock GY-N "Contract verified"`. The reason is recorded in the event ledger. Workers may only clear their own blockers while holding the current lease. After the operator resolves an abandoned blocker and the old lease expires, a new worker can claim normally.
+An operator can clear an existing blocker with `graphyard unblock GY-N "Contract verified"`. The CLI sends the task revision it just read and the reason is recorded in the event ledger; stale requests and attempts to clear no blocker are refused. Scoped operator agents similarly release unreleased backlog work with `graphyard ready GY-N "Requirements approved"`, which carries the current revision and reason. Workers may only clear their own blockers while holding the current lease. After the operator resolves an abandoned blocker and the old lease expires, a new worker can claim normally.
 
 ## Submitted implementation needs rework
 

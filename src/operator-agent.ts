@@ -22,12 +22,21 @@ const publicDocument = (document: any) => ({ ...document, credentials: undefined
 export class OperatorAgents {
   constructor(private store: Store, private repository: string, private configuredPrincipals: { id: string; tokenHash: string }[] = []) {}
 
+  async assertConfiguredPrincipalSafe(principal: { id: string; tokenHash: string }) {
+    const collision = (await this.store.pool.query(`SELECT 1 FROM operator_agents a
+      LEFT JOIN operator_credentials c ON c.agent_id=a.id
+      WHERE a.id=$1 OR c.token_hash=$2 LIMIT 1`, [principal.id, principal.tokenHash])).rowCount;
+    demand(!collision, 'Configured principal collides with a persisted operator agent', 401);
+  }
+
   async authenticate(secret: string): Promise<Principal | undefined> {
     if (!secret) return;
     const row = (await this.store.pool.query(`SELECT a.document,c.fingerprint FROM operator_credentials c JOIN operator_agents a ON a.id=c.agent_id
       WHERE c.token_hash=$1 AND c.revoked_at IS NULL AND c.valid_from<=clock_timestamp() AND (c.valid_until IS NULL OR c.valid_until>clock_timestamp())`, [digest(secret)])).rows[0];
     if (!row || row.document.revokedAt) return;
     const d = row.document;
+    demand(!this.configuredPrincipals.some(principal => principal.id === d.id || principal.tokenHash === digest(secret)),
+      'Persisted operator agent collides with a configured principal', 401);
     return { id: d.id, role: 'operator-agent', displayName: d.displayName, capabilities: d.capabilities, scope: d.scope, [operatorCredentialHash]: digest(secret) };
   }
 

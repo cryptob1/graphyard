@@ -76,7 +76,7 @@ Environment: GRAPHYARD_URL, GRAPHYARD_TOKEN (individual role-scoped credential)
   runner snapshot file.json    Snapshot an explicit source-file list for review (not approval)
   scenarios                    List versioned E2E test-case definitions
   scenario file.json           Publish a scenario version (operator)
-  ready GY-N                   Release backlog item (operator)
+  ready GY-N REASON            Release backlog item with an audit reason (operator)
   unblock GY-N REASON           Clear a blocker with an audit reason (operator)
   rework GY-N --previous-worker-stopped REASON  Authorize reassignment (operator)
   recover-containment GY-N --previous-worker-stopped REASON
@@ -270,8 +270,9 @@ Never share an operator or producer credential with an implementation agent.`); 
   if (command === 'events') return print(await api(`events?work=${work.id}`));
   if (command === 'rereview') return print(await mutate(command, args[0] ? { epoch: Number(args[0]) } : {}));
   if (command === 'reviewpolicy') return print(await mutate(command, { provider: args[0], expectedPolicyRevision: Number(args[1]), reason: args.slice(2).join(' ') }));
-  if (command === 'ready' || command === 'claim') return print(await mutate(command, {}));
-  if (command === 'unblock') return print(await mutate('unblock', { reason: args.join(' ') }));
+  if (command === 'ready') return print(await mutate(command, { expectedRevision: work.revision, reason: args.join(' ') }));
+  if (command === 'claim') return print(await mutate(command, {}));
+  if (command === 'unblock') return print(await mutate('unblock', { expectedRevision: work.revision, reason: args.join(' ') }));
   if (command === 'rework') {
     if (args[0] !== '--previous-worker-stopped') throw new Error('Stop the previous worker first, then pass --previous-worker-stopped and an audit reason');
     return print(await mutate('rework', { reason: args.slice(1).join(' '), previousWorkerStopped: true }));
