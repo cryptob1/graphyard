@@ -54,7 +54,7 @@ cd .graphyard/worktrees/GY-1-EPOCH
 node "$GRAPHYARD_CLI" watch GY-1 EPOCH -- YOUR_AGENT_COMMAND
 ```
 
-Replace `EPOCH` with the value returned by `claim`. `watch` renews the lease and stops the worker when ownership is lost. See [operations](operations.md) for containment and recovery details.
+Replace `EPOCH` with the value returned by `claim`. Durable `watch` containment requires Linux with a working systemd user manager. On Windows it can stop only the direct child, and macOS foreground supervision is refused; use a Linux VM/container or an external supervisor that terminates the full process tree. See [operations](operations.md) for recovery details.
 
 ## Submit the PR
 
