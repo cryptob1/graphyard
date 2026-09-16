@@ -13,7 +13,7 @@ Graphyard helps a team move one well-defined piece of work from an idea to a ver
 3. **Ready**
    Graphyard checks that the item is released, unblocked, and that its dependencies are finished. Until then, nobody can claim it.
 4. **Claim**
-   A worker claims the ready item under its own identity. Graphyard issues a time-limited lease and a new epoch, then reserves that attempt's branch and worktree.
+   A worker claims the ready item under its own identity. Graphyard issues a time-limited lease and a new epoch. The launcher or the separate handoff/worktree step then registers the assigned branch and worktree; the worker waits for that assigned workspace before editing.
 5. **Build**
    The worker changes only the assigned work, renews the lease, and follows the repository instructions. If ownership is lost, the worker stops. External tools may run the session, but they do not own the assignment.
 6. **Review**

@@ -23,6 +23,9 @@ for (const viewport of [{ name: 'desktop', width: 1280, height: 900 }, { name: '
     await expect(page.getByRole('heading', { name: 'How Graphyard works', level: 1 })).toBeVisible();
     const flow = page.locator('.how-guide > ol');
     await expect(flow.locator(':scope > li')).toHaveCount(10);
+    const cards = await flow.locator(':scope > li').evaluateAll(elements => elements.map(element => element.getBoundingClientRect().top));
+    expect(cards).toEqual([...cards].sort((a, b) => a - b));
+    expect(new Set(cards).size).toBe(cards.length);
     await expect(flow.getByText('Setup', { exact: true })).toBeVisible();
     await expect(flow.getByText('Done', { exact: true })).toBeVisible();
     await expect(page.getByRole('heading', { name: 'Who does what' })).toBeVisible();
