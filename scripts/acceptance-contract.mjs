@@ -2,6 +2,75 @@
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 export const requiredCases = ['anonymous-denied', 'exclusive-claim', 'stale-epoch', 'worker-proof-denied', 'dependency-blocked'];
+export const mergeAuthorizationCases = ['authorized-candidate', 'broker-identity-restricted', 'revocation-identity-restricted',
+  'revocation-closes-authorization', 'broker-refuses-revoked-candidate', 'concurrent-attempts-refused', 'merge-after-revocation-refused'];
+// Every proof this trusted harness can produce, and the exact case inventory each one requires.
+export const contracts = {
+  'integration:claim-safety': { cases: requiredCases },
+  'integration:merge-authorization': { cases: mergeAuthorizationCases },
+};
+
+// Judges a merge-authorization transcript produced by scripts/merge-authorization-probe.mjs.
+// The probe records what the candidate did; the expectations live here, outside the candidate.
+export function judgeMergeAuthorization(transcript) {
+  assert.ok(Array.isArray(transcript) && transcript.length, 'Merge-authorization probe produced no transcript');
+  const steps = name => transcript.filter(entry => entry.step === name);
+  const only = name => { const found = steps(name); assert.equal(found.length, 1, `Expected exactly one ${name} step`); return found[0]; };
+  const refused = (entry, status, pattern) => {
+    assert.equal(entry.status, status, `${entry.step} returned ${entry.status}: ${entry.message}`);
+    assert.match(entry.message, pattern, `${entry.step} refused for the wrong reason`);
+  };
+  const cases = [];
+
+  const authorized = only('authorized-candidate');
+  assert.equal(authorized.stage, 'merge'); assert.equal(authorized.gatesPassed, true); assert.equal(authorized.authorized, true);
+  cases.push('authorized-candidate');
+
+  const brokerIdentities = steps('broker-identity');
+  assert.deepEqual(brokerIdentities.map(entry => entry.actor), [null, 'probe-worker', 'probe-producer', 'probe-other-producer']);
+  for (const entry of brokerIdentities) refused(entry, entry.actor ? 403 : 401, entry.actor ? /Coordinator permission/ : /valid Graphyard bearer token/);
+  cases.push('broker-identity-restricted');
+
+  const revocationIdentities = steps('revocation-identity');
+  assert.deepEqual(revocationIdentities.map(entry => entry.actor), [null, 'probe-worker', 'probe-other-producer', 'probe-coordinator']);
+  for (const entry of revocationIdentities) refused(entry, entry.actor ? 403 : 401, entry.actor ? /operator or the trusted producer/ : /valid Graphyard bearer token/);
+  refused(only('revocation-scope'), 404, /No trusted evidence matches/);
+  cases.push('revocation-identity-restricted');
+
+  const granted = only('execution-granted');
+  assert.equal(granted.owner, 'probe-coordinator'); assert.equal(granted.sha, 'a'.repeat(40));
+  assert.ok(Number.isSafeInteger(granted.authorizationRevision) && granted.authorizationRevision > 0);
+  refused(only('frozen-during-execution'), 409, /merge execution is active/i);
+  const revoked = only('revoked');
+  assert.equal(revoked.stage, 'acceptance', 'a revoked candidate must leave the merge stage');
+  assert.equal(revoked.execution, null, 'revocation must cancel the in-flight execution, not wait for it');
+  assert.equal(revoked.authorization, null);
+  assert.match(revoked.acceptanceReasons.join(' '), /previously accepted evidence was revoked/);
+  assert.deepEqual(revoked.revocations.map(item => item.actor), ['probe-producer']);
+  assert.ok(revoked.retainedEvidence >= 1, 'the revoked record must be retained for audit, not deleted');
+  cases.push('revocation-closes-authorization');
+
+  refused(only('verify-after-revocation'), 409, /missing, expired, superseded/);
+  refused(only('acquire-replay-after-revocation'), 409, /expired, cancelled, or superseded/);
+  refused(only('cancel-after-revocation'), 409, /missing, expired, superseded/);
+  cases.push('broker-refuses-revoked-candidate');
+
+  const concurrent = only('concurrent-attempts');
+  assert.equal(concurrent.attempts.length, 8);
+  for (const attempt of concurrent.attempts) refused({ ...attempt, step: 'concurrent-attempts' }, 409, /Merge authorization is no longer current/);
+  const survivors = only('no-execution-survives');
+  assert.equal(survivors.execution, null); assert.equal(survivors.authorization, null);
+  cases.push('concurrent-attempts-refused');
+
+  const merged = only('merge-after-revocation');
+  assert.notEqual(merged.stage, 'done');
+  assert.match(merged.violations.join(' '), /without a prior authorization/);
+  assert.equal(merged.delivery, null);
+  cases.push('merge-after-revocation-refused');
+
+  assert.deepEqual(cases, mergeAuthorizationCases);
+  return cases.map(id => ({ id, result: 'pass' }));
+}
 
 export async function exercise(url, principals) {
   const operator = principals.find(p => p.role === 'admin');

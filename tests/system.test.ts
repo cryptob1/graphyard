@@ -11,12 +11,16 @@ import { server } from '../src/server.js';
 import { OperatorAgents } from '../src/operator-agent.js';
 import { ReconciliationRetry, type Principal, type Work, type Observation } from '../src/model.js';
 import { defineScenario, scenarios } from '../src/scenarios.js';
+import { proofPreview } from '../src/coordination.js';
 import { setTimeout as delay } from 'node:timers/promises';
 import { processJob, type GitHub } from '../src/github.js';
 import { acknowledgeContainment, isConfirmedCoordinationRefusal } from '../src/quarantine.js';
 import { supervise } from '../src/supervisor.js';
 // @ts-expect-error The trusted runner intentionally uses dependency-free JavaScript outside the candidate source.
-import { exercise } from '../scripts/acceptance-contract.mjs';
+import { exercise, judgeMergeAuthorization, mergeAuthorizationCases } from '../scripts/acceptance-contract.mjs';
+// @ts-expect-error The trusted runner intentionally uses dependency-free JavaScript outside the candidate source.
+import { probeMergeAuthorization } from '../scripts/merge-authorization-probe.mjs';
+import { fileURLToPath } from 'node:url';
 
 const operator: Principal = { id: 'operator', role: 'admin' };
 const worker: Principal = { id: 'agent-a', role: 'worker', displayName: 'Atlas', runtime: 'Codex' };
@@ -24,6 +28,7 @@ const other: Principal = { id: 'agent-b', role: 'worker' };
 const coordinator: Principal = { id: 'master', role: 'coordinator' };
 const otherCoordinator: Principal = { id: 'other-master', role: 'coordinator' };
 const producer: Principal = { id: 'ci-runner', role: 'producer', proofs: ['integration:claim-safety'] };
+const otherProducer: Principal = { id: 'other-ci-runner', role: 'producer', proofs: ['integration:unrelated'] };
 const head = 'a'.repeat(40), base = 'b'.repeat(40);
 const probeWorkers = Array.from({ length: 32 }, (_, i) => ({ id: `probe-worker-${i}`, role: 'worker' as const, token: `test-probe-${i}-${'x'.repeat(32)}` }));
 let database: EmbeddedPostgres; let store: Store; let engine: Engine;
@@ -309,6 +314,81 @@ test('a cancelled merge execution cannot authorize a later matching merge', asyn
   const merged = { ...observation(w), merged: true, mergeSha: 'c'.repeat(40), mergedAt: new Date(Date.now() + 1000).toISOString() } as Observation;
   const refused = await engine.observe(w.id, w.revision, merged);
   assert.notEqual(refused.stage, 'done'); assert.match(refused.violations.join(' '), /without a prior authorization/);
+});
+test('a revoked candidate cannot be merged through the broker, including concurrent attempts and retries', async () => {
+  let w = await submitted(); w = await engine.observe(w.id, w.revision, observation(w));
+  w = await engine.execute(producer, 'evidence', w.id, proof(), randomUUID());
+  assert.equal(w.stage, 'merge'); assert.ok(w.gates.every(gate => gate.passed));
+  const withdrawal = { proof: 'integration:claim-safety', sha: head, baseSha: base, policyRevision: w.policyRevision, reason: 'Reported run was attributed to the wrong artifact' };
+  for (const [actor, expected] of [[worker, /operator or the trusted producer/], [coordinator, /operator or the trusted producer/], [otherProducer, /operator or the trusted producer/]] as const)
+    await assert.rejects(engine.execute(actor, 'revoke', w.id, withdrawal, randomUUID()), expected);
+  await assert.rejects(engine.execute(producer, 'revoke', w.id, { ...withdrawal, sha: 'd'.repeat(40) }, randomUUID()), /No trusted evidence matches/);
+  const acquireKey = randomUUID(); const acquireInput = { expectedRevision: w.revision, sha: head, baseSha: base, policyRevision: w.policyRevision };
+  for (const actor of [worker, producer, otherProducer])
+    await assert.rejects(engine.acquireMerge(actor, w.id, acquireInput, randomUUID()), /Coordinator permission/);
+  const granted = await engine.acquireMerge(coordinator, w.id, acquireInput, acquireKey);
+  // Fresh accepted runs stay frozen for the bounded execution; only withdrawal may interrupt it.
+  await assert.rejects(engine.execute(producer, 'evidence', w.id, proof(), randomUUID()), /merge execution is active/i);
+  const revoked = await engine.execute(producer, 'revoke', w.id, withdrawal, randomUUID());
+  assert.equal(revoked.mergeExecution, null, 'revocation cancels the in-flight execution rather than waiting for it');
+  assert.equal(revoked.mergeAuthorization, null); assert.equal(revoked.stage, 'acceptance');
+  assert.match(revoked.gates.find(gate => gate.name === 'acceptance')!.reasons.join(' '), /previously accepted evidence was revoked/);
+  assert.equal(revoked.evidence.at(-1)!.revocation?.actor, producer.id);
+  assert.equal(revoked.evidence.at(-1)!.revocation?.reason, withdrawal.reason);
+  assert.deepEqual(proofPreview(revoked).map(entry => entry.status), ['revoked']);
+  const cancellation = (await store.events(w.id)).find(event => event.kind === 'merge.execution.cancelled');
+  assert.equal(cancellation?.payload.details.executionId, granted.execution.id);
+  await assert.rejects(engine.verifyMerge(coordinator, w.id, { executionId: granted.execution.id }, { ...observation(w), prState: 'open', draft: false }, randomUUID()), /missing, expired, superseded/);
+  await assert.rejects(engine.acquireMerge(coordinator, w.id, acquireInput, acquireKey), /expired, cancelled, or superseded/);
+  await assert.rejects(engine.cancelMerge(coordinator, w.id, { executionId: granted.execution.id, reason: 'Late cancel' }, randomUUID()), /missing, expired, superseded/);
+  const current = (await store.list()).find(item => item.id === w.id)!;
+  const retries = await Promise.allSettled(Array.from({ length: 8 }, (_, index) => engine.acquireMerge(index % 2 ? coordinator : otherCoordinator, w.id,
+    { expectedRevision: current.revision, sha: head, baseSha: base, policyRevision: current.policyRevision }, randomUUID())));
+  assert.deepEqual(retries.map(result => result.status), Array.from({ length: 8 }, () => 'rejected'));
+  for (const result of retries) assert.match((result as PromiseRejectedResult).reason.message, /Merge authorization is no longer current/);
+  assert.equal((await store.list()).find(item => item.id === w.id)!.mergeExecution, null);
+  // A provider merge that lands after the withdrawal is a visible violation, never delivery.
+  const merged = { ...observation(w), merged: true, mergeSha: 'c'.repeat(40), mergedAt: new Date(Date.now() + 5000).toISOString() } as Observation;
+  const refused = await engine.observe(w.id, current.revision, merged);
+  assert.notEqual(refused.stage, 'done'); assert.match(refused.violations.join(' '), /without a prior authorization/);
+  await assert.rejects(engine.execute(producer, 'revoke', w.id, withdrawal, randomUUID()), /No trusted evidence matches/);
+});
+test('revocation withdraws every accepted run for the candidate and republishes a refusing check', async () => {
+  let w = await submitted(); w = await engine.observe(w.id, w.revision, observation(w));
+  w = await engine.execute(producer, 'evidence', w.id, proof(), randomUUID());
+  w = await engine.execute(producer, 'evidence', w.id, { ...proof(), executed: 14 }, randomUUID());
+  assert.equal(w.stage, 'merge');
+  const withdrawal = { proof: 'integration:claim-safety', sha: head, baseSha: base, policyRevision: w.policyRevision, reason: 'Producer retracted both reported runs' };
+  w = await engine.execute(producer, 'revoke', w.id, withdrawal, randomUUID());
+  assert.equal(w.evidence.filter(item => item.revocation).length, 2, 'an older accepted run must not re-authorize the candidate');
+  assert.equal(w.stage, 'acceptance'); assert.equal(w.mergeAuthorization, null);
+  await store.pool.query("UPDATE jobs SET available_at=now()+interval '1 hour'");
+  await store.pool.query('UPDATE jobs SET available_at=now(),locked_until=NULL,token=NULL WHERE work_id=$1', [w.id]);
+  const published: Work[] = [];
+  const adapter = { observe: async (item: Work) => observation(item), publish: async (item: Work) => { published.push(item); } } as unknown as GitHub;
+  await processJob(engine, adapter);
+  assert.equal(published.length, 1);
+  assert.ok(published[0].gates.some(gate => !gate.passed), 'the published check must stop reporting success for a revoked candidate');
+  // Revocation is not a dead end: a fresh accepted run re-authorizes the same candidate.
+  w = await engine.execute(producer, 'evidence', w.id, proof(), randomUUID());
+  assert.equal(w.stage, 'merge'); assert.ok(w.mergeAuthorization);
+});
+test('delivered work refuses revocation and keeps its authorized delivery record', async () => {
+  let w = await submitted(); w = await engine.observe(w.id, w.revision, observation(w));
+  w = await engine.execute(producer, 'evidence', w.id, proof(), randomUUID());
+  const granted = await engine.acquireMerge(coordinator, w.id, { expectedRevision: w.revision, sha: head, baseSha: base, policyRevision: w.policyRevision }, randomUUID());
+  const verified = await engine.verifyMerge(coordinator, w.id, { executionId: granted.execution.id }, { ...observation(w), prState: 'open', draft: false }, randomUUID());
+  await delay(5); const mergedAt = ((await store.pool.query('SELECT clock_timestamp() AS now')).rows[0].now as Date).toISOString(); await delay(5);
+  const delivered = await engine.observe(w.id, verified.revision, { ...observation(w), merged: true, mergedAt, mergeSha: 'a'.repeat(40) });
+  assert.equal(delivered.stage, 'done');
+  await assert.rejects(engine.execute(producer, 'revoke', w.id, { proof: 'integration:claim-safety', sha: head, baseSha: base, policyRevision: w.policyRevision, reason: 'Too late to withdraw' }, randomUUID()), /immutable/);
+  const reloaded = (await store.list()).find(item => item.id === w.id)!;
+  assert.equal(reloaded.stage, 'done'); assert.ok(reloaded.delivery);
+  assert.equal(reloaded.evidence.some(item => item.revocation), false);
+});
+test('the trusted merge-authorization contract passes against this build', async () => {
+  const transcript = await probeMergeAuthorization({ databaseUrl: store.pool.options.connectionString!, sourceRoot: fileURLToPath(new URL('..', import.meta.url)) });
+  assert.deepEqual(judgeMergeAuthorization(transcript), mergeAuthorizationCases.map((id: string) => ({ id, result: 'pass' })));
 });
 test('periodic reconciliation defers without publishing failure during active merge execution', async () => {
   let w = await submitted(); w = await engine.observe(w.id, w.revision, observation(w));

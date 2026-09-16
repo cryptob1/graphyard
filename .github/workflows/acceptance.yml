@@ -12,6 +12,14 @@ on:
         description: Required policy revision
         required: true
         default: '1'
+      proof:
+        description: Proof this run produces
+        required: true
+        default: integration:claim-safety
+        type: choice
+        options:
+          - integration:claim-safety
+          - integration:merge-authorization
 permissions:
   contents: read
 jobs:
@@ -33,8 +41,10 @@ jobs:
           GRAPHYARD_POLICY_REVISION: ${{ inputs.policy_revision }}
       - name: Build isolated candidate
         run: docker build --tag graphyard-acceptance candidate
-      - name: Execute protected HTTP contract against candidate
-        run: node scripts/run-acceptance.mjs candidate.json graphyard-acceptance acceptance.json
+      - name: Execute protected contract against candidate
+        run: node scripts/run-acceptance.mjs candidate.json graphyard-acceptance acceptance.json "$GRAPHYARD_PROOF"
+        env:
+          GRAPHYARD_PROOF: ${{ inputs.proof }}
       - uses: actions/upload-artifact@v4
         if: always() && hashFiles('acceptance.json') != ''
         with:
@@ -64,3 +74,4 @@ jobs:
           GRAPHYARD_PR: ${{ inputs.pr }}
           GRAPHYARD_WORK_ID: ${{ inputs.work_id }}
           GRAPHYARD_POLICY_REVISION: ${{ inputs.policy_revision }}
+          GRAPHYARD_PROOF: ${{ inputs.proof }}

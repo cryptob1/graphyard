@@ -28,6 +28,7 @@ const commands = {
   submit: z.object({ epoch, pr: z.number().int().positive() }).strict(),
   blocked: z.object({ epoch, reason: z.string().max(2000).nullable() }).strict(),
   evidence: z.object({ proof: proofSchema, sha, baseSha: sha, policyRevision: z.number().int().positive(), result: z.enum(['pass', 'fail']), executed: z.number().int().min(0), skipped: z.number().int().min(0), url: z.string().url().max(2000).optional(), scenarioRevision: z.number().int().positive().optional(), environment: z.string().min(1).max(100).optional() }).strict(),
+  revoke: z.object({ proof: proofSchema, sha, baseSha: sha, policyRevision: z.number().int().positive(), reason: z.string().trim().min(1).max(2000) }).strict(),
 } as const;
 const mergeAcquireSchema = z.object({ expectedRevision: z.number().int().positive(), sha, baseSha: sha, policyRevision: z.number().int().positive() }).strict();
 const mergeCancelSchema = z.object({ executionId: z.string().uuid(), reason: z.string().trim().min(1).max(2000) }).strict();
@@ -106,7 +107,10 @@ export class Engine {
       const deliveredContainmentCleanup = work.stage === 'done' && (command === 'settle' || command === 'recover');
       preserveAssignment(work);
       if (!['recover', 'settle'].includes(command) && work.mergeExecution && Date.parse(work.mergeExecution.expiresAt) <= now.getTime()) work.mergeExecution = null;
-      demand(!work.mergeExecution || command === 'heartbeat' || command === 'recover' || command === 'settle', 'A merge execution is active; retry after it completes or expires');
+      // Revocation is the one mutation an in-flight merge execution cannot outrun: freezing it
+      // for the execution's lifetime would leave a withdrawn proof merging against a published
+      // GitHub success check. Every other command still waits for the bounded execution.
+      demand(!work.mergeExecution || command === 'heartbeat' || command === 'recover' || command === 'settle' || command === 'revoke', 'A merge execution is active; retry after it completes or expires');
       if (command !== 'create' && command !== 'settle' && command !== 'recover') demand(work.stage !== 'done', 'Delivered work is immutable; create a follow-up task');
       if (command === 'rereview') {
         if (actor.role !== 'admin') { demand(actor.role === 'worker', 'Worker or operator required', 403); activeLease(work, actor, data.epoch, now); }
@@ -234,6 +238,22 @@ export class Engine {
         demand(actor.role === 'producer' || actor.role === 'worker' || actor.role === 'admin', 'Evidence submission is not permitted', 403);
         const trusted = actor.role === 'producer' && !!actor.proofs?.includes(data.proof) || actor.role === 'admin' && data.proof.startsWith('manual:');
         work.evidence.push({ ...data, id: randomUUID(), producer: actor.id, trusted, at: now.toISOString() });
+      }
+      if (command === 'revoke') {
+        demand(actor.role === 'admin' || actor.role === 'producer' && !!actor.proofs?.includes(data.proof),
+          'Evidence revocation requires an operator or the trusted producer allowlisted for this proof', 403);
+        // Revoke every applicable record for the tuple, not merely the newest: leaving an older
+        // accepted run behind would silently re-authorize the same candidate.
+        const withdrawn = work.evidence.filter(item => item.trusted && !item.revocation && item.proof === data.proof
+          && item.sha === data.sha && item.baseSha === data.baseSha && item.policyRevision === data.policyRevision);
+        demand(withdrawn.length, 'No trusted evidence matches this proof and candidate; reload before revoking', 404);
+        for (const item of withdrawn) item.revocation = { at: now.toISOString(), actor: actor.id, reason: data.reason };
+        const execution = work.mergeExecution;
+        work.mergeExecution = null;
+        // Reuse the cancellation ledger the merge broker and delivery attribution already read,
+        // so an observed merge that lands after this instant refuses instead of completing.
+        if (execution) await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)',
+          [work.id, actor.id, 'merge.execution.cancelled', JSON.stringify({ details: { executionId: execution.id, reason: `Evidence ${data.proof} revoked: ${data.reason}` } })]);
       }
       // Delivery is an immutable snapshot. A late containment cleanup may append
       // its audit/revision metadata, but stale inputs must not re-evaluate it.

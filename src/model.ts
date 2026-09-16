@@ -40,6 +40,7 @@ export interface Evidence {
   producer: string; trusted: boolean; result: 'pass' | 'fail';
   executed: number; skipped: number; url?: string; at: string; expiresAt?: string;
   scenarioRevision?: number; environment?: string;
+  revocation?: { at: string; actor: string; reason: string };
   validation?: { candidateId: string; requestId: string; attemptId: string };
 }
 export interface ReviewRequest { commentId: number; sha: string; baseSha: string; policyRevision: number; body: string; createdAt: string }
@@ -100,7 +101,7 @@ export function activeLease(work: Work, actor: Principal, epoch: number, now: Da
 export function currentEvidence(work: Work, proof: string, now = new Date()): Evidence | undefined {
   const scenario = work.scenarioRequirements?.find(s => s.proof === proof);
   const validation = work.validation?.[proof];
-  const latest = work.evidence.filter(e => e.proof === proof && e.trusted && e.sha === work.candidate?.sha && e.baseSha === work.candidate?.baseSha && e.policyRevision === work.policyRevision
+  const latest = work.evidence.filter(e => e.proof === proof && e.trusted && !e.revocation && e.sha === work.candidate?.sha && e.baseSha === work.candidate?.baseSha && e.policyRevision === work.policyRevision
     && (!validation || !!validation.attemptId && e.validation?.candidateId === validation.candidateId && e.validation?.requestId === validation.requestId && e.validation?.attemptId === validation.attemptId)
     && (!scenario || e.scenarioRevision === scenario.revision && e.environment === scenario.environment)).at(-1);
   return latest && (!latest.expiresAt || Date.parse(latest.expiresAt) > now.getTime()) ? latest : undefined;
@@ -136,7 +137,11 @@ export function evaluate(work: Work, all: Work[], now: Date, ciAppIds: number[])
   for (const ac of work.criteria) for (const proof of ac.proofs) {
     const scenario = work.scenarioRequirements?.find(s => s.proof === proof);
     const evidence = currentEvidence(work, proof, now);
-    if (!evidence || evidence.result !== 'pass' || evidence.executed < 1 || evidence.skipped !== 0) reasons.push(`${ac.id}: ${proof} needs trusted passing evidence, with executed > 0 and skipped = 0, for this candidate and policy${scenario ? `; scenario v${scenario.revision} in ${scenario.environment}` : ''}`);
+    // Name an explicit revocation: an operator otherwise cannot tell a revoked
+    // candidate apart from one that was never proven.
+    const revoked = !evidence && work.evidence.some(e => e.proof === proof && e.trusted && !!e.revocation
+      && e.sha === work.candidate?.sha && e.baseSha === work.candidate?.baseSha && e.policyRevision === work.policyRevision);
+    if (!evidence || evidence.result !== 'pass' || evidence.executed < 1 || evidence.skipped !== 0) reasons.push(`${ac.id}: ${proof} needs trusted passing evidence, with executed > 0 and skipped = 0, for this candidate and policy${scenario ? `; scenario v${scenario.revision} in ${scenario.environment}` : ''}${revoked ? '; previously accepted evidence was revoked' : ''}`);
   }
   add('acceptance', reasons);
   add('merge', [...(!fresh ? ['GitHub observation missing or older than two minutes'] : []), ...(!obs?.protected ? ['Required Graphyard check and strict branch protection have not been verified'] : []), ...(!obs?.mergeable && !obs?.merged ? ['Pull request is not mergeable against the current base'] : [])]);

@@ -32,15 +32,19 @@ Graphyard's own repository uses a protected acceptance workflow to prove its HTT
 
    ```sh
    gh workflow run acceptance.yml --ref main \
-     -f pr=PR_NUMBER -f work_id=WORK_UUID -f policy_revision=1
+     -f pr=PR_NUMBER -f work_id=WORK_UUID -f policy_revision=1 -f proof=integration:claim-safety
    ```
+
+   Each dispatch produces exactly one proof. Pass `-f proof=integration:merge-authorization` to run the merge-broker contract instead; the workflow refuses a proof this harness cannot produce, and the reporter refuses a report whose case inventory does not match the proof it claims.
 
 7. Confirm current-head review, CI, trusted acceptance evidence, branch protection, and guarded merge all pass. Push a new commit once to verify old proof becomes stale.
 
 ## Trust boundary
 
-The exercise job runs candidate code with disposable principals. A separate `graphyard-reporting` environment holds the producer credential and publishes only the fixed `integration:claim-safety` inventory. PR code never receives the production Graphyard token.
+The exercise job runs candidate code with disposable principals. A separate `graphyard-reporting` environment holds the producer credential and publishes only a fixed case inventory, per proof. PR code never receives the production Graphyard token.
 
-This proof covers API authorization, competing claims, stale epochs, worker evidence trust, and unfinished dependencies. It does not prove arbitrary product behavior, cross-machine recovery, or production delivery.
+`integration:claim-safety` covers API authorization, competing claims, stale epochs, worker evidence trust, and unfinished dependencies. `integration:merge-authorization` covers the restricted [merge broker](github.md#enforcement-boundary): who may reach it, who may revoke accepted evidence, and that a revoked candidate is refused by acquisition, replay, verification, concurrent attempts, and post-merge attribution. That scenario needs an observed GitHub candidate, which no client-controlled route can invent, so its probe runs inside the candidate — mounted read-only from protected source — and reports only what it observed; the expectations it is judged against stay outside the candidate, in `scripts/acceptance-contract.mjs`.
+
+Neither proof establishes arbitrary product behavior, cross-machine recovery, or production delivery.
 
 After this loop succeeds, route further Graphyard work through Graphyard-assigned worktrees. See [development](development.md) for repository rules and [GitHub enforcement](github.md) for the general integration model.

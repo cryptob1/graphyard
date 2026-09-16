@@ -20,6 +20,20 @@ An operator can clear an existing blocker with `graphyard unblock GY-N "Contract
 
 An active owner may keep its heartbeat running and update the assigned branch. GitHub observations automatically invalidate old evidence after a push. To reassign: stop the previous worker, then run `graphyard rework GY-N --previous-worker-stopped "Reproduce review failure"` as an operator. This fences old API commands, closes the build gate, and wakes integration reconciliation. A new worker claims with a higher epoch and registers the existing PR branch in a fresh workspace, usually in another clone or on another host. Resubmit the same PR with the new epoch. Keep the old worktree for inspection. GitHub check revocation is asynchronous; suspend merging until the refusing check is visible. Merged work requires a follow-up item.
 
+## Accepted evidence turns out to be wrong
+
+A trusted run can be invalidated after it was accepted — the wrong artifact was measured, the runner is now known to have been misconfigured, or the reported result was withdrawn upstream. Revoking is narrower than a requirement revision: it leaves criteria, policy revision, review and the submitted attempt untouched and only withdraws the runs that no longer stand.
+
+```sh
+cat > revoke.json <<'JSON'
+{ "proof": "integration:claim-safety", "sha": "HEAD_SHA", "baseSha": "BASE_SHA", "policyRevision": 1,
+  "reason": "Producer retracted the reported run" }
+JSON
+graphyard revoke GY-N revoke.json
+```
+
+Run it as an operator, or as the producer allowlisted for that proof; nobody else may. The acceptance gate closes immediately and names the withdrawal, merge authorization is dropped, an in-flight merge execution is cancelled rather than waited out, and reconciliation republishes a refusing GitHub check. Do not wait for that check before revoking — the ledger is authoritative the moment the command returns, and the [merge broker](github.md#enforcement-boundary) refuses the candidate whether or not GitHub has caught up. A fresh trusted run for the same candidate re-authorizes it; delivered work is immutable and needs a follow-up item instead.
+
 ## Worktree creation failed
 
 The reservation is deliberately retained. Inspect Git output and the local branch/worktree state. If no files were created, an operator can run the exact intended Git worktree operation locally. If ownership expired, use a new attempt and fresh path. Never run blanket worktree deletion across worker machines.

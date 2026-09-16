@@ -53,6 +53,7 @@ Other commands use `POST /api/work/UUID/COMMAND` (display keys also work):
 | `workspace` | `{"epoch":1,"host":"build-machine-a","path":"/work/GY-1","branch":"graphyard/gy-1-1"}` |
 | `submit` | `{"epoch":1,"pr":123}` |
 | `evidence` | See below |
+| `revoke` | See [revocation](#revocation) |
 
 No endpoint sets arbitrary lifecycle state. `complete` in the CLI maps to `submit`, not `done`.
 
@@ -104,6 +105,26 @@ SHA fields are full 40-character lowercase Git SHAs. Results are `pass` or `fail
 The server supplies evidence ID, identity, timestamp, and trust. Clients cannot set `trusted` or `producer`. Unknown fields are rejected. A producer may submit a non-allowlisted proof, but it remains untrusted. A producer is a trust boundary, not a guarantee that its test was well designed.
 
 All required proof names must pass. Evidence is selected for the exact head/base/policy tuple. A later matching failure supersedes an earlier pass. Stale evidence is retained for audit without satisfying the current candidate.
+
+### Revocation
+
+`POST /api/work/:id/revoke` withdraws accepted evidence that should no longer authorize a candidate:
+
+```json
+{
+  "proof": "integration:claim-safety",
+  "sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "baseSha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "policyRevision": 1,
+  "reason": "Reported run was attributed to the wrong artifact"
+}
+```
+
+Only an operator, or the trusted producer allowlisted for that exact proof name, may revoke; workers, coordinators, other producers and operator agents are refused. The tuple is pinned deliberately: a request that matches no trusted record refuses with 404 rather than silently withdrawing nothing.
+
+Revocation withdraws *every* trusted record for that tuple, so an older accepted run cannot quietly re-authorize the same candidate. Records are annotated, never deleted; each keeps a `revocation` object naming the actor, reason and time. The acceptance gate then names the withdrawal explicitly instead of reporting the proof as merely unmeasured, and reconciliation republishes a refusing GitHub check. A later trusted run for the same candidate re-authorizes it normally.
+
+Revocation is the one command an active merge execution cannot defer; see [the merge broker](github.md#enforcement-boundary). Delivered work is immutable and refuses revocation: use a follow-up task.
 
 ## GitHub webhook
 

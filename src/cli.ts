@@ -97,6 +97,7 @@ Environment: GRAPHYARD_URL, GRAPHYARD_TOKEN (individual role-scoped credential)
   blocked GY-N EPOCH REASON     Set blocker; use '-' to clear
   complete GY-N EPOCH PR        Submit implementation; gates decide completion
   evidence GY-N file.json       Submit evidence (trust follows credential)
+  revoke GY-N file.json         Withdraw trusted evidence for a candidate (producer/operator)
   watch GY-N EPOCH -- COMMAND   Run a worker, heartbeat, stop on lease loss
   events [GY-N]                Read immutable history
 
@@ -285,6 +286,7 @@ Never share an operator or producer credential with an implementation agent.`); 
   if (command === 'blocked') return print(await mutate('blocked', { epoch: Number(args[0]), reason: args[1] === '-' ? null : args.slice(1).join(' ') }));
   if (command === 'complete') return print(await mutate('submit', { epoch: Number(args[0]), pr: Number(args[1]) }));
   if (command === 'evidence' || command === 'register') return print(await mutate(command === 'register' ? 'workspace' : 'evidence', JSON.parse(await readFile(args[0], 'utf8'))));
+  if (command === 'revoke') return print(await mutate('revoke', JSON.parse(await readFile(args[0], 'utf8'))));
   if (command === 'worktree') {
     const epoch = Number(args[0]); const root = execFileSync('git', ['rev-parse', '--show-toplevel'], { encoding: 'utf8' }).trim();
     const status = await api('status');

@@ -62,7 +62,9 @@ export function proofPreview(work: Work) {
   return work.criteria.flatMap(ac => ac.proofs.map(proof => {
     const pin = work.scenarioRequirements.find(s => s.proof === proof);
     const evidence = currentEvidence(work, proof);
-    const status = !evidence ? 'unmeasured' : evidence.executed < 1 || evidence.skipped > 0 ? 'incomplete' : evidence.result === 'fail' ? 'failed' : 'passed';
+    const revoked = !evidence && work.evidence.some(e => e.proof === proof && e.trusted && !!e.revocation
+      && e.sha === work.candidate?.sha && e.baseSha === work.candidate?.baseSha && e.policyRevision === work.policyRevision);
+    const status = revoked ? 'revoked' : !evidence ? 'unmeasured' : evidence.executed < 1 || evidence.skipped > 0 ? 'incomplete' : evidence.result === 'fail' ? 'failed' : 'passed';
     return { criterion: ac.id, proof, status, scenario: pin, producer: evidence?.producer, evidenceId: evidence?.id };
   }));
 }

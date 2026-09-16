@@ -1,11 +1,14 @@
 import { readFile } from 'node:fs/promises';
 import { pathToFileURL } from 'node:url';
-import { requiredCases } from './acceptance-contract.mjs';
+import { contracts } from './acceptance-contract.mjs';
 
 export function validateReport(report, expected) {
-  if (report.schema !== 1 || !['pass', 'fail'].includes(report.result) || report.proof !== 'integration:claim-safety' || !Number.isSafeInteger(report.executed) || report.executed < 0 || report.executed > requiredCases.length || report.skipped !== 0) throw new Error('Incomplete acceptance report');
-  if (!Array.isArray(report.cases) || report.cases.length !== requiredCases.length || requiredCases.some(id => report.cases.filter(c => c.id === id && ['pass', 'fail'].includes(c.result)).length !== 1)) throw new Error('Required acceptance case inventory is incomplete');
-  if (report.result === 'pass' && (report.cases.some(c => c.result !== 'pass') || report.executed !== requiredCases.length)) throw new Error('Required acceptance cases did not all pass');
+  // The report names the proof it claims; only a proof this harness can actually produce,
+  // with that proof's complete case inventory, may be published.
+  const required = contracts[report.proof]?.cases;
+  if (report.schema !== 1 || !['pass', 'fail'].includes(report.result) || !required || !Number.isSafeInteger(report.executed) || report.executed < 0 || report.executed > required.length || report.skipped !== 0) throw new Error('Incomplete acceptance report');
+  if (!Array.isArray(report.cases) || report.cases.length !== required.length || required.some(id => report.cases.filter(c => c.id === id && ['pass', 'fail'].includes(c.result)).length !== 1)) throw new Error('Required acceptance case inventory is incomplete');
+  if (report.result === 'pass' && (report.cases.some(c => c.result !== 'pass') || report.executed !== required.length)) throw new Error('Required acceptance cases did not all pass');
   for (const [key, value] of Object.entries(expected)) if (value === undefined || value === '' || String(report[key]) !== String(value)) throw new Error(`Report ${key} does not match this trusted run`);
   for (const key of ['sha', 'baseSha', 'testedTree', 'harnessCommit']) if (!/^[a-f0-9]{40}$/.test(report[key] ?? '')) throw new Error(`Invalid ${key}`);
   if (!Number.isSafeInteger(report.policyRevision) || report.policyRevision < 1) throw new Error('Invalid policy revision');
@@ -31,7 +34,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
     const report = JSON.parse(await readFile(process.argv[2], 'utf8'));
     await publishReport(report, { url: process.env.GRAPHYARD_URL, token: process.env.GRAPHYARD_PRODUCER_TOKEN, expected: {
       repository: process.env.GITHUB_REPOSITORY, harnessCommit: process.env.GITHUB_SHA, runId: process.env.GITHUB_RUN_ID, runAttempt: process.env.GITHUB_RUN_ATTEMPT,
-      workId: process.env.GRAPHYARD_WORK_ID, pr: process.env.GRAPHYARD_PR, policyRevision: process.env.GRAPHYARD_POLICY_REVISION,
+      workId: process.env.GRAPHYARD_WORK_ID, pr: process.env.GRAPHYARD_PR, policyRevision: process.env.GRAPHYARD_POLICY_REVISION, proof: process.env.GRAPHYARD_PROOF,
     } });
     console.log('Acceptance evidence submitted for the tested candidate.');
   } catch (error) { console.error(error.message); process.exitCode = 1; }
