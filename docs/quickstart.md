@@ -1,102 +1,69 @@
-# Quickstart
+# Local quickstart
 
-For the complete recommended setup of a new GitHub repository—including Railway, GitHub enforcement, Herdr, the dedicated master, and worker profiles—start with [Repository onboarding](onboarding.md).
+Use this path to evaluate Graphyard on one machine. For a real repository and Herdr fleet, use [repository onboarding](onboarding.md).
 
-For repository discovery, guided GitHub registration, and the first independently proven PR, follow [First enforced PR](first-pr.md).
+## Start Graphyard
 
-This guide starts one control plane and registers a worker. Run one shared server for all machines; do not give every machine a separate ledger.
-
-## 1. Start the server
-
-Install Node 24 and Docker. Clone the repository, then:
+Requires Node 24, Git, Docker Engine, and Docker Compose.
 
 ```sh
+git clone https://github.com/cryptob1/graphyard.git
+cd graphyard
 npm ci
 cp .env.example .env
-node -e "console.log(require('node:crypto').randomBytes(32).toString('hex'))"
-```
-
-Generate a distinct secret for each principal and replace the example tokens in `.env`. The server rejects tokens shorter than 32 characters and duplicate IDs/tokens. Keep operator, coordinator, and worker credentials separate. Give a trusted runner only the proof names it may attest.
-
-```sh
+# Replace every example token with a distinct random secret.
+# Set GITHUB_REPOSITORY to a repository you own and can push to.
 docker compose up -d db
 npm run build
 npm start
 ```
 
-`npm start` loads `.env`. Open `http://localhost:4310`. Use the operator token to create work; the UI stores the token in browser session storage and removes it on sign-out.
+Open `http://localhost:4310` and sign in with the operator token from `.env`.
 
-For live frontend development, run `npm run dev` and `npm run dev:web` in separate terminals. The Vite server proxies `/api` to port 4310.
+Keep this Graphyard checkout running. Clone the configured writable repository separately; Graphyard does not accept a pull request whose head belongs to a different repository.
 
-## 2. Define intent and proof
+## Prepare the repository
 
-Create work in the UI or use [examples/work.json](../examples/work.json). A criterion lists one or more proof names. **All** listed proofs are required. A proof name has a type prefix: `unit:`, `integration:`, `e2e:`, or `manual:`.
+From the writable repository, connect a worker and install the `.graphyard/` ignore rule:
 
 ```sh
 export GRAPHYARD_URL=http://localhost:4310
-export GRAPHYARD_TOKEN=YOUR_OPERATOR_TOKEN
-npm run cli -- create examples/work.json
-npm run cli -- ready GY-1
+export GRAPHYARD_CLI=/absolute/path/to/graphyard/bin/graphyard.mjs
+cd /path/to/your-writable-repository
+node "$GRAPHYARD_CLI" init \
+  --url "$GRAPHYARD_URL" \
+  --host-id local-evaluation \
+  --token-stdin
 ```
 
-Use the returned key if this is not your first item. Requirements are immutable in v0.1 so a worker cannot weaken its own acceptance criteria. Dependencies must refer to existing work UUIDs, not display keys. Only delivered dependencies permit a claim.
+Paste the worker token, press Enter, then press Ctrl-D. Commit the generated `AGENTS.md` and `.gitignore` changes, push or merge that commit into the configured base branch, and fetch it before starting product work.
 
-## 3. Claim from a worker machine
+## Create work
 
-On the machine that will execute the agent, use an individual worker token:
+In the UI, create a small task for this repository, add its acceptance criteria, and move it to Ready. All listed proofs must pass. Only an admin can [revise requirements](coordination.md#revise-requirements-explicitly); workers cannot weaken their own task.
+
+## Claim and launch a worker
+
+Use a distinct worker token:
 
 ```sh
-export GRAPHYARD_URL=https://YOUR-GRAPHYARD-HOST
-export GRAPHYARD_TOKEN=YOUR_WORKER_TOKEN
-node /path/to/graphyard/bin/graphyard.mjs next
-node /path/to/graphyard/bin/graphyard.mjs claim GY-1
+git fetch origin
+node "$GRAPHYARD_CLI" claim GY-1
+node "$GRAPHYARD_CLI" worktree GY-1 EPOCH origin/YOUR_BASE_BRANCH
+cd .graphyard/worktrees/GY-1-EPOCH
+node "$GRAPHYARD_CLI" watch GY-1 EPOCH -- YOUR_AGENT_COMMAND
 ```
 
-The response includes `lease.epoch` and `lease.expiresAt`. Claim acquisition itself is the worker acknowledgment. There is no agent launch implied by claiming.
+Replace `EPOCH` with the value returned by `claim`. A direct `watch` invocation stops the worker process group on Unix. On Windows it can stop only the direct child, so use external containment if the agent may spawn descendants. Foreground Herdr launches have stricter host requirements; see [Herdr integration](herdr.md) and [operations](operations.md).
 
-From your managed repository checkout:
+## Submit the PR
+
+Push the assigned branch, open a PR, then:
 
 ```sh
-node /path/to/graphyard/bin/graphyard.mjs init
-node /path/to/graphyard/bin/graphyard.mjs worktree GY-1 1 origin/main
-cd .graphyard/worktrees/GY-1-1
-node /path/to/graphyard/bin/graphyard.mjs watch GY-1 1 -- YOUR_AGENT_COMMAND
+node "$GRAPHYARD_CLI" complete GY-1 EPOCH PR_NUMBER
 ```
 
-Substitute the actual epoch. `watch` renews the lease every 25 seconds and terminates the process group if renewal fails. Foreground Herdr workers on Linux run in a unique systemd user scope, which keeps descendants contained across forks and reparenting until the grace-period kill completes; a working systemd user manager is therefore required for that launch mode. Before launch, `watch` records an epoch-bound containment quarantine. It keeps a random settlement capability only in the parent supervisor, retries ambiguous establishment and post-shutdown settlement responses with a stable per-operation request key and exact body, and requires Graphyard to confirm the exact epoch, capability hash, and resource fence. Immediately before spawn it reads fresh control-plane state and rechecks the authenticated owner, live lease, quarantine, exact workspace, and exclusive resources; an old idempotency receipt can never authorize launch after rework, expiry, or reassignment. If bounded establishment retries cannot confirm the result, it abandons launch; bounded settlement ambiguity fails closed after the one child execution and retains the quarantine for stopped-worker recovery. Requirements and their exclusive-resource reservations cannot change while the quarantine remains. After SIGKILL the supervisor boundedly polls the scope and clears the fence only after systemd reports the scope inactive or failed, or specifically confirms that the transient unit is unloaded with `LoadState=not-found`, so lease expiry cannot make a possibly live assignment claimable. Manager connection and other query failures remain unverifiable and fail closed. Capability settlement is still accepted if independently observed delivery reaches Done during this shutdown race; all other delivered mutations remain forbidden. The random capability stays in the parent and is never copied to the child environment or durable history. A shutdown-verification timeout or unavailable systemd manager makes supervision fail closed; `diagnose` then reports the task-local quarantine and directs capability settlement or, after independent termination confirmation, operator stopped-worker recovery rather than a fresh claim. Foreground Herdr launch is refused on macOS because Graphyard does not yet provide equivalent durable containment there. Linux fallback cleanup caches the initial root's kernel start-time ticks immediately after spawn and revalidates cached parents and descendants against `/proc/<pid>/stat`; if the root was already gone and uncached, it signals nothing rather than adopting a reused PID. Platforms without an equivalent identity do not use that fallback. Do not keep another unsupervised worker running on the same assignment. On Windows, process-group supervision is not supported as strongly as on Linux.
+Graphyard now evaluates review, CI, acceptance, and merge gates. A trusted producer—not the implementation worker—submits required evidence. GitHub integration must be configured before Graphyard can authorize a merge.
 
-If Herdr creates the worktree, [register it instead](protocol.md#workspaces). The registry cannot remotely inspect the filesystem; it records the worker's claim about location, and independently verifies the PR branch later.
-
-## 4. Submit the implementation
-
-Push the assigned branch and open a PR to the configured base branch. While the lease is active:
-
-```sh
-node /path/to/graphyard/bin/graphyard.mjs complete GY-1 1 123
-```
-
-`123` is the PR number. `complete` submits implementation, not lifecycle completion. Graphyard reads the PR independently, requires the assigned branch, and evaluates review, CI, acceptance, and merge gates.
-
-Configure the [GitHub App and protection](github.md) before this step for a full lifecycle. Without that integration, Graphyard can coordinate claims but cannot authorize merges.
-
-## 5. Attach acceptance evidence
-
-A trusted runner submits evidence using its own narrowly scoped producer token. Replace all placeholder fields in [examples/evidence.json](../examples/evidence.json) with the actual candidate and independently observed result.
-
-```sh
-node /path/to/graphyard/bin/graphyard.mjs evidence GY-1 evidence.json
-```
-
-Worker-submitted evidence remains an assertion. Naming a runner or setting a pass result does not make it trusted. All required proofs need current matching evidence, a passing result, at least one executed assertion, and zero skipped tests.
-
-## 6. Merge through the guarded path
-
-Install the [recommended master-agent operating mode](master-agent.md), even for the initial single supervised worker. After every gate passes, run:
-
-```sh
-node /path/to/graphyard/bin/graphyard.mjs master merge GY-1
-```
-
-The command acquires bounded authority, verifies the exact current GitHub candidate and gates, and invokes the protected merge. Graphyard marks the item Done only after independently observing that verified merge. A direct GitHub merge has no verified execution and becomes a visible unauthorized-merge violation. No deployment guarantee is implied in v0.1.
-
-As the worker fleet grows, the same master setup joins Herdr session health, dispatches workers under their own identities, and routes work from Graphyard's ledger.
+Use [repository onboarding](onboarding.md) to connect GitHub protection, Herdr, and the master-agent flow.
