@@ -7,7 +7,8 @@ Herdr runs visible agent sessions. Graphyard remains authoritative for work owne
 From the managed repository, with an individual worker token:
 
 ```sh
-node /absolute/path/to/graphyard/bin/graphyard.mjs init \
+export GRAPHYARD_CLI=/absolute/path/to/graphyard/bin/graphyard.mjs
+node "$GRAPHYARD_CLI" init \
   --url https://YOUR-GRAPHYARD-HOST \
   --herdr \
   --host-id UNIQUE_MACHINE_NAME \
@@ -35,7 +36,7 @@ quit
 `claim` returns an epoch. It does not prove an agent started. `handoff` prints the assigned workspace and launch command. Run workers under lease supervision:
 
 ```sh
-graphyard watch GY-1 EPOCH -- YOUR_AGENT_COMMAND
+node "$GRAPHYARD_CLI" watch GY-1 EPOCH -- YOUR_AGENT_COMMAND
 ```
 
 `watch` renews the lease and stops the process when ownership is lost. See [operations](operations.md) for containment failures and recovery.
