@@ -33,6 +33,19 @@ const mergeAcquireSchema = z.object({ expectedRevision: z.number().int().positiv
 const mergeCancelSchema = z.object({ executionId: z.string().uuid(), reason: z.string().trim().min(1).max(2000) }).strict();
 const mergeVerifySchema = z.object({ executionId: z.string().uuid() }).strict();
 export type Command = keyof typeof commands;
+const operatorCapabilitiesByCommand: Partial<Record<Command, OperatorCapability>> = { create: 'intent:create', ready: 'intent:ready', unblock: 'intent:unblock', requirements: 'policy:requirements', reviewpolicy: 'policy:review-provider' };
+
+function authorizeOperatorCommand(actor: Principal, command: Command, data: any, work: Work | undefined, repository: string) {
+  const capability = operatorCapabilitiesByCommand[command];
+  demand(capability, 'This operation is not available to operator agents', 403);
+  operatorCapability(actor, capability, work, repository);
+  demand(data.reason, 'Operator-agent mutations require a reason', 400);
+  if (command === 'create') {
+    demand(actor.scope?.workItems.includes('*'), 'Creating work requires wildcard work scope', 403);
+    demand(data.policy.review, 'Operator-created work must require independent review');
+    if (data.policy.reviewProvider !== undefined) operatorCapability(actor, 'policy:review-provider', undefined, repository);
+  }
+}
 
 // Old deployments did not persist assignment labels. Preserve the known owner/epoch
 // before clearing a legacy lease; its original claim time is unknown.
@@ -54,16 +67,17 @@ export class Engine {
         actor = await this.operatorAuthorizer(db, now, actor);
       }
       const receipt = (await db.query('SELECT * FROM receipts WHERE actor=$1 AND key=$2', [actor.id, key])).rows[0];
-      if (receipt) { demand(receipt.fingerprint === fingerprint, 'Idempotency key reused with different input'); return receipt.result as Work; }
+      if (receipt) {
+        demand(receipt.fingerprint === fingerprint, 'Idempotency key reused with different input');
+        if (actor.role === 'operator-agent') authorizeOperatorCommand(actor, command, data, receipt.result as Work, this.repository);
+        return receipt.result as Work;
+      }
       const all: Work[] = (await db.query('SELECT document FROM work_items ORDER BY number')).rows.map(r => r.document);
       let work = all.find(w => w.id === id || w.key === id);
       const before = work ? structuredClone(work) : null;
       if (command === 'create') {
         if (actor.role === 'operator-agent') {
-          operatorCapability(actor, 'intent:create', undefined, this.repository);
-          demand(actor.scope?.workItems.includes('*'), 'Creating work requires wildcard work scope', 403);
-          demand(data.reason, 'Operator-agent mutations require a reason', 400);
-          demand(data.policy.review, 'Operator-created work must require independent review');
+          authorizeOperatorCommand(actor, command, data, undefined, this.repository);
         } else admin(actor);
         demand(data.dependencies.every((dep: string) => all.some(w => w.id === dep)), 'Unknown dependency');
         demand(new Set(data.criteria.map((ac: { id: string }) => ac.id)).size === data.criteria.length, 'Criterion IDs must be unique');
@@ -83,11 +97,8 @@ export class Engine {
         all.push(work!);
       }
       demand(work, 'Work item not found', 404);
-      const capabilities: Partial<Record<Command, OperatorCapability>> = { create: 'intent:create', ready: 'intent:ready', unblock: 'intent:unblock', requirements: 'policy:requirements', reviewpolicy: 'policy:review-provider' };
       if (actor.role === 'operator-agent') {
-        const capability = capabilities[command]; demand(capability, 'This operation is not available to operator agents', 403);
-        operatorCapability(actor, capability, work, this.repository);
-        demand(data.reason, 'Operator-agent mutations require a reason', 400);
+        authorizeOperatorCommand(actor, command, data, work, this.repository);
         if (command === 'ready' || command === 'unblock') demand(data.expectedRevision === work.revision, 'Task revision changed; reload before mutating');
         if (command === 'ready') demand(work.stage === 'backlog' && !work.ready, 'Only unreleased backlog work can be released');
         if (command === 'unblock') demand(work.blocker, 'Task has no blocker to clear');
