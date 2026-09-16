@@ -21,7 +21,6 @@ async function body(req: IncomingMessage, limit = 1_000_000) {
 }
 export function server(engine: Engine, credentials: Credential[], github: GitHub | null = null) {
   const principals = credentials.map(({ token, ...actor }) => ({ actor, hash: createHash('sha256').update(token).digest() }));
-  const validation = new Validation(engine, principals.map(p => p.actor), github?.config.repository ?? process.env.GITHUB_REPOSITORY ?? '');
   // The engine is constructed with the repository that this control plane is
   // authorized to coordinate.  GITHUB_REPOSITORY is merely a process default
   // (and is automatically set to the CI checkout), so it must not override an
@@ -31,6 +30,7 @@ export function server(engine: Engine, credentials: Credential[], github: GitHub
   // by authentication and operator-agent administration. Some embedders pass
   // the repository only through their GitHub adapter.
   engine.repository = repository;
+  const validation = new Validation(engine, principals.map(p => p.actor), repository);
   const operatorAgents = new OperatorAgents(engine.store, repository, credentials.map(credential => ({ id: credential.id, tokenHash: createHash('sha256').update(credential.token).digest('hex') })));
   engine.operatorAuthorizer = operatorAgents.revalidate.bind(operatorAgents);
   return createServer(async (req, res) => {

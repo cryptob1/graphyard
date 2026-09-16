@@ -543,6 +543,23 @@ test('HTTP API authenticates, validates, and preserves command idempotency', asy
   assert.equal((await fetch(`${url}/api/work`, { method: 'POST', headers, body: '{' })).status, 400);
   assert.equal((await fetch(`${url}/api/events?work=invalid`, { headers })).status, 400);
 });
+test('validation uses the canonical engine repository when GitHub configuration differs', async () => {
+  const boundEngine = new Engine(store, [15368], 120, 'owner/selected');
+  const boundHttp = server(boundEngine, [{ ...operator, token: 'o'.repeat(32) }], { config: { repository: 'owner/adapter' } } as GitHub);
+  await new Promise<void>(resolve => boundHttp.listen(0, '127.0.0.1', resolve));
+  const boundUrl = `http://127.0.0.1:${(boundHttp.address() as any).port}`;
+  const define = (repository: string, id: string) => fetch(`${boundUrl}/api/validation/define`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${'o'.repeat(32)}`, 'Content-Type': 'application/json', 'Idempotency-Key': randomUUID() },
+    body: JSON.stringify({ id, expectedRevision: 0, kind: 'environment', repository, url: 'https://staging.example.test', instance: 'staging', immutable: true, services: ['api'], resources: ['database'] }),
+  });
+  try {
+    assert.equal((await define('owner/selected', `selected-${randomUUID()}`)).status, 200, 'validation accepts the canonical engine repository');
+    assert.equal((await define('owner/adapter', `adapter-${randomUUID()}`)).status, 409, 'validation rejects the non-selected GitHub adapter repository');
+  } finally {
+    await new Promise<void>(resolve => boundHttp.close(() => resolve()));
+  }
+});
 test('scoped operator-agent credentials are deny-by-default, auditable, rotation-safe, and cannot weaken policy', async () => {
   const adminHeaders = { Authorization: `Bearer ${'o'.repeat(32)}`, 'Content-Type': 'application/json' };
   const post = (path: string, value: unknown, token = 'o'.repeat(32), key = randomUUID()) => fetch(`${url}/api/${path}`, { method: 'POST', headers: { ...adminHeaders, Authorization: `Bearer ${token}`, 'Idempotency-Key': key }, body: JSON.stringify(value) });
