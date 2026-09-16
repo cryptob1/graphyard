@@ -18,7 +18,7 @@ node "$GRAPHYARD_CLI" master init \
 node "$GRAPHYARD_CLI" master start codex
 ```
 
-Use `master start claude` if preferred. Setup preserves existing repository instructions and stores the coordinator token outside the repository.
+At the token prompt, paste the token, press Enter, then press Ctrl-D to send EOF. Use `master start claude` if preferred. Setup preserves existing repository instructions and stores the coordinator token outside the repository.
 
 Run the coordinator under a dedicated OS identity or machine. Implementation agents running as the same OS user may read its GitHub CLI credentials; Graphyard tokens cannot create a filesystem boundary.
 

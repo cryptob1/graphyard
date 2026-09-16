@@ -22,6 +22,8 @@ Graphyard is not published to npm yet. In the commands below:
 export GRAPHYARD_CLI=/absolute/path/to/graphyard/bin/graphyard.mjs
 ```
 
+For every `--token-stdin` prompt, paste the token, press Enter, then press Ctrl-D to send EOF.
+
 ## 1. Deploy one control plane
 
 Use one Graphyard server and one Postgres database for all workers. Follow [deployment](deployment.md) for Railway or Docker Compose.

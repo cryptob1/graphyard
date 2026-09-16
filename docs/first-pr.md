@@ -13,6 +13,8 @@ Graphyard's own repository uses a protected acceptance workflow to prove its HTT
    node "$GRAPHYARD_CLI" init --url https://YOUR-GRAPHYARD-HOST --herdr --token-stdin
    ```
 
+   Paste the worker token, press Enter, then press Ctrl-D to send EOF.
+
 2. Run `node "$GRAPHYARD_CLI" github-setup https://YOUR-GRAPHYARD-HOST`, register the personal-account GitHub App, copy its private values into Railway, and redeploy.
 3. Preview and apply this repository's integration configuration:
 

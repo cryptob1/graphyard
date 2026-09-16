@@ -15,7 +15,7 @@ node "$GRAPHYARD_CLI" init \
   --token-stdin
 ```
 
-Setup verifies the worker and repository, updates the managed `AGENTS.md` section, stores the connection in ignored `.graphyard/connection.json`, and enables the plugin. Commit `AGENTS.md` and `.gitignore`; never commit `.graphyard/`.
+Paste the token, press Enter, then press Ctrl-D to send EOF. Setup verifies the worker and repository, updates the managed `AGENTS.md` section, stores the connection in ignored `.graphyard/connection.json`, and enables the plugin. Commit `AGENTS.md` and `.gitignore`; never commit `.graphyard/`.
 
 Rerun `init` after moving the Graphyard checkout or changing servers. Each concurrent worker needs its own principal and token.
 
