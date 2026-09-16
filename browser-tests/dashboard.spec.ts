@@ -16,6 +16,26 @@ async function fixture(page: Page, role = 'admin') {
 }
 async function login(page: Page, value = 'browser-fixture') { await page.getByLabel('Access token').fill(value); await page.getByRole('button', { name: 'Open control plane' }).click(); }
 
+for (const viewport of [{ name: 'desktop', width: 1280, height: 900 }, { name: 'mobile', width: 390, height: 844 }]) {
+  test(`How Graphyard works is a readable visual guide on ${viewport.name}`, async ({ page }) => {
+    await page.setViewportSize(viewport);
+    await page.goto('/docs/how-graphyard-works');
+    await expect(page.getByRole('heading', { name: 'How Graphyard works', level: 1 })).toBeVisible();
+    const flow = page.locator('.how-guide > ol');
+    await expect(flow.locator(':scope > li')).toHaveCount(10);
+    const cards = await flow.locator(':scope > li').evaluateAll(elements => elements.map(element => element.getBoundingClientRect().top));
+    expect(cards).toEqual([...cards].sort((a, b) => a - b));
+    expect(new Set(cards).size).toBe(cards.length);
+    await expect(flow.getByText('Setup', { exact: true })).toBeVisible();
+    await expect(flow.getByText('Done', { exact: true })).toBeVisible();
+    await expect(page.getByRole('heading', { name: 'Who does what' })).toBeVisible();
+    await expect(page.getByText('Graphyard: delivery authority')).toBeVisible();
+    await expect(page.getByText('Herdr: runtime supervision')).toBeVisible();
+    const bounds = await page.locator('.docs-shell').evaluate(element => ({ width: element.clientWidth, content: element.scrollWidth }));
+    expect(bounds.content).toBeLessThanOrEqual(bounds.width);
+  });
+}
+
 test('invalid login remains on login; whitespace is trimmed and loading never claims empty work', async ({ page }) => {
   const state = await fixture(page);
   await login(page, 'invalid');
