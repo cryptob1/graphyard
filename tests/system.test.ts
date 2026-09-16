@@ -1,9 +1,9 @@
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp } from 'node:fs/promises';
+import { mkdtemp, rm, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import EmbeddedPostgres from 'embedded-postgres';
 import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
@@ -12,6 +12,8 @@ import { ReconciliationRetry, type Principal, type Work, type Observation } from
 import { defineScenario, scenarios } from '../src/scenarios.js';
 import { setTimeout as delay } from 'node:timers/promises';
 import { processJob, type GitHub } from '../src/github.js';
+import { acknowledgeContainment, isConfirmedCoordinationRefusal } from '../src/quarantine.js';
+import { supervise } from '../src/supervisor.js';
 // @ts-expect-error The trusted runner intentionally uses dependency-free JavaScript outside the candidate source.
 import { exercise } from '../scripts/acceptance-contract.mjs';
 
@@ -67,6 +69,17 @@ test('idempotent retries have one event, and key reuse with different input fail
   assert.equal((await store.events(work.id)).filter(e => e.kind === 'claim').length, 1);
   await assert.rejects(engine.execute(worker, 'release', work.id, { epoch: 1 }, key), /reused/);
 });
+test('real HTTP coordination refusal envelope is classified as definitive', async () => {
+  const response = await fetch(`${url}/api/work/missing/claim`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${'w'.repeat(32)}`, 'Content-Type': 'application/json', 'Idempotency-Key': randomUUID() },
+    body: '{}',
+  });
+  const envelope = await response.json();
+  assert.equal(response.status, 404);
+  assert.deepEqual(envelope, { error: 'Work item not found' });
+  assert.equal(isConfirmedCoordinationRefusal(response.status, envelope), true);
+});
 test('expired lease is recoverable and all stale-owner commands are fenced', async () => {
   let w = await claimed();
   await store.pool.query("UPDATE work_items SET document=jsonb_set(document,'{lease,expiresAt}',to_jsonb('2000-01-01T00:00:00Z'::text)) WHERE id=$1", [w.id]);
@@ -74,6 +87,91 @@ test('expired lease is recoverable and all stale-owner commands are fenced', asy
   w = await engine.execute(other, 'claim', w.id, {}, randomUUID()); assert.equal(w.epoch, 2);
   for (const command of ['heartbeat', 'release'] as const) await assert.rejects(engine.execute(worker, command, w.id, { epoch: 1 }, randomUUID()), /superseded/);
   await assert.rejects(engine.execute(worker, 'submit', w.id, { epoch: 1, pr: 33 }, randomUUID()), /superseded/);
+});
+test('containment quarantine survives lease expiry and blocks overlap until verified settlement', async () => {
+  let w = await claimed();
+  const settlementToken = 'a'.repeat(64), settlementHash = 'ffe054fe7ae0cb6dc65c3af9b61d5209f439851db43d0ba5997337df154668eb';
+  w = await engine.execute(worker, 'quarantine', w.id, { epoch: 1, settlementHash }, randomUUID());
+  assert.deepEqual(w.containmentQuarantine && { owner: w.containmentQuarantine.owner, epoch: w.containmentQuarantine.epoch }, { owner: worker.id, epoch: 1 });
+  await assert.rejects(engine.execute(worker, 'quarantine', w.id, { epoch: 1, settlementHash: 'b'.repeat(64) }, randomUUID()), /cannot be replaced/);
+  await store.pool.query("UPDATE work_items SET document=jsonb_set(document,'{lease,expiresAt}',to_jsonb('2000-01-01T00:00:00Z'::text)) WHERE id=$1", [w.id]);
+  await engine.reconcile();
+  await assert.rejects(engine.execute(other, 'claim', w.id, {}, randomUUID()), /quarantined.*epoch 1/);
+  await assert.rejects(engine.execute(other, 'settle', w.id, { epoch: 1, settlementToken }, randomUUID()), /another worker/);
+  await assert.rejects(engine.execute(worker, 'settle', w.id, { epoch: 1, settlementToken: 'b'.repeat(64) }, randomUUID()), /capability is invalid/);
+  w = await engine.execute(worker, 'settle', w.id, { epoch: 1, settlementToken }, randomUUID());
+  assert.equal(w.containmentQuarantine, null);
+  assert.deepEqual((await store.events(w.id)).find(event => event.kind === 'settle').payload.details, { epoch: 1 }, 'settlement capability is not retained in history');
+  w = await engine.execute(other, 'claim', w.id, {}, randomUUID()); assert.equal(w.epoch, 2);
+});
+test('transactional launch acknowledgement races rework without a stale start or replacement overlap', async () => {
+  let w = await claimed();
+  const settlementToken = 'd'.repeat(64), settlementHash = createHash('sha256').update(settlementToken).digest('hex');
+  w = await engine.execute(worker, 'quarantine', w.id, { epoch: 1, settlementHash }, randomUUID());
+  const dir = await mkdtemp(join(tmpdir(), 'graphyard-launch-race-')), marker = join(dir, 'started');
+  let releaseResponse!: () => void, acknowledgementCommitted!: () => void, monotonic = 0;
+  const responseGate = new Promise<void>(resolve => { releaseResponse = resolve; });
+  const committed = new Promise<void>(resolve => { acknowledgementCommitted = resolve; });
+  const containment = { command: process.execPath, args: ['-e', `require('node:fs').writeFileSync(${JSON.stringify(marker)},'started')`], signal: () => {}, empty: () => true };
+  try {
+    const running = supervise('ignored', [], 1,
+      () => engine.execute(worker, 'heartbeat', w.id, { epoch: 1 }, randomUUID()),
+      { containment, detached: false, graceMs: 1, quarantine: {
+        establish: async () => {}, revalidate: async () => {},
+        acknowledge: () => acknowledgeContainment(async () => {
+          await store.pool.query("UPDATE work_items SET document=jsonb_set(document,'{lease,expiresAt}',to_jsonb((clock_timestamp() + interval '1 second')::text)) WHERE id=$1", [w.id]);
+          const result = await engine.execute(worker, 'launch', w.id, { epoch: 1, settlementHash }, randomUUID());
+          acknowledgementCommitted(); await responseGate;
+          return result; // committed response held beyond both server deadlines
+        }, { principal: worker.id, epoch: 1, settlementHash, exclusiveResources: [], requestId: randomUUID() }, { attempts: 1, monotonicNow: () => monotonic }),
+        settle: () => engine.execute(worker, 'settle', w.id, { epoch: 1, settlementToken }, randomUUID()),
+      } });
+    await committed;
+    await assert.rejects(stat(marker), { code: 'ENOENT' }, 'ack response in flight must not have spawned the worker');
+    await store.pool.query("UPDATE work_items SET document=jsonb_set(document,'{lease,expiresAt}',to_jsonb('2000-01-01T00:00:00Z'::text)) WHERE id=$1", [w.id]);
+    await assert.rejects(engine.execute(operator, 'rework', w.id, { reason: 'lease expired but ACK response remains in flight', previousWorkerStopped: true }, randomUUID()), /both lease and launch authority expiry/);
+    await assert.rejects(engine.execute(other, 'claim', w.id, {}, randomUUID()), /quarantined/);
+    await store.pool.query("UPDATE work_items SET document=jsonb_set(document,'{containmentQuarantine,launchExpiresAt}',to_jsonb('2000-01-01T00:00:00Z'::text)) WHERE id=$1", [w.id]);
+    w = await engine.execute(operator, 'rework', w.id, { reason: 'bounded fence expired and supervisor is stopped', previousWorkerStopped: true }, randomUUID());
+    assert.equal((await engine.execute(other, 'claim', w.id, {}, randomUUID())).epoch, 2);
+    monotonic = 1_001; releaseResponse();
+    await assert.rejects(running, /worker lease expired/);
+    await assert.rejects(stat(marker), { code: 'ENOENT' }, 'stale ACK response must never spawn after recovery');
+  } finally { releaseResponse(); await rm(dir, { recursive: true, force: true }); }
+});
+test('expired quarantines reserve shared resources until settlement or operator recovery', async () => {
+  const resource = `staging:${randomUUID()}`, unrelatedResource = `staging:${randomUUID()}`;
+  const makeReady = async (exclusiveResources: string[]) => {
+    const item = await engine.execute(operator, 'create', null, { ...workInput, exclusiveResources }, randomUUID());
+    return engine.execute(operator, 'ready', item.id, {}, randomUUID());
+  };
+  const owner = await makeReady([resource]);
+  const shared = await makeReady([resource]);
+  const unrelated = await makeReady([unrelatedResource]);
+  let quarantined = await engine.execute(worker, 'claim', owner.id, {}, randomUUID());
+  const settlementToken = 'c'.repeat(64);
+  const settlementHash = createHash('sha256').update(settlementToken).digest('hex');
+  quarantined = await engine.execute(worker, 'quarantine', quarantined.id, { epoch: 1, settlementHash }, randomUUID());
+  await store.pool.query("UPDATE work_items SET document=jsonb_set(document,'{lease,expiresAt}',to_jsonb('2000-01-01T00:00:00Z'::text)) WHERE id=$1", [quarantined.id]);
+  await engine.reconcile();
+  await assert.rejects(engine.execute(operator, 'requirements', quarantined.id, {
+    expectedPolicyRevision: quarantined.policyRevision, reason: 'Attempt to remove the held reservation', criteria: quarantined.criteria,
+    dependencies: [], plannedFiles: [], exclusiveResources: [],
+  }, randomUUID()), /quarantined.*requirements remain immutable/);
+  await assert.rejects(engine.execute(other, 'claim', shared.id, {}, randomUUID()), /Exclusive resources held.*staging:/);
+  assert.equal((await engine.execute(other, 'claim', unrelated.id, {}, randomUUID())).epoch, 1);
+  await engine.execute(worker, 'settle', quarantined.id, { epoch: 1, settlementToken }, randomUUID());
+  assert.equal((await engine.execute(other, 'claim', shared.id, {}, randomUUID())).epoch, 1);
+
+  const recoveryResource = `staging:${randomUUID()}`;
+  let recoveryOwner = await makeReady([recoveryResource]);
+  const recoveryPeer = await makeReady([recoveryResource]);
+  recoveryOwner = await engine.execute(worker, 'claim', recoveryOwner.id, {}, randomUUID());
+  recoveryOwner = await engine.execute(worker, 'quarantine', recoveryOwner.id, { epoch: 1, settlementHash }, randomUUID());
+  await store.pool.query("UPDATE work_items SET document=jsonb_set(document,'{lease,expiresAt}',to_jsonb('2000-01-01T00:00:00Z'::text)) WHERE id=$1", [recoveryOwner.id]);
+  await assert.rejects(engine.execute(other, 'claim', recoveryPeer.id, {}, randomUUID()), /Exclusive resources held/);
+  await engine.execute(operator, 'rework', recoveryOwner.id, { reason: 'Expired supervisor was stopped', previousWorkerStopped: true }, randomUUID());
+  assert.equal((await engine.execute(other, 'claim', recoveryPeer.id, {}, randomUUID())).epoch, 1);
 });
 test('dependencies and explicit blockers refuse claims', async () => {
   const parent = await create(); let child = await create([parent.id]); child = await engine.execute(operator, 'ready', child.id, {}, randomUUID());
@@ -279,6 +377,131 @@ test('only an independently observed merge with a verified execution completes w
   assert.ok(w.delivery?.authorizationRevision);
   assert.equal((await store.pool.query('SELECT 1 FROM jobs WHERE work_id=$1', [w.id])).rowCount, 0);
   await assert.rejects(engine.execute(worker, 'claim', w.id, {}, randomUUID()), /immutable/);
+});
+test('capability settlement preserves active and expired merge executions while refusing forged authority', async () => {
+  const prepare = async (suffix: string) => {
+    let item = await engine.execute(operator, 'create', null, { ...workInput, exclusiveResources: [`merge-settlement:${suffix}:${randomUUID()}`] }, randomUUID());
+    item = await engine.execute(operator, 'ready', item.id, {}, randomUUID());
+    item = await engine.execute(worker, 'claim', item.id, {}, randomUUID());
+    const settlementToken = suffix.repeat(64), settlementHash = createHash('sha256').update(settlementToken).digest('hex');
+    item = await engine.execute(worker, 'quarantine', item.id, { epoch: 1, settlementHash }, randomUUID());
+    item = await engine.execute(worker, 'workspace', item.id, { epoch: 1, host: `merge-settlement-${suffix}`, path: `/tmp/${item.id}-${suffix}`, branch: `graphyard/${item.id}-${suffix}` }, randomUUID());
+    item = await engine.execute(worker, 'submit', item.id, { epoch: 1, pr: Number(item.key.slice(3)) }, randomUUID());
+    item = await engine.observe(item.id, item.revision, observation(item));
+    item = await engine.execute(producer, 'evidence', item.id, proof(), randomUUID());
+    await engine.acquireMerge(coordinator, item.id, { expectedRevision: item.revision, sha: head, baseSha: base, policyRevision: item.policyRevision }, randomUUID());
+    return { item, settlementToken };
+  };
+
+  for (const [suffix, expire] of [['a', false], ['b', true]] as const) {
+    const prepared = await prepare(suffix);
+    if (expire) await store.pool.query("UPDATE work_items SET document=jsonb_set(document,'{mergeExecution,expiresAt}',to_jsonb('2000-01-01T00:00:00Z'::text)) WHERE id=$1", [prepared.item.id]);
+    const before = (await store.pool.query('SELECT document FROM work_items WHERE id=$1', [prepared.item.id])).rows[0].document as Work; const gates = structuredClone(before.gates);
+    const mergeHistory = (await store.events(prepared.item.id)).filter(event => event.kind.startsWith('merge.'));
+    await assert.rejects(engine.execute(other, 'settle', prepared.item.id, { epoch: 1, settlementToken: prepared.settlementToken }, randomUUID()), /another worker/);
+    await assert.rejects(engine.execute(worker, 'settle', prepared.item.id, { epoch: 1, settlementToken: 'f'.repeat(64) }, randomUUID()), /capability is invalid/);
+    const settled = await engine.execute(worker, 'settle', prepared.item.id, { epoch: 1, settlementToken: prepared.settlementToken }, randomUUID());
+    assert.deepEqual(settled.mergeExecution, before.mergeExecution, `${expire ? 'expired' : 'active'} merge execution must be preserved`);
+    assert.deepEqual(settled.gates, gates); assert.deepEqual((await store.events(prepared.item.id)).filter(event => event.kind.startsWith('merge.')), mergeHistory);
+    assert.equal(settled.containmentQuarantine, null);
+  }
+});
+test('non-delivered capability settlement still re-evaluates stale gates', async () => {
+  let w = await claimed();
+  const settlementToken = 'c'.repeat(64), settlementHash = createHash('sha256').update(settlementToken).digest('hex');
+  w = await engine.execute(worker, 'quarantine', w.id, { epoch: 1, settlementHash }, randomUUID());
+  w = await engine.execute(worker, 'workspace', w.id, { epoch: 1, host: `stale-settlement-${w.id}`, path: `/tmp/${w.id}-stale-settlement`, branch: `graphyard/${w.id}-stale-settlement` }, randomUUID());
+  w = await engine.execute(worker, 'submit', w.id, { epoch: 1, pr: Number(w.key.slice(3)) }, randomUUID());
+  w = await engine.observe(w.id, w.revision, observation(w));
+  w = await engine.execute(producer, 'evidence', w.id, proof(), randomUUID());
+  assert.equal(w.stage, 'merge'); assert.ok(w.mergeAuthorization);
+  w = { ...w, observation: { ...w.observation!, at: '2000-01-01T00:00:00Z' },
+    evidence: w.evidence.map(item => ({ ...item, expiresAt: '2000-01-01T00:00:00Z' })) };
+  await store.pool.query('UPDATE work_items SET document=$2 WHERE id=$1', [w.id, JSON.stringify(w)]);
+  const settled = await engine.execute(worker, 'settle', w.id, { epoch: 1, settlementToken }, randomUUID());
+  assert.equal(settled.stage, 'acceptance'); assert.equal(settled.mergeAuthorization, null);
+  assert.equal(settled.gates.find(gate => gate.name === 'acceptance')?.passed, false);
+  assert.equal(settled.gates.find(gate => gate.name === 'merge')?.passed, false);
+});
+test('capability settlement survives the merge-to-done race without weakening delivered immutability', async () => {
+  const resource = `delivery-race:${randomUUID()}`;
+  let w = await engine.execute(operator, 'create', null, { ...workInput, exclusiveResources: [resource] }, randomUUID());
+  w = await engine.execute(operator, 'ready', w.id, {}, randomUUID());
+  w = await engine.execute(worker, 'claim', w.id, {}, randomUUID());
+  let contender = await engine.execute(operator, 'create', null, { ...workInput, exclusiveResources: [resource] }, randomUUID());
+  contender = await engine.execute(operator, 'ready', contender.id, {}, randomUUID());
+  const settlementToken = 'd'.repeat(64), settlementHash = createHash('sha256').update(settlementToken).digest('hex');
+  w = await engine.execute(worker, 'quarantine', w.id, { epoch: 1, settlementHash }, randomUUID());
+  w = await engine.execute(worker, 'workspace', w.id, { epoch: 1, host: 'race-host', path: `/tmp/${w.id}-race`, branch: `graphyard/${w.id}-race` }, randomUUID());
+  w = await engine.execute(worker, 'submit', w.id, { epoch: 1, pr: Number(w.key.slice(3)) }, randomUUID());
+  w = await engine.observe(w.id, w.revision, observation(w));
+  w = await engine.execute(producer, 'evidence', w.id, proof(), randomUUID());
+  const granted = await engine.acquireMerge(coordinator, w.id, { expectedRevision: w.revision, sha: head, baseSha: base, policyRevision: w.policyRevision }, randomUUID());
+  const verified = await engine.verifyMerge(coordinator, w.id, { executionId: granted.execution.id }, { ...observation(w), prState: 'open', draft: false }, randomUUID());
+  await delay(5); const mergedAt = ((await store.pool.query('SELECT clock_timestamp() AS now')).rows[0].now as Date).toISOString(); await delay(5);
+  const merged = { ...observation(w), merged: true, mergedAt, mergeSha: 'f'.repeat(40) } as Observation;
+  let current = await engine.observe(w.id, verified.revision, merged);
+  assert.equal(current.stage, 'done'); assert.ok(current.containmentQuarantine, 'delivery can win the race before supervisor settlement');
+  current = { ...current, observation: { ...current.observation!, at: '2000-01-01T00:00:00Z' },
+    evidence: current.evidence.map(item => ({ ...item, expiresAt: '2000-01-01T00:00:00Z' })),
+    lease: { ...current.lease!, expiresAt: '2000-01-01T00:00:00Z' } };
+  await store.pool.query('UPDATE work_items SET document=$2 WHERE id=$1', [current.id, JSON.stringify(current)]);
+  const preserved = { stage: current.stage, gates: current.gates, candidate: current.candidate, evidence: current.evidence,
+    observation: current.observation, mergeAuthorization: current.mergeAuthorization, delivery: current.delivery };
+  assert.ok(current.mergeAuthorization, 'delivered fixture must retain its merge authorization');
+  await assert.rejects(engine.execute(other, 'claim', contender.id, {}, randomUUID()), /Exclusive resources held/);
+  await assert.rejects(engine.execute(worker, 'settle', current.id, { epoch: 1, settlementToken: 'e'.repeat(64) }, randomUUID()), /capability is invalid/);
+  await assert.rejects(engine.execute(other, 'settle', current.id, { epoch: 1, settlementToken }, randomUUID()), /another worker/);
+  current = await engine.execute(worker, 'settle', current.id, { epoch: 1, settlementToken }, randomUUID());
+  assert.equal(current.stage, 'done'); assert.equal(current.containmentQuarantine, null);
+  assert.deepEqual({ stage: current.stage, gates: current.gates, candidate: current.candidate, evidence: current.evidence,
+    observation: current.observation, mergeAuthorization: current.mergeAuthorization, delivery: current.delivery }, preserved);
+  contender = await engine.execute(other, 'claim', contender.id, {}, randomUUID()); assert.equal(contender.epoch, 1);
+  await assert.rejects(engine.execute(worker, 'release', current.id, { epoch: 1 }, randomUUID()), /immutable/);
+  assert.deepEqual((await store.events(current.id)).find(event => event.kind === 'settle')?.payload.details, { epoch: 1 });
+});
+test('operator stopped-worker recovery clears only a delivered containment quarantine', async () => {
+  const resource = `delivered-recovery:${randomUUID()}`;
+  let w = await engine.execute(operator, 'create', null, { ...workInput, exclusiveResources: [resource] }, randomUUID());
+  w = await engine.execute(operator, 'ready', w.id, {}, randomUUID());
+  w = await engine.execute(worker, 'claim', w.id, {}, randomUUID());
+  const settlementHash = createHash('sha256').update('f'.repeat(64)).digest('hex');
+  w = await engine.execute(worker, 'quarantine', w.id, { epoch: 1, settlementHash }, randomUUID());
+  w = await engine.execute(worker, 'workspace', w.id, { epoch: 1, host: 'recovery-host', path: `/tmp/${w.id}-recovery`, branch: `graphyard/${w.id}-recovery` }, randomUUID());
+  w = await engine.execute(worker, 'submit', w.id, { epoch: 1, pr: Number(w.key.slice(3)) }, randomUUID());
+  w = await engine.observe(w.id, w.revision, observation(w));
+  w = await engine.execute(producer, 'evidence', w.id, proof(), randomUUID());
+  const granted = await engine.acquireMerge(coordinator, w.id, { expectedRevision: w.revision, sha: head, baseSha: base, policyRevision: w.policyRevision }, randomUUID());
+  const verified = await engine.verifyMerge(coordinator, w.id, { executionId: granted.execution.id }, { ...observation(w), prState: 'open', draft: false }, randomUUID());
+  await delay(5); const mergedAt = ((await store.pool.query('SELECT clock_timestamp() AS now')).rows[0].now as Date).toISOString(); await delay(5);
+  w = await engine.observe(w.id, verified.revision, { ...observation(w), merged: true, mergedAt, mergeSha: '9'.repeat(40) });
+  w = { ...w, mergeExecution: verified.mergeExecution, observation: { ...w.observation!, at: '2000-01-01T00:00:00Z' },
+    evidence: w.evidence.map(item => ({ ...item, expiresAt: '2000-01-01T00:00:00Z' })),
+    lease: { ...w.lease!, expiresAt: '2000-01-01T00:00:00Z' } };
+  await store.pool.query('UPDATE work_items SET document=$2 WHERE id=$1', [w.id, JSON.stringify(w)]);
+  w = (await store.list()).find(item => item.id === w.id)!;
+  const preserved = { stage: w.stage, gates: w.gates, candidate: w.candidate, mergeExecution: w.mergeExecution, mergeAuthorization: w.mergeAuthorization,
+    evidence: w.evidence, criteria: w.criteria, delivery: w.delivery, observation: w.observation, submission: w.submission, reworkRequested: w.reworkRequested };
+  assert.ok(w.mergeAuthorization, 'delivered fixture must retain its merge authorization');
+  let contender = await engine.execute(operator, 'create', null, { ...workInput, exclusiveResources: [resource] }, randomUUID());
+  contender = await engine.execute(operator, 'ready', contender.id, {}, randomUUID());
+  await assert.rejects(engine.execute(worker, 'recover', w.id, { reason: 'Worker stopped', previousWorkerStopped: true }, randomUUID()), /permission/);
+  await assert.rejects(engine.execute(operator, 'recover', w.id, { reason: 'Missing attestation' }, randomUUID()));
+  await assert.rejects(engine.execute(other, 'claim', contender.id, {}, randomUUID()), /Exclusive resources held/);
+  const recoveryKey = randomUUID();
+  const recoveries = await Promise.allSettled([
+    engine.execute(operator, 'recover', w.id, { reason: 'Verified worker scope stopped', previousWorkerStopped: true }, recoveryKey),
+    engine.execute(operator, 'recover', w.id, { reason: 'Verified worker scope stopped', previousWorkerStopped: true }, recoveryKey),
+  ]);
+  assert.equal(recoveries.filter(result => result.status === 'fulfilled').length, 2);
+  const recovered = recoveries.find(result => result.status === 'fulfilled')!.value;
+  assert.equal(recovered.containmentQuarantine, null); assert.deepEqual({ stage: recovered.stage, gates: recovered.gates, candidate: recovered.candidate, mergeExecution: recovered.mergeExecution, mergeAuthorization: recovered.mergeAuthorization,
+    evidence: recovered.evidence, criteria: recovered.criteria, delivery: recovered.delivery, observation: recovered.observation, submission: recovered.submission, reworkRequested: recovered.reworkRequested }, preserved);
+  await assert.rejects(engine.execute(operator, 'recover', w.id, { reason: 'Already clear', previousWorkerStopped: true }, randomUUID()), /no containment quarantine/);
+  contender = await engine.execute(other, 'claim', contender.id, {}, randomUUID()); assert.equal(contender.epoch, 1);
+  const recoveryEvents = (await store.events(w.id)).filter(item => item.kind === 'recover'); assert.equal(recoveryEvents.length, 1);
+  const event = recoveryEvents[0];
+  assert.deepEqual(event?.payload.details, { reason: 'Verified worker scope stopped', previousWorkerStopped: true });
 });
 test('bypassed merge is a permanent visible violation, not done', async () => {
   let w = await submitted(); w = await engine.observe(w.id, w.revision, { ...observation(w), merged: true });

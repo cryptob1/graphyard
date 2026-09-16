@@ -7,6 +7,8 @@ import { resourceConflicts } from './coordination.js';
 
 const epoch = z.number().int().positive();
 const sha = z.string().regex(/^[a-f0-9]{40}$/);
+// Longer than acknowledgeContainment's three 30-second HTTP attempts plus retry delays.
+export const launchFenceMs = 120_000;
 const commands = {
   create: createSchema,
   ready: z.object({}).strict(),
@@ -14,9 +16,13 @@ const commands = {
   reviewpolicy: z.object({ provider: z.enum(['github', 'codex']), expectedPolicyRevision: z.number().int().positive(), reason: z.string().trim().min(1).max(2000) }).strict(),
   unblock: z.object({ reason: z.string().min(1).max(2000) }).strict(),
   rework: z.object({ reason: z.string().min(1).max(2000), previousWorkerStopped: z.literal(true) }).strict(),
+  recover: z.object({ reason: z.string().min(1).max(2000), previousWorkerStopped: z.literal(true) }).strict(),
   claim: z.object({}).strict(),
   rereview: z.object({ epoch: epoch.optional() }).strict(),
   heartbeat: z.object({ epoch }).strict(),
+  quarantine: z.object({ epoch, settlementHash: z.string().regex(/^[a-f0-9]{64}$/) }).strict(),
+  launch: z.object({ epoch, settlementHash: z.string().regex(/^[a-f0-9]{64}$/) }).strict(),
+  settle: z.object({ epoch, settlementToken: z.string().regex(/^[a-f0-9]{64}$/) }).strict(),
   release: z.object({ epoch }).strict(),
   workspace: z.object({ epoch, host: z.string().trim().min(1).max(200), path: z.string().startsWith('/').max(1000).refine(p => !/[\u0000-\u001f]/.test(p), 'Invalid path').transform(workspacePath), branch: z.string().max(200).refine(validBranch, 'Invalid Graphyard branch name') }).strict(),
   submit: z.object({ epoch, pr: z.number().int().positive() }).strict(),
@@ -65,10 +71,11 @@ export class Engine {
         all.push(work!);
       }
       demand(work, 'Work item not found', 404);
+      const deliveredContainmentCleanup = work.stage === 'done' && (command === 'settle' || command === 'recover');
       preserveAssignment(work);
-      if (work.mergeExecution && Date.parse(work.mergeExecution.expiresAt) <= now.getTime()) work.mergeExecution = null;
-      demand(!work.mergeExecution || command === 'heartbeat', 'A merge execution is active; retry after it completes or expires');
-      if (command !== 'create') demand(work.stage !== 'done', 'Delivered work is immutable; create a follow-up task');
+      if (!['recover', 'settle'].includes(command) && work.mergeExecution && Date.parse(work.mergeExecution.expiresAt) <= now.getTime()) work.mergeExecution = null;
+      demand(!work.mergeExecution || command === 'heartbeat' || command === 'recover' || command === 'settle', 'A merge execution is active; retry after it completes or expires');
+      if (command !== 'create' && command !== 'settle' && command !== 'recover') demand(work.stage !== 'done', 'Delivered work is immutable; create a follow-up task');
       if (command === 'rereview') {
         if (actor.role !== 'admin') { demand(actor.role === 'worker', 'Worker or operator required', 403); activeLease(work, actor, data.epoch, now); }
         demand(work.policy.review && work.policy.reviewProvider === 'codex' && work.submission && !work.observation?.merged, 'Open submitted work with Codex review policy required');
@@ -88,6 +95,7 @@ export class Engine {
       if (command === 'requirements') {
         admin(actor);
         demand(!work.observation?.merged, 'Merged work requires a follow-up task');
+        demand(!work.containmentQuarantine, `Task is quarantined by unverified containment from epoch ${work.containmentQuarantine?.epoch}; requirements remain immutable until settlement or stopped-worker recovery`);
         demand(!work.lease || Date.parse(work.lease.expiresAt) <= now.getTime(), 'Stop and release the active worker before revising requirements');
         demand(data.expectedPolicyRevision === work.policyRevision, 'Policy revision changed; reload before revising');
         demand(new Set(data.criteria.map((ac: { id: string }) => ac.id)).size === data.criteria.length, 'Criterion IDs must be unique');
@@ -122,12 +130,23 @@ export class Engine {
       if (command === 'rework') {
         admin(actor);
         demand(!work.observation?.merged, 'Merged work requires a follow-up task');
+        demand(!work.containmentQuarantine || (!work.lease || Date.parse(work.lease.expiresAt) <= now.getTime())
+          && (!work.containmentQuarantine.launchExpiresAt || Date.parse(work.containmentQuarantine.launchExpiresAt) <= now.getTime()),
+        `Worker startup for epoch ${work.containmentQuarantine?.epoch} remains fenced; stop its supervisor and wait for both lease and launch authority expiry before recovery`);
         work.reworkRequested = true;
+        work.containmentQuarantine = null;
         work.lease = null;
+      }
+      if (command === 'recover') {
+        admin(actor);
+        demand(work.stage === 'done', 'Containment recovery is only available for delivered work');
+        demand(work.containmentQuarantine, 'Delivered work has no containment quarantine');
+        work.containmentQuarantine = null;
       }
       if (command === 'claim') {
         demand(actor.role === 'worker' || actor.role === 'admin', 'Worker permission required', 403);
         demand(work.ready && !work.blocker, 'Task is not ready or has a blocker');
+        demand(!work.containmentQuarantine, `Task is quarantined by unverified containment from epoch ${work.containmentQuarantine?.epoch}`);
         demand(work.dependencies.every(dep => all.find(w => w.id === dep)?.stage === 'done'), 'Unfinished dependencies');
         demand(!work.lease || Date.parse(work.lease.expiresAt) <= now.getTime(), 'Task already has an active owner');
         demand(!work.submission || work.reworkRequested, 'Implementation is submitted; an operator must request rework before reassignment');
@@ -137,8 +156,27 @@ export class Engine {
         work.lastAssignment = { owner: actor.id, epoch: work.epoch, claimedAt: now.toISOString(), ...(actor.displayName ? { displayName: actor.displayName } : {}), ...(actor.runtime ? { runtime: actor.runtime } : {}) };
         work.lease = { owner: actor.id, epoch: work.epoch, expiresAt: new Date(now.getTime() + this.leaseSeconds * 1000).toISOString() };
       }
-      if (['heartbeat', 'release', 'workspace', 'submit', 'blocked'].includes(command)) activeLease(work, actor, data.epoch, now);
+      if (['heartbeat', 'release', 'workspace', 'submit', 'blocked', 'quarantine', 'launch'].includes(command)) activeLease(work, actor, data.epoch, now);
       if (command === 'heartbeat') work.lease!.expiresAt = new Date(now.getTime() + this.leaseSeconds * 1000).toISOString();
+      if (command === 'quarantine') {
+        demand(!work.containmentQuarantine || work.containmentQuarantine.owner === actor.id && work.containmentQuarantine.epoch === data.epoch
+          && work.containmentQuarantine.settlementHash === data.settlementHash, 'Containment quarantine already exists and cannot be replaced');
+        work.containmentQuarantine ??= { owner: actor.id, epoch: data.epoch, at: now.toISOString(), settlementHash: data.settlementHash };
+      }
+      if (command === 'launch') {
+        demand(work.containmentQuarantine?.owner === actor.id && work.containmentQuarantine.epoch === data.epoch
+          && work.containmentQuarantine.settlementHash === data.settlementHash,
+        'Containment quarantine is missing, superseded, or does not match this launch');
+        work.containmentQuarantine.launchAcknowledgedAt ??= now.toISOString();
+        work.containmentQuarantine.launchExpiresAt ??= new Date(now.getTime() + launchFenceMs).toISOString();
+      }
+      if (command === 'settle') {
+        demand(actor.role === 'worker' && work.containmentQuarantine?.owner === actor.id && work.containmentQuarantine.epoch === data.epoch,
+          'Containment quarantine is missing, superseded, or owned by another worker');
+        demand(createHash('sha256').update(data.settlementToken).digest('hex') === work.containmentQuarantine.settlementHash,
+          'Containment settlement capability is invalid');
+        work.containmentQuarantine = null;
+      }
       if (command === 'release') work.lease = null;
       if (command === 'blocked') work.blocker = data.reason;
       if (command === 'workspace') {
@@ -159,8 +197,10 @@ export class Engine {
         const trusted = actor.role === 'producer' && !!actor.proofs?.includes(data.proof) || actor.role === 'admin' && data.proof.startsWith('manual:');
         work.evidence.push({ ...data, id: randomUUID(), producer: actor.id, trusted, at: now.toISOString() });
       }
-      this.evaluate(work, all, now);
-      await save(db, work, actor.id, command, now, data);
+      // Delivery is an immutable snapshot. A late containment cleanup may append
+      // its audit/revision metadata, but stale inputs must not re-evaluate it.
+      if (!deliveredContainmentCleanup) this.evaluate(work, all, now);
+      await save(db, work, actor.id, command, now, command === 'settle' ? { epoch: data.epoch } : data);
       if (work.submission && !['heartbeat', 'release', 'claim', 'workspace'].includes(command)) await wakeJob(db, work.id);
       await db.query('INSERT INTO receipts(actor,key,fingerprint,result) VALUES($1,$2,$3,$4)', [actor.id, key, fingerprint, JSON.stringify(work)]);
       return work;

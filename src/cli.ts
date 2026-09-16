@@ -12,6 +12,7 @@ import { parseArgs } from 'node:util';
 import { diagnose, fileConflicts, proofPreview, resourceConflicts } from './coordination.js';
 import { loadConnection, setupRepository, handoff, hostIdSchema } from './repository-setup.js';
 import { assertMasterBinding, buildMasterStatus, continueMergeBatch, currentMergeCandidates, dispatchWork, inspectWorkerCredentials, listHerdrAgents, loadMasterConfig, mergeWork, observeHerdrAgents, readCredentialFile, readWorkerCredential, saveWorkerProfile, setupMaster, startMaster, workerProfileSchema } from './master.js';
+import { acknowledgeContainment, containmentCredentials, establishContainment, isConfirmedCoordinationRefusal, revalidateContainment, settleContainment } from './quarantine.js';
 
 try { process.loadEnvFile(); } catch (error: any) { if (error.code !== 'ENOENT') throw error; }
 const [command, id, ...args] = process.argv.slice(2);
@@ -44,7 +45,9 @@ async function api(path: string, data?: unknown, requestId = process.env.GRAPHYA
   const token = await individualToken();
   if (!token) throw new Error('Set GRAPHYARD_TOKEN to your individual credential');
   const response = await fetch(`${base}/api/${path}`, { method: data === undefined ? 'GET' : 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', 'Idempotency-Key': requestId }, body: data === undefined ? undefined : JSON.stringify(data), signal: AbortSignal.timeout(30_000) });
-  const body = await response.json(); if (!response.ok) throw new Error(JSON.stringify(body)); return body;
+  const body = await response.json();
+  if (!response.ok) { const error = new Error(JSON.stringify(body)); (error as any).confirmedRefusal = isConfirmedCoordinationRefusal(response.status, body); throw error; }
+  return body;
 }
 const print = (value: unknown) => console.log(JSON.stringify(value, null, 2));
 async function main() {
@@ -53,7 +56,8 @@ async function main() {
 
 Environment: GRAPHYARD_URL, GRAPHYARD_TOKEN (individual role-scoped credential)
   init [--url URL] [--herdr] [--token-stdin]  Configure repository instructions and Herdr
-  master init --token-stdin     Install the recommended master-agent operating mode
+  master init --token-stdin [--herdr-workspace ID]
+                                Install the recommended master-agent operating mode
   master start AGENT_KIND       Launch the dedicated visible Herdr master session
   master worker add FILE        Add an existing or launchable Herdr worker profile
   master status                 Join Graphyard work truth with Herdr session health
@@ -75,6 +79,8 @@ Environment: GRAPHYARD_URL, GRAPHYARD_TOKEN (individual role-scoped credential)
   ready GY-N                   Release backlog item (operator)
   unblock GY-N REASON           Clear a blocker with an audit reason (operator)
   rework GY-N --previous-worker-stopped REASON  Authorize reassignment (operator)
+  recover-containment GY-N --previous-worker-stopped REASON
+                                Release delivered work's stopped-worker quarantine (operator)
   rereview GY-N [EPOCH]         Request a fresh Codex review (operator or current worker)
   reviewpolicy GY-N github|codex POLICY_REVISION REASON  Revise reviewer source (operator)
   claim GY-N                   Acquire a two-minute lease; returns epoch
@@ -96,12 +102,12 @@ Never share an operator or producer credential with an implementation agent.`); 
     const root = execFileSync('git', ['rev-parse', '--show-toplevel'], { encoding: 'utf8' }).trim();
     if (id === 'guide') return console.log(await readFile(fileURLToPath(new URL('../docs/master-agent.md', import.meta.url)), 'utf8'));
     if (id === 'init') {
-      const { values } = parseArgs({ args, options: { url: { type: 'string' }, 'token-stdin': { type: 'boolean' }, 'no-auto-merge': { type: 'boolean' }, 'merge-method': { type: 'string' }, 'cli-path': { type: 'string' }, 'host-id': { type: 'string' } }, allowPositionals: false });
+      const { values } = parseArgs({ args, options: { url: { type: 'string' }, 'token-stdin': { type: 'boolean' }, 'no-auto-merge': { type: 'boolean' }, 'merge-method': { type: 'string' }, 'cli-path': { type: 'string' }, 'host-id': { type: 'string' }, 'herdr-workspace': { type: 'string' } }, allowPositionals: false });
       if (!values['token-stdin']) throw new Error('Use master init --token-stdin so the coordinator credential is not stored in shell history');
       let input = ''; for await (const chunk of process.stdin) { input += chunk; if (input.length > 10_000) throw new Error('Token input is too large'); }
       const masterToken = input.trim(); if (!masterToken) throw new Error('Master coordinator credential is required; setup made no changes');
       const method = values['merge-method']; if (method && !['merge', 'squash', 'rebase'].includes(method)) throw new Error('Merge method must be merge, squash, or rebase');
-      return print(await setupMaster(root, { url: values.url ?? base, token: masterToken, cliPath: resolve(values['cli-path'] ?? await activeCliPath()), hostId: values['host-id'] ?? individualHostId(), ...(values['no-auto-merge'] ? { autoMerge: false } : {}), ...(method ? { mergeMethod: method as 'merge' | 'squash' | 'rebase' } : {}) }));
+      return print(await setupMaster(root, { url: values.url ?? base, token: masterToken, cliPath: resolve(values['cli-path'] ?? await activeCliPath()), hostId: values['host-id'] ?? individualHostId(), herdrWorkspace: values['herdr-workspace'], ...(values['no-auto-merge'] ? { autoMerge: false } : {}), ...(method ? { mergeMethod: method as 'merge' | 'squash' | 'rebase' } : {}) }));
     }
     const master = await loadMasterConfig(root);
     const masterToken = await readCredentialFile(master.credentialFile);
@@ -212,7 +218,7 @@ Never share an operator or producer credential with an implementation agent.`); 
   if (command === 'scenario') return print(await api('scenarios', JSON.parse(await readFile(id, 'utf8'))));
   if (command === 'list' || command === 'next') {
     const snapshot = await api('work-snapshot'); const items = snapshot.work;
-    return print(command === 'list' ? items : items.filter((w: any) => w.stage !== 'done' && w.ready && !w.blocker && (!w.submission || w.reworkRequested) && (!w.lease || Date.parse(w.lease.expiresAt) <= Date.parse(snapshot.now)) && !resourceConflicts(w, items, Date.parse(snapshot.now)).length && w.dependencies.every((d: string) => items.some((x: any) => x.id === d && x.stage === 'done'))).sort((a: any, b: any) => a.priority - b.priority));
+    return print(command === 'list' ? items : items.filter((w: any) => w.stage !== 'done' && w.ready && !w.blocker && !w.containmentQuarantine && (!w.submission || w.reworkRequested) && (!w.lease || Date.parse(w.lease.expiresAt) <= Date.parse(snapshot.now)) && !resourceConflicts(w, items, Date.parse(snapshot.now)).length && w.dependencies.every((d: string) => items.some((x: any) => x.id === d && x.stage === 'done'))).sort((a: any, b: any) => a.priority - b.priority));
   }
   if (command === 'create') return print(await api('work', JSON.parse(await readFile(id, 'utf8'))));
   if (command === 'diagnose') {
@@ -240,6 +246,10 @@ Never share an operator or producer credential with an implementation agent.`); 
   if (command === 'rework') {
     if (args[0] !== '--previous-worker-stopped') throw new Error('Stop the previous worker first, then pass --previous-worker-stopped and an audit reason');
     return print(await mutate('rework', { reason: args.slice(1).join(' '), previousWorkerStopped: true }));
+  }
+  if (command === 'recover-containment') {
+    if (args[0] !== '--previous-worker-stopped') throw new Error('Stop the previous worker first, then pass --previous-worker-stopped and an audit reason');
+    return print(await mutate('recover', { reason: args.slice(1).join(' '), previousWorkerStopped: true }));
   }
   if (command === 'heartbeat' || command === 'release') return print(await mutate(command, { epoch: Number(args[0]) }));
   if (command === 'blocked') return print(await mutate('blocked', { epoch: Number(args[0]), reason: args[1] === '-' ? null : args.slice(1).join(' ') }));
@@ -284,12 +294,40 @@ Never share an operator or producer credential with an implementation agent.`); 
     const workspace = work.workspaces.find((w: any) => w.epoch === epoch);
     const hostId = individualHostId();
     if (!workspace || workspace.host !== hostId || await realpath(process.cwd()) !== await realpath(workspace.path)) throw new Error('Run watch from the assigned workspace on its registered host');
-    if ((await api('status')).actor?.role !== 'worker') throw new Error('watch requires a worker credential; never pass operator or producer credentials to implementation processes');
+    const workerStatus = await api('status');
+    if (workerStatus.actor?.role !== 'worker') throw new Error('watch requires a worker credential; never pass operator or producer credentials to implementation processes');
     const watchToken = await individualToken();
     process.env.GRAPHYARD_URL = base; process.env.GRAPHYARD_TOKEN = watchToken;
     process.env.GRAPHYARD_CLI = await activeCliPath(); process.env.GRAPHYARD_HOST_ID = hostId;
+    const foreground = !!(process.env.HERDR_ENV === '1' && process.env.GRAPHYARD_HERDR_AGENT_KIND);
+    // This random capability remains only in the supervisor process. It is never
+    // placed in the child environment, request history, or quarantine document.
+    const containment = foreground ? containmentCredentials() : null;
+    const exclusiveResources = [...(work.exclusiveResources ?? [])];
+    const settlementRequestId = foreground ? randomUUID() : '';
+    const launchRequestId = foreground ? randomUUID() : '';
     process.exitCode = await supervise(args[separator + 1], args.slice(separator + 2), epoch,
-      () => api(`work/${work.id}/heartbeat`, { epoch }, randomUUID()));
+      () => api(`work/${work.id}/heartbeat`, { epoch }, randomUUID()), {
+        detached: !foreground,
+        quarantine: foreground ? {
+          establish: () => establishContainment(
+            requestId => api(`work/${work.id}/quarantine`, { epoch, settlementHash: containment!.settlementHash }, requestId),
+            { epoch, settlementHash: containment!.settlementHash, exclusiveResources, requestId: containment!.requestId },
+          ),
+          revalidate: async () => revalidateContainment(await api('work-snapshot'), {
+            workId: work.id, principal: workerStatus.actor.id, epoch, settlementHash: containment!.settlementHash,
+            exclusiveResources, workspace,
+          }),
+          acknowledge: () => acknowledgeContainment(
+            requestId => api(`work/${work.id}/launch`, { epoch, settlementHash: containment!.settlementHash }, requestId),
+            { principal: workerStatus.actor.id, epoch, settlementHash: containment!.settlementHash, exclusiveResources, requestId: launchRequestId },
+          ),
+          settle: () => settleContainment(
+            (requestId, body) => api(`work/${work.id}/settle`, body, requestId),
+            { epoch, settlementToken: containment!.settlementToken, settlementHash: containment!.settlementHash, exclusiveResources, requestId: settlementRequestId },
+          ),
+        } : undefined,
+      });
     return;
   }
   throw new Error(`Unknown command: ${command}`);

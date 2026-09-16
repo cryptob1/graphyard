@@ -31,9 +31,34 @@ test('diagnostics distinguish expired ownership, resource waits and a stalled in
   a.stage = 'done'; assert.deepEqual(diagnose(a, [a,b], now), []);
 });
 
+test('a task own containment quarantine takes precedence over fresh-claim advice', () => {
+  const w = work('A');
+  w.lastAssignment = { owner: 'old-worker', epoch: 4 };
+  w.lease = { owner: 'old-worker', epoch: 4, expiresAt: new Date(now - 60000).toISOString() };
+  w.containmentQuarantine = { owner: 'old-worker', epoch: 4, at: new Date(now - 120000).toISOString(), settlementHash: 'a'.repeat(64) };
+  const result = diagnose(w, [w], now);
+  assert.equal(result[0]?.kind, 'containment-quarantine');
+  assert.match(result[0]?.next ?? '', /settle with its capability/);
+  assert.match(result[0]?.next ?? '', /operator.*stopped-worker recovery/i);
+  assert.equal(result.some(d => d.kind === 'unowned-after-assignment' || d.kind === 'unclaimed'), false);
+});
+
 test('completed work retains its resource reservation until its last lease expires', () => {
   const a = work('A'), b = work('B'); a.exclusiveResources = b.exclusiveResources = ['staging'];
   b.stage = 'done'; b.lease = { owner: 'last-worker', epoch: 1, expiresAt: new Date(now + 60000).toISOString() };
   assert.deepEqual(resourceConflicts(a, [a, b], now), [{ resource: 'staging', key: 'B' }]);
   assert.deepEqual(resourceConflicts(a, [a, b], now + 60000), []);
+});
+
+test('quarantined work retains every resource reservation after lease expiry', () => {
+  const candidate = work('A'), quarantined = work('B');
+  candidate.exclusiveResources = ['staging', 'database']; quarantined.exclusiveResources = ['staging', 'database'];
+  quarantined.lease = { owner: 'old-worker', epoch: 3, expiresAt: new Date(now - 60000).toISOString() };
+  quarantined.containmentQuarantine = { owner: 'old-worker', epoch: 3, at: new Date(now - 120000).toISOString(), settlementHash: 'a'.repeat(64) };
+  assert.deepEqual(resourceConflicts(candidate, [candidate, quarantined], now), [
+    { resource: 'staging', key: 'B' },
+    { resource: 'database', key: 'B' },
+  ]);
+  candidate.exclusiveResources = ['unrelated'];
+  assert.deepEqual(resourceConflicts(candidate, [candidate, quarantined], now), []);
 });
