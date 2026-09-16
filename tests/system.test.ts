@@ -106,6 +106,10 @@ test('expired quarantines reserve shared resources until settlement or operator 
   quarantined = await engine.execute(worker, 'quarantine', quarantined.id, { epoch: 1, settlementHash }, randomUUID());
   await store.pool.query("UPDATE work_items SET document=jsonb_set(document,'{lease,expiresAt}',to_jsonb('2000-01-01T00:00:00Z'::text)) WHERE id=$1", [quarantined.id]);
   await engine.reconcile();
+  await assert.rejects(engine.execute(operator, 'requirements', quarantined.id, {
+    expectedPolicyRevision: quarantined.policyRevision, reason: 'Attempt to remove the held reservation', criteria: quarantined.criteria,
+    dependencies: [], plannedFiles: [], exclusiveResources: [],
+  }, randomUUID()), /quarantined.*requirements remain immutable/);
   await assert.rejects(engine.execute(other, 'claim', shared.id, {}, randomUUID()), /Exclusive resources held.*staging:/);
   assert.equal((await engine.execute(other, 'claim', unrelated.id, {}, randomUUID())).epoch, 1);
   await engine.execute(worker, 'settle', quarantined.id, { epoch: 1, settlementToken }, randomUUID());

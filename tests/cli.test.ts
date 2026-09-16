@@ -9,11 +9,35 @@ import { fileURLToPath } from 'node:url';
 import { createServer } from 'node:http';
 import { setTimeout as delay } from 'node:timers/promises';
 import { linuxProcessRecord, signalTrackedProcesses, supervise, systemdContainment } from '../src/supervisor.js';
+import { containmentCredentials, establishContainment } from '../src/quarantine.js';
 
 const exec = promisify(execFile);
 const launcher = fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url));
 const renewal = (duration = 2000) => ({ updatedAt: new Date().toISOString(), lease: { epoch: 1, expiresAt: new Date(Date.now() + duration).toISOString() } });
 const hasSystemdUserScope = process.platform === 'linux' && spawnSync('systemctl', ['--user', 'show-environment'], { stdio: 'ignore' }).status === 0;
+
+test('quarantine establishment reconciles a committed lost response with the same parent-only capability and request key', async () => {
+  const first = containmentCredentials(), second = containmentCredentials();
+  assert.notEqual(second.settlementToken, first.settlementToken, 'capabilities are random and invocation-local');
+  assert.notEqual(second.requestId, first.requestId, 'request keys are stable only within one bounded attempt');
+  const keys: string[] = []; let committed: any; let calls = 0;
+  const result = await establishContainment(async requestId => {
+    keys.push(requestId); calls++;
+    committed ??= { exclusiveResources: ['staging'], containmentQuarantine: { owner: 'worker-a', epoch: 7, settlementHash: first.settlementHash } };
+    if (calls === 1) throw new TypeError('response terminated after commit');
+    return committed;
+  }, { epoch: 7, settlementHash: first.settlementHash, exclusiveResources: ['staging'], requestId: first.requestId }, { attempts: 2, retryMs: 0 });
+  assert.equal(result, committed); assert.deepEqual(keys, [first.requestId, first.requestId]);
+});
+
+test('quarantine establishment never confirms a mismatched fence or retries a server refusal', async () => {
+  const expected = { ...containmentCredentials(), epoch: 8, exclusiveResources: ['database'] }; let calls = 0;
+  await assert.rejects(establishContainment(async () => ({ exclusiveResources: [], containmentQuarantine: { epoch: 8, settlementHash: expected.settlementHash } }),
+    expected, { attempts: 2, retryMs: 0 }), /could not confirm.*mismatched/);
+  const refusal = Object.assign(new Error('lease expired'), { confirmedRefusal: true });
+  await assert.rejects(establishContainment(async () => { calls++; throw refusal; }, expected), /lease expired/);
+  assert.equal(calls, 1);
+});
 
 test('master-only commands ignore an unrelated unavailable worker token file', async () => {
   const cwd = await mkdtemp(join(tmpdir(), 'graphyard-master-lazy-token-'));

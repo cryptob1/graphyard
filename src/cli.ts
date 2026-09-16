@@ -1,5 +1,5 @@
 import { readFile, mkdir, realpath, stat, writeFile } from 'node:fs/promises';
-import { createHash, randomBytes, randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { hostname } from 'node:os';
 import { resolve } from 'node:path';
 import { execFileSync, spawnSync } from 'node:child_process';
@@ -12,6 +12,7 @@ import { parseArgs } from 'node:util';
 import { diagnose, fileConflicts, proofPreview, resourceConflicts } from './coordination.js';
 import { loadConnection, setupRepository, handoff, hostIdSchema } from './repository-setup.js';
 import { assertMasterBinding, buildMasterStatus, continueMergeBatch, currentMergeCandidates, dispatchWork, inspectWorkerCredentials, listHerdrAgents, loadMasterConfig, mergeWork, observeHerdrAgents, readCredentialFile, readWorkerCredential, saveWorkerProfile, setupMaster, startMaster, workerProfileSchema } from './master.js';
+import { containmentCredentials, establishContainment } from './quarantine.js';
 
 try { process.loadEnvFile(); } catch (error: any) { if (error.code !== 'ENOENT') throw error; }
 const [command, id, ...args] = process.argv.slice(2);
@@ -44,7 +45,9 @@ async function api(path: string, data?: unknown, requestId = process.env.GRAPHYA
   const token = await individualToken();
   if (!token) throw new Error('Set GRAPHYARD_TOKEN to your individual credential');
   const response = await fetch(`${base}/api/${path}`, { method: data === undefined ? 'GET' : 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', 'Idempotency-Key': requestId }, body: data === undefined ? undefined : JSON.stringify(data), signal: AbortSignal.timeout(30_000) });
-  const body = await response.json(); if (!response.ok) throw new Error(JSON.stringify(body)); return body;
+  const body = await response.json();
+  if (!response.ok) { const error = new Error(JSON.stringify(body)); (error as any).confirmedRefusal = response.status >= 400 && response.status < 500; throw error; }
+  return body;
 }
 const print = (value: unknown) => console.log(JSON.stringify(value, null, 2));
 async function main() {
@@ -290,13 +293,19 @@ Never share an operator or producer credential with an implementation agent.`); 
     process.env.GRAPHYARD_URL = base; process.env.GRAPHYARD_TOKEN = watchToken;
     process.env.GRAPHYARD_CLI = await activeCliPath(); process.env.GRAPHYARD_HOST_ID = hostId;
     const foreground = !!(process.env.HERDR_ENV === '1' && process.env.GRAPHYARD_HERDR_AGENT_KIND);
-    const settlementToken = foreground ? randomBytes(32).toString('hex') : '';
+    // This random capability remains only in the supervisor process. It is never
+    // placed in the child environment, request history, or quarantine document.
+    const containment = foreground ? containmentCredentials() : null;
+    const exclusiveResources = [...(work.exclusiveResources ?? [])];
     process.exitCode = await supervise(args[separator + 1], args.slice(separator + 2), epoch,
       () => api(`work/${work.id}/heartbeat`, { epoch }, randomUUID()), {
         detached: !foreground,
         quarantine: foreground ? {
-          establish: () => api(`work/${work.id}/quarantine`, { epoch, settlementHash: createHash('sha256').update(settlementToken).digest('hex') }, randomUUID()),
-          settle: () => api(`work/${work.id}/settle`, { epoch, settlementToken }, randomUUID()),
+          establish: () => establishContainment(
+            requestId => api(`work/${work.id}/quarantine`, { epoch, settlementHash: containment!.settlementHash }, requestId),
+            { epoch, settlementHash: containment!.settlementHash, exclusiveResources, requestId: containment!.requestId },
+          ),
+          settle: () => api(`work/${work.id}/settle`, { epoch, settlementToken: containment!.settlementToken }, randomUUID()),
         } : undefined,
       });
     return;

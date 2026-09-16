@@ -90,6 +90,7 @@ export class Engine {
       if (command === 'requirements') {
         admin(actor);
         demand(!work.observation?.merged, 'Merged work requires a follow-up task');
+        demand(!work.containmentQuarantine, `Task is quarantined by unverified containment from epoch ${work.containmentQuarantine?.epoch}; requirements remain immutable until settlement or stopped-worker recovery`);
         demand(!work.lease || Date.parse(work.lease.expiresAt) <= now.getTime(), 'Stop and release the active worker before revising requirements');
         demand(data.expectedPolicyRevision === work.policyRevision, 'Policy revision changed; reload before revising');
         demand(new Set(data.criteria.map((ac: { id: string }) => ac.id)).size === data.criteria.length, 'Criterion IDs must be unique');
