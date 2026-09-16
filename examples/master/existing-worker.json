@@ -1,0 +1,6 @@
+{
+  "name": "existing-session",
+  "principal": "worker-1",
+  "agentName": "existing-herdr-agent-name",
+  "mode": "existing"
+}

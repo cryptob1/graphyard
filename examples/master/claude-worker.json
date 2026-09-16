@@ -1,0 +1,12 @@
+{
+  "name": "claude-primary",
+  "principal": "claude-1",
+  "agentName": "engineering-claude-1",
+  "mode": "launch",
+  "kind": "claude",
+  "credentialFile": "/home/operator/.config/graphyard/workers/claude-1.token",
+  "agentArgs": [],
+  "environment": {
+    "CLAUDE_CONFIG_DIR": "/home/operator/.config/claude-primary"
+  }
+}
