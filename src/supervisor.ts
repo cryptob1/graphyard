@@ -1,9 +1,56 @@
 import { execFileSync, spawn } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 
 interface Renewal { lease: { epoch: number; expiresAt: string } | null; updatedAt: string }
 
+interface Containment {
+  command: string;
+  args: string[];
+  signal: (signal: NodeJS.Signals) => void;
+}
+
+export function systemdContainment(command: string, args: string[], run: typeof execFileSync = execFileSync): Containment {
+  run('systemctl', ['--user', 'show-environment'], { stdio: 'ignore' });
+  const unit = `graphyard-watch-${process.pid}-${randomUUID()}.scope`;
+  return {
+    command: 'systemd-run',
+    args: ['--user', '--scope', '--quiet', `--unit=${unit}`, '--', command, ...args],
+    signal: signal => { try { run('systemctl', ['--user', 'kill', '--kill-whom=all', `--signal=${signal}`, unit], { stdio: 'ignore' }); } catch {} },
+  };
+}
+
+export type ProcessRecord = { ppid: number; identity: string };
+
+function processTable(): Map<number, ProcessRecord> {
+  const records = new Map<number, ProcessRecord>();
+  try {
+    const output = execFileSync('ps', ['-eo', 'pid=,ppid=,lstart='], { encoding: 'utf8' });
+    for (const row of output.trim().split('\n')) {
+      const match = row.trim().match(/^(\d+)\s+(\d+)\s+(.+)$/);
+      if (match) records.set(Number(match[1]), { ppid: Number(match[2]), identity: match[3] });
+    }
+  } catch {}
+  return records;
+}
+
+export function signalTrackedProcesses(rootPid: number, supervisedPids: Map<number, string>, rows: Map<number, ProcessRecord>, signal: NodeJS.Signals, kill: (pid: number, signal: NodeJS.Signals) => void = process.kill) {
+  const root = rows.get(rootPid);
+  if (root && !supervisedPids.has(rootPid)) supervisedPids.set(rootPid, root.identity);
+  const pending = [...supervisedPids.keys()];
+  while (pending.length) {
+    const parent = pending.shift()!;
+    for (const [pid, record] of rows) if (record.ppid === parent && !supervisedPids.has(pid)) {
+      supervisedPids.set(pid, record.identity); pending.push(pid);
+    }
+  }
+  for (const [pid, identity] of [...supervisedPids].reverse()) {
+    if (rows.get(pid)?.identity !== identity) { supervisedPids.delete(pid); continue; }
+    try { kill(pid, signal); } catch {}
+  }
+}
+
 // The deadline uses elapsed local time and server-reported duration, not synchronized clocks.
-export async function supervise(command: string, args: string[], epoch: number, renew: () => Promise<Renewal>, options: { intervalMs?: number; graceMs?: number; detached?: boolean } = {}) {
+export async function supervise(command: string, args: string[], epoch: number, renew: () => Promise<Renewal>, options: { intervalMs?: number; graceMs?: number; detached?: boolean; containment?: Containment } = {}) {
   let deadline = 0;
   async function heartbeat() {
     const started = performance.now();
@@ -17,21 +64,19 @@ export async function supervise(command: string, args: string[], epoch: number, 
   const env = { ...process.env };
   for (const key of ['GRAPHYARD_PRINCIPALS', 'DATABASE_URL', 'GITHUB_PRIVATE_KEY', 'GITHUB_PRIVATE_KEY_FILE', 'GITHUB_WEBHOOK_SECRET']) delete env[key];
   const detached = options.detached ?? process.platform !== 'win32';
-  const child = spawn(command, args, { stdio: 'inherit', detached, env });
+  const containment = options.containment ?? (!detached && process.platform === 'linux' ? systemdContainment(command, args) : undefined);
+  const child = spawn(containment?.command ?? command, containment?.args ?? args, { stdio: 'inherit', detached, env });
   return new Promise<number>(resolve => {
     let stopping = false, pending = false;
-    const supervisedPids = new Set<number>();
+    const supervisedPids = new Map<number, string>();
     let expiry: ReturnType<typeof setTimeout>;
     const signalGroup = (signal: NodeJS.Signals) => {
       if (!child.pid) return;
+      if (containment) { containment.signal(signal); return; }
       if (detached && process.platform !== 'win32') { try { process.kill(-child.pid, signal); } catch {} return; }
-      supervisedPids.add(child.pid);
-      if (process.platform !== 'win32') try {
-        const rows = execFileSync('ps', ['-eo', 'pid=,ppid='], { encoding: 'utf8' }).trim().split('\n').map(row => row.trim().split(/\s+/).map(Number));
-        const pending = [...supervisedPids];
-        while (pending.length) { const parent = pending.shift()!; for (const [pid, ppid] of rows) if (ppid === parent && !supervisedPids.has(pid)) { supervisedPids.add(pid); pending.push(pid); } }
-      } catch {}
-      for (const pid of [...supervisedPids].reverse()) try { process.kill(pid, signal); } catch {}
+      if (process.platform === 'win32') { try { child.kill(signal); } catch {} return; }
+      const rows = processTable();
+      signalTrackedProcesses(child.pid, supervisedPids, rows, signal);
     };
     const interrupted = () => stop(1);
     function stop(code: number) {

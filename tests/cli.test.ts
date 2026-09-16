@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { execFile } from 'node:child_process';
+import { execFile, spawnSync } from 'node:child_process';
 import { promisify } from 'node:util';
 import { chmod, mkdtemp, mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir, hostname } from 'node:os';
@@ -8,11 +8,12 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createServer } from 'node:http';
 import { setTimeout as delay } from 'node:timers/promises';
-import { supervise } from '../src/supervisor.js';
+import { signalTrackedProcesses, supervise } from '../src/supervisor.js';
 
 const exec = promisify(execFile);
 const launcher = fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url));
 const renewal = (duration = 2000) => ({ updatedAt: new Date().toISOString(), lease: { epoch: 1, expiresAt: new Date(Date.now() + duration).toISOString() } });
+const hasSystemdUserScope = process.platform === 'linux' && spawnSync('systemctl', ['--user', 'show-environment'], { stdio: 'ignore' }).status === 0;
 
 test('master-only commands ignore an unrelated unavailable worker token file', async () => {
   const cwd = await mkdtemp(join(tmpdir(), 'graphyard-master-lazy-token-'));
@@ -85,16 +86,24 @@ test('supervisor kills surviving descendants even after their group leader exits
   } finally { await rm(cwd, { recursive: true, force: true }); }
 });
 
-test('foreground Herdr supervision kills a retained descendant after the foreground leader exits on SIGTERM', async () => {
+test('foreground Herdr containment kills a descendant forked after SIGTERM and reparented', { skip: !hasSystemdUserScope }, async () => {
   const cwd = await mkdtemp(join(tmpdir(), 'graphyard-foreground-descendants-')), output = join(cwd, 'ticks');
   const descendant = `const fs=require('node:fs'); process.on('SIGTERM',()=>{}); fs.appendFileSync(${JSON.stringify(output)},'.'); setInterval(()=>fs.appendFileSync(${JSON.stringify(output)},'.'),10)`;
-  const leader = `require('node:child_process').spawn(process.execPath,['-e',${JSON.stringify(descendant)}],{stdio:'ignore'}); setInterval(()=>{},20)`;
+  const leader = `process.on('SIGTERM',()=>{require('node:child_process').spawn(process.execPath,['-e',${JSON.stringify(descendant)}],{stdio:'ignore'});process.exit(0)});setInterval(()=>{},20)`;
   try {
     let renewals = 0;
     assert.equal(await supervise(process.execPath, ['-e', leader], 1, async () => ++renewals === 1 ? renewal(150) : new Promise(() => {}), { detached: false, intervalMs: 25, graceMs: 75 }), 1);
     await delay(50); const stopped = await readFile(output, 'utf8'); await delay(75);
     assert.equal(await readFile(output, 'utf8'), stopped);
   } finally { await rm(cwd, { recursive: true, force: true }); }
+});
+
+test('foreground fallback does not signal a reused descendant PID', () => {
+  const tracked = new Map<number, string>(); const signalled: number[] = [];
+  signalTrackedProcesses(100, tracked, new Map([[100, { ppid: 1, identity: 'root-start' }], [101, { ppid: 100, identity: 'child-start' }]]), 'SIGTERM', pid => { signalled.push(pid); });
+  assert.deepEqual(signalled, [101, 100]); signalled.length = 0;
+  signalTrackedProcesses(100, tracked, new Map([[101, { ppid: 55, identity: 'unrelated-start' }]]), 'SIGKILL', pid => { signalled.push(pid); });
+  assert.deepEqual(signalled, []); assert.equal(tracked.has(101), false);
 });
 
  test('handoff pairs ownership with its work observation rather than a later status clock', async () => {

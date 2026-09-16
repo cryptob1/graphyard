@@ -61,7 +61,7 @@ cd .graphyard/worktrees/GY-1-1
 node /path/to/graphyard/bin/graphyard.mjs watch GY-1 1 -- YOUR_AGENT_COMMAND
 ```
 
-Substitute the actual epoch. `watch` renews the lease every 25 seconds and terminates the process group if renewal fails. Do not keep another unsupervised worker running on the same assignment. On Windows, process-group supervision is not supported as strongly as on Linux/macOS.
+Substitute the actual epoch. `watch` renews the lease every 25 seconds and terminates the process group if renewal fails. Foreground Herdr workers on Linux run in a unique systemd user scope, which keeps descendants contained across forks and reparenting until the grace-period kill completes; a working systemd user manager is therefore required for that launch mode. Portable foreground cleanup validates process start identities before re-signalling retained PIDs. Do not keep another unsupervised worker running on the same assignment. On Windows, process-group supervision is not supported as strongly as on Linux/macOS.
 
 If Herdr creates the worktree, [register it instead](protocol.md#workspaces). The registry cannot remotely inspect the filesystem; it records the worker's claim about location, and independently verifies the PR branch later.
 
