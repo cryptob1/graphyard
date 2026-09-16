@@ -76,6 +76,7 @@ A revoked identity is retained for audit and cannot be silently reactivated. Cre
 
 - **Credential theft and prompt injection:** the stolen agent can exercise only configured capabilities and targets. Revoke it immediately; inspect immutable events and affected work.
 - **Confused deputy and scope escalation:** every route checks authenticated role, capability, repository, and work scope. The agent cannot edit its own scope or credentials.
+- **Repository split binding:** startup fails closed when an explicitly repository-bound engine is paired with a GitHub adapter for another repository; status, webhooks, validation, and mutations must share one binding.
 - **Stale/replayed requests:** expected revisions reject stale policy edits; idempotency receipts return the identical result and reject changed reuse.
 - **Lease races:** the role has no lease commands. Existing principal identity and epoch checks continue to fence workers.
 - **Evidence forgery and session collapse:** operator automation has no evidence or validation authority. Keep reviewer/proof-producer, worker, master, and operator sessions distinct.

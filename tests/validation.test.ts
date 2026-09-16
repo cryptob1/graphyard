@@ -26,7 +26,7 @@ before(async () => {
   const port = Number(process.env.GRAPHYARD_VALIDATION_TEST_PORT ?? Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 1);
   pg = new EmbeddedPostgres({ databaseDir: await mkdtemp(join(tmpdir(), 'graphyard-validation-')), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await pg.initialise(); await pg.start(); await pg.createDatabase('validation_test');
-  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/validation_test`); await store.init(); engine = new Engine(store); validation = new Validation(engine, principals, 'test/repository');
+  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/validation_test`); await store.init(); engine = new Engine(store, [15368], 120, 'test/repository'); validation = new Validation(engine, principals, 'test/repository');
 });
 after(async () => { if (store) await store.close(); if (pg) await pg.stop(); });
 const id = () => randomUUID();

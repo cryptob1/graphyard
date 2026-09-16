@@ -26,6 +26,8 @@ export function server(engine: Engine, credentials: Credential[], github: GitHub
   // (and is automatically set to the CI checkout), so it must not override an
   // explicit engine binding or scope validation becomes environment-dependent.
   const repository = engine.repository || github?.config.repository || process.env.GITHUB_REPOSITORY || '';
+  demand(!engine.repository || !github || engine.repository.toLowerCase() === github.config.repository.toLowerCase(),
+    'Engine and GitHub repositories must match');
   // Keep mutation authorization on the same canonical repository binding used
   // by authentication and operator-agent administration. Some embedders pass
   // the repository only through their GitHub adapter.
