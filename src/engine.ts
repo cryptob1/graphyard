@@ -71,6 +71,7 @@ export class Engine {
         all.push(work!);
       }
       demand(work, 'Work item not found', 404);
+      const deliveredContainmentCleanup = work.stage === 'done' && (command === 'settle' || command === 'recover');
       preserveAssignment(work);
       if (!['recover', 'settle'].includes(command) && work.mergeExecution && Date.parse(work.mergeExecution.expiresAt) <= now.getTime()) work.mergeExecution = null;
       demand(!work.mergeExecution || command === 'heartbeat' || command === 'recover' || command === 'settle', 'A merge execution is active; retry after it completes or expires');
@@ -196,7 +197,9 @@ export class Engine {
         const trusted = actor.role === 'producer' && !!actor.proofs?.includes(data.proof) || actor.role === 'admin' && data.proof.startsWith('manual:');
         work.evidence.push({ ...data, id: randomUUID(), producer: actor.id, trusted, at: now.toISOString() });
       }
-      this.evaluate(work, all, now);
+      // Delivery is an immutable snapshot. A late containment cleanup may append
+      // its audit/revision metadata, but stale inputs must not re-evaluate it.
+      if (!deliveredContainmentCleanup) this.evaluate(work, all, now);
       await save(db, work, actor.id, command, now, command === 'settle' ? { epoch: data.epoch } : data);
       if (work.submission && !['heartbeat', 'release', 'claim', 'workspace'].includes(command)) await wakeJob(db, work.id);
       await db.query('INSERT INTO receipts(actor,key,fingerprint,result) VALUES($1,$2,$3,$4)', [actor.id, key, fingerprint, JSON.stringify(work)]);

@@ -406,6 +406,23 @@ test('capability settlement preserves active and expired merge executions while 
     assert.equal(settled.containmentQuarantine, null);
   }
 });
+test('non-delivered capability settlement still re-evaluates stale gates', async () => {
+  let w = await claimed();
+  const settlementToken = 'c'.repeat(64), settlementHash = createHash('sha256').update(settlementToken).digest('hex');
+  w = await engine.execute(worker, 'quarantine', w.id, { epoch: 1, settlementHash }, randomUUID());
+  w = await engine.execute(worker, 'workspace', w.id, { epoch: 1, host: `stale-settlement-${w.id}`, path: `/tmp/${w.id}-stale-settlement`, branch: `graphyard/${w.id}-stale-settlement` }, randomUUID());
+  w = await engine.execute(worker, 'submit', w.id, { epoch: 1, pr: Number(w.key.slice(3)) }, randomUUID());
+  w = await engine.observe(w.id, w.revision, observation(w));
+  w = await engine.execute(producer, 'evidence', w.id, proof(), randomUUID());
+  assert.equal(w.stage, 'merge'); assert.ok(w.mergeAuthorization);
+  w = { ...w, observation: { ...w.observation!, at: '2000-01-01T00:00:00Z' },
+    evidence: w.evidence.map(item => ({ ...item, expiresAt: '2000-01-01T00:00:00Z' })) };
+  await store.pool.query('UPDATE work_items SET document=$2 WHERE id=$1', [w.id, JSON.stringify(w)]);
+  const settled = await engine.execute(worker, 'settle', w.id, { epoch: 1, settlementToken }, randomUUID());
+  assert.equal(settled.stage, 'acceptance'); assert.equal(settled.mergeAuthorization, null);
+  assert.equal(settled.gates.find(gate => gate.name === 'acceptance')?.passed, false);
+  assert.equal(settled.gates.find(gate => gate.name === 'merge')?.passed, false);
+});
 test('capability settlement survives the merge-to-done race without weakening delivered immutability', async () => {
   const resource = `delivery-race:${randomUUID()}`;
   let w = await engine.execute(operator, 'create', null, { ...workInput, exclusiveResources: [resource] }, randomUUID());
@@ -425,12 +442,20 @@ test('capability settlement survives the merge-to-done race without weakening de
   const merged = { ...observation(w), merged: true, mergedAt, mergeSha: 'f'.repeat(40) } as Observation;
   let current = await engine.observe(w.id, verified.revision, merged);
   assert.equal(current.stage, 'done'); assert.ok(current.containmentQuarantine, 'delivery can win the race before supervisor settlement');
-  await store.pool.query("UPDATE work_items SET document=jsonb_set(document,'{lease,expiresAt}',to_jsonb('2000-01-01T00:00:00Z'::text)) WHERE id=$1", [current.id]);
+  current = { ...current, observation: { ...current.observation!, at: '2000-01-01T00:00:00Z' },
+    evidence: current.evidence.map(item => ({ ...item, expiresAt: '2000-01-01T00:00:00Z' })),
+    lease: { ...current.lease!, expiresAt: '2000-01-01T00:00:00Z' } };
+  await store.pool.query('UPDATE work_items SET document=$2 WHERE id=$1', [current.id, JSON.stringify(current)]);
+  const preserved = { stage: current.stage, gates: current.gates, candidate: current.candidate, evidence: current.evidence,
+    observation: current.observation, mergeAuthorization: current.mergeAuthorization, delivery: current.delivery };
+  assert.ok(current.mergeAuthorization, 'delivered fixture must retain its merge authorization');
   await assert.rejects(engine.execute(other, 'claim', contender.id, {}, randomUUID()), /Exclusive resources held/);
   await assert.rejects(engine.execute(worker, 'settle', current.id, { epoch: 1, settlementToken: 'e'.repeat(64) }, randomUUID()), /capability is invalid/);
   await assert.rejects(engine.execute(other, 'settle', current.id, { epoch: 1, settlementToken }, randomUUID()), /another worker/);
   current = await engine.execute(worker, 'settle', current.id, { epoch: 1, settlementToken }, randomUUID());
   assert.equal(current.stage, 'done'); assert.equal(current.containmentQuarantine, null);
+  assert.deepEqual({ stage: current.stage, gates: current.gates, candidate: current.candidate, evidence: current.evidence,
+    observation: current.observation, mergeAuthorization: current.mergeAuthorization, delivery: current.delivery }, preserved);
   contender = await engine.execute(other, 'claim', contender.id, {}, randomUUID()); assert.equal(contender.epoch, 1);
   await assert.rejects(engine.execute(worker, 'release', current.id, { epoch: 1 }, randomUUID()), /immutable/);
   assert.deepEqual((await store.events(current.id)).find(event => event.kind === 'settle')?.payload.details, { epoch: 1 });
@@ -450,10 +475,14 @@ test('operator stopped-worker recovery clears only a delivered containment quara
   const verified = await engine.verifyMerge(coordinator, w.id, { executionId: granted.execution.id }, { ...observation(w), prState: 'open', draft: false }, randomUUID());
   await delay(5); const mergedAt = ((await store.pool.query('SELECT clock_timestamp() AS now')).rows[0].now as Date).toISOString(); await delay(5);
   w = await engine.observe(w.id, verified.revision, { ...observation(w), merged: true, mergedAt, mergeSha: '9'.repeat(40) });
-  w = { ...w, mergeExecution: verified.mergeExecution, lease: { ...w.lease!, expiresAt: '2000-01-01T00:00:00Z' } };
+  w = { ...w, mergeExecution: verified.mergeExecution, observation: { ...w.observation!, at: '2000-01-01T00:00:00Z' },
+    evidence: w.evidence.map(item => ({ ...item, expiresAt: '2000-01-01T00:00:00Z' })),
+    lease: { ...w.lease!, expiresAt: '2000-01-01T00:00:00Z' } };
   await store.pool.query('UPDATE work_items SET document=$2 WHERE id=$1', [w.id, JSON.stringify(w)]);
   w = (await store.list()).find(item => item.id === w.id)!;
-  const preserved = { stage: w.stage, candidate: w.candidate, mergeExecution: w.mergeExecution, evidence: w.evidence, criteria: w.criteria, delivery: w.delivery, observation: w.observation, submission: w.submission, reworkRequested: w.reworkRequested };
+  const preserved = { stage: w.stage, gates: w.gates, candidate: w.candidate, mergeExecution: w.mergeExecution, mergeAuthorization: w.mergeAuthorization,
+    evidence: w.evidence, criteria: w.criteria, delivery: w.delivery, observation: w.observation, submission: w.submission, reworkRequested: w.reworkRequested };
+  assert.ok(w.mergeAuthorization, 'delivered fixture must retain its merge authorization');
   let contender = await engine.execute(operator, 'create', null, { ...workInput, exclusiveResources: [resource] }, randomUUID());
   contender = await engine.execute(operator, 'ready', contender.id, {}, randomUUID());
   await assert.rejects(engine.execute(worker, 'recover', w.id, { reason: 'Worker stopped', previousWorkerStopped: true }, randomUUID()), /permission/);
@@ -466,7 +495,8 @@ test('operator stopped-worker recovery clears only a delivered containment quara
   ]);
   assert.equal(recoveries.filter(result => result.status === 'fulfilled').length, 2);
   const recovered = recoveries.find(result => result.status === 'fulfilled')!.value;
-  assert.equal(recovered.containmentQuarantine, null); assert.deepEqual({ stage: recovered.stage, candidate: recovered.candidate, mergeExecution: recovered.mergeExecution, evidence: recovered.evidence, criteria: recovered.criteria, delivery: recovered.delivery, observation: recovered.observation, submission: recovered.submission, reworkRequested: recovered.reworkRequested }, preserved);
+  assert.equal(recovered.containmentQuarantine, null); assert.deepEqual({ stage: recovered.stage, gates: recovered.gates, candidate: recovered.candidate, mergeExecution: recovered.mergeExecution, mergeAuthorization: recovered.mergeAuthorization,
+    evidence: recovered.evidence, criteria: recovered.criteria, delivery: recovered.delivery, observation: recovered.observation, submission: recovered.submission, reworkRequested: recovered.reworkRequested }, preserved);
   await assert.rejects(engine.execute(operator, 'recover', w.id, { reason: 'Already clear', previousWorkerStopped: true }, randomUUID()), /no containment quarantine/);
   contender = await engine.execute(other, 'claim', contender.id, {}, randomUUID()); assert.equal(contender.epoch, 1);
   const recoveryEvents = (await store.events(w.id)).filter(item => item.kind === 'recover'); assert.equal(recoveryEvents.length, 1);
