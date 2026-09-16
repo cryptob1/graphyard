@@ -212,3 +212,45 @@ test('dogfood clean-result variants do not require redundant reviews and unknown
   const f = commentFixture(); f.result.body = f.result.body.replace(':+1:', 'A newly invented unsupported statement.');
   const result = await f.run(); assert.equal(result.approved, false); assert.match(result.reason, /unsupported clean-result format/);
 });
+
+// The exact authenticated connector output observed on PR #17 comment 5690494989.
+const observedResult = 'Codex Review: Didn’t find any major issues. Chef’s kiss.\n\n**Reviewed commit:** `94f65be034`\n';
+test('the observed authenticated clean summary is recognized with either apostrophe spelling', async () => {
+  for (const body of [observedResult, observedResult.replace('Didn’t', "Didn't"), observedResult.replace('Chef’s', "Chef's"), observedResult.replace('kiss.', 'kiss!')]) {
+    const f = commentFixture(); f.result.body = body;
+    const result = await f.run();
+    assert.equal(result.approved, true, body); assert.equal(result.resultId, 15); assert.equal(result.sha, head);
+  }
+});
+test('the newly supported clean summary preserves every existing refusal', async () => {
+  const observed = () => { const f = commentFixture(); f.result.body = observedResult; return f; };
+  // Unknown, ambiguous and finding-bearing verdict text still reaches the explicit refusal.
+  for (const suffix of ['Chef’s kisses.', 'Chef’s kiss. However, a critical issue remains.', 'P1: fix authentication', 'Unknown protocol payload']) {
+    const f = commentFixture(); f.result.body = observedResult.replace('Chef’s kiss.', suffix);
+    const result = await f.run();
+    assert.equal(result.approved, false, suffix); assert.match(result.reason, /unsupported clean-result format/);
+  }
+  const appended = observed(); appended.result.body = observedResult + '\nP1: a serious issue';
+  const appendedResult = await appended.run();
+  assert.equal(appendedResult.approved, false); assert.match(appendedResult.reason, /unsupported clean-result format/);
+  for (const mutate of [
+    (f: ReturnType<typeof commentFixture>) => { f.result.user.id = 99; },
+    (f: ReturnType<typeof commentFixture>) => { f.result.performed_via_github_app.id = 99; },
+    (f: ReturnType<typeof commentFixture>) => { f.request.sha = 'c'.repeat(40); },
+    (f: ReturnType<typeof commentFixture>) => { f.request.policyRevision = 2; },
+    (f: ReturnType<typeof commentFixture>) => { f.result.created_at = f.result.updated_at = f.request.createdAt; },
+    (f: ReturnType<typeof commentFixture>) => { f.result.updated_at = '2026-01-01T00:03:00Z'; },
+    (f: ReturnType<typeof commentFixture>) => { f.trigger.body += 'edited'; },
+    (f: ReturnType<typeof commentFixture>) => { f.resolve('c'.repeat(40)); },
+    (f: ReturnType<typeof commentFixture>) => { f.reviews.push({ user: f.result.user, submitted_at: f.result.created_at }); },
+    (f: ReturnType<typeof commentFixture>) => { f.reactions.push({ user: f.result.user, content: 'eyes' }); },
+    (f: ReturnType<typeof commentFixture>) => { f.comments.push({ id: 16, user: f.result.user, performed_via_github_app: { id: CODEX_APP_ID }, body: 'Starting another review', created_at: '2026-01-01T00:03:00Z', updated_at: '2026-01-01T00:03:00Z' }); },
+    (f: ReturnType<typeof commentFixture>) => { const original = f.source.pages; let reads = 0; f.source.pages = async path => { const rows = await original(path); if (path.endsWith('/comments') && ++reads > 1) rows.find(c => c.id === 15).body += ' edited'; return rows; }; },
+  ]) { const f = observed(); mutate(f); assert.equal((await f.run()).approved, false); }
+  const completed = `<!-- codex-pull-request-review-summary -->\n| 📝 **Code Review** | ✅ **Completed** <relative-time datetime="2026-01-01T00:02:01.250Z">now</relative-time> | \`aaaaaaaaaa\` | Manual request |`;
+  const ambiguous = observed(); ambiguous.summary.body = completed; ambiguous.summary.updated_at = '2026-01-01T00:02:02Z';
+  assert.equal((await ambiguous.run()).approved, true);
+  ambiguous.comments.push({ ...ambiguous.summary, id: 99 });
+  const ambiguousResult = await ambiguous.run();
+  assert.equal(ambiguousResult.approved, false); assert.match(ambiguousResult.reason, /ambiguous/);
+});

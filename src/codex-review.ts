@@ -18,12 +18,18 @@ const cleanCourtesies = new Set([
   'breezy', 'peachy', 'smooth sailing', 'nice job', 'good work', 'lovely', 'beautiful', 'perfect', 'sweet', 'neat', 'great',
   'congratulations', 'superb', 'brilliant', 'terrific', 'marvelous', 'marvellous', 'fabulous', 'lovely stuff', 'good stuff',
   'excellent work', 'all set', 'ship it', 'lgtm', 'onward', 'happy coding', 'hooray', 'hurrah', 'hurray', 'huzzah', 'woohoo', 'yay',
+  'chef’s kiss', "chef's kiss",
 ]);
+// The authenticated connector writes this verdict with either apostrophe spelling; the
+// single source keeps the unsupported-format refusal bound to the accepted verdict.
+const cleanVerdict = /^Codex Review: Didn['’]t find any major issues\./;
 function cleanCommit(body: unknown): string | null {
   if (typeof body !== 'string') return null;
-  const match = /^Codex Review: Didn't find any major issues\.([^\r\n]*)\n\n\*\*Reviewed commit:\*\* `([a-f0-9]{7,40})`(?=\s|$)/.exec(body);
+  const verdict = cleanVerdict.exec(body);
+  if (!verdict) return null;
+  const match = /^([^\r\n]*)\n\n\*\*Reviewed commit:\*\* `([a-f0-9]{7,40})`(?=\s|$)/.exec(body.slice(verdict[0].length));
   if (!match || !cleanCourtesies.has(match[1].trim().replace(/[.!]+$/, '').toLowerCase())) return null;
-  const tail = body.slice(match[0].length).trim().replace(/\s+/g, ' ');
+  const tail = body.slice(verdict[0].length + match[0].length).trim().replace(/\s+/g, ' ');
   return !tail || cleanFooters.has(tail) ? match[2] : null;
 }
 interface SummaryRow { completedAt: number; commit: string; trigger: 'Manual request' | 'New commits' | 'PR opened' }
@@ -86,7 +92,7 @@ export async function observeCodex(source: Source, pr: number, head: string, rev
       || running(prReactions) || running(requestReactions)) return refuse('Codex review changed or is running; retry');
     return { provider: 'codex', sha: head, approved: true, reason: 'Authenticated Codex result reported no major issues', resultId: result.id, requestId: trigger.id, completedAt: new Date(completedAt).toISOString() };
   }
-  if (comments.some(c => isCodex(c) && c.performed_via_github_app?.id === CODEX_APP_ID && typeof c.body === 'string' && c.body.startsWith("Codex Review: Didn't find any major issues.") && Date.parse(c.created_at) > Date.parse(request.createdAt) && !cleanCommit(c.body))) return refuse('Codex returned an unsupported clean-result format; inspect the provider result and update the adapter contract or request a fresh review');
+  if (comments.some(c => isCodex(c) && c.performed_via_github_app?.id === CODEX_APP_ID && typeof c.body === 'string' && cleanVerdict.test(c.body) && Date.parse(c.created_at) > Date.parse(request.createdAt) && !cleanCommit(c.body))) return refuse('Codex returned an unsupported clean-result format; inspect the provider result and update the adapter contract or request a fresh review');
   const summaries = comments.filter(c => isCodex(c) && c.performed_via_github_app?.id === CODEX_APP_ID && c.body?.startsWith('<!-- codex-pull-request-review-summary -->'));
   if (summaries.length !== 1) return refuse('Exactly one authenticated Codex review summary is required');
   const summary = summaries[0];
