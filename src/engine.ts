@@ -70,7 +70,7 @@ export class Engine {
       preserveAssignment(work);
       if (work.mergeExecution && Date.parse(work.mergeExecution.expiresAt) <= now.getTime()) work.mergeExecution = null;
       demand(!work.mergeExecution || command === 'heartbeat', 'A merge execution is active; retry after it completes or expires');
-      if (command !== 'create') demand(work.stage !== 'done', 'Delivered work is immutable; create a follow-up task');
+      if (command !== 'create' && command !== 'settle') demand(work.stage !== 'done', 'Delivered work is immutable; create a follow-up task');
       if (command === 'rereview') {
         if (actor.role !== 'admin') { demand(actor.role === 'worker', 'Worker or operator required', 403); activeLease(work, actor, data.epoch, now); }
         demand(work.policy.review && work.policy.reviewProvider === 'codex' && work.submission && !work.observation?.merged, 'Open submitted work with Codex review policy required');

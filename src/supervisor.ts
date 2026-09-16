@@ -20,8 +20,20 @@ export function systemdContainment(command: string, args: string[], run: typeof 
     args: ['--user', '--scope', '--quiet', `--unit=${unit}`, '--', command, ...args],
     signal: signal => { run('systemctl', ['--user', 'kill', '--kill-whom=all', `--signal=${signal}`, unit], { stdio: 'ignore' }); },
     empty: () => {
-      const state = String(run('systemctl', ['--user', 'show', '--property=ActiveState', '--value', unit], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] })).trim();
-      return state === 'inactive' || state === 'failed';
+      const query = ['--user', 'show', '--property=LoadState', '--property=ActiveState', unit];
+      const unloaded = (output: unknown) => String(output ?? '').split(/\r?\n/).some(line => line.trim() === 'LoadState=not-found');
+      try {
+        const properties = String(run('systemctl', query, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }));
+        if (unloaded(properties)) return true;
+        const state = properties.split(/\r?\n/).find(line => line.startsWith('ActiveState='))?.slice('ActiveState='.length);
+        return state === 'inactive' || state === 'failed';
+      } catch (error) {
+        // A transient scope may be unloaded between process exit and verification.
+        // Only systemd's structured LoadState can turn a failed query into success;
+        // transport, manager and all other query failures remain unverifiable.
+        if (unloaded((error as { stdout?: unknown }).stdout)) return true;
+        throw error;
+      }
     },
   };
 }

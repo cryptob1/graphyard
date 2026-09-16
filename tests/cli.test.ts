@@ -156,6 +156,31 @@ test('systemd containment propagates unavailable or failing scope kills', () => 
   assert.ok(calls.some(call => call.includes('kill')));
 });
 
+test('systemd containment recognizes only a specifically unloaded scope after a failed query', () => {
+  let mode: 'unloaded' | 'manager' | 'active' = 'unloaded';
+  const containment = systemdContainment('worker', [], ((command: string, args: string[]) => {
+    if (args.includes('show-environment')) return '';
+    if (mode === 'unloaded') throw Object.assign(new Error('scope disappeared'), { status: 1, stdout: 'LoadState=not-found\nActiveState=inactive\n' });
+    if (mode === 'manager') throw Object.assign(new Error('Failed to connect to bus'), { status: 1, stdout: '' });
+    return 'LoadState=loaded\nActiveState=active\n';
+  }) as any);
+  assert.equal(containment.empty(), true);
+  mode = 'manager'; assert.throws(() => containment.empty(), /connect to bus/);
+  mode = 'active'; assert.equal(containment.empty(), false);
+});
+
+test('systemd containment polls active and deactivating states before clean unloaded-scope settlement', async () => {
+  const states = ['active', 'deactivating']; let settled = 0;
+  const containment = systemdContainment(process.execPath, ['-e', 'process.exit(0)'], ((command: string, args: string[]) => {
+    if (args.includes('show-environment') || args.includes('kill')) return '';
+    const state = states.shift();
+    if (state) return `LoadState=loaded\nActiveState=${state}\n`;
+    throw Object.assign(new Error('unit not found'), { status: 1, stdout: 'LoadState=not-found\nActiveState=inactive\n' });
+  }) as any);
+  assert.equal(await supervise('ignored', [], 1, async () => renewal(), { containment, detached: false, graceMs: 10, shutdownPollMs: 1, shutdownTimeoutMs: 100, quarantine: { establish: async () => {}, settle: async () => { settled++; } } }), 0);
+  assert.equal(states.length, 0); assert.equal(settled, 1);
+});
+
 test('supervisor fails closed when a scope kill fails and shutdown cannot be verified', async () => {
   const containment = {
     command: process.execPath,
