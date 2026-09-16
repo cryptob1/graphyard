@@ -1,6 +1,6 @@
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp } from 'node:fs/promises';
+import { mkdtemp, rm, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
@@ -12,7 +12,8 @@ import { ReconciliationRetry, type Principal, type Work, type Observation } from
 import { defineScenario, scenarios } from '../src/scenarios.js';
 import { setTimeout as delay } from 'node:timers/promises';
 import { processJob, type GitHub } from '../src/github.js';
-import { isConfirmedCoordinationRefusal } from '../src/quarantine.js';
+import { acknowledgeContainment, isConfirmedCoordinationRefusal } from '../src/quarantine.js';
+import { supervise } from '../src/supervisor.js';
 // @ts-expect-error The trusted runner intentionally uses dependency-free JavaScript outside the candidate source.
 import { exercise } from '../scripts/acceptance-contract.mjs';
 
@@ -103,6 +104,40 @@ test('containment quarantine survives lease expiry and blocks overlap until veri
   assert.deepEqual((await store.events(w.id)).find(event => event.kind === 'settle').payload.details, { epoch: 1 }, 'settlement capability is not retained in history');
   w = await engine.execute(other, 'claim', w.id, {}, randomUUID()); assert.equal(w.epoch, 2);
 });
+test('transactional launch acknowledgement races rework without a stale start or replacement overlap', async () => {
+  let w = await claimed();
+  const settlementToken = 'd'.repeat(64), settlementHash = createHash('sha256').update(settlementToken).digest('hex');
+  w = await engine.execute(worker, 'quarantine', w.id, { epoch: 1, settlementHash }, randomUUID());
+  const dir = await mkdtemp(join(tmpdir(), 'graphyard-launch-race-')), marker = join(dir, 'started');
+  let releaseResponse!: () => void, acknowledgementCommitted!: () => void, monotonic = 0;
+  const responseGate = new Promise<void>(resolve => { releaseResponse = resolve; });
+  const committed = new Promise<void>(resolve => { acknowledgementCommitted = resolve; });
+  const containment = { command: process.execPath, args: ['-e', `require('node:fs').writeFileSync(${JSON.stringify(marker)},'started')`], signal: () => {}, empty: () => true };
+  try {
+    const running = supervise('ignored', [], 1,
+      () => engine.execute(worker, 'heartbeat', w.id, { epoch: 1 }, randomUUID()),
+      { containment, detached: false, graceMs: 1, quarantine: {
+        establish: async () => {}, revalidate: async () => {},
+        acknowledge: () => acknowledgeContainment(async () => {
+          const result = await engine.execute(worker, 'launch', w.id, { epoch: 1, settlementHash }, randomUUID());
+          acknowledgementCommitted(); await responseGate;
+          return result; // committed response held beyond both server deadlines
+        }, { epoch: 1, settlementHash, exclusiveResources: [], requestId: randomUUID() }, { attempts: 1, monotonicNow: () => monotonic }),
+        settle: () => engine.execute(worker, 'settle', w.id, { epoch: 1, settlementToken }, randomUUID()),
+      } });
+    await committed;
+    await assert.rejects(stat(marker), { code: 'ENOENT' }, 'ack response in flight must not have spawned the worker');
+    await store.pool.query("UPDATE work_items SET document=jsonb_set(document,'{lease,expiresAt}',to_jsonb('2000-01-01T00:00:00Z'::text)) WHERE id=$1", [w.id]);
+    await assert.rejects(engine.execute(operator, 'rework', w.id, { reason: 'lease expired but ACK response remains in flight', previousWorkerStopped: true }, randomUUID()), /both lease and launch authority expiry/);
+    await assert.rejects(engine.execute(other, 'claim', w.id, {}, randomUUID()), /quarantined/);
+    await store.pool.query("UPDATE work_items SET document=jsonb_set(document,'{containmentQuarantine,launchExpiresAt}',to_jsonb('2000-01-01T00:00:00Z'::text)) WHERE id=$1", [w.id]);
+    w = await engine.execute(operator, 'rework', w.id, { reason: 'bounded fence expired and supervisor is stopped', previousWorkerStopped: true }, randomUUID());
+    assert.equal((await engine.execute(other, 'claim', w.id, {}, randomUUID())).epoch, 2);
+    monotonic = 121_000; releaseResponse();
+    await assert.rejects(running, /launch authority expired/);
+    await assert.rejects(stat(marker), { code: 'ENOENT' }, 'stale ACK response must never spawn after recovery');
+  } finally { releaseResponse(); await rm(dir, { recursive: true, force: true }); }
+});
 test('expired quarantines reserve shared resources until settlement or operator recovery', async () => {
   const resource = `staging:${randomUUID()}`, unrelatedResource = `staging:${randomUUID()}`;
   const makeReady = async (exclusiveResources: string[]) => {
@@ -134,7 +169,7 @@ test('expired quarantines reserve shared resources until settlement or operator 
   recoveryOwner = await engine.execute(worker, 'quarantine', recoveryOwner.id, { epoch: 1, settlementHash }, randomUUID());
   await store.pool.query("UPDATE work_items SET document=jsonb_set(document,'{lease,expiresAt}',to_jsonb('2000-01-01T00:00:00Z'::text)) WHERE id=$1", [recoveryOwner.id]);
   await assert.rejects(engine.execute(other, 'claim', recoveryPeer.id, {}, randomUUID()), /Exclusive resources held/);
-  await engine.execute(operator, 'rework', recoveryOwner.id, { reason: 'Operator confirmed the previous worker stopped', previousWorkerStopped: true }, randomUUID());
+  await engine.execute(operator, 'rework', recoveryOwner.id, { reason: 'Expired supervisor was stopped', previousWorkerStopped: true }, randomUUID());
   assert.equal((await engine.execute(other, 'claim', recoveryPeer.id, {}, randomUUID())).epoch, 1);
 });
 test('dependencies and explicit blockers refuse claims', async () => {

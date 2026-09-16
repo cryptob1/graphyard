@@ -67,6 +67,8 @@ Run `watch` from the registered workspace on its registered host. Every automati
 
 Submitted work continues through gates without an active implementation lease. To reassign submitted work, an operator must stop the previous process and request `rework`. This clears ownership and closes the build gate while preserving PR attribution. A new claim gets a higher epoch and must register the same PR branch in a fresh host/path. Resubmission closes the rework request. Rework of an observed merged item is refused; create a follow-up instead.
 
+Foreground quarantine now also records a durable startup acknowledgement before process creation. `watch` transactionally acknowledges the exact live epoch, settlement hash, and resource fence with a stable request key, and only a confirmed response permits spawn. That transaction records a separate 120-second launch-authority deadline, longer than the acknowledgement client's three bounded 30-second HTTP attempts and retry delays. Rework cannot clear the quarantine until both its lease and launch authority have expired, so an acknowledgement response still in flight cannot authorize a stale later spawn. The supervisor measures the returned authority against monotonic elapsed request time and refuses spawn if it is no longer valid. A crashed supervisor therefore has a bounded recovery path: after both deadlines expire, an operator who has stopped the supervisor may use the existing stopped-worker rework attestation to clear the fence.
+
 ## Workspaces
 
 Herdr may create worktrees itself. Register the exact branch and a stable machine ID before submitting the PR. Branches must begin `graphyard/`. A branch is globally unique in this control plane; paths are unique per host, including historical reservations. Use the assignment epoch in path and branch names.
@@ -78,6 +80,8 @@ node /path/to/graphyard/bin/graphyard.mjs register GY-1 workspace.json
 ```
 
 The server never assumes it can run Git on a remote host. Host/path registration is worker-reported; PR branch matching is provider-observed. Workspace cleanup is manual and must preserve uncommitted work.
+
+The quarantine and live lease form the final launch fence. Its idempotent control-plane acknowledgement precedes process creation, and rework is transactionally refused for the entire live-lease response window. A stale, reassigned, expired, mismatched, or ambiguous acknowledgement never spawns the child; the supervisor retains its signal handlers through acknowledgement and any cancellation or settlement.
 
 ## Evidence
 

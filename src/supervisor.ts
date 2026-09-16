@@ -84,7 +84,7 @@ export function signalTrackedProcesses(rootPid: number, supervisedPids: Map<numb
 }
 
 // The deadline uses elapsed local time and server-reported duration, not synchronized clocks.
-export async function supervise(command: string, args: string[], epoch: number, renew: () => Promise<Renewal>, options: { intervalMs?: number; graceMs?: number; shutdownPollMs?: number; shutdownTimeoutMs?: number; detached?: boolean; containment?: Containment; platform?: NodeJS.Platform; quarantine?: { establish: () => Promise<unknown>; revalidate?: () => Promise<unknown>; settle: () => Promise<unknown> } } = {}) {
+export async function supervise(command: string, args: string[], epoch: number, renew: () => Promise<Renewal>, options: { intervalMs?: number; graceMs?: number; shutdownPollMs?: number; shutdownTimeoutMs?: number; detached?: boolean; containment?: Containment; platform?: NodeJS.Platform; quarantine?: { establish: () => Promise<unknown>; revalidate?: () => Promise<unknown>; acknowledge?: () => Promise<unknown>; settle: () => Promise<unknown> } } = {}) {
   let deadline = 0;
   async function heartbeat() {
     const started = performance.now();
@@ -178,7 +178,18 @@ export async function supervise(command: string, args: string[], epoch: number, 
           finish(null, 1);
           return;
         }
+        // Acknowledgement is durable launch authority. Rework cannot clear its
+        // quarantine while this live lease (and response) may still reach us.
+        if (containment && options.quarantine!.acknowledge) {
+          await options.quarantine!.acknowledge();
+        }
+        if (prelaunchInterrupted) {
+          if (containment) await options.quarantine!.settle();
+          finish(null, 1); return;
+        }
         child = spawn(containment?.command ?? command, containment?.args ?? args, { stdio: 'inherit', detached, env });
+        child.on('error', error => { console.error(error.message); stop(1); });
+        child.on('exit', code => stop(code ?? 1));
         timer = setInterval(async () => {
           if (pending || stopping) return;
           pending = true;
@@ -187,8 +198,6 @@ export async function supervise(command: string, args: string[], epoch: number, 
           finally { pending = false; }
         }, options.intervalMs ?? 25_000);
         armDeadline();
-        child.on('error', error => { console.error(error.message); stop(1); });
-        child.on('exit', code => stop(code ?? 1));
       } catch (error) { finish(error); }
     })();
   });

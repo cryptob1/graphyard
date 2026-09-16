@@ -68,6 +68,37 @@ export async function establishContainment(
   throw new Error(`Graphyard could not confirm containment quarantine establishment after ${attempts} attempts: ${lastError instanceof Error ? lastError.message : String(lastError)}`);
 }
 
+export async function acknowledgeContainment(
+  mutate: (requestId: string) => Promise<any>,
+  expected: { epoch: number; settlementHash: string; exclusiveResources: string[]; requestId: string },
+  options: { attempts?: number; retryMs?: number; monotonicNow?: () => number } = {},
+) {
+  const attempts = options.attempts ?? 3;
+  const monotonicNow = options.monotonicNow ?? (() => performance.now());
+  const started = monotonicNow();
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    try {
+      const result = await mutate(expected.requestId);
+      const quarantine = result?.containmentQuarantine;
+      if (quarantine?.epoch !== expected.epoch || quarantine?.settlementHash !== expected.settlementHash
+        || typeof quarantine?.launchAcknowledgedAt !== 'string'
+        || typeof quarantine?.launchExpiresAt !== 'string'
+        || JSON.stringify(result?.exclusiveResources ?? []) !== JSON.stringify(expected.exclusiveResources))
+        throw new Error('Graphyard returned a mismatched containment launch acknowledgement');
+      const authorityMs = Date.parse(quarantine.launchExpiresAt) - Date.parse(result.updatedAt);
+      if (!Number.isFinite(authorityMs) || authorityMs <= 0 || monotonicNow() - started >= authorityMs)
+        throw new PrelaunchContainmentError('Graphyard launch authority expired before its acknowledgement response arrived', false);
+      return result;
+    } catch (error) {
+      if ((error as any)?.confirmedRefusal) throw error;
+      lastError = error;
+      if (attempt < attempts) await delay(options.retryMs ?? 100);
+    }
+  }
+  throw new Error(`Graphyard could not confirm containment launch acknowledgement after ${attempts} attempts: ${lastError instanceof Error ? lastError.message : String(lastError)}`);
+}
+
 export async function settleContainment(
   mutate: (requestId: string, body: Readonly<{ epoch: number; settlementToken: string }>) => Promise<any>,
   expected: { epoch: number; settlementToken: string; settlementHash: string; exclusiveResources: string[]; requestId: string },

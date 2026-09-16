@@ -9,7 +9,7 @@ import { fileURLToPath } from 'node:url';
 import { createServer } from 'node:http';
 import { setTimeout as delay } from 'node:timers/promises';
 import { linuxProcessRecord, signalTrackedProcesses, supervise, systemdContainment } from '../src/supervisor.js';
-import { containmentCredentials, establishContainment, isConfirmedCoordinationRefusal, revalidateContainment, settleContainment } from '../src/quarantine.js';
+import { acknowledgeContainment, containmentCredentials, establishContainment, isConfirmedCoordinationRefusal, revalidateContainment, settleContainment } from '../src/quarantine.js';
 
 const exec = promisify(execFile);
 const launcher = fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url));
@@ -37,6 +37,19 @@ test('quarantine establishment never confirms a mismatched fence or retries a se
   const refusal = Object.assign(new Error('lease expired'), { confirmedRefusal: true });
   await assert.rejects(establishContainment(async () => { calls++; throw refusal; }, expected), /lease expired/);
   assert.equal(calls, 1);
+});
+
+test('launch acknowledgement reconciles a committed lost response with one durable request', async () => {
+  const credentials = containmentCredentials();
+  const expected = { epoch: 7, settlementHash: credentials.settlementHash, exclusiveResources: ['staging'], requestId: credentials.requestId };
+  const keys: string[] = []; let calls = 0;
+  const acknowledged = { updatedAt: '2030-01-01T00:00:00Z', exclusiveResources: ['staging'], containmentQuarantine: { epoch: 7, settlementHash: credentials.settlementHash, launchAcknowledgedAt: '2030-01-01T00:00:00Z', launchExpiresAt: '2030-01-01T00:02:00Z' } };
+  const result = await acknowledgeContainment(async key => {
+    keys.push(key);
+    if (++calls === 1) throw new TypeError('response lost after commit');
+    return acknowledged;
+  }, expected, { attempts: 2, retryMs: 0 });
+  assert.equal(result, acknowledged); assert.deepEqual(keys, [expected.requestId, expected.requestId]);
 });
 
 test('fresh prelaunch state rejects stale receipt replay, expiry, workspace and resource mutation', () => {
