@@ -40,6 +40,10 @@ export function systemdContainment(command: string, args: string[], run: typeof 
 
 export type ProcessRecord = { ppid: number; identity: string };
 
+export function captureTrackedRoot(rootPid: number, supervisedPids: Map<number, string>, root: ProcessRecord | null) {
+  if (root) supervisedPids.set(rootPid, root.identity);
+}
+
 export function linuxProcessRecord(stat: string): ProcessRecord | null {
   const end = stat.lastIndexOf(') ');
   if (end < 0) return null;
@@ -63,9 +67,12 @@ function processTable(): Map<number, ProcessRecord> {
   return records;
 }
 
+function processRecord(pid: number): ProcessRecord | null {
+  try { return linuxProcessRecord(readFileSync(`/proc/${pid}/stat`, 'utf8')); }
+  catch { return null; }
+}
+
 export function signalTrackedProcesses(rootPid: number, supervisedPids: Map<number, string>, rows: Map<number, ProcessRecord>, signal: NodeJS.Signals, kill: (pid: number, signal: NodeJS.Signals) => void = process.kill) {
-  const root = rows.get(rootPid);
-  if (root && !supervisedPids.has(rootPid)) supervisedPids.set(rootPid, root.identity);
   const pending = [...supervisedPids.keys()];
   while (pending.length) {
     const parent = pending.shift()!;
@@ -188,6 +195,13 @@ export async function supervise(command: string, args: string[], epoch: number, 
           finish(null, 1); return;
         }
         child = spawn(containment?.command ?? command, containment?.args ?? args, { stdio: 'inherit', detached, env });
+        // Never learn the fallback root from a later /proc snapshot: after this
+        // child exits its numeric PID can identify an unrelated replacement.
+        // Cache the kernel identity immediately after spawn, or leave fallback
+        // traversal empty when the short-lived launcher is already gone.
+        if (containment && !detached && platform === 'linux' && child.pid) {
+          captureTrackedRoot(child.pid, supervisedPids, processRecord(child.pid));
+        }
         child.on('error', error => { console.error(error.message); stop(1); });
         child.on('exit', code => stop(code ?? 1));
         timer = setInterval(async () => {

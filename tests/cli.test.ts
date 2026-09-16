@@ -8,7 +8,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createServer } from 'node:http';
 import { setTimeout as delay } from 'node:timers/promises';
-import { linuxProcessRecord, signalTrackedProcesses, supervise, systemdContainment } from '../src/supervisor.js';
+import { captureTrackedRoot, linuxProcessRecord, signalTrackedProcesses, supervise, systemdContainment } from '../src/supervisor.js';
 import { acknowledgeContainment, containmentCredentials, establishContainment, isConfirmedCoordinationRefusal, revalidateContainment, settleContainment } from '../src/quarantine.js';
 
 const exec = promisify(execFile);
@@ -362,10 +362,28 @@ test('foreground Herdr containment kills a descendant forked after SIGTERM and r
 
 test('foreground fallback does not signal a reused descendant PID', () => {
   const tracked = new Map<number, string>(); const signalled: number[] = [];
-  signalTrackedProcesses(100, tracked, new Map([[100, { ppid: 1, identity: 'root-start' }], [101, { ppid: 100, identity: 'child-start' }]]), 'SIGTERM', pid => { signalled.push(pid); });
+  const initial = new Map([[100, { ppid: 1, identity: 'root-start' }], [101, { ppid: 100, identity: 'child-start' }]]);
+  captureTrackedRoot(100, tracked, initial.get(100)!);
+  signalTrackedProcesses(100, tracked, initial, 'SIGTERM', pid => { signalled.push(pid); });
   assert.deepEqual(signalled, [101, 100]); signalled.length = 0;
   signalTrackedProcesses(100, tracked, new Map([[101, { ppid: 55, identity: 'unrelated-start' }]]), 'SIGKILL', pid => { signalled.push(pid); });
   assert.deepEqual(signalled, []); assert.equal(tracked.has(101), false);
+});
+
+test('foreground fallback never enrolls an uncached initial root or its descendants', () => {
+  const tracked = new Map<number, string>(); const signalled: number[] = [];
+  const rows = new Map([[100, { ppid: 1, identity: 'reused-root' }], [101, { ppid: 100, identity: 'unrelated-child' }]]);
+  signalTrackedProcesses(100, tracked, rows, 'SIGKILL', pid => { signalled.push(pid); });
+  assert.deepEqual(signalled, []);
+  assert.deepEqual([...tracked], []);
+});
+
+test('foreground fallback with an exited cached root cannot adopt a reused root or descendant', () => {
+  const tracked = new Map<number, string>([[100, 'original-root']]); const signalled: number[] = [];
+  const rows = new Map([[100, { ppid: 1, identity: 'replacement-root' }], [101, { ppid: 100, identity: 'replacement-child' }]]);
+  signalTrackedProcesses(100, tracked, rows, 'SIGKILL', pid => { signalled.push(pid); });
+  assert.deepEqual(signalled, []);
+  assert.deepEqual([...tracked], []);
 });
 
 test('foreground fallback does not traverse descendants of a reused cached parent PID', () => {
@@ -405,6 +423,19 @@ test('systemd containment recognizes only a specifically unloaded scope after a 
   assert.equal(containment.empty(), true);
   mode = 'manager'; assert.throws(() => containment.empty(), /connect to bus/);
   mode = 'active'; assert.equal(containment.empty(), false);
+});
+
+test('unloaded-scope fallback cannot signal a replacement for an uncached exited root', () => {
+  const containment = systemdContainment('worker', [], ((command: string, args: string[]) => {
+    if (args.includes('show-environment')) return '';
+    if (args.includes('kill')) throw new Error('scope unloaded before signal');
+    return 'LoadState=not-found\nActiveState=inactive\n';
+  }) as any);
+  const tracked = new Map<number, string>(); const signalled: number[] = [];
+  assert.throws(() => containment.signal('SIGKILL'), /scope unloaded/);
+  signalTrackedProcesses(100, tracked, new Map([[100, { ppid: 1, identity: 'replacement' }], [101, { ppid: 100, identity: 'replacement-child' }]]), 'SIGKILL', pid => { signalled.push(pid); });
+  assert.deepEqual(signalled, []);
+  assert.equal(containment.empty(), true);
 });
 
 test('systemd containment polls active and deactivating states before clean unloaded-scope settlement', async () => {
