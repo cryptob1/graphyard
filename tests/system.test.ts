@@ -12,6 +12,7 @@ import { ReconciliationRetry, type Principal, type Work, type Observation } from
 import { defineScenario, scenarios } from '../src/scenarios.js';
 import { setTimeout as delay } from 'node:timers/promises';
 import { processJob, type GitHub } from '../src/github.js';
+import { isConfirmedCoordinationRefusal } from '../src/quarantine.js';
 // @ts-expect-error The trusted runner intentionally uses dependency-free JavaScript outside the candidate source.
 import { exercise } from '../scripts/acceptance-contract.mjs';
 
@@ -66,6 +67,17 @@ test('idempotent retries have one event, and key reuse with different input fail
   assert.ok(results.every(w => w.epoch === 1));
   assert.equal((await store.events(work.id)).filter(e => e.kind === 'claim').length, 1);
   await assert.rejects(engine.execute(worker, 'release', work.id, { epoch: 1 }, key), /reused/);
+});
+test('real HTTP coordination refusal envelope is classified as definitive', async () => {
+  const response = await fetch(`${url}/api/work/missing/claim`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${'w'.repeat(32)}`, 'Content-Type': 'application/json', 'Idempotency-Key': randomUUID() },
+    body: '{}',
+  });
+  const envelope = await response.json();
+  assert.equal(response.status, 404);
+  assert.deepEqual(envelope, { error: 'Work item not found' });
+  assert.equal(isConfirmedCoordinationRefusal(response.status, envelope), true);
 });
 test('expired lease is recoverable and all stale-owner commands are fenced', async () => {
   let w = await claimed();
@@ -358,6 +370,44 @@ test('capability settlement survives the merge-to-done race without weakening de
   contender = await engine.execute(other, 'claim', contender.id, {}, randomUUID()); assert.equal(contender.epoch, 1);
   await assert.rejects(engine.execute(worker, 'release', current.id, { epoch: 1 }, randomUUID()), /immutable/);
   assert.deepEqual((await store.events(current.id)).find(event => event.kind === 'settle')?.payload.details, { epoch: 1 });
+});
+test('operator stopped-worker recovery clears only a delivered containment quarantine', async () => {
+  const resource = `delivered-recovery:${randomUUID()}`;
+  let w = await engine.execute(operator, 'create', null, { ...workInput, exclusiveResources: [resource] }, randomUUID());
+  w = await engine.execute(operator, 'ready', w.id, {}, randomUUID());
+  w = await engine.execute(worker, 'claim', w.id, {}, randomUUID());
+  const settlementHash = createHash('sha256').update('f'.repeat(64)).digest('hex');
+  w = await engine.execute(worker, 'quarantine', w.id, { epoch: 1, settlementHash }, randomUUID());
+  w = await engine.execute(worker, 'workspace', w.id, { epoch: 1, host: 'recovery-host', path: `/tmp/${w.id}-recovery`, branch: `graphyard/${w.id}-recovery` }, randomUUID());
+  w = await engine.execute(worker, 'submit', w.id, { epoch: 1, pr: Number(w.key.slice(3)) }, randomUUID());
+  w = await engine.observe(w.id, w.revision, observation(w));
+  w = await engine.execute(producer, 'evidence', w.id, proof(), randomUUID());
+  const granted = await engine.acquireMerge(coordinator, w.id, { expectedRevision: w.revision, sha: head, baseSha: base, policyRevision: w.policyRevision }, randomUUID());
+  const verified = await engine.verifyMerge(coordinator, w.id, { executionId: granted.execution.id }, { ...observation(w), prState: 'open', draft: false }, randomUUID());
+  await delay(5); const mergedAt = ((await store.pool.query('SELECT clock_timestamp() AS now')).rows[0].now as Date).toISOString(); await delay(5);
+  w = await engine.observe(w.id, verified.revision, { ...observation(w), merged: true, mergedAt, mergeSha: '9'.repeat(40) });
+  w = { ...w, mergeExecution: verified.mergeExecution, lease: { ...w.lease!, expiresAt: '2000-01-01T00:00:00Z' } };
+  await store.pool.query('UPDATE work_items SET document=$2 WHERE id=$1', [w.id, JSON.stringify(w)]);
+  w = (await store.list()).find(item => item.id === w.id)!;
+  const preserved = { stage: w.stage, candidate: w.candidate, mergeExecution: w.mergeExecution, evidence: w.evidence, criteria: w.criteria, delivery: w.delivery, observation: w.observation, submission: w.submission, reworkRequested: w.reworkRequested };
+  let contender = await engine.execute(operator, 'create', null, { ...workInput, exclusiveResources: [resource] }, randomUUID());
+  contender = await engine.execute(operator, 'ready', contender.id, {}, randomUUID());
+  await assert.rejects(engine.execute(worker, 'recover', w.id, { reason: 'Worker stopped', previousWorkerStopped: true }, randomUUID()), /permission/);
+  await assert.rejects(engine.execute(operator, 'recover', w.id, { reason: 'Missing attestation' }, randomUUID()));
+  await assert.rejects(engine.execute(other, 'claim', contender.id, {}, randomUUID()), /Exclusive resources held/);
+  const recoveryKey = randomUUID();
+  const recoveries = await Promise.allSettled([
+    engine.execute(operator, 'recover', w.id, { reason: 'Verified worker scope stopped', previousWorkerStopped: true }, recoveryKey),
+    engine.execute(operator, 'recover', w.id, { reason: 'Verified worker scope stopped', previousWorkerStopped: true }, recoveryKey),
+  ]);
+  assert.equal(recoveries.filter(result => result.status === 'fulfilled').length, 2);
+  const recovered = recoveries.find(result => result.status === 'fulfilled')!.value;
+  assert.equal(recovered.containmentQuarantine, null); assert.deepEqual({ stage: recovered.stage, candidate: recovered.candidate, mergeExecution: recovered.mergeExecution, evidence: recovered.evidence, criteria: recovered.criteria, delivery: recovered.delivery, observation: recovered.observation, submission: recovered.submission, reworkRequested: recovered.reworkRequested }, preserved);
+  await assert.rejects(engine.execute(operator, 'recover', w.id, { reason: 'Already clear', previousWorkerStopped: true }, randomUUID()), /no containment quarantine/);
+  contender = await engine.execute(other, 'claim', contender.id, {}, randomUUID()); assert.equal(contender.epoch, 1);
+  const recoveryEvents = (await store.events(w.id)).filter(item => item.kind === 'recover'); assert.equal(recoveryEvents.length, 1);
+  const event = recoveryEvents[0];
+  assert.deepEqual(event?.payload.details, { reason: 'Verified worker scope stopped', previousWorkerStopped: true });
 });
 test('bypassed merge is a permanent visible violation, not done', async () => {
   let w = await submitted(); w = await engine.observe(w.id, w.revision, { ...observation(w), merged: true });

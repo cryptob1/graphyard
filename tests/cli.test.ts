@@ -9,7 +9,7 @@ import { fileURLToPath } from 'node:url';
 import { createServer } from 'node:http';
 import { setTimeout as delay } from 'node:timers/promises';
 import { linuxProcessRecord, signalTrackedProcesses, supervise, systemdContainment } from '../src/supervisor.js';
-import { containmentCredentials, establishContainment, settleContainment } from '../src/quarantine.js';
+import { containmentCredentials, establishContainment, isConfirmedCoordinationRefusal, settleContainment } from '../src/quarantine.js';
 
 const exec = promisify(execFile);
 const launcher = fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url));
@@ -37,6 +37,38 @@ test('quarantine establishment never confirms a mismatched fence or retries a se
   const refusal = Object.assign(new Error('lease expired'), { confirmedRefusal: true });
   await assert.rejects(establishContainment(async () => { calls++; throw refusal; }, expected), /lease expired/);
   assert.equal(calls, 1);
+});
+
+test('HTTP 408 and 429 remain ambiguous while known coordination refusals are definitive', async () => {
+  const credentials = containmentCredentials();
+  const expected = { epoch: 5, settlementHash: credentials.settlementHash, exclusiveResources: ['staging'], requestId: credentials.requestId };
+  const keys: string[] = []; let calls = 0;
+  const established = await establishContainment(async key => {
+    keys.push(key); calls++;
+    if (calls < 3) {
+      const status = calls === 1 ? 408 : 429, body = { error: 'ambiguous proxy response' };
+      throw Object.assign(new Error(body.error), { confirmedRefusal: isConfirmedCoordinationRefusal(status, body) });
+    }
+    return { exclusiveResources: expected.exclusiveResources, containmentQuarantine: { epoch: expected.epoch, settlementHash: expected.settlementHash } };
+  }, expected, { attempts: 3, retryMs: 0 });
+  assert.equal(established.containmentQuarantine.epoch, 5);
+  assert.deepEqual(keys, [credentials.requestId, credentials.requestId, credentials.requestId]);
+
+  const settlementKey = 'stable-settlement-key', bodies: unknown[] = []; calls = 0;
+  await settleContainment(async (key, body) => {
+    assert.equal(key, settlementKey); bodies.push(body); calls++;
+    if (calls < 3) {
+      const status = calls === 1 ? 429 : 408, response = { error: 'ambiguous gateway response' };
+      throw Object.assign(new Error(response.error), { confirmedRefusal: isConfirmedCoordinationRefusal(status, response) });
+    }
+    return { epoch: 5, exclusiveResources: expected.exclusiveResources, containmentQuarantine: null };
+  }, { ...expected, settlementToken: credentials.settlementToken, requestId: settlementKey }, { attempts: 3, retryMs: 0 });
+  assert.equal(bodies.length, 3); assert.equal(bodies[0], bodies[1]); assert.equal(bodies[1], bodies[2]);
+  assert.equal(isConfirmedCoordinationRefusal(409, { error: 'lease expired' }), true);
+  assert.equal(isConfirmedCoordinationRefusal(409, { error: { code: 'lease_conflict', message: 'lease expired' } }), true);
+  assert.equal(isConfirmedCoordinationRefusal(400, { message: 'not a Graphyard refusal' }), false);
+  assert.equal(isConfirmedCoordinationRefusal(409, { error: { message: 'proxy-generated body' } }), false);
+  assert.equal(isConfirmedCoordinationRefusal(429, { error: { code: 'rate_limited', message: 'try later' } }), false);
 });
 
 test('containment settlement replays a committed lost response with an identical key and body', async () => {

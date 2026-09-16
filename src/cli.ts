@@ -12,7 +12,7 @@ import { parseArgs } from 'node:util';
 import { diagnose, fileConflicts, proofPreview, resourceConflicts } from './coordination.js';
 import { loadConnection, setupRepository, handoff, hostIdSchema } from './repository-setup.js';
 import { assertMasterBinding, buildMasterStatus, continueMergeBatch, currentMergeCandidates, dispatchWork, inspectWorkerCredentials, listHerdrAgents, loadMasterConfig, mergeWork, observeHerdrAgents, readCredentialFile, readWorkerCredential, saveWorkerProfile, setupMaster, startMaster, workerProfileSchema } from './master.js';
-import { containmentCredentials, establishContainment, settleContainment } from './quarantine.js';
+import { containmentCredentials, establishContainment, isConfirmedCoordinationRefusal, settleContainment } from './quarantine.js';
 
 try { process.loadEnvFile(); } catch (error: any) { if (error.code !== 'ENOENT') throw error; }
 const [command, id, ...args] = process.argv.slice(2);
@@ -46,7 +46,7 @@ async function api(path: string, data?: unknown, requestId = process.env.GRAPHYA
   if (!token) throw new Error('Set GRAPHYARD_TOKEN to your individual credential');
   const response = await fetch(`${base}/api/${path}`, { method: data === undefined ? 'GET' : 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', 'Idempotency-Key': requestId }, body: data === undefined ? undefined : JSON.stringify(data), signal: AbortSignal.timeout(30_000) });
   const body = await response.json();
-  if (!response.ok) { const error = new Error(JSON.stringify(body)); (error as any).confirmedRefusal = response.status >= 400 && response.status < 500; throw error; }
+  if (!response.ok) { const error = new Error(JSON.stringify(body)); (error as any).confirmedRefusal = isConfirmedCoordinationRefusal(response.status, body); throw error; }
   return body;
 }
 const print = (value: unknown) => console.log(JSON.stringify(value, null, 2));
@@ -79,6 +79,8 @@ Environment: GRAPHYARD_URL, GRAPHYARD_TOKEN (individual role-scoped credential)
   ready GY-N                   Release backlog item (operator)
   unblock GY-N REASON           Clear a blocker with an audit reason (operator)
   rework GY-N --previous-worker-stopped REASON  Authorize reassignment (operator)
+  recover-containment GY-N --previous-worker-stopped REASON
+                                Release delivered work's stopped-worker quarantine (operator)
   rereview GY-N [EPOCH]         Request a fresh Codex review (operator or current worker)
   reviewpolicy GY-N github|codex POLICY_REVISION REASON  Revise reviewer source (operator)
   claim GY-N                   Acquire a two-minute lease; returns epoch
@@ -244,6 +246,10 @@ Never share an operator or producer credential with an implementation agent.`); 
   if (command === 'rework') {
     if (args[0] !== '--previous-worker-stopped') throw new Error('Stop the previous worker first, then pass --previous-worker-stopped and an audit reason');
     return print(await mutate('rework', { reason: args.slice(1).join(' '), previousWorkerStopped: true }));
+  }
+  if (command === 'recover-containment') {
+    if (args[0] !== '--previous-worker-stopped') throw new Error('Stop the previous worker first, then pass --previous-worker-stopped and an audit reason');
+    return print(await mutate('recover', { reason: args.slice(1).join(' '), previousWorkerStopped: true }));
   }
   if (command === 'heartbeat' || command === 'release') return print(await mutate(command, { epoch: Number(args[0]) }));
   if (command === 'blocked') return print(await mutate('blocked', { epoch: Number(args[0]), reason: args[1] === '-' ? null : args.slice(1).join(' ') }));

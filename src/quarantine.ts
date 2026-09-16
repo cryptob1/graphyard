@@ -8,6 +8,15 @@ export function containmentCredentials() {
   return { settlementToken, settlementHash, requestId };
 }
 
+export function isConfirmedCoordinationRefusal(status: number, body: unknown) {
+  if (status < 400 || status >= 500 || status === 408 || status === 429 || !body || typeof body !== 'object') return false;
+  const error = (body as { error?: unknown }).error;
+  return typeof error === 'string' && error.length > 0
+    || !!error && typeof error === 'object'
+      && typeof (error as { code?: unknown }).code === 'string' && (error as { code: string }).code.length > 0
+      && typeof (error as { message?: unknown }).message === 'string' && (error as { message: string }).message.length > 0;
+}
+
 export async function establishContainment(
   mutate: (requestId: string) => Promise<any>,
   expected: { epoch: number; settlementHash: string; exclusiveResources: string[]; requestId: string },
