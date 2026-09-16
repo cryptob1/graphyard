@@ -36,7 +36,7 @@ graphyard master start codex
 # or: graphyard master start claude
 ```
 
-This creates a non-focused Herdr tab in the configured workspace, reads the native `tab_created.root_pane.pane_id` response (while retaining supported legacy response shapes), starts the selected agent, and prompts it to read the managed instructions, print the packaged guide, and inspect live status. A malformed creation response fails startup and Graphyard closes the identified tab before returning. Provider-specific arguments may follow `--`. Setup and start do not create worker assignments.
+This creates a non-focused Herdr tab in the configured workspace, reads the native `tab_created.root_pane.pane_id` response (while retaining supported legacy response shapes), starts the selected agent, and prompts it to read the managed instructions, print the packaged guide, and inspect live status. A malformed creation response fails startup and Graphyard closes the identified tab before returning, polling the Herdr inventory for bounded confirmation when removal is asynchronous. Provider-specific arguments may follow `--`. Setup and start do not create worker assignments.
 
 ## Add workers
 

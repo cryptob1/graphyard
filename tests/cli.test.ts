@@ -85,10 +85,10 @@ test('supervisor kills surviving descendants even after their group leader exits
   } finally { await rm(cwd, { recursive: true, force: true }); }
 });
 
-test('foreground Herdr supervision kills the complete child tree without detaching the agent', async () => {
+test('foreground Herdr supervision kills a retained descendant after the foreground leader exits on SIGTERM', async () => {
   const cwd = await mkdtemp(join(tmpdir(), 'graphyard-foreground-descendants-')), output = join(cwd, 'ticks');
   const descendant = `const fs=require('node:fs'); process.on('SIGTERM',()=>{}); fs.appendFileSync(${JSON.stringify(output)},'.'); setInterval(()=>fs.appendFileSync(${JSON.stringify(output)},'.'),10)`;
-  const leader = `require('node:child_process').spawn(process.execPath,['-e',${JSON.stringify(descendant)}],{stdio:'ignore'}); process.on('SIGTERM',()=>{}); setInterval(()=>{},20)`;
+  const leader = `require('node:child_process').spawn(process.execPath,['-e',${JSON.stringify(descendant)}],{stdio:'ignore'}); setInterval(()=>{},20)`;
   try {
     let renewals = 0;
     assert.equal(await supervise(process.execPath, ['-e', leader], 1, async () => ++renewals === 1 ? renewal(150) : new Promise(() => {}), { detached: false, intervalMs: 25, graceMs: 75 }), 1);

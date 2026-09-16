@@ -20,18 +20,18 @@ export async function supervise(command: string, args: string[], epoch: number, 
   const child = spawn(command, args, { stdio: 'inherit', detached, env });
   return new Promise<number>(resolve => {
     let stopping = false, pending = false;
+    const supervisedPids = new Set<number>();
     let expiry: ReturnType<typeof setTimeout>;
     const signalGroup = (signal: NodeJS.Signals) => {
       if (!child.pid) return;
       if (detached && process.platform !== 'win32') { try { process.kill(-child.pid, signal); } catch {} return; }
-      let descendants: number[] = [];
+      supervisedPids.add(child.pid);
       if (process.platform !== 'win32') try {
         const rows = execFileSync('ps', ['-eo', 'pid=,ppid='], { encoding: 'utf8' }).trim().split('\n').map(row => row.trim().split(/\s+/).map(Number));
-        const pending = [child.pid];
-        while (pending.length) { const parent = pending.shift()!; for (const [pid, ppid] of rows) if (ppid === parent) { descendants.push(pid); pending.push(pid); } }
+        const pending = [...supervisedPids];
+        while (pending.length) { const parent = pending.shift()!; for (const [pid, ppid] of rows) if (ppid === parent && !supervisedPids.has(pid)) { supervisedPids.add(pid); pending.push(pid); } }
       } catch {}
-      for (const pid of descendants.reverse()) try { process.kill(pid, signal); } catch {}
-      try { child.kill(signal); } catch { /* process already gone */ }
+      for (const pid of [...supervisedPids].reverse()) try { process.kill(pid, signal); } catch {}
     };
     const interrupted = () => stop(1);
     function stop(code: number) {

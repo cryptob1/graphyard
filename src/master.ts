@@ -261,12 +261,13 @@ function waitForHerdrAgent(target: string, run?: (command: string, args: string[
   const deadline = Date.now() + timeoutMs;
   let lastError: unknown;
   while (Date.now() < deadline) {
+    let agent: any;
     try {
       const raw = herdrJson(['agent', 'get', target], run);
-      const agent = raw?.agent ?? raw;
-      if (agent?.agent_status === 'blocked') throw new Error('Launched worker is blocked before it is ready for a prompt');
-      if (['idle', 'done'].includes(agent?.agent_status)) return agent as HerdrAgent;
+      agent = raw?.agent ?? raw;
     } catch (error) { lastError = error; }
+    if (agent?.agent_status === 'blocked') throw new Error('Launched worker is blocked before it is ready for a prompt');
+    if (['idle', 'done'].includes(agent?.agent_status)) return agent as HerdrAgent;
     Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 250);
   }
   throw new Error(`Launched worker did not become visible in Herdr within ${timeoutMs}ms${lastError instanceof Error ? `: ${lastError.message}` : ''}`);
@@ -291,12 +292,18 @@ function createdHerdrTab(result: any) {
   return { pane, tab: typeof tab === 'string' && tab.trim() ? tab : undefined };
 }
 
-function stopCreatedHerdrTab(pane: string | undefined, tab: string | undefined, run?: (command: string, args: string[]) => string) {
+function stopCreatedHerdrTab(pane: string | undefined, tab: string | undefined, run?: (command: string, args: string[]) => string, timeoutMs = 5_000) {
   if (pane) return stopHerdrPane(pane, run);
   if (!tab) throw new Error('Herdr did not identify the created tab, so cleanup cannot be confirmed');
   herdrJson(['tab', 'close', tab], run);
-  const result = herdrJson(['tab', 'list'], run);
-  if (!Array.isArray(result.tabs) || result.tabs.some((candidate: any) => candidate.tab_id === tab)) throw new Error(`Herdr could not confirm cleanup of tab ${tab}`);
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const result = herdrJson(['tab', 'list'], run);
+    if (!Array.isArray(result.tabs)) throw new Error('Herdr did not return a tab inventory after close');
+    if (!result.tabs.some((candidate: any) => candidate.tab_id === tab)) return;
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 100);
+  }
+  throw new Error(`Herdr still reports tab ${tab} after close`);
 }
 
 export async function startMaster(root: string, kind: WorkerProfile['kind'], agentArgs: string[], agents: HerdrAgent[], run?: (command: string, args: string[]) => string) {
