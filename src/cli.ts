@@ -270,7 +270,7 @@ Never share an operator or producer credential with an implementation agent.`); 
   if (command === 'events') return print(await api(`events?work=${work.id}`));
   if (command === 'rereview') return print(await mutate(command, args[0] ? { epoch: Number(args[0]) } : {}));
   if (command === 'reviewpolicy') return print(await mutate(command, { provider: args[0], expectedPolicyRevision: Number(args[1]), reason: args.slice(2).join(' ') }));
-  if (command === 'ready') return print(await mutate(command, { expectedRevision: work.revision, reason: args.join(' ') }));
+  if (command === 'ready') return print(await mutate(command, args.length ? { expectedRevision: work.revision, reason: args.join(' ') } : {}));
   if (command === 'claim') return print(await mutate(command, {}));
   if (command === 'unblock') return print(await mutate('unblock', { expectedRevision: work.revision, reason: args.join(' ') }));
   if (command === 'rework') {

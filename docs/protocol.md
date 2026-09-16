@@ -13,7 +13,7 @@ All control-plane endpoints except `/healthz` require `Authorization: Bearer TOK
 | `producer` | Submit evidence; only configured `proofs` are trusted |
 | `reader` | Inspect work, status, events |
 
-All roles can read engineering metadata in this single-repository installation. There is no tenant isolation or per-item read ACL in v0.1. Each independent worker process should have a distinct principal; sharing a token makes processes indistinguishable.
+Except for operator-agents, all roles can read engineering metadata in this single-repository installation and have no per-item read ACL in v0.1. Operator-agent reads are restricted to their server-enforced repository/work scope allowlist. Each independent worker process should have a distinct principal; sharing a token makes processes indistinguishable.
 
 ## Requests and retries
 
