@@ -102,19 +102,21 @@ export async function supervise(command: string, args: string[], epoch: number, 
   if (!detached && platform !== 'linux' && !options.containment) throw new Error(`Foreground worker supervision requires durable containment and is not supported on ${platform}`);
   const containment = options.containment ?? (!detached && platform === 'linux' ? systemdContainment(command, args) : undefined);
   if (containment && !options.quarantine) throw new Error('Foreground worker supervision requires a durable Graphyard containment quarantine');
-  if (containment) await options.quarantine!.establish();
-  const child = spawn(containment?.command ?? command, containment?.args ?? args, { stdio: 'inherit', detached, env });
   return new Promise<number>((resolve, reject) => {
-    let stopping = false, pending = false;
+    let child: ReturnType<typeof spawn> | undefined;
+    let stopping = false, pending = false, prelaunchInterrupted = false, finished = false;
     const supervisedPids = new Map<number, string>();
     let containmentFailure: unknown;
     let expiry: ReturnType<typeof setTimeout>;
+    let timer: ReturnType<typeof setInterval>;
     const finish = (error: unknown, code?: number) => {
+      if (finished) return;
+      finished = true;
       process.off('SIGTERM', interrupted); process.off('SIGINT', interrupted);
       if (error) reject(error); else resolve(code!);
     };
     const signalGroup = (signal: NodeJS.Signals) => {
-      if (!child.pid) return;
+      if (!child?.pid) return;
       if (containment) {
         try { containment.signal(signal); return; }
         catch (error) { containmentFailure ??= error; }
@@ -124,7 +126,10 @@ export async function supervise(command: string, args: string[], epoch: number, 
       const rows = processTable();
       signalTrackedProcesses(child.pid, supervisedPids, rows, signal);
     };
-    const interrupted = () => stop(1);
+    const interrupted = () => {
+      if (!child) { prelaunchInterrupted = true; return; }
+      stop(1);
+    };
     function stop(code: number) {
       if (stopping) return;
       stopping = true; clearInterval(timer); clearTimeout(expiry);
@@ -151,16 +156,30 @@ export async function supervise(command: string, args: string[], epoch: number, 
       }, options.graceMs ?? 5000);
     }
     const armDeadline = () => { clearTimeout(expiry); expiry = setTimeout(() => stop(1), Math.max(0, deadline - performance.now())); };
-    const timer = setInterval(async () => {
-      if (pending || stopping) return;
-      pending = true;
-      try { await heartbeat(); if (!stopping) armDeadline(); }
-      catch { console.error('Graphyard lease cannot be renewed. Stopping worker.'); stop(1); }
-      finally { pending = false; }
-    }, options.intervalMs ?? 25_000);
-    armDeadline();
     process.on('SIGTERM', interrupted); process.on('SIGINT', interrupted);
-    child.on('error', error => { console.error(error.message); stop(1); });
-    child.on('exit', code => stop(code ?? 1));
+    void (async () => {
+      try {
+        if (containment) await options.quarantine!.establish();
+        if (prelaunchInterrupted) {
+          if (containment) {
+            try { await options.quarantine!.settle(); }
+            catch (error) { finish(new Error(`Worker launch was interrupted after its Graphyard quarantine was established, but the quarantine could not be settled: ${error instanceof Error ? error.message : String(error)}`)); return; }
+          }
+          finish(null, 1);
+          return;
+        }
+        child = spawn(containment?.command ?? command, containment?.args ?? args, { stdio: 'inherit', detached, env });
+        timer = setInterval(async () => {
+          if (pending || stopping) return;
+          pending = true;
+          try { await heartbeat(); if (!stopping) armDeadline(); }
+          catch { console.error('Graphyard lease cannot be renewed. Stopping worker.'); stop(1); }
+          finally { pending = false; }
+        }, options.intervalMs ?? 25_000);
+        armDeadline();
+        child.on('error', error => { console.error(error.message); stop(1); });
+        child.on('exit', code => stop(code ?? 1));
+      } catch (error) { finish(error); }
+    })();
   });
 }

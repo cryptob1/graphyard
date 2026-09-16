@@ -124,6 +124,79 @@ test('containment settlement bounds persistent ambiguity after one child launch 
   } finally { await rm(cwd, { recursive: true, force: true }); }
 });
 
+test('a prelaunch signal reconciles and settles a committed quarantine without launching a child', async () => {
+  const credentials = containmentCredentials();
+  const expected = { epoch: 9, settlementHash: credentials.settlementHash, exclusiveResources: ['staging'], requestId: credentials.requestId };
+  const cwd = await mkdtemp(join(tmpdir(), 'graphyard-prelaunch-signal-')), marker = join(cwd, 'launched');
+  const baselineInt = process.listenerCount('SIGINT'), baselineTerm = process.listenerCount('SIGTERM');
+  const establishKeys: string[] = [], settleKeys: string[] = []; const settleBodies: unknown[] = [];
+  let establishCalls = 0, settleCalls = 0;
+  const committed = { exclusiveResources: expected.exclusiveResources, containmentQuarantine: { epoch: expected.epoch, settlementHash: expected.settlementHash } };
+  const containment = {
+    command: process.execPath,
+    args: ['-e', `require('node:fs').writeFileSync(${JSON.stringify(marker)}, Object.values(process.env).join('\\n'))`],
+    signal: () => assert.fail('no worker exists to signal'),
+    empty: () => assert.fail('no worker containment needs verification'),
+  };
+  try {
+    assert.equal(await supervise('ignored', [], 9, async () => ({ ...renewal(), lease: { ...renewal().lease, epoch: 9 } }), { containment, detached: false, quarantine: {
+      establish: () => establishContainment(async key => {
+        establishCalls++;
+        assert.equal(process.listenerCount('SIGINT'), baselineInt + 1); assert.equal(process.listenerCount('SIGTERM'), baselineTerm + 1);
+        if (establishCalls === 1) process.emit('SIGINT', 'SIGINT'); // Interrupted before the request is sent.
+        establishKeys.push(key);
+        if (establishCalls === 1) { process.emit('SIGTERM', 'SIGTERM'); throw new TypeError('committed response was lost'); }
+        return committed;
+      }, expected, { attempts: 3, retryMs: 0 }),
+      settle: () => settleContainment(async (key, body) => {
+        settleKeys.push(key); settleBodies.push(body); settleCalls++;
+        assert.equal(process.listenerCount('SIGINT'), baselineInt + 1); assert.equal(process.listenerCount('SIGTERM'), baselineTerm + 1);
+        process.emit(settleCalls % 2 ? 'SIGTERM' : 'SIGINT', settleCalls % 2 ? 'SIGTERM' : 'SIGINT');
+        if (settleCalls < 3) {
+          const status = settleCalls === 1 ? 408 : 429, response = { error: 'ambiguous gateway response' };
+          throw Object.assign(new Error(response.error), { confirmedRefusal: isConfirmedCoordinationRefusal(status, response) });
+        }
+        return { epoch: expected.epoch, exclusiveResources: expected.exclusiveResources, containmentQuarantine: null };
+      }, { ...expected, settlementToken: credentials.settlementToken, requestId: 'stable-prelaunch-settlement' }, { attempts: 3, retryMs: 0 }),
+    } }), 1);
+    assert.deepEqual(establishKeys, [credentials.requestId, credentials.requestId]);
+    assert.deepEqual(settleKeys, Array(3).fill('stable-prelaunch-settlement'));
+    assert.equal(settleBodies[0], settleBodies[1]); assert.equal(settleBodies[1], settleBodies[2]);
+    assert.deepEqual(settleBodies[0], { epoch: 9, settlementToken: credentials.settlementToken });
+    await assert.rejects(stat(marker), { code: 'ENOENT' });
+    assert.equal(process.listenerCount('SIGINT'), baselineInt); assert.equal(process.listenerCount('SIGTERM'), baselineTerm);
+  } finally { await rm(cwd, { recursive: true, force: true }); }
+});
+
+test('a prelaunch signal fails closed on persistent establishment ambiguity and cleans up handlers', async () => {
+  const credentials = containmentCredentials(); const expected = { epoch: 6, settlementHash: credentials.settlementHash, exclusiveResources: [], requestId: credentials.requestId };
+  const cwd = await mkdtemp(join(tmpdir(), 'graphyard-prelaunch-ambiguous-')), marker = join(cwd, 'launched');
+  const baselineInt = process.listenerCount('SIGINT'), baselineTerm = process.listenerCount('SIGTERM');
+  let attempts = 0, settlements = 0;
+  const containment = { command: process.execPath, args: ['-e', `require('node:fs').writeFileSync(${JSON.stringify(marker)},'yes')`], signal: () => {}, empty: () => true };
+  try {
+    await assert.rejects(supervise('ignored', [], 6, async () => ({ ...renewal(), lease: { ...renewal().lease, epoch: 6 } }), { containment, detached: false, quarantine: {
+      establish: () => establishContainment(async key => {
+        assert.equal(key, credentials.requestId); attempts++;
+        assert.equal(process.listenerCount('SIGINT'), baselineInt + 1); assert.equal(process.listenerCount('SIGTERM'), baselineTerm + 1);
+        process.emit(attempts % 2 ? 'SIGINT' : 'SIGTERM', attempts % 2 ? 'SIGINT' : 'SIGTERM');
+        throw new TypeError('response unavailable');
+      }, expected, { attempts: 3, retryMs: 0 }),
+      settle: async () => { settlements++; },
+    } }), /could not confirm containment quarantine establishment after 3 attempts/);
+    assert.equal(attempts, 3); assert.equal(settlements, 0); await assert.rejects(stat(marker), { code: 'ENOENT' });
+    assert.equal(process.listenerCount('SIGINT'), baselineInt); assert.equal(process.listenerCount('SIGTERM'), baselineTerm);
+  } finally { await rm(cwd, { recursive: true, force: true }); }
+});
+
+test('foreground establishment refusal removes prelaunch signal handlers without launching', async () => {
+  const baselineInt = process.listenerCount('SIGINT'), baselineTerm = process.listenerCount('SIGTERM');
+  const refusal = Object.assign(new Error('lease expired'), { confirmedRefusal: true });
+  const containment = { command: 'ignored', args: [], signal: () => {}, empty: () => true };
+  await assert.rejects(supervise('ignored', [], 1, async () => renewal(), { containment, detached: false, quarantine: { establish: async () => { throw refusal; }, settle: async () => {} } }), /lease expired/);
+  assert.equal(process.listenerCount('SIGINT'), baselineInt); assert.equal(process.listenerCount('SIGTERM'), baselineTerm);
+});
+
 test('master-only commands ignore an unrelated unavailable worker token file', async () => {
   const cwd = await mkdtemp(join(tmpdir(), 'graphyard-master-lazy-token-'));
   try {
