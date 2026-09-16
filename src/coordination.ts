@@ -3,7 +3,7 @@ import { currentEvidence, type Work } from './model.js';
 export interface IntegrationJob { work_id: string; available_at: string; locked_until: string | null; error: string | null }
 export interface Diagnostic { kind: string; message: string; next: string }
 export function resourceConflicts(work: Work, all: Work[], now: number) {
-  return all.filter(w => w.id !== work.id && w.lease && Date.parse(w.lease.expiresAt) > now)
+  return all.filter(w => w.id !== work.id && (w.containmentQuarantine || w.lease && Date.parse(w.lease.expiresAt) > now))
     .flatMap(w => (work.exclusiveResources ?? []).filter(r => w.exclusiveResources?.includes(r)).map(resource => ({ resource, key: w.key })));
 }
 

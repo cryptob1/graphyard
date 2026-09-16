@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import EmbeddedPostgres from 'embedded-postgres';
 import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
@@ -90,6 +90,36 @@ test('containment quarantine survives lease expiry and blocks overlap until veri
   assert.equal(w.containmentQuarantine, null);
   assert.deepEqual((await store.events(w.id)).find(event => event.kind === 'settle').payload.details, { epoch: 1 }, 'settlement capability is not retained in history');
   w = await engine.execute(other, 'claim', w.id, {}, randomUUID()); assert.equal(w.epoch, 2);
+});
+test('expired quarantines reserve shared resources until settlement or operator recovery', async () => {
+  const resource = `staging:${randomUUID()}`, unrelatedResource = `staging:${randomUUID()}`;
+  const makeReady = async (exclusiveResources: string[]) => {
+    const item = await engine.execute(operator, 'create', null, { ...workInput, exclusiveResources }, randomUUID());
+    return engine.execute(operator, 'ready', item.id, {}, randomUUID());
+  };
+  const owner = await makeReady([resource]);
+  const shared = await makeReady([resource]);
+  const unrelated = await makeReady([unrelatedResource]);
+  let quarantined = await engine.execute(worker, 'claim', owner.id, {}, randomUUID());
+  const settlementToken = 'c'.repeat(64);
+  const settlementHash = createHash('sha256').update(settlementToken).digest('hex');
+  quarantined = await engine.execute(worker, 'quarantine', quarantined.id, { epoch: 1, settlementHash }, randomUUID());
+  await store.pool.query("UPDATE work_items SET document=jsonb_set(document,'{lease,expiresAt}',to_jsonb('2000-01-01T00:00:00Z'::text)) WHERE id=$1", [quarantined.id]);
+  await engine.reconcile();
+  await assert.rejects(engine.execute(other, 'claim', shared.id, {}, randomUUID()), /Exclusive resources held.*staging:/);
+  assert.equal((await engine.execute(other, 'claim', unrelated.id, {}, randomUUID())).epoch, 1);
+  await engine.execute(worker, 'settle', quarantined.id, { epoch: 1, settlementToken }, randomUUID());
+  assert.equal((await engine.execute(other, 'claim', shared.id, {}, randomUUID())).epoch, 1);
+
+  const recoveryResource = `staging:${randomUUID()}`;
+  let recoveryOwner = await makeReady([recoveryResource]);
+  const recoveryPeer = await makeReady([recoveryResource]);
+  recoveryOwner = await engine.execute(worker, 'claim', recoveryOwner.id, {}, randomUUID());
+  recoveryOwner = await engine.execute(worker, 'quarantine', recoveryOwner.id, { epoch: 1, settlementHash }, randomUUID());
+  await store.pool.query("UPDATE work_items SET document=jsonb_set(document,'{lease,expiresAt}',to_jsonb('2000-01-01T00:00:00Z'::text)) WHERE id=$1", [recoveryOwner.id]);
+  await assert.rejects(engine.execute(other, 'claim', recoveryPeer.id, {}, randomUUID()), /Exclusive resources held/);
+  await engine.execute(operator, 'rework', recoveryOwner.id, { reason: 'Operator confirmed the previous worker stopped', previousWorkerStopped: true }, randomUUID());
+  assert.equal((await engine.execute(other, 'claim', recoveryPeer.id, {}, randomUUID())).epoch, 1);
 });
 test('dependencies and explicit blockers refuse claims', async () => {
   const parent = await create(); let child = await create([parent.id]); child = await engine.execute(operator, 'ready', child.id, {}, randomUUID());

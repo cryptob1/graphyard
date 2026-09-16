@@ -37,3 +37,16 @@ test('completed work retains its resource reservation until its last lease expir
   assert.deepEqual(resourceConflicts(a, [a, b], now), [{ resource: 'staging', key: 'B' }]);
   assert.deepEqual(resourceConflicts(a, [a, b], now + 60000), []);
 });
+
+test('quarantined work retains every resource reservation after lease expiry', () => {
+  const candidate = work('A'), quarantined = work('B');
+  candidate.exclusiveResources = ['staging', 'database']; quarantined.exclusiveResources = ['staging', 'database'];
+  quarantined.lease = { owner: 'old-worker', epoch: 3, expiresAt: new Date(now - 60000).toISOString() };
+  quarantined.containmentQuarantine = { owner: 'old-worker', epoch: 3, at: new Date(now - 120000).toISOString(), settlementHash: 'a'.repeat(64) };
+  assert.deepEqual(resourceConflicts(candidate, [candidate, quarantined], now), [
+    { resource: 'staging', key: 'B' },
+    { resource: 'database', key: 'B' },
+  ]);
+  candidate.exclusiveResources = ['unrelated'];
+  assert.deepEqual(resourceConflicts(candidate, [candidate, quarantined], now), []);
+});
