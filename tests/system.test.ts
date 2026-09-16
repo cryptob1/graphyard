@@ -548,6 +548,8 @@ test('scoped operator-agent credentials are deny-by-default, auditable, rotation
   const firstToken = `operator-first-${'x'.repeat(32)}`, secondToken = `operator-second-${'y'.repeat(32)}`;
   const setup = { id: `planner-${randomUUID()}`, displayName: 'Planning agent', capabilities: ['intent:create', 'intent:ready', 'policy:requirements'], scope: { repositories: ['owner/project'], workItems: ['*'] }, token: firstToken, reason: 'Human enabled bounded planning automation' };
   const setupKey = randomUUID();
+  const status: any = await (await fetch(`${url}/api/status`, { headers: adminHeaders })).json();
+  assert.equal(status.repository, 'owner/project', 'the explicitly bound repository wins over ambient CI metadata');
   const configured: any = await (await post('operator-agents', setup, 'o'.repeat(32), setupKey)).json();
   assert.equal(configured.role, 'operator-agent'); assert.deepEqual(configured.fingerprints, [createHash('sha256').update(firstToken).digest('hex').slice(0, 16)]); assert.equal(JSON.stringify(configured).includes(firstToken), false);
   assert.deepEqual(await (await post('operator-agents', setup, 'o'.repeat(32), setupKey)).json(), configured, 'setup retry is idempotent');

@@ -22,7 +22,11 @@ async function body(req: IncomingMessage, limit = 1_000_000) {
 export function server(engine: Engine, credentials: Credential[], github: GitHub | null = null) {
   const principals = credentials.map(({ token, ...actor }) => ({ actor, hash: createHash('sha256').update(token).digest() }));
   const validation = new Validation(engine, principals.map(p => p.actor), github?.config.repository ?? process.env.GITHUB_REPOSITORY ?? '');
-  const repository = github?.config.repository ?? process.env.GITHUB_REPOSITORY ?? engine.repository;
+  // The engine is constructed with the repository that this control plane is
+  // authorized to coordinate.  GITHUB_REPOSITORY is merely a process default
+  // (and is automatically set to the CI checkout), so it must not override an
+  // explicit engine binding or scope validation becomes environment-dependent.
+  const repository = github?.config.repository ?? engine.repository ?? process.env.GITHUB_REPOSITORY ?? '';
   const operatorAgents = new OperatorAgents(engine.store, repository);
   return createServer(async (req, res) => {
     res.setHeader('X-Content-Type-Options', 'nosniff');
