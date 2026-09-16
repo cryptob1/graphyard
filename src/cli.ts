@@ -83,6 +83,11 @@ Environment: GRAPHYARD_URL, GRAPHYARD_TOKEN (individual role-scoped credential)
                                 Release delivered work's stopped-worker quarantine (operator)
   rereview GY-N [EPOCH]         Request a fresh Codex review (operator or current worker)
   reviewpolicy GY-N github|codex POLICY_REVISION REASON  Revise reviewer source (operator)
+  operator-agent list          Inspect configured identities, scopes and redacted fingerprints (admin)
+  operator-agent setup FILE --token-stdin  Create a scoped identity; FILE contains no secret (admin)
+  operator-agent configure ID FILE          Revise capabilities/scope with expectedRevision (admin)
+  operator-agent rotate ID SECONDS REASON --token-stdin  Rotate with a bounded overlap (admin)
+  operator-agent revoke ID REASON            Revoke immediately and fail closed (admin)
   claim GY-N                   Acquire a two-minute lease; returns epoch
   handoff GY-N                 Show assigned workspace and supervisor command
   heartbeat GY-N EPOCH          Extend current lease
@@ -182,6 +187,30 @@ Never share an operator or producer credential with an implementation agent.`); 
     if (id === 'show-candidate' && args[0]) return print(await api(`validation/candidate/${encodeURIComponent(args[0])}`));
     if (!['define','build','candidate','request','dispatch','ack','heartbeat','result','cancel','settle','retry'].includes(id) || !args[0]) throw new Error('Use validation ACTION file.json');
     return print(await api(`validation/${id}`, JSON.parse(await readFile(args[0], 'utf8'))));
+  }
+  if (command === 'operator-agent') {
+    if (!id || id === 'list') return print(await api('operator-agents'));
+    if (id === 'setup') {
+      if (!args[0] || args[1] !== '--token-stdin') throw new Error('Use operator-agent setup FILE --token-stdin');
+      let secret = ''; for await (const chunk of process.stdin) { secret += chunk; if (secret.length > 10000) throw new Error('Token input is too large'); }
+      secret = secret.trim(); if (!secret) throw new Error('Operator-agent credential is required; setup made no changes');
+      return print(await api('operator-agents', { ...JSON.parse(await readFile(args[0], 'utf8')), token: secret }));
+    }
+    if (id === 'configure') {
+      if (!args[0] || !args[1]) throw new Error('Use operator-agent configure ID FILE');
+      return print(await api(`operator-agents/${encodeURIComponent(args[0])}/configure`, JSON.parse(await readFile(args[1], 'utf8'))));
+    }
+    if (id === 'rotate') {
+      const marker = args.indexOf('--token-stdin'); if (!args[0] || marker < 0 || marker < 2) throw new Error('Use operator-agent rotate ID SECONDS REASON --token-stdin');
+      let secret = ''; for await (const chunk of process.stdin) { secret += chunk; if (secret.length > 10000) throw new Error('Token input is too large'); }
+      secret = secret.trim(); if (!secret) throw new Error('New operator-agent credential is required; rotation made no changes');
+      return print(await api(`operator-agents/${encodeURIComponent(args[0])}/rotate`, { token: secret, transitionSeconds: Number(args[1]), reason: args.slice(2, marker).join(' ') }));
+    }
+    if (id === 'revoke') {
+      if (!args[0]) throw new Error('Use operator-agent revoke ID REASON');
+      return print(await api(`operator-agents/${encodeURIComponent(args[0])}/revoke`, { reason: args.slice(1).join(' ') }));
+    }
+    throw new Error('Use operator-agent list, setup, configure, rotate, or revoke');
   }
   if (command === 'init') {
     const root = execFileSync('git', ['rev-parse', '--show-toplevel'], { encoding: 'utf8' }).trim();

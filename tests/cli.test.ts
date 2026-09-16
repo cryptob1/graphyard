@@ -308,7 +308,8 @@ test('watch refuses the wrong workspace and uses a fresh heartbeat key despite c
     else res.end(JSON.stringify([{ id: 'task', key: 'GY-1', workspaces: [{ epoch: 1, host: hostname(), path: registeredPath }] }]));
   });
   await new Promise<void>(r => http.listen(0, '127.0.0.1', r));
-  const env = { ...process.env, GRAPHYARD_HOST_ID: hostname(), GRAPHYARD_TOKEN: 'test-only', GRAPHYARD_REQUEST_ID: 'replayed-command', GRAPHYARD_URL: `http://127.0.0.1:${(http.address() as any).port}` };
+  const env: NodeJS.ProcessEnv = { ...process.env, GRAPHYARD_HOST_ID: hostname(), GRAPHYARD_TOKEN: 'test-only', GRAPHYARD_REQUEST_ID: 'replayed-command', GRAPHYARD_URL: `http://127.0.0.1:${(http.address() as any).port}` };
+  delete env.HERDR_ENV; delete env.GRAPHYARD_HERDR_AGENT_KIND;
   try {
     await assert.rejects(exec(process.execPath, [launcher, 'watch', 'GY-1', '1', '--', process.execPath, '-e', 'process.exit(0)'], { cwd, env }), /assigned workspace/);
     assert.equal(keys.length, 0); registeredPath = cwd;

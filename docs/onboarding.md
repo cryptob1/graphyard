@@ -23,6 +23,8 @@ You keep talking directly to the master. The master reads work and gate state fr
 
 The initial setup works with one worker. Add more workers or machines only after the first PR has completed the full loop.
 
+Do not create an operator-agent credential during this bootstrap. After the repository is connected and its gates have completed the protected loop, a human administrator may optionally configure [scoped operator automation](operator-automation.md). That mode keeps Operator, Master, Worker, and Reviewer/proof-producer as four distinct AI sessions; it does not replace human goals, approvals, exceptions, or oversight.
+
 For the recommended security boundary, run the master and its merge-capable GitHub CLI login on a dedicated coordination machine or OS identity. Run implementation agents under separate OS identities or on worker machines, using GitHub identities that can push feature branches and open PRs but cannot merge the protected base branch. A Graphyard worker token prevents control-plane actions; it cannot hide files or GitHub credentials from another process running as the same OS user.
 
 The short version is:

@@ -2,7 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { Store, save, wakeJob } from './store.js';
 import { workspacePath, pathsOverlap, validBranch } from './workspace.js';
-import { activeLease, admin, MergeExecutionInProgress, requireCurrent, createSchema, criterionSchema, currentEvidence, resourcesSchema, demand, evaluate, proofSchema, type Principal, type Work, type Observation, type ReviewRequest } from './model.js';
+import { activeLease, admin, operatorCapability, MergeExecutionInProgress, requireCurrent, createSchema, criterionSchema, currentEvidence, resourcesSchema, demand, evaluate, proofSchema, type Principal, type Work, type Observation, type ReviewRequest, type OperatorCapability } from './model.js';
 import { resourceConflicts } from './coordination.js';
 
 const epoch = z.number().int().positive();
@@ -11,10 +11,10 @@ const sha = z.string().regex(/^[a-f0-9]{40}$/);
 export const launchFenceMs = 120_000;
 const commands = {
   create: createSchema,
-  ready: z.object({}).strict(),
+  ready: z.object({ expectedRevision: z.number().int().positive().optional() }).strict(),
   requirements: z.object({ expectedPolicyRevision: z.number().int().positive(), reason: z.string().trim().min(1).max(2000), criteria: z.array(criterionSchema).min(1).max(50), dependencies: z.array(z.string().uuid()).max(50), plannedFiles: createSchema.shape.plannedFiles, exclusiveResources: resourcesSchema }).strict(),
   reviewpolicy: z.object({ provider: z.enum(['github', 'codex']), expectedPolicyRevision: z.number().int().positive(), reason: z.string().trim().min(1).max(2000) }).strict(),
-  unblock: z.object({ reason: z.string().min(1).max(2000) }).strict(),
+  unblock: z.object({ reason: z.string().min(1).max(2000), expectedRevision: z.number().int().positive().optional() }).strict(),
   rework: z.object({ reason: z.string().min(1).max(2000), previousWorkerStopped: z.literal(true) }).strict(),
   recover: z.object({ reason: z.string().min(1).max(2000), previousWorkerStopped: z.literal(true) }).strict(),
   claim: z.object({}).strict(),
@@ -41,7 +41,7 @@ function preserveAssignment(work: Work) {
     work.lastAssignment = { owner: work.lease.owner, epoch: work.lease.epoch };
 }
 export class Engine {
-  constructor(public store: Store, public ciAppIds: number[] = [15368], public leaseSeconds = 120) {}
+  constructor(public store: Store, public ciAppIds: number[] = [15368], public leaseSeconds = 120, public repository = process.env.GITHUB_REPOSITORY ?? '') {}
   async execute(actor: Principal, command: Command, id: string | null, input: unknown, key: string) {
     demand(Object.hasOwn(commands, command), 'Unknown command', 404);
     demand(key && key.length <= 200, 'An Idempotency-Key is required', 400);
@@ -52,8 +52,9 @@ export class Engine {
       if (receipt) { demand(receipt.fingerprint === fingerprint, 'Idempotency key reused with different input'); return receipt.result as Work; }
       const all: Work[] = (await db.query('SELECT document FROM work_items ORDER BY number')).rows.map(r => r.document);
       let work = all.find(w => w.id === id || w.key === id);
+      const before = work ? structuredClone(work) : null;
       if (command === 'create') {
-        admin(actor);
+        if (actor.role === 'operator-agent') { operatorCapability(actor, 'intent:create', undefined, this.repository); demand(actor.scope?.workItems.includes('*'), 'Creating work requires wildcard work scope', 403); } else admin(actor);
         demand(data.dependencies.every((dep: string) => all.some(w => w.id === dep)), 'Unknown dependency');
         demand(new Set(data.criteria.map((ac: { id: string }) => ac.id)).size === data.criteria.length, 'Criterion IDs must be unique');
         const scenarioRequirements: Work['scenarioRequirements'] = [];
@@ -71,6 +72,12 @@ export class Engine {
         all.push(work!);
       }
       demand(work, 'Work item not found', 404);
+      const capabilities: Partial<Record<Command, OperatorCapability>> = { create: 'intent:create', ready: 'intent:ready', unblock: 'intent:unblock', requirements: 'policy:requirements', reviewpolicy: 'policy:review-provider' };
+      if (actor.role === 'operator-agent') {
+        const capability = capabilities[command]; demand(capability, 'This operation is not available to operator agents', 403);
+        operatorCapability(actor, capability, work, this.repository);
+        if (command === 'ready' || command === 'unblock') demand(data.expectedRevision === work.revision, 'Task revision changed; reload before mutating');
+      }
       const deliveredContainmentCleanup = work.stage === 'done' && (command === 'settle' || command === 'recover');
       preserveAssignment(work);
       if (!['recover', 'settle'].includes(command) && work.mergeExecution && Date.parse(work.mergeExecution.expiresAt) <= now.getTime()) work.mergeExecution = null;
@@ -82,7 +89,7 @@ export class Engine {
         work.reviewRequest = null; work.observation = null; work.mergeAuthorization = null;
       }
       if (command === 'reviewpolicy') {
-        admin(actor);
+        if (actor.role !== 'operator-agent') admin(actor);
         demand(!work.observation?.merged, 'Merged work requires a follow-up task');
         demand(work.policy.review, 'Task must already require review');
         demand(work.policyRevision === data.expectedPolicyRevision, 'Policy revision changed; reload before revising');
@@ -93,12 +100,18 @@ export class Engine {
         work.observation = null; work.mergeAuthorization = null; work.reviewRequest = null;
       }
       if (command === 'requirements') {
-        admin(actor);
+        if (actor.role !== 'operator-agent') admin(actor);
         demand(!work.observation?.merged, 'Merged work requires a follow-up task');
         demand(!work.containmentQuarantine, `Task is quarantined by unverified containment from epoch ${work.containmentQuarantine?.epoch}; requirements remain immutable until settlement or stopped-worker recovery`);
         demand(!work.lease || Date.parse(work.lease.expiresAt) <= now.getTime(), 'Stop and release the active worker before revising requirements');
         demand(data.expectedPolicyRevision === work.policyRevision, 'Policy revision changed; reload before revising');
         demand(new Set(data.criteria.map((ac: { id: string }) => ac.id)).size === data.criteria.length, 'Criterion IDs must be unique');
+        if (actor.role === 'operator-agent') {
+          demand(work.criteria.every(previous => data.criteria.some((next: typeof previous) => next.id === previous.id && next.text === previous.text && JSON.stringify(next.proofs) === JSON.stringify(previous.proofs))), 'Operator agents may add requirements but cannot weaken or rewrite existing criteria');
+          demand(work.dependencies.every(dependency => data.dependencies.includes(dependency)), 'Operator agents cannot remove dependencies');
+          demand(work.plannedFiles.every(path => data.plannedFiles.includes(path)), 'Operator agents cannot remove planned-file containment');
+          demand((work.exclusiveResources ?? []).every(resource => data.exclusiveResources.includes(resource)), 'Operator agents cannot remove exclusive-resource containment');
+        }
         demand(data.criteria.every((ac: { id: string }) => !work!.retiredCriterionIds?.includes(ac.id)), 'Retired criterion IDs cannot be reused');
         demand(new Set(data.dependencies).size === data.dependencies.length && data.dependencies.every((dep: string) => all.some(w => w.id === dep)), 'Unknown or duplicate dependency');
         const reachesWork = (id: string, visited = new Set<string>()): boolean => {
@@ -125,8 +138,8 @@ export class Engine {
         // A submitted implementation must be explicitly reconsidered for changed intent.
         if (work.submission) work.reworkRequested = true;
       }
-      if (command === 'ready') { admin(actor); work.ready = true; }
-      if (command === 'unblock') { admin(actor); work.blocker = null; }
+      if (command === 'ready') { if (actor.role !== 'operator-agent') admin(actor); work.ready = true; }
+      if (command === 'unblock') { if (actor.role !== 'operator-agent') admin(actor); work.blocker = null; }
       if (command === 'rework') {
         admin(actor);
         demand(!work.observation?.merged, 'Merged work requires a follow-up task');
@@ -200,7 +213,7 @@ export class Engine {
       // Delivery is an immutable snapshot. A late containment cleanup may append
       // its audit/revision metadata, but stale inputs must not re-evaluate it.
       if (!deliveredContainmentCleanup) this.evaluate(work, all, now);
-      await save(db, work, actor.id, command, now, command === 'settle' ? { epoch: data.epoch } : data);
+      await save(db, work, actor.id, command, now, command === 'settle' ? { epoch: data.epoch } : actor.role === 'operator-agent' ? { before, intent: data, reason: data.reason ?? null } : data);
       if (work.submission && !['heartbeat', 'release', 'claim', 'workspace'].includes(command)) await wakeJob(db, work.id);
       await db.query('INSERT INTO receipts(actor,key,fingerprint,result) VALUES($1,$2,$3,$4)', [actor.id, key, fingerprint, JSON.stringify(work)]);
       return work;

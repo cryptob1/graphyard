@@ -32,7 +32,7 @@ before(async () => {
   const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438);
   database = new EmbeddedPostgres({ databaseDir: await mkdtemp(join(tmpdir(), 'graphyard-test-')), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('graphyard_test');
-  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/graphyard_test`); await store.init(); engine = new Engine(store);
+  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/graphyard_test`); await store.init(); engine = new Engine(store, [15368], 120, 'owner/project');
   http = server(engine, [{ ...operator, token: 'o'.repeat(32) }, { ...worker, token: 'w'.repeat(32) }, { ...coordinator, token: 'm'.repeat(32) }, ...probeWorkers]);
   await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));
   url = `http://127.0.0.1:${(http.address() as any).port}`;
@@ -541,6 +541,32 @@ test('HTTP API authenticates, validates, and preserves command idempotency', asy
   assert.equal(mergeResponse.status, 409, 'coordinator merge route exists and refuses an unauthorized candidate');
   assert.equal((await fetch(`${url}/api/work`, { method: 'POST', headers, body: '{' })).status, 400);
   assert.equal((await fetch(`${url}/api/events?work=invalid`, { headers })).status, 400);
+});
+test('scoped operator-agent credentials are deny-by-default, auditable, rotation-safe, and cannot weaken policy', async () => {
+  const adminHeaders = { Authorization: `Bearer ${'o'.repeat(32)}`, 'Content-Type': 'application/json' };
+  const post = (path: string, value: unknown, token = 'o'.repeat(32), key = randomUUID()) => fetch(`${url}/api/${path}`, { method: 'POST', headers: { ...adminHeaders, Authorization: `Bearer ${token}`, 'Idempotency-Key': key }, body: JSON.stringify(value) });
+  const firstToken = `operator-first-${'x'.repeat(32)}`, secondToken = `operator-second-${'y'.repeat(32)}`;
+  const setup = { id: `planner-${randomUUID()}`, displayName: 'Planning agent', capabilities: ['intent:create', 'intent:ready', 'policy:requirements'], scope: { repositories: ['owner/project'], workItems: ['*'] }, token: firstToken, reason: 'Human enabled bounded planning automation' };
+  const setupKey = randomUUID();
+  const configured: any = await (await post('operator-agents', setup, 'o'.repeat(32), setupKey)).json();
+  assert.equal(configured.role, 'operator-agent'); assert.deepEqual(configured.fingerprints, [createHash('sha256').update(firstToken).digest('hex').slice(0, 16)]); assert.equal(JSON.stringify(configured).includes(firstToken), false);
+  assert.deepEqual(await (await post('operator-agents', setup, 'o'.repeat(32), setupKey)).json(), configured, 'setup retry is idempotent');
+  assert.equal((await fetch(`${url}/api/operator-agents`, { headers: { Authorization: `Bearer ${firstToken}` } })).status, 403, 'agent cannot administer identities');
+  const createdResponse = await post('work', workInput, firstToken); const created: any = await createdResponse.json(); assert.equal(createdResponse.status, 200, JSON.stringify(created));
+  assert.equal((await post(`work/${created.id}/ready`, {}, firstToken)).status, 409, 'operator-agent mutations require a current revision');
+  const releasedResponse = await post(`work/${created.id}/ready`, { expectedRevision: created.revision }, firstToken); assert.equal(releasedResponse.status, 200);
+  assert.equal((await post(`work/${created.id}/claim`, {}, firstToken)).status, 403);
+  assert.equal((await post(`work/${created.id}/evidence`, proof(), firstToken)).status, 403);
+  assert.equal((await post(`work/${created.id}/merge-acquire`, {}, firstToken)).status, 403);
+  assert.equal((await post(`validation/request`, {}, firstToken)).status, 403);
+  const weakened = { expectedPolicyRevision: created.policyRevision, reason: 'Remove the requirement', criteria: [{ id: 'AC-2', text: 'Less', proofs: ['unit:less'] }], dependencies: [], plannedFiles: [], exclusiveResources: [] };
+  assert.equal((await post(`work/${created.id}/requirements`, weakened, firstToken)).status, 409);
+  const unchanged = (await store.list()).find(w => w.id === created.id)!; assert.deepEqual(unchanged.criteria, created.criteria); assert.equal(unchanged.policyRevision, created.policyRevision);
+  const rotated: any = await (await post(`operator-agents/${setup.id}/rotate`, { token: secondToken, transitionSeconds: 0, reason: 'Scheduled rotation' })).json();
+  assert.equal(rotated.lastMutation.kind, 'rotate'); assert.equal((await fetch(`${url}/api/status`, { headers: { Authorization: `Bearer ${firstToken}` } })).status, 401); assert.equal((await fetch(`${url}/api/status`, { headers: { Authorization: `Bearer ${secondToken}` } })).status, 200);
+  assert.equal((await post(`operator-agents/${setup.id}/revoke`, { reason: 'Automation disabled by human' })).status, 200);
+  assert.equal((await fetch(`${url}/api/status`, { headers: { Authorization: `Bearer ${secondToken}` } })).status, 401);
+  const history = await store.events(); assert.ok(history.some(event => event.kind === 'operator-agent.setup' && event.actor === operator.id)); assert.ok(history.some(event => event.kind === 'operator-agent.revoke'));
 });
 test('E2E definitions are versioned, immutable, operator-owned, and pinned by work', async () => {
   const definition = { id: 'booking-sms', title: 'One booking SMS', purpose: 'Prevent duplicate confirmations', steps: ['Confirm booking twice'], expected: ['One SMS'], environment: 'staging', runner: 'Playwright', testPath: 'tests/booking.spec.ts', expectedRevision: 0 };

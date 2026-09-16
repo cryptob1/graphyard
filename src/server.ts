@@ -10,6 +10,7 @@ import { Refusal, demand, type Principal } from './model.js';
 import { githubFromEnv, processJob, type GitHub } from './github.js';
 import { Validation } from './validation.js';
 import { defineScenario, scenarios } from './scenarios.js';
+import { OperatorAgents } from './operator-agent.js';
 
 export const principalSchema = z.array(z.object({ id: z.string().min(1), role: z.enum(['admin', 'coordinator', 'worker', 'producer', 'reader']), token: z.string().min(32), proofs: z.array(z.string()).optional(), displayName: z.string().trim().min(1).max(100).regex(/^[^\u0000-\u001f\u007f]+$/).optional(), runtime: z.string().trim().min(1).max(80).regex(/^[^\u0000-\u001f\u007f]+$/).optional() }).strict()).min(1);
 export type Credential = Principal & { token: string };
@@ -21,6 +22,8 @@ async function body(req: IncomingMessage, limit = 1_000_000) {
 export function server(engine: Engine, credentials: Credential[], github: GitHub | null = null) {
   const principals = credentials.map(({ token, ...actor }) => ({ actor, hash: createHash('sha256').update(token).digest() }));
   const validation = new Validation(engine, principals.map(p => p.actor), github?.config.repository ?? process.env.GITHUB_REPOSITORY ?? '');
+  const repository = github?.config.repository ?? process.env.GITHUB_REPOSITORY ?? engine.repository;
+  const operatorAgents = new OperatorAgents(engine.store, repository);
   return createServer(async (req, res) => {
     res.setHeader('X-Content-Type-Options', 'nosniff');
     res.setHeader('Referrer-Policy', 'no-referrer');
@@ -50,8 +53,20 @@ export function server(engine: Engine, credentials: Credential[], github: GitHub
       if (url.pathname.startsWith('/api/')) {
         const token = String(req.headers.authorization ?? '').replace(/^Bearer /, '');
         const hash = createHash('sha256').update(token).digest();
-        const actor = principals.find(p => timingSafeEqual(p.hash, hash))?.actor;
+        const actor = principals.find(p => timingSafeEqual(p.hash, hash))?.actor ?? await operatorAgents.authenticate(token);
         demand(actor, 'A valid Graphyard bearer token is required', 401);
+        if (url.pathname === '/api/operator-agents' && req.method === 'GET') return send(200, await operatorAgents.list(actor));
+        if (url.pathname === '/api/operator-agents' && req.method === 'POST') return send(200, await operatorAgents.setup(actor, JSON.parse((await body(req)).toString()), String(req.headers['idempotency-key'] ?? '')));
+        const operatorRoute = url.pathname.match(/^\/api\/operator-agents\/([^/]+)\/(configure|rotate|revoke)$/);
+        if (operatorRoute && req.method === 'POST') {
+          const data = JSON.parse((await body(req)).toString()), key = String(req.headers['idempotency-key'] ?? '');
+          return send(200, operatorRoute[2] === 'configure' ? await operatorAgents.configure(actor, operatorRoute[1], data, key)
+            : operatorRoute[2] === 'rotate' ? await operatorAgents.rotate(actor, operatorRoute[1], data, key) : await operatorAgents.revoke(actor, operatorRoute[1], data, key));
+        }
+        const operatorVisible = (items: any[]) => actor.role !== 'operator-agent' ? items : items.filter(item => actor.scope?.workItems.includes('*') || actor.scope?.workItems.includes(item.id) || actor.scope?.workItems.includes(item.key));
+        if (actor.role === 'operator-agent') demand(
+          url.pathname === '/api/status' || url.pathname === '/api/work-snapshot' || url.pathname === '/api/work' || url.pathname === '/api/events' || /^\/api\/work(?:\/[^/]+\/[a-z]+)?$/.test(url.pathname),
+          'Route is not available to operator agents', 403);
         if (url.pathname === '/api/validation/artifacts' && req.method === 'POST') return send(200, await validation.uploadArtifact(actor, JSON.parse((await body(req, 11_200_000)).toString()), String(req.headers['idempotency-key'] ?? '')));
         const artifactRead = url.pathname.match(/^\/api\/validation\/artifacts\/([^/]+)\/([^/]+)$/);
         if (artifactRead && req.method === 'GET') {
@@ -81,18 +96,19 @@ export function server(engine: Engine, credentials: Credential[], github: GitHub
           if (req.method === 'POST') return send(200, await defineScenario(engine.store, actor, JSON.parse((await body(req)).toString()), String(req.headers['idempotency-key'] ?? '')));
         }
         if (req.method === 'GET' && url.pathname === '/api/status') {
-          const jobs = (await engine.store.pool.query('SELECT work_id,available_at,locked_until,attempts,error FROM jobs WHERE error IS NOT NULL ORDER BY available_at LIMIT 50')).rows;
+          const jobs = actor.role === 'operator-agent' ? [] : (await engine.store.pool.query('SELECT work_id,available_at,locked_until,attempts,error FROM jobs WHERE error IS NOT NULL ORDER BY available_at LIMIT 50')).rows;
           const githubRepository = github ? await github.reviewRepository() : null;
           const githubPermissions = github ? await github.reviewPermissions() : {};
           const codexAvailable = !!githubRepository && githubPermissions.pull_requests === 'write' && ['read', 'write'].includes(githubPermissions.issues) && githubPermissions.checks === 'write';
           const observedAt = (await engine.store.pool.query('SELECT clock_timestamp() AS now')).rows[0].now as Date;
-          return send(200, { actor, repository: github?.config.repository ?? process.env.GITHUB_REPOSITORY ?? null, baseBranch: github?.config.base ?? process.env.GITHUB_BASE_BRANCH ?? 'main', github: !!github, check: 'Graphyard / merge', reviewProviders: codexAvailable ? ['github', 'codex'] : ['github'], githubPermissions, githubRepository, githubAppId: github?.config.appId ?? null, githubInstallationId: github?.config.installationId ?? null, jobs, now: observedAt.toISOString() });
+          return send(200, { actor, repository: repository || null, baseBranch: github?.config.base ?? process.env.GITHUB_BASE_BRANCH ?? 'main', github: !!github, check: 'Graphyard / merge', reviewProviders: codexAvailable ? ['github', 'codex'] : ['github'], githubPermissions, githubRepository, githubAppId: github?.config.appId ?? null, githubInstallationId: github?.config.installationId ?? null, jobs, now: observedAt.toISOString() });
         }
-        if (req.method === 'GET' && url.pathname === '/api/work-snapshot') return send(200, await engine.store.workSnapshot());
-        if (req.method === 'GET' && url.pathname === '/api/work') return send(200, await engine.store.list());
+        if (req.method === 'GET' && url.pathname === '/api/work-snapshot') { const snapshot = await engine.store.workSnapshot(); const visibleWork = operatorVisible(snapshot.work); return send(200, { ...snapshot, work: visibleWork, jobs: actor.role === 'operator-agent' ? snapshot.jobs.filter(job => visibleWork.some(work => work.id === job.work_id)) : snapshot.jobs }); }
+        if (req.method === 'GET' && url.pathname === '/api/work') return send(200, operatorVisible(await engine.store.list()));
         if (req.method === 'GET' && url.pathname === '/api/events') {
           const id = url.searchParams.get('work') ?? undefined;
           if (id) z.string().uuid().parse(id);
+          if (actor.role === 'operator-agent') { demand(id, 'Operator-agent history reads require a scoped work item', 403); const item = (await engine.store.list()).find(w => w.id === id); demand(item && operatorVisible([item]).length, 'Work item is outside this operator-agent scope', 403); }
           return send(200, await engine.store.events(id));
         }
         const mergeRoute = url.pathname.match(/^\/api\/work\/([^/]+)\/merge-(acquire|cancel|verify)$/);

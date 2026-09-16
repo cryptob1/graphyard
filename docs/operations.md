@@ -40,6 +40,8 @@ An observed merge with unsatisfied gates creates a permanent violation. Do not b
 
 ## Credentials
 
+Scoped post-bootstrap operator automation uses the transactional credential registry and secret-safe CLI described in [Scoped operator-agent automation](operator-automation.md). It must never use an entry from `GRAPHYARD_PRINCIPALS` with the `admin` role.
+
 Add or rotate principals in `GRAPHYARD_PRINCIPALS`, then redeploy. Use a unique ID for each coordinator and worker identity and a unique secret for every principal. Rotation invalidates the old credential on restarted replicas; coordinate rolling replicas so old credentials do not remain accepted indefinitely. Revoke GitHub App keys separately from worker credentials. A coordinator is read-only at the Graphyard API boundary; its local GitHub CLI access separately controls whether it can invoke the guarded routine-merge flow.
 
 The UI keeps its token in session storage. Sign out on shared machines. Producer credentials should be held by trusted reporters, never by arbitrary PR code. Logs intentionally omit tokens, but operator-provided blocker text and evidence URLs can still contain sensitive data; avoid submitting secrets as engineering metadata.
