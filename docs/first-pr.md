@@ -19,6 +19,8 @@ Graphyard's own repository uses a protected acceptance workflow to prove its HTT
    node scripts/configure-integrations.mjs --plan
    node scripts/configure-integrations.mjs --apply
    npx @railway/cli config plan
+   npx @railway/cli config apply
+   npx @railway/cli up --service graphyard --detach
    ```
 
 4. Protect `main` with `node scripts/protect-github.mjs --plan`, review the output, then apply it.
