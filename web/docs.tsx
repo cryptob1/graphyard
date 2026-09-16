@@ -6,6 +6,7 @@ const pages = [
   ['deployment', 'Deploy Graphyard'], ['github', 'GitHub enforcement'], ['herdr', 'Herdr integration'], ['master-agent', 'Master-agent setup'],
   ['architecture', 'Architecture reference'], ['protocol', 'Agent protocol & API'],
   ['operations', 'Operations & recovery'], ['development', 'Development & dogfooding'],
+  ['operator-automation', 'Operator automation'],
   ['coordination', 'Coordination & recovery drills'],
   ['test-cases', 'E2E test cases'], ['validation', 'Validation runner protocol'], ['runner-setup', 'Runner preparation & artifacts'],
   ['first-pr', 'Graphyard repository bootstrap'],

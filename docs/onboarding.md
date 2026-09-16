@@ -12,6 +12,12 @@ flowchart LR
   R[Reviewer and trusted runner] --> G
 ```
 
+You keep talking directly to the master. The master reads work and gate state from Graphyard, dispatches ready items to supervised workers, notices stalls, and performs routine exact-candidate merges when every configured gate passes. Workers write code in Graphyard-assigned worktrees. GitHub owns code review and CI facts; trusted runners produce acceptance evidence.
+
+The initial setup works with one worker. Add more workers or machines only after the first PR has completed the full loop.
+
+Do not create an operator-agent credential during this bootstrap. After the repository is connected and its gates have completed the protected loop, a human administrator may optionally configure [scoped operator automation](operator-automation.md). That mode keeps Operator, Master, Worker, and Reviewer/proof-producer as four distinct AI sessions; it does not replace human goals, approvals, exceptions, or oversight.
+
 ## Before you start
 
 You need Node 24, Git, Docker, Herdr 0.7.1+, a Graphyard checkout, a GitHub repository, and a Railway account or another Docker host. Agent providers such as Codex or Claude must already be authenticated on the machine that runs them. The coordinator also needs GitHub CLI authenticated as an identity allowed to merge the protected base branch.
