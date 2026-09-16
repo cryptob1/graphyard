@@ -27,6 +27,10 @@ export function server(engine: Engine, credentials: Credential[], github: GitHub
   // (and is automatically set to the CI checkout), so it must not override an
   // explicit engine binding or scope validation becomes environment-dependent.
   const repository = engine.repository || github?.config.repository || process.env.GITHUB_REPOSITORY || '';
+  // Keep mutation authorization on the same canonical repository binding used
+  // by authentication and operator-agent administration. Some embedders pass
+  // the repository only through their GitHub adapter.
+  engine.repository = repository;
   const operatorAgents = new OperatorAgents(engine.store, repository, credentials.map(credential => ({ id: credential.id, tokenHash: createHash('sha256').update(credential.token).digest('hex') })));
   engine.operatorAuthorizer = operatorAgents.revalidate.bind(operatorAgents);
   return createServer(async (req, res) => {

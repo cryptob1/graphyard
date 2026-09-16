@@ -555,6 +555,9 @@ test('scoped operator-agent credentials are deny-by-default, auditable, rotation
   assert.equal((await post('operator-agents', { ...setup, id: `collision-${randomUUID()}`, token: 'w'.repeat(32) }, 'o'.repeat(32))).status, 409, 'dynamic credential cannot inherit a configured principal role');
   const configured: any = await (await post('operator-agents', setup, 'o'.repeat(32), setupKey)).json();
   assert.equal(configured.role, 'operator-agent'); assert.deepEqual(configured.fingerprints, [createHash('sha256').update(firstToken).digest('hex').slice(0, 16)]); assert.equal(JSON.stringify(configured).includes(firstToken), false);
+  const inferredEngine = new Engine(store, [15368], 120, '');
+  server(inferredEngine, [{ ...operator, token: 'o'.repeat(32) }], { config: { repository: 'owner/project' } } as GitHub);
+  assert.equal(inferredEngine.repository, 'owner/project', 'the GitHub-inferred repository also binds engine mutation authorization');
   const persistedCollision = new OperatorAgents(store, 'owner/project', [{ id: setup.id, tokenHash: createHash('sha256').update('different-static-token').digest('hex') }]);
   await assert.rejects(persistedCollision.authenticate(firstToken), /collides with a configured principal/, 'persisted identities are rechecked against deployment principals');
   await assert.rejects(new OperatorAgents(store, 'owner/project').assertConfiguredPrincipalSafe({ id: 'static-new', tokenHash: createHash('sha256').update(firstToken).digest('hex') }), /collides with a persisted operator agent/, 'persisted tokens cannot acquire a newly configured role');
@@ -569,8 +572,14 @@ test('scoped operator-agent credentials are deny-by-default, auditable, rotation
   assert.equal((await post(`work/${created.id}/ready`, { reason: 'Release using stale state' }, firstToken)).status, 409, 'operator-agent mutations require a current revision');
   const releasedResponse = await post(`work/${created.id}/ready`, { expectedRevision: created.revision, reason: 'Requirements are ready for implementation' }, firstToken); assert.equal(releasedResponse.status, 200);
   const released: any = await releasedResponse.json();
+  await store.pool.query(`UPDATE work_items SET document=jsonb_set(document,'{blocker}', '"Waiting for dependency"'::jsonb) WHERE id=$1`, [created.id]);
+  assert.equal((await post(`work/${created.id}/unblock`, { expectedRevision: released.revision, reason: '   ' }, firstToken)).status, 400, 'operator-agent unblock rejects a blank audit reason');
+  assert.equal((await store.list()).find(w => w.id === created.id)?.blocker, 'Waiting for dependency', 'a rejected blank reason does not mutate the blocker');
   assert.equal((await post(`work/${created.id}/ready`, { expectedRevision: released.revision, reason: 'Release again' }, firstToken)).status, 409, 'operator agents cannot churn revisions by re-releasing work');
-  assert.equal((await post(`work/${created.id}/unblock`, { expectedRevision: released.revision, reason: 'Clear nothing' }, firstToken)).status, 409, 'operator agents cannot churn revisions by clearing no blocker');
+  const unblockedResponse = await post(`work/${created.id}/unblock`, { expectedRevision: released.revision, reason: 'Dependency was verified complete' }, firstToken);
+  assert.equal(unblockedResponse.status, 200); const unblocked: any = await unblockedResponse.json();
+  assert.equal(unblocked.blocker, null); assert.equal(unblocked.revision, released.revision + 1);
+  assert.equal((await post(`work/${created.id}/unblock`, { expectedRevision: unblocked.revision, reason: 'Clear nothing' }, firstToken)).status, 409, 'operator agents cannot churn revisions by clearing no blocker');
   const priorDocument = (await store.pool.query('SELECT document FROM operator_agents WHERE id=$1', [setup.id])).rows[0].document;
   await store.pool.query(`UPDATE operator_agents SET document=jsonb_set(document,'{scope,repositories}', '["other/project"]'::jsonb) WHERE id=$1`, [setup.id]);
   assert.equal((await fetch(`${url}/api/work`, { headers: { Authorization: `Bearer ${firstToken}` } })).status, 403, 'operator-agent reads require the current repository scope');
