@@ -1,5 +1,32 @@
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
+import type { Work, Workspace } from './model.js';
+
+export class PrelaunchContainmentError extends Error {
+  constructor(message: string, public readonly settleAllowed: boolean) { super(message); }
+}
+
+export function revalidateContainment(
+  snapshot: { now: string; work: Work[] },
+  expected: { workId: string; principal: string; epoch: number; settlementHash: string; exclusiveResources: string[]; workspace: Workspace },
+) {
+  const work = snapshot.work.find(item => item.id === expected.workId);
+  if (!work) throw new PrelaunchContainmentError('Fresh Graphyard snapshot no longer contains the work item', false);
+  const quarantineOwned = work.containmentQuarantine?.owner === expected.principal
+    && work.containmentQuarantine.epoch === expected.epoch
+    && work.containmentQuarantine.settlementHash === expected.settlementHash;
+  const snapshotTime = Date.parse(snapshot.now);
+  const leaseLive = work.lease?.owner === expected.principal && work.lease.epoch === expected.epoch
+    && Number.isFinite(snapshotTime) && Date.parse(work.lease.expiresAt) > snapshotTime;
+  const authorized = quarantineOwned && leaseLive;
+  const workspace = work.workspaces.find(item => item.epoch === expected.epoch);
+  const workspaceExact = !!workspace && workspace.owner === expected.workspace.owner && workspace.host === expected.workspace.host
+    && workspace.path === expected.workspace.path && workspace.branch === expected.workspace.branch;
+  const resourcesExact = JSON.stringify(work.exclusiveResources ?? []) === JSON.stringify(expected.exclusiveResources);
+  if (!authorized || !workspaceExact || !resourcesExact)
+    throw new PrelaunchContainmentError('Fresh Graphyard snapshot does not authorize this contained worker launch', authorized);
+  return work;
+}
 
 export function containmentCredentials() {
   const settlementToken = randomBytes(32).toString('hex');

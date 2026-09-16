@@ -84,7 +84,7 @@ export function signalTrackedProcesses(rootPid: number, supervisedPids: Map<numb
 }
 
 // The deadline uses elapsed local time and server-reported duration, not synchronized clocks.
-export async function supervise(command: string, args: string[], epoch: number, renew: () => Promise<Renewal>, options: { intervalMs?: number; graceMs?: number; shutdownPollMs?: number; shutdownTimeoutMs?: number; detached?: boolean; containment?: Containment; platform?: NodeJS.Platform; quarantine?: { establish: () => Promise<unknown>; settle: () => Promise<unknown> } } = {}) {
+export async function supervise(command: string, args: string[], epoch: number, renew: () => Promise<Renewal>, options: { intervalMs?: number; graceMs?: number; shutdownPollMs?: number; shutdownTimeoutMs?: number; detached?: boolean; containment?: Containment; platform?: NodeJS.Platform; quarantine?: { establish: () => Promise<unknown>; revalidate?: () => Promise<unknown>; settle: () => Promise<unknown> } } = {}) {
   let deadline = 0;
   async function heartbeat() {
     const started = performance.now();
@@ -160,6 +160,16 @@ export async function supervise(command: string, args: string[], epoch: number, 
     void (async () => {
       try {
         if (containment) await options.quarantine!.establish();
+        if (containment && options.quarantine!.revalidate) {
+          try { await options.quarantine!.revalidate(); }
+          catch (error) {
+            if ((error as { settleAllowed?: boolean }).settleAllowed) {
+              try { await options.quarantine!.settle(); }
+              catch (settlementError) { throw new Error(`Fresh Graphyard state refused worker launch and its unlaunched quarantine could not be settled: ${settlementError instanceof Error ? settlementError.message : String(settlementError)}`); }
+            }
+            throw error;
+          }
+        }
         if (prelaunchInterrupted) {
           if (containment) {
             try { await options.quarantine!.settle(); }

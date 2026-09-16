@@ -12,7 +12,7 @@ import { parseArgs } from 'node:util';
 import { diagnose, fileConflicts, proofPreview, resourceConflicts } from './coordination.js';
 import { loadConnection, setupRepository, handoff, hostIdSchema } from './repository-setup.js';
 import { assertMasterBinding, buildMasterStatus, continueMergeBatch, currentMergeCandidates, dispatchWork, inspectWorkerCredentials, listHerdrAgents, loadMasterConfig, mergeWork, observeHerdrAgents, readCredentialFile, readWorkerCredential, saveWorkerProfile, setupMaster, startMaster, workerProfileSchema } from './master.js';
-import { containmentCredentials, establishContainment, isConfirmedCoordinationRefusal, settleContainment } from './quarantine.js';
+import { containmentCredentials, establishContainment, isConfirmedCoordinationRefusal, revalidateContainment, settleContainment } from './quarantine.js';
 
 try { process.loadEnvFile(); } catch (error: any) { if (error.code !== 'ENOENT') throw error; }
 const [command, id, ...args] = process.argv.slice(2);
@@ -294,7 +294,8 @@ Never share an operator or producer credential with an implementation agent.`); 
     const workspace = work.workspaces.find((w: any) => w.epoch === epoch);
     const hostId = individualHostId();
     if (!workspace || workspace.host !== hostId || await realpath(process.cwd()) !== await realpath(workspace.path)) throw new Error('Run watch from the assigned workspace on its registered host');
-    if ((await api('status')).actor?.role !== 'worker') throw new Error('watch requires a worker credential; never pass operator or producer credentials to implementation processes');
+    const workerStatus = await api('status');
+    if (workerStatus.actor?.role !== 'worker') throw new Error('watch requires a worker credential; never pass operator or producer credentials to implementation processes');
     const watchToken = await individualToken();
     process.env.GRAPHYARD_URL = base; process.env.GRAPHYARD_TOKEN = watchToken;
     process.env.GRAPHYARD_CLI = await activeCliPath(); process.env.GRAPHYARD_HOST_ID = hostId;
@@ -312,6 +313,10 @@ Never share an operator or producer credential with an implementation agent.`); 
             requestId => api(`work/${work.id}/quarantine`, { epoch, settlementHash: containment!.settlementHash }, requestId),
             { epoch, settlementHash: containment!.settlementHash, exclusiveResources, requestId: containment!.requestId },
           ),
+          revalidate: async () => revalidateContainment(await api('work-snapshot'), {
+            workId: work.id, principal: workerStatus.actor.id, epoch, settlementHash: containment!.settlementHash,
+            exclusiveResources, workspace,
+          }),
           settle: () => settleContainment(
             (requestId, body) => api(`work/${work.id}/settle`, body, requestId),
             { epoch, settlementToken: containment!.settlementToken, settlementHash: containment!.settlementHash, exclusiveResources, requestId: settlementRequestId },

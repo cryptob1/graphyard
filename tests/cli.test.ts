@@ -9,7 +9,7 @@ import { fileURLToPath } from 'node:url';
 import { createServer } from 'node:http';
 import { setTimeout as delay } from 'node:timers/promises';
 import { linuxProcessRecord, signalTrackedProcesses, supervise, systemdContainment } from '../src/supervisor.js';
-import { containmentCredentials, establishContainment, isConfirmedCoordinationRefusal, settleContainment } from '../src/quarantine.js';
+import { containmentCredentials, establishContainment, isConfirmedCoordinationRefusal, revalidateContainment, settleContainment } from '../src/quarantine.js';
 
 const exec = promisify(execFile);
 const launcher = fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url));
@@ -37,6 +37,50 @@ test('quarantine establishment never confirms a mismatched fence or retries a se
   const refusal = Object.assign(new Error('lease expired'), { confirmedRefusal: true });
   await assert.rejects(establishContainment(async () => { calls++; throw refusal; }, expected), /lease expired/);
   assert.equal(calls, 1);
+});
+
+test('fresh prelaunch state rejects stale receipt replay, expiry, workspace and resource mutation', () => {
+  const credentials = containmentCredentials();
+  const workspace = { owner: 'worker-a', epoch: 7, host: 'host-a', path: '/work/GY-7', branch: 'graphyard/gy-7-7' };
+  const expected = { workId: 'work-7', principal: 'worker-a', epoch: 7, settlementHash: credentials.settlementHash, exclusiveResources: ['staging'], workspace };
+  const work = { id: 'work-7', lease: { owner: 'worker-a', epoch: 7, expiresAt: '2030-01-01T00:02:00Z' }, workspaces: [workspace], exclusiveResources: ['staging'], containmentQuarantine: { owner: 'worker-a', epoch: 7, at: '2030-01-01T00:00:00Z', settlementHash: credentials.settlementHash } } as any;
+  const snapshot = (value = work, now = '2030-01-01T00:01:00Z') => ({ now, work: [value] });
+  assert.equal(revalidateContainment(snapshot(), expected), work);
+  for (const stale of [
+    { ...work, lease: { owner: 'worker-b', epoch: 8, expiresAt: '2030-01-01T00:03:00Z' }, containmentQuarantine: null },
+    { ...work, lease: { ...work.lease, expiresAt: '2030-01-01T00:01:00Z' } },
+  ]) assert.throws(() => revalidateContainment(snapshot(stale), expected), (error: any) => error.settleAllowed === false);
+  assert.throws(() => revalidateContainment(snapshot({ ...work, workspaces: [{ ...workspace, path: '/work/mutated' }] }), expected), (error: any) => error.settleAllowed === true);
+  assert.throws(() => revalidateContainment(snapshot({ ...work, exclusiveResources: ['production'] }), expected), (error: any) => error.settleAllowed === true);
+  assert.throws(() => revalidateContainment({ now: 'ambiguous', work: [work] }, expected), (error: any) => error.settleAllowed === false);
+});
+
+test('stale quarantine replay never launches or settles against another owner', async () => {
+  const cwd = await mkdtemp(join(tmpdir(), 'graphyard-stale-replay-')), marker = join(cwd, 'launched');
+  const containment = { command: process.execPath, args: ['-e', `require('node:fs').writeFileSync(${JSON.stringify(marker)},'yes')`], signal: () => {}, empty: () => true };
+  let settlements = 0;
+  try {
+    await assert.rejects(supervise('ignored', [], 7, async () => ({ ...renewal(), lease: { ...renewal().lease, epoch: 7 } }), { containment, detached: false, quarantine: {
+      establish: async () => ({ containmentQuarantine: { owner: 'worker-a', epoch: 7 } }),
+      revalidate: async () => { throw Object.assign(new Error('fresh owner is worker-b epoch 8'), { settleAllowed: false }); },
+      settle: async () => { settlements++; },
+    } }), /fresh owner is worker-b epoch 8/);
+    await assert.rejects(stat(marker), { code: 'ENOENT' }); assert.equal(settlements, 0);
+  } finally { await rm(cwd, { recursive: true, force: true }); }
+});
+
+test('authorized prelaunch mismatch settles once without launching', async () => {
+  const cwd = await mkdtemp(join(tmpdir(), 'graphyard-owned-mismatch-')), marker = join(cwd, 'launched');
+  const containment = { command: process.execPath, args: ['-e', `require('node:fs').writeFileSync(${JSON.stringify(marker)},'yes')`], signal: () => {}, empty: () => true };
+  let settlements = 0;
+  try {
+    await assert.rejects(supervise('ignored', [], 7, async () => ({ ...renewal(), lease: { ...renewal().lease, epoch: 7 } }), { containment, detached: false, quarantine: {
+      establish: async () => {},
+      revalidate: async () => { throw Object.assign(new Error('workspace changed'), { settleAllowed: true }); },
+      settle: async () => { settlements++; },
+    } }), /workspace changed/);
+    await assert.rejects(stat(marker), { code: 'ENOENT' }); assert.equal(settlements, 1);
+  } finally { await rm(cwd, { recursive: true, force: true }); }
 });
 
 test('HTTP 408 and 429 remain ambiguous while known coordination refusals are definitive', async () => {
