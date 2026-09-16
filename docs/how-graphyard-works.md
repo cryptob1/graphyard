@@ -31,14 +31,16 @@ Every box is a checkpoint. A blocked box explains what is missing; it is not an 
 
 ## Who does what
 
-| Role | Responsible for | Boundary |
-| --- | --- | --- |
-| **Operator** | Sets up the repository and identities; creates and revises work and requirements; resolves policy-level blockers. | Does not turn an implementation claim into approval, mint automated test results, or bypass a failed gate. |
-| **Master** | Watches Graphyard and runtime health; dispatches ready work; routes durable handoffs; requests routine merges when policy allows. | Does not implement work, hold worker leases, produce evidence, or override Graphyard. Dispatch is an invitation, not ownership. |
-| **Worker** | Claims under its own identity; uses the assigned worktree; builds, tests, opens the PR, and submits the candidate. | Must stop after lease loss. Cannot self-review, grant itself trusted proof credentials, or change requirements merely to pass. |
-| **Reviewer / proof producer** | Independently reviews the candidate or runs an approved proof and reports evidence for its allowlisted proof name. | Does not inherit trust from the worker. Evidence must match the exact candidate and requirements; it cannot authorize unrelated work. |
+In this installation, the operational roles below are separate **AI-agent duties**. The human user supplies goals and oversight, but is not expected to manually perform the Operator, Master, Worker, or Reviewer/proof-producer roles.
 
-One person may operate more than one tool, but the credentials and duties stay separate. In particular, an implementation session never becomes a trusted evidence producer just because it ran a test.
+| AI-agent duty | Responsible for | Boundary |
+| --- | --- | --- |
+| **Operator agent** | Sets up the repository and identities; creates and revises work and requirements; resolves policy-level blockers. | Does not turn an implementation claim into approval, mint automated test results, or bypass a failed gate. |
+| **Master agent** | Watches Graphyard and runtime health; dispatches ready work; routes durable handoffs; requests routine merges when policy allows. | Does not implement work, hold worker leases, produce evidence, or override Graphyard. Dispatch is an invitation, not ownership. |
+| **Worker agent** | Claims under its own identity; uses the assigned worktree; builds, tests, opens the PR, and submits the candidate. | Must stop after lease loss. Never receives operator or trusted evidence-producer credentials, cannot self-review, and cannot change requirements merely to pass. |
+| **Reviewer/proof-producer agent** | Independently reviews the candidate or runs an approved proof and reports evidence for its allowlisted proof name. | Does not inherit trust from the worker. Evidence must match the exact candidate and requirements; it cannot authorize unrelated work. |
+
+Even when agents share an underlying provider or account, separation is enforced by identities, credentials, authority, and independent sessions. An implementation session never becomes an operator or trusted evidence producer just because it ran a test. Graphyard remains the source of ownership and progression truth: CI, trusted evidence, independent review, and the merge gate decide progression, and no client-controlled lifecycle-state bypass exists.
 
 ## Graphyard and Herdr answer different questions
 

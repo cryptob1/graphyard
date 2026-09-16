@@ -29,6 +29,10 @@ for (const viewport of [{ name: 'desktop', width: 1280, height: 900 }, { name: '
     await expect(flow.getByText('Setup', { exact: true })).toBeVisible();
     await expect(flow.getByText('Done', { exact: true })).toBeVisible();
     await expect(page.getByRole('heading', { name: 'Who does what' })).toBeVisible();
+    const duties = ['Operator agent', 'Master agent', 'Worker agent', 'Reviewer/proof-producer agent'];
+    for (const duty of duties) await expect(page.getByRole('cell', { name: duty, exact: true })).toBeVisible();
+    await expect(page.locator('p', { hasText: 'The human user supplies goals and oversight' })).toContainText('The human user supplies goals and oversight, but is not expected to manually perform the Operator, Master, Worker, or Reviewer/proof-producer roles.');
+    await expect(page.getByText('Even when agents share an underlying provider or account, separation is enforced by identities, credentials, authority, and independent sessions.', { exact: false })).toBeVisible();
     await expect(page.getByText('Graphyard: delivery authority')).toBeVisible();
     await expect(page.getByText('Herdr: runtime supervision')).toBeVisible();
     const bounds = await page.locator('.docs-shell').evaluate(element => ({ width: element.clientWidth, content: element.scrollWidth }));
