@@ -42,8 +42,8 @@ Other commands use `POST /api/work/UUID/COMMAND` (display keys also work):
 | Command | JSON body |
 | --- | --- |
 | `requirements` | Full criteria, dependencies, plannedFiles, exclusiveResources, expectedPolicyRevision and reason; operator only, see [coordination](coordination.md) |
-| `ready` | `{}`; operator only |
-| `unblock` | `{"reason":"Contract verified"}`; operator only, audit reason required |
+| `ready` | Admin: `{}`. Operator-agent: `{"expectedRevision":12,"reason":"Requirements approved"}` with the current work revision and a nonblank audit reason. |
+| `unblock` | Admin: `{"reason":"Contract verified"}`. Operator-agent: `{"expectedRevision":12,"reason":"Contract verified"}` with the current work revision and a nonblank audit reason. |
 | `rework` | `{"reason":"Retry implementation","previousWorkerStopped":true}`; operator only |
 | `recover` | `{"reason":"Verified delivered worker stopped","previousWorkerStopped":true}`; operator only, delivered quarantine only |
 | `claim` | `{}`; returns current lease and epoch |
