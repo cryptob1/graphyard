@@ -9,10 +9,11 @@ Graphyard's own repository uses a protected acceptance workflow to prove its HTT
 1. Run repository discovery and install the Herdr worker connection:
 
    ```sh
-   graphyard init --url https://YOUR-GRAPHYARD-HOST --herdr --token-stdin
+   export GRAPHYARD_CLI=/absolute/path/to/graphyard/bin/graphyard.mjs
+   node "$GRAPHYARD_CLI" init --url https://YOUR-GRAPHYARD-HOST --herdr --token-stdin
    ```
 
-2. Register the personal-account GitHub App with `graphyard github-setup`, copy the resulting private values into Railway, and redeploy.
+2. Run `node "$GRAPHYARD_CLI" github-setup https://YOUR-GRAPHYARD-HOST`, register the personal-account GitHub App, copy its private values into Railway, and redeploy.
 3. Preview and apply this repository's integration configuration:
 
    ```sh
