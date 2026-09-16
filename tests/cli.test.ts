@@ -106,6 +106,14 @@ test('foreground fallback does not signal a reused descendant PID', () => {
   assert.deepEqual(signalled, []); assert.equal(tracked.has(101), false);
 });
 
+test('foreground fallback does not traverse descendants of a reused cached parent PID', () => {
+  const tracked = new Map<number, string>([[100, 'root-start'], [101, 'child-start']]); const signalled: number[] = [];
+  const rows = new Map([[100, { ppid: 1, identity: 'root-start' }], [101, { ppid: 55, identity: 'reused-start' }], [102, { ppid: 101, identity: 'unrelated-child-start' }]]);
+  signalTrackedProcesses(100, tracked, rows, 'SIGKILL', pid => { signalled.push(pid); });
+  assert.deepEqual(signalled, [100]);
+  assert.deepEqual([...tracked], [[100, 'root-start']]);
+});
+
 test('Linux process identity uses the kernel start-time field without one-second collisions', () => {
   const stat = (start: string, name = 'worker (nested) name') => `123 (${name}) S 42 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 ${start} 0`;
   assert.deepEqual(linuxProcessRecord(stat('987654321')), { ppid: 42, identity: '987654321' });
@@ -132,7 +140,7 @@ test('supervisor fails closed when a scope kill fails and shutdown cannot be ver
     empty: () => false,
   };
   let established = 0, settled = 0;
-  await assert.rejects(supervise('ignored', [], 1, async () => renewal(), { containment, detached: false, graceMs: 10, quarantine: { establish: async () => { established++; }, settle: async () => { settled++; } } }), /shutdown could not be verified: scope kill failed/);
+  await assert.rejects(supervise('ignored', [], 1, async () => renewal(), { containment, detached: false, graceMs: 10, shutdownPollMs: 1, shutdownTimeoutMs: 5, quarantine: { establish: async () => { established++; }, settle: async () => { settled++; } } }), /shutdown could not be verified: scope kill failed/);
   assert.equal(established, 1); assert.equal(settled, 0, 'an unverifiable shutdown must retain its durable quarantine');
 });
 
@@ -146,6 +154,30 @@ test('supervisor accepts a failed scope signal only when the scope is verified e
   let established = 0, settled = 0;
   assert.equal(await supervise('ignored', [], 1, async () => renewal(), { containment, detached: false, graceMs: 10, quarantine: { establish: async () => { established++; }, settle: async () => { settled++; } } }), 0);
   assert.equal(established, 1); assert.equal(settled, 1);
+});
+
+test('supervisor polls a stopping scope after SIGKILL before settling quarantine', async () => {
+  let reads = 0, settled = 0;
+  const containment = {
+    command: process.execPath,
+    args: ['-e', 'process.exit(0)'],
+    signal: () => {},
+    empty: () => ++reads >= 3,
+  };
+  assert.equal(await supervise('ignored', [], 1, async () => renewal(), { containment, detached: false, graceMs: 10, shutdownPollMs: 1, shutdownTimeoutMs: 100, quarantine: { establish: async () => {}, settle: async () => { settled++; } } }), 0);
+  assert.equal(reads, 3); assert.equal(settled, 1);
+});
+
+test('supervisor retains quarantine only after bounded scope shutdown verification times out', async () => {
+  let reads = 0, settled = 0;
+  const containment = {
+    command: process.execPath,
+    args: ['-e', 'process.exit(0)'],
+    signal: () => {},
+    empty: () => { reads++; return false; },
+  };
+  await assert.rejects(supervise('ignored', [], 1, async () => renewal(), { containment, detached: false, graceMs: 10, shutdownPollMs: 1, shutdownTimeoutMs: 5, quarantine: { establish: async () => {}, settle: async () => { settled++; } } }), /shutdown could not be verified/);
+  assert.ok(reads > 1); assert.equal(settled, 0);
 });
 
 test('foreground containment refuses to launch before a durable quarantine exists', async () => {

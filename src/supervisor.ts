@@ -1,6 +1,7 @@
 import { execFileSync, spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { readdirSync, readFileSync } from 'node:fs';
+import { setTimeout as delay } from 'node:timers/promises';
 
 interface Renewal { lease: { epoch: number; expiresAt: string } | null; updatedAt: string }
 
@@ -56,6 +57,10 @@ export function signalTrackedProcesses(rootPid: number, supervisedPids: Map<numb
   const pending = [...supervisedPids.keys()];
   while (pending.length) {
     const parent = pending.shift()!;
+    if (rows.get(parent)?.identity !== supervisedPids.get(parent)) {
+      supervisedPids.delete(parent);
+      continue;
+    }
     for (const [pid, record] of rows) if (record.ppid === parent && !supervisedPids.has(pid)) {
       supervisedPids.set(pid, record.identity); pending.push(pid);
     }
@@ -67,7 +72,7 @@ export function signalTrackedProcesses(rootPid: number, supervisedPids: Map<numb
 }
 
 // The deadline uses elapsed local time and server-reported duration, not synchronized clocks.
-export async function supervise(command: string, args: string[], epoch: number, renew: () => Promise<Renewal>, options: { intervalMs?: number; graceMs?: number; detached?: boolean; containment?: Containment; platform?: NodeJS.Platform; quarantine?: { establish: () => Promise<unknown>; settle: () => Promise<unknown> } } = {}) {
+export async function supervise(command: string, args: string[], epoch: number, renew: () => Promise<Renewal>, options: { intervalMs?: number; graceMs?: number; shutdownPollMs?: number; shutdownTimeoutMs?: number; detached?: boolean; containment?: Containment; platform?: NodeJS.Platform; quarantine?: { establish: () => Promise<unknown>; settle: () => Promise<unknown> } } = {}) {
   let deadline = 0;
   async function heartbeat() {
     const started = performance.now();
@@ -113,8 +118,16 @@ export async function supervise(command: string, args: string[], epoch: number, 
         signalGroup('SIGKILL');
         process.off('SIGTERM', interrupted); process.off('SIGINT', interrupted);
         if (containment) {
-          let empty = false;
-          try { empty = containment.empty(); } catch (error) { containmentFailure ??= error; }
+          let empty = false, lastVerificationFailure: unknown;
+          const shutdownDeadline = performance.now() + (options.shutdownTimeoutMs ?? 2000);
+          do {
+            try { if (containment.empty()) { empty = true; break; } }
+            catch (error) { lastVerificationFailure = error; }
+            const remaining = shutdownDeadline - performance.now();
+            if (remaining <= 0) break;
+            await delay(Math.min(options.shutdownPollMs ?? 50, remaining));
+          } while (performance.now() < shutdownDeadline);
+          containmentFailure ??= lastVerificationFailure;
           if (!empty) { reject(new Error(`Worker containment shutdown could not be verified${containmentFailure instanceof Error ? `: ${containmentFailure.message}` : ''}`)); return; }
           try { await options.quarantine!.settle(); }
           catch (error) { reject(new Error(`Worker containment shutdown was verified but its Graphyard quarantine could not be settled: ${error instanceof Error ? error.message : String(error)}`)); return; }
