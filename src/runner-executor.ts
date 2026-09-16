@@ -61,6 +61,9 @@ export function assertRunnerCredentialScope(status: unknown) {
   return actor as { id: string; role: 'worker' };
 }
 
+/** Both container names are derived from the attempt alone, so a collector that never
+ * saw the plan can name exactly the containers this attempt was allowed to start. */
+export const containerNames = (attemptId: string) => (['enumerate', 'execute'] as Phase[]).map(phase => `graphyard-${phase}-${attemptId}`);
 export const containerName = (plan: ExecutionPlan, phase: Phase) => `graphyard-${phase}-${plan.grant.attemptId}`;
 export function executionCommand(plan: ExecutionPlan, phase: Phase) {
   const p = executionPlanSchema.parse(plan);
@@ -116,22 +119,43 @@ export async function assertIsolation(plan: ExecutionPlan) {
 }
 
 export type PhaseResult = { phase: Phase; exitCode: number; timedOut: boolean; durationMs: number };
-export type Runner = (command: { file: string; argv: string[] }, timeoutMs: number) => Promise<{ exitCode: number; timedOut: boolean }>;
+export type Runner = (command: { file: string; argv: string[] }, timeoutMs: number, signal?: AbortSignal) => Promise<{ exitCode: number; timedOut: boolean }>;
 /** `absent` is the only state that proves this attempt can no longer act on shared resources. */
 export type ContainerState = 'absent' | 'present' | 'unknown';
 export type Settler = (name: string) => Promise<ContainerState>;
 
-const spawnProcess = (file: string, argv: string[], timeoutMs: number) => new Promise<{ exitCode: number; timedOut: boolean }>(resolve => {
+const spawnProcess = (file: string, argv: string[], timeoutMs: number, signal?: AbortSignal) => new Promise<{ exitCode: number; timedOut: boolean }>(resolve => {
   // Candidate-influenced stdout/stderr is never captured or forwarded: it can carry
   // test-account credentials, and the report file is the only accepted channel.
   const child = spawn(file, argv, { stdio: 'ignore' });
   let timedOut = false, done = false;
-  const finish = (exitCode: number) => { if (done) return; done = true; clearTimeout(timer); resolve({ exitCode, timedOut }); };
-  const timer = setTimeout(() => { timedOut = true; child.kill('SIGKILL'); }, timeoutMs);
+  const stop = () => child.kill('SIGKILL');
+  const finish = (exitCode: number) => { if (done) return; done = true; clearTimeout(timer); signal?.removeEventListener('abort', stop); resolve({ exitCode, timedOut }); };
+  const timer = setTimeout(() => { timedOut = true; stop(); }, timeoutMs);
+  // Losing attempt authority stops this process immediately; settlement afterwards is
+  // what actually removes the container it started.
+  if (signal?.aborted) stop(); else signal?.addEventListener('abort', stop, { once: true });
   child.on('error', () => finish(127));
   child.on('close', code => finish(code ?? 1));
 });
-const dockerRunner: Runner = (command, timeoutMs) => spawnProcess(command.file, command.argv, timeoutMs);
+const dockerRunner: Runner = (command, timeoutMs, signal) => spawnProcess(command.file, command.argv, timeoutMs, signal);
+const dockerArgv = (dockerHost: string | undefined, argv: string[]) => (dockerHost ? ['--host', dockerHost, ...argv] : argv);
+async function inspectContainer(name: string, dockerHost?: string): Promise<ContainerState> {
+  const inspected = await spawnProcess('docker', dockerArgv(dockerHost, ['inspect', '--type=container', name]), 30_000);
+  if (inspected.timedOut) return 'unknown';
+  return inspected.exitCode === 0 ? 'present' : inspected.exitCode === 1 ? 'absent' : 'unknown';
+}
+/**
+ * Read-only settlement observation for a party that is not the runner. The collector
+ * uses it to derive settlement itself instead of believing the execution record; it
+ * never removes anything, so observing is not a way to manufacture `absent`.
+ */
+export async function observeContainers(names: string[], options: { dockerHost?: string; inspect?: (name: string) => Promise<ContainerState> } = {}) {
+  const inspect = options.inspect ?? (name => inspectContainer(name, options.dockerHost));
+  const observed: { name: string; state: ContainerState }[] = [];
+  for (const name of z.array(z.string().min(1).max(200)).max(8).parse(names)) observed.push({ name, state: await inspect(name) });
+  return observed;
+}
 /**
  * Killing `docker run` does not stop the container it started, so settlement is an
  * independent observation: force removal, then confirm the name no longer resolves.
@@ -139,9 +163,7 @@ const dockerRunner: Runner = (command, timeoutMs) => spawnProcess(command.file, 
  */
 const dockerSettler: Settler = async name => {
   await spawnProcess('docker', ['rm', '--force', name], 30_000);
-  const inspected = await spawnProcess('docker', ['inspect', '--type=container', name], 30_000);
-  if (inspected.timedOut) return 'unknown';
-  return inspected.exitCode === 0 ? 'present' : inspected.exitCode === 1 ? 'absent' : 'unknown';
+  return inspectContainer(name);
 };
 
 /** What a collector may accept as an execution record. It is data, never authority. */
@@ -155,28 +177,46 @@ export const executionRecordSchema = z.object({
 }).strict();
 export type ExecutionRecord = z.infer<typeof executionRecordSchema>;
 
+/** Everything that can refuse locally before the attempt is acknowledged. */
+export type Preflight = { oraclePath: string; outputPath: string; bundleDigest: string };
+/**
+ * Structural isolation plus the first bundle measurement. A runner performs this before
+ * acknowledging: a refusal here leaves the attempt unacknowledged, so it expires and
+ * releases its reservations instead of blocking them until an operator settles by hand.
+ */
+export async function preflightAttempt(plan: unknown): Promise<Preflight> {
+  const p = executionPlanSchema.parse(plan);
+  const paths = await assertIsolation(p);
+  return { ...paths, bundleDigest: (await oracleBundleDigest(paths.oraclePath)).digest };
+}
+
 /**
  * Run one authorized attempt. This process decides nothing about acceptance: it verifies
  * the approved bytes before and after execution and hands an execution record plus the
- * untouched output directory to the separately trusted collector.
+ * untouched output directory to the separately trusted collector. `signal` carries loss
+ * of attempt authority: an aborted attempt stops talking to the target and settles.
  */
-export async function executeAttempt(plan: unknown, options: { run?: Runner; settle?: Settler; now?: () => Date } = {}): Promise<ExecutionRecord> {
+export async function executeAttempt(plan: unknown, options: { run?: Runner; settle?: Settler; now?: () => Date; preflight?: Preflight; signal?: AbortSignal } = {}): Promise<ExecutionRecord> {
   const p = executionPlanSchema.parse(plan);
   const now = options.now ?? (() => new Date());
   const run = options.run ?? dockerRunner, settle = options.settle ?? dockerSettler;
-  const paths = await assertIsolation(p);
-  const before = await oracleBundleDigest(paths.oraclePath);
+  const signal = options.signal;
+  const paths = options.preflight ?? await preflightAttempt(p);
+  const before = { digest: paths.bundleDigest };
   const refusals: string[] = [];
   if (before.digest !== p.grant.bundleDigest) refusals.push('Approved oracle bundle bytes differ from the pinned digest');
   const startedAt = now().toISOString();
   const phases: PhaseResult[] = [];
+  const lostAuthority = 'Attempt authority was lost during execution; the attempt was aborted';
+  if (signal?.aborted) refusals.push(lostAuthority);
   if (!refusals.length) {
     for (const phase of ['enumerate', 'execute'] as Phase[]) {
       const deadline = Math.min(p.timeoutMs, Math.max(0, Date.parse(p.grant.deadline) - now().getTime()));
       if (deadline < 1_000) { refusals.push('Attempt deadline elapsed before execution'); break; }
       const at = now().getTime();
-      const outcome = await run(executionCommand(p, phase), deadline);
+      const outcome = await run(executionCommand(p, phase), deadline, signal);
       phases.push({ phase, ...outcome, durationMs: now().getTime() - at });
+      if (signal?.aborted) { refusals.push(lostAuthority); break; }
       if (outcome.timedOut) break;
       // A failing execute phase is a behaviour signal for the collector, not a reason to
       // skip the post-execution integrity check. A failing enumerate phase is fatal.

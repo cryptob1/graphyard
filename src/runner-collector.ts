@@ -5,7 +5,7 @@ import { resolve } from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
 import { z } from 'zod';
 import { runnerReport, verifyRunnerReport } from './runner-report.js';
-import { attemptGrantSchema, executionRecordSchema, type AttemptGrant, type ExecutionRecord } from './runner-executor.js';
+import { attemptGrantSchema, containerNames, executionRecordSchema, type AttemptGrant, type ContainerState, type ExecutionRecord } from './runner-executor.js';
 
 const name = z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9._/-]*$/).max(150);
 const digest = z.string().regex(/^sha256:[a-f0-9]{64}$/);
@@ -33,6 +33,11 @@ export const selfReportedObservation = (at: string, instance: string): TargetObs
  * explicitly insufficient: coverage requires measurements that bracket the whole run
  * with no gap longer than `maxGapMs`, so an A -> B -> A rollout inside the interval is
  * either observed (`changed`) or left as uncovered `unknown`. Both refuse acceptance.
+ *
+ * Only the execution interval is judged. A provider history commonly reaches further
+ * back and further forward than the run; the nearest measurement at or before the start
+ * and the nearest at or after the finish are its boundaries, and anything outside them
+ * is neither coverage nor evidence of a change during this attempt.
  */
 export function attributeExecution(input: {
   expected: { instance: string; artifacts: { service: string; digest: string }[] };
@@ -41,15 +46,19 @@ export function attributeExecution(input: {
   const expected = z.object({ instance: name, artifacts: serviceArtifacts.min(1) }).strict().parse(input.expected);
   const maxGapMs = z.number().int().min(1_000).max(600_000).parse(input.maxGapMs);
   const startedAt = Date.parse(z.iso.datetime().parse(input.startedAt)), finishedAt = Date.parse(z.iso.datetime().parse(input.finishedAt));
-  const observations = z.array(targetObservationSchema).max(5_000).parse(input.observations)
+  const supplied = z.array(targetObservationSchema).max(5_000).parse(input.observations)
     .map(o => ({ ...o, time: Date.parse(o.at) })).sort((a, b) => a.time - b.time);
   const reasons: string[] = [];
   if (finishedAt < startedAt) throw new Error('Execution interval ends before it starts');
+  const opening = supplied.filter(o => o.time <= startedAt).at(-1);
+  // A zero-length interval cannot be bracketed by one measurement counted twice.
+  const closing = supplied.find(o => o.time >= finishedAt && o !== opening);
+  const observations = [...(opening ? [opening] : []), ...supplied.filter(o => o.time > startedAt && o.time < finishedAt), ...(closing ? [closing] : [])];
   const wanted = JSON.stringify(order(expected.artifacts));
   const matches = observations.map(o => o.instance === expected.instance && JSON.stringify(order(o.artifacts)) === wanted);
   const measurement: Measurement = observations.some(o => o.measurement === 'unknown') || !observations.length ? 'unknown'
     : observations.every(o => o.measurement === 'provider') ? 'provider' : 'host-attestation';
-  const brackets = observations.length >= 2 && observations[0].time <= startedAt && observations.at(-1)!.time >= finishedAt;
+  const brackets = !!opening && !!closing;
   const gap = observations.findIndex((o, i) => i > 0 && o.time - observations[i - 1].time > maxGapMs);
   const coversEntireRun = brackets && gap === -1 && measurement !== 'unknown';
   if (observations.length < 2) reasons.push('Attribution needs independent measurements before and after the execution interval');
@@ -114,6 +123,37 @@ export async function collectArtifacts(outputDirectory: string, required: string
   return { artifacts, reasons, complete: reasons.length === 0 && artifacts.length === new Set(names).size };
 }
 
+/**
+ * The authority the collector re-read, the record it was handed and the directory it is
+ * about to read must describe one attempt. A record copied from an older successful
+ * attempt, or a configuration pointing at that attempt's leftover output, is refused
+ * here — before anything is read or published — rather than being uploaded as this
+ * attempt's behaviour.
+ */
+export function collectionBinding(input: { grant: unknown; execution: unknown; collectedFrom: string }) {
+  const grant: AttemptGrant = attemptGrantSchema.parse(input.grant);
+  const execution: ExecutionRecord = executionRecordSchema.parse(input.execution);
+  const collectedFrom = z.string().min(1).max(4096).parse(input.collectedFrom);
+  const reasons: string[] = [];
+  if (!isDeepStrictEqual(grant, execution.grant)) reasons.push('The execution record does not hold the authority the collector independently re-read');
+  if (resolve(collectedFrom) !== execution.outputPath) reasons.push('The collected directory is not the output boundary this execution recorded');
+  return { grant, execution, reasons };
+}
+
+/**
+ * Settlement the collector observed itself. The record's own `settled` boolean is a
+ * worker assertion and can never release a protected resource: the collector names the
+ * containers this attempt was allowed to start, from the grant, and only its own
+ * `absent` observation of every one of them settles the attempt.
+ */
+export function deriveSettlement(attemptId: string, observations: unknown) {
+  const observed = z.array(z.object({ name: z.string().min(1).max(200), state: z.enum(['absent', 'present', 'unknown']) }).strict()).max(8).parse(observations);
+  const expected = containerNames(attemptId);
+  const state = new Map<string, ContainerState>(observed.map(o => [o.name, o.state]));
+  const settled = expected.every(name => state.get(name) === 'absent') && observed.every(o => expected.includes(o.name));
+  return { settled, expected, observed };
+}
+
 export type ArtifactState = 'verified' | 'missing' | 'upload-failed' | 'expired';
 export type CollectorResult = {
   report: {
@@ -136,24 +176,28 @@ export type CollectorResult = {
  * mismatch yields no report at all, so a stray attempt cannot advance any work.
  */
 export function assembleResult(input: {
-  grant: unknown; execution: unknown;
+  grant: unknown; execution: unknown; collectedFrom: string;
   expected: { instance: string; artifacts: { service: string; digest: string }[] };
   observations: unknown; maxGapMs: number;
   collected: { artifacts: { name: string; digest: string; document: unknown }[]; reasons: string[] };
   uploaded: { name: string; digest: string; url: string }[];
+  settlementObservations: unknown;
   requiredArtifacts: string[];
   cancelled?: boolean;
 }): CollectorResult {
-  const grant: AttemptGrant = attemptGrantSchema.parse(input.grant);
-  const execution: ExecutionRecord = executionRecordSchema.parse(input.execution);
+  const binding = collectionBinding({ grant: input.grant, execution: input.execution, collectedFrom: input.collectedFrom });
+  const grant: AttemptGrant = binding.grant, execution: ExecutionRecord = binding.execution;
   const refusals: string[] = [];
-  if (!isDeepStrictEqual(grant, execution.grant)) return { report: null, refusals: ['The execution record does not hold the authority the collector independently re-read'] };
+  if (binding.reasons.length) return { report: null, refusals: binding.reasons };
   // The runner's own refusals are recorded, but the collector re-derives the boundary
   // facts from the grant it read itself rather than trusting the record's conclusions.
   const boundary: string[] = [];
   if (execution.bundleDigestBefore !== grant.bundleDigest || execution.bundleDigestAfter !== grant.bundleDigest) boundary.push('Oracle bundle bytes measured at the execution boundary differ from the approved digest');
   if (execution.runnerImageDigest !== grant.runnerImageDigest) boundary.push('The executed runner image differs from the approved digest');
   if (!isDeepStrictEqual(execution.phases.map(p => p.phase), ['enumerate', 'execute'])) boundary.push('The attempt did not complete offline inventory enumeration followed by execution');
+  const settlement = deriveSettlement(grant.attemptId, input.settlementObservations);
+  if (!isDeepStrictEqual([...execution.settlement.containers].map(c => c.name).sort(), [...settlement.expected].sort())) boundary.push('The execution record does not account for exactly the containers this attempt was allowed to start');
+  if (!settlement.settled) boundary.push('The collector did not independently observe every container of this attempt removed; the execution-resource barrier stays closed');
   refusals.push(...execution.refusals, ...boundary, ...input.collected.reasons);
 
   const attribution = attributeExecution({ expected: input.expected, observations: input.observations, startedAt: execution.startedAt, finishedAt: execution.finishedAt, maxGapMs: input.maxGapMs });
@@ -187,7 +231,9 @@ export function assembleResult(input: {
       target: attribution.target,
       bundleDigest: execution.bundleDigestAfter, runnerImageDigest: execution.runnerImageDigest,
       artifacts: required.filter(n => uploadedByName.has(n)).map(n => ({ name: n, digest: uploadedByName.get(n)!.digest, url: uploadedByName.get(n)!.url })),
-      artifactState, executionSettled: execution.settlement.settled,
+      // Derived from the collector's own observation. Releasing a protected resource is
+      // never a worker assertion, so the record's boolean cannot reach the control plane.
+      artifactState, executionSettled: settlement.settled,
     },
     refusals,
   };

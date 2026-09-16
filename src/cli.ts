@@ -5,8 +5,8 @@ import { resolve } from 'node:path';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { supervise } from './supervisor.js';
 import { inspectRunnerRepository, oracleBundleDigest, snapshotRunnerSources } from './runner-setup.js';
-import { assertRunnerCredentialScope, attemptGrantSchema, executeAttempt, executionPlanSchema, executionRecordSchema } from './runner-executor.js';
-import { assembleResult, collectArtifacts, targetObservationSchema } from './runner-collector.js';
+import { assertRunnerCredentialScope, attemptGrantSchema, containerNames, executeAttempt, executionPlanSchema, executionRecordSchema, observeContainers, preflightAttempt } from './runner-executor.js';
+import { assembleResult, collectArtifacts, collectionBinding, targetObservationSchema } from './runner-collector.js';
 import { assertRepository, discover } from './onboarding.js';
 import { startGithubSetup } from './github-setup.js';
 import { fileURLToPath } from 'node:url';
@@ -189,10 +189,20 @@ Never share an operator or producer credential with an implementation agent.`); 
         runner: registration, bundleDigest: dispatched.bundle.digest, runnerImageDigest: dispatched.bundle.runnerImageDigest,
         targetUrl: dispatched.environment.url, deadline: dispatched.request.deadline });
       const attemptCommand = { requestId: grant.requestId, attemptId: grant.attemptId, epoch: grant.epoch };
+      // Every local refusal happens before acknowledgement. An unacknowledged attempt
+      // expires and releases its runner, environment and external reservations; one that
+      // has been acknowledged holds them until an operator settles it by hand.
+      let preflight;
+      try { preflight = await preflightAttempt({ ...plan, grant }); }
+      catch (error: any) { throw new Error(`Execution boundary refused before acknowledgement; this attempt was never acknowledged and expires without holding protected resources: ${error.message}`); }
       await api('validation/ack', attemptCommand, `${grant.attemptId}-ack`);
+      // A rejected heartbeat is the server saying this epoch may no longer act. The
+      // container boundary fences the host, not the target, so execution stops here
+      // rather than continuing to exercise the target until the request deadline.
+      const authority = new AbortController();
       let beat = 0;
-      const heartbeat = setInterval(() => { void api('validation/heartbeat', attemptCommand, `${grant.attemptId}-beat-${++beat}`).catch(() => { /* reconciliation decides authority; execution is fenced by the container boundary */ }); }, 20_000);
-      try { return print({ dispatched: true, environment: { instance: dispatched.environment.instance, url: dispatched.environment.url }, expected: { instance: dispatched.environment.instance, artifacts: dispatched.build.artifacts }, record: await executeAttempt({ ...plan, grant }) }); }
+      const heartbeat = setInterval(() => { void api('validation/heartbeat', attemptCommand, `${grant.attemptId}-beat-${++beat}`).catch((error: any) => { if (error?.confirmedRefusal) authority.abort(); /* transient failures leave reconciliation to decide */ }); }, 20_000);
+      try { return print({ dispatched: true, environment: { instance: dispatched.environment.instance, url: dispatched.environment.url }, expected: { instance: dispatched.environment.instance, artifacts: dispatched.build.artifacts }, record: await executeAttempt({ ...plan, grant }, { preflight, signal: authority.signal }) }); }
       finally { clearInterval(heartbeat); }
     }
     if (id === 'collect' && args.length === 1) {
@@ -200,9 +210,18 @@ Never share an operator or producer credential with an implementation agent.`); 
       // measures the target itself and never trusts candidate-authored JSON.
       const input = z.object({ grant: attemptGrantSchema, record: executionRecordSchema, outputPath: z.string(), requiredArtifacts: z.array(z.string()).min(1).max(30),
         expected: z.object({ instance: z.string(), artifacts: z.array(z.object({ service: z.string(), digest: z.string() }).strict()).min(1) }).strict(),
-        observations: z.array(targetObservationSchema).max(5000), maxGapMs: z.number().int().min(1000).max(600_000).default(30_000), cancelled: z.boolean().default(false) })
+        observations: z.array(targetObservationSchema).max(5000), maxGapMs: z.number().int().min(1000).max(600_000).default(30_000), cancelled: z.boolean().default(false),
+        dockerHost: z.string().min(1).max(200).optional() })
         .strict().parse(JSON.parse(await readFile(args[0], 'utf8')));
-      const collected = await collectArtifacts(resolve(input.outputPath), input.requiredArtifacts);
+      // Bind authority, record and boundary before anything is read or published: an
+      // immutable artifact name published for the wrong bytes cannot be taken back.
+      const collectedFrom = await realpath(resolve(input.outputPath));
+      const binding = collectionBinding({ grant: input.grant, execution: input.record, collectedFrom });
+      if (binding.reasons.length) throw new Error(`Collection refused before reading the execution boundary: ${binding.reasons.join('; ')}`);
+      // Settlement is the collector's own observation of the execution host, never the
+      // runner's claim about itself.
+      const settlementObservations = await observeContainers(containerNames(input.grant.attemptId), { dockerHost: input.dockerHost });
+      const collected = await collectArtifacts(collectedFrom, input.requiredArtifacts);
       const uploaded: { name: string; digest: string; url: string }[] = [];
       const failures: string[] = [];
       for (const artifact of collected.artifacts) {
@@ -212,8 +231,8 @@ Never share an operator or producer credential with an implementation agent.`); 
           uploaded.push({ name: artifact.name, digest: stored.digest, url: stored.url });
         } catch { failures.push(`Private storage rejected required artifact ${artifact.name}`); }
       }
-      const assembled = assembleResult({ grant: input.grant, execution: input.record, expected: input.expected, observations: input.observations,
-        maxGapMs: input.maxGapMs, requiredArtifacts: input.requiredArtifacts, cancelled: input.cancelled,
+      const assembled = assembleResult({ grant: input.grant, execution: input.record, collectedFrom, expected: input.expected, observations: input.observations,
+        maxGapMs: input.maxGapMs, requiredArtifacts: input.requiredArtifacts, cancelled: input.cancelled, settlementObservations,
         collected: { artifacts: collected.artifacts, reasons: [...collected.reasons, ...failures] }, uploaded });
       if (!assembled.report) throw new Error(`Collection refused: ${assembled.refusals.join('; ')}`);
       return print({ refusals: assembled.refusals, report: assembled.report, result: await api('validation/result', assembled.report, `${input.grant.attemptId}-result`) });

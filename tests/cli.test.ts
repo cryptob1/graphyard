@@ -8,6 +8,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createServer } from 'node:http';
 import { setTimeout as delay } from 'node:timers/promises';
+import { randomUUID } from 'node:crypto';
 import { captureTrackedRoot, linuxProcessRecord, signalTrackedProcesses, supervise, systemdContainment } from '../src/supervisor.js';
 import { acknowledgeContainment, containmentCredentials, establishContainment, isConfirmedCoordinationRefusal, revalidateContainment, settleContainment } from '../src/quarantine.js';
 
@@ -671,6 +672,20 @@ test('the packaged runner path is usable from the CLI and refuses evidence-produ
 
     await writeFile(join(cwd, 'collect.json'), JSON.stringify({ grant: {}, record: {}, outputPath: join(cwd, 'out'), requiredArtifacts: ['report'], expected: { instance: 'x', artifacts: [] }, observations: [] }));
     await assert.rejects(exec(process.execPath, [launcher, 'runner', 'collect', join(cwd, 'collect.json')], { cwd, env }));
+    assert.deepEqual(posts, ['/api/validation/dispatch']);
+
+    // A live grant with another attempt's output directory is refused before any
+    // artifact is uploaded: an artifact name is immutable once published for an attempt.
+    const grant = { requestId: randomUUID(), attemptId: randomUUID(), epoch: 1, runner: { id: 'preview-runner', revision: 1 },
+      bundleDigest: bundle.digest, runnerImageDigest: `sha256:${'b'.repeat(64)}`, targetUrl: 'https://preview.example.test/', deadline: '2026-09-16T01:00:00.000Z' };
+    const record = { grant, startedAt: '2026-09-16T00:00:00.000Z', finishedAt: '2026-09-16T00:01:00.000Z',
+      phases: [{ phase: 'enumerate', exitCode: 0, timedOut: false, durationMs: 1 }, { phase: 'execute', exitCode: 0, timedOut: false, durationMs: 2 }],
+      bundleDigestBefore: bundle.digest, bundleDigestAfter: bundle.digest, runnerImageDigest: grant.runnerImageDigest,
+      outcome: 'completed', refusals: [], outputPath: '/srv/graphyard/attempts/previous',
+      settlement: { settled: true, containers: [{ name: `graphyard-enumerate-${grant.attemptId}`, state: 'absent' }, { name: `graphyard-execute-${grant.attemptId}`, state: 'absent' }] } };
+    await writeFile(join(cwd, 'stale.json'), JSON.stringify({ grant, record, outputPath: join(cwd, 'out'), requiredArtifacts: ['inventory', 'report'],
+      expected: { instance: 'preview-7f3a', artifacts: [{ service: 'api', digest: `sha256:${'c'.repeat(64)}` }] }, observations: [] }));
+    await assert.rejects(exec(process.execPath, [launcher, 'runner', 'collect', join(cwd, 'stale.json')], { cwd, env }), /output boundary this execution recorded/);
     assert.deepEqual(posts, ['/api/validation/dispatch']);
     await assert.rejects(exec(process.execPath, [launcher, 'runner', 'nonsense'], { cwd, env }), /Use runner inspect/);
   } finally { await new Promise<void>(r => http.close(() => r())); await rm(cwd, { recursive: true, force: true }); }

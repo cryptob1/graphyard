@@ -1,11 +1,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, writeFile, symlink, rm, chmod } from 'node:fs/promises';
+import { mkdtemp, mkdir, writeFile, symlink, realpath, rm, chmod } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { oracleBundleDigest } from '../src/runner-setup.js';
-import { assertIsolation, assertRunnerCredentialScope, containerEnvironment, executeAttempt, executionCommand, type ExecutionPlan, type Runner, type Settler } from '../src/runner-executor.js';
+import { assertIsolation, assertRunnerCredentialScope, containerEnvironment, containerNames, executeAttempt, executionCommand, observeContainers, preflightAttempt, type ExecutionPlan, type Runner, type Settler } from '../src/runner-executor.js';
 
 const image = `sha256:${'1'.repeat(64)}`;
 const runAsUser = `${process.getuid!()}:${process.getgid!()}`;
@@ -142,6 +142,57 @@ test('failed enumeration stops the attempt, and a failing execution still reache
   assert.equal(failingTests.outcome, 'completed');
   assert.equal(failingTests.phases.at(-1)!.exitCode, 1);
 }));
+
+test('every local refusal happens before acknowledgement, and preflight bytes carry into execution', async () => boundary(async ({ oracle, output, plan }) => {
+  const preflight = await preflightAttempt(plan);
+  assert.deepEqual(preflight, { oraclePath: await realpath(oracle), outputPath: await realpath(output), bundleDigest: plan.grant.bundleDigest });
+
+  // Each structural refusal rejects, so a runner can decline before acknowledging and
+  // let the attempt expire instead of holding protected resources until an operator acts.
+  await writeFile(join(output, 'planted.json'), '{}');
+  await assert.rejects(preflightAttempt(plan), /must be empty/);
+  await rm(join(output, 'planted.json'));
+  await assert.rejects(preflightAttempt({ ...plan, oraclePath: join(oracle, 'missing') }), /ENOENT|no such file/);
+  await symlink('/etc/passwd', join(oracle, 'link.ts'));
+  await assert.rejects(preflightAttempt(plan), /cannot contain symlinks/);
+  await rm(join(oracle, 'link.ts'));
+
+  const record = await executeAttempt(plan, { run: settledRunner, settle: absent, preflight });
+  assert.equal(record.bundleDigestBefore, preflight.bundleDigest);
+  assert.deepEqual(record.refusals, []);
+  assert.deepEqual(record.settlement.containers.map(c => c.name), containerNames(plan.grant.attemptId));
+}));
+
+test('losing attempt authority stops execution instead of exercising the target to the deadline', async () => boundary(async ({ plan }) => {
+  const authority = new AbortController();
+  const phases: string[] = [];
+  // The server rejects a heartbeat mid-attempt: the container boundary fences the host,
+  // not the target, so the phase is killed and no further phase is started.
+  const run: Runner = async (command, _timeout, signal) => { phases.push(command.argv.at(-1)!); authority.abort(); return { exitCode: signal?.aborted ? 137 : 0, timedOut: false }; };
+  const settled: string[] = [];
+  const aborted = await executeAttempt(plan, { run, settle: async name => { settled.push(name); return 'absent'; }, signal: authority.signal });
+  assert.deepEqual(phases, ['enumerate']);
+  assert.ok(aborted.refusals.some(r => /authority was lost/.test(r)));
+  assert.equal(aborted.outcome, 'failed');
+  // Settlement still runs: an aborted attempt must not leave a container able to act.
+  assert.deepEqual(settled, containerNames(plan.grant.attemptId));
+  assert.equal(aborted.settlement.settled, true);
+
+  const before = new AbortController(); before.abort();
+  const never = await executeAttempt(plan, { run: settledRunner, settle: absent, signal: before.signal });
+  assert.deepEqual(never.phases, []);
+  assert.ok(never.refusals.some(r => /authority was lost/.test(r)));
+}));
+
+test('a collector observes settlement itself rather than reading the record', async () => {
+  const names = containerNames('11111111-2222-3333-4444-555555555555');
+  const seen: string[] = [];
+  assert.deepEqual(await observeContainers(names, { inspect: async name => { seen.push(name); return name.includes('execute') ? 'present' : 'absent'; } }),
+    [{ name: names[0], state: 'absent' }, { name: names[1], state: 'present' }]);
+  assert.deepEqual(seen, names);
+  // Observation is read-only; it has no way to remove a container to manufacture `absent`.
+  assert.deepEqual(await observeContainers([], {}), []);
+});
 
 test('an elapsed attempt deadline refuses execution instead of running unauthorized', async () => boundary(async ({ plan }) => {
   const record = await executeAttempt({ ...plan, grant: { ...plan.grant, deadline: new Date(Date.now() - 1000).toISOString() } }, { run: settledRunner, settle: absent });

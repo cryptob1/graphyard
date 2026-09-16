@@ -121,7 +121,7 @@ Only the pinned collector can call `result`. It must independently verify the ex
 - `target: {instance, artifacts: [{service, digest}], measurement, coversEntireRun, attribution}`;
 - actual executed `bundleDigest` and `runnerImageDigest`;
 - verified `artifacts: [{name, digest, url}]` covering the required names, and `artifactState`;
-- `executionSettled`: whether independent observation proves execution/operations have finished.
+- `executionSettled`: whether the collector's **own** independent observation proves execution/operations have finished. A runner's claim about itself is not settlement; releasing a protected resource is never a worker assertion.
 
 `measurement` is `provider`, `host-attestation` or `unknown`. Application self-reported version strings cannot count as either trusted measurement. `attribution` is `matched`, `mismatched`, `changed` or `unknown`, and only `matched` with whole-run coverage can pass: before/after probes cannot rule out A → B → A changes, so an uncovered interval stays `unknown`. `artifactState` is `verified`, `missing`, `upload-failed` or `expired`, and only `verified` can pass, so a runner exiting zero without durable required artifacts cannot be accepted. The collector must inspect the approved execution boundary and real inventory, not trust a report uploaded by candidate code. Artifact URLs are metadata, not public access grants; custom collectors must use private authorized storage and avoid secrets in URLs or reports.
 
@@ -139,7 +139,7 @@ Operator commands use `{requestId, epoch, reason}`:
 - `settle` also requires `settlementEvidence`, a URL referencing independent termination/operation-settlement proof. Only use it after confirming the process and its external operations are stopped/fenced. This is an explicit manual recovery attestation in D1, not an automatic kill command.
 - `retry` requires a settled prior attempt, an unexpired deadline, remaining attempt budget and current candidate/registration authority. It queues another attempt and invalidates any earlier pass.
 
-Revoked definitions require newly authorized configuration and a new request. Do not reassign a protected resource because a timer expired. Unknown external outcomes remain blocked until verified settlement. The packaged runner implements and tests this external boundary by confirming container removal before reporting settlement; these APIs do not make arbitrary custom executors safe automatically.
+Revoked definitions require newly authorized configuration and a new request. Do not reassign a protected resource because a timer expired. Unknown external outcomes remain blocked until verified settlement. The packaged runner implements and tests this external boundary by removing its containers and confirming their absence, and the collector independently re-observes those containers before reporting settlement; these APIs do not make arbitrary custom executors safe automatically.
 
 ## Verification
 
