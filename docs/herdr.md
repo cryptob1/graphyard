@@ -4,6 +4,8 @@ Herdr runs visible agent sessions. Graphyard remains authoritative for work owne
 
 ## Install the plugin
 
+Requires Node 24, Herdr 0.7.1 or newer, and a Graphyard checkout.
+
 From the managed repository, with an individual worker token:
 
 ```sh
