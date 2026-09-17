@@ -516,6 +516,18 @@ export async function mergeWork(config: MasterConfig, work: Work, freshSnapshot:
     const commitDelay = githubProviderDelay(committingTime, 0, commitClock, verified.clockOffset.min);
     if (commitDelay > 21_000 || remainingAtSnapshot - (performance.now() - authorityBudgetStartedAt) - commitDelay <= 90_000) throw new Error('Clock uncertainty leaves insufficient committed merge authority; wait for observation or expiry');
     if (commitDelay) await new Promise(resolve => setTimeout(resolve, commitDelay));
+    // A suspended broker can resume after its execution expired: reconciliation then
+    // clears the execution, the revocation window reopens, and this stale SHA could
+    // merge before the asynchronously published GitHub check changes. Revalidate the
+    // committed authority and its remaining lifetime immediately before the provider
+    // mutation; the mutation is refused on any missing or expired authority.
+    const preProvider = await freshSnapshot();
+    const finalExecution = preProvider.work.find(item => item.id === work.id)?.mergeExecution;
+    const remainingBeforeProvider = remainingAtSnapshot - (performance.now() - authorityBudgetStartedAt);
+    if (!finalExecution || finalExecution.id !== granted.execution.id || !finalExecution.committingAt
+      || finalExecution.sha !== authorization.sha || Date.parse(finalExecution.expiresAt) <= Date.parse(preProvider.now)
+      || !Number.isFinite(remainingBeforeProvider) || remainingBeforeProvider <= 90_000)
+      throw new Error(`${work.key} merge execution expired or was superseded during the provider clock wait; the provider merge is refused`);
     const provider = JSON.parse(run('gh', ['api', '--method', 'PUT', `repos/${config.repository}/pulls/${authorization.pr}/merge`, '-f', `sha=${authorization.sha}`, '-f', `merge_method=${config.mergeMethod}`]));
     if (provider.merged !== true || typeof provider.sha !== 'string') {
       await cancel(latest, granted.execution, provider.message || 'GitHub confirmed that it did not merge the candidate'); cancelled = true;

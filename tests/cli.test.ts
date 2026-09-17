@@ -379,7 +379,10 @@ test('foreground Herdr containment kills a descendant forked after SIGTERM and r
   const leader = `process.on('SIGTERM',()=>{require('node:child_process').spawn(process.execPath,['-e',${JSON.stringify(descendant)}],{stdio:'ignore'});process.exit(0)});setInterval(()=>{},20)`;
   try {
     let renewals = 0;
-    assert.equal(await supervise(process.execPath, ['-e', leader], 1, async () => ++renewals === 1 ? renewal(150) : new Promise(() => {}), { detached: false, intervalMs: 25, graceMs: 75, quarantine: { establish: async () => {}, settle: async () => {} } }), 1);
+    // The descendant is forked by the leader's SIGTERM handler and must finish its own node
+    // boot before writing its first tick; a tight grace can SIGKILL it first and would only
+    // prove the kill, not the ticks stopping. Give it ample time to demonstrably tick.
+    assert.equal(await supervise(process.execPath, ['-e', leader], 1, async () => ++renewals === 1 ? renewal(150) : new Promise(() => {}), { detached: false, intervalMs: 25, graceMs: 500, quarantine: { establish: async () => {}, settle: async () => {} } }), 1);
     await delay(50); const stopped = await readFile(output, 'utf8'); await delay(75);
     assert.equal(await readFile(output, 'utf8'), stopped);
   } finally { await rm(cwd, { recursive: true, force: true }); }

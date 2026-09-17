@@ -268,7 +268,11 @@ test('routine merge is exact-candidate, double-checked, and never uses an admin 
   const execution = { id: '11111111-1111-4111-8111-111111111111', owner: 'master', sha: candidate.candidate!.sha, baseSha: candidate.candidate!.baseSha, policyRevision: 2, authorizationRevision: candidate.revision, issuedAt: new Date().toISOString(), expiresAt: new Date(Date.now() + 120_000).toISOString() };
   const acquire = async () => ({ execution }); const cancel = async () => ({}); const verify = async () => ({ executionId: execution.id, sha: execution.sha, verifiedAt: new Date(Date.now() - 2000).toISOString(), providerDelayMs: 0, clockOffset: { min: 0, max: 0 } });
   const commit = async () => ({ executionId: execution.id, sha: execution.sha, committingAt: new Date(Date.now() - 2000).toISOString() });
-  const result = await mergeWork(config, candidate, async () => ({ work: [candidate], now: new Date().toISOString() }), acquire, cancel, verify, (_command, args) => {
+  // The third snapshot read is the broker's pre-provider revalidation, so it must observe
+  // the committed execution exactly as the server holds it after merge-commit.
+  const staged = (pre: Work, post: Work) => { let reads = 0; return async () => ({ work: [++reads >= 3 ? post : pre], now: new Date().toISOString() }); };
+  const committedView = (source: Work) => work({ observation: source.observation, mergeExecution: { ...execution, committingAt: new Date().toISOString() } });
+  const result = await mergeWork(config, candidate, staged(candidate, committedView(candidate)), acquire, cancel, verify, (_command, args) => {
     calls.push(args);
     if (args[1] === 'view') return JSON.stringify({ headRefOid: candidate.candidate!.sha, baseRefOid: candidate.candidate!.baseSha, baseRefName: 'main', state: 'OPEN', isDraft: false });
     if (args.includes('--include')) return `Date: ${new Date().toUTCString()}\n\n{}`;
@@ -285,14 +289,14 @@ test('routine merge is exact-candidate, double-checked, and never uses an admin 
   const stale = work({ observation: { at: '2000-01-01T00:00:00Z' } as any });
   await assert.rejects(mergeWork(config, stale, async () => ({ work: [stale], now: new Date().toISOString() }), acquire, cancel, verify), /does not have/);
   let cancelled = '';
-  await assert.rejects(mergeWork(config, candidate, async () => ({ work: [candidate], now: new Date().toISOString() }), acquire, async (_work, authority) => { cancelled = authority.id; }, verify, (_command, args) => {
+  await assert.rejects(mergeWork(config, candidate, staged(candidate, committedView(candidate)), acquire, async (_work, authority) => { cancelled = authority.id; }, verify, (_command, args) => {
     if (args[1] === 'view') return JSON.stringify({ headRefOid: candidate.candidate!.sha, baseRefOid: candidate.candidate!.baseSha, baseRefName: 'main', state: 'OPEN', isDraft: false });
     if (args.includes('--include')) return `Date: ${new Date().toUTCString()}\n\n{}`;
     if (args[1] !== '--method') return JSON.stringify(validProtection);
     throw new Error('provider response lost');
   }, undefined, commit), /outcome is unknown/);
   assert.equal(cancelled, '', 'an unknown provider outcome retains authority');
-  await assert.rejects(mergeWork(config, candidate, async () => ({ work: [candidate], now: new Date().toISOString() }), acquire, async (_work, authority) => { cancelled = authority.id; }, verify, (_command, args) => {
+  await assert.rejects(mergeWork(config, candidate, staged(candidate, committedView(candidate)), acquire, async (_work, authority) => { cancelled = authority.id; }, verify, (_command, args) => {
     if (args[1] === 'view') return JSON.stringify({ headRefOid: candidate.candidate!.sha, baseRefOid: candidate.candidate!.baseSha, baseRefName: 'main', state: 'OPEN', isDraft: false });
     if (args.includes('--include')) return `Date: ${new Date().toUTCString()}\n\n{}`;
     if (args[1] !== '--method') return JSON.stringify(validProtection);
@@ -312,7 +316,7 @@ test('routine merge is exact-candidate, double-checked, and never uses an admin 
   }), /verification refused/);
   assert.equal(cancelled, execution.id, 'a confirmed verification refusal cancels authority');
   const resumed = work({ observation: candidate.observation, mergeExecution: execution }); let reacquired = false;
-  const resumedResult = await mergeWork(config, resumed, async () => ({ work: [resumed], now: new Date().toISOString() }), async () => { reacquired = true; return { execution }; }, cancel, verify, (_command, args) => {
+  const resumedResult = await mergeWork(config, resumed, staged(resumed, committedView(resumed)), async () => { reacquired = true; return { execution }; }, cancel, verify, (_command, args) => {
     if (args[1] === 'view') return JSON.stringify({ headRefOid: resumed.candidate!.sha, baseRefOid: resumed.candidate!.baseSha, baseRefName: 'main', state: 'OPEN', isDraft: false });
     if (args.includes('--include')) return `Date: ${new Date().toUTCString()}\n\n{}`;
     return args[1] === '--method' ? JSON.stringify({ merged: true, sha: 'c'.repeat(40) }) : JSON.stringify(validProtection);
@@ -331,6 +335,42 @@ test('routine merge is exact-candidate, double-checked, and never uses an admin 
   assert.equal(cancelled, lateExecution.id, 'a resumed execution uses its actual remaining lifetime');
 });
 
+test('merge broker refuses the provider call when committed authority died during the clock wait', async () => {
+  const candidate = work({ observation: { at: new Date().toISOString(), candidate: { sha: 'a'.repeat(40), baseSha: 'b'.repeat(40), pr: 42, branch: 'graphyard/gy-42-1', author: 'worker' } } as any });
+  const config = { version: 1 as const, url: 'https://graphyard.example', credentialFile: '/outside/master.token', cliPath: launcher, repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'machine-a', masterAgentName: 'graphyard-master-project', autoMerge: true, mergeMethod: 'merge' as const, workers: [] };
+  const execution = { id: '22222222-2222-4222-8222-222222222222', owner: 'master', sha: candidate.candidate!.sha, baseSha: candidate.candidate!.baseSha, policyRevision: 2, authorizationRevision: candidate.revision, issuedAt: new Date().toISOString(), expiresAt: new Date(Date.now() + 120_000).toISOString() };
+  const acquire = async () => ({ execution });
+  const verify = async () => ({ executionId: execution.id, sha: execution.sha, verifiedAt: new Date(Date.now() - 2000).toISOString(), providerDelayMs: 0, clockOffset: { min: 0, max: 0 } });
+  const commit = async () => ({ executionId: execution.id, sha: execution.sha, committingAt: new Date(Date.now() - 2000).toISOString() });
+  let puts = 0; let cancelled = '';
+  const run = (_command: string, args: string[]) => {
+    if (args[1] === 'view') return JSON.stringify({ headRefOid: candidate.candidate!.sha, baseRefOid: candidate.candidate!.baseSha, baseRefName: 'main', state: 'OPEN', isDraft: false });
+    if (args.includes('--include')) return `Date: ${new Date().toUTCString()}\n\n{}`;
+    if (args[1] !== '--method') return JSON.stringify(validProtection);
+    puts++;
+    return JSON.stringify({ merged: true, sha: 'c'.repeat(40) });
+  };
+  // A broker suspended during the post-commit clock wait can resume after reconciliation
+  // cleared its expired execution: the pre-provider revalidation must refuse without
+  // invoking GitHub or cancelling the (already unknown-outcome) execution.
+  let reads = 0; const reconciled = work({ observation: candidate.observation, mergeExecution: null });
+  await assert.rejects(mergeWork(config, candidate, async () => ({ work: [++reads === 3 ? reconciled : work({ observation: candidate.observation, mergeExecution: execution })], now: new Date().toISOString() }),
+    acquire, async (_work, authority) => { cancelled = authority.id; }, verify, run, execution.owner, commit),
+    /expired or was superseded during the provider clock wait/);
+  assert.equal(puts, 0, 'the broker must not invoke the provider without live committed authority');
+  assert.equal(cancelled, '', 'a post-commit refusal retains the unknown outcome instead of cancelling');
+  // A stale broker must not merge under a superseded execution either, even when the
+  // replacement looks equally committed.
+  reads = 0; cancelled = '';
+  const replacement = { ...execution, id: '33333333-3333-4333-8333-333333333333', committingAt: new Date().toISOString() };
+  const superseded = work({ observation: candidate.observation, mergeExecution: replacement });
+  await assert.rejects(mergeWork(config, candidate, async () => ({ work: [++reads === 3 ? superseded : work({ observation: candidate.observation, mergeExecution: execution })], now: new Date().toISOString() }),
+    acquire, async (_work, authority) => { cancelled = authority.id; }, verify, run, execution.owner, commit),
+    /expired or was superseded during the provider clock wait/);
+  assert.equal(puts, 0, 'a superseded authority never reaches the provider');
+  assert.equal(cancelled, '');
+});
+
 test('manual merge remains guarded when automatic merge is disabled and GitHub clock skew is covered', async () => {
   assert.equal(githubProviderDelay(Date.parse('2026-01-01T00:00:05.250Z'), 200, 'HTTP/2 200\r\nDate: Thu, 01 Jan 2026 00:00:02 GMT\r\n\r\n{}'), 4000);
   assert.equal(githubProviderDelay(Date.parse('2026-01-01T00:00:05.250Z'), 800, 'Date: Thu, 01 Jan 2026 00:00:06 GMT\n\n{}'), 800);
@@ -340,7 +380,8 @@ test('manual merge remains guarded when automatic merge is disabled and GitHub c
   const candidate = work({ observation: { at: new Date().toISOString(), candidate: { sha: 'a'.repeat(40), baseSha: 'b'.repeat(40), pr: 42, branch: 'graphyard/gy-42-1', author: 'worker' } } as any });
   const config = { version: 1 as const, url: 'https://graphyard.example', credentialFile: '/outside/master.token', cliPath: launcher, repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'machine-a', masterAgentName: 'graphyard-master-project', autoMerge: false, mergeMethod: 'merge' as const, workers: [] };
   const execution = { id: '11111111-1111-4111-8111-111111111111', owner: 'master', sha: candidate.candidate!.sha, baseSha: candidate.candidate!.baseSha, policyRevision: 2, authorizationRevision: candidate.revision, issuedAt: new Date().toISOString(), expiresAt: new Date(Date.now() + 120_000).toISOString() };
-  const result = await mergeWork(config, candidate, async () => ({ work: [candidate], now: new Date().toISOString() }), async () => ({ execution }), async () => ({}), async () => ({ executionId: execution.id, sha: execution.sha, verifiedAt: new Date(Date.now() - 2000).toISOString(), providerDelayMs: 0, clockOffset: { min: 0, max: 0 } }), (_command, args) => {
+  let reads = 0;
+  const result = await mergeWork(config, candidate, async () => ({ work: [++reads === 3 ? work({ observation: candidate.observation, mergeExecution: { ...execution, committingAt: new Date().toISOString() } }) : candidate], now: new Date().toISOString() }), async () => ({ execution }), async () => ({}), async () => ({ executionId: execution.id, sha: execution.sha, verifiedAt: new Date(Date.now() - 2000).toISOString(), providerDelayMs: 0, clockOffset: { min: 0, max: 0 } }), (_command, args) => {
     if (args[1] === 'view') return JSON.stringify({ headRefOid: candidate.candidate!.sha, baseRefOid: candidate.candidate!.baseSha, baseRefName: 'main', state: 'OPEN', isDraft: false });
     if (args.includes('--include')) return `Date: ${new Date().toUTCString()}\n\n{}`;
     return args[1] === '--method' ? JSON.stringify({ merged: true, sha: 'c'.repeat(40) }) : JSON.stringify(validProtection);
