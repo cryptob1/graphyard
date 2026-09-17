@@ -42,6 +42,11 @@ export function evaluateEnforcement({ repository, baseBranch, appId, protection,
     ...(recheck.work?.candidate?.baseSha !== candidate?.baseSha ? [`candidate base changed from ${candidate?.baseSha ?? 'missing'} to ${recheck.work?.candidate?.baseSha ?? 'missing'} during inspection`] : []),
     ...(recheck.pull?.head?.sha !== pull.head?.sha ? [`pull request head changed from ${pull.head?.sha ?? 'missing'} to ${recheck.pull?.head?.sha ?? 'missing'} during inspection`] : []),
     ...(recheck.pull?.base?.sha !== pull.base?.sha ? [`pull request base changed from ${pull.base?.sha ?? 'missing'} to ${recheck.pull?.base?.sha ?? 'missing'} during inspection`] : []),
+    ...(recheck.pull?.state !== pull.state ? [`pull request state changed from ${pull.state ?? 'missing'} to ${recheck.pull?.state ?? 'missing'} during inspection`] : []),
+    ...(recheck.pull?.draft !== pull.draft ? [`pull request draft changed from ${pull.draft ?? 'missing'} to ${recheck.pull?.draft ?? 'missing'} during inspection`] : []),
+    ...(recheck.pull?.merged !== pull.merged ? [`pull request merged changed from ${pull.merged ?? 'missing'} to ${recheck.pull?.merged ?? 'missing'} during inspection`] : []),
+    ...(recheck.pull?.mergeable !== pull.mergeable ? [`pull request mergeable changed from ${pull.mergeable ?? 'missing'} to ${recheck.pull?.mergeable ?? 'missing'} during inspection`] : []),
+    ...(recheck.pull?.mergeable_state !== pull.mergeable_state ? [`pull request mergeable state changed from ${pull.mergeable_state ?? 'missing'} to ${recheck.pull?.mergeable_state ?? 'missing'} during inspection`] : []),
   ];
   const observationFinding = !Number.isFinite(observationAge) || observationAge < 0 || observationAge >= 120_000
     ? 'Graphyard observation is missing, future-dated, or older than two minutes' : null;
@@ -96,7 +101,8 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
     const rulesets = optional(`repos/${repository}/rulesets`);
     const checkRuns = ghPages(`repos/${repository}/commits/${pull.head.sha}/check-runs?filter=latest&per_page=100`, 'check_runs');
     // Re-read both mutable snapshots last. A report may only say permitted when the
-    // revision and exact commits observed above still describe live state.
+    // revision, exact commits and merge-controlling PR state observed above still
+    // describe live state.
     const currentWork = JSON.parse(execFileSync(process.execPath, [cli, 'status', key], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }));
     const currentPull = gh(`repos/${repository}/pulls/${pr}`);
     console.log(JSON.stringify(evaluateEnforcement({ repository, baseBranch, appId, protection, rulesets,

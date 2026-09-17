@@ -262,6 +262,11 @@ test('enforcement inspection refuses snapshots that change during collection', (
     [{ work: { ...initial.work, candidate: { ...initial.work.candidate, baseSha: 'd'.repeat(40) } }, pull: initial.pull }, /candidate base changed/],
     [{ work: initial.work, pull: { ...initial.pull, head: { sha: 'c'.repeat(40) } } }, /pull request head changed/],
     [{ work: initial.work, pull: { ...initial.pull, base: { ...initial.pull.base, sha: 'd'.repeat(40) } } }, /pull request base changed/],
+    [{ work: initial.work, pull: { ...initial.pull, state: 'closed' } }, /pull request state changed/],
+    [{ work: initial.work, pull: { ...initial.pull, draft: true } }, /pull request draft changed/],
+    [{ work: initial.work, pull: { ...initial.pull, merged: true } }, /pull request merged changed/],
+    [{ work: initial.work, pull: { ...initial.pull, mergeable: false } }, /pull request mergeable changed/],
+    [{ work: initial.work, pull: { ...initial.pull, mergeable_state: 'blocked' } }, /pull request mergeable state changed/],
   ];
   for (const [recheck, expected] of changes) {
     const report = evaluateEnforcement({ ...initial, recheck });
