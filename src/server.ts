@@ -39,6 +39,11 @@ function flowQuery(url: URL) {
   const parsed = flowQuerySchema.parse(raw);
   return { ...parsed, days: parsed.window as FlowWindow };
 }
+function canonicalJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
+  if (value && typeof value === 'object') return `{${Object.entries(value as Record<string, unknown>).sort(([a], [b]) => a.localeCompare(b)).map(([key, entry]) => `${JSON.stringify(key)}:${canonicalJson(entry)}`).join(',')}}`;
+  return JSON.stringify(value);
+}
 async function body(req: IncomingMessage, limit = 1_000_000) {
   const chunks: Buffer[] = []; let size = 0;
   for await (const chunk of req) { size += chunk.length; demand(size <= limit, 'Request exceeds size limit', 413); chunks.push(chunk); }
@@ -146,7 +151,7 @@ export function server(engine: Engine, credentials: Credential[], github: GitHub
               const sameObservation = existingObservation.environment === data.environment && existingObservation.sha === data.sha
                 && new Date(existingObservation.started_at).toISOString() === new Date(data.startedAt).toISOString()
                 && (existingObservation.finished_at ? new Date(existingObservation.finished_at).toISOString() : null) === (data.finishedAt ? new Date(data.finishedAt).toISOString() : null)
-                && JSON.stringify(existingObservation.details ?? {}) === JSON.stringify(data.details ?? {});
+                && canonicalJson(existingObservation.details ?? {}) === canonicalJson(data.details ?? {});
               demand(sameObservation && JSON.stringify(existing) === JSON.stringify(normalized), 'A duplicate deployment observation must exactly replay every immutable field', 409);
             }
             await client.query('COMMIT');
@@ -155,6 +160,7 @@ export function server(engine: Engine, credentials: Credential[], github: GitHub
           finally { client.release(); }
         }
         if (url.pathname === '/api/deployments' && req.method === 'GET') {
+          demand(['admin', 'coordinator', 'producer'].includes(actor.role), 'An audit role is required to read deployment identifiers', 403);
           const rows = (await engine.store.pool.query(`SELECT d.provider,d.external_id,d.environment,d.sha,d.state,d.started_at,d.finished_at,d.recorded_at,
             COALESCE(array_agg(dm.merge_sha ORDER BY dm.merge_sha) FILTER (WHERE dm.merge_sha IS NOT NULL), '{}') AS contained_merge_shas
             FROM deployment_observations d LEFT JOIN deployment_merge_observations dm ON dm.deployment_id=d.id

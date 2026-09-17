@@ -87,7 +87,7 @@ export interface DeploymentObservation {
   containedMergeShas: string[]; state: 'succeeded' | 'failed' | 'rolled_back'; startedAt: string; finishedAt: string | null; recordedAt: string; details: Record<string, any>;
 }
 
-const pendingCheck = new Set(['queued', 'in_progress', 'pending', 'waiting', 'requested', 'action_required']);
+const pendingCheck = new Set(['queued', 'in_progress', 'pending', 'waiting', 'requested']);
 function iso(value: Date | string | null | undefined) { return value instanceof Date ? value.toISOString() : typeof value === 'string' ? value : ''; }
 function time(value: string | null | undefined) { const parsed = Date.parse(value ?? ''); return Number.isFinite(parsed) ? parsed : null; }
 
@@ -337,10 +337,9 @@ export async function readFlow(store: Store, query: FlowQuery): Promise<FlowData
   const pending = (await store.pool.query('SELECT count(*)::int AS pending FROM (SELECT 1 FROM events WHERE seq>$1 AND work_id IS NOT NULL LIMIT 1001) probe', [lastEvent])).rows[0].pending as number;
   const projection = { lastEvent, updatedAt: projectionRow ? iso(projectionRow.updated_at) : null, pendingEvents: Math.min(pending, 1000), pendingCapped: pending > 1000 };
   const scanLimit = Math.min(Math.max(1, query.limit ?? flowLimits.scan), flowLimits.scan);
-  const stageFilter = query.stage ? ' AND stage=$5' : '';
   const scan = ids.length ? await store.pool.query(
-    `SELECT * FROM flow_facts WHERE work_id=ANY($1) AND observed_at>=$2 AND observed_at<$3${stageFilter} ORDER BY observed_at,id LIMIT $4`,
-    query.stage ? [ids, from, to, scanLimit + 1, query.stage] : [ids, from, to, scanLimit + 1]) : { rows: [], rowCount: 0 };
+    `SELECT * FROM flow_facts WHERE work_id=ANY($1) AND observed_at>=$2 AND observed_at<$3 ORDER BY observed_at,id LIMIT $4`,
+    [ids, from, to, scanLimit + 1]) : { rows: [], rowCount: 0 };
   const truncated = scan.rowCount! > scanLimit;
   const facts = scan.rows.slice(0, scanLimit).map(rowToFact);
   // Current state is read as of the observation instant, inclusively: a fact recorded in
@@ -611,7 +610,9 @@ export function computeFlow(dataset: FlowDataset, query: FlowQuery) {
       episodes.push({
         key: item.key, workId: item.id, sha, pr: candidate.details.pr ?? null, startedAt, partial, facts,
         milestones: {
-          'pr-created': candidate.details.prCreatedAt ? { at: time(candidate.details.prCreatedAt)!, source: 'github' } : { at: null, source: 'github', reason: 'pull-request-creation-time-not-observed' },
+          'pr-created': candidate.details.supersedes
+            ? { at: startedAt, source: 'graphyard-candidate-observation' }
+            : candidate.details.prCreatedAt ? { at: time(candidate.details.prCreatedAt)!, source: 'github' } : { at: null, source: 'github', reason: 'pull-request-creation-time-not-observed' },
           'review-start': milestone(reviewStart, 'github'),
           'review-complete': milestone(approval, 'github'),
           'evidence-complete': milestone(evidenceComplete, 'graphyard'),
@@ -703,7 +704,7 @@ export function computeFlow(dataset: FlowDataset, query: FlowQuery) {
   });
 
   // Dependency critical path across undelivered work.
-  const dependencies = new Map(scope.map(item => [item.id, (latest.get(`${item.id}:dependencies.changed`)?.details.dependencies ?? []) as string[]]));
+  const dependencies = new Map(dataset.work.map(item => [item.id, (latest.get(`${item.id}:dependencies.changed`)?.details.dependencies ?? []) as string[]]));
   const keyOf = new Map(dataset.work.map(item => [item.id, item.key]));
   const deliveredIds = new Set(dataset.work.filter(item => latest.has(`${item.id}:delivered`)).map(item => item.id));
   const chains = new Map<string, string[]>();
@@ -918,7 +919,7 @@ export function flowDrilldown(dataset: FlowDataset, report: FlowReport, request:
         const merged = first('merged');
         const deployment = dataset.deployments.filter(entry => entry.state === 'succeeded' && entry.containedMergeShas.includes(merged?.details.mergeSha ?? sha)).sort((a, b) => time(a.startedAt)! - time(b.startedAt)!)[0];
         const milestones: Record<string, number | null> = {
-          'pr-created': time(candidate.details.prCreatedAt), 'review-start': reviewStart ? time(reviewStart.observedAt) : null,
+          'pr-created': candidate.details.supersedes ? startedAt : time(candidate.details.prCreatedAt), 'review-start': reviewStart ? time(reviewStart.observedAt) : null,
           'review-complete': reviewComplete ? time(reviewComplete.observedAt) : null, 'evidence-complete': evidenceComplete ? time(evidenceComplete.observedAt) : null,
           'merge-authorized': time(first('merge.authorized')?.observedAt), merged: time(merged?.observedAt), production: time(deployment?.startedAt),
         };
@@ -935,12 +936,24 @@ export function flowDrilldown(dataset: FlowDataset, report: FlowReport, request:
         authorized ? `${fact.details.result}; trusted=${fact.details.trusted}; executed=${fact.details.executed}; skipped=${fact.details.skipped}; evidence=${fact.details.evidenceId}${fact.details.validation ? `; artifactRequest=${fact.details.validation.requestId}` : ''}`
           : `${fact.details.result}; trusted=${fact.details.trusted}; identifiers require an authorized role`);
   } else if (metric === 'merge-ready') {
-    for (const item of report.mergeReadyDwell.current) row(item.key, 'merge-ready', null, item.sinceMs, null, null, 'Every gate passed; merge not yet observed');
+    for (const item of scoped) {
+      const carried = dataset.carryIn.find(fact => fact.workId === item.id && fact.kind === 'gates.changed');
+      const gates = [...(carried ? [carried] : []), ...dataset.facts.filter(fact => fact.workId === item.id && fact.kind === 'gates.changed')]
+        .sort((a, b) => time(a.observedAt)! - time(b.observedAt)!);
+      let since: number | null = null;
+      for (const fact of gates) {
+        const ready = (fact.details.unmet ?? []).length === 0 && fact.details.hasCandidate;
+        if (ready && since === null) since = Math.max(time(dataset.from)!, time(fact.observedAt)!);
+        if (!ready) since = null;
+      }
+      if (since !== null && !latest.has(`${item.id}:merged`)) row(item.key, 'merge-ready', new Date(since).toISOString(), Math.max(0, time(dataset.to)! - since), null, null, 'Every gate passed; merge not yet observed');
+    }
   } else if (metric === 'deployments') {
     for (const entry of dataset.deployments.filter(entry => !key || entry.environment === key)) {
       const merged = dataset.mergedForDeployments.filter(fact => entry.containedMergeShas.includes(fact.details.mergeSha));
       for (const fact of merged.length ? merged : [null])
-        row(fact ? keyOf.get(fact.workId) ?? fact.workKey : 'unlinked', entry.environment, entry.startedAt, fact ? time(entry.startedAt)! - time(fact.observedAt)! : null, fact?.details.pr ?? null, entry.sha, `${entry.state} via ${entry.provider} ${entry.externalId}`);
+        row(fact ? keyOf.get(fact.workId) ?? fact.workKey : 'unlinked', entry.environment, entry.startedAt, fact ? time(entry.startedAt)! - time(fact.observedAt)! : null, fact?.details.pr ?? null, authorized ? entry.sha : null,
+          authorized ? `${entry.state} via ${entry.provider} ${entry.externalId}` : `${entry.state}; deployment identifiers require an authorized role`);
     }
   } else if (metric === 'review') {
     for (const fact of dataset.facts.filter(fact => fact.kind === 'review.submitted' && (!key || fact.details.reviewState === key)))

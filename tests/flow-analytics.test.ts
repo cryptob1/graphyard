@@ -362,6 +362,8 @@ test('integration:flow-analytics-edge-cases', async () => {
   assert.equal(retried.filter(fact => fact.kind === 'check.observed').length, 1);
   assert.match(retried.find(fact => fact.kind === 'check.observed')!.dedupe, /:103:1:failure$/);
   assert.equal(derive(12, 'failure', 103).filter(fact => fact.kind === 'check.observed').length, 0, 'replaying the same run remains idempotent');
+  const actionRequired = derive(13, 'action_required', 104).find(fact => fact.kind === 'check.observed')!;
+  assert.equal(actionRequired.details.pending, false, 'action_required is a terminal conclusion, not an in-progress run');
 });
 
 test('integration:flow-analytics-operations', async () => {
@@ -394,6 +396,10 @@ test('integration:flow-analytics-operations', async () => {
   assert.ok(operations.unblocked.items.includes(root.key) && !operations.unblocked.items.includes(leaf.key));
   const filteredOperations = (await analyse({ slice: 'gy35-filtered-dependent' })).report.operations;
   assert.deepEqual(filteredOperations.criticalPath.chain, [filteredDependent.key], 'an out-of-scope delivered dependency is not treated as unfinished');
+  const outsidePending = await released('gy35-out-of-scope-pending');
+  const insideDependent = await released('gy35-inside-dependent', { dependencies: [outsidePending.id] });
+  const crossScope = (await analyse({ slice: 'gy35-inside-dependent' })).report.operations;
+  assert.deepEqual(crossScope.criticalPath.chain, [outsidePending.key, insideDependent.key], 'critical paths traverse unfinished dependencies outside the presentation filter');
   assert.equal(operations.review.findings, 1, 'a change request is a recorded finding');
   assert.equal(operations.review.approvals, 1);
   assert.equal(operations.review.independentApprovals, 1);
@@ -521,6 +527,8 @@ test('integration:flow-analytics-drilldown-export', async () => {
   assert.equal(served.body.rows.length, 1);
   const readerView = await api(`/api/analytics/flow/drilldown?window=30&slice=${slice}&metric=evidence`, tokens.reader);
   assert.ok(!String(readerView.body.rows[0].detail).includes('evidence='), 'a reader gets counts without evidence identifiers');
+  const rawDeployments = await api('/api/deployments', tokens.reader);
+  assert.equal(rawDeployments.status, 403, 'raw deployment identifiers require an audit role');
   const download = await fetch(`${url}/api/analytics/flow/export?window=30&slice=${slice}&metric=evidence&format=csv`, { headers: { Authorization: `Bearer ${tokens.operator}` } });
   assert.equal(download.headers.get('content-type'), 'text/csv; charset=utf-8');
   assert.match(download.headers.get('content-disposition') ?? '', /graphyard-flow-evidence-30d\.csv/);

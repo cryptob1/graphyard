@@ -157,8 +157,10 @@ The page shows exactly one state:
 
 Every aggregate drills down to the underlying records: the work item, the exact pull
 request and commit, and evidence or artifact identifiers where the role allows. Readers see
-results and counts; operators, coordinators, and producers additionally see evidence and
-artifact identifiers.
+results and counts; administrators, coordinators, and producers additionally see evidence
+and artifact identifiers. The raw deployment-observation endpoint has the same audit-role
+restriction. Deployment drill-down and export redact artifact SHAs, provider names, and
+external deployment IDs for ordinary readers.
 Summary cards may preview only the first 25 deterministic rows, but drill-downs are rebuilt
 from the complete bounded population and independently return up to 200 rows.
 
@@ -239,8 +241,9 @@ A deployment observation is recorded by a producer or operator credential:
 `state` is `succeeded`, `failed`, or `rolled_back`. `sha` is the full artifact commit SHA.
 `containedMergeShas` contains one to 200 full GitHub merge SHAs independently verified as
 part of that artifact. Abbreviations are refused. The same provider, external ID, and state
-is recorded once; an identical repeat is reported as a duplicate, while a repeat that
-tries to change containment is refused.
+is recorded once; a semantically identical repeat is reported as a duplicate (JSON object
+key order is immaterial), while a repeat that changes any immutable field or containment is
+refused.
 Implementation workers do not hold producer credentials, so they cannot record deployment
 observations.
 
