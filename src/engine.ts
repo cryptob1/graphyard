@@ -418,6 +418,13 @@ export class Engine {
       // expiry at the raw provider instant can call evidence expired that was live when
       // the merge was authorized. Recorded with the delivery so the judgement is exact.
       let evidenceAsOf: string | null = null;
+      // The same two clocks make the raw provider merge timestamp unusable for any
+      // repository-clock comparison a reader makes later: window membership, weekly
+      // bucketing, and the interval from the append-only intent event are all measured on
+      // the database clock. Carry the merge onto that clock here, while the bounded offset
+      // is still in hand, and record the offset itself so other provider timestamps on the
+      // same observation (the pull request's creation time) can be carried with it.
+      let mergedAtRepository: string | null = null; let repositoryClockOffsetMs: number | null = null;
       if (observation.merged && observation.mergedAt && Number.isFinite(Date.parse(observation.mergedAt))) {
         const providerMergedTime = Date.parse(observation.mergedAt);
         // Never allow evidence from after the earliest possible merge instant.
@@ -426,6 +433,11 @@ export class Engine {
         const boundedExecution = activeExecution ?? acquired ?? null;
         const offset = boundedExecution?.clockOffset;
         const mergedTime = providerMergedTime + (offset?.min ?? 0);
+        // The lower bound of the offset, so the recorded instant is the earliest the merge
+        // can have happened on the repository clock and a derived duration is never
+        // inflated by skew. The bound is narrow: `verifyMerge` refuses an offset
+        // observation wider than 20 seconds, so the true instant is at most that far later.
+        if (offset) { repositoryClockOffsetMs = offset.min; mergedAtRepository = new Date(mergedTime).toISOString(); }
         const cutoff = providerMergedTime + (/\.\d+Z$/.test(observation.mergedAt) ? 1 : 1000) + (offset?.max ?? 0);
         // Every authorization path below requires `executionValid`, which bounds
         // `cutoff` by the execution expiry, and `acquireMerge` bounds that expiry by the
@@ -472,7 +484,8 @@ export class Engine {
           if (work.gates.some(g => !g.passed)) work.violations.push('Post-merge checks differ from the recorded authorization; follow-up required');
           work.stage = 'done'; work.stageEnteredAt = now.toISOString();
           work.mergeExecution = null;
-          work.delivery = { mergedAt: observation.mergedAt!, mergeSha: observation.mergeSha, authorizationRevision: authorizationRevision!, ...(evidenceAsOf ? { evidenceAsOf } : {}) };
+          work.delivery = { mergedAt: observation.mergedAt!, mergeSha: observation.mergeSha, authorizationRevision: authorizationRevision!, ...(evidenceAsOf ? { evidenceAsOf } : {}),
+            ...(mergedAtRepository ? { mergedAtRepository, repositoryClockOffsetMs: repositoryClockOffsetMs! } : {}) };
           await db.query('DELETE FROM jobs WHERE work_id=$1', [work.id]);
         } else {
           work.mergeExecution = null;

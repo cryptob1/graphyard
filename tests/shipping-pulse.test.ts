@@ -5,11 +5,11 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import EmbeddedPostgres from 'embedded-postgres';
-import { Store } from '../src/store.js';
+import { Store, DELIVERY_REPOSITORY_INSTANT } from '../src/store.js';
 import { shippingPulse, SHIPPING_PULSE_LIMIT } from '../src/shipping-pulse.js';
 import { Engine } from '../src/engine.js';
 import { server } from '../src/server.js';
-import { ProductionDelivery } from '../src/production-delivery.js';
+import { ProductionDelivery, PRODUCTION_CLOCK_SKEW_MS } from '../src/production-delivery.js';
 
 let database: EmbeddedPostgres; let store: Store;
 before(async () => {
@@ -65,14 +65,16 @@ test('bounded aggregation is served by the delivery and production-merge indexes
     await db.query('BEGIN'); await db.query('SET LOCAL enable_seqscan=off');
     const explain = async (sql: string, params: unknown[]) =>
       (await db.query(`EXPLAIN ${sql}`, params)).rows.map(row => row['QUERY PLAN']).join('\n');
-    const plan = await explain(`SELECT DISTINCT ON (e.work_id) e.work_id, e.seq
-      FROM events e WHERE e.kind='github.observed' AND e.payload->'work'->'delivery'->>'mergedAt' IS NOT NULL
-        AND graphyard_instant(e.payload->'work'->'delivery'->>'mergedAt') BETWEEN $1 AND $2
-      ORDER BY e.work_id ASC, e.seq ASC`,
+    const plan = await explain(`SELECT DISTINCT ON (work_id) work_id, seq
+      FROM events WHERE kind='github.observed' AND payload->'work'->'delivery'->>'mergedAt' IS NOT NULL
+        AND ${DELIVERY_REPOSITORY_INSTANT} BETWEEN $1 AND $2
+      ORDER BY work_id ASC, seq ASC`,
       [new Date(Date.now() - 84 * 86_400_000).toISOString(), new Date().toISOString()]);
-    // The range must appear as an Index Cond. A text-keyed index still shows up in the
-    // plan but demotes the range to a Filter, reading every delivery row in the ledger.
-    assert.match(plan, /Index Scan using events_delivery_instant/);
+    // The range must appear as an Index Cond. An index keyed on any other expression -
+    // text, or the provider merge timestamp the pulse no longer compares against the
+    // repository clock - still shows up in the plan but demotes the range to a Filter,
+    // reading every delivery row in the ledger.
+    assert.match(plan, /Index Scan using events_delivery_repository_instant/);
     assert.match(plan, /Index Cond:[^\n]*graphyard_instant/);
     assert.doesNotMatch(plan, /Filter:[^\n]*graphyard_instant/);
     const lookup = await explain(`SELECT pom.deployed_at FROM production_observation_merges pom
@@ -226,6 +228,70 @@ test('delivery timestamps are read as instants regardless of the recorded offset
   const pulse = await shippingPulse(store.pool);
   const entry = pulse.recent.find(item => item.key === 'GY-OFFSET');
   assert.equal(Date.parse(entry!.mergedAt), mergedAt.getTime());
+});
+
+test('repository-clock comparisons use the merge instant the delivery carried onto that clock', async () => {
+  const before = await shippingPulse(store.pool);
+  const now = (await store.pool.query('SELECT statement_timestamp() AS now')).rows[0].now as Date;
+  // The repository clock runs ten minutes ahead of GitHub's. Merge verification bounds how
+  // precisely that offset is measured, not how large it can be, and afterwards the recorded
+  // instant is the only thing relating the two clocks. Every value below is stated on the
+  // clock that produced it, exactly as the ledger holds them.
+  const offsetMs = 600_000;
+  const record = async (key: string, repositoryMergedAt: Date, mergeSha: string, times: { intentAt?: Date; prCreatedAt?: Date } = {}) => {
+    const id = randomUUID(), providerMergedAt = new Date(repositoryMergedAt.getTime() - offsetMs);
+    const work = {
+      id, key, title: key, revision: 2, candidate: { pr: 800, sha: 'a'.repeat(40), baseSha: 'b'.repeat(40) }, policyRevision: 1,
+      ...(times.prCreatedAt ? { observation: { prCreatedAt: times.prCreatedAt.toISOString() } } : {}),
+      delivery: { mergedAt: providerMergedAt.toISOString(), mergedAtRepository: repositoryMergedAt.toISOString(), repositoryClockOffsetMs: offsetMs, mergeSha, authorizationRevision: 1 },
+      evidence: [], criteria: [], violations: [],
+    };
+    await store.pool.query('INSERT INTO work_items(id,document) VALUES($1,$2)', [id, { id }]);
+    if (times.intentAt) await store.pool.query("INSERT INTO events(work_id,actor,kind,payload,created_at) VALUES($1,'operator','create',$2,$3)", [id, { work: { id, key } }, times.intentAt]);
+    await store.pool.query("INSERT INTO events(work_id,actor,kind,payload) VALUES($1,'github','github.observed',$2)", [id, { work }]);
+  };
+  // A minute inside the seven-day window on the repository clock, nine minutes outside it
+  // on GitHub's. The raw provider timestamp would drop it from the window entirely.
+  await record('GY-CLOCK-WINDOW', new Date(now.getTime() - 7 * 86_400_000 + 60_000), '1'.repeat(40));
+  // The newest delivery. Its append-only intent event was written five minutes after the
+  // raw provider merge timestamp and five minutes before the repository merge instant, so
+  // judging the interval on the provider clock reads the work as created after it merged
+  // and silently drops it from the median instead of measuring five minutes. Its pull
+  // request was created two minutes after the merge on GitHub's own clock, which stays a
+  // genuine ordering violation only because that timestamp is carried across with the same
+  // offset rather than compared raw against a repository instant.
+  const newest = new Date(now.getTime() - 60_000);
+  await record('GY-CLOCK-INTENT', newest, '2'.repeat(40),
+    { intentAt: new Date(newest.getTime() - offsetMs + 300_000), prCreatedAt: new Date(newest.getTime() - offsetMs + 120_000) });
+  await new ProductionDelivery(store).observe({ id: 'deployment-observer', role: 'producer', deploymentProviders: ['railway'] }, {
+    provider: 'railway', deploymentId: 'clock-order', status: 'succeeded', kind: 'deployment', deployedAt: new Date(now.getTime() - 30_000).toISOString(),
+    commitSha: 'a'.repeat(40), sourceUrl: 'https://railway.example/deployment/clock-order', mergeShas: ['2'.repeat(40)],
+  }, randomUUID());
+  const after = await shippingPulse(store.pool);
+  assert.equal(after.counts.days7 - before.counts.days7, 2, 'the seven-day window admits the boundary delivery on the repository clock');
+  assert.equal(after.recent[0].key, 'GY-CLOCK-INTENT');
+  assert.equal(Date.parse(after.recent[0].mergedAt), newest.getTime(), 'the reported merge instant is the repository-clock one');
+  assert.equal(after.intentToMerge.sampleSize - before.intentToMerge.sampleSize, 1, 'the intent interval is measured, not discarded as out of order');
+  assert.equal((after.prToProduction.exclusions['invalid-clock-order'] ?? 0) - (before.prToProduction.exclusions['invalid-clock-order'] ?? 0), 1,
+    'a pull request created after its own merge stays an ordering violation once both provider times are carried across together');
+});
+
+test('a deployment reported from a provider clock slightly ahead of the repository is retained, not refused', async () => {
+  const delivery = new ProductionDelivery(store);
+  const producer = { id: 'deployment-observer', role: 'producer' as const, deploymentProviders: ['railway'] };
+  const now = (await store.pool.query('SELECT statement_timestamp() AS now')).rows[0].now as Date;
+  const reported = (aheadMs: number) => ({
+    provider: 'railway', deploymentId: `skew-${aheadMs}`, status: 'succeeded' as const, kind: 'deployment' as const,
+    deployedAt: new Date(now.getTime() + aheadMs).toISOString(), commitSha: 'b'.repeat(40),
+    sourceUrl: `https://railway.example/deployment/skew-${aheadMs}`, mergeShas: ['b'.repeat(40)],
+  });
+  // A finished deployment whose provider clock runs a little fast is real production
+  // history; refusing it loses the observation until a collector happens to retry later.
+  const accepted = await delivery.observe(producer, reported(PRODUCTION_CLOCK_SKEW_MS / 2), randomUUID());
+  assert.equal(accepted.status, 'succeeded');
+  // Past the bounded allowance the timestamp is no longer explainable as clock skew, so it
+  // is still refused rather than recorded as an observed fact.
+  await assert.rejects(() => delivery.observe(producer, reported(PRODUCTION_CLOCK_SKEW_MS * 4), randomUUID()), /ahead of the repository clock/);
 });
 
 test('API requires authentication and bounded larger histories are explicitly partial', async () => {

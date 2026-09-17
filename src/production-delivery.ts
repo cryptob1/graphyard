@@ -14,6 +14,16 @@ const observationSchema = z.object({
   if (value.status === 'succeeded' && value.kind === 'deployment' && !value.mergeShas.length) context.addIssue({ code: 'custom', path: ['mergeShas'], message: 'A successful deployment needs independently verified merge containment' });
 });
 
+/**
+ * How far ahead of the repository clock a provider-reported deployment time may be.
+ * `deployedAt` is the provider's own clock, so a provider running slightly fast reports a
+ * valid, already-finished deployment with a timestamp in the repository's future.
+ * Refusing those outright loses real production history until a collector happens to
+ * retry after the offset elapses, so a bounded allowance is accepted and anything beyond
+ * it is still refused rather than recorded as fact.
+ */
+export const PRODUCTION_CLOCK_SKEW_MS = 120_000;
+
 export class ProductionDelivery {
   constructor(private store: Store) {}
   /**
@@ -35,7 +45,8 @@ export class ProductionDelivery {
     return this.store.transaction(async (db, now) => {
       const receipt = (await db.query('SELECT * FROM receipts WHERE actor=$1 AND key=$2', [actor.id, key])).rows[0];
       if (receipt) { demand(receipt.fingerprint === fingerprint, 'Idempotency key was already used for another request'); return receipt.result; }
-      demand(Date.parse(data.deployedAt) <= now.getTime(), 'Deployment time cannot be in the future', 400);
+      demand(Date.parse(data.deployedAt) <= now.getTime() + PRODUCTION_CLOCK_SKEW_MS,
+        `Deployment time is more than ${PRODUCTION_CLOCK_SKEW_MS / 1000} seconds ahead of the repository clock`, 400);
       const result = { id: randomUUID(), observedAt: now.toISOString(), ...data, mergeShas: [...new Set(data.mergeShas.map(value => value.toLowerCase()))] };
       await db.query(`INSERT INTO production_observations(id,provider,deployment_id,status,kind,deployed_at,observed_at,commit_sha,artifact_digest,source_url,producer,document)
         VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`, [result.id, data.provider, data.deploymentId, data.status, data.kind, data.deployedAt, now, data.commitSha?.toLowerCase() ?? null, data.artifactDigest ?? null, data.sourceUrl, actor.id, result]);

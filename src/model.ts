@@ -75,10 +75,17 @@ export interface Work extends Create {
   reviewRequest?: ReviewRequest | null;
   mergeAuthorization?: { sha: string; baseSha: string; policyRevision: number; at: string } | null;
   mergeExecution?: { id: string; owner: string; sha: string; baseSha: string; policyRevision: number; authorizationRevision: number; issuedAt: string; expiresAt: string; verifiedAt?: string; clockOffset?: { min: number; max: number } } | null;
+  // `mergedAt` is GitHub's own merge timestamp, kept exactly as the provider reported it.
   // `evidenceAsOf` is the repository-clock instant at which the authorizing snapshot's
   // evidence applicability was judged, preserved because the provider merge timestamp
-  // alone cannot reproduce it once the two clocks disagree.
-  delivery?: { mergedAt: string; mergeSha: string; authorizationRevision: number; evidenceAsOf?: string };
+  // alone cannot reproduce it once the two clocks disagree. For the same reason
+  // `repositoryClockOffsetMs` preserves the lower bound of the GitHub-to-repository clock
+  // offset measured at merge verification, and `mergedAtRepository` is the merge instant
+  // carried onto the repository clock with it: the earliest repository instant the merge
+  // can have happened at. Every repository-clock comparison - window membership, weekly
+  // bucketing, and intent-to-merge duration - reads those rather than re-deriving them,
+  // because a reader has no way to recover the offset later.
+  delivery?: { mergedAt: string; mergeSha: string; authorizationRevision: number; evidenceAsOf?: string; mergedAtRepository?: string; repositoryClockOffsetMs?: number };
   evidence: Evidence[]; observation: Observation | null; blocker: string | null;
   gates: Gate[]; violations: string[];
 }

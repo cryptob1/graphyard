@@ -1,5 +1,6 @@
 import type pg from 'pg';
 import { currentEvidence, type Work } from './model.js';
+import { DELIVERY_REPOSITORY_INSTANT } from './store.js';
 
 export const SHIPPING_PULSE_WEEKS = 12;
 export const SHIPPING_PULSE_LIMIT = 1000;
@@ -96,8 +97,12 @@ function average(values: number[]) { return values.length ? values.reduce((sum, 
 function p90(values: number[]) { return values.length ? [...values].sort((a, b) => a - b)[Math.ceil(values.length * 0.9) - 1] : null; }
 
 /**
- * Reads immutable create and accepted-delivery events only. The database clock is
- * the repository clock; both ends of every published interval are inclusive.
+ * Reads immutable create and accepted-delivery events only. The database clock is the
+ * repository clock, and every instant this compares against it is carried onto it first:
+ * GitHub's merge and pull-request timestamps are its own clock, related to the repository
+ * clock only through the bounded offset each delivery recorded at merge verification.
+ * Comparing them raw would move a delivery across a window boundary or bias its duration
+ * by the whole offset. Both ends of every published interval are inclusive.
  */
 export async function shippingPulse(pool: pg.Pool): Promise<ShippingPulse> {
   const clock = await pool.query("SELECT statement_timestamp() AS now");
@@ -107,13 +112,13 @@ export async function shippingPulse(pool: pg.Pool): Promise<ShippingPulse> {
   rangeStart.setUTCDate(rangeStart.getUTCDate() - 7 * (SHIPPING_PULSE_WEEKS - 1));
   const result = await pool.query<DeliveryRow>(`
     WITH delivery_events AS (
-      SELECT DISTINCT ON (e.work_id) e.work_id, e.seq, e.payload->'work' AS work,
-        graphyard_instant(e.payload->'work'->'delivery'->>'mergedAt') AS merged_at
-      FROM events e
-      WHERE e.kind = 'github.observed'
-        AND e.payload->'work'->'delivery'->>'mergedAt' IS NOT NULL
-        AND graphyard_instant(e.payload->'work'->'delivery'->>'mergedAt') BETWEEN $1 AND $2
-      ORDER BY e.work_id ASC, e.seq ASC
+      SELECT DISTINCT ON (work_id) work_id, seq, payload->'work' AS work,
+        ${DELIVERY_REPOSITORY_INSTANT} AS merged_at
+      FROM events
+      WHERE kind = 'github.observed'
+        AND payload->'work'->'delivery'->>'mergedAt' IS NOT NULL
+        AND ${DELIVERY_REPOSITORY_INSTANT} BETWEEN $1 AND $2
+      ORDER BY work_id ASC, seq ASC
     ), exact_deliveries AS (
       SELECT work_id, seq, work, merged_at FROM delivery_events
       ORDER BY merged_at DESC, work_id ASC LIMIT $3
@@ -124,9 +129,14 @@ export async function shippingPulse(pool: pg.Pool): Promise<ShippingPulse> {
     SELECT d.work_id, d.work->>'key' AS key, d.work->>'title' AS title,
       (d.work->'candidate'->>'pr')::int AS pull_request,
       d.work->'delivery'->>'mergeSha' AS merge_sha, d.merged_at,
-      (d.work->'observation'->>'prCreatedAt')::timestamptz AS pr_created_at,
+      -- GitHub's own pull-request creation time, carried onto the repository clock with
+      -- the offset the delivery recorded, so it can be compared with the merge instant and
+      -- with repository deployment observations. Both endpoints of the PR-to-merge split
+      -- shift together, so that component is unchanged by the correction.
+      graphyard_instant(d.work->'observation'->>'prCreatedAt')
+        + COALESCE((d.work->'delivery'->>'repositoryClockOffsetMs')::bigint, 0) * interval '1 millisecond' AS pr_created_at,
       -- Written by the engine on the repository clock; deliveries recorded before this
-      -- field existed have none, and fall back to the provider merge instant.
+      -- field existed have none, and fall back to the repository merge instant above.
       graphyard_instant(d.work->'delivery'->>'evidenceAsOf') AS evidence_as_of,
       intent.created_at AS intent_at,
       CASE WHEN d.rank_position <= $5 THEN COALESCE(d.work->'violations','[]'::jsonb) END AS delivery_violations,

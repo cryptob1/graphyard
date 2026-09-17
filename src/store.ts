@@ -3,6 +3,17 @@ import { randomUUID } from 'node:crypto';
 import type { Work } from './model.js';
 import type { IntegrationJob } from './coordination.js';
 
+/**
+ * The repository-clock instant of a delivery, written once so the index key, the pulse
+ * predicate and its ordering are literally the same expression. A delivery authorized
+ * with a measured GitHub/database clock offset carries `mergedAtRepository`; one recorded
+ * before that field existed falls back to the provider timestamp, which is the best
+ * available reading of it. Unqualified `payload` resolves to the single `events` table in
+ * every place this is used, so the planner can match it to the index.
+ */
+export const DELIVERY_REPOSITORY_INSTANT =
+  "graphyard_instant(COALESCE(payload->'work'->'delivery'->>'mergedAtRepository',payload->'work'->'delivery'->>'mergedAt'))";
+
 export const migration = `
 CREATE TABLE IF NOT EXISTS work_items (
   id uuid PRIMARY KEY, number bigserial UNIQUE, document jsonb NOT NULL
@@ -30,10 +41,14 @@ CREATE OR REPLACE FUNCTION graphyard_instant(value text) RETURNS timestamptz
   END
   FROM (SELECT found, replace(found,':','') AS digits, found AS offset_text
         FROM (SELECT substring(value from '[0-9]{2}:[0-9]{2}(?::[0-9]{2})?(?:\\.[0-9]+)?([+-][0-9]{2}:?[0-9]{2}|[+-][0-9]{2})$') AS found) raw) parsed $fn$;
--- Renamed with the key it now holds: the text-keyed events_delivery_time could not
--- answer an instant range, and CREATE INDEX IF NOT EXISTS would have kept it.
+-- Renamed each time the key changed, because CREATE INDEX IF NOT EXISTS would otherwise
+-- keep an index that can no longer answer the pulse range: the text-keyed
+-- events_delivery_time could not answer an instant range at all, and
+-- events_delivery_instant was keyed on the provider merge timestamp, which the pulse no
+-- longer compares against repository-clock values.
 DROP INDEX IF EXISTS events_delivery_time;
-CREATE INDEX IF NOT EXISTS events_delivery_instant ON events (graphyard_instant(payload->'work'->'delivery'->>'mergedAt'),work_id,seq)
+DROP INDEX IF EXISTS events_delivery_instant;
+CREATE INDEX IF NOT EXISTS events_delivery_repository_instant ON events (${DELIVERY_REPOSITORY_INSTANT},work_id,seq)
   WHERE kind='github.observed' AND payload->'work'->'delivery'->>'mergedAt' IS NOT NULL;
 -- Recent-delivery quality is read from the immutable snapshot each delivery cites by
 -- revision, so that lookup must be an exact probe rather than a walk of one work
