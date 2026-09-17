@@ -34,7 +34,8 @@ export interface Principal {
 export interface AssignmentIdentity { owner: string; epoch: number; displayName?: string; runtime?: string; claimedAt?: string }
 export interface Lease { owner: string; epoch: number; expiresAt: string }
 export interface Workspace { host: string; path: string; branch: string; epoch: number; owner: string }
-export interface Candidate { sha: string; baseSha: string; pr: number; branch: string; author: string }
+// createdAt is the provider's pull-request creation time; older observations predate it.
+export interface Candidate { sha: string; baseSha: string; pr: number; branch: string; author: string; createdAt?: string }
 export interface Evidence {
   id: string; proof: string; sha: string; baseSha: string; policyRevision: number;
   producer: string; trusted: boolean; result: 'pass' | 'fail';

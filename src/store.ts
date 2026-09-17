@@ -2,6 +2,7 @@ import pg from 'pg';
 import { randomUUID } from 'node:crypto';
 import type { Work } from './model.js';
 import type { IntegrationJob } from './coordination.js';
+import { flowMigration } from './flow-analytics.js';
 
 export const migration = `
 CREATE TABLE IF NOT EXISTS work_items (
@@ -64,7 +65,7 @@ CREATE TABLE IF NOT EXISTS validation_resources (resource text PRIMARY KEY, requ
 CREATE TABLE IF NOT EXISTS scenarios (id text NOT NULL, revision int NOT NULL, document jsonb NOT NULL, PRIMARY KEY(id,revision));
 DROP TRIGGER IF EXISTS immutable_scenarios ON scenarios;
 CREATE TRIGGER immutable_scenarios BEFORE UPDATE OR DELETE ON scenarios FOR EACH ROW EXECUTE FUNCTION graphyard_immutable();
-`;
+${flowMigration}`;
 
 export class Store {
   pool: pg.Pool;

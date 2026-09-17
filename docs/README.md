@@ -16,6 +16,7 @@ Choose one path. The reference guides are there when a gate or integration needs
 - [Master-agent mode](master-agent.md) — routing, recovery, and guarded merges.
 - [Operations](operations.md) — stalled work, expired leases, rework, and outages.
 - [Coordination](coordination.md) — dependencies, requirement revisions, overlap, and shared resources.
+- [Flow analytics](flow-analytics.md) — delivery bottlenecks, phase durations, and their data lineage.
 
 ## Build integrations
 

@@ -30,6 +30,12 @@ Errors return JSON `{ "error": "actionable reason" }`. Invalid JSON/schema is `4
 | `GET /api/work-snapshot` | Work, integration job metadata and database time from one snapshot |
 | `GET /api/work` | Work aggregates, in creation order |
 | `GET /api/events?work=UUID` | Latest 300 events for one item; omit filter for latest global events |
+| `GET /api/analytics/flow` | Bounded delivery-flow report for a 7-, 30-, or 90-day window |
+| `GET /api/analytics/flow/drilldown` | Bounded underlying records behind one aggregate |
+| `GET /api/analytics/flow/export` | The same bounded records as deterministic CSV or JSON |
+| `GET /api/deployments` | Latest recorded deployment-provider observations |
+
+Flow analytics reads are bounded in window, work items, records scanned, buckets, drill-down rows, and payload size, and report when a bound was reached. They are not available to operator agents. See [flow analytics](flow-analytics.md).
 
 The initial list API is unpaginated. Do not use it as an unlimited analytics export. Event payload snapshots can reconstruct historical item revisions; full archival/export pagination is future work.
 
@@ -104,6 +110,28 @@ SHA fields are full 40-character lowercase Git SHAs. Results are `pass` or `fail
 The server supplies evidence ID, identity, timestamp, and trust. Clients cannot set `trusted` or `producer`. Unknown fields are rejected. A producer may submit a non-allowlisted proof, but it remains untrusted. A producer is a trust boundary, not a guarantee that its test was well designed.
 
 All required proof names must pass. Evidence is selected for the exact head/base/policy tuple. A later matching failure supersedes an earlier pass. Stale evidence is retained for audit without satisfying the current candidate.
+
+## Deployment observations
+
+`POST /api/deployments` records one deployment-provider observation. It requires a producer
+or operator credential; implementation workers cannot record one.
+
+```json
+{
+  "provider": "railway",
+  "externalId": "deployment-1234",
+  "environment": "production",
+  "sha": "cccccccccccccccccccccccccccccccccccccccc",
+  "state": "succeeded",
+  "startedAt": "2026-09-17T05:04:00.000Z",
+  "finishedAt": "2026-09-17T05:05:30.000Z"
+}
+```
+
+`state` is `succeeded`, `failed`, or `rolled_back`. Records are append-only and unique per
+provider, external ID, and state; a repeat returns `duplicate`. Deployment observations feed
+deployment frequency, latency, failure, and rollback in [flow analytics](flow-analytics.md).
+They are not a lifecycle-state endpoint: they never move a gate.
 
 ## GitHub webhook
 

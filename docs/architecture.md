@@ -29,6 +29,8 @@ flowchart LR
 
 `jobs` is a durable integration queue, with next-attempt time, owner token, lease expiry, error, and attempt count. It is created transactionally with PR submission. Jobs are processed with Postgres `FOR UPDATE SKIP LOCKED`, then acknowledged with the exact owner token. GitHub calls occur outside coordination transactions.
 
+`flow_facts` is a normalized, append-only projection of the ledger and of observed provider facts, with its own checkpoint and per-item projection state. It exists so delivery metrics survive upstream retention: a deleted pull request or pruned deployment record cannot erase a fact Graphyard already observed. `deployment_observations` records deployment-provider facts from a producer or operator credential. Both are read only by [flow analytics](flow-analytics.md) and never participate in gate evaluation.
+
 Database triggers reject updates and deletes to the event ledger. This is an application audit guarantee, not tamper-proof storage against a database administrator. Backups and database access controls still matter.
 
 ## Coordination transactions
@@ -69,7 +71,7 @@ GitHub observations older than two minutes refuse the merge gate. Actual GitHub 
 
 The graph shows the first refusing stage; the card contains all refusal reasons. A blocker annotates work without introducing a separate lifecycle node. Delivered work stays historically delivered. A merge observed with unsatisfied gates creates a permanent visible violation and does not become done when missing evidence arrives later.
 
-The board is a view of evaluated state. There is no drag-to-done API. Current dwell metrics measure how long items have been in their present stage; they are not historical throughput percentiles.
+The board is a view of evaluated state. There is no drag-to-done API. Its dwell figures measure how long items have been in their present stage. Historical distributions, phase durations, and throughput percentiles live in [flow analytics](flow-analytics.md), which reads the durable projection rather than the current documents.
 
 Before a merge can complete work, Graphyard must have recorded an authorization for the same head, base, and policy and a final GitHub verification under a short-lived, single-use execution authority. While that authority is active, requirement, evidence, validation, reconciliation, and non-matching observation mutations are refused. Final verification is a transactional, idempotent mutation that re-evaluates the current GitHub observation, records its timestamp, and must precede the provider-reported merge interval. This freezes the control-plane decision while the external GitHub merge runs without holding a database transaction open. A confirmed failed client cancels the authority; an abandoned or uncertain attempt expires. The engine consults ledger snapshots at the reported merge time, so an outage or later failure does not erase historical authorization. The delivery record references the authorization revision and observed merge SHA. Later differing checks remain visible as a follow-up warning.
 

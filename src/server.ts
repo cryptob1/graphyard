@@ -1,19 +1,38 @@
 import { createServer, type IncomingMessage } from 'node:http';
-import { createHash, createHmac, timingSafeEqual } from 'node:crypto';
+import { createHash, createHmac, randomUUID, timingSafeEqual } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { resolve, extname } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { z } from 'zod';
 import { Store } from './store.js';
 import { Engine, type Command } from './engine.js';
-import { Refusal, demand, type Principal } from './model.js';
+import { Refusal, demand, stages, type Principal } from './model.js';
 import { githubFromEnv, processJob, type GitHub } from './github.js';
 import { Validation } from './validation.js';
 import { defineScenario, scenarios } from './scenarios.js';
 import { OperatorAgents } from './operator-agent.js';
+import { computeFlow, flowDrilldown, flowExport, flowWindows, projectFlow, readFlow, type FlowWindow } from './flow-analytics.js';
 
 export const principalSchema = z.array(z.object({ id: z.string().min(1), role: z.enum(['admin', 'coordinator', 'worker', 'producer', 'reader']), token: z.string().min(32), proofs: z.array(z.string()).optional(), displayName: z.string().trim().min(1).max(100).regex(/^[^\u0000-\u001f\u007f]+$/).optional(), runtime: z.string().trim().min(1).max(80).regex(/^[^\u0000-\u001f\u007f]+$/).optional() }).strict()).min(1);
 export type Credential = Principal & { token: string };
+const deploymentSchema = z.object({
+  provider: z.string().trim().min(1).max(100), externalId: z.string().trim().min(1).max(200),
+  environment: z.string().trim().min(1).max(100), sha: z.string().regex(/^[a-f0-9]{7,40}$/),
+  state: z.enum(['succeeded', 'failed', 'rolled_back']),
+  startedAt: z.string().datetime(), finishedAt: z.string().datetime().optional(),
+  details: z.record(z.string().max(100), z.union([z.string().max(500), z.number(), z.boolean()])).optional(),
+}).strict();
+const flowQuerySchema = z.object({
+  window: z.coerce.number().int().refine(value => (flowWindows as readonly number[]).includes(value), 'Window must be 7, 30, or 90 days').default(30),
+  type: z.enum(['feature', 'bug', 'chore']).nullish(), stage: z.enum(stages).nullish(),
+  slice: z.string().max(200).nullish(), asOf: z.string().datetime().nullish(),
+  metric: z.string().max(60).nullish(), key: z.string().max(200).nullish(), format: z.enum(['json', 'csv']).default('json'),
+}).strict();
+function flowQuery(url: URL) {
+  const raw = Object.fromEntries([...url.searchParams].filter(([, value]) => value !== ''));
+  const parsed = flowQuerySchema.parse(raw);
+  return { ...parsed, days: parsed.window as FlowWindow };
+}
 async function body(req: IncomingMessage, limit = 1_000_000) {
   const chunks: Buffer[] = []; let size = 0;
   for await (const chunk of req) { size += chunk.length; demand(size <= limit, 'Request exceeds size limit', 413); chunks.push(chunk); }
@@ -81,6 +100,37 @@ export function server(engine: Engine, credentials: Credential[], github: GitHub
         if (actor.role === 'operator-agent') demand(
           url.pathname === '/api/status' || url.pathname === '/api/work-snapshot' || url.pathname === '/api/work' || url.pathname === '/api/events' || /^\/api\/work(?:\/[^/]+\/[a-z]+)?$/.test(url.pathname),
           'Route is not available to operator agents', 403);
+        if (url.pathname.startsWith('/api/analytics/flow') && req.method === 'GET') {
+          const query = flowQuery(url);
+          // Bounded catch-up keeps the read current without blocking on a full backfill.
+          await projectFlow(engine.store, { batches: 3 });
+          const dataset = await readFlow(engine.store, query);
+          const report = computeFlow(dataset, query);
+          if (url.pathname === '/api/analytics/flow') return send(200, report);
+          const authorized = ['admin', 'coordinator', 'producer'].includes(actor.role);
+          const drilldown = flowDrilldown(dataset, report, { metric: query.metric ?? 'bottleneck', key: query.key ?? null, authorized });
+          if (url.pathname === '/api/analytics/flow/drilldown') return send(200, drilldown);
+          if (url.pathname === '/api/analytics/flow/export') {
+            const payload = flowExport(report, drilldown, query.format);
+            res.writeHead(200, { 'Content-Type': query.format === 'csv' ? 'text/csv; charset=utf-8' : 'application/json', 'Content-Disposition': `attachment; filename="graphyard-flow-${drilldown.metric}-${query.days}d.${query.format}"` });
+            return res.end(payload);
+          }
+          return send(404, { error: 'Route not found' });
+        }
+        if (url.pathname === '/api/deployments' && req.method === 'POST') {
+          demand(actor.role === 'producer' || actor.role === 'admin', 'A deployment-provider or operator credential is required to record a deployment observation', 403);
+          const data = deploymentSchema.parse(JSON.parse((await body(req)).toString()));
+          demand(!data.finishedAt || Date.parse(data.finishedAt) >= Date.parse(data.startedAt), 'A deployment cannot finish before it starts', 400);
+          const inserted = await engine.store.pool.query(
+            `INSERT INTO deployment_observations(id,provider,external_id,environment,sha,state,started_at,finished_at,producer,details)
+             VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) ON CONFLICT (provider,external_id,state) DO NOTHING RETURNING id`,
+            [randomUUID(), data.provider, data.externalId, data.environment, data.sha, data.state, data.startedAt, data.finishedAt ?? null, actor.id, JSON.stringify(data.details ?? {})]);
+          return send(200, { recorded: inserted.rowCount === 1, id: inserted.rows[0]?.id ?? null, duplicate: inserted.rowCount === 0 });
+        }
+        if (url.pathname === '/api/deployments' && req.method === 'GET') {
+          const rows = (await engine.store.pool.query('SELECT provider,external_id,environment,sha,state,started_at,finished_at,recorded_at FROM deployment_observations ORDER BY started_at DESC,id DESC LIMIT 200')).rows;
+          return send(200, rows.map(row => ({ provider: row.provider, externalId: row.external_id, environment: row.environment, sha: row.sha, state: row.state, startedAt: row.started_at, finishedAt: row.finished_at, recordedAt: row.recorded_at })));
+        }
         if (url.pathname === '/api/validation/artifacts' && req.method === 'POST') return send(200, await validation.uploadArtifact(actor, JSON.parse((await body(req, 11_200_000)).toString()), String(req.headers['idempotency-key'] ?? '')));
         const artifactRead = url.pathname.match(/^\/api\/validation\/artifacts\/([^/]+)\/([^/]+)$/);
         if (artifactRead && req.method === 'GET') {
@@ -183,7 +233,7 @@ async function main() {
   let running = false;
   const timer = setInterval(async () => {
     if (running) return; running = true;
-    try { await validation.expireArtifacts(); await validation.reconcile(); await engine.reconcile(); if (github) await Promise.all(Array.from({ length: 4 }, () => processJob(engine, github))); }
+    try { await validation.expireArtifacts(); await validation.reconcile(); await engine.reconcile(); await projectFlow(engine.store, { batches: 4 }); if (github) await Promise.all(Array.from({ length: 4 }, () => processJob(engine, github))); }
     catch (error) { console.error('reconciliation failed', error instanceof Error ? error.message : 'unknown'); }
     finally { running = false; }
   }, 2000);
