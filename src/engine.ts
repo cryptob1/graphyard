@@ -412,6 +412,12 @@ export class Engine {
       demand(work.workspaces.some(w => w.epoch === work.submission!.epoch && w.branch === observation.candidate.branch), 'PR branch does not match the assigned workspace');
       if (work.stage === 'done') return work;
       let authorizedSnapshot: Work | null = null; let authorizationRevision: number | null = null;
+      // The repository-clock instant at which this authorization's evidence was judged
+      // applicable. The provider merge timestamp cannot stand in for it: the two clocks
+      // are only related through the recorded offset bound, so a reader that re-checks
+      // expiry at the raw provider instant can call evidence expired that was live when
+      // the merge was authorized. Recorded with the delivery so the judgement is exact.
+      let evidenceAsOf: string | null = null;
       if (observation.merged && observation.mergedAt && Number.isFinite(Date.parse(observation.mergedAt))) {
         const providerMergedTime = Date.parse(observation.mergedAt);
         // Never allow evidence from after the earliest possible merge instant.
@@ -421,6 +427,11 @@ export class Engine {
         const offset = boundedExecution?.clockOffset;
         const mergedTime = providerMergedTime + (offset?.min ?? 0);
         const cutoff = providerMergedTime + (/\.\d+Z$/.test(observation.mergedAt) ? 1 : 1000) + (offset?.max ?? 0);
+        // Every authorization path below requires `executionValid`, which bounds
+        // `cutoff` by the execution expiry, and `acquireMerge` bounds that expiry by the
+        // earliest required-evidence expiry. So evidence live at authorization is still
+        // live at `cutoff - 1`, the same instant the historical check uses.
+        evidenceAsOf = new Date(cutoff - 1).toISOString();
         let cancelledExecution = false;
         if (boundedExecution) {
           const cancellation = (await db.query("SELECT created_at FROM events WHERE work_id=$1 AND kind='merge.execution.cancelled' AND payload->'details'->>'executionId'=$2 AND created_at<$3 ORDER BY seq DESC LIMIT 1", [id, boundedExecution.id, new Date(cutoff)])).rows[0]?.created_at as Date | undefined;
@@ -461,7 +472,7 @@ export class Engine {
           if (work.gates.some(g => !g.passed)) work.violations.push('Post-merge checks differ from the recorded authorization; follow-up required');
           work.stage = 'done'; work.stageEnteredAt = now.toISOString();
           work.mergeExecution = null;
-          work.delivery = { mergedAt: observation.mergedAt!, mergeSha: observation.mergeSha, authorizationRevision: authorizationRevision! };
+          work.delivery = { mergedAt: observation.mergedAt!, mergeSha: observation.mergeSha, authorizationRevision: authorizationRevision!, ...(evidenceAsOf ? { evidenceAsOf } : {}) };
           await db.query('DELETE FROM jobs WHERE work_id=$1', [work.id]);
         } else {
           work.mergeExecution = null;

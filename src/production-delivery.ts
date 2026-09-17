@@ -16,10 +16,21 @@ const observationSchema = z.object({
 
 export class ProductionDelivery {
   constructor(private store: Store) {}
+  /**
+   * Deployment observation is its own trust lane. A producer credential alone is not
+   * enough: acceptance collectors and build attestors also hold `producer`, and their
+   * `proofs` allowlist confers no deployment authority, so a compromised test collector
+   * would otherwise be able to forge production-delivery history it cannot forge
+   * acceptance evidence for. The credential must carry an explicit deployment-observer
+   * scope naming this exact provider, and that scope is never satisfied by widening a
+   * proof allowlist. Configured empty or absent, the endpoint denies.
+   */
   async observe(actor: Principal, input: unknown, key: string) {
     demand(actor.role === 'producer', 'Only a trusted producer may record provider deployment observations', 403);
+    demand(actor.deploymentProviders?.length, 'This credential carries no deployment-observer authority', 403);
     demand(key && key.length <= 200, 'An Idempotency-Key is required', 400);
     const data = observationSchema.parse(input);
+    demand(actor.deploymentProviders!.includes(data.provider), 'Deployment-observer authority does not cover this provider', 403);
     const fingerprint = createHash('sha256').update(JSON.stringify(data)).digest('hex');
     return this.store.transaction(async (db, now) => {
       const receipt = (await db.query('SELECT * FROM receipts WHERE actor=$1 AND key=$2', [actor.id, key])).rows[0];

@@ -27,6 +27,11 @@ export const operatorCredentialHash = Symbol('operatorCredentialHash');
 export interface Principal {
   id: string; role: 'admin' | 'operator-agent' | 'coordinator' | 'worker' | 'producer' | 'reader';
   proofs?: string[]; displayName?: string; runtime?: string;
+  // Deployment observation is a separate lane from acceptance-proof collection. A
+  // producer's `proofs` allowlist grants no authority here and is never widened to
+  // cover it: recording provider deployments requires this explicit per-provider
+  // scope, so a build or test collector cannot forge production-delivery history.
+  deploymentProviders?: string[];
   capabilities?: OperatorCapability[];
   scope?: { repositories: string[]; workItems: string[] };
   [operatorCredentialHash]?: string;
@@ -70,7 +75,10 @@ export interface Work extends Create {
   reviewRequest?: ReviewRequest | null;
   mergeAuthorization?: { sha: string; baseSha: string; policyRevision: number; at: string } | null;
   mergeExecution?: { id: string; owner: string; sha: string; baseSha: string; policyRevision: number; authorizationRevision: number; issuedAt: string; expiresAt: string; verifiedAt?: string; clockOffset?: { min: number; max: number } } | null;
-  delivery?: { mergedAt: string; mergeSha: string; authorizationRevision: number };
+  // `evidenceAsOf` is the repository-clock instant at which the authorizing snapshot's
+  // evidence applicability was judged, preserved because the provider merge timestamp
+  // alone cannot reproduce it once the two clocks disagree.
+  delivery?: { mergedAt: string; mergeSha: string; authorizationRevision: number; evidenceAsOf?: string };
   evidence: Evidence[]; observation: Observation | null; blocker: string | null;
   gates: Gate[]; violations: string[];
 }

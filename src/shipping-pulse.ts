@@ -42,7 +42,7 @@ type AuthorizedSnapshot = Pick<Work, 'evidence' | 'criteria' | 'candidate' | 'po
 
 type DeliveryRow = {
   work_id: string; key: string; title: string; pull_request: number; merge_sha: string;
-  merged_at: Date; intent_at: Date | null; authorized_work: AuthorizedSnapshot | null; delivery_violations: unknown;
+  merged_at: Date; evidence_as_of: Date | null; intent_at: Date | null; authorized_work: AuthorizedSnapshot | null; delivery_violations: unknown;
   pr_created_at: Date | null; production_at: Date | null; production_matches: number; superseded_matches: number;
 };
 
@@ -69,19 +69,23 @@ export const QUALITY_UNRESOLVED = 'The immutable snapshot that authorized this d
  * requirements carries the newer criteria, and reading those would restate a
  * historically authorized delivery as unproven. Evidence is then applied with the same
  * rules the merge gate used - exact candidate SHA, base SHA, policy revision,
- * validation selection, and scenario revision, unexpired as of the merge - so an
- * obsolete pass recorded against an earlier candidate is never counted. Violations stay
- * with the append-only delivery record, which also carries any violation the post-merge
- * comparison raised against that authorization.
+ * validation selection, and scenario revision - so an obsolete pass recorded against an
+ * earlier candidate is never counted. Expiry is re-checked at the authorization-time
+ * clock bound the delivery itself recorded, never at the raw provider merge timestamp:
+ * those are different clocks, related only through the offset bound captured at merge
+ * verification, so judging expiry at the provider instant can report evidence that was
+ * live at authorization as expired. Violations stay with the append-only delivery
+ * record, which also carries any violation the post-merge comparison raised against that
+ * authorization.
  */
-function deliveredQuality(snapshot: AuthorizedSnapshot | null, recorded: unknown, mergedAt: Date) {
+function deliveredQuality(snapshot: AuthorizedSnapshot | null, recorded: unknown, asOf: Date) {
   const violations = Array.isArray(recorded) ? recorded.filter(value => typeof value === 'string').slice(0, 10) : [];
   // An unresolvable authorization is unknown, never zero proofs passed out of zero required.
   if (!snapshot) return { passingProofs: null, requiredProofs: null, violations, unavailableReason: QUALITY_UNRESOLVED };
   const required = [...new Set((snapshot.criteria ?? []).flatMap(criterion => criterion.proofs ?? []))];
   const work = { ...snapshot, evidence: snapshot.evidence ?? [] } as Work;
   const passed = required.filter(proof => {
-    const evidence = currentEvidence(work, proof, mergedAt);
+    const evidence = currentEvidence(work, proof, asOf);
     return !!evidence && evidence.result === 'pass' && evidence.executed > 0 && evidence.skipped === 0;
   });
   return { passingProofs: passed.length, requiredProofs: required.length, violations };
@@ -121,6 +125,9 @@ export async function shippingPulse(pool: pg.Pool): Promise<ShippingPulse> {
       (d.work->'candidate'->>'pr')::int AS pull_request,
       d.work->'delivery'->>'mergeSha' AS merge_sha, d.merged_at,
       (d.work->'observation'->>'prCreatedAt')::timestamptz AS pr_created_at,
+      -- Written by the engine on the repository clock; deliveries recorded before this
+      -- field existed have none, and fall back to the provider merge instant.
+      graphyard_instant(d.work->'delivery'->>'evidenceAsOf') AS evidence_as_of,
       intent.created_at AS intent_at,
       CASE WHEN d.rank_position <= $5 THEN COALESCE(d.work->'violations','[]'::jsonb) END AS delivery_violations,
       -- Requirements and evidence come from the revision this delivery cites, found by an
@@ -207,7 +214,7 @@ export async function shippingPulse(pool: pg.Pool): Promise<ShippingPulse> {
     weeks,
     recent: rows.slice(0, SHIPPING_PULSE_RECENT_LIMIT).map(row => ({
       key: row.key, title: row.title, pullRequest: row.pull_request, mergeSha: row.merge_sha, mergedAt: row.merged_at.toISOString(),
-      quality: deliveredQuality(row.authorized_work, row.delivery_violations, row.merged_at),
+      quality: deliveredQuality(row.authorized_work, row.delivery_violations, row.evidence_as_of ?? row.merged_at),
     })),
   };
 }

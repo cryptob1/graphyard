@@ -14,7 +14,7 @@ import { OperatorAgents } from './operator-agent.js';
 import { shippingPulse } from './shipping-pulse.js';
 import { ProductionDelivery } from './production-delivery.js';
 
-export const principalSchema = z.array(z.object({ id: z.string().min(1), role: z.enum(['admin', 'coordinator', 'worker', 'producer', 'reader']), token: z.string().min(32), proofs: z.array(z.string()).optional(), displayName: z.string().trim().min(1).max(100).regex(/^[^\u0000-\u001f\u007f]+$/).optional(), runtime: z.string().trim().min(1).max(80).regex(/^[^\u0000-\u001f\u007f]+$/).optional() }).strict()).min(1);
+export const principalSchema = z.array(z.object({ id: z.string().min(1), role: z.enum(['admin', 'coordinator', 'worker', 'producer', 'reader']), token: z.string().min(32), proofs: z.array(z.string()).optional(), deploymentProviders: z.array(z.string().trim().min(1).max(40)).max(20).optional(), displayName: z.string().trim().min(1).max(100).regex(/^[^\u0000-\u001f\u007f]+$/).optional(), runtime: z.string().trim().min(1).max(80).regex(/^[^\u0000-\u001f\u007f]+$/).optional() }).strict()).min(1);
 export type Credential = Principal & { token: string };
 async function body(req: IncomingMessage, limit = 1_000_000) {
   const chunks: Buffer[] = []; let size = 0;

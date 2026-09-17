@@ -264,6 +264,11 @@ test('single-use merge execution freezes relevant mutations through observed mer
   const delivered = await engine.observe(w.id, renewed.revision, merged);
   assert.equal(delivered.stage, 'done', 'a whole-second provider timestamp proves ordering once its lower bound postdates the grant'); assert.equal(delivered.mergeExecution, null);
   assert.equal(delivered.delivery?.authorizationRevision, second.execution.authorizationRevision, 'delivery cites the authorized snapshot rather than the later heartbeat');
+  // The instant the authorization judged evidence applicability, on the repository clock.
+  // A reader re-checking expiry at the raw provider timestamp would use a different clock.
+  const asOf = Date.parse(delivered.delivery!.evidenceAsOf!);
+  assert.ok(Number.isFinite(asOf), 'delivery records the authorization-time clock bound');
+  assert.ok(asOf < Date.parse(second.execution.expiresAt), 'the recorded bound precedes the execution expiry that capped required-evidence validity');
 });
 test('a matching merge from before the execution grant remains an unauthorized violation', async () => {
   let w = await submitted(); w = await engine.observe(w.id, w.revision, observation(w));

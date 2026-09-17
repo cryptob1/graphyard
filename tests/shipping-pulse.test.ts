@@ -98,7 +98,7 @@ test('bounded aggregation is served by the delivery and production-merge indexes
 
 test('PR-to-production uses exact retained containment and excludes superseded, rollback, invalid, and missing observations', async () => {
   const delivery = new ProductionDelivery(store);
-  const producer = { id: 'deployment-observer', role: 'producer' as const };
+  const producer = { id: 'deployment-observer', role: 'producer' as const, deploymentProviders: ['railway'] };
   const first = await ledgerDelivery(10, 2, '101', 20);
   const second = await ledgerDelivery(8, 2, '102', 10);
   const outlier = await ledgerDelivery(200, 2, '105', 100);
@@ -116,6 +116,16 @@ test('PR-to-production uses exact retained containment and excludes superseded, 
   await observe('rollback', 'succeeded', 'rollback', 1, [superseded.work.delivery.mergeSha]);
   await observe('invalid-clock', 'succeeded', 'deployment', 1, [invalid.work.delivery.mergeSha]);
   await assert.rejects(() => delivery.observe({ id: 'worker', role: 'worker' }, { provider: 'railway' }, randomUUID()), /trusted producer/);
+  // Deployment authority is its own lane. An acceptance collector holds the same
+  // `producer` role and a proof allowlist, and that allowlist must not let it forge
+  // production-delivery history; a deployment observer scoped to one provider must not
+  // reach another. Neither denial is repaired by widening the proof allowlist.
+  await assert.rejects(() => delivery.observe({ id: 'test-collector', role: 'producer', proofs: ['integration:pulse'] },
+    { provider: 'railway', deploymentId: 'forged', status: 'succeeded', kind: 'deployment', deployedAt: new Date(observedNow.getTime() - 3_600_000).toISOString(), commitSha: 'd'.repeat(40), sourceUrl: 'https://railway.example/deployment/forged', mergeShas: [first.work.delivery.mergeSha] },
+    randomUUID()), /no deployment-observer authority/);
+  await assert.rejects(() => delivery.observe({ id: 'other-provider-observer', role: 'producer', deploymentProviders: ['fly'] },
+    { provider: 'railway', deploymentId: 'out-of-scope', status: 'succeeded', kind: 'deployment', deployedAt: new Date(observedNow.getTime() - 3_600_000).toISOString(), commitSha: 'd'.repeat(40), sourceUrl: 'https://railway.example/deployment/out-of-scope', mergeShas: [first.work.delivery.mergeSha] },
+    randomUUID()), /does not cover this provider/);
   const pulse = await shippingPulse(store.pool);
   assert.deepEqual({ average: pulse.prToProduction.averageHours, median: pulse.prToProduction.medianHours, p90: pulse.prToProduction.p90Hours }, { average: 115, median: 29, p90: 299 });
   assert.equal(pulse.prToProduction.sampleSize, 3);
@@ -160,6 +170,28 @@ test('recorded quality reads the cited authorization snapshot, not requirements 
   const entry = pulse.recent.find(item => item.key === 'GY-QUALITY');
   // The authorized totals stand, and the violation the delivery itself recorded is kept.
   assert.deepEqual(entry!.quality, { passingProofs: 1, requiredProofs: 1, violations: ['Post-merge checks differ from the recorded authorization; follow-up required'] });
+});
+
+test('recorded quality re-checks evidence expiry on the authorization clock, not the provider clock', async () => {
+  const id = randomUUID(), now = (await store.pool.query('SELECT statement_timestamp() AS now')).rows[0].now as Date;
+  // The repository clock trails GitHub's. `Engine.observe` therefore authorized this
+  // merge at a cutoff that precedes the raw provider `mergedAt`, and the evidence expiry
+  // falls between the two: live when the merge was authorized, expired at the provider
+  // instant. Re-checking on the provider clock would restate an authorized delivery as
+  // unproven, so the delivery carries the instant the judgement actually used.
+  const mergedAt = new Date(now.getTime() - 3_600_000);
+  const evidenceAsOf = new Date(mergedAt.getTime() - 20_000);
+  const expiresAt = new Date(mergedAt.getTime() - 10_000);
+  const candidate = { pr: 903, sha: '1'.repeat(40), baseSha: '2'.repeat(40), branch: 'skewed', author: 'worker' };
+  const evidence = { proof: 'integration:pulse', trusted: true, result: 'pass', executed: 1, skipped: 0, sha: candidate.sha, baseSha: candidate.baseSha, policyRevision: 1, expiresAt: expiresAt.toISOString() };
+  const authorized = { id, key: 'GY-SKEW', revision: 20, candidate, policyRevision: 1, evidence: [evidence], criteria: [{ proofs: ['integration:pulse'] }], violations: [] };
+  const work = { ...authorized, revision: 21, title: 'Clock-skewed delivery', delivery: { mergedAt: mergedAt.toISOString(), mergeSha: '6'.repeat(40), authorizationRevision: authorized.revision, evidenceAsOf: evidenceAsOf.toISOString() } };
+  await store.pool.query('INSERT INTO work_items(id,document) VALUES($1,$2)', [id, { id }]);
+  await store.pool.query("INSERT INTO events(work_id,actor,kind,payload) VALUES($1,'coordinator','merge.execution.acquired',$2)", [id, { work: authorized }]);
+  await store.pool.query("INSERT INTO events(work_id,actor,kind,payload) VALUES($1,'github','github.observed',$2)", [id, { work }]);
+  const pulse = await shippingPulse(store.pool);
+  const entry = pulse.recent.find(item => item.key === 'GY-SKEW');
+  assert.deepEqual(entry!.quality, { passingProofs: 1, requiredProofs: 1, violations: [] });
 });
 
 test('a delivery whose cited authorization is not retained reports unknown proofs, never zero', async () => {
@@ -208,7 +240,7 @@ test('API requires authentication and bounded larger histories are explicitly pa
   assert.match(pulse.partialReason!, /counts are lower bounds/i);
   assert.match(pulse.partialReason!, /durations are not bounds/i);
   assert.doesNotMatch(pulse.partialReason!, /statistics are lower-bound/i);
-  const http = server(new Engine(store, [15368], 120, 'owner/project'), [{ id: 'reader', role: 'reader', token: 'r'.repeat(32) }, { id: 'producer', role: 'producer', token: 'p'.repeat(32) }]);
+  const http = server(new Engine(store, [15368], 120, 'owner/project'), [{ id: 'reader', role: 'reader', token: 'r'.repeat(32) }, { id: 'producer', role: 'producer', deploymentProviders: ['railway'], token: 'p'.repeat(32) }, { id: 'collector', role: 'producer', proofs: ['integration:pulse'], token: 'c'.repeat(32) }]);
   await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));
   const origin = `http://127.0.0.1:${(http.address() as any).port}`;
   try {
@@ -217,6 +249,11 @@ test('API requires authentication and bounded larger histories are explicitly pa
     assert.equal(response.status, 200); assert.equal((await response.json()).completeness, 'partial');
     const denied = await fetch(`${origin}/api/production-observations`, { method: 'POST', headers: { Authorization: `Bearer ${'r'.repeat(32)}`, 'Content-Type': 'application/json', 'Idempotency-Key': randomUUID() }, body: '{}' });
     assert.equal(denied.status, 403);
+    // A configured producer without an explicit deployment-observer scope is denied over
+    // HTTP too, so a proof-collector credential cannot reach the ingestion path at all.
+    const unscoped = await fetch(`${origin}/api/production-observations`, { method: 'POST', headers: { Authorization: `Bearer ${'c'.repeat(32)}`, 'Content-Type': 'application/json', 'Idempotency-Key': randomUUID() }, body: JSON.stringify({ provider: 'railway', deploymentId: 'deploy-unscoped', status: 'succeeded', kind: 'deployment', deployedAt: new Date(Date.now() - 3_600_000).toISOString(), commitSha: 'e'.repeat(40), sourceUrl: 'https://railway.app/deploy/unscoped', mergeShas: ['f'.repeat(40)] }) });
+    assert.equal(unscoped.status, 403);
+    assert.match((await unscoped.json()).error ?? '', /deployment-observer authority/);
     // An over-long key would otherwise reach the receipts primary key and exceed the
     // B-tree entry limit, turning a valid observation into a 500.
     const oversized = await fetch(`${origin}/api/production-observations`, { method: 'POST', headers: { Authorization: `Bearer ${'p'.repeat(32)}`, 'Content-Type': 'application/json', 'Idempotency-Key': 'k'.repeat(3000) }, body: JSON.stringify({ provider: 'railway', deploymentId: 'deploy-oversized', status: 'succeeded', kind: 'deployment', deployedAt: new Date(Date.now() - 3_600_000).toISOString(), commitSha: 'e'.repeat(40), sourceUrl: 'https://railway.app/deploy/oversized', mergeShas: ['f'.repeat(40)] }) });
