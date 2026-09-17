@@ -41,6 +41,11 @@ for (const viewport of [{ name: 'desktop', width: 1280, height: 900 }, { name: '
     await expect(page.getByRole('heading', { name: 'Four AI agent sessions' })).toBeVisible();
     const duties = ['Operator agent', 'Master agent', 'Worker agent', 'Reviewer/proof-producer agent'];
     for (const duty of duties) await expect(page.getByRole('cell', { name: duty, exact: true })).toBeVisible();
+    const operatorRow = page.getByRole('row', { name: /Operator agent/ });
+    await expect(operatorRow).toContainText('human-approved bounded intent');
+    await expect(operatorRow).toContainText('may add requirements but never remove or rewrite them');
+    await expect(operatorRow).toContainText('Exceptions and approval decisions stay with the human operator');
+    await expect(operatorRow).toContainText('least-privilege, never unrestricted admin authority');
     const separation = page.locator('p', { hasText: 'These are distinct AI sessions' });
     await expect(separation).toContainText('authenticated principal identities, scoped credentials, and authority checks');
     await expect(separation).toContainText('must keep the sessions independent');

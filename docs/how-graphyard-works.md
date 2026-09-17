@@ -38,7 +38,7 @@ Every box is a checkpoint. A blocked box explains what is missing; it is not an 
 
 | Independent session | Duty |
 | --- | --- |
-| **Operator agent** | Turns human goals into scoped work and handles policy exceptions. Its automation is least-privilege, never unrestricted admin authority. |
+| **Operator agent** | Executes human-approved bounded intent: it turns goals into scoped work and may add requirements but never remove or rewrite them. Exceptions and approval decisions stay with the human operator, and its automation is least-privilege, never unrestricted admin authority. |
 | **Master agent** | Watches readiness and runtime health, dispatches ready work, routes handoffs, and requests policy-allowed merges. It never implements or overrides Graphyard. |
 | **Worker agent** | Claims work, uses its assigned worktree, builds, tests, opens the PR, and submits the candidate. It stops on lease loss. |
 | **Reviewer/proof-producer agent** | Independently reviews the exact candidate or reports an approved proof. It does not inherit trust from the worker. |
