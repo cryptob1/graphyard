@@ -39,7 +39,7 @@ Postgres mode stores bounded artifact bytes in the existing durable database. On
 The collector uses `POST /api/validation/artifacts` or `graphyard validation artifact-upload file.json` with:
 
 - `requestId`, `attemptId`, `epoch`, required `name`;
-- `mediaType`: `application/json`, `application/zip` or `image/png`;
+- `mediaType`: `application/json`, `application/zip`, `image/png` or `text/plain`;
 - base64 `bytes`, maximum 8 MiB decoded;
 - `capturePolicy: "approved-test-data-only"`.
 
