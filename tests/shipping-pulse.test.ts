@@ -24,7 +24,8 @@ async function ledgerDelivery(hoursAgo: number, intentHoursBefore: number | null
   const id = randomUUID(), now = (await store.pool.query('SELECT statement_timestamp() AS now')).rows[0].now as Date;
   const mergedAt = new Date(now.getTime() - hoursAgo * 3_600_000);
   const candidate = { pr: Number(suffix), sha: suffix.padStart(40, 'a'), baseSha: 'b'.repeat(40), branch: `pulse-${suffix}`, author: 'worker' };
-  const work = { id, key: `GY-${suffix}`, title: `Delivery ${suffix}`, candidate, observation: prHoursBefore === null ? undefined : { prCreatedAt: new Date(mergedAt.getTime() - prHoursBefore * 3_600_000).toISOString() }, delivery: { mergedAt: mergedAt.toISOString(), mergeSha: suffix.padStart(40, 'c'), authorizationRevision: 1 }, evidence: [{ trusted: true, result: 'pass', executed: 1, skipped: 0 }], criteria: [{ proofs: ['integration:pulse'] }], violations: suffix === '2' ? ['Observed policy context'] : [] };
+  const evidence = { proof: 'integration:pulse', trusted: true, result: 'pass', executed: 1, skipped: 0, sha: candidate.sha, baseSha: candidate.baseSha, policyRevision: 1 };
+  const work = { id, key: `GY-${suffix}`, title: `Delivery ${suffix}`, candidate, policyRevision: 1, observation: prHoursBefore === null ? undefined : { prCreatedAt: new Date(mergedAt.getTime() - prHoursBefore * 3_600_000).toISOString() }, delivery: { mergedAt: mergedAt.toISOString(), mergeSha: suffix.padStart(40, 'c'), authorizationRevision: 1 }, evidence: [evidence], criteria: [{ proofs: ['integration:pulse'] }], violations: suffix === '2' ? ['Observed policy context'] : [] };
   await store.pool.query('INSERT INTO work_items(id,document) VALUES($1,$2)', [id, { id, mutable: true, delivery: { mergedAt: now.toISOString() } }]);
   if (intentHoursBefore !== null) await store.pool.query("INSERT INTO events(work_id,actor,kind,payload,created_at) VALUES($1,'operator','create',$2,$3)", [id, { work: { id, key: work.key } }, new Date(mergedAt.getTime() - intentHoursBefore * 3_600_000)]);
   await store.pool.query("INSERT INTO events(work_id,actor,kind,payload) VALUES($1,'github','github.observed',$2)", [id, { work }]);
@@ -45,6 +46,36 @@ test('pulse uses exact append-only deliveries, deduplicates, orders, and compute
   assert.deepEqual(pulse.intentToMerge, { medianHours: 3, sampleSize: 2, excluded: 1 });
   assert.deepEqual(pulse.recent.map(item => item.key), ['GY-1', 'GY-2', 'GY-3']);
   assert.deepEqual(pulse.recent[1].quality.violations, ['Observed policy context']);
+});
+
+test('bounded aggregation is served by the delivery and production-merge indexes', async () => {
+  // Asserted with sequential scans disabled: the question is whether the indexed key can
+  // satisfy the pulse predicate and ordering at all, not what a planner prefers on a small
+  // table. A mismatched index expression would still force a sequential scan here.
+  const db = await store.pool.connect();
+  try {
+    await db.query('BEGIN'); await db.query('SET LOCAL enable_seqscan=off');
+    const explain = async (sql: string, params: unknown[]) =>
+      (await db.query(`EXPLAIN ${sql}`, params)).rows.map(row => row['QUERY PLAN']).join('\n');
+    const plan = await explain(`SELECT DISTINCT ON (e.work_id) e.work_id, e.seq
+      FROM events e WHERE e.kind='github.observed' AND e.payload->'work'->'delivery'->>'mergedAt' IS NOT NULL
+        AND graphyard_instant(e.payload->'work'->'delivery'->>'mergedAt') BETWEEN $1 AND $2
+      ORDER BY e.work_id ASC, e.seq ASC`,
+      [new Date(Date.now() - 84 * 86_400_000).toISOString(), new Date().toISOString()]);
+    // The range must appear as an Index Cond. A text-keyed index still shows up in the
+    // plan but demotes the range to a Filter, reading every delivery row in the ledger.
+    assert.match(plan, /Index Scan using events_delivery_instant/);
+    assert.match(plan, /Index Cond:[^\n]*graphyard_instant/);
+    assert.doesNotMatch(plan, /Filter:[^\n]*graphyard_instant/);
+    const lookup = await explain(`SELECT pom.deployed_at FROM production_observation_merges pom
+      WHERE pom.merge_sha=$1 AND pom.status='succeeded' AND pom.kind='deployment'
+      ORDER BY pom.deployed_at ASC, pom.observation_id ASC LIMIT 101`, ['c'.repeat(40)]);
+    // The cap stops the scan because the index already supplies deployment order; an index
+    // keyed on observation_id would have to sort every mapping for the merge SHA first.
+    assert.match(lookup, /Index Only Scan using production_merges_deploy_order/);
+    assert.match(lookup, /Index Cond: \(merge_sha =/);
+    assert.doesNotMatch(lookup, /Sort Key/);
+  } finally { await db.query('ROLLBACK'); db.release(); }
 });
 
 test('PR-to-production uses exact retained containment and excludes superseded, rollback, invalid, and missing observations', async () => {
@@ -75,6 +106,49 @@ test('PR-to-production uses exact retained containment and excludes superseded, 
   assert.equal(pulse.prToProduction.exclusions['invalid-clock-order'], 1);
   assert.equal(pulse.prToProduction.exclusions['missing-pr-created-at'], 3);
   assert.equal(pulse.prToProduction.sparse, true);
+});
+
+test('recorded quality counts only evidence that authorized the delivered candidate', async () => {
+  const id = randomUUID(), now = (await store.pool.query('SELECT statement_timestamp() AS now')).rows[0].now as Date;
+  const mergedAt = new Date(now.getTime() - 3_600_000);
+  const candidate = { pr: 900, sha: 'e'.repeat(40), baseSha: 'f'.repeat(40), branch: 'quality', author: 'worker' };
+  const applicable = { proof: 'integration:pulse', trusted: true, result: 'pass', executed: 2, skipped: 0, sha: candidate.sha, baseSha: candidate.baseSha, policyRevision: 3 };
+  const work = {
+    id, key: 'GY-QUALITY', title: 'Quality context', candidate, policyRevision: 3,
+    delivery: { mergedAt: mergedAt.toISOString(), mergeSha: '9'.repeat(40), authorizationRevision: 1 },
+    // One required proof; an obsolete pass from an earlier candidate, a pass under an
+    // earlier policy revision, a skipped run, and the one pass that authorized the merge.
+    evidence: [
+      { ...applicable, sha: '0'.repeat(40) },
+      { ...applicable, policyRevision: 2 },
+      { ...applicable, executed: 1, skipped: 1 },
+      applicable,
+    ],
+    criteria: [{ proofs: ['integration:pulse'] }, { proofs: ['integration:pulse'] }],
+    violations: [],
+  };
+  await store.pool.query('INSERT INTO work_items(id,document) VALUES($1,$2)', [id, { id }]);
+  await store.pool.query("INSERT INTO events(work_id,actor,kind,payload) VALUES($1,'github','github.observed',$2)", [id, { work }]);
+  const pulse = await shippingPulse(store.pool);
+  const entry = pulse.recent.find(item => item.key === 'GY-QUALITY');
+  assert.deepEqual(entry!.quality, { passingProofs: 1, requiredProofs: 1, violations: [] });
+});
+
+test('delivery timestamps are read as instants regardless of the recorded offset', async () => {
+  const now = (await store.pool.query('SELECT statement_timestamp() AS now')).rows[0].now as Date;
+  const mergedAt = new Date(now.getTime() - 2 * 3_600_000);
+  // Same instant, written with a +05:30 offset instead of Z. Text ordering would sort it
+  // wrongly; the indexed instant expression must place it exactly two hours ago.
+  const shifted = new Date(mergedAt.getTime() + 5.5 * 3_600_000).toISOString().replace('Z', '+05:30');
+  const id = randomUUID();
+  const work = { id, key: 'GY-OFFSET', title: 'Offset delivery', candidate: { pr: 901, sha: 'a'.repeat(40), baseSha: 'b'.repeat(40) }, policyRevision: 1, delivery: { mergedAt: shifted, mergeSha: '8'.repeat(40), authorizationRevision: 1 }, evidence: [], criteria: [], violations: [] };
+  await store.pool.query('INSERT INTO work_items(id,document) VALUES($1,$2)', [id, { id }]);
+  await store.pool.query("INSERT INTO events(work_id,actor,kind,payload) VALUES($1,'github','github.observed',$2)", [id, { work }]);
+  const parsed = (await store.pool.query('SELECT graphyard_instant($1) AS at', [shifted])).rows[0].at as Date;
+  assert.equal(parsed.getTime(), mergedAt.getTime());
+  const pulse = await shippingPulse(store.pool);
+  const entry = pulse.recent.find(item => item.key === 'GY-OFFSET');
+  assert.equal(Date.parse(entry!.mergedAt), mergedAt.getTime());
 });
 
 test('API requires authentication and bounded larger histories are explicitly partial', async () => {

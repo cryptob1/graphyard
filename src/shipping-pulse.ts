@@ -1,4 +1,5 @@
 import type pg from 'pg';
+import { currentEvidence, type Work } from './model.js';
 
 export const SHIPPING_PULSE_WEEKS = 12;
 export const SHIPPING_PULSE_LIMIT = 1000;
@@ -25,10 +26,12 @@ export interface ShippingPulse {
   }[];
 }
 
+/** Only the newest deliveries carry evidence context, so the response stays bounded. */
+type QualitySource = Pick<Work, 'evidence' | 'criteria' | 'candidate' | 'policyRevision' | 'scenarioRequirements' | 'validation'> & { violations: unknown };
+
 type DeliveryRow = {
   work_id: string; key: string; title: string; pull_request: number; merge_sha: string;
-  merged_at: Date; intent_at: Date | null; passing_proofs: number; required_proofs: number;
-  violations: unknown;
+  merged_at: Date; intent_at: Date | null; quality_source: QualitySource | null;
   pr_created_at: Date | null; production_at: Date | null; production_matches: number; superseded_matches: number;
 };
 
@@ -44,6 +47,24 @@ function median(values: number[]) {
   values.sort((a, b) => a - b);
   const middle = Math.floor(values.length / 2);
   return values.length % 2 ? values[middle] : (values[middle - 1] + values[middle]) / 2;
+}
+
+/**
+ * Counts the proofs that actually authorized this delivery. Evidence is applied with
+ * the same rules the merge gate used - exact candidate SHA, base SHA, policy revision,
+ * validation selection, and scenario revision, unexpired as of the merge - so an
+ * obsolete pass recorded against an earlier candidate is never counted.
+ */
+function deliveredQuality(source: QualitySource | null, mergedAt: Date) {
+  const required = [...new Set((source?.criteria ?? []).flatMap(criterion => criterion.proofs ?? []))];
+  const violations = Array.isArray(source?.violations) ? source.violations.filter(value => typeof value === 'string').slice(0, 10) : [];
+  if (!source) return { passingProofs: 0, requiredProofs: required.length, violations };
+  const work = { ...source, evidence: source.evidence ?? [] } as Work;
+  const passed = required.filter(proof => {
+    const evidence = currentEvidence(work, proof, mergedAt);
+    return !!evidence && evidence.result === 'pass' && evidence.executed > 0 && evidence.skipped === 0;
+  });
+  return { passingProofs: passed.length, requiredProofs: required.length, violations };
 }
 
 function rounded(value: number | null) { return value === null ? null : Math.round(value * 10) / 10; }
@@ -62,15 +83,15 @@ export async function shippingPulse(pool: pg.Pool): Promise<ShippingPulse> {
   rangeStart.setUTCDate(rangeStart.getUTCDate() - 7 * (SHIPPING_PULSE_WEEKS - 1));
   const result = await pool.query<DeliveryRow>(`
     WITH delivery_events AS (
-      SELECT e.work_id, e.seq, e.payload->'work' AS work,
-        (e.payload->'work'->'delivery'->>'mergedAt')::timestamptz AS merged_at,
-        row_number() OVER (PARTITION BY e.work_id ORDER BY e.seq ASC) AS delivery_number
+      SELECT DISTINCT ON (e.work_id) e.work_id, e.seq, e.payload->'work' AS work,
+        graphyard_instant(e.payload->'work'->'delivery'->>'mergedAt') AS merged_at
       FROM events e
       WHERE e.kind = 'github.observed'
         AND e.payload->'work'->'delivery'->>'mergedAt' IS NOT NULL
-        AND e.payload->'work'->'delivery'->>'mergedAt' BETWEEN $1 AND $2
+        AND graphyard_instant(e.payload->'work'->'delivery'->>'mergedAt') BETWEEN $1 AND $2
+      ORDER BY e.work_id ASC, e.seq ASC
     ), exact_deliveries AS (
-      SELECT work_id, seq, work, merged_at FROM delivery_events WHERE delivery_number=1
+      SELECT work_id, seq, work, merged_at FROM delivery_events
       ORDER BY merged_at DESC, work_id ASC LIMIT $3
     )
     SELECT d.work_id, d.work->>'key' AS key, d.work->>'title' AS title,
@@ -78,12 +99,14 @@ export async function shippingPulse(pool: pg.Pool): Promise<ShippingPulse> {
       d.work->'delivery'->>'mergeSha' AS merge_sha, d.merged_at,
       (d.work->'observation'->>'prCreatedAt')::timestamptz AS pr_created_at,
       intent.created_at AS intent_at,
-      (SELECT count(*)::int FROM jsonb_array_elements(COALESCE(d.work->'evidence','[]'::jsonb)) proof
-        WHERE proof->>'trusted' = 'true' AND proof->>'result' = 'pass'
-          AND (proof->>'executed')::int > 0 AND (proof->>'skipped')::int = 0) AS passing_proofs,
-      (SELECT count(*)::int FROM jsonb_array_elements(COALESCE(d.work->'criteria','[]'::jsonb)) criterion,
-        jsonb_array_elements(COALESCE(criterion->'proofs','[]'::jsonb))) AS required_proofs,
-      COALESCE(d.work->'violations','[]'::jsonb) AS violations,
+      CASE WHEN row_number() OVER (ORDER BY d.merged_at DESC, d.work_id ASC) <= $5 THEN jsonb_build_object(
+        'evidence', COALESCE(d.work->'evidence','[]'::jsonb),
+        'criteria', COALESCE(d.work->'criteria','[]'::jsonb),
+        'candidate', d.work->'candidate',
+        'policyRevision', d.work->'policyRevision',
+        'scenarioRequirements', COALESCE(d.work->'scenarioRequirements','[]'::jsonb),
+        'validation', COALESCE(d.work->'validation','{}'::jsonb),
+        'violations', COALESCE(d.work->'violations','[]'::jsonb)) END AS quality_source,
       production.production_at, production.production_matches::int, production.superseded_matches::int
     FROM exact_deliveries d
     LEFT JOIN LATERAL (
@@ -91,23 +114,23 @@ export async function shippingPulse(pool: pg.Pool): Promise<ShippingPulse> {
       WHERE work_id=d.work_id AND kind='create' ORDER BY seq ASC LIMIT 1
     ) intent ON true
     LEFT JOIN LATERAL (
-      SELECT min(o.deployed_at) FILTER (WHERE o.status='succeeded' AND o.kind='deployment'
-          AND o.deployed_at>=d.merged_at AND NOT EXISTS (
-            SELECT 1 FROM production_observations later WHERE later.provider=o.provider
-              AND later.deployment_id=o.deployment_id AND later.status='superseded')) AS production_at,
-        count(*) FILTER (WHERE o.status='succeeded' AND o.kind='deployment') AS production_matches,
-        count(*) FILTER (WHERE o.status='succeeded' AND o.kind='deployment' AND EXISTS (
-            SELECT 1 FROM production_observations later WHERE later.provider=o.provider
-              AND later.deployment_id=o.deployment_id AND later.status='superseded')) AS superseded_matches
+      SELECT min(o.deployed_at) FILTER (WHERE o.deployed_at>=d.merged_at AND NOT o.superseded) AS production_at,
+        count(*) AS production_matches,
+        count(*) FILTER (WHERE o.superseded) AS superseded_matches
       FROM (
-        SELECT observed.* FROM production_observation_merges pom
-        JOIN production_observations observed ON observed.id=pom.observation_id
+        SELECT pom.deployed_at, EXISTS (
+            SELECT 1 FROM production_observations later
+            WHERE later.provider=source.provider AND later.deployment_id=source.deployment_id
+              AND later.status='superseded') AS superseded
+        FROM production_observation_merges pom
+        JOIN production_observations source ON source.id=pom.observation_id
         WHERE pom.merge_sha=lower(d.work->'delivery'->>'mergeSha')
-          AND observed.status='succeeded' AND observed.kind='deployment'
-        ORDER BY observed.deployed_at ASC, observed.id ASC LIMIT $4
+          AND pom.status='succeeded' AND pom.kind='deployment'
+        ORDER BY pom.deployed_at ASC, pom.observation_id ASC LIMIT $4
       ) o
     ) production ON true
-    ORDER BY d.merged_at DESC, d.work_id ASC`, [rangeStart.toISOString(), now.toISOString(), SHIPPING_PULSE_LIMIT + 1, SHIPPING_PULSE_PRODUCTION_LIMIT + 1]);
+    ORDER BY d.merged_at DESC, d.work_id ASC`,
+    [rangeStart.toISOString(), now.toISOString(), SHIPPING_PULSE_LIMIT + 1, SHIPPING_PULSE_PRODUCTION_LIMIT + 1, SHIPPING_PULSE_RECENT_LIMIT]);
   const deliveryPartial = result.rows.length > SHIPPING_PULSE_LIMIT;
   const rows = result.rows.slice(0, SHIPPING_PULSE_LIMIT);
   const productionPartial = rows.some(row => row.production_matches > SHIPPING_PULSE_PRODUCTION_LIMIT);
@@ -150,7 +173,7 @@ export async function shippingPulse(pool: pg.Pool): Promise<ShippingPulse> {
     weeks,
     recent: rows.slice(0, SHIPPING_PULSE_RECENT_LIMIT).map(row => ({
       key: row.key, title: row.title, pullRequest: row.pull_request, mergeSha: row.merge_sha, mergedAt: row.merged_at.toISOString(),
-      quality: { passingProofs: row.passing_proofs, requiredProofs: row.required_proofs, violations: Array.isArray(row.violations) ? row.violations.filter(value => typeof value === 'string').slice(0, 10) : [] },
+      quality: deliveredQuality(row.quality_source, row.merged_at),
     })),
   };
 }

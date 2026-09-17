@@ -13,7 +13,27 @@ CREATE TABLE IF NOT EXISTS events (
   created_at timestamptz NOT NULL DEFAULT clock_timestamp()
 );
 CREATE INDEX IF NOT EXISTS events_work ON events(work_id,seq);
-CREATE INDEX IF NOT EXISTS events_delivery_time ON events ((payload->'work'->'delivery'->>'mergedAt'),seq)
+-- Parses an RFC3339 delivery timestamp into an instant using only immutable
+-- primitives, so the same expression can be indexed and used as the pulse query
+-- predicate. A numeric offset is subtracted explicitly; a bare or Z-suffixed
+-- value is read as repository UTC. Casting straight to timestamptz would depend
+-- on the session TimeZone and could not be indexed.
+CREATE OR REPLACE FUNCTION graphyard_instant(value text) RETURNS timestamptz
+  LANGUAGE sql IMMUTABLE STRICT PARALLEL SAFE AS $fn$
+  SELECT CASE WHEN parsed.offset_text IS NULL
+    THEN rtrim(value,'Zz')::timestamp AT TIME ZONE 'UTC'
+    ELSE (left(value, length(value) - length(parsed.offset_text))::timestamp
+          - make_interval(mins => (CASE WHEN left(parsed.digits,1)='-' THEN -1 ELSE 1 END)
+              * (substring(parsed.digits from 2 for 2)::int * 60
+                 + CASE WHEN length(parsed.digits)=5 THEN substring(parsed.digits from 4 for 2)::int ELSE 0 END)))
+         AT TIME ZONE 'UTC'
+  END
+  FROM (SELECT found, replace(found,':','') AS digits, found AS offset_text
+        FROM (SELECT substring(value from '[0-9]{2}:[0-9]{2}(?::[0-9]{2})?(?:\\.[0-9]+)?([+-][0-9]{2}:?[0-9]{2}|[+-][0-9]{2})$') AS found) raw) parsed $fn$;
+-- Renamed with the key it now holds: the text-keyed events_delivery_time could not
+-- answer an instant range, and CREATE INDEX IF NOT EXISTS would have kept it.
+DROP INDEX IF EXISTS events_delivery_time;
+CREATE INDEX IF NOT EXISTS events_delivery_instant ON events (graphyard_instant(payload->'work'->'delivery'->>'mergedAt'),work_id,seq)
   WHERE kind='github.observed' AND payload->'work'->'delivery'->>'mergedAt' IS NOT NULL;
 CREATE OR REPLACE FUNCTION graphyard_immutable() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN RAISE EXCEPTION 'The event ledger is append-only'; END $$;
@@ -28,11 +48,28 @@ CREATE TABLE IF NOT EXISTS production_observations (
   producer text NOT NULL, document jsonb NOT NULL,
   UNIQUE(provider,deployment_id,status)
 );
+-- deployed_at/status/kind are copied from the immutable observation written in the
+-- same transaction so the per-merge lookup can be satisfied, ordered, and capped
+-- entirely from one index instead of sorting every mapping for a merge SHA.
 CREATE TABLE IF NOT EXISTS production_observation_merges (
   observation_id uuid NOT NULL REFERENCES production_observations(id), merge_sha text NOT NULL,
+  deployed_at timestamptz NOT NULL, status text NOT NULL, kind text NOT NULL,
   PRIMARY KEY(observation_id,merge_sha)
 );
-CREATE INDEX IF NOT EXISTS production_merges_lookup ON production_observation_merges(merge_sha,observation_id);
+-- Databases created before the ordering columns existed are upgraded in place from
+-- the immutable observations they already reference; the append-only guard is
+-- reinstated below, so no recorded observation can be altered outside this step.
+DROP TRIGGER IF EXISTS immutable_production_observation_merges ON production_observation_merges;
+ALTER TABLE production_observation_merges ADD COLUMN IF NOT EXISTS deployed_at timestamptz;
+ALTER TABLE production_observation_merges ADD COLUMN IF NOT EXISTS status text;
+ALTER TABLE production_observation_merges ADD COLUMN IF NOT EXISTS kind text;
+UPDATE production_observation_merges m SET deployed_at=o.deployed_at, status=o.status, kind=o.kind
+  FROM production_observations o WHERE o.id=m.observation_id AND m.deployed_at IS NULL;
+ALTER TABLE production_observation_merges ALTER COLUMN deployed_at SET NOT NULL,
+  ALTER COLUMN status SET NOT NULL, ALTER COLUMN kind SET NOT NULL;
+DROP INDEX IF EXISTS production_merges_lookup;
+CREATE INDEX IF NOT EXISTS production_merges_deploy_order ON production_observation_merges(merge_sha,deployed_at,observation_id)
+  WHERE status='succeeded' AND kind='deployment';
 CREATE INDEX IF NOT EXISTS production_deployment_time ON production_observations(deployed_at,id) WHERE status='succeeded' AND kind='deployment';
 CREATE INDEX IF NOT EXISTS production_deployment_state ON production_observations(provider,deployment_id,status);
 DROP TRIGGER IF EXISTS immutable_production_observations ON production_observations;

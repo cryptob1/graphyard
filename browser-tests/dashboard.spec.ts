@@ -105,8 +105,7 @@ test('shipping pulse distinguishes loading, unavailable, empty, partial, and sta
     if (mode === 'loading') { await pending; return route.abort(); }
     if (mode === 'unavailable') return route.abort();
     if (mode === 'empty') return route.fulfill({ json: pulseFixture({ recent: [], counts: { days7: 0, days30: 0 }, weeks: Array.from({ length: 12 }, (_, index) => ({ start: new Date(Date.UTC(2026, 5, 29 + index * 7)).toISOString(), end: new Date(Date.UTC(2026, 6, 5 + index * 7)).toISOString(), count: 0 })) }) });
-    if (mode === 'partial') return route.fulfill({ json: pulseFixture({ completeness: 'partial', partialReason: 'Counts are lower-bound samples.' }) });
-    return route.fulfill({ json: pulseFixture({ generatedAt: '2020-01-01T00:00:00.000Z' }) });
+    return route.fulfill({ json: pulseFixture({ completeness: 'partial', partialReason: 'Counts are lower-bound samples.' }) });
   });
   await login(page); await page.getByRole('button', { name: /Shipping pulse/ }).click();
   await expect(page.getByRole('status')).toContainText('Loading shipping pulse');
@@ -115,8 +114,17 @@ test('shipping pulse distinguishes loading, unavailable, empty, partial, and sta
   await expect(page.getByText('No deliveries in this window')).toBeVisible(); await expect(page.getByLabel('Delivery metrics')).toHaveCount(0);
   mode = 'partial'; await page.getByRole('button', { name: /Delivery graph/ }).click(); await page.getByRole('button', { name: /Shipping pulse/ }).click();
   await expect(page.getByText('Partial history.')).toBeVisible(); await expect(page.getByText('Counts are lower-bound samples.')).toBeVisible();
-  mode = 'stale'; await page.getByRole('button', { name: /Delivery graph/ }).click(); await page.getByRole('button', { name: /Shipping pulse/ }).click();
+  // Staleness is measured from this browser's own last successful read, so it appears
+  // when a refresh fails while data is on screen - never from a repository/browser clock gap.
+  mode = 'unavailable'; await page.getByRole('button', { name: 'Refresh' }).click();
   await expect(page.getByText('Data is stale.')).toBeVisible();
+  await expect(page.getByText('Partial history.')).toBeVisible();
+});
+
+test('shipping pulse is not offered to operator agents whose scoped API cannot serve it', async ({ page }) => {
+  await fixture(page, 'operator-agent'); await login(page);
+  await expect(page.getByRole('button', { name: /Delivery graph/ })).toBeVisible();
+  await expect(page.getByRole('button', { name: /Shipping pulse/ })).toHaveCount(0);
 });
 
 async function checkDialog(page: Page, trigger: ReturnType<Page['getByRole']>) {

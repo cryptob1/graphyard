@@ -28,7 +28,7 @@ export class ProductionDelivery {
       const result = { id: randomUUID(), observedAt: now.toISOString(), ...data, mergeShas: [...new Set(data.mergeShas.map(value => value.toLowerCase()))] };
       await db.query(`INSERT INTO production_observations(id,provider,deployment_id,status,kind,deployed_at,observed_at,commit_sha,artifact_digest,source_url,producer,document)
         VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`, [result.id, data.provider, data.deploymentId, data.status, data.kind, data.deployedAt, now, data.commitSha?.toLowerCase() ?? null, data.artifactDigest ?? null, data.sourceUrl, actor.id, result]);
-      for (const mergeSha of result.mergeShas) await db.query('INSERT INTO production_observation_merges(observation_id,merge_sha) VALUES($1,$2)', [result.id, mergeSha]);
+      for (const mergeSha of result.mergeShas) await db.query('INSERT INTO production_observation_merges(observation_id,merge_sha,deployed_at,status,kind) VALUES($1,$2,$3,$4,$5)', [result.id, mergeSha, data.deployedAt, data.status, data.kind]);
       await db.query('INSERT INTO receipts(actor,key,fingerprint,result) VALUES($1,$2,$3,$4)', [actor.id, key, fingerprint, result]);
       return result;
     });

@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import type { ShippingPulse as Pulse } from '../src/shipping-pulse';
 
 const STALE_AFTER_MS = 120_000;
@@ -7,7 +7,12 @@ const hours = (value: number | null) => value === null ? 'Unavailable' : `${valu
 export default function ShippingPulse({ token, repository }: { token: string; repository?: string }) {
   const [pulse, setPulse] = useState<Pulse | null>(null);
   const [unavailable, setUnavailable] = useState(false);
-  const [clock, setClock] = useState(Date.now());
+  // Staleness is elapsed time since this browser last read the pulse successfully.
+  // Both endpoints come from one clock, so a workstation clock that disagrees with
+  // the repository clock cannot make fresh data look stale or stale data look fresh.
+  const [elapsed, setElapsed] = useState(0);
+  const [reloads, setReloads] = useState(0);
+  const readAt = useRef(performance.now());
   useEffect(() => {
     const controller = new AbortController(); let active = true;
     const load = async () => {
@@ -15,22 +20,22 @@ export default function ShippingPulse({ token, repository }: { token: string; re
         const response = await fetch('/api/shipping-pulse', { headers: { Authorization: `Bearer ${token}` }, signal: AbortSignal.any([controller.signal, AbortSignal.timeout(15000)]) });
         if (!response.ok) throw new Error(String(response.status));
         const next = await response.json();
-        if (active) { setPulse(next); setUnavailable(false); setClock(Date.now()); }
-      } catch { if (active) setUnavailable(true); }
+        if (active) { setPulse(next); setUnavailable(false); readAt.current = performance.now(); setElapsed(0); }
+      } catch { if (active) { setUnavailable(true); setElapsed(performance.now() - readAt.current); } }
     };
-    void load(); const poll = setInterval(load, 30_000); const tick = setInterval(() => setClock(Date.now()), 30_000);
+    void load(); const poll = setInterval(load, 30_000); const tick = setInterval(() => setElapsed(performance.now() - readAt.current), 10_000);
     return () => { active = false; controller.abort(); clearInterval(poll); clearInterval(tick); };
-  }, [token]);
+  }, [token, reloads]);
   if (!pulse && !unavailable) return <section className="pulse-state" role="status"><h2>Loading shipping pulse…</h2><p>Reading bounded delivery history from the repository ledger.</p></section>;
   if (!pulse && unavailable) return <section className="pulse-state danger" role="alert"><h2>Shipping pulse unavailable</h2><p>The delivery ledger could not be read. Check the control-plane connection; missing data is not shown as zero.</p></section>;
-  const stale = clock - Date.parse(pulse!.generatedAt) > STALE_AFTER_MS;
+  const stale = unavailable || elapsed > STALE_AFTER_MS;
   const empty = pulse!.recent.length === 0;
-  const state = unavailable || stale ? 'stale' : pulse!.completeness;
+  const state = stale ? 'stale' : pulse!.completeness;
   const base = repository ? `https://github.com/${repository}` : null;
   const max = Math.max(1, ...pulse!.weeks.map(week => week.count));
   return <div className="pulse" aria-labelledby="pulse-title">
-    <div className="page-heading"><div><div className="eyebrow">REPOSITORY DELIVERY FLOW</div><h1 id="pulse-title">Shipping pulse</h1><p>Exact observed merges, without individual activity or productivity scoring.</p></div><span className={`pulse-badge ${state}`}>{state}</span></div>
-    {(unavailable || stale) && <div className="notice" role="status"><strong>Data is stale.</strong> Last complete read was {new Date(pulse!.generatedAt).toLocaleString()}. Check the connection before using these figures.</div>}
+    <div className="page-heading"><div><div className="eyebrow">REPOSITORY DELIVERY FLOW</div><h1 id="pulse-title">Shipping pulse</h1><p>Exact observed merges, without individual activity or productivity scoring.</p></div><div className="pulse-actions"><button type="button" onClick={() => setReloads(count => count + 1)}>Refresh</button><span className={`pulse-badge ${state}`}>{state}</span></div></div>
+    {stale && <div className="notice" role="status"><strong>Data is stale.</strong> This browser last read the pulse {Math.max(1, Math.round(elapsed / 60_000))} minute(s) ago; the repository generated it at {new Date(pulse!.generatedAt).toLocaleString()}. Refreshing has not succeeded since, so check the control-plane connection and use Refresh above before relying on these figures.</div>}
     {pulse!.completeness === 'partial' && <div className="notice" role="status"><strong>Partial history.</strong> {pulse!.partialReason}</div>}
     {empty ? <section className="pulse-state"><h2>No deliveries in this window</h2><p>The ledger was read successfully. No exact observed merges occurred between {new Date(pulse!.range.start).toLocaleDateString()} and {new Date(pulse!.range.end).toLocaleDateString()} (inclusive, repository UTC).</p></section> : <>
       <div className="pulse-metrics" aria-label="Delivery metrics"><div><span>Last 7 days</span><strong>{pulse!.counts.days7}</strong><small>exact merges</small></div><div><span>Last 30 days</span><strong>{pulse!.counts.days30}</strong><small>exact merges</small></div><div><span>Median intent → merge</span><strong>{pulse!.intentToMerge.medianHours === null ? 'Unavailable' : `${pulse!.intentToMerge.medianHours}h`}</strong><small>{pulse!.intentToMerge.sampleSize} included · {pulse!.intentToMerge.excluded} excluded</small></div></div>
