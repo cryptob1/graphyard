@@ -76,13 +76,18 @@ Environment: GRAPHYARD_URL, GRAPHYARD_TOKEN (individual role-scoped credential)
   runner snapshot file.json    Snapshot an explicit source-file list for review (not approval)
   scenarios                    List versioned E2E test-case definitions
   scenario file.json           Publish a scenario version (operator)
-  ready GY-N                   Release backlog item (operator)
+  ready GY-N REASON            Release backlog item with an audit reason (operator)
   unblock GY-N REASON           Clear a blocker with an audit reason (operator)
   rework GY-N --previous-worker-stopped REASON  Authorize reassignment (operator)
   recover-containment GY-N --previous-worker-stopped REASON
                                 Release delivered work's stopped-worker quarantine (operator)
   rereview GY-N [EPOCH]         Request a fresh Codex review (operator or current worker)
   reviewpolicy GY-N github|codex POLICY_REVISION REASON  Revise reviewer source (operator)
+  operator-agent list          Inspect configured identities, scopes and redacted fingerprints (admin)
+  operator-agent setup FILE --token-stdin  Create a scoped identity; FILE contains no secret (admin)
+  operator-agent configure ID FILE          Revise capabilities/scope with expectedRevision (admin)
+  operator-agent rotate ID SECONDS REASON --token-stdin  Rotate with a bounded overlap (admin)
+  operator-agent revoke ID REASON            Revoke immediately and fail closed (admin)
   claim GY-N                   Acquire a two-minute lease; returns epoch
   handoff GY-N                 Show assigned workspace and supervisor command
   heartbeat GY-N EPOCH          Extend current lease
@@ -183,6 +188,30 @@ Never share an operator or producer credential with an implementation agent.`); 
     if (!['define','build','candidate','request','dispatch','ack','heartbeat','result','cancel','settle','retry'].includes(id) || !args[0]) throw new Error('Use validation ACTION file.json');
     return print(await api(`validation/${id}`, JSON.parse(await readFile(args[0], 'utf8'))));
   }
+  if (command === 'operator-agent') {
+    if (!id || id === 'list') return print(await api('operator-agents'));
+    if (id === 'setup') {
+      if (!args[0] || args[1] !== '--token-stdin') throw new Error('Use operator-agent setup FILE --token-stdin');
+      let secret = ''; for await (const chunk of process.stdin) { secret += chunk; if (secret.length > 10000) throw new Error('Token input is too large'); }
+      secret = secret.trim(); if (!secret) throw new Error('Operator-agent credential is required; setup made no changes');
+      return print(await api('operator-agents', { ...JSON.parse(await readFile(args[0], 'utf8')), token: secret }));
+    }
+    if (id === 'configure') {
+      if (!args[0] || !args[1]) throw new Error('Use operator-agent configure ID FILE');
+      return print(await api(`operator-agents/${encodeURIComponent(args[0])}/configure`, JSON.parse(await readFile(args[1], 'utf8'))));
+    }
+    if (id === 'rotate') {
+      const marker = args.indexOf('--token-stdin'); if (!args[0] || marker < 0 || marker < 2) throw new Error('Use operator-agent rotate ID SECONDS REASON --token-stdin');
+      let secret = ''; for await (const chunk of process.stdin) { secret += chunk; if (secret.length > 10000) throw new Error('Token input is too large'); }
+      secret = secret.trim(); if (!secret) throw new Error('New operator-agent credential is required; rotation made no changes');
+      return print(await api(`operator-agents/${encodeURIComponent(args[0])}/rotate`, { token: secret, transitionSeconds: Number(args[1]), reason: args.slice(2, marker).join(' ') }));
+    }
+    if (id === 'revoke') {
+      if (!args[0]) throw new Error('Use operator-agent revoke ID REASON');
+      return print(await api(`operator-agents/${encodeURIComponent(args[0])}/revoke`, { reason: args.slice(1).join(' ') }));
+    }
+    throw new Error('Use operator-agent list, setup, configure, rotate, or revoke');
+  }
   if (command === 'init') {
     const root = execFileSync('git', ['rev-parse', '--show-toplevel'], { encoding: 'utf8' }).trim();
     const { values } = parseArgs({ args: process.argv.slice(3), options: { url: { type: 'string' }, herdr: { type: 'boolean' }, 'token-stdin': { type: 'boolean' }, 'host-id': { type: 'string' }, 'cli-path': { type: 'string' } }, allowPositionals: false });
@@ -241,8 +270,9 @@ Never share an operator or producer credential with an implementation agent.`); 
   if (command === 'events') return print(await api(`events?work=${work.id}`));
   if (command === 'rereview') return print(await mutate(command, args[0] ? { epoch: Number(args[0]) } : {}));
   if (command === 'reviewpolicy') return print(await mutate(command, { provider: args[0], expectedPolicyRevision: Number(args[1]), reason: args.slice(2).join(' ') }));
-  if (command === 'ready' || command === 'claim') return print(await mutate(command, {}));
-  if (command === 'unblock') return print(await mutate('unblock', { reason: args.join(' ') }));
+  if (command === 'ready') return print(await mutate(command, args.length ? { expectedRevision: work.revision, reason: args.join(' ') } : {}));
+  if (command === 'claim') return print(await mutate(command, {}));
+  if (command === 'unblock') return print(await mutate('unblock', { expectedRevision: work.revision, reason: args.join(' ') }));
   if (command === 'rework') {
     if (args[0] !== '--previous-worker-stopped') throw new Error('Stop the previous worker first, then pass --previous-worker-stopped and an audit reason');
     return print(await mutate('rework', { reason: args.slice(1).join(' '), previousWorkerStopped: true }));

@@ -21,6 +21,14 @@ CREATE TABLE IF NOT EXISTS receipts (
   actor text NOT NULL, key text NOT NULL, fingerprint text NOT NULL, result jsonb NOT NULL,
   PRIMARY KEY(actor,key)
 );
+CREATE TABLE IF NOT EXISTS operator_agents (
+  id text PRIMARY KEY, document jsonb NOT NULL
+);
+CREATE TABLE IF NOT EXISTS operator_credentials (
+  agent_id text NOT NULL REFERENCES operator_agents(id), fingerprint text NOT NULL,
+  token_hash text NOT NULL UNIQUE, valid_from timestamptz NOT NULL, valid_until timestamptz,
+  revoked_at timestamptz, PRIMARY KEY(agent_id,fingerprint)
+);
 CREATE TABLE IF NOT EXISTS jobs (
   work_id uuid PRIMARY KEY REFERENCES work_items(id), available_at timestamptz NOT NULL DEFAULT now(),
   locked_until timestamptz, token uuid, attempts int NOT NULL DEFAULT 0, error text

@@ -8,11 +8,12 @@ All control-plane endpoints except `/healthz` require `Authorization: Bearer TOK
 | --- | --- |
 | `admin` | Create/release work, participate as a worker, attest manual proofs |
 | `coordinator` | Read work and integration state for master-agent routing; acquire, verify, or cancel only the engine's bounded merge execution authority |
+| `operator-agent` | Only explicitly configured intent/policy capabilities within a server-enforced repository/work allowlist; never leases, evidence, identity administration, or merge execution |
 | `worker` | Claim work, renew/release own lease, register workspace, report blockers, submit implementation, submit untrusted assertions |
 | `producer` | Submit evidence; only configured `proofs` are trusted |
 | `reader` | Inspect work, status, events |
 
-All roles can read engineering metadata in this single-repository installation. There is no tenant isolation or per-item read ACL in v0.1. Each independent worker process should have a distinct principal; sharing a token makes processes indistinguishable.
+Except for operator-agents, all roles can read engineering metadata in this single-repository installation and have no per-item read ACL in v0.1. Operator-agent reads are restricted to their server-enforced repository/work scope allowlist. Each independent worker process should have a distinct principal; sharing a token makes processes indistinguishable.
 
 ## Requests and retries
 
@@ -41,8 +42,8 @@ Other commands use `POST /api/work/UUID/COMMAND` (display keys also work):
 | Command | JSON body |
 | --- | --- |
 | `requirements` | Full criteria, dependencies, plannedFiles, exclusiveResources, expectedPolicyRevision and reason; operator only, see [coordination](coordination.md) |
-| `ready` | `{}`; operator only |
-| `unblock` | `{"reason":"Contract verified"}`; operator only, audit reason required |
+| `ready` | Admin: `{}`. Operator-agent: `{"expectedRevision":12,"reason":"Requirements approved"}` with the current work revision and a nonblank audit reason. |
+| `unblock` | Admin: `{"reason":"Contract verified"}`. Operator-agent: `{"expectedRevision":12,"reason":"Contract verified"}` with the current work revision and a nonblank audit reason. |
 | `rework` | `{"reason":"Retry implementation","previousWorkerStopped":true}`; operator only |
 | `recover` | `{"reason":"Verified delivered worker stopped","previousWorkerStopped":true}`; operator only, delivered quarantine only |
 | `claim` | `{}`; returns current lease and epoch |
