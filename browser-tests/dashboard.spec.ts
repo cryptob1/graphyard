@@ -62,6 +62,7 @@ for (const viewport of [{ name: 'desktop', width: 1280, height: 900 }, { name: '
     await expect(page.locator('.node small span[title]')).toHaveCount(8);
     await expect(node('Build').locator('span[title]')).toHaveAttribute('title', /50th and 95th percentile/);
     await expect(node('Merge').locator('span[title]')).toHaveAttribute('title', 'No dwell data to summarize for this stage yet');
+    await expect(node('Build').locator('span[title]')).toHaveCSS('text-transform', 'none');
     await expect(page.locator('.card-top', { hasText: 'GY-2' })).toContainText('45m');
     await expect(page.locator('.card-top', { hasText: 'GY-3' })).toContainText('14h 54m');
     await expect(page.locator('.card-top', { hasText: 'GY-5' })).toContainText('2d 3h');
