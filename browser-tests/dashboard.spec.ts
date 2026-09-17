@@ -72,6 +72,41 @@ test('mobile sign out is reachable and removes the session', async ({ page }) =>
   expect(await page.evaluate(() => sessionStorage.getItem('graphyard-token'))).toBeNull();
 });
 
+const pulseFixture = (overrides: Record<string, unknown> = {}) => ({ generatedAt: new Date().toISOString(), range: { start: '2026-06-29T00:00:00.000Z', end: new Date().toISOString(), weeks: 12, semantics: 'repository-utc-inclusive' }, completeness: 'complete', counts: { days7: 3, days30: 8 }, intentToMerge: { medianHours: 12.5, sampleSize: 7, excluded: 1 }, weeks: Array.from({ length: 12 }, (_, index) => ({ start: new Date(Date.UTC(2026, 5, 29 + index * 7)).toISOString(), end: new Date(Date.UTC(2026, 6, 5 + index * 7)).toISOString(), count: index % 4 })), recent: [{ key: 'GY-9', title: 'Exact delivery', pullRequest: 42, mergeSha: 'abcdef1234567890abcdef1234567890abcdef12', mergedAt: '2026-09-15T12:00:00.000Z', quality: { passingProofs: 4, requiredProofs: 4, violations: [] } }], ...overrides });
+
+for (const viewport of [{ name: 'desktop', width: 1280, height: 900 }, { name: 'mobile', width: 390, height: 844 }]) test(`shipping pulse exposes exact metrics, links and chart text on ${viewport.name}`, async ({ page }) => {
+  await page.setViewportSize(viewport); await fixture(page);
+  await page.route('**/api/shipping-pulse', route => route.fulfill({ json: pulseFixture() }));
+  await login(page); await page.getByRole('button', { name: /Shipping pulse/ }).click();
+  await expect(page.getByRole('heading', { name: 'Shipping pulse' })).toBeVisible();
+  await expect(page.getByLabel('Delivery metrics')).toContainText('3');
+  await expect(page.getByText('12.5h')).toBeVisible(); await expect(page.getByText('7 included · 1 excluded')).toBeVisible();
+  await expect(page.getByRole('list', { name: 'Weekly delivery counts' }).getByRole('listitem')).toHaveCount(12);
+  await expect(page.getByRole('link', { name: /PR #42/ })).toHaveAttribute('href', 'https://github.com/fixture/repository/pull/42');
+  await expect(page.getByRole('link', { name: /Commit abcdef12/ })).toHaveAttribute('href', 'https://github.com/fixture/repository/commit/abcdef1234567890abcdef1234567890abcdef12');
+  const shell = page.locator('.shell'); expect((await shell.evaluate(element => element.scrollWidth <= element.clientWidth))).toBe(true);
+});
+
+test('shipping pulse distinguishes loading, unavailable, empty, partial, and stale data', async ({ page }) => {
+  await fixture(page); let mode = 'loading'; let release!: () => void; const pending = new Promise<void>(resolve => { release = resolve; });
+  await page.route('**/api/shipping-pulse', async route => {
+    if (mode === 'loading') { await pending; return route.abort(); }
+    if (mode === 'unavailable') return route.abort();
+    if (mode === 'empty') return route.fulfill({ json: pulseFixture({ recent: [], counts: { days7: 0, days30: 0 }, weeks: Array.from({ length: 12 }, (_, index) => ({ start: new Date(Date.UTC(2026, 5, 29 + index * 7)).toISOString(), end: new Date(Date.UTC(2026, 6, 5 + index * 7)).toISOString(), count: 0 })) }) });
+    if (mode === 'partial') return route.fulfill({ json: pulseFixture({ completeness: 'partial', partialReason: 'Counts are lower-bound samples.' }) });
+    return route.fulfill({ json: pulseFixture({ generatedAt: '2020-01-01T00:00:00.000Z' }) });
+  });
+  await login(page); await page.getByRole('button', { name: /Shipping pulse/ }).click();
+  await expect(page.getByRole('status')).toContainText('Loading shipping pulse');
+  mode = 'unavailable'; release(); await expect(page.getByRole('alert')).toContainText('unavailable');
+  mode = 'empty'; await page.getByRole('button', { name: /Delivery graph/ }).click(); await page.getByRole('button', { name: /Shipping pulse/ }).click();
+  await expect(page.getByText('No deliveries in this window')).toBeVisible(); await expect(page.getByLabel('Delivery metrics')).toHaveCount(0);
+  mode = 'partial'; await page.getByRole('button', { name: /Delivery graph/ }).click(); await page.getByRole('button', { name: /Shipping pulse/ }).click();
+  await expect(page.getByText('Partial history.')).toBeVisible(); await expect(page.getByText('Counts are lower-bound samples.')).toBeVisible();
+  mode = 'stale'; await page.getByRole('button', { name: /Delivery graph/ }).click(); await page.getByRole('button', { name: /Shipping pulse/ }).click();
+  await expect(page.getByText('Data is stale.')).toBeVisible();
+});
+
 async function checkDialog(page: Page, trigger: ReturnType<Page['getByRole']>) {
   await trigger.click(); const dialog = page.getByRole('dialog'); await expect(dialog).toBeVisible();
   await expect(dialog.getByRole('button', { name: /Close/ })).toBeFocused();

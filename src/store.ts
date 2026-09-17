@@ -13,6 +13,8 @@ CREATE TABLE IF NOT EXISTS events (
   created_at timestamptz NOT NULL DEFAULT clock_timestamp()
 );
 CREATE INDEX IF NOT EXISTS events_work ON events(work_id,seq);
+CREATE INDEX IF NOT EXISTS events_delivery_time ON events ((payload->'work'->'delivery'->>'mergedAt'),seq)
+  WHERE kind='github.observed' AND payload->'work'->'delivery'->>'mergedAt' IS NOT NULL;
 CREATE OR REPLACE FUNCTION graphyard_immutable() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN RAISE EXCEPTION 'The event ledger is append-only'; END $$;
 DROP TRIGGER IF EXISTS immutable_events ON events;
