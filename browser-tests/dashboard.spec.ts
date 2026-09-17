@@ -91,12 +91,20 @@ for (const viewport of [{ name: 'desktop', width: 1280, height: 900 }, { name: '
 
 test('shipping pulse labels sparse and unavailable production samples without fabricating zero', async ({ page }) => {
   await fixture(page);
-  await page.route('**/api/shipping-pulse', route => route.fulfill({ json: pulseFixture({ prToProduction: { averageHours: null, medianHours: null, p90Hours: null, sampleSize: 0, eligible: 1, excluded: 1, coveragePercent: 0, sparse: true, exclusions: { 'no-verifiable-production-deployment': 1 }, split: { prToMergeAverageHours: null, mergeToProductionAverageHours: null } } }) }));
+  // The second delivery's authorizing snapshot cannot be resolved, so its proof totals are
+  // unknown. An unknown total must never be drawn as 0/0, which would read as a clean record.
+  const unresolved = { key: 'GY-10', title: 'Unretained authorization', pullRequest: 43, mergeSha: 'bcdef01234567890abcdef1234567890abcdef12', mergedAt: '2026-09-14T12:00:00.000Z', quality: { passingProofs: null, requiredProofs: null, violations: [], unavailableReason: 'The immutable snapshot that authorized this delivery is no longer in the retained ledger, so recorded proof totals are unknown.' } };
+  await page.route('**/api/shipping-pulse', route => route.fulfill({ json: pulseFixture({ prToProduction: { averageHours: null, medianHours: null, p90Hours: null, sampleSize: 0, eligible: 1, excluded: 1, coveragePercent: 0, sparse: true, exclusions: { 'no-verifiable-production-deployment': 1 }, split: { prToMergeAverageHours: null, mergeToProductionAverageHours: null } }, recent: [...pulseFixture().recent, unresolved] }) }));
   await login(page); await page.getByRole('button', { name: /Shipping pulse/ }).click();
   await expect(page.getByText('Sparse sample.')).toBeVisible();
   await expect(page.getByLabel('Pull request to production metrics')).toContainText('Unavailable');
   await page.getByText('Why records were excluded').click();
   await expect(page.getByText('no verifiable production deployment: 1')).toBeVisible();
+  const entry = page.locator('.delivery-list article').filter({ hasText: 'GY-10' });
+  await expect(entry).toContainText('Recorded proof totals unavailable');
+  await expect(entry).toContainText('no longer in the retained ledger');
+  await expect(entry).not.toContainText('0/0');
+  await expect(page.locator('.delivery-list article').filter({ hasText: 'GY-9' })).toContainText('4/4 recorded proofs passed');
 });
 
 test('shipping pulse distinguishes loading, unavailable, empty, partial, and stale data', async ({ page }) => {

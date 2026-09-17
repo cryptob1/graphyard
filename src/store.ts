@@ -35,6 +35,13 @@ CREATE OR REPLACE FUNCTION graphyard_instant(value text) RETURNS timestamptz
 DROP INDEX IF EXISTS events_delivery_time;
 CREATE INDEX IF NOT EXISTS events_delivery_instant ON events (graphyard_instant(payload->'work'->'delivery'->>'mergedAt'),work_id,seq)
   WHERE kind='github.observed' AND payload->'work'->'delivery'->>'mergedAt' IS NOT NULL;
+-- Recent-delivery quality is read from the immutable snapshot each delivery cites by
+-- revision, so that lookup must be an exact probe rather than a walk of one work
+-- item's history. Revisions are written by save() as canonical JSON integers, so the
+-- stored text compares exactly; a numeric cast would not be indexable over rows whose
+-- payload carries no work document.
+CREATE INDEX IF NOT EXISTS events_work_revision ON events (work_id,(payload->'work'->>'revision'),seq)
+  WHERE payload ? 'work';
 CREATE OR REPLACE FUNCTION graphyard_immutable() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN RAISE EXCEPTION 'The event ledger is append-only'; END $$;
 DROP TRIGGER IF EXISTS immutable_events ON events;

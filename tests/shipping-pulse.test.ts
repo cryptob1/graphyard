@@ -20,16 +20,23 @@ before(async () => {
 });
 after(async () => { if (store) await store.close(); if (database) await database.stop(); });
 
+// The revision the merge execution authorized; the recording observation is one later.
+const AUTHORIZED_REVISION = 4;
+
 async function ledgerDelivery(hoursAgo: number, intentHoursBefore: number | null, suffix: string, prHoursBefore: number | null = null) {
   const id = randomUUID(), now = (await store.pool.query('SELECT statement_timestamp() AS now')).rows[0].now as Date;
   const mergedAt = new Date(now.getTime() - hoursAgo * 3_600_000);
   const candidate = { pr: Number(suffix), sha: suffix.padStart(40, 'a'), baseSha: 'b'.repeat(40), branch: `pulse-${suffix}`, author: 'worker' };
   const evidence = { proof: 'integration:pulse', trusted: true, result: 'pass', executed: 1, skipped: 0, sha: candidate.sha, baseSha: candidate.baseSha, policyRevision: 1 };
-  const work = { id, key: `GY-${suffix}`, title: `Delivery ${suffix}`, candidate, policyRevision: 1, observation: prHoursBefore === null ? undefined : { prCreatedAt: new Date(mergedAt.getTime() - prHoursBefore * 3_600_000).toISOString() }, delivery: { mergedAt: mergedAt.toISOString(), mergeSha: suffix.padStart(40, 'c'), authorizationRevision: 1 }, evidence: [evidence], criteria: [{ proofs: ['integration:pulse'] }], violations: suffix === '2' ? ['Observed policy context'] : [] };
+  const criteria = [{ proofs: ['integration:pulse'] }];
+  // The immutable snapshot the delivery cites, then the observation that recorded it.
+  const authorized = { id, key: `GY-${suffix}`, revision: AUTHORIZED_REVISION, candidate, policyRevision: 1, evidence: [evidence], criteria, violations: [] };
+  const work = { id, key: `GY-${suffix}`, title: `Delivery ${suffix}`, revision: AUTHORIZED_REVISION + 1, candidate, policyRevision: 1, observation: prHoursBefore === null ? undefined : { prCreatedAt: new Date(mergedAt.getTime() - prHoursBefore * 3_600_000).toISOString() }, delivery: { mergedAt: mergedAt.toISOString(), mergeSha: suffix.padStart(40, 'c'), authorizationRevision: AUTHORIZED_REVISION }, evidence: [evidence], criteria, violations: suffix === '2' ? ['Observed policy context'] : [] };
   await store.pool.query('INSERT INTO work_items(id,document) VALUES($1,$2)', [id, { id, mutable: true, delivery: { mergedAt: now.toISOString() } }]);
   if (intentHoursBefore !== null) await store.pool.query("INSERT INTO events(work_id,actor,kind,payload,created_at) VALUES($1,'operator','create',$2,$3)", [id, { work: { id, key: work.key } }, new Date(mergedAt.getTime() - intentHoursBefore * 3_600_000)]);
+  await store.pool.query("INSERT INTO events(work_id,actor,kind,payload) VALUES($1,'coordinator','merge.execution.acquired',$2)", [id, { work: authorized }]);
   await store.pool.query("INSERT INTO events(work_id,actor,kind,payload) VALUES($1,'github','github.observed',$2)", [id, { work }]);
-  return { id, work, mergedAt };
+  return { id, work, authorized, mergedAt };
 }
 
 test('pulse uses exact append-only deliveries, deduplicates, orders, and computes documented windows and median', async () => {
@@ -45,6 +52,7 @@ test('pulse uses exact append-only deliveries, deduplicates, orders, and compute
   assert.equal(pulse.weeks.length, 12); assert.equal(pulse.weeks.reduce((sum, week) => sum + week.count, 0), 3);
   assert.deepEqual(pulse.intentToMerge, { medianHours: 3, sampleSize: 2, excluded: 1 });
   assert.deepEqual(pulse.recent.map(item => item.key), ['GY-1', 'GY-2', 'GY-3']);
+  assert.deepEqual(pulse.recent[0].quality, { passingProofs: 1, requiredProofs: 1, violations: [] });
   assert.deepEqual(pulse.recent[1].quality.violations, ['Observed policy context']);
 });
 
@@ -75,6 +83,16 @@ test('bounded aggregation is served by the delivery and production-merge indexes
     assert.match(lookup, /Index Only Scan using production_merges_deploy_order/);
     assert.match(lookup, /Index Cond: \(merge_sha =/);
     assert.doesNotMatch(lookup, /Sort Key/);
+    const authorization = await explain(`SELECT e.payload->'work' FROM events e
+      WHERE e.work_id=$1 AND e.payload ? 'work' AND e.payload->'work'->>'revision'=$2
+      ORDER BY e.seq DESC LIMIT 1`, [randomUUID(), String(AUTHORIZED_REVISION)]);
+    // Recent-delivery quality resolves one cited revision per delivery. Work identity and
+    // revision must both be index conditions, and seq must come from the same index, or the
+    // probe degrades into a walk of that work item's whole history.
+    assert.match(authorization, /events_work_revision/);
+    assert.match(authorization, /Index Cond:[^\n]*revision/);
+    assert.doesNotMatch(authorization, /Filter:[^\n]*revision/);
+    assert.doesNotMatch(authorization, /Sort Key/);
   } finally { await db.query('ROLLBACK'); db.release(); }
 });
 
@@ -108,14 +126,13 @@ test('PR-to-production uses exact retained containment and excludes superseded, 
   assert.equal(pulse.prToProduction.sparse, true);
 });
 
-test('recorded quality counts only evidence that authorized the delivered candidate', async () => {
+test('recorded quality reads the cited authorization snapshot, not requirements revised after it', async () => {
   const id = randomUUID(), now = (await store.pool.query('SELECT statement_timestamp() AS now')).rows[0].now as Date;
   const mergedAt = new Date(now.getTime() - 3_600_000);
   const candidate = { pr: 900, sha: 'e'.repeat(40), baseSha: 'f'.repeat(40), branch: 'quality', author: 'worker' };
   const applicable = { proof: 'integration:pulse', trusted: true, result: 'pass', executed: 2, skipped: 0, sha: candidate.sha, baseSha: candidate.baseSha, policyRevision: 3 };
-  const work = {
-    id, key: 'GY-QUALITY', title: 'Quality context', candidate, policyRevision: 3,
-    delivery: { mergedAt: mergedAt.toISOString(), mergeSha: '9'.repeat(40), authorizationRevision: 1 },
+  const authorized = {
+    id, key: 'GY-QUALITY', revision: 11, candidate, policyRevision: 3,
     // One required proof; an obsolete pass from an earlier candidate, a pass under an
     // earlier policy revision, a skipped run, and the one pass that authorized the merge.
     evidence: [
@@ -127,11 +144,39 @@ test('recorded quality counts only evidence that authorized the delivered candid
     criteria: [{ proofs: ['integration:pulse'] }, { proofs: ['integration:pulse'] }],
     violations: [],
   };
+  // A merge observed after its execution expired records the work item as it stands then:
+  // the operator has since added a requirement and revised policy, and no evidence can
+  // exist for that revision. Reading this snapshot would restate the delivery as 0 of 2.
+  const work = {
+    ...authorized, revision: 13, title: 'Quality context', policyRevision: 4,
+    criteria: [...authorized.criteria, { proofs: ['manual:added-after-the-merge'] }],
+    delivery: { mergedAt: mergedAt.toISOString(), mergeSha: '9'.repeat(40), authorizationRevision: authorized.revision },
+    violations: ['Post-merge checks differ from the recorded authorization; follow-up required'],
+  };
   await store.pool.query('INSERT INTO work_items(id,document) VALUES($1,$2)', [id, { id }]);
+  await store.pool.query("INSERT INTO events(work_id,actor,kind,payload) VALUES($1,'coordinator','merge.execution.acquired',$2)", [id, { work: authorized }]);
   await store.pool.query("INSERT INTO events(work_id,actor,kind,payload) VALUES($1,'github','github.observed',$2)", [id, { work }]);
   const pulse = await shippingPulse(store.pool);
   const entry = pulse.recent.find(item => item.key === 'GY-QUALITY');
-  assert.deepEqual(entry!.quality, { passingProofs: 1, requiredProofs: 1, violations: [] });
+  // The authorized totals stand, and the violation the delivery itself recorded is kept.
+  assert.deepEqual(entry!.quality, { passingProofs: 1, requiredProofs: 1, violations: ['Post-merge checks differ from the recorded authorization; follow-up required'] });
+});
+
+test('a delivery whose cited authorization is not retained reports unknown proofs, never zero', async () => {
+  const id = randomUUID(), now = (await store.pool.query('SELECT statement_timestamp() AS now')).rows[0].now as Date;
+  const mergedAt = new Date(now.getTime() - 3 * 3_600_000);
+  const work = {
+    id, key: 'GY-UNRESOLVED', title: 'Unretained authorization', revision: 40,
+    candidate: { pr: 902, sha: 'a'.repeat(40), baseSha: 'b'.repeat(40) }, policyRevision: 1,
+    delivery: { mergedAt: mergedAt.toISOString(), mergeSha: '7'.repeat(40), authorizationRevision: 39 },
+    evidence: [], criteria: [{ proofs: ['integration:pulse'] }], violations: [],
+  };
+  await store.pool.query('INSERT INTO work_items(id,document) VALUES($1,$2)', [id, { id }]);
+  await store.pool.query("INSERT INTO events(work_id,actor,kind,payload) VALUES($1,'github','github.observed',$2)", [id, { work }]);
+  const pulse = await shippingPulse(store.pool);
+  const entry = pulse.recent.find(item => item.key === 'GY-UNRESOLVED');
+  assert.equal(entry!.quality.passingProofs, null); assert.equal(entry!.quality.requiredProofs, null);
+  assert.match(entry!.quality.unavailableReason!, /no longer in the retained ledger/);
 });
 
 test('delivery timestamps are read as instants regardless of the recorded offset', async () => {

@@ -22,16 +22,20 @@ export interface ShippingPulse {
   weeks: { start: string; end: string; count: number }[];
   recent: {
     key: string; title: string; pullRequest: number; mergeSha: string; mergedAt: string;
-    quality: { passingProofs: number; requiredProofs: number; violations: string[] };
+    quality: { passingProofs: number | null; requiredProofs: number | null; violations: string[]; unavailableReason?: string };
   }[];
 }
 
-/** Only the newest deliveries carry evidence context, so the response stays bounded. */
-type QualitySource = Pick<Work, 'evidence' | 'criteria' | 'candidate' | 'policyRevision' | 'scenarioRequirements' | 'validation'> & { violations: unknown };
+/**
+ * The immutable snapshot that authorized a delivery, located by the revision the
+ * delivery record itself cites. Only the newest deliveries carry it, so the response
+ * stays bounded.
+ */
+type AuthorizedSnapshot = Pick<Work, 'evidence' | 'criteria' | 'candidate' | 'policyRevision' | 'scenarioRequirements' | 'validation'>;
 
 type DeliveryRow = {
   work_id: string; key: string; title: string; pull_request: number; merge_sha: string;
-  merged_at: Date; intent_at: Date | null; quality_source: QualitySource | null;
+  merged_at: Date; intent_at: Date | null; authorized_work: AuthorizedSnapshot | null; delivery_violations: unknown;
   pr_created_at: Date | null; production_at: Date | null; production_matches: number; superseded_matches: number;
 };
 
@@ -49,17 +53,26 @@ function median(values: number[]) {
   return values.length % 2 ? values[middle] : (values[middle - 1] + values[middle]) / 2;
 }
 
+export const QUALITY_UNRESOLVED = 'The immutable snapshot that authorized this delivery is no longer in the retained ledger, so recorded proof totals are unknown.';
+
 /**
- * Counts the proofs that actually authorized this delivery. Evidence is applied with
- * the same rules the merge gate used - exact candidate SHA, base SHA, policy revision,
+ * Counts the proofs that actually authorized this delivery. Requirements, policy
+ * revision, and evidence are read from the snapshot the delivery cites, never from the
+ * work item as it stands now: an observation recorded after the operator revised
+ * requirements carries the newer criteria, and reading those would restate a
+ * historically authorized delivery as unproven. Evidence is then applied with the same
+ * rules the merge gate used - exact candidate SHA, base SHA, policy revision,
  * validation selection, and scenario revision, unexpired as of the merge - so an
- * obsolete pass recorded against an earlier candidate is never counted.
+ * obsolete pass recorded against an earlier candidate is never counted. Violations stay
+ * with the append-only delivery record, which also carries any violation the post-merge
+ * comparison raised against that authorization.
  */
-function deliveredQuality(source: QualitySource | null, mergedAt: Date) {
-  const required = [...new Set((source?.criteria ?? []).flatMap(criterion => criterion.proofs ?? []))];
-  const violations = Array.isArray(source?.violations) ? source.violations.filter(value => typeof value === 'string').slice(0, 10) : [];
-  if (!source) return { passingProofs: 0, requiredProofs: required.length, violations };
-  const work = { ...source, evidence: source.evidence ?? [] } as Work;
+function deliveredQuality(snapshot: AuthorizedSnapshot | null, recorded: unknown, mergedAt: Date) {
+  const violations = Array.isArray(recorded) ? recorded.filter(value => typeof value === 'string').slice(0, 10) : [];
+  // An unresolvable authorization is unknown, never zero proofs passed out of zero required.
+  if (!snapshot) return { passingProofs: null, requiredProofs: null, violations, unavailableReason: QUALITY_UNRESOLVED };
+  const required = [...new Set((snapshot.criteria ?? []).flatMap(criterion => criterion.proofs ?? []))];
+  const work = { ...snapshot, evidence: snapshot.evidence ?? [] } as Work;
   const passed = required.filter(proof => {
     const evidence = currentEvidence(work, proof, mergedAt);
     return !!evidence && evidence.result === 'pass' && evidence.executed > 0 && evidence.skipped === 0;
@@ -93,22 +106,36 @@ export async function shippingPulse(pool: pg.Pool): Promise<ShippingPulse> {
     ), exact_deliveries AS (
       SELECT work_id, seq, work, merged_at FROM delivery_events
       ORDER BY merged_at DESC, work_id ASC LIMIT $3
+    ), ranked AS (
+      SELECT work_id, work, merged_at,
+        row_number() OVER (ORDER BY merged_at DESC, work_id ASC) AS rank_position FROM exact_deliveries
     )
     SELECT d.work_id, d.work->>'key' AS key, d.work->>'title' AS title,
       (d.work->'candidate'->>'pr')::int AS pull_request,
       d.work->'delivery'->>'mergeSha' AS merge_sha, d.merged_at,
       (d.work->'observation'->>'prCreatedAt')::timestamptz AS pr_created_at,
       intent.created_at AS intent_at,
-      CASE WHEN row_number() OVER (ORDER BY d.merged_at DESC, d.work_id ASC) <= $5 THEN jsonb_build_object(
-        'evidence', COALESCE(d.work->'evidence','[]'::jsonb),
-        'criteria', COALESCE(d.work->'criteria','[]'::jsonb),
-        'candidate', d.work->'candidate',
-        'policyRevision', d.work->'policyRevision',
-        'scenarioRequirements', COALESCE(d.work->'scenarioRequirements','[]'::jsonb),
-        'validation', COALESCE(d.work->'validation','{}'::jsonb),
-        'violations', COALESCE(d.work->'violations','[]'::jsonb)) END AS quality_source,
+      CASE WHEN d.rank_position <= $5 THEN COALESCE(d.work->'violations','[]'::jsonb) END AS delivery_violations,
+      -- Requirements and evidence come from the revision this delivery cites, found by an
+      -- exact (work_id, revision) index probe on the append-only ledger. The observation
+      -- that recorded the delivery carries whatever the work item held at observation
+      -- time, which may already be a later requirement or policy revision.
+      CASE WHEN d.rank_position <= $5 THEN (
+        SELECT jsonb_build_object(
+          'evidence', COALESCE(a.work->'evidence','[]'::jsonb),
+          'criteria', COALESCE(a.work->'criteria','[]'::jsonb),
+          'candidate', a.work->'candidate',
+          'policyRevision', a.work->'policyRevision',
+          'scenarioRequirements', COALESCE(a.work->'scenarioRequirements','[]'::jsonb),
+          'validation', COALESCE(a.work->'validation','{}'::jsonb))
+        FROM (
+          SELECT e.payload->'work' AS work FROM events e
+          WHERE e.work_id=d.work_id AND e.payload ? 'work'
+            AND e.payload->'work'->>'revision' = d.work->'delivery'->>'authorizationRevision'
+          ORDER BY e.seq DESC LIMIT 1
+        ) a) END AS authorized_work,
       production.production_at, production.production_matches::int, production.superseded_matches::int
-    FROM exact_deliveries d
+    FROM ranked d
     LEFT JOIN LATERAL (
       SELECT created_at FROM events
       WHERE work_id=d.work_id AND kind='create' ORDER BY seq ASC LIMIT 1
@@ -173,7 +200,7 @@ export async function shippingPulse(pool: pg.Pool): Promise<ShippingPulse> {
     weeks,
     recent: rows.slice(0, SHIPPING_PULSE_RECENT_LIMIT).map(row => ({
       key: row.key, title: row.title, pullRequest: row.pull_request, mergeSha: row.merge_sha, mergedAt: row.merged_at.toISOString(),
-      quality: deliveredQuality(row.quality_source, row.merged_at),
+      quality: deliveredQuality(row.authorized_work, row.delivery_violations, row.merged_at),
     })),
   };
 }
