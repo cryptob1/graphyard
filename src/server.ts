@@ -12,6 +12,7 @@ import { Validation } from './validation.js';
 import { defineScenario, scenarios } from './scenarios.js';
 import { OperatorAgents } from './operator-agent.js';
 import { shippingPulse } from './shipping-pulse.js';
+import { ProductionDelivery } from './production-delivery.js';
 
 export const principalSchema = z.array(z.object({ id: z.string().min(1), role: z.enum(['admin', 'coordinator', 'worker', 'producer', 'reader']), token: z.string().min(32), proofs: z.array(z.string()).optional(), displayName: z.string().trim().min(1).max(100).regex(/^[^\u0000-\u001f\u007f]+$/).optional(), runtime: z.string().trim().min(1).max(80).regex(/^[^\u0000-\u001f\u007f]+$/).optional() }).strict()).min(1);
 export type Credential = Principal & { token: string };
@@ -35,6 +36,7 @@ export function server(engine: Engine, credentials: Credential[], github: GitHub
   engine.repository = repository;
   const validation = new Validation(engine, principals.map(p => p.actor), repository);
   const operatorAgents = new OperatorAgents(engine.store, repository, credentials.map(credential => ({ id: credential.id, tokenHash: createHash('sha256').update(credential.token).digest('hex') })));
+  const productionDelivery = new ProductionDelivery(engine.store);
   engine.operatorAuthorizer = operatorAgents.revalidate.bind(operatorAgents);
   return createServer(async (req, res) => {
     res.setHeader('X-Content-Type-Options', 'nosniff');
@@ -83,6 +85,7 @@ export function server(engine: Engine, credentials: Credential[], github: GitHub
           url.pathname === '/api/status' || url.pathname === '/api/work-snapshot' || url.pathname === '/api/work' || url.pathname === '/api/events' || /^\/api\/work(?:\/[^/]+\/[a-z]+)?$/.test(url.pathname),
           'Route is not available to operator agents', 403);
         if (url.pathname === '/api/validation/artifacts' && req.method === 'POST') return send(200, await validation.uploadArtifact(actor, JSON.parse((await body(req, 11_200_000)).toString()), String(req.headers['idempotency-key'] ?? '')));
+        if (url.pathname === '/api/production-observations' && req.method === 'POST') return send(200, await productionDelivery.observe(actor, JSON.parse((await body(req)).toString()), String(req.headers['idempotency-key'] ?? '')));
         const artifactRead = url.pathname.match(/^\/api\/validation\/artifacts\/([^/]+)\/([^/]+)$/);
         if (artifactRead && req.method === 'GET') {
           const artifact = await validation.readArtifact(actor, artifactRead[1], artifactRead[2]);

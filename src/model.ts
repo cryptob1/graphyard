@@ -48,7 +48,7 @@ export interface Observation {
   clockOffset?: { min: number; max: number };
   reviewIds?: number[];
   agentReview?: AgentReview;
-  prState?: 'open' | 'closed'; draft?: boolean;
+  prState?: 'open' | 'closed'; draft?: boolean; prCreatedAt?: string;
   candidate: Candidate; checks: { name: string; result: string; appId: number }[];
   reviews: { reviewer: string; sha: string; state: string; id?: number; submittedAt?: string }[];
   merged: boolean; mergeSha: string | null; mergedAt?: string | null; mergeable: boolean;

@@ -19,6 +19,26 @@ CREATE OR REPLACE FUNCTION graphyard_immutable() RETURNS trigger LANGUAGE plpgsq
 BEGIN RAISE EXCEPTION 'The event ledger is append-only'; END $$;
 DROP TRIGGER IF EXISTS immutable_events ON events;
 CREATE TRIGGER immutable_events BEFORE UPDATE OR DELETE ON events FOR EACH ROW EXECUTE FUNCTION graphyard_immutable();
+CREATE TABLE IF NOT EXISTS production_observations (
+  id uuid PRIMARY KEY, provider text NOT NULL, deployment_id text NOT NULL,
+  status text NOT NULL CHECK (status IN ('succeeded','failed','superseded')),
+  kind text NOT NULL CHECK (kind IN ('deployment','rollback')),
+  deployed_at timestamptz NOT NULL, observed_at timestamptz NOT NULL,
+  commit_sha text, artifact_digest text, source_url text NOT NULL,
+  producer text NOT NULL, document jsonb NOT NULL,
+  UNIQUE(provider,deployment_id,status)
+);
+CREATE TABLE IF NOT EXISTS production_observation_merges (
+  observation_id uuid NOT NULL REFERENCES production_observations(id), merge_sha text NOT NULL,
+  PRIMARY KEY(observation_id,merge_sha)
+);
+CREATE INDEX IF NOT EXISTS production_merges_lookup ON production_observation_merges(merge_sha,observation_id);
+CREATE INDEX IF NOT EXISTS production_deployment_time ON production_observations(deployed_at,id) WHERE status='succeeded' AND kind='deployment';
+CREATE INDEX IF NOT EXISTS production_deployment_state ON production_observations(provider,deployment_id,status);
+DROP TRIGGER IF EXISTS immutable_production_observations ON production_observations;
+CREATE TRIGGER immutable_production_observations BEFORE UPDATE OR DELETE ON production_observations FOR EACH ROW EXECUTE FUNCTION graphyard_immutable();
+DROP TRIGGER IF EXISTS immutable_production_observation_merges ON production_observation_merges;
+CREATE TRIGGER immutable_production_observation_merges BEFORE UPDATE OR DELETE ON production_observation_merges FOR EACH ROW EXECUTE FUNCTION graphyard_immutable();
 CREATE TABLE IF NOT EXISTS receipts (
   actor text NOT NULL, key text NOT NULL, fingerprint text NOT NULL, result jsonb NOT NULL,
   PRIMARY KEY(actor,key)
