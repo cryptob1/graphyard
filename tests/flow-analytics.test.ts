@@ -11,7 +11,7 @@ import { server } from '../src/server.js';
 import type { Observation, Principal, Work } from '../src/model.js';
 import {
   classifyWait, computeFlow, deriveFacts, distribution, flowDrilldown, flowExport, flowLimits,
-  projectFlow, readFlow, workSlices, type FlowQuery, type FlowWindow,
+  projectFlow, readFlow, workSlices, type FlowQuery, type FlowWindow, type ProjectionState,
 } from '../src/flow-analytics.js';
 
 const operator: Principal = { id: 'operator', role: 'admin' };
@@ -120,6 +120,20 @@ test('integration:flow-analytics-source-integrity', async () => {
   assert.equal(report.coverage.workItems, 1);
   assert.equal(report.coverage.projection.pendingEvents, 0);
   assert.equal(report.coverage.complete, true);
+
+  // A ledger entry without a work item (for example a scenario definition) is skipped by
+  // the projector; it must not hold the report permanently stale.
+  await store.pool.query("INSERT INTO events(work_id,actor,kind,payload) VALUES(NULL,'system','scenario.defined','{}'::jsonb)");
+  const withNonWork = await analyse({ slice });
+  assert.equal(withNonWork.report.coverage.projection.pendingEvents, 0, 'events without a work item are not projection debt');
+  assert.equal(withNonWork.report.coverage.complete, true);
+
+  // A fact recorded exactly at the read instant is the state at that instant, never stale.
+  const boundary = Date.now() - 60_000;
+  await seedFact(work, 'gates.changed', boundary, { stage: 'review', unmet: ['acceptance'], firstUnmet: 'acceptance', firstUnmetReason: 'proof', reasons: [], dependencyWaiting: [], hasCandidate: true, released: true, blocker: null, violations: 0 });
+  const atBoundary = await readFlow(store, { days: 30, slice, asOf: new Date(boundary).toISOString() });
+  assert.equal(atBoundary.latest.find(fact => fact.workId === work.id && fact.kind === 'gates.changed')?.details.unmet.join(','), 'acceptance',
+    'a fact observed exactly at the read instant is the current state');
   assert.equal(report.leadTime.bands.n, 0);
   assert.equal(report.leadTime.bands.medianMs, null, 'an empty sample is null, never zero');
   assert.ok(report.unavailable.some(entry => entry.metric === 'leadTime'));
@@ -304,6 +318,8 @@ test('integration:flow-analytics-edge-cases', async () => {
   const startedAt = new Date(Date.now() - 3600_000).toISOString();
   await api('/api/deployments', tokens.producer, { method: 'POST', body: JSON.stringify({ provider: 'railway', externalId: 'release-42', environment: 'production', sha: releaseSha, state: 'succeeded', startedAt }) });
   await api('/api/deployments', tokens.producer, { method: 'POST', body: JSON.stringify({ provider: 'railway', externalId: 'release-42', environment: 'production', sha: releaseSha, state: 'rolled_back', startedAt: new Date(Date.now() - 3500_000).toISOString() }) });
+  const abbreviated = await api('/api/deployments', tokens.producer, { method: 'POST', body: JSON.stringify({ provider: 'railway', externalId: 'abbreviated-sha', environment: 'production', sha: 'abc1234', state: 'succeeded', startedAt }) });
+  assert.equal(abbreviated.status, 400, 'an abbreviated SHA is refused instead of being silently unlinked');
   const rolled = (await analyse({ slice })).report;
   assert.equal(rolled.operations.deployments.rollbacks, 1);
   assert.ok(rolled.operations.deployments.succeeded >= 1, 'deployment observations are repository-wide, not slice-filtered');
@@ -546,4 +562,46 @@ test('integration:flow-analytics-bounded-indexed', async () => {
     assert.match(plan, /flow_facts_(work|time|kind)/, 'the window scan uses a flow_facts index');
     await client.query('ROLLBACK');
   } finally { client.release(); }
+
+  // A claim that immediately replaces an expired lease keeps its active time: the old
+  // loss closes before the replacement claim opens, at one recorded instant.
+  const leaseItem = await submitted('gy35-lease-replacement');
+  const replacementAt = Date.now();
+  await seedFact(leaseItem, 'lease.lost', replacementAt, { epoch: 1, reason: 'expired' });
+  await seedFact(leaseItem, 'lease.claimed', replacementAt, { epoch: 2, reassignment: true });
+  await projectFlow(store);
+  const leaseQuery: FlowQuery = { days: 30, slice: 'gy35-lease-replacement' };
+  const resumedDataset = await readFlow(store, leaseQuery);
+  const resumedRow = computeFlow(resumedDataset, leaseQuery).queueVsActive.items.find(row => row.key === leaseItem.key)!;
+  assert.ok(resumedRow, 'the replaced item stays in scope');
+  assert.ok(resumedRow.activeMs >= Date.parse(resumedDataset.to) - replacementAt - 1_000, 'the replacement lease is active time, not queue time');
+  const staleLease: ProjectionState = { created: true, leaseEpoch: 1 };
+  const replacementEvent = { seq: 9_999_999, work_id: leaseItem.id, actor: 'system', kind: 'claim', payload: { work: { ...leaseItem, lease: { epoch: 2 } } }, created_at: new Date().toISOString() } as any;
+  const replacementFacts = deriveFacts(replacementEvent, staleLease);
+  assert.deepEqual(replacementFacts.filter(fact => fact.kind.startsWith('lease.')).map(fact => fact.kind), ['lease.lost', 'lease.claimed'],
+    'an expiring lease closes before its replacement opens');
+
+  // An exhausted work-item scan bound is partial coverage: the newest items are reported
+  // as excluded by the bound, never silently dropped.
+  const bulk = Array.from({ length: flowLimits.work + 1 }, (_, index) => `('${randomUUID()}', '{"key":"GY-BULK-${index}","type":"chore","title":"Bulk fixture ${index}"}'::jsonb)`);
+  await store.pool.query(`INSERT INTO work_items(id,document) VALUES ${bulk.join(',')}`);
+  const overflow = await readFlow(store, { days: 30, slice });
+  assert.equal(overflow.work.length, flowLimits.work);
+  assert.equal(overflow.workTruncated, true);
+  const overflowReport = computeFlow(overflow, { days: 30, slice });
+  assert.equal(overflowReport.coverage.workItemScanLimit, flowLimits.work);
+  assert.equal(overflowReport.coverage.workItemsTruncated, true);
+  assert.equal(overflowReport.coverage.complete, false, 'a work-item bound is partial coverage');
+
+  // An exhausted deployment-observation bound is partial coverage too.
+  const bulkDeployments = Array.from({ length: flowLimits.deployments + 1 }, (_, index) =>
+    `('${randomUUID()}'::uuid,'test','bulk-${index}','production','${'9'.repeat(40)}','succeeded','${new Date(Date.now() - (index + 1) * 1_000).toISOString()}','system')`);
+  await store.pool.query(`INSERT INTO deployment_observations(id,provider,external_id,environment,sha,state,started_at,producer) VALUES ${bulkDeployments.join(',')}`);
+  const deploymentOverflow = await readFlow(store, { days: 30, slice });
+  assert.equal(deploymentOverflow.deployments.length, flowLimits.deployments);
+  assert.equal(deploymentOverflow.deploymentsTruncated, true);
+  const deploymentReport = computeFlow(deploymentOverflow, { days: 30, slice });
+  assert.equal(deploymentReport.coverage.deploymentScanLimit, flowLimits.deployments);
+  assert.equal(deploymentReport.coverage.deploymentsTruncated, true);
+  assert.equal(deploymentReport.coverage.complete, false, 'a deployment-observation bound is partial coverage');
 });

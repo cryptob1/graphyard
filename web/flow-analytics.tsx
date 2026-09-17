@@ -66,14 +66,15 @@ export default function FlowAnalytics({ request, download, canAudit }: { request
 
   const coverage = report?.coverage;
   const state = error ? 'unavailable' : loading && !report ? 'loading' : !report ? 'unavailable'
-    : coverage.workItems === 0 ? 'empty' : coverage.truncated ? 'partial'
+    : coverage.workItems === 0 ? 'empty'
+    : coverage.truncated || coverage.workItemsTruncated || coverage.deploymentsTruncated ? 'partial'
     : coverage.projection.stale || Date.now() - Date.parse(report.generatedAt) > 120_000 ? 'stale'
     : coverage.sparse ? 'sparse' : 'complete';
   const stateText: Record<string, string> = {
     loading: 'Loading flow analytics…',
     unavailable: 'Flow analytics are unavailable. Displayed values, if any, are from an earlier observation.',
     empty: 'No work item matches this window and filter. Nothing is inferred and nothing is shown as zero.',
-    partial: `Partial: the scan bound of ${coverage?.scanLimit} records was reached, so some records in this window are not included.`,
+    partial: `Partial: a scan bound was reached (${coverage?.scanLimit} records, ${coverage?.workItemScanLimit} work items, or ${coverage?.deploymentScanLimit} deployment observations), so some records in this window are not included.`,
     stale: 'Stale: the durable projection is behind the ledger, or this observation is older than two minutes.',
     sparse: 'Sparse: too few records in this window for the distributions to be representative.',
     complete: 'Complete: every record in this window is included in the figures below.',

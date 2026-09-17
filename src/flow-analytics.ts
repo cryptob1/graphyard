@@ -121,10 +121,12 @@ export function deriveFacts(event: LedgerEvent, state: ProjectionState): FlowFac
   if (state.created && blocker !== (state.blocker ?? null)) push(blocker ? 'blocker.set' : 'blocker.cleared', recordedAt, 'graphyard', String(sourceEvent), { reason: blocker ?? state.blocker ?? null });
   else if (!state.created && blocker) push('blocker.set', recordedAt, 'graphyard', String(sourceEvent), { reason: blocker });
 
-  if (event.kind === 'claim' && work.lease) push('lease.claimed', recordedAt, 'graphyard', String(work.lease.epoch), { epoch: work.lease.epoch, reassignment: work.lease.epoch > 1 });
-  if (event.kind === 'release' && state.leaseEpoch) push('lease.released', recordedAt, 'graphyard', String(state.leaseEpoch), { epoch: state.leaseEpoch });
+  // An expiring lease is closed before its replacement is opened. A claim that follows an
+  // expiry at the same recorded instant must never be swallowed by the older loss.
   if (state.leaseEpoch && event.kind !== 'release' && (!work.lease || work.lease.epoch !== state.leaseEpoch))
     push('lease.lost', recordedAt, 'graphyard', String(state.leaseEpoch), { epoch: state.leaseEpoch, reason: event.kind === 'reconciled' ? 'expired' : event.kind });
+  if (event.kind === 'claim' && work.lease) push('lease.claimed', recordedAt, 'graphyard', String(work.lease.epoch), { epoch: work.lease.epoch, reassignment: work.lease.epoch > 1 });
+  if (event.kind === 'release' && state.leaseEpoch) push('lease.released', recordedAt, 'graphyard', String(state.leaseEpoch), { epoch: state.leaseEpoch });
   if (event.kind === 'rework') push('rework.requested', recordedAt, 'graphyard', String(sourceEvent), { epoch: work.epoch });
 
   if (event.kind === 'submit' && work.submission) push('pr.submitted', recordedAt, 'graphyard', `${work.submission.pr}:${work.submission.epoch}`, { pr: work.submission.pr, epoch: work.submission.epoch });
@@ -282,7 +284,7 @@ export interface FlowQuery { days: FlowWindow; type?: string | null; stage?: str
 export interface FlowDataset {
   observedAt: string; from: string; to: string; days: FlowWindow;
   work: Work[]; included: Work[]; facts: FlowFact[]; latest: FlowFact[]; carryIn: FlowFact[]; deployments: DeploymentObservation[];
-  mergedForDeployments: FlowFact[]; scanned: number; truncated: boolean;
+  mergedForDeployments: FlowFact[]; scanned: number; truncated: boolean; workTruncated: boolean; deploymentsTruncated: boolean;
   projection: { lastEvent: number; updatedAt: string | null; pendingEvents: number; pendingCapped: boolean };
 }
 // Facts whose most recent value before the window end is needed to describe the present
@@ -299,13 +301,20 @@ export async function readFlow(store: Store, query: FlowQuery): Promise<FlowData
   const clock = iso((await store.pool.query('SELECT clock_timestamp() AS now')).rows[0].now);
   const observedAt = query.asOf && time(query.asOf) !== null && time(query.asOf)! <= time(clock)! ? new Date(time(query.asOf)!).toISOString() : clock;
   const to = observedAt, from = new Date(time(observedAt)! - query.days * day).toISOString();
-  const work: Work[] = (await store.pool.query('SELECT document FROM work_items ORDER BY number LIMIT $1', [flowLimits.work])).rows.map(r => r.document);
+  // One extra work item and one extra deployment probe their own scan bounds, so an
+  // exhausted bound is reported as partial coverage instead of silently dropping the
+  // newest records.
+  const workRows: Work[] = (await store.pool.query('SELECT document FROM work_items ORDER BY number LIMIT $1', [flowLimits.work + 1])).rows.map(r => r.document);
+  const workTruncated = workRows.length > flowLimits.work;
+  const work: Work[] = workRows.slice(0, flowLimits.work);
   const included = work.filter(item => (!query.type || item.type === query.type) && (!query.slice || workSlices(item).slices.includes(query.slice)));
   const ids = included.map(item => item.id);
-  const empty = { observedAt, from, to, days: query.days, work, included, facts: [], latest: [], carryIn: [], deployments: [], mergedForDeployments: [], scanned: 0, truncated: false };
+  const empty = { observedAt, from, to, days: query.days, work, included, facts: [], latest: [], carryIn: [], deployments: [], mergedForDeployments: [], scanned: 0, truncated: false, workTruncated, deploymentsTruncated: false };
   const projectionRow = (await store.pool.query('SELECT last_event,updated_at FROM flow_projection WHERE id=1')).rows[0];
   const lastEvent = Number(projectionRow?.last_event ?? 0);
-  const pending = (await store.pool.query('SELECT count(*)::int AS pending FROM (SELECT 1 FROM events WHERE seq>$1 LIMIT 1001) probe', [lastEvent])).rows[0].pending as number;
+  // Lag counts exactly the events the projector consumes; ledger entries without a work
+  // item are skipped by the projection and must not hold the report permanently stale.
+  const pending = (await store.pool.query('SELECT count(*)::int AS pending FROM (SELECT 1 FROM events WHERE seq>$1 AND work_id IS NOT NULL LIMIT 1001) probe', [lastEvent])).rows[0].pending as number;
   const projection = { lastEvent, updatedAt: projectionRow ? iso(projectionRow.updated_at) : null, pendingEvents: Math.min(pending, 1000), pendingCapped: pending > 1000 };
   if (!ids.length) return { ...empty, projection };
   const scanLimit = Math.min(Math.max(1, query.limit ?? flowLimits.scan), flowLimits.scan);
@@ -315,20 +324,25 @@ export async function readFlow(store: Store, query: FlowQuery): Promise<FlowData
     query.stage ? [ids, from, to, scanLimit + 1, query.stage] : [ids, from, to, scanLimit + 1]);
   const truncated = scan.rowCount! > scanLimit;
   const facts = scan.rows.slice(0, scanLimit).map(rowToFact);
+  // Current state is read as of the observation instant, inclusively: a fact recorded in
+  // the same millisecond as the read clock is the state at that instant, never stale.
+  // The in-window scan above stays half-open on `to` as documented.
   const latest = (await store.pool.query(
-    `SELECT DISTINCT ON (work_id,kind) * FROM flow_facts WHERE work_id=ANY($1) AND kind=ANY($2) AND observed_at<$3 ORDER BY work_id,kind,observed_at DESC,id DESC`,
+    `SELECT DISTINCT ON (work_id,kind) * FROM flow_facts WHERE work_id=ANY($1) AND kind=ANY($2) AND observed_at<=$3 ORDER BY work_id,kind,observed_at DESC,id DESC`,
     [ids, carryKinds, to])).rows.map(rowToFact);
   const carryIn = (await store.pool.query(
     `SELECT DISTINCT ON (work_id,kind) * FROM flow_facts WHERE work_id=ANY($1) AND kind=ANY($2) AND observed_at<$3 ORDER BY work_id,kind,observed_at DESC,id DESC`,
     [ids, carryKinds, from])).rows.map(rowToFact);
-  const deployments: DeploymentObservation[] = (await store.pool.query(
-    'SELECT * FROM deployment_observations WHERE started_at>=$1 AND started_at<$2 ORDER BY started_at,id LIMIT $3', [from, to, flowLimits.deployments]))
-    .rows.map(row => ({ id: row.id, provider: row.provider, externalId: row.external_id, environment: row.environment, sha: row.sha, state: row.state, startedAt: iso(row.started_at), finishedAt: row.finished_at ? iso(row.finished_at) : null, recordedAt: iso(row.recorded_at), details: row.details ?? {} }));
+  const deploymentRows = (await store.pool.query(
+    'SELECT * FROM deployment_observations WHERE started_at>=$1 AND started_at<$2 ORDER BY started_at,id LIMIT $3', [from, to, flowLimits.deployments + 1])).rows;
+  const deploymentsTruncated = deploymentRows.length > flowLimits.deployments;
+  const deployments: DeploymentObservation[] = deploymentRows.slice(0, flowLimits.deployments)
+    .map(row => ({ id: row.id, provider: row.provider, externalId: row.external_id, environment: row.environment, sha: row.sha, state: row.state, startedAt: iso(row.started_at), finishedAt: row.finished_at ? iso(row.finished_at) : null, recordedAt: iso(row.recorded_at), details: row.details ?? {} }));
   const shas = [...new Set(deployments.map(d => d.sha))];
   const mergedForDeployments = shas.length
     ? (await store.pool.query(`SELECT * FROM flow_facts WHERE kind='merged' AND (details->>'mergeSha'=ANY($1) OR details->>'sha'=ANY($1)) ORDER BY observed_at LIMIT $2`, [shas, flowLimits.deployments])).rows.map(rowToFact)
     : [];
-  return { observedAt, from, to, days: query.days, work, included, facts, latest, carryIn, deployments, mergedForDeployments, scanned: facts.length, truncated, projection };
+  return { observedAt, from, to, days: query.days, work, included, facts, latest, carryIn, deployments, mergedForDeployments, scanned: facts.length, truncated, workTruncated, deploymentsTruncated, projection };
 }
 
 export type WaitCategory = 'delivered' | 'backlog' | 'blocked' | 'dependency' | 'implementation' | 'review' | 'evidence' | 'merge-blocked' | 'merge-ready';
@@ -484,10 +498,14 @@ export function computeFlow(dataset: FlowDataset, query: FlowQuery) {
 
   // Queue time versus active work time, from lease facts.
   const leaseKinds: FlowKind[] = ['lease.claimed', 'lease.released', 'lease.lost'];
+  // At one recorded instant a loss or release closes the previous lease before a
+  // replacement claim opens the next, so equal-time facts never let an older epoch's
+  // loss swallow the replacement's active time.
+  const leaseOrder = (a: FlowFact, b: FlowFact) => time(a.observedAt)! - time(b.observedAt)! || (a.kind === 'lease.claimed' ? 1 : 0) - (b.kind === 'lease.claimed' ? 1 : 0);
   let activeTotal = 0, openTotal = 0, idleTotal = 0;
   const leaseRows = scope.map(item => {
-    const events = [...leaseKinds.flatMap(kind => itemFacts(item.id, kind))].sort((a, b) => time(a.observedAt)! - time(b.observedAt)!);
-    const before = leaseKinds.map(kind => carry.get(`${item.id}:${kind}`)).filter(Boolean).sort((a, b) => time(a!.observedAt)! - time(b!.observedAt)!).at(-1);
+    const events = [...leaseKinds.flatMap(kind => itemFacts(item.id, kind))].sort(leaseOrder);
+    const before = leaseKinds.map(kind => carry.get(`${item.id}:${kind}`)).filter((fact): fact is FlowFact => !!fact).sort(leaseOrder).at(-1);
     let active = before?.kind === 'lease.claimed' ? from : null;
     let activeMs = 0;
     for (const event of events) {
@@ -777,12 +795,14 @@ export function computeFlow(dataset: FlowDataset, query: FlowQuery) {
     undelivered: scope.filter(item => !deliveredIds.has(item.id)).length,
     withObservedCandidate: withCandidate.length,
     facts: dataset.facts.length, scanned: dataset.scanned, scanLimit: Math.min(query.limit ?? flowLimits.scan, flowLimits.scan), truncated: dataset.truncated,
+    workItemScanLimit: flowLimits.work, workItemsTruncated: dataset.workTruncated,
+    deploymentScanLimit: flowLimits.deployments, deploymentsTruncated: dataset.deploymentsTruncated,
     oldestFact: dataset.facts[0]?.observedAt ?? null, newestFact: dataset.facts.at(-1)?.observedAt ?? null,
     providerTimestamps: observedTimes, controlPlaneTimestamps: dataset.facts.length - observedTimes,
     slices: sliceSummary,
     projection: { ...dataset.projection, stale: dataset.projection.pendingEvents > 0 },
     sparse: dataset.facts.length < sparseSampleSize,
-    complete: !dataset.truncated && dataset.projection.pendingEvents === 0,
+    complete: !dataset.truncated && !dataset.workTruncated && !dataset.deploymentsTruncated && dataset.projection.pendingEvents === 0,
   };
   const exclusions = [...excluded].map(([reason, keys]) => ({ reason, count: keys.size, items: [...keys].sort().slice(0, flowLimits.distinct) }))
     .sort((a, b) => b.count - a.count || a.reason.localeCompare(b.reason));
@@ -881,7 +901,8 @@ export function flowExport(report: FlowReport, drilldown: ReturnType<typeof flow
     window: `${report.window.from}/${report.window.to}`, windowDays: report.window.days, windowBoundaries: report.window.boundaries,
     filterType: report.filters.type, filterStage: report.filters.stage, filterSlice: report.filters.slice,
     coverageWorkItems: report.coverage.workItems, coverageFacts: report.coverage.facts,
-    coverageTruncated: report.coverage.truncated, coverageComplete: report.coverage.complete,
+    coverageTruncated: report.coverage.truncated, coverageWorkItemsTruncated: report.coverage.workItemsTruncated,
+    coverageDeploymentsTruncated: report.coverage.deploymentsTruncated, coverageComplete: report.coverage.complete,
     projectionPendingEvents: report.coverage.projection.pendingEvents,
     exclusions: report.exclusions.map(entry => `${entry.reason}=${entry.count}`).join('; ') || 'none',
     rows: drilldown.total, rowsReturned: drilldown.rows.length, rowsTruncated: drilldown.truncated,

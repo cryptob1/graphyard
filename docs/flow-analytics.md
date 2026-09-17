@@ -170,8 +170,10 @@ definitions are deliberately built so that it never will.
 ## Bounds
 
 Aggregation is bounded in date range (7, 30, or 90 days), work items scanned, records
-scanned, daily buckets, drill-down rows, and payload size. Reaching a bound is reported,
-never hidden: `coverage.truncated` and the **partial** state say so. Reads use indexed
+scanned, deployment observations, daily buckets, drill-down rows, and payload size.
+Reaching a bound is reported, never hidden: `coverage.truncated`,
+`coverage.workItemsTruncated`, `coverage.deploymentsTruncated`, and the **partial** state
+say so. Reads use indexed
 access paths on `flow_facts` — `(observed_at, id)`, `(work_id, observed_at, id)`, and
 `(kind, observed_at, id)` — with deterministic ordering, so repeating a bounded query
 returns the same rows in the same order.
@@ -217,8 +219,11 @@ A deployment observation is recorded by a producer or operator credential:
 }
 ```
 
-`state` is `succeeded`, `failed`, or `rolled_back`. The same provider, external ID, and
-state is recorded once; a repeat is reported as a duplicate rather than counted twice.
+`state` is `succeeded`, `failed`, or `rolled_back`. `sha` must be the full 40-character
+commit SHA: deployment analytics join it to GitHub's full commit SHAs, and an
+abbreviation would be silently unlinked, so it is refused instead. The same provider,
+external ID, and state is recorded once; a repeat is reported as a duplicate rather than
+counted twice.
 Implementation workers do not hold producer credentials, so they cannot record deployment
 observations.
 

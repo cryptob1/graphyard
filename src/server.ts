@@ -17,7 +17,10 @@ export const principalSchema = z.array(z.object({ id: z.string().min(1), role: z
 export type Credential = Principal & { token: string };
 const deploymentSchema = z.object({
   provider: z.string().trim().min(1).max(100), externalId: z.string().trim().min(1).max(200),
-  environment: z.string().trim().min(1).max(100), sha: z.string().regex(/^[a-f0-9]{7,40}$/),
+  environment: z.string().trim().min(1).max(100),
+  // Deployment analytics join this SHA to GitHub's full commit SHAs; an abbreviation
+  // would be silently unlinked, so only the full 40-character SHA is accepted.
+  sha: z.string().regex(/^[a-f0-9]{40}$/),
   state: z.enum(['succeeded', 'failed', 'rolled_back']),
   startedAt: z.string().datetime(), finishedAt: z.string().datetime().optional(),
   details: z.record(z.string().max(100), z.union([z.string().max(500), z.number(), z.boolean()])).optional(),
