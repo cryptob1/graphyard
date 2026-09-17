@@ -267,7 +267,7 @@ test('routine merge is exact-candidate, double-checked, and never uses an admin 
   const calls: string[][] = [];
   const execution = { id: '11111111-1111-4111-8111-111111111111', owner: 'master', sha: candidate.candidate!.sha, baseSha: candidate.candidate!.baseSha, policyRevision: 2, authorizationRevision: candidate.revision, issuedAt: new Date().toISOString(), expiresAt: new Date(Date.now() + 120_000).toISOString() };
   const acquire = async () => ({ execution }); const cancel = async () => ({}); const verify = async () => ({ executionId: execution.id, sha: execution.sha, verifiedAt: new Date(Date.now() - 2000).toISOString(), providerDelayMs: 0 });
-  const commit = async () => ({ executionId: execution.id, sha: execution.sha, committingAt: new Date().toISOString() });
+  const commit = async () => ({ executionId: execution.id, sha: execution.sha, committingAt: new Date(Date.now() - 2000).toISOString() });
   const result = await mergeWork(config, candidate, async () => ({ work: [candidate], now: new Date().toISOString() }), acquire, cancel, verify, (_command, args) => {
     calls.push(args);
     if (args[1] === 'view') return JSON.stringify({ headRefOid: candidate.candidate!.sha, baseRefOid: candidate.candidate!.baseSha, baseRefName: 'main', state: 'OPEN', isDraft: false });
@@ -275,7 +275,8 @@ test('routine merge is exact-candidate, double-checked, and never uses an admin 
     return args[1] === '--method' ? JSON.stringify({ merged: true, sha: 'c'.repeat(40) }) : JSON.stringify(validProtection);
   }, undefined, commit);
   assert.equal(result.result.startsWith('merge requested'), true);
-  assert.deepEqual(calls[4].slice(0, 3), ['api', '--method', 'PUT']); assert.ok(calls[4].includes(`sha=${candidate.candidate!.sha}`)); assert.equal(calls[4].includes('--admin'), false);
+  assert.equal(calls.filter(args => args.includes('--include')).length, 2, 'the broker reads provider time again after committing');
+  assert.deepEqual(calls[5].slice(0, 3), ['api', '--method', 'PUT']); assert.ok(calls[5].includes(`sha=${candidate.candidate!.sha}`)); assert.equal(calls[5].includes('--admin'), false);
   assert.doesNotThrow(() => assertMergeProtection(validProtection, config, candidate));
   assert.throws(() => assertMergeProtection({ ...validProtection, required_status_checks: { ...validProtection.required_status_checks, checks: [] } }, config, candidate), /protection changed/);
   assert.throws(() => assertMergeCandidate(work({ gates: [{ name: 'acceptance', passed: false, reasons: ['Human approval required'] }] })), /does not have/);
@@ -341,7 +342,7 @@ test('manual merge remains guarded when automatic merge is disabled and GitHub c
     if (args[1] === 'view') return JSON.stringify({ headRefOid: candidate.candidate!.sha, baseRefOid: candidate.candidate!.baseSha, baseRefName: 'main', state: 'OPEN', isDraft: false });
     if (args.includes('--include')) return `Date: ${new Date().toUTCString()}\n\n{}`;
     return args[1] === '--method' ? JSON.stringify({ merged: true, sha: 'c'.repeat(40) }) : JSON.stringify(validProtection);
-  }, undefined, async () => ({ executionId: execution.id, sha: execution.sha, committingAt: new Date().toISOString() }));
+  }, undefined, async () => ({ executionId: execution.id, sha: execution.sha, committingAt: new Date(Date.now() - 2000).toISOString() }));
   assert.match(result.result, /merge requested/);
 });
 

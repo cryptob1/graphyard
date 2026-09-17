@@ -500,10 +500,18 @@ export async function mergeWork(config: MasterConfig, work: Work, freshSnapshot:
     if (!Number.isFinite(remainingAfterProtection) || remainingAfterProtection <= 90_000) throw new Error(`${work.key} merge execution no longer has enough time for the provider call after verifying branch protection; retry`);
     if (!commit) throw new Error(`${work.key} merge broker commit callback is unavailable`);
     const committed = await commit(latest, granted.execution);
-    if (committed.executionId !== granted.execution.id || committed.sha !== authorization.sha || !Number.isFinite(Date.parse(committed.committingAt))) throw new Error(`${work.key} received an invalid provider commit authority`);
+    const committingTime = Date.parse(committed.committingAt);
+    if (committed.executionId !== granted.execution.id || committed.sha !== authorization.sha || !Number.isFinite(committingTime)) throw new Error(`${work.key} received an invalid provider commit authority`);
     // From this transactional boundary onward revocation refuses: the broker has won
     // serialization and must treat any provider error as an unknown merge outcome.
     providerStarted = true;
+    // GitHub reports merged_at only to whole-second precision. Cross a provider-clock
+    // boundary after the transactional commit so a fast successful merge cannot appear
+    // to predate the authority that serialized it against revocation.
+    const commitClock = run('gh', ['api', '--include', 'rate_limit']);
+    const commitDelay = githubProviderDelay(committingTime, 0, commitClock);
+    if (commitDelay > 21_000 || remainingAtSnapshot - (performance.now() - authorityBudgetStartedAt) - commitDelay <= 90_000) throw new Error('Clock uncertainty leaves insufficient committed merge authority; wait for observation or expiry');
+    if (commitDelay) await new Promise(resolve => setTimeout(resolve, commitDelay));
     const provider = JSON.parse(run('gh', ['api', '--method', 'PUT', `repos/${config.repository}/pulls/${authorization.pr}/merge`, '-f', `sha=${authorization.sha}`, '-f', `merge_method=${config.mergeMethod}`]));
     if (provider.merged !== true || typeof provider.sha !== 'string') {
       await cancel(latest, granted.execution, provider.message || 'GitHub confirmed that it did not merge the candidate'); cancelled = true;
