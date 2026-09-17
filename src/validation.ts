@@ -31,7 +31,7 @@ const candidateSchema = z.object({ workId: z.uuid(), expectedWorkRevision: revis
 export type ValidationCandidate = z.infer<typeof candidateSchema> & { id: string; sourceSha: string; baseSha: string; policyRevision: number; scenario: { revision: number; hash: string; environment: string }; createdAt: string; createdBy: string };
 const requestSchema = z.object({ candidateId: z.uuid(), expectedWorkRevision: revision, runner: ref, collector: ref, deadline: z.iso.datetime(), maxAttempts: z.number().int().min(1).max(5) }).strict();
 export type Attempt = { id: string; epoch: number; dispatchedAt: string; expiresAt: string; acknowledgedAt?: string; finishedAt?: string; state: 'dispatched' | 'running' | 'completed' | 'expired' | 'cancelled' | 'superseded'; settled: boolean };
-export type ValidationRequest = z.infer<typeof requestSchema> & { id: string; workId: string; proof: string; state: 'queued' | 'dispatched' | 'running' | 'completed' | 'cancelled' | 'expired' | 'superseded'; attempts: Attempt[]; createdAt: string; createdBy: string; result?: { accepted: boolean; passed: boolean; reasons: string[] } };
+export type ValidationRequest = z.infer<typeof requestSchema> & { id: string; workId: string; proof: string; state: 'queued' | 'dispatched' | 'running' | 'collecting' | 'completed' | 'cancelled' | 'expired' | 'superseded'; attempts: Attempt[]; createdAt: string; createdBy: string; result?: { accepted: boolean; passed: boolean; reasons: string[] } };
 const commandSchema = z.object({ requestId: z.uuid(), attemptId: z.uuid(), epoch: revision }).strict();
 const reportSchema = commandSchema.extend({
   execution: z.enum(['completed', 'cancelled', 'timed_out']), behavior: z.enum(['passed', 'failed', 'blocked', 'unmeasured']),
@@ -279,18 +279,30 @@ export class Validation {
       const r = await this.request(db, data.requestId), a = r.attempts.at(-1);
       const registration = await this.registration(db, r.collector, 'collector');
       demand(registration.principalId === actor.id && actor.proofs?.includes(r.proof), 'Wrong collector principal or proof scope', 403);
-      demand(a && a.id === data.attemptId && a.epoch === data.epoch && r.state === 'running' && Date.parse(a.expiresAt) > now.getTime(), 'Attempt lease expired, cancelled or superseded');
+      demand(a && a.id === data.attemptId && a.epoch === data.epoch && r.state === 'collecting' && Date.parse(a.expiresAt) > now.getTime(), 'Attempt lease expired, cancelled or superseded, or collection authority was never taken over');
       a.expiresAt = new Date(Math.min(now.getTime() + 60_000, Date.parse(r.deadline))).toISOString();
       await this.persist(db, r); await this.event(db, actor.id, 'collection-heartbeat', { requestId: r.id, attempt: a }, r.workId); return r;
     });
   }
+  /**
+   * The collection handoff. Taking authority is what *ends* the runner's: `collecting`
+   * refuses further ACKs and heartbeats, so the runner aborts instead of starting or
+   * restarting a container after the collector has observed settlement.
+   */
   async collectionAuthority(actor: Principal, input: unknown) {
     demand(actor.role === 'producer', 'A separate trusted collector is required', 403); const data = commandSchema.parse(input);
-    return this.store.transaction(async db => {
+    return this.store.transaction(async (db, now) => {
+      await this.reconcileWithin(db, now);
       const r = await this.request(db, data.requestId), a = r.attempts.at(-1), c = await this.candidate(db, r.candidateId);
       const collector = await this.registration(db, r.collector, 'collector');
       demand(collector.principalId === actor.id && actor.proofs?.includes(r.proof), 'Wrong collector principal or proof scope', 403);
       demand(a && a.id === data.attemptId && a.epoch === data.epoch, 'Attempt authority differs', 403);
+      demand(['running', 'collecting'].includes(r.state) && Date.parse(a.expiresAt) > now.getTime() && Date.parse(r.deadline) > now.getTime(), 'Attempt lease expired, cancelled or superseded');
+      if (r.state !== 'collecting') {
+        // Revoke execution authority first, then extend the lease for the collector.
+        r.state = 'collecting'; a.expiresAt = new Date(Math.min(now.getTime() + 60_000, Date.parse(r.deadline))).toISOString();
+        await this.persist(db, r); await this.event(db, actor.id, 'collecting', { requestId: r.id, attempt: a }, r.workId);
+      }
       const runner = await this.definition(db, 'registration', r.runner, false) as Registration;
       const environment = await this.definition(db, 'environment', c.environment, false) as Environment;
       const bundle = await this.definition(db, 'bundle', c.bundle, false) as Bundle;
@@ -310,7 +322,7 @@ export class Validation {
       const w = (await db.query('SELECT document FROM work_items WHERE id=$1', [r.workId])).rows[0]?.document as Work;
       const rejection: string[] = [];
       try { await this.registration(db, r.runner, 'runner'); await this.registration(db, r.collector, 'collector'); await this.valid(db, c, w); } catch { rejection.push('Candidate or registration authority was revoked or superseded'); }
-      if (!a || a.id !== data.attemptId || a.epoch !== data.epoch || current.state !== 'running' || Date.parse(a.expiresAt) <= now.getTime() || Date.parse(r.deadline) <= now.getTime()) rejection.push('Result does not hold the current live acknowledged attempt');
+      if (!a || a.id !== data.attemptId || a.epoch !== data.epoch || current.state !== 'collecting' || Date.parse(a.expiresAt) <= now.getTime() || Date.parse(r.deadline) <= now.getTime()) rejection.push('Result does not hold the current live acknowledged attempt under collection authority');
       if (w.validation?.[r.proof]?.candidateId !== c.id || w.validation?.[r.proof]?.requestId !== r.id || w.validation?.[r.proof]?.attemptId !== a?.id) rejection.push('A newer validation selection supersedes this result');
       if (rejection.length) {
         const result = { accepted: false, passed: false, reasons: rejection };
@@ -358,7 +370,7 @@ export class Validation {
       await this.registration(db, r.runner, 'runner');
       const c = await this.candidate(db, r.candidateId), w = await this.work(db, r.workId, now); await this.valid(db, c, w);
       demand(c.artifactStorage === 'postgres' && c.requiredArtifacts.includes(data.name), 'Artifact storage or name is not authorized');
-      demand(a && a.id === data.attemptId && a.epoch === data.epoch && r.state === 'running' && Date.parse(a.expiresAt) > now.getTime() && Date.parse(r.deadline) > now.getTime() && w.validation?.[r.proof]?.requestId === r.id, 'Artifact attempt authority expired or superseded');
+      demand(a && a.id === data.attemptId && a.epoch === data.epoch && r.state === 'collecting' && Date.parse(a.expiresAt) > now.getTime() && Date.parse(r.deadline) > now.getTime() && w.validation?.[r.proof]?.requestId === r.id, 'Artifact attempt authority expired or superseded, or collection authority was never taken over');
       demand(!(await db.query('SELECT id FROM validation_artifacts WHERE request_id=$1 AND attempt_id=$2 AND name=$3', [r.id, a.id, data.name])).rowCount, 'Artifact name already published; reuse the original idempotency key');
       const id = randomUUID(), expiresAt = new Date(now.getTime() + 7 * 86_400_000).toISOString();
       await db.query('INSERT INTO validation_artifacts(id,request_id,attempt_id,name,digest,created_at,expires_at,media_type,bytes) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)', [id, r.id, a.id, data.name, digest, now, expiresAt, data.mediaType, bytes]);
@@ -417,7 +429,7 @@ export class Validation {
       const r = await this.request(db, data.requestId), a = r.attempts.at(-1);
       demand((a?.epoch ?? 0) === data.epoch, 'Attempt epoch changed');
       if (command === 'settle') {
-        demand(a && !['dispatched', 'running'].includes(r.state) && data.settlementEvidence, 'Terminate/cancel first and provide independent settlement evidence');
+        demand(a && !['dispatched', 'running', 'collecting'].includes(r.state) && data.settlementEvidence, 'Terminate/cancel first and provide independent settlement evidence');
         a.settled = true; await db.query('DELETE FROM validation_resources WHERE request_id=$1', [r.id]);
       } else if (command === 'retry') {
         demand(a && a.settled && ['expired', 'completed', 'cancelled'].includes(r.state) && r.attempts.length < r.maxAttempts && Date.parse(r.deadline) > now.getTime(), 'Retry needs settled prior execution, time and attempt budget');
@@ -426,7 +438,7 @@ export class Validation {
         await this.registration(db, r.runner, 'runner'); await this.registration(db, r.collector, 'collector');
         r.state = 'queued'; delete r.result;
       } else {
-        demand(['queued', 'dispatched', 'running'].includes(r.state), 'Request is already terminal');
+        demand(['queued', 'dispatched', 'running', 'collecting'].includes(r.state), 'Request is already terminal');
         await this.endActiveAttempt(db, r, 'cancelled', now);
         r.state = 'cancelled';
         // Running cancellation is not physical termination. Only never-ACKed
@@ -439,7 +451,7 @@ export class Validation {
   }
   private async endActiveAttempt(db: pg.PoolClient, r: ValidationRequest, state: 'cancelled' | 'expired' | 'superseded', now: Date) {
     const a = r.attempts.at(-1);
-    if (!a || !['dispatched', 'running'].includes(r.state)) return;
+    if (!a || !['dispatched', 'running', 'collecting'].includes(r.state)) return;
     if (r.state === 'dispatched') {
       // ACK and revocation/termination serialize on the same coordination lock.
       // A later ACK cannot succeed, so this attempt never acquired execution authority.
@@ -463,7 +475,7 @@ export class Validation {
         FROM work_items w CROSS JOIN LATERAL jsonb_each(COALESCE(w.document->'validation','{}'::jsonb)) v
         WHERE w.document->>'stage'<>'done' AND v.value ? 'requestId'
       )
-      SELECT document FROM validation_requests WHERE document->>'state' IN ('queued','dispatched','running')
+      SELECT document FROM validation_requests WHERE document->>'state' IN ('queued','dispatched','running','collecting')
       UNION ALL
       SELECT r.document FROM selected s JOIN validation_requests r ON r.id=s.request_id
       JOIN validation_candidates c ON c.id=(r.document->>'candidateId')::uuid
@@ -479,7 +491,7 @@ export class Validation {
       const a = r.attempts.at(-1);
       if (invalid) {
         await this.endActiveAttempt(db, r, 'superseded', now); r.state = 'superseded';
-      } else if (r.state !== 'completed' && (Date.parse(r.deadline) <= now.getTime() || a && ['dispatched', 'running'].includes(r.state) && Date.parse(a.expiresAt) <= now.getTime())) {
+      } else if (r.state !== 'completed' && (Date.parse(r.deadline) <= now.getTime() || a && ['dispatched', 'running', 'collecting'].includes(r.state) && Date.parse(a.expiresAt) <= now.getTime())) {
         // Unacknowledged runners are prohibited from starting. Their expired ACK
         // cannot succeed; no execution was authorized, so those slots are reusable.
         await this.endActiveAttempt(db, r, 'expired', now); r.state = 'expired';

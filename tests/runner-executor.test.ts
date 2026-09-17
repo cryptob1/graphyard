@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, writeFile, symlink, realpath, rm, chmod } from 'node:fs/promises';
+import { mkdtemp, mkdir, writeFile, symlink, realpath, rm, chmod, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
@@ -9,6 +9,11 @@ import { assertIsolation, assertRunnerCredentialScope, containerEnvironment, con
 
 const image = `sha256:${'1'.repeat(64)}`;
 const runAsUser = `${process.getuid!()}:${process.getgid!()}`;
+// The approved bundle belongs to an operator identity, not to the runner. These fixtures
+// own the oracle tree, so they run as a runner uid that does not: `nobody` stands in for
+// the deployed runner account. `process.getuid()` is used where a runner-writable tree
+// must be refused.
+const runnerUid = 65534;
 async function boundary(run: (paths: { oracle: string; output: string; plan: ExecutionPlan }) => Promise<void>, files: Record<string, string> = { 'playwright.config.ts': 'export default {};', 'suite.spec.ts': 'approved assertion' }) {
   const root = await mkdtemp(join(tmpdir(), 'graphyard-executor-'));
   const oracle = join(root, 'oracle'), output = join(root, 'output');
@@ -65,31 +70,76 @@ test('a runner credential may never carry evidence-producer scope', () => {
 });
 
 test('isolation refuses overlapping, shared or pre-populated execution boundaries', async () => boundary(async ({ oracle, output, plan }) => {
-  await assert.doesNotReject(assertIsolation(plan));
+  await assert.doesNotReject(assertIsolation(plan, { uid: runnerUid }));
   await mkdir(join(oracle, 'nested'), { mode: 0o700 });
-  await assert.rejects(assertIsolation({ ...plan, outputPath: join(oracle, 'nested') }), /must not overlap/);
-  await assert.rejects(assertIsolation({ ...plan, outputPath: oracle }), /must not overlap/);
+  await assert.rejects(assertIsolation({ ...plan, outputPath: join(oracle, 'nested') }, { uid: runnerUid }), /must not overlap/);
+  await assert.rejects(assertIsolation({ ...plan, outputPath: oracle }, { uid: runnerUid }), /must not overlap/);
   await rm(join(oracle, 'nested'), { recursive: true });
   await writeFile(join(oracle, 'regular.txt'), 'not a directory');
-  await assert.rejects(assertIsolation({ ...plan, outputPath: join(oracle, 'regular.txt') }), /must be a directory/);
+  await assert.rejects(assertIsolation({ ...plan, outputPath: join(oracle, 'regular.txt') }, { uid: runnerUid }), /must be a directory/);
   await rm(join(oracle, 'regular.txt'));
   await chmod(oracle, 0o777);
-  await assert.rejects(assertIsolation(plan), /group- or world-writable/);
+  await assert.rejects(assertIsolation(plan, { uid: runnerUid }), /group- or world-writable/);
   await chmod(oracle, 0o755);
   await chmod(output, 0o755);
-  await assert.rejects(assertIsolation(plan), /private to the collector/);
+  await assert.rejects(assertIsolation(plan, { uid: runnerUid }), /private to the collector/);
   await chmod(output, 0o700);
-  await assert.rejects(assertIsolation({ ...plan, runAsUser: '65534:65534' }), /owned by the unprivileged container user/);
+  await assert.rejects(assertIsolation({ ...plan, runAsUser: '65534:65534' }, { uid: runnerUid }), /owned by the unprivileged container user/);
   await writeFile(join(output, 'planted.json'), '{}');
-  await assert.rejects(assertIsolation(plan), /must be empty/);
+  await assert.rejects(assertIsolation(plan, { uid: runnerUid }), /must be empty/);
   await rm(join(output, 'planted.json'));
   const shared = join(output, '..', 'accounts.env');
   await writeFile(shared, 'TEST_ACCOUNT=approved', { mode: 0o644 });
-  await assert.rejects(assertIsolation({ ...plan, testAccountEnvFile: shared }), /private regular file/);
+  await assert.rejects(assertIsolation({ ...plan, testAccountEnvFile: shared }, { uid: runnerUid }), /private regular file/);
   await chmod(shared, 0o600);
-  await assert.doesNotReject(assertIsolation({ ...plan, testAccountEnvFile: shared }));
+  await assert.doesNotReject(assertIsolation({ ...plan, testAccountEnvFile: shared }, { uid: runnerUid }));
   await writeFile(shared, 'NODE_OPTIONS=--require=/tmp/forge.js', { mode: 0o600 });
-  await assert.rejects(assertIsolation({ ...plan, testAccountEnvFile: shared }), /only TEST_ACCOUNT/);
+  await assert.rejects(assertIsolation({ ...plan, testAccountEnvFile: shared }, { uid: runnerUid }), /only TEST_ACCOUNT/);
+  await rm(shared);
+}));
+
+test('an oracle tree the runner identity can rewrite is refused before any container starts', async () => boundary(async ({ oracle, plan }) => {
+  // A read-only container mount does not stop host-side writes. When the runner (or the
+  // implementation worker it shares an account with) owns the approved bytes, it can
+  // weaken them after the preflight digest and restore them before the closing one, so
+  // ownership itself must be an operator boundary.
+  await assert.rejects(assertIsolation(plan), /owned by an identity the runner cannot write as/);
+  await assert.rejects(preflightAttempt(plan), /owned by an identity the runner cannot write as/);
+  // Every entry counts, not just the root: one writable approved file is enough.
+  await chmod(join(oracle, 'suite.spec.ts'), 0o666);
+  await assert.rejects(assertIsolation(plan, { uid: runnerUid }), /must not be (?:group|world)-writable throughout execution/);
+  await chmod(join(oracle, 'suite.spec.ts'), 0o644);
+  await mkdir(join(oracle, 'helpers')); await chmod(join(oracle, 'helpers'), 0o775);
+  await assert.rejects(assertIsolation(plan, { uid: runnerUid }), /must not be group-writable throughout execution/);
+  await rm(join(oracle, 'helpers'), { recursive: true });
+  // A directory the runner could rename redirects the mount, so the path leading to the
+  // approved bytes is held to the same rule.
+  await assert.rejects(assertIsolation(plan, { uid: (await stat(join(oracle, '..'))).uid }), /owned by an identity the runner cannot write as/);
+  await assert.doesNotReject(assertIsolation(plan, { uid: runnerUid }));
+}));
+
+test('approved test-account variables are passed by value, never by reopened pathname', async () => boundary(async ({ output, plan }) => {
+  const shared = join(output, '..', 'accounts.env');
+  await writeFile(shared, '# approved\nTEST_ACCOUNT_USER=booking-bot\nTEST_ACCOUNT_PASSWORD=approved secret\n', { mode: 0o600 });
+  const withAccounts = { ...plan, testAccountEnvFile: shared };
+  const preflight = await preflightAttempt(withAccounts, { uid: runnerUid });
+  assert.deepEqual(preflight.testAccountEnv, { TEST_ACCOUNT_USER: 'booking-bot', TEST_ACCOUNT_PASSWORD: 'approved secret' });
+
+  // Docker reopens `--env-file` when the container starts. Nothing in the command refers
+  // to the path, so rewriting the file after preflight changes nothing that executes.
+  const argv = executionCommand(withAccounts, 'execute', preflight.testAccountEnv).argv;
+  assert.ok(!argv.includes('--env-file') && !argv.some(a => a.includes(shared)));
+  assert.ok(argv.includes('TEST_ACCOUNT_USER=booking-bot'));
+  await writeFile(shared, 'NODE_OPTIONS=--require=/tmp/forge.js\n', { mode: 0o600 });
+  assert.deepEqual(executionCommand(withAccounts, 'execute', preflight.testAccountEnv).argv, argv);
+  assert.equal(containerEnvironment(withAccounts, 'execute', preflight.testAccountEnv).NODE_OPTIONS, undefined);
+
+  // Approved material is for the target-facing phase only, and never reaches enumeration.
+  assert.equal(containerEnvironment(withAccounts, 'enumerate', preflight.testAccountEnv).TEST_ACCOUNT_USER, undefined);
+  // Entries that were never validated cannot be handed to the container instead.
+  assert.throws(() => executionCommand(withAccounts, 'execute'), /must be read and validated in preflight/);
+  assert.throws(() => executionCommand(withAccounts, 'execute', { NODE_OPTIONS: '--require=/tmp/forge.js' }), /Only validated TEST_ACCOUNT/);
+  assert.throws(() => executionCommand(withAccounts, 'execute', { TEST_ACCOUNT_USER: 'a\nTEST_ACCOUNT_OTHER=b' }));
   await rm(shared);
 }));
 
@@ -100,7 +150,7 @@ test('built-in Docker networks cannot replace the approved isolation boundary', 
 test('an authorized attempt enumerates then executes, and verifies settlement before releasing', async () => boundary(async ({ plan }) => {
   const phases: string[] = [];
   const run: Runner = async command => { phases.push(command.argv.at(-1)!); return { exitCode: 0, timedOut: false }; };
-  const record = await executeAttempt(plan, { run, settle: absent, now: at(Date.parse('2026-09-16T00:00:00.000Z')) });
+  const record = await executeAttempt(plan, { uid: runnerUid, run, settle: absent, now: at(Date.parse('2026-09-16T00:00:00.000Z')) });
   assert.deepEqual(phases, ['enumerate', 'execute']);
   assert.equal(record.outcome, 'completed');
   assert.deepEqual(record.refusals, []);
@@ -110,7 +160,7 @@ test('an authorized attempt enumerates then executes, and verifies settlement be
 }));
 
 test('pinned bytes are verified before and after execution, so late substitution cannot be accepted', async () => boundary(async ({ oracle, plan }) => {
-  const stale = await executeAttempt({ ...plan, grant: { ...plan.grant, bundleDigest: `sha256:${'9'.repeat(64)}` } }, { run: settledRunner, settle: absent });
+  const stale = await executeAttempt({ ...plan, grant: { ...plan.grant, bundleDigest: `sha256:${'9'.repeat(64)}` } }, { uid: runnerUid, run: settledRunner, settle: absent });
   assert.deepEqual(stale.phases, []);
   assert.ok(stale.refusals.some(r => /differ from the pinned digest/.test(r)));
 
@@ -119,52 +169,52 @@ test('pinned bytes are verified before and after execution, so late substitution
     if (command.argv.at(-1) === 'execute') await writeFile(join(oracle, 'suite.spec.ts'), 'expect(true).toBe(true)');
     return { exitCode: 0, timedOut: false };
   };
-  const mutated = await executeAttempt(plan, { run: substituting, settle: absent });
+  const mutated = await executeAttempt(plan, { uid: runnerUid, run: substituting, settle: absent });
   assert.notEqual(mutated.bundleDigestAfter, mutated.bundleDigestBefore);
   assert.equal(mutated.outcome, 'failed');
   assert.ok(mutated.refusals.some(r => /changed during the attempt/.test(r)));
 }));
 
 test('unverified settlement and timeouts keep the execution-resource barrier closed', async () => boundary(async ({ plan }) => {
-  const unknown = await executeAttempt(plan, { run: settledRunner, settle: async () => 'unknown' });
+  const unknown = await executeAttempt(plan, { uid: runnerUid, run: settledRunner, settle: async () => 'unknown' });
   assert.equal(unknown.settlement.settled, false);
   assert.ok(unknown.refusals.some(r => /settlement is unverified/.test(r)));
 
-  const stillRunning = await executeAttempt(plan, { run: settledRunner, settle: async () => 'present' });
+  const stillRunning = await executeAttempt(plan, { uid: runnerUid, run: settledRunner, settle: async () => 'present' });
   assert.equal(stillRunning.settlement.settled, false);
 
   const timeout: Runner = async command => command.argv.at(-1) === 'execute' ? { exitCode: 137, timedOut: true } : { exitCode: 0, timedOut: false };
-  const timedOut = await executeAttempt(plan, { run: timeout, settle: absent });
+  const timedOut = await executeAttempt(plan, { uid: runnerUid, run: timeout, settle: absent });
   assert.equal(timedOut.outcome, 'timed_out');
   assert.deepEqual(timedOut.phases.map(p => p.phase), ['enumerate', 'execute']);
 }));
 
 test('failed enumeration stops the attempt, and a failing execution still reaches integrity checks', async () => boundary(async ({ plan }) => {
-  const badInventory = await executeAttempt(plan, { run: async command => ({ exitCode: command.argv.at(-1) === 'enumerate' ? 2 : 0, timedOut: false }), settle: absent });
+  const badInventory = await executeAttempt(plan, { uid: runnerUid, run: async command => ({ exitCode: command.argv.at(-1) === 'enumerate' ? 2 : 0, timedOut: false }), settle: absent });
   assert.deepEqual(badInventory.phases.map(p => p.phase), ['enumerate']);
   assert.ok(badInventory.refusals.some(r => /inventory enumeration did not complete/.test(r)));
 
-  const failingTests = await executeAttempt(plan, { run: async command => ({ exitCode: command.argv.at(-1) === 'execute' ? 1 : 0, timedOut: false }), settle: absent });
+  const failingTests = await executeAttempt(plan, { uid: runnerUid, run: async command => ({ exitCode: command.argv.at(-1) === 'execute' ? 1 : 0, timedOut: false }), settle: absent });
   assert.deepEqual(failingTests.refusals, []);
   assert.equal(failingTests.outcome, 'completed');
   assert.equal(failingTests.phases.at(-1)!.exitCode, 1);
 }));
 
 test('every local refusal happens before acknowledgement, and preflight bytes carry into execution', async () => boundary(async ({ oracle, output, plan }) => {
-  const preflight = await preflightAttempt(plan);
-  assert.deepEqual(preflight, { oraclePath: await realpath(oracle), outputPath: await realpath(output), bundleDigest: plan.grant.bundleDigest });
+  const preflight = await preflightAttempt(plan, { uid: runnerUid });
+  assert.deepEqual(preflight, { oraclePath: await realpath(oracle), outputPath: await realpath(output), bundleDigest: plan.grant.bundleDigest, testAccountEnv: {} });
 
   // Each structural refusal rejects, so a runner can decline before acknowledging and
   // let the attempt expire instead of holding protected resources until an operator acts.
   await writeFile(join(output, 'planted.json'), '{}');
-  await assert.rejects(preflightAttempt(plan), /must be empty/);
+  await assert.rejects(preflightAttempt(plan, { uid: runnerUid }), /must be empty/);
   await rm(join(output, 'planted.json'));
-  await assert.rejects(preflightAttempt({ ...plan, oraclePath: join(oracle, 'missing') }), /ENOENT|no such file/);
+  await assert.rejects(preflightAttempt({ ...plan, oraclePath: join(oracle, 'missing') }, { uid: runnerUid }), /ENOENT|no such file/);
   await symlink('/etc/passwd', join(oracle, 'link.ts'));
-  await assert.rejects(preflightAttempt(plan), /cannot contain symlinks/);
+  await assert.rejects(preflightAttempt(plan, { uid: runnerUid }), /cannot contain symlinks/);
   await rm(join(oracle, 'link.ts'));
 
-  const record = await executeAttempt(plan, { run: settledRunner, settle: absent, preflight });
+  const record = await executeAttempt(plan, { uid: runnerUid, run: settledRunner, settle: absent, preflight });
   assert.equal(record.bundleDigestBefore, preflight.bundleDigest);
   assert.deepEqual(record.refusals, []);
   assert.deepEqual(record.settlement.containers.map(c => c.name), containerNames(plan.grant.attemptId));
@@ -177,7 +227,7 @@ test('losing attempt authority stops execution instead of exercising the target 
   // not the target, so the phase is killed and no further phase is started.
   const run: Runner = async (command, _timeout, signal) => { phases.push(command.argv.at(-1)!); authority.abort(); return { exitCode: signal?.aborted ? 137 : 0, timedOut: false }; };
   const settled: string[] = [];
-  const aborted = await executeAttempt(plan, { run, settle: async name => { settled.push(name); return 'absent'; }, signal: authority.signal });
+  const aborted = await executeAttempt(plan, { uid: runnerUid, run, settle: async name => { settled.push(name); return 'absent'; }, signal: authority.signal });
   assert.deepEqual(phases, ['enumerate']);
   assert.ok(aborted.refusals.some(r => /authority was lost/.test(r)));
   assert.equal(aborted.outcome, 'failed');
@@ -186,7 +236,7 @@ test('losing attempt authority stops execution instead of exercising the target 
   assert.equal(aborted.settlement.settled, true);
 
   const before = new AbortController(); before.abort();
-  const never = await executeAttempt(plan, { run: settledRunner, settle: absent, signal: before.signal });
+  const never = await executeAttempt(plan, { uid: runnerUid, run: settledRunner, settle: absent, signal: before.signal });
   assert.deepEqual(never.phases, []);
   assert.ok(never.refusals.some(r => /authority was lost/.test(r)));
 }));
@@ -202,7 +252,7 @@ test('a collector observes settlement itself rather than reading the record', as
 });
 
 test('an elapsed attempt deadline refuses execution instead of running unauthorized', async () => boundary(async ({ plan }) => {
-  const record = await executeAttempt({ ...plan, grant: { ...plan.grant, deadline: new Date(Date.now() - 1000).toISOString() } }, { run: settledRunner, settle: absent });
+  const record = await executeAttempt({ ...plan, grant: { ...plan.grant, deadline: new Date(Date.now() - 1000).toISOString() } }, { uid: runnerUid, run: settledRunner, settle: absent });
   assert.deepEqual(record.phases, []);
   assert.ok(record.refusals.some(r => /deadline elapsed/.test(r)));
 }));

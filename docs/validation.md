@@ -12,7 +12,7 @@ Keep credentials separate:
 | --- | --- | --- |
 | Operator | `admin` | Define environments, approve bundles, register principals, select candidates, request/cancel/recover validation |
 | Implementation agent | `worker` | Existing implementation ownership; cannot define validation authority or publish trusted results |
-| Runner | `worker` with an operator-created runner registration | Poll dispatch, ACK and heartbeat its assigned attempt |
+| Runner | `worker` with an operator-created runner registration | Poll dispatch, ACK and heartbeat its assigned attempt until collection takes over |
 | Build producer | `producer` with a builder registration | Attest independently verified source/build inputs → artifact mapping in its environment |
 | Collector | `producer` with a collector registration and matching `proofs` allowlist | Verify execution, inventory, approved oracle, target identity, artifacts and settlement; publish the bound result |
 
@@ -109,6 +109,8 @@ Create a request with `candidateId`, `expectedWorkRevision`, versioned `runner` 
 The runner polls `dispatch` with `{"registration":{"id":"preview-runner","revision":1}}`. An eligible response includes the pinned request, candidate, trusted build attestation/artifact manifest, environment, bundle and attempt; an unavailable queue returns `request: null` with a reason. At most one request holds a runner principal's slot. Global test-resource reservations prevent conflicting assignments across replicas.
 
 An attempt has a unique ID and monotonic epoch. Send `{requestId, attemptId, epoch}` to `ack` **before any execution**. The initial ACK window is 30 seconds; after ACK, heartbeats extend the lease up to 60 seconds, bounded by the request deadline. Renew at least every 20 seconds. Stop on refusal and never infer permission from an old receipt. A runner must implement external fencing/isolation: a database lease cannot physically stop a partitioned process.
+
+Collection is a handoff, not a parallel activity. The collector calls `collection-authority` with `{requestId, attemptId, epoch}` before it reads or publishes anything; the request moves from `running` to `collecting`, which revokes the runner's authority — further `ack`/`heartbeat` calls are refused — and extends the lease for the collector, renewed through `collection-heartbeat`. Artifact uploads and `result` require that state, so settlement is never measured while the executing party could still start a container. An expired `collecting` lease keeps the resource barrier closed exactly like a running one.
 
 An unacknowledged timeout, cancellation or supersession releases its reservations because no execution was authorized and late ACKs fail. A running timeout retains its resource barrier. Server restarts preserve requests, epochs, receipts and reservations. Reconciliation checks active request deadlines and authority every two seconds. Completed current evidence is rechecked on configuration changes and server startup, rather than rescanning all completed history on each tick. Build provenance is stored in an indexed immutable table as well as the event ledger. Source/policy changes immediately make old evidence inapplicable through the gate evaluator.
 

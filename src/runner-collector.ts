@@ -13,10 +13,24 @@ const hash = (bytes: Buffer) => `sha256:${createHash('sha256').update(bytes).dig
 const serviceArtifacts = z.array(z.object({ service: name, digest }).strict()).max(30);
 const order = <T extends { service: string }>(a: T[]) => [...a].sort((x, y) => x.service.localeCompare(y.service));
 
+/**
+ * The conclusions `assembleResult` acts on. They are signed with the rest of the payload,
+ * so a worker cannot obtain a valid attestation and then turn `timed_out` into
+ * `completed`, drop the runner's refusals, or replace measured digests with the approved
+ * ones: the record would no longer match what the host attested.
+ */
+const conclusionsSchema = z.object({
+  outcome: executionRecordSchema.shape.outcome, refusals: executionRecordSchema.shape.refusals, phases: executionRecordSchema.shape.phases,
+  bundleDigestBefore: digest, bundleDigestAfter: digest, runnerImageDigest: digest,
+}).strict();
+type Conclusions = z.infer<typeof conclusionsSchema>;
+const conclusions = (source: Conclusions): Conclusions => ({ outcome: source.outcome, refusals: source.refusals, phases: source.phases,
+  bundleDigestBefore: source.bundleDigestBefore, bundleDigestAfter: source.bundleDigestAfter, runnerImageDigest: source.runnerImageDigest });
 const executionAttestationPayloadSchema = z.object({
   requestId: z.uuid(), attemptId: z.uuid(), epoch: z.number().int().positive(),
   executionHost: z.string().min(1).max(500), outputPath: z.string().min(1).max(4096),
   startedAt: z.iso.datetime(), finishedAt: z.iso.datetime(),
+  ...conclusionsSchema.shape,
   artifacts: z.array(z.object({ name, digest }).strict()).max(30),
   containers: z.array(z.object({ name: z.string().min(1).max(200), state: z.enum(['absent', 'present', 'unknown']) }).strict()).max(8),
 }).strict();
@@ -27,6 +41,7 @@ export function signExecutionAttestation(input: { grant: unknown; execution: unk
   const grant = attemptGrantSchema.parse(input.grant), execution = executionRecordSchema.parse(input.execution);
   const payload = executionAttestationPayloadSchema.parse({ requestId: grant.requestId, attemptId: grant.attemptId, epoch: grant.epoch,
     executionHost: grant.executionHost, outputPath: execution.outputPath, startedAt: execution.startedAt, finishedAt: execution.finishedAt,
+    ...conclusions(execution),
     artifacts: input.collected.artifacts.map(({ name, digest }) => ({ name, digest })).sort((a, b) => a.name.localeCompare(b.name)),
     containers: [...execution.settlement.containers].sort((a, b) => a.name.localeCompare(b.name)) });
   return { payload, signature: signBytes(null, attestationBytes(payload), input.privateKey).toString('base64') };
@@ -42,6 +57,7 @@ export function verifyExecutionAttestation(grantInput: unknown, executionInput: 
   if (p.requestId !== grant.requestId || p.attemptId !== grant.attemptId || p.epoch !== grant.epoch) reasons.push('Host attestation is not bound to this attempt authority');
   if (p.executionHost !== grant.executionHost) reasons.push('Host attestation did not come from the execution host pinned by the runner registration');
   if (resolve(p.outputPath) !== execution.outputPath || p.startedAt !== execution.startedAt || p.finishedAt !== execution.finishedAt) reasons.push('Host attestation is not bound to this execution interval and output boundary');
+  if (!isDeepStrictEqual(conclusions(p), conclusions(execution))) reasons.push('Host attestation does not bind the execution outcome, refusals, phase results and measured digests this record claims');
   const artifacts = [...collected.artifacts].map(({ name, digest }) => ({ name, digest })).sort((a, b) => a.name.localeCompare(b.name));
   if (!isDeepStrictEqual([...p.artifacts].sort((a, b) => a.name.localeCompare(b.name)), artifacts)) reasons.push('Collected artifact bytes differ from the host-attested boundary');
   if (!isDeepStrictEqual([...p.containers].sort((a, b) => a.name.localeCompare(b.name)), [...execution.settlement.containers].sort((a, b) => a.name.localeCompare(b.name)))) reasons.push('Host attestation does not bind the execution container set');

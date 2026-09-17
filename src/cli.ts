@@ -236,6 +236,8 @@ Never share an operator or producer credential with an implementation agent.`); 
       try {
       // Bind authority, record and boundary before anything is read or published: an
       // immutable artifact name published for the wrong bytes cannot be taken back.
+      // Taking collection authority also revokes the runner's, so nothing this collector
+      // observes — settlement above all — can be invalidated by a container started next.
       const grant = attemptGrantSchema.parse(await api('validation/collection-authority', attemptCommand));
       const collectedFrom = await realpath(resolve(input.outputPath));
       const binding = collectionBinding({ grant, execution: input.record, collectedFrom });

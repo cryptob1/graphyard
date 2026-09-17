@@ -51,7 +51,7 @@ export default function ValidationView({ api, work }: { api: (path: string) => P
     {loaded && !error && !requests.length && <div className="empty"><h2>No validation requested yet.</h2><p>Configure an approved environment, test bundle and separate runner/collector identities, then create a pinned request.</p><a href="/docs/validation">Set up the validation protocol ↗</a></div>}
     <div className="scenario-list">{recent.map(r => {
       const c = candidates.find(c => c.id === r.candidateId), attempt = r.attempts.at(-1), item = work.find(w => w.id === r.workId);
-      const waitingSettlement = attempt && !attempt.settled && !['queued', 'dispatched', 'running'].includes(r.state);
+      const waitingSettlement = attempt && !attempt.settled && !['queued', 'dispatched', 'running', 'collecting'].includes(r.state);
       return <article className="scenario-card" key={r.id}><div className="card-top"><span>{item?.key ?? r.workId} · {r.proof}</span><strong>{r.state}</strong></div><h2>{item?.title ?? 'Validation request'}</h2>
         <p>{c ? `${c.environment.id} · source ${c.sourceSha.slice(0,10)} · policy ${c.policyRevision}` : `Candidate ${r.candidateId}`}</p>
         <p>Runner: {r.runner.id} · collector: {r.collector.id}</p><p>{attempt ? `Attempt ${attempt.epoch} of ${r.maxAttempts}` : 'Not dispatched'} · deadline {new Date(r.deadline).toLocaleString()}</p>

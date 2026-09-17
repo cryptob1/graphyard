@@ -6,8 +6,8 @@ import { join, resolve } from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
-import { createHash, generateKeyPairSync, randomUUID, sign } from 'node:crypto';
-import { assembleResult, attributeExecution, collectArtifacts, collectionBinding, deriveSettlement, selfReportedObservation, type TargetObservation } from '../src/runner-collector.js';
+import { createHash, generateKeyPairSync, randomUUID } from 'node:crypto';
+import { assembleResult, attributeExecution, collectArtifacts, collectionBinding, deriveSettlement, selfReportedObservation, signExecutionAttestation, type TargetObservation } from '../src/runner-collector.js';
 import { containerNames, type AttemptGrant, type ExecutionRecord } from '../src/runner-executor.js';
 
 const run = promisify(execFile);
@@ -38,11 +38,7 @@ const collectedOf = (inventory: unknown, execution: unknown, reasons: string[] =
 const uploadedOf = (collected: ReturnType<typeof collectedOf>) => collected.artifacts.map(a => ({ name: a.name, digest: a.digest, url: `graphyard-artifact://owner/repo/${grant.requestId}/${a.name}` }));
 const required = ['inventory', 'report'];
 function attestation(execution: ExecutionRecord, collected: { artifacts: { name: string; digest: string }[] }) {
-  const payload = { requestId: grant.requestId, attemptId: grant.attemptId, epoch: grant.epoch, executionHost: grant.executionHost,
-    outputPath: execution.outputPath, startedAt: execution.startedAt, finishedAt: execution.finishedAt,
-    artifacts: collected.artifacts.map(({ name, digest }) => ({ name, digest })).sort((a, b) => a.name.localeCompare(b.name)),
-    containers: [...execution.settlement.containers].sort((a, b) => a.name.localeCompare(b.name)) };
-  return { payload, signature: sign(null, Buffer.from(JSON.stringify(payload)), attestor.privateKey).toString('base64') };
+  return signExecutionAttestation({ grant, execution, collected, privateKey: attestor.privateKey.export({ type: 'pkcs8', format: 'pem' }).toString() });
 }
 function assemble(over: Partial<Parameters<typeof assembleResult>[0]> = {}) {
   const collected = collectedOf(inventoryOf(['books']), executionOf(['books']));
@@ -157,6 +153,22 @@ test('worker-authored output cannot pass without the pinned host attestor', () =
   const redirected = assemble({ executionAttestation: wrongHost });
   assert.equal(redirected.report!.behavior, 'blocked');
   assert.ok(redirected.refusals.some(r => /execution host pinned/.test(r)));
+});
+
+test('a signature obtained for one execution cannot be reused after its conclusions change', () => {
+  // Everything assembleResult acts on is signed, so a worker holding a valid attestation
+  // for the run that actually happened cannot rewrite the record it hands the collector.
+  const blocked = record({ outcome: 'timed_out', refusals: ['Approved oracle bundle changed during the attempt'], bundleDigestAfter: `sha256:${'e'.repeat(64)}` });
+  const signed = attestation(blocked, collectedOf(inventoryOf(['books']), executionOf(['books'])));
+  for (const rewritten of [{ outcome: 'completed' as const }, { refusals: [] }, { bundleDigestAfter: bundle }, { phases: [{ phase: 'execute' as const, exitCode: 0, timedOut: false, durationMs: 1 }] }]) {
+    const laundered = assemble({ execution: record({ ...blocked, ...rewritten }), executionAttestation: signed });
+    assert.equal(laundered.report!.behavior, 'blocked');
+    assert.ok(laundered.refusals.some(r => /does not bind the execution outcome, refusals, phase results and measured digests/.test(r)));
+  }
+  // The same attestation still verifies against the record it was actually signed for.
+  const honest = assemble({ execution: blocked, executionAttestation: signed });
+  assert.ok(!honest.refusals.some(r => /does not bind the execution outcome/.test(r)));
+  assert.equal(honest.report!.execution, 'timed_out');
 });
 
 test('settlement is the collector\'s own observation, never the runner\'s assertion', () => {

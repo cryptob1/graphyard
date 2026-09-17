@@ -55,7 +55,10 @@ async function fixture(artifactStorage: 'external' | 'postgres' = 'external') {
 async function start(f: Awaited<ReturnType<typeof fixture>>) {
   const d: any = await validation.dispatch(runner, { registration: f.runnerRef }, id()); assert.equal(d.request.id, f.r.id);
   const command = { requestId: f.r.id, attemptId: d.attempt.id, epoch: d.attempt.epoch };
-  await validation.runnerCommand(runner, 'ack', command, id()); return command;
+  await validation.runnerCommand(runner, 'ack', command, id());
+  // Publishing anything about an attempt happens under collection authority, which
+  // revokes the runner's before settlement can be observed.
+  await validation.collectionAuthority(collector, command); return command;
 }
 function report(f: Awaited<ReturnType<typeof fixture>>, command: { requestId: string; attemptId: string; epoch: number }) {
   return { ...command, execution: 'completed', behavior: 'passed', executed: 2, skipped: 0, inventoryComplete: true, target: { instance: `instance-${f.n}`, artifacts: [{ service: 'api', digest }], measurement: 'provider', coversEntireRun: true, attribution: 'matched' }, bundleDigest: digest, runnerImageDigest: inputs, artifacts: [{ name: 'report', digest, url: 'https://private.example.test/report' }], artifactState: 'verified', executionSettled: true };
@@ -65,7 +68,7 @@ async function expire(f: Awaited<ReturnType<typeof fixture>>) {
 }
 async function cleanup(f: Awaited<ReturnType<typeof fixture>>) {
   const r = (await validation.list()).requests.find(r => r.id === f.r.id)!;
-  if (['queued', 'dispatched', 'running'].includes(r.state)) await validation.operatorCommand(operator, 'cancel', { requestId: r.id, epoch: r.attempts.at(-1)?.epoch ?? 0, reason: 'Test process never launched' }, id());
+  if (['queued', 'dispatched', 'running', 'collecting'].includes(r.state)) await validation.operatorCommand(operator, 'cancel', { requestId: r.id, epoch: r.attempts.at(-1)?.epoch ?? 0, reason: 'Test process never launched' }, id());
   const a = r.attempts.at(-1); if (a && !a.settled) await validation.operatorCommand(operator, 'settle', { requestId: r.id, epoch: a.epoch, reason: 'Fixture has no external process', settlementEvidence: 'https://tests.example.test/no-process' }, id());
 }
 
@@ -93,6 +96,8 @@ test('independent pools race one runner slot and restart preserves dispatch/ACK/
     const receipt = id(); const ack = await replica.runnerCommand(runner, 'ack', command, receipt);
     assert.deepEqual(await replica.runnerCommand(runner, 'ack', command, receipt), ack);
     assert.equal((await replica.list()).requests.find(r => r.id === f.r.id)?.state, 'running');
+    await replica.collectionAuthority(collector, command);
+    assert.equal((await replica.list()).requests.find(r => r.id === f.r.id)?.state, 'collecting');
     const outcome: any = await replica.result(collector, report(f, command), id()); assert.equal(outcome.passed, true);
     assert.equal((await current(f.w.id)).gates.find(g => g.name === 'acceptance')?.passed, true);
   } finally { await cleanup(f); await second.close(); }
@@ -163,6 +168,36 @@ test('new source invalidates running attempts and worker cannot publish trusted 
   const w = await current(f.w.id); await engine.observe(w.id, w.revision, { ...w.observation!, candidate: { ...w.candidate!, sha: 'f'.repeat(40) }, at: new Date().toISOString() });
   const result: any = await validation.result(collector, report(f, command), id()); assert.equal(result.accepted, false); await cleanup(f);
 });
+test('collection authority fences the runner before settlement can release resources', async () => {
+  const f = await fixture('postgres'), d: any = await validation.dispatch(runner, { registration: f.runnerRef }, id());
+  const command = { requestId: f.r.id, attemptId: d.attempt.id, epoch: d.attempt.epoch };
+  await validation.runnerCommand(runner, 'ack', command, id());
+
+  // Settlement observed while the runner may still act proves nothing: a container can be
+  // started again after the observation. Nothing is publishable before the handoff.
+  await assert.rejects(validation.collectionHeartbeat(collector, command, id()), /collection authority was never taken over/);
+  await assert.rejects(validation.uploadArtifact(collector, { ...command, name: 'report', mediaType: 'application/json', bytes: Buffer.from('{}').toString('base64'), capturePolicy: 'approved-test-data-only' }, id()), /collection authority was never taken over/);
+  const early: any = await validation.result(collector, report(f, command), id());
+  assert.equal(early.accepted, false);
+  assert.ok(early.reasons.some((r: string) => /collection authority/.test(r)));
+  assert.equal((await current(f.w.id)).evidence.length, 0);
+
+  const authority: any = await validation.collectionAuthority(collector, command);
+  assert.equal(authority.attemptId, d.attempt.id);
+  assert.equal((await validation.list()).requests.find(r => r.id === f.r.id)?.state, 'collecting');
+  // The runner's lease is gone: it cannot renew, and it cannot start another phase.
+  await assert.rejects(validation.runnerCommand(runner, 'heartbeat', command, id()), /expired, cancelled or superseded/);
+  await assert.rejects(validation.runnerCommand(runner, 'ack', command, id()), /expired, cancelled or superseded/);
+  // Recovery still cannot release the barrier under an active collection.
+  await assert.rejects(validation.operatorCommand(operator, 'settle', { requestId: f.r.id, epoch: command.epoch, reason: 'Premature', settlementEvidence: 'https://tests.example.test/premature' }, id()), /Terminate\/cancel first/);
+  // The handoff is idempotent for a collector that re-reads its authority mid-collection.
+  await validation.collectionAuthority(collector, command);
+  await validation.collectionHeartbeat(collector, command, id());
+  const outcome: any = await validation.result(collector, { ...report(f, command), artifacts: [] }, id());
+  assert.equal(outcome.accepted, true);
+  await cleanup(f);
+});
+
 test('HTTP validation endpoints enforce authenticated roles', async () => {
   const http = server(engine, [{ ...worker, token: 'w'.repeat(32) }]);
   await new Promise<void>(r => http.listen(0, '127.0.0.1', r));
@@ -170,7 +205,16 @@ test('HTTP validation endpoints enforce authenticated roles', async () => {
     const url = `http://127.0.0.1:${(http.address() as any).port}/api/validation`;
     assert.equal((await fetch(url)).status, 401);
     assert.equal((await fetch(url, { headers: { Authorization: `Bearer ${'w'.repeat(32)}` } })).status, 200);
-    assert.equal((await fetch(`${url}/define`, { method: 'POST', headers: { Authorization: `Bearer ${'w'.repeat(32)}`, 'Content-Type': 'application/json', 'Idempotency-Key': id() }, body: '{}' })).status, 403);
+    // Every command the packaged runner and collector call must be routed. An unmatched
+    // path answers 404, which the collector cannot distinguish from a missing request,
+    // so it would never publish a result at all.
+    const post = (command: string) => fetch(`${url}/${command}`, { method: 'POST', headers: { Authorization: `Bearer ${'w'.repeat(32)}`, 'Content-Type': 'application/json', 'Idempotency-Key': id() }, body: '{}' });
+    for (const command of ['define', 'build', 'candidate', 'request', 'dispatch', 'ack', 'heartbeat', 'collection-authority', 'collection-heartbeat', 'result', 'cancel', 'settle', 'retry']) {
+      assert.notEqual((await post(command)).status, 404, command);
+    }
+    assert.equal((await post('define')).status, 403);
+    // The collection commands are the collector's, and this worker is not one.
+    for (const command of ['collection-authority', 'collection-heartbeat']) assert.equal((await post(command)).status, 403, command);
   } finally { await new Promise<void>(r => http.close(() => r())); }
 });
 

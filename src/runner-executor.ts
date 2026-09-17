@@ -1,7 +1,7 @@
-import { constants } from 'node:fs';
-import { open, readdir, realpath, stat } from 'node:fs/promises';
+import { constants, type Stats } from 'node:fs';
+import { lstat, open, readdir, realpath, stat } from 'node:fs/promises';
 import { spawn } from 'node:child_process';
-import { relative, sep } from 'node:path';
+import { dirname, relative, resolve, sep } from 'node:path';
 import { z } from 'zod';
 import { oracleBundleDigest } from './runner-setup.js';
 
@@ -46,8 +46,23 @@ export const reportFiles: Record<Phase, string> = { enumerate: 'inventory.json',
 // that talks to the deployed candidate. NODE_*/npm_* additionally redirect module
 // resolution, which would let candidate-influenced configuration supply oracle bytes.
 const forbidden = /^(GRAPHYARD_(?!REPORT_FILE|TARGET_URL|PHASE)|NODE_|npm_|PLAYWRIGHT_|GH_|GITHUB_|AWS_|GOOGLE_|RAILWAY_|DATABASE_|PG|DOCKER_|SSH_|HERDR_)/;
-export function containerEnvironment(plan: ExecutionPlan, phase: Phase) {
+const testAccountKey = /^TEST_ACCOUNT(?:_[A-Z0-9_]+)?$/;
+/** The approved test-account variables, parsed once from the file preflight validated. */
+export type TestAccountEnv = Record<string, string>;
+/**
+ * Approved test-account material is passed by value, never by pathname. Docker reopens an
+ * `--env-file` when the container starts, which is after the allowlist was checked: the
+ * identity that owns that mode 0600 file could rewrite it in between and inject variables
+ * such as `NODE_OPTIONS` into the trusted runner container. Only the entries preflight
+ * actually read and validated reach the boundary.
+ */
+export function containerEnvironment(plan: ExecutionPlan, phase: Phase, testAccount: TestAccountEnv = {}) {
+  const approved = phase === 'execute' ? z.record(z.string(), z.string().max(4096).regex(/^[^\x00-\x1f\x7f]*$/)).parse(testAccount) : {};
+  if (phase === 'execute' && plan.testAccountEnvFile && !Object.keys(approved).length) throw new Error('Approved test-account configuration must be read and validated in preflight before execution');
+  const unapproved = Object.keys(approved).filter(key => !testAccountKey.test(key));
+  if (unapproved.length) throw new Error(`Only validated TEST_ACCOUNT_* variables may reach the runner container: ${unapproved.sort().join(', ')}`);
   const env: Record<string, string> = {
+    ...approved,
     HOME: '/scratch', TMPDIR: '/scratch', CI: '1',
     GRAPHYARD_PHASE: phase,
     GRAPHYARD_REPORT_FILE: `/output/${reportFiles[phase]}`,
@@ -70,9 +85,9 @@ export function assertRunnerCredentialScope(status: unknown) {
  * saw the plan can name exactly the containers this attempt was allowed to start. */
 export const containerNames = (attemptId: string) => (['enumerate', 'execute'] as Phase[]).map(phase => `graphyard-${phase}-${attemptId}`);
 export const containerName = (plan: ExecutionPlan, phase: Phase) => `graphyard-${phase}-${plan.grant.attemptId}`;
-export function executionCommand(plan: ExecutionPlan, phase: Phase) {
+export function executionCommand(plan: ExecutionPlan, phase: Phase, testAccount: TestAccountEnv = {}) {
   const p = executionPlanSchema.parse(plan);
-  const env = containerEnvironment(p, phase);
+  const env = containerEnvironment(p, phase, testAccount);
   const memory = `${p.memoryMb}m`;
   return {
     file: 'docker',
@@ -86,7 +101,6 @@ export function executionCommand(plan: ExecutionPlan, phase: Phase) {
       '--tmpfs=/scratch:rw,noexec,nosuid,nodev,size=512m',
       '--workdir', '/scratch',
       ...Object.entries(env).flatMap(([key, value]) => ['--env', `${key}=${value}`]),
-      ...(phase === 'execute' && p.testAccountEnvFile ? ['--env-file', p.testAccountEnvFile] : []),
       `${p.imageRepository}@${p.grant.runnerImageDigest}`, phase],
     env,
   };
@@ -101,30 +115,85 @@ async function directory(path: string) {
 const contains = (outer: string, inner: string) => { const r = relative(outer, inner); return r === '' || (!r.startsWith('..') && !r.startsWith(sep)); };
 
 /**
- * Structural checks before any container starts. The approved bytes and the writable
- * collection area must be separate, and the collection area must be empty so a previous
- * or candidate-planted file cannot be mistaken for this attempt's output.
+ * Ownership the runner identity cannot defeat. A read-only container mount stops the
+ * container, not the host: an oracle tree the runner can write may be weakened between
+ * the preflight digest and execution and restored before the closing digest. The approved
+ * bytes must therefore belong to another identity — an operator-owned snapshot — and no
+ * entry, nor any directory leading to it, may be writable by the runner's own uid or by
+ * group/world. Sticky ancestors such as `/tmp` are accepted: their entries can only be
+ * renamed or removed by their owner.
  */
-export async function assertIsolation(plan: ExecutionPlan) {
+async function assertOracleImmutable(root: string, runnerUid: number) {
+  const refuse = (path: string, info: Stats, ancestor: boolean) => {
+    // A symlink's target can be redirected without touching the tree, so the bundle's
+    // own refusal of them is enforced here too, before any mode or ownership claim.
+    if (!ancestor && info.isSymbolicLink()) throw new Error(`Approved oracle bundles cannot contain symlinks: ${path}`);
+    if (info.uid === runnerUid) throw new Error(`Approved oracle bytes must be owned by an identity the runner cannot write as: ${path}`);
+    // A sticky ancestor such as `/tmp` is shared on purpose: only an entry's owner can
+    // rename or remove it there, so the path to the approved bytes stays fixed.
+    if (ancestor && info.mode & 0o1000) return;
+    if (info.mode & 0o020) throw new Error(`Approved oracle bytes must not be group-writable throughout execution: ${path}`);
+    if (info.mode & 0o002) throw new Error(`Approved oracle bytes must not be world-writable throughout execution: ${path}`);
+  };
+  for (let path = dirname(root), previous = ''; path !== previous; previous = path, path = dirname(path)) refuse(path, await lstat(path), true);
+  let entries = 0;
+  async function walk(path: string, depth: number) {
+    if (depth > 20) throw new Error('Approved oracle bundle exceeds the supported directory depth');
+    for (const entry of await readdir(path, { withFileTypes: true })) {
+      if (++entries > 10_000) throw new Error('Approved oracle bundle exceeds the supported file limit');
+      const child = resolve(path, entry.name);
+      refuse(child, await lstat(child), false);
+      if (entry.isDirectory()) await walk(child, depth + 1);
+    }
+  }
+  refuse(root, await lstat(root), false);
+  await walk(root, 0);
+}
+
+/**
+ * Structural checks before any container starts. The approved bytes and the writable
+ * collection area must be separate, the approved bytes must be immutable to the runner
+ * identity for the whole attempt, and the collection area must be empty so a previous
+ * or candidate-planted file cannot be mistaken for this attempt's output.
+ *
+ * `uid` is the identity the runner executes as; it defaults to this process's own.
+ */
+export async function assertIsolation(plan: ExecutionPlan, options: { uid?: number } = {}) {
   const p = executionPlanSchema.parse(plan);
+  const runnerUid = options.uid ?? process.getuid?.() ?? 0;
   const oracle = await directory(p.oraclePath), output = await directory(p.outputPath);
   if (contains(oracle.path, output.path) || contains(output.path, oracle.path)) throw new Error('Approved oracle bytes and the writable output path must not overlap');
   if (oracle.mode & 0o022) throw new Error('The approved oracle directory must not be group- or world-writable');
+  await assertOracleImmutable(oracle.path, runnerUid);
   if (output.mode & 0o077) throw new Error('The collector output directory must be private to the collector');
   if (output.uid !== Number(p.runAsUser.split(':')[0])) throw new Error('The collector output directory must be owned by the unprivileged container user');
   if ((await readdir(output.path)).length) throw new Error('The collector output directory must be empty before an attempt');
-  if (p.testAccountEnvFile) {
-    const file = await open(p.testAccountEnvFile, constants.O_RDONLY | constants.O_NOFOLLOW);
-    try {
-      const info = await file.stat();
-      if (!info.isFile() || info.mode & 0o077) throw new Error('Approved test-account configuration must be a private regular file (mode 0600)');
-      if (info.size > 65_536) throw new Error('Approved test-account configuration is too large');
-      const contents = await file.readFile('utf8');
-      const keys = contents.split(/\r?\n/).filter(line => line.trim() && !line.trimStart().startsWith('#')).map(line => line.match(/^([A-Za-z_][A-Za-z0-9_]*)=/)?.[1]);
-      if (keys.some(key => !key || !/^TEST_ACCOUNT(?:_[A-Z0-9_]+)?$/.test(key))) throw new Error('Approved test-account configuration may contain only TEST_ACCOUNT_* variables');
-    } finally { await file.close(); }
-  }
-  return { oraclePath: oracle.path, outputPath: output.path };
+  const testAccountEnv = p.testAccountEnvFile ? await readTestAccountEnv(p.testAccountEnvFile) : {};
+  return { oraclePath: oracle.path, outputPath: output.path, testAccountEnv };
+}
+
+/**
+ * Read the approved variables once, from the descriptor that was validated. The returned
+ * entries — not the pathname — are what execution may pass to the container.
+ */
+async function readTestAccountEnv(path: string): Promise<TestAccountEnv> {
+  const file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+  try {
+    const info = await file.stat();
+    if (!info.isFile() || info.mode & 0o077) throw new Error('Approved test-account configuration must be a private regular file (mode 0600)');
+    if (info.size > 65_536) throw new Error('Approved test-account configuration is too large');
+    const entries: TestAccountEnv = {};
+    for (const line of (await file.readFile('utf8')).split(/\r?\n/)) {
+      if (!line.trim() || line.trimStart().startsWith('#')) continue;
+      const match = line.match(/^([A-Za-z_][A-Za-z0-9_]*)=(.*)$/);
+      if (!match || !testAccountKey.test(match[1])) throw new Error('Approved test-account configuration may contain only TEST_ACCOUNT_* variables');
+      if (match[1] in entries) throw new Error('Approved test-account configuration must not define a variable twice');
+      if (match[2].length > 4096) throw new Error('Approved test-account values must be bounded single-line text');
+      entries[match[1]] = match[2];
+    }
+    if (!Object.keys(entries).length) throw new Error('Approved test-account configuration must define at least one TEST_ACCOUNT variable');
+    return entries;
+  } finally { await file.close(); }
 }
 
 export type PhaseResult = { phase: Phase; exitCode: number; timedOut: boolean; durationMs: number };
@@ -193,15 +262,15 @@ export const executionRecordSchema = z.object({
 export type ExecutionRecord = z.infer<typeof executionRecordSchema>;
 
 /** Everything that can refuse locally before the attempt is acknowledged. */
-export type Preflight = { oraclePath: string; outputPath: string; bundleDigest: string };
+export type Preflight = { oraclePath: string; outputPath: string; bundleDigest: string; testAccountEnv: TestAccountEnv };
 /**
  * Structural isolation plus the first bundle measurement. A runner performs this before
  * acknowledging: a refusal here leaves the attempt unacknowledged, so it expires and
  * releases its reservations instead of blocking them until an operator settles by hand.
  */
-export async function preflightAttempt(plan: unknown): Promise<Preflight> {
+export async function preflightAttempt(plan: unknown, options: { uid?: number } = {}): Promise<Preflight> {
   const p = executionPlanSchema.parse(plan);
-  const paths = await assertIsolation(p);
+  const paths = await assertIsolation(p, options);
   return { ...paths, bundleDigest: (await oracleBundleDigest(paths.oraclePath)).digest };
 }
 
@@ -211,12 +280,12 @@ export async function preflightAttempt(plan: unknown): Promise<Preflight> {
  * untouched output directory to the separately trusted collector. `signal` carries loss
  * of attempt authority: an aborted attempt stops talking to the target and settles.
  */
-export async function executeAttempt(plan: unknown, options: { run?: Runner; settle?: Settler; now?: () => Date; preflight?: Preflight; signal?: AbortSignal } = {}): Promise<ExecutionRecord> {
+export async function executeAttempt(plan: unknown, options: { run?: Runner; settle?: Settler; now?: () => Date; preflight?: Preflight; signal?: AbortSignal; uid?: number } = {}): Promise<ExecutionRecord> {
   const p = executionPlanSchema.parse(plan);
   const now = options.now ?? (() => new Date());
   const run = options.run ?? dockerRunner, settle = options.settle ?? dockerSettler;
   const signal = options.signal;
-  const paths = options.preflight ?? await preflightAttempt(p);
+  const paths = options.preflight ?? await preflightAttempt(p, { uid: options.uid });
   // The exact canonical roots checked and hashed in preflight are the roots mounted.
   // Never resolve a worker-replaceable symlink a second time in `docker run`.
   const mountedPlan: ExecutionPlan = { ...p, oraclePath: paths.oraclePath, outputPath: paths.outputPath };
@@ -232,7 +301,7 @@ export async function executeAttempt(plan: unknown, options: { run?: Runner; set
       const deadline = Math.min(p.timeoutMs, Math.max(0, Date.parse(p.grant.deadline) - now().getTime()));
       if (deadline < 1_000) { refusals.push('Attempt deadline elapsed before execution'); break; }
       const at = now().getTime();
-      const outcome = await run(executionCommand(mountedPlan, phase), deadline, signal);
+      const outcome = await run(executionCommand(mountedPlan, phase, paths.testAccountEnv), deadline, signal);
       phases.push({ phase, ...outcome, durationMs: now().getTime() - at });
       if (signal?.aborted) { refusals.push(lostAuthority); break; }
       if (outcome.timedOut) break;
