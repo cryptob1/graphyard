@@ -32,18 +32,18 @@ Every box is a checkpoint. A blocked box explains what is missing; it is not an 
 ## Two phases, one clear handoff
 
 1. **Phase 1 · Bootstrap — Human operator → one implementation agent.** The MVP is unchanged: a single implementation agent works under the human operator's direct supervision while it connects Graphyard's own repository and activates its gates. No multi-agent operation yet.
-2. **Phase 2 · Automated operation — Human → goals, required decisions, oversight.** Only after the repository is connected, its gates are active, and GY-30 scoped operator automation is configured does the installation fan out to the four independent AI agent sessions below. The human supplies goals, required decisions, and oversight, and is not expected to perform the routine Operator, Master, Worker, or Reviewer/proof-producer duties.
+2. **Phase 2 · Automated operation — Human → goals, required decisions, oversight.** Only after the repository is connected, its gates are active, and GY-30 scoped operator automation is configured does the installation fan out to the four independent AI agent sessions below. The human supplies goals, required decisions, and oversight, and is not expected to perform the routine Operator, Master, Worker, or Reviewer/proof-producer duties. Phase 2 is the target for this installation, not its present state: scoped operator automation is planned and not active today, and until the scoped operator-agent principal is provisioned, Graphyard accepts requirements and policy changes only from the unrestricted human administrator.
 
 ## Four AI agent sessions
 
 | Independent session | Duty |
 | --- | --- |
-| **Operator agent** | Executes human-approved bounded intent: it turns goals into scoped work and may add requirements but never remove or rewrite them. Exceptions and approval decisions stay with the human operator, and its automation is least-privilege, never unrestricted admin authority. |
+| **Operator agent** | Executes human-approved bounded intent: it turns goals into scoped work and may add requirements but never remove or rewrite them. Exceptions and approval decisions stay with the human operator, and its automation is least-privilege, never unrestricted admin authority. This duty is future-facing until GY-30 automation is provisioned: today no scoped operator-agent credential exists, so only the unrestricted human administrator holds this authority. |
 | **Master agent** | Watches readiness and runtime health, dispatches ready work, routes handoffs, and requests policy-allowed merges. It never implements or overrides Graphyard. |
 | **Worker agent** | Claims work, uses its assigned worktree, builds, tests, opens the PR, and submits the candidate. It stops on lease loss. |
 | **Reviewer/proof-producer agent** | Independently reviews the exact candidate or reports an approved proof. It does not inherit trust from the worker. |
 
-These are distinct AI sessions, even if they use the same provider or account. Graphyard enforces separation with **authenticated principal identities, scoped credentials, and authority checks**. The runtime or deployment—for example, Herdr—must keep the sessions independent; Graphyard does not verify runtime isolation.
+These are distinct AI sessions, even if they use the same provider or account. Graphyard enforces separation with **authenticated principal identities, scoped credentials, and authority checks**. The runtime or deployment—for example, Herdr—must keep the sessions independent; Graphyard does not verify runtime isolation. Separation is only as real as the principals Graphyard knows: Worker, Master/coordinator, and Reviewer/proof-producer map to enforced credentials today, while the scoped Operator agent remains a designed contract, not an active credential, until GY-30 automation is provisioned.
 
 ## The boundaries that do not move
 
