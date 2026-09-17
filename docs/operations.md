@@ -2,16 +2,21 @@
 
 ## Perpetual master loop
 
-Keep a dedicated master coordinator running until every in-scope item is Done or has
-a genuinely external blocker recorded in Graphyard. Repeatedly run status,
-dispatch ready work, shepherd review and trusted proof collection, request guarded
-merges, and verify deployment and live behavior against the exact deployed release.
-Close finished agent sessions and return to status after every material event.
+Keep a dedicated master coordinator running until the terminal condition holds:
+every in-scope item is Done or has a genuinely external blocker recorded in
+Graphyard, and the merged change is deployed and live-verified against the exact
+deployed release, or a genuinely external deployment blocker is recorded in
+Graphyard. Repeatedly run status, dispatch ready work, shepherd review and trusted
+proof collection, request guarded merges, and verify deployment and live behavior
+against the exact deployed release. Close finished agent sessions and return to
+status after every material event.
 
 Ordinary review findings, rework, idle workers, and proof setup are not stopping
 conditions. They are work for the coordinator to route and follow through. A local
 or stale check is not deployment verification, and blockers must be recorded in
-Graphyard rather than inferred from an inactive session.
+Graphyard rather than inferred from an inactive session. Done marks an observed
+merge, so it never authorizes stopping before deployment and live verification
+against the exact deployed release.
 
 ## Daily checks
 

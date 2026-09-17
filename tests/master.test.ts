@@ -31,8 +31,9 @@ test('master instructions are managed idempotently without replacing repository 
   const original = `# Local rules\n${bootstrap}\nKeep this text.\n`; const first = managedMasterInstructions(original);
   assert.ok(first.startsWith(original)); assert.match(first, /dedicated, visible master-agent session/);
   assert.match(first, /Keep cycling: status, dispatch ready work, shepherd review and proof collection,\nguarded merge, then deployment verification/);
-  assert.match(first, /every in-scope item is\nDone or has a genuinely external blocker recorded in Graphyard/);
-  for (const condition of ['Ordinary review', 'rework', 'idle workers', 'proof setup', 'Close\nfinished agent sessions']) assert.match(first, new RegExp(condition));
+  assert.match(first, /every in-scope item is\nDone or has a genuinely external blocker recorded in Graphyard and the merged change\nis deployed and live-verified against the exact deployed release, or a genuinely\nexternal deployment blocker is recorded in Graphyard/);
+  assert.match(first, /An observed merge alone does\nnot end the loop/);
+  for (const condition of ['Ordinary review', 'rework', 'idle workers', 'proof setup', 'Close finished agent sessions']) assert.match(first, new RegExp(condition));
   assert.equal(first.split(bootstrap).length - 1, 1, 'master setup preserves the protected bootstrap rule byte-for-byte');
   assert.equal(managedMasterInstructions(first), first);
   assert.throws(() => managedMasterInstructions(first + first), /markers/);

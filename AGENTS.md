@@ -36,6 +36,15 @@ completion; it does not set Done. CI, trusted evidence, independent review, and
 Graphyard's merge gate decide progression. Report blockers explicitly.
 Never use an operator/producer token for implementation or weaken proof requirements.
 Herdr runs sessions; Graphyard remains the source of ownership truth.
+
+A dedicated master coordinator must keep cycling: status, dispatch ready work,
+shepherd review and proof collection, guarded merge, then deployment verification.
+Repeat until every in-scope item is Done or has a genuinely external blocker recorded
+in Graphyard and the merged change is deployed and live-verified against the exact
+deployed release, or a genuinely external deployment blocker is recorded in Graphyard.
+An observed merge alone does not end the loop. Ordinary review findings, rework, idle
+workers, and proof setup are not stopping conditions. Close finished agent sessions
+as part of the cycle.
 <!-- /graphyard -->
 
 <!-- graphyard-master -->
@@ -53,9 +62,11 @@ when an agent, provider account, machine, or context window changes.
 
 Keep cycling: status, dispatch ready work, shepherd review and proof collection,
 guarded merge, then deployment verification. Repeat until every in-scope item is
-Done or has a genuinely external blocker recorded in Graphyard. Ordinary review
-findings, rework, idle workers, and proof setup are not stopping conditions. Close
-finished agent sessions as part of the cycle.
+Done or has a genuinely external blocker recorded in Graphyard and the merged change
+is deployed and live-verified against the exact deployed release, or a genuinely
+external deployment blocker is recorded in Graphyard. An observed merge alone does
+not end the loop. Ordinary review findings, rework, idle workers, and proof setup
+are not stopping conditions. Close finished agent sessions as part of the cycle.
 
 Check the automatic-merge preference in master status. When disabled, wait for
 explicit operator approval for each merge. Otherwise routine merges may use
