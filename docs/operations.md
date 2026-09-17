@@ -2,11 +2,11 @@
 
 ## Perpetual master loop
 
-Keep a dedicated master coordinator running until the terminal condition holds:
-every in-scope item is Done or has a genuinely external blocker recorded in
-Graphyard, and the merged change is deployed and live-verified against the exact
-deployed release, or a genuinely external deployment blocker is recorded in
-Graphyard. Repeatedly run status, dispatch ready work, shepherd review and trusted
+Keep a dedicated master coordinator running until both parts of the terminal
+condition hold: (1) every in-scope item is Done or has a genuinely external blocker
+recorded in Graphyard; and (2) the merged change is deployed and live-verified against
+the exact deployed release, or a genuinely external deployment blocker is recorded
+in Graphyard. Repeatedly run status, dispatch ready work, shepherd review and trusted
 proof collection, request guarded merges, and verify deployment and live behavior
 against the exact deployed release. Close finished agent sessions and return to
 status after every material event.

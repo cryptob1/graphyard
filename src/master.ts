@@ -72,10 +72,11 @@ Treat prompt delivery as an invitation, never as ownership. Use durable handoffs
 when an agent, provider account, machine, or context window changes.
 
 Keep cycling: status, dispatch ready work, shepherd review and proof collection,
-guarded merge, then deployment verification. Repeat until every in-scope item is
-Done or has a genuinely external blocker recorded in Graphyard and the merged change
-is deployed and live-verified against the exact deployed release, or a genuinely
-external deployment blocker is recorded in Graphyard. An observed merge alone does
+guarded merge, then deployment verification. Repeat until both conditions hold:
+(1) every in-scope item is Done or has a genuinely external blocker recorded in
+Graphyard; and (2) the merged change is deployed and live-verified against the exact
+deployed release, or a genuinely external deployment blocker is recorded in Graphyard.
+An observed merge alone does
 not end the loop. Ordinary review findings, rework, idle workers, and proof setup
 are not stopping conditions. Close finished agent sessions as part of the cycle.
 
