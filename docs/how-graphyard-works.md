@@ -31,8 +31,8 @@ Every box is a checkpoint. A blocked box explains what is missing; it is not an 
 
 ## Two phases, one clear handoff
 
-1. **Phase 1 · Bootstrap — Human operator → one implementation agent.** The MVP is unchanged: the human directly supervises one agent while it connects Graphyard's own repository and activates its gates. No multi-agent operation yet.
-2. **Phase 2 · Automated operation — Human → goals · approvals · exceptions · oversight.** Only after the repository is connected, its gates are active, and GY-30 scoped operator automation is configured does work fan out to the four independent AI agent sessions below. The human oversees the system, but does not perform their routine duties.
+1. **Phase 1 · Bootstrap — Human operator → one implementation agent.** The MVP is unchanged: a single implementation agent works under the human operator's direct supervision while it connects Graphyard's own repository and activates its gates. No multi-agent operation yet.
+2. **Phase 2 · Automated operation — Human → goals, required decisions, oversight.** Only after the repository is connected, its gates are active, and GY-30 scoped operator automation is configured does the installation fan out to the four independent AI agent sessions below. The human supplies goals, required decisions, and oversight, and is not expected to perform the routine Operator, Master, Worker, or Reviewer/proof-producer duties.
 
 ## Four AI agent sessions
 

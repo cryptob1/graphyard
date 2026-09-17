@@ -32,11 +32,12 @@ for (const viewport of [{ name: 'desktop', width: 1280, height: 900 }, { name: '
     const phases = page.getByRole('heading', { name: 'Two phases, one clear handoff' }).locator('xpath=following-sibling::ol[1]/li');
     await expect(phases).toHaveCount(2);
     await expect(phases.nth(0)).toContainText('Human operator → one implementation agent');
-    await expect(phases.nth(0)).toContainText('human directly supervises one agent');
+    await expect(phases.nth(0)).toContainText("single implementation agent works under the human operator's direct supervision");
     await expect(phases.nth(0)).toContainText("connects Graphyard's own repository and activates its gates");
-    await expect(phases.nth(1)).toContainText('Human → goals · approvals · exceptions · oversight');
+    await expect(phases.nth(1)).toContainText('Human → goals, required decisions, oversight');
     await expect(phases.nth(1)).toContainText('GY-30 scoped operator automation is configured');
-    await expect(phases.nth(1)).toContainText('does not perform their routine duties');
+    await expect(phases.nth(1)).toContainText('supplies goals, required decisions, and oversight');
+    await expect(phases.nth(1)).toContainText('not expected to perform the routine Operator, Master, Worker, or Reviewer/proof-producer duties');
     await expect(page.getByRole('heading', { name: 'Four AI agent sessions' })).toBeVisible();
     const duties = ['Operator agent', 'Master agent', 'Worker agent', 'Reviewer/proof-producer agent'];
     for (const duty of duties) await expect(page.getByRole('cell', { name: duty, exact: true })).toBeVisible();
