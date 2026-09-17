@@ -53,7 +53,9 @@ Download with an authenticated request:
 graphyard validation artifact-download REQUEST_UUID ARTIFACT_UUID ./report.json
 ```
 
-The CLI creates a new private file and refuses to overwrite an existing path. The HTTP route is `GET /api/validation/artifacts/REQUEST_UUID/ARTIFACT_UUID`; it returns an attachment, never executable inline HTML. Operators/readers have this single repository's audit access. Implementation workers can read only work whose latest assignment belongs to them; producer access is restricted to their still-authorized collection request. A bearer token and a matching request are required even when someone knows the artifact ID. Artifact reads are audited.
+The CLI creates a new private file and refuses to overwrite an existing path. The HTTP route is `GET /api/validation/artifacts/REQUEST_UUID/ARTIFACT_UUID`. Evidence history records typed artifact descriptors (kind, label, media type, size, digest, retention and authenticated reference), while legacy evidence with one public URL remains readable and is visibly identified as external. The work-detail UI fetches private bytes with the browser session credential; credentials are never placed in links or markup. PNG screenshots and JSON/plain-text output up to 1 MiB may be requested with `?preview=1`. Larger files, ZIP/trace/report binaries, HTML and unknown types always use `application/octet-stream`, `nosniff` and attachment disposition, so they cannot execute inline.
+
+Operators/readers have this single repository's audit access. Implementation workers can read only work whose latest assignment belongs to them; producer access is restricted to their still-authorized collection request. A bearer token and a matching request are required even when someone knows the artifact ID. Every preview and download is audited. Missing, redacted and expired descriptors remain explicit history states and do not offer a read action; expired storage reads return refusal rather than falling back to an external location.
 
 ## Persistence and retention
 

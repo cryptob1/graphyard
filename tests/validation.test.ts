@@ -319,6 +319,8 @@ test('private artifacts bind request/attempt, authenticate reads and never enter
   assert.equal(result.passed, true);
   const w = await current(f.w.id);
   assert.equal(w.evidence.at(-1)?.expiresAt, artifact.expiresAt);
+  assert.deepEqual(w.evidence.at(-1)?.artifacts, [{ kind: 'report', label: 'report', mediaType: 'application/json', size: bytes.length, digest: artifact.digest,
+    expiresAt: artifact.expiresAt, availability: 'available', reference: { requestId: f.r.id, artifactId: artifact.id } }]);
   assert.equal(evaluate(w, [w], new Date(Date.now() + 8 * 86_400_000), [15368]).gates.find(g => g.name === 'acceptance')?.passed, false);
   await store.pool.query("UPDATE validation_artifacts SET expires_at='2000-01-01' WHERE id=$1", [artifact.id]);
   await assert.rejects(validation.readArtifact(operator, f.r.id, artifact.id), /retention expired/);
@@ -356,8 +358,15 @@ test('artifact HTTP routes require authentication and return private attachments
     const headers = { Authorization: `Bearer ${'1'.repeat(32)}` };
     const response = await fetch(url, { headers });
     assert.equal(response.status, 200); assert.match(response.headers.get('content-disposition')!, /^attachment/); assert.equal(response.headers.get('cache-control'), 'no-store');
+    assert.equal(response.headers.get('content-type'), 'application/octet-stream'); assert.equal(response.headers.get('x-content-type-options'), 'nosniff');
     assert.equal(await response.text(), '{"private":true}');
+    const preview = await fetch(`${url}?preview=1`, { headers });
+    assert.match(preview.headers.get('content-disposition')!, /^inline/); assert.equal(preview.headers.get('content-type'), 'application/json');
+    await store.pool.query("UPDATE validation_artifacts SET media_type='text/html' WHERE id=$1", [artifact.id]);
+    const html = await fetch(`${url}?preview=1`, { headers });
+    assert.match(html.headers.get('content-disposition')!, /^attachment/); assert.equal(html.headers.get('content-type'), 'application/octet-stream');
     assert.equal((await fetch(`${origin}/api/validation/artifacts`, { method: 'POST', headers: { ...headers, 'Content-Type': 'application/json', 'Idempotency-Key': id() }, body: '{}' })).status, 403);
+    assert.equal((await store.pool.query("SELECT count(*) FROM events WHERE work_id=$1 AND kind='validation.artifact-read'", [f.w.id])).rows[0].count, '3');
   } finally { await new Promise<void>(r => http.close(() => r())); await cleanup(f); }
 });
 
