@@ -334,6 +334,26 @@ test('private artifact requirements cannot pass with a caller-authored URL or mi
   const result: any = await validation.result(collector, report(f, command), id());
   assert.equal(result.passed, false); assert.ok(result.reasons.some((s: string) => s.includes('Private artifact report'))); await cleanup(f);
 });
+test('external storage binds artifact URLs to safe public locations; private routes cannot pass', async () => {
+  const f = await fixture(), command = await start(f);
+  try {
+    await assert.rejects(validation.result(collector, { ...report(f, command), artifacts: [{ name: 'report', digest, url: 'https://user:secret@private.example.test/report' }] }, id()), /HTTP\(S\)/);
+    const result: any = await validation.result(collector, { ...report(f, command), artifacts: [
+      { name: 'report', digest, url: `graphyard-artifact://test/repository/${f.r.id}/${randomUUID()}` }] }, id());
+    assert.equal(result.accepted, true); assert.equal(result.passed, false);
+    assert.ok(result.reasons.some((s: string) => s.includes('safe HTTP(S)')));
+    const w = await current(f.w.id);
+    assert.equal(w.evidence.at(-1)?.result, 'fail');
+    assert.deepEqual(w.evidence.at(-1)?.artifacts, [{ kind: 'report', label: 'report', digest, availability: 'missing' }]);
+    assert.equal(w.gates.find(g => g.name === 'acceptance')?.passed, false);
+  } finally { await cleanup(f); }
+  const ok = await fixture(), okCommand = await start(ok);
+  try {
+    const passing: any = await validation.result(collector, report(ok, okCommand), id());
+    assert.equal(passing.passed, true);
+    assert.deepEqual((await current(ok.w.id)).evidence.at(-1)?.artifacts, [{ kind: 'report', label: 'report', digest, availability: 'external', url: 'https://private.example.test/report' }]);
+  } finally { await cleanup(ok); }
+});
 test('revocation and expired epochs refuse artifact uploads before storing bytes', async () => {
   const f = await fixture('postgres'), command = await start(f);
   const input = { ...command, name: 'report', mediaType: 'application/json', bytes: Buffer.from('{}').toString('base64'), capturePolicy: 'approved-test-data-only' };

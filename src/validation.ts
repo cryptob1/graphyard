@@ -15,7 +15,8 @@ const base = { id: name, expectedRevision: z.number().int().min(0) };
 const resourceNames = z.array(name).min(1).max(30).refine(a => new Set(a).size === a.length, 'Resources must be unique');
 const artifacts = z.array(z.object({ service: name, digest }).strict()).min(1).max(30).refine(a => new Set(a.map(x => x.service)).size === a.length, 'Services must be unique');
 const ref = z.object({ id: name, revision }).strict();
-const externalUrl = z.url().max(2000).refine(value => { const parsed = new URL(value); return ['http:', 'https:'].includes(parsed.protocol) && !parsed.username && !parsed.password; }, 'Artifact URL must be HTTP(S) without credentials');
+const safeHttpUrl = (value: string) => { try { const parsed = new URL(value); return ['http:', 'https:'].includes(parsed.protocol) && !parsed.username && !parsed.password; } catch { return false; } };
+const externalUrl = z.url().max(2000).refine(safeHttpUrl, 'Artifact URL must be HTTP(S) without credentials');
 export const definitionSchema = z.discriminatedUnion('kind', [
   z.object({ ...base, kind: z.literal('environment'), repository: z.string().regex(/^[\w.-]+\/[\w.-]+$/), url: z.url().max(2000).refine(s => { const u = new URL(s); return u.protocol === 'https:' && !u.username && !u.password && !u.hash && !u.search; }, 'Use HTTPS without credentials, query or fragment'), instance: name, immutable: z.literal(true), services: resourceNames, resources: resourceNames }).strict(),
   z.object({ ...base, kind: z.literal('registration'), principalId: name, role: z.enum(['runner', 'collector', 'builder']), environment: ref, adapterVersion: name, proofs: z.array(proofSchema).max(50), enabled: z.boolean() }).strict(),
@@ -300,7 +301,9 @@ export class Validation {
               availability: !actual.retained ? 'missing' : actual.expires_at <= now ? 'expired' : 'available', reference: { requestId: r.id, artifactId: actual.id } });
           } else evidenceArtifacts.push({ kind: this.artifactKind(required), label: required, availability: 'missing' });
         }
-      } else evidenceArtifacts.push(...data.artifacts.map(artifact => ({ kind: this.artifactKind(artifact.name), label: artifact.name, digest: artifact.digest, availability: 'external' as const, url: artifact.url })));
+      } else evidenceArtifacts.push(...data.artifacts.map(artifact => safeHttpUrl(artifact.url)
+        ? { kind: this.artifactKind(artifact.name), label: artifact.name, digest: artifact.digest, availability: 'external' as const, url: artifact.url }
+        : { kind: this.artifactKind(artifact.name), label: artifact.name, digest: artifact.digest, availability: 'missing' as const }));
       const result = { accepted: true, passed: reasons.length === 0, reasons };
       current.state = 'completed'; current.result = result; a!.state = 'completed'; a!.finishedAt = now.toISOString(); a!.settled = data.executionSettled;
       if (a!.settled) await db.query('DELETE FROM validation_resources WHERE request_id=$1', [r.id]);
@@ -387,6 +390,9 @@ export class Validation {
     if (data.target.measurement === 'unknown' || !data.target.coversEntireRun || data.target.instance !== e.instance || !same([...data.target.artifacts].sort((a,b) => a.service.localeCompare(b.service)), [...build.artifacts].sort((a,b) => a.service.localeCompare(b.service)))) reasons.push('Independent whole-run target attribution is missing or mismatched');
     if (data.bundleDigest !== b.digest || data.runnerImageDigest !== b.runnerImageDigest) reasons.push('Executed oracle bundle or runner image differs from approval');
     if (new Set(data.artifacts.map(a => a.name)).size !== data.artifacts.length || c.requiredArtifacts.some(n => !data.artifacts.some(a => a.name === n))) reasons.push('Required execution artifacts are missing or ambiguous');
+    // Private Graphyard routes exist only for Postgres-backed storage; external storage
+    // must cite safe public locations, and Postgres binding is enforced by row matching.
+    if (c.artifactStorage === 'external' && data.artifacts.some(a => !safeHttpUrl(a.url))) reasons.push('External-storage artifacts must reference safe HTTP(S) locations; private Graphyard artifact routes require Postgres storage');
     if (!data.executionSettled) reasons.push('Execution settlement is unverified; resources remain reserved');
     return reasons;
   }
