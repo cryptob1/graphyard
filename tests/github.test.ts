@@ -171,7 +171,7 @@ function enforcement(overrides: any = {}) {
     rulesets: [],
     pull: { number: 10, head: { sha: head }, base: { sha: base, ref: 'main' }, state: 'open', draft: false, merged: false, mergeable: true, mergeable_state: 'clean' },
     checkRuns: [{ name: CHECK_NAME, status: 'completed', conclusion: 'success', app: { id: 1234, slug: 'graphyard' }, pull_requests: [{ number: 10 }] }],
-    work: { key: 'GY-1', stage: 'merge', policyRevision: 1, policy: { review: true, reviewProvider: 'codex', checks: ['test'] },
+    work: { key: 'GY-1', revision: 7, stage: 'merge', policyRevision: 1, policy: { review: true, reviewProvider: 'codex', checks: ['test'] },
       submission: { pr: 10, epoch: 1 }, candidate: { pr: 10, sha: head, baseSha: base, branch: 'topic', author: 'worker' }, observation: { at: now },
       gates: [{ name: 'acceptance', passed: true, reasons: [] }, { name: 'merge', passed: true, reasons: [] }] },
     ...overrides,
@@ -252,4 +252,21 @@ test('enforcement inspection selects the dedicated App run before a newer same-n
   ] }));
   assert.equal(report.verdict, 'permitted');
   assert.equal(report.app.publishedCheck.appId, 1234);
+});
+
+test('enforcement inspection refuses snapshots that change during collection', () => {
+  const initial = enforcement();
+  const changes: [any, RegExp][] = [
+    [{ work: { ...initial.work, revision: 8 }, pull: initial.pull }, /work revision changed/],
+    [{ work: { ...initial.work, candidate: { ...initial.work.candidate, sha: 'c'.repeat(40) } }, pull: initial.pull }, /candidate head changed/],
+    [{ work: { ...initial.work, candidate: { ...initial.work.candidate, baseSha: 'd'.repeat(40) } }, pull: initial.pull }, /candidate base changed/],
+    [{ work: initial.work, pull: { ...initial.pull, head: { sha: 'c'.repeat(40) } } }, /pull request head changed/],
+    [{ work: initial.work, pull: { ...initial.pull, base: { ...initial.pull.base, sha: 'd'.repeat(40) } } }, /pull request base changed/],
+  ];
+  for (const [recheck, expected] of changes) {
+    const report = evaluateEnforcement({ ...initial, recheck });
+    assert.equal(report.verdict, 'refused');
+    assert.equal(report.revalidated, false);
+    assert.match(report.refusals.join('\n'), expected);
+  }
 });
