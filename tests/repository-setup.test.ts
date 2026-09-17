@@ -45,7 +45,7 @@ test('Herdr setup validates identity, privately saves configuration, updates ins
 });
 
 test('privileged or rejected credentials cause no instruction, plugin, or credential writes', async () => {
-  for (const role of ['admin', 'producer', 'reader', 'rejected']) {
+  for (const role of ['admin', 'coordinator', 'producer', 'reader', 'rejected']) {
     const root = await repo(); let invoked = false;
     try {
       await assert.rejects(setupRepository(root, connection, { herdr: true, fetcher: async () => new Response(JSON.stringify({ actor: { role } }), { status: role === 'rejected' ? 401 : 200 }), runHerdr: () => { invoked = true; return ''; } }));

@@ -1,8 +1,12 @@
 # Architecture and correctness model
 
+This page is the technical reference for Graphyard's invariants and storage model. For a visual, plain-language tour from setup to Done, start with [How Graphyard works](how-graphyard-works.md).
+
 ## Boundary
 
 Graphyard owns coordination decisions. Git owns source history. GitHub owns the actual PR and merge facts. Herdr owns agent sessions. Test runners produce evidence. A Graphyard gate is a deterministic evaluation, never an LLM judgment.
+
+The practical distinction between Graphyard's delivery authority and Herdr's runtime health is summarized in [How Graphyard works](how-graphyard-works.md#graphyard-and-herdr-answer-different-questions).
 
 ```mermaid
 flowchart LR
@@ -67,9 +71,9 @@ The graph shows the first refusing stage; the card contains all refusal reasons.
 
 The board is a view of evaluated state. There is no drag-to-done API. Current dwell metrics measure how long items have been in their present stage; they are not historical throughput percentiles.
 
-Before a merge can complete work, Graphyard must have recorded an authorization for the same head, base, and policy. The engine consults ledger snapshots at the reported merge time, so an outage or later failure does not erase historical authorization. The delivery record references the authorization revision and observed merge SHA. Later differing checks remain visible as a follow-up warning.
+Before a merge can complete work, Graphyard must have recorded an authorization for the same head, base, and policy and a final GitHub verification under a short-lived, single-use execution authority. While that authority is active, requirement, evidence, validation, reconciliation, and non-matching observation mutations are refused. Final verification is a transactional, idempotent mutation that re-evaluates the current GitHub observation, records its timestamp, and must precede the provider-reported merge interval. This freezes the control-plane decision while the external GitHub merge runs without holding a database transaction open. A confirmed failed client cancels the authority; an abandoned or uncertain attempt expires. The engine consults ledger snapshots at the reported merge time, so an outage or later failure does not erase historical authorization. The delivery record references the authorization revision and observed merge SHA. Later differing checks remain visible as a follow-up warning.
 
-Evidence received after an earlier merge cannot retroactively invent approval. Authorization must predate the earliest possible merge instant; changes within the provider timestamp's precision window are considered conservatively. GitHub's whole-second timestamps can cause same-second authorizations to be refused. This assumes reasonably synchronized provider/database clocks and cannot establish subsecond ordering or prove the merged artifact was tested; a restricted merge broker and artifact verification remain necessary for a stronger guarantee.
+Evidence received after an earlier merge cannot retroactively invent approval. A direct external merge without a verified execution authority remains visible as an unauthorized merge and cannot complete the work item. Because GitHub reports merge time with whole-second precision, the master waits until the next timestamp boundary after final verification before invoking the provider. Artifact verification remains necessary to prove that the merged artifact itself was tested.
 
 ## Why no workflow framework yet?
 

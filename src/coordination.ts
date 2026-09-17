@@ -1,9 +1,9 @@
-import type { Work } from './model.js';
+import { currentEvidence, type Work } from './model.js';
 
 export interface IntegrationJob { work_id: string; available_at: string; locked_until: string | null; error: string | null }
 export interface Diagnostic { kind: string; message: string; next: string }
 export function resourceConflicts(work: Work, all: Work[], now: number) {
-  return all.filter(w => w.id !== work.id && w.lease && Date.parse(w.lease.expiresAt) > now)
+  return all.filter(w => w.id !== work.id && (w.containmentQuarantine || w.lease && Date.parse(w.lease.expiresAt) > now))
     .flatMap(w => (work.exclusiveResources ?? []).filter(r => w.exclusiveResources?.includes(r)).map(resource => ({ resource, key: w.key })));
 }
 
@@ -40,7 +40,9 @@ export function diagnose(work: Work, all: Work[], now: number, jobs: Integration
     if (parent?.stage !== 'done') add('dependency', `Waiting for ${parent?.key ?? dep}`, 'Complete the prerequisite before claiming this item.');
   }
   const owns = work.lease && Date.parse(work.lease.expiresAt) > now;
-  if (work.ready && !owns && (!work.submission || work.reworkRequested)) {
+  if (work.containmentQuarantine) {
+    add('containment-quarantine', `Worker containment from epoch ${work.containmentQuarantine.epoch} has not been verified stopped`, 'The supervising parent must verify shutdown and settle with its capability; if that capability is unavailable, an operator must independently confirm the worker stopped and use the stopped-worker recovery command.');
+  } else if (work.ready && !owns && (!work.submission || work.reworkRequested)) {
     add(work.lastAssignment ? 'unowned-after-assignment' : 'unclaimed', work.lastAssignment ? 'Previous assignment no longer has authority' : 'No worker has claimed this item', 'Check dependencies and resources, then claim a fresh epoch and workspace.');
   }
   if (owns && !work.workspaces.some(w => w.epoch === work.lease!.epoch)) add('workspace-missing', 'Owner has not registered this attempt’s workspace', 'Run worktree or register before starting implementation.');
@@ -59,8 +61,7 @@ export function diagnose(work: Work, all: Work[], now: number, jobs: Integration
 export function proofPreview(work: Work) {
   return work.criteria.flatMap(ac => ac.proofs.map(proof => {
     const pin = work.scenarioRequirements.find(s => s.proof === proof);
-    const matching = work.evidence.filter(e => e.proof === proof && e.trusted && e.sha === work.candidate?.sha && e.baseSha === work.candidate?.baseSha && e.policyRevision === work.policyRevision && (!pin || e.scenarioRevision === pin.revision && e.environment === pin.environment));
-    const evidence = matching.at(-1);
+    const evidence = currentEvidence(work, proof);
     const status = !evidence ? 'unmeasured' : evidence.executed < 1 || evidence.skipped > 0 ? 'incomplete' : evidence.result === 'fail' ? 'failed' : 'passed';
     return { criterion: ac.id, proof, status, scenario: pin, producer: evidence?.producer, evidenceId: evidence?.id };
   }));

@@ -1,5 +1,7 @@
 # Deployment
 
+If this is the first Graphyard installation for a repository, follow [Repository onboarding](onboarding.md) for the complete sequence through Herdr, the master, workers, and the first PR. This guide is the deployment reference for that path.
+
 Graphyard ships one application Docker image and uses a separate Postgres service. The container serves the compiled UI, HTTP API, and reconciliation loop. It stores no durable application data on its filesystem. Worktrees live on worker machines, not inside the control-plane container.
 
 ## Railway
@@ -16,7 +18,7 @@ Graphyard ships one application Docker image and uses a separate Postgres servic
 | `DATABASE_URL` | Reference `${{Postgres.DATABASE_URL}}` to use Railway private networking |
 | `HOST` | `0.0.0.0` for Railway/container ingress |
 | `PORT` | `4310`, or the port supplied by Railway |
-| `GRAPHYARD_PRINCIPALS` | JSON array of individual operator, worker, reader, and proof-producer credentials |
+| `GRAPHYARD_PRINCIPALS` | JSON array of individual operator, coordinator, worker, reader, and proof-producer credentials |
 | `GITHUB_REPOSITORY` | `owner/repository`; one repository per control plane |
 | `GITHUB_BASE_BRANCH` | Usually `main` |
 | `GITHUB_APP_ID` | Dedicated Graphyard GitHub App ID |
@@ -42,6 +44,8 @@ railway domain --service graphyard --port 4310
 ```
 
 Do not paste secrets into committed configuration, screenshots, or issue reports. Each worker should receive only its own token. The initial provisioning helper in `scripts/provision-railway.mjs` is specific to this project's personal Railway deployment; generic installs should follow the variables table.
+
+For a multi-agent installation, add one `coordinator` principal for the recommended [master-agent operating mode](master-agent.md). This identity can read control-plane state but cannot claim work, revise requirements, or submit evidence. Keep its token in the master's ignored mode-0600 configuration. Give every concurrent implementation session a different `worker` principal.
 
 The checked-in `.railway/railway.ts` describes this project's existing personal deployment, including preserved values. It is not a universal fresh-project template: adapt resource/source identities and supply your own secrets before planning a new installation. `preserve()` retains existing values; it does not generate credentials for new services.
 

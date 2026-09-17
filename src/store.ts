@@ -21,6 +21,14 @@ CREATE TABLE IF NOT EXISTS receipts (
   actor text NOT NULL, key text NOT NULL, fingerprint text NOT NULL, result jsonb NOT NULL,
   PRIMARY KEY(actor,key)
 );
+CREATE TABLE IF NOT EXISTS operator_agents (
+  id text PRIMARY KEY, document jsonb NOT NULL
+);
+CREATE TABLE IF NOT EXISTS operator_credentials (
+  agent_id text NOT NULL REFERENCES operator_agents(id), fingerprint text NOT NULL,
+  token_hash text NOT NULL UNIQUE, valid_from timestamptz NOT NULL, valid_until timestamptz,
+  revoked_at timestamptz, PRIMARY KEY(agent_id,fingerprint)
+);
 CREATE TABLE IF NOT EXISTS jobs (
   work_id uuid PRIMARY KEY REFERENCES work_items(id), available_at timestamptz NOT NULL DEFAULT now(),
   locked_until timestamptz, token uuid, attempts int NOT NULL DEFAULT 0, error text
@@ -28,6 +36,31 @@ CREATE TABLE IF NOT EXISTS jobs (
 ALTER TABLE jobs ADD COLUMN IF NOT EXISTS generation bigint NOT NULL DEFAULT 0;
 ALTER TABLE jobs ADD COLUMN IF NOT EXISTS claimed_generation bigint NOT NULL DEFAULT 0;
 CREATE TABLE IF NOT EXISTS webhook_receipts (id text PRIMARY KEY, created_at timestamptz NOT NULL DEFAULT now());
+CREATE TABLE IF NOT EXISTS validation_definitions (
+  kind text NOT NULL, id text NOT NULL, revision int NOT NULL, document jsonb NOT NULL,
+  PRIMARY KEY(kind,id,revision)
+);
+DROP TRIGGER IF EXISTS immutable_validation_definitions ON validation_definitions;
+CREATE TRIGGER immutable_validation_definitions BEFORE UPDATE OR DELETE ON validation_definitions FOR EACH ROW EXECUTE FUNCTION graphyard_immutable();
+CREATE TABLE IF NOT EXISTS validation_builds (id uuid PRIMARY KEY, document jsonb NOT NULL);
+DROP TRIGGER IF EXISTS immutable_validation_builds ON validation_builds;
+CREATE TRIGGER immutable_validation_builds BEFORE UPDATE OR DELETE ON validation_builds FOR EACH ROW EXECUTE FUNCTION graphyard_immutable();
+CREATE TABLE IF NOT EXISTS validation_candidates (id uuid PRIMARY KEY, document jsonb NOT NULL);
+DROP TRIGGER IF EXISTS immutable_validation_candidates ON validation_candidates;
+CREATE TRIGGER immutable_validation_candidates BEFORE UPDATE OR DELETE ON validation_candidates FOR EACH ROW EXECUTE FUNCTION graphyard_immutable();
+CREATE TABLE IF NOT EXISTS validation_requests (id uuid PRIMARY KEY, document jsonb NOT NULL);
+CREATE INDEX IF NOT EXISTS validation_definition_page ON validation_definitions ((document->>'createdAt') DESC,kind DESC,id DESC,revision DESC);
+CREATE INDEX IF NOT EXISTS validation_request_page ON validation_requests ((document->>'createdAt') DESC,id DESC);
+CREATE INDEX IF NOT EXISTS validation_request_state ON validation_requests ((document->>'state'));
+CREATE TABLE IF NOT EXISTS validation_artifacts (
+  id uuid PRIMARY KEY, request_id uuid NOT NULL REFERENCES validation_requests(id),
+  attempt_id uuid NOT NULL, name text NOT NULL, digest text NOT NULL,
+  created_at timestamptz NOT NULL, expires_at timestamptz NOT NULL,
+  media_type text NOT NULL, bytes bytea, deleted_at timestamptz,
+  UNIQUE(request_id,attempt_id,name)
+);
+CREATE INDEX IF NOT EXISTS validation_artifact_expiry ON validation_artifacts(expires_at) WHERE bytes IS NOT NULL;
+CREATE TABLE IF NOT EXISTS validation_resources (resource text PRIMARY KEY, request_id uuid NOT NULL REFERENCES validation_requests(id));
 CREATE TABLE IF NOT EXISTS scenarios (id text NOT NULL, revision int NOT NULL, document jsonb NOT NULL, PRIMARY KEY(id,revision));
 DROP TRIGGER IF EXISTS immutable_scenarios ON scenarios;
 CREATE TRIGGER immutable_scenarios BEFORE UPDATE OR DELETE ON scenarios FOR EACH ROW EXECUTE FUNCTION graphyard_immutable();
@@ -73,6 +106,11 @@ export class Store {
     await this.pool.query(`UPDATE jobs SET token=NULL,locked_until=NULL,error=$3,
       available_at=now()+ CASE WHEN generation<>claimed_generation THEN interval '0 seconds' WHEN $4::boolean THEN interval '2 seconds' WHEN $3::text IS NULL THEN interval '20 seconds' ELSE interval '45 seconds' END
       WHERE work_id=$1 AND token=$2 AND locked_until>clock_timestamp()`, [id, token, error ?? null, retry]);
+  }
+  async deferJob(id: string, token: string, until: string) {
+    await this.pool.query(`UPDATE jobs SET token=NULL,locked_until=NULL,error=NULL,
+      available_at=CASE WHEN generation<>claimed_generation THEN now() ELSE $3::timestamptz END
+      WHERE work_id=$1 AND token=$2 AND locked_until>clock_timestamp()`, [id, token, until]);
   }
 }
 

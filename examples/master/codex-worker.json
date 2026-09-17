@@ -1,0 +1,10 @@
+{
+  "name": "codex-primary",
+  "principal": "codex-1",
+  "agentName": "engineering-codex-1",
+  "mode": "launch",
+  "kind": "codex",
+  "credentialFile": "/home/operator/.config/graphyard/workers/codex-1.token",
+  "agentArgs": [],
+  "environment": {}
+}

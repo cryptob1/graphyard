@@ -1,4 +1,4 @@
-import { ReconciliationRetry, requireCurrent } from './model.js';
+import { MergeExecutionInProgress, ReconciliationRetry, requireCurrent } from './model.js';
 import { createSign, randomUUID } from 'node:crypto';
 import { observeCodex } from './codex-review.js';
 import { readFile } from 'node:fs/promises';
@@ -134,6 +134,22 @@ export class GitHub {
       protected: protectedBranch, files: files.map(f => f.filename), at: startedAt,
     };
   }
+  async verify(work: Work): Promise<Observation> {
+    const first = await this.observe(work);
+    const second = await this.observe(work);
+    const gates = (o: Observation) => JSON.stringify({ candidate: o.candidate, checks: o.checks, reviews: o.reviews, agentReview: o.agentReview, protected: o.protected, merged: o.merged, mergeable: o.mergeable, prState: o.prState, draft: o.draft });
+    demand(gates(first) === gates(second), 'GitHub gates changed during final verification; retry');
+    return second;
+  }
+  async serverTime(): Promise<number> {
+    await this.authenticate();
+    const response = await fetch('https://api.github.com/rate_limit', { headers: { Authorization: `Bearer ${this.token}`, Accept: 'application/vnd.github+json', 'Cache-Control': 'no-cache' }, signal: AbortSignal.timeout(15_000) });
+    this.backoff(response);
+    const time = Date.parse(response.headers.get('date') ?? '');
+    demand(response.ok && Number.isFinite(time), 'GitHub server time is unavailable', 502);
+    await response.body?.cancel();
+    return time;
+  }
   async requestCodex(work: Work, beforeWrite: () => Promise<void>): Promise<ReviewRequest> {
     demand(work.candidate && work.policy.review && work.policy.reviewProvider === 'codex', 'Candidate with Codex review policy required');
     const pr = await this.request(`/pulls/${work.candidate.pr}`);
@@ -190,7 +206,13 @@ export async function processJob(engine: Engine, github: GitHub) {
     await engine.store.finishJob(job.work_id, job.token);
   } catch (error) {
     const message = error instanceof Error ? error.message : 'GitHub reconciliation failed';
-    const latest = (await engine.store.list()).find(w => w.id === job.work_id);
+    const current = (await engine.store.pool.query('SELECT document,clock_timestamp() AS now FROM work_items WHERE id=$1', [job.work_id])).rows[0];
+    const latest = current?.document as Work | undefined;
+    const execution = latest?.mergeExecution;
+    const executionActive = !!execution && Date.parse(execution.expiresAt) > current.now.getTime();
+    if (execution && (executionActive || error instanceof MergeExecutionInProgress)) {
+      await engine.store.deferJob(job.work_id, job.token, execution.expiresAt); return;
+    }
     if (latest?.candidate && latest.stage !== 'done') try { await github.publish(latest, 'Reconciliation failed; fresh verification required', guard(latest, false)); } catch { /* Durable retry follows. */ }
     await engine.store.finishJob(job.work_id, job.token, error instanceof ReconciliationRetry ? undefined : message, error instanceof ReconciliationRetry);
   }

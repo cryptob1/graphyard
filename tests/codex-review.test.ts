@@ -83,6 +83,23 @@ function commentFixture() {
 test('authenticated explicit clean result supersedes an older stuck summary', async () => {
   const f = commentFixture(); const result = await f.run(); assert.equal(result.approved, true); assert.equal(result.resultId, 15);
 });
+test('explicit clean result permits only its matching connector summary completion', async () => {
+  const f = commentFixture();
+  f.summary.body = `<!-- codex-pull-request-review-summary -->\n| 📝 **Code Review** | ✅ **Completed** <relative-time datetime="2026-01-01T00:02:01.250Z">now</relative-time> | \`aaaaaaaaaa\` | Manual request |`;
+  f.summary.updated_at = '2026-01-01T00:02:02Z';
+  assert.equal((await f.run()).approved, true);
+  for (const mutate of [
+    (g: ReturnType<typeof commentFixture>) => { g.summary.body = g.summary.body.replace('aaaaaaaaaa', 'bbbbbbbbbb'); },
+    (g: ReturnType<typeof commentFixture>) => { g.summary.body = g.summary.body.replace('Manual request', 'New commits'); },
+    (g: ReturnType<typeof commentFixture>) => { g.summary.body = g.summary.body.replace('00:02:01.250Z', '00:02:11.250Z'); },
+    (g: ReturnType<typeof commentFixture>) => { g.summary.updated_at = '2026-01-01T00:02:11Z'; },
+  ]) {
+    const g = commentFixture();
+    g.summary.body = `<!-- codex-pull-request-review-summary -->\n| 📝 **Code Review** | ✅ **Completed** <relative-time datetime="2026-01-01T00:02:01.250Z">now</relative-time> | \`aaaaaaaaaa\` | Manual request |`;
+    g.summary.updated_at = '2026-01-01T00:02:02Z'; mutate(g);
+    assert.equal((await g.run()).approved, false);
+  }
+});
 test('explicit results refuse stale, edited, spoofed, conflicting and changing evidence', async () => {
   const changes = [
     (f: ReturnType<typeof commentFixture>) => { f.result.user.id = 99; },
@@ -120,6 +137,9 @@ test('explicit results refuse stale, edited, spoofed, conflicting and changing e
   const {readFile} = await import('node:fs/promises');
   const real = await readFile(new URL('./fixtures/codex-clean-result.txt', import.meta.url), 'utf8');
   const valid = commentFixture(); valid.result.body = real; assert.equal((await valid.run()).approved, true);
+  const currentFooter = `Codex Review: Didn't find any major issues. Bravo.\n\n**Reviewed commit:** \`aaaaaaaaaa\`\n\n<details> <summary>ℹ️ About Codex in GitHub</summary>\n<br/>\n\n[Your team has set up Codex to review pull requests in this repo](https://chatgpt.com/codex/cloud/settings/general). Reviews are triggered when you\n- Open a pull request for review\n- Mark a draft as ready\n- Comment "@codex review".\n\nIf Codex has suggestions, it will comment; otherwise it will react with 👍.\n\nCodex can also answer questions or update the PR. Try commenting "@codex address that feedback".\n</details>`;
+  const current = commentFixture(); current.result.body = currentFooter; assert.equal((await current.run()).approved, true);
+  current.result.body = currentFooter.replace('Try commenting', 'A critical issue remains. Try commenting'); assert.equal((await current.run()).approved, false);
   for (const body of [real + '\nP1: a serious issue', real.replace('Codex can also answer questions', 'Critical bug found. Codex can also answer questions'), commentFixture().result.body + '\nAdditional findings']) {
     const f = commentFixture(); f.result.body = body; assert.equal((await f.run()).approved, false);
   }
@@ -144,7 +164,7 @@ test('migration refuses required code-owner review before making any external ch
     const f = commentFixture(); f.result.body = f.result.body.replace(':+1:', suffix);
     assert.equal((await f.run()).approved, true, suffix);
   }
-  for (const suffix of ['P1: fix authentication', 'Nice work! However, a bug remains.', 'Critical!', 'Please fix the review findings.', 'Unknown protocol payload']) {
+  for (const suffix of ['P1: fix authentication', 'Nice work! However, a bug remains.', 'Critical!', 'Please fix the review findings.', 'Unknown protocol payload', ':rocket: P1: broken authentication', "Can't wait for the next one! However, a critical bug remains."]) {
     const f = commentFixture(); f.result.body = f.result.body.replace(':+1:', suffix);
     assert.equal((await f.run()).approved, false, suffix);
   }
@@ -184,11 +204,53 @@ test('migration refuses required code-owner review before making any external ch
  });
 
 test('dogfood clean-result variants do not require redundant reviews and unknown results explain refusal', async () => {
-  for (const suffix of ['Already looking forward to the next diff.', 'Keep them coming!', 'Another round soon, please!', 'Swish!', 'You’re on a roll!', "You're on a roll!"]) {
+  for (const suffix of ['Already looking forward to the next diff.', 'Keep them coming!', 'Another round soon, please!', 'Swish!', 'You’re on a roll!', "You're on a roll!", "Can't wait for the next one!", ":rocket:"]) {
     const f = commentFixture(); f.result.body = f.result.body.replace(':+1:', suffix);
     assert.equal((await f.run()).approved, true, suffix);
     f.result.updated_at = '2026-01-01T00:03:00Z'; assert.equal((await f.run()).approved, false);
   }
   const f = commentFixture(); f.result.body = f.result.body.replace(':+1:', 'A newly invented unsupported statement.');
   const result = await f.run(); assert.equal(result.approved, false); assert.match(result.reason, /unsupported clean-result format/);
+});
+
+// The exact authenticated connector output observed on PR #17 comment 5690494989.
+const observedResult = 'Codex Review: Didn’t find any major issues. Chef’s kiss.\n\n**Reviewed commit:** `94f65be034`\n';
+test('the observed authenticated clean summary is recognized with either apostrophe spelling', async () => {
+  for (const body of [observedResult, observedResult.replace('Didn’t', "Didn't"), observedResult.replace('Chef’s', "Chef's"), observedResult.replace('kiss.', 'kiss!')]) {
+    const f = commentFixture(); f.result.body = body;
+    const result = await f.run();
+    assert.equal(result.approved, true, body); assert.equal(result.resultId, 15); assert.equal(result.sha, head);
+  }
+});
+test('the newly supported clean summary preserves every existing refusal', async () => {
+  const observed = () => { const f = commentFixture(); f.result.body = observedResult; return f; };
+  // Unknown, ambiguous and finding-bearing verdict text still reaches the explicit refusal.
+  for (const suffix of ['Chef’s kisses.', 'Chef’s kiss. However, a critical issue remains.', 'P1: fix authentication', 'Unknown protocol payload']) {
+    const f = commentFixture(); f.result.body = observedResult.replace('Chef’s kiss.', suffix);
+    const result = await f.run();
+    assert.equal(result.approved, false, suffix); assert.match(result.reason, /unsupported clean-result format/);
+  }
+  const appended = observed(); appended.result.body = observedResult + '\nP1: a serious issue';
+  const appendedResult = await appended.run();
+  assert.equal(appendedResult.approved, false); assert.match(appendedResult.reason, /unsupported clean-result format/);
+  for (const mutate of [
+    (f: ReturnType<typeof commentFixture>) => { f.result.user.id = 99; },
+    (f: ReturnType<typeof commentFixture>) => { f.result.performed_via_github_app.id = 99; },
+    (f: ReturnType<typeof commentFixture>) => { f.request.sha = 'c'.repeat(40); },
+    (f: ReturnType<typeof commentFixture>) => { f.request.policyRevision = 2; },
+    (f: ReturnType<typeof commentFixture>) => { f.result.created_at = f.result.updated_at = f.request.createdAt; },
+    (f: ReturnType<typeof commentFixture>) => { f.result.updated_at = '2026-01-01T00:03:00Z'; },
+    (f: ReturnType<typeof commentFixture>) => { f.trigger.body += 'edited'; },
+    (f: ReturnType<typeof commentFixture>) => { f.resolve('c'.repeat(40)); },
+    (f: ReturnType<typeof commentFixture>) => { f.reviews.push({ user: f.result.user, submitted_at: f.result.created_at }); },
+    (f: ReturnType<typeof commentFixture>) => { f.reactions.push({ user: f.result.user, content: 'eyes' }); },
+    (f: ReturnType<typeof commentFixture>) => { f.comments.push({ id: 16, user: f.result.user, performed_via_github_app: { id: CODEX_APP_ID }, body: 'Starting another review', created_at: '2026-01-01T00:03:00Z', updated_at: '2026-01-01T00:03:00Z' }); },
+    (f: ReturnType<typeof commentFixture>) => { const original = f.source.pages; let reads = 0; f.source.pages = async path => { const rows = await original(path); if (path.endsWith('/comments') && ++reads > 1) rows.find(c => c.id === 15).body += ' edited'; return rows; }; },
+  ]) { const f = observed(); mutate(f); assert.equal((await f.run()).approved, false); }
+  const completed = `<!-- codex-pull-request-review-summary -->\n| 📝 **Code Review** | ✅ **Completed** <relative-time datetime="2026-01-01T00:02:01.250Z">now</relative-time> | \`aaaaaaaaaa\` | Manual request |`;
+  const ambiguous = observed(); ambiguous.summary.body = completed; ambiguous.summary.updated_at = '2026-01-01T00:02:02Z';
+  assert.equal((await ambiguous.run()).approved, true);
+  ambiguous.comments.push({ ...ambiguous.summary, id: 99 });
+  const ambiguousResult = await ambiguous.run();
+  assert.equal(ambiguousResult.approved, false); assert.match(ambiguousResult.reason, /ambiguous/);
 });

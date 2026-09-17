@@ -14,7 +14,7 @@ The lease expires after 120 seconds without a heartbeat. Reconciliation clears t
 
 ## Blocked item with no owner
 
-An operator can clear the blocker with `graphyard unblock GY-N "Contract verified"`. The reason is recorded in the event ledger. Workers may only clear their own blockers while holding the current lease. After the operator resolves an abandoned blocker and the old lease expires, a new worker can claim normally.
+An operator can clear an existing blocker with `graphyard unblock GY-N "Contract verified"`. The CLI sends the task revision it just read and the reason is recorded in the event ledger; stale requests and attempts to clear no blocker are refused. Scoped operator agents similarly release unreleased backlog work with `graphyard ready GY-N "Requirements approved"`, which carries the current revision and reason. Workers may only clear their own blockers while holding the current lease. After the operator resolves an abandoned blocker and the old lease expires, a new worker can claim normally.
 
 ## Submitted implementation needs rework
 
@@ -32,7 +32,7 @@ Own-App check webhooks are ignored. Other signed webhook deliveries wake jobs, b
 
 ## GitHub or Graphyard outage
 
-The database merge gate refuses observations older than two minutes. GitHub's last successful check may still exist; it does not expire automatically. Suspend merging operationally during an integration outage if this matters to your policy. The future merge-broker design should remove reliance on that manual outage response.
+The database merge gate refuses observations older than two minutes. GitHub's last successful check may still exist; it does not expire automatically. Routine master merges acquire a short-lived server authority, transactionally record a final GitHub verification, and freeze relevant Graphyard mutations around the exact-head provider call. A direct GitHub merge has no verified execution and cannot complete its Graphyard work item. Repository rules must restrict alternative merge identities when the merge itself must also be prevented during an outage.
 
 ## Merge bypass
 
@@ -40,7 +40,9 @@ An observed merge with unsatisfied gates creates a permanent violation. Do not b
 
 ## Credentials
 
-Add or rotate principals in `GRAPHYARD_PRINCIPALS`, then redeploy. Use a unique ID for each worker identity and a unique secret for every principal. Rotation invalidates the old credential on restarted replicas; coordinate rolling replicas so old credentials do not remain accepted indefinitely. Revoke GitHub App keys separately from worker credentials.
+Scoped post-bootstrap operator automation uses the transactional credential registry and secret-safe CLI described in [Scoped operator-agent automation](operator-automation.md). It must never use an entry from `GRAPHYARD_PRINCIPALS` with the `admin` role.
+
+Add or rotate principals in `GRAPHYARD_PRINCIPALS`, then redeploy. Use a unique ID for each coordinator and worker identity and a unique secret for every principal. Rotation invalidates the old credential on restarted replicas; coordinate rolling replicas so old credentials do not remain accepted indefinitely. Revoke GitHub App keys separately from worker credentials. A coordinator is read-only at the Graphyard API boundary; its local GitHub CLI access separately controls whether it can invoke the guarded routine-merge flow.
 
 The UI keeps its token in session storage. Sign out on shared machines. Producer credentials should be held by trusted reporters, never by arbitrary PR code. Logs intentionally omit tokens, but operator-provided blocker text and evidence URLs can still contain sensitive data; avoid submitting secrets as engineering metadata.
 

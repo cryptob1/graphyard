@@ -31,22 +31,18 @@ Test behavioral invariants, not implementation details: conflicting claims, stal
 
 ## Bootstrap boundary
 
-The first Graphyard implementation is built by one agent under human supervision. It cannot honestly claim to have governed its own creation. Record the initial code and validation as bootstrap work, then route subsequent work through Graphyard after the control plane, trusted producers, and required GitHub check are connected.
+Graphyard's initial implementation predates its own control plane and remains bootstrap history. The repository now routes new work through Graphyard-assigned worktrees, current-head Codex review, protected CI, trusted acceptance evidence, and guarded master merges.
 
-The first fleet acceptance uses Herdr after the MVP. No autonomous multi-agent fleet is part of the bootstrap build.
-
-Follow [First enforced PR](first-pr.md) to connect the App and protected reporter. `container-acceptance` in regular PR CI validates Docker packaging and the HTTP harness without production credentials. The separate dispatched trusted workflow can publish evidence only from protected main after bootstrap review.
+The [repository bootstrap guide](first-pr.md) documents Graphyard's protected reporter. Regular PR CI validates packaging without production credentials; only the separate protected workflow may publish trusted acceptance evidence.
 
 ## Suggested first dogfooding tasks
 
-1. Exercise operator-mediated recovery for blocked and submitted work across real Herdr hosts.
-2. A merge broker/queue that narrows the cross-system check-revocation race.
-3. Trusted CI inventory reporting with an identity boundary unavailable to PR code.
-4. File-overlap warnings from planned paths and provider-observed changes.
-5. Herdr dispatch acknowledgment and lifecycle hooks, tested across two machines.
-6. Explicit versioned policy edits and requirement-change review.
-7. Pagination, normalized evidence/event storage, and load tests for hundreds of workers.
-8. Deployment/build/environment observations with staging acceptance.
+1. Secure supervised dispatch and acknowledgment across Herdr hosts.
+2. Turnkey execution for pinned E2E scenarios with protected runner identities.
+3. Deployment, environment, and production verification observations.
+4. API and semantic conflict detection beyond current file/resource overlap.
+5. Multi-repository delivery graphs and release coordination.
+6. Pagination, archival export, and measured fleet-scale load tests.
 
 Each task should define an observable outcome and trusted proof names before an implementation agent claims it. Do not weaken policy to get the system's own PRs through its gates. A future policy-engine migration needs an explicit bootstrap/recovery procedure under operator control.
 

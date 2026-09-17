@@ -8,17 +8,33 @@ import { Store } from './store.js';
 import { Engine, type Command } from './engine.js';
 import { Refusal, demand, type Principal } from './model.js';
 import { githubFromEnv, processJob, type GitHub } from './github.js';
+import { Validation } from './validation.js';
 import { defineScenario, scenarios } from './scenarios.js';
+import { OperatorAgents } from './operator-agent.js';
 
-export const principalSchema = z.array(z.object({ id: z.string().min(1), role: z.enum(['admin', 'worker', 'producer', 'reader']), token: z.string().min(32), proofs: z.array(z.string()).optional(), displayName: z.string().trim().min(1).max(100).regex(/^[^\u0000-\u001f\u007f]+$/).optional(), runtime: z.string().trim().min(1).max(80).regex(/^[^\u0000-\u001f\u007f]+$/).optional() }).strict()).min(1);
+export const principalSchema = z.array(z.object({ id: z.string().min(1), role: z.enum(['admin', 'coordinator', 'worker', 'producer', 'reader']), token: z.string().min(32), proofs: z.array(z.string()).optional(), displayName: z.string().trim().min(1).max(100).regex(/^[^\u0000-\u001f\u007f]+$/).optional(), runtime: z.string().trim().min(1).max(80).regex(/^[^\u0000-\u001f\u007f]+$/).optional() }).strict()).min(1);
 export type Credential = Principal & { token: string };
-async function body(req: IncomingMessage) {
+async function body(req: IncomingMessage, limit = 1_000_000) {
   const chunks: Buffer[] = []; let size = 0;
-  for await (const chunk of req) { size += chunk.length; demand(size <= 1_000_000, 'Request exceeds 1 MB', 413); chunks.push(chunk); }
+  for await (const chunk of req) { size += chunk.length; demand(size <= limit, 'Request exceeds size limit', 413); chunks.push(chunk); }
   return Buffer.concat(chunks);
 }
 export function server(engine: Engine, credentials: Credential[], github: GitHub | null = null) {
   const principals = credentials.map(({ token, ...actor }) => ({ actor, hash: createHash('sha256').update(token).digest() }));
+  // The engine is constructed with the repository that this control plane is
+  // authorized to coordinate.  GITHUB_REPOSITORY is merely a process default
+  // (and is automatically set to the CI checkout), so it must not override an
+  // explicit engine binding or scope validation becomes environment-dependent.
+  const repository = engine.repository || github?.config.repository || process.env.GITHUB_REPOSITORY || '';
+  demand(!engine.repository || !github || engine.repository.toLowerCase() === github.config.repository.toLowerCase(),
+    'Engine and GitHub repositories must match');
+  // Keep mutation authorization on the same canonical repository binding used
+  // by authentication and operator-agent administration. Some embedders pass
+  // the repository only through their GitHub adapter.
+  engine.repository = repository;
+  const validation = new Validation(engine, principals.map(p => p.actor), repository);
+  const operatorAgents = new OperatorAgents(engine.store, repository, credentials.map(credential => ({ id: credential.id, tokenHash: createHash('sha256').update(credential.token).digest('hex') })));
+  engine.operatorAuthorizer = operatorAgents.revalidate.bind(operatorAgents);
   return createServer(async (req, res) => {
     res.setHeader('X-Content-Type-Options', 'nosniff');
     res.setHeader('Referrer-Policy', 'no-referrer');
@@ -48,26 +64,84 @@ export function server(engine: Engine, credentials: Credential[], github: GitHub
       if (url.pathname.startsWith('/api/')) {
         const token = String(req.headers.authorization ?? '').replace(/^Bearer /, '');
         const hash = createHash('sha256').update(token).digest();
-        const actor = principals.find(p => timingSafeEqual(p.hash, hash))?.actor;
+        const configured = principals.find(p => timingSafeEqual(p.hash, hash));
+        if (configured) await operatorAgents.assertConfiguredPrincipalSafe({ id: configured.actor.id, tokenHash: hash.toString('hex') });
+        const actor = configured?.actor ?? await operatorAgents.authenticate(token);
         demand(actor, 'A valid Graphyard bearer token is required', 401);
+        if (actor.role === 'operator-agent') demand(actor.scope?.repositories.includes(repository), 'Repository is outside operator-agent scope', 403);
+        if (url.pathname === '/api/operator-agents' && req.method === 'GET') return send(200, await operatorAgents.list(actor));
+        if (url.pathname === '/api/operator-agents' && req.method === 'POST') return send(200, await operatorAgents.setup(actor, JSON.parse((await body(req)).toString()), String(req.headers['idempotency-key'] ?? '')));
+        const operatorRoute = url.pathname.match(/^\/api\/operator-agents\/([^/]+)\/(configure|rotate|revoke)$/);
+        if (operatorRoute && req.method === 'POST') {
+          const data = JSON.parse((await body(req)).toString()), key = String(req.headers['idempotency-key'] ?? '');
+          return send(200, operatorRoute[2] === 'configure' ? await operatorAgents.configure(actor, operatorRoute[1], data, key)
+            : operatorRoute[2] === 'rotate' ? await operatorAgents.rotate(actor, operatorRoute[1], data, key) : await operatorAgents.revoke(actor, operatorRoute[1], data, key));
+        }
+        const operatorVisible = (items: any[]) => actor.role !== 'operator-agent' ? items : items.filter(item => actor.scope?.workItems.includes('*') || actor.scope?.workItems.includes(item.id) || actor.scope?.workItems.includes(item.key));
+        if (actor.role === 'operator-agent') demand(
+          url.pathname === '/api/status' || url.pathname === '/api/work-snapshot' || url.pathname === '/api/work' || url.pathname === '/api/events' || /^\/api\/work(?:\/[^/]+\/[a-z]+)?$/.test(url.pathname),
+          'Route is not available to operator agents', 403);
+        if (url.pathname === '/api/validation/artifacts' && req.method === 'POST') return send(200, await validation.uploadArtifact(actor, JSON.parse((await body(req, 11_200_000)).toString()), String(req.headers['idempotency-key'] ?? '')));
+        const artifactRead = url.pathname.match(/^\/api\/validation\/artifacts\/([^/]+)\/([^/]+)$/);
+        if (artifactRead && req.method === 'GET') {
+          const artifact = await validation.readArtifact(actor, artifactRead[1], artifactRead[2]);
+          res.writeHead(200, { 'Content-Type': 'application/octet-stream', 'Content-Disposition': 'attachment; filename="graphyard-artifact"', 'Content-Length': artifact.bytes.length });
+          return res.end(artifact.bytes);
+        }
+        if (url.pathname === '/api/validation' && req.method === 'GET') return send(200, await validation.list(url.searchParams.get('cursor') ?? undefined));
+        if (url.pathname === '/api/validation/definitions' && req.method === 'GET') return send(200, await validation.definitions(url.searchParams.get('cursor') ?? undefined));
+        const candidateRead = url.pathname.match(/^\/api\/validation\/candidate\/([^/]+)$/);
+        if (candidateRead && req.method === 'GET') return send(200, await validation.readCandidate(candidateRead[1]));
+        const validationRoute = url.pathname.match(/^\/api\/validation\/(define|build|candidate|request|dispatch|ack|heartbeat|result|cancel|settle|retry)$/);
+        if (validationRoute && req.method === 'POST') {
+          const command = validationRoute[1], data = JSON.parse((await body(req)).toString()), key = String(req.headers['idempotency-key'] ?? '');
+          const result = command === 'define' ? await validation.define(actor, data, key)
+            : command === 'build' ? await validation.attestBuild(actor, data, key)
+            : command === 'candidate' ? await validation.createCandidate(actor, data, key)
+            : command === 'request' ? await validation.createRequest(actor, data, key)
+            : command === 'dispatch' ? await validation.dispatch(actor, data, key)
+            : command === 'result' ? await validation.result(actor, data, key)
+            : command === 'ack' || command === 'heartbeat' ? await validation.runnerCommand(actor, command, data, key)
+            : await validation.operatorCommand(actor, command as 'cancel' | 'settle' | 'retry', data, key);
+          return send(200, result);
+        }
         if (url.pathname === '/api/scenarios') {
           if (req.method === 'GET') return send(200, await scenarios(engine.store));
           if (req.method === 'POST') return send(200, await defineScenario(engine.store, actor, JSON.parse((await body(req)).toString()), String(req.headers['idempotency-key'] ?? '')));
         }
         if (req.method === 'GET' && url.pathname === '/api/status') {
-          const jobs = (await engine.store.pool.query('SELECT work_id,available_at,locked_until,attempts,error FROM jobs WHERE error IS NOT NULL ORDER BY available_at LIMIT 50')).rows;
+          const jobs = actor.role === 'operator-agent' ? [] : (await engine.store.pool.query('SELECT work_id,available_at,locked_until,attempts,error FROM jobs WHERE error IS NOT NULL ORDER BY available_at LIMIT 50')).rows;
           const githubRepository = github ? await github.reviewRepository() : null;
           const githubPermissions = github ? await github.reviewPermissions() : {};
           const codexAvailable = !!githubRepository && githubPermissions.pull_requests === 'write' && ['read', 'write'].includes(githubPermissions.issues) && githubPermissions.checks === 'write';
           const observedAt = (await engine.store.pool.query('SELECT clock_timestamp() AS now')).rows[0].now as Date;
-          return send(200, { actor, repository: github?.config.repository ?? process.env.GITHUB_REPOSITORY ?? null, github: !!github, check: 'Graphyard / merge', reviewProviders: codexAvailable ? ['github', 'codex'] : ['github'], githubPermissions, githubRepository, githubAppId: github?.config.appId ?? null, githubInstallationId: github?.config.installationId ?? null, jobs, now: observedAt.toISOString() });
+          return send(200, { actor, repository: repository || null, baseBranch: github?.config.base ?? process.env.GITHUB_BASE_BRANCH ?? 'main', github: !!github, check: 'Graphyard / merge', reviewProviders: codexAvailable ? ['github', 'codex'] : ['github'], githubPermissions, githubRepository, githubAppId: github?.config.appId ?? null, githubInstallationId: github?.config.installationId ?? null, jobs, now: observedAt.toISOString() });
         }
-        if (req.method === 'GET' && url.pathname === '/api/work-snapshot') return send(200, await engine.store.workSnapshot());
-        if (req.method === 'GET' && url.pathname === '/api/work') return send(200, await engine.store.list());
+        if (req.method === 'GET' && url.pathname === '/api/work-snapshot') { const snapshot = await engine.store.workSnapshot(); const visibleWork = operatorVisible(snapshot.work); return send(200, { ...snapshot, work: visibleWork, jobs: actor.role === 'operator-agent' ? snapshot.jobs.filter(job => visibleWork.some(work => work.id === job.work_id)) : snapshot.jobs }); }
+        if (req.method === 'GET' && url.pathname === '/api/work') return send(200, operatorVisible(await engine.store.list()));
         if (req.method === 'GET' && url.pathname === '/api/events') {
           const id = url.searchParams.get('work') ?? undefined;
           if (id) z.string().uuid().parse(id);
+          if (actor.role === 'operator-agent') { demand(id, 'Operator-agent history reads require a scoped work item', 403); const item = (await engine.store.list()).find(w => w.id === id); demand(item && operatorVisible([item]).length, 'Work item is outside this operator-agent scope', 403); }
           return send(200, await engine.store.events(id));
+        }
+        const mergeRoute = url.pathname.match(/^\/api\/work\/([^/]+)\/merge-(acquire|cancel|verify)$/);
+        if (req.method === 'POST' && mergeRoute) {
+          const data = JSON.parse((await body(req)).toString() || '{}'), key = String(req.headers['idempotency-key'] ?? '');
+          if (mergeRoute[2] === 'acquire') return send(200, await engine.acquireMerge(actor, mergeRoute[1], data, key));
+          if (mergeRoute[2] === 'cancel') return send(200, await engine.cancelMerge(actor, mergeRoute[1], data, key));
+          demand(actor.role === 'coordinator' || actor.role === 'admin', 'Coordinator permission required', 403);
+          demand(github, 'GitHub integration is required for merge verification', 503);
+          const work = (await engine.store.list()).find(item => item.id === mergeRoute[1] || item.key === mergeRoute[1]); demand(work?.submission, 'Submitted work item required', 404);
+          const replay = await engine.replayMergeVerification(actor, work.id, data, key); if (replay) return send(200, replay);
+          const observation = await github.verify(work);
+          const before = (await engine.store.pool.query('SELECT clock_timestamp() AS now')).rows[0].now as Date;
+          const providerTime = await github.serverTime();
+          const after = (await engine.store.pool.query('SELECT clock_timestamp() AS now')).rows[0].now as Date;
+          // Bound DB minus GitHub time using the request interval and GitHub's
+          // whole-second Date precision. Keep all network I/O outside transactions.
+          observation.clockOffset = { min: before.getTime() - providerTime - 1000, max: after.getTime() - providerTime };
+          return send(200, await engine.verifyMerge(actor, work.id, data, observation, key));
         }
         const match = url.pathname.match(/^\/api\/work(?:\/([^/]+)\/([a-z]+))?$/);
         if (req.method === 'POST' && match) {
@@ -103,10 +177,13 @@ async function main() {
   const engine = new Engine(store, (process.env.GITHUB_CI_APP_IDS ?? '15368').split(',').map(Number));
   const github = await githubFromEnv();
   const http = server(engine, credentials, github);
+  const validation = new Validation(engine, credentials.map(({ token, ...actor }) => actor), github?.config.repository ?? process.env.GITHUB_REPOSITORY ?? '');
+  await validation.expireArtifacts();
+  await validation.reconcile(true);
   let running = false;
   const timer = setInterval(async () => {
     if (running) return; running = true;
-    try { await engine.reconcile(); if (github) await Promise.all(Array.from({ length: 4 }, () => processJob(engine, github))); }
+    try { await validation.expireArtifacts(); await validation.reconcile(); await engine.reconcile(); if (github) await Promise.all(Array.from({ length: 4 }, () => processJob(engine, github))); }
     catch (error) { console.error('reconciliation failed', error instanceof Error ? error.message : 'unknown'); }
     finally { running = false; }
   }, 2000);

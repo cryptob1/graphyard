@@ -16,6 +16,26 @@ async function fixture(page: Page, role = 'admin') {
 }
 async function login(page: Page, value = 'browser-fixture') { await page.getByLabel('Access token').fill(value); await page.getByRole('button', { name: 'Open control plane' }).click(); }
 
+for (const viewport of [{ name: 'desktop', width: 1280, height: 900 }, { name: 'mobile', width: 390, height: 844 }]) {
+  test(`How Graphyard works is a readable visual guide on ${viewport.name}`, async ({ page }) => {
+    await page.setViewportSize(viewport);
+    await page.goto('/docs/how-graphyard-works');
+    await expect(page.getByRole('heading', { name: 'How Graphyard works', level: 1 })).toBeVisible();
+    const flow = page.locator('.how-guide > ol');
+    await expect(flow.locator(':scope > li')).toHaveCount(10);
+    const cards = await flow.locator(':scope > li').evaluateAll(elements => elements.map(element => element.getBoundingClientRect().top));
+    expect(cards).toEqual([...cards].sort((a, b) => a - b));
+    expect(new Set(cards).size).toBe(cards.length);
+    await expect(flow.getByText('Setup', { exact: true })).toBeVisible();
+    await expect(flow.getByText('Done', { exact: true })).toBeVisible();
+    await expect(page.getByRole('heading', { name: 'Who does what' })).toBeVisible();
+    await expect(page.getByText('Graphyard: delivery authority')).toBeVisible();
+    await expect(page.getByText('Herdr: runtime supervision')).toBeVisible();
+    const bounds = await page.locator('.docs-shell').evaluate(element => ({ width: element.clientWidth, content: element.scrollWidth }));
+    expect(bounds.content).toBeLessThanOrEqual(bounds.width);
+  });
+}
+
 test('invalid login remains on login; whitespace is trimmed and loading never claims empty work', async ({ page }) => {
   const state = await fixture(page);
   await login(page, 'invalid');
@@ -221,4 +241,28 @@ test('work details explain missing proof and operator can revise explicit criter
   await expect(form).toHaveCount(0);
   expect(body.expectedPolicyRevision).toBe(1); expect(body.criteria[1]).toEqual({ id: 'AC-2', text: 'An explicit second outcome', proofs: ['integration:second'] });
   expect(body.reason).toBe('New behavior discovered during planning'); expect(state.writes).toBe(0);
+});
+
+test('validation view reports failures honestly and bounds request history', async ({ page }) => {
+  await fixture(page); let fail = true;
+  const requests = Array.from({ length: 25 }, (_, i) => ({ id: `request-${i}`, workId: work.id, proof: 'e2e:behavior', candidateId: 'candidate', runner: { id: 'runner' }, collector: { id: 'collector' }, state: 'expired', attempts: [{ id: `attempt-${i}`, epoch: 1, state: 'expired', settled: false, dispatchedAt: '2026-01-01T00:00:00Z' }], maxAttempts: 2, deadline: '2026-01-01T01:00:00Z', createdAt: '2026-01-01T00:00:00Z' }));
+  let olderReads = 0;
+  await page.route('**/api/validation*', route => {
+    const older = new URL(route.request().url()).searchParams.has('cursor'); if (older) olderReads++;
+    return route.fulfill(fail ? { status: 503, json: { error: 'Validation unavailable' } } : { json: { candidates: [], requests: older ? requests.slice(20) : requests.slice(0,20), nextCursor: older ? null : 'page-two' } });
+  });
+  await login(page); await page.getByRole('button', { name: '↻ Validation' }).click();
+  await expect(page.getByRole('heading', { name: 'Validation requests' })).toBeVisible();
+  await expect(page.getByRole('alert')).toContainText('Validation unavailable');
+  await expect(page.getByText('No validation requested yet.')).toHaveCount(0);
+  fail = false; await page.getByRole('button', { name: 'Retry validation requests' }).click();
+  await expect(page.locator('.scenario-card')).toHaveCount(20);
+  await expect(page.getByText('Resources remain reserved.', { exact: false })).toHaveCount(20);
+  expect(olderReads).toBe(0);
+  await page.getByRole('button', { name: 'Load older requests' }).click();
+  await expect(page.locator('.scenario-card')).toHaveCount(25);
+  expect(olderReads).toBe(1);
+  await expect(page.getByText('Browsing history; live updates paused.', { exact: false })).toBeVisible();
+  await page.getByRole('button', { name: 'Return to latest' }).click();
+  await expect(page.locator('.scenario-card')).toHaveCount(20);
 });
