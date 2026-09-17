@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
+import { fileURLToPath } from 'node:url';
 import { createHash, randomUUID } from 'node:crypto';
 import { assembleResult, attributeExecution, collectArtifacts, collectionBinding, deriveSettlement, selfReportedObservation, type TargetObservation } from '../src/runner-collector.js';
 import { containerNames, type AttemptGrant, type ExecutionRecord } from '../src/runner-executor.js';
@@ -222,7 +223,7 @@ test('a real Playwright attempt is collected end to end, and a broken assertion 
     await writeFile(config, `export default { testDir: '.', retries: 0, workers: 1, reporter: [[${JSON.stringify(resolve('src/playwright-reporter.ts'))}]] };`);
     const output = join(root, 'output'); await mkdir(output, { mode: 0o700 });
     async function phase(file: string, list: boolean) {
-      try { await run(process.execPath, [resolve('node_modules/playwright/cli.js'), 'test', '--config', config, ...(list ? ['--list'] : [])], { env: { ...process.env, GRAPHYARD_REPORT_FILE: join(output, file) }, timeout: 60_000 }); } catch { /* behaviour is read from the report, not the exit code */ }
+      try { await run(process.execPath, [fileURLToPath(import.meta.resolve('@playwright/test/cli')), 'test', '--config', config, ...(list ? ['--list'] : [])], { env: { ...process.env, GRAPHYARD_REPORT_FILE: join(output, file) }, timeout: 60_000 }); } catch { /* behaviour is read from the report, not the exit code */ }
     }
     await writeFile(spec, `import { test, expect } from '@playwright/test'; test('books are listed', async () => { await test.step('private-step-marker', async () => { expect(1).toBe(1); }); });`);
     await phase('inventory.json', true);
