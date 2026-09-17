@@ -36,6 +36,41 @@ for (const viewport of [{ name: 'desktop', width: 1280, height: 900 }, { name: '
   });
 }
 
+for (const viewport of [{ name: 'desktop', width: 1280, height: 900 }, { name: 'mobile', width: 390, height: 844 }]) {
+  test(`dashboard durations use adaptive units with accessible text and no clipping on ${viewport.name}`, async ({ page }) => {
+    const at = (minutesAgo: number) => new Date(Date.now() - minutesAgo * 60000).toISOString();
+    const item = (key: string, stage: string, minutesAgo: number) => ({ ...work, id: `fixture-${key.toLowerCase()}`, key, stage, stageEnteredAt: at(minutesAgo) });
+    const items = [item('GY-2', 'ready', 45), item('GY-3', 'review', 894), item('GY-4', 'review', 890), item('GY-5', 'build', 3060), item('GY-6', 'build', 3055)];
+    await page.setViewportSize(viewport);
+    await page.route('**/api/**', async route => {
+      if (route.request().headers().authorization !== 'Bearer browser-fixture') return route.fulfill({ status: 401, json: { error: 'Rejected' } });
+      const path = new URL(route.request().url()).pathname;
+      if (path.endsWith('/status')) return route.fulfill({ json: { actor: { id: 'fixture', role: 'admin' }, github: true, reviewProviders: ['github'], repository: 'fixture/repository', jobs: [] } });
+      if (path.endsWith('/work-snapshot')) return route.fulfill({ json: { work: items, now: new Date().toISOString() } });
+      return route.fulfill({ json: [] });
+    });
+    await page.goto('/'); await login(page);
+    const node = (stage: string) => page.locator('.node', { hasText: stage });
+    await expect(node('Ready')).toContainText('Oldest 45m');
+    await expect(node('Ready')).toContainText('p50 45m · p95 45m');
+    await expect(node('Review')).toContainText('Oldest 14h 54m');
+    await expect(node('Review')).toContainText('p50 14h 54m · p95 14h 54m');
+    await expect(node('Build')).toContainText('Oldest 2d 3h');
+    await expect(node('Build')).toContainText('p50 2d 3h · p95 2d 3h');
+    await expect(node('Backlog')).toContainText('Clear');
+    await expect(node('Backlog')).toContainText('—');
+    await expect(page.locator('.node small span[title]')).toHaveCount(8);
+    await expect(node('Build').locator('span[title]')).toHaveAttribute('title', /50th and 95th percentile/);
+    await expect(node('Merge').locator('span[title]')).toHaveAttribute('title', 'No dwell data to summarize for this stage yet');
+    await expect(page.locator('.card-top', { hasText: 'GY-2' })).toContainText('45m');
+    await expect(page.locator('.card-top', { hasText: 'GY-3' })).toContainText('14h 54m');
+    await expect(page.locator('.card-top', { hasText: 'GY-5' })).toContainText('2d 3h');
+    await expect(page.locator('.card-top', { hasText: 'GY-6' })).toContainText('2d 2h');
+    const clipped = await page.locator('.node').evaluateAll(nodes => nodes.flatMap(node => [node, ...node.querySelectorAll('small')].map(element => element.scrollWidth > element.clientWidth)));
+    expect(clipped).not.toContain(true);
+  });
+}
+
 test('invalid login remains on login; whitespace is trimmed and loading never claims empty work', async ({ page }) => {
   const state = await fixture(page);
   await login(page, 'invalid');
