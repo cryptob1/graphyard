@@ -5,7 +5,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 
 export const CHECK_NAME = 'Graphyard / merge';
 
-export function evaluateEnforcement({ repository, baseBranch, appId, protection, rulesets = [], pull, checkRuns, work }) {
+export function evaluateEnforcement({ repository, baseBranch, appId, protection, rulesets = [], pull, checkRuns, work, now }) {
   const requireNativeReview = !!work.policy?.review && (work.policy?.reviewProvider ?? 'github') !== 'codex';
   const required = protection?.required_status_checks?.checks ?? [];
   const bound = required.find(c => c.context === CHECK_NAME) ?? null;
@@ -22,23 +22,39 @@ export function evaluateEnforcement({ repository, baseBranch, appId, protection,
     if (requireNativeReview && !(review?.required_approving_review_count >= 1 && review?.dismiss_stale_reviews && review?.require_last_push_approval))
       protectionFindings.push('This work still selects native GitHub review, which requires a nonzero approval count, stale-review dismissal and last-push approval');
   }
-  const published = checkRuns.filter(run => run.name === CHECK_NAME).sort((a, b) => String(b.started_at ?? '').localeCompare(String(a.started_at ?? '')))[0] ?? null;
+  const namedRuns = checkRuns.filter(run => run.name === CHECK_NAME).sort((a, b) => String(b.started_at ?? '').localeCompare(String(a.started_at ?? '')));
+  const published = namedRuns.find(run => run.app?.id === appId) ?? namedRuns[0] ?? null;
   const linked = published?.pull_requests?.map(p => p.number) ?? [];
   const gates = (work.gates ?? []).map(gate => ({ name: gate.name, passed: !!gate.passed, reasons: gate.reasons ?? [] }));
+  const candidate = work.candidate ?? null;
+  const observationAge = Date.parse(now ?? '') - Date.parse(work.observation?.at ?? '');
+  const candidateFindings = [
+    ...(!candidate ? ['work has no current candidate'] : []),
+    ...(candidate && work.submission?.pr !== candidate.pr ? [`submitted PR ${work.submission?.pr ?? 'missing'} does not match candidate PR ${candidate.pr}`] : []),
+    ...(candidate && pull.number !== candidate.pr ? [`inspected PR ${pull.number} does not match candidate PR ${candidate.pr}`] : []),
+    ...(candidate && pull.head?.sha !== candidate.sha ? [`pull request head ${pull.head?.sha ?? 'missing'} does not match candidate head ${candidate.sha}`] : []),
+    ...(candidate && pull.base?.sha !== candidate.baseSha ? [`pull request base ${pull.base?.sha ?? 'missing'} does not match candidate base ${candidate.baseSha}`] : []),
+    ...(pull.base?.ref !== baseBranch ? [`pull request targets ${pull.base?.ref ?? 'missing'}, not the managed base branch ${baseBranch}`] : []),
+  ];
+  const observationFinding = !Number.isFinite(observationAge) || observationAge < 0 || observationAge >= 120_000
+    ? 'Graphyard observation is missing, future-dated, or older than two minutes' : null;
+  const blockingMergeStates = new Set(['blocked', 'behind', 'dirty', 'draft', 'unknown']);
   const refusals = [
     ...gates.filter(gate => !gate.passed).flatMap(gate => gate.reasons.map(reason => `${gate.name} gate: ${reason}`)),
     ...protectionFindings.map(finding => `branch protection: ${finding}`),
+    ...candidateFindings.map(finding => `candidate: ${finding}`),
+    ...(observationFinding ? [`observation: ${observationFinding}`] : []),
     ...(!published ? [`${CHECK_NAME} has not been published on head ${pull.head?.sha ?? 'unknown'}`]
       : published.conclusion !== 'success' ? [`${CHECK_NAME} reports ${published.status === 'completed' ? published.conclusion : published.status}`]
       : published.app?.id !== appId ? [`${CHECK_NAME} on this head was published by App ${published.app?.id ?? 'unknown'}, not the dedicated App ${appId}`] : []),
     ...(pull.merged ? ['pull request is already merged'] : []),
-    ...(pull.state !== 'open' ? [`pull request state is ${pull.state}`] : pull.draft ? ['pull request is a draft'] : pull.mergeable !== true ? [`GitHub reports mergeable=${pull.mergeable} (${pull.mergeable_state ?? 'unknown'})`] : []),
+    ...(pull.state !== 'open' ? [`pull request state is ${pull.state}`] : pull.draft ? ['pull request is a draft'] : pull.mergeable !== true ? [`GitHub reports mergeable=${pull.mergeable} (${pull.mergeable_state ?? 'unknown'})`]
+      : blockingMergeStates.has(pull.mergeable_state ?? 'unknown') ? [`GitHub reports blocking merge state ${pull.mergeable_state ?? 'unknown'}`] : []),
   ];
   const notes = [
     ...(!rulesets ? ['Repository rulesets could not be read; inspect them manually for alternate merge paths']
       : rulesets.length ? [`Active rulesets are not read by the merge verifier; inspect ${rulesets.map(r => r.name).join(', ')} for alternate merge paths`] : []),
     ...(published?.conclusion === 'success' && linked.length && !linked.includes(pull.number) ? [`The successful check on this head is linked to PR ${linked.join(', ')}; check runs are commit-scoped and can be inherited`] : []),
-    ...(pull.base?.ref !== baseBranch ? [`Pull request targets ${pull.base?.ref}, not the managed base branch ${baseBranch}`] : []),
   ];
   return {
     repository, baseBranch, work: { key: work.key, stage: work.stage, policyRevision: work.policyRevision, reviewProvider: work.policy?.reviewProvider ?? 'github' },
@@ -46,7 +62,7 @@ export function evaluateEnforcement({ repository, baseBranch, appId, protection,
     app: { dedicated: appId, publishedCheck: published ? { appId: published.app?.id ?? null, appSlug: published.app?.slug ?? null, status: published.status, conclusion: published.conclusion, linkedPullRequests: linked } : null },
     protection: { strict: !!protection?.required_status_checks?.strict, enforceAdmins: !!protection?.enforce_admins?.enabled, forcePushesAllowed: !!protection?.allow_force_pushes?.enabled, deletionsAllowed: !!protection?.allow_deletions?.enabled,
       checkBinding: bound ? { context: bound.context, appId: bound.app_id ?? null } : null, nativeReviewRequired: requireNativeReview, nativeReview: review ? { approvals: review.required_approving_review_count, dismissStale: !!review.dismiss_stale_reviews, lastPushApproval: !!review.require_last_push_approval } : null, findings: protectionFindings },
-    gates, notes, verdict: refusals.length ? 'refused' : 'permitted', refusals,
+    gates, observation: { at: work.observation?.at ?? null, serverNow: now ?? null, fresh: !observationFinding }, notes, verdict: refusals.length ? 'refused' : 'permitted', refusals,
     limits: ['This is an inspection report, not evidence. Only an operator may attest manual:github-enforcement.',
       'A permitted verdict describes this observation; Graphyard re-verifies the exact candidate immediately before any merge.'],
   };
@@ -64,10 +80,12 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
     const repository = status.repository, baseBranch = status.baseBranch ?? 'main', appId = status.githubAppId;
     if (!repository || !Number.isSafeInteger(appId)) throw new Error('The live server does not report a managed repository and dedicated App; connect the App first');
     const gh = path => JSON.parse(execFileSync('gh', ['api', path], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }));
+    const ghPages = (path, field) => JSON.parse(execFileSync('gh', ['api', '--paginate', '--slurp', path], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }))
+      .flatMap(page => page?.[field] ?? []);
     const pull = gh(`repos/${repository}/pulls/${pr}`);
     const optional = path => { try { return gh(path); } catch { return null; } };
-    const protection = optional(`repos/${repository}/branches/${baseBranch}/protection`);
+    const protection = optional(`repos/${repository}/branches/${encodeURIComponent(baseBranch)}/protection`);
     console.log(JSON.stringify(evaluateEnforcement({ repository, baseBranch, appId, protection, rulesets: optional(`repos/${repository}/rulesets`),
-      pull, checkRuns: gh(`repos/${repository}/commits/${pull.head.sha}/check-runs?filter=latest&per_page=100`).check_runs, work }), null, 2));
+      pull, checkRuns: ghPages(`repos/${repository}/commits/${pull.head.sha}/check-runs?filter=latest&per_page=100`, 'check_runs'), work, now: status.now }), null, 2));
   } catch (error) { console.error(error.message); process.exitCode = 1; }
 }

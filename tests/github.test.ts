@@ -162,15 +162,18 @@ test('draft and closed PRs expose actionable review waits without requesting pro
 
 
 function enforcement(overrides: any = {}) {
+  const now = '2026-09-17T05:00:00.000Z';
   return {
-    repository: 'owner/repo', baseBranch: 'main', appId: 1234,
+    repository: 'owner/repo', baseBranch: 'main', appId: 1234, now,
     protection: { required_status_checks: { strict: true, checks: [{ context: CHECK_NAME, app_id: 1234 }, { context: 'test', app_id: 15368 }] },
       required_pull_request_reviews: { required_approving_review_count: 1, dismiss_stale_reviews: true, require_last_push_approval: true },
       enforce_admins: { enabled: true }, allow_force_pushes: { enabled: false }, allow_deletions: { enabled: false } },
     rulesets: [],
     pull: { number: 10, head: { sha: head }, base: { sha: base, ref: 'main' }, state: 'open', draft: false, merged: false, mergeable: true, mergeable_state: 'clean' },
     checkRuns: [{ name: CHECK_NAME, status: 'completed', conclusion: 'success', app: { id: 1234, slug: 'graphyard' }, pull_requests: [{ number: 10 }] }],
-    work: { key: 'GY-1', stage: 'merge', policyRevision: 1, policy: { review: true, reviewProvider: 'codex', checks: ['test'] }, gates: [{ name: 'acceptance', passed: true, reasons: [] }, { name: 'merge', passed: true, reasons: [] }] },
+    work: { key: 'GY-1', stage: 'merge', policyRevision: 1, policy: { review: true, reviewProvider: 'codex', checks: ['test'] },
+      submission: { pr: 10, epoch: 1 }, candidate: { pr: 10, sha: head, baseSha: base, branch: 'topic', author: 'worker' }, observation: { at: now },
+      gates: [{ name: 'acceptance', passed: true, reasons: [] }, { name: 'merge', passed: true, reasons: [] }] },
     ...overrides,
   };
 }
@@ -224,4 +227,29 @@ test('enforcement inspection reports the native-review migration boundary and co
   assert.equal(inherited.verdict, 'permitted');
   assert.match(inherited.notes.join('\n'), /commit-scoped and can be inherited/);
   assert.match(evaluateEnforcement(enforcement({ rulesets: null })).notes.join('\n'), /rulesets could not be read/);
+});
+
+test('enforcement inspection binds the exact candidate and refuses stale or blocking observations', () => {
+  const mismatches: [any, RegExp][] = [
+    [{ pull: { ...enforcement().pull, number: 11 } }, /inspected PR 11/],
+    [{ pull: { ...enforcement().pull, head: { sha: 'c'.repeat(40) } } }, /does not match candidate head/],
+    [{ pull: { ...enforcement().pull, base: { sha: 'd'.repeat(40), ref: 'main' } } }, /does not match candidate base/],
+    [{ pull: { ...enforcement().pull, base: { sha: base, ref: 'release\/v1' } } }, /not the managed base branch/],
+    [{ pull: { ...enforcement().pull, mergeable_state: 'blocked' } }, /blocking merge state blocked/],
+    [{ work: { ...enforcement().work, observation: { at: '2026-09-17T04:57:59.999Z' } } }, /older than two minutes/],
+  ];
+  for (const [override, expected] of mismatches) {
+    const report = evaluateEnforcement(enforcement(override));
+    assert.equal(report.verdict, 'refused');
+    assert.match(report.refusals.join('\n'), expected);
+  }
+});
+
+test('enforcement inspection selects the dedicated App run before a newer same-name foreign run', () => {
+  const report = evaluateEnforcement(enforcement({ checkRuns: [
+    { name: CHECK_NAME, started_at: '2026-09-17T05:01:00Z', status: 'completed', conclusion: 'failure', app: { id: 999, slug: 'foreign' } },
+    { name: CHECK_NAME, started_at: '2026-09-17T05:00:00Z', status: 'completed', conclusion: 'success', app: { id: 1234, slug: 'graphyard' }, pull_requests: [{ number: 10 }] },
+  ] }));
+  assert.equal(report.verdict, 'permitted');
+  assert.equal(report.app.publishedCheck.appId, 1234);
 });
