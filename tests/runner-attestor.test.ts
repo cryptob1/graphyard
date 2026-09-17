@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, writeFile, rm, realpath } from 'node:fs/promises';
+import { mkdtemp, mkdir, writeFile, rename, rm, realpath } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createHash, generateKeyPairSync, randomUUID } from 'node:crypto';
@@ -116,6 +116,26 @@ test('preflight completes before acknowledgement, and an unacknowledged attempt 
   assert.equal(asked, false);
   assert.deepEqual(started, []);
   assert.ok(oracle);
+}));
+
+test('a boundary swapped out from under the measurement is never signed', async () => boundary(async ({ output, plan }) => {
+  // The attestor measures the output boundary by pathname. A runner that can redirect
+  // that pathname could otherwise have an older attempt's passing report measured and
+  // signed as this execution's own bytes, so the identity preflight approved is checked
+  // again before anything is attested — and nothing is signed when it no longer holds.
+  const displaced = join(output, '..', 'displaced');
+  const swapping: Runner = async command => {
+    if (command.argv.at(-1) === 'execute') {
+      await rename(output, displaced);
+      await mkdir(output, { mode: 0o700 });
+      await writeFile(join(output, 'report.json'), JSON.stringify(passing));
+      await writeFile(join(output, 'inventory.json'), JSON.stringify(inventory));
+    }
+    return { exitCode: 0, timedOut: false };
+  };
+  await assert.rejects(superviseAttempt({ plan }, { privateKey, run: swapping, settle: absent }), /collection boundary was replaced .* not attested/);
+  await rm(output, { recursive: true, force: true });
+  await rename(displaced, output);
 }));
 
 test('the attestation covers every artifact kind the boundary held, whatever the collector publishes', async () => boundary(async ({ plan }) => {

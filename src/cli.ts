@@ -6,7 +6,7 @@ import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import { supervise } from './supervisor.js';
 import { inspectRunnerRepository, oracleBundleDigest, snapshotRunnerSources } from './runner-setup.js';
 import { assertRunnerCredentialScope, attemptGrantSchema, containerNames, executionPlanSchema, executionRecordSchema, observeContainers } from './runner-executor.js';
-import { assembleResult, collectArtifacts, collectionBinding, targetObservationSchema } from './runner-collector.js';
+import { assembleResult, collectArtifacts, collectionBinding, collectionInputs, targetObservationSchema } from './runner-collector.js';
 import { superviseAttempt } from './runner-attestor.js';
 import { assertRepository, discover } from './onboarding.js';
 import { startGithubSetup } from './github-setup.js';
@@ -330,10 +330,15 @@ Never share an operator or producer credential with an implementation agent.`); 
       // Settlement is the collector's own observation of the execution host, never the
       // runner's claim about itself.
       const settlementObservations = await observeContainers(containerNames(grant.attemptId), { dockerHost: grant.executionHost });
-      const collected = await collectArtifacts(collectedFrom, input.requiredArtifacts);
+      // Read every approved kind the boundary holds, whatever this collector publishes:
+      // behaviour cannot be verified from the execution report alone, and a kind left
+      // unread would look like output the approved reporter never wrote. Only the upload
+      // below is narrowed to the configured subset.
+      const collected = await collectArtifacts(collectedFrom, collectionInputs(input.requiredArtifacts));
+      const publish = new Set(input.requiredArtifacts);
       const uploaded: { name: string; digest: string; url: string }[] = [];
       const failures: string[] = [];
-      for (const artifact of collected.artifacts) {
+      for (const artifact of collected.artifacts.filter(a => publish.has(a.name))) {
         if (collectionAuthorityError) throw new Error('Collection authority could not be renewed; no artifact or result was published');
         try {
           const body = { requestId: grant.requestId, attemptId: grant.attemptId, epoch: grant.epoch,

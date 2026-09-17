@@ -1,11 +1,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, writeFile, symlink, realpath, rm, chmod, stat } from 'node:fs/promises';
+import { mkdtemp, mkdir, writeFile, rename, symlink, realpath, rm, chmod, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { oracleBundleDigest } from '../src/runner-setup.js';
-import { assertIsolation, assertRunnerCredentialScope, containerEnvironment, containerNames, executeAttempt, executionCommand, executionPlanSchema, observeContainers, preflightAttempt, type ExecutionPlan, type Runner, type Settler } from '../src/runner-executor.js';
+import { assertIsolation, assertRunnerCredentialScope, boundaryIdentity, containerEnvironment, containerNames, executeAttempt, executionCommand, executionPlanSchema, observeContainers, preflightAttempt, type ExecutionPlan, type Runner, type Settler } from '../src/runner-executor.js';
 
 const image = `sha256:${'1'.repeat(64)}`;
 const runAsUser = `${process.getuid!()}:${process.getgid!()}`;
@@ -122,6 +122,35 @@ test('an oracle tree any other account can rewrite is refused before any contain
   await assert.doesNotReject(assertIsolation(plan, { uid: attestorUid }));
 }));
 
+test('a collection boundary whose pathname another account controls is refused, and a replaced one is recorded', async () => boundary(async ({ output, plan }) => {
+  // Checking the output directory's own ownership, mode and emptiness says nothing about
+  // who may rename it. An account that can write a parent can move the checked directory
+  // aside and leave an earlier attempt's passing output at the same pathname, which both
+  // the container mount and the attestor's measurement would follow.
+  const shared = join(output, '..', 'shared');
+  await mkdir(shared); await chmod(shared, 0o777);
+  const exposed = join(shared, 'attempt');
+  await mkdir(exposed, { mode: 0o700 });
+  await assert.rejects(assertIsolation({ ...plan, outputPath: exposed }, { uid: attestorUid }), /leading to the collection boundary must not be group- or world-writable/);
+  await chmod(shared, 0o755);
+  await assert.doesNotReject(assertIsolation({ ...plan, outputPath: exposed }, { uid: attestorUid }));
+  await rm(shared, { recursive: true });
+
+  // And if the pathname is redirected anyway, the attempt says so rather than reporting
+  // whatever directory now answers to the recorded path.
+  const swapping: Runner = async command => {
+    if (command.argv.at(-1) === 'execute') {
+      await rename(output, join(output, '..', 'displaced'));
+      await mkdir(output, { mode: 0o700 });
+      await writeFile(join(output, 'report.json'), JSON.stringify({ passed: 'an older attempt' }));
+    }
+    return { exitCode: 0, timedOut: false };
+  };
+  const swapped = await executeAttempt(plan, { uid: attestorUid, run: swapping, settle: absent });
+  assert.ok(swapped.refusals.some(r => /collection boundary was replaced during the attempt/.test(r)));
+  assert.equal(swapped.outcome, 'failed');
+}));
+
 test('approved test-account variables are passed by value, never by reopened pathname', async () => boundary(async ({ output, plan }) => {
   const shared = join(output, '..', 'accounts.env');
   await writeFile(shared, '# approved\nTEST_ACCOUNT_USER=booking-bot\nTEST_ACCOUNT_PASSWORD=approved secret\n', { mode: 0o600 });
@@ -213,7 +242,8 @@ test('failed enumeration stops the attempt, and a failing execution still reache
 
 test('every local refusal happens before acknowledgement, and preflight bytes carry into execution', async () => boundary(async ({ oracle, output, plan }) => {
   const preflight = await preflightAttempt(plan, { uid: attestorUid });
-  assert.deepEqual(preflight, { oraclePath: await realpath(oracle), outputPath: await realpath(output), bundleDigest: plan.grant.bundleDigest, testAccountEnv: {} });
+  assert.deepEqual(preflight, { oraclePath: await realpath(oracle), outputPath: await realpath(output),
+    outputBoundary: await boundaryIdentity(output), bundleDigest: plan.grant.bundleDigest, testAccountEnv: {} });
 
   // Each structural refusal rejects, so a runner can decline before acknowledging and
   // let the attempt expire instead of holding protected resources until an operator acts.

@@ -7,7 +7,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
 import { createHash, generateKeyPairSync, randomUUID, sign as signBytes } from 'node:crypto';
-import { assembleResult, attestationBytes, attributeExecution, collectArtifacts, collectionBinding, deriveSettlement, executionAttestationPayload, selfReportedObservation, type TargetObservation } from '../src/runner-collector.js';
+import { assembleResult, attestationBytes, attributeExecution, collectArtifacts, collectionBinding, collectionInputs, deriveSettlement, executionAttestationPayload, selfReportedObservation, type TargetObservation } from '../src/runner-collector.js';
 import { containerNames, type AttemptGrant, type ExecutionRecord } from '../src/runner-executor.js';
 
 const run = promisify(execFile);
@@ -252,6 +252,37 @@ test('collection accepts only approved reporter output from the attempt boundary
 
     await writeFile(join(output, 'report.json'), JSON.stringify({ passed: true, note: 'candidate-authored proof' }));
     assert.ok((await collectArtifacts(output, required)).reasons.some(r => /not an approved data-minimised report/.test(r)));
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test('publishing a subset of the artifacts still verifies the whole boundary', async () => {
+  // `requiredArtifacts` configures what this collector uploads, not what it checks. The
+  // approved reporter writes both files whatever the upload list says, so reading only
+  // the subset would leave the other one looking like output nobody approved and would
+  // leave behaviour unverifiable — a supported configuration that could never pass.
+  assert.deepEqual(collectionInputs(['report']), ['inventory', 'report']);
+  assert.deepEqual(collectionInputs(['report', 'trace']), ['inventory', 'report', 'trace']);
+
+  const root = await mkdtemp(join(tmpdir(), 'graphyard-subset-'));
+  try {
+    const output = join(root, 'output'); await mkdir(output, { mode: 0o700 });
+    await writeFile(join(output, 'inventory.json'), JSON.stringify(inventoryOf(['books'])));
+    await writeFile(join(output, 'report.json'), JSON.stringify(executionOf(['books'])));
+    const collected = await collectArtifacts(output, collectionInputs(['report']));
+    assert.deepEqual(collected.reasons, []);
+    assert.deepEqual(collected.artifacts.map(a => a.name), ['inventory', 'report']);
+
+    const boundary = await realpath(output);
+    const execution = record({ outputPath: boundary });
+    const uploaded = uploadedOf(collected as never).filter(a => a.name === 'report');
+    const published = assembleResult({ grant, execution, collectedFrom: boundary, expected, observations: covering, maxGapMs: 30_000,
+      collected, uploaded, settlementObservations: absent, requiredArtifacts: ['report'],
+      executionAttestation: attestation(execution, collected) });
+    assert.deepEqual(published.refusals, []);
+    assert.equal(published.report!.behavior, 'passed');
+    assert.equal(published.report!.artifactState, 'verified');
+    // Only the configured subset is published, and only bytes the attestor measured.
+    assert.deepEqual(published.report!.artifacts.map(a => a.name), ['report']);
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 

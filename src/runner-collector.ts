@@ -149,6 +149,18 @@ export const artifactKinds: Record<string, { file: string; mediaType: 'applicati
   inventory: { file: 'inventory.json', mediaType: 'application/json' },
   report: { file: 'report.json', mediaType: 'application/json' },
 };
+/**
+ * Which artifacts a collector must read, given the names it is configured to publish.
+ * Verification always needs every approved kind the boundary holds: an execution report
+ * means nothing without the inventory enumerated offline, and a kind left unread would
+ * additionally look like output the approved reporter never wrote. `requiredArtifacts`
+ * is an upload configuration, so it decides what is published, not what is verified. An
+ * unsupported name stays in the list, so it still refuses explicitly instead of silently
+ * dropping out of the boundary check.
+ */
+export const collectionInputs = (required: string[]) =>
+  [...new Set([...Object.keys(artifactKinds), ...z.array(name).min(1).max(30).parse(required)])].sort();
+
 async function readPrivateFile(root: string, file: string, limit: number) {
   const handle = await open(resolve(root, file), constants.O_RDONLY | constants.O_NOFOLLOW);
   try {

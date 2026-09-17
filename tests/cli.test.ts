@@ -719,8 +719,14 @@ test('the runner holds authority while the host attestor executes and signs the 
     }));
   });
   await new Promise<void>(r => http.listen(0, '127.0.0.1', r));
-  const env = { ...process.env, GRAPHYARD_TOKEN: 'test-only', GRAPHYARD_URL: `http://127.0.0.1:${(http.address() as any).port}` };
+  // Whether this host happens to have a working Docker daemon must not decide what the
+  // attempt observes. This stub answers every invocation the way an unreachable daemon
+  // does, so the attestor can start no container and can confirm no container removed.
+  const fakeBin = join(cwd, 'fake-bin');
+  const env = { ...process.env, PATH: `${fakeBin}:${process.env.PATH}`, GRAPHYARD_TOKEN: 'test-only', GRAPHYARD_URL: `http://127.0.0.1:${(http.address() as any).port}` };
   try {
+    await mkdir(fakeBin);
+    await writeFile(join(fakeBin, 'docker'), '#!/bin/sh\nexit 1\n'); await chmod(join(fakeBin, 'docker'), 0o755);
     const oracle = join(cwd, 'oracle'), output = join(cwd, 'out'), key = join(cwd, 'attestor.key');
     await mkdir(oracle, { mode: 0o755 }); await mkdir(output, { mode: 0o700 });
     await writeFile(join(oracle, 'suite.spec.ts'), 'approved assertion');
@@ -738,8 +744,9 @@ test('the runner holds authority while the host attestor executes and signs the 
 
     // Acknowledgement sits between the attestor's preflight and its first container.
     assert.deepEqual(posts, ['dispatch', 'ack']);
-    // The runner observed nothing: it forwards the record the attestor signed. Docker is
-    // unavailable here, so the attempt is blocked — and blocked is what it reports.
+    // The runner observed nothing: it forwards the record the attestor signed. No
+    // container could run here, so the attempt is blocked — and blocked is what it
+    // reports, over the attestor's signature rather than the runner's word.
     assert.equal(attempt.record.grant.executionNetwork, 'gy-isolated');
     assert.equal(attempt.record.outcome, 'failed');
     assert.ok(attempt.record.refusals.some((r: string) => /settlement is unverified/.test(r)));

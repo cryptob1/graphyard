@@ -1,6 +1,6 @@
 import { sign as signBytes } from 'node:crypto';
 import { z } from 'zod';
-import { executeAttempt, executionPlanSchema, preflightAttempt, type ExecutionRecord, type Runner, type Settler } from './runner-executor.js';
+import { boundaryUnchanged, executeAttempt, executionPlanSchema, preflightAttempt, type ExecutionRecord, type Runner, type Settler } from './runner-executor.js';
 import { artifactKinds, attestationBytes, collectArtifacts, executionAttestationPayload, type ExecutionAttestation } from './runner-collector.js';
 
 /**
@@ -51,6 +51,12 @@ export async function superviseAttempt(input: unknown, options: {
   // how the separate collector happens to be configured. The collector publishes its own
   // required subset and each of those digests must match one measured here.
   const collected = await collectArtifacts(record.outputPath, Object.keys(artifactKinds));
+  // Measuring by pathname is only meaningful while the pathname still leads to the
+  // boundary preflight approved. Nothing is signed otherwise: an attestation over an
+  // older attempt's output would be a valid signature on someone else's execution.
+  if (!await boundaryUnchanged(preflight.outputPath, preflight.outputBoundary)) {
+    throw new Error('The collection boundary was replaced before its bytes were measured; this attempt was not attested');
+  }
   const artifacts = collected.artifacts.map(({ name, digest }) => ({ name, digest }));
   const payload = executionAttestationPayload({ grant: plan.grant, execution: record, artifacts });
   return { record, attestation: { payload, signature: signBytes(null, attestationBytes(payload), options.privateKey).toString('base64') },

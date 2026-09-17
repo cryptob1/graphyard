@@ -114,7 +114,24 @@ async function directory(path: string) {
   const resolved = await realpath(path);
   const info = await stat(resolved);
   if (!info.isDirectory()) throw new Error(`Execution boundary path must be a directory: ${path}`);
-  return { path: resolved, mode: info.mode & 0o777, uid: info.uid };
+  return { path: resolved, mode: info.mode & 0o777, uid: info.uid, identity: { dev: info.dev, ino: info.ino } };
+}
+
+/**
+ * Which directory a pathname actually reaches. A path is a name, not a thing: the same
+ * name can be made to lead somewhere else, so the boundary a preflight approved is
+ * identified by the filesystem object it resolved to and re-checked against it later.
+ */
+export type BoundaryIdentity = { dev: number; ino: number };
+export async function boundaryIdentity(path: string): Promise<BoundaryIdentity> {
+  const info = await stat(path);
+  if (!info.isDirectory()) throw new Error(`Execution boundary path must be a directory: ${path}`);
+  return { dev: info.dev, ino: info.ino };
+}
+const sameBoundary = (a: BoundaryIdentity, b: BoundaryIdentity) => a.dev === b.dev && a.ino === b.ino;
+/** Resolve the boundary again and report whether it is still the one that was approved. */
+export async function boundaryUnchanged(path: string, approved: BoundaryIdentity) {
+  try { return sameBoundary(await boundaryIdentity(path), approved); } catch { return false; }
 }
 const contains = (outer: string, inner: string) => { const r = relative(outer, inner); return r === '' || (!r.startsWith('..') && !r.startsWith(sep)); };
 
@@ -123,36 +140,51 @@ const contains = (outer: string, inner: string) => { const r = relative(outer, i
  * the container, not the host: an oracle tree that some other account can write may be
  * weakened between the preflight digest and execution and restored before the closing
  * one. Nor is "not owned by the executing account" enough, because the worker that asks
- * for supervision is a different account again. So the approved bytes must belong to the
- * supervising attestor identity itself (or to root), and no entry — nor any directory
- * leading to it — may be group- or world-writable. Sticky ancestors such as `/tmp` are
- * accepted: their entries can only be renamed or removed by their owner.
+ * for supervision is a different account again. So every entry under the approved bytes
+ * must belong to the supervising attestor identity itself (or to root) and must not be
+ * group- or world-writable. The path leading to them is held to the same rule by
+ * `assertAncestryFixed`.
  */
 async function assertOracleImmutable(root: string, attestorUid: number) {
-  const refuse = (path: string, info: Stats, ancestor: boolean) => {
+  const refuse = (path: string, info: Stats) => {
     // A symlink's target can be redirected without touching the tree, so the bundle's
     // own refusal of them is enforced here too, before any mode or ownership claim.
-    if (!ancestor && info.isSymbolicLink()) throw new Error(`Approved oracle bundles cannot contain symlinks: ${path}`);
-    // A sticky ancestor such as `/tmp` is shared on purpose: only an entry's owner can
-    // rename or remove it there, so the path to the approved bytes stays fixed.
-    if (ancestor && info.mode & 0o1000) return;
+    if (info.isSymbolicLink()) throw new Error(`Approved oracle bundles cannot contain symlinks: ${path}`);
     if (info.uid !== attestorUid && info.uid !== 0) throw new Error(`Approved oracle bytes must be owned by the supervising attestor identity or by root: ${path}`);
     if (info.mode & 0o020) throw new Error(`Approved oracle bytes must not be group-writable throughout execution: ${path}`);
     if (info.mode & 0o002) throw new Error(`Approved oracle bytes must not be world-writable throughout execution: ${path}`);
   };
-  for (let path = dirname(root), previous = ''; path !== previous; previous = path, path = dirname(path)) refuse(path, await lstat(path), true);
   let entries = 0;
   async function walk(path: string, depth: number) {
     if (depth > 20) throw new Error('Approved oracle bundle exceeds the supported directory depth');
     for (const entry of await readdir(path, { withFileTypes: true })) {
       if (++entries > 10_000) throw new Error('Approved oracle bundle exceeds the supported file limit');
       const child = resolve(path, entry.name);
-      refuse(child, await lstat(child), false);
+      refuse(child, await lstat(child));
       if (entry.isDirectory()) await walk(child, depth + 1);
     }
   }
-  refuse(root, await lstat(root), false);
+  refuse(root, await lstat(root));
   await walk(root, 0);
+}
+
+/**
+ * A boundary is only as fixed as the pathname that reaches it. Checking a directory's
+ * own ownership, mode and contents says nothing about who may rename it: an identity
+ * that can write a parent directory can move the checked entry aside and leave a
+ * different directory — an earlier attempt's passing output, or a weakened oracle tree —
+ * at the same path, and every later `docker run` mount and host-side measurement follows
+ * the name. So no identity but the supervising attestor (or root) may control a
+ * component of the path. Sticky ancestors such as `/tmp` are accepted: only an entry's
+ * own owner can rename or remove it there.
+ */
+async function assertAncestryFixed(root: string, attestorUid: number, subject: string) {
+  for (let path = dirname(root), previous = ''; path !== previous; previous = path, path = dirname(path)) {
+    const info = await lstat(path);
+    if (info.mode & 0o1000) continue;
+    if (info.uid !== attestorUid && info.uid !== 0) throw new Error(`Every directory leading to the ${subject} must be owned by the supervising attestor identity or by root: ${path}`);
+    if (info.mode & 0o022) throw new Error(`Every directory leading to the ${subject} must not be group- or world-writable: ${path}`);
+  }
 }
 
 /**
@@ -171,12 +203,17 @@ export async function assertIsolation(plan: ExecutionPlan, options: { uid?: numb
   const oracle = await directory(p.oraclePath), output = await directory(p.outputPath);
   if (contains(oracle.path, output.path) || contains(output.path, oracle.path)) throw new Error('Approved oracle bytes and the writable output path must not overlap');
   if (oracle.mode & 0o022) throw new Error('The approved oracle directory must not be group- or world-writable');
+  await assertAncestryFixed(oracle.path, attestorUid, 'approved oracle bundle');
   await assertOracleImmutable(oracle.path, attestorUid);
   if (output.mode & 0o077) throw new Error('The collector output directory must be private to the collector');
   if (output.uid !== Number(p.runAsUser.split(':')[0])) throw new Error('The collector output directory must be owned by the unprivileged container user');
+  // The output directory's own mode keeps the runner out of it; its ancestry is what
+  // keeps the runner from putting a different directory at the same pathname, which
+  // both the container mount and the attestor's post-execution measurement would follow.
+  await assertAncestryFixed(output.path, attestorUid, 'collection boundary');
   if ((await readdir(output.path)).length) throw new Error('The collector output directory must be empty before an attempt');
   const testAccountEnv = p.testAccountEnvFile ? await readTestAccountEnv(p.testAccountEnvFile) : {};
-  return { oraclePath: oracle.path, outputPath: output.path, testAccountEnv };
+  return { oraclePath: oracle.path, outputPath: output.path, outputBoundary: output.identity, testAccountEnv };
 }
 
 /**
@@ -269,7 +306,7 @@ export const executionRecordSchema = z.object({
 export type ExecutionRecord = z.infer<typeof executionRecordSchema>;
 
 /** Everything that can refuse locally before the attempt is acknowledged. */
-export type Preflight = { oraclePath: string; outputPath: string; bundleDigest: string; testAccountEnv: TestAccountEnv };
+export type Preflight = { oraclePath: string; outputPath: string; outputBoundary: BoundaryIdentity; bundleDigest: string; testAccountEnv: TestAccountEnv };
 /**
  * Structural isolation plus the first bundle measurement. The attestor that will execute
  * performs this before the runner acknowledges: a refusal here leaves the attempt
@@ -327,6 +364,10 @@ export async function executeAttempt(plan: unknown, options: { run?: Runner; set
   if (!settled) refusals.push('Execution settlement is unverified; the execution-resource barrier stays closed');
   const after = await oracleBundleDigest(paths.oraclePath);
   if (after.digest !== before.digest) refusals.push('Approved oracle bundle changed during the attempt');
+  // The recorded output path must still lead to the directory preflight approved. A
+  // renamed or replaced boundary would otherwise let an older attempt's passing report
+  // be measured, signed and collected as this attempt's behaviour.
+  if (!await boundaryUnchanged(paths.outputPath, paths.outputBoundary)) refusals.push('The collection boundary was replaced during the attempt; the recorded output path is not the directory this attempt prepared');
   const timedOut = phases.some(phase => phase.timedOut);
   return { grant: p.grant, startedAt, finishedAt, phases,
     bundleDigestBefore: before.digest, bundleDigestAfter: after.digest, runnerImageDigest: p.grant.runnerImageDigest,
