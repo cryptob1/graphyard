@@ -247,13 +247,19 @@ export class Engine {
         const withdrawn = work.evidence.filter(item => item.trusted && !item.revocation && item.proof === data.proof
           && item.sha === data.sha && item.baseSha === data.baseSha && item.policyRevision === data.policyRevision);
         demand(withdrawn.length, 'No trusted evidence matches this proof and candidate; reload before revoking', 404);
+        const execution = work.mergeExecution
+          && work.mergeExecution.sha === data.sha
+          && work.mergeExecution.baseSha === data.baseSha
+          && work.mergeExecution.policyRevision === data.policyRevision
+          && work.criteria.some(criterion => criterion.proofs.includes(data.proof))
+          ? work.mergeExecution : null;
         // mergeCommit is the serialization point immediately before the provider mutation.
-        // Once it wins the row lock, the supported broker has committed to that mutation and
-        // a later withdrawal must refuse rather than falsely claim it revoked the candidate.
-        demand(!work.mergeExecution?.committingAt, 'The merge broker already committed this candidate to the provider; wait for reconciliation before revoking');
+        // Once it wins the row lock, a withdrawal that contributed to that execution must
+        // refuse rather than falsely claim it recalled the candidate. Historical/unrelated
+        // evidence can still be withdrawn without disturbing the current execution.
+        demand(!execution?.committingAt, 'The merge broker already committed this candidate to the provider; wait for reconciliation before revoking');
         for (const item of withdrawn) item.revocation = { at: now.toISOString(), actor: actor.id, reason: data.reason };
-        const execution = work.mergeExecution;
-        work.mergeExecution = null;
+        if (execution) work.mergeExecution = null;
         // Reuse the cancellation ledger the merge broker and delivery attribution already read,
         // so an observed merge that lands after this instant refuses instead of completing.
         if (execution) await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)',
@@ -375,7 +381,7 @@ export class Engine {
       execution.clockOffset = offset;
       await save(db, work, actor.id, 'merge.execution.verified', now, { executionId: execution.id, sha: execution.sha, verifiedAt: execution.verifiedAt });
       const providerDelayMs = Math.ceil((now.getTime() + 1) / 1000) * 1000 - now.getTime() + Math.ceil(offset.max - offset.min);
-      const result = { key: work.key, executionId: execution.id, sha: execution.sha, verifiedAt: execution.verifiedAt, providerDelayMs, revision: work.revision };
+      const result = { key: work.key, executionId: execution.id, sha: execution.sha, verifiedAt: execution.verifiedAt, providerDelayMs, clockOffset: offset, revision: work.revision };
       await db.query('INSERT INTO receipts(actor,key,fingerprint,result) VALUES($1,$2,$3,$4)', [actor.id, key, fingerprint, JSON.stringify(result)]);
       return result;
     });

@@ -26,7 +26,7 @@ try {
   if (!policies.length) gh(['api', '--method', 'POST', `${endpoint}/deployment-branch-policies`, '--input', '-'], JSON.stringify({ name: 'main', type: 'branch' }));
   policies = JSON.parse(gh(['api', `${endpoint}/deployment-branch-policies`])).branch_policies;
   if (policies.length !== 1 || policies[0].name !== 'main' || policies[0].type !== 'branch') throw new Error('Reporter environment must allow only main');
-  const producer = { id: 'trusted-acceptance', role: 'producer', proofs: ['integration:claim-safety'], token: randomBytes(32).toString('hex') };
+  const producer = { id: 'trusted-acceptance', role: 'producer', proofs: ['integration:claim-safety', 'integration:merge-authorization'], token: randomBytes(32).toString('hex') };
   const variables = { GITHUB_APP_ID: String(app.appId), GITHUB_INSTALLATION_ID: String(app.installationId), GITHUB_PRIVATE_KEY: app.privateKey, GITHUB_WEBHOOK_SECRET: app.webhookSecret,
     GRAPHYARD_PRINCIPALS: JSON.stringify([...principals.filter(p => p.id !== producer.id), producer]) };
   stage = 'stage Railway secret variables';

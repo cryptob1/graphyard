@@ -19,8 +19,7 @@ import { supervise } from '../src/supervisor.js';
 // @ts-expect-error The trusted runner intentionally uses dependency-free JavaScript outside the candidate source.
 import { exercise, judgeMergeAuthorization, mergeAuthorizationCases } from '../scripts/acceptance-contract.mjs';
 // @ts-expect-error The trusted runner intentionally uses dependency-free JavaScript outside the candidate source.
-import { probeMergeAuthorization } from '../scripts/merge-authorization-probe.mjs';
-import { fileURLToPath } from 'node:url';
+import { mergeAuthorizationPrincipals, probeMergeAuthorization } from '../scripts/merge-authorization-probe.mjs';
 
 const operator: Principal = { id: 'operator', role: 'admin' };
 const worker: Principal = { id: 'agent-a', role: 'worker', displayName: 'Atlas', runtime: 'Codex' };
@@ -392,8 +391,15 @@ test('delivered work refuses revocation and keeps its authorized delivery record
   assert.equal(reloaded.evidence.some(item => item.revocation), false);
 });
 test('the trusted merge-authorization contract passes against this build', async () => {
-  const transcript = await probeMergeAuthorization({ databaseUrl: store.pool.options.connectionString!, sourceRoot: fileURLToPath(new URL('..', import.meta.url)) });
-  assert.deepEqual(judgeMergeAuthorization(transcript), mergeAuthorizationCases.map((id: string) => ({ id, result: 'pass' })));
+  const principals = mergeAuthorizationPrincipals(); let snapshot: Observation | null = null;
+  const probeStore = new Store(store.pool.options.connectionString!); const probeEngine = new Engine(probeStore, [15368], 120, 'graphyard-probe/candidate');
+  const probeHttp = server(probeEngine, principals, { config: { repository: 'graphyard-probe/candidate', base: 'main', appId: 1, installationId: 1, privateKey: '' }, verify: async () => structuredClone(snapshot), serverTime: async () => Date.now(), reviewRepository: async () => null, reviewPermissions: async () => ({}) } as any);
+  await new Promise<void>(resolve => probeHttp.listen(0, '127.0.0.1', resolve));
+  try {
+    const probeUrl = `http://127.0.0.1:${(probeHttp.address() as any).port}`;
+    const transcript = await probeMergeAuthorization({ url: probeUrl, principals, observeCandidate: async (item: Work, observed: Observation) => { snapshot = observed; return probeEngine.observe(item.id, item.revision, observed); } });
+    assert.deepEqual(judgeMergeAuthorization(transcript), mergeAuthorizationCases.map((id: string) => ({ id, result: 'pass' })));
+  } finally { await new Promise<void>(resolve => probeHttp.close(() => resolve())); await probeStore.close(); }
 });
 test('periodic reconciliation defers without publishing failure during active merge execution', async () => {
   let w = await submitted(); w = await engine.observe(w.id, w.revision, observation(w));

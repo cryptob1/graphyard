@@ -1,52 +1,31 @@
-// Protected merge-authorization probe. Run this from protected source against a candidate
-// build; never from the candidate checkout. The probe only drives the candidate and records
-// what it observed. Every assertion lives outside, in judgeMergeAuthorization, so a candidate
-// cannot pass by rewriting the expectations it is measured against.
+// Protected merge-authorization probe. Run this controller from protected source against a
+// candidate process over HTTP; never import candidate code here. It records only the responses
+// it observes. Every assertion lives outside, in judgeMergeAuthorization, so a candidate cannot
+// pass by rewriting the transcript or expectations it is measured against.
 //
 // Unlike the claim-safety contract, this scenario needs an observed GitHub candidate, and
 // Graphyard deliberately exposes no client-controlled route that invents one. The probe
-// therefore stands in for the provider adapter at exactly those two points — supplying an
-// observation and a final verification snapshot — and drives every authorization decision
-// under test through the candidate's own HTTP API.
+// therefore uses a separately authenticated harness endpoint at exactly those two points —
+// supplying an observation and a final verification snapshot — and drives every authorization
+// decision under test through the candidate's own HTTP API.
 import { randomUUID } from 'node:crypto';
-import { pathToFileURL } from 'node:url';
-import { resolve } from 'node:path';
 
 const head = 'a'.repeat(40), base = 'b'.repeat(40);
 const repository = 'graphyard-probe/candidate';
 const proof = 'integration:merge-authorization';
 
-async function load(sourceRoot, file) {
-  return import(pathToFileURL(resolve(sourceRoot, 'src', file)).href);
-}
+export function mergeAuthorizationPrincipals() { return [
+  { id: 'probe-operator', role: 'admin', token: randomUUID() + randomUUID() },
+  { id: 'probe-worker', role: 'worker', token: randomUUID() + randomUUID() },
+  { id: 'probe-coordinator', role: 'coordinator', token: randomUUID() + randomUUID() },
+  { id: 'probe-other-coordinator', role: 'coordinator', token: randomUUID() + randomUUID() },
+  { id: 'probe-producer', role: 'producer', proofs: [proof], token: randomUUID() + randomUUID() },
+  { id: 'probe-other-producer', role: 'producer', proofs: ['integration:unrelated'], token: randomUUID() + randomUUID() },
+]; }
 
-export async function probeMergeAuthorization({ databaseUrl, sourceRoot = '/app' }) {
-  const { Store } = await load(sourceRoot, 'store.js');
-  const { Engine } = await load(sourceRoot, 'engine.js');
-  const { server } = await load(sourceRoot, 'server.js');
-  const principals = [
-    { id: 'probe-operator', role: 'admin', token: randomUUID() + randomUUID() },
-    { id: 'probe-worker', role: 'worker', token: randomUUID() + randomUUID() },
-    { id: 'probe-coordinator', role: 'coordinator', token: randomUUID() + randomUUID() },
-    { id: 'probe-other-coordinator', role: 'coordinator', token: randomUUID() + randomUUID() },
-    { id: 'probe-producer', role: 'producer', proofs: [proof], token: randomUUID() + randomUUID() },
-    { id: 'probe-other-producer', role: 'producer', proofs: ['integration:unrelated'], token: randomUUID() + randomUUID() },
-  ];
+export async function probeMergeAuthorization({ url, controlUrl, controlToken, principals, observeCandidate }) {
   const actor = id => principals.find(candidate => candidate.id === id);
-  const store = new Store(databaseUrl);
-  await store.init();
-  const engine = new Engine(store, [15368], 120, repository);
   let snapshot = null;
-  const github = {
-    config: { repository, base: 'main', appId: 1, installationId: 1, privateKey: '' },
-    verify: async () => structuredClone(snapshot),
-    serverTime: async () => Date.now(),
-    reviewRepository: async () => null,
-    reviewPermissions: async () => ({}),
-  };
-  const http = server(engine, principals, github);
-  await new Promise(done => http.listen(0, '127.0.0.1', done));
-  const url = `http://127.0.0.1:${http.address().port}`;
   const transcript = [];
   const record = (step, detail) => { transcript.push({ step, ...detail }); return detail; };
   try {
@@ -59,6 +38,10 @@ export async function probeMergeAuthorization({ databaseUrl, sourceRoot = '/app'
       return { status: response.status, body: await response.json() };
     };
     const refusal = result => ({ status: result.status, message: String(result.body?.error ?? '') });
+    const observeWork = observeCandidate ?? (async (item, observation) => {
+      const response = await fetch(`${controlUrl}/observe`, { method: 'POST', headers: { Authorization: `Bearer ${controlToken}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ id: item.id, revision: item.revision, observation }), signal: AbortSignal.timeout(20_000) });
+      const body = await response.json(); if (!response.ok) throw new Error(body.error || 'Probe observation failed'); return body;
+    });
 
     let work = (await call('work', 'probe-operator', { title: 'Merge authorization probe', criteria: [{ id: 'AC-1', text: 'A revoked candidate cannot merge', proofs: [proof] }] })).body;
     await call(`work/${work.id}/ready`, 'probe-operator', {});
@@ -76,7 +59,7 @@ export async function probeMergeAuthorization({ databaseUrl, sourceRoot = '/app'
       at: new Date().toISOString(), ...extra,
     });
     snapshot = observe({ prState: 'open', draft: false });
-    work = await engine.observe(work.id, work.revision, observe());
+    work = await observeWork(work, observe());
     work = (await call(`work/${work.id}/evidence`, 'probe-producer', { proof, sha: head, baseSha: base, policyRevision: work.policyRevision, result: 'pass', executed: 9, skipped: 0 })).body;
     record('authorized-candidate', { stage: work.stage, gatesPassed: work.gates.every(gate => gate.passed), authorized: !!work.mergeAuthorization });
 
@@ -115,7 +98,7 @@ export async function probeMergeAuthorization({ databaseUrl, sourceRoot = '/app'
     const settled = (await call('work', 'probe-operator')).body.find(item => item.id === work.id);
     record('no-execution-survives', { execution: settled.mergeExecution ?? null, authorization: settled.mergeAuthorization ?? null });
 
-    const merged = await engine.observe(work.id, settled.revision, observe({ merged: true, mergeSha: 'c'.repeat(40), mergedAt: new Date(Date.now() + 5000).toISOString() }));
+    const merged = await observeWork(settled, observe({ merged: true, mergeSha: 'c'.repeat(40), mergedAt: new Date(Date.now() + 5000).toISOString() }));
     record('merge-after-revocation', { stage: merged.stage, violations: merged.violations, delivery: merged.delivery ?? null });
 
     // Exercise the exact final race on a fresh candidate. The row lock gives one operation
@@ -128,7 +111,7 @@ export async function probeMergeAuthorization({ databaseUrl, sourceRoot = '/app'
     raced = (await call(`work/${raced.id}/workspace`, 'probe-worker', { epoch: raced.epoch, host: 'probe-race-host', path: `/tmp/probe-race-${raced.id}`, branch: racedBranch })).body;
     raced = (await call(`work/${raced.id}/submit`, 'probe-worker', { epoch: raced.epoch, pr: 4002 })).body;
     snapshot = observe({ candidate: { sha: head, baseSha: base, pr: 4002, branch: racedBranch, author: 'probe-implementer' }, prState: 'open', draft: false });
-    raced = await engine.observe(raced.id, raced.revision, snapshot);
+    raced = await observeWork(raced, snapshot);
     raced = (await call(`work/${raced.id}/evidence`, 'probe-producer', { proof, sha: head, baseSha: base, policyRevision: raced.policyRevision, result: 'pass', executed: 9, skipped: 0 })).body;
     const racedAcquire = (await call(`work/${raced.id}/merge-acquire`, 'probe-coordinator', { expectedRevision: raced.revision, sha: head, baseSha: base, policyRevision: raced.policyRevision })).body;
     await call(`work/${raced.id}/merge-verify`, 'probe-coordinator', { executionId: racedAcquire.execution.id });
@@ -145,13 +128,5 @@ export async function probeMergeAuthorization({ databaseUrl, sourceRoot = '/app'
       committingAt: racedCurrent.mergeExecution?.committingAt ?? null,
     });
     return transcript;
-  } finally {
-    await new Promise(done => http.close(done));
-    await store.close();
-  }
-}
-
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  const transcript = await probeMergeAuthorization({ databaseUrl: process.env.DATABASE_URL, sourceRoot: process.env.GRAPHYARD_SOURCE_ROOT ?? '/app' });
-  process.stdout.write(`\n--- graphyard-transcript ---\n${JSON.stringify(transcript)}\n--- end-graphyard-transcript ---\n`);
+  } finally { /* candidate lifecycle is owned by the outer controller */ }
 }

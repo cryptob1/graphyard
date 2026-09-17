@@ -455,17 +455,20 @@ export function assertMergeProtection(protection: any, config: MasterConfig, wor
     && Array.isArray(checks?.checks) && checks.checks.some((check: any) => check?.context === 'Graphyard / merge' && check?.app_id === config.githubAppId);
   if (!protectedBranch) throw new Error(`${work.key} managed-branch protection changed after merge authorization; Graphyard refused the merge`);
 }
-export function githubProviderDelay(verifiedTime: number, serverDelayMs: number, response: string) {
+export function githubProviderDelay(verifiedTime: number, serverDelayMs: number, response: string, providerToDatabaseOffsetMin = 0) {
   const header = /^Date:\s*(.+?)\r?$/gmi.exec(response);
   const githubTime = header ? Date.parse(header[1]) : Number.NaN;
-  if (!Number.isFinite(verifiedTime) || !Number.isInteger(serverDelayMs) || serverDelayMs < 0 || !Number.isFinite(githubTime)) throw new Error('GitHub did not provide a valid server time for merge ordering');
+  if (!Number.isFinite(verifiedTime) || !Number.isInteger(serverDelayMs) || serverDelayMs < 0 || !Number.isFinite(githubTime) || !Number.isFinite(providerToDatabaseOffsetMin)) throw new Error('GitHub did not provide a valid server time for merge ordering');
   // GitHub's Date and merged_at values have whole-second precision. Waiting from
   // the lower bound of GitHub's reported second remains conservative when the
   // database clock is ahead of GitHub's clock.
-  const verifiedBoundary = Math.ceil((verifiedTime + 1) / 1000) * 1000;
+  // Delivery compares the lower bound of GitHub's whole-second merged_at interval,
+  // translated into the database clock domain by offset.min.  Therefore the provider
+  // clock must cross (database time - offset.min), not merely database time.
+  const verifiedBoundary = Math.ceil((verifiedTime - providerToDatabaseOffsetMin + 1) / 1000) * 1000;
   return Math.max(serverDelayMs, verifiedBoundary - githubTime, 0);
 }
-export async function mergeWork(config: MasterConfig, work: Work, freshSnapshot: () => Promise<{ work: Work[]; now: string }>, acquire: (work: Work, authorization: ReturnType<typeof assertMergeCandidate>) => Promise<{ execution: MergeExecution }>, cancel: (work: Work, execution: MergeExecution, reason: string) => Promise<unknown>, verify: (work: Work, execution: MergeExecution) => Promise<{ executionId: string; sha: string; verifiedAt: string; providerDelayMs: number }>, run: (command: string, args: string[]) => string = (command, args) => execFileSync(command, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 90_000 }), executionOwner?: string, commit?: (work: Work, execution: MergeExecution) => Promise<{ executionId: string; sha: string; committingAt: string }>) {
+export async function mergeWork(config: MasterConfig, work: Work, freshSnapshot: () => Promise<{ work: Work[]; now: string }>, acquire: (work: Work, authorization: ReturnType<typeof assertMergeCandidate>) => Promise<{ execution: MergeExecution }>, cancel: (work: Work, execution: MergeExecution, reason: string) => Promise<unknown>, verify: (work: Work, execution: MergeExecution) => Promise<{ executionId: string; sha: string; verifiedAt: string; providerDelayMs: number; clockOffset?: { min: number; max: number } }>, run: (command: string, args: string[]) => string = (command, args) => execFileSync(command, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 90_000 }), executionOwner?: string, commit?: (work: Work, execution: MergeExecution) => Promise<{ executionId: string; sha: string; committingAt: string }>) {
   const before = await freshSnapshot(); const current = before.work.find(item => item.id === work.id);
   if (!current || current.revision !== work.revision) throw new Error(`${work.key} changed before GitHub verification; retry`);
   const authorization = assertMergeCandidate(current, before.now, executionOwner);
@@ -491,7 +494,8 @@ export async function mergeWork(config: MasterConfig, work: Work, freshSnapshot:
     assertMergeProtection(protection, config, latest);
     verificationStarted = true; const verified = await verify(latest, granted.execution); verificationCompleted = true;
     const verifiedTime = Date.parse(verified.verifiedAt);
-    if (verified.executionId !== granted.execution.id || verified.sha !== authorization.sha || !Number.isFinite(verifiedTime) || !Number.isInteger(verified.providerDelayMs) || verified.providerDelayMs < 0 || verified.providerDelayMs > 21_000) throw new Error(`${work.key} received an invalid final GitHub gate verification`);
+    if (verified.executionId !== granted.execution.id || verified.sha !== authorization.sha || !Number.isFinite(verifiedTime) || !Number.isInteger(verified.providerDelayMs) || verified.providerDelayMs < 0 || verified.providerDelayMs > 21_000
+      || !verified.clockOffset || !Number.isFinite(verified.clockOffset.min) || !Number.isFinite(verified.clockOffset.max) || verified.clockOffset.min > verified.clockOffset.max || verified.clockOffset.max - verified.clockOffset.min > 20_000) throw new Error(`${work.key} received an invalid final GitHub gate verification`);
     const githubClock = run('gh', ['api', '--include', 'rate_limit']);
     const delay = githubProviderDelay(verifiedTime, verified.providerDelayMs, githubClock);
     if (delay > 21_000 || remainingAtSnapshot - (performance.now() - authorityBudgetStartedAt) - delay <= 90_000) throw new Error('Clock uncertainty leaves insufficient merge authority; refresh and retry');
@@ -509,7 +513,7 @@ export async function mergeWork(config: MasterConfig, work: Work, freshSnapshot:
     // boundary after the transactional commit so a fast successful merge cannot appear
     // to predate the authority that serialized it against revocation.
     const commitClock = run('gh', ['api', '--include', 'rate_limit']);
-    const commitDelay = githubProviderDelay(committingTime, 0, commitClock);
+    const commitDelay = githubProviderDelay(committingTime, 0, commitClock, verified.clockOffset.min);
     if (commitDelay > 21_000 || remainingAtSnapshot - (performance.now() - authorityBudgetStartedAt) - commitDelay <= 90_000) throw new Error('Clock uncertainty leaves insufficient committed merge authority; wait for observation or expiry');
     if (commitDelay) await new Promise(resolve => setTimeout(resolve, commitDelay));
     const provider = JSON.parse(run('gh', ['api', '--method', 'PUT', `repos/${config.repository}/pulls/${authorization.pr}/merge`, '-f', `sha=${authorization.sha}`, '-f', `merge_method=${config.mergeMethod}`]));

@@ -6,6 +6,7 @@ import { join, resolve } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { contracts, exercise, judgeMergeAuthorization } from './acceptance-contract.mjs';
+import { mergeAuthorizationPrincipals, probeMergeAuthorization } from './merge-authorization-probe.mjs';
 
 const [metadataFile, image, output, proofInput] = process.argv.slice(2);
 if (!metadataFile || !image || !output) throw new Error('Usage: run-acceptance metadata.json image output.json [proof]');
@@ -28,7 +29,7 @@ try {
     await new Promise(r => setTimeout(r, 1000));
   }
   if (!databaseReady) throw new Error('Isolated database did not become ready');
-  const cases = proof === 'integration:merge-authorization' ? judgeMergeAuthorization(readTranscript()) : await exerciseOverHttp();
+  const cases = proof === 'integration:merge-authorization' ? judgeMergeAuthorization(await exerciseMergeAuthorization()) : await exerciseOverHttp();
   result = { ...result, result: 'pass', cases, executed: cases.length }; console.log(`Trusted acceptance completed: ${cases.length} ${proof} cases passed.`);
 } catch { console.error('Trusted acceptance failed. No passing evidence was produced.'); process.exitCode = 1; }
 finally {
@@ -39,17 +40,21 @@ finally {
   await writeFile(resolve(output), JSON.stringify(result, null, 2));
 }
 
-// The merge-authorization scenario needs an observed GitHub candidate, which no client-controlled
-// route can invent. The probe runs inside the candidate, mounted read-only from protected source,
-// and only reports what it saw; judgeMergeAuthorization decides out here whether that is a pass.
-function readTranscript() {
-  const logs = execFileSync('docker', ['run', '--rm', '--name', app, '--network', network, '--cap-drop=ALL', '--security-opt=no-new-privileges',
-    '--memory=1g', '--cpus=2', '--pids-limit=256', '-e', `DATABASE_URL=${database}`, '-e', 'GRAPHYARD_SOURCE_ROOT=/app',
-    '-v', `${harness}:/harness:ro`, '--entrypoint', 'node', image, '--import', 'tsx', '/harness/merge-authorization-probe.mjs'],
-  { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 300_000, maxBuffer: 8_000_000 });
-  const match = /\n--- graphyard-transcript ---\n(.*)\n--- end-graphyard-transcript ---/.exec(logs);
-  if (!match) throw new Error('Candidate produced no merge-authorization transcript');
-  return JSON.parse(match[1]);
+// Candidate code and the protected judge never share a process. A small protected launcher inside
+// the container supplies provider observations, while this controller drives and judges HTTP only.
+async function exerciseMergeAuthorization() {
+  const principals = mergeAuthorizationPrincipals(), controlToken = randomBytes(32).toString('hex');
+  const envFile = join(scratch, 'merge-candidate.env');
+  await writeFile(envFile, `DATABASE_URL=${database}\nGRAPHYARD_SOURCE_ROOT=/app\nGRAPHYARD_PRINCIPALS=${JSON.stringify(principals)}\nGRAPHYARD_PROBE_CONTROL_TOKEN=${controlToken}\n`, { mode: 0o600 });
+  docker('run', '-d', '--name', app, '--network', network, '--cap-drop=ALL', '--security-opt=no-new-privileges', '--memory=1g', '--cpus=2', '--pids-limit=256', '--env-file', envFile,
+    '-v', `${harness}:/harness:ro`, '-p', '127.0.0.1::4310', '-p', '127.0.0.1::4311', '--entrypoint', 'node', image, '--import', 'tsx', '/harness/merge-authorization-server.mjs');
+  const apiPort = docker('port', app, '4310/tcp'), controlPort = docker('port', app, '4311/tcp');
+  if (!/^127\.0\.0\.1:\d+$/.test(apiPort) || !/^127\.0\.0\.1:\d+$/.test(controlPort)) throw new Error('Unexpected container ports');
+  const url = `http://${apiPort}`, controlUrl = `http://${controlPort}`;
+  let ready = false;
+  for (let i = 0; i < 60; i++) { try { const response = await fetch(`${url}/healthz`, { signal: AbortSignal.timeout(1000) }); if (response.ok) { ready = true; break; } } catch { /* startup */ } await new Promise(resolve => setTimeout(resolve, 1000)); }
+  if (!ready) throw new Error('Merge-authorization candidate did not become healthy');
+  return probeMergeAuthorization({ url, controlUrl, controlToken, principals });
 }
 
 async function exerciseOverHttp() {
