@@ -4,7 +4,7 @@ Herdr runs visible agent sessions. Graphyard remains authoritative for work owne
 
 ## Install the plugin
 
-Requires Node 24, Herdr 0.7.1 or newer, and a Graphyard checkout.
+Requires Node 24, Herdr 0.7.1 or newer, and a Graphyard checkout. Supervised Muse launch and lifecycle detection require Herdr 0.9.0 or newer plus an installed `muse` executable.
 
 From the managed repository, with an individual worker token:
 
@@ -48,6 +48,8 @@ A direct `watch` invocation stops the worker process group on Unix. On Windows i
 For several workers, use the [master-agent mode](master-agent.md). It joins Graphyard work state with Herdr session health, dispatches trusted local launch profiles, and requests guarded merges.
 
 A visible session is health information, not ownership. Graphyard recognizes ownership only after the worker's authenticated claim.
+
+Muse is available as `kind: "muse"` in a master launch profile. Dispatch still follows the normal authenticated claim, assigned-worktree, Herdr pane, and `graphyard watch` path. Herdr's Muse states make launch, active work, waiting, exit, and offline sessions observable, but cannot claim, release, renew, or advance Graphyard work. A failed launch is cleaned up before release, and lease loss terminates the supervised process. There is no supported unsupervised Muse dispatch path.
 
 ## Multiple machines
 

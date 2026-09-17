@@ -1,0 +1,10 @@
+{
+  "name": "muse-primary",
+  "principal": "muse-1",
+  "agentName": "engineering-muse-1",
+  "mode": "launch",
+  "kind": "muse",
+  "credentialFile": "/home/operator/.config/graphyard/workers/muse-1.token",
+  "agentArgs": [],
+  "environment": {}
+}

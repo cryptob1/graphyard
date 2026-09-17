@@ -21,7 +21,7 @@ export const workerProfileSchema = z.object({
   principal: z.string().trim().min(1).max(200),
   agentName: z.string().trim().min(1).max(100),
   mode: z.enum(['existing', 'launch']),
-  kind: z.enum(['pi', 'claude', 'codex', 'gemini', 'cursor', 'devin', 'agy', 'cline', 'omp', 'mastracode', 'opencode', 'copilot', 'kimi', 'kiro', 'droid', 'amp', 'grok', 'hermes', 'kilo', 'qodercli', 'qwen', 'maki']).optional(),
+  kind: z.enum(['pi', 'claude', 'codex', 'gemini', 'cursor', 'devin', 'agy', 'cline', 'omp', 'mastracode', 'opencode', 'copilot', 'kimi', 'kiro', 'droid', 'amp', 'grok', 'hermes', 'kilo', 'qodercli', 'qwen', 'maki', 'muse']).optional(),
   credentialFile: z.string().optional(),
   agentArgs: z.array(z.string().max(1000)).max(30).default([]),
   environment: safeEnvironment,

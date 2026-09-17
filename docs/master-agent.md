@@ -6,7 +6,7 @@ Graphyard remains the source of truth. Herdr only reports live session health.
 
 ## Install
 
-Requires Node 24, Herdr 0.7.1 or newer, a Graphyard checkout, and GitHub CLI authenticated as an identity allowed to merge the protected base branch.
+Requires Node 24, Herdr 0.7.1 or newer, a Graphyard checkout, and GitHub CLI authenticated as an identity allowed to merge the protected base branch. Muse profiles require Herdr 0.9.0 or newer and an installed, authenticated `muse` executable on the coordinator host.
 
 Create a `coordinator` principal on the Graphyard server. From a clean coordinator checkout, list Herdr workspaces and bind the master to this repository's workspace:
 
@@ -30,6 +30,7 @@ Use a template:
 
 - [Codex](../examples/master/codex-worker.json)
 - [Claude](../examples/master/claude-worker.json)
+- [Muse](../examples/master/muse-worker.json)
 - [existing session](../examples/master/existing-worker.json)
 
 A launch profile points to a mode-0600 worker-token file outside every repository worktree:
@@ -42,6 +43,8 @@ node "$GRAPHYARD_CLI" master status
 Provider login and Graphyard identity are separate. Profiles cannot contain Graphyard variables or secret-looking environment values.
 
 `launch` profiles are supervised and can receive new work. `existing` profiles add health visibility for a session that already owns work; Graphyard will not inject a new assignment into an unsupervised process.
+
+Muse uses the same launch boundary as every other runtime. `master dispatch` authenticates the profile's distinct role-worker credential, claims and creates the assigned worktree, starts `muse` in Herdr through `graphyard watch`, and prompts it only after Herdr reports it ready. Do not launch Muse directly for dispatched work, reuse the coordinator token, or give its worker principal operator or trusted evidence-producer privileges. Herdr reports Muse as working, idle, blocked, done, or offline; those states are operational telemetry only. Graphyard's authenticated lease and epoch remain the sole ownership and lifecycle authority, and lease loss causes the common supervisor to terminate Muse.
 
 Local dispatch requires Linux with a working systemd user manager for durable containment. On macOS or Linux without user systemd, route work to a separately supervised remote worker instead.
 
