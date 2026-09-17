@@ -102,6 +102,8 @@ export function server(engine: Engine, credentials: Credential[], github: GitHub
             : command === 'dispatch' ? await validation.dispatch(actor, data, key)
             : command === 'result' ? await validation.result(actor, data, key)
             : command === 'ack' || command === 'heartbeat' ? await validation.runnerCommand(actor, command, data, key)
+            : command === 'collection-heartbeat' ? await validation.collectionHeartbeat(actor, data, key)
+            : command === 'collection-authority' ? await validation.collectionAuthority(actor, data)
             : await validation.operatorCommand(actor, command as 'cancel' | 'settle' | 'retry', data, key);
           return send(200, result);
         }

@@ -644,10 +644,12 @@ test('rework worktree reopens the exact observed PR branch while preserving its 
 test('the packaged runner path is usable from the CLI and refuses evidence-producer credentials', async () => {
   const cwd = await mkdtemp(join(tmpdir(), 'graphyard-runner-cli-'));
   let role = 'producer';
+  let collectionAuthority: unknown;
   const posts: string[] = [];
   const http = createServer((req, res) => {
     res.setHeader('Content-Type', 'application/json');
     if (req.url === '/api/status') { res.end(JSON.stringify({ actor: { id: 'preview-runner', role, ...(role === 'producer' ? { proofs: ['e2e:booking'] } : {}) } })); return; }
+    if (req.url === '/api/validation/collection-authority') { posts.push(String(req.url)); res.end(JSON.stringify(collectionAuthority)); return; }
     posts.push(String(req.url)); res.end('{}');
   });
   await new Promise<void>(r => http.listen(0, '127.0.0.1', r));
@@ -677,16 +679,18 @@ test('the packaged runner path is usable from the CLI and refuses evidence-produ
     // A live grant with another attempt's output directory is refused before any
     // artifact is uploaded: an artifact name is immutable once published for an attempt.
     const grant = { requestId: randomUUID(), attemptId: randomUUID(), epoch: 1, runner: { id: 'preview-runner', revision: 1 },
+      executionHost: 'ssh://runner.test', attestationPublicKey: 'test-public-key-material-at-least-32-bytes',
       bundleDigest: bundle.digest, runnerImageDigest: `sha256:${'b'.repeat(64)}`, targetUrl: 'https://preview.example.test/', deadline: '2026-09-16T01:00:00.000Z' };
+    collectionAuthority = grant;
     const record = { grant, startedAt: '2026-09-16T00:00:00.000Z', finishedAt: '2026-09-16T00:01:00.000Z',
       phases: [{ phase: 'enumerate', exitCode: 0, timedOut: false, durationMs: 1 }, { phase: 'execute', exitCode: 0, timedOut: false, durationMs: 2 }],
       bundleDigestBefore: bundle.digest, bundleDigestAfter: bundle.digest, runnerImageDigest: grant.runnerImageDigest,
       outcome: 'completed', refusals: [], outputPath: '/srv/graphyard/attempts/previous',
       settlement: { settled: true, containers: [{ name: `graphyard-enumerate-${grant.attemptId}`, state: 'absent' }, { name: `graphyard-execute-${grant.attemptId}`, state: 'absent' }] } };
     await writeFile(join(cwd, 'stale.json'), JSON.stringify({ grant, record, outputPath: join(cwd, 'out'), requiredArtifacts: ['inventory', 'report'],
-      expected: { instance: 'preview-7f3a', artifacts: [{ service: 'api', digest: `sha256:${'c'.repeat(64)}` }] }, observations: [] }));
+      expected: { instance: 'preview-7f3a', artifacts: [{ service: 'api', digest: `sha256:${'c'.repeat(64)}` }] }, observations: [], executionAttestation: {} }));
     await assert.rejects(exec(process.execPath, [launcher, 'runner', 'collect', join(cwd, 'stale.json')], { cwd, env }), /output boundary this execution recorded/);
-    assert.deepEqual(posts, ['/api/validation/dispatch']);
+    assert.deepEqual(posts, ['/api/validation/dispatch', '/api/validation/collection-authority']);
     await assert.rejects(exec(process.execPath, [launcher, 'runner', 'nonsense'], { cwd, env }), /Use runner inspect/);
   } finally { await new Promise<void>(r => http.close(() => r())); await rm(cwd, { recursive: true, force: true }); }
 });

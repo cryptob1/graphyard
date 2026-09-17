@@ -6,13 +6,15 @@ import { join, resolve } from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
-import { createHash, randomUUID } from 'node:crypto';
+import { createHash, generateKeyPairSync, randomUUID, sign } from 'node:crypto';
 import { assembleResult, attributeExecution, collectArtifacts, collectionBinding, deriveSettlement, selfReportedObservation, type TargetObservation } from '../src/runner-collector.js';
 import { containerNames, type AttemptGrant, type ExecutionRecord } from '../src/runner-executor.js';
 
 const run = promisify(execFile);
 const bundle = `sha256:${'a'.repeat(64)}`, image = `sha256:${'b'.repeat(64)}`;
+const attestor = generateKeyPairSync('ed25519');
 const grant: AttemptGrant = { requestId: randomUUID(), attemptId: randomUUID(), epoch: 1, runner: { id: 'preview-runner', revision: 1 },
+  executionHost: 'ssh://runner.test', attestationPublicKey: attestor.publicKey.export({ type: 'spki', format: 'pem' }).toString(),
   bundleDigest: bundle, runnerImageDigest: image, targetUrl: 'https://preview.example.test/', deadline: '2026-09-16T01:00:00.000Z' };
 const startedAt = '2026-09-16T00:00:00.000Z', finishedAt = '2026-09-16T00:01:00.000Z';
 const expected = { instance: 'preview-7f3a', artifacts: [{ service: 'api', digest: `sha256:${'c'.repeat(64)}` }] };
@@ -35,10 +37,20 @@ const collectedOf = (inventory: unknown, execution: unknown, reasons: string[] =
   ({ artifacts: [{ name: 'inventory', digest: `sha256:${'1'.repeat(64)}`, document: inventory }, { name: 'report', digest: `sha256:${'2'.repeat(64)}`, document: execution }], reasons });
 const uploadedOf = (collected: ReturnType<typeof collectedOf>) => collected.artifacts.map(a => ({ name: a.name, digest: a.digest, url: `graphyard-artifact://owner/repo/${grant.requestId}/${a.name}` }));
 const required = ['inventory', 'report'];
+function attestation(execution: ExecutionRecord, collected: { artifacts: { name: string; digest: string }[] }) {
+  const payload = { requestId: grant.requestId, attemptId: grant.attemptId, epoch: grant.epoch, executionHost: grant.executionHost,
+    outputPath: execution.outputPath, startedAt: execution.startedAt, finishedAt: execution.finishedAt,
+    artifacts: collected.artifacts.map(({ name, digest }) => ({ name, digest })).sort((a, b) => a.name.localeCompare(b.name)),
+    containers: [...execution.settlement.containers].sort((a, b) => a.name.localeCompare(b.name)) };
+  return { payload, signature: sign(null, Buffer.from(JSON.stringify(payload)), attestor.privateKey).toString('base64') };
+}
 function assemble(over: Partial<Parameters<typeof assembleResult>[0]> = {}) {
   const collected = collectedOf(inventoryOf(['books']), executionOf(['books']));
-  return assembleResult({ grant, execution: record(), collectedFrom: outputPath, expected, observations: covering, maxGapMs: 30_000,
-    collected, uploaded: uploadedOf(collected), settlementObservations: absent, requiredArtifacts: required, ...over });
+  const execution = (over.execution as ExecutionRecord | undefined) ?? record();
+  const selected = (over.collected as typeof collected | undefined) ?? collected;
+  return assembleResult({ grant, execution, collectedFrom: outputPath, expected, observations: covering, maxGapMs: 30_000,
+    collected: selected, uploaded: uploadedOf(collected), settlementObservations: absent, requiredArtifacts: required,
+    executionAttestation: attestation(execution, selected), ...over });
 }
 
 test('whole-run attribution refuses A -> B -> A rollouts and uncovered intervals', () => {
@@ -132,6 +144,19 @@ test('collected facts become an independently computed result, and refusals neve
     settlementObservations: absent.map(c => ({ ...c, state: 'unknown' as const })) });
   assert.equal(unsettled.report!.executionSettled, false);
   assert.equal(unsettled.report!.behavior, 'blocked');
+});
+
+test('worker-authored output cannot pass without the pinned host attestor', () => {
+  const clean = assemble();
+  assert.equal(clean.report!.behavior, 'passed');
+  const forged = assemble({ executionAttestation: { ...attestation(record(), collectedOf(inventoryOf(['books']), executionOf(['books']))), signature: Buffer.alloc(64).toString('base64') } });
+  assert.equal(forged.report!.behavior, 'blocked');
+  assert.ok(forged.refusals.some(r => /signature is invalid/.test(r)));
+  const signed = attestation(record(), collectedOf(inventoryOf(['books']), executionOf(['books'])));
+  const wrongHost = { ...signed, payload: { ...signed.payload, executionHost: 'ssh://other-runner.test' } };
+  const redirected = assemble({ executionAttestation: wrongHost });
+  assert.equal(redirected.report!.behavior, 'blocked');
+  assert.ok(redirected.refusals.some(r => /execution host pinned/.test(r)));
 });
 
 test('settlement is the collector\'s own observation, never the runner\'s assertion', () => {
@@ -232,7 +257,8 @@ test('a real Playwright attempt is collected end to end, and a broken assertion 
     assert.equal(collected.complete, true);
     const boundary = await realpath(output);
     const passed = assembleResult({ grant, execution: record({ outputPath: boundary }), collectedFrom: boundary, expected, observations: covering, maxGapMs: 30_000,
-      collected, uploaded: uploadedOf(collected as never), settlementObservations: absent, requiredArtifacts: required });
+      collected, uploaded: uploadedOf(collected as never), settlementObservations: absent, requiredArtifacts: required,
+      executionAttestation: attestation(record({ outputPath: boundary }), collected) });
     assert.deepEqual(passed.refusals, []);
     assert.equal(passed.report!.behavior, 'passed');
     assert.equal(passed.report!.executed, 1);
@@ -244,7 +270,8 @@ test('a real Playwright attempt is collected end to end, and a broken assertion 
     await phase('report.json', false);
     const brokenCollected = await collectArtifacts(output, required);
     const broken = assembleResult({ grant, execution: record({ outputPath: boundary }), collectedFrom: boundary, expected, observations: covering, maxGapMs: 30_000,
-      collected: brokenCollected, uploaded: uploadedOf(brokenCollected as never), settlementObservations: absent, requiredArtifacts: required });
+      collected: brokenCollected, uploaded: uploadedOf(brokenCollected as never), settlementObservations: absent, requiredArtifacts: required,
+      executionAttestation: attestation(record({ outputPath: boundary }), brokenCollected) });
     assert.equal(broken.report!.behavior, 'failed');
     assert.ok(broken.refusals.length);
     // The trace locates the failing test and step without echoing candidate strings.

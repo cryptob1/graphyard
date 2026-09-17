@@ -81,12 +81,14 @@ Define separate runner, collector and builder registrations:
   "role": "runner",
   "environment": {"id": "preview", "revision": 1},
   "adapterVersion": "custom-v1",
+  "executionHost": "ssh://graphyard-inspect@preview-runner.internal",
+  "attestationPublicKey": "-----BEGIN PUBLIC KEY-----\n…\n-----END PUBLIC KEY-----\n",
   "proofs": [],
   "enabled": true
 }
 ```
 
-Use `role: collector` and its allowed `e2e:...` proofs for the collector; use `role: builder` for the build producer. These must reference separately configured principals with the roles in the table above.
+Runner registrations must pin the exact container host the collector inspects and the public key of an operator-controlled host attestor; the attestor private key must be inaccessible to the runner worker. Use `role: collector` and its allowed `e2e:...` proofs for the collector; use `role: builder` for the build producer. Non-runner registrations omit `executionHost` and `attestationPublicKey`. These must reference separately configured principals with the roles in the table above.
 
 Approve a `kind: bundle` definition with `id`, `expectedRevision`, `scenario`, `scenarioRevision`, `scenarioHash`, `digest` and `runnerImageDigest`. Digests use `sha256:` plus 64 lowercase hex characters. The bundle digest must cover all executable assertions, transitive helpers, fixtures, configuration and lockfiles. The runner image pins runtime dependencies. Changed executable bytes require a new scenario revision and work pinned to it, even if published under a different bundle ID. Existing E2E scenario pins cannot be upgraded in place yet: create a follow-up work item pinned to the new revision, preserving the earlier item for history. Do not remove and re-add a proof to work around this boundary. D1 records the operator's approval; D2's isolated executor must enforce immutable approved bytes throughout execution.
 

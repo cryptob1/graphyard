@@ -16,6 +16,7 @@ async function boundary(run: (paths: { oracle: string; output: string; plan: Exe
   for (const [path, content] of Object.entries(files)) await writeFile(join(oracle, path), content);
   const bundle = await oracleBundleDigest(oracle);
   const plan: ExecutionPlan = { grant: { requestId: randomUUID(), attemptId: randomUUID(), epoch: 1, runner: { id: 'preview-runner', revision: 1 },
+      executionHost: 'unix:///var/run/docker.sock', attestationPublicKey: 'test-public-key-material-at-least-32-bytes',
       bundleDigest: bundle.digest, runnerImageDigest: image, targetUrl: 'https://preview.example.test/', deadline: new Date(Date.now() + 600_000).toISOString() },
     imageRepository: 'ghcr.io/example/graphyard-runner', oraclePath: oracle, outputPath: output, network: 'gy-isolated', timeoutMs: 60_000, memoryMb: 2048, cpus: 2, pidsLimit: 256, runAsUser };
   try { await run({ oracle, output, plan }); } finally { await rm(root, { recursive: true, force: true }); }
@@ -87,7 +88,13 @@ test('isolation refuses overlapping, shared or pre-populated execution boundarie
   await assert.rejects(assertIsolation({ ...plan, testAccountEnvFile: shared }), /private regular file/);
   await chmod(shared, 0o600);
   await assert.doesNotReject(assertIsolation({ ...plan, testAccountEnvFile: shared }));
+  await writeFile(shared, 'NODE_OPTIONS=--require=/tmp/forge.js', { mode: 0o600 });
+  await assert.rejects(assertIsolation({ ...plan, testAccountEnvFile: shared }), /only TEST_ACCOUNT/);
   await rm(shared);
+}));
+
+test('built-in Docker networks cannot replace the approved isolation boundary', async () => boundary(async ({ plan }) => {
+  for (const network of ['host', 'bridge', 'default', 'none']) assert.throws(() => executionCommand({ ...plan, network }, 'execute'), /dedicated operator-approved/);
 }));
 
 test('an authorized attempt enumerates then executes, and verifies settlement before releasing', async () => boundary(async ({ plan }) => {

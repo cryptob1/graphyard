@@ -14,6 +14,11 @@ const targetUrl = z.url().max(2000).refine(s => { const u = new URL(s); return u
 export const attemptGrantSchema = z.object({
   requestId: z.uuid(), attemptId: z.uuid(), epoch: z.number().int().positive(),
   runner: z.object({ id: name, revision: z.number().int().positive() }).strict(),
+  // These values come from the operator-versioned runner registration. They bind
+  // collection to one host and to an attestor whose private key is unavailable to
+  // the implementation worker.
+  executionHost: z.string().min(1).max(500),
+  attestationPublicKey: z.string().min(32).max(4096),
   bundleDigest: digest, runnerImageDigest: digest, targetUrl, deadline: z.iso.datetime(),
 }).strict();
 export type AttemptGrant = z.infer<typeof attemptGrantSchema>;
@@ -22,7 +27,7 @@ export const executionPlanSchema = z.object({
   grant: attemptGrantSchema,
   oraclePath: absolute, outputPath: absolute,
   imageRepository: z.string().regex(/^[a-z0-9][a-z0-9._\/-]*$/).max(255),
-  network: z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,60}$/),
+  network: z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,60}$/).refine(value => !['host', 'bridge', 'default', 'none'].includes(value), 'Use a dedicated operator-approved Docker network'),
   timeoutMs: z.number().int().min(1_000).max(3_600_000),
   memoryMb: z.number().int().min(256).max(16_384).default(2048),
   cpus: z.number().min(0.5).max(16).default(2),
@@ -113,6 +118,10 @@ export async function assertIsolation(plan: ExecutionPlan) {
     try {
       const info = await file.stat();
       if (!info.isFile() || info.mode & 0o077) throw new Error('Approved test-account configuration must be a private regular file (mode 0600)');
+      if (info.size > 65_536) throw new Error('Approved test-account configuration is too large');
+      const contents = await file.readFile('utf8');
+      const keys = contents.split(/\r?\n/).filter(line => line.trim() && !line.trimStart().startsWith('#')).map(line => line.match(/^([A-Za-z_][A-Za-z0-9_]*)=/)?.[1]);
+      if (keys.some(key => !key || !/^TEST_ACCOUNT(?:_[A-Z0-9_]+)?$/.test(key))) throw new Error('Approved test-account configuration may contain only TEST_ACCOUNT_* variables');
     } finally { await file.close(); }
   }
   return { oraclePath: oracle.path, outputPath: output.path };
@@ -141,9 +150,15 @@ const spawnProcess = (file: string, argv: string[], timeoutMs: number, signal?: 
 const dockerRunner: Runner = (command, timeoutMs, signal) => spawnProcess(command.file, command.argv, timeoutMs, signal);
 const dockerArgv = (dockerHost: string | undefined, argv: string[]) => (dockerHost ? ['--host', dockerHost, ...argv] : argv);
 async function inspectContainer(name: string, dockerHost?: string): Promise<ContainerState> {
-  const inspected = await spawnProcess('docker', dockerArgv(dockerHost, ['inspect', '--type=container', name]), 30_000);
-  if (inspected.timedOut) return 'unknown';
-  return inspected.exitCode === 0 ? 'present' : inspected.exitCode === 1 ? 'absent' : 'unknown';
+  return new Promise(resolve => {
+    const child = spawn('docker', dockerArgv(dockerHost, ['inspect', '--type=container', name]), { stdio: ['ignore', 'ignore', 'pipe'] });
+    let stderr = '', done = false;
+    child.stderr.on('data', chunk => { if (stderr.length < 8192) stderr += chunk.toString('utf8').slice(0, 8192 - stderr.length); });
+    const timer = setTimeout(() => child.kill('SIGKILL'), 30_000);
+    const finish = (state: ContainerState) => { if (done) return; done = true; clearTimeout(timer); resolve(state); };
+    child.on('error', () => finish('unknown'));
+    child.on('close', code => finish(code === 0 ? 'present' : code === 1 && /no such (object|container)/i.test(stderr) ? 'absent' : 'unknown'));
+  });
 }
 /**
  * Read-only settlement observation for a party that is not the runner. The collector
@@ -202,6 +217,9 @@ export async function executeAttempt(plan: unknown, options: { run?: Runner; set
   const run = options.run ?? dockerRunner, settle = options.settle ?? dockerSettler;
   const signal = options.signal;
   const paths = options.preflight ?? await preflightAttempt(p);
+  // The exact canonical roots checked and hashed in preflight are the roots mounted.
+  // Never resolve a worker-replaceable symlink a second time in `docker run`.
+  const mountedPlan: ExecutionPlan = { ...p, oraclePath: paths.oraclePath, outputPath: paths.outputPath };
   const before = { digest: paths.bundleDigest };
   const refusals: string[] = [];
   if (before.digest !== p.grant.bundleDigest) refusals.push('Approved oracle bundle bytes differ from the pinned digest');
@@ -214,7 +232,7 @@ export async function executeAttempt(plan: unknown, options: { run?: Runner; set
       const deadline = Math.min(p.timeoutMs, Math.max(0, Date.parse(p.grant.deadline) - now().getTime()));
       if (deadline < 1_000) { refusals.push('Attempt deadline elapsed before execution'); break; }
       const at = now().getTime();
-      const outcome = await run(executionCommand(p, phase), deadline, signal);
+      const outcome = await run(executionCommand(mountedPlan, phase), deadline, signal);
       phases.push({ phase, ...outcome, durationMs: now().getTime() - at });
       if (signal?.aborted) { refusals.push(lostAuthority); break; }
       if (outcome.timedOut) break;

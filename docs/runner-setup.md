@@ -46,7 +46,7 @@ Register the result as an operator with `validation define`, pinning both the bu
 
 ## Execute one dispatched attempt
 
-The runner runs under a **worker** registration. The CLI refuses to start if the credential carries an evidence-producer proof scope, because execution must never be able to attest its own success.
+The runner runs under a **worker** registration. The CLI refuses to start if the credential carries an evidence-producer proof scope, because execution must never be able to attest its own success. Its operator-created registration must also pin `executionHost` (the Docker endpoint the collector will inspect) and `attestationPublicKey` (an Ed25519 public key). Changing either requires a new registration revision; neither value is accepted from a collector input file.
 
 ```bash
 graphyard runner attempt runner.json > execution.json
@@ -75,11 +75,21 @@ Each phase runs with the bundle bind-mounted read-only at `/oracle`, a separate 
 
 Preflight happens **before the acknowledgement**, not after it. The runner refuses unless the oracle and output paths are separate directories, the oracle directory is not group- or world-writable, and the output directory is owned by `runAsUser`, private (mode 0700) and **empty** — a pre-existing file must never be mistaken for this attempt's output. A refusal at this point leaves the attempt unacknowledged, so it expires and releases its runner, environment and external reservations; an acknowledged attempt holds them until an operator settles it by hand, which is why no local check may run after the ACK. The bundle digest measured during preflight is the one carried into execution, and it is verified again after the last phase; a mismatch either way is an explicit refusal rather than a result.
 
-A rejected heartbeat means this epoch may no longer act. The runner aborts: the running phase is killed, no further phase starts, and the record carries an explicit authority-loss refusal. The container boundary fences the host, not the target, so an attempt whose authority has been cancelled, superseded or expired must stop exercising the target rather than continue to its request deadline. Transient failures — a timeout, an unreachable control plane, a 5xx — are not authority loss and leave reconciliation to decide.
+A rejected heartbeat means this epoch may no longer act. The runner aborts: the running phase is killed, no further phase starts, and the record carries an explicit authority-loss refusal. The container boundary fences the host, not the target, so an attempt whose authority has been cancelled, superseded or expired must stop exercising the target rather than continue to its request deadline. An ambiguous renewal failure also aborts before the last confirmed 60-second lease can expire; network failure is not permission to keep exercising the target.
 
 Killing `docker run` does not stop the container it started. After the phases — including an aborted or timed-out one — the runner force-removes each container and then confirms the name no longer resolves. Anything else, including an unreachable daemon, records `settled: false`. That record is a diagnostic: the resource barrier is released only by the collector's own observation, described below.
 
 The execution record decides nothing about acceptance. It reports what ran, the digests measured before and after, whether the attempt timed out, whether settlement was verified, and any refusals.
+
+## Attest the protected host boundary
+
+Run a small host-attestor service under an OS identity the implementation worker cannot access. Generate an Ed25519 keypair, store its private key mode 0600 for that service only, and pin the public key plus the Docker endpoint in the runner registration. After execution, the service runs:
+
+```bash
+graphyard runner attest attestor.json > execution-attestation.json
+```
+
+`attestor.json` contains the dispatch `grant`, execution `record`, exact `outputPath`, `requiredArtifacts`, and `privateKeyFile`. The command re-reads and structurally verifies the artifacts, then signs the request/attempt/epoch, pinned host, actual interval, canonical output path, artifact digests, and complete container set. The private key is never mounted into either Playwright container, returned to the worker, or placed in Git. A worker can fabricate JSON in a writable output directory, but cannot produce the signature required by the collector. Deploy the attestor with its own filesystem and Docker access controls; running it under the worker's OS account collapses this boundary and is unsupported.
 
 ## Collect, verify and publish
 
@@ -96,7 +106,7 @@ graphyard runner collect collector.json
              "targetUrl": "https://preview-7f3a.example.test/", "deadline": "2026-09-16T01:00:00.000Z" },
   "record": { "…": "the runner's execution record" },
   "outputPath": "/srv/graphyard/attempts/current",
-  "dockerHost": "ssh://graphyard@preview-runner.internal",
+  "executionAttestation": { "payload": { "…": "signed host facts" }, "signature": "base64…" },
   "requiredArtifacts": ["inventory", "report"],
   "expected": { "instance": "preview-7f3a", "artifacts": [{ "service": "api", "digest": "sha256:…" }] },
   "observations": [{ "at": "…", "measurement": "provider", "instance": "preview-7f3a", "artifacts": [{ "service": "api", "digest": "sha256:…" }] }],
@@ -104,7 +114,7 @@ graphyard runner collect collector.json
 }
 ```
 
-The collector re-reads the dispatch authority itself and compares it with the execution record **and with the directory it is about to read**, before anything is read or uploaded. A mismatched request, attempt, epoch or runner registration produces **no publishable report at all**, so a stray attempt cannot advance any work, and `outputPath` must resolve to the boundary that execution recorded — otherwise a live record plus an older attempt's successful output directory would publish that attempt's behaviour as this one's. Binding first also protects the attempt: an artifact name is immutable once published, so a premature upload of the wrong bytes could not be corrected by a later run with the correct record. The record is data, not authority: a malformed one refuses, and the collector re-derives the boundary facts — that the measured bundle bytes and runner image match the approved digests, and that offline enumeration preceded execution — against the grant it read rather than trusting the record's own conclusions.
+The collector re-reads the dispatch authority itself and compares it with the execution record **and with the directory it is about to read**, before anything is read or uploaded. It additionally verifies the host-attestor signature against the public key in that authority. A mismatched request, attempt, epoch, host, interval, artifact digest, container set, or runner registration refuses. `outputPath` must resolve to the boundary execution recorded — otherwise a live record plus an older attempt's successful output directory could publish that attempt's behaviour as this one's.
 
 It then reads the output boundary directly. Only the approved reporter's structure is accepted: arbitrary candidate-authored JSON is not proof that a command ran, and any file the approved reporter did not write refuses collection. The enumerated inventory is compared against actual execution — empty, skipped, expected-failing, missing, duplicated, retried, inconsistent and truncated reports all refuse.
 
@@ -112,7 +122,9 @@ It then reads the output boundary directly. Only the approved reporter's structu
 
 `executionSettled` in the published result is the collector's own observation, never a field copied from the execution record. The collector derives both container names for the attempt from the grant — `graphyard-enumerate-ATTEMPT` and `graphyard-execute-ATTEMPT` — and inspects each one itself, read-only; it never removes anything, so observing cannot manufacture an `absent`. Only `absent` for exactly those containers settles the attempt and lets Graphyard release its protected reservations. A record whose settlement does not account for exactly those containers, or that claims settlement the collector cannot see, is refused as blocked and the barrier stays closed until an operator supplies independent settlement evidence.
 
-This is why the collector needs reachability to the execution host's container runtime: set `dockerHost` when it is not the local daemon (any `docker --host` value, such as an `ssh://` endpoint scoped to inspection). It stays a separate credential and a separate role — the runner cannot publish evidence, and the collector cannot execute. Without that reachability every container reads `unknown`, which refuses rather than passes.
+This is why the collector needs reachability to the execution host's container runtime. It uses the `executionHost` pinned in the operator-versioned runner registration; a collector cannot redirect inspection to a daemon where the attempt's containers merely happen to be absent. Scope that endpoint to inspection. Docker transport, daemon, and authentication failures are `unknown`; only Docker's specific “no such container/object” response establishes absence. The runner cannot publish evidence, and the collector cannot execute.
+
+The collector renews the acknowledged attempt while it verifies and uploads. Collection that legitimately takes longer than the runner's final 60-second lease therefore remains live, while a rejected or expired collector renewal still fails closed. Artifact uploads use stable idempotency keys and retry ambiguous transport failures before publishing a terminal result.
 
 Artifacts are uploaded to private storage first, and the published result carries an explicit artifact state. `missing` (nothing at the boundary) and `upload-failed` (stored bytes do not match the collected digest) both refuse acceptance even when the runner exited zero. An artifact kind with no implementation that meets the capture policy — currently traces, screenshots and videos — is refused rather than uploaded unprotected.
 

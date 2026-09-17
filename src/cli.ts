@@ -6,7 +6,7 @@ import { execFileSync, spawnSync } from 'node:child_process';
 import { supervise } from './supervisor.js';
 import { inspectRunnerRepository, oracleBundleDigest, snapshotRunnerSources } from './runner-setup.js';
 import { assertRunnerCredentialScope, attemptGrantSchema, containerNames, executeAttempt, executionPlanSchema, executionRecordSchema, observeContainers, preflightAttempt } from './runner-executor.js';
-import { assembleResult, collectArtifacts, collectionBinding, targetObservationSchema } from './runner-collector.js';
+import { assembleResult, collectArtifacts, collectionBinding, signExecutionAttestation, targetObservationSchema } from './runner-collector.js';
 import { assertRepository, discover } from './onboarding.js';
 import { startGithubSetup } from './github-setup.js';
 import { fileURLToPath } from 'node:url';
@@ -187,6 +187,7 @@ Never share an operator or producer credential with an implementation agent.`); 
       if (!dispatched.request) return print({ dispatched: false, reason: dispatched.reason });
       const grant = attemptGrantSchema.parse({ requestId: dispatched.request.id, attemptId: dispatched.attempt.id, epoch: dispatched.attempt.epoch,
         runner: registration, bundleDigest: dispatched.bundle.digest, runnerImageDigest: dispatched.bundle.runnerImageDigest,
+        executionHost: dispatched.executionAuthority.host, attestationPublicKey: dispatched.executionAuthority.attestationPublicKey,
         targetUrl: dispatched.environment.url, deadline: dispatched.request.deadline });
       const attemptCommand = { requestId: grant.requestId, attemptId: grant.attemptId, epoch: grant.epoch };
       // Every local refusal happens before acknowledgement. An unacknowledged attempt
@@ -200,10 +201,27 @@ Never share an operator or producer credential with an implementation agent.`); 
       // container boundary fences the host, not the target, so execution stops here
       // rather than continuing to exercise the target until the request deadline.
       const authority = new AbortController();
-      let beat = 0;
-      const heartbeat = setInterval(() => { void api('validation/heartbeat', attemptCommand, `${grant.attemptId}-beat-${++beat}`).catch((error: any) => { if (error?.confirmedRefusal) authority.abort(); /* transient failures leave reconciliation to decide */ }); }, 20_000);
+      let beat = 0, lastAuthority = Date.now();
+      const heartbeat = setInterval(() => { void api('validation/heartbeat', attemptCommand, `${grant.attemptId}-beat-${++beat}`).then(() => { lastAuthority = Date.now(); }).catch((error: any) => { if (error?.confirmedRefusal || Date.now() - lastAuthority >= 50_000) authority.abort(); }); }, 20_000);
+      const authorityDeadline = setInterval(() => { if (Date.now() - lastAuthority >= 50_000) authority.abort(); }, 1_000);
       try { return print({ dispatched: true, environment: { instance: dispatched.environment.instance, url: dispatched.environment.url }, expected: { instance: dispatched.environment.instance, artifacts: dispatched.build.artifacts }, record: await executeAttempt({ ...plan, grant }, { preflight, signal: authority.signal }) }); }
-      finally { clearInterval(heartbeat); }
+      finally { clearInterval(heartbeat); clearInterval(authorityDeadline); }
+    }
+    if (id === 'attest' && args.length === 1) {
+      // Run only in the operator-controlled host-attestor service. Its private key must
+      // not be readable by the implementation worker or mounted into runner containers.
+      const input = z.object({ grant: attemptGrantSchema, record: executionRecordSchema, outputPath: z.string(),
+        requiredArtifacts: z.array(z.string()).min(1).max(30), privateKeyFile: z.string().min(1).max(4096) }).strict()
+        .parse(JSON.parse(await readFile(args[0], 'utf8')));
+      const collectedFrom = await realpath(resolve(input.outputPath));
+      const binding = collectionBinding({ grant: input.grant, execution: input.record, collectedFrom });
+      if (binding.reasons.length) throw new Error(`Attestation refused: ${binding.reasons.join('; ')}`);
+      const collected = await collectArtifacts(collectedFrom, input.requiredArtifacts);
+      if (!collected.complete) throw new Error(`Attestation refused: ${collected.reasons.join('; ')}`);
+      const keyInfo = await stat(input.privateKeyFile);
+      if (!keyInfo.isFile() || keyInfo.mode & 0o077) throw new Error('Host-attestor private key must be a private regular file (mode 0600)');
+      const privateKey = await readFile(input.privateKeyFile, 'utf8');
+      return print(signExecutionAttestation({ grant: input.grant, execution: input.record, collected, privateKey }));
     }
     if (id === 'collect' && args.length === 1) {
       // Collector path. Separate credential, separate host: it re-reads the authority,
@@ -211,33 +229,45 @@ Never share an operator or producer credential with an implementation agent.`); 
       const input = z.object({ grant: attemptGrantSchema, record: executionRecordSchema, outputPath: z.string(), requiredArtifacts: z.array(z.string()).min(1).max(30),
         expected: z.object({ instance: z.string(), artifacts: z.array(z.object({ service: z.string(), digest: z.string() }).strict()).min(1) }).strict(),
         observations: z.array(targetObservationSchema).max(5000), maxGapMs: z.number().int().min(1000).max(600_000).default(30_000), cancelled: z.boolean().default(false),
-        dockerHost: z.string().min(1).max(200).optional() })
+        executionAttestation: z.unknown() })
         .strict().parse(JSON.parse(await readFile(args[0], 'utf8')));
+      const attemptCommand = { requestId: input.grant.requestId, attemptId: input.grant.attemptId, epoch: input.grant.epoch };
+      let collectionBeat = 0, collectionAuthorityError: unknown, renewCollection: NodeJS.Timeout | undefined;
+      try {
       // Bind authority, record and boundary before anything is read or published: an
       // immutable artifact name published for the wrong bytes cannot be taken back.
+      const grant = attemptGrantSchema.parse(await api('validation/collection-authority', attemptCommand));
       const collectedFrom = await realpath(resolve(input.outputPath));
-      const binding = collectionBinding({ grant: input.grant, execution: input.record, collectedFrom });
+      const binding = collectionBinding({ grant, execution: input.record, collectedFrom });
       if (binding.reasons.length) throw new Error(`Collection refused before reading the execution boundary: ${binding.reasons.join('; ')}`);
+      await api('validation/collection-heartbeat', attemptCommand, `${input.grant.attemptId}-collection-beat-${++collectionBeat}`);
+      renewCollection = setInterval(() => { void api('validation/collection-heartbeat', attemptCommand, `${input.grant.attemptId}-collection-beat-${++collectionBeat}`).catch(error => { collectionAuthorityError = error; }); }, 20_000);
       // Settlement is the collector's own observation of the execution host, never the
       // runner's claim about itself.
-      const settlementObservations = await observeContainers(containerNames(input.grant.attemptId), { dockerHost: input.dockerHost });
+      const settlementObservations = await observeContainers(containerNames(grant.attemptId), { dockerHost: grant.executionHost });
       const collected = await collectArtifacts(collectedFrom, input.requiredArtifacts);
       const uploaded: { name: string; digest: string; url: string }[] = [];
       const failures: string[] = [];
       for (const artifact of collected.artifacts) {
+        if (collectionAuthorityError) throw new Error('Collection authority could not be renewed; no artifact or result was published');
         try {
-          const stored = await api('validation/artifacts', { requestId: input.grant.requestId, attemptId: input.grant.attemptId, epoch: input.grant.epoch,
-            name: artifact.name, mediaType: artifact.mediaType, bytes: artifact.bytes.toString('base64'), capturePolicy: 'approved-test-data-only' }, `${input.grant.attemptId}-artifact-${artifact.name}`);
+          const body = { requestId: grant.requestId, attemptId: grant.attemptId, epoch: grant.epoch,
+            name: artifact.name, mediaType: artifact.mediaType, bytes: artifact.bytes.toString('base64'), capturePolicy: 'approved-test-data-only' };
+          let stored: any, error: unknown;
+          for (let retry = 0; retry < 3 && !stored; retry++) try { stored = await api('validation/artifacts', body, `${grant.attemptId}-artifact-${artifact.name}`); } catch (caught) { error = caught; }
+          if (!stored) throw error;
           uploaded.push({ name: artifact.name, digest: stored.digest, url: stored.url });
         } catch { failures.push(`Private storage rejected required artifact ${artifact.name}`); }
       }
-      const assembled = assembleResult({ grant: input.grant, execution: input.record, collectedFrom, expected: input.expected, observations: input.observations,
+      const assembled = assembleResult({ grant, execution: input.record, collectedFrom, expected: input.expected, observations: input.observations,
         maxGapMs: input.maxGapMs, requiredArtifacts: input.requiredArtifacts, cancelled: input.cancelled, settlementObservations,
-        collected: { artifacts: collected.artifacts, reasons: [...collected.reasons, ...failures] }, uploaded });
+        collected: { artifacts: collected.artifacts, reasons: [...collected.reasons, ...failures] }, uploaded, executionAttestation: input.executionAttestation });
       if (!assembled.report) throw new Error(`Collection refused: ${assembled.refusals.join('; ')}`);
-      return print({ refusals: assembled.refusals, report: assembled.report, result: await api('validation/result', assembled.report, `${input.grant.attemptId}-result`) });
+      if (collectionAuthorityError) throw new Error('Collection authority could not be renewed; no result was published');
+      return print({ refusals: assembled.refusals, report: assembled.report, result: await api('validation/result', assembled.report, `${grant.attemptId}-result`) });
+      } finally { if (renewCollection) clearInterval(renewCollection); }
     }
-    throw new Error('Use runner inspect|snapshot|bundle-digest|attempt|collect');
+    throw new Error('Use runner inspect|snapshot|bundle-digest|attempt|attest|collect');
   }
   if (command === 'validation') {
     if (!id || id === 'requests') return print(await api('validation' + (args[0] ? `?cursor=${encodeURIComponent(args[0])}` : '')));

@@ -1,6 +1,6 @@
 import { constants } from 'node:fs';
 import { open, readdir, realpath } from 'node:fs/promises';
-import { createHash } from 'node:crypto';
+import { createHash, sign as signBytes, verify as verifySignature } from 'node:crypto';
 import { resolve } from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
 import { z } from 'zod';
@@ -12,6 +12,44 @@ const digest = z.string().regex(/^sha256:[a-f0-9]{64}$/);
 const hash = (bytes: Buffer) => `sha256:${createHash('sha256').update(bytes).digest('hex')}`;
 const serviceArtifacts = z.array(z.object({ service: name, digest }).strict()).max(30);
 const order = <T extends { service: string }>(a: T[]) => [...a].sort((x, y) => x.service.localeCompare(y.service));
+
+const executionAttestationPayloadSchema = z.object({
+  requestId: z.uuid(), attemptId: z.uuid(), epoch: z.number().int().positive(),
+  executionHost: z.string().min(1).max(500), outputPath: z.string().min(1).max(4096),
+  startedAt: z.iso.datetime(), finishedAt: z.iso.datetime(),
+  artifacts: z.array(z.object({ name, digest }).strict()).max(30),
+  containers: z.array(z.object({ name: z.string().min(1).max(200), state: z.enum(['absent', 'present', 'unknown']) }).strict()).max(8),
+}).strict();
+export const executionAttestationSchema = z.object({ payload: executionAttestationPayloadSchema, signature: z.string().min(1).max(4096) }).strict();
+export type ExecutionAttestation = z.infer<typeof executionAttestationSchema>;
+const attestationBytes = (payload: z.infer<typeof executionAttestationPayloadSchema>) => Buffer.from(JSON.stringify(payload));
+export function signExecutionAttestation(input: { grant: unknown; execution: unknown; collected: { artifacts: { name: string; digest: string }[] }; privateKey: string }): ExecutionAttestation {
+  const grant = attemptGrantSchema.parse(input.grant), execution = executionRecordSchema.parse(input.execution);
+  const payload = executionAttestationPayloadSchema.parse({ requestId: grant.requestId, attemptId: grant.attemptId, epoch: grant.epoch,
+    executionHost: grant.executionHost, outputPath: execution.outputPath, startedAt: execution.startedAt, finishedAt: execution.finishedAt,
+    artifacts: input.collected.artifacts.map(({ name, digest }) => ({ name, digest })).sort((a, b) => a.name.localeCompare(b.name)),
+    containers: [...execution.settlement.containers].sort((a, b) => a.name.localeCompare(b.name)) });
+  return { payload, signature: signBytes(null, attestationBytes(payload), input.privateKey).toString('base64') };
+}
+
+/** Verify facts signed by the operator-controlled host attestor. The worker can write its
+ * output directory, but it cannot turn those bytes into trusted evidence without this
+ * signature from the pinned execution authority. */
+export function verifyExecutionAttestation(grantInput: unknown, executionInput: unknown, collected: { artifacts: { name: string; digest: string }[] }, input: unknown) {
+  const grant = attemptGrantSchema.parse(grantInput), execution = executionRecordSchema.parse(executionInput);
+  const attestation = executionAttestationSchema.parse(input), p = attestation.payload;
+  const reasons: string[] = [];
+  if (p.requestId !== grant.requestId || p.attemptId !== grant.attemptId || p.epoch !== grant.epoch) reasons.push('Host attestation is not bound to this attempt authority');
+  if (p.executionHost !== grant.executionHost) reasons.push('Host attestation did not come from the execution host pinned by the runner registration');
+  if (resolve(p.outputPath) !== execution.outputPath || p.startedAt !== execution.startedAt || p.finishedAt !== execution.finishedAt) reasons.push('Host attestation is not bound to this execution interval and output boundary');
+  const artifacts = [...collected.artifacts].map(({ name, digest }) => ({ name, digest })).sort((a, b) => a.name.localeCompare(b.name));
+  if (!isDeepStrictEqual([...p.artifacts].sort((a, b) => a.name.localeCompare(b.name)), artifacts)) reasons.push('Collected artifact bytes differ from the host-attested boundary');
+  if (!isDeepStrictEqual([...p.containers].sort((a, b) => a.name.localeCompare(b.name)), [...execution.settlement.containers].sort((a, b) => a.name.localeCompare(b.name)))) reasons.push('Host attestation does not bind the execution container set');
+  let valid = false;
+  try { valid = verifySignature(null, attestationBytes(p), grant.attestationPublicKey, Buffer.from(attestation.signature, 'base64')); } catch { /* invalid key/signature */ }
+  if (!valid) reasons.push('Execution boundary attestation signature is invalid');
+  return { attestation, reasons };
+}
 
 export type Attribution = 'matched' | 'mismatched' | 'changed' | 'unknown';
 export type Measurement = 'provider' | 'host-attestation' | 'unknown';
@@ -182,6 +220,7 @@ export function assembleResult(input: {
   collected: { artifacts: { name: string; digest: string; document: unknown }[]; reasons: string[] };
   uploaded: { name: string; digest: string; url: string }[];
   settlementObservations: unknown;
+  executionAttestation: unknown;
   requiredArtifacts: string[];
   cancelled?: boolean;
 }): CollectorResult {
@@ -189,6 +228,7 @@ export function assembleResult(input: {
   const grant: AttemptGrant = binding.grant, execution: ExecutionRecord = binding.execution;
   const refusals: string[] = [];
   if (binding.reasons.length) return { report: null, refusals: binding.reasons };
+  const attested = verifyExecutionAttestation(grant, execution, input.collected, input.executionAttestation);
   // The runner's own refusals are recorded, but the collector re-derives the boundary
   // facts from the grant it read itself rather than trusting the record's conclusions.
   const boundary: string[] = [];
@@ -198,7 +238,7 @@ export function assembleResult(input: {
   const settlement = deriveSettlement(grant.attemptId, input.settlementObservations);
   if (!isDeepStrictEqual([...execution.settlement.containers].map(c => c.name).sort(), [...settlement.expected].sort())) boundary.push('The execution record does not account for exactly the containers this attempt was allowed to start');
   if (!settlement.settled) boundary.push('The collector did not independently observe every container of this attempt removed; the execution-resource barrier stays closed');
-  refusals.push(...execution.refusals, ...boundary, ...input.collected.reasons);
+  refusals.push(...execution.refusals, ...boundary, ...attested.reasons, ...input.collected.reasons);
 
   const attribution = attributeExecution({ expected: input.expected, observations: input.observations, startedAt: execution.startedAt, finishedAt: execution.finishedAt, maxGapMs: input.maxGapMs });
   refusals.push(...attribution.reasons);
@@ -220,7 +260,7 @@ export function assembleResult(input: {
 
   const executionState: 'completed' | 'cancelled' | 'timed_out' = input.cancelled ? 'cancelled' : execution.outcome === 'timed_out' ? 'timed_out' : 'completed';
   // Infrastructure problems are never reported as a product failure, and never as a pass.
-  const blocked = execution.refusals.length > 0 || boundary.length > 0 || execution.outcome !== 'completed' || input.collected.reasons.length > 0;
+  const blocked = execution.refusals.length > 0 || boundary.length > 0 || attested.reasons.length > 0 || execution.outcome !== 'completed' || input.collected.reasons.length > 0;
   const behavior = blocked ? 'blocked' as const : !verified ? 'unmeasured' as const : verified.passed ? 'passed' as const : 'failed' as const;
 
   return {
