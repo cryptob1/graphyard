@@ -117,6 +117,33 @@ export async function probeMergeAuthorization({ databaseUrl, sourceRoot = '/app'
 
     const merged = await engine.observe(work.id, settled.revision, observe({ merged: true, mergeSha: 'c'.repeat(40), mergedAt: new Date(Date.now() + 5000).toISOString() }));
     record('merge-after-revocation', { stage: merged.stage, violations: merged.violations, delivery: merged.delivery ?? null });
+
+    // Exercise the exact final race on a fresh candidate. The row lock gives one operation
+    // a total order: withdrawal cancels before provider commit, or commit wins and the later
+    // withdrawal refuses instead of falsely reporting a revoked candidate.
+    let raced = (await call('work', 'probe-operator', { title: 'Merge commit race probe', criteria: [{ id: 'AC-1', text: 'Revocation serializes with provider commit', proofs: [proof] }] })).body;
+    await call(`work/${raced.id}/ready`, 'probe-operator', {});
+    raced = (await call(`work/${raced.id}/claim`, 'probe-worker', {})).body;
+    const racedBranch = `graphyard/probe-${raced.id}`;
+    raced = (await call(`work/${raced.id}/workspace`, 'probe-worker', { epoch: raced.epoch, host: 'probe-race-host', path: `/tmp/probe-race-${raced.id}`, branch: racedBranch })).body;
+    raced = (await call(`work/${raced.id}/submit`, 'probe-worker', { epoch: raced.epoch, pr: 4002 })).body;
+    snapshot = observe({ candidate: { sha: head, baseSha: base, pr: 4002, branch: racedBranch, author: 'probe-implementer' }, prState: 'open', draft: false });
+    raced = await engine.observe(raced.id, raced.revision, snapshot);
+    raced = (await call(`work/${raced.id}/evidence`, 'probe-producer', { proof, sha: head, baseSha: base, policyRevision: raced.policyRevision, result: 'pass', executed: 9, skipped: 0 })).body;
+    const racedAcquire = (await call(`work/${raced.id}/merge-acquire`, 'probe-coordinator', { expectedRevision: raced.revision, sha: head, baseSha: base, policyRevision: raced.policyRevision })).body;
+    await call(`work/${raced.id}/merge-verify`, 'probe-coordinator', { executionId: racedAcquire.execution.id });
+    const racedWithdrawal = { proof, sha: head, baseSha: base, policyRevision: raced.policyRevision, reason: 'Probe raced final provider commit' };
+    const [commitResult, revokeResult] = await Promise.all([
+      call(`work/${raced.id}/merge-commit`, 'probe-coordinator', { executionId: racedAcquire.execution.id }),
+      call(`work/${raced.id}/revoke`, 'probe-producer', racedWithdrawal),
+    ]);
+    const racedCurrent = (await call('work', 'probe-operator')).body.find(item => item.id === raced.id);
+    record('provider-commit-race', {
+      commit: commitResult.status === 200 ? { status: 200 } : refusal(commitResult),
+      revoke: revokeResult.status === 200 ? { status: 200 } : refusal(revokeResult),
+      revokedEvidence: racedCurrent.evidence.filter(item => item.revocation).length,
+      committingAt: racedCurrent.mergeExecution?.committingAt ?? null,
+    });
     return transcript;
   } finally {
     await new Promise(done => http.close(done));

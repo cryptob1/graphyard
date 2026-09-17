@@ -125,11 +125,12 @@ export function server(engine: Engine, credentials: Credential[], github: GitHub
           if (actor.role === 'operator-agent') { demand(id, 'Operator-agent history reads require a scoped work item', 403); const item = (await engine.store.list()).find(w => w.id === id); demand(item && operatorVisible([item]).length, 'Work item is outside this operator-agent scope', 403); }
           return send(200, await engine.store.events(id));
         }
-        const mergeRoute = url.pathname.match(/^\/api\/work\/([^/]+)\/merge-(acquire|cancel|verify)$/);
+        const mergeRoute = url.pathname.match(/^\/api\/work\/([^/]+)\/merge-(acquire|cancel|verify|commit)$/);
         if (req.method === 'POST' && mergeRoute) {
           const data = JSON.parse((await body(req)).toString() || '{}'), key = String(req.headers['idempotency-key'] ?? '');
           if (mergeRoute[2] === 'acquire') return send(200, await engine.acquireMerge(actor, mergeRoute[1], data, key));
           if (mergeRoute[2] === 'cancel') return send(200, await engine.cancelMerge(actor, mergeRoute[1], data, key));
+          if (mergeRoute[2] === 'commit') return send(200, await engine.commitMerge(actor, mergeRoute[1], data, key));
           demand(actor.role === 'coordinator' || actor.role === 'admin', 'Coordinator permission required', 403);
           demand(github, 'GitHub integration is required for merge verification', 503);
           const work = (await engine.store.list()).find(item => item.id === mergeRoute[1] || item.key === mergeRoute[1]); demand(work?.submission, 'Submitted work item required', 404);

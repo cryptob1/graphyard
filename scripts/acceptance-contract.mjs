@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 export const requiredCases = ['anonymous-denied', 'exclusive-claim', 'stale-epoch', 'worker-proof-denied', 'dependency-blocked'];
 export const mergeAuthorizationCases = ['authorized-candidate', 'broker-identity-restricted', 'revocation-identity-restricted',
-  'revocation-closes-authorization', 'broker-refuses-revoked-candidate', 'concurrent-attempts-refused', 'merge-after-revocation-refused'];
+  'revocation-closes-authorization', 'broker-refuses-revoked-candidate', 'concurrent-attempts-refused', 'merge-after-revocation-refused', 'provider-commit-serialized'];
 // Every proof this trusted harness can produce, and the exact case inventory each one requires.
 export const contracts = {
   'integration:claim-safety': { cases: requiredCases },
@@ -67,6 +67,19 @@ export function judgeMergeAuthorization(transcript) {
   assert.match(merged.violations.join(' '), /without a prior authorization/);
   assert.equal(merged.delivery, null);
   cases.push('merge-after-revocation-refused');
+
+  const race = only('provider-commit-race');
+  assert.deepEqual([race.commit.status, race.revoke.status].sort(), [200, 409], 'exactly one side of the commit/revocation race must win');
+  if (race.commit.status === 200) {
+    assert.match(race.revoke.message, /already committed this candidate/);
+    assert.equal(race.revokedEvidence, 0, 'a refused late withdrawal must not claim to revoke evidence');
+    assert.ok(race.committingAt);
+  } else {
+    assert.match(race.commit.message, /missing, expired, superseded/);
+    assert.ok(race.revokedEvidence > 0, 'a winning withdrawal must cancel provider authority');
+    assert.equal(race.committingAt, null);
+  }
+  cases.push('provider-commit-serialized');
 
   assert.deepEqual(cases, mergeAuthorizationCases);
   return cases.map(id => ({ id, result: 'pass' }));

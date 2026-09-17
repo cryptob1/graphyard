@@ -247,6 +247,10 @@ export class Engine {
         const withdrawn = work.evidence.filter(item => item.trusted && !item.revocation && item.proof === data.proof
           && item.sha === data.sha && item.baseSha === data.baseSha && item.policyRevision === data.policyRevision);
         demand(withdrawn.length, 'No trusted evidence matches this proof and candidate; reload before revoking', 404);
+        // mergeCommit is the serialization point immediately before the provider mutation.
+        // Once it wins the row lock, the supported broker has committed to that mutation and
+        // a later withdrawal must refuse rather than falsely claim it revoked the candidate.
+        demand(!work.mergeExecution?.committingAt, 'The merge broker already committed this candidate to the provider; wait for reconciliation before revoking');
         for (const item of withdrawn) item.revocation = { at: now.toISOString(), actor: actor.id, reason: data.reason };
         const execution = work.mergeExecution;
         work.mergeExecution = null;
@@ -376,6 +380,38 @@ export class Engine {
       return result;
     });
   }
+  async commitMerge(actor: Principal, id: string, input: unknown, key: string) {
+    demand(actor.role === 'coordinator' || actor.role === 'admin', 'Coordinator permission required', 403);
+    demand(key && key.length <= 200, 'An Idempotency-Key is required', 400);
+    const data = mergeVerifySchema.parse(input); const fingerprint = createHash('sha256').update(JSON.stringify({ command: 'merge.commit', id, data })).digest('hex');
+    return this.store.transaction(async (db, now) => {
+      const receipt = (await db.query('SELECT * FROM receipts WHERE actor=$1 AND key=$2', [actor.id, key])).rows[0];
+      if (receipt) {
+        demand(receipt.fingerprint === fingerprint, 'Idempotency key reused with different input');
+        const current = (await db.query('SELECT document FROM work_items WHERE id::text=$1 OR document->>\'key\'=$1', [id])).rows[0]?.document as Work | undefined;
+        demand(current?.mergeExecution?.id === data.executionId && current.mergeExecution.owner === actor.id
+          && current.mergeExecution.committingAt === receipt.result.committingAt && Date.parse(current.mergeExecution.expiresAt) > now.getTime(),
+        'Replayed merge commit is expired, cancelled, or superseded');
+        return receipt.result;
+      }
+      const all: Work[] = (await db.query('SELECT document FROM work_items ORDER BY number')).rows.map(row => row.document);
+      const work = all.find(item => item.id === id || item.key === id); demand(work, 'Work item not found', 404);
+      const execution = work.mergeExecution;
+      demand(execution?.id === data.executionId && execution.owner === actor.id && Date.parse(execution.expiresAt) > now.getTime(), 'Merge execution is missing, expired, superseded, or owned by another coordinator');
+      demand(execution.verifiedAt, 'Merge execution has not passed final verification');
+      demand(!execution.committingAt, 'Merge execution was already committed; retry with the original idempotency key');
+      this.evaluate(work, all, now);
+      demand(work.stage === 'merge' && work.gates.every(gate => gate.passed) && !work.violations.length && work.mergeAuthorization
+        && work.mergeAuthorization.sha === execution.sha && work.mergeAuthorization.baseSha === execution.baseSha
+        && work.mergeAuthorization.policyRevision === execution.policyRevision,
+      'Merge authorization changed after final verification; provider merge refused');
+      execution.committingAt = now.toISOString();
+      await save(db, work, actor.id, 'merge.execution.committed', now, { executionId: execution.id, sha: execution.sha, committingAt: execution.committingAt });
+      const result = { key: work.key, executionId: execution.id, sha: execution.sha, committingAt: execution.committingAt, revision: work.revision };
+      await db.query('INSERT INTO receipts(actor,key,fingerprint,result) VALUES($1,$2,$3,$4)', [actor.id, key, fingerprint, JSON.stringify(result)]);
+      return result;
+    });
+  }
   async bindReviewRequest(id: string, expectedRevision: number, request: ReviewRequest, jobToken: string) {
     return this.store.transaction(async (db, now) => {
       const job = (await db.query('SELECT 1 FROM jobs WHERE work_id=$1 AND token=$2 AND locked_until>$3', [id, jobToken, now])).rows[0];
@@ -436,7 +472,7 @@ export class Engine {
         const providerMergedTime = Date.parse(observation.mergedAt);
         // Never allow evidence from after the earliest possible merge instant.
         // Whole-second timestamps can therefore conservatively refuse same-second authorization.
-        const acquired = (await db.query("SELECT payload->'work'->'mergeExecution' AS execution FROM events WHERE work_id=$1 AND kind IN ('merge.execution.acquired','merge.execution.verified') ORDER BY seq DESC LIMIT 1", [id])).rows[0]?.execution as Work['mergeExecution'] | undefined;
+        const acquired = (await db.query("SELECT payload->'work'->'mergeExecution' AS execution FROM events WHERE work_id=$1 AND kind IN ('merge.execution.acquired','merge.execution.verified','merge.execution.committed') ORDER BY seq DESC LIMIT 1", [id])).rows[0]?.execution as Work['mergeExecution'] | undefined;
         const boundedExecution = activeExecution ?? acquired ?? null;
         const offset = boundedExecution?.clockOffset;
         const mergedTime = providerMergedTime + (offset?.min ?? 0);
@@ -447,8 +483,10 @@ export class Engine {
           cancelledExecution = !!cancellation && cancellation.getTime() < cutoff;
         }
         const executionValid = !!boundedExecution && !!offset && !cancelledExecution && boundedExecution.sha === observation.candidate.sha && boundedExecution.baseSha === observation.candidate.baseSha
-          && !!boundedExecution.verifiedAt && Date.parse(boundedExecution.issuedAt) <= Date.parse(boundedExecution.verifiedAt)
-          && Date.parse(boundedExecution.verifiedAt) < mergedTime && cutoff <= Date.parse(boundedExecution.expiresAt);
+          && !!boundedExecution.verifiedAt && !!boundedExecution.committingAt
+          && Date.parse(boundedExecution.issuedAt) <= Date.parse(boundedExecution.verifiedAt)
+          && Date.parse(boundedExecution.verifiedAt) <= Date.parse(boundedExecution.committingAt)
+          && Date.parse(boundedExecution.committingAt) < mergedTime && cutoff <= Date.parse(boundedExecution.expiresAt);
         if (activeExecution && executionValid && work.mergeAuthorization
           && activeExecution.sha === observation.candidate.sha && activeExecution.baseSha === observation.candidate.baseSha
           && activeExecution.policyRevision === work.policyRevision && work.mergeAuthorization.sha === activeExecution.sha

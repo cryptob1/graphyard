@@ -124,7 +124,7 @@ Only an operator, or the trusted producer allowlisted for that exact proof name,
 
 Revocation withdraws *every* trusted record for that tuple, so an older accepted run cannot quietly re-authorize the same candidate. Records are annotated, never deleted; each keeps a `revocation` object naming the actor, reason and time. The acceptance gate then names the withdrawal explicitly instead of reporting the proof as merely unmeasured, and reconciliation republishes a refusing GitHub check. A later trusted run for the same candidate re-authorizes it normally.
 
-Revocation is the one command an active merge execution cannot defer; see [the merge broker](github.md#enforcement-boundary). Delivered work is immutable and refuses revocation: use a follow-up task.
+Revocation may interrupt an active merge execution until the broker's transactional provider-commit boundary; it then serializes before the commit and cancels it, or serializes after it and refuses because the provider mutation is already irrevocably in flight. See [the merge broker](github.md#enforcement-boundary). Delivered work is immutable and refuses revocation: use a follow-up task.
 
 ## GitHub webhook
 

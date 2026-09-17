@@ -32,7 +32,7 @@ JSON
 graphyard revoke GY-N revoke.json
 ```
 
-Run it as an operator, or as the producer allowlisted for that proof; nobody else may. The acceptance gate closes immediately and names the withdrawal, merge authorization is dropped, an in-flight merge execution is cancelled rather than waited out, and reconciliation republishes a refusing GitHub check. Do not wait for that check before revoking — the ledger is authoritative the moment the command returns, and the [merge broker](github.md#enforcement-boundary) refuses the candidate whether or not GitHub has caught up. A fresh trusted run for the same candidate re-authorizes it; delivered work is immutable and needs a follow-up item instead.
+Run it as an operator, or as the producer allowlisted for that proof; nobody else may. The acceptance gate closes immediately and names the withdrawal, merge authorization is dropped, an in-flight merge execution is cancelled rather than waited out, and reconciliation republishes a refusing GitHub check. Do not wait for that check before revoking — the ledger is authoritative the moment the command returns, and the [merge broker](github.md#enforcement-boundary) refuses the candidate whether or not GitHub has caught up. If the broker's final provider commit already won serialization, revocation refuses instead of claiming it recalled an irrevocable provider call; wait for reconciliation and use a follow-up item if the merge landed. A fresh trusted run for the same candidate re-authorizes it; delivered work is immutable and needs a follow-up item instead.
 
 ## Worktree creation failed
 
