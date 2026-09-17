@@ -1,6 +1,6 @@
 import { constants } from 'node:fs';
 import { open, readdir, realpath } from 'node:fs/promises';
-import { createHash, sign as signBytes, verify as verifySignature } from 'node:crypto';
+import { createHash, verify as verifySignature } from 'node:crypto';
 import { resolve } from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
 import { z } from 'zod';
@@ -36,15 +36,22 @@ const executionAttestationPayloadSchema = z.object({
 }).strict();
 export const executionAttestationSchema = z.object({ payload: executionAttestationPayloadSchema, signature: z.string().min(1).max(4096) }).strict();
 export type ExecutionAttestation = z.infer<typeof executionAttestationSchema>;
-const attestationBytes = (payload: z.infer<typeof executionAttestationPayloadSchema>) => Buffer.from(JSON.stringify(payload));
-export function signExecutionAttestation(input: { grant: unknown; execution: unknown; collected: { artifacts: { name: string; digest: string }[] }; privateKey: string }): ExecutionAttestation {
-  const grant = attemptGrantSchema.parse(input.grant), execution = executionRecordSchema.parse(input.execution);
-  const payload = executionAttestationPayloadSchema.parse({ requestId: grant.requestId, attemptId: grant.attemptId, epoch: grant.epoch,
+export type ExecutionAttestationPayload = z.infer<typeof executionAttestationPayloadSchema>;
+export const attestationBytes = (payload: ExecutionAttestationPayload) => Buffer.from(JSON.stringify(payload));
+/**
+ * The bytes an attestor signs. This only shapes an observation into a payload; there is
+ * deliberately no exported function that signs a *submitted* execution record, because a
+ * signature over worker-supplied facts authenticates nothing. `superviseAttempt` in
+ * `runner-attestor.ts` is the only producer of an attestation, and it passes the record
+ * its own `executeAttempt` call returned.
+ */
+export function executionAttestationPayload(input: { grant: AttemptGrant; execution: ExecutionRecord; artifacts: { name: string; digest: string }[] }): ExecutionAttestationPayload {
+  const { grant, execution } = input;
+  return executionAttestationPayloadSchema.parse({ requestId: grant.requestId, attemptId: grant.attemptId, epoch: grant.epoch,
     executionHost: grant.executionHost, outputPath: execution.outputPath, startedAt: execution.startedAt, finishedAt: execution.finishedAt,
     ...conclusions(execution),
-    artifacts: input.collected.artifacts.map(({ name, digest }) => ({ name, digest })).sort((a, b) => a.name.localeCompare(b.name)),
+    artifacts: input.artifacts.map(({ name, digest }) => ({ name, digest })).sort((a, b) => a.name.localeCompare(b.name)),
     containers: [...execution.settlement.containers].sort((a, b) => a.name.localeCompare(b.name)) });
-  return { payload, signature: signBytes(null, attestationBytes(payload), input.privateKey).toString('base64') };
 }
 
 /** Verify facts signed by the operator-controlled host attestor. The worker can write its
@@ -58,8 +65,11 @@ export function verifyExecutionAttestation(grantInput: unknown, executionInput: 
   if (p.executionHost !== grant.executionHost) reasons.push('Host attestation did not come from the execution host pinned by the runner registration');
   if (resolve(p.outputPath) !== execution.outputPath || p.startedAt !== execution.startedAt || p.finishedAt !== execution.finishedAt) reasons.push('Host attestation is not bound to this execution interval and output boundary');
   if (!isDeepStrictEqual(conclusions(p), conclusions(execution))) reasons.push('Host attestation does not bind the execution outcome, refusals, phase results and measured digests this record claims');
-  const artifacts = [...collected.artifacts].map(({ name, digest }) => ({ name, digest })).sort((a, b) => a.name.localeCompare(b.name));
-  if (!isDeepStrictEqual([...p.artifacts].sort((a, b) => a.name.localeCompare(b.name)), artifacts)) reasons.push('Collected artifact bytes differ from the host-attested boundary');
+  // The attestor measures every artifact kind the boundary held; this collector may be
+  // configured to publish a subset. Every byte it does publish must be one the attestor
+  // saw, with the same digest, so a file rewritten after attestation cannot be uploaded.
+  const attested = new Map(p.artifacts.map(a => [a.name, a.digest]));
+  if (collected.artifacts.some(a => attested.get(a.name) !== a.digest)) reasons.push('Collected artifact bytes differ from the host-attested boundary');
   if (!isDeepStrictEqual([...p.containers].sort((a, b) => a.name.localeCompare(b.name)), [...execution.settlement.containers].sort((a, b) => a.name.localeCompare(b.name)))) reasons.push('Host attestation does not bind the execution container set');
   let valid = false;
   try { valid = verifySignature(null, attestationBytes(p), grant.attestationPublicKey, Buffer.from(attestation.signature, 'base64')); } catch { /* invalid key/signature */ }

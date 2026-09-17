@@ -83,12 +83,13 @@ Define separate runner, collector and builder registrations:
   "adapterVersion": "custom-v1",
   "executionHost": "ssh://graphyard-inspect@preview-runner.internal",
   "attestationPublicKey": "-----BEGIN PUBLIC KEY-----\n…\n-----END PUBLIC KEY-----\n",
+  "executionNetwork": "gy-preview-isolated",
   "proofs": [],
   "enabled": true
 }
 ```
 
-Runner registrations must pin the exact container host the collector inspects and the public key of an operator-controlled host attestor; the attestor private key must be inaccessible to the runner worker. Use `role: collector` and its allowed `e2e:...` proofs for the collector; use `role: builder` for the build producer. Non-runner registrations omit `executionHost` and `attestationPublicKey`. These must reference separately configured principals with the roles in the table above.
+Runner registrations must pin the exact container host the collector inspects, the public key of an operator-controlled host attestor, and the dedicated isolated network the target-facing phase may join; the attestor private key must be inaccessible to the runner worker. `executionNetwork` is authority for the same reason as the other two: a container runtime resolves a network name against every network it already has, so an unpinned one lets a runner attach the browser to internal services. The built-in `host`, `bridge`, `default` and `none` names refuse. Use `role: collector` and its allowed `e2e:...` proofs for the collector; use `role: builder` for the build producer. Non-runner registrations omit `executionHost`, `attestationPublicKey` and `executionNetwork`. These must reference separately configured principals with the roles in the table above.
 
 Approve a `kind: bundle` definition with `id`, `expectedRevision`, `scenario`, `scenarioRevision`, `scenarioHash`, `digest` and `runnerImageDigest`. Digests use `sha256:` plus 64 lowercase hex characters. The bundle digest must cover all executable assertions, transitive helpers, fixtures, configuration and lockfiles. The runner image pins runtime dependencies. Changed executable bytes require a new scenario revision and work pinned to it, even if published under a different bundle ID. Existing E2E scenario pins cannot be upgraded in place yet: create a follow-up work item pinned to the new revision, preserving the earlier item for history. Do not remove and re-add a proof to work around this boundary. D1 records the operator's approval; D2's isolated executor must enforce immutable approved bytes throughout execution.
 
@@ -106,7 +107,7 @@ Create the candidate as operator with `workId`, `expectedWorkRevision`, required
 
 Create a request with `candidateId`, `expectedWorkRevision`, versioned `runner` and `collector` references, an absolute ISO UTC `deadline` within the next hour, and `maxAttempts` from 1 to 5. The selected collector must be authorized for the candidate's proof and environment. A newer request prevents fallback to an older pass while it is queued, running, cancelled or incomplete.
 
-The runner polls `dispatch` with `{"registration":{"id":"preview-runner","revision":1}}`. An eligible response includes the pinned request, candidate, trusted build attestation/artifact manifest, environment, bundle and attempt; an unavailable queue returns `request: null` with a reason. At most one request holds a runner principal's slot. Global test-resource reservations prevent conflicting assignments across replicas.
+The runner polls `dispatch` with `{"registration":{"id":"preview-runner","revision":1}}`. An eligible response includes the pinned request, candidate, trusted build attestation/artifact manifest, environment, bundle and attempt, plus the `executionAuthority` the registration pinned — host, attestor public key and isolated network; an unavailable queue returns `request: null` with a reason. At most one request holds a runner principal's slot. Global test-resource reservations prevent conflicting assignments across replicas.
 
 An attempt has a unique ID and monotonic epoch. Send `{requestId, attemptId, epoch}` to `ack` **before any execution**. The initial ACK window is 30 seconds; after ACK, heartbeats extend the lease up to 60 seconds, bounded by the request deadline. Renew at least every 20 seconds. Stop on refusal and never infer permission from an old receipt. A runner must implement external fencing/isolation: a database lease cannot physically stop a partitioned process.
 

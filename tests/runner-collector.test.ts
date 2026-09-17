@@ -6,15 +6,15 @@ import { join, resolve } from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
-import { createHash, generateKeyPairSync, randomUUID } from 'node:crypto';
-import { assembleResult, attributeExecution, collectArtifacts, collectionBinding, deriveSettlement, selfReportedObservation, signExecutionAttestation, type TargetObservation } from '../src/runner-collector.js';
+import { createHash, generateKeyPairSync, randomUUID, sign as signBytes } from 'node:crypto';
+import { assembleResult, attestationBytes, attributeExecution, collectArtifacts, collectionBinding, deriveSettlement, executionAttestationPayload, selfReportedObservation, type TargetObservation } from '../src/runner-collector.js';
 import { containerNames, type AttemptGrant, type ExecutionRecord } from '../src/runner-executor.js';
 
 const run = promisify(execFile);
 const bundle = `sha256:${'a'.repeat(64)}`, image = `sha256:${'b'.repeat(64)}`;
 const attestor = generateKeyPairSync('ed25519');
 const grant: AttemptGrant = { requestId: randomUUID(), attemptId: randomUUID(), epoch: 1, runner: { id: 'preview-runner', revision: 1 },
-  executionHost: 'ssh://runner.test', attestationPublicKey: attestor.publicKey.export({ type: 'spki', format: 'pem' }).toString(),
+  executionHost: 'ssh://runner.test', attestationPublicKey: attestor.publicKey.export({ type: 'spki', format: 'pem' }).toString(), executionNetwork: 'gy-isolated',
   bundleDigest: bundle, runnerImageDigest: image, targetUrl: 'https://preview.example.test/', deadline: '2026-09-16T01:00:00.000Z' };
 const startedAt = '2026-09-16T00:00:00.000Z', finishedAt = '2026-09-16T00:01:00.000Z';
 const expected = { instance: 'preview-7f3a', artifacts: [{ service: 'api', digest: `sha256:${'c'.repeat(64)}` }] };
@@ -37,8 +37,12 @@ const collectedOf = (inventory: unknown, execution: unknown, reasons: string[] =
   ({ artifacts: [{ name: 'inventory', digest: `sha256:${'1'.repeat(64)}`, document: inventory }, { name: 'report', digest: `sha256:${'2'.repeat(64)}`, document: execution }], reasons });
 const uploadedOf = (collected: ReturnType<typeof collectedOf>) => collected.artifacts.map(a => ({ name: a.name, digest: a.digest, url: `graphyard-artifact://owner/repo/${grant.requestId}/${a.name}` }));
 const required = ['inventory', 'report'];
+// These tests stand in for the operator's host attestor: they hold its private key and
+// sign the payload for an execution they describe. There is deliberately no production
+// helper that signs a submitted record — `superviseAttempt` signs only what it ran.
 function attestation(execution: ExecutionRecord, collected: { artifacts: { name: string; digest: string }[] }) {
-  return signExecutionAttestation({ grant, execution, collected, privateKey: attestor.privateKey.export({ type: 'pkcs8', format: 'pem' }).toString() });
+  const payload = executionAttestationPayload({ grant, execution, artifacts: collected.artifacts });
+  return { payload, signature: signBytes(null, attestationBytes(payload), attestor.privateKey.export({ type: 'pkcs8', format: 'pem' }).toString()).toString('base64') };
 }
 function assemble(over: Partial<Parameters<typeof assembleResult>[0]> = {}) {
   const collected = collectedOf(inventoryOf(['books']), executionOf(['books']));

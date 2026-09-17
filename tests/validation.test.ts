@@ -38,7 +38,7 @@ async function fixture(artifactStorage: 'external' | 'postgres' = 'external') {
   collector.proofs!.push(proof);
   const scenario = await defineScenario(store, operator, { id: `scenario-${n}`, title: 'Behavior', purpose: 'Prove behavior', steps: ['Execute'], expected: ['Correct'], environment: environment.id, runner: 'playwright', testPath: 'tests/behavior.spec.ts' }, id());
   await validation.define(operator, { kind: 'environment', id: environment.id, expectedRevision: 0, repository: 'test/repository', url: 'https://preview.example.test', instance: `instance-${n}`, immutable: true, services: ['api'], resources: [`test-account-${n}`] }, id());
-  for (const [ref, actor, role] of [[runnerRef, runner, 'runner'], [collectorRef, collector, 'collector'], [builderRef, builder, 'builder']] as const) await validation.define(operator, { kind: 'registration', id: ref.id, expectedRevision: 0, principalId: actor.id, role, environment, adapterVersion: 'test-v1', proofs: role === 'collector' ? [proof] : [], enabled: true, ...(role === 'runner' ? { executionHost: 'ssh://runner.test', attestationPublicKey } : {}) }, id());
+  for (const [ref, actor, role] of [[runnerRef, runner, 'runner'], [collectorRef, collector, 'collector'], [builderRef, builder, 'builder']] as const) await validation.define(operator, { kind: 'registration', id: ref.id, expectedRevision: 0, principalId: actor.id, role, environment, adapterVersion: 'test-v1', proofs: role === 'collector' ? [proof] : [], enabled: true, ...(role === 'runner' ? { executionHost: 'ssh://runner.test', attestationPublicKey, executionNetwork: 'gy-isolated' } : {}) }, id());
   await validation.define(operator, { kind: 'bundle', id: bundle.id, expectedRevision: 0, scenario: scenario.id, scenarioRevision: scenario.revision, scenarioHash: scenario.hash, digest, runnerImageDigest: inputs }, id());
   let w = await engine.execute(operator, 'create', null, { title: 'Validation fixture', criteria: [{ id: 'AC-1', text: 'Behavior is proven', proofs: [proof] }] }, id());
   w = await engine.execute(operator, 'ready', w.id, {}, id()); w = await engine.execute(worker, 'claim', w.id, {}, id());
@@ -275,6 +275,26 @@ test('authorized build producers still cannot attest a mismatched source or inco
   await cleanup(f);
 });
 
+test('the execution boundary a runner may use is operator-versioned, not runner configuration', async () => {
+  const f = await fixture();
+  const n = `net-${f.n}`;
+  const base = { kind: 'registration' as const, id: n, expectedRevision: 0, principalId: runner.id, role: 'runner' as const, environment: f.environment, adapterVersion: 'test-v1', proofs: [], enabled: true, executionHost: 'ssh://runner.test', attestationPublicKey };
+  // Docker resolves a network name against every network the daemon already has, so an
+  // unpinned one lets a runner attach the browser container to databases and other
+  // internal services. The approved isolated network is authority, like the host and key.
+  await assert.rejects(validation.define(operator, base, id()), /dedicated isolated Docker network/);
+  for (const executionNetwork of ['host', 'bridge', 'default', 'none', 'not a network'])
+    await assert.rejects(validation.define(operator, { ...base, executionNetwork }, id()), /dedicated isolated Docker network/);
+  // Only a runner registration configures an execution boundary at all.
+  await assert.rejects(validation.define(operator, { ...base, id: `${n}-c`, principalId: collector.id, role: 'collector', proofs: [f.proof], executionNetwork: 'gy-isolated' }, id()), /Only runner registrations/);
+  // The runner learns the approved network from dispatch; it is never in its own input.
+  const dispatched: any = await validation.dispatch(runner, { registration: f.runnerRef }, id());
+  assert.equal(dispatched.executionAuthority.network, 'gy-isolated');
+  const command = { requestId: f.r.id, attemptId: dispatched.attempt.id, epoch: 1 };
+  await validation.runnerCommand(runner, 'ack', command, id());
+  assert.equal((await validation.collectionAuthority(collector, command) as any).executionNetwork, 'gy-isolated');
+  await cleanup(f);
+});
 test('builder and collector registrations cannot collapse onto one producer principal', async () => {
   const f = await fixture();
   const shared = { id: `shared-builder-${f.n}`, revision: 1 };

@@ -2,14 +2,16 @@ import { readFile, mkdir, realpath, stat, writeFile } from 'node:fs/promises';
 import { createHash, randomUUID } from 'node:crypto';
 import { hostname } from 'node:os';
 import { resolve } from 'node:path';
-import { execFileSync, spawnSync } from 'node:child_process';
+import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import { supervise } from './supervisor.js';
 import { inspectRunnerRepository, oracleBundleDigest, snapshotRunnerSources } from './runner-setup.js';
-import { assertRunnerCredentialScope, attemptGrantSchema, containerNames, executeAttempt, executionPlanSchema, executionRecordSchema, observeContainers, preflightAttempt } from './runner-executor.js';
-import { assembleResult, collectArtifacts, collectionBinding, signExecutionAttestation, targetObservationSchema } from './runner-collector.js';
+import { assertRunnerCredentialScope, attemptGrantSchema, containerNames, executionPlanSchema, executionRecordSchema, observeContainers } from './runner-executor.js';
+import { assembleResult, collectArtifacts, collectionBinding, targetObservationSchema } from './runner-collector.js';
+import { superviseAttempt } from './runner-attestor.js';
 import { assertRepository, discover } from './onboarding.js';
 import { startGithubSetup } from './github-setup.js';
 import { fileURLToPath } from 'node:url';
+import { createInterface } from 'node:readline';
 import { parseArgs } from 'node:util';
 import { z } from 'zod';
 import { diagnose, fileConflicts, proofPreview, resourceConflicts } from './coordination.js';
@@ -20,7 +22,10 @@ import { acknowledgeContainment, containmentCredentials, establishContainment, i
 try { process.loadEnvFile(); } catch (error: any) { if (error.code !== 'ENOENT') throw error; }
 const [command, id, ...args] = process.argv.slice(2);
 let connection: Awaited<ReturnType<typeof loadConnection>>;
-if (command === 'master') connection = null;
+// The host attestor holds no control-plane credential: it signs what it supervised and
+// never speaks to Graphyard. Requiring a connection file there would be a reason to give
+// that identity a token it must not have.
+if (command === 'master' || (command === 'runner' && id === 'supervise')) connection = null;
 else try { connection = await loadConnection(process.cwd()); } catch { console.error('Invalid or insecure Graphyard connection file. Inspect local configuration; credential values are omitted.'); process.exit(1); }
 const base = process.env.GRAPHYARD_URL ?? connection?.url ?? 'http://127.0.0.1:4310';
 let savedToken: string | undefined;
@@ -53,6 +58,67 @@ async function api(path: string, data?: unknown, requestId = process.env.GRAPHYA
   return body;
 }
 const print = (value: unknown) => console.log(JSON.stringify(value, null, 2));
+
+/**
+ * What the runner account configures locally. Everything that decides *what* is approved
+ * — the target, the bundle and image digests, the isolated network, the attestor's public
+ * key and execution host — comes from the operator-versioned registration through the
+ * dispatch grant, never from this file. `runAsUser` is deliberately left unresolved here:
+ * the container identity is a fact about the execution host, so the attestor's own
+ * default applies when an operator has not pinned one.
+ */
+const runnerPlanSchema = executionPlanSchema.omit({ grant: true, runAsUser: true }).extend({
+  runAsUser: z.string().regex(/^[0-9]{1,10}:[0-9]{1,10}$/).optional(),
+  registration: z.object({ id: z.string(), revision: z.number().int().positive() }).strict(),
+  // How this host reaches the operator's attestor, for example
+  // `sudo -n -u graphyard-attestor /usr/local/bin/graphyard runner supervise`.
+  supervisor: z.object({ command: z.string().min(1).max(4096), args: z.array(z.string().max(4096)).max(32).default([]) }).strict(),
+}).strict();
+
+/**
+ * Hand one attempt to the operator's host attestor and wait for the record it signed.
+ *
+ * The runner writes the plan, acknowledges the attempt once the attestor reports a clean
+ * preflight, and reads back the execution record and attestation. It observes nothing
+ * about the run itself, so there is no execution fact here for it to author: a runner
+ * that rewrote the record it forwards would only invalidate the signature over it.
+ * Losing attempt authority terminates the attestor, which aborts and settles.
+ */
+function superviseThroughAttestor(supervisor: { command: string; args: string[] }, request: unknown, acknowledge: () => Promise<void>, signal: AbortSignal, timeoutMs: number) {
+  return new Promise<{ record: unknown; attestation: unknown; collection: unknown }>((settled, refused) => {
+    const child = spawn(supervisor.command, supervisor.args, { stdio: ['pipe', 'pipe', 'pipe'] });
+    let out = '', diagnostics = '', done = false, acknowledged = false;
+    const stop = () => child.kill('SIGTERM');
+    const finish = (report: () => void) => { if (done) return; done = true; clearTimeout(timer); signal.removeEventListener('abort', stop); report(); };
+    const timer = setTimeout(() => child.kill('SIGKILL'), timeoutMs);
+    if (signal.aborted) stop(); else signal.addEventListener('abort', stop, { once: true });
+    child.stdout.setEncoding('utf8'); child.stderr.setEncoding('utf8');
+    child.stderr.on('data', chunk => { if (diagnostics.length < 4096) diagnostics += chunk; });
+    child.stdout.on('data', chunk => {
+      if (out.length > 16_777_216) return;
+      out += chunk;
+      const end = out.indexOf('\n');
+      if (acknowledged || end === -1) return;
+      acknowledged = true;
+      let ready: any; try { ready = JSON.parse(out.slice(0, end)); } catch { /* reported below */ }
+      out = out.slice(end + 1);
+      if (ready?.preflight !== 'ready') { child.kill('SIGTERM'); finish(() => refused(new Error('The host attestor did not report a clean preflight; no container was started'))); return; }
+      void acknowledge().then(() => child.stdin.end(`${JSON.stringify({ proceed: true })}\n`),
+        (error: any) => { child.kill('SIGTERM'); finish(() => refused(error)); });
+    });
+    child.on('error', () => finish(() => refused(new Error(`The host attestor could not be started, so nothing was executed or acknowledged: ${supervisor.command}`))));
+    child.on('close', code => finish(() => {
+      const detail = diagnostics.trim() || `exit ${code}`;
+      if (!acknowledged) return refused(new Error(`The execution boundary refused before acknowledgement; this attempt was never acknowledged and expires without holding protected resources: ${detail}`));
+      try { settled(z.object({ record: executionRecordSchema, attestation: z.unknown(), collection: z.unknown() }).parse(JSON.parse(out))); }
+      catch { refused(new Error(`The host attestor returned no signed execution record: ${detail}`)); }
+    }));
+    // The attestor may refuse and exit before reading the whole request; that is reported
+    // through its exit, not as an unhandled pipe error here.
+    child.stdin.on('error', () => {});
+    child.stdin.write(`${JSON.stringify(request)}\n`);
+  });
+}
 async function main() {
   if (!command || command === 'help' || command === '--help') {
     console.log(`Graphyard 0.1 — distributed work, explicit proof
@@ -78,7 +144,8 @@ Environment: GRAPHYARD_URL, GRAPHYARD_TOKEN (individual role-scoped credential)
   runner inspect [DIRECTORY]   Discover Playwright inputs without executing repository code
   runner snapshot file.json    Snapshot an explicit source-file list for review (not approval)
   runner bundle-digest DIR      Content identity of an executable oracle bundle for approval
-  runner attempt file.json      Execute one dispatched attempt in the isolated boundary
+  runner attempt file.json      Hold one dispatched attempt while the host attestor runs it
+  runner supervise              Host attestor: run one attempt and attest what it observed
   runner collect file.json      Verify one attempt and publish a trusted result (collector)
   scenarios                    List versioned E2E test-case definitions
   scenario file.json           Publish a scenario version (operator)
@@ -178,50 +245,66 @@ Never share an operator or producer credential with an implementation agent.`); 
     if (id === 'bundle-digest' && args.length === 1) return print(await oracleBundleDigest(resolve(args[0])));
     if (id === 'attempt' && args.length === 1) {
       // Runner path. This credential is a worker registration: it can acknowledge and
-      // execute, and it can never publish evidence about its own execution.
-      const { registration, ...plan } = executionPlanSchema.omit({ grant: true })
-        .extend({ registration: z.object({ id: z.string(), revision: z.number().int().positive() }).strict() }).strict()
-        .parse(JSON.parse(await readFile(args[0], 'utf8')));
+      // hold attempt authority, but it neither executes nor authors any execution fact.
+      const { registration, supervisor, ...plan } = runnerPlanSchema.parse(JSON.parse(await readFile(args[0], 'utf8')));
       assertRunnerCredentialScope(await api('status'));
       const dispatched = await api('validation/dispatch', { registration });
       if (!dispatched.request) return print({ dispatched: false, reason: dispatched.reason });
       const grant = attemptGrantSchema.parse({ requestId: dispatched.request.id, attemptId: dispatched.attempt.id, epoch: dispatched.attempt.epoch,
         runner: registration, bundleDigest: dispatched.bundle.digest, runnerImageDigest: dispatched.bundle.runnerImageDigest,
         executionHost: dispatched.executionAuthority.host, attestationPublicKey: dispatched.executionAuthority.attestationPublicKey,
+        executionNetwork: dispatched.executionAuthority.network,
         targetUrl: dispatched.environment.url, deadline: dispatched.request.deadline });
       const attemptCommand = { requestId: grant.requestId, attemptId: grant.attemptId, epoch: grant.epoch };
-      // Every local refusal happens before acknowledgement. An unacknowledged attempt
-      // expires and releases its runner, environment and external reservations; one that
-      // has been acknowledged holds them until an operator settles it by hand.
-      let preflight;
-      try { preflight = await preflightAttempt({ ...plan, grant }); }
-      catch (error: any) { throw new Error(`Execution boundary refused before acknowledgement; this attempt was never acknowledged and expires without holding protected resources: ${error.message}`); }
-      await api('validation/ack', attemptCommand, `${grant.attemptId}-ack`);
       // A rejected heartbeat is the server saying this epoch may no longer act. The
-      // container boundary fences the host, not the target, so execution stops here
-      // rather than continuing to exercise the target until the request deadline.
+      // container boundary fences the host, not the target, so the supervised execution
+      // is aborted rather than left exercising the target until the request deadline.
       const authority = new AbortController();
       let beat = 0, lastAuthority = Date.now();
-      const heartbeat = setInterval(() => { void api('validation/heartbeat', attemptCommand, `${grant.attemptId}-beat-${++beat}`).then(() => { lastAuthority = Date.now(); }).catch((error: any) => { if (error?.confirmedRefusal || Date.now() - lastAuthority >= 50_000) authority.abort(); }); }, 20_000);
-      const authorityDeadline = setInterval(() => { if (Date.now() - lastAuthority >= 50_000) authority.abort(); }, 1_000);
-      try { return print({ dispatched: true, environment: { instance: dispatched.environment.instance, url: dispatched.environment.url }, expected: { instance: dispatched.environment.instance, artifacts: dispatched.build.artifacts }, record: await executeAttempt({ ...plan, grant }, { preflight, signal: authority.signal }) }); }
-      finally { clearInterval(heartbeat); clearInterval(authorityDeadline); }
+      let heartbeat: NodeJS.Timeout | undefined, authorityDeadline: NodeJS.Timeout | undefined;
+      // Acknowledgement happens between the attestor's preflight and its first container.
+      // Every local refusal therefore still precedes the ACK: an unacknowledged attempt
+      // expires and releases its runner, environment and external reservations, while an
+      // acknowledged one holds them until an operator settles it by hand.
+      const acknowledge = async () => {
+        await api('validation/ack', attemptCommand, `${grant.attemptId}-ack`);
+        lastAuthority = Date.now();
+        heartbeat = setInterval(() => { void api('validation/heartbeat', attemptCommand, `${grant.attemptId}-beat-${++beat}`).then(() => { lastAuthority = Date.now(); }).catch((error: any) => { if (error?.confirmedRefusal || Date.now() - lastAuthority >= 50_000) authority.abort(); }); }, 20_000);
+        authorityDeadline = setInterval(() => { if (Date.now() - lastAuthority >= 50_000) authority.abort(); }, 1_000);
+      };
+      try {
+        const supervised = await superviseThroughAttestor(supervisor, { plan: { ...plan, grant } }, acknowledge, authority.signal, plan.timeoutMs * 2 + 120_000);
+        return print({ dispatched: true, environment: { instance: dispatched.environment.instance, url: dispatched.environment.url },
+          expected: { instance: dispatched.environment.instance, artifacts: dispatched.build.artifacts }, ...supervised });
+      } finally { clearInterval(heartbeat); clearInterval(authorityDeadline); }
     }
-    if (id === 'attest' && args.length === 1) {
-      // Run only in the operator-controlled host-attestor service. Its private key must
-      // not be readable by the implementation worker or mounted into runner containers.
-      const input = z.object({ grant: attemptGrantSchema, record: executionRecordSchema, outputPath: z.string(),
-        requiredArtifacts: z.array(z.string()).min(1).max(30), privateKeyFile: z.string().min(1).max(4096) }).strict()
-        .parse(JSON.parse(await readFile(args[0], 'utf8')));
-      const collectedFrom = await realpath(resolve(input.outputPath));
-      const binding = collectionBinding({ grant: input.grant, execution: input.record, collectedFrom });
-      if (binding.reasons.length) throw new Error(`Attestation refused: ${binding.reasons.join('; ')}`);
-      const collected = await collectArtifacts(collectedFrom, input.requiredArtifacts);
-      if (!collected.complete) throw new Error(`Attestation refused: ${collected.reasons.join('; ')}`);
-      const keyInfo = await stat(input.privateKeyFile);
+    if (id === 'supervise' && args.length === 0) {
+      // The operator-controlled host attestor. It runs under an OS identity the worker
+      // cannot act as, owns the approved bytes and the signing key, and is reachable from
+      // the runner only through this pipe. It signs the attempt it supervised itself; no
+      // command anywhere signs an execution record that arrived from somewhere else.
+      const keyFile = process.env.GRAPHYARD_ATTESTOR_KEY;
+      if (!keyFile) throw new Error('The host attestor requires GRAPHYARD_ATTESTOR_KEY to name its Ed25519 private key; the signing key is never taken from the supervision request');
+      const keyInfo = await stat(keyFile);
       if (!keyInfo.isFile() || keyInfo.mode & 0o077) throw new Error('Host-attestor private key must be a private regular file (mode 0600)');
-      const privateKey = await readFile(input.privateKeyFile, 'utf8');
-      return print(signExecutionAttestation({ grant: input.grant, execution: input.record, collected, privateKey }));
+      if (keyInfo.uid !== (process.getuid?.() ?? -1)) throw new Error('Host-attestor private key must belong to the supervising identity');
+      const lines = createInterface({ input: process.stdin })[Symbol.asyncIterator]();
+      const nextLine = async () => { const { value, done } = await lines.next(); if (done) throw new Error('The supervision channel closed before the attempt could proceed'); return String(value); };
+      const request = JSON.parse(await nextLine());
+      const authority = new AbortController();
+      const abort = () => authority.abort();
+      process.on('SIGTERM', abort); process.on('SIGINT', abort);
+      // Preflight has passed and no container has started yet. The runner acknowledges
+      // now; without its confirmation nothing is executed.
+      const ready = async () => {
+        process.stdout.write(`${JSON.stringify({ preflight: 'ready' })}\n`);
+        if (JSON.parse(await nextLine())?.proceed !== true) throw new Error('The attempt was not acknowledged; no container was started');
+      };
+      // Under the documented `sudo` rule the runner's own identity is knowable, and the
+      // container must not run as it: the output boundary is private to the container user.
+      const callerUid = /^[0-9]{1,10}$/.test(process.env.SUDO_UID ?? '') ? Number(process.env.SUDO_UID) : undefined;
+      try { process.stdout.write(`${JSON.stringify(await superviseAttempt(request, { privateKey: await readFile(keyFile, 'utf8'), ready, signal: authority.signal, callerUid }))}\n`); return; }
+      finally { process.off('SIGTERM', abort); process.off('SIGINT', abort); }
     }
     if (id === 'collect' && args.length === 1) {
       // Collector path. Separate credential, separate host: it re-reads the authority,
@@ -269,7 +352,7 @@ Never share an operator or producer credential with an implementation agent.`); 
       return print({ refusals: assembled.refusals, report: assembled.report, result: await api('validation/result', assembled.report, `${grant.attemptId}-result`) });
       } finally { if (renewCollection) clearInterval(renewCollection); }
     }
-    throw new Error('Use runner inspect|snapshot|bundle-digest|attempt|attest|collect');
+    throw new Error('Use runner inspect|snapshot|bundle-digest|attempt|supervise|collect');
   }
   if (command === 'validation') {
     if (!id || id === 'requests') return print(await api('validation' + (args[0] ? `?cursor=${encodeURIComponent(args[0])}` : '')));

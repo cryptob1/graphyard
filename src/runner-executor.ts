@@ -9,6 +9,10 @@ const digest = z.string().regex(/^sha256:[a-f0-9]{64}$/);
 const name = z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9._/-]*$/).max(150);
 const absolute = z.string().min(1).max(4096).refine(p => p.startsWith('/') && !/[\x00-\x1f\x7f]/.test(p), 'Use an absolute path without control characters');
 const targetUrl = z.url().max(2000).refine(s => { const u = new URL(s); return u.protocol === 'https:' && !u.username && !u.password && !u.hash; }, 'The approved target must be HTTPS without credentials or fragment');
+/** Docker resolves a network name against everything the daemon already has, so an
+ * arbitrary one can attach the browser to databases and other internal services. The
+ * approved name is operator-versioned authority, never runner configuration. */
+const dockerNetwork = z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,60}$/).refine(value => !['host', 'bridge', 'default', 'none'].includes(value), 'Use a dedicated operator-approved Docker network');
 
 /** Exactly the fields a runner may act on. A dispatch response is authority, not a suggestion. */
 export const attemptGrantSchema = z.object({
@@ -19,6 +23,7 @@ export const attemptGrantSchema = z.object({
   // the implementation worker.
   executionHost: z.string().min(1).max(500),
   attestationPublicKey: z.string().min(32).max(4096),
+  executionNetwork: dockerNetwork,
   bundleDigest: digest, runnerImageDigest: digest, targetUrl, deadline: z.iso.datetime(),
 }).strict();
 export type AttemptGrant = z.infer<typeof attemptGrantSchema>;
@@ -27,7 +32,6 @@ export const executionPlanSchema = z.object({
   grant: attemptGrantSchema,
   oraclePath: absolute, outputPath: absolute,
   imageRepository: z.string().regex(/^[a-z0-9][a-z0-9._\/-]*$/).max(255),
-  network: z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,60}$/).refine(value => !['host', 'bridge', 'default', 'none'].includes(value), 'Use a dedicated operator-approved Docker network'),
   timeoutMs: z.number().int().min(1_000).max(3_600_000),
   memoryMb: z.number().int().min(256).max(16_384).default(2048),
   cpus: z.number().min(0.5).max(16).default(2),
@@ -93,7 +97,7 @@ export function executionCommand(plan: ExecutionPlan, phase: Phase, testAccount:
     file: 'docker',
     argv: ['run', '--rm', '--name', containerName(p, phase),
       // Enumeration is offline: the approved inventory cannot depend on the target.
-      '--network', phase === 'enumerate' ? 'none' : p.network,
+      '--network', phase === 'enumerate' ? 'none' : p.grant.executionNetwork,
       '--read-only', '--cap-drop=ALL', '--security-opt=no-new-privileges', '--user', p.runAsUser,
       `--memory=${memory}`, `--memory-swap=${memory}`, `--cpus=${p.cpus}`, `--pids-limit=${p.pidsLimit}`,
       `--mount=type=bind,source=${p.oraclePath},target=/oracle,readonly`,
@@ -115,23 +119,24 @@ async function directory(path: string) {
 const contains = (outer: string, inner: string) => { const r = relative(outer, inner); return r === '' || (!r.startsWith('..') && !r.startsWith(sep)); };
 
 /**
- * Ownership the runner identity cannot defeat. A read-only container mount stops the
- * container, not the host: an oracle tree the runner can write may be weakened between
- * the preflight digest and execution and restored before the closing digest. The approved
- * bytes must therefore belong to another identity — an operator-owned snapshot — and no
- * entry, nor any directory leading to it, may be writable by the runner's own uid or by
- * group/world. Sticky ancestors such as `/tmp` are accepted: their entries can only be
- * renamed or removed by their owner.
+ * Ownership no other identity on the host can defeat. A read-only container mount stops
+ * the container, not the host: an oracle tree that some other account can write may be
+ * weakened between the preflight digest and execution and restored before the closing
+ * one. Nor is "not owned by the executing account" enough, because the worker that asks
+ * for supervision is a different account again. So the approved bytes must belong to the
+ * supervising attestor identity itself (or to root), and no entry — nor any directory
+ * leading to it — may be group- or world-writable. Sticky ancestors such as `/tmp` are
+ * accepted: their entries can only be renamed or removed by their owner.
  */
-async function assertOracleImmutable(root: string, runnerUid: number) {
+async function assertOracleImmutable(root: string, attestorUid: number) {
   const refuse = (path: string, info: Stats, ancestor: boolean) => {
     // A symlink's target can be redirected without touching the tree, so the bundle's
     // own refusal of them is enforced here too, before any mode or ownership claim.
     if (!ancestor && info.isSymbolicLink()) throw new Error(`Approved oracle bundles cannot contain symlinks: ${path}`);
-    if (info.uid === runnerUid) throw new Error(`Approved oracle bytes must be owned by an identity the runner cannot write as: ${path}`);
     // A sticky ancestor such as `/tmp` is shared on purpose: only an entry's owner can
     // rename or remove it there, so the path to the approved bytes stays fixed.
     if (ancestor && info.mode & 0o1000) return;
+    if (info.uid !== attestorUid && info.uid !== 0) throw new Error(`Approved oracle bytes must be owned by the supervising attestor identity or by root: ${path}`);
     if (info.mode & 0o020) throw new Error(`Approved oracle bytes must not be group-writable throughout execution: ${path}`);
     if (info.mode & 0o002) throw new Error(`Approved oracle bytes must not be world-writable throughout execution: ${path}`);
   };
@@ -152,19 +157,21 @@ async function assertOracleImmutable(root: string, runnerUid: number) {
 
 /**
  * Structural checks before any container starts. The approved bytes and the writable
- * collection area must be separate, the approved bytes must be immutable to the runner
- * identity for the whole attempt, and the collection area must be empty so a previous
- * or candidate-planted file cannot be mistaken for this attempt's output.
+ * collection area must be separate, the approved bytes must be immutable to every
+ * identity but the supervising attestor for the whole attempt, and the collection area
+ * must be empty so a previous or candidate-planted file cannot be mistaken for this
+ * attempt's output.
  *
- * `uid` is the identity the runner executes as; it defaults to this process's own.
+ * `uid` is the supervising attestor identity that must own the approved bytes; it
+ * defaults to this process's own, because this runs inside the attestor.
  */
 export async function assertIsolation(plan: ExecutionPlan, options: { uid?: number } = {}) {
   const p = executionPlanSchema.parse(plan);
-  const runnerUid = options.uid ?? process.getuid?.() ?? 0;
+  const attestorUid = options.uid ?? process.getuid?.() ?? 0;
   const oracle = await directory(p.oraclePath), output = await directory(p.outputPath);
   if (contains(oracle.path, output.path) || contains(output.path, oracle.path)) throw new Error('Approved oracle bytes and the writable output path must not overlap');
   if (oracle.mode & 0o022) throw new Error('The approved oracle directory must not be group- or world-writable');
-  await assertOracleImmutable(oracle.path, runnerUid);
+  await assertOracleImmutable(oracle.path, attestorUid);
   if (output.mode & 0o077) throw new Error('The collector output directory must be private to the collector');
   if (output.uid !== Number(p.runAsUser.split(':')[0])) throw new Error('The collector output directory must be owned by the unprivileged container user');
   if ((await readdir(output.path)).length) throw new Error('The collector output directory must be empty before an attempt');
@@ -264,9 +271,10 @@ export type ExecutionRecord = z.infer<typeof executionRecordSchema>;
 /** Everything that can refuse locally before the attempt is acknowledged. */
 export type Preflight = { oraclePath: string; outputPath: string; bundleDigest: string; testAccountEnv: TestAccountEnv };
 /**
- * Structural isolation plus the first bundle measurement. A runner performs this before
- * acknowledging: a refusal here leaves the attempt unacknowledged, so it expires and
- * releases its reservations instead of blocking them until an operator settles by hand.
+ * Structural isolation plus the first bundle measurement. The attestor that will execute
+ * performs this before the runner acknowledges: a refusal here leaves the attempt
+ * unacknowledged, so it expires and releases its reservations instead of blocking them
+ * until an operator settles by hand.
  */
 export async function preflightAttempt(plan: unknown, options: { uid?: number } = {}): Promise<Preflight> {
   const p = executionPlanSchema.parse(plan);
@@ -275,10 +283,12 @@ export async function preflightAttempt(plan: unknown, options: { uid?: number } 
 }
 
 /**
- * Run one authorized attempt. This process decides nothing about acceptance: it verifies
- * the approved bytes before and after execution and hands an execution record plus the
- * untouched output directory to the separately trusted collector. `signal` carries loss
- * of attempt authority: an aborted attempt stops talking to the target and settles.
+ * Run one authorized attempt inside the host attestor. Every fact this returns is the
+ * supervising process's own observation — the digests it measured, the exit codes and
+ * timings of the container invocations it made, and the container states it confirmed
+ * after removal — which is what makes the record signable. It still decides nothing
+ * about acceptance. `signal` carries loss of attempt authority: an aborted attempt stops
+ * talking to the target and settles.
  */
 export async function executeAttempt(plan: unknown, options: { run?: Runner; settle?: Settler; now?: () => Date; preflight?: Preflight; signal?: AbortSignal; uid?: number } = {}): Promise<ExecutionRecord> {
   const p = executionPlanSchema.parse(plan);

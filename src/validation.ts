@@ -17,7 +17,7 @@ const artifacts = z.array(z.object({ service: name, digest }).strict()).min(1).m
 const ref = z.object({ id: name, revision }).strict();
 export const definitionSchema = z.discriminatedUnion('kind', [
   z.object({ ...base, kind: z.literal('environment'), repository: z.string().regex(/^[\w.-]+\/[\w.-]+$/), url: z.url().max(2000).refine(s => { const u = new URL(s); return u.protocol === 'https:' && !u.username && !u.password && !u.hash && !u.search; }, 'Use HTTPS without credentials, query or fragment'), instance: name, immutable: z.literal(true), services: resourceNames, resources: resourceNames }).strict(),
-  z.object({ ...base, kind: z.literal('registration'), principalId: name, role: z.enum(['runner', 'collector', 'builder']), environment: ref, adapterVersion: name, proofs: z.array(proofSchema).max(50), enabled: z.boolean(), executionHost: z.string().min(1).max(500).optional(), attestationPublicKey: z.string().min(32).max(4096).optional() }).strict(),
+  z.object({ ...base, kind: z.literal('registration'), principalId: name, role: z.enum(['runner', 'collector', 'builder']), environment: ref, adapterVersion: name, proofs: z.array(proofSchema).max(50), enabled: z.boolean(), executionHost: z.string().min(1).max(500).optional(), attestationPublicKey: z.string().min(32).max(4096).optional(), executionNetwork: z.string().min(1).max(60).optional() }).strict(),
   z.object({ ...base, kind: z.literal('bundle'), scenario: name, scenarioRevision: revision, scenarioHash: z.string().regex(/^[a-f0-9]{64}$/), digest, runnerImageDigest: digest }).strict(),
 ]);
 type DefinitionInput = z.infer<typeof definitionSchema>;
@@ -163,10 +163,15 @@ export class Validation {
         if (data.enabled && data.role === 'collector') demand(data.proofs.length && data.proofs.every(p => principal?.proofs?.includes(p)), 'Collector cannot exceed configured proof scope');
         if (data.enabled && data.role === 'runner') {
           demand(data.executionHost && /^(?:ssh|tcp|unix):\/\//.test(data.executionHost) && data.attestationPublicKey, 'Runner registration must pin its execution host and trusted attestor public key');
+          // Docker resolves a network name against every network the daemon already has.
+          // Left to runner configuration, it could attach the browser container to the
+          // networks carrying databases and other internal services, so the approved
+          // isolated network is operator-versioned authority like the host and key.
+          demand(!!data.executionNetwork && /^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,59}$/.test(data.executionNetwork) && !['host', 'bridge', 'default', 'none'].includes(data.executionNetwork), 'Runner registration must pin a dedicated isolated Docker network');
           let keyType: string | undefined; try { keyType = createPublicKey(data.attestationPublicKey).asymmetricKeyType; } catch { /* invalid key */ }
           demand(keyType === 'ed25519', 'Runner host attestor must use a valid Ed25519 public key');
         }
-        if (data.role !== 'runner') demand(!data.executionHost && !data.attestationPublicKey, 'Only runner registrations may configure execution authority');
+        if (data.role !== 'runner') demand(!data.executionHost && !data.attestationPublicKey && !data.executionNetwork, 'Only runner registrations may configure execution authority');
       }
       if (data.kind === 'bundle') {
         const s = (await db.query('SELECT document FROM scenarios WHERE id=$1 AND revision=$2', [data.scenario, data.scenarioRevision])).rows[0]?.document as Scenario | undefined;
@@ -254,7 +259,7 @@ export class Validation {
         await this.changed(db, w, actor.id, 'dispatched', now, { requestId: r.id, attempt, resources });
         const build = (await db.query('SELECT document FROM validation_builds WHERE id=$1', [c.buildAttestationId])).rows[0].document as BuildAttestation;
         return { request: r, candidate: c, build, environment, bundle: await this.definition(db, 'bundle', c.bundle), attempt,
-          executionAuthority: { host: registration.executionHost!, attestationPublicKey: registration.attestationPublicKey! } };
+          executionAuthority: { host: registration.executionHost!, attestationPublicKey: registration.attestationPublicKey!, network: registration.executionNetwork! } };
       }
       return { request: null, reason: 'No eligible request or protected resources are still reserved' };
     });
@@ -307,7 +312,7 @@ export class Validation {
       const environment = await this.definition(db, 'environment', c.environment, false) as Environment;
       const bundle = await this.definition(db, 'bundle', c.bundle, false) as Bundle;
       return { requestId: r.id, attemptId: a.id, epoch: a.epoch, runner: r.runner,
-        executionHost: runner.executionHost, attestationPublicKey: runner.attestationPublicKey,
+        executionHost: runner.executionHost, attestationPublicKey: runner.attestationPublicKey, executionNetwork: runner.executionNetwork,
         bundleDigest: bundle.digest, runnerImageDigest: bundle.runnerImageDigest, targetUrl: environment.url, deadline: r.deadline };
     });
   }

@@ -8,7 +8,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createServer } from 'node:http';
 import { setTimeout as delay } from 'node:timers/promises';
-import { randomUUID } from 'node:crypto';
+import { generateKeyPairSync, randomUUID, verify } from 'node:crypto';
 import { captureTrackedRoot, linuxProcessRecord, signalTrackedProcesses, supervise, systemdContainment } from '../src/supervisor.js';
 import { acknowledgeContainment, containmentCredentials, establishContainment, isConfirmedCoordinationRefusal, revalidateContainment, settleContainment } from '../src/quarantine.js';
 
@@ -663,7 +663,8 @@ test('the packaged runner path is usable from the CLI and refuses evidence-produ
 
     const plan = join(cwd, 'runner.json');
     await writeFile(plan, JSON.stringify({ registration: { id: 'preview-runner', revision: 1 }, imageRepository: 'example/graphyard-runner',
-      oraclePath: oracle, outputPath: join(cwd, 'out'), network: 'gy-test', timeoutMs: 60_000 }));
+      oraclePath: oracle, outputPath: join(cwd, 'out'), timeoutMs: 60_000,
+      supervisor: { command: process.execPath, args: [launcher, 'runner', 'supervise'] } }));
     // A producer credential could publish evidence about its own execution.
     await assert.rejects(exec(process.execPath, [launcher, 'runner', 'attempt', plan], { cwd, env }), /worker-scoped runner credential/);
     assert.deepEqual(posts, []);
@@ -679,7 +680,7 @@ test('the packaged runner path is usable from the CLI and refuses evidence-produ
     // A live grant with another attempt's output directory is refused before any
     // artifact is uploaded: an artifact name is immutable once published for an attempt.
     const grant = { requestId: randomUUID(), attemptId: randomUUID(), epoch: 1, runner: { id: 'preview-runner', revision: 1 },
-      executionHost: 'ssh://runner.test', attestationPublicKey: 'test-public-key-material-at-least-32-bytes',
+      executionHost: 'ssh://runner.test', attestationPublicKey: 'test-public-key-material-at-least-32-bytes', executionNetwork: 'gy-test',
       bundleDigest: bundle.digest, runnerImageDigest: `sha256:${'b'.repeat(64)}`, targetUrl: 'https://preview.example.test/', deadline: '2026-09-16T01:00:00.000Z' };
     collectionAuthority = grant;
     const record = { grant, startedAt: '2026-09-16T00:00:00.000Z', finishedAt: '2026-09-16T00:01:00.000Z',
@@ -692,5 +693,67 @@ test('the packaged runner path is usable from the CLI and refuses evidence-produ
     await assert.rejects(exec(process.execPath, [launcher, 'runner', 'collect', join(cwd, 'stale.json')], { cwd, env }), /output boundary this execution recorded/);
     assert.deepEqual(posts, ['/api/validation/dispatch', '/api/validation/collection-authority']);
     await assert.rejects(exec(process.execPath, [launcher, 'runner', 'nonsense'], { cwd, env }), /Use runner inspect/);
+  } finally { await new Promise<void>(r => http.close(() => r())); await rm(cwd, { recursive: true, force: true }); }
+});
+
+test('the runner holds authority while the host attestor executes and signs the attempt', async () => {
+  const cwd = await mkdtemp(join(tmpdir(), 'graphyard-supervision-'));
+  const posts: string[] = [];
+  const requestId = randomUUID(), attemptId = randomUUID();
+  const { publicKey, privateKey } = generateKeyPairSync('ed25519');
+  let bundleDigest = '';
+  const http = createServer((req, res) => {
+    res.setHeader('Content-Type', 'application/json');
+    if (req.url === '/api/status') { res.end(JSON.stringify({ actor: { id: 'preview-runner', role: 'worker' } })); return; }
+    posts.push(String(req.url).replace('/api/validation/', ''));
+    if (req.url !== '/api/validation/dispatch') { res.end('{}'); return; }
+    res.end(JSON.stringify({
+      request: { id: requestId, deadline: new Date(Date.now() + 600_000).toISOString() },
+      attempt: { id: attemptId, epoch: 1 },
+      bundle: { digest: bundleDigest, runnerImageDigest: `sha256:${'b'.repeat(64)}` },
+      environment: { instance: 'preview-7f3a', url: 'https://preview.example.test/' },
+      build: { artifacts: [{ service: 'api', digest: `sha256:${'c'.repeat(64)}` }] },
+      // The approved execution boundary is operator-versioned authority, not runner input.
+      executionAuthority: { host: 'unix:///var/run/docker.sock', network: 'gy-isolated',
+        attestationPublicKey: publicKey.export({ type: 'spki', format: 'pem' }).toString() },
+    }));
+  });
+  await new Promise<void>(r => http.listen(0, '127.0.0.1', r));
+  const env = { ...process.env, GRAPHYARD_TOKEN: 'test-only', GRAPHYARD_URL: `http://127.0.0.1:${(http.address() as any).port}` };
+  try {
+    const oracle = join(cwd, 'oracle'), output = join(cwd, 'out'), key = join(cwd, 'attestor.key');
+    await mkdir(oracle, { mode: 0o755 }); await mkdir(output, { mode: 0o700 });
+    await writeFile(join(oracle, 'suite.spec.ts'), 'approved assertion');
+    await writeFile(key, privateKey.export({ type: 'pkcs8', format: 'pem' }).toString(), { mode: 0o600 });
+    bundleDigest = JSON.parse((await exec(process.execPath, [launcher, 'runner', 'bundle-digest', oracle], { cwd, env })).stdout).digest;
+
+    // The host attestor takes its signing key from its own environment. A runner that
+    // could name the key could choose one it holds, and attest its own execution.
+    const attestorEnv = { ...env, GRAPHYARD_ATTESTOR_KEY: key };
+    const plan = join(cwd, 'runner.json');
+    await writeFile(plan, JSON.stringify({ registration: { id: 'preview-runner', revision: 1 }, imageRepository: 'example/graphyard-runner',
+      oraclePath: oracle, outputPath: output, timeoutMs: 60_000,
+      supervisor: { command: process.execPath, args: [launcher, 'runner', 'supervise'] } }));
+    const attempt = JSON.parse((await exec(process.execPath, [launcher, 'runner', 'attempt', plan], { cwd, env: attestorEnv, maxBuffer: 8 << 20 })).stdout);
+
+    // Acknowledgement sits between the attestor's preflight and its first container.
+    assert.deepEqual(posts, ['dispatch', 'ack']);
+    // The runner observed nothing: it forwards the record the attestor signed. Docker is
+    // unavailable here, so the attempt is blocked — and blocked is what it reports.
+    assert.equal(attempt.record.grant.executionNetwork, 'gy-isolated');
+    assert.equal(attempt.record.outcome, 'failed');
+    assert.ok(attempt.record.refusals.some((r: string) => /settlement is unverified/.test(r)));
+    assert.equal(attempt.attestation.payload.attemptId, attemptId);
+    assert.ok(verify(null, Buffer.from(JSON.stringify(attempt.attestation.payload)),
+      publicKey.export({ type: 'spki', format: 'pem' }).toString(), Buffer.from(attempt.attestation.signature, 'base64')));
+
+    // The attestor refuses to sign at all without a private key of its own, and refuses a
+    // key any other account on the host could read.
+    const supervision = JSON.stringify({ plan: { grant: attempt.record.grant, imageRepository: 'example/graphyard-runner',
+      oraclePath: oracle, outputPath: output, timeoutMs: 60_000 } });
+    const supervise = (settings: NodeJS.ProcessEnv) => exec(process.execPath, [launcher, 'runner', 'supervise'], { cwd, env: settings, input: `${supervision}\n{"proceed":true}\n` } as any);
+    await assert.rejects(supervise(env), /GRAPHYARD_ATTESTOR_KEY/);
+    await chmod(key, 0o644);
+    await assert.rejects(supervise(attestorEnv), /private regular file/);
   } finally { await new Promise<void>(r => http.close(() => r())); await rm(cwd, { recursive: true, force: true }); }
 });
