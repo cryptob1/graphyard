@@ -14,12 +14,12 @@ test('formatDuration renders hours and minutes from 60 minutes through under 48 
   assert.equal(formatDuration(61), '1h 1m');
   assert.equal(formatDuration(894), '14h 54m');
   assert.equal(formatDuration(1439), '23h 59m');
+  assert.equal(formatDuration(1440), '24h');
+  assert.equal(formatDuration(1500), '25h');
+  assert.equal(formatDuration(2879), '47h 59m');
 });
 
 test('formatDuration renders days and hours at 48 hours and above', () => {
-  assert.equal(formatDuration(1440), '1d');
-  assert.equal(formatDuration(1500), '1d 1h');
-  assert.equal(formatDuration(2879), '1d 23h');
   assert.equal(formatDuration(2880), '2d');
   assert.equal(formatDuration(3060), '2d 3h');
   assert.equal(formatDuration(10080), '7d');
@@ -28,8 +28,8 @@ test('formatDuration renders days and hours at 48 hours and above', () => {
 test('formatDuration omits zero components in every band', () => {
   assert.equal(formatDuration(120), '2h');
   assert.equal(formatDuration(125), '2h 5m');
-  assert.equal(formatDuration(1440), '1d');
-  assert.equal(formatDuration(2160), '1d 12h');
+  assert.equal(formatDuration(1440), '24h');
+  assert.equal(formatDuration(2160), '36h');
   for (const minutes of [60, 120, 1440, 2880, 4320]) assert.ok(!/\b0[dmh]\b/.test(formatDuration(minutes)), `${minutes} must omit zero components: ${formatDuration(minutes)}`);
 });
 

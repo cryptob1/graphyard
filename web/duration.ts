@@ -10,10 +10,13 @@ export function formatDuration(minutes: number | null | undefined): string {
   if (typeof minutes !== 'number' || !Number.isFinite(minutes)) return UNKNOWN_DURATION;
   const total = Math.max(0, Math.floor(minutes));
   const days = Math.floor(total / 1440);
-  const hours = Math.floor((total % 1440) / 60);
+  const dayHours = Math.floor((total % 1440) / 60);
   const mins = total % 60;
-  if (days > 0) return hours > 0 ? `${days}d ${hours}h` : `${days}d`;
-  if (total >= 60) return mins > 0 ? `${hours}h ${mins}m` : `${hours}h`;
+  if (total >= 2880) return dayHours > 0 ? `${days}d ${dayHours}h` : `${days}d`;
+  if (total >= 60) {
+    const hours = Math.floor(total / 60);
+    return mins > 0 ? `${hours}h ${mins}m` : `${hours}h`;
+  }
   return `${mins}m`;
 }
 

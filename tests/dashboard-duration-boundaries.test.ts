@@ -8,8 +8,8 @@ test('exact boundary inputs produce the documented band edges', () => {
   assert.equal(formatDuration(60), '1h');
   assert.equal(formatDuration(61), '1h 1m');
   assert.equal(formatDuration(1439), '23h 59m');
-  assert.equal(formatDuration(1440), '1d');
-  assert.equal(formatDuration(2879), '1d 23h');
+  assert.equal(formatDuration(1440), '24h');
+  assert.equal(formatDuration(2879), '47h 59m');
   assert.equal(formatDuration(2880), '2d');
 });
 
@@ -28,7 +28,8 @@ test('negative inputs clamp to zero minutes instead of emitting negatives', () =
 test('zero components are omitted at exact hour and day multiples', () => {
   assert.equal(formatDuration(60), '1h');
   assert.equal(formatDuration(600), '10h');
-  assert.equal(formatDuration(1440), '1d');
+  assert.equal(formatDuration(1440), '24h');
+  assert.equal(formatDuration(2160), '36h');
   assert.equal(formatDuration(2880), '2d');
   assert.equal(formatDuration(4460), '3d 2h');
 });
