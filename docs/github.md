@@ -47,6 +47,10 @@ The service does not automatically overwrite repository protection. For this pro
 
 By default the configured CI App ID is `15368`; verify the actual app IDs returned by your check runs and adjust `GITHUB_CI_APP_IDS`. A check with the right name from an unknown App cannot satisfy policy.
 
+## Dashboard candidate links
+
+Work cards and the work-detail Ownership section show `PR #N` and the candidate SHA. When GitHub is configured, both are links into that repository: `https://github.com/<owner>/<repo>/pull/<N>` and `https://github.com/<owner>/<repo>/commit/<sha>`. Destinations derive only from the configured repository identity plus the observed candidate's numeric PR number and full hexadecimal SHA; candidate-authored values can never select a URL. Links open in a new tab with descriptive accessible names and visible keyboard focus, and selecting them does not change dashboard selection. Without a configured GitHub repository, or when a reference fails validation (for example a legacy abbreviated SHA), the reference renders as selectable plain text instead of a link.
+
 ## Trusted test producers
 
 A green GitHub job does not prove every behavioral criterion. A dedicated producer reads the actual test report, verifies the code under test, and sends Graphyard evidence with its credential and an artifact link. Give it only the proof names it can produce.

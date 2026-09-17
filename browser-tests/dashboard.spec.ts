@@ -1,7 +1,7 @@
 import { test, expect, type Page } from '@playwright/test';
 
 // Browser-only API fixtures: no production requests, credentials, or writes.
-const work = { dependencies: [], plannedFiles: [], scenarioRequirements: [], id: 'fixture-work', key: 'GY-1', title: 'Browser fixture', description: 'Isolated UI audit', type: 'feature', priority: 1, stage: 'review', stageEnteredAt: '2026-01-01T00:00:00Z', ready: true, policy: { review: true, reviewProvider: 'github', checks: ['test'] }, policyRevision: 1, revision: 1, violations: [], workspaces: [], criteria: [{ id: 'AC-1', text: 'Observable behavior', proofs: ['manual:browser'] }], evidence: [], gates: [{ name: 'review', passed: false, reasons: ['Independent review required'] }], submission: { epoch: 1 }, candidate: { pr: 1, sha: 'abcdef123456' } };
+const work = { dependencies: [], plannedFiles: [], scenarioRequirements: [], id: 'fixture-work', key: 'GY-1', title: 'Browser fixture', description: 'Isolated UI audit', type: 'feature', priority: 1, stage: 'review', stageEnteredAt: '2026-01-01T00:00:00Z', ready: true, policy: { review: true, reviewProvider: 'github', checks: ['test'] }, policyRevision: 1, revision: 1, violations: [], workspaces: [], criteria: [{ id: 'AC-1', text: 'Observable behavior', proofs: ['manual:browser'] }], evidence: [], gates: [{ name: 'review', passed: false, reasons: ['Independent review required'] }], submission: { epoch: 1 }, candidate: { pr: 1, sha: 'abcdef1234567890abcdef1234567890abcdef12' } };
 async function fixture(page: Page, role = 'admin') {
   const state = { offline: false, unauthorized: false, writes: 0, pause: false };
   await page.route('**/api/**', async route => {
@@ -265,4 +265,91 @@ test('validation view reports failures honestly and bounds request history', asy
   await expect(page.getByText('Browsing history; live updates paused.', { exact: false })).toBeVisible();
   await page.getByRole('button', { name: 'Return to latest' }).click();
   await expect(page.locator('.scenario-card')).toHaveCount(20);
+});
+
+const prHref = 'https://github.com/fixture/repository/pull/1', commitHref = `https://github.com/fixture/repository/commit/${work.candidate!.sha}`;
+const cardPrLink = (page: Page) => page.getByRole('link', { name: 'Open pull request #1 for GY-1 in GitHub' });
+const detailPrLink = (page: Page) => page.getByRole('dialog').getByRole('link', { name: 'Open pull request #1 for GY-1 in GitHub' });
+const detailShaLink = (page: Page) => page.getByRole('dialog').getByRole('link', { name: 'Open commit abcdef123456 in GitHub' });
+
+test('card and ownership candidate references link to the exact PR and commit in the configured repository', async ({ page }) => {
+  const state = await fixture(page); await login(page);
+  await page.route('https://github.com/**', route => route.fulfill({ body: 'GitHub destination stub' }));
+  const cardLink = cardPrLink(page);
+  await expect(cardLink).toHaveAttribute('href', prHref);
+  await expect(cardLink).toContainText('PR #1');
+  const [popup] = await Promise.all([page.waitForEvent('popup'), cardLink.click()]);
+  expect(popup.url()).toBe(prHref); await popup.close();
+  await expect(page.getByRole('dialog')).toHaveCount(0);
+  await page.getByRole('button', { name: /GY-1.*Browser fixture/ }).click();
+  const dialog = page.getByRole('dialog');
+  await expect(detailPrLink(page)).toHaveAttribute('href', prHref);
+  const shaLink = detailShaLink(page);
+  await expect(shaLink).toHaveAttribute('href', commitHref);
+  await expect(shaLink.locator('code')).toHaveText('abcdef123456');
+  await expect(dialog.getByText('PR #1', { exact: true })).toBeVisible();
+  const [commitPopup] = await Promise.all([page.waitForEvent('popup'), shaLink.click()]);
+  expect(commitPopup.url()).toBe(commitHref); await commitPopup.close();
+  expect(state.writes).toBe(0);
+});
+
+for (const viewport of [{ name: 'desktop', width: 1280, height: 900 }, { name: 'mobile', width: 390, height: 844 }]) {
+  test(`candidate references keep keyboard access, focus treatment, and selection on ${viewport.name}`, async ({ page }) => {
+    await page.setViewportSize(viewport);
+    await fixture(page); await login(page);
+    const cardLink = cardPrLink(page);
+    await expect(cardLink).toBeVisible();
+    const card = page.locator('.card').first();
+    await card.focus(); await page.keyboard.press('Enter');
+    const dialog = page.getByRole('dialog'); await expect(dialog).toBeVisible();
+    await expect(dialog.getByRole('button', { name: /Close/ })).toBeFocused();
+    await page.keyboard.press('Tab');
+    await expect(detailPrLink(page)).toBeFocused();
+    expect(['solid', 'auto']).toContain(await detailPrLink(page).evaluate(e => getComputedStyle(e).outlineStyle));
+    await page.keyboard.press('Tab');
+    await expect(detailShaLink(page)).toBeFocused();
+    await page.keyboard.press('Escape'); await expect(dialog).toHaveCount(0);
+    await expect(page.locator('.card').first()).toBeVisible();
+    await card.focus(); await page.keyboard.press('Enter');
+    await expect(page.getByRole('dialog')).toBeVisible();
+    await expect(page.getByRole('dialog').getByRole('link', { name: 'Open pull request #1 for GY-1 in GitHub' })).toBeVisible();
+  });
+}
+
+test('an unconfigured GitHub repository renders candidate references as non-link text', async ({ page }) => {
+  await fixture(page);
+  await page.route('**/api/status', route => route.fulfill({ json: { actor: { id: 'fixture', role: 'admin' }, github: false, reviewProviders: ['github'], repository: null, jobs: [] } }));
+  await login(page);
+  await expect(cardPrLink(page)).toHaveCount(0);
+  await expect(page.locator('.card').getByText('PR #1', { exact: true })).toBeVisible();
+  await page.getByRole('button', { name: /GY-1.*Browser fixture/ }).click();
+  const dialog = page.getByRole('dialog');
+  await expect(dialog.getByText('PR #1', { exact: true })).toBeVisible();
+  await expect(dialog.getByText('abcdef123456', { exact: true })).toBeVisible();
+  await expect(dialog.getByRole('link')).toHaveCount(0);
+});
+
+test('legacy abbreviated SHAs and invalid candidate references never become links', async ({ page }) => {
+  await fixture(page);
+  const cases = [
+    { candidate: { pr: 1, sha: 'abcdef123456' }, shaText: 'abcdef123456', prHref, commitHref: null },
+    { candidate: { pr: 0, sha: work.candidate!.sha }, shaText: 'abcdef123456', prHref: null, commitHref },
+    { candidate: { pr: 1, sha: 'not-a-sha' }, shaText: 'not-a-sha', prHref, commitHref: null }];
+  for (const { candidate, shaText, prHref: expectedPr, commitHref: expectedCommit } of cases) {
+    await page.route('**/api/work-snapshot', route => route.fulfill({ json: { work: [{ ...work, candidate }], now: '2026-01-01T00:00:00Z' } }));
+    await login(page);
+    await expect(page.locator('.card').getByRole('link', { name: /Open pull request/ })).toHaveCount(expectedPr ? 1 : 0);
+    if (expectedPr) await expect(page.locator('.card').getByRole('link', { name: /Open pull request/ })).toHaveAttribute('href', expectedPr);
+    await page.getByRole('button', { name: /GY-1.*Browser fixture/ }).click();
+    const dialog = page.getByRole('dialog');
+    await expect(dialog.getByText(shaText, { exact: true })).toBeVisible();
+    await expect(dialog.getByRole('link', { name: /Open pull request/ })).toHaveCount(expectedPr ? 1 : 0);
+    await expect(dialog.getByRole('link', { name: /Open commit/ })).toHaveCount(expectedCommit ? 1 : 0);
+    if (expectedCommit) await expect(dialog.getByRole('link', { name: /Open commit/ })).toHaveAttribute('href', expectedCommit);
+    await page.keyboard.press('Escape');
+    await page.getByRole('button', { name: 'Sign out' }).click();
+  }
+  await page.route('**/api/work-snapshot', route => route.fulfill({ json: { work: [{ ...work, candidate: null }], now: '2026-01-01T00:00:00Z' } }));
+  await login(page);
+  await expect(page.locator('.card').getByText('No PR', { exact: true })).toBeVisible();
 });
