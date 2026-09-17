@@ -2,8 +2,8 @@
 
 ## Perpetual master loop
 
-Keep a dedicated master coordinator running until every in-scope item is Done or a
-genuinely external blocker is recorded in Graphyard. Repeatedly run status,
+Keep a dedicated master coordinator running until every in-scope item is Done or has
+a genuinely external blocker recorded in Graphyard. Repeatedly run status,
 dispatch ready work, shepherd review and trusted proof collection, request guarded
 merges, and verify deployment and live behavior against the exact deployed release.
 Close finished agent sessions and return to status after every material event.

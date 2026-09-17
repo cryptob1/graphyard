@@ -19,6 +19,7 @@ test('managed instructions refresh one section and preserve all surrounding oper
   const original = `# Operator rules\n${bootstrap}\nNever delete customer data.\n`;
   const first = managedInstructions(original, 'https://one.example');
   assert.match(first, /dedicated master coordinator must keep cycling: status, dispatch ready work,\nshepherd review and proof collection, guarded merge, then deployment verification/);
+  assert.match(first, /every in-scope item is Done or has a genuinely external blocker recorded\nin Graphyard/);
   for (const condition of ['Ordinary review findings', 'rework', 'idle workers', 'proof setup', 'Close finished agent sessions']) assert.match(first, new RegExp(condition));
   const surrounding = `${first}\n## Team review\nAsk the maintainer.\n`;
   const updated = managedInstructions(surrounding, 'https://two.example');

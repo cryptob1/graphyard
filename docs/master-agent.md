@@ -48,8 +48,8 @@ Local dispatch requires Linux with a working systemd user manager for durable co
 ## Operate
 
 The master is a perpetual coordinator, not a one-shot dispatcher. Keep cycling
-through these steps until every in-scope work item is Done or a genuinely external
-blocker is recorded in Graphyard:
+through these steps until every in-scope work item is Done or has a genuinely
+external blocker recorded in Graphyard:
 
 1. Run `master status` and treat Graphyard as progression truth.
 2. Dispatch ready work to an appropriate worker profile.
@@ -60,8 +60,8 @@ blocker is recorded in Graphyard:
 6. Close finished agent sessions, then return to status and continue the cycle.
 
 Ordinary review findings, rework, idle workers, and proof setup are not stopping
-conditions. Resolve or route them and continue. Stop only when the in-scope work is
-Done or a genuinely external blocker has been recorded in Graphyard.
+conditions. Resolve or route them and continue. Stop only when every in-scope work
+item is Done or has a genuinely external blocker recorded in Graphyard.
 
 ```sh
 node "$GRAPHYARD_CLI" master status

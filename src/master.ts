@@ -73,7 +73,7 @@ when an agent, provider account, machine, or context window changes.
 
 Keep cycling: status, dispatch ready work, shepherd review and proof collection,
 guarded merge, then deployment verification. Repeat until every in-scope item is
-Done or a genuinely external blocker is recorded in Graphyard. Ordinary review
+Done or has a genuinely external blocker recorded in Graphyard. Ordinary review
 findings, rework, idle workers, and proof setup are not stopping conditions. Close
 finished agent sessions as part of the cycle.
 
