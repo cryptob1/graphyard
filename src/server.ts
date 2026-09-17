@@ -135,14 +135,19 @@ export function server(engine: Engine, credentials: Credential[], github: GitHub
               `INSERT INTO deployment_observations(id,provider,external_id,environment,sha,state,started_at,finished_at,producer,details)
                VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) ON CONFLICT (provider,external_id,state) DO NOTHING RETURNING id`,
               [id, data.provider, data.externalId, data.environment, data.sha, data.state, data.startedAt, data.finishedAt ?? null, actor.id, JSON.stringify(data.details ?? {})]);
-            const deploymentId = inserted.rows[0]?.id ?? (await client.query(
-              'SELECT id FROM deployment_observations WHERE provider=$1 AND external_id=$2 AND state=$3', [data.provider, data.externalId, data.state])).rows[0].id;
+            const existingObservation = inserted.rowCount === 0 ? (await client.query(
+              'SELECT * FROM deployment_observations WHERE provider=$1 AND external_id=$2 AND state=$3', [data.provider, data.externalId, data.state])).rows[0] : null;
+            const deploymentId = inserted.rows[0]?.id ?? existingObservation.id;
             const normalized = [...new Set(data.containedMergeShas)].sort();
             if (inserted.rowCount === 1) {
               for (const mergeSha of normalized) await client.query('INSERT INTO deployment_merge_observations(deployment_id,merge_sha) VALUES($1,$2)', [deploymentId, mergeSha]);
             } else {
               const existing = (await client.query('SELECT merge_sha FROM deployment_merge_observations WHERE deployment_id=$1 ORDER BY merge_sha', [deploymentId])).rows.map(row => row.merge_sha);
-              demand(JSON.stringify(existing) === JSON.stringify(normalized), 'A duplicate deployment observation cannot change contained merge identities', 409);
+              const sameObservation = existingObservation.environment === data.environment && existingObservation.sha === data.sha
+                && new Date(existingObservation.started_at).toISOString() === new Date(data.startedAt).toISOString()
+                && (existingObservation.finished_at ? new Date(existingObservation.finished_at).toISOString() : null) === (data.finishedAt ? new Date(data.finishedAt).toISOString() : null)
+                && JSON.stringify(existingObservation.details ?? {}) === JSON.stringify(data.details ?? {});
+              demand(sameObservation && JSON.stringify(existing) === JSON.stringify(normalized), 'A duplicate deployment observation must exactly replay every immutable field', 409);
             }
             await client.query('COMMIT');
             return send(200, { recorded: inserted.rowCount === 1, id: deploymentId, duplicate: inserted.rowCount === 0 });

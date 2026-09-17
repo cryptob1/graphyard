@@ -28,8 +28,10 @@ fact in the ledger, so editing a stored document cannot move a number.
 
 Ledger events are projected into `flow_facts`, a normalized, append-only, database-trigger
 protected table. The projection is incremental and bounded: it reads events after a stored
-checkpoint in batches, derives facts with exact identities (review ID, evidence ID, commit
-SHA, ledger sequence), and inserts them idempotently. Replaying the ledger inserts nothing
+checkpoint in batches, derives facts with exact identities (review result ID, check-run ID
+and attempt, evidence ID, commit SHA, ledger sequence), and inserts them idempotently. A
+pending review is not a completed-review fact, and repeated CI outcomes from distinct runs
+remain distinct. Replaying the same ledger event inserts nothing
 new, and two replicas projecting at once cannot duplicate a fact.
 
 The projection runs in the server's reconciliation loop and as a short catch-up before each
@@ -46,6 +48,8 @@ commit may contain many independently observed PR merge commits; production phas
 pull-requests-per-deployment join through those immutable containment records, never by
 assuming the artifact SHA equals a PR merge SHA. They are repository-wide: slice, type,
 and stage filters do not narrow them.
+Repeating a deployment identity is accepted only when every immutable observation field and
+contained merge identity matches the original record.
 
 ## Timezone, windows, and buckets
 
@@ -151,6 +155,8 @@ Every aggregate drills down to the underlying records: the work item, the exact 
 request and commit, and evidence or artifact identifiers where the role allows. Readers see
 results and counts; operators, coordinators, and producers additionally see evidence and
 artifact identifiers.
+Summary cards may preview only the first 25 deterministic rows, but drill-downs are rebuilt
+from the complete bounded population and independently return up to 200 rows.
 
 The selected bounded result exports as CSV or JSON. Both formats begin with the metric,
 its definition, the observation instant, the timezone, the window and its boundary rule,
@@ -179,8 +185,9 @@ Reaching a bound is reported, never hidden: `coverage.truncated`,
 `coverage.workItemsTruncated`, `coverage.deploymentsTruncated`,
 `coverage.deploymentMergesTruncated`, and the **partial** state
 say so. Reads use indexed
-access paths on `flow_facts` — `(observed_at, id)`, `(work_id, observed_at, id)`, and
-`(kind, observed_at, id)` — with deterministic ordering, so repeating a bounded query
+access paths on `flow_facts` — `(observed_at, id)`, `(work_id, observed_at, id)`,
+`(kind, observed_at, id)`, and `(work_id, kind, observed_at DESC, id DESC)` for bounded
+latest-state lookups — with deterministic ordering, so repeating a bounded query
 returns the same rows in the same order.
 
 ## Reading it well

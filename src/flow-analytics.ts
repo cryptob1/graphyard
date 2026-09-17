@@ -29,6 +29,7 @@ CREATE TABLE IF NOT EXISTS flow_facts (
 );
 CREATE INDEX IF NOT EXISTS flow_facts_time ON flow_facts(observed_at, id);
 CREATE INDEX IF NOT EXISTS flow_facts_work ON flow_facts(work_id, observed_at, id);
+CREATE INDEX IF NOT EXISTS flow_facts_work_kind_latest ON flow_facts(work_id, kind, observed_at DESC, id DESC);
 CREATE INDEX IF NOT EXISTS flow_facts_kind ON flow_facts(kind, observed_at, id);
 CREATE INDEX IF NOT EXISTS flow_facts_merge_sha ON flow_facts((details->>'mergeSha'), observed_at, id) WHERE kind='merged';
 DROP TRIGGER IF EXISTS immutable_flow_facts ON flow_facts;
@@ -162,8 +163,9 @@ export function deriveFacts(event: LedgerEvent, state: ProjectionState): FlowFac
     });
   }
   const agentReview = observation?.agentReview;
-  const agentKey = agentReview ? `${agentReview.sha}:${agentReview.approved}` : '';
-  if (agentReview && agentKey !== state.agentReview)
+  const agentIdentity = agentReview?.resultId ?? agentReview?.summaryId ?? agentReview?.reactionId;
+  const agentKey = agentReview?.completedAt && agentIdentity ? `${agentReview.sha}:${agentIdentity}` : '';
+  if (agentReview && agentKey && agentKey !== state.agentReview)
     push('review.completed', agentReview.completedAt, 'github', agentKey, { provider: agentReview.provider, approved: agentReview.approved, sha: agentReview.sha, reason: String(agentReview.reason ?? '').slice(0, 300), timestampSource: time(agentReview.completedAt) === null ? 'graphyard' : 'github' });
 
   const checks: Record<string, string> = {};
@@ -171,8 +173,10 @@ export function deriveFacts(event: LedgerEvent, state: ProjectionState): FlowFac
     const key = `${observation!.candidate.sha}:${check.name}`;
     checks[key] = check.result;
     if ((state.checks ?? {})[key] === check.result) continue;
-    push('check.observed', recordedAt, 'ci', `${key}:${check.result}`, {
+    const observationIdentity = check.id ? `${check.id}:${check.attempt ?? 1}` : `${sourceEvent}`;
+    push('check.observed', recordedAt, 'ci', `${key}:${observationIdentity}:${check.result}`, {
       name: check.name, result: check.result, sha: observation!.candidate.sha, appId: check.appId,
+      checkRunId: check.id ?? null, attempt: check.attempt ?? null,
       pending: pendingCheck.has(check.result), previous: (state.checks ?? {})[key] ?? null, timestampSource: 'graphyard',
     });
   }
@@ -317,6 +321,7 @@ export async function readFlow(store: Store, query: FlowQuery): Promise<FlowData
   const work: Work[] = workRows.slice(0, flowLimits.work);
   const included = work.filter(item => (!query.type || item.type === query.type) && (!query.slice || workSlices(item).slices.includes(query.slice)));
   const ids = included.map(item => item.id);
+  const stateIds = work.map(item => item.id);
   const empty = { observedAt, from, to, days: query.days, work, included, facts: [], latest: [], carryIn: [], deployments: [], mergedForDeployments: [], scanned: 0, truncated: false, workTruncated, deploymentsTruncated: false, deploymentMergesTruncated: false };
   const projectionRow = (await store.pool.query('SELECT last_event,updated_at FROM flow_projection WHERE id=1')).rows[0];
   const lastEvent = Number(projectionRow?.last_event ?? 0);
@@ -324,23 +329,27 @@ export async function readFlow(store: Store, query: FlowQuery): Promise<FlowData
   // item are skipped by the projection and must not hold the report permanently stale.
   const pending = (await store.pool.query('SELECT count(*)::int AS pending FROM (SELECT 1 FROM events WHERE seq>$1 AND work_id IS NOT NULL LIMIT 1001) probe', [lastEvent])).rows[0].pending as number;
   const projection = { lastEvent, updatedAt: projectionRow ? iso(projectionRow.updated_at) : null, pendingEvents: Math.min(pending, 1000), pendingCapped: pending > 1000 };
-  if (!ids.length) return { ...empty, projection };
   const scanLimit = Math.min(Math.max(1, query.limit ?? flowLimits.scan), flowLimits.scan);
   const stageFilter = query.stage ? ' AND stage=$5' : '';
-  const scan = await store.pool.query(
+  const scan = ids.length ? await store.pool.query(
     `SELECT * FROM flow_facts WHERE work_id=ANY($1) AND observed_at>=$2 AND observed_at<$3${stageFilter} ORDER BY observed_at,id LIMIT $4`,
-    query.stage ? [ids, from, to, scanLimit + 1, query.stage] : [ids, from, to, scanLimit + 1]);
+    query.stage ? [ids, from, to, scanLimit + 1, query.stage] : [ids, from, to, scanLimit + 1]) : { rows: [], rowCount: 0 };
   const truncated = scan.rowCount! > scanLimit;
   const facts = scan.rows.slice(0, scanLimit).map(rowToFact);
   // Current state is read as of the observation instant, inclusively: a fact recorded in
   // the same millisecond as the read clock is the state at that instant, never stale.
   // The in-window scan above stays half-open on `to` as documented.
-  const latest = (await store.pool.query(
-    `SELECT DISTINCT ON (work_id,kind) * FROM flow_facts WHERE work_id=ANY($1) AND kind=ANY($2) AND observed_at<=$3 ORDER BY work_id,kind,observed_at DESC,id DESC`,
-    [ids, carryKinds, to])).rows.map(rowToFact);
-  const carryIn = (await store.pool.query(
-    `SELECT DISTINCT ON (work_id,kind) * FROM flow_facts WHERE work_id=ANY($1) AND kind=ANY($2) AND observed_at<$3 ORDER BY work_id,kind,observed_at DESC,id DESC`,
-    [ids, carryKinds, from])).rows.map(rowToFact);
+  // One indexed lookup per bounded work/kind pair avoids scanning an item's lifetime.
+  // Latest state covers the bounded repository population so filtered dependency paths
+  // can still recognize an out-of-scope dependency that has already been delivered.
+  const latest = stateIds.length ? (await store.pool.query(
+    `SELECT fact.* FROM unnest($1::uuid[]) selected_work(work_id) CROSS JOIN unnest($2::text[]) selected_kind(kind)
+       CROSS JOIN LATERAL (SELECT * FROM flow_facts WHERE flow_facts.work_id=selected_work.work_id AND flow_facts.kind=selected_kind.kind AND observed_at<=$3 ORDER BY observed_at DESC,id DESC LIMIT 1) fact`,
+    [stateIds, carryKinds, to])).rows.map(rowToFact) : [];
+  const carryIn = ids.length ? (await store.pool.query(
+    `SELECT fact.* FROM unnest($1::uuid[]) selected_work(work_id) CROSS JOIN unnest($2::text[]) selected_kind(kind)
+       CROSS JOIN LATERAL (SELECT * FROM flow_facts WHERE flow_facts.work_id=selected_work.work_id AND flow_facts.kind=selected_kind.kind AND observed_at<$3 ORDER BY observed_at DESC,id DESC LIMIT 1) fact`,
+    [ids, carryKinds, from])).rows.map(rowToFact) : [];
   const deploymentRows = (await store.pool.query(
     `SELECT d.*, COALESCE(array_agg(dm.merge_sha ORDER BY dm.merge_sha) FILTER (WHERE dm.merge_sha IS NOT NULL), '{}') AS contained_merge_shas
        FROM deployment_observations d LEFT JOIN deployment_merge_observations dm ON dm.deployment_id=d.id
@@ -846,19 +855,26 @@ export function flowDrilldown(dataset: FlowDataset, report: FlowReport, request:
   const columns = ['workKey', 'metric', 'bucket', 'observedAt', 'valueMs', 'pullRequest', 'commit', 'detail'];
   const rows: Record<string, string | number | null>[] = [];
   const keyOf = new Map(dataset.work.map(item => [item.id, item.key]));
+  const latest = new Map(dataset.latest.map(fact => [`${fact.workId}:${fact.kind}`, fact]));
+  const currentStage = (item: Work) => latest.get(`${item.id}:stage.changed`)?.details.to ?? 'backlog';
+  const scoped = dataset.included.filter(item => latest.has(`${item.id}:work.created`) && (!report.filters.stage || currentStage(item) === report.filters.stage));
   const row = (workKey: string, bucket: string | null, observedAt: string | null, valueMs: number | null, pr: number | null, commit: string | null, detail: string) =>
     rows.push({ workKey, metric, bucket, observedAt, valueMs, pullRequest: pr, commit, detail });
   if (metric === 'bottleneck') {
-    for (const category of report.bottleneck.categories) {
-      if (key && category.id !== key) continue;
-      for (const item of category.items) {
-        const gate = dataset.latest.find(fact => fact.workId === item.id && fact.kind === 'gates.changed');
-        const candidate = dataset.latest.find(fact => fact.workId === item.id && fact.kind === 'candidate.observed');
-        row(item.key, category.id, item.since, item.waitingMs, candidate?.details.pr ?? null, candidate?.details.sha ?? null, String(gate?.details.firstUnmetReason ?? category.definition));
-      }
+    for (const item of scoped.filter(item => !latest.has(`${item.id}:delivered`))) {
+      const gate = latest.get(`${item.id}:gates.changed`), category = classifyWait(gate?.details, false);
+      if (key && category !== key) continue;
+      const candidate = latest.get(`${item.id}:candidate.observed`), since = gate?.observedAt ?? null;
+      row(item.key, category, since, since ? Math.max(0, time(dataset.to)! - time(since)!) : null, candidate?.details.pr ?? null, candidate?.details.sha ?? null,
+        String(gate?.details.firstUnmetReason ?? waitCategories.find(entry => entry.id === category)?.definition ?? 'No durable gate fact'));
     }
   } else if (metric === 'wip') {
-    for (const stage of report.wip) { if (key && stage.stage !== key) continue; for (const item of stage.items) row(item.key, stage.stage, item.since, item.ageMs, null, null, `In ${stage.stage}`); }
+    for (const item of scoped.filter(item => !latest.has(`${item.id}:delivered`))) {
+      const stage = currentStage(item);
+      if (key && stage !== key) continue;
+      const since = latest.get(`${item.id}:stage.changed`)?.observedAt ?? latest.get(`${item.id}:work.created`)!.observedAt;
+      row(item.key, stage, since, Math.max(0, time(dataset.to)! - time(since)!), null, null, `In ${stage}`);
+    }
   } else if (metric === 'stage-dwell') {
     for (const fact of dataset.facts.filter(fact => fact.kind === 'stage.changed' && (!key || fact.details.from === key) && typeof fact.details.dwellMs === 'number'))
       row(fact.workKey, String(fact.details.from), fact.observedAt, fact.details.dwellMs, null, null, `${fact.details.from} to ${fact.details.to}`);
@@ -870,8 +886,42 @@ export function flowDrilldown(dataset: FlowDataset, report: FlowReport, request:
       row(fact.workKey, bucket, fact.observedAt, created ? time(fact.observedAt)! - time(created.observedAt)! : null, fact.details.pr ?? null, fact.details.mergeSha ?? null, 'Observed authorized merge');
     }
   } else if (metric === 'phase') {
-    for (const fact of dataset.facts.filter(fact => fact.kind === 'candidate.observed'))
-      row(fact.workKey, key ?? 'all-phases', fact.observedAt, null, fact.details.pr ?? null, fact.details.sha ?? null, `Candidate episode; pull-request creation ${fact.details.prCreatedAt ?? 'not observed'}`);
+    const pairs = [
+      ['pr-created-to-review-start', 'pr-created', 'review-start'],
+      ['review-start-to-review-complete', 'review-start', 'review-complete'],
+      ['review-complete-to-evidence-complete', 'review-complete', 'evidence-complete'],
+      ['evidence-complete-to-merge-authorized', 'evidence-complete', 'merge-authorized'],
+      ['merge-authorized-to-merged', 'merge-authorized', 'merged'],
+      ['merged-to-production', 'merged', 'production'],
+    ].filter(([phase]) => !key || phase === key);
+    for (const item of scoped) {
+      const candidates = [...(dataset.carryIn.filter(fact => fact.workId === item.id && fact.kind === 'candidate.observed')),
+        ...dataset.facts.filter(fact => fact.workId === item.id && fact.kind === 'candidate.observed')]
+        .sort((a, b) => time(a.recordedAt)! - time(b.recordedAt)!);
+      for (let index = 0; index < candidates.length; index++) {
+        const candidate = candidates[index], startedAt = time(candidate.recordedAt)!;
+        const endsAt = candidates[index + 1] ? time(candidates[index + 1].recordedAt)! : Infinity;
+        const sha = String(candidate.details.sha ?? '');
+        const facts = dataset.facts.filter(fact => fact.workId === item.id && time(fact.recordedAt)! >= startedAt && time(fact.recordedAt)! < endsAt && (!fact.details.sha || fact.details.sha === sha));
+        const first = (kind: FlowKind, predicate: (fact: FlowFact) => boolean = () => true) => facts.filter(fact => fact.kind === kind && predicate(fact)).sort((a, b) => time(a.observedAt)! - time(b.observedAt)!)[0];
+        const reviewStart = [first('review.requested'), first('review.submitted')].filter((fact): fact is FlowFact => !!fact).sort((a, b) => time(a.observedAt)! - time(b.observedAt)!)[0];
+        const reviewComplete = [first('review.submitted', fact => fact.details.reviewState === 'APPROVED'), first('review.completed', fact => fact.details.approved === true)].filter((fact): fact is FlowFact => !!fact).sort((a, b) => time(a.observedAt)! - time(b.observedAt)!)[0];
+        const gateCleared = facts.filter(fact => fact.kind === 'gates.changed' && fact.details.hasCandidate && !(fact.details.unmet ?? []).includes('acceptance')).sort((a, b) => time(a.observedAt)! - time(b.observedAt)!)[0];
+        const evidenceComplete = gateCleared ? facts.filter(fact => fact.kind === 'evidence.recorded' && time(fact.observedAt)! <= time(gateCleared.observedAt)!).sort((a, b) => time(a.observedAt)! - time(b.observedAt)!).at(-1) ?? gateCleared : undefined;
+        const merged = first('merged');
+        const deployment = dataset.deployments.filter(entry => entry.state === 'succeeded' && entry.containedMergeShas.includes(merged?.details.mergeSha ?? sha)).sort((a, b) => time(a.startedAt)! - time(b.startedAt)!)[0];
+        const milestones: Record<string, number | null> = {
+          'pr-created': time(candidate.details.prCreatedAt), 'review-start': reviewStart ? time(reviewStart.observedAt) : null,
+          'review-complete': reviewComplete ? time(reviewComplete.observedAt) : null, 'evidence-complete': evidenceComplete ? time(evidenceComplete.observedAt) : null,
+          'merge-authorized': time(first('merge.authorized')?.observedAt), merged: time(merged?.observedAt), production: time(deployment?.startedAt),
+        };
+        for (const [phase, startId, endId] of pairs) {
+          const start = milestones[startId], end = milestones[endId];
+          if (start === null || end === null || end < start) continue;
+          row(item.key, phase, new Date(end).toISOString(), end - start, candidate.details.pr ?? null, sha, `${startId} to ${endId}`);
+        }
+      }
+    }
   } else if (metric === 'evidence') {
     for (const fact of dataset.facts.filter(fact => fact.kind === 'evidence.recorded' && (!key || fact.details.proof === key)))
       row(fact.workKey, String(fact.details.proof), fact.observedAt, null, null, fact.details.sha ?? null,

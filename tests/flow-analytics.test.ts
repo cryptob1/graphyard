@@ -111,7 +111,7 @@ test('integration:flow-analytics-source-integrity', async () => {
   assert.equal(counts(await analyse({ slice })), before, 'a mutated lifecycle snapshot establishes nothing');
   await store.pool.query('UPDATE work_items SET document=$2 WHERE id=$1', [work.id, JSON.stringify(work)]);
 
-  const { report } = await analyse({ slice });
+  const { report, dataset } = await analyse({ slice });
   assert.equal(report.timezone, 'UTC');
   assert.match(report.window.boundaries, /Half-open/);
   assert.equal(report.window.days, 30);
@@ -162,7 +162,7 @@ test('integration:flow-analytics-core-metrics', async () => {
     await seedFact(older, 'stage.changed', now - (10 - index) * day, { from: 'review', to: 'acceptance', dwellMs: (index + 1) * 3600_000, clockOrder: 'ordered' }, 'review');
   await seedFact(older, 'delivered', Date.now(), { mergeSha: 'c'.repeat(40), pr: older.submission!.pr }, 'done');
 
-  const { report } = await analyse({ slice });
+  const { report, dataset } = await analyse({ slice });
   const dwell = report.stageDwell.find(entry => entry.stage === 'review')!;
   assert.equal(dwell.n, 6);
   assert.equal(dwell.averageMs, 3600_000 * 3.5);
@@ -259,7 +259,7 @@ test('integration:flow-analytics-phase-durations', async () => {
   assert.equal(recorded.status, 200); assert.equal(recorded.body.recorded, true);
   await settle(deployedAt);
 
-  const { report } = await analyse({ slice });
+  const { report, dataset } = await analyse({ slice });
   const phase = (id: string) => report.phases.find(entry => entry.phase === id)!;
   assert.equal(phase('pr-created-to-review-start').n, 1);
   assert.equal(phase('pr-created-to-review-start').medianMs, 3600_000, 'independently observed provider timestamps bound the first phase');
@@ -281,6 +281,10 @@ test('integration:flow-analytics-phase-durations', async () => {
   assert.equal(report.operations.deployments.succeeded, 1);
   assert.equal(report.operations.deployments.latency.n, 1);
   assert.equal(report.operations.deployments.latency.medianMs, 1000);
+  const phaseRows = flowDrilldown(dataset, report, { metric: 'phase', key: 'merged-to-production' });
+  assert.equal(phaseRows.total, 1);
+  assert.equal(phaseRows.rows[0].valueMs, 1000, 'phase drill-down returns the duration behind the aggregate');
+  assert.equal(phaseRows.rows[0].commit, head);
 });
 
 test('integration:flow-analytics-edge-cases', async () => {
@@ -328,6 +332,8 @@ test('integration:flow-analytics-edge-cases', async () => {
   assert.equal(rolled.operations.deployments.pullRequestsPerDeployment.max, 2, 'one deployment can carry several merged pull requests');
   const changedContainment = await api('/api/deployments', tokens.producer, { method: 'POST', body: JSON.stringify({ provider: 'railway', externalId: 'release-42', environment: 'production', sha: releaseSha, containedMergeShas: [firstMerge], state: 'succeeded', startedAt }) });
   assert.equal(changedContainment.status, 409, 'an idempotent replay cannot rewrite immutable deployment containment');
+  const changedArtifact = await api('/api/deployments', tokens.producer, { method: 'POST', body: JSON.stringify({ provider: 'railway', externalId: 'release-42', environment: 'staging', sha: 'f'.repeat(40), containedMergeShas, state: 'succeeded', startedAt }) });
+  assert.equal(changedArtifact.status, 409, 'an idempotent replay cannot rewrite any immutable deployment field');
   assert.ok((rolled.operations.deployments.latency.minMs ?? 0) >= 0, 'a deployment observed before its merge never becomes a negative latency');
   assert.ok(rolled.exclusions.some(entry => entry.reason === 'clock-inverted-deployment'));
 
@@ -340,7 +346,22 @@ test('integration:flow-analytics-edge-cases', async () => {
   assert.equal(empty.coverage.workItems, 0);
   assert.equal(empty.bottleneck.narrative, 'No undelivered work item is currently recorded in scope.');
   assert.equal(empty.leadTime.bands.medianMs, null);
+  assert.ok(empty.operations.deployments.observations >= 1, 'repository deployment metrics remain available for an empty work filter');
   assert.ok(empty.unavailable.length >= 3);
+
+  // Pending Codex state is not a completion, and a repeated terminal check run remains
+  // a distinct append-only observation after an intervening queued transition.
+  const eventWork = await submitted('gy35-observation-identities');
+  const state: ProjectionState = {};
+  const derive = (seq: number, result: string, id: number, agentReview?: Observation['agentReview']) => deriveFacts({
+    seq, work_id: eventWork.id, actor: 'system', kind: 'observed', created_at: new Date(now + seq).toISOString(),
+    payload: { work: { ...eventWork, observation: observation(eventWork, 'gy35-observation-identities', { checks: [{ name: 'test', result, appId: 15368, id }], ...(agentReview ? { agentReview } : {}) }) } },
+  }, state);
+  assert.equal(derive(10, 'failure', 101, { provider: 'codex', sha: head, approved: false, reason: 'Waiting' }).filter(fact => fact.kind === 'review.completed').length, 0);
+  derive(11, 'queued', 102);
+  const retried = derive(12, 'failure', 103);
+  assert.equal(retried.filter(fact => fact.kind === 'check.observed').length, 1);
+  assert.match(retried.find(fact => fact.kind === 'check.observed')!.dedupe, /:103:1:failure$/);
 });
 
 test('integration:flow-analytics-operations', async () => {
@@ -351,6 +372,10 @@ test('integration:flow-analytics-operations', async () => {
   const root = await released(slice);
   const middle = await released(slice, { dependencies: [root.id] });
   const leaf = await released(slice, { dependencies: [middle.id] });
+
+  const deliveredDependency = await released('gy35-out-of-scope-dependency');
+  await seedFact(deliveredDependency, 'delivered', now - 1000, { mergeSha: '6'.repeat(40), pr: null }, 'done');
+  const filteredDependent = await released('gy35-filtered-dependent', { dependencies: [deliveredDependency.id] });
 
   let reviewed = await submitted(slice, second);
   const changesAt = new Date(now - 3 * 3600_000).toISOString(), approvedAt = new Date(now - 2 * 3600_000).toISOString();
@@ -367,6 +392,8 @@ test('integration:flow-analytics-operations', async () => {
   assert.equal(operations.criticalPath.length, 3);
   assert.deepEqual(operations.criticalPath.chain, [root.key, middle.key, leaf.key]);
   assert.ok(operations.unblocked.items.includes(root.key) && !operations.unblocked.items.includes(leaf.key));
+  const filteredOperations = (await analyse({ slice: 'gy35-filtered-dependent' })).report.operations;
+  assert.deepEqual(filteredOperations.criticalPath.chain, [filteredDependent.key], 'an out-of-scope delivered dependency is not treated as unfinished');
   assert.equal(operations.review.findings, 1, 'a change request is a recorded finding');
   assert.equal(operations.review.approvals, 1);
   assert.equal(operations.review.independentApprovals, 1);
@@ -513,6 +540,11 @@ test('integration:flow-analytics-bounded-indexed', async () => {
   assert.equal(report.bottleneck.categories.find(category => category.id === 'dependency')!.count, 27);
   assert.equal(report.bottleneck.categories.find(category => category.id === 'dependency')!.items.length, flowLimits.distinct);
   assert.equal(report.bottleneck.categories.find(category => category.id === 'dependency')!.truncated, true);
+  const dependencyRows = flowDrilldown(dataset, report, { metric: 'bottleneck', key: 'dependency' });
+  assert.equal(dependencyRows.total, 27, 'bottleneck drill-down uses the full aggregate population');
+  const largestWip = [...report.wip].sort((a, b) => b.count - a.count)[0];
+  const wipRows = flowDrilldown(dataset, report, { metric: 'wip', key: largestWip.stage });
+  assert.equal(wipRows.total, largestWip.count, 'WIP drill-down is independent of the 25-row summary preview');
   const rows = flowDrilldown(dataset, report, { metric: 'stage-dwell', key: 'review' });
   assert.equal(rows.total, 210);
   assert.equal(rows.rows.length, flowLimits.drilldown);
@@ -563,6 +595,8 @@ test('integration:flow-analytics-bounded-indexed', async () => {
     const plan = (await client.query('EXPLAIN SELECT * FROM flow_facts WHERE work_id=ANY($1) AND observed_at>=$2 AND observed_at<$3 ORDER BY observed_at,id LIMIT 100',
       [dataset.included.map(item => item.id), dataset.from, dataset.to])).rows.map(row => row['QUERY PLAN']).join('\n');
     assert.match(plan, /flow_facts_(work|time|kind)/, 'the window scan uses a flow_facts index');
+    const indexes = (await client.query("SELECT indexname FROM pg_indexes WHERE tablename='flow_facts'")).rows.map(row => row.indexname);
+    assert.ok(indexes.includes('flow_facts_work_kind_latest'), 'carry-state lookups have a work/kind/time index');
     await client.query('ROLLBACK');
   } finally { client.release(); }
 

@@ -50,7 +50,7 @@ export interface Observation {
   reviewIds?: number[];
   agentReview?: AgentReview;
   prState?: 'open' | 'closed'; draft?: boolean;
-  candidate: Candidate; checks: { name: string; result: string; appId: number }[];
+  candidate: Candidate; checks: { name: string; result: string; appId: number; id?: number; attempt?: number }[];
   reviews: { reviewer: string; sha: string; state: string; id?: number; submittedAt?: string }[];
   merged: boolean; mergeSha: string | null; mergedAt?: string | null; mergeable: boolean;
   protected: boolean; files: string[]; at: string;
