@@ -33,6 +33,16 @@ test('GitHub adapter binds observations to repository, base, current reviews, an
   f.pr.base.ref = 'other'; await assert.rejects(f.github.observe(f.work), /unmanaged/);
   f.pr.base.ref = 'main'; f.pr.head.repo.full_name = 'attacker/fork'; await assert.rejects(f.github.observe(f.work), /same-repository/);
 });
+test('GitHub adapter retains retry history in deterministic check-run identity order', async () => {
+  const f = fixture(), request = f.github.request.bind(f.github);
+  f.github.request = async (path, method, body) => path.includes('/check-runs')
+    ? { check_runs: [
+      { id: 103, run_attempt: 2, name: 'test', status: 'completed', conclusion: 'success', app: { id: 15368 } },
+      { id: 101, run_attempt: 1, name: 'test', status: 'completed', conclusion: 'failure', app: { id: 15368 } },
+    ] }
+    : request(path, method, body);
+  assert.deepEqual((await f.github.observe(f.work)).checks.map(check => [check.id, check.result]), [[101, 'failure'], [103, 'success']]);
+});
 test('final verification refuses gate changes after the initial collection', async () => {
   const f = fixture(), request = f.github.request.bind(f.github); let reads = 0;
   f.github.request = async (path, method, body) => {

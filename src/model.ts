@@ -107,6 +107,20 @@ export function currentEvidence(work: Work, proof: string, now = new Date()): Ev
   return latest && (!latest.expiresAt || Date.parse(latest.expiresAt) > now.getTime()) ? latest : undefined;
 }
 
+// Observations retain every immutable check run for delivery analytics. Gates use
+// only the newest trusted run for a required name; GitHub check-run IDs are
+// immutable and increase as the provider creates retries. Array position is a
+// fallback for legacy observations that predate run identity capture.
+function latestCheck(checks: Observation['checks']): Observation['checks'][number] | undefined {
+  return checks.reduce<Observation['checks'][number] | undefined>((latest, check) => {
+    if (!latest) return check;
+    if (check.id !== undefined && latest.id !== undefined) return check.id > latest.id ? check : latest;
+    if (check.id !== undefined) return check;
+    if (latest.id !== undefined) return latest;
+    return check;
+  }, undefined);
+}
+
 // Pure evaluation: neither worker assertions nor UI state can authorize progression.
 export function evaluate(work: Work, all: Work[], now: Date, ciAppIds: number[]): { stage: Stage; gates: Gate[]; violations: string[] } {
   const gates: Gate[] = [];
@@ -131,7 +145,7 @@ export function evaluate(work: Work, all: Work[], now: Date, ciAppIds: number[])
   ] : []);
   add('test', work.policy.checks.filter(name => {
     const checks = current ? obs!.checks.filter(c => c.name === name && ciAppIds.includes(c.appId)) : [];
-    return !checks.length || checks.some(c => c.result !== 'success');
+    return latestCheck(checks)?.result !== 'success';
   }).map(name => `Required CI check ${name} has not passed on the current candidate`));
   const reasons: string[] = [];
   for (const ac of work.criteria) for (const proof of ac.proofs) {

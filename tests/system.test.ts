@@ -368,6 +368,27 @@ test('wrong CI producer, self review, and missing protection fail closed', async
   obs = observation(w); obs.protected = false; w = await engine.observe(w.id, w.revision, obs);
   w = await engine.execute(producer, 'evidence', w.id, proof(), randomUUID()); assert.equal(w.stage, 'merge'); assert.equal(w.gates.find(g => g.name === 'merge')!.passed, false);
 });
+test('CI gates use the latest trusted run while retaining retry history', async () => {
+  let w = await submitted();
+  let obs = observation(w);
+  obs.checks = [
+    { name: 'test', result: 'success', appId: 15368, id: 103, attempt: 2 },
+    { name: 'test', result: 'failure', appId: 15368, id: 101, attempt: 1 },
+    { name: 'typecheck', result: 'success', appId: 15368, id: 102, attempt: 1 },
+  ];
+  w = await engine.observe(w.id, w.revision, obs);
+  assert.equal(w.stage, 'acceptance', 'a successful retry supersedes an older failure for the gate');
+  assert.equal(w.observation!.checks.length, 3, 'all runs remain available to append-only analytics');
+
+  obs = observation(w);
+  obs.checks = [
+    { name: 'test', result: 'success', appId: 15368, id: 103, attempt: 2 },
+    { name: 'test', result: 'failure', appId: 15368, id: 105, attempt: 3 },
+    { name: 'typecheck', result: 'success', appId: 15368, id: 102, attempt: 1 },
+  ];
+  w = await engine.observe(w.id, w.revision, obs);
+  assert.equal(w.stage, 'test', 'a newer failed retry closes the gate');
+});
 test('only an independently observed merge with a verified execution completes work', async () => {
   let w = await submitted(); w = await engine.observe(w.id, w.revision, observation(w));
   w = await engine.execute(producer, 'evidence', w.id, proof(), randomUUID()); assert.equal(w.stage, 'merge');
