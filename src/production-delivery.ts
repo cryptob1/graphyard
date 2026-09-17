@@ -18,7 +18,7 @@ export class ProductionDelivery {
   constructor(private store: Store) {}
   async observe(actor: Principal, input: unknown, key: string) {
     demand(actor.role === 'producer', 'Only a trusted producer may record provider deployment observations', 403);
-    demand(key, 'Idempotency-Key is required', 400);
+    demand(key && key.length <= 200, 'An Idempotency-Key is required', 400);
     const data = observationSchema.parse(input);
     const fingerprint = createHash('sha256').update(JSON.stringify(data)).digest('hex');
     return this.store.transaction(async (db, now) => {

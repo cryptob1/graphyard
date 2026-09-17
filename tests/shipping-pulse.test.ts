@@ -47,7 +47,7 @@ test('pulse uses exact append-only deliveries, deduplicates, orders, and compute
   const fake = await store.pool.query('SELECT id FROM work_items WHERE id<>$1 LIMIT 1', [first.id]);
   await store.pool.query("INSERT INTO events(work_id,actor,kind,payload) VALUES($1,'worker','submit',$2)", [fake.rows[0].id, { work: { ...second.work, key: 'GY-FAKE' } }]);
   const pulse = await shippingPulse(store.pool);
-  assert.equal(pulse.completeness, 'complete');
+  assert.equal(pulse.completeness, 'complete'); assert.equal(pulse.truncated, false);
   assert.equal(pulse.counts.days7, 1); assert.equal(pulse.counts.days30, 2);
   assert.equal(pulse.weeks.length, 12); assert.equal(pulse.weeks.reduce((sum, week) => sum + week.count, 0), 3);
   assert.deepEqual(pulse.intentToMerge, { medianHours: 3, sampleSize: 2, excluded: 1 });
@@ -202,7 +202,12 @@ test('API requires authentication and bounded larger histories are explicitly pa
     INSERT INTO events(work_id,actor,kind,payload)
     SELECT id,'github','github.observed',jsonb_build_object('work',jsonb_build_object('id',id,'key','GY-BULK-'||row_number() OVER (),'title','Bulk','candidate',jsonb_build_object('pr',1),'delivery',jsonb_build_object('mergedAt',(statement_timestamp()-interval '2 days')::text,'mergeSha',repeat('d',40)),'criteria','[]'::jsonb,'evidence','[]'::jsonb,'violations','[]'::jsonb)) FROM inserted`, [SHIPPING_PULSE_LIMIT + 1]);
   const pulse = await shippingPulse(store.pool);
-  assert.equal(pulse.completeness, 'partial'); assert.match(pulse.partialReason!, /lower-bound samples/); assert.equal(pulse.recent.length, 10);
+  assert.equal(pulse.completeness, 'partial'); assert.equal(pulse.truncated, true); assert.equal(pulse.recent.length, 10);
+  // Truncation makes the counts lower bounds; it does not make the durations bounds, and
+  // the explanation must not describe them as if it did.
+  assert.match(pulse.partialReason!, /counts are lower bounds/i);
+  assert.match(pulse.partialReason!, /durations are not bounds/i);
+  assert.doesNotMatch(pulse.partialReason!, /statistics are lower-bound/i);
   const http = server(new Engine(store, [15368], 120, 'owner/project'), [{ id: 'reader', role: 'reader', token: 'r'.repeat(32) }, { id: 'producer', role: 'producer', token: 'p'.repeat(32) }]);
   await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));
   const origin = `http://127.0.0.1:${(http.address() as any).port}`;
@@ -212,5 +217,12 @@ test('API requires authentication and bounded larger histories are explicitly pa
     assert.equal(response.status, 200); assert.equal((await response.json()).completeness, 'partial');
     const denied = await fetch(`${origin}/api/production-observations`, { method: 'POST', headers: { Authorization: `Bearer ${'r'.repeat(32)}`, 'Content-Type': 'application/json', 'Idempotency-Key': randomUUID() }, body: '{}' });
     assert.equal(denied.status, 403);
+    // An over-long key would otherwise reach the receipts primary key and exceed the
+    // B-tree entry limit, turning a valid observation into a 500.
+    const oversized = await fetch(`${origin}/api/production-observations`, { method: 'POST', headers: { Authorization: `Bearer ${'p'.repeat(32)}`, 'Content-Type': 'application/json', 'Idempotency-Key': 'k'.repeat(3000) }, body: JSON.stringify({ provider: 'railway', deploymentId: 'deploy-oversized', status: 'succeeded', kind: 'deployment', deployedAt: new Date(Date.now() - 3_600_000).toISOString(), commitSha: 'e'.repeat(40), sourceUrl: 'https://railway.app/deploy/oversized', mergeShas: ['f'.repeat(40)] }) });
+    assert.equal(oversized.status, 400);
+    assert.match((await oversized.json()).error ?? '', /Idempotency-Key/);
+    const accepted = await fetch(`${origin}/api/production-observations`, { method: 'POST', headers: { Authorization: `Bearer ${'p'.repeat(32)}`, 'Content-Type': 'application/json', 'Idempotency-Key': 'k'.repeat(200) }, body: JSON.stringify({ provider: 'railway', deploymentId: 'deploy-bounded', status: 'succeeded', kind: 'deployment', deployedAt: new Date(Date.now() - 3_600_000).toISOString(), commitSha: 'e'.repeat(40), sourceUrl: 'https://railway.app/deploy/bounded', mergeShas: ['f'.repeat(40)] }) });
+    assert.equal(accepted.status, 200);
   } finally { await new Promise<void>(resolve => http.close(() => resolve())); }
 });

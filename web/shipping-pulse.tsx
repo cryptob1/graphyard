@@ -33,16 +33,22 @@ export default function ShippingPulse({ token, repository }: { token: string; re
   const state = stale ? 'stale' : pulse!.completeness;
   const base = repository ? `https://github.com/${repository}` : null;
   const max = Math.max(1, ...pulse!.weeks.map(week => week.count));
+  // The cap truncates to the newest deliveries, so counts read low but durations are
+  // simply a sample of recent work. Saying so beside every duration keeps an operator
+  // from reading these as conservative bounds the way the counts can be read.
+  const durationSample = pulse!.truncated && <p className="muted">Sampled durations: more deliveries fell in this window than the query reads, so these durations come only from the newest ones. Older deliveries in the window were not read and could move these values up or down. Unlike the counts, they are not lower bounds.</p>;
   return <div className="pulse" aria-labelledby="pulse-title">
     <div className="page-heading"><div><div className="eyebrow">REPOSITORY DELIVERY FLOW</div><h1 id="pulse-title">Shipping pulse</h1><p>Exact observed merges, without individual activity or productivity scoring.</p></div><div className="pulse-actions"><button type="button" onClick={() => setReloads(count => count + 1)}>Refresh</button><span className={`pulse-badge ${state}`}>{state}</span></div></div>
     {stale && <div className="notice" role="status"><strong>Data is stale.</strong> This browser last read the pulse {Math.max(1, Math.round(elapsed / 60_000))} minute(s) ago; the repository generated it at {new Date(pulse!.generatedAt).toLocaleString()}. Refreshing has not succeeded since, so check the control-plane connection and use Refresh above before relying on these figures.</div>}
     {pulse!.completeness === 'partial' && <div className="notice" role="status"><strong>Partial history.</strong> {pulse!.partialReason}</div>}
     {empty ? <section className="pulse-state"><h2>No deliveries in this window</h2><p>The ledger was read successfully. No exact observed merges occurred between {new Date(pulse!.range.start).toLocaleDateString()} and {new Date(pulse!.range.end).toLocaleDateString()} (inclusive, repository UTC).</p></section> : <>
       <div className="pulse-metrics" aria-label="Delivery metrics"><div><span>Last 7 days</span><strong>{pulse!.counts.days7}</strong><small>exact merges</small></div><div><span>Last 30 days</span><strong>{pulse!.counts.days30}</strong><small>exact merges</small></div><div><span>Median intent → merge</span><strong>{pulse!.intentToMerge.medianHours === null ? 'Unavailable' : `${pulse!.intentToMerge.medianHours}h`}</strong><small>{pulse!.intentToMerge.sampleSize} included · {pulse!.intentToMerge.excluded} excluded</small></div></div>
+      {durationSample}
       <section className="pulse-production" aria-labelledby="production-heading"><div className="section-title"><h2 id="production-heading">Pull request → production</h2><span>EXACT VERIFIED CONTAINMENT · UTC</span></div>
         {pulse!.prToProduction.sparse && <div className="notice" role="status"><strong>Sparse sample.</strong> Fewer than 5 deliveries have a verified production endpoint; interpret these durations cautiously.</div>}
         <div className="pulse-metrics" aria-label="Pull request to production metrics"><div><span>Average</span><strong>{hours(pulse!.prToProduction.averageHours)}</strong></div><div><span>Median</span><strong>{hours(pulse!.prToProduction.medianHours)}</strong></div><div><span>90th percentile</span><strong>{hours(pulse!.prToProduction.p90Hours)}</strong></div></div>
         <p><strong>{pulse!.prToProduction.sampleSize} included of {pulse!.prToProduction.eligible}</strong> ({pulse!.prToProduction.coveragePercent}% coverage) · {pulse!.prToProduction.excluded} excluded.</p>
+        {durationSample}
         <p>Average split: PR created → merge {hours(pulse!.prToProduction.split.prToMergeAverageHours)} · merge → production {hours(pulse!.prToProduction.split.mergeToProductionAverageHours)}.</p>
         {Object.keys(pulse!.prToProduction.exclusions).length > 0 && <details><summary>Why records were excluded</summary><ul>{Object.entries(pulse!.prToProduction.exclusions).map(([reason, count]) => <li key={reason}>{reason.replaceAll('-', ' ')}: {count}</li>)}</ul></details>}
       </section>

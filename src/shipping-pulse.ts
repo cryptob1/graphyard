@@ -11,6 +11,13 @@ export interface ShippingPulse {
   range: { start: string; end: string; weeks: number; semantics: 'repository-utc-inclusive' };
   completeness: 'complete' | 'partial';
   partialReason?: string;
+  /**
+   * The window held more deliveries than the query cap, so only the newest were read.
+   * Counts are then lower bounds, but the durations are not bounds in either direction:
+   * they describe the newest deliveries alone, and the omitted older ones could move
+   * them up or down. Callers must present the two differently.
+   */
+  truncated: boolean;
   counts: { days7: number; days30: number };
   intentToMerge: { medianHours: number | null; sampleSize: number; excluded: number };
   prToProduction: {
@@ -186,8 +193,8 @@ export async function shippingPulse(pool: pg.Pool): Promise<ShippingPulse> {
   });
   return {
     generatedAt: now.toISOString(), range: { start: rangeStart.toISOString(), end: now.toISOString(), weeks: SHIPPING_PULSE_WEEKS, semantics: 'repository-utc-inclusive' },
-    completeness: partial ? 'partial' : 'complete',
-    ...(partial ? { partialReason: [deliveryPartial ? `More than ${SHIPPING_PULSE_LIMIT} exact deliveries occurred in the bounded window; counts and statistics are lower-bound samples.` : '', productionPartial ? `More than ${SHIPPING_PULSE_PRODUCTION_LIMIT} production observations matched at least one merge; the response is conservatively partial at the explicit query cap.` : ''].filter(Boolean).join(' ') } : {}),
+    completeness: partial ? 'partial' : 'complete', truncated: deliveryPartial,
+    ...(partial ? { partialReason: [deliveryPartial ? `More than ${SHIPPING_PULSE_LIMIT} exact deliveries occurred in the bounded window; only the newest ${SHIPPING_PULSE_LIMIT} were read. The counts are lower bounds. The durations are not bounds: they describe only those newest ${SHIPPING_PULSE_LIMIT} deliveries, and the older ones left out could move them in either direction.` : '', productionPartial ? `More than ${SHIPPING_PULSE_PRODUCTION_LIMIT} production observations matched at least one merge; the response is conservatively partial at the explicit query cap.` : ''].filter(Boolean).join(' ') } : {}),
     counts: { days7: rows.filter(row => row.merged_at.getTime() >= since7).length, days30: rows.filter(row => row.merged_at.getTime() >= since30).length },
     intentToMerge: { medianHours: rounded(medianHours), sampleSize: durations.length, excluded: rows.length - durations.length },
     prToProduction: {
