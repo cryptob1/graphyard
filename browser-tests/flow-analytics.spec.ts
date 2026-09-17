@@ -74,7 +74,7 @@ function dataset(): FlowDataset {
   return {
     observedAt: new Date(observedAt).toISOString(), from: new Date(observedAt - 30 * day).toISOString(), to: new Date(observedAt).toISOString(),
     days: 30, work, included: work, facts, latest, carryIn: [], deployments: [], mergedForDeployments: [],
-    scanned: facts.length, truncated: false, workTruncated: false, deploymentsTruncated: false,
+    scanned: facts.length, truncated: false, workTruncated: false, deploymentsTruncated: false, deploymentMergesTruncated: false,
     projection: { lastEvent: sequence, updatedAt: new Date(observedAt).toISOString(), pendingEvents: 0, pendingCapped: false },
   };
 }

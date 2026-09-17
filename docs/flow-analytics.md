@@ -18,7 +18,7 @@ Open it from the control plane sidebar (**Flow analytics**) or read it from
 | GitHub observation | pull-request creation time, review submission and state, merge time and merge commit | Collected by the control plane's own App credential |
 | CI observation | check run name, result, and transitions | Observed through the same GitHub observation |
 | Evidence records | proof, result, executed and skipped counts, trust, expiry | Trust follows the submitting credential; a worker assertion is stored and never counted as trusted |
-| Deployment-provider observation | environment, commit, state, start and finish | Recorded through `POST /api/deployments` with a producer or operator credential |
+| Deployment-provider observation | environment, artifact commit, contained merge commits, state, start and finish | Recorded through `POST /api/deployments` with a producer or operator credential |
 
 A work item's current document is a *mutable snapshot*. It is never used as evidence here.
 The present state shown by the bottleneck summary is read back from the last durable gate
@@ -40,8 +40,12 @@ Normalization is what makes the metrics durable. A provider that deletes a pull 
 check run, or a deployment record cannot erase a fact that Graphyard already observed and
 stored, so future windows keep reporting on that history.
 
-Deployment observations live in `deployment_observations`, also append-only. They are
-repository-wide: slice, type, and stage filters do not narrow them.
+Deployment observations and their exact contained merge identities live in the append-only
+`deployment_observations` and `deployment_merge_observations` tables. A release or artifact
+commit may contain many independently observed PR merge commits; production phases and
+pull-requests-per-deployment join through those immutable containment records, never by
+assuming the artifact SHA equals a PR merge SHA. They are repository-wide: slice, type,
+and stage filters do not narrow them.
 
 ## Timezone, windows, and buckets
 
@@ -172,7 +176,8 @@ definitions are deliberately built so that it never will.
 Aggregation is bounded in date range (7, 30, or 90 days), work items scanned, records
 scanned, deployment observations, daily buckets, drill-down rows, and payload size.
 Reaching a bound is reported, never hidden: `coverage.truncated`,
-`coverage.workItemsTruncated`, `coverage.deploymentsTruncated`, and the **partial** state
+`coverage.workItemsTruncated`, `coverage.deploymentsTruncated`,
+`coverage.deploymentMergesTruncated`, and the **partial** state
 say so. Reads use indexed
 access paths on `flow_facts` — `(observed_at, id)`, `(work_id, observed_at, id)`, and
 `(kind, observed_at, id)` — with deterministic ordering, so repeating a bounded query
@@ -213,17 +218,18 @@ A deployment observation is recorded by a producer or operator credential:
   "externalId": "deployment-1234",
   "environment": "production",
   "sha": "cccccccccccccccccccccccccccccccccccccccc",
+  "containedMergeShas": ["dddddddddddddddddddddddddddddddddddddddd"],
   "state": "succeeded",
   "startedAt": "2026-09-17T05:04:00.000Z",
   "finishedAt": "2026-09-17T05:05:30.000Z"
 }
 ```
 
-`state` is `succeeded`, `failed`, or `rolled_back`. `sha` must be the full 40-character
-commit SHA: deployment analytics join it to GitHub's full commit SHAs, and an
-abbreviation would be silently unlinked, so it is refused instead. The same provider,
-external ID, and state is recorded once; a repeat is reported as a duplicate rather than
-counted twice.
+`state` is `succeeded`, `failed`, or `rolled_back`. `sha` is the full artifact commit SHA.
+`containedMergeShas` contains one to 200 full GitHub merge SHAs independently verified as
+part of that artifact. Abbreviations are refused. The same provider, external ID, and state
+is recorded once; an identical repeat is reported as a duplicate, while a repeat that
+tries to change containment is refused.
 Implementation workers do not hold producer credentials, so they cannot record deployment
 observations.
 

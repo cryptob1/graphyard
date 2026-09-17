@@ -30,6 +30,7 @@ CREATE TABLE IF NOT EXISTS flow_facts (
 CREATE INDEX IF NOT EXISTS flow_facts_time ON flow_facts(observed_at, id);
 CREATE INDEX IF NOT EXISTS flow_facts_work ON flow_facts(work_id, observed_at, id);
 CREATE INDEX IF NOT EXISTS flow_facts_kind ON flow_facts(kind, observed_at, id);
+CREATE INDEX IF NOT EXISTS flow_facts_merge_sha ON flow_facts((details->>'mergeSha'), observed_at, id) WHERE kind='merged';
 DROP TRIGGER IF EXISTS immutable_flow_facts ON flow_facts;
 CREATE TRIGGER immutable_flow_facts BEFORE UPDATE OR DELETE ON flow_facts FOR EACH ROW EXECUTE FUNCTION graphyard_immutable();
 CREATE TABLE IF NOT EXISTS flow_projection (id int PRIMARY KEY, last_event bigint NOT NULL DEFAULT 0, updated_at timestamptz NOT NULL DEFAULT clock_timestamp());
@@ -45,12 +46,19 @@ CREATE INDEX IF NOT EXISTS deployment_time ON deployment_observations(started_at
 CREATE INDEX IF NOT EXISTS deployment_sha ON deployment_observations(sha);
 DROP TRIGGER IF EXISTS immutable_deployments ON deployment_observations;
 CREATE TRIGGER immutable_deployments BEFORE UPDATE OR DELETE ON deployment_observations FOR EACH ROW EXECUTE FUNCTION graphyard_immutable();
+CREATE TABLE IF NOT EXISTS deployment_merge_observations (
+  deployment_id uuid NOT NULL REFERENCES deployment_observations(id), merge_sha text NOT NULL,
+  PRIMARY KEY(deployment_id, merge_sha)
+);
+CREATE INDEX IF NOT EXISTS deployment_merge_sha ON deployment_merge_observations(merge_sha, deployment_id);
+DROP TRIGGER IF EXISTS immutable_deployment_merges ON deployment_merge_observations;
+CREATE TRIGGER immutable_deployment_merges BEFORE UPDATE OR DELETE ON deployment_merge_observations FOR EACH ROW EXECUTE FUNCTION graphyard_immutable();
 `;
 
 export const flowWindows = [7, 30, 90] as const;
 export type FlowWindow = typeof flowWindows[number];
 // Every aggregation is bounded: date range, rows scanned, buckets, drill-down rows and payload size.
-export const flowLimits = { batch: 400, batches: 20, scan: 20_000, work: 2000, buckets: 90, drilldown: 200, distinct: 25, deployments: 500, payloadBytes: 4_000_000 };
+export const flowLimits = { batch: 400, batches: 20, scan: 20_000, work: 2000, buckets: 90, drilldown: 200, distinct: 25, deployments: 500, deploymentMerges: 5000, payloadBytes: 4_000_000 };
 export const sparseSampleSize = 5;
 const day = 86_400_000;
 
@@ -75,7 +83,7 @@ export interface ProjectionState {
 }
 export interface DeploymentObservation {
   id: string; provider: string; externalId: string; environment: string; sha: string;
-  state: 'succeeded' | 'failed' | 'rolled_back'; startedAt: string; finishedAt: string | null; recordedAt: string; details: Record<string, any>;
+  containedMergeShas: string[]; state: 'succeeded' | 'failed' | 'rolled_back'; startedAt: string; finishedAt: string | null; recordedAt: string; details: Record<string, any>;
 }
 
 const pendingCheck = new Set(['queued', 'in_progress', 'pending', 'waiting', 'requested', 'action_required']);
@@ -284,7 +292,7 @@ export interface FlowQuery { days: FlowWindow; type?: string | null; stage?: str
 export interface FlowDataset {
   observedAt: string; from: string; to: string; days: FlowWindow;
   work: Work[]; included: Work[]; facts: FlowFact[]; latest: FlowFact[]; carryIn: FlowFact[]; deployments: DeploymentObservation[];
-  mergedForDeployments: FlowFact[]; scanned: number; truncated: boolean; workTruncated: boolean; deploymentsTruncated: boolean;
+  mergedForDeployments: FlowFact[]; scanned: number; truncated: boolean; workTruncated: boolean; deploymentsTruncated: boolean; deploymentMergesTruncated: boolean;
   projection: { lastEvent: number; updatedAt: string | null; pendingEvents: number; pendingCapped: boolean };
 }
 // Facts whose most recent value before the window end is needed to describe the present
@@ -309,7 +317,7 @@ export async function readFlow(store: Store, query: FlowQuery): Promise<FlowData
   const work: Work[] = workRows.slice(0, flowLimits.work);
   const included = work.filter(item => (!query.type || item.type === query.type) && (!query.slice || workSlices(item).slices.includes(query.slice)));
   const ids = included.map(item => item.id);
-  const empty = { observedAt, from, to, days: query.days, work, included, facts: [], latest: [], carryIn: [], deployments: [], mergedForDeployments: [], scanned: 0, truncated: false, workTruncated, deploymentsTruncated: false };
+  const empty = { observedAt, from, to, days: query.days, work, included, facts: [], latest: [], carryIn: [], deployments: [], mergedForDeployments: [], scanned: 0, truncated: false, workTruncated, deploymentsTruncated: false, deploymentMergesTruncated: false };
   const projectionRow = (await store.pool.query('SELECT last_event,updated_at FROM flow_projection WHERE id=1')).rows[0];
   const lastEvent = Number(projectionRow?.last_event ?? 0);
   // Lag counts exactly the events the projector consumes; ledger entries without a work
@@ -334,15 +342,18 @@ export async function readFlow(store: Store, query: FlowQuery): Promise<FlowData
     `SELECT DISTINCT ON (work_id,kind) * FROM flow_facts WHERE work_id=ANY($1) AND kind=ANY($2) AND observed_at<$3 ORDER BY work_id,kind,observed_at DESC,id DESC`,
     [ids, carryKinds, from])).rows.map(rowToFact);
   const deploymentRows = (await store.pool.query(
-    'SELECT * FROM deployment_observations WHERE started_at>=$1 AND started_at<$2 ORDER BY started_at,id LIMIT $3', [from, to, flowLimits.deployments + 1])).rows;
+    `SELECT d.*, COALESCE(array_agg(dm.merge_sha ORDER BY dm.merge_sha) FILTER (WHERE dm.merge_sha IS NOT NULL), '{}') AS contained_merge_shas
+       FROM deployment_observations d LEFT JOIN deployment_merge_observations dm ON dm.deployment_id=d.id
+      WHERE d.started_at>=$1 AND d.started_at<$2 GROUP BY d.id ORDER BY d.started_at,d.id LIMIT $3`, [from, to, flowLimits.deployments + 1])).rows;
   const deploymentsTruncated = deploymentRows.length > flowLimits.deployments;
   const deployments: DeploymentObservation[] = deploymentRows.slice(0, flowLimits.deployments)
-    .map(row => ({ id: row.id, provider: row.provider, externalId: row.external_id, environment: row.environment, sha: row.sha, state: row.state, startedAt: iso(row.started_at), finishedAt: row.finished_at ? iso(row.finished_at) : null, recordedAt: iso(row.recorded_at), details: row.details ?? {} }));
-  const shas = [...new Set(deployments.map(d => d.sha))];
-  const mergedForDeployments = shas.length
-    ? (await store.pool.query(`SELECT * FROM flow_facts WHERE kind='merged' AND (details->>'mergeSha'=ANY($1) OR details->>'sha'=ANY($1)) ORDER BY observed_at LIMIT $2`, [shas, flowLimits.deployments])).rows.map(rowToFact)
-    : [];
-  return { observedAt, from, to, days: query.days, work, included, facts, latest, carryIn, deployments, mergedForDeployments, scanned: facts.length, truncated, workTruncated, deploymentsTruncated, projection };
+    .map(row => ({ id: row.id, provider: row.provider, externalId: row.external_id, environment: row.environment, sha: row.sha, containedMergeShas: row.contained_merge_shas, state: row.state, startedAt: iso(row.started_at), finishedAt: row.finished_at ? iso(row.finished_at) : null, recordedAt: iso(row.recorded_at), details: row.details ?? {} }));
+  const mergeShas = [...new Set(deployments.flatMap(d => d.containedMergeShas))];
+  const mergeRows = mergeShas.length
+    ? (await store.pool.query(`SELECT * FROM flow_facts WHERE kind='merged' AND details->>'mergeSha'=ANY($1) ORDER BY observed_at,id LIMIT $2`, [mergeShas, flowLimits.deploymentMerges + 1])).rows : [];
+  const deploymentMergesTruncated = mergeRows.length > flowLimits.deploymentMerges;
+  const mergedForDeployments = mergeRows.slice(0, flowLimits.deploymentMerges).map(rowToFact);
+  return { observedAt, from, to, days: query.days, work, included, facts, latest, carryIn, deployments, mergedForDeployments, scanned: facts.length, truncated, workTruncated, deploymentsTruncated, deploymentMergesTruncated, projection };
 }
 
 export type WaitCategory = 'delivered' | 'backlog' | 'blocked' | 'dependency' | 'implementation' | 'review' | 'evidence' | 'merge-blocked' | 'merge-ready';
@@ -405,7 +416,7 @@ export const metricDefinitions: Record<string, { label: string; formula: string;
   ci: { label: 'CI duration, failure and retry', formula: 'Per check name and commit, the interval between the first pending observation and the first terminal observation. Durations are bounded by Graphyard observation intervals, not by provider start timestamps.', sources: ['flow_facts:check.observed'] },
   evidence: { label: 'Evidence wait, expiry and staleness', formula: 'Wait is review completion to the gate fact where acceptance stops refusing. Expiry counts recorded evidence whose expiry precedes the observation time; staleness counts evidence bound to a superseded commit.', sources: ['flow_facts:evidence.recorded', 'flow_facts:gates.changed'] },
   operations: { label: 'Operational analytics', formula: 'Counts of recorded blockers, gate refusal reasons, review rounds and findings, rework, lease lifecycle, and queue depth sampled at daily boundaries. Aggregates are never keyed by a person.', sources: ['flow_facts:blocker.set', 'flow_facts:gates.changed', 'flow_facts:review.submitted', 'flow_facts:rework.requested', 'flow_facts:lease.claimed'] },
-  deployments: { label: 'Deployment frequency, latency, failure and rollback', formula: 'Deployment-provider observations joined to merged facts by commit. Latency is deployment start minus observed merge. Deployment observations are repository-wide, so slice, type and stage filters do not narrow them. Absent observations are reported as unavailable, never as zero.', sources: ['deployment_observations', 'flow_facts:merged'] },
+  deployments: { label: 'Deployment frequency, latency, failure and rollback', formula: 'Deployment-provider observations join their independently observed contained merge SHAs to merged facts. Latency is deployment start minus the latest contained observed merge. Deployment observations are repository-wide, so slice, type and stage filters do not narrow them. Absent observations are reported as unavailable, never as zero.', sources: ['deployment_observations', 'deployment_merge_observations', 'flow_facts:merged'] },
   bottleneck: { label: 'Bottleneck summary', formula: 'Each undelivered item is classified by its latest durable gate fact into exactly one wait category.', sources: ['flow_facts:gates.changed', 'flow_facts:delivered'] },
 };
 
@@ -578,7 +589,7 @@ export function computeFlow(dataset: FlowDataset, query: FlowQuery) {
       const authorized = first('merge.authorized', () => true);
       const merged = first('merged', () => true);
       const mergeSha = merged?.details.mergeSha ?? sha;
-      const deployment = dataset.deployments.filter(entry => (entry.sha === mergeSha || entry.sha === sha) && entry.state === 'succeeded').sort((a, b) => time(a.startedAt)! - time(b.startedAt)!)[0];
+      const deployment = dataset.deployments.filter(entry => entry.containedMergeShas.includes(mergeSha) && entry.state === 'succeeded').sort((a, b) => time(a.startedAt)! - time(b.startedAt)!)[0];
       const partial = startedAt < from;
       const milestone = (fact: FlowFact | undefined, source: string) => fact ? { at: time(fact.observedAt)!, source } : { at: null, source, reason: partial ? 'episode-started-before-window' : 'not-observed' };
       episodes.push({
@@ -736,7 +747,7 @@ export function computeFlow(dataset: FlowDataset, query: FlowQuery) {
   const deployedSuccess = dataset.deployments.filter(entry => entry.state === 'succeeded');
   const deploymentLatency: number[] = [];
   for (const entry of deployedSuccess) {
-    const merged = dataset.mergedForDeployments.filter(fact => fact.details.mergeSha === entry.sha || fact.details.sha === entry.sha);
+    const merged = dataset.mergedForDeployments.filter(fact => entry.containedMergeShas.includes(fact.details.mergeSha));
     if (!merged.length) { exclude('deployment-without-observed-merge', entry.externalId); continue; }
     const value = time(entry.startedAt)! - Math.max(...merged.map(fact => time(fact.observedAt)!));
     if (value < 0) exclude('clock-inverted-deployment', entry.externalId); else deploymentLatency.push(value);
@@ -750,7 +761,7 @@ export function computeFlow(dataset: FlowDataset, query: FlowQuery) {
     perDay: dataset.deployments.length ? Number((dataset.deployments.length / query.days).toFixed(3)) : null,
     failureRate: dataset.deployments.length ? Number((dataset.deployments.filter(entry => entry.state !== 'succeeded').length / dataset.deployments.length).toFixed(4)) : null,
     latency: distribution(deploymentLatency),
-    pullRequestsPerDeployment: countSummary(deployedSuccess.map(entry => dataset.mergedForDeployments.filter(fact => fact.details.mergeSha === entry.sha || fact.details.sha === entry.sha).length).filter(count => count > 0)),
+    pullRequestsPerDeployment: countSummary(deployedSuccess.map(entry => dataset.mergedForDeployments.filter(fact => entry.containedMergeShas.includes(fact.details.mergeSha)).length).filter(count => count > 0)),
   };
   if (!dataset.deployments.length) unavailable.push({ metric: 'deployments', reason: 'No deployment-provider observation has been recorded for this window. Deployment metrics are unavailable, not zero.' });
 
@@ -797,12 +808,13 @@ export function computeFlow(dataset: FlowDataset, query: FlowQuery) {
     facts: dataset.facts.length, scanned: dataset.scanned, scanLimit: Math.min(query.limit ?? flowLimits.scan, flowLimits.scan), truncated: dataset.truncated,
     workItemScanLimit: flowLimits.work, workItemsTruncated: dataset.workTruncated,
     deploymentScanLimit: flowLimits.deployments, deploymentsTruncated: dataset.deploymentsTruncated,
+    deploymentMergeScanLimit: flowLimits.deploymentMerges, deploymentMergesTruncated: dataset.deploymentMergesTruncated,
     oldestFact: dataset.facts[0]?.observedAt ?? null, newestFact: dataset.facts.at(-1)?.observedAt ?? null,
     providerTimestamps: observedTimes, controlPlaneTimestamps: dataset.facts.length - observedTimes,
     slices: sliceSummary,
     projection: { ...dataset.projection, stale: dataset.projection.pendingEvents > 0 },
     sparse: dataset.facts.length < sparseSampleSize,
-    complete: !dataset.truncated && !dataset.workTruncated && !dataset.deploymentsTruncated && dataset.projection.pendingEvents === 0,
+    complete: !dataset.truncated && !dataset.workTruncated && !dataset.deploymentsTruncated && !dataset.deploymentMergesTruncated && dataset.projection.pendingEvents === 0,
   };
   const exclusions = [...excluded].map(([reason, keys]) => ({ reason, count: keys.size, items: [...keys].sort().slice(0, flowLimits.distinct) }))
     .sort((a, b) => b.count - a.count || a.reason.localeCompare(b.reason));
@@ -869,7 +881,7 @@ export function flowDrilldown(dataset: FlowDataset, report: FlowReport, request:
     for (const item of report.mergeReadyDwell.current) row(item.key, 'merge-ready', null, item.sinceMs, null, null, 'Every gate passed; merge not yet observed');
   } else if (metric === 'deployments') {
     for (const entry of dataset.deployments.filter(entry => !key || entry.environment === key)) {
-      const merged = dataset.mergedForDeployments.filter(fact => fact.details.mergeSha === entry.sha || fact.details.sha === entry.sha);
+      const merged = dataset.mergedForDeployments.filter(fact => entry.containedMergeShas.includes(fact.details.mergeSha));
       for (const fact of merged.length ? merged : [null])
         row(fact ? keyOf.get(fact.workId) ?? fact.workKey : 'unlinked', entry.environment, entry.startedAt, fact ? time(entry.startedAt)! - time(fact.observedAt)! : null, fact?.details.pr ?? null, entry.sha, `${entry.state} via ${entry.provider} ${entry.externalId}`);
     }
@@ -902,7 +914,7 @@ export function flowExport(report: FlowReport, drilldown: ReturnType<typeof flow
     filterType: report.filters.type, filterStage: report.filters.stage, filterSlice: report.filters.slice,
     coverageWorkItems: report.coverage.workItems, coverageFacts: report.coverage.facts,
     coverageTruncated: report.coverage.truncated, coverageWorkItemsTruncated: report.coverage.workItemsTruncated,
-    coverageDeploymentsTruncated: report.coverage.deploymentsTruncated, coverageComplete: report.coverage.complete,
+    coverageDeploymentsTruncated: report.coverage.deploymentsTruncated, coverageDeploymentMergesTruncated: report.coverage.deploymentMergesTruncated, coverageComplete: report.coverage.complete,
     projectionPendingEvents: report.coverage.projection.pendingEvents,
     exclusions: report.exclusions.map(entry => `${entry.reason}=${entry.count}`).join('; ') || 'none',
     rows: drilldown.total, rowsReturned: drilldown.rows.length, rowsTruncated: drilldown.truncated,

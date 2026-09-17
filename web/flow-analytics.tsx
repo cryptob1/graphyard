@@ -67,7 +67,7 @@ export default function FlowAnalytics({ request, download, canAudit }: { request
   const coverage = report?.coverage;
   const state = error ? 'unavailable' : loading && !report ? 'loading' : !report ? 'unavailable'
     : coverage.workItems === 0 ? 'empty'
-    : coverage.truncated || coverage.workItemsTruncated || coverage.deploymentsTruncated ? 'partial'
+    : coverage.truncated || coverage.workItemsTruncated || coverage.deploymentsTruncated || coverage.deploymentMergesTruncated ? 'partial'
     : coverage.projection.stale || Date.now() - Date.parse(report.generatedAt) > 120_000 ? 'stale'
     : coverage.sparse ? 'sparse' : 'complete';
   const stateText: Record<string, string> = {

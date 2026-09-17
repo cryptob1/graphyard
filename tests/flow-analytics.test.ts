@@ -255,7 +255,7 @@ test('integration:flow-analytics-phase-durations', async () => {
   const mergeSha = 'c'.repeat(40);
   const { mergedAt } = await deliver(work, slice, mergeSha, reviewed);
   const deployedAt = new Date(Date.parse(mergedAt) + 1000).toISOString();
-  const recorded = await api('/api/deployments', tokens.producer, { method: 'POST', body: JSON.stringify({ provider: 'railway', externalId: 'deploy-phase-1', environment: 'production', sha: mergeSha, state: 'succeeded', startedAt: deployedAt, finishedAt: new Date(Date.parse(deployedAt) + 30_000).toISOString() }) });
+  const recorded = await api('/api/deployments', tokens.producer, { method: 'POST', body: JSON.stringify({ provider: 'railway', externalId: 'deploy-phase-1', environment: 'production', sha: mergeSha, containedMergeShas: [mergeSha], state: 'succeeded', startedAt: deployedAt, finishedAt: new Date(Date.parse(deployedAt) + 30_000).toISOString() }) });
   assert.equal(recorded.status, 200); assert.equal(recorded.body.recorded, true);
   await settle(deployedAt);
 
@@ -306,25 +306,28 @@ test('integration:flow-analytics-edge-cases', async () => {
   assert.equal(report.evidence.superseded, 0);
 
   // Multiple pull requests reaching production in one deployment, plus a rollback.
-  const releaseSha = 'e'.repeat(40);
+  const releaseSha = 'e'.repeat(40), firstMerge = '1'.repeat(40), secondMerge = '2'.repeat(40);
   const first = await submitted(slice);
   let firstWork = await engine.observe(first.id, first.revision, observation(first, slice, { reviews: approval(head, 9301) }));
   firstWork = await engine.execute(producer, 'evidence', firstWork.id, proof(), randomUUID());
-  await deliver(firstWork, slice, releaseSha, { reviews: approval(head, 9301) });
+  await deliver(firstWork, slice, firstMerge, { reviews: approval(head, 9301) });
   const secondItem = await submitted(slice, second);
   let secondWork = await engine.observe(secondItem.id, secondItem.revision, observation(secondItem, slice, { reviews: approval(head, 9302) }));
   secondWork = await engine.execute(producer, 'evidence', secondWork.id, proof(), randomUUID());
-  await deliver(secondWork, slice, releaseSha, { reviews: approval(head, 9302) });
+  await deliver(secondWork, slice, secondMerge, { reviews: approval(head, 9302) });
   const startedAt = new Date(Date.now() - 3600_000).toISOString();
-  await api('/api/deployments', tokens.producer, { method: 'POST', body: JSON.stringify({ provider: 'railway', externalId: 'release-42', environment: 'production', sha: releaseSha, state: 'succeeded', startedAt }) });
-  await api('/api/deployments', tokens.producer, { method: 'POST', body: JSON.stringify({ provider: 'railway', externalId: 'release-42', environment: 'production', sha: releaseSha, state: 'rolled_back', startedAt: new Date(Date.now() - 3500_000).toISOString() }) });
-  const abbreviated = await api('/api/deployments', tokens.producer, { method: 'POST', body: JSON.stringify({ provider: 'railway', externalId: 'abbreviated-sha', environment: 'production', sha: 'abc1234', state: 'succeeded', startedAt }) });
+  const containedMergeShas = [firstMerge, secondMerge];
+  await api('/api/deployments', tokens.producer, { method: 'POST', body: JSON.stringify({ provider: 'railway', externalId: 'release-42', environment: 'production', sha: releaseSha, containedMergeShas, state: 'succeeded', startedAt }) });
+  await api('/api/deployments', tokens.producer, { method: 'POST', body: JSON.stringify({ provider: 'railway', externalId: 'release-42', environment: 'production', sha: releaseSha, containedMergeShas, state: 'rolled_back', startedAt: new Date(Date.now() - 3500_000).toISOString() }) });
+  const abbreviated = await api('/api/deployments', tokens.producer, { method: 'POST', body: JSON.stringify({ provider: 'railway', externalId: 'abbreviated-sha', environment: 'production', sha: 'abc1234', containedMergeShas, state: 'succeeded', startedAt }) });
   assert.equal(abbreviated.status, 400, 'an abbreviated SHA is refused instead of being silently unlinked');
   const rolled = (await analyse({ slice })).report;
   assert.equal(rolled.operations.deployments.rollbacks, 1);
   assert.ok(rolled.operations.deployments.succeeded >= 1, 'deployment observations are repository-wide, not slice-filtered');
   assert.ok(rolled.operations.deployments.failureRate! > 0);
   assert.equal(rolled.operations.deployments.pullRequestsPerDeployment.max, 2, 'one deployment can carry several merged pull requests');
+  const changedContainment = await api('/api/deployments', tokens.producer, { method: 'POST', body: JSON.stringify({ provider: 'railway', externalId: 'release-42', environment: 'production', sha: releaseSha, containedMergeShas: [firstMerge], state: 'succeeded', startedAt }) });
+  assert.equal(changedContainment.status, 409, 'an idempotent replay cannot rewrite immutable deployment containment');
   assert.ok((rolled.operations.deployments.latency.minMs ?? 0) >= 0, 'a deployment observed before its merge never becomes a negative latency');
   assert.ok(rolled.exclusions.some(entry => entry.reason === 'clock-inverted-deployment'));
 
@@ -592,6 +595,23 @@ test('integration:flow-analytics-bounded-indexed', async () => {
   assert.equal(overflowReport.coverage.workItemScanLimit, flowLimits.work);
   assert.equal(overflowReport.coverage.workItemsTruncated, true);
   assert.equal(overflowReport.coverage.complete, false, 'a work-item bound is partial coverage');
+
+  // The independent contained-merge join has its own +1 probe. A release commit can
+  // contain more merge facts than the deployment-observation count itself suggests.
+  const containmentSha = '8'.repeat(40), containmentId = randomUUID();
+  await store.pool.query(`INSERT INTO deployment_observations(id,provider,external_id,environment,sha,state,started_at,producer)
+    VALUES($1,'test','large-release','production',$2,'succeeded',clock_timestamp()-interval '1 second','system')`, [containmentId, '7'.repeat(40)]);
+  await store.pool.query('INSERT INTO deployment_merge_observations(deployment_id,merge_sha) VALUES($1,$2)', [containmentId, containmentSha]);
+  await store.pool.query(`INSERT INTO flow_facts(work_id,work_key,kind,observed_at,recorded_at,source,source_event,stage,work_type,slices,details,dedupe)
+    SELECT $1,$2,'merged',clock_timestamp()-interval '2 seconds',clock_timestamp(),'github',0,'done','feature',$3,$4,concat('merge-bound:',g)
+    FROM generate_series(1,$5) g`, [leaseItem.id, leaseItem.key, workSlices(leaseItem).slices, JSON.stringify({ mergeSha: containmentSha }), flowLimits.deploymentMerges + 1]);
+  const mergeOverflow = await readFlow(store, { days: 30, slice });
+  assert.equal(mergeOverflow.mergedForDeployments.length, flowLimits.deploymentMerges);
+  assert.equal(mergeOverflow.deploymentMergesTruncated, true);
+  const mergeOverflowReport = computeFlow(mergeOverflow, { days: 30, slice });
+  assert.equal(mergeOverflowReport.coverage.deploymentMergeScanLimit, flowLimits.deploymentMerges);
+  assert.equal(mergeOverflowReport.coverage.deploymentMergesTruncated, true);
+  assert.equal(mergeOverflowReport.coverage.complete, false, 'a contained-merge join bound is partial coverage');
 
   // An exhausted deployment-observation bound is partial coverage too.
   const bulkDeployments = Array.from({ length: flowLimits.deployments + 1 }, (_, index) =>

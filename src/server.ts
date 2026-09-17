@@ -18,9 +18,12 @@ export type Credential = Principal & { token: string };
 const deploymentSchema = z.object({
   provider: z.string().trim().min(1).max(100), externalId: z.string().trim().min(1).max(200),
   environment: z.string().trim().min(1).max(100),
-  // Deployment analytics join this SHA to GitHub's full commit SHAs; an abbreviation
-  // would be silently unlinked, so only the full 40-character SHA is accepted.
+  // Preserve the provider's exact artifact identity even when it is a release commit.
+  // Abbreviated identities cannot be verified or joined safely.
   sha: z.string().regex(/^[a-f0-9]{40}$/),
+  // Independently verified merge commits contained in the deployed artifact. The
+  // artifact SHA need not equal any PR merge SHA (for example, a release commit).
+  containedMergeShas: z.array(z.string().regex(/^[a-f0-9]{40}$/)).min(1).max(200),
   state: z.enum(['succeeded', 'failed', 'rolled_back']),
   startedAt: z.string().datetime(), finishedAt: z.string().datetime().optional(),
   details: z.record(z.string().max(100), z.union([z.string().max(500), z.number(), z.boolean()])).optional(),
@@ -124,15 +127,34 @@ export function server(engine: Engine, credentials: Credential[], github: GitHub
           demand(actor.role === 'producer' || actor.role === 'admin', 'A deployment-provider or operator credential is required to record a deployment observation', 403);
           const data = deploymentSchema.parse(JSON.parse((await body(req)).toString()));
           demand(!data.finishedAt || Date.parse(data.finishedAt) >= Date.parse(data.startedAt), 'A deployment cannot finish before it starts', 400);
-          const inserted = await engine.store.pool.query(
-            `INSERT INTO deployment_observations(id,provider,external_id,environment,sha,state,started_at,finished_at,producer,details)
-             VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) ON CONFLICT (provider,external_id,state) DO NOTHING RETURNING id`,
-            [randomUUID(), data.provider, data.externalId, data.environment, data.sha, data.state, data.startedAt, data.finishedAt ?? null, actor.id, JSON.stringify(data.details ?? {})]);
-          return send(200, { recorded: inserted.rowCount === 1, id: inserted.rows[0]?.id ?? null, duplicate: inserted.rowCount === 0 });
+          const client = await engine.store.pool.connect();
+          try {
+            await client.query('BEGIN');
+            const id = randomUUID();
+            const inserted = await client.query(
+              `INSERT INTO deployment_observations(id,provider,external_id,environment,sha,state,started_at,finished_at,producer,details)
+               VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) ON CONFLICT (provider,external_id,state) DO NOTHING RETURNING id`,
+              [id, data.provider, data.externalId, data.environment, data.sha, data.state, data.startedAt, data.finishedAt ?? null, actor.id, JSON.stringify(data.details ?? {})]);
+            const deploymentId = inserted.rows[0]?.id ?? (await client.query(
+              'SELECT id FROM deployment_observations WHERE provider=$1 AND external_id=$2 AND state=$3', [data.provider, data.externalId, data.state])).rows[0].id;
+            const normalized = [...new Set(data.containedMergeShas)].sort();
+            if (inserted.rowCount === 1) {
+              for (const mergeSha of normalized) await client.query('INSERT INTO deployment_merge_observations(deployment_id,merge_sha) VALUES($1,$2)', [deploymentId, mergeSha]);
+            } else {
+              const existing = (await client.query('SELECT merge_sha FROM deployment_merge_observations WHERE deployment_id=$1 ORDER BY merge_sha', [deploymentId])).rows.map(row => row.merge_sha);
+              demand(JSON.stringify(existing) === JSON.stringify(normalized), 'A duplicate deployment observation cannot change contained merge identities', 409);
+            }
+            await client.query('COMMIT');
+            return send(200, { recorded: inserted.rowCount === 1, id: deploymentId, duplicate: inserted.rowCount === 0 });
+          } catch (error) { await client.query('ROLLBACK').catch(() => {}); throw error; }
+          finally { client.release(); }
         }
         if (url.pathname === '/api/deployments' && req.method === 'GET') {
-          const rows = (await engine.store.pool.query('SELECT provider,external_id,environment,sha,state,started_at,finished_at,recorded_at FROM deployment_observations ORDER BY started_at DESC,id DESC LIMIT 200')).rows;
-          return send(200, rows.map(row => ({ provider: row.provider, externalId: row.external_id, environment: row.environment, sha: row.sha, state: row.state, startedAt: row.started_at, finishedAt: row.finished_at, recordedAt: row.recorded_at })));
+          const rows = (await engine.store.pool.query(`SELECT d.provider,d.external_id,d.environment,d.sha,d.state,d.started_at,d.finished_at,d.recorded_at,
+            COALESCE(array_agg(dm.merge_sha ORDER BY dm.merge_sha) FILTER (WHERE dm.merge_sha IS NOT NULL), '{}') AS contained_merge_shas
+            FROM deployment_observations d LEFT JOIN deployment_merge_observations dm ON dm.deployment_id=d.id
+            GROUP BY d.id ORDER BY d.started_at DESC,d.id DESC LIMIT 200`)).rows;
+          return send(200, rows.map(row => ({ provider: row.provider, externalId: row.external_id, environment: row.environment, sha: row.sha, containedMergeShas: row.contained_merge_shas, state: row.state, startedAt: row.started_at, finishedAt: row.finished_at, recordedAt: row.recorded_at })));
         }
         if (url.pathname === '/api/validation/artifacts' && req.method === 'POST') return send(200, await validation.uploadArtifact(actor, JSON.parse((await body(req, 11_200_000)).toString()), String(req.headers['idempotency-key'] ?? '')));
         const artifactRead = url.pathname.match(/^\/api\/validation\/artifacts\/([^/]+)\/([^/]+)$/);
