@@ -113,7 +113,7 @@ export class GitHub {
     demand(pr.base.repo.full_name.toLowerCase() === this.config.repository.toLowerCase() && pr.head.repo?.full_name.toLowerCase() === this.config.repository.toLowerCase(), 'MVP requires same-repository pull requests');
     demand(pr.base.ref === this.config.base, 'Pull request targets an unmanaged branch');
     const [checks, reviews, protectedBranch, files] = await Promise.all([
-      this.pages(`/commits/${pr.head.sha}/check-runs?filter=latest`, 'check_runs'), this.pages(`/pulls/${pr.number}/reviews`), this.protection(work.policy.review && work.policy.reviewProvider !== 'codex'), this.pages(`/pulls/${pr.number}/files`),
+      this.pages(`/commits/${pr.head.sha}/check-runs?filter=all`, 'check_runs'), this.pages(`/pulls/${pr.number}/reviews`), this.protection(work.policy.review && work.policy.reviewProvider !== 'codex'), this.pages(`/pulls/${pr.number}/files`),
     ]);
     const latest = new Map<string, any>();
     for (const r of reviews) if (['APPROVED', 'CHANGES_REQUESTED', 'DISMISSED'].includes(r.state)) latest.set(r.user.login, r);

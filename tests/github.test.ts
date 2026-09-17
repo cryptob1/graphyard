@@ -27,6 +27,7 @@ function fixture() {
 test('GitHub adapter binds observations to repository, base, current reviews, and producer', async () => {
   const f = fixture(); f.reviews([{ id: 10, user: { login: 'reviewer' }, commit_id: head, state: 'APPROVED' }, { id: 11, user: { login: 'reviewer' }, commit_id: head, state: 'CHANGES_REQUESTED', submitted_at: '2026-01-01T00:01:00Z' }]);
   const obs = await f.github.observe(f.work);
+  assert.ok(f.calls.some(call => call.path.includes('/check-runs?filter=all')), 'all check-run identities are observed so retries are retained');
   assert.deepEqual(obs.checks, [{ name: 'test', result: 'success', appId: 15368, id: 9 }]);
   assert.deepEqual(obs.reviewIds, [10, 11]); assert.equal(obs.reviews[0].id, 11); assert.equal(obs.reviews[0].submittedAt, '2026-01-01T00:01:00Z'); assert.equal(obs.reviews[0].state, 'CHANGES_REQUESTED'); assert.equal(obs.candidate.baseSha, base); assert.equal(obs.protected, true);
   f.pr.base.ref = 'other'; await assert.rejects(f.github.observe(f.work), /unmanaged/);

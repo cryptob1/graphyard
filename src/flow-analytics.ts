@@ -79,7 +79,7 @@ export interface LedgerEvent { seq: number | string; work_id: string; actor: str
 export interface ProjectionState {
   created?: boolean; released?: boolean; stage?: string; stageAt?: string; blocker?: string | null;
   leaseEpoch?: number | null; candidateSha?: string; submittedPr?: number; reviewRequest?: number | null;
-  reviews?: Record<string, string>; checks?: Record<string, string>; evidence?: string[]; agentReview?: string;
+  reviews?: Record<string, string>; checks?: Record<string, string>; checkRuns?: Record<string, string>; evidence?: string[]; agentReview?: string;
   authorized?: string | null; merged?: boolean; delivered?: boolean; gateKey?: string; dependencies?: string[];
 }
 export interface DeploymentObservation {
@@ -169,11 +169,17 @@ export function deriveFacts(event: LedgerEvent, state: ProjectionState): FlowFac
     push('review.completed', agentReview.completedAt, 'github', agentKey, { provider: agentReview.provider, approved: agentReview.approved, sha: agentReview.sha, reason: String(agentReview.reason ?? '').slice(0, 300), timestampSource: time(agentReview.completedAt) === null ? 'graphyard' : 'github' });
 
   const checks: Record<string, string> = {};
+  const checkRuns = { ...(state.checkRuns ?? {}) };
   for (const check of observation?.checks ?? []) {
     const key = `${observation!.candidate.sha}:${check.name}`;
     checks[key] = check.result;
-    if ((state.checks ?? {})[key] === check.result) continue;
     const observationIdentity = check.id ? `${check.id}:${check.attempt ?? 1}` : `${sourceEvent}`;
+    const runKey = `${key}:${observationIdentity}`;
+    // A repeated result is still a new retry when GitHub gives it a distinct immutable
+    // check-run identity. Legacy projection rows have no checkRuns map, so the first
+    // observation after upgrading is deliberately retained rather than guessed away.
+    if (checkRuns[runKey] === check.result) continue;
+    checkRuns[runKey] = check.result;
     push('check.observed', recordedAt, 'ci', `${key}:${observationIdentity}:${check.result}`, {
       name: check.name, result: check.result, sha: observation!.candidate.sha, appId: check.appId,
       checkRunId: check.id ?? null, attempt: check.attempt ?? null,
@@ -240,6 +246,7 @@ export function deriveFacts(event: LedgerEvent, state: ProjectionState): FlowFac
   state.reviewRequest = work.reviewRequest?.commentId ?? null;
   state.reviews = Object.fromEntries(Object.entries(reviews).slice(-200));
   state.checks = Object.keys(checks).length ? checks : state.checks;
+  state.checkRuns = Object.fromEntries(Object.entries(checkRuns).slice(-500));
   state.evidence = [...seenEvidence].slice(-300);
   state.agentReview = agentKey || state.agentReview;
   state.authorized = authorizationKey;

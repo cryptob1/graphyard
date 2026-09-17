@@ -349,8 +349,8 @@ test('integration:flow-analytics-edge-cases', async () => {
   assert.ok(empty.operations.deployments.observations >= 1, 'repository deployment metrics remain available for an empty work filter');
   assert.ok(empty.unavailable.length >= 3);
 
-  // Pending Codex state is not a completion, and a repeated terminal check run remains
-  // a distinct append-only observation after an intervening queued transition.
+  // Pending Codex state is not a completion, and a repeated terminal result remains
+  // a distinct append-only observation when its immutable check-run identity changes.
   const eventWork = await submitted('gy35-observation-identities');
   const state: ProjectionState = {};
   const derive = (seq: number, result: string, id: number, agentReview?: Observation['agentReview']) => deriveFacts({
@@ -358,10 +358,10 @@ test('integration:flow-analytics-edge-cases', async () => {
     payload: { work: { ...eventWork, observation: observation(eventWork, 'gy35-observation-identities', { checks: [{ name: 'test', result, appId: 15368, id }], ...(agentReview ? { agentReview } : {}) }) } },
   }, state);
   assert.equal(derive(10, 'failure', 101, { provider: 'codex', sha: head, approved: false, reason: 'Waiting' }).filter(fact => fact.kind === 'review.completed').length, 0);
-  derive(11, 'queued', 102);
-  const retried = derive(12, 'failure', 103);
+  const retried = derive(11, 'failure', 103);
   assert.equal(retried.filter(fact => fact.kind === 'check.observed').length, 1);
   assert.match(retried.find(fact => fact.kind === 'check.observed')!.dedupe, /:103:1:failure$/);
+  assert.equal(derive(12, 'failure', 103).filter(fact => fact.kind === 'check.observed').length, 0, 'replaying the same run remains idempotent');
 });
 
 test('integration:flow-analytics-operations', async () => {

@@ -31,7 +31,9 @@ protected table. The projection is incremental and bounded: it reads events afte
 checkpoint in batches, derives facts with exact identities (review result ID, check-run ID
 and attempt, evidence ID, commit SHA, ledger sequence), and inserts them idempotently. A
 pending review is not a completed-review fact, and repeated CI outcomes from distinct runs
-remain distinct. Replaying the same ledger event inserts nothing
+remain distinct. GitHub collection requests all bounded, paginated check runs for the
+candidate rather than only the latest result, so an unobserved intermediate state cannot
+hide a retry with the same terminal outcome. Replaying the same ledger event inserts nothing
 new, and two replicas projecting at once cannot duplicate a fact.
 
 The projection runs in the server's reconciliation loop and as a short catch-up before each
