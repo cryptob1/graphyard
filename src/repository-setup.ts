@@ -65,6 +65,12 @@ completion; it does not set Done. CI, trusted evidence, independent review, and
 Graphyard's merge gate decide progression. Report blockers explicitly.
 Never use an operator/producer token for implementation or weaken proof requirements.
 Herdr runs sessions; Graphyard remains the source of ownership truth.
+
+A dedicated master coordinator must keep cycling: status, dispatch ready work,
+shepherd review and proof collection, guarded merge, then deployment verification.
+Repeat until every in-scope item is Done or a genuinely external blocker is recorded
+in Graphyard. Ordinary review findings, rework, idle workers, and proof setup are
+not stopping conditions. Close finished agent sessions as part of the cycle.
 ${end}`;
   return starts ? existing.slice(0, existing.indexOf(start)) + section + existing.slice(existing.indexOf(end) + end.length) : `${existing}${existing.endsWith('\n') || !existing ? '' : '\n'}\n${section}\n`;
 }

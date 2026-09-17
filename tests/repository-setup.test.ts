@@ -15,12 +15,16 @@ const fetcher = async () => new Response(JSON.stringify({ actor: { id: 'worker-a
 async function repo() { const root = await mkdtemp(join(tmpdir(), 'graphyard-init-')); execFileSync('git', ['init', '-q', root]); return root; }
 
 test('managed instructions refresh one section and preserve all surrounding operator content', () => {
-  const original = '# Operator rules\nNever delete customer data.\n';
+  const bootstrap = "The initial MVP is a single-agent bootstrap under the operator's supervision. Do not launch other agents for bootstrap work.";
+  const original = `# Operator rules\n${bootstrap}\nNever delete customer data.\n`;
   const first = managedInstructions(original, 'https://one.example');
+  assert.match(first, /dedicated master coordinator must keep cycling: status, dispatch ready work,\nshepherd review and proof collection, guarded merge, then deployment verification/);
+  for (const condition of ['Ordinary review findings', 'rework', 'idle workers', 'proof setup', 'Close finished agent sessions']) assert.match(first, new RegExp(condition));
   const surrounding = `${first}\n## Team review\nAsk the maintainer.\n`;
   const updated = managedInstructions(surrounding, 'https://two.example');
   assert.ok(updated.startsWith(original)); assert.ok(updated.endsWith('## Team review\nAsk the maintainer.\n'));
   assert.equal(updated.split('<!-- graphyard -->').length, 2); assert.doesNotMatch(updated, /one.example/);
+  assert.equal(updated.split(bootstrap).length - 1, 1, 'setup preserves the protected bootstrap rule byte-for-byte');
   assert.equal(managedInstructions(updated, 'https://two.example'), updated);
   for (const broken of ['<!-- graphyard -->', '<!-- /graphyard --><!-- graphyard -->', first + first]) assert.throws(() => managedInstructions(broken, 'https://example.com'), /markers/);
 });

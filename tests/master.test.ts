@@ -27,8 +27,12 @@ function work(overrides: Partial<Work> = {}) {
 }
 
 test('master instructions are managed idempotently without replacing repository rules', () => {
-  const original = '# Local rules\nKeep this text.\n'; const first = managedMasterInstructions(original);
+  const bootstrap = "The initial MVP is a single-agent bootstrap under the operator's supervision. Do not launch other agents for bootstrap work.";
+  const original = `# Local rules\n${bootstrap}\nKeep this text.\n`; const first = managedMasterInstructions(original);
   assert.ok(first.startsWith(original)); assert.match(first, /dedicated, visible master-agent session/);
+  assert.match(first, /Keep cycling: status, dispatch ready work, shepherd review and proof collection,\nguarded merge, then deployment verification/);
+  for (const condition of ['Ordinary review', 'rework', 'idle workers', 'proof setup', 'Close\nfinished agent sessions']) assert.match(first, new RegExp(condition));
+  assert.equal(first.split(bootstrap).length - 1, 1, 'master setup preserves the protected bootstrap rule byte-for-byte');
   assert.equal(managedMasterInstructions(first), first);
   assert.throws(() => managedMasterInstructions(first + first), /markers/);
 });

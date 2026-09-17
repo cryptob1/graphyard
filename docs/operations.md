@@ -1,5 +1,18 @@
 # Operations and recovery
 
+## Perpetual master loop
+
+Keep a dedicated master coordinator running until every in-scope item is Done or a
+genuinely external blocker is recorded in Graphyard. Repeatedly run status,
+dispatch ready work, shepherd review and trusted proof collection, request guarded
+merges, and verify deployment and live behavior against the exact deployed release.
+Close finished agent sessions and return to status after every material event.
+
+Ordinary review findings, rework, idle workers, and proof setup are not stopping
+conditions. They are work for the coordinator to route and follow through. A local
+or stale check is not deployment verification, and blockers must be recorded in
+Graphyard rather than inferred from an inactive session.
+
 ## Daily checks
 
 - `/healthz` should return 200 and confirm database connectivity.

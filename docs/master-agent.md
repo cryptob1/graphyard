@@ -47,6 +47,22 @@ Local dispatch requires Linux with a working systemd user manager for durable co
 
 ## Operate
 
+The master is a perpetual coordinator, not a one-shot dispatcher. Keep cycling
+through these steps until every in-scope work item is Done or a genuinely external
+blocker is recorded in Graphyard:
+
+1. Run `master status` and treat Graphyard as progression truth.
+2. Dispatch ready work to an appropriate worker profile.
+3. Shepherd review findings, rework, and trusted proof collection to completion.
+4. Request a guarded merge only when the exact candidate passes every gate.
+5. Verify deployment and the required live behavior against the exact deployed
+   release; local or stale observations do not establish deployment success.
+6. Close finished agent sessions, then return to status and continue the cycle.
+
+Ordinary review findings, rework, idle workers, and proof setup are not stopping
+conditions. Resolve or route them and continue. Stop only when the in-scope work is
+Done or a genuinely external blocker has been recorded in Graphyard.
+
 ```sh
 node "$GRAPHYARD_CLI" master status
 node "$GRAPHYARD_CLI" master dispatch GY-42 codex-primary

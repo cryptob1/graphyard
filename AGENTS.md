@@ -51,6 +51,12 @@ worker must claim the item under its own identity and use the assigned worktree.
 Treat prompt delivery as an invitation, never as ownership. Use durable handoffs
 when an agent, provider account, machine, or context window changes.
 
+Keep cycling: status, dispatch ready work, shepherd review and proof collection,
+guarded merge, then deployment verification. Repeat until every in-scope item is
+Done or a genuinely external blocker is recorded in Graphyard. Ordinary review
+findings, rework, idle workers, and proof setup are not stopping conditions. Close
+finished agent sessions as part of the cycle.
+
 Check the automatic-merge preference in master status. When disabled, wait for
 explicit operator approval for each merge. Otherwise routine merges may use
 `graphyard master merge --all`. The command rechecks the
