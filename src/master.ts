@@ -9,6 +9,7 @@ import { loadConnection, managedInstructions, serverOrigin } from './repository-
 import { resourceConflicts } from './coordination.js';
 import { launchPlan, masterHarnessPlan, writeHarnessPermissions } from './harness.js';
 import { CHECK_NAME, exhaustedReviewerProfiles, nativeReviewRequired, reviewerProfileFor, reviewProviderOf, type Work } from './model.js';
+import { predictQueue, type QueuePlacement } from './merge-queue.js';
 
 const safeEnvironment = z.record(
   z.string().regex(/^[A-Z_][A-Z0-9_]*$/)
@@ -275,7 +276,9 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
     const credential = credentialHealth[profile.name] ?? { available: true, reason: null };
     return { profile: profile.name, principal: profile.principal, agentName: profile.agentName, mode: profile.mode, state: agent?.agent_status ?? 'offline', pane: agent?.pane_id ?? null, cwd: agent?.foreground_cwd ?? agent?.cwd ?? null, contextPercent: agent?.tokens?.agent_watcher_context_pct ? Number(agent.tokens.agent_watcher_context_pct) : null, credential };
   });
+  const placements = predictQueue(snapshot.work, now);
   const rows = snapshot.work.filter(work => work.stage !== 'done').map(work => {
+    const placement = placements.find(entry => entry.id === work.id) ?? null;
     const active = !!work.lease && Date.parse(work.lease.expiresAt) > now;
     const profile = active ? profiles.find(item => item.principal === work.lease!.owner) : undefined;
     const session = profile ? sessions.find(item => item.profile === profile.name) : undefined;
@@ -291,11 +294,16 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
     const attention = active && (!session || !['working', 'idle'].includes(session.state)) ? `Assigned worker session is ${session?.state ?? 'offline'}`
       : review?.exhausted ? `Every configured reviewer profile is exhausted for the current candidate (${review.failedOver.map(entry => `${entry.profile}: ${entry.exhaustion}`).join(', ')})`
       : work.blocker || dwellMs > 3_600_000 ? first?.reasons[0] ?? `Work has remained at ${work.stage} for more than one hour` : null;
-    return { key: work.key, title: work.title, stage: work.stage, owner: active ? work.lease!.owner : null, profile: profile?.name ?? null, session: session?.state ?? null, refusal: first ? { gate: first.name, reason: first.reasons[0] } : null, mergeable, review, attention };
+    return { key: work.key, title: work.title, stage: work.stage, owner: active ? work.lease!.owner : null, profile: profile?.name ?? null, session: session?.state ?? null, refusal: first ? { gate: first.name, reason: first.reasons[0] } : null, mergeable, review, attention, queue: placement ? queueRow(placement) : null };
   });
-  return { observedAt: snapshot.now, counts: { open: rows.length, ready: rows.filter(row => row.stage === 'ready').length, active: rows.filter(row => row.owner).length, attention: rows.filter(row => row.attention).length, mergeable: rows.filter(row => row.mergeable).length, reviewsPending: reviews.pending.length, reviewFailover: rows.filter(row => row.review?.failedOver.length).length }, workers: sessions, reviews, work: rows };
+  return { observedAt: snapshot.now, counts: { open: rows.length, ready: rows.filter(row => row.stage === 'ready').length, active: rows.filter(row => row.owner).length, attention: rows.filter(row => row.attention).length, mergeable: rows.filter(row => row.mergeable).length, reviewsPending: reviews.pending.length, reviewFailover: rows.filter(row => row.review?.failedOver.length).length, queued: placements.length }, workers: sessions, reviews, work: rows, queue: placements.map(queueRow) };
 }
 
+function queueRow(placement: QueuePlacement) {
+  return { key: placement.key, position: placement.position + 1, size: placement.size, predictedBase: placement.predictedBase,
+    predictedTip: placement.tip, validated: placement.current, waitMs: placement.waitMs, waitMinutes: Math.floor(placement.waitMs / 60_000),
+    enqueuedAt: placement.enqueuedAt, ahead: placement.predecessors, reasons: placement.reasons };
+}
 export function herdrJson(args: string[], run: (command: string, args: string[]) => string = (command, commandArgs) => execFileSync(command, commandArgs, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] })) {
   const parsed = JSON.parse(run('herdr', args));
   if (parsed.error) throw new Error(`Herdr refused the operation: ${parsed.error.message ?? parsed.error}`);
@@ -512,10 +520,29 @@ export function assertMergeProtection(protection: any, config: MasterConfig, wor
   const nativeReview = nativeReviewRequired(work.policy);
   const reviews = protection?.required_pull_request_reviews;
   const checks = protection?.required_status_checks;
+  // "Require branches to be up to date" cannot coexist with a merge queue: a queued tip is
+  // deliberately behind the base branch while the entries ahead of it land. Graphyard replaces that
+  // setting with a stronger binding of its own — every landing is a published speculative tip that
+  // already contains its validated base, rechecked against the live base tree immediately before
+  // the provider call — so it is required to be off rather than left to fail at the merge API.
+  if (checks?.strict !== false) throw new Error(`${work.key} managed-branch protection still requires branches to be up to date; the merge queue supersedes that setting and no queued tip can land while it is enabled`);
   const protectedBranch = (!nativeReview || reviews?.required_approving_review_count >= 1 && reviews?.dismiss_stale_reviews === true && reviews?.require_last_push_approval === true)
-    && checks?.strict === true && protection?.enforce_admins?.enabled === true && protection?.allow_force_pushes?.enabled !== true && protection?.allow_deletions?.enabled !== true
+    && protection?.enforce_admins?.enabled === true && protection?.allow_force_pushes?.enabled !== true && protection?.allow_deletions?.enabled !== true
     && Array.isArray(checks?.checks) && checks.checks.some((check: any) => check?.context === CHECK_NAME && check?.app_id === config.githubAppId);
   if (!protectedBranch) throw new Error(`${work.key} managed-branch protection changed after merge authorization; Graphyard refused the merge`);
+}
+/**
+ * The validated commit must still land its tested tree. Only a Graphyard-published speculative tip
+ * may land, because publication is what proves the validated commit already contains its base. The
+ * base branch must then still be exactly that base, or have advanced only through earlier queue
+ * merges, which leave its tree untouched. Any other advance refuses the merge.
+ */
+export function assertQueuedLanding(work: Work, authorization: { sha: string; baseSha: string }, baseRefOid: string, repository: string, run: (command: string, args: string[]) => string) {
+  const speculation = work.queue?.speculation;
+  if (!speculation || speculation.tip !== authorization.sha || speculation.base !== authorization.baseSha || !speculation.baseTree) throw new Error(`${work.key} has no published merge-queue tip for the authorized commit; the queue is the only path onto the base branch`);
+  if (baseRefOid === authorization.baseSha) return;
+  const commit = JSON.parse(run('gh', ['api', `repos/${repository}/commits/${baseRefOid}`]));
+  if (commit?.commit?.tree?.sha !== speculation.baseTree) throw new Error(`${work.key} base branch advanced outside the merge queue; the validated tip would no longer land its tested tree`);
 }
 export function githubProviderDelay(verifiedTime: number, serverDelayMs: number, response: string) {
   const header = /^Date:\s*(.+?)\r?$/gmi.exec(response);
@@ -533,7 +560,8 @@ export async function mergeWork(config: MasterConfig, work: Work, freshSnapshot:
   const authorization = assertMergeCandidate(current, before.now, executionOwner);
   if (current.mergeExecution?.verifiedAt) return { key: authorization.key, pr: authorization.pr, sha: authorization.sha, method: config.mergeMethod, result: 'final verification was already committed; Graphyard retained the execution and will reconcile a provider result or let it expire before a new attempt' };
   const pr = JSON.parse(run('gh', ['pr', 'view', String(authorization.pr), '--repo', config.repository, '--json', 'headRefOid,baseRefOid,baseRefName,state,isDraft']));
-  if (pr.headRefOid !== authorization.sha || pr.baseRefOid !== authorization.baseSha || pr.baseRefName !== config.baseBranch || pr.state !== 'OPEN' || pr.isDraft) throw new Error(`${work.key} changed on GitHub before merge`);
+  if (pr.headRefOid !== authorization.sha || pr.baseRefName !== config.baseBranch || pr.state !== 'OPEN' || pr.isDraft) throw new Error(`${work.key} changed on GitHub before merge`);
+  assertQueuedLanding(current, authorization, pr.baseRefOid, config.repository, run);
   const authorityBudgetStartedAt = performance.now();
   const after = await freshSnapshot(); const latest = after.work.find(item => item.id === work.id);
   if (!latest || latest.revision !== authorization.revision) throw new Error(`${work.key} changed after GitHub verification; retry`);
@@ -546,7 +574,8 @@ export async function mergeWork(config: MasterConfig, work: Work, freshSnapshot:
   let verificationStarted = false; let verificationCompleted = false;
   try {
     const lockedPr = JSON.parse(run('gh', ['pr', 'view', String(authorization.pr), '--repo', config.repository, '--json', 'headRefOid,baseRefOid,baseRefName,state,isDraft']));
-    if (lockedPr.headRefOid !== authorization.sha || lockedPr.baseRefOid !== authorization.baseSha || lockedPr.baseRefName !== config.baseBranch || lockedPr.state !== 'OPEN' || lockedPr.isDraft) throw new Error(`${work.key} changed on GitHub after merge authority was acquired`);
+    if (lockedPr.headRefOid !== authorization.sha || lockedPr.baseRefName !== config.baseBranch || lockedPr.state !== 'OPEN' || lockedPr.isDraft) throw new Error(`${work.key} changed on GitHub after merge authority was acquired`);
+    assertQueuedLanding(latest, authorization, lockedPr.baseRefOid, config.repository, run);
     const remaining = remainingAtSnapshot - (performance.now() - authorityBudgetStartedAt);
     if (!Number.isFinite(remaining) || remaining <= 90_000) throw new Error(`${work.key} merge execution does not remain valid for the provider timeout; refresh gate inputs and retry`);
     const protection = JSON.parse(run('gh', ['api', `repos/${config.repository}/branches/${encodeURIComponent(config.baseBranch)}/protection`]));

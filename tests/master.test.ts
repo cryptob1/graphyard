@@ -7,7 +7,7 @@ import { execFile, execFileSync } from 'node:child_process';
 import { createServer } from 'node:http';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
-import { assertDispatchable, assertMasterBinding, assertMergeCandidate, assertMergeProtection, buildMasterStatus, continueMergeBatch, currentMergeCandidates, dispatchWork, githubProviderDelay, inspectWorkerCredentials, loadMasterConfig, managedMasterInstructions, mergeWork, observeHerdrAgents, prepareWorkerLaunch, saveWorkerProfile, setupMaster, startMaster, workerProfileSchema } from '../src/master.js';
+import { assertDispatchable, assertMasterBinding, assertMergeCandidate, assertMergeProtection, assertQueuedLanding, buildMasterStatus, continueMergeBatch, currentMergeCandidates, dispatchWork, githubProviderDelay, inspectWorkerCredentials, loadMasterConfig, managedMasterInstructions, mergeWork, observeHerdrAgents, prepareWorkerLaunch, saveWorkerProfile, setupMaster, startMaster, workerProfileSchema } from '../src/master.js';
 import type { Work } from '../src/model.js';
 
 const launcher = fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url));
@@ -20,10 +20,12 @@ async function repository() {
   return root;
 }
 const coordinatorStatus = async () => new Response(JSON.stringify({ actor: { id: 'master', role: 'coordinator' }, repository: 'owner/project', baseBranch: 'main', githubAppId: 1234 }));
-const validProtection = { required_pull_request_reviews: { required_approving_review_count: 1, dismiss_stale_reviews: true, require_last_push_approval: true }, required_status_checks: { strict: true, checks: [{ context: 'Graphyard / merge', app_id: 1234 }] }, enforce_admins: { enabled: true }, allow_force_pushes: { enabled: false }, allow_deletions: { enabled: false } };
+const validProtection = { required_pull_request_reviews: { required_approving_review_count: 1, dismiss_stale_reviews: true, require_last_push_approval: true }, required_status_checks: { strict: false, checks: [{ context: 'Graphyard / merge', app_id: 1234 }] }, enforce_admins: { enabled: true }, allow_force_pushes: { enabled: false }, allow_deletions: { enabled: false } };
 function work(overrides: Partial<Work> = {}) {
   const candidate = { sha: 'a'.repeat(40), baseSha: 'b'.repeat(40), pr: 42, branch: 'graphyard/gy-42-1', author: 'worker' };
-  return { id: 'work-id', key: 'GY-42', title: 'Prove the master flow', description: '', type: 'feature', priority: 1, dependencies: [], criteria: [{ id: 'AC-1', text: 'Works', proofs: ['integration:master'] }], policy: { checks: ['test'], review: true }, plannedFiles: [], stage: 'merge', revision: 9, policyRevision: 2, createdAt: '', updatedAt: '', stageEnteredAt: '', ready: true, epoch: 1, lease: null, workspaces: [], candidate, submission: { epoch: 1, pr: 42 }, reworkRequested: false, scenarioRequirements: [], evidence: [], observation: null, blocker: null, gates: [{ name: 'merge', passed: true, reasons: [] }], violations: [], mergeAuthorization: { sha: candidate.sha, baseSha: candidate.baseSha, policyRevision: 2, at: new Date().toISOString() }, ...overrides } as Work;
+  const queue = { sequence: 1, enqueuedAt: '2030-01-01T00:30:00Z', policyRevision: 2,
+    speculation: { ref: 'refs/graphyard/queue/gy-42', tip: candidate.sha, base: candidate.baseSha, baseTree: 'e'.repeat(40), predecessors: [], policyRevision: 2, publishedAt: '2030-01-01T00:31:00Z' } };
+  return { id: 'work-id', key: 'GY-42', queue, title: 'Prove the master flow', description: '', type: 'feature', priority: 1, dependencies: [], criteria: [{ id: 'AC-1', text: 'Works', proofs: ['integration:master'] }], policy: { checks: ['test'], review: true }, plannedFiles: [], stage: 'merge', revision: 9, policyRevision: 2, createdAt: '', updatedAt: '', stageEnteredAt: '', ready: true, epoch: 1, lease: null, workspaces: [], candidate, submission: { epoch: 1, pr: 42 }, reworkRequested: false, scenarioRequirements: [], evidence: [], observation: null, blocker: null, gates: [{ name: 'merge', passed: true, reasons: [] }], violations: [], mergeAuthorization: { sha: candidate.sha, baseSha: candidate.baseSha, policyRevision: 2, at: new Date().toISOString() }, ...overrides } as Work;
 }
 
 test('master instructions are managed idempotently without replacing repository rules', () => {
@@ -277,6 +279,7 @@ test('routine merge is exact-candidate, double-checked, and never uses an admin 
   assert.deepEqual(calls[4].slice(0, 3), ['api', '--method', 'PUT']); assert.ok(calls[4].includes(`sha=${candidate.candidate!.sha}`)); assert.equal(calls[4].includes('--admin'), false);
   assert.doesNotThrow(() => assertMergeProtection(validProtection, config, candidate));
   assert.throws(() => assertMergeProtection({ ...validProtection, required_status_checks: { ...validProtection.required_status_checks, checks: [] } }, config, candidate), /protection changed/);
+  assert.throws(() => assertMergeProtection({ ...validProtection, required_status_checks: { ...validProtection.required_status_checks, strict: true } }, config, candidate), /requires branches to be up to date/);
   assert.throws(() => assertMergeCandidate(work({ gates: [{ name: 'acceptance', passed: false, reasons: ['Human approval required'] }] })), /does not have/);
   let reads = 0; await assert.rejects(mergeWork(config, candidate, async () => ({ work: [reads++ ? work({ revision: 10 }) : candidate], now: new Date().toISOString() }), acquire, cancel, verify, () => JSON.stringify({ headRefOid: candidate.candidate!.sha, baseRefOid: candidate.candidate!.baseSha, baseRefName: 'main', state: 'OPEN', isDraft: false })), /changed after/);
   await assert.rejects(mergeWork(config, candidate, async () => ({ work: [candidate], now: new Date().toISOString() }), acquire, cancel, verify, () => JSON.stringify({ headRefOid: candidate.candidate!.sha, baseRefOid: candidate.candidate!.baseSha, baseRefName: 'release', state: 'OPEN', isDraft: false })), /changed on GitHub/);
@@ -357,6 +360,44 @@ test('merge-all selection and execution do not let refusing work starve eligible
   assert.deepEqual(batch, [{ key: 'GY-50', result: 'refused', reason: 'candidate changed' }, { key: 'GY-51', result: 'merged' }]);
 });
 
+const queueEntry = (sequence: number, enqueuedAt: string, speculation: any = null) => ({ sequence, enqueuedAt, policyRevision: 2, speculation });
+
+test('master status reports queue position, predicted tip, and per-entry wait time', () => {
+  const observedAt = '2030-01-01T01:00:00Z';
+  const head = work({ id: 'head-id', key: 'GY-42', observation: { at: observedAt, baseTip: 'b'.repeat(40), candidate: { sha: 'a'.repeat(40), baseSha: 'b'.repeat(40), pr: 42, branch: 'graphyard/gy-42-1', author: 'worker' } } as any, queue: queueEntry(1, '2030-01-01T00:30:00Z', { ref: 'refs/graphyard/queue/gy-42', tip: 'a'.repeat(40), base: 'b'.repeat(40), baseTree: 'e'.repeat(40), predecessors: [], policyRevision: 2, publishedAt: '2030-01-01T00:31:00Z' }) } as Partial<Work>);
+  const next = work({ id: 'next-id', key: 'GY-43', candidate: { sha: 'd'.repeat(40), baseSha: 'a'.repeat(40), pr: 43, branch: 'graphyard/gy-43-1', author: 'worker' },
+    observation: { at: observedAt, baseTip: 'b'.repeat(40), candidate: { sha: 'd'.repeat(40), baseSha: 'a'.repeat(40), pr: 43, branch: 'graphyard/gy-43-1', author: 'worker' } } as any,
+    queue: queueEntry(2, '2030-01-01T00:45:00Z', { ref: 'refs/graphyard/queue/gy-43', tip: 'd'.repeat(40), base: 'a'.repeat(40), baseTree: 'e'.repeat(40), predecessors: ['GY-42'], policyRevision: 2, publishedAt: observedAt }),
+    gates: [{ name: 'merge', passed: false, reasons: ['Merge queue position 2 of 2: GY-42 is ahead'] }] } as Partial<Work>);
+  const status = buildMasterStatus({ work: [head, next], now: observedAt }, [], []);
+  assert.equal(status.counts.queued, 2);
+  assert.deepEqual(status.queue.map(entry => [entry.key, entry.position, entry.size]), [['GY-42', 1, 2], ['GY-43', 2, 2]]);
+  assert.equal(status.queue[0].predictedBase, 'b'.repeat(40));
+  assert.equal(status.queue[0].predictedTip, 'a'.repeat(40));
+  assert.equal(status.queue[0].waitMinutes, 30);
+  assert.equal(status.queue[1].predictedBase, 'a'.repeat(40), 'the entry behind predicts against the tip ahead of it');
+  assert.deepEqual(status.queue[1].ahead, ['GY-42']);
+  assert.equal(status.queue[1].validated, true);
+  assert.equal(status.queue[1].waitMinutes, 15);
+  assert.equal(status.work[1].queue!.position, 2);
+  assert.equal(status.work[1].mergeable, false, 'only the queue head can hold a merge authorization');
+});
+
+test('a merge only proceeds while the validated tip still lands its tested tree', () => {
+  const tip = 'a'.repeat(40), validatedBase = 'b'.repeat(40), baseTree = 'e'.repeat(40), advanced = 'f'.repeat(40);
+  const queued = work({ queue: queueEntry(1, '2030-01-01T00:30:00Z', { ref: 'refs/graphyard/queue/gy-42', tip, base: validatedBase, baseTree, predecessors: ['GY-41'], policyRevision: 2, publishedAt: '2030-01-01T00:31:00Z' }) } as Partial<Work>);
+  const authorization = { sha: tip, baseSha: validatedBase };
+  const reads: string[][] = [];
+  const run = (tree: string) => (_command: string, args: string[]) => { reads.push(args); return JSON.stringify({ commit: { tree: { sha: tree } } }); };
+  assert.doesNotThrow(() => assertQueuedLanding(queued, authorization, validatedBase, 'owner/project', run('unused')));
+  assert.equal(reads.length, 0, 'an unchanged base needs no extra provider call');
+  assert.doesNotThrow(() => assertQueuedLanding(queued, authorization, advanced, 'owner/project', run(baseTree)));
+  assert.deepEqual(reads[0], ['api', `repos/owner/project/commits/${advanced}`]);
+  assert.throws(() => assertQueuedLanding(queued, authorization, advanced, 'owner/project', run('9'.repeat(40))), /would no longer land its tested tree/);
+  assert.throws(() => assertQueuedLanding(work({ queue: null } as Partial<Work>), authorization, validatedBase, 'owner/project', run(baseTree)), /no published merge-queue tip/);
+  assert.throws(() => assertQueuedLanding(work({ queue: { ...queued.queue!, speculation: { ...queued.queue!.speculation!, tip: '7'.repeat(40) } } } as Partial<Work>), authorization, validatedBase, 'owner/project', run(baseTree)), /no published merge-queue tip/);
+});
+
 test('master status surfaces reviewer failover and exhausted reviewer capacity', () => {
   const profiles = [
     { name: 'claude-reviewer', runtime: 'claude', reviewerApp: 'claude-reviewer', timeoutSeconds: 1800 },
@@ -397,12 +438,15 @@ test('master status surfaces reviewer failover and exhausted reviewer capacity',
 test('agent review policies keep Graphyard branch protection without a native approval count', () => {
   const config = { version: 1 as const, url: 'https://graphyard.example', credentialFile: '/outside/master.token', cliPath: launcher, repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'machine-a', masterAgentName: 'graphyard-master-project', autoMerge: true, mergeMethod: 'merge' as const, workers: [], reviewers: [] };
   const protection = (overrides: Record<string, unknown> = {}) => ({ required_pull_request_reviews: { required_approving_review_count: 0 },
-    required_status_checks: { strict: true, checks: [{ context: 'Graphyard / merge', app_id: 1234 }] }, enforce_admins: { enabled: true }, ...overrides });
+    required_status_checks: { strict: false, checks: [{ context: 'Graphyard / merge', app_id: 1234 }] }, enforce_admins: { enabled: true }, ...overrides });
   const agent = work({ policy: { checks: ['test'], review: true, reviewProvider: 'agent', reviewerProfiles: [{ name: 'claude-reviewer', runtime: 'claude', reviewerApp: 'claude-reviewer', timeoutSeconds: 1800 }] } });
   assert.doesNotThrow(() => assertMergeProtection(protection(), config, agent));
-  // Graphyard's own required check, strict mode and admin enforcement still apply.
-  for (const weakened of [{ required_status_checks: { strict: false, checks: [{ context: 'Graphyard / merge', app_id: 1234 }] } }, { enforce_admins: { enabled: false } },
-    { required_status_checks: { strict: true, checks: [{ context: 'Graphyard / merge', app_id: 999 }] } }, { allow_force_pushes: { enabled: true } }])
+  // Graphyard's own required check and admin enforcement still apply.
+  for (const weakened of [{ required_status_checks: { strict: false, checks: [] } }, { enforce_admins: { enabled: false } },
+    { required_status_checks: { strict: false, checks: [{ context: 'Graphyard / merge', app_id: 999 }] } }, { allow_force_pushes: { enabled: true } }])
     assert.throws(() => assertMergeProtection(protection(weakened), config, agent), /protection changed/);
+  // The merge queue supersedes "require branches to be up to date" for agent review too.
+  assert.throws(() => assertMergeProtection(protection({ required_status_checks: { strict: true, checks: [{ context: 'Graphyard / merge', app_id: 1234 }] } }), config, agent),
+    /requires branches to be up to date/);
   assert.throws(() => assertMergeProtection(protection(), config, work({ policy: { checks: ['test'], review: true } })), /protection changed/);
 });

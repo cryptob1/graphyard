@@ -23,7 +23,9 @@ export function protectionPlan(current: any, config: { repository: string; baseB
   const reviews = current?.required_pull_request_reviews, checks = current?.required_status_checks;
   const observed = { requiredApprovals: Number(reviews?.required_approving_review_count ?? 0), requireLastPushApproval: reviews?.require_last_push_approval === true, dismissStaleReviews: reviews?.dismiss_stale_reviews === true };
   const blockers = [
-    ...(checks?.strict === true ? [] : ['Require branches to be up to date before merging is disabled']),
+    // The merge queue lands published speculative tips that are deliberately behind the base branch,
+    // so GitHub's "require branches to be up to date" setting must stay off (see assertMergeProtection).
+    ...(checks?.strict === false ? [] : ['Require branches to be up to date before merging is enabled; the merge queue requires it off']),
     ...(Array.isArray(checks?.checks) && checks.checks.some((check: any) => check?.context === CHECK_NAME && check?.app_id === config.githubAppId) ? [] : [`Required check ${CHECK_NAME} is not bound to Graphyard App ${config.githubAppId}`]),
     ...(current?.enforce_admins?.enabled === true ? [] : ['Administrator enforcement is disabled']),
     ...(current?.allow_force_pushes?.enabled === true ? ['Force pushes are allowed on the managed base branch'] : []),
@@ -48,7 +50,7 @@ export async function applyProtection(config: { repository: string; baseBranch: 
   const plan = protectionPlan(readProtection(config, run), config, work);
   if (plan.blockers.length) throw new Error(plan.refusal!);
   if (!plan.changes.length) return { ...plan, applied: false, result: 'branch protection already matches every open review policy' };
-  // Only the review subresource changes; the App-bound check, strict mode, and admin enforcement stay as observed.
+  // Only the review subresource changes; the App-bound check, the strict-off setting, and admin enforcement stay as observed.
   run('gh', ['api', '--method', 'PATCH', `repos/${config.repository}/branches/${encodeURIComponent(config.baseBranch)}/protection/required_pull_request_reviews`, '--input', '-'],
     JSON.stringify({ required_approving_review_count: plan.desired.requiredApprovals, require_last_push_approval: plan.desired.requireLastPushApproval, dismiss_stale_reviews: plan.desired.dismissStaleReviews }));
   const verified = protectionPlan(readProtection(config, run), config, work);

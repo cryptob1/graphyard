@@ -1,4 +1,6 @@
 import { z } from 'zod';
+import { ejectionReason, nextQueueSequence, queueHistoryLimit, queuePlacement } from './merge-queue.js';
+import type { QueueEjection, QueueEntry, QueueHistoryEntry } from './merge-queue.js';
 
 export const CHECK_NAME = 'Graphyard / merge';
 export const stages = ['backlog', 'ready', 'build', 'review', 'test', 'acceptance', 'merge', 'done'] as const;
@@ -116,6 +118,9 @@ export interface Observation {
   candidate: Candidate; checks: { name: string; result: string; appId: number }[];
   reviews: { reviewer: string; sha: string; state: string; id?: number; submittedAt?: string }[];
   merged: boolean; mergeSha: string | null; mergedAt?: string | null; mergeable: boolean;
+  // The real base-branch head and its tree, recorded separately from the candidate's bound
+  // base so a speculative binding never hides where the managed branch actually points.
+  baseTip?: string; baseTree?: string;
   protected: boolean; files: string[]; at: string;
 }
 export interface Gate { name: string; passed: boolean; reasons: string[] }
@@ -129,6 +134,7 @@ export interface Work extends Create {
   epoch: number; lease: Lease | null; lastAssignment?: AssignmentIdentity; workspaces: Workspace[]; candidate: Candidate | null;
   containmentQuarantine?: { owner: string; epoch: number; at: string; settlementHash: string; launchAcknowledgedAt?: string; launchExpiresAt?: string } | null;
   submission: { epoch: number; pr: number } | null;
+  queue?: QueueEntry | null; queueSequence?: number; queueEjection?: QueueEjection | null; queueHistory?: QueueHistoryEntry[];
   reworkRequested: boolean;
   scenarioRequirements: { proof: string; revision: number; environment: string; hash: string }[];
   reviewRequest?: ReviewRequest | null;
@@ -143,6 +149,7 @@ export class Refusal extends Error {
   constructor(message: string, public status = 409) { super(message); }
 }
 export class ReconciliationRetry extends Refusal {}
+export class SpeculativeConflict extends Refusal {}
 export class MergeExecutionInProgress extends ReconciliationRetry {}
 export function requireCurrent(value: unknown, message: string): asserts value {
   if (!value) throw new ReconciliationRetry(message, 409);
@@ -199,7 +206,7 @@ export function currentEvidence(work: Work, proof: string, now = new Date()): Ev
 }
 
 // Pure evaluation: neither worker assertions nor UI state can authorize progression.
-export function evaluate(work: Work, all: Work[], now: Date, ciAppIds: number[]): { stage: Stage; gates: Gate[]; violations: string[] } {
+export function evaluate(work: Work, all: Work[], now: Date, ciAppIds: number[]): { stage: Stage; gates: Gate[]; violations: string[]; queue: QueueEntry | null; queueSequence: number; queueEjection: QueueEjection | null; queueHistory: QueueHistoryEntry[] } {
   const gates: Gate[] = [];
   const add = (name: string, reasons: string[]) => gates.push({ name, passed: reasons.length === 0, reasons });
   const dependencies = work.dependencies.filter(id => all.find(w => w.id === id)?.stage !== 'done');
@@ -249,11 +256,48 @@ export function evaluate(work: Work, all: Work[], now: Date, ciAppIds: number[])
     if (!evidence || evidence.result !== 'pass' || evidence.executed < 1 || evidence.skipped !== 0) reasons.push(`${ac.id}: ${proof} needs trusted passing evidence, with executed > 0 and skipped = 0, for this candidate and policy${scenario ? `; scenario v${scenario.revision} in ${scenario.environment}` : ''}`);
   }
   add('acceptance', reasons);
-  add('merge', [...(!fresh ? ['GitHub observation missing or older than two minutes'] : []), ...(!obs?.protected ? ['Required Graphyard check and strict branch protection have not been verified'] : []), ...(!obs?.mergeable && !obs?.merged ? ['Pull request is not mergeable against the current base'] : [])]);
+  // The merge queue owns the last hop. A candidate that has proven itself enters the queue,
+  // is validated against the speculative tip it will actually land, and merges in order.
+  const queueState = placeInQueue(work, all, now, ciAppIds, gates.every(g => g.passed) && !work.violations.length && !!candidate && !obs?.merged);
+  add('merge', [...(!fresh ? ['GitHub observation missing or older than two minutes'] : []), ...(!obs?.protected ? ['Required Graphyard check and merge-queue branch protection have not been verified'] : []), ...(!obs?.mergeable && !obs?.merged ? ['Pull request is not mergeable against the current base'] : []), ...queueState.reasons]);
   const first = gates.find(g => !g.passed);
   const violations = [...work.violations];
   let stage: Stage = !work.ready ? 'backlog' : !work.submission ? (work.lease && Date.parse(work.lease.expiresAt) > now.getTime() ? 'build' : 'ready') : (first?.name === 'ready' ? 'build' : first?.name as Stage ?? 'merge');
   // Delivery history stays complete; later observations cannot rewrite it.
   if (work.stage === 'done') stage = 'done';
-  return { stage, gates, violations };
+  return { stage, gates, violations, queue: queueState.queue, queueSequence: queueState.queueSequence, queueEjection: queueState.ejection, queueHistory: queueState.history };
+}
+
+/**
+ * Queue membership is derived, never asserted: no command, operator, or administrator can
+ * place, reorder, or hold a position. An entry leaves only by merging or by an explicit,
+ * observed validation failure, and a re-entry always starts a new sequence at the back.
+ */
+function placeInQueue(work: Work, all: Work[], now: Date, ciAppIds: number[], eligible: boolean) {
+  const history = [...(work.queueHistory ?? [])];
+  const candidate = work.candidate;
+  let queue = work.queue ?? null, queueSequence = work.queueSequence ?? 0, ejection = work.queueEjection ?? null;
+  const record = (event: QueueHistoryEntry['event'], reason?: string, tip?: string) => {
+    history.push({ at: now.toISOString(), event, sequence: queueSequence, ...(reason ? { reason } : {}), ...(tip ? { tip } : {}) });
+    if (history.length > queueHistoryLimit) history.splice(0, history.length - queueHistoryLimit);
+  };
+  const probe = { ...work, queue, queueSequence, gates: [], violations: work.violations } as Work;
+  const reason = queue ? ejectionReason(probe, ciAppIds) : null;
+  if (queue && reason) {
+    ejection = { at: now.toISOString(), sequence: queue.sequence, reason, sha: candidate?.sha ?? null, policyRevision: work.policyRevision };
+    record('ejected', reason, queue.speculation?.tip ?? candidate?.sha);
+    queue = null;
+  } else if (!queue && eligible && !(ejection && candidate && ejection.sha === candidate.sha && ejection.policyRevision === work.policyRevision)) {
+    queueSequence = nextQueueSequence(all);
+    queue = { sequence: queueSequence, enqueuedAt: now.toISOString(), policyRevision: work.policyRevision, speculation: null };
+    ejection = null;
+    record('enqueued');
+  }
+  const shadow = { ...work, queue, queueSequence } as Work;
+  const placement = queue ? queuePlacement(shadow, all.map(item => item.id === work.id ? shadow : item), now.getTime()) : null;
+  const reasons = placement ? placement.reasons
+    : work.observation?.merged || work.stage === 'done' ? []
+    : ejection ? [`Ejected from the merge queue: ${ejection.reason}; a new candidate re-enters at the back of the queue`]
+    : eligible ? ['Candidate has not entered the merge queue'] : [];
+  return { queue, queueSequence, ejection, history, reasons, placement };
 }

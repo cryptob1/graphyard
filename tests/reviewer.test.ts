@@ -319,7 +319,7 @@ test('master harness rules cover the master loop and grant no merge path or cred
 test('branch protection reconciles to the review policy of every open item and refuses a mix', () => {
   const config = { repository: 'owner/project', baseBranch: 'main', githubAppId: 1234 };
   const native = work(), agent = work({ id: 'agent', key: 'GY-43', policy: { checks: ['test'], review: true, reviewProvider: 'codex' } as any });
-  const current = (reviews: any) => ({ required_pull_request_reviews: reviews, required_status_checks: { strict: true, checks: [{ context: 'Graphyard / merge', app_id: 1234 }] }, enforce_admins: { enabled: true }, allow_force_pushes: { enabled: false }, allow_deletions: { enabled: false } });
+  const current = (reviews: any) => ({ required_pull_request_reviews: reviews, required_status_checks: { strict: false, checks: [{ context: 'Graphyard / merge', app_id: 1234 }] }, enforce_admins: { enabled: true }, allow_force_pushes: { enabled: false }, allow_deletions: { enabled: false } });
   assert.equal(requiredReviewProtection([native]).protection.requiredApprovals, 1);
   assert.equal(requiredReviewProtection([agent]).protection.requiredApprovals, 0);
   assert.equal(requiredReviewProtection([native, work({ id: 'done', key: 'GY-9', stage: 'done', policy: { checks: ['test'], review: true, reviewProvider: 'codex' } as any })]).protection.mode, 'native');
@@ -329,8 +329,8 @@ test('branch protection reconciles to the review policy of every open item and r
   assert.equal(switching.consistent, false); assert.deepEqual(switching.items.codex, ['GY-43']);
   assert.ok(switching.changes.some(change => change.startsWith('required_approving_review_count 1 to 0')));
   assert.equal(protectionPlan(current({ required_approving_review_count: 1, require_last_push_approval: true, dismiss_stale_reviews: true }), config, [native]).consistent, true);
-  const unprotected = protectionPlan({ required_status_checks: { strict: false, checks: [] }, enforce_admins: { enabled: false } }, config, [native]);
-  assert.equal(unprotected.blockers.length, 3); assert.match(unprotected.refusal!, /Graphyard \/ merge/);
+  const unprotected = protectionPlan({ required_status_checks: { strict: true, checks: [] }, enforce_admins: { enabled: false } }, config, [native]);
+  assert.equal(unprotected.blockers.length, 3); assert.match(unprotected.refusal!, /merge queue requires it off/); assert.match(unprotected.refusal!, /Graphyard \/ merge/);
   assert.match(protectionPlan(current({ required_approving_review_count: 1, require_code_owner_reviews: true, require_last_push_approval: true, dismiss_stale_reviews: true }), config, [native]).refusal!, /CODEOWNERS/);
   assert.equal(protectionPlan(current({ required_approving_review_count: 1, require_last_push_approval: true, dismiss_stale_reviews: true }), { ...config, githubAppId: 4321 }, [native]).blockers.length, 1);
 });
@@ -343,7 +343,7 @@ test('applying protection changes only the review subresource and verifies the r
   const run = (_command: string, args: string[], input?: string) => {
     calls.push({ args, input });
     if (args.includes('PATCH')) { reviews = { ...reviews, ...JSON.parse(input!) }; return '{}'; }
-    return JSON.stringify({ required_pull_request_reviews: reviews, required_status_checks: { strict: true, checks: [{ context: 'Graphyard / merge', app_id: 1234 }] }, enforce_admins: { enabled: true }, allow_force_pushes: { enabled: false }, allow_deletions: { enabled: false } });
+    return JSON.stringify({ required_pull_request_reviews: reviews, required_status_checks: { strict: false, checks: [{ context: 'Graphyard / merge', app_id: 1234 }] }, enforce_admins: { enabled: true }, allow_force_pushes: { enabled: false }, allow_deletions: { enabled: false } });
   };
   const applied = await applyProtection(config, [agent], run);
   assert.equal(applied.applied, true); assert.equal(applied.consistent, true); assert.equal(reviews.required_approving_review_count, 0);
@@ -375,7 +375,7 @@ test('the master CLI installs its harness rules and reconciles protection agains
 const { readFileSync, writeFileSync } = require('node:fs');
 const args = process.argv.slice(2), state = ${JSON.stringify(state)};
 if (args.includes('PATCH')) { writeFileSync(state, JSON.stringify({ ...JSON.parse(readFileSync(state, 'utf8')), ...JSON.parse(readFileSync(0, 'utf8')) })); console.log('{}'); process.exit(0); }
-console.log(JSON.stringify({ required_pull_request_reviews: JSON.parse(readFileSync(state, 'utf8')), required_status_checks: { strict: true, checks: [{ context: 'Graphyard / merge', app_id: 1234 }] }, enforce_admins: { enabled: true }, allow_force_pushes: { enabled: false }, allow_deletions: { enabled: false } }));
+console.log(JSON.stringify({ required_pull_request_reviews: JSON.parse(readFileSync(state, 'utf8')), required_status_checks: { strict: false, checks: [{ context: 'Graphyard / merge', app_id: 1234 }] }, enforce_admins: { enabled: true }, allow_force_pushes: { enabled: false }, allow_deletions: { enabled: false } }));
 `, { mode: 0o755 });
     const environment: NodeJS.ProcessEnv = { ...process.env, PATH: `${binary}:${process.env.PATH}`, GRAPHYARD_CONFIG_HOME: credentialDirectory };
     for (const name of Object.keys(environment)) if (name.startsWith('GRAPHYARD_') && name !== 'GRAPHYARD_CONFIG_HOME') delete environment[name];

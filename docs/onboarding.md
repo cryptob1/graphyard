@@ -194,7 +194,7 @@ node "$GRAPHYARD_CLI" master status
 
 Connect that evidence before merging. Version 0.1 has no general-purpose runner: put a narrowly scoped `producer` token in protected CI that pull-request code cannot read, then submit the current candidate's actual result. For a criterion explicitly defined with a `manual:` proof, use a separate admin-authenticated operator session to inspect and submit it; never expose that credential to the worker checkout. An admin cannot certify automated proof names. See [evidence submission](protocol.md#evidence).
 
-When `Graphyard / merge` first appears, add it to strict branch protection. After every gate passes:
+When `Graphyard / merge` first appears, add it to branch protection — with "require branches to be up to date" off, which the [merge queue](github.md#merge-queue) requires. After every gate passes:
 
 ```sh
 node "$GRAPHYARD_CLI" master merge GY-1

@@ -9,7 +9,8 @@ import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import { server } from '../src/server.js';
 import { OperatorAgents } from '../src/operator-agent.js';
-import { ReconciliationRetry, type Principal, type Work, type Observation } from '../src/model.js';
+import { ReconciliationRetry, SpeculativeConflict, type Principal, type Work, type Observation } from '../src/model.js';
+import { predictQueue, queueRef, type QueuePlacement, type QueueSpeculation } from '../src/merge-queue.js';
 import { defineScenario, scenarios } from '../src/scenarios.js';
 import { setTimeout as delay } from 'node:timers/promises';
 import { processJob, type GitHub } from '../src/github.js';
@@ -46,7 +47,14 @@ async function claimed() { const w = await ready(); return engine.execute(worker
 async function submitted() {
   let w = await claimed();
   w = await engine.execute(worker, 'workspace', w.id, { epoch: 1, host: 'machine-a', path: `/tmp/${w.id}`, branch: `graphyard/${w.id}` }, randomUUID());
-  return engine.execute(worker, 'submit', w.id, { epoch: 1, pr: Number(w.key.slice(3)) }, randomUUID());
+  w = await engine.execute(worker, 'submit', w.id, { epoch: 1, pr: Number(w.key.slice(3)) }, randomUUID());
+  // Every candidate lands on the same managed branch, so the merge queue is global. Tests that
+  // assert single-candidate behaviour start from an empty queue; queue behaviour has its own tests.
+  await clearQueue(w.id);
+  return w;
+}
+async function clearQueue(keep?: string) {
+  await store.pool.query("UPDATE work_items SET document=document-'queue' WHERE ($1::uuid IS NULL OR id<>$1) AND document->>'stage'<>'done'", [keep ?? null]);
 }
 function observation(w: Work): Observation {
   return { clockOffset: { min: 0, max: 0 }, candidate: { sha: head, baseSha: base, pr: w.submission!.pr, branch: w.workspaces[0].branch, author: 'implementer' },
@@ -55,6 +63,20 @@ function observation(w: Work): Observation {
     merged: false, mergeSha: null, files: ['src/claims.ts'], at: new Date().toISOString() };
 }
 function proof() { return { proof: 'integration:claim-safety', sha: head, baseSha: base, policyRevision: 1, result: 'pass', executed: 12, skipped: 0 }; }
+/**
+ * A proven candidate with Graphyard's queue tip published for it: the state a merge authorization
+ * now requires, since only a published tip proves the validated commit contains its base. Its
+ * branch already sits on that base, so the tip is its own head. Publication itself is exercised by
+ * the merge-queue scenarios below; these tests are about the authority that follows it.
+ */
+async function proven(w: Work, observed?: Observation) {
+  const evidenced = await engine.execute(producer, 'evidence', w.id, proof(), randomUUID());
+  const speculation: QueueSpeculation = { ref: queueRef(evidenced.key), tip: evidenced.candidate!.sha, base: evidenced.candidate!.baseSha,
+    baseTree: sha40('7e'), predecessors: [], policyRevision: evidenced.policyRevision, publishedAt: new Date().toISOString() };
+  await store.pool.query("UPDATE work_items SET document=jsonb_set(document,'{queue,speculation}',$2::jsonb) WHERE id=$1", [evidenced.id, JSON.stringify(speculation)]);
+  return engine.observe(evidenced.id, (await reload(evidenced)).revision, observed ?? observation(evidenced));
+}
+
 const GRAPHYARD_APP = 1234;
 const reviewerApps = [
   { id: 'claude-reviewer', runtime: 'claude', appId: 55_001, botUserId: 55_002 },
@@ -229,7 +251,7 @@ test('operator can unblock abandoned work with an auditable reason', async () =>
 });
 test('operator-mediated rework fences old ownership, closes build gate, and preserves PR attribution', async () => {
   let w = await submitted(); w = await engine.observe(w.id, w.revision, observation(w));
-  w = await engine.execute(producer, 'evidence', w.id, proof(), randomUUID()); assert.ok(w.gates.every(g => g.passed));
+  w = await proven(w); assert.ok(w.gates.every(g => g.passed));
   await assert.rejects(engine.execute(worker, 'rework', w.id, { reason: 'Retry', previousWorkerStopped: true }, randomUUID()), /permission/);
   w = await engine.execute(operator, 'rework', w.id, { reason: 'Old process stopped; reproduce new failure', previousWorkerStopped: true }, randomUUID());
   assert.equal(w.stage, 'build'); assert.equal(w.lease, null);
@@ -253,7 +275,7 @@ test('coordinator can observe but cannot mutate work, claim leases, or submit ev
 });
 test('final merge verification re-evaluates mutable GitHub gates under the active execution', async () => {
   let w = await submitted(); w = await engine.observe(w.id, w.revision, observation(w));
-  w = await engine.execute(producer, 'evidence', w.id, proof(), randomUUID());
+  w = await proven(w);
   const granted = await engine.acquireMerge(coordinator, w.id, { expectedRevision: w.revision, sha: head, baseSha: base, policyRevision: w.policyRevision }, randomUUID());
   const current = { ...observation(w), prState: 'open' as const, draft: false };
   const verifyKey = randomUUID(); const verifyInput = { executionId: granted.execution.id };
@@ -269,7 +291,7 @@ test('final merge verification re-evaluates mutable GitHub gates under the activ
 
 test('single-use merge execution freezes relevant mutations through observed merge', async () => {
   let w = await submitted(); w = await engine.observe(w.id, w.revision, observation(w));
-  w = await engine.execute(producer, 'evidence', w.id, proof(), randomUUID()); assert.ok(w.gates.every(gate => gate.passed));
+  w = await proven(w); assert.ok(w.gates.every(gate => gate.passed));
   const acquireKey = randomUUID();
   const first = await engine.acquireMerge(coordinator, w.id, { expectedRevision: w.revision, sha: head, baseSha: base, policyRevision: w.policyRevision }, acquireKey);
   assert.equal(first.execution.authorizationRevision, w.revision); assert.equal(first.execution.owner, coordinator.id);
@@ -296,7 +318,7 @@ test('single-use merge execution freezes relevant mutations through observed mer
 });
 test('a matching merge from before the execution grant remains an unauthorized violation', async () => {
   let w = await submitted(); w = await engine.observe(w.id, w.revision, observation(w));
-  w = await engine.execute(producer, 'evidence', w.id, proof(), randomUUID());
+  w = await proven(w);
   const granted = await engine.acquireMerge(coordinator, w.id, { expectedRevision: w.revision, sha: head, baseSha: base, policyRevision: w.policyRevision }, randomUUID());
   const merged = { ...observation(w), merged: true, mergeSha: 'c'.repeat(40), mergedAt: new Date(Date.parse(granted.execution.issuedAt) - 1000).toISOString() } as Observation;
   const refused = await engine.observe(w.id, granted.revision, merged);
@@ -304,7 +326,7 @@ test('a matching merge from before the execution grant remains an unauthorized v
 });
 test('a matching merge after the bounded execution deadline remains an unauthorized violation', async () => {
   let w = await submitted(); w = await engine.observe(w.id, w.revision, observation(w));
-  w = await engine.execute(producer, 'evidence', w.id, proof(), randomUUID());
+  w = await proven(w);
   const granted = await engine.acquireMerge(coordinator, w.id, { expectedRevision: w.revision, sha: head, baseSha: base, policyRevision: w.policyRevision }, randomUUID());
   const merged = { ...observation(w), merged: true, mergeSha: 'c'.repeat(40), mergedAt: new Date(Date.parse(granted.execution.expiresAt) + 1).toISOString() } as Observation;
   const refused = await engine.observe(w.id, granted.revision, merged);
@@ -312,7 +334,7 @@ test('a matching merge after the bounded execution deadline remains an unauthori
 });
 test('database clock ahead of GitHub cannot authorize a merge after the database deadline', async () => {
   let w = await submitted(); w = await engine.observe(w.id, w.revision, observation(w));
-  w = await engine.execute(producer, 'evidence', w.id, proof(), randomUUID());
+  w = await proven(w);
   const granted = await engine.acquireMerge(coordinator, w.id, { expectedRevision: w.revision, sha: head, baseSha: base, policyRevision: w.policyRevision }, randomUUID());
   const verified = await engine.verifyMerge(coordinator, w.id, { executionId: granted.execution.id }, { ...observation(w), prState: 'open', draft: false, clockOffset: { min: 5000, max: 6000 } }, randomUUID());
   const merged = { ...observation(w), merged: true, mergeSha: 'c'.repeat(40), mergedAt: new Date(Date.parse(granted.execution.expiresAt) - 4000).toISOString() };
@@ -321,7 +343,7 @@ test('database clock ahead of GitHub cannot authorize a merge after the database
 });
 test('whole-second merge timestamps require authority through the entire reported interval', async () => {
   let w = await submitted(); w = await engine.observe(w.id, w.revision, observation(w));
-  w = await engine.execute(producer, 'evidence', w.id, proof(), randomUUID());
+  w = await proven(w);
   const granted = await engine.acquireMerge(coordinator, w.id, { expectedRevision: w.revision, sha: head, baseSha: base, policyRevision: w.policyRevision }, randomUUID());
   const lowerBound = Math.floor(Date.now() / 1000) * 1000 + 60_000; const expiresAt = new Date(lowerBound + 500).toISOString();
   await store.pool.query("UPDATE work_items SET document=jsonb_set(document,'{mergeExecution,expiresAt}',to_jsonb($2::text)) WHERE id=$1", [w.id, expiresAt]);
@@ -331,7 +353,7 @@ test('whole-second merge timestamps require authority through the entire reporte
 });
 test('a cancelled merge execution cannot authorize a later matching merge', async () => {
   let w = await submitted(); w = await engine.observe(w.id, w.revision, observation(w));
-  w = await engine.execute(producer, 'evidence', w.id, proof(), randomUUID());
+  w = await proven(w);
   const granted = await engine.acquireMerge(coordinator, w.id, { expectedRevision: w.revision, sha: head, baseSha: base, policyRevision: w.policyRevision }, randomUUID());
   await engine.cancelMerge(coordinator, w.id, { executionId: granted.execution.id, reason: 'GitHub refused this attempt' }, randomUUID());
   w = (await store.list()).find(item => item.id === w.id)!;
@@ -341,7 +363,7 @@ test('a cancelled merge execution cannot authorize a later matching merge', asyn
 });
 test('periodic reconciliation defers without publishing failure during active merge execution', async () => {
   let w = await submitted(); w = await engine.observe(w.id, w.revision, observation(w));
-  w = await engine.execute(producer, 'evidence', w.id, proof(), randomUUID());
+  w = await proven(w);
   const granted = await engine.acquireMerge(coordinator, w.id, { expectedRevision: w.revision, sha: head, baseSha: base, policyRevision: w.policyRevision }, randomUUID());
   await store.pool.query("UPDATE jobs SET available_at=now()+interval '1 hour'");
   await store.pool.query('UPDATE jobs SET available_at=now(),locked_until=NULL,token=NULL WHERE work_id=$1', [w.id]);
@@ -354,7 +376,7 @@ test('periodic reconciliation defers without publishing failure during active me
 });
 test('reconciliation that became stale during merge acquisition defers without replacing the passing check', async () => {
   let w = await submitted(); w = await engine.observe(w.id, w.revision, observation(w));
-  w = await engine.execute(producer, 'evidence', w.id, proof(), randomUUID());
+  w = await proven(w);
   await store.pool.query('UPDATE jobs SET available_at=now(),locked_until=NULL,token=NULL WHERE work_id=$1', [w.id]);
   let observed!: () => void, resume!: () => void; const started = new Promise<void>(resolve => { observed = resolve; }); const paused = new Promise<void>(resolve => { resume = resolve; });
   let publications = 0;
@@ -368,7 +390,7 @@ test('reconciliation that became stale during merge acquisition defers without r
 });
 test('merge execution cannot outlive a required proof or the fresh observation', async () => {
   let w = await submitted(); w = await engine.observe(w.id, w.revision, observation(w));
-  w = await engine.execute(producer, 'evidence', w.id, proof(), randomUUID());
+  w = await proven(w);
   const expiresAt = new Date(Date.now() + 94_000).toISOString();
   await store.pool.query("UPDATE work_items SET document=jsonb_set(document,'{evidence,0,expiresAt}',to_jsonb($2::text)) WHERE id=$1", [w.id, expiresAt]);
   w = (await store.list()).find(item => item.id === w.id)!;
@@ -381,13 +403,13 @@ test('assertions, skipped suites, zero executed, stale base, stale head, and sta
   for (const override of [{ skipped: 1 }, { executed: 0 }, { sha: 'c'.repeat(40) }, { baseSha: 'd'.repeat(40) }, { policyRevision: 2 }, { result: 'fail' }]) {
     w = await engine.execute(producer, 'evidence', w.id, { ...proof(), ...override }, randomUUID()); assert.equal(w.stage, 'acceptance');
   }
-  w = await engine.execute(producer, 'evidence', w.id, proof(), randomUUID()); assert.equal(w.stage, 'merge');
+  w = await proven(w); assert.equal(w.stage, 'merge');
   const obs = observation(w); obs.candidate.sha = 'f'.repeat(40); obs.reviews[0].sha = obs.candidate.sha;
   w = await engine.observe(w.id, w.revision, obs); assert.equal(w.stage, 'acceptance');
 });
 test('latest failed evidence supersedes previous passing evidence', async () => {
   let w = await submitted(); w = await engine.observe(w.id, w.revision, observation(w));
-  w = await engine.execute(producer, 'evidence', w.id, proof(), randomUUID()); assert.equal(w.stage, 'merge');
+  w = await proven(w); assert.equal(w.stage, 'merge');
   w = await engine.execute(producer, 'evidence', w.id, { ...proof(), result: 'fail' }, randomUUID()); assert.equal(w.stage, 'acceptance');
 });
 test('legacy evidence URL remains valid and typed external artifacts do not change trust', async () => {
@@ -416,11 +438,11 @@ test('wrong CI producer, self review, and missing protection fail closed', async
   w = await engine.observe(w.id, w.revision, obs); assert.equal(w.stage, 'review');
   obs = observation(w); obs.checks[0].appId = 999; w = await engine.observe(w.id, w.revision, obs); assert.equal(w.stage, 'test');
   obs = observation(w); obs.protected = false; w = await engine.observe(w.id, w.revision, obs);
-  w = await engine.execute(producer, 'evidence', w.id, proof(), randomUUID()); assert.equal(w.stage, 'merge'); assert.equal(w.gates.find(g => g.name === 'merge')!.passed, false);
+  w = await proven(w, { ...observation(w), protected: false }); assert.equal(w.stage, 'merge'); assert.equal(w.gates.find(g => g.name === 'merge')!.passed, false);
 });
 test('only an independently observed merge with a verified execution completes work', async () => {
   let w = await submitted(); w = await engine.observe(w.id, w.revision, observation(w));
-  w = await engine.execute(producer, 'evidence', w.id, proof(), randomUUID()); assert.equal(w.stage, 'merge');
+  w = await proven(w); assert.equal(w.stage, 'merge');
   const granted = await engine.acquireMerge(coordinator, w.id, { expectedRevision: w.revision, sha: head, baseSha: base, policyRevision: w.policyRevision }, randomUUID());
   const verified = await engine.verifyMerge(coordinator, w.id, { executionId: granted.execution.id }, { ...observation(w), prState: 'open', draft: false }, randomUUID());
   await delay(5); const mergedAt = ((await store.pool.query('SELECT clock_timestamp() AS now')).rows[0].now as Date).toISOString(); await delay(5);
@@ -438,8 +460,9 @@ test('capability settlement preserves active and expired merge executions while 
     item = await engine.execute(worker, 'quarantine', item.id, { epoch: 1, settlementHash }, randomUUID());
     item = await engine.execute(worker, 'workspace', item.id, { epoch: 1, host: `merge-settlement-${suffix}`, path: `/tmp/${item.id}-${suffix}`, branch: `graphyard/${item.id}-${suffix}` }, randomUUID());
     item = await engine.execute(worker, 'submit', item.id, { epoch: 1, pr: Number(item.key.slice(3)) }, randomUUID());
+    await clearQueue(item.id);
     item = await engine.observe(item.id, item.revision, observation(item));
-    item = await engine.execute(producer, 'evidence', item.id, proof(), randomUUID());
+    item = await proven(item);
     await engine.acquireMerge(coordinator, item.id, { expectedRevision: item.revision, sha: head, baseSha: base, policyRevision: item.policyRevision }, randomUUID());
     return { item, settlementToken };
   };
@@ -463,8 +486,9 @@ test('non-delivered capability settlement still re-evaluates stale gates', async
   w = await engine.execute(worker, 'quarantine', w.id, { epoch: 1, settlementHash }, randomUUID());
   w = await engine.execute(worker, 'workspace', w.id, { epoch: 1, host: `stale-settlement-${w.id}`, path: `/tmp/${w.id}-stale-settlement`, branch: `graphyard/${w.id}-stale-settlement` }, randomUUID());
   w = await engine.execute(worker, 'submit', w.id, { epoch: 1, pr: Number(w.key.slice(3)) }, randomUUID());
+  await clearQueue(w.id);
   w = await engine.observe(w.id, w.revision, observation(w));
-  w = await engine.execute(producer, 'evidence', w.id, proof(), randomUUID());
+  w = await proven(w);
   assert.equal(w.stage, 'merge'); assert.ok(w.mergeAuthorization);
   w = { ...w, observation: { ...w.observation!, at: '2000-01-01T00:00:00Z' },
     evidence: w.evidence.map(item => ({ ...item, expiresAt: '2000-01-01T00:00:00Z' })) };
@@ -485,8 +509,9 @@ test('capability settlement survives the merge-to-done race without weakening de
   w = await engine.execute(worker, 'quarantine', w.id, { epoch: 1, settlementHash }, randomUUID());
   w = await engine.execute(worker, 'workspace', w.id, { epoch: 1, host: 'race-host', path: `/tmp/${w.id}-race`, branch: `graphyard/${w.id}-race` }, randomUUID());
   w = await engine.execute(worker, 'submit', w.id, { epoch: 1, pr: Number(w.key.slice(3)) }, randomUUID());
+  await clearQueue(w.id);
   w = await engine.observe(w.id, w.revision, observation(w));
-  w = await engine.execute(producer, 'evidence', w.id, proof(), randomUUID());
+  w = await proven(w);
   const granted = await engine.acquireMerge(coordinator, w.id, { expectedRevision: w.revision, sha: head, baseSha: base, policyRevision: w.policyRevision }, randomUUID());
   const verified = await engine.verifyMerge(coordinator, w.id, { executionId: granted.execution.id }, { ...observation(w), prState: 'open', draft: false }, randomUUID());
   await delay(5); const mergedAt = ((await store.pool.query('SELECT clock_timestamp() AS now')).rows[0].now as Date).toISOString(); await delay(5);
@@ -520,8 +545,9 @@ test('operator stopped-worker recovery clears only a delivered containment quara
   w = await engine.execute(worker, 'quarantine', w.id, { epoch: 1, settlementHash }, randomUUID());
   w = await engine.execute(worker, 'workspace', w.id, { epoch: 1, host: 'recovery-host', path: `/tmp/${w.id}-recovery`, branch: `graphyard/${w.id}-recovery` }, randomUUID());
   w = await engine.execute(worker, 'submit', w.id, { epoch: 1, pr: Number(w.key.slice(3)) }, randomUUID());
+  await clearQueue(w.id);
   w = await engine.observe(w.id, w.revision, observation(w));
-  w = await engine.execute(producer, 'evidence', w.id, proof(), randomUUID());
+  w = await proven(w);
   const granted = await engine.acquireMerge(coordinator, w.id, { expectedRevision: w.revision, sha: head, baseSha: base, policyRevision: w.policyRevision }, randomUUID());
   const verified = await engine.verifyMerge(coordinator, w.id, { executionId: granted.execution.id }, { ...observation(w), prState: 'open', draft: false }, randomUUID());
   await delay(5); const mergedAt = ((await store.pool.query('SELECT clock_timestamp() AS now')).rows[0].now as Date).toISOString(); await delay(5);
@@ -557,12 +583,12 @@ test('operator stopped-worker recovery clears only a delivered containment quara
 test('bypassed merge is a permanent visible violation, not done', async () => {
   let w = await submitted(); w = await engine.observe(w.id, w.revision, { ...observation(w), merged: true });
   assert.notEqual(w.stage, 'done'); assert.ok(w.violations.length);
-  w = await engine.execute(producer, 'evidence', w.id, proof(), randomUUID()); assert.notEqual(w.stage, 'done');
+  w = await proven(w); assert.notEqual(w.stage, 'done');
 });
 test('evidence arriving after the actual merge cannot retroactively authorize it', async () => {
   let w = await submitted(); w = await engine.observe(w.id, w.revision, observation(w));
   const actualMerge = '2000-01-01T00:00:00Z';
-  w = await engine.execute(producer, 'evidence', w.id, proof(), randomUUID()); assert.ok(w.mergeAuthorization);
+  w = await proven(w); assert.ok(w.mergeAuthorization);
   w = await engine.observe(w.id, w.revision, { ...observation(w), merged: true, mergedAt: actualMerge });
   assert.notEqual(w.stage, 'done'); assert.ok(w.violations.includes('Merge observed without a prior authorization for this candidate'));
 });
@@ -686,6 +712,7 @@ test('E2E definitions are versioned, immutable, operator-owned, and pinned by wo
   w = await engine.execute(worker, 'claim', w.id, {}, randomUUID());
   w = await engine.execute(worker, 'workspace', w.id, { epoch: 1, host: 'e2e-host', path: `/tmp/${w.id}`, branch: `graphyard/${w.id}` }, randomUUID());
   w = await engine.execute(worker, 'submit', w.id, { epoch: 1, pr: Number(w.key.slice(3)) }, randomUUID());
+  await clearQueue(w.id);
   w = await engine.observe(w.id, w.revision, observation(w));
   const reporter: Principal = { id: 'e2e-reporter', role: 'producer', proofs: ['e2e:booking-sms'] };
   for (const binding of [{}, { scenarioRevision: 2, environment: 'staging' }, { scenarioRevision: 1, environment: 'production' }]) {
@@ -732,7 +759,7 @@ test('new evidence wakes an in-flight integration job and its acknowledgment pre
 
 test('a delayed merge uses historical authorization despite an outage and later failing evidence', async () => {
   let w = await submitted(); w = await engine.observe(w.id, w.revision, observation(w));
-  w = await engine.execute(producer, 'evidence', w.id, proof(), randomUUID());
+  w = await proven(w);
   const granted = await engine.acquireMerge(coordinator, w.id, { expectedRevision: w.revision, sha: head, baseSha: base, policyRevision: w.policyRevision }, randomUUID());
   const verified = await engine.verifyMerge(coordinator, w.id, { executionId: granted.execution.id }, { ...observation(w), prState: 'open', draft: false }, randomUUID());
   const authorizedRevision = granted.execution.authorizationRevision;
@@ -750,7 +777,7 @@ test('a delayed merge uses historical authorization despite an outage and later 
 
 test('whole-second merge timestamps do not accept same-second backfilled authorization', async () => {
   let w = await submitted(); w = await engine.observe(w.id, w.revision, observation(w));
-  w = await engine.execute(producer, 'evidence', w.id, proof(), randomUUID());
+  w = await proven(w);
   const mergedAt = w.mergeAuthorization!.at.replace(/\.\d+Z$/, 'Z');
   w = await engine.observe(w.id, w.revision, { ...observation(w), merged: true, mergedAt, mergeSha: 'e'.repeat(40) });
   assert.notEqual(w.stage, 'done');
@@ -758,7 +785,7 @@ test('whole-second merge timestamps do not accept same-second backfilled authori
 
 test('integration publication discards a passing snapshot superseded by failed evidence', async () => {
   let w = await submitted(); w = await engine.observe(w.id, w.revision, observation(w));
-  w = await engine.execute(producer, 'evidence', w.id, proof(), randomUUID());
+  w = await proven(w);
   await store.pool.query("UPDATE jobs SET available_at=now()+interval '1 hour'");
   await store.pool.query('UPDATE jobs SET available_at=now(),locked_until=NULL,token=NULL WHERE work_id=$1', [w.id]);
   const published: { forced?: string; passing: boolean }[] = []; let calls = 0;
@@ -828,7 +855,7 @@ test('assignment identity comes from the authenticated principal and survives re
   } finally { globalThis.Date = originalDate; }
  });
 test('review-provider revisions require operator identity, compare revisions, and invalidate acceptance', async () => {
-  let w = await submitted(); w = await engine.observe(w.id, w.revision, observation(w)); w = await engine.execute(producer, 'evidence', w.id, proof(), randomUUID());
+  let w = await submitted(); w = await engine.observe(w.id, w.revision, observation(w)); w = await proven(w);
   const input = { provider: 'codex', expectedPolicyRevision: 1, reason: 'Operator chooses independent cloud review' };
   await assert.rejects(engine.execute(worker, 'reviewpolicy', w.id, input, randomUUID()), /Operator/);
   w = await engine.execute(operator, 'reviewpolicy', w.id, input, randomUUID());
@@ -887,7 +914,7 @@ test('concurrent task changes schedule a prompt retry without an operator error'
 
  test('a policy change after the actual merge cannot invalidate historical delivery authorization', async () => {
   let w = await submitted(); w = await engine.observe(w.id, w.revision, observation(w));
-  w = await engine.execute(producer, 'evidence', w.id, proof(), randomUUID());
+  w = await proven(w);
   const granted = await engine.acquireMerge(coordinator, w.id, { expectedRevision: w.revision, sha: head, baseSha: base, policyRevision: w.policyRevision }, randomUUID());
   const verified = await engine.verifyMerge(coordinator, w.id, { executionId: granted.execution.id }, { ...observation(w), prState: 'open', draft: false }, randomUUID());
   const authorizedRevision = granted.execution.authorizationRevision;
@@ -914,7 +941,7 @@ test('concurrent task changes schedule a prompt retry without an operator error'
 
  test('whole-second delivery never searches past a same-second policy revocation', async () => {
   let w = await submitted(); w = await engine.observe(w.id, w.revision, observation(w));
-  w = await engine.execute(producer, 'evidence', w.id, proof(), randomUUID());
+  w = await proven(w);
   await delay(1100 - Date.now() % 1000);
   w = await engine.execute(operator, 'reviewpolicy', w.id, { provider: 'codex', expectedPolicyRevision: 1, reason: 'Revoke the prior review policy' }, randomUUID());
   const mergedAt = w.updatedAt.replace(/\.\d+Z$/, 'Z');
@@ -953,7 +980,7 @@ test('draft and closed submissions wait normally and dispatch after becoming rea
 
 test('requirement revisions require stopped ownership, preserve history, and invalidate prior proof', async () => {
   let w = await submitted(); w = await engine.observe(w.id, w.revision, observation(w));
-  w = await engine.execute(producer, 'evidence', w.id, proof(), randomUUID());
+  w = await proven(w);
   const revision = { expectedPolicyRevision: 1, reason: 'Clarify the independent acceptance obligation', criteria: [{ id: 'AC-1', text: 'Revised outcome', proofs: ['integration:claim-safety'] }], dependencies: [], plannedFiles: ['src/'], exclusiveResources: ['staging:account'] };
   await assert.rejects(engine.execute(worker, 'requirements', w.id, revision, randomUUID()), /Operator/);
   await assert.rejects(engine.execute(operator, 'requirements', w.id, revision, randomUUID()), /release/);
@@ -1038,6 +1065,191 @@ test('formal review identities stay excluded after revisions regardless of clock
   assert.equal(w.formalReviewBaseline, undefined);
   w = await engine.observe(w.id, w.revision, { ...observation(w), reviewIds: [100, 101, 102], reviews: [{ ...existing, id: 102 }] });
   assert.equal(w.gates.find(g => g.name === 'review')!.passed, false);
+});
+
+const sha40 = (label: string) => label.padEnd(40, '0');
+function tip(w: Work, candidate: { sha: string; baseSha: string }, extra: Partial<Observation> = {}): Observation {
+  return { clockOffset: { min: 0, max: 0 },
+    candidate: { ...candidate, pr: w.submission!.pr, branch: w.workspaces.at(-1)!.branch, author: 'implementer' },
+    checks: [{ name: 'test', result: 'success', appId: 15368 }, { name: 'typecheck', result: 'success', appId: 15368 }],
+    reviews: [{ reviewer: 'reviewer', sha: candidate.sha, state: 'APPROVED' }], protected: true, mergeable: true,
+    merged: false, mergeSha: null, prState: 'open', draft: false, baseTip: candidate.baseSha,
+    files: ['src/engine.ts'], at: new Date().toISOString(), ...extra };
+}
+async function validated(w: Work, candidate: { sha: string; baseSha: string }, extra: Partial<Observation> = {}) {
+  const observed = await engine.observe(w.id, w.revision, tip(w, candidate, extra));
+  return engine.execute(producer, 'evidence', observed.id, { ...proof(), sha: candidate.sha, baseSha: candidate.baseSha }, randomUUID());
+}
+async function reload(w: Work) { return (await store.list()).find(item => item.id === w.id)!; }
+async function placementOf(w: Work) { return predictQueue(await store.list(), Date.now()).find(entry => entry.id === w.id)!; }
+async function onlyJob(w: Work) {
+  await store.pool.query("UPDATE jobs SET available_at=now()+interval '1 hour'");
+  await store.pool.query('UPDATE jobs SET available_at=now(),locked_until=NULL,token=NULL WHERE work_id=$1', [w.id]);
+}
+function queueAdapter(observation: (w: Work) => Observation, speculation: (w: Work, placement: QueuePlacement) => QueueSpeculation, seen: { key: string; base: string | null; predecessors: string[] }[] = []) {
+  return { seen, adapter: {
+    observe: async (w: Work) => observation(w),
+    publishSpeculativeTip: async (w: Work, placement: QueuePlacement) => {
+      seen.push({ key: w.key, base: placement.predictedBase, predecessors: placement.predecessors });
+      return speculation(w, placement);
+    },
+    publish: async () => { throw new Error('the replaced head must not receive a check publication'); },
+  } as unknown as GitHub };
+}
+const predicted = (w: Work, placement: QueuePlacement, tipSha: string, baseTree: string): QueueSpeculation =>
+  ({ ref: queueRef(w.key), tip: tipSha, base: placement.predictedBase!, baseTree, predecessors: placement.predecessors, policyRevision: w.policyRevision, publishedAt: new Date().toISOString() });
+/**
+ * Graphyard publishes a tip for every entry, the head included: publication is what proves the
+ * validated commit already contains its base. A branch that already sits on its predicted base
+ * publishes its own head, so nothing is rebuilt and nothing is revalidated.
+ */
+async function publishTip(w: Work, observed: { sha: string; baseSha: string }, tipSha: string, baseTree: string, extra: Partial<Observation> = {}) {
+  await onlyJob(w);
+  const run = queueAdapter(item => tip(item, observed, extra), (item, placement) => predicted(item, placement, tipSha, baseTree));
+  await processJob(engine, run.adapter);
+  return run.seen;
+}
+
+test('a queued candidate is validated on the speculative tip it will land, and an earlier merge does not invalidate it', async () => {
+  const main = sha40('a1'), firstHead = sha40('a2'), secondHead = sha40('a3'), secondTip = sha40('a4'), mainTree = sha40('a5'), mergeSha = sha40('a6');
+  let first = await submitted(), second = await submitted();
+  first = await validated(first, { sha: firstHead, baseSha: main });
+  second = await validated(second, { sha: secondHead, baseSha: main });
+  assert.equal((await placementOf(first)).current, false, 'nothing lands until Graphyard has published the tip for it');
+  assert.deepEqual(await publishTip(first, { sha: firstHead, baseSha: main }, firstHead, mainTree), [{ key: first.key, base: main, predecessors: [] }]);
+  first = await reload(first);
+  assert.equal(first.queue!.speculation!.tip, firstHead, 'a branch already on its predicted base publishes its own head as the tip');
+  const head = await placementOf(first), behind = await placementOf(second);
+  assert.equal(head.position, 0); assert.equal(head.predictedBase, main); assert.equal(head.current, true);
+  assert.equal(behind.position, 1); assert.equal(behind.predictedBase, firstHead, 'the entry behind predicts against the tip the head will land');
+  assert.equal(behind.current, false);
+  second = await reload(second);
+  assert.equal(second.mergeAuthorization, null);
+  assert.match(second.gates.find(gate => gate.name === 'merge')!.reasons.join(' '), /position 2 of 2/);
+
+  await onlyJob(second);
+  const { seen, adapter } = queueAdapter(w => tip(w, { sha: secondHead, baseSha: main }), (w, placement) => predicted(w, placement, secondTip, mainTree));
+  await processJob(engine, adapter);
+  assert.deepEqual(seen, [{ key: second.key, base: firstHead, predecessors: [first.key] }]);
+  second = await reload(second);
+  assert.equal(second.queue!.speculation!.tip, secondTip);
+  assert.equal(second.queue!.speculation!.ref, `refs/graphyard/queue/${second.key.toLowerCase()}`);
+  assert.equal((await store.events(second.id)).filter(event => event.kind === 'queue.predicted').length, 1);
+
+  second = await engine.observe(second.id, second.revision, tip(second, { sha: secondTip, baseSha: firstHead }, { baseTip: main, reviews: [{ reviewer: 'reviewer', sha: secondHead, state: 'APPROVED' }] }));
+  assert.equal(second.candidate!.baseSha, firstHead, 'the candidate binds to the predicted base rather than the base branch');
+  assert.equal(second.gates.find(gate => gate.name === 'review')!.passed, false, 'approval of the replaced head does not approve the speculative tip');
+  assert.equal(second.gates.find(gate => gate.name === 'acceptance')!.passed, false, 'proof of the replaced head does not prove the speculative tip');
+  second = await validated(second, { sha: secondTip, baseSha: firstHead }, { baseTip: main });
+  assert.equal(second.gates.find(gate => gate.name === 'acceptance')!.passed, true);
+  assert.match(second.gates.find(gate => gate.name === 'merge')!.reasons.join(' '), /position 2 of 2/, 'a fully validated entry still waits its turn');
+
+  first = await reload(first);
+  const granted = await engine.acquireMerge(coordinator, first.id, { expectedRevision: first.revision, sha: firstHead, baseSha: main, policyRevision: first.policyRevision }, randomUUID());
+  const verified = await engine.verifyMerge(coordinator, first.id, { executionId: granted.execution.id }, tip(first, { sha: firstHead, baseSha: main }), randomUUID());
+  await delay(5); const mergedAt = ((await store.pool.query('SELECT clock_timestamp() AS now')).rows[0].now as Date).toISOString(); await delay(5);
+  first = await engine.observe(first.id, verified.revision, tip(first, { sha: firstHead, baseSha: main }, { merged: true, mergeSha, mergedAt }));
+  assert.equal(first.stage, 'done');
+
+  second = await reload(second);
+  const evidenceBefore = second.evidence.length;
+  second = await engine.observe(second.id, second.revision, tip(second, { sha: secondTip, baseSha: firstHead }, { baseTip: mergeSha, baseTree: mainTree }));
+  assert.equal((await placementOf(second)).position, 0);
+  assert.equal(second.evidence.length, evidenceBefore, 'no new proof was required after the merge ahead of it');
+  assert.ok(second.gates.every(gate => gate.passed), second.gates.flatMap(gate => gate.reasons).join('; '));
+  assert.equal(second.mergeAuthorization!.sha, secondTip);
+  assert.equal(second.mergeAuthorization!.baseSha, firstHead);
+});
+
+test('main advancing outside the queue re-validates the head and re-bases the entries behind it without rework', async () => {
+  const main = sha40('b1'), firstHead = sha40('b2'), secondHead = sha40('b3'), secondTip = sha40('b4'), mainTree = sha40('b5');
+  const outside = sha40('b6'), outsideTree = sha40('b7'), firstTip = sha40('b8'), secondRebase = sha40('b9');
+  let first = await submitted(), second = await submitted();
+  first = await validated(first, { sha: firstHead, baseSha: main });
+  second = await validated(second, { sha: secondHead, baseSha: main });
+  await publishTip(first, { sha: firstHead, baseSha: main }, firstHead, mainTree);
+  first = await reload(first);
+  await onlyJob(second);
+  const initial = queueAdapter(w => tip(w, { sha: secondHead, baseSha: main }), (w, placement) => predicted(w, placement, secondTip, mainTree));
+  await processJob(engine, initial.adapter);
+  second = await validated(await reload(second), { sha: secondTip, baseSha: firstHead }, { baseTip: main });
+  assert.ok(second.queue!.speculation);
+
+  // Someone lands a commit on the managed branch outside the queue.
+  first = await engine.observe(first.id, (await reload(first)).revision, tip(first, { sha: firstHead, baseSha: main }, { baseTip: outside, baseTree: outsideTree }));
+  assert.equal(first.mergeAuthorization, null, 'the stale binding is refused, not reused');
+  assert.match(first.gates.find(gate => gate.name === 'merge')!.reasons.join(' '), /Speculative tip on predicted base/);
+  const waiting = await placementOf(second);
+  assert.equal(waiting.predictedBase, null); assert.equal(waiting.publishable, false);
+  assert.match(waiting.reasons.at(-1)!, /Waiting for .* to publish its speculative tip/, 'only the queue head is re-validated against the new base');
+  assert.equal((await placementOf(first)).publishable, true);
+
+  await onlyJob(first);
+  const headRun = queueAdapter(w => tip(w, { sha: firstHead, baseSha: main }, { baseTip: outside, baseTree: outsideTree }), (w, placement) => predicted(w, placement, firstTip, outsideTree));
+  await processJob(engine, headRun.adapter);
+  assert.deepEqual(headRun.seen, [{ key: first.key, base: outside, predecessors: [] }]);
+  first = await validated(await reload(first), { sha: firstTip, baseSha: outside }, { baseTip: outside });
+  assert.ok(first.gates.every(gate => gate.passed));
+
+  const rebased = await placementOf(second);
+  assert.equal(rebased.predictedBase, firstTip, 'the entry behind is re-predicted onto the new head tip');
+  assert.equal(rebased.publishable, true);
+  await onlyJob(second);
+  const behindRun = queueAdapter(w => tip(w, { sha: secondTip, baseSha: firstHead }, { baseTip: outside }), (w, placement) => predicted(w, placement, secondRebase, outsideTree));
+  await processJob(engine, behindRun.adapter);
+  assert.deepEqual(behindRun.seen, [{ key: second.key, base: firstTip, predecessors: [first.key] }]);
+  second = await reload(second);
+  assert.equal(second.queue!.speculation!.tip, secondRebase);
+  assert.equal(second.reworkRequested, false, 'Graphyard re-based the entry; the worker was not asked to redo anything');
+  assert.equal(second.submission!.epoch, 1); assert.equal(second.workspaces.length, 1);
+  second = await engine.observe(second.id, second.revision, tip(second, { sha: secondRebase, baseSha: firstTip }, { baseTip: outside, reviews: [{ reviewer: 'reviewer', sha: secondTip, state: 'APPROVED' }] }));
+  assert.equal(second.gates.find(gate => gate.name === 'acceptance')!.passed, false, 'the binding made against the superseded tip is refused');
+  assert.equal(second.gates.find(gate => gate.name === 'review')!.passed, false);
+});
+
+test('a failed speculative validation ejects the entry with a reason and re-predicts the queue without it', async () => {
+  const main = sha40('c1'), firstHead = sha40('c2'), secondHead = sha40('c3'), thirdHead = sha40('c4'), thirdTip = sha40('c5'), mainTree = sha40('c6');
+  let first = await submitted(), second = await submitted(), third = await submitted();
+  first = await validated(first, { sha: firstHead, baseSha: main });
+  second = await validated(second, { sha: secondHead, baseSha: main });
+  third = await validated(third, { sha: thirdHead, baseSha: main });
+  await publishTip(first, { sha: firstHead, baseSha: main }, firstHead, mainTree);
+  first = await reload(first);
+  assert.deepEqual((await placementOf(third)).predecessors, [first.key, second.key]);
+
+  second = await engine.observe(second.id, (await reload(second)).revision, tip(second, { sha: secondHead, baseSha: main }, { checks: [{ name: 'test', result: 'failure', appId: 15368 }, { name: 'typecheck', result: 'success', appId: 15368 }] }));
+  assert.equal(second.queue, null);
+  assert.match(second.queueEjection!.reason, /Required CI check test did not pass on speculative tip/);
+  assert.equal(second.queueHistory!.at(-1)!.event, 'ejected');
+  assert.ok((await store.events(second.id)).some(event => event.payload.work.queueEjection?.reason === second.queueEjection!.reason), 'the ejection and its reason are in the append-only history');
+  assert.deepEqual((await placementOf(third)).predecessors, [first.key], 'the entries behind are re-predicted without the ejected entry');
+  assert.equal((await placementOf(third)).predictedBase, firstHead);
+
+  // A repaired candidate returns to the back of the queue; the failed commit cannot re-enter.
+  second = await engine.observe(second.id, second.revision, tip(second, { sha: secondHead, baseSha: main }));
+  assert.equal(second.queue, null);
+  assert.match(second.gates.find(gate => gate.name === 'merge')!.reasons.join(' '), /Ejected from the merge queue/);
+  second = await validated(second, { sha: sha40('c7'), baseSha: main });
+  assert.ok(second.queue); assert.ok(second.queue!.sequence > third.queue!.sequence);
+
+  // No identity can buy a position, reorder the queue, or merge past the head.
+  await assert.rejects(engine.execute(operator, 'queue' as any, third.id, {}, randomUUID()), /Unknown command/);
+  third = await reload(third);
+  await assert.rejects(engine.acquireMerge(operator, third.id, { expectedRevision: third.revision, sha: thirdHead, baseSha: main, policyRevision: third.policyRevision }, randomUUID()), /Merge authorization is no longer current/);
+  await assert.rejects(engine.acquireMerge(coordinator, third.id, { expectedRevision: third.revision, sha: thirdHead, baseSha: main, policyRevision: third.policyRevision }, randomUUID()), /Merge authorization is no longer current/);
+
+  await onlyJob(third);
+  const conflicted = {
+    observe: async (w: Work) => tip(w, { sha: thirdHead, baseSha: main }),
+    publishSpeculativeTip: async () => { throw new SpeculativeConflict(`Speculative merge of ${firstHead.slice(0, 12)} into graphyard/third conflicts and cannot be resolved by Graphyard`); },
+    publish: async () => {},
+  } as unknown as GitHub;
+  await processJob(engine, conflicted);
+  third = await reload(third);
+  assert.equal(third.queue, null);
+  assert.match(third.queueEjection!.reason, /conflicts and cannot be resolved by Graphyard/);
+  assert.equal((await store.events(third.id)).filter(event => event.kind === 'queue.ejected').length, 1);
+  assert.equal(thirdTip.length, 40);
 });
 
 test('agent review policy requires registered reviewer profiles and an operator identity', async () => {
