@@ -1,0 +1,8 @@
+{
+  "name": "cursor-reviewer",
+  "agentName": "review-cursor-1",
+  "kind": "cursor",
+  "agentArgs": [],
+  "approvals": "auto",
+  "environment": {}
+}

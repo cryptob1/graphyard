@@ -6,5 +6,6 @@
   "kind": "codex",
   "credentialFile": "/home/operator/.config/graphyard/workers/codex-1.token",
   "agentArgs": [],
+  "approvals": "auto",
   "environment": {}
 }
