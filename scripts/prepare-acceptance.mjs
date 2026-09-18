@@ -1,7 +1,7 @@
 import { writeFile, mkdir } from 'node:fs/promises';
 import { execFileSync } from 'node:child_process';
 import { resolve } from 'node:path';
-import { contract } from './contracts.mjs';
+import { contract, requireStagedContract } from './contracts.mjs';
 const { GITHUB_REPOSITORY: repository, GH_TOKEN: token, GRAPHYARD_PR: prText, GRAPHYARD_WORK_ID: workId, GRAPHYARD_POLICY_REVISION: revisionText, GRAPHYARD_PROOF: proof } = process.env;
 if (!/^[\w.-]+\/[\w.-]+$/.test(repository ?? '') || !/^\d+$/.test(prText ?? '') || !/^[0-9a-f-]{36}$/.test(workId ?? '') || !/^[1-9]\d*$/.test(revisionText ?? '')) throw new Error('Invalid acceptance input');
 // Resolve the requested proof against this protected checkout before fetching candidate code, so a
@@ -17,7 +17,13 @@ const directory = resolve('candidate'); await mkdir(directory, { recursive: true
 const git = (...args) => execFileSync('git', args, { cwd: directory, stdio: ['ignore', 'pipe', 'pipe'] });
 git('init', '-q'); git('remote', 'add', 'origin', `https://github.com/${repository}.git`);
 // No credentials persist in the candidate build context. Bootstrap runner supports public repos.
-git('fetch', '--no-tags', 'origin', head, base); git('checkout', '--detach', head);
+// Fetch the protected base alone first: the contract must already be staged there, so the
+// change that introduces a contract can never be the change its own trusted proof certifies.
+git('fetch', '--no-tags', 'origin', base);
+requireStagedContract(proof ?? '', base, path => {
+  try { git('cat-file', '-e', `${base}:${path}`); return true; } catch { return false; }
+});
+git('fetch', '--no-tags', 'origin', head); git('checkout', '--detach', head);
 git('-c', 'user.name=Graphyard acceptance', '-c', 'user.email=acceptance@localhost', 'merge', '--no-commit', '--no-ff', base);
 await writeFile('candidate.json', JSON.stringify({ repository, pr: Number(prText), workId, sha: head, baseSha: base, policyRevision: Number(revisionText), testedTree: git('write-tree').toString().trim(), harnessCommit: process.env.GITHUB_SHA, runId: process.env.GITHUB_RUN_ID, runAttempt: process.env.GITHUB_RUN_ATTEMPT }, null, 2));
 console.log('Prepared exact PR head plus base for isolated acceptance.');

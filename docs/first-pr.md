@@ -51,7 +51,11 @@ The exercise job runs candidate code with disposable principals. A separate `gra
 
 ## Adding a trusted contract
 
-Because a trusted run executes only protected source, a contract must reach protected `main` before any work item may require its proof. Land the harness, its registry entry, and its unprivileged CI job as their own change, gated by review, CI and the proofs that already exist; then require the new proof of later work. A dispatch that names a proof the protected checkout does not register is refused in the preparation step, before candidate code is fetched. The CI job for the new contract runs the identical fixed inventory against every candidate, so the change that introduces a contract is still executed end to end — it simply publishes no trusted evidence.
+Because a trusted run executes only protected source, a contract must reach protected `main` before any work item may require its proof. Land the harness, its registry entry, and its unprivileged CI job as their own change, gated by review, CI and the proofs that already exist; then require the new proof of later work.
+
+Preparation enforces that order rather than trusting the dispatch. It first resolves the requested proof against the registry in this protected checkout, before any candidate code is fetched. It then fetches the candidate's base commit alone and refuses unless that base already carries the contract's source file, so the change that introduces a contract can never be the change its own trusted proof certifies. Assigning a new proof to the change that introduces it therefore fails closed instead of producing evidence a candidate effectively wrote for itself.
+
+The CI job for the new contract runs the identical fixed inventory against every candidate, so the change that introduces a contract is still executed end to end — it simply publishes no trusted evidence.
 
 `integration:claim-safety` covers API authorization, competing claims, stale epochs, worker evidence trust, and unfinished dependencies. `integration:herdr-recovery` covers [cross-machine lease recovery](herdr.md#automated-recovery-contract). Neither proves arbitrary product behavior or production delivery, and neither replaces the [two-machine operational drill](coordination.md#two-machine-operational-drill) on real hosts.
 
