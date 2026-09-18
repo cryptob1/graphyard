@@ -146,3 +146,57 @@ Known clean-result courtesy variants observed while dogfooding (including “Kee
 The “Can’t wait for the next one!” compatibility fixture comes from the [authenticated PR #12 result](https://github.com/cryptob1/graphyard/pull/12#issuecomment-5673722335). It adds one exact benign suffix; contradictory continuation, edited results and unknown wording still refuse.
 
 The same contract recognizes the exact `:rocket:` suffix from the [subsequent authenticated PR #12 clean result](https://github.com/cryptob1/graphyard/pull/12#issuecomment-5673779337); emoji followed by findings or other prose is still refused.
+
+## Identity-bound agent review providers
+
+Hard-wiring the review gate to one hosted vendor makes every open item wait on that vendor's quota. Graphyard's review invariant is *an approving identity distinct from the author reviewed this exact head*, not *vendor X reviewed it*. The `agent` provider makes that invariant explicit: a policy lists ordered **reviewer profiles**, each naming an agent runtime and a **registered reviewer GitHub App**. Graphyard dispatches a request bound to head, base and policy revision; the runtime posts its verdict as that App; Graphyard verifies the identity, the binding and the freshness. Codex and formal GitHub policies are untouched by this and keep working exactly as before.
+
+### Register the reviewer App
+
+Each reviewer profile needs its own GitHub App identity — never the Graphyard control-plane App, and never the pull request author. Create one through the same local App-manifest flow, once per reviewer:
+
+```sh
+graphyard github-setup https://your-graphyard-deployment.example --reviewer claude
+```
+
+The manifest requests **Metadata: read**, **Contents: read**, **Pull requests: write** and **Issues: read**. It deliberately requests no `checks` and no `administration` permission, so a reviewer can never publish Graphyard's own `Graphyard / merge` check or change branch protection. Install it on the managed repository, signed in as an account that is not the pull request author. Credentials land in `.graphyard/github-reviewer-<name>.json` with mode 0600 and are never sent to Graphyard: the reviewer runtime — not the control plane — authenticates as that App.
+
+The final setup page prints the registry entry. Add every reviewer to the server's `GRAPHYARD_REVIEWER_APPS` environment variable, whose shape matches [examples/reviewer-apps.json](../examples/reviewer-apps.json):
+
+```json
+[{ "id": "claude-reviewer", "runtime": "claude", "appId": 1550001, "botUserId": 1550002 }]
+```
+
+Registration is the identity boundary. `appId` and `botUserId` are numeric GitHub identities, not display names or logins; `id` and `runtime` are how policies refer to them. IDs, App IDs and bot user IDs must be unique, and the server refuses to start if a registered reviewer shares the control-plane App ID. A policy can only name a registered reviewer, and `GET /api/status` lists the registered identities and advertises `agent` in `reviewProviders` once at least one is registered and the App holds its dispatch permissions.
+
+### Select reviewer profiles
+
+Profiles are ordered: the first is dispatched, later ones are failover capacity. Each profile names a `runtime` matching its registered App, an optional `mention` for runtimes that are triggered by a pull request mention, and a `timeoutSeconds` (60–86400, default 1800) after which silence counts as exhaustion. See [examples/reviewer-profiles.json](../examples/reviewer-profiles.json) for Cursor, Claude and opencode profiles.
+
+```sh
+graphyard reviewpolicy GY-N agent CURRENT_POLICY_REVISION "Adopt identity-bound agent review" --profiles examples/reviewer-profiles.json
+```
+
+Like every review-policy revision this preserves criteria and CI requirements, increments the policy revision, appends audit history, invalidates prior acceptance evidence, and queues reconciliation. Profile names and reviewer Apps must be unique within one policy, so an accepted verdict is attributable to exactly one profile. Reordering or replacing the profile list is itself a policy revision. Switching back to `github` or `codex` drops the profiles. Workers cannot change policy; operator agents need the existing `policy:review-provider` capability. The dashboard displays the selected provider, the profile order and any failover, and keeps the Codex/GitHub toggle; profiles are set through the CLI or API because they name registered identities.
+
+### The verdict contract
+
+Graphyard posts one request comment through its own App, recording the returned comment ID against the exact head SHA, base SHA, policy revision, dispatched profile and a unique correlation marker. The reviewer runtime replies with exactly one pull request comment, posted as its registered App, containing one line:
+
+```
+<!-- graphyard-verdict:MARKER head:FULL_40_CHAR_SHA verdict:approved -->
+```
+
+`verdict:changes-requested` reports findings and `verdict:usage-limit` reports exhausted quota. Prose around the line is ignored; the line itself is the protocol. Approval additionally requires that the comment was created strictly after the recorded request, is unedited, carries the marker of the *current* request, names the current head, and that the reviewer identity has filed no pull request review and no newer comment since. The recorded request comment must still be present and unedited. Verdict, request, comments and reviews are all reread before approval, and any change refuses. Unknown verdict words, two verdict lines in one comment, malformed markers and conflicting verdicts refuse with an explicit reason instead of being guessed at.
+
+Refusals are deliberately narrow and loud: a verdict posted before the request, for another commit, for another base or policy revision, for a superseded profile, by the control-plane App, by the pull request author's identity, or by any unregistered App is refused. Outstanding native `CHANGES_REQUESTED` reviews still block, exactly as with the other providers. This proves that a registered independent identity approved this exact head — not that every possible defect has been disproved.
+
+### Quota failover
+
+Provider exhaustion is a capacity fact, not an approval. Two signals trigger it: a `verdict:usage-limit` reply from the dispatched profile, or no verdict within that profile's `timeoutSeconds`. Graphyard then records a failover entry — profile, runtime, exhaustion reason, candidate, policy revision, request comment ID and the next profile — as a `review.failover` event, releases the request, and dispatches to the next untried profile on the same candidate. The superseded profile's own verdict can no longer approve that candidate.
+
+Selection is derived from that history, never stored as mutable state, so it is scoped to the exact head, base and policy revision: a rebase, a new base, or a policy revision starts again at the first profile. When every profile is exhausted the review gate stays closed with `Every configured reviewer profile is exhausted for this candidate`; Graphyard never approves work because reviewers ran out. Add reviewer capacity, wait for quota, or select another provider. `graphyard master status` reports the active profile, the failover entries for the current candidate, a `reviewFailover` count, and raises attention when a task has no reviewer capacity left. `graphyard rereview GY-N` clears the current candidate's failover entries and restarts at the first profile; the event ledger keeps every superseded entry, while the work document retains the most recent hundred.
+
+### Limits
+
+The verdict contract is Graphyard's own, so each reviewer runtime needs an integration that authenticates as its App and posts the line — installing the App alone does not make a runtime review anything. A dispatched request is an invitation: a runtime that ignores mentions leaves the gate closed until its timeout converts the silence into failover. Graphyard verifies identity and binding, not review quality, and a runtime with repository write access outside its reviewer App is still outside this boundary. GitHub remains a trusted administration boundary, and the [enforcement boundary](#enforcement-boundary) and merge-broker limits above apply unchanged. Agent review, like Codex review, does not need GitHub's native approval count, so tasks using it rely on the App-bound required check, strict status checks and enforced administrator protection; tasks still using formal GitHub review keep requiring a nonzero approval count, stale-review dismissal and last-push approval.

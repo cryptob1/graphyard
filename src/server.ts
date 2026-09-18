@@ -6,7 +6,7 @@ import { pathToFileURL } from 'node:url';
 import { z } from 'zod';
 import { Store } from './store.js';
 import { Engine, type Command } from './engine.js';
-import { Refusal, demand, type Principal } from './model.js';
+import { Refusal, demand, parseReviewerApps, type Principal } from './model.js';
 import { githubFromEnv, processJob, type GitHub } from './github.js';
 import { Validation } from './validation.js';
 import { defineScenario, scenarios } from './scenarios.js';
@@ -32,6 +32,11 @@ export function server(engine: Engine, credentials: Credential[], github: GitHub
   // by authentication and operator-agent administration. Some embedders pass
   // the repository only through their GitHub adapter.
   engine.repository = repository;
+  // Reviewer identities come from deployment configuration alongside the control-plane App,
+  // so a single parsed registry authorizes both policy validation and provider observation.
+  if (github) { engine.reviewerApps = github.config.reviewerApps ?? []; engine.controlPlaneAppId = github.config.appId; }
+  demand(!engine.reviewerApps.some(app => app.appId === engine.controlPlaneAppId),
+    'A registered reviewer App must be distinct from the Graphyard control-plane App');
   const validation = new Validation(engine, principals.map(p => p.actor), repository);
   const operatorAgents = new OperatorAgents(engine.store, repository, credentials.map(credential => ({ id: credential.id, tokenHash: createHash('sha256').update(credential.token).digest('hex') })));
   engine.operatorAuthorizer = operatorAgents.revalidate.bind(operatorAgents);
@@ -113,9 +118,9 @@ export function server(engine: Engine, credentials: Credential[], github: GitHub
           const jobs = actor.role === 'operator-agent' ? [] : (await engine.store.pool.query('SELECT work_id,available_at,locked_until,attempts,error FROM jobs WHERE error IS NOT NULL ORDER BY available_at LIMIT 50')).rows;
           const githubRepository = github ? await github.reviewRepository() : null;
           const githubPermissions = github ? await github.reviewPermissions() : {};
-          const codexAvailable = !!githubRepository && githubPermissions.pull_requests === 'write' && ['read', 'write'].includes(githubPermissions.issues) && githubPermissions.checks === 'write';
+          const dispatchAvailable = !!githubRepository && githubPermissions.pull_requests === 'write' && ['read', 'write'].includes(githubPermissions.issues) && githubPermissions.checks === 'write';
           const observedAt = (await engine.store.pool.query('SELECT clock_timestamp() AS now')).rows[0].now as Date;
-          return send(200, { actor, repository: repository || null, baseBranch: github?.config.base ?? process.env.GITHUB_BASE_BRANCH ?? 'main', github: !!github, check: 'Graphyard / merge', reviewProviders: codexAvailable ? ['github', 'codex'] : ['github'], githubPermissions, githubRepository, githubAppId: github?.config.appId ?? null, githubInstallationId: github?.config.installationId ?? null, jobs, now: observedAt.toISOString() });
+          return send(200, { actor, repository: repository || null, baseBranch: github?.config.base ?? process.env.GITHUB_BASE_BRANCH ?? 'main', github: !!github, check: 'Graphyard / merge', reviewProviders: ['github', ...(dispatchAvailable ? ['codex'] : []), ...(dispatchAvailable && engine.reviewerApps.length ? ['agent'] : [])], reviewerApps: engine.reviewerApps, githubPermissions, githubRepository, githubAppId: github?.config.appId ?? null, githubInstallationId: github?.config.installationId ?? null, jobs, now: observedAt.toISOString() });
         }
         if (req.method === 'GET' && url.pathname === '/api/work-snapshot') { const snapshot = await engine.store.workSnapshot(); const visibleWork = operatorVisible(snapshot.work); return send(200, { ...snapshot, work: visibleWork, jobs: actor.role === 'operator-agent' ? snapshot.jobs.filter(job => visibleWork.some(work => work.id === job.work_id)) : snapshot.jobs }); }
         if (req.method === 'GET' && url.pathname === '/api/work') return send(200, operatorVisible(await engine.store.list()));
@@ -175,6 +180,7 @@ async function main() {
   const store = new Store(process.env.DATABASE_URL ?? 'postgres://graphyard:graphyard@localhost:5438/graphyard');
   await store.init();
   const engine = new Engine(store, (process.env.GITHUB_CI_APP_IDS ?? '15368').split(',').map(Number));
+  engine.reviewerApps = parseReviewerApps(process.env.GRAPHYARD_REVIEWER_APPS);
   const github = await githubFromEnv();
   const http = server(engine, credentials, github);
   const validation = new Validation(engine, credentials.map(({ token, ...actor }) => actor), github?.config.repository ?? process.env.GITHUB_REPOSITORY ?? '');

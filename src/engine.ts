@@ -2,7 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { Store, save, wakeJob } from './store.js';
 import { workspacePath, pathsOverlap, validBranch } from './workspace.js';
-import { activeLease, admin, operatorCapability, MergeExecutionInProgress, requireCurrent, createSchema, criterionSchema, currentEvidence, resourcesSchema, demand, evaluate, proofSchema, type Principal, type Work, type Observation, type ReviewRequest, type OperatorCapability } from './model.js';
+import { activeLease, admin, assertReviewerProfiles, operatorCapability, MergeExecutionInProgress, requireCurrent, createSchema, criterionSchema, currentEvidence, resourcesSchema, demand, evaluate, exhaustedReviewerProfiles, proofSchema, reviewerProfileFor, reviewerProfileSchema, reviewProviders, reviewProviderOf, type Principal, type ReviewerApp, type ReviewFailover, type Work, type Observation, type ReviewRequest, type OperatorCapability } from './model.js';
 import { resourceConflicts } from './coordination.js';
 
 const epoch = z.number().int().positive();
@@ -13,7 +13,7 @@ const commands = {
   create: createSchema.extend({ reason: z.string().trim().min(1).max(2000).optional() }),
   ready: z.object({ expectedRevision: z.number().int().positive().optional(), reason: z.string().trim().min(1).max(2000).optional() }).strict(),
   requirements: z.object({ expectedPolicyRevision: z.number().int().positive(), reason: z.string().trim().min(1).max(2000), criteria: z.array(criterionSchema).min(1).max(50), dependencies: z.array(z.string().uuid()).max(50), plannedFiles: createSchema.shape.plannedFiles, exclusiveResources: resourcesSchema }).strict(),
-  reviewpolicy: z.object({ provider: z.enum(['github', 'codex']), expectedPolicyRevision: z.number().int().positive(), reason: z.string().trim().min(1).max(2000) }).strict(),
+  reviewpolicy: z.object({ provider: z.enum(reviewProviders), reviewerProfiles: z.array(reviewerProfileSchema).min(1).max(10).optional(), expectedPolicyRevision: z.number().int().positive(), reason: z.string().trim().min(1).max(2000) }).strict(),
   unblock: z.object({ reason: z.string().trim().min(1).max(2000), expectedRevision: z.number().int().positive().optional() }).strict(),
   rework: z.object({ reason: z.string().min(1).max(2000), previousWorkerStopped: z.literal(true) }).strict(),
   recover: z.object({ reason: z.string().min(1).max(2000), previousWorkerStopped: z.literal(true) }).strict(),
@@ -55,6 +55,9 @@ function preserveAssignment(work: Work) {
 }
 export class Engine {
   operatorAuthorizer?: (db: any, now: Date, actor: Principal) => Promise<Principal>;
+  // Reviewer identities and the control-plane App are deployment facts, not client input.
+  reviewerApps: ReviewerApp[] = [];
+  controlPlaneAppId?: number;
   constructor(public store: Store, public ciAppIds: number[] = [15368], public leaseSeconds = 120, public repository = process.env.GITHUB_REPOSITORY ?? '') {}
   async execute(actor: Principal, command: Command, id: string | null, input: unknown, key: string) {
     demand(Object.hasOwn(commands, command), 'Unknown command', 404);
@@ -79,6 +82,7 @@ export class Engine {
         if (actor.role === 'operator-agent') {
           authorizeOperatorCommand(actor, command, data, undefined, this.repository);
         } else admin(actor);
+        if (reviewProviderOf(data.policy) === 'agent') assertReviewerProfiles(data.policy.reviewerProfiles, this.reviewerApps, this.controlPlaneAppId);
         demand(data.dependencies.every((dep: string) => all.some(w => w.id === dep)), 'Unknown dependency');
         demand(new Set(data.criteria.map((ac: { id: string }) => ac.id)).size === data.criteria.length, 'Criterion IDs must be unique');
         const scenarioRequirements: Work['scenarioRequirements'] = [];
@@ -110,16 +114,28 @@ export class Engine {
       if (command !== 'create' && command !== 'settle' && command !== 'recover') demand(work.stage !== 'done', 'Delivered work is immutable; create a follow-up task');
       if (command === 'rereview') {
         if (actor.role !== 'admin') { demand(actor.role === 'worker', 'Worker or operator required', 403); activeLease(work, actor, data.epoch, now); }
-        demand(work.policy.review && work.policy.reviewProvider === 'codex' && work.submission && !work.observation?.merged, 'Open submitted work with Codex review policy required');
+        demand(work.policy.review && ['codex', 'agent'].includes(reviewProviderOf(work.policy)) && work.submission && !work.observation?.merged, 'Open submitted work with a dispatched review provider is required');
         work.reviewRequest = null; work.observation = null; work.mergeAuthorization = null;
+        // Re-review restarts failover at the first configured profile; the event ledger keeps
+        // every superseded exhaustion record for this candidate.
+        work.reviewFailovers = (work.reviewFailovers ?? []).filter(failover => failover.sha !== work.candidate?.sha
+          || failover.baseSha !== work.candidate?.baseSha || failover.policyRevision !== work.policyRevision);
       }
       if (command === 'reviewpolicy') {
         if (actor.role !== 'operator-agent') admin(actor);
         demand(!work.observation?.merged, 'Merged work requires a follow-up task');
         demand(work.policy.review, 'Task must already require review');
         demand(work.policyRevision === data.expectedPolicyRevision, 'Policy revision changed; reload before revising');
-        demand((work.policy.reviewProvider ?? 'github') !== data.provider, 'Review provider is already selected');
-        work.policy = { ...work.policy, reviewProvider: data.provider };
+        demand(data.provider === 'agent' ? !!data.reviewerProfiles : !data.reviewerProfiles, 'Reviewer profiles are required for agent review and rejected for every other provider');
+        demand(reviewProviderOf(work.policy) !== data.provider || JSON.stringify(work.policy.reviewerProfiles ?? null) !== JSON.stringify(data.reviewerProfiles ?? null), 'Review provider and reviewer profiles are already selected');
+        if (data.provider === 'agent') {
+          assertReviewerProfiles(data.reviewerProfiles, this.reviewerApps, this.controlPlaneAppId);
+          demand(new Set(data.reviewerProfiles.map((profile: { name: string }) => profile.name)).size === data.reviewerProfiles.length
+            && new Set(data.reviewerProfiles.map((profile: { reviewerApp: string }) => profile.reviewerApp)).size === data.reviewerProfiles.length,
+          'Reviewer profile names and reviewer Apps must be unique');
+        }
+        const { reviewerProfiles: _previousProfiles, ...rest } = work.policy;
+        work.policy = { ...rest, reviewProvider: data.provider, ...(data.provider === 'agent' ? { reviewerProfiles: data.reviewerProfiles } : {}) };
         work.policyRevision++;
         work.formalReviewResetRequired = true; work.formalReviewBaseline = undefined;
         work.observation = null; work.mergeAuthorization = null; work.reviewRequest = null;
@@ -364,10 +380,55 @@ export class Engine {
       const work = all.find(w => w.id === id);
       requireCurrent(work && work.revision === expectedRevision && work.stage !== 'done' && !work.observation?.merged, 'Task changed during review dispatch');
       demand(!work.mergeExecution || Date.parse(work.mergeExecution.expiresAt) <= now.getTime(), 'Merge execution is active');
-      demand(work.policy.review && work.policy.reviewProvider === 'codex' && request.sha === work.candidate?.sha && request.baseSha === work.candidate?.baseSha && request.policyRevision === work.policyRevision, 'Review request candidate or policy changed');
+      const provider = reviewProviderOf(work.policy);
+      demand(work.policy.review && (request.provider ?? 'codex') === provider && ['codex', 'agent'].includes(provider)
+        && request.sha === work.candidate?.sha && request.baseSha === work.candidate?.baseSha && request.policyRevision === work.policyRevision, 'Review request candidate or policy changed');
+      if (provider === 'agent') {
+        const selected = reviewerProfileFor(work);
+        demand(!!selected && selected.name === request.profile && selected.reviewerApp === request.reviewerApp && !!request.marker,
+          'Review request does not name the currently selected reviewer profile');
+      }
       work.reviewRequest = request;
-      if (work.observation) work.observation.agentReview = { provider: 'codex', sha: request.sha, approved: false, reason: 'Waiting for dispatched Codex review' };
+      if (work.observation) work.observation.agentReview = provider === 'agent'
+        ? { provider: 'agent', sha: request.sha, approved: false, profile: request.profile, reviewerApp: request.reviewerApp, reason: `Waiting for reviewer profile ${request.profile} to post a verdict through its registered App` }
+        : { provider: 'codex', sha: request.sha, approved: false, reason: 'Waiting for dispatched Codex review' };
       this.evaluate(work, all, now); await save(db, work, 'github', 'review.requested', now); return work;
+    });
+  }
+  /**
+   * Record provider exhaustion for the dispatched reviewer profile and release the request so
+   * the next configured profile is selected. Failing over never approves anything: when no
+   * profile remains, the review gate stays closed with the exhaustion recorded in history.
+   */
+  async failoverReviewRequest(id: string, expectedRevision: number, input: { exhaustion: 'usage-limit' | 'timeout'; reason: string }, jobToken: string) {
+    return this.store.transaction(async (db, now) => {
+      const job = (await db.query('SELECT 1 FROM jobs WHERE work_id=$1 AND token=$2 AND locked_until>$3', [id, jobToken, now])).rows[0];
+      requireCurrent(job, 'Integration job lease expired or superseded');
+      const all: Work[] = (await db.query('SELECT document FROM work_items ORDER BY number')).rows.map(r => r.document);
+      const work = all.find(w => w.id === id);
+      requireCurrent(work && work.revision === expectedRevision && work.stage !== 'done' && !work.observation?.merged, 'Task changed during review failover');
+      demand(!work.mergeExecution || Date.parse(work.mergeExecution.expiresAt) <= now.getTime(), 'Merge execution is active');
+      const request = work.reviewRequest;
+      demand(work.policy.review && reviewProviderOf(work.policy) === 'agent' && request?.provider === 'agent'
+        && request.sha === work.candidate?.sha && request.baseSha === work.candidate?.baseSha && request.policyRevision === work.policyRevision,
+      'Review failover requires a current agent review request');
+      const dispatched = reviewerProfileFor(work);
+      demand(dispatched && dispatched.name === request!.profile && dispatched.reviewerApp === request!.reviewerApp, 'Review failover must name the currently dispatched reviewer profile');
+      const exhausted = new Set([...exhaustedReviewerProfiles(work), dispatched!.name]);
+      const next = (work.policy.reviewerProfiles ?? []).find(profile => !exhausted.has(profile.name)) ?? null;
+      const failover: ReviewFailover = { profile: dispatched!.name, reviewerApp: dispatched!.reviewerApp, runtime: dispatched!.runtime,
+        exhaustion: input.exhaustion, reason: input.reason.slice(0, 500), at: now.toISOString(), sha: request!.sha, baseSha: request!.baseSha,
+        policyRevision: request!.policyRevision, requestCommentId: request!.commentId, nextProfile: next?.name ?? null };
+      // The complete sequence stays in the append-only ledger; the document keeps recent entries.
+      work.reviewFailovers = [...(work.reviewFailovers ?? []), failover].slice(-100);
+      work.reviewRequest = null;
+      if (work.observation) work.observation.agentReview = { provider: 'agent', sha: failover.sha, approved: false,
+        profile: next?.name, reviewerApp: next?.reviewerApp,
+        reason: next ? `Reviewer profile ${failover.profile} is exhausted (${failover.exhaustion}); Graphyard failed over to ${next.name}`
+          : `Every configured reviewer profile is exhausted for this candidate; the last was ${failover.profile} (${failover.exhaustion})` };
+      this.evaluate(work, all, now);
+      await save(db, work, 'github', 'review.failover', now, failover);
+      return work;
     });
   }
   evaluate(work: Work, all: Work[], now: Date) {
@@ -449,7 +510,7 @@ export class Engine {
       work.observation = observation;
       // Snapshot all provider review identities after the revision. Approvals in this
       // first observation never count, regardless of clock skew or future reevaluation.
-      if (work.formalReviewResetRequired && work.policy.reviewProvider !== 'codex' && !work.formalReviewBaseline && observation.reviewIds
+      if (work.formalReviewResetRequired && reviewProviderOf(work.policy) === 'github' && !work.formalReviewBaseline && observation.reviewIds
         && observation.reviewIds.every(id => Number.isSafeInteger(id) && id > 0)
         && observation.reviews.every(r => Number.isSafeInteger(r.id) && observation.reviewIds!.includes(r.id!))) {
         work.formalReviewBaseline = { pr: observation.candidate.pr, policyRevision: work.policyRevision, reviewIds: [...observation.reviewIds] };
