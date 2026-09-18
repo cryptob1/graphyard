@@ -1,5 +1,6 @@
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
+import { z } from 'zod';
 import type { Work, Workspace } from './model.js';
 
 export class PrelaunchContainmentError extends Error {
@@ -129,4 +130,97 @@ export async function settleContainment(
     }
   }
   throw new Error(`Graphyard could not confirm containment settlement after ${attempts} attempts: ${lastError instanceof Error ? lastError.message : String(lastError)}`);
+}
+
+/**
+ * Automatic settlement of a containment quarantine after verified supervisor death.
+ *
+ * The containment model is unchanged: a quarantine is a fence that only proof can lower.
+ * Capability settlement proves the supervisor itself observed its containment empty.
+ * This path proves the same thing from the outside, on the registered host, and refuses
+ * on every unverifiable signal instead of assuming death. What cannot be proven still
+ * requires the operator attestation path.
+ */
+/** Both the worker lease and the launch authority must have been expired this long. */
+export const containmentGraceMs = 120_000;
+/** A host verification older than this is no longer evidence about the present. */
+export const containmentProbeFreshnessMs = 120_000;
+/** Automatic settlement joins two clocks; they must demonstrably agree within this bound. */
+export const containmentClockToleranceMs = 5_000;
+
+export const containmentVerificationSchema = z.object({
+  method: z.literal('linux-proc-systemd'),
+  host: z.string().trim().min(1).max(200),
+  uid: z.number().int().min(0),
+  platform: z.string().trim().min(1).max(40),
+  workspacePath: z.string().startsWith('/').max(1000),
+  observedAt: z.iso.datetime(),
+  /** Local clock minus control-plane clock, bounded by the read that produced it. */
+  clockOffset: z.object({ min: z.number().int().min(-86_400_000).max(86_400_000), max: z.number().int().min(-86_400_000).max(86_400_000) }).strict(),
+  processes: z.array(z.object({ pid: z.number().int().positive(), evidence: z.enum(['command', 'workspace']) }).strict()).max(200),
+  scopes: z.array(z.object({
+    unit: z.string().min(1).max(200), activeState: z.string().min(1).max(40),
+    /** Members a live scope still holds that were not attributed to another assignment. */
+    processes: z.array(z.number().int().positive()).max(200),
+    /** Members that descend from a live supervisor of a different work key or epoch. */
+    attributed: z.array(z.number().int().positive()).max(200).default([]),
+  }).strict()).max(50),
+  /** Privileged host processes outside every containment scope that withheld inspection. */
+  inaccessible: z.number().int().min(0),
+  unverifiable: z.array(z.string().min(1).max(500)).max(50),
+}).strict();
+export type ContainmentVerification = z.infer<typeof containmentVerificationSchema>;
+
+export const containmentAttestation = (key: string) =>
+  `Confirm the previous worker is stopped and use the operator attestation path: rework ${key} --previous-worker-stopped REASON, or recover-containment ${key} --previous-worker-stopped REASON once the work is delivered`;
+
+/**
+ * Pure refusal evaluation, shared by the verifying coordinator and the control plane.
+ * Every check states what it could not prove; an empty result is the only authorization.
+ */
+export function containmentSettlementRefusals(
+  work: Pick<Work, 'containmentQuarantine' | 'lease' | 'workspaces'>,
+  verification: ContainmentVerification,
+  options: { now: number; graceMs?: number; freshnessMs?: number; clockToleranceMs?: number },
+): string[] {
+  const grace = options.graceMs ?? containmentGraceMs;
+  const freshness = options.freshnessMs ?? containmentProbeFreshnessMs;
+  const tolerance = options.clockToleranceMs ?? containmentClockToleranceMs;
+  const now = options.now;
+  const quarantine = work.containmentQuarantine;
+  if (!quarantine) return ['No containment quarantine is recorded for this task'];
+  const refusals: string[] = [];
+  const seconds = (value: number) => Math.round(value / 1000);
+  const workspace = work.workspaces.find(item => item.epoch === quarantine.epoch);
+  if (!workspace) refusals.push(`Epoch ${quarantine.epoch} registered no workspace, so its supervisor has no verifiable host`);
+  else {
+    if (workspace.host !== verification.host) refusals.push(`Verification ran on host ${verification.host}; epoch ${quarantine.epoch} is registered on ${workspace.host}`);
+    if (workspace.path !== verification.workspacePath) refusals.push(`Verification inspected ${verification.workspacePath}; epoch ${quarantine.epoch} is registered at ${workspace.path}`);
+  }
+  if (verification.platform !== 'linux') refusals.push(`Supervisor absence was not established by Linux process and scope inspection; the host reports ${verification.platform}`);
+  if (work.lease && work.lease.epoch !== quarantine.epoch) refusals.push(`A lease for epoch ${work.lease.epoch} supersedes quarantined epoch ${quarantine.epoch}`);
+  // Reconciliation clears an expired lease, so the live record is only sometimes present.
+  // The quarantine retains its own deadline; the later of the two is the fence, and a
+  // quarantine that records neither cannot prove its grace window has passed at all.
+  if (work.lease && !Number.isFinite(Date.parse(work.lease.expiresAt))) refusals.push(`Worker lease for epoch ${work.lease.epoch} carries no readable expiry`);
+  const deadlines = [work.lease?.expiresAt, quarantine.leaseExpiresAt].map(value => value ? Date.parse(value) : NaN).filter(Number.isFinite);
+  const leaseExpiry = deadlines.length ? Math.max(...deadlines) : null;
+  if (leaseExpiry === null) refusals.push(`Quarantined epoch ${quarantine.epoch} records no worker-lease deadline, so its ${seconds(grace)}s grace window cannot be established`);
+  else if (!(leaseExpiry + grace <= now)) refusals.push(`Worker lease for epoch ${quarantine.epoch} has not been expired for the required ${seconds(grace)}s grace window`);
+  const launchExpiry = quarantine.launchExpiresAt ? Date.parse(quarantine.launchExpiresAt) : null;
+  if (launchExpiry !== null && !(launchExpiry + grace <= now)) refusals.push(`Launch authority for epoch ${quarantine.epoch} has not been expired for the required ${seconds(grace)}s grace window`);
+  const observed = Date.parse(verification.observedAt);
+  if (!Number.isFinite(observed)) refusals.push('Host verification carries no readable observation time');
+  else if (observed > now + tolerance) refusals.push('Host verification is dated after the control-plane clock; clocks disagree');
+  else if (now - observed > freshness) refusals.push(`Host verification is older than ${seconds(freshness)}s; verify the host again`);
+  const { min, max } = verification.clockOffset;
+  if (max < min) refusals.push('Host verification reported inconsistent clock bounds');
+  else if (max - min > tolerance) refusals.push(`Verifying host could not bound its clock against the control plane within ${tolerance}ms`);
+  else if (min > tolerance || max < -tolerance) refusals.push(`Verifying host clock differs from the control plane by more than ${tolerance}ms; clocks disagree`);
+  for (const failure of verification.unverifiable) refusals.push(`Host verification was incomplete: ${failure}`);
+  for (const process of verification.processes)
+    refusals.push(`Process ${process.pid} of the contained worker is still present on ${verification.host} (matched by ${process.evidence === 'command' ? 'supervisor command line' : 'assigned workspace'})`);
+  for (const scope of verification.scopes.filter(entry => entry.processes.length))
+    refusals.push(`Containment scope ${scope.unit} is ${scope.activeState} and still holds ${scope.processes.length} process(es) that are not attributed to another assignment`);
+  return refusals;
 }

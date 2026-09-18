@@ -90,7 +90,7 @@ before(async () => {
   database = new EmbeddedPostgres({ databaseDir: await mkdtemp(join(tmpdir(), 'graphyard-delegation-')), user: 'graphyard', password: 'testing-only', port: 15448, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('delegation_test');
   store = new Store('postgres://graphyard:testing-only@127.0.0.1:15448/delegation_test'); await store.init();
-  engine = new Engine(store); engine.roster = roster;
+  engine = new Engine(store); engine.principals = roster;
   http = server(engine, credentials);
   await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));
   url = `http://127.0.0.1:${(http.address() as { port: number }).port}`;
@@ -440,7 +440,7 @@ test('integration:ownership-and-delivery-invariants — Graphyard owns leases, w
   // Watch supervision is what keeps an assignment alive: an assignment whose
   // supervisor stops renewing loses ownership on the server's clock, the loss is
   // recorded as an escalation no worker can clear, and the item is reassignable.
-  const brief = new Engine(store, [15368], 0); brief.roster = roster;
+  const brief = new Engine(store, [15368], 0); brief.principals = roster;
   let unattended = await engine.execute(admin, 'create', null, input('ownership-unattended', 'infrastructure'), id());
   unattended = await engine.execute(admin, 'ready', unattended.id, {}, id());
   unattended = await brief.execute(workerA, 'claim', unattended.id, {}, id());
@@ -622,7 +622,7 @@ test('integration:intake-authority-routing — routine intake is autonomous, hum
 
   // Scoped operator agents: a second control plane bound to a repository, so
   // operator-agent scope is live on the delegation and intake routes.
-  const scopedEngine = new Engine(store, [15368], 120, 'owner/delegation'); scopedEngine.roster = roster;
+  const scopedEngine = new Engine(store, [15368], 120, 'owner/delegation'); scopedEngine.principals = roster;
   const scopedHttp = server(scopedEngine, credentials);
   await new Promise<void>(resolve => scopedHttp.listen(0, '127.0.0.1', resolve));
   const scopedUrl = `http://127.0.0.1:${(scopedHttp.address() as { port: number }).port}`;
@@ -753,7 +753,7 @@ test('unit:dynamic-merge-ordering — order follows dependencies and current con
 
 test('integration:automatic-escalation — every trigger escalates and no lead can suppress it', async () => {
   // Lease loss.
-  const brief = new Engine(store, [15368], 0); brief.roster = roster;
+  const brief = new Engine(store, [15368], 0); brief.principals = roster;
   let lost = await engine.execute(admin, 'create', null, input('escalation-lease', 'product'), id());
   lost = await engine.execute(admin, 'ready', lost.id, {}, id());
   lost = await brief.execute(workerA, 'claim', lost.id, {}, id());
@@ -809,7 +809,7 @@ test('integration:automatic-escalation — every trigger escalates and no lead c
   assert.ok(product.bottlenecks.every(bottleneck => !!bottleneck.reason));
   // A replacement claim is itself the proof of lease loss, so the escalation is
   // recorded in the same transaction that overwrites the expired lease.
-  const expiring = new Engine(store, [15368], 0); expiring.roster = roster;
+  const expiring = new Engine(store, [15368], 0); expiring.principals = roster;
   let replaced = await engine.execute(admin, 'create', null, input('escalation-replacement', 'infrastructure'), id());
   replaced = await engine.execute(admin, 'ready', replaced.id, {}, id());
   replaced = await expiring.execute(workerA, 'claim', replaced.id, {}, id());
@@ -956,7 +956,7 @@ test('integration:bootstrap-compatibility — the single-agent bootstrap flow is
   // A bootstrap roster has no slice leads, no slices, and needs no producer to start.
   validateDelegationPrincipals([admin, workerA]);
   validateDelegationPrincipals([{ ...admin, token: 'o'.repeat(32) }, { ...workerA, token: 'w'.repeat(32) }]);
-  const bootstrap = new Engine(store); bootstrap.roster = [admin, workerA, workerB, workerC, reviewer];
+  const bootstrap = new Engine(store); bootstrap.principals = [admin, workerA, workerB, workerC, reviewer];
   let item = await bootstrap.execute(admin, 'create', null, input('bootstrap-flow'), id());
   assert.equal(item.slice, undefined);
   item = await bootstrap.execute(admin, 'ready', item.id, {}, id());

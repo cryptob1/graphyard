@@ -4,10 +4,10 @@ import { observeCodex } from './codex-review.js';
 import { observeAgentReview } from './agent-review.js';
 import { readFile } from 'node:fs/promises';
 import type { Engine } from './engine.js';
-import { demand, nativeReviewRequired, parseReviewerApps, reviewerProfileFor, reviewProviderOf, type Observation, type ReviewerApp, type ReviewerProfile, type Work, type ReviewRequest } from './model.js';
+import { CHECK_NAME, demand, nativeReviewRequired, parseReviewerApps, reviewerProfileFor, reviewProviderOf, type Observation, type ReviewerApp, type ReviewerProfile, type Work, type ReviewRequest } from './model.js';
+export { CHECK_NAME };
 import { queuePlacement, queueRef, type QueuePlacement, type QueueSpeculation } from './merge-queue.js';
 
-export const CHECK_NAME = 'Graphyard / merge';
 export interface GitHubConfig { repository: string; base: string; appId: number; installationId: number; privateKey: string; reviewerApps?: ReviewerApp[] }
 export class GitHub {
   private token = '';

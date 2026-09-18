@@ -1,0 +1,35 @@
+# Durable Graphyard master coordinator.
+#
+# Install as a systemd *user* unit on the coordinator machine or OS identity:
+#   mkdir -p ~/.config/systemd/user
+#   cp examples/master/graphyard-master.service ~/.config/systemd/user/
+#   # edit WorkingDirectory and ExecStart to your checkout and CLI path
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now graphyard-master
+#   journalctl --user -u graphyard-master -f
+#
+# The loop authenticates with the coordinator credential stored by `master init` outside the
+# repository. Do not add a worker, producer, or operator credential here: the coordinator must not
+# be able to claim work, publish evidence, or revise requirements.
+[Unit]
+Description=Graphyard master coordination loop
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/code/graphyard
+ExecStart=/usr/bin/node %h/code/graphyard/bin/graphyard.mjs master run
+# The loop persists its cursor before and after every action, so a restart resumes rather than
+# repeating. Give it time to finish the action in flight before SIGKILL.
+Restart=always
+RestartSec=10
+TimeoutStopSec=120
+KillSignal=SIGTERM
+StandardOutput=journal
+StandardError=journal
+NoNewPrivileges=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=default.target

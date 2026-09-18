@@ -12,6 +12,7 @@ import { Validation } from './validation.js';
 import { defineScenario, scenarios } from './scenarios.js';
 import { OperatorAgents } from './operator-agent.js';
 import { delegationLimits, delegationSnapshot, producerIndependenceRefusal, recordEvidenceRefusal, recordIntake, recordLeadRuling, recordLeadViolation, validateDelegationPrincipals } from './delegation.js';
+import { ProofGrants } from './proof-grants.js';
 
 export const principalSchema = z.array(z.object({ id: z.string().min(1), role: z.enum(['admin', 'coordinator', 'slice-lead', 'worker', 'producer', 'reader']), token: z.string().min(32), proofs: z.array(z.string()).optional(), displayName: z.string().trim().min(1).max(100).regex(/^[^\u0000-\u001f\u007f]+$/).optional(), runtime: z.string().trim().min(1).max(80).regex(/^[^\u0000-\u001f\u007f]+$/).optional(), slice: z.enum(['product', 'infrastructure', 'docs-experience']).optional(), sessionKind: z.enum(['human', 'ai']).optional() }).strict()).min(1);
 export type Credential = Principal & { token: string };
@@ -24,8 +25,6 @@ export function server(engine: Engine, credentials: Credential[], github: GitHub
   const limits = delegationLimits();
   validateDelegationPrincipals(credentials, limits);
   const principals = credentials.map(({ token, ...actor }) => ({ actor, hash: createHash('sha256').update(token).digest() }));
-  // The engine decides evidence trust and must see the same roster as this server.
-  engine.roster = principals.map(p => p.actor);
   // The engine is constructed with the repository that this control plane is
   // authorized to coordinate.  GITHUB_REPOSITORY is merely a process default
   // (and is automatically set to the CI checkout), so it must not override an
@@ -45,6 +44,11 @@ export function server(engine: Engine, credentials: Credential[], github: GitHub
   const validation = new Validation(engine, principals.map(p => p.actor), repository);
   const operatorAgents = new OperatorAgents(engine.store, repository, credentials.map(credential => ({ id: credential.id, tokenHash: createHash('sha256').update(credential.token).digest('hex') })));
   engine.operatorAuthorizer = operatorAgents.revalidate.bind(operatorAgents);
+  // Proof authority is Graphyard state. The configured registry only identifies which
+  // principals exist and what role each holds; the grant store decides what they may prove.
+  const configured = credentials.map(({ token, ...actor }) => actor);
+  engine.principals = configured;
+  const proofGrants = new ProofGrants(engine.store, configured);
   return createServer(async (req, res) => {
     res.setHeader('X-Content-Type-Options', 'nosniff');
     res.setHeader('Referrer-Policy', 'no-referrer');
@@ -81,6 +85,14 @@ export function server(engine: Engine, credentials: Credential[], github: GitHub
         if (actor.role === 'operator-agent') demand(actor.scope?.repositories.includes(repository), 'Repository is outside operator-agent scope', 403);
         if (url.pathname === '/api/operator-agents' && req.method === 'GET') return send(200, await operatorAgents.list(actor));
         if (url.pathname === '/api/operator-agents' && req.method === 'POST') return send(200, await operatorAgents.setup(actor, JSON.parse((await body(req)).toString()), String(req.headers['idempotency-key'] ?? '')));
+        if (url.pathname === '/api/proof-grants' && req.method === 'GET') return send(200, await proofGrants.list(actor));
+        const grantHistory = url.pathname.match(/^\/api\/proof-grants\/([^/]+)\/history$/);
+        if (grantHistory && req.method === 'GET') return send(200, await proofGrants.history(actor, decodeURIComponent(grantHistory[1])));
+        const grantRoute = url.pathname.match(/^\/api\/proof-grants\/([^/]+)\/(grant|revoke)$/);
+        if (grantRoute && req.method === 'POST') {
+          const data = JSON.parse((await body(req)).toString()), key = String(req.headers['idempotency-key'] ?? ''), target = decodeURIComponent(grantRoute[1]);
+          return send(200, grantRoute[2] === 'grant' ? await proofGrants.grant(actor, target, data, key) : await proofGrants.revoke(actor, target, data, key));
+        }
         const operatorRoute = url.pathname.match(/^\/api\/operator-agents\/([^/]+)\/(configure|rotate|revoke)$/);
         if (operatorRoute && req.method === 'POST') {
           const data = JSON.parse((await body(req)).toString()), key = String(req.headers['idempotency-key'] ?? '');
@@ -114,7 +126,11 @@ export function server(engine: Engine, credentials: Credential[], github: GitHub
         if (url.pathname === '/api/validation/definitions' && req.method === 'GET') return send(200, await validation.definitions(url.searchParams.get('cursor') ?? undefined));
         const candidateRead = url.pathname.match(/^\/api\/validation\/candidate\/([^/]+)$/);
         if (candidateRead && req.method === 'GET') return send(200, await validation.readCandidate(candidateRead[1]));
-        const validationRoute = url.pathname.match(/^\/api\/validation\/(define|build|candidate|request|dispatch|ack|heartbeat|result|cancel|settle|retry)$/);
+        // The host attestor's independent read of what it is about to execute. Read-only,
+        // and refused to the worker and producer credentials that run and collect.
+        const attemptRead = url.pathname.match(/^\/api\/validation\/attempt\/([^/]+)$/);
+        if (attemptRead && req.method === 'GET') return send(200, await validation.attemptAuthority(actor, attemptRead[1]));
+        const validationRoute = url.pathname.match(/^\/api\/validation\/(define|build|candidate|request|dispatch|ack|heartbeat|collection-authority|collection-heartbeat|result|cancel|settle|retry)$/);
         if (validationRoute && req.method === 'POST') {
           const command = validationRoute[1], data = JSON.parse((await body(req)).toString()), key = String(req.headers['idempotency-key'] ?? '');
           const result = command === 'define' ? await validation.define(actor, data, key)
@@ -124,6 +140,8 @@ export function server(engine: Engine, credentials: Credential[], github: GitHub
             : command === 'dispatch' ? await validation.dispatch(actor, data, key)
             : command === 'result' ? await validation.result(actor, data, key)
             : command === 'ack' || command === 'heartbeat' ? await validation.runnerCommand(actor, command, data, key)
+            : command === 'collection-heartbeat' ? await validation.collectionHeartbeat(actor, data, key)
+            : command === 'collection-authority' ? await validation.collectionAuthority(actor, data)
             : await validation.operatorCommand(actor, command as 'cancel' | 'settle' | 'retry', data, key);
           return send(200, result);
         }
@@ -185,7 +203,7 @@ export function server(engine: Engine, credentials: Credential[], github: GitHub
           const raw = await body(req);
           if (attempted === 'evidence' && match[1] && actor.role !== 'worker') {
             const item = (await engine.store.list()).find(w => w.id === match[1] || w.key === match[1]);
-            const dependent = item ? producerIndependenceRefusal(actor, item, engine.roster) : null;
+            const dependent = item ? producerIndependenceRefusal(actor, item, engine.principals) : null;
             if (item && dependent) {
               // An unparsable body is still a recorded refusal; the engine repeats this decision.
               let proof: unknown = null;
@@ -226,6 +244,10 @@ async function main() {
   engine.reviewerApps = parseReviewerApps(process.env.GRAPHYARD_REVIEWER_APPS);
   const github = await githubFromEnv();
   const http = server(engine, credentials, github);
+  // One-time materialization of the deployment allowlist. Operators manage proof authority
+  // inside Graphyard from here on; a later environment edit no longer changes authority.
+  const seeded = await new ProofGrants(store, credentials.map(({ token, ...actor }) => actor)).seed();
+  if (seeded.length) console.log(`Seeded proof grants for ${seeded.map(grant => grant.principalId).join(', ')}`);
   const validation = new Validation(engine, credentials.map(({ token, ...actor }) => actor), github?.config.repository ?? process.env.GITHUB_REPOSITORY ?? '');
   await validation.expireArtifacts();
   await validation.reconcile(true);

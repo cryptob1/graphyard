@@ -7,10 +7,10 @@ All control-plane endpoints except `/healthz` require `Authorization: Bearer TOK
 | Role | Permissions |
 | --- | --- |
 | `admin` | Create/release work, participate as a worker, attest manual proofs |
-| `coordinator` | Read work and integration state for master-agent routing; acquire, verify, or cancel only the engine's bounded merge execution authority |
-| `operator-agent` | Only explicitly configured intent/policy capabilities within a server-enforced repository/work allowlist; never leases, evidence, identity administration, or merge execution |
+| `coordinator` | Read work and integration state for master-agent routing; acquire, verify, or cancel only the engine's bounded merge execution authority; settle a containment quarantine whose supervisor it has verified dead on the registered host |
+| `operator-agent` | Only explicitly configured intent/policy capabilities (`intent:create`, `intent:ready`, `intent:unblock`, `policy:requirements`, `policy:review-provider`, `policy:bootstrap`) within a server-enforced repository/work allowlist; never leases, evidence, identity administration, or merge execution |
 | `worker` | Claim work, renew/release own lease, register workspace, report blockers, submit implementation, submit untrusted assertions |
-| `producer` | Submit evidence; only configured `proofs` are trusted |
+| `producer` | Submit evidence; only proof names authorized by a live Graphyard grant are trusted |
 | `reader` | Inspect work, status, events |
 
 Except for operator-agents, all roles can read engineering metadata in this single-repository installation and have no per-item read ACL in v0.1. Operator-agent reads are restricted to their server-enforced repository/work scope allowlist. Each independent worker process should have a distinct principal; sharing a token makes processes indistinguishable.
@@ -31,12 +31,14 @@ Errors return JSON `{ "error": "actionable reason" }`. Invalid JSON/schema is `4
 | `GET /api/work` | Work aggregates, in creation order |
 | `GET /api/events?work=UUID` | Latest 300 events for one item; omit filter for latest global events |
 | `GET /api/delegation` | Slices, leads, engineers, workers, reviewers and bottlenecks; filtered by operator-agent scope |
+| `GET /api/proof-grants` | Live proof authority per principal, and the grant records behind it |
+| `GET /api/proof-grants/ID/history` | Append-only grant history for one principal |
 
 The initial list API is unpaginated. Do not use it as an unlimited analytics export. Event payload snapshots can reconstruct historical item revisions; full archival/export pagination is future work.
 
 ## Work commands
 
-Create with `POST /api/work` and the structure in [examples/work.json](../examples/work.json). Required fields are `title` and nonempty `criteria`; each criterion requires a unique `AC-N` ID, text, and at least one proof. The policy defaults to checks `test` and `typecheck`, plus independent review. Dependencies refer to existing UUIDs. Operator requirement revisions explicitly reject cycles. Optional `exclusiveResources` reserves named resources during active ownership; `plannedFiles` supplies advisory overlap scopes.
+Create with `POST /api/work` and the structure in [examples/work.json](../examples/work.json). Required fields are `title` and nonempty `criteria`; each criterion requires a unique `AC-N` ID, text, and at least one proof, and may carry an operator-only `bootstrap` declaration. The policy defaults to checks `test` and `typecheck`, plus independent review. Dependencies refer to existing UUIDs. Operator requirement revisions explicitly reject cycles. Optional `exclusiveResources` reserves named resources during active ownership; `plannedFiles` supplies advisory overlap scopes.
 
 Human-only intake origins additionally require a credential declaring `sessionKind: "human"`; routine origins are unchanged. `POST /api/intake` records a backlog intake item and `POST /api/work/UUID/lead-ruling` records a slice-lead ruling; both require `Idempotency-Key` and replay the original result, so a lost response never duplicates immutable history. See [slice-lead delegation](delegation.md).
 
@@ -44,12 +46,13 @@ Other commands use `POST /api/work/UUID/COMMAND` (display keys also work):
 
 | Command | JSON body |
 | --- | --- |
-| `requirements` | Full criteria, dependencies, plannedFiles, exclusiveResources, expectedPolicyRevision and reason; operator only, see [coordination](coordination.md) |
+| `requirements` | Full criteria, dependencies, plannedFiles, exclusiveResources, expectedPolicyRevision and reason; operator only, see [coordination](coordination.md). A criterion may carry `bootstrap`, see [below](#bootstrap-mode-for-a-change-that-introduces-its-own-proof-harness) |
 | `ready` | Admin: `{}`. Operator-agent: `{"expectedRevision":12,"reason":"Requirements approved"}` with the current work revision and a nonblank audit reason. |
 | `unblock` | Admin: `{"reason":"Contract verified"}`. Operator-agent: `{"expectedRevision":12,"reason":"Contract verified"}` with the current work revision and a nonblank audit reason. |
 | `resolve` | `{"trigger":"security-concern","expectedRevision":12,"reason":"Dependency change reviewed"}` naming one standing escalation trigger, the current work revision, and a nonblank audit reason; admin credentials declaring `sessionKind: "human"` only |
 | `rework` | `{"reason":"Retry implementation","previousWorkerStopped":true}`; operator only |
 | `recover` | `{"reason":"Verified delivered worker stopped","previousWorkerStopped":true}`; operator only, delivered quarantine only |
+| `autosettle` | `{"epoch":1,"settlementHash":"...","reason":"Supervisor verified dead","verification":{...}}`; coordinator or operator, see [automatic containment settlement](#automatic-containment-settlement) |
 | `claim` | `{}`; returns current lease and epoch |
 | `heartbeat` | `{"epoch":1}` |
 | `release` | `{"epoch":1}` |
@@ -73,6 +76,27 @@ Run `watch` from the registered workspace on its registered host. Every automati
 Submitted work continues through gates without an active implementation lease. To reassign submitted work, an operator must stop the previous process and request `rework`. This clears ownership and closes the build gate while preserving PR attribution. Clearing a lease that was still held records a `lease-loss` escalation naming that worker and epoch, because no later reconciliation or claim can observe a lease this path has already removed; the attestation authorizes the reassignment, not the silence, and the escalation refuses the merge gate until a declared human session resolves it. A new claim gets a higher epoch and must register the same PR branch in a fresh host/path. Resubmission closes the rework request. Rework of an observed merged item is refused; create a follow-up instead.
 
 Foreground quarantine now also records a durable startup acknowledgement before process creation. `watch` transactionally acknowledges the exact live epoch, settlement hash, and resource fence with a stable request key, and only a confirmed response permits spawn. That transaction records a separate 120-second launch-authority deadline, longer than the acknowledgement client's three bounded 30-second HTTP attempts and retry delays. Rework cannot clear the quarantine until both its lease and launch authority have expired, so an acknowledgement response still in flight cannot authorize a stale later spawn. The supervisor measures the returned authority against monotonic elapsed request time and refuses spawn if it is no longer valid. A crashed supervisor therefore has a bounded recovery path: after both deadlines expire, an operator who has stopped the supervisor may use the existing stopped-worker rework attestation to clear the fence.
+
+## Automatic containment settlement
+
+A supervisor that dies without settling (a crashed process, an exhausted provider account) leaves an epoch-bound quarantine that no capability can lower, because the capability died with it. The terminal path is an operator attestation. A coordinator that can *prove* the supervisor is gone may settle it instead, with the proof recorded.
+
+`POST /api/work/UUID/autosettle` requires the coordinator or operator role and carries the quarantine's epoch and settlement hash, an audit reason, and a host verification record. The control plane re-checks everything it can check itself and never trusts the report for those facts:
+
+- the quarantine still exists, at exactly that epoch and settlement hash;
+- no lease of another epoch supersedes it;
+- the worker lease and the launch authority have each been expired for at least a 120-second grace window, longer than the acknowledgement client's bounded attempts, so an in-flight response can never authorize a later spawn. Reconciliation clears an expired lease record, so the quarantine retains the lease deadline itself: it is written when the quarantine is established and moves forward with every renewal of that epoch's lease, and the later of the retained and live deadlines is the one the window is measured from. A quarantine that records no lease deadline at all cannot establish its window and refuses;
+- the verification names the host and path registered for that epoch;
+- the verification was observed within the last 120 seconds, is not dated after the control-plane clock, and reports clock bounds that agree with it within five seconds;
+- the verification reports Linux process and systemd scope inspection that found no surviving process, no containment scope holding processes of the assigned workspace, and no signal it failed to collect.
+
+The verifying host collects that record from two independent readings. It reads `/proc` for any process whose command line is the `watch` invocation of this work key and epoch — readable for every process regardless of its owner, which is what makes supervisor absence provable — and, among its own user's processes, for any whose working directory is inside the assigned workspace. It then queries its systemd user manager for `graphyard-watch-*.scope` units and resolves the members of every live scope.
+
+A scope unit is named for the PID that created it, never for the work key, so the unit name cannot say whose assignment a live scope is. Every member a live scope still holds therefore fences this quarantine unless that member is positively attributed to a *different* live assignment: a contained worker descends from the supervisor that created its scope, and both parentage and command lines are readable for every process, so the probe follows a member's ancestry until it reaches a `watch KEY EPOCH --` supervisor and reads the assignment from it. Only a different work key or epoch attributes the member elsewhere. A working directory outside the assigned workspace proves nothing on its own — a worker may `chdir` anywhere — and neither does an unreadable one; an orphan reparented away from its dead supervisor, a chain this user cannot follow, and a member whose command line cannot be read are all held, not excused. The member's own working directory still counts against it: one inside the assigned workspace fences regardless of ancestry.
+
+An unreachable systemd user manager, a failed scope, unit, or cgroup query, an unreadable command line, a non-Linux host, or a still-present process is reported as an unverifiable signal, and any live scope member that was not attributed to another assignment is reported as held. Every unverifiable signal refuses settlement and directs the operator to the attestation path; only an empty refusal list authorizes it. Privileged host processes outside every containment scope withhold their working directory from this user; because the containment cgroup, not a directory guess, is what holds a contained worker, they are counted in the record as `inaccessible` rather than treated as either a survivor or a missing signal.
+
+Settlement clears the quarantine and nothing else: the lease, gates, candidate, evidence, observation, merge authority, and delivery snapshot are untouched, and a submitted implementation still requires operator rework before reassignment. The verification and its reason are appended to the event ledger. This path is scoped to what it can observe: a supervisor started by another user, on another host, or outside the coordinator's systemd user manager cannot be verified this way, and remains the operator attestation's responsibility.
 
 ## Workspaces
 
@@ -105,9 +129,71 @@ The quarantine and live lease form the final launch fence. Its idempotent contro
 
 SHA fields are full 40-character lowercase Git SHAs. Results are `pass` or `fail`. Counts must be nonnegative integers. For manual acceptance, executed means the number of criteria actually inspected, not a fabricated test count.
 
-The server supplies evidence ID, identity, timestamp, and trust. Clients cannot set `trusted` or `producer`. Unknown fields are rejected. A producer may submit a non-allowlisted proof, but it remains untrusted. A producer is a trust boundary, not a guarantee that its test was well designed.
+The server supplies evidence ID, identity, timestamp, and trust. Clients cannot set `trusted` or `producer`. Unknown fields are rejected. A producer may submit an unauthorized proof, but it remains untrusted. A producer is a trust boundary, not a guarantee that its test was well designed.
+
+### Proof authority
+
+Trust is decided against the live grant set inside each mutation transaction, never against process configuration. `POST /api/proof-grants/ID/grant` and `POST /api/proof-grants/ID/revoke` take `{ "patterns": [...], "reason": "...", "expectedRevision": N }` and require the `admin` role; `expectedRevision` is optional and refuses a stale write when supplied. A pattern is an exact proof name, a whole kind such as `integration:*`, or a bounded prefix such as `manual:gy-43/*`; nothing else parses. Grants apply only to `producer` principals — `worker`, `reader`, `coordinator` and `operator-agent` are refused with `403` — while `admin` holds the `manual:*` lane by role. Validation collector registrations are bounded by the same live authority, so revoking a grant immediately withdraws a collector's scope. Environment allowlists seed the grant store once at startup and decide nothing afterwards. See [Proof authority grants](operations.md#proof-authority-grants).
+
+Work creation and every requirement revision record `proofGaps`: the required proof names that had no authorized producer at that moment. A nonempty list means the acceptance gate cannot be satisfied by anyone, and it is visible in `graphyard status`, `graphyard diagnose`, and the dashboard before the item is dispatched.
 
 All required proof names must pass. Evidence is selected for the exact head/base/policy tuple. A later matching failure supersedes an earlier pass. Stale evidence is retained for audit without satisfying the current candidate.
+
+## Bootstrap mode for a change that introduces its own proof harness
+
+A criterion whose proof does not yet exist cannot be proven by the change that creates it: the
+protected harness refuses to run against a base that lacks the contract, so the item stalls. An
+operator may declare that one criterion in **bootstrap mode**. The proof is deferred for this
+candidate only and is never dropped.
+
+```json
+{
+  "id": "AC-1",
+  "text": "Herdr recovery is proven end to end",
+  "proofs": ["integration:herdr-recovery"],
+  "bootstrap": {
+    "reason": "This candidate introduces the herdr-recovery harness the proof needs",
+    "contractPaths": ["src/herdr/recovery.ts"]
+  }
+}
+```
+
+`reason` is required and nonblank. `contractPaths` names the contract the deferred proof belongs
+to, as exact paths or directory prefixes ending `/`, `/*` or `/**`. Every contract path must lie
+inside the item's own `plannedFiles`, so an operator cannot bind an obligation to a contract this
+change does not own. Contract paths must be unique.
+
+A criterion whose proofs include an `e2e:` name cannot use bootstrap mode: an E2E proof pins a
+scenario revision, environment, and hash on its own work item, and an inherited obligation carries
+no pin. Sequence those through the scenario registry instead.
+
+The declaration is accepted on `create` and on `requirements`. It requires the `policy:bootstrap`
+capability: an operator-agent holding only `policy:requirements` is refused, and workers cannot
+reach either command. `declaredBy`, `declaredAt`, and the declaring `policyRevision` are stamped
+from the authenticated actor and the server clock; a client that submits them is rejected. A later
+revision that repeats an unchanged declaration keeps the original attribution. Removing `bootstrap`
+strengthens the gate and needs no extra capability. Every declaration, with its reason, is in
+append-only history.
+
+**What the gate does.** The acceptance gate stops demanding the deferred criterion's proofs for
+this candidate. Review, the required CI checks, the merge queue, and every other criterion's proofs
+still gate it exactly as before. A bootstrap candidate with no review or a failing check does not
+advance.
+
+**What is owed.** The deferred proof becomes an obligation on its contract paths, derived from the
+work documents rather than asserted anywhere. Any later item whose `plannedFiles` overlap those
+contract paths inherits the proof as a required criterion, and its acceptance gate reports
+`Bootstrap obligation inherited from GY-N AC-M`. The inheriting change cannot defer it again: a
+second `bootstrap` declaration over an inherited proof is refused, and the inherited requirement is
+evaluated regardless of what that item declares.
+
+An obligation is discharged only when some change is delivered with trusted, passing, complete
+evidence for that proof bound to its merged candidate and policy — the same standard as any other
+proof. No operator or administrator command retires one.
+
+`GET /api/work-snapshot` carries the declarations on each criterion. `graphyard obligations` lists
+every outstanding obligation and who inherits it, and `graphyard diagnose GY-N` reports the item's
+own deferrals and inherited obligations.
 
 ## GitHub webhook
 

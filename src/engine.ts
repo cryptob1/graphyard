@@ -1,9 +1,11 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { Store, save, wakeJob } from './store.js';
+import { authorizedForProof, unauthorizedProofs } from './proof-grants.js';
 import { workspacePath, pathsOverlap, validBranch } from './workspace.js';
-import { activeLease, admin, assertReviewerProfiles, operatorCapability, escalationTriggers, MergeExecutionInProgress, raiseEscalation, releaseLeadHold, resolveEscalation, standingEscalations, requireCurrent, createSchema, criterionSchema, currentEvidence, resourcesSchema, demand, evaluate, exhaustedReviewerProfiles, proofSchema, reviewerProfileFor, reviewerProfileSchema, reviewProviders, reviewProviderOf, type Principal, type ReviewerApp, type ReviewFailover, type Work, type Observation, type ReviewRequest, type OperatorCapability } from './model.js';
+import { activeLease, admin, assertReviewerProfiles, operatorCapability, escalationTriggers, MergeExecutionInProgress, raiseEscalation, releaseLeadHold, resolveEscalation, standingEscalations, requireCurrent, createSchema, criterionSchema, currentEvidence, inheritedObligations, pathScopeContains, requiredProofs, resourcesSchema, demand, evaluate, exhaustedReviewerProfiles, proofSchema, reviewerProfileFor, reviewerProfileSchema, reviewProviders, reviewProviderOf, type Criterion, type Principal, type ReviewerApp, type ReviewFailover, type Work, type Observation, type ReviewRequest, type OperatorCapability } from './model.js';
 import { resourceConflicts } from './coordination.js';
+import { containmentAttestation, containmentSettlementRefusals, containmentVerificationSchema } from './quarantine.js';
 import { activeEngineers, delegationLimits, implementerIdentities, leadMay, producerIndependenceRefusal, sessionKind } from './delegation.js';
 import { queueHistoryLimit, type QueueSpeculation } from './merge-queue.js';
 
@@ -40,6 +42,7 @@ const commands = {
   quarantine: z.object({ epoch, settlementHash: z.string().regex(/^[a-f0-9]{64}$/) }).strict(),
   launch: z.object({ epoch, settlementHash: z.string().regex(/^[a-f0-9]{64}$/) }).strict(),
   settle: z.object({ epoch, settlementToken: z.string().regex(/^[a-f0-9]{64}$/) }).strict(),
+  autosettle: z.object({ epoch, settlementHash: z.string().regex(/^[a-f0-9]{64}$/), reason: z.string().trim().min(1).max(2000), verification: containmentVerificationSchema }).strict(),
   release: z.object({ epoch }).strict(),
   workspace: z.object({ epoch, host: z.string().trim().min(1).max(200), path: z.string().startsWith('/').max(1000).refine(p => !/[\u0000-\u001f]/.test(p), 'Invalid path').transform(workspacePath), branch: z.string().max(200).refine(validBranch, 'Invalid Graphyard branch name') }).strict(),
   submit: z.object({ epoch, pr: z.number().int().positive() }).strict(),
@@ -70,14 +73,56 @@ function preserveAssignment(work: Work) {
   if (work.lease && (!work.lastAssignment || work.lastAssignment.epoch < work.lease.epoch))
     work.lastAssignment = { owner: work.lease.owner, epoch: work.lease.epoch };
 }
+
+// A quarantine outlives the lease that raised it: reconciliation clears an expired lease,
+// and release, rework and changed requirements clear a live one. The deadline automatic
+// settlement measures its grace window from is therefore retained on the quarantine, which
+// only proof removes. It only ever moves forward, and only for the quarantined epoch.
+function retainQuarantineFence(work: Work) {
+  const quarantine = work.containmentQuarantine;
+  if (!quarantine || !work.lease || work.lease.epoch !== quarantine.epoch) return;
+  const retained = quarantine.leaseExpiresAt ? Date.parse(quarantine.leaseExpiresAt) : -Infinity;
+  const live = Date.parse(work.lease.expiresAt);
+  if (Number.isFinite(live) && !(live <= retained)) quarantine.leaseExpiresAt = work.lease.expiresAt;
+}
 export class Engine {
   operatorAuthorizer?: (db: any, now: Date, actor: Principal) => Promise<Principal>;
-  // Configured roster, used to refuse trust minted by lead or slice-bound identities.
-  roster: Principal[] = [];
+  // The configured credential registry, used to report which required proof names
+  // currently have an authorized producer. Authority itself lives in the grant store.
+  principals: Principal[] = [];
   // Reviewer identities and the control-plane App are deployment facts, not client input.
   reviewerApps: ReviewerApp[] = [];
   controlPlaneAppId?: number;
   constructor(public store: Store, public ciAppIds: number[] = [15368], public leaseSeconds = 120, public repository = process.env.GITHUB_REPOSITORY ?? '') {}
+  /**
+   * Bootstrap deferral is an operator act. It requires the explicit policy:bootstrap capability,
+   * a reason, and a contract scope inside the task's own planned files. The audit fields are
+   * stamped from the authenticated actor and the server clock, never taken from the request, and
+   * an unchanged declaration keeps its original attribution across later revisions.
+   */
+  private declareBootstrap(actor: Principal, data: any, previous: Criterion[], policyRevision: number, now: Date, work?: Work): Criterion[] {
+    return data.criteria.map((ac: any): Criterion => {
+      if (!ac.bootstrap) return { id: ac.id, text: ac.text, proofs: ac.proofs };
+      const prior = previous.find(existing => existing.id === ac.id)?.bootstrap;
+      const unchanged = !!prior && prior.reason === ac.bootstrap.reason && JSON.stringify(prior.contractPaths) === JSON.stringify(ac.bootstrap.contractPaths);
+      if (!unchanged) operatorCapability(actor, 'policy:bootstrap', work, this.repository);
+      // An E2E proof pins a scenario revision, environment and hash on its own work item. An
+      // inherited obligation carries no pin, so deferring one would let the heir satisfy it
+      // against an unbound scenario version. Sequence those through the scenario registry.
+      demand(!ac.proofs.some((proof: string) => proof.startsWith('e2e:')),
+        `Criterion ${ac.id} cannot use bootstrap mode: an E2E proof pins a scenario version that an inherited obligation cannot carry forward`);
+      demand(ac.bootstrap.contractPaths.every((path: string) => data.plannedFiles.some((planned: string) => pathScopeContains(planned, path))),
+        `Bootstrap contract paths for ${ac.id} must lie inside the task's planned files`);
+      return { id: ac.id, text: ac.text, proofs: ac.proofs, bootstrap: unchanged ? prior! : { ...ac.bootstrap, declaredBy: actor.id, declaredAt: now.toISOString(), policyRevision } };
+    });
+  }
+  /** A deferral can never be renewed by the very change that inherited the obligation. */
+  private refuseRenewedDeferral(work: Work, all: Work[]) {
+    for (const obligation of inheritedObligations(work, all)) {
+      const renewed = work.criteria.find(ac => ac.bootstrap && ac.proofs.includes(obligation.proof));
+      demand(!renewed, `${renewed?.id}: ${obligation.proof} is already a bootstrap obligation inherited from ${obligation.key} ${obligation.criterionId} and cannot be deferred again`);
+    }
+  }
   async execute(actor: Principal, command: Command, id: string | null, input: unknown, key: string) {
     demand(Object.hasOwn(commands, command), 'Unknown command', 404);
     // Leads coordinate through rulings; no lifecycle command is lead-permitted.
@@ -106,6 +151,7 @@ export class Engine {
         if (reviewProviderOf(data.policy) === 'agent') assertReviewerProfiles(data.policy.reviewerProfiles, this.reviewerApps, this.controlPlaneAppId);
         demand(data.dependencies.every((dep: string) => all.some(w => w.id === dep)), 'Unknown dependency');
         demand(new Set(data.criteria.map((ac: { id: string }) => ac.id)).size === data.criteria.length, 'Criterion IDs must be unique');
+        const criteria = this.declareBootstrap(actor, data, [], 1, now);
         const scenarioRequirements: Work['scenarioRequirements'] = [];
         const proofNames: string[] = [...new Set<string>(data.criteria.flatMap((ac: { proofs: string[] }) => ac.proofs))];
         for (const proof of proofNames.filter(p => p.startsWith('e2e:'))) {
@@ -115,11 +161,13 @@ export class Engine {
         }
         const created = now.toISOString();
         const { reason: _reason, ...intent } = data;
-        work = { ...intent, id: randomUUID(), key: '', stage: 'backlog', revision: 0, policyRevision: 1, createdAt: created, updatedAt: created, stageEnteredAt: created,
+        work = { ...intent, criteria, id: randomUUID(), key: '', stage: 'backlog', revision: 0, policyRevision: 1, createdAt: created, updatedAt: created, stageEnteredAt: created,
           ready: false, epoch: 0, lease: null, workspaces: [], candidate: null, submission: null, reworkRequested: false, scenarioRequirements, evidence: [], observation: null, blocker: null, gates: [], violations: [] };
+        work!.proofGaps = await unauthorizedProofs(db, this.principals, proofNames);
         const inserted = await db.query('INSERT INTO work_items(id,document) VALUES($1,$2) RETURNING number', [work!.id, JSON.stringify(work)]);
         work!.key = `GY-${inserted.rows[0].number}`;
         all.push(work!);
+        this.refuseRenewedDeferral(work!, all);
       }
       demand(work, 'Work item not found', 404);
       if (actor.role === 'operator-agent') {
@@ -128,11 +176,12 @@ export class Engine {
         if (command === 'ready') demand(work.stage === 'backlog' && !work.ready, 'Only unreleased backlog work can be released');
         if (command === 'unblock') demand(work.blocker, 'Task has no blocker to clear');
       }
-      const deliveredContainmentCleanup = work.stage === 'done' && (command === 'settle' || command === 'recover');
-      preserveAssignment(work);
-      if (!['recover', 'settle'].includes(command) && work.mergeExecution && Date.parse(work.mergeExecution.expiresAt) <= now.getTime()) work.mergeExecution = null;
-      demand(!work.mergeExecution || command === 'heartbeat' || command === 'recover' || command === 'settle', 'A merge execution is active; retry after it completes or expires');
-      if (command !== 'create' && command !== 'settle' && command !== 'recover') demand(work.stage !== 'done', 'Delivered work is immutable; create a follow-up task');
+      const containmentCleanup = ['settle', 'recover', 'autosettle'];
+      const deliveredContainmentCleanup = work.stage === 'done' && containmentCleanup.includes(command);
+      preserveAssignment(work); retainQuarantineFence(work);
+      if (!containmentCleanup.includes(command) && work.mergeExecution && Date.parse(work.mergeExecution.expiresAt) <= now.getTime()) work.mergeExecution = null;
+      demand(!work.mergeExecution || command === 'heartbeat' || containmentCleanup.includes(command), 'A merge execution is active; retry after it completes or expires');
+      if (command !== 'create' && !containmentCleanup.includes(command)) demand(work.stage !== 'done', 'Delivered work is immutable; create a follow-up task');
       if (command === 'rereview') {
         if (actor.role !== 'admin') { demand(actor.role === 'worker', 'Worker or operator required', 403); activeLease(work, actor, data.epoch, now); }
         demand(work.policy.review && ['codex', 'agent'].includes(reviewProviderOf(work.policy)) && work.submission && !work.observation?.merged, 'Open submitted work with a dispatched review provider is required');
@@ -183,6 +232,7 @@ export class Engine {
           return all.find(w => w.id === id)!.dependencies.some(dep => reachesWork(dep, visited));
         };
         demand(!data.dependencies.some((dep: string) => reachesWork(dep)), 'Dependencies would create a cycle');
+        const revised = this.declareBootstrap(actor, data, work.criteria, work.policyRevision + 1, now, work);
         const pins: Work['scenarioRequirements'] = [];
         const proofs = [...new Set<string>(data.criteria.flatMap((ac: { proofs: string[] }) => ac.proofs))];
         for (const proof of proofs.filter(p => p.startsWith('e2e:'))) {
@@ -195,9 +245,12 @@ export class Engine {
         const retired = work.criteria.filter(ac => !data.criteria.some((next: { id: string }) => next.id === ac.id));
         const narrowed = work.criteria.filter(ac => { const next = data.criteria.find((n: { id: string }) => n.id === ac.id); return next && ac.proofs.some(proof => !next.proofs.includes(proof)); });
         if (retired.length || narrowed.length) raiseEscalation(work, { trigger: 'requirement-weakening', reason: `Requirement revision retires ${retired.map(ac => ac.id).join(', ') || 'no criterion'} and narrows proofs for ${narrowed.map(ac => ac.id).join(', ') || 'no criterion'}`, at: now.toISOString(), actor: actor.id });
-        work.retiredCriterionIds = [...(work.retiredCriterionIds ?? []), ...retired.map(ac => ac.id)];
-        work.criteria = data.criteria; work.dependencies = data.dependencies; work.plannedFiles = data.plannedFiles; work.exclusiveResources = data.exclusiveResources;
+        work.retiredCriterionIds = [...(work.retiredCriterionIds ?? []), ...work.criteria.filter(ac => !data.criteria.some((next: { id: string }) => next.id === ac.id)).map(ac => ac.id)];
+        work.criteria = revised;
+        work.dependencies = data.dependencies; work.plannedFiles = data.plannedFiles; work.exclusiveResources = data.exclusiveResources;
         work.scenarioRequirements = pins; work.policyRevision++;
+        this.refuseRenewedDeferral(work, all);
+        work.proofGaps = await unauthorizedProofs(db, this.principals, proofs);
         work.formalReviewResetRequired = true; work.formalReviewBaseline = undefined;
         work.lease = null; work.observation = null; work.mergeAuthorization = null; work.reviewRequest = null;
         // A submitted implementation must be explicitly reconsidered for changed intent.
@@ -294,6 +347,16 @@ export class Engine {
           'Containment settlement capability is invalid');
         work.containmentQuarantine = null;
       }
+      if (command === 'autosettle') {
+        // Verified death is proof, not an assertion: the control plane re-checks the fence
+        // deadlines and the reported verification itself before lowering a containment fence.
+        demand(actor.role === 'coordinator' || actor.role === 'admin', 'Coordinator permission required', 403);
+        demand(work.containmentQuarantine?.epoch === data.epoch && work.containmentQuarantine?.settlementHash === data.settlementHash,
+          'Containment quarantine is missing, superseded, or does not match this verification');
+        const refusals = containmentSettlementRefusals(work, data.verification, { now: now.getTime() });
+        demand(!refusals.length, `Automatic containment settlement refused: ${refusals.join('; ')}. ${containmentAttestation(work.key)}`);
+        work.containmentQuarantine = null;
+      }
       if (command === 'release') work.lease = null;
       if (command === 'blocked') work.blocker = data.reason;
       if (command === 'workspace') {
@@ -313,12 +376,14 @@ export class Engine {
         demand(actor.role === 'producer' || actor.role === 'worker' || actor.role === 'admin', 'Evidence submission is not permitted', 403);
         // Workers may still record their own untrusted assertions; every identity
         // that could mint trust must be independent of the implementation and the lead.
-        const dependent = actor.role === 'worker' ? null : producerIndependenceRefusal(actor, work, this.roster);
+        const dependent = actor.role === 'worker' ? null : producerIndependenceRefusal(actor, work, this.principals);
         demand(!dependent, dependent ?? 'Evidence producer is not independent', 403);
-        const trusted = actor.role === 'producer' && !!actor.proofs?.includes(data.proof) || actor.role === 'admin' && data.proof.startsWith('manual:');
+        // Trust is decided by the live grant set, never by the deployment environment.
+        const trusted = await authorizedForProof(db, actor, data.proof);
         work.evidence.push({ ...data, id: randomUUID(), producer: actor.id, trusted, at: now.toISOString() });
         if (trusted && data.policyRevision !== work.policyRevision) raiseEscalation(work, { trigger: 'evidence-policy-conflict', reason: `Evidence policy v${data.policyRevision} conflicts with current policy v${work.policyRevision}`, at: now.toISOString(), actor: actor.id });
       }
+      retainQuarantineFence(work);
       // Delivery is an immutable snapshot. A late containment cleanup may append
       // its audit/revision metadata, but stale inputs must not re-evaluate it.
       if (!deliveredContainmentCleanup) this.evaluate(work, all, now);
@@ -358,7 +423,7 @@ export class Engine {
         && authorization.sha === data.sha && authorization.baseSha === data.baseSha && authorization.policyRevision === data.policyRevision
         && work.candidate?.sha === data.sha && work.candidate.baseSha === data.baseSha && Number.isFinite(age) && age >= 0 && age < 120_000,
       'Merge authorization is no longer current');
-      const requiredEvidence = [...new Set(work.criteria.flatMap(criterion => criterion.proofs))].map(proof => currentEvidence(work, proof, now));
+      const requiredEvidence = requiredProofs(work, all).map(proof => currentEvidence(work, proof, now));
       const validityDeadlines = [now.getTime() + 120_000, Date.parse(work.observation!.at) + 120_000,
         ...requiredEvidence.flatMap(evidence => evidence?.expiresAt ? [Date.parse(evidence.expiresAt)] : [])];
       const expiresAt = Math.min(...validityDeadlines);
@@ -552,7 +617,7 @@ export class Engine {
       for (const work of all) {
         if (work.stage === 'done') continue;
         const before = JSON.stringify(work);
-        preserveAssignment(work);
+        preserveAssignment(work); retainQuarantineFence(work);
         const executing = !!work.mergeExecution && Date.parse(work.mergeExecution.expiresAt) > now.getTime();
         const leaseLost = !!work.lease && Date.parse(work.lease.expiresAt) <= now.getTime();
         // An in-flight merge execution defers reconciliation, but never a lease
@@ -613,7 +678,9 @@ export class Engine {
         }
         const past = authorizedSnapshot || !executionValid ? undefined : (await db.query("SELECT payload->'work' AS work FROM events WHERE work_id=$1 AND created_at<$2 AND payload ? 'work' ORDER BY seq DESC LIMIT 1", [id, new Date(cutoff)])).rows[0]?.work as Work | undefined;
         const authorization = past?.mergeAuthorization;
-        const evidenceValid = past ? [...new Set(past.criteria.flatMap(criterion => criterion.proofs))].every(proof => !!currentEvidence(past, proof, new Date(cutoff - 1))) : false;
+        // Exactly the acceptance gate's demand at the merge cutoff: a bootstrap criterion's
+        // deferred proofs are excluded, and an inherited obligation is re-checked here too.
+        const evidenceValid = past ? requiredProofs(past, all).every(proof => !!currentEvidence(past, proof, new Date(cutoff - 1))) : false;
         if (!authorizedSnapshot && past && authorization && authorization.sha === observation.candidate.sha && authorization.baseSha === observation.candidate.baseSha && authorization.policyRevision === past.policyRevision
           && past.submission?.pr === observation.candidate.pr && past.gates.every(g => g.passed) && !past.violations.length
           && evidenceValid && past.observation && cutoff - Date.parse(past.observation.at) < 120_000 && Date.parse(authorization.at) < mergedTime) {
