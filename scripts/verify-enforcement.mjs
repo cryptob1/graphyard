@@ -5,6 +5,8 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 
 export const CHECK_NAME = 'Graphyard / merge';
 
+// `now` must be server time read after every re-read below, so a report cannot call an
+// observation fresh that Graphyard would already refuse as stale by the time it prints.
 export function evaluateEnforcement({ repository, baseBranch, appId, protection, rulesets = [], pull, checkRuns, work, now,
   recheck = { work, pull, protection, checkRuns } }) {
   const requireNativeReview = !!work.policy?.review && (work.policy?.reviewProvider ?? 'github') !== 'codex';
@@ -23,11 +25,14 @@ export function evaluateEnforcement({ repository, baseBranch, appId, protection,
     if (requireNativeReview && !(review?.required_approving_review_count >= 1 && review?.dismiss_stale_reviews && review?.require_last_push_approval))
       protectionFindings.push('This work still selects native GitHub review, which requires a nonzero approval count, stale-review dismissal and last-push approval');
   }
-  const namedRuns = checkRuns.filter(run => run.name === CHECK_NAME).sort((a, b) => String(b.started_at ?? '').localeCompare(String(a.started_at ?? '')));
-  const published = namedRuns.find(run => run.app?.id === appId) ?? namedRuns[0] ?? null;
-  const currentNamedRuns = (recheck.checkRuns ?? []).filter(run => run.name === CHECK_NAME)
-    .sort((a, b) => String(b.started_at ?? '').localeCompare(String(a.started_at ?? '')));
-  const currentPublished = currentNamedRuns.find(run => run.app?.id === appId) ?? currentNamedRuns[0] ?? null;
+  // Newest run first; a run published by the App the context is bound to wins over a foreign same-name run.
+  const latestRun = (runs, context, preferredAppId) => {
+    const named = (runs ?? []).filter(run => run.name === context)
+      .sort((a, b) => String(b.started_at ?? '').localeCompare(String(a.started_at ?? '')));
+    return named.find(run => run.app?.id === preferredAppId) ?? named[0] ?? null;
+  };
+  const published = latestRun(checkRuns, CHECK_NAME, appId);
+  const currentPublished = latestRun(recheck.checkRuns, CHECK_NAME, appId);
   const linked = published?.pull_requests?.map(p => p.number) ?? [];
   const gates = (work.gates ?? []).map(gate => ({ name: gate.name, passed: !!gate.passed, reasons: gate.reasons ?? [] }));
   const candidate = work.candidate ?? null;
@@ -40,6 +45,23 @@ export function evaluateEnforcement({ repository, baseBranch, appId, protection,
     ...(candidate && pull.base?.sha !== candidate.baseSha ? [`pull request base ${pull.base?.sha ?? 'missing'} does not match candidate base ${candidate.baseSha}`] : []),
     ...(pull.base?.ref !== baseBranch ? [`pull request targets ${pull.base?.ref ?? 'missing'}, not the managed base branch ${baseBranch}`] : []),
   ];
+  // Every context branch protection requires — not only the Graphyard check — must still be
+  // passing at re-read time, and must still match the run set observed during collection.
+  const requiredContexts = [...new Set([CHECK_NAME,
+    ...required.map(entry => entry.context).filter(Boolean),
+    ...(recheck.protection?.required_status_checks?.checks ?? []).map(entry => entry.context).filter(Boolean)])];
+  const contextRuns = (runs, context) => (runs ?? []).filter(run => run.name === context)
+    .map(run => ({ id: run.id ?? null, appId: run.app?.id ?? null, status: run.status ?? null, conclusion: run.conclusion ?? null, startedAt: run.started_at ?? null }))
+    .sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)));
+  const changedContexts = requiredContexts.filter(context =>
+    JSON.stringify(contextRuns(checkRuns, context)) !== JSON.stringify(contextRuns(recheck.checkRuns, context)));
+  const requiredCheckFindings = required.filter(entry => entry.context && entry.context !== CHECK_NAME).flatMap(entry => {
+    const run = latestRun(recheck.checkRuns ?? checkRuns, entry.context, entry.app_id ?? undefined);
+    if (!run) return [`required check ${entry.context} has not been published on head ${pull.head?.sha ?? 'unknown'}`];
+    if (run.status !== 'completed' || run.conclusion !== 'success') return [`required check ${entry.context} reports ${run.status === 'completed' ? run.conclusion : run.status}`];
+    if (entry.app_id != null && run.app?.id !== entry.app_id) return [`required check ${entry.context} was published by App ${run.app?.id ?? 'unknown'} rather than the required App ${entry.app_id}`];
+    return [];
+  });
   const recheckFindings = [
     ...(recheck.work?.revision !== work.revision ? [`work revision changed from ${work.revision ?? 'missing'} to ${recheck.work?.revision ?? 'missing'} during inspection`] : []),
     ...(recheck.work?.candidate?.sha !== candidate?.sha ? [`candidate head changed from ${candidate?.sha ?? 'missing'} to ${recheck.work?.candidate?.sha ?? 'missing'} during inspection`] : []),
@@ -53,7 +75,8 @@ export function evaluateEnforcement({ repository, baseBranch, appId, protection,
     ...(recheck.pull?.mergeable !== pull.mergeable ? [`pull request mergeable changed from ${pull.mergeable ?? 'missing'} to ${recheck.pull?.mergeable ?? 'missing'} during inspection`] : []),
     ...(recheck.pull?.mergeable_state !== pull.mergeable_state ? [`pull request mergeable state changed from ${pull.mergeable_state ?? 'missing'} to ${recheck.pull?.mergeable_state ?? 'missing'} during inspection`] : []),
     ...(JSON.stringify(protection) !== JSON.stringify(recheck.protection) ? ['managed branch protection changed during inspection'] : []),
-    ...(JSON.stringify(published) !== JSON.stringify(currentPublished) ? [`${CHECK_NAME} check state changed during inspection`] : []),
+    ...changedContexts.map(context => `${context} check state changed during inspection`),
+    ...(!changedContexts.includes(CHECK_NAME) && JSON.stringify(published) !== JSON.stringify(currentPublished) ? [`${CHECK_NAME} check state changed during inspection`] : []),
   ];
   const observationFinding = !Number.isFinite(observationAge) || observationAge < 0 || observationAge >= 120_000
     ? 'Graphyard observation is missing, future-dated, or older than two minutes' : null;
@@ -67,6 +90,7 @@ export function evaluateEnforcement({ repository, baseBranch, appId, protection,
     ...(!published ? [`${CHECK_NAME} has not been published on head ${pull.head?.sha ?? 'unknown'}`]
       : published.conclusion !== 'success' ? [`${CHECK_NAME} reports ${published.status === 'completed' ? published.conclusion : published.status}`]
       : published.app?.id !== appId ? [`${CHECK_NAME} on this head was published by App ${published.app?.id ?? 'unknown'}, not the dedicated App ${appId}`] : []),
+    ...requiredCheckFindings,
     ...(pull.merged ? ['pull request is already merged'] : []),
     ...(pull.state !== 'open' ? [`pull request state is ${pull.state}`] : pull.draft ? ['pull request is a draft'] : pull.mergeable !== true ? [`GitHub reports mergeable=${pull.mergeable} (${pull.mergeable_state ?? 'unknown'})`]
       : blockingMergeStates.has(pull.mergeable_state ?? 'unknown') ? [`GitHub reports blocking merge state ${pull.mergeable_state ?? 'unknown'}`] : []),
@@ -82,6 +106,7 @@ export function evaluateEnforcement({ repository, baseBranch, appId, protection,
     app: { dedicated: appId, publishedCheck: published ? { appId: published.app?.id ?? null, appSlug: published.app?.slug ?? null, status: published.status, conclusion: published.conclusion, linkedPullRequests: linked } : null },
     protection: { strict: !!protection?.required_status_checks?.strict, enforceAdmins: !!protection?.enforce_admins?.enabled, forcePushesAllowed: !!protection?.allow_force_pushes?.enabled, deletionsAllowed: !!protection?.allow_deletions?.enabled,
       checkBinding: bound ? { context: bound.context, appId: bound.app_id ?? null } : null, nativeReviewRequired: requireNativeReview, nativeReview: review ? { approvals: review.required_approving_review_count, dismissStale: !!review.dismiss_stale_reviews, lastPushApproval: !!review.require_last_push_approval } : null, findings: protectionFindings },
+    requiredChecks: { contexts: requiredContexts, findings: requiredCheckFindings },
     gates, observation: { at: work.observation?.at ?? null, serverNow: now ?? null, fresh: !observationFinding }, revalidated: !recheckFindings.length, notes, verdict: refusals.length ? 'refused' : 'permitted', refusals,
     limits: ['This is an inspection report, not evidence. Only an operator may attest manual:github-enforcement.',
       'A permitted verdict describes this observation; Graphyard re-verifies the exact candidate immediately before any merge.'],
@@ -93,10 +118,11 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   try {
     if (!/^[A-Z][A-Z0-9]*-\d+$/.test(key ?? '')) throw new Error('Usage: node scripts/verify-enforcement.mjs GY-N [PR_NUMBER]');
     const cli = process.env.GRAPHYARD_CLI ?? fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url));
+    const serverStatus = () => JSON.parse(execFileSync(process.execPath, [cli, 'status'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }));
     const work = JSON.parse(execFileSync(process.execPath, [cli, 'status', key], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }));
     const pr = Number(prArgument ?? work.submission?.pr ?? work.candidate?.pr);
     if (!Number.isSafeInteger(pr) || pr <= 0) throw new Error(`${key} has no submitted pull request; pass one explicitly to inspect it`);
-    const status = JSON.parse(execFileSync(process.execPath, [cli, 'status'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }));
+    const status = serverStatus();
     const repository = status.repository, baseBranch = status.baseBranch ?? 'main', appId = status.githubAppId;
     if (!repository || !Number.isSafeInteger(appId)) throw new Error('The live server does not report a managed repository and dedicated App; connect the App first');
     const gh = path => JSON.parse(execFileSync('gh', ['api', path], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }));
@@ -114,8 +140,11 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
     const currentPull = gh(`repos/${repository}/pulls/${pr}`);
     const currentProtection = optional(`repos/${repository}/branches/${encodeURIComponent(baseBranch)}/protection`);
     const currentCheckRuns = ghPages(`repos/${repository}/commits/${currentPull.head.sha}/check-runs?filter=latest&per_page=100`, 'check_runs');
+    // Freshness is judged against server time read after every collection and re-read above,
+    // so collection time counts against the observation exactly as it does for Graphyard.
+    const now = serverStatus().now;
     console.log(JSON.stringify(evaluateEnforcement({ repository, baseBranch, appId, protection, rulesets,
-      pull, checkRuns, work, now: status.now,
+      pull, checkRuns, work, now,
       recheck: { work: currentWork, pull: currentPull, protection: currentProtection, checkRuns: currentCheckRuns } }), null, 2));
   } catch (error) { console.error(error.message); process.exitCode = 1; }
 }
