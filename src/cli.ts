@@ -9,7 +9,7 @@ import { assertRepository, discover } from './onboarding.js';
 import { startGithubSetup } from './github-setup.js';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
-import { diagnose, fileConflicts, proofPreview, resourceConflicts } from './coordination.js';
+import { diagnose, fileConflicts, proofAuthorization, proofPreview, resourceConflicts } from './coordination.js';
 import { loadConnection, setupRepository, handoff, hostIdSchema } from './repository-setup.js';
 import { assertMasterBinding, buildMasterStatus, continueMergeBatch, currentMergeCandidates, dispatchWork, inspectWorkerCredentials, listHerdrAgents, loadMasterConfig, mergeWork, observeHerdrAgents, readCredentialFile, readWorkerCredential, saveWorkerProfile, setupMaster, startMaster, workerProfileSchema } from './master.js';
 import { acknowledgeContainment, containmentCredentials, establishContainment, isConfirmedCoordinationRefusal, revalidateContainment, settleContainment } from './quarantine.js';
@@ -87,6 +87,11 @@ Environment: GRAPHYARD_URL, GRAPHYARD_TOKEN (individual role-scoped credential)
   reviewpolicy GY-N github|codex|agent POLICY_REVISION REASON [--profiles FILE]
                                 Revise reviewer source; agent review reads its ordered
                                 reviewer profiles from FILE (operator)
+  grants                       Show live proof authority per principal and its source
+  grants grant ID PATTERNS REASON   Grant proof authority; PATTERNS is comma separated,
+                                exact names or bounded patterns such as 'integration:*' (admin)
+  grants revoke ID PATTERNS REASON  Revoke granted patterns immediately, no redeploy (admin)
+  grants history ID            Read the append-only grant history for one principal
   operator-agent list          Inspect configured identities, scopes and redacted fingerprints (admin)
   operator-agent setup FILE --token-stdin  Create a scoped identity; FILE contains no secret (admin)
   operator-agent configure ID FILE          Revise capabilities/scope with expectedRevision (admin)
@@ -192,6 +197,21 @@ Never share an operator or producer credential with an implementation agent.`); 
     if (!['define','build','candidate','request','dispatch','ack','heartbeat','result','cancel','settle','retry'].includes(id) || !args[0]) throw new Error('Use validation ACTION file.json');
     return print(await api(`validation/${id}`, JSON.parse(await readFile(args[0], 'utf8'))));
   }
+  if (command === 'grants') {
+    if (!id || id === 'list') return print(await api('proof-grants'));
+    if (id === 'history') {
+      if (!args[0]) throw new Error('Use grants history PRINCIPAL_ID');
+      return print(await api(`proof-grants/${encodeURIComponent(args[0])}/history`));
+    }
+    if (id === 'grant' || id === 'revoke') {
+      const [principal, list, ...rest] = args;
+      const patterns = (list ?? '').split(',').map(value => value.trim()).filter(Boolean);
+      const why = rest.join(' ').trim();
+      if (!principal || !patterns.length || !why) throw new Error(`Use grants ${id} PRINCIPAL_ID PATTERNS REASON`);
+      return print(await api(`proof-grants/${encodeURIComponent(principal)}/${id}`, { patterns, reason: why }));
+    }
+    throw new Error('Use grants list, grant, revoke, or history');
+  }
   if (command === 'operator-agent') {
     if (!id || id === 'list') return print(await api('operator-agents'));
     if (id === 'setup') {
@@ -258,7 +278,13 @@ Never share an operator or producer credential with an implementation agent.`); 
   if (command === 'diagnose') {
     const snapshot = await api('work-snapshot'); const item = snapshot.work.find((w: any) => w.id === id || w.key === id);
     if (!item) throw new Error(`Unknown work item ${id}`);
-    return print({ key: item.key, observedAt: snapshot.now, diagnostics: diagnose(item, snapshot.work, Date.parse(snapshot.now), snapshot.jobs), overlaps: fileConflicts(item, snapshot.work), proofs: proofPreview(item) });
+    // A required proof nobody is authorized to produce can never be satisfied; report it
+    // alongside the other blockers rather than leaving it to be discovered at acceptance.
+    let authorities: any[] = [];
+    try { authorities = (await api('proof-grants')).authorities ?? []; } catch { /* reported as unknown authority below */ }
+    const authorization = proofAuthorization(item, authorities);
+    return print({ key: item.key, observedAt: snapshot.now, diagnostics: diagnose(item, snapshot.work, Date.parse(snapshot.now), snapshot.jobs), overlaps: fileConflicts(item, snapshot.work), proofs: proofPreview(item),
+      proofAuthority: authorization, proofGaps: authorization.filter(entry => !entry.producers.length).map(entry => entry.proof) });
   }
   if (command === 'handoff') {
     const [snapshot, status] = await Promise.all([api('work-snapshot'), api('status')]);

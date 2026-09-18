@@ -1,4 +1,4 @@
-import { currentEvidence, type Work } from './model.js';
+import { currentEvidence, grantsAuthorize, type ProofAuthority, type Work } from './model.js';
 
 export interface IntegrationJob { work_id: string; available_at: string; locked_until: string | null; error: string | null }
 export interface Diagnostic { kind: string; message: string; next: string }
@@ -52,6 +52,7 @@ export function diagnose(work: Work, all: Work[], now: number, jobs: Integration
   if (work.submission && !work.observation) add('unobserved', 'Submitted PR has not been observed for the current requirements', 'Check the GitHub connection and reconciliation job; missing observation is not success.');
   if (work.submission && work.observation && now - Date.parse(work.observation.at) >= 120000) add('stale-observation', 'GitHub observation is older than two minutes', 'Restore provider connectivity; the merge gate requires a fresh observation.');
   if (work.submission && job && !job.error && Date.parse(job.available_at) < now - 120000 && (!job.locked_until || Date.parse(job.locked_until) <= now)) add('reconciliation-stalled', 'Integration work is overdue and has no active processor', 'Check that the Graphyard server and its reconciliation loop are running.');
+  for (const proof of work.proofGaps ?? []) add('proof-authority-gap', `No principal is authorized to produce ${proof}`, 'Grant the proof name to a producer principal with `graphyard grants grant`; the acceptance gate cannot be satisfied until someone can produce it.');
   for (const violation of work.violations) add('violation', violation, 'An operator must investigate; do not bypass the gate.');
   const first = work.gates.find(g => !g.passed);
   if (work.submission && first) for (const reason of first.reasons) add(`gate-${first.name}`, reason, `Satisfy the ${first.name} gate; new observations and evidence trigger reevaluation.`);
@@ -66,3 +67,14 @@ export function proofPreview(work: Work) {
     return { criterion: ac.id, proof, status, scenario: pin, producer: evidence?.producer, evidenceId: evidence?.id };
   }));
 }
+
+/**
+ * Which principal, if any, is currently authorized to produce each required proof.
+ * A proof with no authorized producer is a dispatch gap: nobody can ever satisfy it.
+ */
+export function proofAuthorization(work: Work, authorities: readonly ProofAuthority[]) {
+  const required = [...new Set(work.criteria.flatMap(ac => ac.proofs))];
+  return required.map(proof => ({ proof, producers: authorities.filter(a => grantsAuthorize(a.patterns, proof)).map(a => a.principalId) }));
+}
+export const proofGaps = (work: Work, authorities: readonly ProofAuthority[]) =>
+  proofAuthorization(work, authorities).filter(entry => !entry.producers.length).map(entry => entry.proof);

@@ -11,6 +11,7 @@ import { githubFromEnv, processJob, type GitHub } from './github.js';
 import { Validation } from './validation.js';
 import { defineScenario, scenarios } from './scenarios.js';
 import { OperatorAgents } from './operator-agent.js';
+import { ProofGrants } from './proof-grants.js';
 
 export const principalSchema = z.array(z.object({ id: z.string().min(1), role: z.enum(['admin', 'coordinator', 'worker', 'producer', 'reader']), token: z.string().min(32), proofs: z.array(z.string()).optional(), displayName: z.string().trim().min(1).max(100).regex(/^[^\u0000-\u001f\u007f]+$/).optional(), runtime: z.string().trim().min(1).max(80).regex(/^[^\u0000-\u001f\u007f]+$/).optional() }).strict()).min(1);
 export type Credential = Principal & { token: string };
@@ -40,6 +41,11 @@ export function server(engine: Engine, credentials: Credential[], github: GitHub
   const validation = new Validation(engine, principals.map(p => p.actor), repository);
   const operatorAgents = new OperatorAgents(engine.store, repository, credentials.map(credential => ({ id: credential.id, tokenHash: createHash('sha256').update(credential.token).digest('hex') })));
   engine.operatorAuthorizer = operatorAgents.revalidate.bind(operatorAgents);
+  // Proof authority is Graphyard state. The configured registry only identifies which
+  // principals exist and what role each holds; the grant store decides what they may prove.
+  const configured = credentials.map(({ token, ...actor }) => actor);
+  engine.principals = configured;
+  const proofGrants = new ProofGrants(engine.store, configured);
   return createServer(async (req, res) => {
     res.setHeader('X-Content-Type-Options', 'nosniff');
     res.setHeader('Referrer-Policy', 'no-referrer');
@@ -76,6 +82,14 @@ export function server(engine: Engine, credentials: Credential[], github: GitHub
         if (actor.role === 'operator-agent') demand(actor.scope?.repositories.includes(repository), 'Repository is outside operator-agent scope', 403);
         if (url.pathname === '/api/operator-agents' && req.method === 'GET') return send(200, await operatorAgents.list(actor));
         if (url.pathname === '/api/operator-agents' && req.method === 'POST') return send(200, await operatorAgents.setup(actor, JSON.parse((await body(req)).toString()), String(req.headers['idempotency-key'] ?? '')));
+        if (url.pathname === '/api/proof-grants' && req.method === 'GET') return send(200, await proofGrants.list(actor));
+        const grantHistory = url.pathname.match(/^\/api\/proof-grants\/([^/]+)\/history$/);
+        if (grantHistory && req.method === 'GET') return send(200, await proofGrants.history(actor, decodeURIComponent(grantHistory[1])));
+        const grantRoute = url.pathname.match(/^\/api\/proof-grants\/([^/]+)\/(grant|revoke)$/);
+        if (grantRoute && req.method === 'POST') {
+          const data = JSON.parse((await body(req)).toString()), key = String(req.headers['idempotency-key'] ?? ''), target = decodeURIComponent(grantRoute[1]);
+          return send(200, grantRoute[2] === 'grant' ? await proofGrants.grant(actor, target, data, key) : await proofGrants.revoke(actor, target, data, key));
+        }
         const operatorRoute = url.pathname.match(/^\/api\/operator-agents\/([^/]+)\/(configure|rotate|revoke)$/);
         if (operatorRoute && req.method === 'POST') {
           const data = JSON.parse((await body(req)).toString()), key = String(req.headers['idempotency-key'] ?? '');
@@ -187,6 +201,10 @@ async function main() {
   engine.reviewerApps = parseReviewerApps(process.env.GRAPHYARD_REVIEWER_APPS);
   const github = await githubFromEnv();
   const http = server(engine, credentials, github);
+  // One-time materialization of the deployment allowlist. Operators manage proof authority
+  // inside Graphyard from here on; a later environment edit no longer changes authority.
+  const seeded = await new ProofGrants(store, credentials.map(({ token, ...actor }) => actor)).seed();
+  if (seeded.length) console.log(`Seeded proof grants for ${seeded.map(grant => grant.principalId).join(', ')}`);
   const validation = new Validation(engine, credentials.map(({ token, ...actor }) => actor), github?.config.repository ?? process.env.GITHUB_REPOSITORY ?? '');
   await validation.expireArtifacts();
   await validation.reconcile(true);
