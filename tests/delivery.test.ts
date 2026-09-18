@@ -325,6 +325,28 @@ test('D3-10 later failures create a visible incident without erasing evidence or
   assert.equal((await state(f.env.id)).history[1].outcome, 'skipped', 'a never-verified release that was superseded is skipped, not failed');
 });
 
+test('D3-10 a later failure inside an earlier, longer matched interval still invalidates current health', async () => {
+  const f = await environment(); const base = Date.now(); const w = await delivered('6'.repeat(40));
+  const r = await release(f, [{ workId: w.id, mergeSha: '6'.repeat(40) }]); await select(f, r);
+  // The provider vouches for a long validity window; a later, shorter snapshot within it finds api unhealthy.
+  await observe(snapshot(f, 1, { validFrom: at(-60, base), validTo: at(60, base), observedAt: at(0, base) })); await delivery.sweep();
+  const verified = await state(f.env.id); assert.equal(verified.verification.status, 'verified');
+  assert.deepEqual(verified.coverage.api.segments, [{ from: at(-60, base), to: at(60, base) }]);
+  await observe(snapshot(f, 1, { validFrom: at(10, base), validTo: at(10, base), observedAt: at(10, base) }, [service('api', [instance('api-1', expected.api, 'provider', false)]), service('web', [instance('web-1', expected.web)])])); await delivery.sweep();
+  const degraded = await state(f.env.id);
+  assert.equal(degraded.coverage.api.latest?.observedAt, at(10, base), 'current health follows the most recent observation, not the longest validity');
+  assert.equal(degraded.coverage.api.latest?.state, 'unhealthy');
+  assert.equal(degraded.verification.status, 'degraded'); assert.match(degraded.verification.reasons.join(), /api-1 of api is unhealthy/);
+  assert.equal(degraded.incidents.length, 1);
+  assert.deepEqual(degraded.coverage.api.segments, verified.coverage.api.segments, 'the matched history is not rewritten');
+  assert.deepEqual(degraded.verification.interval, verified.verification.interval); assert.equal((await reload(w)).releaseDeliveries?.length, 1);
+  // An out-of-order arrival of an older matched snapshot extends history but cannot restore current health.
+  await observe(snapshot(f, 1, { validFrom: at(-90, base), validTo: at(-30, base), observedAt: at(-30, base) })); await delivery.sweep();
+  const still = await state(f.env.id);
+  assert.equal(still.coverage.api.latest?.observedAt, at(10, base)); assert.equal(still.verification.status, 'degraded'); assert.equal(still.incidents.length, 1);
+  assert.deepEqual(still.coverage.api.segments, [{ from: at(-90, base), to: at(60, base) }]);
+});
+
 test('deployment identity registrations are service-scoped and carry no execution or proof authority', async () => {
   const f = await environment();
   const definition = { kind: 'registration', id: `bad-${f.n}`, expectedRevision: 0, principalId: observer.id, role: 'observer', environment: f.env, adapterVersion: 'test-v1', proofs: [], enabled: true };

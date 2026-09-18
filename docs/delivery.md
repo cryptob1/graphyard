@@ -148,7 +148,7 @@ A provider webhook relayed through `POST /api/delivery/notify` `{"environment", 
 
 ## Verification
 
-Every two seconds the server sweeps each environment: it folds at most fifty new observations into the environment's coverage, then re-evaluates. The cursor is stored with the environment, so a sweep interrupted at its bound — or a restarted server — resumes at the next observation and never skips one; an operator can run `graphyard delivery sweep` to drain a backlog sooner. Coverage keeps, per service, the merged intervals during which every listed instance matched the expected digest under measured identity, and the latest observation's state.
+Every two seconds the server sweeps each environment: it folds at most fifty new observations into the environment's coverage, then re-evaluates. The cursor is stored with the environment, so a sweep interrupted at its bound — or a restarted server — resumes at the next observation and never skips one; an operator can run `graphyard delivery sweep` to drain a backlog sooner. Coverage keeps, per service, the merged intervals during which every listed instance matched the expected digest under measured identity, and the most recently observed state by `observedAt`. Validity histories may overlap: a later observation that finds a service unhealthy or mismatched invalidates current health even when its interval ends before an earlier, longer match, while the matched intervals already recorded stay as history.
 
 The environment's status is derived, in this order:
 

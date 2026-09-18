@@ -46,7 +46,7 @@ export interface EnvironmentDelivery {
   environmentId: string; generation: number;
   expected: { releaseId: string; releaseRevision: number; manifestHash: string; buildId: string; policyRevision: number; approvalId: string | null; selectedAt: string; selectedBy: string } | null;
   history: ReleaseSelection[];
-  /** Folded from the current generation's authoritative observations only. */
+  /** Folded from the current generation's authoritative observations only. `segments` is matched history; `latest` is the most recently observed state. */
   coverage: Record<string, { segments: Interval[]; latest: { observationId: string; observedAt: string; validTo: string; state: ServiceState; reasons: string[] } | null }>;
   verification: { generation: number; status: VerificationStatus; reasons: string[]; interval: Interval | null; evaluatedAt: string | null; verifiedAt: string | null };
   incidents: Incident[];
@@ -113,7 +113,9 @@ export function fold(state: EnvironmentDelivery, observation: DeploymentObservat
     const result = state.coverage[snapshot.service] ??= { segments: [], latest: null };
     const { state: serviceStatus, reasons } = serviceState(snapshot, manifest[snapshot.service]);
     if (serviceStatus === 'matched') result.segments = mergeSegments([...result.segments, { from: observation.validFrom, to: observation.validTo }]);
-    if (!result.latest || ms(observation.validTo) >= ms(result.latest.validTo)) result.latest = { observationId: observation.id, observedAt: observation.observedAt, validTo: observation.validTo, state: serviceStatus, reasons };
+    // Current health is what was observed most recently, by trusted observation time: a later failure whose validity
+    // ends before an earlier long match still supersedes it. Matched segments above are history and stay untouched.
+    if (!result.latest || ms(observation.observedAt) >= ms(result.latest.observedAt)) result.latest = { observationId: observation.id, observedAt: observation.observedAt, validTo: observation.validTo, state: serviceStatus, reasons };
   }
 }
 
