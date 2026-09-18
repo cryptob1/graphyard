@@ -19,7 +19,7 @@ const safeHttpUrl = (value: string) => { try { const parsed = new URL(value); re
 const externalUrl = z.url().max(2000).refine(safeHttpUrl, 'Artifact URL must be HTTP(S) without credentials');
 export const definitionSchema = z.discriminatedUnion('kind', [
   z.object({ ...base, kind: z.literal('environment'), repository: z.string().regex(/^[\w.-]+\/[\w.-]+$/), url: z.url().max(2000).refine(s => { const u = new URL(s); return u.protocol === 'https:' && !u.username && !u.password && !u.hash && !u.search; }, 'Use HTTPS without credentials, query or fragment'), instance: name, immutable: z.literal(true), services: resourceNames, resources: resourceNames }).strict(),
-  z.object({ ...base, kind: z.literal('registration'), principalId: name, role: z.enum(['runner', 'collector', 'builder']), environment: ref, adapterVersion: name, proofs: z.array(proofSchema).max(50), enabled: z.boolean(), executionHost: z.string().min(1).max(500).optional(), attestationPublicKey: z.string().min(32).max(4096).optional(), executionNetwork: z.string().min(1).max(60).optional() }).strict(),
+  z.object({ ...base, kind: z.literal('registration'), principalId: name, role: z.enum(['runner', 'collector', 'builder']), environment: ref, adapterVersion: name, proofs: z.array(proofSchema).max(50), enabled: z.boolean(), executionHost: z.string().min(1).max(500).optional(), attestationPublicKey: z.string().min(32).max(4096).optional(), executionNetwork: z.string().min(1).max(60).optional(), testAccountDigest: digest.optional() }).strict(),
   z.object({ ...base, kind: z.literal('bundle'), scenario: name, scenarioRevision: revision, scenarioHash: z.string().regex(/^[a-f0-9]{64}$/), digest, runnerImageDigest: digest }).strict(),
 ]);
 type DefinitionInput = z.infer<typeof definitionSchema>;
@@ -176,7 +176,7 @@ export class Validation {
           let keyType: string | undefined; try { keyType = createPublicKey(data.attestationPublicKey).asymmetricKeyType; } catch { /* invalid key */ }
           demand(keyType === 'ed25519', 'Runner host attestor must use a valid Ed25519 public key');
         }
-        if (data.role !== 'runner') demand(!data.executionHost && !data.attestationPublicKey && !data.executionNetwork, 'Only runner registrations may configure execution authority');
+        if (data.role !== 'runner') demand(!data.executionHost && !data.attestationPublicKey && !data.executionNetwork && !data.testAccountDigest, 'Only runner registrations may configure execution authority');
       }
       if (data.kind === 'bundle') {
         const s = (await db.query('SELECT document FROM scenarios WHERE id=$1 AND revision=$2', [data.scenario, data.scenarioRevision])).rows[0]?.document as Scenario | undefined;
@@ -264,7 +264,10 @@ export class Validation {
         await this.changed(db, w, actor.id, 'dispatched', now, { requestId: r.id, attempt, resources });
         const build = (await db.query('SELECT document FROM validation_builds WHERE id=$1', [c.buildAttestationId])).rows[0].document as BuildAttestation;
         return { request: r, candidate: c, build, environment, bundle: await this.definition(db, 'bundle', c.bundle), attempt,
-          executionAuthority: { host: registration.executionHost!, attestationPublicKey: registration.attestationPublicKey!, network: registration.executionNetwork! } };
+          // Which approved test-account material the attempt may run with travels with the
+          // rest of the execution authority. Left to the runner, the choice of account —
+          // and of the privileges its evidence would cover — would be the runner's.
+          executionAuthority: { host: registration.executionHost!, attestationPublicKey: registration.attestationPublicKey!, network: registration.executionNetwork!, testAccountDigest: registration.testAccountDigest ?? null } };
       }
       return { request: null, reason: 'No eligible request or protected resources are still reserved' };
     });
@@ -318,7 +321,8 @@ export class Validation {
       const bundle = await this.definition(db, 'bundle', c.bundle, false) as Bundle;
       return { requestId: r.id, attemptId: a.id, epoch: a.epoch, runner: r.runner,
         executionHost: runner.executionHost, attestationPublicKey: runner.attestationPublicKey, executionNetwork: runner.executionNetwork,
-        bundleDigest: bundle.digest, runnerImageDigest: bundle.runnerImageDigest, targetUrl: environment.url, deadline: r.deadline };
+        bundleDigest: bundle.digest, runnerImageDigest: bundle.runnerImageDigest, targetUrl: environment.url, deadline: r.deadline,
+        testAccountDigest: runner.testAccountDigest ?? null };
     });
   }
   /**
@@ -347,7 +351,8 @@ export class Validation {
       return {
         grant: { requestId: r.id, attemptId: a!.id, epoch: a!.epoch, runner: r.runner,
           executionHost: runner.executionHost, attestationPublicKey: runner.attestationPublicKey, executionNetwork: runner.executionNetwork,
-          bundleDigest: bundle.digest, runnerImageDigest: bundle.runnerImageDigest, targetUrl: environment.url, deadline: r.deadline },
+          bundleDigest: bundle.digest, runnerImageDigest: bundle.runnerImageDigest, targetUrl: environment.url, deadline: r.deadline,
+          testAccountDigest: runner.testAccountDigest ?? null },
         // `running` is the only state in which an attempt may still start a container:
         // `dispatched` has not been acknowledged, and `collecting` means the collector has
         // already taken authority and observed settlement.

@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { oracleBundleDigest } from '../src/runner-setup.js';
-import { assertAncestryFixed, assertIsolation, assertRunnerCredentialScope, attemptBoundaryPath, boundaryIdentity, containerEnvironment, containerNames, executeAttempt, executionCommand, executionPlanSchema, observeContainers, preflightAttempt, type ExecutionPlan, type Runner, type Settler } from '../src/runner-executor.js';
+import { accountFileDigest, approvedAccountDigest, assertAncestryFixed, assertIsolation, assertRunnerCredentialScope, attemptBoundaryPath, boundaryIdentity, containerEnvironment, containerNames, executeAttempt, executionCommand, executionPlanSchema, observeContainers, preflightAttempt, type ExecutionPlan, type Runner, type Settler } from '../src/runner-executor.js';
 
 const image = `sha256:${'1'.repeat(64)}`;
 const runAsUser = `${process.getuid!()}:${process.getgid!()}`;
@@ -23,7 +23,8 @@ async function boundary(run: (paths: { oracle: string; collection: string; outpu
   const plan: ExecutionPlan = { grant: { requestId: randomUUID(), attemptId: randomUUID(), epoch: 1, runner: { id: 'preview-runner', revision: 1 },
       executionHost: 'unix:///var/run/docker.sock', attestationPublicKey: 'test-public-key-material-at-least-32-bytes',
       executionNetwork: 'gy-isolated',
-      bundleDigest: bundle.digest, runnerImageDigest: image, targetUrl: 'https://preview.example.test/', deadline: new Date(Date.now() + 600_000).toISOString() },
+      bundleDigest: bundle.digest, runnerImageDigest: image, targetUrl: 'https://preview.example.test/', deadline: new Date(Date.now() + 600_000).toISOString(),
+      testAccountDigest: null },
     imageRepository: 'ghcr.io/example/graphyard-runner', oraclePath: oracle, outputPath: collection, timeoutMs: 60_000, memoryMb: 2048, cpus: 2, pidsLimit: 256, runAsUser };
   // Preflight provisions one boundary per attempt beneath the collection root. The fixture
   // creates the same directory so the structural checks can also be exercised directly.
@@ -35,6 +36,13 @@ const attestorUid = process.getuid!();
 /** `assertIsolation` against the boundary this attempt was provisioned, as preflight does. */
 const isolation = (plan: ExecutionPlan, options: { uid?: number; gids?: number[] } = {}, boundaryPath?: string) =>
   assertIsolation(plan, { ...options, boundaryPath: boundaryPath ?? attemptBoundaryPath(plan) });
+/**
+ * A plan whose grant approves exactly `entries`, kept in `file`. The pathname is host
+ * configuration the runner supplies; the digest is operator-versioned authority reached
+ * through the dispatch grant, so the two are set together or the attempt is refused.
+ */
+const withAccounts = (plan: ExecutionPlan, file: string, entries: Record<string, string>): ExecutionPlan =>
+  ({ ...plan, testAccountEnvFile: file, grant: { ...plan.grant, testAccountDigest: approvedAccountDigest(entries) } });
 const settledRunner: Runner = async () => ({ exitCode: 0, timedOut: false });
 const absent: Settler = async () => 'absent';
 const at = (start: number) => { let n = start; return () => new Date(n += 1000); };
@@ -110,12 +118,13 @@ test('isolation refuses overlapping, shared or pre-populated execution boundarie
   await assert.rejects(isolation(plan, { uid: attestorUid }), /must be empty/);
   await rm(join(output, 'planted.json'));
   const shared = join(collection, 'accounts.env');
+  const approved = withAccounts(plan, shared, { TEST_ACCOUNT: 'approved' });
   await writeFile(shared, 'TEST_ACCOUNT=approved', { mode: 0o644 });
-  await assert.rejects(isolation({ ...plan, testAccountEnvFile: shared }, { uid: attestorUid }), /private regular file/);
+  await assert.rejects(isolation(approved, { uid: attestorUid }), /private regular file/);
   await chmod(shared, 0o600);
-  await assert.doesNotReject(isolation({ ...plan, testAccountEnvFile: shared }, { uid: attestorUid }));
+  await assert.doesNotReject(isolation(approved, { uid: attestorUid }));
   await writeFile(shared, 'NODE_OPTIONS=--require=/tmp/forge.js', { mode: 0o600 });
-  await assert.rejects(isolation({ ...plan, testAccountEnvFile: shared }, { uid: attestorUid }), /only TEST_ACCOUNT/);
+  await assert.rejects(isolation(approved, { uid: attestorUid }), /only TEST_ACCOUNT/);
   await rm(shared);
 }));
 
@@ -212,26 +221,60 @@ test('a collection boundary whose pathname another account controls is refused, 
 test('approved test-account variables are passed by value, never by reopened pathname', async () => boundary(async ({ collection, plan }) => {
   const shared = join(collection, 'accounts.env');
   await writeFile(shared, '# approved\nTEST_ACCOUNT_USER=booking-bot\nTEST_ACCOUNT_PASSWORD=approved secret\n', { mode: 0o600 });
-  const withAccounts = { ...plan, testAccountEnvFile: shared };
-  const preflight = await preflightAttempt(withAccounts, { uid: attestorUid });
+  const accounts = withAccounts(plan, shared, { TEST_ACCOUNT_USER: 'booking-bot', TEST_ACCOUNT_PASSWORD: 'approved secret' });
+  const preflight = await preflightAttempt(accounts, { uid: attestorUid });
   assert.deepEqual(preflight.testAccountEnv, { TEST_ACCOUNT_USER: 'booking-bot', TEST_ACCOUNT_PASSWORD: 'approved secret' });
 
   // Docker reopens `--env-file` when the container starts. Nothing in the command refers
   // to the path, so rewriting the file after preflight changes nothing that executes.
-  const argv = executionCommand(withAccounts, 'execute', preflight.testAccountEnv).argv;
+  const argv = executionCommand(accounts, 'execute', preflight.testAccountEnv).argv;
   assert.ok(!argv.includes('--env-file') && !argv.some(a => a.includes(shared)));
   assert.ok(argv.includes('TEST_ACCOUNT_USER=booking-bot'));
   await writeFile(shared, 'NODE_OPTIONS=--require=/tmp/forge.js\n', { mode: 0o600 });
-  assert.deepEqual(executionCommand(withAccounts, 'execute', preflight.testAccountEnv).argv, argv);
-  assert.equal(containerEnvironment(withAccounts, 'execute', preflight.testAccountEnv).NODE_OPTIONS, undefined);
+  assert.deepEqual(executionCommand(accounts, 'execute', preflight.testAccountEnv).argv, argv);
+  assert.equal(containerEnvironment(accounts, 'execute', preflight.testAccountEnv).NODE_OPTIONS, undefined);
 
   // Approved material is for the target-facing phase only, and never reaches enumeration.
-  assert.equal(containerEnvironment(withAccounts, 'enumerate', preflight.testAccountEnv).TEST_ACCOUNT_USER, undefined);
+  assert.equal(containerEnvironment(accounts, 'enumerate', preflight.testAccountEnv).TEST_ACCOUNT_USER, undefined);
   // Entries that were never validated cannot be handed to the container instead.
-  assert.throws(() => executionCommand(withAccounts, 'execute'), /must be read and validated in preflight/);
-  assert.throws(() => executionCommand(withAccounts, 'execute', { NODE_OPTIONS: '--require=/tmp/forge.js' }), /Only validated TEST_ACCOUNT/);
-  assert.throws(() => executionCommand(withAccounts, 'execute', { TEST_ACCOUNT_USER: 'a\nTEST_ACCOUNT_OTHER=b' }));
+  assert.throws(() => executionCommand(accounts, 'execute'), /must be read and validated in preflight/);
+  assert.throws(() => executionCommand(accounts, 'execute', { NODE_OPTIONS: '--require=/tmp/forge.js' }), /Only validated TEST_ACCOUNT/);
+  assert.throws(() => executionCommand(accounts, 'execute', { TEST_ACCOUNT_USER: 'a\nTEST_ACCOUNT_OTHER=b' }));
   await rm(shared);
+}));
+
+test('which test-account material an attempt may use is operator-versioned authority, not a pathname', async () => boundary(async ({ collection, plan }) => {
+  const approvedFile = join(collection, 'accounts.env'), privilegedFile = join(collection, 'admin.env');
+  const entries = { TEST_ACCOUNT_USER: 'booking-bot', TEST_ACCOUNT_PASSWORD: 'approved secret' };
+  await writeFile(approvedFile, '# approved\n\nTEST_ACCOUNT_PASSWORD=approved secret\nTEST_ACCOUNT_USER=booking-bot\n', { mode: 0o600 });
+  // Comments, blank lines and key order are not the approval; the entries the container
+  // would receive are, so an operator can reformat the file without re-registering it.
+  assert.equal(await accountFileDigest(approvedFile), approvedAccountDigest(entries));
+  const accounts = withAccounts(plan, approvedFile, entries);
+  await assert.doesNotReject(preflightAttempt(accounts, { uid: attestorUid }));
+
+  // A second private env file, for an account this scenario was never approved to
+  // exercise, satisfies every structural check: mode 0600, regular file, TEST_ACCOUNT_*
+  // only. Nothing but the registered digest separates the two, so without it a runner
+  // that can choose the pathname chooses which privileges the evidence covers.
+  await writeFile(privilegedFile, 'TEST_ACCOUNT_USER=site-admin\nTEST_ACCOUNT_PASSWORD=privileged\n', { mode: 0o600 });
+  await assert.rejects(preflightAttempt({ ...accounts, testAccountEnvFile: privilegedFile }, { uid: attestorUid }),
+    /not the material this attempt authority approved/);
+  // Rewriting the approved pathname is the same substitution by another route.
+  await writeFile(approvedFile, 'TEST_ACCOUNT_USER=site-admin\nTEST_ACCOUNT_PASSWORD=privileged\n', { mode: 0o600 });
+  await assert.rejects(preflightAttempt(accounts, { uid: attestorUid }), /not the material this attempt authority approved/);
+
+  // Holding material and being approved to use it are separate facts; neither alone
+  // decides what the container receives.
+  await assert.rejects(preflightAttempt({ ...plan, testAccountEnvFile: approvedFile }, { uid: attestorUid }), /approves no test-account material/);
+  await assert.rejects(preflightAttempt({ ...plan, grant: accounts.grant }, { uid: attestorUid }), /names no env file/);
+
+  // And again at the last point before these values become container arguments, so no
+  // caller can assemble a command carrying material the grant does not cover.
+  assert.throws(() => executionCommand(accounts, 'execute', { TEST_ACCOUNT_USER: 'site-admin', TEST_ACCOUNT_PASSWORD: 'privileged' }),
+    /not the material this attempt authority approved/);
+  assert.throws(() => executionCommand({ ...plan, testAccountEnvFile: approvedFile }, 'execute', entries), /approves no test-account material/);
+  await rm(approvedFile); await rm(privilegedFile);
 }));
 
 test('the execution network is operator-versioned authority, not runner configuration', async () => boundary(async ({ plan }) => {

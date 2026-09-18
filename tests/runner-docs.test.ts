@@ -29,7 +29,7 @@ test('the documented runner configuration parses as the runner plan the CLI read
   assert.equal(plan.runAsUser, '10001:20001');
   assert.notEqual(plan.runAsUser.split(':')[0], plan.runAsUser.split(':')[1], 'the documented container account and boundary group use distinct numeric identities');
   // Nothing that decides what is approved may be configured locally.
-  for (const authority of ['grant', 'targetUrl', 'bundleDigest', 'executionNetwork', 'attestationPublicKey', 'executionHost']) {
+  for (const authority of ['grant', 'targetUrl', 'bundleDigest', 'executionNetwork', 'attestationPublicKey', 'executionHost', 'testAccountDigest']) {
     assert.throws(() => runnerPlanSchema.parse({ ...sample('supervisor'), [authority]: 'x' }), new RegExp('unrecognized|Unrecognized', 'i'), authority);
   }
   const { runAsUser: _runAsUser, ...missingContainerIdentity } = sample('supervisor');
@@ -49,6 +49,11 @@ test('the documented collector configuration carries the whole dispatch authorit
   // mount pathnames to.
   assert.match(grant.executionHost, /^unix:\/\/\//);
   assert.match(grant.attestationPublicKey, /BEGIN PUBLIC KEY/);
+  // The runner plan names the private file this host keeps approved account material in;
+  // which material is approved travels with the rest of the dispatch authority, so the
+  // documented pair only makes sense together.
+  assert.match(grant.testAccountDigest ?? '', /^sha256:[a-f0-9]{64}$/);
+  assert.equal(typeof sample('supervisor').testAccountEnvFile, 'string');
   // The collector reads the attempt's own boundary, which the execution record names.
   assert.equal(collector.outputPath, `/srv/graphyard/attempts/${grant.attemptId}`);
 

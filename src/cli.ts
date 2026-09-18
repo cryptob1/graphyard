@@ -5,7 +5,7 @@ import { resolve } from 'node:path';
 import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import { supervise } from './supervisor.js';
 import { inspectRunnerRepository, oracleBundleDigest, snapshotRunnerSources } from './runner-setup.js';
-import { assertRunnerCredentialScope, attemptGrantSchema, containerNames, executionRecordSchema, observeContainers, runnerPlanSchema } from './runner-executor.js';
+import { accountFileDigest, assertRunnerCredentialScope, attemptGrantSchema, containerNames, executionRecordSchema, observeContainers, runnerPlanSchema } from './runner-executor.js';
 import { assembleResult, collectArtifacts, collectionBinding, collectionInputs, collectorInputSchema, verifyExecutionAttestation } from './runner-collector.js';
 import { superviseAttempt, supervisionRequestSchema } from './runner-attestor.js';
 import { assertRepository, discover } from './onboarding.js';
@@ -131,6 +131,7 @@ Environment: GRAPHYARD_URL, GRAPHYARD_TOKEN (individual role-scoped credential)
   runner inspect [DIRECTORY]   Discover Playwright inputs without executing repository code
   runner snapshot file.json    Snapshot an explicit source-file list for review (not approval)
   runner bundle-digest DIR      Content identity of an executable oracle bundle for approval
+  runner account-digest FILE    Measure an approved test-account env file for registration
   runner attempt file.json      Hold one dispatched attempt while the host attestor runs it
   runner supervise              Host attestor: run one attempt and attest what it observed
   runner collect file.json      Verify one attempt and publish a trusted result (collector)
@@ -232,6 +233,10 @@ Never share an operator or producer credential with an implementation agent.`); 
     if (id === 'inspect' && args.length <= 1) return print(await inspectRunnerRepository(resolve(args[0] ?? '.')));
     if (id === 'snapshot' && args.length === 1) return print(await snapshotRunnerSources(process.cwd(), JSON.parse(await readFile(args[0], 'utf8'))));
     if (id === 'bundle-digest' && args.length === 1) return print(await oracleBundleDigest(resolve(args[0])));
+    // What an operator registers as `testAccountDigest` on the runner registration. It is
+    // read here only to be measured: the entries never leave this process, and approving
+    // them is a separate operator action against Graphyard.
+    if (id === 'account-digest' && args.length === 1) return print({ testAccountDigest: await accountFileDigest(resolve(args[0])) });
     if (id === 'attempt' && args.length === 1) {
       // Runner path. This credential is a worker registration: it can acknowledge and
       // hold attempt authority, but it neither executes nor authors any execution fact.
@@ -243,6 +248,9 @@ Never share an operator or producer credential with an implementation agent.`); 
         runner: registration, bundleDigest: dispatched.bundle.digest, runnerImageDigest: dispatched.bundle.runnerImageDigest,
         executionHost: dispatched.executionAuthority.host, attestationPublicKey: dispatched.executionAuthority.attestationPublicKey,
         executionNetwork: dispatched.executionAuthority.network,
+        // Never the runner's own configuration: which approved account material this
+        // attempt may run with is operator-versioned authority like the target and network.
+        testAccountDigest: dispatched.executionAuthority.testAccountDigest ?? null,
         targetUrl: dispatched.environment.url, deadline: dispatched.request.deadline });
       const attemptCommand = { requestId: grant.requestId, attemptId: grant.attemptId, epoch: grant.epoch };
       // A rejected heartbeat is the server saying this epoch may no longer act. The

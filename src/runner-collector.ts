@@ -145,23 +145,37 @@ export function attributeExecution(input: {
     .map(o => ({ ...o, time: Date.parse(o.at) })).sort((a, b) => a.time - b.time);
   const reasons: string[] = [];
   if (finishedAt < startedAt) throw new Error('Execution interval ends before it starts');
-  const opening = supplied.filter(o => o.time <= startedAt).at(-1);
-  // A zero-length interval cannot be bracketed by one measurement counted twice.
-  const closing = supplied.find(o => o.time >= finishedAt && o !== opening);
-  const observations = [...(opening ? [opening] : []), ...supplied.filter(o => o.time > startedAt && o.time < finishedAt), ...(closing ? [closing] : [])];
+  // A boundary is an instant, not a single array position. Providers commonly stamp
+  // observations at whole-second precision, so several can share the nearest timestamp on
+  // either side; keeping one of them discarded the rest, and a measurement that disagreed
+  // about identity could be dropped — ordered before the match at the start, or after it
+  // at the finish — while attribution still read `matched` over an ambiguous target.
+  // Every measurement at the selected boundary instants is judged.
+  const openingAt = supplied.filter(o => o.time <= startedAt).at(-1)?.time;
+  const closingAt = supplied.find(o => o.time >= finishedAt)?.time;
+  const sharedBoundary = openingAt !== undefined && openingAt === closingAt;
+  const openings = supplied.filter(o => o.time === openingAt), closings = supplied.filter(o => o.time === closingAt);
+  const observations = [...openings, ...supplied.filter(o => o.time > startedAt && o.time < finishedAt), ...(sharedBoundary ? [] : closings)];
   const wanted = JSON.stringify(order(expected.artifacts));
-  const matches = observations.map(o => o.instance === expected.instance && JSON.stringify(order(o.artifacts)) === wanted);
+  const matched = (o: TargetObservation) => o.instance === expected.instance && JSON.stringify(order(o.artifacts)) === wanted;
+  const matches = observations.map(matched);
   const measurement: Measurement = observations.some(o => o.measurement === 'unknown') || !observations.length ? 'unknown'
     : observations.every(o => o.measurement === 'provider') ? 'provider' : 'host-attestation';
-  const brackets = !!opening && !!closing;
+  // Only a zero-length interval can select the same instant on both sides, and one
+  // measurement counted twice does not bracket it; two distinct ones at that instant do.
+  const brackets = openingAt !== undefined && closingAt !== undefined && (!sharedBoundary || openings.length > 1);
   const gap = observations.findIndex((o, i) => i > 0 && o.time - observations[i - 1].time > maxGapMs);
   const coversEntireRun = brackets && gap === -1 && measurement !== 'unknown';
   if (observations.length < 2) reasons.push('Attribution needs independent measurements before and after the execution interval');
   else if (!brackets) reasons.push('Independent measurements do not bracket the whole execution interval');
   if (gap !== -1) reasons.push(`Independent measurement gap exceeds ${maxGapMs}ms; the interval is not continuously covered`);
   if (measurement === 'unknown') reasons.push('Runtime artifact identity was not independently measured; application self-reports do not count');
+  // Whether the target *ended* on the expected identity is decided by every measurement
+  // at the closing instant, so a disagreement among them is not settled by array order:
+  // an identity that is no longer unambiguous at the finish is not the expected one.
+  const closed = brackets && (sharedBoundary ? openings : closings).every(matched);
   const attribution: Attribution = measurement === 'unknown' || !coversEntireRun ? 'unknown'
-    : matches.every(Boolean) ? 'matched' : !matches.at(-1) ? 'mismatched' : 'changed';
+    : matches.every(Boolean) ? 'matched' : !closed ? 'mismatched' : 'changed';
   if (attribution === 'changed') reasons.push('The target ran different artifacts during the execution interval');
   if (attribution === 'mismatched') reasons.push('The target did not run the expected artifact identity');
   const observed = observations.at(-1);

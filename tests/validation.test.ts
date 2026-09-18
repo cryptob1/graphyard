@@ -33,12 +33,13 @@ after(async () => { if (store) await store.close(); if (pg) await pg.stop(); });
 const id = () => randomUUID();
 async function definitions(): Promise<Definition[]> { return (await store.pool.query('SELECT document FROM validation_definitions ORDER BY kind,id,revision DESC')).rows.map(r => r.document); }
 async function current(workId: string) { return (await store.list()).find(w => w.id === workId)!; }
-async function fixture(artifactStorage: 'external' | 'postgres' = 'external') {
+/** `runnerAuthority` adds execution authority the operator pinned on the runner registration. */
+async function fixture(artifactStorage: 'external' | 'postgres' = 'external', runnerAuthority: Record<string, unknown> = {}) {
   const n = ++serial, environment = { id: `preview-${n}`, revision: 1 }, runnerRef = { id: `runner-${n}`, revision: 1 }, collectorRef = { id: `collector-${n}`, revision: 1 }, builderRef = { id: `builder-${n}`, revision: 1 }, bundle = { id: `bundle-${n}`, revision: 1 }, proof = `e2e:scenario-${n}`;
   collector.proofs!.push(proof);
   const scenario = await defineScenario(store, operator, { id: `scenario-${n}`, title: 'Behavior', purpose: 'Prove behavior', steps: ['Execute'], expected: ['Correct'], environment: environment.id, runner: 'playwright', testPath: 'tests/behavior.spec.ts' }, id());
   await validation.define(operator, { kind: 'environment', id: environment.id, expectedRevision: 0, repository: 'test/repository', url: 'https://preview.example.test', instance: `instance-${n}`, immutable: true, services: ['api'], resources: [`test-account-${n}`] }, id());
-  for (const [ref, actor, role] of [[runnerRef, runner, 'runner'], [collectorRef, collector, 'collector'], [builderRef, builder, 'builder']] as const) await validation.define(operator, { kind: 'registration', id: ref.id, expectedRevision: 0, principalId: actor.id, role, environment, adapterVersion: 'test-v1', proofs: role === 'collector' ? [proof] : [], enabled: true, ...(role === 'runner' ? { executionHost: 'unix:///var/run/docker.sock', attestationPublicKey, executionNetwork: 'gy-isolated' } : {}) }, id());
+  for (const [ref, actor, role] of [[runnerRef, runner, 'runner'], [collectorRef, collector, 'collector'], [builderRef, builder, 'builder']] as const) await validation.define(operator, { kind: 'registration', id: ref.id, expectedRevision: 0, principalId: actor.id, role, environment, adapterVersion: 'test-v1', proofs: role === 'collector' ? [proof] : [], enabled: true, ...(role === 'runner' ? { executionHost: 'unix:///var/run/docker.sock', attestationPublicKey, executionNetwork: 'gy-isolated', ...runnerAuthority } : {}) }, id());
   await validation.define(operator, { kind: 'bundle', id: bundle.id, expectedRevision: 0, scenario: scenario.id, scenarioRevision: scenario.revision, scenarioHash: scenario.hash, digest, runnerImageDigest: inputs }, id());
   let w = await engine.execute(operator, 'create', null, { title: 'Validation fixture', criteria: [{ id: 'AC-1', text: 'Behavior is proven', proofs: [proof] }] }, id());
   w = await engine.execute(operator, 'ready', w.id, {}, id()); w = await engine.execute(worker, 'claim', w.id, {}, id());
@@ -299,6 +300,33 @@ test('the execution boundary a runner may use is operator-versioned, not runner 
   assert.equal((await validation.collectionAuthority(collector, command) as any).executionNetwork, 'gy-isolated');
   await cleanup(f);
 });
+
+test('which approved test-account material an attempt may use is operator-versioned too', async () => {
+  const f = await fixture();
+  const n = `acct-${f.n}`;
+  const testAccountDigest = `sha256:${'e'.repeat(64)}`;
+  const base = { kind: 'registration' as const, id: n, expectedRevision: 0, principalId: runner.id, role: 'runner' as const, environment: f.environment, adapterVersion: 'test-v1', proofs: [], enabled: true, executionHost: 'unix:///var/run/docker.sock', attestationPublicKey, executionNetwork: 'gy-isolated' };
+  // It is execution authority, so only a runner registration may carry it at all.
+  await assert.rejects(validation.define(operator, { ...base, id: `${n}-c`, principalId: collector.id, role: 'collector', proofs: [f.proof], testAccountDigest }, id()), /Only runner registrations/);
+  await assert.doesNotReject(validation.define(operator, { ...base, testAccountDigest }, id()));
+  // Approving none is the default, and says so explicitly rather than by omission: the
+  // attestor refuses a plan that names an env file when nothing is approved.
+  const none: any = await validation.dispatch(runner, { registration: f.runnerRef }, id());
+  assert.equal(none.executionAuthority.testAccountDigest, null);
+  await cleanup(f);
+
+  // A registration that does approve material carries the digest through dispatch and
+  // through both independent re-reads, so the runner never chooses which account — and
+  // which privileges its evidence would cover — the target-facing phase signs in as.
+  const g = await fixture('external', { testAccountDigest });
+  const d: any = await validation.dispatch(runner, { registration: g.runnerRef }, id());
+  assert.equal(d.executionAuthority.testAccountDigest, testAccountDigest);
+  const command = { requestId: g.r.id, attemptId: d.attempt.id, epoch: d.attempt.epoch };
+  assert.equal((await validation.attemptAuthority({ id: 'attestor', role: 'reader' }, g.r.id) as any).grant.testAccountDigest, testAccountDigest);
+  await validation.runnerCommand(runner, 'ack', command, id());
+  assert.equal((await validation.collectionAuthority(collector, command) as any).testAccountDigest, testAccountDigest);
+  await cleanup(g);
+});
 test('the host attestor reads current attempt authority itself, under a read-only credential', async () => {
   const f = await fixture();
   const d: any = await validation.dispatch(runner, { registration: f.runnerRef }, id());
@@ -314,7 +342,8 @@ test('the host attestor reads current attempt authority itself, under a read-onl
   // so a plan carrying a substituted target or network cannot match it.
   assert.deepEqual(dispatched.grant, { requestId: f.r.id, attemptId: d.attempt.id, epoch: d.attempt.epoch, runner: f.runnerRef,
     executionHost: 'unix:///var/run/docker.sock', attestationPublicKey, executionNetwork: 'gy-isolated',
-    bundleDigest: digest, runnerImageDigest: inputs, targetUrl: 'https://preview.example.test', deadline: f.requestInput.deadline });
+    bundleDigest: digest, runnerImageDigest: inputs, targetUrl: 'https://preview.example.test', deadline: f.requestInput.deadline,
+    testAccountDigest: null });
 
   await validation.runnerCommand(runner, 'ack', command, id());
   const running: any = await validation.attemptAuthority(attestor, f.r.id);

@@ -15,7 +15,7 @@ const bundle = `sha256:${'a'.repeat(64)}`, image = `sha256:${'b'.repeat(64)}`;
 const attestor = generateKeyPairSync('ed25519');
 const grant: AttemptGrant = { requestId: randomUUID(), attemptId: randomUUID(), epoch: 1, runner: { id: 'preview-runner', revision: 1 },
   executionHost: 'unix:///var/run/docker.sock', attestationPublicKey: attestor.publicKey.export({ type: 'spki', format: 'pem' }).toString(), executionNetwork: 'gy-isolated',
-  bundleDigest: bundle, runnerImageDigest: image, targetUrl: 'https://preview.example.test/', deadline: '2026-09-16T01:00:00.000Z' };
+  bundleDigest: bundle, runnerImageDigest: image, targetUrl: 'https://preview.example.test/', deadline: '2026-09-16T01:00:00.000Z', testAccountDigest: null };
 const startedAt = '2026-09-16T00:00:00.000Z', finishedAt = '2026-09-16T00:01:00.000Z';
 const expected = { instance: 'preview-7f3a', artifacts: [{ service: 'api', digest: `sha256:${'c'.repeat(64)}` }] };
 const seen = (at: string, over: Partial<TargetObservation> = {}): TargetObservation => ({ at, measurement: 'provider', ...expected, ...over });
@@ -90,6 +90,37 @@ test('whole-run attribution refuses A -> B -> A rollouts and uncovered intervals
   assert.equal(attributeExecution({ expected, observations: [seen('2026-09-15T23:00:00.000Z'), seen(startedAt), seen(finishedAt), seen('2026-09-16T02:00:00.000Z')], startedAt, finishedAt, maxGapMs: 30_000 }).attribution, 'unknown');
   // A measurement before the run does not bracket its end, however recent it is.
   assert.equal(attributeExecution({ expected, observations: [seen('2026-09-15T23:59:59.000Z'), seen(startedAt)], startedAt, finishedAt, maxGapMs: 30_000 }).attribution, 'unknown');
+});
+
+test('measurements sharing a boundary instant are all judged, so a disagreement cannot be dropped', () => {
+  const other = { instance: 'preview-7f3a', artifacts: [{ service: 'api', digest: `sha256:${'d'.repeat(64)}` }] };
+  const middle = seen('2026-09-16T00:00:30.000Z');
+  // Providers commonly stamp observations at whole-second precision, so several can carry
+  // the same boundary timestamp. Keeping one of them by array position would let a
+  // disagreeing measurement be discarded — ordered before the match at the start, or
+  // after it at the finish — and leave an ambiguous identity reading as `matched`, which
+  // is the only attribution `reportReasons` accepts.
+  const openingConflict = attributeExecution({ expected, observations: [seen(startedAt, other), seen(startedAt), middle, seen(finishedAt)], startedAt, finishedAt, maxGapMs: 30_000 });
+  assert.notEqual(openingConflict.attribution, 'matched');
+  assert.equal(openingConflict.attribution, 'changed');
+  const closingConflict = attributeExecution({ expected, observations: [seen(startedAt), middle, seen(finishedAt), seen(finishedAt, other)], startedAt, finishedAt, maxGapMs: 30_000 });
+  assert.notEqual(closingConflict.attribution, 'matched');
+  // Which of the two the array happens to end on must not decide it: an identity that is
+  // no longer unambiguous at the finish is not the expected one.
+  assert.equal(closingConflict.attribution, 'mismatched');
+  assert.equal(attributeExecution({ expected, observations: [seen(startedAt), middle, seen(finishedAt, other), seen(finishedAt)], startedAt, finishedAt, maxGapMs: 30_000 }).attribution, 'mismatched');
+  // Agreeing measurements at one instant are not a conflict, and the extra one is not a
+  // coverage gap either.
+  assert.equal(attributeExecution({ expected, observations: [seen(startedAt), seen(startedAt), middle, seen(finishedAt), seen(finishedAt)], startedAt, finishedAt, maxGapMs: 30_000 }).attribution, 'matched');
+
+  // A zero-length interval still cannot be bracketed by one measurement counted twice,
+  // and two distinct ones at that instant are judged together rather than against
+  // each other's position.
+  const instant = { startedAt, finishedAt: startedAt, maxGapMs: 30_000 };
+  assert.equal(attributeExecution({ expected, observations: [seen(startedAt)], ...instant }).attribution, 'unknown');
+  assert.equal(attributeExecution({ expected, observations: [seen(startedAt), seen(startedAt)], ...instant }).attribution, 'matched');
+  assert.equal(attributeExecution({ expected, observations: [seen(startedAt), seen(startedAt, other)], ...instant }).attribution, 'mismatched');
+  assert.equal(attributeExecution({ expected, observations: [seen(startedAt, other), seen(startedAt)], ...instant }).attribution, 'mismatched');
 });
 
 test('a mismatched authority binding produces no publishable result at all', () => {

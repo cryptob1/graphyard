@@ -55,8 +55,11 @@ The runner runs under a **worker** registration. The CLI refuses to start if the
 | `executionHost` | the local Docker socket every attempt command is addressed to |
 | `attestationPublicKey` | the Ed25519 public key of the host attestor |
 | `executionNetwork` | the dedicated isolated Docker network the target-facing phase may join |
+| `testAccountDigest` | the approved test-account material the target-facing phase may sign in as, if any |
 
 Changing any of them requires a new registration revision, and none is accepted from a runner or collector input file. `executionNetwork` matters as much as the other two: Docker resolves a network name against every network the daemon already has, so a runner-chosen name could attach the browser container to the networks carrying databases and other internal services. The built-in `host`, `bridge`, `default` and `none` names are refused at registration.
+
+`testAccountDigest` is what makes the account material approved, and the runner's `testAccountEnvFile` only says which private file on this host holds it. Measure the file with `graphyard runner account-digest /srv/graphyard/accounts.env` and register the digest it prints; it covers the `TEST_ACCOUNT_*` entries themselves, so comments, blank lines and key order may be changed freely without a new revision. Preflight refuses unless the file it reads hashes to the registered digest, and refuses a plan that names a file when the registration approves none — or a registration that approves material when the plan names no file. Without that pin the pathname would be the approval: every mode-0600 env file the attestor can read passes the structural checks, including one for a support or administrator account the scenario was never approved to exercise, so a compromised runner could point preflight at it and obtain trusted evidence for privileges nobody approved. The digest travels in the dispatch grant, is re-read independently by the attestor and by the collector, and is covered by the signed attestation along with the rest of the grant.
 
 `executionHost` must be a local `unix://` socket, and a remote `ssh://` or `tcp://` endpoint is refused at registration. Preflight measures the approved bundle, the attempt boundary and every directory leading to them on the filesystem the attestor can see, while `--mount` sources are resolved by whichever daemon actually starts the container. Against a remote daemon those are two different filesystems: the same pathnames could mount bytes nobody measured, or nothing at all, with every host-side check passing. Attestor and daemon therefore share a host, and so does the collector — see [Collect, verify and publish](#collect-verify-and-publish). What the trust boundary actually requires is three separate *identities*, not three separate machines.
 
@@ -217,7 +220,8 @@ graphyard runner collect collector.json
     "bundleDigest": "sha256:3f9a1c7d2e5b4086a1d3c6f8092b4e7a5d1c8f30b2a69e4d7c05f1a8b3e6d924",
     "runnerImageDigest": "sha256:7c2e4a91f0d38b56ac17e9042f6b8d3519a0c7e4b62d9f18305a7c4e1b09d6f2",
     "targetUrl": "https://preview-7f3a.example.test/",
-    "deadline": "2026-09-16T01:00:00.000Z"
+    "deadline": "2026-09-16T01:00:00.000Z",
+    "testAccountDigest": "sha256:5b8e0d3a7f21c94e6082d5b1a3f7c0e94d26b8a15f309c7e4b1d02a6f8395c7e"
   },
   "record": { "…": "the execution record the host attestor produced" },
   "outputPath": "/srv/graphyard/attempts/b1d7c05e-8a24-4f6b-93ec-2f7a1d905c38",

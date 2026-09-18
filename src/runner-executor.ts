@@ -1,4 +1,5 @@
 import { constants, type Stats } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { chmod, lstat, mkdir, open, readdir, realpath, stat } from 'node:fs/promises';
 import { spawn } from 'node:child_process';
 import { dirname, relative, resolve, sep } from 'node:path';
@@ -48,6 +49,18 @@ export const attemptGrantSchema = z.object({
   attestationPublicKey: z.string().min(32).max(4096),
   executionNetwork: dockerNetwork,
   bundleDigest: digest, runnerImageDigest: digest, targetUrl, deadline: z.iso.datetime(),
+  /**
+   * Which test-account material this attempt is approved to run with, as a digest of the
+   * approved entries themselves — `null` when it is approved to run with none.
+   *
+   * The pathname the runner reads is host configuration, so it can never be the approval:
+   * any private file the attestor can read would otherwise do, and a compromised runner
+   * could obtain trusted evidence for a different account, and a different privilege
+   * scenario, than the operator approved. The digest comes from the operator-versioned
+   * runner registration through the dispatch grant, is re-read independently by the
+   * attestor and the collector, and is covered by `grantDigest` in the signed attestation.
+   */
+  testAccountDigest: digest.nullable().default(null),
 }).strict();
 export type AttemptGrant = z.infer<typeof attemptGrantSchema>;
 
@@ -93,6 +106,19 @@ const testAccountKey = /^TEST_ACCOUNT(?:_[A-Z0-9_]+)?$/;
 /** The approved test-account variables, parsed once from the file preflight validated. */
 export type TestAccountEnv = Record<string, string>;
 /**
+ * The identity of one set of approved test-account entries, independent of the file that
+ * happened to carry them. Comments, ordering and blank lines are not part of the approval,
+ * so an operator can reformat the env file without re-registering; the keys and values the
+ * container would actually receive are. This is what a runner registration pins and what
+ * preflight and `containerEnvironment` check the material they hold against.
+ *
+ * The joined encoding is unambiguous because both readers refuse anything else: a key is
+ * `TEST_ACCOUNT_*` and so cannot contain `=`, and a value cannot contain a newline, so no
+ * two distinct entry sets can serialise to the same bytes.
+ */
+export const approvedAccountDigest = (entries: TestAccountEnv) =>
+  `sha256:${createHash('sha256').update(Object.keys(entries).sort().map(key => `${key}=${entries[key]}\n`).join('')).digest('hex')}`;
+/**
  * Approved test-account material is passed by value, never by pathname. Docker reopens an
  * `--env-file` when the container starts, which is after the allowlist was checked: the
  * identity that owns that mode 0600 file could rewrite it in between and inject variables
@@ -104,6 +130,15 @@ export function containerEnvironment(plan: ExecutionPlan, phase: Phase, testAcco
   if (phase === 'execute' && plan.testAccountEnvFile && !Object.keys(approved).length) throw new Error('Approved test-account configuration must be read and validated in preflight before execution');
   const unapproved = Object.keys(approved).filter(key => !testAccountKey.test(key));
   if (unapproved.length) throw new Error(`Only validated TEST_ACCOUNT_* variables may reach the runner container: ${unapproved.sort().join(', ')}`);
+  // The last check before these values become container arguments: the material must be
+  // exactly what this attempt's authority approved. Preflight already refused anything
+  // else, and this refuses again here so no caller can assemble a command that carries
+  // account material the grant does not cover.
+  if (phase === 'execute') {
+    const pinned = plan.grant.testAccountDigest;
+    if (!pinned && Object.keys(approved).length) throw new Error('This attempt authority approves no test-account material; the runner container must receive none');
+    if (pinned && approvedAccountDigest(approved) !== pinned) throw new Error('The test-account material for this container is not the material this attempt authority approved');
+  }
   const env: Record<string, string> = {
     ...approved,
     HOME: '/scratch', TMPDIR: '/scratch', CI: '1',
@@ -319,15 +354,21 @@ export async function assertIsolation(plan: ExecutionPlan, options: AttestorIden
   // both the container mount and the attestor's post-execution measurement would follow.
   await assertAncestryFixed(output.path, attestorUid, 'collection boundary');
   if ((await readdir(output.path)).length) throw new Error('The collection boundary must be empty before an attempt');
-  const testAccountEnv = p.testAccountEnvFile ? await readTestAccountEnv(p.testAccountEnvFile) : {};
+  // Reading approved account material and being approved to use it are separate facts.
+  // The plan says which file this host keeps it in; the grant says which material the
+  // operator approved. Neither alone may decide what the container receives.
+  if (p.grant.testAccountDigest && !p.testAccountEnvFile) throw new Error('This attempt authority approves test-account material, but the runner plan names no env file to read it from');
+  if (!p.grant.testAccountDigest && p.testAccountEnvFile) throw new Error('This attempt authority approves no test-account material; remove testAccountEnvFile or register the approved account digest');
+  const testAccountEnv = p.testAccountEnvFile ? await readTestAccountEnv(p.testAccountEnvFile, p.grant.testAccountDigest!) : {};
   return { oraclePath: oracle.path, outputPath: output.path, outputBoundary: output.identity, testAccountEnv };
 }
 
 /**
- * Read the approved variables once, from the descriptor that was validated. The returned
- * entries — not the pathname — are what execution may pass to the container.
+ * Read one private env file into validated entries. This decides only what the file
+ * contains, never whether that material is approved for anything; `readTestAccountEnv`
+ * below is the only reader execution uses, and it answers that separately.
  */
-async function readTestAccountEnv(path: string): Promise<TestAccountEnv> {
+async function readAccountFile(path: string): Promise<TestAccountEnv> {
   const file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
   try {
     const info = await file.stat();
@@ -345,6 +386,27 @@ async function readTestAccountEnv(path: string): Promise<TestAccountEnv> {
     if (!Object.keys(entries).length) throw new Error('Approved test-account configuration must define at least one TEST_ACCOUNT variable');
     return entries;
   } finally { await file.close(); }
+}
+/**
+ * Measure an approved test-account env file, for an operator registering its digest. It
+ * grants nothing: the entries stay in this process, and approving them is a separate
+ * operator action against Graphyard under an operator credential.
+ */
+export const accountFileDigest = async (path: string) => approvedAccountDigest(await readAccountFile(path));
+/**
+ * The approved variables for this attempt, read once from the descriptor that was
+ * validated. The returned entries — not the pathname — are what execution may pass to the
+ * container, and only once they are shown to be the material `pinned` approves.
+ *
+ * Shape alone is not approval. Every attestor-readable private file of `TEST_ACCOUNT_*`
+ * variables satisfies the structural checks, including one for an account holding
+ * privileges this scenario was never approved to exercise; only the digest carried by the
+ * attempt grant says which account material this attempt may run with.
+ */
+async function readTestAccountEnv(path: string, pinned: string): Promise<TestAccountEnv> {
+  const entries = await readAccountFile(path);
+  if (approvedAccountDigest(entries) !== pinned) throw new Error('The test-account configuration at this path is not the material this attempt authority approved');
+  return entries;
 }
 
 export type PhaseResult = { phase: Phase; exitCode: number; timedOut: boolean; durationMs: number };
