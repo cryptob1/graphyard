@@ -2,12 +2,14 @@ import { before, after, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { mkdtemp, readFile } from 'node:fs/promises';
+import { setTimeout as delay } from 'node:timers/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import EmbeddedPostgres from 'embedded-postgres';
 import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import { bootstrapObligations, criterionSchema, deliveredProof, evaluate, inheritedObligations, pathScopeContains, pathScopesOverlap, requiredProofs, type Observation, type Principal, type Work } from '../src/model.js';
+import { queueRef } from '../src/merge-queue.js';
 import { diagnose, obligationLedger, proofPreview } from '../src/coordination.js';
 
 const operator: Principal = { id: 'operator', role: 'admin' };
@@ -299,6 +301,85 @@ test('integration:bootstrap-policy-inheritance clears the obligation once a deli
   const after = await submitted({ title: 'Touch the discharged contract', plannedFiles: ['src/discharge/engine.ts'],
     criteria: [{ id: 'AC-1', text: 'The change behaves', proofs: ['unit:discharge-after'] }] });
   assert.deepEqual(inheritedObligations(after, await all()), [], 'later work does not inherit a discharged obligation');
+});
+
+// ---------------------------------------------------------------------------
+// Delivery reconciliation. When the in-flight merge execution is gone by the time
+// GitHub reports the merge, authorization is re-derived from the event history.
+// That fallback must demand exactly what the acceptance gate demanded: a deferred
+// proof is excluded, an inherited obligation is not.
+// ---------------------------------------------------------------------------
+
+const coordinator: Principal = { id: 'merge-coordinator', role: 'coordinator' };
+
+/** Every candidate lands on one managed branch, so the queue is global: leave only this entry. */
+const soleQueueEntry = (workId: string) =>
+  store.pool.query("UPDATE work_items SET document=document-'queue' WHERE id<>$1 AND document->>'stage'<>'done'", [workId]);
+
+/** Publish the validated speculative tip the queue head needs before it may merge. */
+async function queueHead(work: Work) {
+  await soleQueueEntry(work.id);
+  const speculation = { ref: queueRef(work.key), tip: work.candidate!.sha, base: work.candidate!.baseSha, baseTree: 'c'.repeat(40),
+    predecessors: [], policyRevision: work.policyRevision, publishedAt: new Date().toISOString() };
+  await store.pool.query("UPDATE work_items SET document=jsonb_set(document,'{queue,speculation}',$2::jsonb) WHERE id=$1", [work.id, JSON.stringify(speculation)]);
+  return engine.observe(work.id, (await current(work.id)).revision, observation(work));
+}
+
+/**
+ * Deliver the queue head through a verified execution whose live record is then gone, so the
+ * merge observation has to fall back to the authorized snapshot in the event history. `between`
+ * runs after verification and before GitHub reports the merge.
+ */
+async function deliverFromHistory(work: Work, between?: () => Promise<unknown>) {
+  const ready = await queueHead(work);
+  assert.deepEqual(ready.gates.filter(gate => !gate.passed).map(gate => gate.name), [], 'the candidate must be merge-ready before delivery');
+  const granted = await engine.acquireMerge(coordinator, ready.id, { expectedRevision: ready.revision, sha: head, baseSha: base, policyRevision: ready.policyRevision }, id());
+  const verified = await engine.verifyMerge(coordinator, ready.id, { executionId: granted.execution.id }, { ...observation(ready), prState: 'open', draft: false }, id());
+  await delay(5);
+  const mergedAt = ((await store.pool.query('SELECT clock_timestamp() AS now')).rows[0].now as Date).toISOString();
+  await delay(5);
+  if (between) await between();
+  // The execution record is gone from the document; only the event history still carries it.
+  await store.pool.query("UPDATE work_items SET document=document-'mergeExecution' WHERE id=$1", [work.id]);
+  return engine.observe(work.id, verified.revision, { ...observation(ready), merged: true, mergedAt, mergeSha: 'e'.repeat(40) });
+}
+
+test('integration:bootstrap-policy-gate reconciles a delivered bootstrap candidate from event history', async () => {
+  const work = await submitted({ title: 'Deliver the deferring change', plannedFiles: ['src/deliver/'],
+    criteria: [{ id: 'AC-1', text: 'The harness proves itself later', proofs: ['integration:deliver-harness'], bootstrap: { reason: 'Introduces the harness', contractPaths: ['src/deliver/engine.ts'] } },
+      { id: 'AC-2', text: 'The change behaves', proofs: ['unit:deliver'] }] });
+  assert.deepEqual(acceptance(await prove(work, 'unit:deliver')).reasons, []);
+
+  const delivered = await deliverFromHistory(await current(work.id));
+  assert.equal(delivered.stage, 'done', 'a deferred proof has no evidence by design and must not read as an unauthorized merge');
+  assert.deepEqual(delivered.violations, []);
+  assert.ok(delivered.delivery?.authorizationRevision, 'the delivery records the revision that authorized it');
+  assert.deepEqual(bootstrapObligations(await all()).filter(obligation => obligation.workId === work.id).map(obligation => obligation.proof),
+    ['integration:deliver-harness'], 'delivering the deferral leaves the obligation standing for the next change on the contract');
+});
+
+test('integration:bootstrap-policy-inheritance re-checks an inherited obligation at the merge cutoff', async () => {
+  await submitted({ title: 'Introduce the delivered harness', plannedFiles: ['src/cutoff/'],
+    criteria: [{ id: 'AC-1', text: 'Cutoff is proven', proofs: ['integration:cutoff-harness'], bootstrap: { reason: 'Introduces the harness', contractPaths: ['src/cutoff/engine.ts'] } }] });
+  const heir = await submitted({ title: 'Prove the inherited harness', plannedFiles: ['src/cutoff/engine.ts'],
+    criteria: [{ id: 'AC-1', text: 'The change behaves', proofs: ['unit:cutoff-heir'] }] });
+  await prove(heir, 'unit:cutoff-heir');
+  assert.deepEqual(acceptance(await prove(heir, 'integration:cutoff-harness')).reasons, []);
+  const delivered = await deliverFromHistory(await current(heir.id));
+  assert.equal(delivered.stage, 'done', 'an heir that ran the inherited proof delivers through the same fallback');
+  assert.deepEqual(delivered.violations, []);
+
+  // An obligation declared while a candidate is mid-merge is still binding at reconciliation:
+  // the inherited proof is not in the heir's own criteria, so only requiredProofs sees it.
+  const late = await submitted({ title: 'Change the unproven contract', plannedFiles: ['src/late/engine.ts'],
+    criteria: [{ id: 'AC-1', text: 'The change behaves', proofs: ['unit:late-heir'] }] });
+  assert.deepEqual(acceptance(await prove(late, 'unit:late-heir')).reasons, []);
+  const refused = await deliverFromHistory(await current(late.id), () => engine.execute(operator, 'create', null,
+    { title: 'Introduce the late harness', plannedFiles: ['src/late/'],
+      criteria: [{ id: 'AC-1', text: 'Late is proven', proofs: ['integration:late-harness'], bootstrap: { reason: 'Introduces the harness', contractPaths: ['src/late/engine.ts'] } }] }, id()));
+  assert.notEqual(refused.stage, 'done', 'an unproven inherited obligation is not an authorized merge');
+  assert.ok(refused.violations.includes('Merge observed without a prior authorization for this candidate'));
+  assert.deepEqual(requiredProofs(refused, await all()).slice().sort(), ['integration:late-harness', 'unit:late-heir']);
 });
 
 // ---------------------------------------------------------------------------

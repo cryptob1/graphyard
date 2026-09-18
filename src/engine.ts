@@ -581,7 +581,9 @@ export class Engine {
         }
         const past = authorizedSnapshot || !executionValid ? undefined : (await db.query("SELECT payload->'work' AS work FROM events WHERE work_id=$1 AND created_at<$2 AND payload ? 'work' ORDER BY seq DESC LIMIT 1", [id, new Date(cutoff)])).rows[0]?.work as Work | undefined;
         const authorization = past?.mergeAuthorization;
-        const evidenceValid = past ? [...new Set(past.criteria.flatMap(criterion => criterion.proofs))].every(proof => !!currentEvidence(past, proof, new Date(cutoff - 1))) : false;
+        // Exactly the acceptance gate's demand at the merge cutoff: a bootstrap criterion's
+        // deferred proofs are excluded, and an inherited obligation is re-checked here too.
+        const evidenceValid = past ? requiredProofs(past, all).every(proof => !!currentEvidence(past, proof, new Date(cutoff - 1))) : false;
         if (!authorizedSnapshot && past && authorization && authorization.sha === observation.candidate.sha && authorization.baseSha === observation.candidate.baseSha && authorization.policyRevision === past.policyRevision
           && past.submission?.pr === observation.candidate.pr && past.gates.every(g => g.passed) && !past.violations.length
           && evidenceValid && past.observation && cutoff - Date.parse(past.observation.at) < 120_000 && Date.parse(authorization.at) < mergedTime) {
