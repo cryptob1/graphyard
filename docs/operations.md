@@ -8,6 +8,35 @@
 - Keep backups and verify a restore in an isolated environment periodically.
 - Monitor Postgres size: events contain work snapshots and evidence is retained. The MVP has no automatic retention pruning.
 
+## Master coordination loop
+
+`graphyard master run` is the durable coordinator. Run it under systemd or Herdr, never as a chat
+session: see [`examples/master/graphyard-master.service`](../examples/master/graphyard-master.service)
+and the [operating guide](master-agent.md#durable-loop).
+
+- **Health.** `graphyard master status` reports the loop under `daemon`. `running` is false when no
+  cycle has completed within three intervals. `lagMs` is the age of the last cycle, `unresolved`
+  lists actions interrupted mid-flight, and `escalations` lists what the loop deliberately left for
+  a person. `journalctl --user -u graphyard-master` has the per-action log.
+- **Restart.** Stop and start it freely. The cursor beside the coordinator credential is written
+  before and after every external action and is reconciled against Graphyard on the next start, so a
+  restart never re-dispatches an assignment that landed and never loses one that did not. Do not
+  edit or delete the cursor to force a retry; change the Graphyard state the loop is reading.
+- **Two loops.** A second daemon refuses while the first is alive. If a coordinator machine was
+  reimaged or lost, the abandoned lock on another host clears after three intervals (at least two
+  minutes); confirm the old process is really gone before starting elsewhere.
+- **Stuck at a stage.** The loop does not clear blockers, revise requirements, release backlog work,
+  approve reviews, or produce evidence, and it cannot: it holds only the coordinator credential. An
+  item that stays put is waiting on an operator action recorded in `escalations` — reviewer capacity,
+  an operator-witnessed proof, a blocker, or an approval.
+- **Deployment lag.** `daemon.deployment` names the commit the running release serves and which
+  delivered items it covers. Items under `pending` are merged but not yet live. It is an observation,
+  never a gate; an unreachable probe reports `unavailable` and leaves every delivery pending rather
+  than assuming it shipped.
+- **Worker profiles.** A failed launch cools its profile off for ten minutes and work routes to
+  another profile. `daemon.profiles` holds the reason. A profile that never recovers usually has an
+  unreadable credential file or an agent name already taken in Herdr.
+
 ## Lost worker before submission
 
 The lease expires after 120 seconds without a heartbeat. Reconciliation clears the lease; a new worker can claim with a higher epoch. Old API mutations refuse. Preserve the old worktree for inspection and create a new branch/path for the new attempt. Do not assume the old process has stopped merely because its lease expired.
@@ -33,6 +62,67 @@ Own-App check webhooks are ignored. Other signed webhook deliveries wake jobs, b
 ## GitHub or Graphyard outage
 
 The database merge gate refuses observations older than two minutes. GitHub's last successful check may still exist; it does not expire automatically. Routine master merges acquire a short-lived server authority, transactionally record a final GitHub verification, and freeze relevant Graphyard mutations around the exact-head provider call. A direct GitHub merge has no verified execution and cannot complete its Graphyard work item. Repository rules must restrict alternative merge identities when the merge itself must also be prevented during an outage.
+
+## Bootstrap mode for a self-proving change
+
+An item can require a proof that does not exist yet, because the same change is what introduces the
+harness. The protected harness refuses to run against a base that lacks the contract, so the item
+cannot prove itself and stalls until someone re-sequences requirements by hand. Bootstrap mode is
+the audited way through, and it is an operator decision.
+
+Mark the one criterion whose proof is not yet runnable:
+
+```sh
+graphyard requirements GY-N revision.json
+```
+
+```json
+{
+  "expectedPolicyRevision": 3,
+  "reason": "The herdr-recovery harness ships in this change",
+  "criteria": [
+    {"id": "AC-1", "text": "Herdr recovery is proven end to end", "proofs": ["integration:herdr-recovery"],
+     "bootstrap": {"reason": "This candidate introduces the harness the proof needs",
+                   "contractPaths": ["src/herdr/recovery.ts"]}},
+    {"id": "AC-2", "text": "The supervisor stops cleanly", "proofs": ["unit:supervisor-stop"]}
+  ],
+  "dependencies": [],
+  "plannedFiles": ["src/herdr/", "tests/"],
+  "exclusiveResources": []
+}
+```
+
+The same declaration can be made at creation, or from **Revise requirements** in the dashboard.
+Contract paths must lie inside the item's planned files. Declaring or changing bootstrap mode
+requires the `policy:bootstrap` capability; an operator-agent scoped to `policy:requirements` alone
+is refused, and implementation workers cannot revise their own criteria at all. Graphyard stamps who
+declared the deferral and when, and records the declaration and its reason in append-only history.
+
+A criterion with an `e2e:` proof cannot be deferred: its scenario version is pinned per work item
+and cannot travel with the obligation. Sequence those through the test-case registry instead.
+
+What stays in force: independent review, every required CI check, the merge queue, and every proof
+of every criterion that is not marked. A bootstrap candidate with a failing check or no approval
+does not advance. Bootstrap mode buys sequencing, not a lower bar.
+
+What is owed: the deferred proof becomes an obligation on its contract paths. The next work item
+whose planned files touch that contract inherits the proof as a required criterion automatically —
+its acceptance gate names the originating item and criterion — and that item cannot defer it again.
+The obligation clears only when some change is delivered with trusted, passing, complete evidence
+for that proof. No command retires it.
+
+Review what is outstanding before planning new work:
+
+```sh
+graphyard obligations
+graphyard diagnose GY-N
+```
+
+The dashboard shows the same facts on the work item: a bootstrap badge and the declaring identity on
+the criterion, `deferred` on the required-proof list, inherited obligations on the items that pick
+them up, and a **Bootstrap obligations** ledger of everything still owed. If an obligation has no
+inheritor and the harness now exists on main, create the follow-up item that runs it rather than
+leaving the proof owed indefinitely.
 
 ## Merge bypass
 
@@ -89,6 +179,27 @@ requires editing production configuration.
 Every grant and revoke appends an immutable history row and an event, recording the actor,
 the reason, the patterns applied, and the resulting effective set. Read one principal's
 record with `graphyard grants history ID`; the ledger itself rejects updates and deletes.
+
+## Setup proposals and drift
+
+`graphyard init --scan` replaces hand-authored setup with a reviewed proposal. The scan reads package manifests, CI workflows, deploy configuration, and the test layout, then writes `.graphyard/setup-proposal.json` (ignored by Git, mode 0600) proposing required check names, build/test commands with proof names, deploy verification, the candidate environment topology, review provider, worker/reviewer profiles for runtimes found on that machine, and the GitHub App registration. It changes nothing else.
+
+`graphyard init --scan --apply` applies exactly the stored proposal after an operator review: it performs the GitHub App manifest flow, writes the managed `AGENTS.md` section, records principals and proof grants in `.graphyard/principals.json` (install the array as `GRAPHYARD_PRINCIPALS` on the deployment), and writes profile files under `.graphyard/profiles/`. Principals come only from the reviewed proposal: apply registers the operator, coordinator, and producer principals plus exactly the worker principals the proposal's profiles declare, so a machine with no agent runtime gets no worker credential rather than an unreviewed one; install an agent CLI and rerun `init --scan --apply` to add one. Applying is idempotent: unchanged artifacts are left alone, existing principal tokens are preserved so a re-run never invalidates a deployed configuration, operator-edited profiles are reported as drift and kept rather than overwritten, and a repository that changed after apply is reported as drift by later scans. If the repository changes between review and apply, apply refuses and the stored proposal is left untouched.
+
+### Environment topology chosen by the scan
+
+The candidate-bound-environment invariant is declared explicitly in every proposal: ephemeral where the stack allows, pooled or partial with data isolation where it does not.
+
+| Detected stack | Deploy target | Topology chosen | Declaration |
+| --- | --- | --- | --- |
+| Node package with `railway.json`/`railway.toml` | Railway | `ephemeral` | Each candidate deploys to its own Railway environment built from its commit and destroyed after review; backing datastores must be per-candidate copies seeded from structure, never shared live state. |
+| Python project with `Dockerfile`/compose | Container registry | `pooled` | Candidates deploy as isolated containers, but a shared backing datastore (compose database, driver dependency, or connection URL) was detected; every candidate must receive isolated data — a per-candidate schema or database seeded from structure only — so concurrent candidates cannot observe each other. |
+| Static site (`index.html`, `.nojekyll`/`CNAME`) | GitHub Pages | `ephemeral` | Each candidate deploys to a disposable static target created from its own commit and discarded after review; nothing persists between candidates. |
+| Any stack with no deploy configuration | none | `partial` | Only CI-level isolation exists; the operator must add a deploy target or accept partial environment verification, and any shared backing service requires declared data isolation between candidates. |
+
+Railway, Vercel, and Fly detections choose the same ephemeral pattern as the Railway row, with target-specific SHA verification instructions (for example, comparing `RAILWAY_GIT_COMMIT_SHA`, Vercel deployment metadata, or `fly status` releases with the candidate SHA). Container deployments propose SHA-tagged images and digest verification. The pooled choice is deliberate conservatism: containers are disposable, but the detected datastore is not, so the proposal requires isolation instead of assuming per-candidate copies the platform has not promised.
+
+Drift is informational, never auto-repaired: rerun `init --scan`, compare the refreshed proposal against what was applied, and reapply only after operator review. `graphyard doctor` reports the stored proposal, the applied setup record, and current drift.
 
 ## Scale limits
 

@@ -33,8 +33,20 @@ export interface ProofGrant {
 }
 /** One principal's effective proof authority, with the source that currently decides it. */
 export interface ProofAuthority { principalId: string; role: Principal['role']; patterns: string[]; source: 'grant' | 'environment' | 'role' }
-
-export const criterionSchema = z.object({ id: z.string().regex(/^AC-\d+$/), text: z.string().min(1).max(2000), proofs: z.array(proofSchema).min(1).max(20) }).strict();
+// Bootstrap mode: an operator may defer a criterion's proofs for the single change that
+// introduces the harness those proofs depend on. The proof is never dropped. It becomes a
+// standing obligation on the named contract paths, and the next change touching those paths
+// inherits it as a required proof. Workers can never declare it.
+export const bootstrapDeclarationSchema = z.object({
+  reason: z.string().trim().min(1).max(2000),
+  contractPaths: z.array(z.string().trim().min(1).max(500)).min(1).max(20)
+    .refine(paths => new Set(paths).size === paths.length, 'Bootstrap contract paths must be unique'),
+}).strict();
+export type BootstrapDeclaration = z.infer<typeof bootstrapDeclarationSchema>;
+export const criterionSchema = z.object({ id: z.string().regex(/^AC-\d+$/), text: z.string().min(1).max(2000), proofs: z.array(proofSchema).min(1).max(20), bootstrap: bootstrapDeclarationSchema.optional() }).strict();
+/** Stored declaration. The audit fields are stamped by the control plane, never by the client. */
+export interface BootstrapMode extends BootstrapDeclaration { declaredBy: string; declaredAt: string; policyRevision: number }
+export interface Criterion { id: string; text: string; proofs: string[]; bootstrap?: BootstrapMode }
 export const reviewProviders = ['github', 'codex', 'agent'] as const;
 export type ReviewProvider = typeof reviewProviders[number];
 const identifier = z.string().trim().regex(/^[a-z0-9][a-z0-9._-]{0,63}$/);
@@ -90,7 +102,7 @@ export const createSchema = z.object({
   exclusiveResources: resourcesSchema.optional(),
 }).strict();
 export type Create = z.infer<typeof createSchema>;
-export const operatorCapabilities = ['intent:create', 'intent:ready', 'intent:unblock', 'policy:requirements', 'policy:review-provider'] as const;
+export const operatorCapabilities = ['intent:create', 'intent:ready', 'intent:unblock', 'policy:requirements', 'policy:review-provider', 'policy:bootstrap'] as const;
 export type OperatorCapability = typeof operatorCapabilities[number];
 export const operatorCredentialHash = Symbol('operatorCredentialHash');
 export interface Principal {
@@ -154,6 +166,7 @@ export interface Observation {
 export interface Gate { name: string; passed: boolean; reasons: string[] }
 export interface Work extends Create {
   validation?: Record<string, { candidateId: string; requestId?: string; attemptId?: string }>;
+  criteria: Criterion[];
   retiredCriterionIds?: string[];
   formalReviewResetRequired?: boolean;
   formalReviewBaseline?: { pr: number; policyRevision: number; reviewIds: number[] };
@@ -235,6 +248,68 @@ export function currentEvidence(work: Work, proof: string, now = new Date()): Ev
   return latest && (!latest.expiresAt || Date.parse(latest.expiresAt) > now.getTime()) ? latest : undefined;
 }
 
+// Deliberately bounded scope syntax: exact paths or directory prefixes ending /, /*, /**.
+// Unsupported glob expressions are not interpreted as semantic dependency knowledge.
+export function pathScope(value: string) {
+  const path = value.replace(/^\.\//, '');
+  const prefix = path.endsWith('/') || /\/\*{1,2}$/.test(path);
+  return { path: prefix ? path.replace(/\*+$/, '') : path, prefix };
+}
+export function pathScopesOverlap(a: string, b: string) {
+  const left = pathScope(a), right = pathScope(b);
+  return left.path === right.path || left.prefix && right.path.startsWith(left.path) || right.prefix && left.path.startsWith(right.path);
+}
+/** True when `outer` covers every file `inner` can name. A file scope contains only itself. */
+export function pathScopeContains(outer: string, inner: string) {
+  const wide = pathScope(outer), narrow = pathScope(inner);
+  return wide.path === narrow.path ? wide.prefix || !narrow.prefix : wide.prefix && narrow.path.startsWith(wide.path);
+}
+
+export interface BootstrapObligation extends BootstrapMode { key: string; workId: string; criterionId: string; proof: string }
+
+/**
+ * A deferred proof is discharged only by a delivered change that actually ran it: trusted
+ * passing evidence bound to that change's merged candidate and policy. Nothing an operator
+ * or worker asserts can retire an obligation.
+ */
+export function deliveredProof(work: Work, proof: string) {
+  const candidate = work.candidate;
+  return work.stage === 'done' && !!candidate && work.evidence.some(evidence => evidence.proof === proof && evidence.trusted
+    && evidence.result === 'pass' && evidence.executed > 0 && evidence.skipped === 0
+    && evidence.sha === candidate.sha && evidence.baseSha === candidate.baseSha && evidence.policyRevision === work.policyRevision);
+}
+
+/** Every bootstrap deferral no delivered change has proven yet. Derived, never asserted. */
+export function bootstrapObligations(all: Work[]): BootstrapObligation[] {
+  const declared = all.flatMap(item => item.criteria.flatMap(ac => ac.bootstrap
+    ? ac.proofs.map(proof => ({ key: item.key, workId: item.id, criterionId: ac.id, proof, ...ac.bootstrap! }))
+    : []));
+  return declared.filter(obligation => !all.some(item => deliveredProof(item, obligation.proof)));
+}
+
+/**
+ * Obligations another change deferred that this item's planned files now touch. A criterion
+ * of this item cannot defer an inherited proof a second time: its own bootstrap declaration is
+ * deliberately not consulted here, so the deferral can never be renewed by the change that
+ * inherits it.
+ */
+export function inheritedObligations(work: Work, all: Work[]): BootstrapObligation[] {
+  if (work.stage === 'done') return [];
+  const alreadyRequired = new Set(work.criteria.flatMap(ac => ac.bootstrap ? [] : ac.proofs));
+  const inherited: BootstrapObligation[] = [];
+  for (const obligation of bootstrapObligations(all)) {
+    if (obligation.workId === work.id || alreadyRequired.has(obligation.proof)) continue;
+    if (inherited.some(seen => seen.proof === obligation.proof)) continue;
+    if (work.plannedFiles.some(path => obligation.contractPaths.some(contract => pathScopesOverlap(path, contract)))) inherited.push(obligation);
+  }
+  return inherited;
+}
+
+/** Exactly the proofs the acceptance gate demands for the current candidate. */
+export function requiredProofs(work: Work, all: Work[]): string[] {
+  return [...new Set([...work.criteria.flatMap(ac => ac.bootstrap ? [] : ac.proofs), ...inheritedObligations(work, all).map(obligation => obligation.proof)])];
+}
+
 // Pure evaluation: neither worker assertions nor UI state can authorize progression.
 export function evaluate(work: Work, all: Work[], now: Date, ciAppIds: number[]): { stage: Stage; gates: Gate[]; violations: string[]; queue: QueueEntry | null; queueSequence: number; queueEjection: QueueEjection | null; queueHistory: QueueHistoryEntry[] } {
   const gates: Gate[] = [];
@@ -280,10 +355,21 @@ export function evaluate(work: Work, all: Work[], now: Date, ciAppIds: number[])
     return !checks.length || checks.some(c => c.result !== 'success');
   }).map(name => `Required CI check ${name} has not passed on the current candidate`));
   const reasons: string[] = [];
-  for (const ac of work.criteria) for (const proof of ac.proofs) {
-    const scenario = work.scenarioRequirements?.find(s => s.proof === proof);
+  const unproven = (proof: string) => {
     const evidence = currentEvidence(work, proof, now);
-    if (!evidence || evidence.result !== 'pass' || evidence.executed < 1 || evidence.skipped !== 0) reasons.push(`${ac.id}: ${proof} needs trusted passing evidence, with executed > 0 and skipped = 0, for this candidate and policy${scenario ? `; scenario v${scenario.revision} in ${scenario.environment}` : ''}`);
+    return !evidence || evidence.result !== 'pass' || evidence.executed < 1 || evidence.skipped !== 0;
+  };
+  const demanded = (proof: string) => {
+    const scenario = work.scenarioRequirements?.find(s => s.proof === proof);
+    return `${proof} needs trusted passing evidence, with executed > 0 and skipped = 0, for this candidate and policy${scenario ? `; scenario v${scenario.revision} in ${scenario.environment}` : ''}`;
+  };
+  // A bootstrap criterion's proofs are deferred here and required of the next change that
+  // touches the same contract; review, CI and every other criterion still gate this one.
+  for (const ac of work.criteria.filter(criterion => !criterion.bootstrap)) for (const proof of ac.proofs) {
+    if (unproven(proof)) reasons.push(`${ac.id}: ${demanded(proof)}`);
+  }
+  for (const obligation of inheritedObligations(work, all)) {
+    if (unproven(obligation.proof)) reasons.push(`Bootstrap obligation inherited from ${obligation.key} ${obligation.criterionId}: ${demanded(obligation.proof)}`);
   }
   add('acceptance', reasons);
   // The merge queue owns the last hop. A candidate that has proven itself enters the queue,

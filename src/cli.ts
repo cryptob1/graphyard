@@ -5,13 +5,15 @@ import { resolve } from 'node:path';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { supervise } from './supervisor.js';
 import { inspectRunnerRepository, snapshotRunnerSources } from './runner-setup.js';
-import { assertRepository, discover } from './onboarding.js';
+import { inheritedObligations } from './model.js';
+import { assertRepository, availableRuntimes, discover } from './onboarding.js';
 import { startGithubSetup } from './github-setup.js';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
-import { diagnose, fileConflicts, proofAuthorization, proofPreview, resourceConflicts } from './coordination.js';
-import { loadConnection, setupRepository, handoff, hostIdSchema } from './repository-setup.js';
-import { assertMasterBinding, buildMasterStatus, continueMergeBatch, currentMergeCandidates, dispatchWork, inspectWorkerCredentials, listHerdrAgents, loadMasterConfig, mergeWork, observeHerdrAgents, readCredentialFile, readWorkerCredential, saveWorkerProfile, setupMaster, startMaster, workerProfileSchema } from './master.js';
+import { diagnose, fileConflicts, obligationLedger, proofAuthorization, proofPreview, resourceConflicts } from './coordination.js';
+import { applyProposal, loadAppliedSetup, loadProposal, loadConnection, readSetupStatus, repositoryScanDifference, saveProposal, scanProposal, setupDrift, setupRepository, handoff, hostIdSchema } from './repository-setup.js';
+import { assertMasterBinding, buildMasterStatus, continueMergeBatch, currentMergeCandidates, dispatchWork, inspectWorkerCredentials, listHerdrAgents, loadMasterConfig, mergeExecutor, observeHerdrAgents, readCredentialFile, readWorkerCredential, saveWorkerProfile, setupMaster, startMaster, workerProfileSchema } from './master.js';
+import { daemonEffects, daemonSummary, readDaemonState, runDaemon } from './master-daemon.js';
 import { acknowledgeContainment, containmentCredentials, establishContainment, isConfirmedCoordinationRefusal, revalidateContainment, settleContainment } from './quarantine.js';
 
 try { process.loadEnvFile(); } catch (error: any) { if (error.code !== 'ENOENT') throw error; }
@@ -50,12 +52,27 @@ async function api(path: string, data?: unknown, requestId = process.env.GRAPHYA
   return body;
 }
 const print = (value: unknown) => console.log(JSON.stringify(value, null, 2));
+const interactiveGithubSetup = (root: string) => async (repository: string, deployment: string) => {
+  const setup = await startGithubSetup(root, repository, deployment);
+  console.log(`Open ${setup.url} in your browser. On SSH, forward port 4311 to this machine first. Credentials stay in .graphyard/github-app.json; do not share that file. Setup finishes automatically once the App is installed; press Ctrl+C to finish later and rerun init --scan --apply.`);
+  for (;;) {
+    await new Promise(accept => setTimeout(accept, 1000));
+    try {
+      const app = JSON.parse(await readFile(resolve(root, '.graphyard/github-app.json'), 'utf8'));
+      if (Number.isSafeInteger(app.appId) && app.appId > 0 && typeof app.slug === 'string' && app.slug && Number.isSafeInteger(app.installationId) && app.installationId > 0) {
+        await new Promise<void>(accept => setup.http.close(() => accept()));
+        return { appId: app.appId, slug: app.slug };
+      }
+    } catch (error: any) { if (error.code !== 'ENOENT') throw error; }
+  }
+};
 async function main() {
   if (!command || command === 'help' || command === '--help') {
     console.log(`Graphyard 0.1 — distributed work, explicit proof
 
 Environment: GRAPHYARD_URL, GRAPHYARD_TOKEN (individual role-scoped credential)
-  init [--url URL] [--herdr] [--token-stdin]  Configure repository instructions and Herdr
+  init [--scan] [--apply] [--url URL] [--herdr] [--token-stdin]
+                                Scan and propose the delivery workflow (--scan), or apply the reviewed proposal (--apply)
   master init --token-stdin [--herdr-workspace ID]
                                 Install the recommended master-agent operating mode
   master start AGENT_KIND       Launch the dedicated visible Herdr master session
@@ -63,6 +80,8 @@ Environment: GRAPHYARD_URL, GRAPHYARD_TOKEN (individual role-scoped credential)
   master status                 Join Graphyard work truth with Herdr session health
   master dispatch GY-N PROFILE  Invite a worker to claim ready work in a visible tab
   master merge GY-N|--all       Merge exact authorized candidates without bypasses
+  master run [--once] [--interval SECONDS]
+                                Run the durable coordination loop as a supervised process
   master guide                  Print the complete master-agent operating guide
   doctor                       Inspect local discovery and live integration readiness
   github-setup HTTPS_URL [--reviewer NAME]
@@ -70,7 +89,11 @@ Environment: GRAPHYARD_URL, GRAPHYARD_TOKEN (individual role-scoped credential)
                                 through the local App-manifest browser flow
   status [GY-N]                Control-plane or work status
   diagnose GY-N                Explain blockers, overlap and required proof
-  requirements GY-N file.json  Revise requirements with an audit reason (operator)
+  requirements GY-N file.json  Revise requirements with an audit reason (operator);
+                                a criterion may carry "bootstrap": {reason, contractPaths}
+                                to defer its proofs onto the named contract (operator with
+                                policy:bootstrap). Deferred proofs are never dropped.
+  obligations                  List every deferred bootstrap proof still owed and who inherits it
   list | next                  List all work / claimable work
   create path/to/work.json      Create work with acceptance criteria (operator)
   validation [ACTION file.json] List validation state or submit a protocol command
@@ -116,12 +139,13 @@ Never share an operator or producer credential with an implementation agent.`); 
     const root = execFileSync('git', ['rev-parse', '--show-toplevel'], { encoding: 'utf8' }).trim();
     if (id === 'guide') return console.log(await readFile(fileURLToPath(new URL('../docs/master-agent.md', import.meta.url)), 'utf8'));
     if (id === 'init') {
-      const { values } = parseArgs({ args, options: { url: { type: 'string' }, 'token-stdin': { type: 'boolean' }, 'no-auto-merge': { type: 'boolean' }, 'merge-method': { type: 'string' }, 'cli-path': { type: 'string' }, 'host-id': { type: 'string' }, 'herdr-workspace': { type: 'string' } }, allowPositionals: false });
+      const { values } = parseArgs({ args, options: { url: { type: 'string' }, 'token-stdin': { type: 'boolean' }, 'no-auto-merge': { type: 'boolean' }, 'merge-method': { type: 'string' }, 'cli-path': { type: 'string' }, 'host-id': { type: 'string' }, 'herdr-workspace': { type: 'string' }, interval: { type: 'string' }, 'proof-workflow': { type: 'string' }, 'deployment-url': { type: 'string' }, 'deployment-sha-field': { type: 'string' } }, allowPositionals: false });
       if (!values['token-stdin']) throw new Error('Use master init --token-stdin so the coordinator credential is not stored in shell history');
       let input = ''; for await (const chunk of process.stdin) { input += chunk; if (input.length > 10_000) throw new Error('Token input is too large'); }
       const masterToken = input.trim(); if (!masterToken) throw new Error('Master coordinator credential is required; setup made no changes');
       const method = values['merge-method']; if (method && !['merge', 'squash', 'rebase'].includes(method)) throw new Error('Merge method must be merge, squash, or rebase');
-      return print(await setupMaster(root, { url: values.url ?? base, token: masterToken, cliPath: resolve(values['cli-path'] ?? await activeCliPath()), hostId: values['host-id'] ?? individualHostId(), herdrWorkspace: values['herdr-workspace'], ...(values['no-auto-merge'] ? { autoMerge: false } : {}), ...(method ? { mergeMethod: method as 'merge' | 'squash' | 'rebase' } : {}) }));
+      const run = { ...(values.interval ? { intervalSeconds: Number(values.interval) } : {}), ...(values['proof-workflow'] ? { proofWorkflow: values['proof-workflow'] } : {}), ...(values['deployment-url'] ? { deploymentUrl: values['deployment-url'] } : {}), ...(values['deployment-sha-field'] ? { deploymentShaField: values['deployment-sha-field'] } : {}) };
+      return print(await setupMaster(root, { url: values.url ?? base, token: masterToken, cliPath: resolve(values['cli-path'] ?? await activeCliPath()), hostId: values['host-id'] ?? individualHostId(), herdrWorkspace: values['herdr-workspace'], ...(values['no-auto-merge'] ? { autoMerge: false } : {}), ...(method ? { mergeMethod: method as 'merge' | 'squash' | 'rebase' } : {}), ...(Object.keys(run).length ? { run } : {}) }));
     }
     const master = await loadMasterConfig(root);
     const masterToken = await readCredentialFile(master.credentialFile);
@@ -144,7 +168,9 @@ Never share an operator or producer credential with an implementation agent.`); 
     if (id === 'status') {
       const runtime = observeHerdrAgents();
       const credentials = await inspectWorkerCredentials(root, master.workers);
-      return print({ ...buildMasterStatus(await masterApi('work-snapshot'), master.workers, runtime.agents, credentials), autoMerge: master.autoMerge, mergeApproval: master.autoMerge ? 'routine merges permitted after gates pass' : 'explicit operator approval required for each merge', runtime: { herdr: { available: runtime.available, reason: runtime.reason } } });
+      const daemonState = await readDaemonState(root, master).catch(error => ({ error: error instanceof Error ? error.message : 'Master daemon state is unreadable' }));
+      const daemon = 'error' in daemonState ? { running: false, error: daemonState.error } : daemonSummary(daemonState, Date.now(), master.run.intervalSeconds * 1000);
+      return print({ ...buildMasterStatus(await masterApi('work-snapshot'), master.workers, runtime.agents, credentials), autoMerge: master.autoMerge, mergeApproval: master.autoMerge ? 'routine merges permitted after gates pass' : 'explicit operator approval required for each merge', daemon, runtime: { herdr: { available: runtime.available, reason: runtime.reason } } });
     }
     if (id === 'dispatch') {
       if (!args[0]) throw new Error('Use master dispatch GY-N PROFILE');
@@ -165,15 +191,24 @@ Never share an operator or producer credential with an implementation agent.`); 
       const selected = args[0] === '--all' ? currentMergeCandidates(snapshot.work, snapshot.now, coordinator.actor.id) : snapshot.work.filter((item: any) => item.id === args[0] || item.key === args[0]);
       if (!selected.length) throw new Error(args[0] === '--all' ? 'No work has a current all-gates-passing merge authorization' : `Unknown work item ${args[0]}`);
       const outerRequest = process.env.GRAPHYARD_REQUEST_ID ?? randomUUID();
-      const stepKey = (item: any, step: string, executionId = '') => createHash('sha256').update(`${outerRequest}\0master-merge\0${item.id}\0${item.candidate?.sha ?? ''}\0${step}\0${executionId}`).digest('hex');
-      const mergeOne = (item: any) => mergeWork(master, item, () => masterApi('work-snapshot'),
-        (latest, authorization) => masterMutation(`work/${latest.id}/merge-acquire`, { expectedRevision: authorization.revision, sha: authorization.sha, baseSha: authorization.baseSha, policyRevision: authorization.policyRevision }, stepKey(latest, 'acquire')),
-        (latest, execution, reason) => masterMutation(`work/${latest.id}/merge-cancel`, { executionId: execution.id, reason }, stepKey(latest, 'cancel', execution.id)),
-        (latest, execution) => masterMutation(`work/${latest.id}/merge-verify`, { executionId: execution.id }, stepKey(latest, 'verify', execution.id)), undefined, coordinator.actor.id);
+      const mergeOne = mergeExecutor(master, () => masterApi('work-snapshot'), masterMutation, coordinator.actor.id, outerRequest);
       const results = args[0] === '--all' ? await continueMergeBatch(selected, mergeOne) : [await mergeOne(selected[0])];
       return print({ requestId: outerRequest, results });
     }
-    throw new Error('Use master init, start, worker add, status, dispatch, merge, or guide');
+    if (id === 'run') {
+      const { values } = parseArgs({ args, options: { once: { type: 'boolean' }, interval: { type: 'string' } }, allowPositionals: false });
+      const intervalSeconds = values.interval ? Number(values.interval) : master.run.intervalSeconds;
+      if (!Number.isInteger(intervalSeconds) || intervalSeconds < 5 || intervalSeconds > 900) throw new Error('Use master run --interval with whole seconds between 5 and 900');
+      // A coordinator credential is the daemon's entire authority. Anything broader would let the
+      // loop satisfy a gate it is supposed to be waiting on.
+      if (coordinator.actor.role !== 'coordinator') throw new Error('The durable master loop requires a coordinator credential; operator, producer, and worker credentials are refused');
+      if (coordinator.actor.proofs?.length) throw new Error('The durable master loop refuses a credential that is also allowed to produce evidence');
+      const state = await readDaemonState(root, master);
+      const effects = daemonEffects(root, master, { snapshot: () => masterApi('work-snapshot'), mutate: masterMutation, executionOwner: coordinator.actor.id });
+      const result = await runDaemon(master, state, effects, { once: values.once, intervalMs: intervalSeconds * 1000, identity: { pid: process.pid, host: master.hostId } });
+      return print({ repository: master.repository, coordinator: coordinator.actor.id, intervalSeconds, cycles: result.cycles.length, stopped: result.stopped ? 'signal' : 'completed', last: result.cycles.at(-1) ?? null });
+    }
+    throw new Error('Use master init, start, worker add, status, dispatch, run, merge, or guide');
   }
   if (command === 'runner') {
     if (id === 'inspect' && args.length <= 1) return print(await inspectRunnerRepository(resolve(args[0] ?? '.')));
@@ -238,7 +273,28 @@ Never share an operator or producer credential with an implementation agent.`); 
   }
   if (command === 'init') {
     const root = execFileSync('git', ['rev-parse', '--show-toplevel'], { encoding: 'utf8' }).trim();
-    const { values } = parseArgs({ args: process.argv.slice(3), options: { url: { type: 'string' }, herdr: { type: 'boolean' }, 'token-stdin': { type: 'boolean' }, 'host-id': { type: 'string' }, 'cli-path': { type: 'string' } }, allowPositionals: false });
+    const { values } = parseArgs({ args: process.argv.slice(3), options: { url: { type: 'string' }, herdr: { type: 'boolean' }, 'token-stdin': { type: 'boolean' }, 'host-id': { type: 'string' }, 'cli-path': { type: 'string' }, scan: { type: 'boolean' }, apply: { type: 'boolean' } }, allowPositionals: false });
+    if (values.scan || values.apply) {
+      if (values.herdr || values['token-stdin']) throw new Error('--scan/--apply propose and apply the delivery workflow; run them as the operator before any worker credential setup');
+      const fresh = await scanProposal(root, { url: values.url ?? null, runtimes: availableRuntimes() });
+      if (values.apply) {
+        const stored = await loadProposal(root);
+        if (!stored) throw new Error('No stored setup proposal to apply. Run init --scan, review .graphyard/setup-proposal.json, then rerun with --apply');
+        const differences = repositoryScanDifference(fresh, stored.proposal);
+        if (differences.length) throw new Error(`${differences.join('; ')}. Rerun init --scan, review the refreshed proposal, then apply it again. The stored proposal was left unchanged.`);
+        const url = values.url ?? stored.proposal.server;
+        if (!url) throw new Error('Applying requires the Graphyard server URL; pass --url');
+        const result = await applyProposal(root, stored.proposal, { url, githubSetup: interactiveGithubSetup(root) });
+        return print({ proposal: stored.file, ...result });
+      }
+      await saveProposal(root, fresh);
+      const applied = await loadAppliedSetup(root);
+      return print({ proposalFile: '.graphyard/setup-proposal.json', proposal: fresh,
+        applied: applied ? { at: applied.appliedAt, githubApp: applied.artifacts.githubApp } : null,
+        drift: setupDrift(applied, fresh),
+        appliedNothingElse: true,
+        next: 'Review .graphyard/setup-proposal.json, then rerun init --scan --apply --url SERVER_URL to apply the reviewed proposal' });
+    }
     let workerToken = await individualToken();
     if (values['token-stdin']) {
       let input = ''; for await (const chunk of process.stdin) { input += chunk; if (input.length > 10000) throw new Error('Token input is too large'); }
@@ -264,10 +320,12 @@ Never share an operator or producer credential with an implementation agent.`); 
     let live: any = null, failure: string | undefined;
     try { live = await api('status'); } catch (error: any) { failure = error.message; }
     return print({ discovered, server: base, cliPath: await activeCliPath(), hostId: individualHostId(), connected: !!live, githubConfigured: !!live?.github, role: live?.actor?.role, failure,
+      setup: await readSetupStatus(root).catch((error: any) => ({ error: error.message })),
       next: !live ? 'Configure GRAPHYARD_URL and an individual token' : !live.github ? 'Complete github-setup and configure the server App credentials' : 'Submit a real PR and inspect every gate; configured is not proof of enforcement',
       limits: ['CI discovery is a proposal, not executed-test inventory', 'Herdr two-host recovery and GitHub refusal-to-acceptance must be demonstrated'] });
   }
   if (command === 'status' && !id) return print(await api('status'));
+  if (command === 'obligations') return print(obligationLedger((await api('work-snapshot')).work));
   if (command === 'scenarios') return print(await api('scenarios'));
   if (command === 'scenario') return print(await api('scenarios', JSON.parse(await readFile(id, 'utf8'))));
   if (command === 'list' || command === 'next') {
@@ -282,8 +340,8 @@ Never share an operator or producer credential with an implementation agent.`); 
     // alongside the other blockers rather than leaving it to be discovered at acceptance.
     let authorities: any[] = [];
     try { authorities = (await api('proof-grants')).authorities ?? []; } catch { /* reported as unknown authority below */ }
-    const authorization = proofAuthorization(item, authorities);
-    return print({ key: item.key, observedAt: snapshot.now, diagnostics: diagnose(item, snapshot.work, Date.parse(snapshot.now), snapshot.jobs), overlaps: fileConflicts(item, snapshot.work), proofs: proofPreview(item),
+    const authorization = proofAuthorization(item, authorities, snapshot.work);
+    return print({ key: item.key, observedAt: snapshot.now, diagnostics: diagnose(item, snapshot.work, Date.parse(snapshot.now), snapshot.jobs), overlaps: fileConflicts(item, snapshot.work), proofs: proofPreview(item, snapshot.work), obligations: inheritedObligations(item, snapshot.work),
       proofAuthority: authorization, proofGaps: authorization.filter(entry => !entry.producers.length).map(entry => entry.proof) });
   }
   if (command === 'handoff') {

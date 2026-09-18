@@ -3,7 +3,7 @@ import { z } from 'zod';
 import { Store, save, wakeJob } from './store.js';
 import { authorizedForProof, unauthorizedProofs } from './proof-grants.js';
 import { workspacePath, pathsOverlap, validBranch } from './workspace.js';
-import { activeLease, admin, assertReviewerProfiles, operatorCapability, MergeExecutionInProgress, requireCurrent, createSchema, criterionSchema, currentEvidence, resourcesSchema, demand, evaluate, exhaustedReviewerProfiles, proofSchema, reviewerProfileFor, reviewerProfileSchema, reviewProviders, reviewProviderOf, type Principal, type ReviewerApp, type ReviewFailover, type Work, type Observation, type ReviewRequest, type OperatorCapability } from './model.js';
+import { activeLease, admin, assertReviewerProfiles, operatorCapability, MergeExecutionInProgress, requireCurrent, createSchema, criterionSchema, currentEvidence, inheritedObligations, pathScopeContains, requiredProofs, resourcesSchema, demand, evaluate, exhaustedReviewerProfiles, proofSchema, reviewerProfileFor, reviewerProfileSchema, reviewProviders, reviewProviderOf, type Criterion, type Principal, type ReviewerApp, type ReviewFailover, type Work, type Observation, type ReviewRequest, type OperatorCapability } from './model.js';
 import { resourceConflicts } from './coordination.js';
 import { queueHistoryLimit, type QueueSpeculation } from './merge-queue.js';
 
@@ -74,6 +74,35 @@ export class Engine {
   reviewerApps: ReviewerApp[] = [];
   controlPlaneAppId?: number;
   constructor(public store: Store, public ciAppIds: number[] = [15368], public leaseSeconds = 120, public repository = process.env.GITHUB_REPOSITORY ?? '') {}
+  /**
+   * Bootstrap deferral is an operator act. It requires the explicit policy:bootstrap capability,
+   * a reason, and a contract scope inside the task's own planned files. The audit fields are
+   * stamped from the authenticated actor and the server clock, never taken from the request, and
+   * an unchanged declaration keeps its original attribution across later revisions.
+   */
+  private declareBootstrap(actor: Principal, data: any, previous: Criterion[], policyRevision: number, now: Date, work?: Work): Criterion[] {
+    return data.criteria.map((ac: any): Criterion => {
+      if (!ac.bootstrap) return { id: ac.id, text: ac.text, proofs: ac.proofs };
+      const prior = previous.find(existing => existing.id === ac.id)?.bootstrap;
+      const unchanged = !!prior && prior.reason === ac.bootstrap.reason && JSON.stringify(prior.contractPaths) === JSON.stringify(ac.bootstrap.contractPaths);
+      if (!unchanged) operatorCapability(actor, 'policy:bootstrap', work, this.repository);
+      // An E2E proof pins a scenario revision, environment and hash on its own work item. An
+      // inherited obligation carries no pin, so deferring one would let the heir satisfy it
+      // against an unbound scenario version. Sequence those through the scenario registry.
+      demand(!ac.proofs.some((proof: string) => proof.startsWith('e2e:')),
+        `Criterion ${ac.id} cannot use bootstrap mode: an E2E proof pins a scenario version that an inherited obligation cannot carry forward`);
+      demand(ac.bootstrap.contractPaths.every((path: string) => data.plannedFiles.some((planned: string) => pathScopeContains(planned, path))),
+        `Bootstrap contract paths for ${ac.id} must lie inside the task's planned files`);
+      return { id: ac.id, text: ac.text, proofs: ac.proofs, bootstrap: unchanged ? prior! : { ...ac.bootstrap, declaredBy: actor.id, declaredAt: now.toISOString(), policyRevision } };
+    });
+  }
+  /** A deferral can never be renewed by the very change that inherited the obligation. */
+  private refuseRenewedDeferral(work: Work, all: Work[]) {
+    for (const obligation of inheritedObligations(work, all)) {
+      const renewed = work.criteria.find(ac => ac.bootstrap && ac.proofs.includes(obligation.proof));
+      demand(!renewed, `${renewed?.id}: ${obligation.proof} is already a bootstrap obligation inherited from ${obligation.key} ${obligation.criterionId} and cannot be deferred again`);
+    }
+  }
   async execute(actor: Principal, command: Command, id: string | null, input: unknown, key: string) {
     demand(Object.hasOwn(commands, command), 'Unknown command', 404);
     demand(key && key.length <= 200, 'An Idempotency-Key is required', 400);
@@ -100,6 +129,7 @@ export class Engine {
         if (reviewProviderOf(data.policy) === 'agent') assertReviewerProfiles(data.policy.reviewerProfiles, this.reviewerApps, this.controlPlaneAppId);
         demand(data.dependencies.every((dep: string) => all.some(w => w.id === dep)), 'Unknown dependency');
         demand(new Set(data.criteria.map((ac: { id: string }) => ac.id)).size === data.criteria.length, 'Criterion IDs must be unique');
+        const criteria = this.declareBootstrap(actor, data, [], 1, now);
         const scenarioRequirements: Work['scenarioRequirements'] = [];
         const proofNames: string[] = [...new Set<string>(data.criteria.flatMap((ac: { proofs: string[] }) => ac.proofs))];
         for (const proof of proofNames.filter(p => p.startsWith('e2e:'))) {
@@ -109,12 +139,13 @@ export class Engine {
         }
         const created = now.toISOString();
         const { reason: _reason, ...intent } = data;
-        work = { ...intent, id: randomUUID(), key: '', stage: 'backlog', revision: 0, policyRevision: 1, createdAt: created, updatedAt: created, stageEnteredAt: created,
+        work = { ...intent, criteria, id: randomUUID(), key: '', stage: 'backlog', revision: 0, policyRevision: 1, createdAt: created, updatedAt: created, stageEnteredAt: created,
           ready: false, epoch: 0, lease: null, workspaces: [], candidate: null, submission: null, reworkRequested: false, scenarioRequirements, evidence: [], observation: null, blocker: null, gates: [], violations: [] };
         work!.proofGaps = await unauthorizedProofs(db, this.principals, proofNames);
         const inserted = await db.query('INSERT INTO work_items(id,document) VALUES($1,$2) RETURNING number', [work!.id, JSON.stringify(work)]);
         work!.key = `GY-${inserted.rows[0].number}`;
         all.push(work!);
+        this.refuseRenewedDeferral(work!, all);
       }
       demand(work, 'Work item not found', 404);
       if (actor.role === 'operator-agent') {
@@ -178,6 +209,7 @@ export class Engine {
           return all.find(w => w.id === id)!.dependencies.some(dep => reachesWork(dep, visited));
         };
         demand(!data.dependencies.some((dep: string) => reachesWork(dep)), 'Dependencies would create a cycle');
+        const revised = this.declareBootstrap(actor, data, work.criteria, work.policyRevision + 1, now, work);
         const pins: Work['scenarioRequirements'] = [];
         const proofs = [...new Set<string>(data.criteria.flatMap((ac: { proofs: string[] }) => ac.proofs))];
         for (const proof of proofs.filter(p => p.startsWith('e2e:'))) {
@@ -188,8 +220,10 @@ export class Engine {
           pins.push({ proof, revision: scenario.revision, environment: scenario.environment, hash: scenario.hash });
         }
         work.retiredCriterionIds = [...(work.retiredCriterionIds ?? []), ...work.criteria.filter(ac => !data.criteria.some((next: { id: string }) => next.id === ac.id)).map(ac => ac.id)];
-        work.criteria = data.criteria; work.dependencies = data.dependencies; work.plannedFiles = data.plannedFiles; work.exclusiveResources = data.exclusiveResources;
+        work.criteria = revised;
+        work.dependencies = data.dependencies; work.plannedFiles = data.plannedFiles; work.exclusiveResources = data.exclusiveResources;
         work.scenarioRequirements = pins; work.policyRevision++;
+        this.refuseRenewedDeferral(work, all);
         work.proofGaps = await unauthorizedProofs(db, this.principals, proofs);
         work.formalReviewResetRequired = true; work.formalReviewBaseline = undefined;
         work.lease = null; work.observation = null; work.mergeAuthorization = null; work.reviewRequest = null;
@@ -308,7 +342,7 @@ export class Engine {
         && authorization.sha === data.sha && authorization.baseSha === data.baseSha && authorization.policyRevision === data.policyRevision
         && work.candidate?.sha === data.sha && work.candidate.baseSha === data.baseSha && Number.isFinite(age) && age >= 0 && age < 120_000,
       'Merge authorization is no longer current');
-      const requiredEvidence = [...new Set(work.criteria.flatMap(criterion => criterion.proofs))].map(proof => currentEvidence(work, proof, now));
+      const requiredEvidence = requiredProofs(work, all).map(proof => currentEvidence(work, proof, now));
       const validityDeadlines = [now.getTime() + 120_000, Date.parse(work.observation!.at) + 120_000,
         ...requiredEvidence.flatMap(evidence => evidence?.expiresAt ? [Date.parse(evidence.expiresAt)] : [])];
       const expiresAt = Math.min(...validityDeadlines);
@@ -554,7 +588,9 @@ export class Engine {
         }
         const past = authorizedSnapshot || !executionValid ? undefined : (await db.query("SELECT payload->'work' AS work FROM events WHERE work_id=$1 AND created_at<$2 AND payload ? 'work' ORDER BY seq DESC LIMIT 1", [id, new Date(cutoff)])).rows[0]?.work as Work | undefined;
         const authorization = past?.mergeAuthorization;
-        const evidenceValid = past ? [...new Set(past.criteria.flatMap(criterion => criterion.proofs))].every(proof => !!currentEvidence(past, proof, new Date(cutoff - 1))) : false;
+        // Exactly the acceptance gate's demand at the merge cutoff: a bootstrap criterion's
+        // deferred proofs are excluded, and an inherited obligation is re-checked here too.
+        const evidenceValid = past ? requiredProofs(past, all).every(proof => !!currentEvidence(past, proof, new Date(cutoff - 1))) : false;
         if (!authorizedSnapshot && past && authorization && authorization.sha === observation.candidate.sha && authorization.baseSha === observation.candidate.baseSha && authorization.policyRevision === past.policyRevision
           && past.submission?.pr === observation.candidate.pr && past.gates.every(g => g.passed) && !past.violations.length
           && evidenceValid && past.observation && cutoff - Date.parse(past.observation.at) < 120_000 && Date.parse(authorization.at) < mergedTime) {

@@ -8,7 +8,7 @@ All control-plane endpoints except `/healthz` require `Authorization: Bearer TOK
 | --- | --- |
 | `admin` | Create/release work, participate as a worker, attest manual proofs |
 | `coordinator` | Read work and integration state for master-agent routing; acquire, verify, or cancel only the engine's bounded merge execution authority |
-| `operator-agent` | Only explicitly configured intent/policy capabilities within a server-enforced repository/work allowlist; never leases, evidence, identity administration, or merge execution |
+| `operator-agent` | Only explicitly configured intent/policy capabilities (`intent:create`, `intent:ready`, `intent:unblock`, `policy:requirements`, `policy:review-provider`, `policy:bootstrap`) within a server-enforced repository/work allowlist; never leases, evidence, identity administration, or merge execution |
 | `worker` | Claim work, renew/release own lease, register workspace, report blockers, submit implementation, submit untrusted assertions |
 | `producer` | Submit evidence; only proof names authorized by a live Graphyard grant are trusted |
 | `reader` | Inspect work, status, events |
@@ -37,13 +37,13 @@ The initial list API is unpaginated. Do not use it as an unlimited analytics exp
 
 ## Work commands
 
-Create with `POST /api/work` and the structure in [examples/work.json](../examples/work.json). Required fields are `title` and nonempty `criteria`; each criterion requires a unique `AC-N` ID, text, and at least one proof. The policy defaults to checks `test` and `typecheck`, plus independent review. Dependencies refer to existing UUIDs. Operator requirement revisions explicitly reject cycles. Optional `exclusiveResources` reserves named resources during active ownership; `plannedFiles` supplies advisory overlap scopes.
+Create with `POST /api/work` and the structure in [examples/work.json](../examples/work.json). Required fields are `title` and nonempty `criteria`; each criterion requires a unique `AC-N` ID, text, and at least one proof, and may carry an operator-only `bootstrap` declaration. The policy defaults to checks `test` and `typecheck`, plus independent review. Dependencies refer to existing UUIDs. Operator requirement revisions explicitly reject cycles. Optional `exclusiveResources` reserves named resources during active ownership; `plannedFiles` supplies advisory overlap scopes.
 
 Other commands use `POST /api/work/UUID/COMMAND` (display keys also work):
 
 | Command | JSON body |
 | --- | --- |
-| `requirements` | Full criteria, dependencies, plannedFiles, exclusiveResources, expectedPolicyRevision and reason; operator only, see [coordination](coordination.md) |
+| `requirements` | Full criteria, dependencies, plannedFiles, exclusiveResources, expectedPolicyRevision and reason; operator only, see [coordination](coordination.md). A criterion may carry `bootstrap`, see [below](#bootstrap-mode-for-a-change-that-introduces-its-own-proof-harness) |
 | `ready` | Admin: `{}`. Operator-agent: `{"expectedRevision":12,"reason":"Requirements approved"}` with the current work revision and a nonblank audit reason. |
 | `unblock` | Admin: `{"reason":"Contract verified"}`. Operator-agent: `{"expectedRevision":12,"reason":"Contract verified"}` with the current work revision and a nonblank audit reason. |
 | `rework` | `{"reason":"Retry implementation","previousWorkerStopped":true}`; operator only |
@@ -112,6 +112,62 @@ Trust is decided against the live grant set inside each mutation transaction, ne
 Work creation and every requirement revision record `proofGaps`: the required proof names that had no authorized producer at that moment. A nonempty list means the acceptance gate cannot be satisfied by anyone, and it is visible in `graphyard status`, `graphyard diagnose`, and the dashboard before the item is dispatched.
 
 All required proof names must pass. Evidence is selected for the exact head/base/policy tuple. A later matching failure supersedes an earlier pass. Stale evidence is retained for audit without satisfying the current candidate.
+
+## Bootstrap mode for a change that introduces its own proof harness
+
+A criterion whose proof does not yet exist cannot be proven by the change that creates it: the
+protected harness refuses to run against a base that lacks the contract, so the item stalls. An
+operator may declare that one criterion in **bootstrap mode**. The proof is deferred for this
+candidate only and is never dropped.
+
+```json
+{
+  "id": "AC-1",
+  "text": "Herdr recovery is proven end to end",
+  "proofs": ["integration:herdr-recovery"],
+  "bootstrap": {
+    "reason": "This candidate introduces the herdr-recovery harness the proof needs",
+    "contractPaths": ["src/herdr/recovery.ts"]
+  }
+}
+```
+
+`reason` is required and nonblank. `contractPaths` names the contract the deferred proof belongs
+to, as exact paths or directory prefixes ending `/`, `/*` or `/**`. Every contract path must lie
+inside the item's own `plannedFiles`, so an operator cannot bind an obligation to a contract this
+change does not own. Contract paths must be unique.
+
+A criterion whose proofs include an `e2e:` name cannot use bootstrap mode: an E2E proof pins a
+scenario revision, environment, and hash on its own work item, and an inherited obligation carries
+no pin. Sequence those through the scenario registry instead.
+
+The declaration is accepted on `create` and on `requirements`. It requires the `policy:bootstrap`
+capability: an operator-agent holding only `policy:requirements` is refused, and workers cannot
+reach either command. `declaredBy`, `declaredAt`, and the declaring `policyRevision` are stamped
+from the authenticated actor and the server clock; a client that submits them is rejected. A later
+revision that repeats an unchanged declaration keeps the original attribution. Removing `bootstrap`
+strengthens the gate and needs no extra capability. Every declaration, with its reason, is in
+append-only history.
+
+**What the gate does.** The acceptance gate stops demanding the deferred criterion's proofs for
+this candidate. Review, the required CI checks, the merge queue, and every other criterion's proofs
+still gate it exactly as before. A bootstrap candidate with no review or a failing check does not
+advance.
+
+**What is owed.** The deferred proof becomes an obligation on its contract paths, derived from the
+work documents rather than asserted anywhere. Any later item whose `plannedFiles` overlap those
+contract paths inherits the proof as a required criterion, and its acceptance gate reports
+`Bootstrap obligation inherited from GY-N AC-M`. The inheriting change cannot defer it again: a
+second `bootstrap` declaration over an inherited proof is refused, and the inherited requirement is
+evaluated regardless of what that item declares.
+
+An obligation is discharged only when some change is delivered with trusted, passing, complete
+evidence for that proof bound to its merged candidate and policy — the same standard as any other
+proof. No operator or administrator command retires one.
+
+`GET /api/work-snapshot` carries the declarations on each criterion. `graphyard obligations` lists
+every outstanding obligation and who inherits it, and `graphyard diagnose GY-N` reports the item's
+own deferrals and inherited obligations.
 
 ## GitHub webhook
 
