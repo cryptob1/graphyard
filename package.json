@@ -16,6 +16,7 @@
     "cli": "tsx src/cli.ts",
     "test": "tsx --test tests/*.test.ts",
     "typecheck": "tsc --noEmit",
+    "docs:check": "node scripts/check-docs.mjs",
     "test:browser": "playwright test"
   },
   "dependencies": {

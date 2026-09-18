@@ -1,5 +1,7 @@
 # Implementation audit — September 13, 2026
 
+> **Historical snapshot.** This audit describes the repository at the listed date. Use the [current documentation index](../README.md) for setup and operations.
+
 This review compares the bootstrap implementation with the original Graphyard specification and the subsequent requests for distributed ownership, Herdr integration, Railway deployment, public source, documentation, and E2E case storage. It covers the domain engine, persistence, HTTP boundary, GitHub adapter, CLI, Herdr plugin, UI, deployment files, documentation, tests, and repository history.
 
 The result is a useful bootstrap control plane with several correctness fixes. It is **not yet an enforced end-to-end multi-agent delivery system**. The dedicated GitHub App, trusted test reporter, and real multi-host acceptance exercise remain outstanding. No additional agents were launched during this review.

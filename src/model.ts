@@ -21,7 +21,16 @@ export const createSchema = z.object({
   exclusiveResources: resourcesSchema.optional(),
 }).strict();
 export type Create = z.infer<typeof createSchema>;
-export interface Principal { id: string; role: 'admin' | 'coordinator' | 'worker' | 'producer' | 'reader'; proofs?: string[]; displayName?: string; runtime?: string }
+export const operatorCapabilities = ['intent:create', 'intent:ready', 'intent:unblock', 'policy:requirements', 'policy:review-provider'] as const;
+export type OperatorCapability = typeof operatorCapabilities[number];
+export const operatorCredentialHash = Symbol('operatorCredentialHash');
+export interface Principal {
+  id: string; role: 'admin' | 'operator-agent' | 'coordinator' | 'worker' | 'producer' | 'reader';
+  proofs?: string[]; displayName?: string; runtime?: string;
+  capabilities?: OperatorCapability[];
+  scope?: { repositories: string[]; workItems: string[] };
+  [operatorCredentialHash]?: string;
+}
 export interface AssignmentIdentity { owner: string; epoch: number; displayName?: string; runtime?: string; claimedAt?: string }
 export interface Lease { owner: string; epoch: number; expiresAt: string }
 export interface Workspace { host: string; path: string; branch: string; epoch: number; owner: string }
@@ -77,6 +86,12 @@ export function demand(value: unknown, message: string, status = 409): asserts v
   if (!value) throw new Refusal(message, status);
 }
 export function admin(actor: Principal) { demand(actor.role === 'admin', 'Operator permission required', 403); }
+export function operatorCapability(actor: Principal, capability: OperatorCapability, work?: Work, repository?: string) {
+  if (actor.role === 'admin') return;
+  demand(actor.role === 'operator-agent' && actor.capabilities?.includes(capability), `Capability ${capability} is required`, 403);
+  demand(!!repository && actor.scope?.repositories.includes(repository), 'Repository is outside this operator-agent scope', 403);
+  if (work) demand(actor.scope?.workItems.includes('*') || actor.scope?.workItems.includes(work.id) || actor.scope?.workItems.includes(work.key), 'Work item is outside this operator-agent scope', 403);
+}
 export function activeLease(work: Work, actor: Principal, epoch: number, now: Date) {
   demand(work.lease && work.lease.owner === actor.id && work.lease.epoch === epoch && Date.parse(work.lease.expiresAt) > now.getTime(), 'Lease missing, expired, or superseded; claim the task again');
 }
