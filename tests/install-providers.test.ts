@@ -115,8 +115,33 @@ test('changing the provider or domain of an existing installation is reported as
 });
 
 test('an observed value is compared by fingerprint only when it is a credential', () => {
-  assert.equal(variableMarker('railway', 'DATABASE_URL', '${{Postgres.DATABASE_URL}}'), '${{Postgres.DATABASE_URL}}');
-  assert.match(variableMarker('compose', 'DATABASE_URL', 'postgres://graphyard:secret@db:5432/graphyard'), /^sha:[0-9a-f]{12}$/);
-  assert.match(variableMarker('railway', 'GITHUB_PRIVATE_KEY', 'pem'), /^sha:[0-9a-f]{12}$/);
-  assert.equal(variableMarker('railway', 'HOST', '0.0.0.0'), '0.0.0.0');
+  // Classification follows the value, not the name: the same DATABASE_URL is a harmless
+  // provider reference in one installation and a password-bearing connection string in another.
+  assert.equal(variableMarker('DATABASE_URL', '${{Postgres.DATABASE_URL}}'), '${{Postgres.DATABASE_URL}}');
+  assert.match(variableMarker('DATABASE_URL', 'postgres://graphyard:secret@db:5432/graphyard'), /^sha:[0-9a-f]{12}$/);
+  assert.match(variableMarker('DATABASE_URL', 'postgres://postgres:managed@monorail.proxy.rlwy.net:41234/railway'), /^sha:[0-9a-f]{12}$/);
+  assert.match(variableMarker('GITHUB_PRIVATE_KEY', 'pem'), /^sha:[0-9a-f]{12}$/);
+  assert.equal(variableMarker('HOST', '0.0.0.0'), '0.0.0.0');
+});
+
+/**
+ * Railway is given the shared reference `${{Postgres.DATABASE_URL}}` but reports the value it
+ * resolves to. That resolved value is a password, it differs from what was set, so it lands in
+ * drift — and drift is printed. It has to arrive there as a fingerprint.
+ */
+test('a database password a provider resolves for itself never reaches the plan', async () => {
+  const first = await harness({ provider: 'railway' });
+  let second: Harness | undefined;
+  try {
+    const session = await materializeInstall(await prepareInstall(first.root, inputsFor('railway'), first.deps));
+    const resolved = 'postgres://postgres:railway-managed-password-9xz@monorail.proxy.rlwy.net:41234/railway';
+    const envFile = renderEnv('railway', coreEnv(session).map(value => value.name === 'DATABASE_URL' ? { ...value, value: resolved } : value));
+    second = await harness({ provider: 'railway', installed: true, envFile, protection: satisfiedProtection(null), root: first.root, configHome: first.configHome });
+    const plan = await buildPlan(await prepareInstall(second.root, inputsFor('railway'), second.deps, 'plan'));
+
+    const entry = plan.drift.find(item => item.field === 'DATABASE_URL');
+    assert.ok(entry, 'a resolved DATABASE_URL must be reported as drift');
+    assert.match(entry.observed, /^sha:[0-9a-f]{12}$/);
+    assert.ok(!JSON.stringify(plan).includes('railway-managed-password-9xz'), 'the resolved database password reached the plan');
+  } finally { await first.cleanup(); await second?.cleanup(); }
 });

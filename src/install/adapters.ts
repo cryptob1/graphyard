@@ -133,14 +133,14 @@ async function readRemote(transport: Transport, path: string) {
   return result.code === 0 ? result.stdout : null;
 }
 
-/** Observed env names map to a fingerprint marker, so drift compares without reading secrets. */
-export function markersFromEnvFile(content: string, fingerprintOf: (value: string) => string, secretNames: Set<string>) {
+/** Observed env values map through the same marker, so drift compares without reading secrets. */
+export function markersFromEnvFile(content: string) {
   const markers: Record<string, string> = {};
   for (const line of content.split('\n')) {
     const index = line.indexOf('=');
     if (index <= 0 || line.startsWith('#')) continue;
     const name = line.slice(0, index).trim(); const value = line.slice(index + 1);
-    markers[name] = secretNames.has(name) ? `sha:${fingerprintOf(value)}` : value;
+    markers[name] = variableMarker(name, value);
   }
   return markers;
 }
@@ -169,7 +169,7 @@ export const composeAdapter: ProviderAdapter = {
     const environment = await readRemote(ctx.transport, `${ctx.workdir}/server.env`);
     if (environment === null) return observation;
     observation.installed = true;
-    observation.variables = markersFromEnvFile(environment, value => secretMarker(value), secretNamesFor(ctx.provider));
+    observation.variables = markersFromEnvFile(environment);
     const state = await composeRunning(ctx.transport, ctx);
     observation.database = state.database; observation.app = state.app;
     observation.url = state.app ? `http://127.0.0.1:${ctx.port}` : null;
@@ -222,7 +222,7 @@ export const dockerHostAdapter: ProviderAdapter = {
     const environment = await readRemote(remote, `${ctx.workdir}/server.env`);
     if (environment === null) return observation;
     observation.installed = true;
-    observation.variables = markersFromEnvFile(environment, value => secretMarker(value), secretNamesFor(ctx.provider));
+    observation.variables = markersFromEnvFile(environment);
     const state = await composeRunning(remote, ctx);
     observation.database = state.database; observation.app = state.app;
     observation.url = state.app ? publicUrl(ctx) : null;
@@ -303,7 +303,7 @@ export const hetznerAdapter: ProviderAdapter = {
     const environment = await readRemote(remote, `${ctx.workdir}/server.env`);
     if (environment === null) return observation;
     observation.installed = true;
-    observation.variables = markersFromEnvFile(environment, value => secretMarker(value), secretNamesFor(ctx.provider));
+    observation.variables = markersFromEnvFile(environment);
     const state = await composeRunning(remote, ctx);
     observation.database = state.database; observation.app = state.app;
     observation.url = state.app ? (ctx.domain ? `https://${ctx.domain}` : `https://${address}`) : null;
@@ -378,7 +378,7 @@ export const railwayAdapter: ProviderAdapter = {
       try {
         const parsed = JSON.parse(variables.stdout) as Record<string, string>;
         observation.installed = Object.keys(parsed).length > 0;
-        for (const [name, value] of Object.entries(parsed)) observation.variables[name] = variableMarker(ctx.provider, name, String(value));
+        for (const [name, value] of Object.entries(parsed)) observation.variables[name] = variableMarker(name, String(value));
       } catch { /* an unparsable listing is reported as no observed variables */ }
     }
     const domains = await ctx.transport.exec('railway', ['domain', '--service', ctx.service, '--json'], { allowFailure: true, timeout: 180_000 });
@@ -423,13 +423,18 @@ export const railwayAdapter: ProviderAdapter = {
 
 /**
  * Variables whose values are credentials: never echoed, only compared by fingerprint.
- * Railway's DATABASE_URL is the shared reference `${{Postgres.DATABASE_URL}}`, not a secret,
- * so comparing it as plain text is what keeps a re-plan from reporting phantom drift.
+ *
+ * `DATABASE_URL` is classified by its value rather than by its name, because the same name
+ * holds both kinds of thing. On Railway the installer sets the shared reference
+ * `${{Postgres.DATABASE_URL}}`, which carries no credential and compares as plain text — that
+ * is what keeps a re-plan from reporting phantom drift. Any other value in it is a connection
+ * string with a password, including the resolved one a provider reports back in place of the
+ * reference it was given, and a password must never reach the plan.
  */
 export const secretVariableNames = new Set(['GRAPHYARD_PRINCIPALS', 'GITHUB_PRIVATE_KEY', 'GITHUB_WEBHOOK_SECRET']);
-export const secretNamesFor = (provider: Provider) => provider === 'railway' ? secretVariableNames : new Set([...secretVariableNames, 'DATABASE_URL']);
-const secretMarker = (value: string) => fingerprint(value);
-export const variableMarker = (provider: Provider, name: string, value: string) => secretNamesFor(provider).has(name) ? `sha:${secretMarker(value)}` : value;
+const providerReference = /^\$\{\{[^{}]+\}\}$/;
+export const carriesCredential = (name: string, value: string) => secretVariableNames.has(name) || (name === 'DATABASE_URL' && !providerReference.test(value.trim()));
+export const variableMarker = (name: string, value: string) => carriesCredential(name, value) ? `sha:${fingerprint(value)}` : value;
 
 export const adapters: Record<Provider, ProviderAdapter> = {
   railway: railwayAdapter,

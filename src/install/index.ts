@@ -3,7 +3,7 @@ import { randomBytes } from 'node:crypto';
 import { hostname } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { discover } from '../onboarding.js';
-import { adapterFor, secretNamesFor, variableMarker, type AdapterContext, type AdapterObservation, type ProviderAdapter, DEFAULT_IMAGE } from './adapters.js';
+import { adapterFor, carriesCredential, variableMarker, type AdapterContext, type AdapterObservation, type ProviderAdapter, DEFAULT_IMAGE } from './adapters.js';
 import { applyProtection, appClient, configureWebhook, detectCiAppIds, effectiveReviewCount, headSha, githubCli, installationClient, protectionSatisfied, readProtection, readWebhookConfig, triggerDelivery, verifyDelivery, webhookUrlFor, CHECK_NAME, type AppFacts, type DeliveryProof } from './github.js';
 import { detectHerdr, detectRuntimes, masterRuntime, reviewerProfiles, workerProfiles, type DetectedRuntime, type HerdrState, type ReviewerProfileDraft, type WorkerProfileDraft } from './runtimes.js';
 import { assertOutsideRepository, ensureTokens, fingerprint, installDirectory, installRecordSchema, plannedPrincipals, prepareInstallDirectory, principalOfRole, principalsVariable, readInstallRecord, tokenFile, workerPrincipals, writeInstallRecord, Vault, type InstallRecord } from './secrets.js';
@@ -158,7 +158,7 @@ export function coreEnv(session: InstallSession): EnvValue[] {
   return [
     { name: 'HOST', value: '0.0.0.0', secret: false },
     { name: 'PORT', value: String(SERVER_PORT), secret: false },
-    { name: 'DATABASE_URL', value: databaseUrl, secret: secretNamesFor(context.provider).has('DATABASE_URL') },
+    { name: 'DATABASE_URL', value: databaseUrl, secret: carriesCredential('DATABASE_URL', databaseUrl) },
     { name: 'GRAPHYARD_PRINCIPALS', value: principalsVariable(session.principals, session.tokens), secret: true },
     { name: 'GITHUB_REPOSITORY', value: inputs.repository, secret: false },
     { name: 'GITHUB_BASE_BRANCH', value: inputs.baseBranch, secret: false },
@@ -186,10 +186,12 @@ function variableDrift(session: InstallSession, action: string, values: EnvValue
   return values.flatMap(value => {
     // A credential this machine has not generated yet cannot be compared to a running one.
     if (value.secret && !session.materialized) return [];
-    const expected = variableMarker(session.context.provider, value.name, value.value);
+    const expected = variableMarker(value.name, value.value);
     const current = observed[value.name];
-    if (current === undefined) return [{ action, field: value.name, expected: value.secret ? `sha:${fingerprint(value.value)}` : expected, observed: 'absent' }];
-    return current === expected ? [] : [{ action, field: value.name, expected: value.secret ? `sha:${fingerprint(value.value)}` : expected, observed: value.secret ? current : current }];
+    // Both sides are markers for anything carrying a credential, so drift is reportable
+    // verbatim: an observed value only ever reaches the plan as `sha:<fingerprint>`.
+    if (current === undefined) return [{ action, field: value.name, expected, observed: 'absent' }];
+    return current === expected ? [] : [{ action, field: value.name, expected, observed: current }];
   });
 }
 
