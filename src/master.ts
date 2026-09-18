@@ -9,6 +9,8 @@ import { loadConnection, managedInstructions, serverOrigin } from './repository-
 import { resourceConflicts } from './coordination.js';
 import { launchPlan, masterHarnessPlan, writeHarnessPermissions } from './harness.js';
 import { CHECK_NAME, exhaustedReviewerProfiles, nativeReviewRequired, reviewerProfileFor, reviewProviderOf, type Work } from './model.js';
+import { containmentAttestation, containmentSettlementRefusals, containmentVerificationSchema, type ContainmentVerification } from './quarantine.js';
+import { probeSupervisorAbsence } from './supervisor.js';
 import { predictQueue, type QueuePlacement } from './merge-queue.js';
 
 const safeEnvironment = z.record(
@@ -280,7 +282,71 @@ function reviewState(work: Work) {
   return { provider: 'agent' as const, profile: active?.name ?? null, runtime: active?.runtime ?? null,
     exhausted: !active && !!work.policy.reviewerProfiles?.length && !!exhaustedReviewerProfiles(work).length, failedOver };
 }
-export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profiles: WorkerProfile[], agents: HerdrAgent[], credentialHealth: Record<string, { available: boolean; reason: string | null }> = {}, reviews: { pending: any[]; completed: any[] } = { pending: [], completed: [] }) {
+export interface ContainmentAssessment {
+  key: string; id: string; epoch: number; owner: string; at: string;
+  host: string | null; workspacePath: string | null;
+  settleable: boolean; refusals: string[]; attestation: string;
+  verification: ContainmentVerification | null;
+}
+
+/** Quarantines this coordinator could verify: the registered host is the one it runs on. */
+export function containmentQuarantines(work: Work[], hostId: string) {
+  return work.filter(item => item.containmentQuarantine
+    && item.workspaces.some(workspace => workspace.epoch === item.containmentQuarantine!.epoch && workspace.host === hostId));
+}
+
+/** Bound the local clock against the control plane with the read that produced the snapshot. */
+export async function snapshotWithClock<T extends { now: string }>(read: () => Promise<T>, clock: () => number = Date.now) {
+  const before = clock();
+  const snapshot = await read();
+  const after = clock();
+  const server = Date.parse(snapshot.now);
+  const bound = (value: number) => Number.isFinite(server) ? Math.round(value - server) : NaN;
+  return { snapshot, clockOffset: { min: bound(before), max: bound(after) } };
+}
+
+/**
+ * Verify on this host that a quarantined supervisor is gone, and say why not when it cannot.
+ * The assessment is a proposal: the control plane re-evaluates the same refusals itself.
+ */
+export function verifyContainmentDeath(
+  work: Work,
+  options: { observedAt: string; hostId: string; clockOffset: { min: number; max: number }; localNow?: Date; probe?: typeof probeSupervisorAbsence },
+): ContainmentAssessment {
+  const quarantine = work.containmentQuarantine!;
+  const workspace = work.workspaces.find(item => item.epoch === quarantine?.epoch) ?? null;
+  const assessment: ContainmentAssessment = {
+    key: work.key, id: work.id, epoch: quarantine?.epoch ?? work.epoch, owner: quarantine?.owner ?? '', at: quarantine?.at ?? '',
+    host: workspace?.host ?? null, workspacePath: workspace?.path ?? null,
+    settleable: false, refusals: [], attestation: containmentAttestation(work.key), verification: null,
+  };
+  if (!quarantine) return { ...assessment, refusals: ['No containment quarantine is recorded for this task'] };
+  if (!workspace) return { ...assessment, refusals: [`Epoch ${quarantine.epoch} registered no workspace, so its supervisor has no verifiable host`] };
+  if (workspace.host !== options.hostId)
+    return { ...assessment, refusals: [`Epoch ${quarantine.epoch} is registered on host ${workspace.host}; automatic verification must run there`] };
+  const bounded = (value: number) => Number.isInteger(value) && Math.abs(value) <= 86_400_000;
+  if (!bounded(options.clockOffset.min) || !bounded(options.clockOffset.max))
+    return { ...assessment, refusals: ['The control-plane clock could not be compared with this host'] };
+  const probe = (options.probe ?? probeSupervisorAbsence)({ key: work.key, epoch: quarantine.epoch, workspacePath: workspace.path });
+  const verification = containmentVerificationSchema.parse({ ...probe, host: options.hostId, observedAt: (options.localNow ?? new Date()).toISOString(), clockOffset: options.clockOffset });
+  const refusals = containmentSettlementRefusals(work, verification, { now: Date.parse(options.observedAt) });
+  return { ...assessment, settleable: !refusals.length, refusals, verification };
+}
+/** Verify every quarantine this host is responsible for, keyed by work id. */
+export function assessContainment(work: Work[], options: { hostId: string; observedAt: string; clockOffset: { min: number; max: number }; probe?: typeof probeSupervisorAbsence }) {
+  const assessments: Record<string, ContainmentAssessment> = {};
+  for (const item of containmentQuarantines(work, options.hostId)) {
+    try { assessments[item.id] = verifyContainmentDeath(item, options); }
+    catch (error) {
+      assessments[item.id] = { key: item.key, id: item.id, epoch: item.containmentQuarantine!.epoch, owner: item.containmentQuarantine!.owner, at: item.containmentQuarantine!.at,
+        host: options.hostId, workspacePath: item.workspaces.find(workspace => workspace.epoch === item.containmentQuarantine!.epoch)?.path ?? null,
+        settleable: false, refusals: [`Host verification could not be completed: ${error instanceof Error ? error.message : String(error)}`],
+        attestation: containmentAttestation(item.key), verification: null };
+    }
+  }
+  return assessments;
+}
+export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profiles: WorkerProfile[], agents: HerdrAgent[], credentialHealth: Record<string, { available: boolean; reason: string | null }> = {}, containment: Record<string, ContainmentAssessment> = {}, reviews: { pending: any[]; completed: any[] } = { pending: [], completed: [] }) {
   const now = Date.parse(snapshot.now);
   const sessions = profiles.map(profile => {
     const agent = agents.find(candidate => candidate.name === profile.agentName);
@@ -302,12 +368,25 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
       && work.gates.every(gate => gate.passed) && !work.violations.length;
     const dwellMs = now - Date.parse(work.stageEnteredAt);
     const review = reviewState(work);
-    const attention = active && (!session || !['working', 'idle'].includes(session.state)) ? `Assigned worker session is ${session?.state ?? 'offline'}`
+    const assessed = containment[work.id];
+    const quarantine = work.containmentQuarantine
+      ? { epoch: work.containmentQuarantine.epoch, owner: work.containmentQuarantine.owner, at: work.containmentQuarantine.at,
+        settleable: assessed?.settleable ?? false,
+        refusals: assessed?.refusals ?? ['Supervisor absence has not been verified on the registered host'],
+        host: assessed?.host ?? work.workspaces.find(item => item.epoch === work.containmentQuarantine!.epoch)?.host ?? null,
+        verifiedAt: assessed?.verification?.observedAt ?? null,
+        // A refusal is only useful with the path that still works.
+        attestation: assessed?.settleable ? null : containmentAttestation(work.key) }
+      : null;
+    const attention = quarantine ? quarantine.settleable
+      ? `Containment quarantine from epoch ${quarantine.epoch} is verified settleable; run master settle-containment ${work.key}`
+      : `Containment quarantine from epoch ${quarantine.epoch} blocks dispatch: ${quarantine.refusals[0]}`
+      : active && (!session || !['working', 'idle'].includes(session.state)) ? `Assigned worker session is ${session?.state ?? 'offline'}`
       : review?.exhausted ? `Every configured reviewer profile is exhausted for the current candidate (${review.failedOver.map(entry => `${entry.profile}: ${entry.exhaustion}`).join(', ')})`
       : work.blocker || dwellMs > 3_600_000 ? first?.reasons[0] ?? `Work has remained at ${work.stage} for more than one hour` : null;
-    return { key: work.key, title: work.title, stage: work.stage, owner: active ? work.lease!.owner : null, profile: profile?.name ?? null, session: session?.state ?? null, refusal: first ? { gate: first.name, reason: first.reasons[0] } : null, mergeable, review, attention, queue: placement ? queueRow(placement) : null };
+    return { key: work.key, title: work.title, stage: work.stage, owner: active ? work.lease!.owner : null, profile: profile?.name ?? null, session: session?.state ?? null, refusal: first ? { gate: first.name, reason: first.reasons[0] } : null, mergeable, review, containment: quarantine, attention, queue: placement ? queueRow(placement) : null };
   });
-  return { observedAt: snapshot.now, counts: { open: rows.length, ready: rows.filter(row => row.stage === 'ready').length, active: rows.filter(row => row.owner).length, attention: rows.filter(row => row.attention).length, mergeable: rows.filter(row => row.mergeable).length, reviewsPending: reviews.pending.length, reviewFailover: rows.filter(row => row.review?.failedOver.length).length, queued: placements.length }, workers: sessions, reviews, work: rows, queue: placements.map(queueRow) };
+  return { observedAt: snapshot.now, counts: { open: rows.length, ready: rows.filter(row => row.stage === 'ready').length, active: rows.filter(row => row.owner).length, attention: rows.filter(row => row.attention).length, mergeable: rows.filter(row => row.mergeable).length, reviewsPending: reviews.pending.length, reviewFailover: rows.filter(row => row.review?.failedOver.length).length, queued: placements.length, quarantined: rows.filter(row => row.containment).length, settleableQuarantines: rows.filter(row => row.containment?.settleable).length }, workers: sessions, reviews, work: rows, queue: placements.map(queueRow) };
 }
 
 function queueRow(placement: QueuePlacement) {

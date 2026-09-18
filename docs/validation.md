@@ -12,7 +12,7 @@ Keep credentials separate:
 | --- | --- | --- |
 | Operator | `admin` | Define environments, approve bundles, register principals, select candidates, request/cancel/recover validation |
 | Implementation agent | `worker` | Existing implementation ownership; cannot define validation authority or publish trusted results |
-| Runner | `worker` with an operator-created runner registration | Poll dispatch, ACK and heartbeat its assigned attempt |
+| Runner | `worker` with an operator-created runner registration | Poll dispatch, ACK and heartbeat its assigned attempt until collection takes over |
 | Build producer | `producer` with a builder registration | Attest independently verified source/build inputs → artifact mapping in its environment |
 | Collector | `producer` with a collector registration and matching `proofs` allowlist | Verify execution, inventory, approved oracle, target identity, artifacts and settlement; publish the bound result |
 
@@ -81,12 +81,16 @@ Define separate runner, collector and builder registrations:
   "role": "runner",
   "environment": {"id": "preview", "revision": 1},
   "adapterVersion": "custom-v1",
+  "executionHost": "unix:///var/run/docker.sock",
+  "attestationPublicKey": "-----BEGIN PUBLIC KEY-----\n…\n-----END PUBLIC KEY-----\n",
+  "executionNetwork": "gy-preview-isolated",
+  "testAccountDigest": "sha256:5b8e0d3a7f21c94e6082d5b1a3f7c0e94d26b8a15f309c7e4b1d02a6f8395c7e",
   "proofs": [],
   "enabled": true
 }
 ```
 
-Use `role: collector` and its allowed `e2e:...` proofs for the collector; use `role: builder` for the build producer. These must reference separately configured principals with the roles in the table above.
+Runner registrations must pin the exact container host the collector inspects, the public key of an operator-controlled host attestor, and the dedicated isolated network the target-facing phase may join; the attestor private key must be inaccessible to the runner worker. `executionHost` must be a local `unix://` socket: the supported executor measures the bundle and the attempt boundary on the attestor's own filesystem, and a remote daemon would resolve the same bind-mount pathnames somewhere that was never measured, so `ssh://` and `tcp://` endpoints refuse. `executionNetwork` is authority for the same reason as the other two: a container runtime resolves a network name against every network it already has, so an unpinned one lets a runner attach the browser to internal services. The built-in `host`, `bridge`, `default` and `none` names refuse. `testAccountDigest` is optional and pins which approved test-account material the target-facing phase may sign in as, measured with `graphyard runner account-digest FILE`; omit it for an attempt that needs none. Without it the pathname in the runner's own configuration would be the approval, and every private env file the attestor can read — including one for a support or administrator account the scenario was never approved to exercise — would satisfy the structural checks, so a compromised runner could obtain trusted evidence covering privileges nobody approved. Use `role: collector` and its allowed `e2e:...` proofs for the collector; use `role: builder` for the build producer. Non-runner registrations omit `executionHost`, `attestationPublicKey`, `executionNetwork` and `testAccountDigest`. These must reference separately configured principals with the roles in the table above.
 
 Approve a `kind: bundle` definition with `id`, `expectedRevision`, `scenario`, `scenarioRevision`, `scenarioHash`, `digest` and `runnerImageDigest`. Digests use `sha256:` plus 64 lowercase hex characters. The bundle digest must cover all executable assertions, transitive helpers, fixtures, configuration and lockfiles. The runner image pins runtime dependencies. Changed executable bytes require a new scenario revision and work pinned to it, even if published under a different bundle ID. Existing E2E scenario pins cannot be upgraded in place yet: create a follow-up work item pinned to the new revision, preserving the earlier item for history. Do not remove and re-add a proof to work around this boundary. D1 records the operator's approval; D2's isolated executor must enforce immutable approved bytes throughout execution.
 
@@ -104,9 +108,11 @@ Create the candidate as operator with `workId`, `expectedWorkRevision`, required
 
 Create a request with `candidateId`, `expectedWorkRevision`, versioned `runner` and `collector` references, an absolute ISO UTC `deadline` within the next hour, and `maxAttempts` from 1 to 5. The selected collector must be authorized for the candidate's proof and environment. A newer request prevents fallback to an older pass while it is queued, running, cancelled or incomplete.
 
-The runner polls `dispatch` with `{"registration":{"id":"preview-runner","revision":1}}`. An eligible response includes the pinned request, candidate, trusted build attestation/artifact manifest, environment, bundle and attempt; an unavailable queue returns `request: null` with a reason. At most one request holds a runner principal's slot. Global test-resource reservations prevent conflicting assignments across replicas.
+The runner polls `dispatch` with `{"registration":{"id":"preview-runner","revision":1}}`. An eligible response includes the pinned request, candidate, trusted build attestation/artifact manifest, environment, bundle and attempt, plus the `executionAuthority` the registration pinned — host, attestor public key and isolated network; an unavailable queue returns `request: null` with a reason. At most one request holds a runner principal's slot. Global test-resource reservations prevent conflicting assignments across replicas.
 
 An attempt has a unique ID and monotonic epoch. Send `{requestId, attemptId, epoch}` to `ack` **before any execution**. The initial ACK window is 30 seconds; after ACK, heartbeats extend the lease up to 60 seconds, bounded by the request deadline. Renew at least every 20 seconds. Stop on refusal and never infer permission from an old receipt. A runner must implement external fencing/isolation: a database lease cannot physically stop a partitioned process.
+
+Collection is a handoff, not a parallel activity. The collector calls `collection-authority` with `{requestId, attemptId, epoch}` before it reads or publishes anything; the request moves from `running` to `collecting`, which revokes the runner's authority — further `ack`/`heartbeat` calls are refused — and extends the lease for the collector, renewed through `collection-heartbeat`. Artifact uploads and `result` require that state, so settlement is never measured while the executing party could still start a container. An expired `collecting` lease keeps the resource barrier closed exactly like a running one.
 
 An unacknowledged timeout, cancellation or supersession releases its reservations because no execution was authorized and late ACKs fail. A running timeout retains its resource barrier. Server restarts preserve requests, epochs, receipts and reservations. Reconciliation checks active request deadlines and authority every two seconds. Completed current evidence is rechecked on configuration changes and server startup, rather than rescanning all completed history on each tick. Build provenance is stored in an indexed immutable table as well as the event ledger. Source/policy changes immediately make old evidence inapplicable through the gate evaluator.
 
@@ -118,12 +124,14 @@ Only the pinned collector can call `result`. It must independently verify the ex
 - `execution`: `completed`, `cancelled` or `timed_out`;
 - `behavior`: `passed`, `failed`, `blocked` or `unmeasured`;
 - actual `executed`, `skipped` and `inventoryComplete`;
-- `target: {instance, artifacts: [{service, digest}], measurement, coversEntireRun}`;
+- `target: {instance, artifacts: [{service, digest}], measurement, coversEntireRun, attribution}`;
 - actual executed `bundleDigest` and `runnerImageDigest`;
-- verified `artifacts: [{name, digest, url}]` covering the required names;
-- `executionSettled`: whether independent observation proves execution/operations have finished.
+- verified `artifacts: [{name, digest, url}]` covering the required names, and `artifactState`;
+- `executionSettled`: whether the collector's **own** independent observation proves execution/operations have finished. A runner's claim about itself is not settlement; releasing a protected resource is never a worker assertion.
 
-`measurement` is `provider`, `host-attestation` or `unknown`. Application self-reported version strings cannot count as either trusted measurement. Attribution must cover the whole run; before/after probes cannot rule out A → B → A changes. The collector must inspect the approved execution boundary and real inventory, not trust a report uploaded by candidate code. Artifact URLs are metadata, not public access grants; custom collectors must use private authorized storage and avoid secrets in URLs or reports.
+`measurement` is `provider`, `host-attestation` or `unknown`. Application self-reported version strings cannot count as either trusted measurement. `attribution` is `matched`, `mismatched`, `changed` or `unknown`, and only `matched` with whole-run coverage can pass: before/after probes cannot rule out A → B → A changes, so an uncovered interval stays `unknown`. `artifactState` is `verified`, `missing`, `upload-failed` or `expired`, and only `verified` can pass, so a runner exiting zero without durable required artifacts cannot be accepted. The collector must inspect the approved execution boundary and real inventory, not trust a report uploaded by candidate code. Artifact URLs are metadata, not public access grants; custom collectors must use private authorized storage and avoid secrets in URLs or reports.
+
+The packaged runner and collector in [runner setup](runner-setup.md) compute all of these fields from the isolated execution boundary and independent target measurements. Graphyard rechecks every dimension against the pinned candidate when the result arrives, so a collector's computation is a second boundary rather than the only one.
 
 A current report returns `{accepted: true, passed, reasons}`. `accepted` means the report belongs to a current authorized attempt; **it does not mean tests passed**. Zero/skipped/missing inventory, wrong artifact, unknown target, wrong bundle, missing artifacts or unverified settlement produce failed evidence. All passing dimensions are required.
 
@@ -137,7 +145,7 @@ Operator commands use `{requestId, epoch, reason}`:
 - `settle` also requires `settlementEvidence`, a URL referencing independent termination/operation-settlement proof. Only use it after confirming the process and its external operations are stopped/fenced. This is an explicit manual recovery attestation in D1, not an automatic kill command.
 - `retry` requires a settled prior attempt, an unexpired deadline, remaining attempt budget and current candidate/registration authority. It queues another attempt and invalidates any earlier pass.
 
-Revoked definitions require newly authorized configuration and a new request. Do not reassign a protected resource because a timer expired. Unknown external outcomes remain blocked until verified settlement. The packaged D2 runner will implement and test this external boundary; these APIs do not make arbitrary custom executors safe automatically.
+Revoked definitions require newly authorized configuration and a new request. Do not reassign a protected resource because a timer expired. Unknown external outcomes remain blocked until verified settlement. The packaged runner implements and tests this external boundary by removing its containers and confirming their absence, and the collector independently re-observes those containers before reporting settlement; these APIs do not make arbitrary custom executors safe automatically.
 
 ## Verification
 

@@ -164,7 +164,7 @@ test('master review mints a private session credential, records the request, and
     await assert.rejects(stat(sessionDirectory), /ENOENT/, 'the reviewer credential directory is removed once the session is closed');
     const summary = summarizeReviews((await readReviewLedger(root)).reviews);
     assert.equal(summary.pending.length, 0); assert.equal(summary.completed[0].verdict, 'APPROVED');
-    const status = buildMasterStatus({ work: [], now: new Date().toISOString() }, [], [], {}, summary);
+    const status = buildMasterStatus({ work: [], now: new Date().toISOString() }, [], [], {}, {}, summary);
     assert.equal(status.counts.reviewsPending, 0); assert.equal(status.reviews.completed[0].work, 'GY-42');
   } finally { await cleanup(); }
 });
