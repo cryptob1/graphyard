@@ -10,7 +10,7 @@ import { assembleResult, collectArtifacts, collectionBinding, collectionInputs, 
 import { superviseAttempt, supervisionRequestSchema } from './runner-attestor.js';
 import { inheritedObligations } from './model.js';
 import { assertRepository, availableRuntimes, discover } from './onboarding.js';
-import { startGithubSetup } from './github-setup.js';
+import { startGithubSetup, updateAppPermissions } from './github-setup.js';
 import { fileURLToPath } from 'node:url';
 import { createInterface } from 'node:readline';
 import { isDeepStrictEqual, parseArgs } from 'node:util';
@@ -144,6 +144,9 @@ Environment: GRAPHYARD_URL, GRAPHYARD_TOKEN (individual role-scoped credential)
   github-setup HTTPS_URL [--reviewer NAME]
                                 Register the control-plane or a reviewer GitHub App
                                 through the local App-manifest browser flow
+  github-setup --update-permissions [--reviewer NAME] [--wait SECONDS]
+                                Compare a registered App with its declared permissions,
+                                print the exact migration steps, and verify acceptance
   status [GY-N]                Control-plane or work status
   diagnose GY-N                Explain blockers, overlap and required proof
   requirements GY-N file.json  Revise requirements with an audit reason (operator);
@@ -229,7 +232,7 @@ Never share an operator or producer credential with an implementation agent.`); 
       const containment = assessContainment(snapshot.work, { hostId: master.hostId, observedAt: snapshot.now, clockOffset });
       const daemonState = await readDaemonState(root, master).catch(error => ({ error: error instanceof Error ? error.message : 'Master daemon state is unreadable' }));
       const daemon = 'error' in daemonState ? { running: false, error: daemonState.error } : daemonSummary(daemonState, Date.now(), master.run.intervalSeconds * 1000);
-      return print({ ...buildMasterStatus(snapshot, master.workers, runtime.agents, credentials, containment), autoMerge: master.autoMerge, mergeApproval: master.autoMerge ? 'routine merges permitted after gates pass' : 'explicit operator approval required for each merge', daemon, runtime: { herdr: { available: runtime.available, reason: runtime.reason } } });
+      return print({ ...buildMasterStatus(snapshot, master.workers, runtime.agents, credentials, containment, coordinator), autoMerge: master.autoMerge, mergeApproval: master.autoMerge ? 'routine merges permitted after gates pass' : 'explicit operator approval required for each merge', daemon, runtime: { herdr: { available: runtime.available, reason: runtime.reason } } });
     }
     if (id === 'settle-containment') {
       if (!args[0] || !args.slice(1).join(' ').trim()) throw new Error('Use master settle-containment GY-N REASON');
@@ -550,16 +553,31 @@ Never share an operator or producer credential with an implementation agent.`); 
     const discovered = await discover(root);
     if (command === 'github-setup') {
       if (!discovered.repository) throw new Error('Set origin to the GitHub repository being managed first');
-      const { values } = parseArgs({ args, options: { reviewer: { type: 'string' } }, allowPositionals: false });
-      const setup = await startGithubSetup(root, discovered.repository, id, 4311, {}, values.reviewer);
+      const { values, positionals } = parseArgs({ args: [id, ...args].filter((value): value is string => value !== undefined), options: { reviewer: { type: 'string' }, 'update-permissions': { type: 'boolean' }, wait: { type: 'string' } }, allowPositionals: true });
+      if (values['update-permissions']) {
+        const waitSeconds = values.wait === undefined ? 0 : Number(values.wait);
+        if (!Number.isInteger(waitSeconds) || waitSeconds < 0 || waitSeconds > 3600) throw new Error('Use --wait with whole seconds up to 3600');
+        const result = await updateAppPermissions(root, { reviewer: values.reviewer, waitMs: waitSeconds * 1000 });
+        print(result);
+        if (!result.verified) process.exitCode = 1;
+        return;
+      }
+      if (values.wait !== undefined) throw new Error('--wait only applies to --update-permissions');
+      const deployment = positionals[0];
+      if (!deployment || positionals.length > 1) throw new Error('Use github-setup HTTPS_URL to register an App, or github-setup --update-permissions to migrate a registered one');
+      const setup = await startGithubSetup(root, discovered.repository, deployment, 4311, {}, values.reviewer);
       console.log(`Open ${setup.url} in your browser. On SSH, forward port 4311 to this machine first. Credentials stay in ${setup.file}; do not share that file. Press Ctrl+C when finished.`);
       const stop = () => setup.http.close(); process.once('SIGINT', stop); process.once('SIGTERM', stop); return;
     }
     let live: any = null, failure: string | undefined;
     try { live = await api('status'); } catch (error: any) { failure = error.message; }
+    const appPermissions = live?.appPermissions ?? null;
     return print({ discovered, server: base, cliPath: await activeCliPath(), hostId: individualHostId(), connected: !!live, githubConfigured: !!live?.github, role: live?.actor?.role, failure,
       setup: await readSetupStatus(root).catch((error: any) => ({ error: error.message })),
-      next: !live ? 'Configure GRAPHYARD_URL and an individual token' : !live.github ? 'Complete github-setup and configure the server App credentials' : 'Submit a real PR and inspect every gate; configured is not proof of enforcement',
+      appPermissions: appPermissions ? { verifiedAt: appPermissions.verifiedAt, missing: appPermissions.missing, attention: appPermissions.attention, installationUrl: appPermissions.installationUrl } : null,
+      heldJobs: live?.heldJobs ?? 0,
+      next: !live ? 'Configure GRAPHYARD_URL and an individual token' : !live.github ? 'Complete github-setup and configure the server App credentials'
+        : appPermissions?.missing?.length ? `Run graphyard github-setup --update-permissions: ${appPermissions.attention[0]}` : 'Submit a real PR and inspect every gate; configured is not proof of enforcement',
       limits: ['CI discovery is a proposal, not executed-test inventory', 'Herdr two-host recovery and GitHub refusal-to-acceptance must be demonstrated'] });
   }
   if (command === 'status' && !id) return print(await api('status'));

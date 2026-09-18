@@ -59,7 +59,7 @@ node "$GRAPHYARD_CLI" github-setup https://YOUR-GRAPHYARD-HOST
 
 This guided flow supports personal-account Apps. For organization-owned repositories, create the App manually using [GitHub enforcement](github.md#create-and-install-the-app).
 
-Install the App only on the managed repository and copy its private values into the Graphyard service. Configure normal CI and review protection now. The new `Graphyard / merge` check may appear only after the first linked PR; require it as soon as Graphyard publishes it, before merging.
+The manifest requests exactly the [declared control-plane permission set](github.md#app-permissions); an App registered before the merge queue must be [migrated](github.md#migrating-an-existing-app) to Contents: read and write. Install the App only on the managed repository and copy its private values into the Graphyard service. Configure normal CI and review protection now. The new `Graphyard / merge` check may appear only after the first linked PR; require it as soon as Graphyard publishes it, before merging.
 
 Confirm the exact CI check names and their GitHub App IDs. GitHub Actions uses App ID `15368`; other CI providers do not.
 

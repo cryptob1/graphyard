@@ -216,7 +216,11 @@ export async function setupMaster(root: string, input: { url: string; token: str
   const { writeFile, rename } = await import('node:fs/promises');
   await writeFile(temporary, instructions, { mode, flag: 'wx' }); await rename(temporary, instructionsFile); await chmod(instructionsFile, mode);
   await saveDiscovery(root);
-  return { repository: config.repository, server: config.url, role: status.actor.role, autoMerge: config.autoMerge, workers: config.workers.length, run: config.run, config: '.graphyard/master.json', next: `Run graphyard master start codex (or another supported agent kind), then add worker profiles` };
+  // A permission the installed App lacks is announced here with its exact migration steps, not
+  // discovered later as a 403 loop. It never blocks setup: master status keeps reporting it.
+  const { attention } = controlPlaneAttention(status);
+  return { repository: config.repository, server: config.url, role: status.actor.role, autoMerge: config.autoMerge, workers: config.workers.length, run: config.run, config: '.graphyard/master.json', attention,
+    next: attention.length ? `Accept the GitHub App permission request (run graphyard github-setup --update-permissions on the machine holding .graphyard/github-app.json for the exact steps), then run graphyard master start codex (or another supported agent kind) and add worker profiles` : `Run graphyard master start codex (or another supported agent kind), then add worker profiles` };
 }
 
 export async function saveWorkerProfile(root: string, profileInput: unknown, verify: (token: string) => Promise<any>) {
@@ -307,8 +311,24 @@ export function assessContainment(work: Work[], options: { hostId: string; obser
   }
   return assessments;
 }
-export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profiles: WorkerProfile[], agents: HerdrAgent[], credentialHealth: Record<string, { available: boolean; reason: string | null }> = {}, containment: Record<string, ContainmentAssessment> = {}) {
+/** The control-plane facts `GET /api/status` reports that are not about any one work item. */
+export interface ControlPlaneStatus {
+  appPermissions?: { app?: string; installationUrl?: string; verifiedAt?: string | null; error?: string | null; suspended?: boolean; missing?: { permission: string; required: string; features: string[] }[]; attention?: string[] } | null;
+  heldJobs?: number;
+}
+/**
+ * Attention that belongs to the installation rather than to a work item: a declared App
+ * permission the installation lacks, an unverifiable preflight, and the jobs held on it.
+ */
+export function controlPlaneAttention(status: ControlPlaneStatus | undefined) {
+  const report = status?.appPermissions;
+  const attention = [...(report?.attention ?? [])];
+  if (status?.heldJobs) attention.push(`${status.heldJobs} integration job${status.heldJobs === 1 ? ' is' : 's are'} held on that permission shortfall rather than retried; they resume on their own once the installation reports the permission`);
+  return { attention, appPermissions: report ? { app: report.app ?? null, installationUrl: report.installationUrl ?? null, verifiedAt: report.verifiedAt ?? null, error: report.error ?? null, suspended: report.suspended ?? false, missing: (report.missing ?? []).map(shortfall => ({ permission: shortfall.permission, required: shortfall.required, features: shortfall.features })) } : null, heldJobs: status?.heldJobs ?? 0 };
+}
+export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profiles: WorkerProfile[], agents: HerdrAgent[], credentialHealth: Record<string, { available: boolean; reason: string | null }> = {}, containment: Record<string, ContainmentAssessment> = {}, controlPlane?: ControlPlaneStatus) {
   const now = Date.parse(snapshot.now);
+  const installation = controlPlaneAttention(controlPlane);
   const sessions = profiles.map(profile => {
     const agent = agents.find(candidate => candidate.name === profile.agentName);
     const credential = credentialHealth[profile.name] ?? { available: true, reason: null };
@@ -347,7 +367,7 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
       : work.blocker || dwellMs > 3_600_000 ? first?.reasons[0] ?? `Work has remained at ${work.stage} for more than one hour` : null;
     return { key: work.key, title: work.title, stage: work.stage, owner: active ? work.lease!.owner : null, profile: profile?.name ?? null, session: session?.state ?? null, refusal: first ? { gate: first.name, reason: first.reasons[0] } : null, mergeable, review, containment: quarantine, attention, queue: placement ? queueRow(placement) : null };
   });
-  return { observedAt: snapshot.now, counts: { open: rows.length, ready: rows.filter(row => row.stage === 'ready').length, active: rows.filter(row => row.owner).length, attention: rows.filter(row => row.attention).length, mergeable: rows.filter(row => row.mergeable).length, reviewFailover: rows.filter(row => row.review?.failedOver.length).length, queued: placements.length, quarantined: rows.filter(row => row.containment).length, settleableQuarantines: rows.filter(row => row.containment?.settleable).length }, workers: sessions, work: rows, queue: placements.map(queueRow) };
+  return { observedAt: snapshot.now, counts: { open: rows.length, ready: rows.filter(row => row.stage === 'ready').length, active: rows.filter(row => row.owner).length, attention: rows.filter(row => row.attention).length + installation.attention.length, mergeable: rows.filter(row => row.mergeable).length, reviewFailover: rows.filter(row => row.review?.failedOver.length).length, queued: placements.length, quarantined: rows.filter(row => row.containment).length, settleableQuarantines: rows.filter(row => row.containment?.settleable).length }, workers: sessions, work: rows, queue: placements.map(queueRow), controlPlane: installation };
 }
 
 function queueRow(placement: QueuePlacement) {

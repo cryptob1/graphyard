@@ -65,6 +65,8 @@ The reservation is deliberately retained. Inspect Git output and the local branc
 
 Jobs keep the error and retry after 45 seconds. Expired job leases are recoverable after 90 seconds. Check App installation access, permission changes, API availability, branch protection, and whether the PR still matches the registered branch. A task revision conflict during observation is usually a normal retry.
 
+A permission error is different. The server compares the installed App's permissions with the [declared set](github.md#app-permissions) at startup, every five minutes, and after any 403; a shortfall is an attention item in `GET /api/status` (`appPermissions`), the dashboard, and `master status`, naming the missing permission and the installation page. Jobs that need the missing permission are held rather than retried — `diagnose GY-N` shows `integration-held` — and a job that hits an unexpected 401/403 retries at most three times before it is held for thirty minutes. Accept the pending permission request (`github-setup --update-permissions` prints the exact steps) and the next preflight releases every held job; nothing needs restarting. See [migrating an existing App](github.md#migrating-an-existing-app).
+
 Own-App check webhooks are ignored. Other signed webhook deliveries wake jobs, but periodic polling is the fallback. Missing webhooks should delay progress rather than permanently strand it.
 
 ## GitHub or Graphyard outage
