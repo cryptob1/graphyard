@@ -59,6 +59,8 @@ function effects(overrides: Partial<DaemonEffects> = {}, log: string[] = []): Da
     requestProof: item => { log.push(`proof:${item.key}`); },
     merge: async item => { log.push(`merge:${item.key}`); return { result: 'merge requested' }; },
     observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(0), reason: 'not configured', deployed: [], pending: [] }),
+    recordDeployment: async (item, observation) => { log.push(`record:${item.key}:${observation.sha.slice(0, 4)}`); },
+    requestSmoke: item => { log.push(`smoke:${item.key}`); },
     persist: async () => {},
     ...overrides,
   };
@@ -343,6 +345,69 @@ test('a failed launch puts its profile in cool-off so the next cycle uses anothe
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
 
+test('the loop records the observed deployment, requests the trusted smoke proof, escalates a failed verdict with rollback guidance, and measures post-deploy time', async () => {
+  const { directory, token } = await privateDirectory();
+  try {
+    const mergeSha = 'c'.repeat(40), serving = 'd'.repeat(40);
+    const delivered = (overrides: Partial<Work['delivery']> = {}, extra: Partial<Work> = {}) => work({ id: 'smoky', key: 'GY-50', stage: 'done', createdAt: iso(-5 * hour),
+      policy: { checks: ['test'], review: true, deploySmoke: true }, delivery: { mergedAt: iso(-2 * hour), mergeSha, authorizationRevision: 5, ...overrides }, ...extra });
+    const plain = work({ id: 'plain', key: 'GY-51', stage: 'done', delivery: { mergedAt: iso(-hour), mergeSha: 'e'.repeat(40), authorizationRevision: 6 } });
+    const pending = delivered({}, { id: 'pending', key: 'GY-52' });
+    const log: string[] = [];
+    let snapshot: Work[] = [delivered(), plain, pending];
+    const deps = effects({
+      snapshot: async () => ({ work: snapshot, now: iso(0) }),
+      observeDeployment: async () => ({ source: 'endpoint', sha: serving, at: iso(-hour), reason: null, deployed: ['GY-50', 'GY-51'], pending: ['GY-52'] }),
+    }, log);
+    const unconfigured = config(token, { run: { intervalSeconds: 20, deploymentShaField: 'commit' } });
+    const state = emptyDaemonState(unconfigured);
+    // Cycle 1: the release serves GY-50, so its deployment is recorded on Graphyard. GY-51 asks for no
+    // smoke proof and GY-52 is not yet served, so neither is touched.
+    let result = await runCycle(unconfigured, state, deps, () => clock);
+    assert.deepEqual(log, ['record:GY-50:dddd']);
+    assert.ok(result.actions.some(action => action.kind === 'deployment' && action.work === 'GY-50' && action.state === 'done'));
+    assert.equal(result.metrics.postDeploy.count, 2, 'both smoke-policy deliveries are still inside their post-deploy window');
+    assert.equal(result.metrics.postDeployFailures, 0);
+    // Cycle 2: Graphyard now holds the observation. Without a smoke workflow the loop can only say so.
+    log.length = 0;
+    const observation = { sha: serving, mergeSha, source: 'endpoint' as const, observedAt: iso(-hour), covers: 'descendant' as const, at: iso(-hour), observer: 'master' };
+    snapshot = [delivered({ deployment: observation }), plain, pending];
+    result = await runCycle(unconfigured, state, deps, () => clock + 20_000);
+    assert.deepEqual(log, [], 'the loop never re-records a deployment Graphyard already holds');
+    const unconfiguredSmoke = result.actions.find(action => action.kind === 'smoke')!;
+    assert.equal(unconfiguredSmoke.state, 'failed'); assert.match(unconfiguredSmoke.detail, /--smoke-workflow/);
+    assert.equal(result.metrics.production.count, 1, 'PR-to-production latency is measured from the recorded observation');
+    assert.equal(result.metrics.production.p50Ms, 4 * hour);
+    // With the workflow configured the request names the exact deployed and merge commits, once.
+    const configured = config(token, { run: { intervalSeconds: 20, deploymentShaField: 'commit', smokeWorkflow: 'deploy-smoke.yml' } });
+    delete state.actions[`smoke:smoky:${serving}`];
+    result = await runCycle(configured, state, deps, () => clock + 40_000);
+    assert.deepEqual(log, ['smoke:GY-50']);
+    assert.match(result.actions.find(action => action.kind === 'smoke')!.detail, /deploy-smoke\.yml for GY-50 against deployed dddddddddddd \(merge cccccccccccc\)/);
+    log.length = 0;
+    await runCycle(configured, state, deps, () => clock + 60_000);
+    assert.deepEqual(log, [], 'one smoke request per deployed commit');
+    // Cycle 3: the trusted producer reported a failure. The loop escalates with rollback guidance and
+    // the failure shows up in the flow analytics; it never requests the proof again or clears it.
+    const smoke = { evidenceId: 'ev-1', result: 'fail' as const, sha: serving, mergeSha, producer: 'smoke-runner', at: iso(-30 * 60_000), executed: 3, skipped: 0 };
+    snapshot = [delivered({ deployment: observation, smoke }), plain, pending];
+    result = await runCycle(configured, state, deps, () => clock + 80_000);
+    assert.deepEqual(log, []);
+    const escalation = result.actions.find(action => action.kind === 'escalation' && action.work === 'GY-50')!;
+    assert.match(escalation.detail, /delivered with a failed post-deployment smoke proof/);
+    assert.ok(escalation.detail.includes(serving) && escalation.detail.includes(mergeSha) && /revert .* on main/.test(escalation.detail));
+    assert.equal(result.metrics.postDeployFailures, 1);
+    assert.equal(result.metrics.postDeploy.p50Ms, 90 * 60_000, 'post-deploy time runs from merge to the verdict');
+    const again = await runCycle(configured, state, deps, () => clock + 100_000);
+    assert.equal(again.actions.filter(action => action.kind === 'escalation').length, 0, 'an escalation is recorded once per verdict');
+    // A record interrupted mid-flight is resolved against Graphyard, not the cursor.
+    state.actions['deployment:record:smoky:x'] = { kind: 'deployment', work: 'GY-50', principal: null, epoch: null, state: 'started', detail: 'Recording', attempts: 1, cycle: 0, at: iso(0) };
+    state.actions['deployment:record:pending:x'] = { kind: 'deployment', work: 'GY-52', principal: null, epoch: null, state: 'started', detail: 'Recording', attempts: 1, cycle: 0, at: iso(0) };
+    const resumed = reconcilePendingActions(state, snapshot, clock);
+    assert.deepEqual(resumed.map(action => `${action.work}:${action.state}`), ['GY-50:done', 'GY-52:failed']);
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
 test('deployment verification reports the served commit and which delivered items it covers', async () => {
   const { directory, token } = await privateDirectory();
   try {
@@ -407,7 +472,7 @@ test('the cursor stays bounded without discarding an unresolved action, and stat
   const state = emptyDaemonState(masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', credentialFile: '/outside/coordinator.token', cliPath: launcher, repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'machine-a', masterAgentName: 'graphyard-master-project' }));
   for (let index = 0; index < retainedActions + 50; index++) state.actions[`done:${index}`] = { kind: 'review', work: `GY-${index}`, principal: null, epoch: null, state: 'done', detail: 'recorded', attempts: 1, cycle: index, at: iso(index) };
   state.actions.stuck = { kind: 'proof', work: 'GY-9', principal: null, epoch: null, state: 'indeterminate', detail: 'interrupted', attempts: 1, cycle: 0, at: iso(-hour) };
-  for (let index = 0; index < 150; index++) state.metrics.push({ cycle: index, at: iso(index), durationMs: 1, open: 1, actions: 0, stages: {}, lead: { count: 0, p50Ms: 0, p90Ms: 0 } });
+  for (let index = 0; index < 150; index++) state.metrics.push({ cycle: index, at: iso(index), durationMs: 1, open: 1, actions: 0, stages: {}, lead: { count: 0, p50Ms: 0, p90Ms: 0 }, production: { count: 0, p50Ms: 0, p90Ms: 0 }, postDeploy: { count: 0, p50Ms: 0, p90Ms: 0 }, postDeployFailures: 0 });
   pruneDaemonState(state);
   assert.equal(Object.keys(state.actions).length, retainedActions + 1);
   assert.ok(state.actions.stuck, 'an unresolved action is never pruned away');
