@@ -14,7 +14,7 @@ import { assertMergeCandidate, currentMergeCandidates } from '../src/master.js';
 import { queueRef, type QueueSpeculation } from '../src/merge-queue.js';
 import { Engine } from '../src/engine.js';
 import { server } from '../src/server.js';
-import { sliceIds, type Observation, type Principal, type SliceId, type Work } from '../src/model.js';
+import { sliceIds, standingEscalations, type Observation, type Principal, type SliceId, type Work } from '../src/model.js';
 import { Store } from '../src/store.js';
 
 // Each test is named for the proof it produces, so acceptance evidence maps to
@@ -394,6 +394,68 @@ test('integration:ownership-and-delivery-invariants — Graphyard owns leases, w
     assert.doesNotMatch(await readFile(new URL(`../src/${module}`, import.meta.url), 'utf8'), /herdr/i, module);
   await engine.execute(workerA, 'release', item.id, { epoch: item.epoch }, id());
   await engine.execute(workerB, 'release', other.id, { epoch: other.epoch }, id());
+
+  // The binding is per claimed item, not per worker: one engineer may hold more
+  // than one item in a slice, each bound to exactly that engineer and exactly one
+  // registered worktree, while occupying a single seat under the slice lead.
+  const token = credentials.find(c => c.id === workerA.id)!.token;
+  const held: Work[] = [];
+  for (const name of ['seat-first', 'seat-second']) {
+    const created = await engine.execute(admin, 'create', null, input(name, 'infrastructure'), id());
+    held.push(await engine.execute(admin, 'ready', created.id, {}, id()));
+  }
+  held[0] = await engine.execute(workerA, 'claim', held[0].id, {}, id());
+  // The second claim by the same engineer is accepted by the server, not merely by a client.
+  const second = await fetch(`${url}/api/work/${held[1].id}/claim`, { method: 'POST',
+    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', 'Idempotency-Key': id() }, body: '{}' });
+  assert.equal(second.status, 200, await second.text());
+  held[1] = await reload(held[1]);
+  for (const work of held) {
+    assert.equal(work.lease!.owner, workerA.id);
+    assert.equal(work.lastAssignment!.owner, workerA.id);
+    assert.deepEqual(implementerIdentities(work), [workerA.id]);
+  }
+  assert.deepEqual([...activeEngineers(await store.list(), 'infrastructure', Date.now())], [workerA.id], 'two claimed items, one seat');
+  const infrastructure = delegationSnapshot(roster, await store.list(), Date.now()).slices.find(s => s.id === 'infrastructure')!;
+  assert.deepEqual(infrastructure.engineers.map(engineer => engineer.id), [workerA.id]);
+  assert.deepEqual(infrastructure.workers.map(worker => [worker.key, worker.id]), held.map(work => [work.key, workerA.id]));
+  // Each item still gets exactly one worktree of its own: the same engineer cannot
+  // point a second item at the worktree already registered for the first.
+  const first = { epoch: held[0].epoch, host: 'ownership-host', path: '/tmp/delegation/seat-first', branch: 'graphyard/seat-first' };
+  held[0] = await engine.execute(workerA, 'workspace', held[0].id, first, id());
+  await assert.rejects(engine.execute(workerA, 'workspace', held[1].id, { ...first, epoch: held[1].epoch }, id()), /reserved or overlaps/);
+  await assert.rejects(engine.execute(workerA, 'workspace', held[1].id, { ...first, epoch: held[1].epoch, path: '/tmp/delegation/seat-first/nested', branch: 'graphyard/seat-second' }, id()), /reserved or overlaps/);
+  held[1] = await engine.execute(workerA, 'workspace', held[1].id, { epoch: held[1].epoch, host: 'ownership-host', path: '/tmp/delegation/seat-second', branch: 'graphyard/seat-second' }, id());
+  for (const work of held) {
+    assert.equal(work.workspaces.length, 1);
+    assert.equal(work.workspaces[0].owner, workerA.id);
+    assert.equal(work.workspaces[0].epoch, work.epoch);
+  }
+  // Only the item's own assignment renews its lease: a peer worker, the wrong
+  // epoch, and the engineer's other item are all refused.
+  await assert.rejects(engine.execute(workerB, 'heartbeat', held[0].id, { epoch: held[0].epoch }, id()), /superseded/);
+  await assert.rejects(engine.execute(workerA, 'heartbeat', held[0].id, { epoch: held[1].epoch + 1 }, id()), /superseded/);
+  for (const work of held) await engine.execute(workerA, 'release', work.id, { epoch: work.epoch }, id());
+
+  // Watch supervision is what keeps an assignment alive: an assignment whose
+  // supervisor stops renewing loses ownership on the server's clock, the loss is
+  // recorded as an escalation no worker can clear, and the item is reassignable.
+  const brief = new Engine(store, [15368], 0); brief.roster = roster;
+  let unattended = await engine.execute(admin, 'create', null, input('ownership-unattended', 'infrastructure'), id());
+  unattended = await engine.execute(admin, 'ready', unattended.id, {}, id());
+  unattended = await brief.execute(workerA, 'claim', unattended.id, {}, id());
+  await assert.rejects(engine.execute(workerA, 'heartbeat', unattended.id, { epoch: unattended.epoch }, id()), /expired/);
+  await brief.reconcile();
+  unattended = await reload(unattended);
+  assert.equal(unattended.lease, null);
+  assert.deepEqual(standingEscalations(unattended).map(entry => entry.trigger), ['lease-loss']);
+  assert.deepEqual(unattended.lastAssignment && { owner: unattended.lastAssignment.owner, epoch: unattended.lastAssignment.epoch }, { owner: workerA.id, epoch: 1 });
+  await assert.rejects(engine.execute(workerA, 'resolve', unattended.id, { trigger: 'lease-loss', reason: 'I am back', expectedRevision: unattended.revision }, id()), /Operator permission required/);
+  unattended = await engine.execute(workerB, 'claim', unattended.id, {}, id());
+  assert.equal(unattended.lease!.owner, workerB.id);
+  assert.equal(unattended.epoch, 2);
+  assert.deepEqual(implementerIdentities(unattended), [workerA.id, workerB.id]);
+  await engine.execute(workerB, 'release', unattended.id, { epoch: unattended.epoch }, id());
 });
 
 test('integration:exact-candidate-validation — trusted evidence binds the exact candidate and an independent producer', async () => {
