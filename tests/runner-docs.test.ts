@@ -66,7 +66,11 @@ test('the documented setgid boundary is writable only by the container and reada
   // and collector read, and the runner has no access at all.
   const script = String.raw`set -eu
 root=$(mktemp -d)
-trap 'rm -rf "$root"' EXIT
+trap 'umount "$root" 2>/dev/null || true; rm -rf "$root"' EXIT
+# GitHub mounts /tmp from the host with ownership changes to subordinate IDs
+# disabled. Use a namespace-private tmpfs so these are real kernel permission
+# checks without depending on the hosted runner's backing filesystem policy.
+mount -t tmpfs -o mode=0755 graphyard-boundary-test "$root"
 attestor=10002
 container=10001
 collector=10003
@@ -102,6 +106,7 @@ fi`;
   };
   const [uids, gids] = await Promise.all([subordinate('/etc/subuid'), subordinate('/etc/subgid')]);
   await exec('unshare', [
+    '--mount',
     '--map-user=0', '--map-group=0',
     `--map-users=1:${uids}`, `--map-groups=1:${gids}`,
     '--', 'bash', '-c', script,
