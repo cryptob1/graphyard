@@ -110,17 +110,32 @@ test('an interrupted cursor entry is resolved against Graphyard, never repeated 
     const landed = work({ id: 'landed', key: 'GY-1', epoch: 1, lease: { owner: 'codex-principal', epoch: 1, expiresAt: iso(60_000) } });
     const lost = work({ id: 'lost', key: 'GY-2' });
     const merged = work({ id: 'merged', key: 'GY-3', stage: 'done', observation: { merged: true } as any });
-    state.actions[dispatchKey(work({ id: 'landed', epoch: 0 }))] = { kind: 'dispatch', work: 'GY-1', principal: 'codex-principal', state: 'started', detail: 'Dispatching', attempts: 1, cycle: 0, at: iso(0) };
-    state.actions[dispatchKey(work({ id: 'lost', epoch: 0 }))] = { kind: 'dispatch', work: 'GY-2', principal: 'codex-principal', state: 'started', detail: 'Dispatching', attempts: 1, cycle: 0, at: iso(0) };
-    state.actions['merge:merged'] = { kind: 'merge', work: 'GY-3', principal: null, state: 'started', detail: 'Merging', attempts: 1, cycle: 0, at: iso(0) };
-    state.actions['proof:x'] = { kind: 'proof', work: 'GY-2', principal: null, state: 'started', detail: 'Requesting', attempts: 1, cycle: 0, at: iso(0) };
-    const resumed = reconcilePendingActions(state, [landed, lost, merged], clock + 1000);
-    assert.equal(resumed.length, 4);
+    // Rework keeps the earlier attempt's submission while the item waits for a new claim, so only an
+    // advanced epoch shows the dispatch landed; the worker that finished released its lease instead.
+    const reworked = work({ id: 'reworked', key: 'GY-4', epoch: 2, submission: { epoch: 2, pr: 44 }, reworkRequested: true });
+    const released = work({ id: 'released', key: 'GY-5', epoch: 3, submission: { epoch: 3, pr: 45 } });
+    const dispatchAction = (key: string, epoch: number | null) => ({ kind: 'dispatch' as const, work: key, principal: 'codex-principal', epoch, state: 'started' as const, detail: 'Dispatching', attempts: 1, cycle: 0, at: iso(0) });
+    state.actions[dispatchKey(work({ id: 'landed', epoch: 0 }))] = dispatchAction('GY-1', 0);
+    state.actions[dispatchKey(work({ id: 'lost', epoch: 0 }))] = dispatchAction('GY-2', 0);
+    state.actions[dispatchKey(work({ id: 'reworked', epoch: 2 }))] = dispatchAction('GY-4', 2);
+    state.actions[dispatchKey(work({ id: 'released', epoch: 2 }))] = dispatchAction('GY-5', 2);
+    state.actions['merge:merged'] = { kind: 'merge', work: 'GY-3', principal: null, epoch: null, state: 'started', detail: 'Merging', attempts: 1, cycle: 0, at: iso(0) };
+    state.actions['proof:x'] = { kind: 'proof', work: 'GY-2', principal: null, epoch: null, state: 'started', detail: 'Requesting', attempts: 1, cycle: 0, at: iso(0) };
+    const resumed = reconcilePendingActions(state, [landed, lost, merged, reworked, released], clock + 1000);
+    assert.equal(resumed.length, 6);
     assert.equal(state.actions[dispatchKey(work({ id: 'landed', epoch: 0 }))].state, 'done');
     assert.match(state.actions[dispatchKey(work({ id: 'landed', epoch: 0 }))].detail, /assignment landed/);
     assert.equal(state.actions[dispatchKey(work({ id: 'lost', epoch: 0 }))].state, 'failed', 'an assignment that never landed must not be lost');
+    assert.equal(state.actions[dispatchKey(work({ id: 'reworked', epoch: 2 }))].state, 'failed', 'a submission kept across rework is not proof that this attempt landed');
+    assert.equal(state.actions[dispatchKey(work({ id: 'released', epoch: 2 }))].state, 'done', 'a landed dispatch stays done once the finished worker released its lease');
     assert.equal(state.actions['merge:merged'].state, 'done');
     assert.equal(state.actions['proof:x'].state, 'indeterminate');
+    // A cursor written before attempt epochs were recorded still resolves against the current attempt.
+    state.actions['dispatch:legacy'] = { ...dispatchAction('GY-5', null) };
+    state.actions['dispatch:legacy-rework'] = { ...dispatchAction('GY-4', null) };
+    reconcilePendingActions(state, [reworked, released], clock + 2000);
+    assert.equal(state.actions['dispatch:legacy'].state, 'done');
+    assert.equal(state.actions['dispatch:legacy-rework'].state, 'failed');
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
 
@@ -162,6 +177,42 @@ test('restarting the loop resumes the cursor without dispatching or requesting a
     assert.equal(state.cycle, 3);
     assert.equal(state.actions[dispatchKey(ready)].state, 'done');
   } finally { await rm(directory, { recursive: true, force: true }); await rm(root, { recursive: true, force: true }); }
+});
+
+test('a dispatch of operator-authorized rework interrupted by a kill is dispatched again on restart', async () => {
+  const { directory, token } = await privateDirectory();
+  const workerCredential = join(directory, 'worker.token');
+  await writeFile(workerCredential, workerToken, { mode: 0o600 });
+  try {
+    const master = config(token, { workers: [profile('codex', workerCredential)] });
+    // An operator requested rework: the lease is gone and the build gate is open again, but Graphyard
+    // keeps the earlier attempt's submission and PR so the new attempt reuses the same branch.
+    const rework = submitted({ stage: 'build', reworkRequested: true, lease: null,
+      gates: [{ name: 'build', passed: false, reasons: ['Worker has not submitted implementation for this attempt'] }] });
+    const calls: string[] = [];
+    let snapshotWork: Work[] = [rework];
+    const deps = effects({
+      snapshot: async () => ({ work: snapshotWork, now: iso(0) }),
+      dispatch: async item => {
+        calls.push(`dispatch:${item.key}`);
+        // The launcher claims for the worker, which is the only thing that advances the attempt.
+        snapshotWork = snapshotWork.map(entry => entry.id === item.id
+          ? { ...entry, epoch: entry.epoch + 1, lease: { owner: 'codex-principal', epoch: entry.epoch + 1, expiresAt: iso(120_000) } } as Work
+          : entry);
+      },
+    }, calls);
+    const state = emptyDaemonState(master);
+    // The kill landed between the two cursor writes, so the dispatch is still open against this attempt.
+    state.actions[dispatchKey(rework)] = { kind: 'dispatch', work: rework.key, principal: 'codex-principal', epoch: rework.epoch, state: 'started', detail: `Dispatching ${rework.key} to codex`, attempts: 1, cycle: 0, at: iso(0) };
+
+    await runCycle(master, state, deps, () => clock);
+    assert.deepEqual(calls.filter(call => call.startsWith('dispatch')), ['dispatch:GY-42'], 'rework whose dispatch never landed must be dispatched again');
+    assert.equal(state.actions[dispatchKey(rework)].state, 'done');
+
+    // The retry landed, so a second restart must not dispatch the same attempt twice.
+    await runCycle(master, state, deps, () => clock + 30_000);
+    assert.deepEqual(calls.filter(call => call.startsWith('dispatch')), ['dispatch:GY-42']);
+  } finally { await rm(directory, { recursive: true, force: true }); }
 });
 
 test('one cycle closes finished sessions, dispatches, requests proof, merges only through the guard, and measures', async () => {
@@ -354,8 +405,8 @@ test('stage percentiles and outstanding proofs are computed from the snapshot th
 test('the cursor stays bounded without discarding an unresolved action, and status reports the loop', () => {
   const { directory: _ } = { directory: '' };
   const state = emptyDaemonState(masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', credentialFile: '/outside/coordinator.token', cliPath: launcher, repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'machine-a', masterAgentName: 'graphyard-master-project' }));
-  for (let index = 0; index < retainedActions + 50; index++) state.actions[`done:${index}`] = { kind: 'review', work: `GY-${index}`, principal: null, state: 'done', detail: 'recorded', attempts: 1, cycle: index, at: iso(index) };
-  state.actions.stuck = { kind: 'proof', work: 'GY-9', principal: null, state: 'indeterminate', detail: 'interrupted', attempts: 1, cycle: 0, at: iso(-hour) };
+  for (let index = 0; index < retainedActions + 50; index++) state.actions[`done:${index}`] = { kind: 'review', work: `GY-${index}`, principal: null, epoch: null, state: 'done', detail: 'recorded', attempts: 1, cycle: index, at: iso(index) };
+  state.actions.stuck = { kind: 'proof', work: 'GY-9', principal: null, epoch: null, state: 'indeterminate', detail: 'interrupted', attempts: 1, cycle: 0, at: iso(-hour) };
   for (let index = 0; index < 150; index++) state.metrics.push({ cycle: index, at: iso(index), durationMs: 1, open: 1, actions: 0, stages: {}, lead: { count: 0, p50Ms: 0, p90Ms: 0 } });
   pruneDaemonState(state);
   assert.equal(Object.keys(state.actions).length, retainedActions + 1);

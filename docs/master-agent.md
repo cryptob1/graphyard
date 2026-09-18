@@ -93,6 +93,11 @@ closed, one that never landed is released for a fresh attempt, and a review requ
 that already has one is never sent twice. Restarting is therefore always safe, and the supervisor
 may restart it as often as it likes.
 
+Whether an assignment landed is read from the attempt epoch, which only a claim advances, and never
+from the presence of a submission: an item returned to the worker by `rework` keeps the previous
+attempt's submission until the new attempt resubmits, so treating that as success would leave the
+rework waiting for a dispatch that never comes.
+
 One loop owns a repository at a time. A second refuses while the first is alive; a lock left by a
 killed daemon on the same host is reclaimed as soon as that process is gone.
 

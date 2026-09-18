@@ -23,6 +23,9 @@ export const daemonActionSchema = z.object({
   state: z.enum(['started', 'done', 'failed', 'indeterminate']),
   detail: z.string().max(2000),
   attempts: z.number().int().min(0).max(1000).default(1),
+  // The item's attempt epoch when the action started. A dispatch that lands always advances it,
+  // which is what separates a landed assignment from a submission left over from an earlier one.
+  epoch: z.number().int().min(0).nullable().default(null),
   cycle: z.number().int().min(0),
   at: z.string(),
 }).strict();
@@ -120,6 +123,11 @@ export function acquireDaemonLock(state: DaemonState, identity: { pid: number; h
  * A daemon killed mid-action leaves a `started` cursor entry. Graphyard, not the cursor, decides
  * what actually happened: an assignment that landed is closed as done, one that did not is released
  * for a fresh attempt. Neither outcome repeats an action that already took effect.
+ *
+ * A dispatch lands only by the launcher claiming under the worker's own identity, and every claim
+ * advances the epoch, so the attempt epoch is the one honest witness. A submission is not: rework
+ * authorized by an operator keeps the previous attempt's submission while the item waits to be
+ * assigned again, and reading that as success would strand the rework at a key that never retries.
  */
 export function reconcilePendingActions(state: DaemonState, work: Work[], now: number) {
   const resumed: DaemonAction[] = [];
@@ -129,10 +137,14 @@ export function reconcilePendingActions(state: DaemonState, work: Work[], now: n
     const owned = !!item?.lease && item.lease.owner === action.principal && Date.parse(item.lease.expiresAt) > now;
     const next: DaemonAction = { ...action, at: new Date(now).toISOString() };
     if (action.kind === 'dispatch') {
-      next.state = owned || !!item?.submission ? 'done' : 'failed';
-      next.detail = owned ? 'Resumed: Graphyard shows the assignment landed before the restart'
-        : item?.submission ? 'Resumed: the assignment produced a submission before the restart'
-          : 'Resumed: no assignment landed, so the item stays eligible for a fresh dispatch';
+      // A cursor written before attempt epochs were recorded can fall back only to a submission the
+      // current attempt owns; one kept across rework says nothing about the attempt just dispatched.
+      const landed = owned ? 'Graphyard shows the assignment landed before the restart'
+        : action.epoch !== null && item && item.epoch > action.epoch ? `Graphyard advanced the attempt past epoch ${action.epoch}, so the assignment landed before the restart`
+          : action.epoch === null && item?.submission && !item.reworkRequested ? 'the current attempt is already submitted, so the assignment landed before the restart'
+            : null;
+      next.state = landed ? 'done' : 'failed';
+      next.detail = landed ? `Resumed: ${landed}` : 'Resumed: no assignment landed, so the item stays eligible for a fresh dispatch';
     } else if (action.kind === 'merge') {
       next.state = item?.observation?.merged || item?.stage === 'done' ? 'done' : 'failed';
       next.detail = next.state === 'done' ? 'Resumed: Graphyard observed the merge' : 'Resumed: no merge was observed; the guarded merge may be attempted again';
@@ -224,7 +236,7 @@ export interface DaemonEffects {
   persist: (state: DaemonState) => Promise<void>;
 }
 
-async function record(state: DaemonState, key: string, action: Omit<DaemonAction, 'at'> & { at?: string }, now: number, persist: DaemonEffects['persist']) {
+async function record(state: DaemonState, key: string, action: Omit<DaemonAction, 'at' | 'epoch'> & { at?: string; epoch?: number | null }, now: number, persist: DaemonEffects['persist']) {
   const entry = daemonActionSchema.parse({ ...action, at: action.at ?? new Date(now).toISOString() });
   state.actions[key] = entry; await persist(state);
   return entry;
@@ -292,14 +304,14 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
       break;
     }
     taken.add(choice.profile.name);
-    await record(state, key, { kind: 'dispatch', work: item.key, principal: choice.profile.principal, state: 'started', detail: `Dispatching ${item.key} to ${choice.profile.name}`, attempts: (state.actions[key]?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist);
+    await record(state, key, { kind: 'dispatch', work: item.key, principal: choice.profile.principal, epoch: item.epoch, state: 'started', detail: `Dispatching ${item.key} to ${choice.profile.name}`, attempts: (state.actions[key]?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist);
     try {
       await effects.dispatch(item, choice.profile, free, snapshot);
       clearProfileFailure(state, choice.profile);
-      performed.push(await record(state, key, { kind: 'dispatch', work: item.key, principal: choice.profile.principal, state: 'done', detail: `Dispatched ${item.key} to ${choice.profile.name}; the worker launcher claimed under ${choice.profile.principal}`, attempts: state.actions[key].attempts, cycle: state.cycle }, now(), effects.persist));
+      performed.push(await record(state, key, { kind: 'dispatch', work: item.key, principal: choice.profile.principal, epoch: item.epoch, state: 'done', detail: `Dispatched ${item.key} to ${choice.profile.name}; the worker launcher claimed under ${choice.profile.principal}`, attempts: state.actions[key].attempts, cycle: state.cycle }, now(), effects.persist));
     } catch (error) {
       recordProfileFailure(state, choice.profile, message(error), now());
-      performed.push(await record(state, key, { kind: 'dispatch', work: item.key, principal: choice.profile.principal, state: 'failed', detail: `Dispatch of ${item.key} to ${choice.profile.name} failed: ${message(error)}`, attempts: state.actions[key].attempts, cycle: state.cycle }, now(), effects.persist));
+      performed.push(await record(state, key, { kind: 'dispatch', work: item.key, principal: choice.profile.principal, epoch: item.epoch, state: 'failed', detail: `Dispatch of ${item.key} to ${choice.profile.name} failed: ${message(error)}`, attempts: state.actions[key].attempts, cycle: state.cycle }, now(), effects.persist));
     }
   }
 
