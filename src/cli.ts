@@ -5,12 +5,12 @@ import { resolve } from 'node:path';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { supervise } from './supervisor.js';
 import { inspectRunnerRepository, snapshotRunnerSources } from './runner-setup.js';
-import { assertRepository, discover } from './onboarding.js';
+import { assertRepository, availableRuntimes, discover } from './onboarding.js';
 import { startGithubSetup } from './github-setup.js';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 import { diagnose, fileConflicts, proofPreview, resourceConflicts } from './coordination.js';
-import { loadConnection, setupRepository, handoff, hostIdSchema } from './repository-setup.js';
+import { applyProposal, loadAppliedSetup, loadProposal, loadConnection, readSetupStatus, repositoryScanDifference, saveProposal, scanProposal, setupDrift, setupRepository, handoff, hostIdSchema } from './repository-setup.js';
 import { assertMasterBinding, buildMasterStatus, continueMergeBatch, currentMergeCandidates, dispatchWork, inspectWorkerCredentials, listHerdrAgents, loadMasterConfig, mergeWork, observeHerdrAgents, readCredentialFile, readWorkerCredential, saveWorkerProfile, setupMaster, startMaster, workerProfileSchema } from './master.js';
 import { acknowledgeContainment, containmentCredentials, establishContainment, isConfirmedCoordinationRefusal, revalidateContainment, settleContainment } from './quarantine.js';
 
@@ -50,12 +50,27 @@ async function api(path: string, data?: unknown, requestId = process.env.GRAPHYA
   return body;
 }
 const print = (value: unknown) => console.log(JSON.stringify(value, null, 2));
+const interactiveGithubSetup = (root: string) => async (repository: string, deployment: string) => {
+  const setup = await startGithubSetup(root, repository, deployment);
+  console.log(`Open ${setup.url} in your browser. On SSH, forward port 4311 to this machine first. Credentials stay in .graphyard/github-app.json; do not share that file. Setup finishes automatically once the App is installed; press Ctrl+C to finish later and rerun init --scan --apply.`);
+  for (;;) {
+    await new Promise(accept => setTimeout(accept, 1000));
+    try {
+      const app = JSON.parse(await readFile(resolve(root, '.graphyard/github-app.json'), 'utf8'));
+      if (Number.isSafeInteger(app.appId) && app.appId > 0 && typeof app.slug === 'string' && app.slug && Number.isSafeInteger(app.installationId) && app.installationId > 0) {
+        await new Promise<void>(accept => setup.http.close(() => accept()));
+        return { appId: app.appId, slug: app.slug };
+      }
+    } catch (error: any) { if (error.code !== 'ENOENT') throw error; }
+  }
+};
 async function main() {
   if (!command || command === 'help' || command === '--help') {
     console.log(`Graphyard 0.1 — distributed work, explicit proof
 
 Environment: GRAPHYARD_URL, GRAPHYARD_TOKEN (individual role-scoped credential)
-  init [--url URL] [--herdr] [--token-stdin]  Configure repository instructions and Herdr
+  init [--scan] [--apply] [--url URL] [--herdr] [--token-stdin]
+                                Scan and propose the delivery workflow (--scan), or apply the reviewed proposal (--apply)
   master init --token-stdin [--herdr-workspace ID]
                                 Install the recommended master-agent operating mode
   master start AGENT_KIND       Launch the dedicated visible Herdr master session
@@ -214,7 +229,28 @@ Never share an operator or producer credential with an implementation agent.`); 
   }
   if (command === 'init') {
     const root = execFileSync('git', ['rev-parse', '--show-toplevel'], { encoding: 'utf8' }).trim();
-    const { values } = parseArgs({ args: process.argv.slice(3), options: { url: { type: 'string' }, herdr: { type: 'boolean' }, 'token-stdin': { type: 'boolean' }, 'host-id': { type: 'string' }, 'cli-path': { type: 'string' } }, allowPositionals: false });
+    const { values } = parseArgs({ args: process.argv.slice(3), options: { url: { type: 'string' }, herdr: { type: 'boolean' }, 'token-stdin': { type: 'boolean' }, 'host-id': { type: 'string' }, 'cli-path': { type: 'string' }, scan: { type: 'boolean' }, apply: { type: 'boolean' } }, allowPositionals: false });
+    if (values.scan || values.apply) {
+      if (values.herdr || values['token-stdin']) throw new Error('--scan/--apply propose and apply the delivery workflow; run them as the operator before any worker credential setup');
+      const fresh = await scanProposal(root, { url: values.url ?? null, runtimes: availableRuntimes() });
+      if (values.apply) {
+        const stored = await loadProposal(root);
+        if (!stored) throw new Error('No stored setup proposal to apply. Run init --scan, review .graphyard/setup-proposal.json, then rerun with --apply');
+        const differences = repositoryScanDifference(fresh, stored.proposal);
+        if (differences.length) throw new Error(`${differences.join('; ')}. Rerun init --scan, review the refreshed proposal, then apply it again. The stored proposal was left unchanged.`);
+        const url = values.url ?? stored.proposal.server;
+        if (!url) throw new Error('Applying requires the Graphyard server URL; pass --url');
+        const result = await applyProposal(root, stored.proposal, { url, githubSetup: interactiveGithubSetup(root) });
+        return print({ proposal: stored.file, ...result });
+      }
+      await saveProposal(root, fresh);
+      const applied = await loadAppliedSetup(root);
+      return print({ proposalFile: '.graphyard/setup-proposal.json', proposal: fresh,
+        applied: applied ? { at: applied.appliedAt, githubApp: applied.artifacts.githubApp } : null,
+        drift: setupDrift(applied, fresh),
+        appliedNothingElse: true,
+        next: 'Review .graphyard/setup-proposal.json, then rerun init --scan --apply --url SERVER_URL to apply the reviewed proposal' });
+    }
     let workerToken = await individualToken();
     if (values['token-stdin']) {
       let input = ''; for await (const chunk of process.stdin) { input += chunk; if (input.length > 10000) throw new Error('Token input is too large'); }
@@ -239,6 +275,7 @@ Never share an operator or producer credential with an implementation agent.`); 
     let live: any = null, failure: string | undefined;
     try { live = await api('status'); } catch (error: any) { failure = error.message; }
     return print({ discovered, server: base, cliPath: await activeCliPath(), hostId: individualHostId(), connected: !!live, githubConfigured: !!live?.github, role: live?.actor?.role, failure,
+      setup: await readSetupStatus(root).catch((error: any) => ({ error: error.message })),
       next: !live ? 'Configure GRAPHYARD_URL and an individual token' : !live.github ? 'Complete github-setup and configure the server App credentials' : 'Submit a real PR and inspect every gate; configured is not proof of enforcement',
       limits: ['CI discovery is a proposal, not executed-test inventory', 'Herdr two-host recovery and GitHub refusal-to-acceptance must be demonstrated'] });
   }
