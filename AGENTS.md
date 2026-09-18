@@ -8,7 +8,7 @@ Domain mutations must be transactional, append history, and enforce principal id
 
 Run `npm run build` and `npm test` for domain/API changes. Tests run a temporary real Postgres database; do not substitute production data. Update the relevant guide under `docs/` when behavior changes. Keep external I/O outside coordination transactions.
 
-No secrets belong in Git. `.graphyard/credentials.json` and `.env` are local-only. Deployment changes use the Dockerfile and `.railway/railway.ts`; preview infrastructure changes before applying.
+No secrets belong in Git. `.graphyard/credentials.json` and `.env` are local-only. Deployment changes use the Dockerfile, `compose.yaml`, `deploy/helm/graphyard` and `.railway/railway.ts`; preview infrastructure changes before applying, and keep the release contract (`scripts/verify-image-release.mjs`) and the chart exercise passing.
 
 <!-- graphyard -->
 ## Graphyard coordination

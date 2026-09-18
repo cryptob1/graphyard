@@ -125,6 +125,14 @@ For the recommended separated setup, workers run on other machines with GitHub i
 
 ## 6. Prove the first PR
 
+Before the first PR, read the readiness checklist for the completion profile you intend to enforce:
+
+```sh
+node "$GRAPHYARD_CLI" doctor --profile through-merge
+```
+
+Every `missing` item names the command or setting that resolves it — a missing credential, an App permission, an unapplied proposal, an unsupported test format. A ready checklist is configuration, not proof; the PR below is what demonstrates enforcement.
+
 Create a small real work item in the UI. Use the repository's exact CI check names and acceptance proofs.
 
 A trusted local profile can be dispatched with:
@@ -159,6 +167,6 @@ Before adding more workers, stop one worker, let its lease expire, reclaim with 
 
 ## Current manual steps
 
-Version 0.1 still requires an operator to deploy the server, provision identities, configure GitHub protection, authenticate agent providers, and connect project-specific trusted evidence. A hosted signup flow and general turnkey E2E execution are not shipped.
+Version 0.1 still requires an operator to deploy the server, provision identities, configure GitHub protection, authenticate agent providers, and connect project-specific trusted evidence. Self-hosting is the complete product: versioned images, Compose, the Helm chart, backups and restores need no hosted account. A hosted signup flow is not shipped, and turnkey E2E execution covers the [packaged Playwright runner](runner-setup.md) and the [report adapters](report-adapters.md) it accepts.
 
 Use the [documentation index](README.md) for deeper setup, operations, and protocol details.

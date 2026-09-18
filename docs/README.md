@@ -10,7 +10,7 @@ Choose one path. The reference guides are there when a gate or integration needs
 
 ## Operate Graphyard
 
-- [Deployment](deployment.md) — Railway, Docker Compose, backups, and upgrades.
+- [Deployment](deployment.md) — versioned images, Railway, Docker Compose, the Helm chart, backups, upgrades, and restores.
 - [GitHub enforcement](github.md) — App permissions, branch protection, CI producers, and Codex review.
 - [Herdr integration](herdr.md) — worker installation and multi-machine use.
 - [Master-agent mode](master-agent.md) — routing, recovery, and guarded merges.
@@ -23,6 +23,7 @@ Choose one path. The reference guides are there when a gate or integration needs
 - [E2E test-case registry](test-cases.md)
 - [Validation runner protocol](validation.md)
 - [Packaged Playwright runner](runner-setup.md)
+- [Report adapters](report-adapters.md) — what each supported report format proves, observes and refuses
 
 ## Understand or contribute
 

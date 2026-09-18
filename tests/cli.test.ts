@@ -686,7 +686,7 @@ test('the packaged runner path is usable from the CLI and refuses evidence-produ
     const grant = { requestId: randomUUID(), attemptId: randomUUID(), epoch: 1, runner: { id: 'preview-runner', revision: 1 },
       executionHost: 'unix:///var/run/docker.sock', attestationPublicKey: 'test-public-key-material-at-least-32-bytes', executionNetwork: 'gy-test',
       bundleDigest: bundle.digest, runnerImageDigest: `sha256:${'b'.repeat(64)}`, targetUrl: 'https://preview.example.test/', deadline: '2026-09-16T01:00:00.000Z',
-      testAccountDigest: null };
+      reportFormat: 'graphyard-playwright-v1' as const, testAccountDigest: null };
     collectionAuthority = grant;
     const record = { grant, startedAt: '2026-09-16T00:00:00.000Z', finishedAt: '2026-09-16T00:01:00.000Z',
       phases: [{ phase: 'enumerate', exitCode: 0, timedOut: false, durationMs: 1 }, { phase: 'execute', exitCode: 0, timedOut: false, durationMs: 2 }],

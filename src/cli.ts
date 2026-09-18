@@ -8,6 +8,8 @@ import { inspectRunnerRepository, oracleBundleDigest, snapshotRunnerSources } fr
 import { accountFileDigest, assertRunnerCredentialScope, attemptGrantSchema, authorityWatch, containerNames, executionRecordSchema, observeContainers, runnerPlanSchema } from './runner-executor.js';
 import { assembleResult, collectArtifacts, collectionBinding, collectionInputs, collectorInputSchema, verifyExecutionAttestation } from './runner-collector.js';
 import { superviseAttempt, supervisionRequestSchema } from './runner-attestor.js';
+import { adapterContracts, reportAdapter } from './report-adapters.js';
+import { completionProfiles, readinessChecklist, summarizeDefinitions, type CompletionProfile } from './readiness.js';
 import { inheritedObligations } from './model.js';
 import { assertRepository, availableRuntimes, discover } from './onboarding.js';
 import { startGithubSetup } from './github-setup.js';
@@ -19,6 +21,9 @@ import { diagnose, fileConflicts, obligationLedger, proofPreview, resourceConfli
 import { applyProposal, loadAppliedSetup, loadProposal, loadConnection, readSetupStatus, repositoryScanDifference, saveProposal, scanProposal, setupDrift, setupRepository, handoff, hostIdSchema } from './repository-setup.js';
 import { assertMasterBinding, buildMasterStatus, continueMergeBatch, currentMergeCandidates, dispatchWork, inspectWorkerCredentials, listHerdrAgents, loadMasterConfig, mergeExecutor, observeHerdrAgents, readCredentialFile, readWorkerCredential, saveWorkerProfile, setupMaster, startMaster, workerProfileSchema } from './master.js';
 import { daemonEffects, daemonSummary, readDaemonState, runDaemon } from './master-daemon.js';
+import { createBackup, ledgerCounts, restoreBackup, verifyBackup } from './backup.js';
+import { Store } from './store.js';
+import { releaseInfo, schemaVersion } from './release.js';
 import { acknowledgeContainment, containmentCredentials, establishContainment, isConfirmedCoordinationRefusal, revalidateContainment, settleContainment } from './quarantine.js';
 
 try { process.loadEnvFile(); } catch (error: any) { if (error.code !== 'ENOENT') throw error; }
@@ -28,7 +33,7 @@ let connection: Awaited<ReturnType<typeof loadConnection>>;
 // credential of its own — read-only, and named by an environment variable its own sudo
 // rule sets — precisely so the identity that invokes it cannot choose which credential,
 // or which server, it verifies attempt authority against.
-if (command === 'master' || (command === 'runner' && id === 'supervise')) connection = null;
+if (command === 'master' || command === 'db' || (command === 'runner' && id === 'supervise')) connection = null;
 else try { connection = await loadConnection(process.cwd()); } catch { console.error('Invalid or insecure Graphyard connection file. Inspect local configuration; credential values are omitted.'); process.exit(1); }
 const base = process.env.GRAPHYARD_URL ?? connection?.url ?? 'http://127.0.0.1:4310';
 let savedToken: string | undefined;
@@ -137,7 +142,12 @@ Environment: GRAPHYARD_URL, GRAPHYARD_TOKEN (individual role-scoped credential)
   master run [--once] [--interval SECONDS]
                                 Run the durable coordination loop as a supervised process
   master guide                  Print the complete master-agent operating guide
-  doctor                       Inspect local discovery and live integration readiness
+  doctor [--profile PROFILE]   Inspect local discovery, live integration readiness and the
+                                readiness checklist for a completion profile
+  db migrate|status            Migrate or inspect the database named by DATABASE_URL (server host)
+  db backup FILE               Write a verified logical backup of the whole ledger (server host)
+  db verify FILE               Check a backup's digest and schema generation without restoring
+  db restore FILE              Restore a backup into an empty, migrated database (server host)
   github-setup HTTPS_URL [--reviewer NAME]
                                 Register the control-plane or a reviewer GitHub App
                                 through the local App-manifest browser flow
@@ -155,6 +165,9 @@ Environment: GRAPHYARD_URL, GRAPHYARD_TOKEN (individual role-scoped credential)
   runner snapshot file.json    Snapshot an explicit source-file list for review (not approval)
   runner bundle-digest DIR      Content identity of an executable oracle bundle for approval
   runner account-digest FILE    Measure an approved test-account env file for registration
+  runner adapters               Print each supported report adapter's declared contract
+  runner verify-report FORMAT INVENTORY REPORT
+                                Preview an adapter's verdict over two local files (not evidence)
   runner attempt file.json      Hold one dispatched attempt while the host attestor runs it
   runner supervise              Host attestor: run one attempt and attest what it observed
   runner collect file.json      Verify one attempt and publish a trusted result (collector)
@@ -188,6 +201,31 @@ Environment: GRAPHYARD_URL, GRAPHYARD_TOKEN (individual role-scoped credential)
 
 Use GRAPHYARD_REQUEST_ID to safely retry an identical command after a network timeout.
 Never share an operator or producer credential with an implementation agent.`); return;
+  }
+  if (command === 'db') {
+    // Server-side maintenance over DATABASE_URL, never over the HTTP API: these commands
+    // run where the database is reachable (the control-plane container or its host) and
+    // need no Graphyard credential. A backup is as sensitive as the database itself.
+    const url = process.env.DATABASE_URL;
+    if (!url) throw new Error('Set DATABASE_URL to the Graphyard database; db commands run on the control-plane host, not through the API');
+    const store = new Store(url);
+    try {
+      if (id === 'migrate') { await store.init(); return print({ migrated: true, schema: await store.schema(), release: releaseInfo() }); }
+      if (id === 'status') return print({ schema: await store.schema(), expectedSchema: schemaVersion, release: releaseInfo(), counts: await ledgerCounts(store.pool) });
+      if (id === 'backup' && args.length === 1) {
+        const backup = await createBackup(store.pool);
+        await writeFile(resolve(args[0]), JSON.stringify(backup), { flag: 'wx', mode: 0o600 });
+        return print({ file: args[0], takenAt: backup.takenAt, schema: backup.schemaVersion, digest: backup.digest, rows: Object.fromEntries(backup.tables.map(t => [t.name, t.rows.length])), note: 'Treat the file like the database: it holds private artifacts, evidence and credential hashes' });
+      }
+      if (id === 'verify' && args.length === 1) { const backup = verifyBackup(JSON.parse(await readFile(resolve(args[0]), 'utf8'))); return print({ file: args[0], valid: true, takenAt: backup.takenAt, graphyardVersion: backup.graphyardVersion, schema: backup.schemaVersion, rows: Object.fromEntries(backup.tables.map(t => [t.name, t.rows.length])) }); }
+      if (id === 'restore' && args.length === 1) {
+        const backup = verifyBackup(JSON.parse(await readFile(resolve(args[0]), 'utf8')));
+        await store.init();
+        const result = await restoreBackup(store.pool, backup);
+        return print({ ...result, counts: await ledgerCounts(store.pool) });
+      }
+      throw new Error('Use db migrate | db status | db backup FILE | db verify FILE | db restore FILE');
+    } finally { await store.close(); }
   }
   if (command === 'master') {
     const root = execFileSync('git', ['rev-parse', '--show-toplevel'], { encoding: 'utf8' }).trim();
@@ -272,6 +310,15 @@ Never share an operator or producer credential with an implementation agent.`); 
     // read here only to be measured: the entries never leave this process, and approving
     // them is a separate operator action against Graphyard.
     if (id === 'account-digest' && args.length === 1) return print({ testAccountDigest: await accountFileDigest(resolve(args[0])) });
+    if (id === 'adapters' && !args.length) return print({ adapters: adapterContracts(), note: 'A format is pinned in the operator-approved bundle definition; the collector verifies only the pinned format and refuses every other structure.' });
+    if (id === 'verify-report' && args.length === 3) {
+      // A local preview of the pinned adapter's verdict over two files. It reads no attempt
+      // authority and publishes nothing: evidence comes only from the collector, over bytes
+      // the host attestor measured.
+      const adapter = reportAdapter(args[0]);
+      const inventory = adapter.parse('inventory', await readFile(resolve(args[1]))), report = adapter.parse('report', await readFile(resolve(args[2])));
+      return print({ format: adapter.format, verification: adapter.verify(inventory.document, report.document), publishedReport: JSON.parse(report.published.bytes.toString('utf8')), evidence: false });
+    }
     if (id === 'attempt' && args.length === 1) {
       // Runner path. This credential is a worker registration: it can acknowledge and
       // hold attempt authority, but it neither executes nor authors any execution fact.
@@ -280,7 +327,7 @@ Never share an operator or producer credential with an implementation agent.`); 
       const dispatched = await api('validation/dispatch', { registration });
       if (!dispatched.request) return print({ dispatched: false, reason: dispatched.reason });
       const grant = attemptGrantSchema.parse({ requestId: dispatched.request.id, attemptId: dispatched.attempt.id, epoch: dispatched.attempt.epoch,
-        runner: registration, bundleDigest: dispatched.bundle.digest, runnerImageDigest: dispatched.bundle.runnerImageDigest,
+        runner: registration, bundleDigest: dispatched.bundle.digest, runnerImageDigest: dispatched.bundle.runnerImageDigest, reportFormat: dispatched.bundle.reportFormat,
         executionHost: dispatched.executionAuthority.host, attestationPublicKey: dispatched.executionAuthority.attestationPublicKey,
         executionNetwork: dispatched.executionAuthority.network,
         // Never the runner's own configuration: which approved account material this
@@ -416,7 +463,7 @@ Never share an operator or producer credential with an implementation agent.`); 
       // behaviour cannot be verified from the execution report alone, and a kind left
       // unread would look like output the approved reporter never wrote. Only the upload
       // below is narrowed to the configured subset.
-      const collected = await collectArtifacts(collectedFrom, collectionInputs(input.requiredArtifacts));
+      const collected = await collectArtifacts(collectedFrom, collectionInputs(input.requiredArtifacts), grant.reportFormat);
       // Verify the host attestation, and the digests of the bytes just read, *before* the
       // first upload. An artifact name is published once per attempt and cannot be taken
       // back: a live grant plus schema-valid forged boundary files would otherwise consume
@@ -432,7 +479,7 @@ Never share an operator or producer credential with an implementation agent.`); 
         if (collectionAuthority.lost) throw new Error('Collection authority could not be renewed; no artifact or result was published');
         try {
           const body = { requestId: grant.requestId, attemptId: grant.attemptId, epoch: grant.epoch,
-            name: artifact.name, mediaType: artifact.mediaType, bytes: artifact.bytes.toString('base64'), capturePolicy: 'approved-test-data-only' };
+            name: artifact.name, mediaType: artifact.published.mediaType, bytes: artifact.published.bytes.toString('base64'), capturePolicy: 'approved-test-data-only' };
           let stored: any, error: unknown;
           for (let retry = 0; retry < 3 && !stored; retry++) try { stored = await api('validation/artifacts', body, `${grant.attemptId}-artifact-${artifact.name}`); } catch (caught) { error = caught; }
           if (!stored) throw error;
@@ -447,7 +494,7 @@ Never share an operator or producer credential with an implementation agent.`); 
       return print({ refusals: assembled.refusals, report: assembled.report, result: await api('validation/result', assembled.report, `${grant.attemptId}-result`) });
       } finally { if (renewCollection) clearInterval(renewCollection); }
     }
-    throw new Error('Use runner inspect|snapshot|bundle-digest|attempt|supervise|collect');
+    throw new Error('Use runner inspect|snapshot|bundle-digest|account-digest|adapters|verify-report|attempt|supervise|collect');
   }
   if (command === 'validation') {
     if (!id || id === 'requests') return print(await api('validation' + (args[0] ? `?cursor=${encodeURIComponent(args[0])}` : '')));
@@ -536,12 +583,29 @@ Never share an operator or producer credential with an implementation agent.`); 
       console.log(`Open ${setup.url} in your browser. On SSH, forward port 4311 to this machine first. Credentials stay in ${setup.file}; do not share that file. Press Ctrl+C when finished.`);
       const stop = () => setup.http.close(); process.once('SIGINT', stop); process.once('SIGTERM', stop); return;
     }
+    const { values } = parseArgs({ args: process.argv.slice(3), options: { profile: { type: 'string' } }, allowPositionals: false });
+    const profile = (values.profile ?? 'through-merge') as CompletionProfile;
+    if (!completionProfiles.includes(profile)) throw new Error(`Unknown completion profile ${values.profile}; choose one of ${completionProfiles.join(', ')}`);
     let live: any = null, failure: string | undefined;
     try { live = await api('status'); } catch (error: any) { failure = error.message; }
-    return print({ discovered, server: base, cliPath: await activeCliPath(), hostId: individualHostId(), connected: !!live, githubConfigured: !!live?.github, role: live?.actor?.role, failure,
-      setup: await readSetupStatus(root).catch((error: any) => ({ error: error.message })),
-      next: !live ? 'Configure GRAPHYARD_URL and an individual token' : !live.github ? 'Complete github-setup and configure the server App credentials' : 'Submit a real PR and inspect every gate; configured is not proof of enforcement',
-      limits: ['CI discovery is a proposal, not executed-test inventory', 'Herdr two-host recovery and GitHub refusal-to-acceptance must be demonstrated'] });
+    const setup = await readSetupStatus(root).catch((error: any) => ({ error: error.message }));
+    const stored = await loadProposal(root).catch(() => null);
+    // Validation definitions are readable by operators and readers; every other credential
+    // leaves the runner-path items `unknown` with the command that reads them.
+    let definitions: { kind: string; id: string; revision: number; role?: string; enabled?: boolean }[] | null = null;
+    if (live && ['admin', 'reader'].includes(live.actor?.role)) { try { definitions = (await api('validation/definitions')).definitions; } catch { definitions = null; } }
+    const readiness = readinessChecklist(profile, {
+      repository: discovered.repository ?? null,
+      server: { url: base, reachable: !!live, role: live?.actor?.role, github: !!live?.github, githubPermissions: live?.githubPermissions ?? {}, failure },
+      setup: 'error' in setup ? { proposal: null, appliedAt: null, githubApp: null, drift: [], unreadable: [String(setup.error)] } : { ...setup, unreadable: setup.unreadable.filter((entry): entry is string => typeof entry === 'string') },
+      proposal: stored?.proposal ?? null,
+      validation: definitions ? summarizeDefinitions(definitions) : null,
+    });
+    return print({ discovered, server: base, cliPath: await activeCliPath(), hostId: individualHostId(), connected: !!live, githubConfigured: !!live?.github, role: live?.actor?.role, release: live?.release ?? null, failure,
+      setup,
+      readiness,
+      next: readiness.next,
+      limits: ['CI discovery is a proposal, not executed-test inventory', 'Herdr two-host recovery and GitHub refusal-to-acceptance must be demonstrated', 'A ready checklist is configuration, never evidence: the first real PR must visibly pass every gate'] });
   }
   if (command === 'status' && !id) return print(await api('status'));
   if (command === 'obligations') return print(obligationLedger((await api('work-snapshot')).work));

@@ -14,13 +14,17 @@ jobs:
         with: { persist-credentials: false }
       - uses: actions/setup-node@v4
         with: { node-version: '24' }
-      - name: Build candidate image
-        run: docker build --tag graphyard-ci .
+      - name: Build candidate image as the release process would
+        run: |
+          version="$(node -p "require('./package.json').version")"
+          docker build --build-arg "GRAPHYARD_VERSION=$version" --build-arg "GRAPHYARD_BUILD_REVISION=$GITHUB_SHA" --tag graphyard-ci .
       - name: Exercise container over HTTP with an isolated database
         # Validation only: this PR-controlled job has no evidence-producer credential.
         run: |
           echo '{}' > "$RUNNER_TEMP/candidate.json"
           node scripts/run-acceptance.mjs "$RUNNER_TEMP/candidate.json" graphyard-ci "$RUNNER_TEMP/acceptance.json"
+      - name: Verify the release contract, backup and restore with the shipped image
+        run: node scripts/verify-image-release.mjs graphyard-ci "$(node -p "require('./package.json').version")" "$GITHUB_SHA"
   secrets:
     runs-on: ubuntu-latest
     steps:

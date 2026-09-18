@@ -2,6 +2,7 @@ import pg from 'pg';
 import { randomUUID } from 'node:crypto';
 import type { Work } from './model.js';
 import type { IntegrationJob } from './coordination.js';
+import { releaseInfo, schemaVersion } from './release.js';
 
 export const migration = `
 CREATE TABLE IF NOT EXISTS work_items (
@@ -64,12 +65,31 @@ CREATE TABLE IF NOT EXISTS validation_resources (resource text PRIMARY KEY, requ
 CREATE TABLE IF NOT EXISTS scenarios (id text NOT NULL, revision int NOT NULL, document jsonb NOT NULL, PRIMARY KEY(id,revision));
 DROP TRIGGER IF EXISTS immutable_scenarios ON scenarios;
 CREATE TRIGGER immutable_scenarios BEFORE UPDATE OR DELETE ON scenarios FOR EACH ROW EXECUTE FUNCTION graphyard_immutable();
+CREATE TABLE IF NOT EXISTS graphyard_schema (
+  version int PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT clock_timestamp(), graphyard_version text NOT NULL
+);
 `;
+/** Every table a logical backup carries, in an order a restore can insert without violating references. */
+export const ledgerTables = ['work_items', 'events', 'receipts', 'operator_agents', 'operator_credentials', 'jobs', 'webhook_receipts',
+  'validation_definitions', 'validation_builds', 'validation_candidates', 'validation_requests', 'validation_artifacts', 'validation_resources', 'scenarios', 'graphyard_schema'] as const;
 
 export class Store {
   pool: pg.Pool;
   constructor(url: string) { this.pool = new pg.Pool({ connectionString: url, max: 12 }); }
-  async init() { await this.transaction(async db => { await db.query(migration); }); }
+  /**
+   * Apply the additive migration and record the schema generation it reached. Running
+   * against a database a newer release already migrated refuses: rolling the application
+   * back under a schema it does not know is how columns and rows go missing silently.
+   */
+  async init() {
+    await this.transaction(async db => {
+      await db.query(migration);
+      const current = Number((await db.query('SELECT COALESCE(MAX(version),0) AS version FROM graphyard_schema')).rows[0].version);
+      if (current > schemaVersion) throw new Error(`Database schema generation ${current} is newer than this release supports (${schemaVersion}); deploy the release that migrated it, or restore a backup taken at generation ${schemaVersion} or earlier`);
+      if (current < schemaVersion) await db.query('INSERT INTO graphyard_schema(version, graphyard_version) VALUES($1,$2)', [schemaVersion, releaseInfo().version]);
+    });
+  }
+  async schema() { return Number((await this.pool.query('SELECT COALESCE(MAX(version),0) AS version FROM graphyard_schema')).rows[0].version); }
   async close() { await this.pool.end(); }
   async transaction<T>(fn: (db: pg.PoolClient, now: Date) => Promise<T>): Promise<T> {
     const db = await this.pool.connect();

@@ -1,0 +1,12 @@
+apiVersion: v2
+name: graphyard
+description: Evidence-backed coordination for distributed software agents. One stateless control-plane image in front of a Postgres ledger.
+type: application
+# The chart version tracks the chart; appVersion is the Graphyard release the default image tag names.
+version: 0.1.0
+appVersion: "0.1.0"
+kubeVersion: ">=1.27.0-0"
+home: https://github.com/cryptob1/graphyard
+sources:
+  - https://github.com/cryptob1/graphyard
+keywords: [agents, coordination, delivery, evidence]

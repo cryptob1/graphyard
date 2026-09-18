@@ -6,6 +6,7 @@ import { admin, demand, proofSchema, type EvidenceArtifact, type Principal, type
 import { save, wakeJob } from './store.js';
 import { Engine } from './engine.js';
 import type { Scenario } from './scenarios.js';
+import { defaultReportFormat, reportFormats } from './report-adapters.js';
 
 const name = z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9._/-]*$/).max(150);
 const digest = z.string().regex(/^sha256:[a-f0-9]{64}$/);
@@ -20,7 +21,7 @@ const externalUrl = z.url().max(2000).refine(safeHttpUrl, 'Artifact URL must be 
 export const definitionSchema = z.discriminatedUnion('kind', [
   z.object({ ...base, kind: z.literal('environment'), repository: z.string().regex(/^[\w.-]+\/[\w.-]+$/), url: z.url().max(2000).refine(s => { const u = new URL(s); return u.protocol === 'https:' && !u.username && !u.password && !u.hash && !u.search; }, 'Use HTTPS without credentials, query or fragment'), instance: name, immutable: z.literal(true), services: resourceNames, resources: resourceNames }).strict(),
   z.object({ ...base, kind: z.literal('registration'), principalId: name, role: z.enum(['runner', 'collector', 'builder']), environment: ref, adapterVersion: name, proofs: z.array(proofSchema).max(50), enabled: z.boolean(), executionHost: z.string().min(1).max(500).optional(), attestationPublicKey: z.string().min(32).max(4096).optional(), executionNetwork: z.string().min(1).max(60).optional(), testAccountDigest: digest.optional() }).strict(),
-  z.object({ ...base, kind: z.literal('bundle'), scenario: name, scenarioRevision: revision, scenarioHash: z.string().regex(/^[a-f0-9]{64}$/), digest, runnerImageDigest: digest }).strict(),
+  z.object({ ...base, kind: z.literal('bundle'), scenario: name, scenarioRevision: revision, scenarioHash: z.string().regex(/^[a-f0-9]{64}$/), digest, runnerImageDigest: digest, reportFormat: z.enum(reportFormats).default(defaultReportFormat) }).strict(),
 ]);
 type DefinitionInput = z.infer<typeof definitionSchema>;
 export type Definition = DefinitionInput & { revision: number; createdAt: string; createdBy: string };
@@ -182,7 +183,7 @@ export class Validation {
         const s = (await db.query('SELECT document FROM scenarios WHERE id=$1 AND revision=$2', [data.scenario, data.scenarioRevision])).rows[0]?.document as Scenario | undefined;
         demand(s?.hash === data.scenarioHash, 'Bundle approval must pin an existing scenario revision and hash');
         const prior: Bundle[] = (await db.query("SELECT document FROM validation_definitions WHERE kind='bundle' AND document->>'scenario'=$1 AND (document->>'scenarioRevision')::int=$2", [data.scenario, data.scenarioRevision])).rows.map(r => r.document);
-        demand(prior.every(p => p.digest === data.digest && p.runnerImageDigest === data.runnerImageDigest), 'Changed executable bundles require a new scenario revision and work pinned to it');
+        demand(prior.every(p => p.digest === data.digest && p.runnerImageDigest === data.runnerImageDigest && (p.reportFormat ?? defaultReportFormat) === data.reportFormat), 'Changed executable bundles require a new scenario revision and work pinned to it');
       }
       const definition: Definition = { ...data, revision: latest + 1, createdAt: now.toISOString(), createdBy: actor.id };
       await db.query('INSERT INTO validation_definitions VALUES($1,$2,$3,$4)', [data.kind, data.id, definition.revision, JSON.stringify(definition)]);
@@ -263,7 +264,8 @@ export class Validation {
         w.validation![c.proof] = { candidateId: c.id, requestId: r.id, attemptId: attempt.id };
         await this.changed(db, w, actor.id, 'dispatched', now, { requestId: r.id, attempt, resources });
         const build = (await db.query('SELECT document FROM validation_builds WHERE id=$1', [c.buildAttestationId])).rows[0].document as BuildAttestation;
-        return { request: r, candidate: c, build, environment, bundle: await this.definition(db, 'bundle', c.bundle), attempt,
+        const bundle = await this.definition(db, 'bundle', c.bundle) as Bundle;
+        return { request: r, candidate: c, build, environment, bundle: { ...bundle, reportFormat: bundle.reportFormat ?? defaultReportFormat }, attempt,
           // Which approved test-account material the attempt may run with travels with the
           // rest of the execution authority. Left to the runner, the choice of account —
           // and of the privileges its evidence would cover — would be the runner's.
@@ -321,7 +323,7 @@ export class Validation {
       const bundle = await this.definition(db, 'bundle', c.bundle, false) as Bundle;
       return { requestId: r.id, attemptId: a.id, epoch: a.epoch, runner: r.runner,
         executionHost: runner.executionHost, attestationPublicKey: runner.attestationPublicKey, executionNetwork: runner.executionNetwork,
-        bundleDigest: bundle.digest, runnerImageDigest: bundle.runnerImageDigest, targetUrl: environment.url, deadline: r.deadline,
+        bundleDigest: bundle.digest, runnerImageDigest: bundle.runnerImageDigest, reportFormat: bundle.reportFormat ?? defaultReportFormat, targetUrl: environment.url, deadline: r.deadline,
         testAccountDigest: runner.testAccountDigest ?? null };
     });
   }
@@ -351,7 +353,7 @@ export class Validation {
       return {
         grant: { requestId: r.id, attemptId: a!.id, epoch: a!.epoch, runner: r.runner,
           executionHost: runner.executionHost, attestationPublicKey: runner.attestationPublicKey, executionNetwork: runner.executionNetwork,
-          bundleDigest: bundle.digest, runnerImageDigest: bundle.runnerImageDigest, targetUrl: environment.url, deadline: r.deadline,
+          bundleDigest: bundle.digest, runnerImageDigest: bundle.runnerImageDigest, reportFormat: bundle.reportFormat ?? defaultReportFormat, targetUrl: environment.url, deadline: r.deadline,
           testAccountDigest: runner.testAccountDigest ?? null },
         // `running` is the only state in which an attempt may still start a container:
         // `dispatched` has not been acknowledged, and `collecting` means the collector has
