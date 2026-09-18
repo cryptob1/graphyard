@@ -29,17 +29,30 @@ Graphyard helps a team move one well-defined piece of work from an idea to a ver
 
 Every box is a checkpoint. A blocked box explains what is missing; it is not an invitation to skip ahead.
 
-## Who does what
+## Two phases, one clear handoff
 
-| Role | Responsible for | Boundary |
-| --- | --- | --- |
-| **Operator** | Sets up the repository and identities; creates and revises work and requirements; resolves policy-level blockers. | Does not turn an implementation claim into approval, mint automated test results, or bypass a failed gate. |
-| **Master** | Watches Graphyard and runtime health; dispatches ready work; routes durable handoffs; requests routine merges when policy allows. | Does not implement work, hold worker leases, produce evidence, or override Graphyard. Dispatch is an invitation, not ownership. |
-| **Worker** | Claims under its own identity; uses the assigned worktree; builds, tests, opens the PR, and submits the candidate. | Must stop after lease loss. Cannot self-review, grant itself trusted proof credentials, or change requirements merely to pass. |
-| **Reviewer / proof producer** | Independently reviews the candidate or runs an approved proof and reports evidence for its allowlisted proof name. | Does not inherit trust from the worker. Evidence must match the exact candidate and requirements; it cannot authorize unrelated work. |
-| **Slice lead** (optional) | Coordinates one formal slice: approves or rejects plans, classifies failures, requests reruns, sends work back, and escalates, always citing a written rule ID and a reason. | Does not implement, hold a worker lease, submit evidence, bypass a gate, or merge. See [slice-lead delegation](delegation.md). |
+1. **Phase 1 · Bootstrap — Human operator → one implementation agent.** The MVP is unchanged: the human operator connects the managed (target) repository and activates its gates while directly supervising a single, worker-scoped implementation agent. The agent never receives the operator or GitHub credentials used for setup. No multi-agent operation yet.
+2. **Phase 2 · Automated operation — Human → goals, required decisions, oversight.** Only after the managed repository is connected, its gates are active, and GY-30 scoped operator automation is configured does the installation fan out to the four independent AI agent sessions below. The human supplies goals, required decisions, and oversight, and is not expected to perform the routine Operator, Master, Worker, or Reviewer/proof-producer duties. Scoped operator automation is shipped and available as an opt-in, least-privilege credential that a human administrator provisions; it is a configuration step, not future work. Until this installation provisions the scoped operator-agent principal, the unrestricted human administrator still makes requirements and policy changes. [Provision scoped operator automation](operator-automation.md).
 
-One person may operate more than one tool, but the credentials and duties stay separate. In particular, an implementation session never becomes a trusted evidence producer just because it ran a test.
+## Four AI agent sessions
+
+| Independent session | Duty |
+| --- | --- |
+| **Operator agent** | Executes human-approved bounded intent: it turns goals into scoped work and may add requirements but never remove or rewrite them. Exceptions and approval decisions stay with the human operator, and its automation is least-privilege, never unrestricted admin authority. The GY-30 credential behind this duty is shipped and opt-in: an administrator provisions it per installation, and until this installation provisions the scoped operator-agent principal the unrestricted human administrator holds this authority. |
+| **Master agent** | Watches readiness and runtime health, dispatches ready work, routes handoffs, and requests policy-allowed merges. It never implements or overrides Graphyard. |
+| **Worker agent** | Claims work, uses its assigned worktree, builds, tests, opens the PR, and submits the candidate. It stops on lease loss. |
+| **Reviewer/proof-producer agent** | Independently reviews the exact candidate or reports an approved proof. It does not inherit trust from the worker. |
+
+A fifth session joins only where slice delegation is configured: a **slice lead agent** coordinates one formal slice — approving or rejecting plans, classifying failures, requesting reruns, sending work back, and escalating, always citing a written rule ID and a reason — and never implements, holds a worker lease, submits evidence, bypasses a gate, or merges. See [slice-lead delegation](delegation.md).
+
+These are distinct AI sessions, even if they use the same provider or account. Graphyard enforces separation with **authenticated principal identities, scoped credentials, and authority checks**. The runtime or deployment—for example, Herdr—must keep the sessions independent; Graphyard does not verify runtime isolation. Separation is only as real as the principals Graphyard knows: Worker, Master/coordinator, and Reviewer/proof-producer map to enforced credentials today, and the scoped Operator agent uses a shipped credential type that each installation provisions before that session becomes active.
+
+## The boundaries that do not move
+
+- **Graphyard is the source of ownership and progression truth.** Runtime health is not ownership.
+- **Gates decide progression:** CI, trusted evidence, independent review, and the merge gate.
+- **Workers stay untrusted.** They never receive operator, scoped operator-agent, coordinator, or trusted evidence-producer credentials.
+- **There is no shortcut.** No client-controlled lifecycle-state endpoint and no administrative merge bypass.
 
 ## Graphyard and Herdr answer different questions
 

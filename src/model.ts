@@ -1,14 +1,54 @@
 import { z } from 'zod';
+import { ejectionReason, nextQueueSequence, queueHistoryLimit, queuePlacement } from './merge-queue.js';
+import type { QueueEjection, QueueEntry, QueueHistoryEntry } from './merge-queue.js';
 
 export const stages = ['backlog', 'ready', 'build', 'review', 'test', 'acceptance', 'merge', 'done'] as const;
 export type Stage = typeof stages[number];
 export const proofSchema = z.string().regex(/^(unit|integration|e2e|manual):[a-zA-Z0-9._/-]+$/);
 export const criterionSchema = z.object({ id: z.string().regex(/^AC-\d+$/), text: z.string().min(1).max(2000), proofs: z.array(proofSchema).min(1).max(20) }).strict();
+export const reviewProviders = ['github', 'codex', 'agent'] as const;
+export type ReviewProvider = typeof reviewProviders[number];
+const identifier = z.string().trim().regex(/^[a-z0-9][a-z0-9._-]{0,63}$/);
+// A runtime label is descriptive provenance (which agent produced the review), never authority.
+const runtimeName = z.string().trim().regex(/^[a-z0-9][a-z0-9.+_-]{0,39}$/);
+export const reviewerProfileSchema = z.object({
+  name: identifier, runtime: runtimeName, reviewerApp: identifier,
+  mention: z.string().regex(/^@[A-Za-z0-9][A-Za-z0-9-]{0,38}(?:\[bot\])?$/).optional(),
+  timeoutSeconds: z.number().int().min(60).max(86_400).default(1800),
+}).strict();
+export type ReviewerProfile = z.infer<typeof reviewerProfileSchema>;
+// Registered reviewer identities are numeric GitHub App/bot identities, not display names.
+export const reviewerAppSchema = z.object({
+  id: identifier, runtime: runtimeName,
+  appId: z.number().int().positive(), botUserId: z.number().int().positive(),
+  displayName: z.string().trim().min(1).max(100).regex(/^[^\u0000-\u001f\u007f]+$/).optional(),
+}).strict();
+export type ReviewerApp = z.infer<typeof reviewerAppSchema>;
+const distinct = (values: unknown[]) => new Set(values.map(value => JSON.stringify(value))).size === values.length;
+export const reviewerAppsSchema = z.array(reviewerAppSchema).max(50)
+  .refine(apps => distinct(apps.map(app => app.id)), 'Reviewer App identifiers must be unique')
+  .refine(apps => distinct(apps.map(app => app.appId)), 'Reviewer GitHub App IDs must be unique')
+  .refine(apps => distinct(apps.map(app => app.botUserId)), 'Reviewer bot user IDs must be unique');
+export function parseReviewerApps(raw: string | undefined): ReviewerApp[] {
+  return reviewerAppsSchema.parse(JSON.parse(raw?.trim() || '[]'));
+}
 export const policySchema = z.object({
   checks: z.array(z.string().min(1).max(200)).min(1).max(30).default(['test', 'typecheck']),
   review: z.boolean().default(true),
-  reviewProvider: z.enum(['github', 'codex']).optional(),
-}).strict();
+  reviewProvider: z.enum(reviewProviders).optional(),
+  reviewerProfiles: z.array(reviewerProfileSchema).min(1).max(10).optional(),
+}).strict().superRefine((policy, context) => {
+  if (policy.reviewProvider !== 'agent') {
+    if (policy.reviewerProfiles) context.addIssue({ code: 'custom', message: 'Reviewer profiles require reviewProvider "agent"', path: ['reviewerProfiles'] });
+    return;
+  }
+  if (!policy.review) context.addIssue({ code: 'custom', message: 'Agent review requires review: true', path: ['review'] });
+  const profiles = policy.reviewerProfiles ?? [];
+  if (!profiles.length) context.addIssue({ code: 'custom', message: 'Agent review requires at least one reviewer profile', path: ['reviewerProfiles'] });
+  if (!distinct(profiles.map(profile => profile.name))) context.addIssue({ code: 'custom', message: 'Reviewer profile names must be unique', path: ['reviewerProfiles'] });
+  // One identity per profile keeps a verdict attributable to exactly one profile.
+  if (!distinct(profiles.map(profile => profile.reviewerApp))) context.addIssue({ code: 'custom', message: 'Each reviewer profile must name a distinct registered reviewer App', path: ['reviewerProfiles'] });
+});
 export const resourcesSchema = z.array(z.string().regex(/^[a-z0-9][a-z0-9._:/-]*$/).max(200)).max(30).refine(v => new Set(v).size === v.length, 'Resource names must be unique');
 export const sliceIds = ['product', 'infrastructure', 'docs-experience'] as const;
 export type SliceId = typeof sliceIds[number];
@@ -41,15 +81,40 @@ export interface AssignmentIdentity { owner: string; epoch: number; displayName?
 export interface Lease { owner: string; epoch: number; expiresAt: string }
 export interface Workspace { host: string; path: string; branch: string; epoch: number; owner: string }
 export interface Candidate { sha: string; baseSha: string; pr: number; branch: string; author: string }
+export type ArtifactKind = 'log' | 'report' | 'screenshot' | 'trace' | 'other';
+export type ArtifactAvailability = 'available' | 'expired' | 'redacted' | 'missing' | 'external';
+export interface EvidenceArtifact {
+  kind: ArtifactKind; label: string; mediaType?: string; size?: number; digest?: string;
+  expiresAt?: string; availability: ArtifactAvailability;
+  /** Public location. External locations are never treated as trusted proof. */
+  url?: string;
+  /** Authenticated Graphyard route components; never contains a bearer credential. */
+  reference?: { requestId: string; artifactId: string };
+}
 export interface Evidence {
   id: string; proof: string; sha: string; baseSha: string; policyRevision: number;
   producer: string; trusted: boolean; result: 'pass' | 'fail';
   executed: number; skipped: number; url?: string; at: string; expiresAt?: string;
+  artifacts?: EvidenceArtifact[];
   scenarioRevision?: number; environment?: string;
   validation?: { candidateId: string; requestId: string; attemptId: string };
 }
-export interface ReviewRequest { commentId: number; sha: string; baseSha: string; policyRevision: number; body: string; createdAt: string }
-export interface AgentReview { provider: 'codex'; sha: string; approved: boolean; reason: string; summaryId?: number; resultId?: number; requestId?: number; reactionId?: number; completedAt?: string }
+export interface ReviewRequest {
+  commentId: number; sha: string; baseSha: string; policyRevision: number; body: string; createdAt: string;
+  // Absent provider metadata identifies a legacy Codex request; agent requests name the
+  // dispatched profile, its registered App identity, and the correlation marker.
+  provider?: ReviewProvider; profile?: string; reviewerApp?: string; marker?: string;
+}
+export interface AgentReview {
+  provider: 'codex' | 'agent'; sha: string; approved: boolean; reason: string;
+  summaryId?: number; resultId?: number; requestId?: number; reactionId?: number; completedAt?: string;
+  profile?: string; reviewerApp?: string; verdictId?: number;
+  exhausted?: boolean; exhaustion?: 'usage-limit' | 'timeout';
+}
+export interface ReviewFailover {
+  profile: string; reviewerApp: string; runtime: string; exhaustion: 'usage-limit' | 'timeout'; reason: string;
+  at: string; sha: string; baseSha: string; policyRevision: number; requestCommentId: number; nextProfile: string | null;
+}
 export interface Observation {
   clockOffset?: { min: number; max: number };
   reviewIds?: number[];
@@ -58,6 +123,9 @@ export interface Observation {
   candidate: Candidate; checks: { name: string; result: string; appId: number }[];
   reviews: { reviewer: string; sha: string; state: string; id?: number; submittedAt?: string }[];
   merged: boolean; mergeSha: string | null; mergedAt?: string | null; mergeable: boolean;
+  // The real base-branch head and its tree, recorded separately from the candidate's bound
+  // base so a speculative binding never hides where the managed branch actually points.
+  baseTip?: string; baseTree?: string;
   protected: boolean; files: string[]; at: string;
 }
 export interface Gate { name: string; passed: boolean; reasons: string[] }
@@ -75,9 +143,11 @@ export interface Work extends Create {
   epoch: number; lease: Lease | null; lastAssignment?: AssignmentIdentity; workspaces: Workspace[]; candidate: Candidate | null;
   containmentQuarantine?: { owner: string; epoch: number; at: string; settlementHash: string; launchAcknowledgedAt?: string; launchExpiresAt?: string } | null;
   submission: { epoch: number; pr: number } | null;
+  queue?: QueueEntry | null; queueSequence?: number; queueEjection?: QueueEjection | null; queueHistory?: QueueHistoryEntry[];
   reworkRequested: boolean;
   scenarioRequirements: { proof: string; revision: number; environment: string; hash: string }[];
   reviewRequest?: ReviewRequest | null;
+  reviewFailovers?: ReviewFailover[];
   mergeAuthorization?: { sha: string; baseSha: string; policyRevision: number; at: string } | null;
   mergeExecution?: { id: string; owner: string; sha: string; baseSha: string; policyRevision: number; authorizationRevision: number; issuedAt: string; expiresAt: string; verifiedAt?: string; clockOffset?: { min: number; max: number }; fenced?: { reason: string; at: string } | null } | null;
   delivery?: { mergedAt: string; mergeSha: string; authorizationRevision: number };
@@ -96,6 +166,7 @@ export class Refusal extends Error {
   constructor(message: string, public status = 409) { super(message); }
 }
 export class ReconciliationRetry extends Refusal {}
+export class SpeculativeConflict extends Refusal {}
 export class MergeExecutionInProgress extends ReconciliationRetry {}
 export function requireCurrent(value: unknown, message: string): asserts value {
   if (!value) throw new ReconciliationRetry(message, 409);
@@ -246,6 +317,33 @@ export function evidenceIndependenceRefusals(work: Work, now = new Date()): stri
   return refusals;
 }
 
+// A task created before pluggable providers keeps requiring a formal GitHub approval.
+export const reviewProviderOf = (policy: Work['policy']): ReviewProvider => policy.reviewProvider ?? 'github';
+export const nativeReviewRequired = (policy: Work['policy']) => !!policy.review && reviewProviderOf(policy) === 'github';
+// Failover is derived, never stored: the recorded exhaustion history for the exact
+// candidate and policy selects the next untried reviewer profile in configured order.
+export function exhaustedReviewerProfiles(work: Work): string[] {
+  return (work.reviewFailovers ?? []).filter(failover => failover.sha === work.candidate?.sha
+    && failover.baseSha === work.candidate?.baseSha && failover.policyRevision === work.policyRevision).map(failover => failover.profile);
+}
+export function reviewerProfileFor(work: Work): ReviewerProfile | null {
+  if (reviewProviderOf(work.policy) !== 'agent') return null;
+  const exhausted = new Set(exhaustedReviewerProfiles(work));
+  return (work.policy.reviewerProfiles ?? []).find(profile => !exhausted.has(profile.name)) ?? null;
+}
+
+// Registration is the identity boundary: a policy may only name reviewer Apps whose
+// numeric GitHub identities the control plane already knows, and never its own App.
+export function assertReviewerProfiles(profiles: ReviewerProfile[] | undefined, registry: ReviewerApp[], controlPlaneAppId?: number) {
+  demand(profiles?.length, 'Agent review requires at least one reviewer profile');
+  for (const profile of profiles!) {
+    const app = registry.find(entry => entry.id === profile.reviewerApp);
+    demand(app, `Reviewer App ${profile.reviewerApp} is not registered in Graphyard`);
+    demand(app!.runtime === profile.runtime, `Reviewer profile ${profile.name} must name its registered runtime ${app!.runtime}`);
+    demand(!controlPlaneAppId || app!.appId !== controlPlaneAppId, 'The Graphyard control-plane App cannot act as a reviewer identity');
+  }
+}
+
 // Shared by gates and human-facing proof previews.
 export function currentEvidence(work: Work, proof: string, now = new Date()): Evidence | undefined {
   const scenario = work.scenarioRequirements?.find(s => s.proof === proof);
@@ -258,7 +356,7 @@ export function currentEvidence(work: Work, proof: string, now = new Date()): Ev
 }
 
 // Pure evaluation: neither worker assertions nor UI state can authorize progression.
-export function evaluate(work: Work, all: Work[], now: Date, ciAppIds: number[]): { stage: Stage; gates: Gate[]; violations: string[] } {
+export function evaluate(work: Work, all: Work[], now: Date, ciAppIds: number[]): { stage: Stage; gates: Gate[]; violations: string[]; queue: QueueEntry | null; queueSequence: number; queueEjection: QueueEjection | null; queueHistory: QueueHistoryEntry[] } {
   const gates: Gate[] = [];
   const add = (name: string, reasons: string[]) => gates.push({ name, passed: reasons.length === 0, reasons });
   const dependencies = work.dependencies.filter(id => all.find(w => w.id === id)?.stage !== 'done');
@@ -271,12 +369,30 @@ export function evaluate(work: Work, all: Work[], now: Date, ciAppIds: number[])
   const reviews = current ? obs!.reviews : [];
   const changesRequested = reviews.some(r => r.state === 'CHANGES_REQUESTED');
   const agentReview = current ? obs!.agentReview : undefined;
-  const reviewPassed = work.policy.reviewProvider === 'codex'
-    ? !!candidate && !!agentReview?.approved && agentReview.provider === 'codex' && agentReview.sha === candidate.sha && work.reviewRequest?.commentId === agentReview.requestId && work.reviewRequest?.sha === candidate.sha && work.reviewRequest?.baseSha === candidate.baseSha && work.reviewRequest?.policyRevision === work.policyRevision
+  const provider = reviewProviderOf(work.policy);
+  const selectedProfile = reviewerProfileFor(work);
+  // A dispatched provider verdict counts only for the exact recorded request.
+  const dispatchedApproval = (expected: 'codex' | 'agent') => !!candidate && !!agentReview?.approved && agentReview.provider === expected
+    && agentReview.sha === candidate.sha && work.reviewRequest?.commentId === agentReview.requestId
+    && work.reviewRequest?.sha === candidate.sha && work.reviewRequest?.baseSha === candidate.baseSha
+    && work.reviewRequest?.policyRevision === work.policyRevision;
+  const reviewPassed = provider === 'codex' ? dispatchedApproval('codex')
+    : provider === 'agent' ? dispatchedApproval('agent')
+      // The approving identity must be the profile Graphyard currently dispatched to,
+      // and that profile must still be configured with the same registered App.
+      && !!agentReview!.profile && !!agentReview!.reviewerApp
+      && work.reviewRequest!.provider === 'agent' && work.reviewRequest!.profile === agentReview!.profile
+      && work.reviewRequest!.reviewerApp === agentReview!.reviewerApp
+      && selectedProfile?.name === agentReview!.profile && selectedProfile?.reviewerApp === agentReview!.reviewerApp
     : !!candidate && reviews.some(r => r.sha === candidate.sha && r.state === 'APPROVED' && r.reviewer !== candidate.author
       && (!work.formalReviewResetRequired || work.formalReviewBaseline?.pr === candidate.pr && work.formalReviewBaseline.policyRevision === work.policyRevision && Number.isSafeInteger(r.id) && r.id! > 0 && !work.formalReviewBaseline.reviewIds.includes(r.id!)));
+  const reviewRefusal = provider === 'codex' ? agentReview?.reason ?? 'Verified clean Codex review of the current commit is required'
+    : provider === 'agent' ? !selectedProfile
+      ? `Every configured reviewer profile is exhausted for this candidate (${exhaustedReviewerProfiles(work).join(', ') || 'none configured'}); add reviewer capacity or select another review provider`
+      : agentReview?.reason ?? `Verified approval from reviewer profile ${selectedProfile.name} is required for the current commit`
+    : work.formalReviewResetRequired ? 'A new independent GitHub approval after the requirement-review baseline is required' : 'Independent approval of the current commit is required';
   add('review', work.policy.review ? [
-    ...(!reviewPassed ? [work.policy.reviewProvider === 'codex' ? agentReview?.reason ?? 'Verified clean Codex review of the current commit is required' : work.formalReviewResetRequired ? 'A new independent GitHub approval after the requirement-review baseline is required' : 'Independent approval of the current commit is required'] : []),
+    ...(!reviewPassed ? [reviewRefusal] : []),
     ...(changesRequested ? ['Outstanding change requests must be resolved through a new review'] : []),
   ] : []);
   add('test', work.policy.checks.filter(name => {
@@ -293,11 +409,51 @@ export function evaluate(work: Work, all: Work[], now: Date, ciAppIds: number[])
   // producer joined the implementer set refuses acceptance with a named reason.
   reasons.push(...evidenceIndependenceRefusals(work, now));
   add('acceptance', reasons);
-  add('merge', [...(!fresh ? ['GitHub observation missing or older than two minutes'] : []), ...(!obs?.protected ? ['Required Graphyard check and strict branch protection have not been verified'] : []), ...(!obs?.mergeable && !obs?.merged ? ['Pull request is not mergeable against the current base'] : []), ...escalationRefusals(work), ...(leadHoldRefusal(work) ? [leadHoldRefusal(work)!] : [])]);
+  // The merge queue owns the last hop. A candidate that has proven itself enters the queue,
+  // is validated against the speculative tip it will actually land, and merges in order.
+  // A standing escalation or lead hold is a refusal to deliver, so such an item never
+  // becomes queue-eligible and its own reason is reported alongside the queue's.
+  const delivery = [...escalationRefusals(work), ...(leadHoldRefusal(work) ? [leadHoldRefusal(work)!] : [])];
+  const queueState = placeInQueue(work, all, now, ciAppIds, gates.every(g => g.passed) && !work.violations.length && !delivery.length && !!candidate && !obs?.merged);
+  add('merge', [...(!fresh ? ['GitHub observation missing or older than two minutes'] : []), ...(!obs?.protected ? ['Required Graphyard check and merge-queue branch protection have not been verified'] : []), ...(!obs?.mergeable && !obs?.merged ? ['Pull request is not mergeable against the current base'] : []), ...delivery, ...queueState.reasons]);
   const first = gates.find(g => !g.passed);
   const violations = [...work.violations];
   let stage: Stage = !work.ready ? 'backlog' : !work.submission ? (work.lease && Date.parse(work.lease.expiresAt) > now.getTime() ? 'build' : 'ready') : (first?.name === 'ready' ? 'build' : first?.name as Stage ?? 'merge');
   // Delivery history stays complete; later observations cannot rewrite it.
   if (work.stage === 'done') stage = 'done';
-  return { stage, gates, violations };
+  return { stage, gates, violations, queue: queueState.queue, queueSequence: queueState.queueSequence, queueEjection: queueState.ejection, queueHistory: queueState.history };
+}
+
+/**
+ * Queue membership is derived, never asserted: no command, operator, or administrator can
+ * place, reorder, or hold a position. An entry leaves only by merging or by an explicit,
+ * observed validation failure, and a re-entry always starts a new sequence at the back.
+ */
+function placeInQueue(work: Work, all: Work[], now: Date, ciAppIds: number[], eligible: boolean) {
+  const history = [...(work.queueHistory ?? [])];
+  const candidate = work.candidate;
+  let queue = work.queue ?? null, queueSequence = work.queueSequence ?? 0, ejection = work.queueEjection ?? null;
+  const record = (event: QueueHistoryEntry['event'], reason?: string, tip?: string) => {
+    history.push({ at: now.toISOString(), event, sequence: queueSequence, ...(reason ? { reason } : {}), ...(tip ? { tip } : {}) });
+    if (history.length > queueHistoryLimit) history.splice(0, history.length - queueHistoryLimit);
+  };
+  const probe = { ...work, queue, queueSequence, gates: [], violations: work.violations } as Work;
+  const reason = queue ? ejectionReason(probe, ciAppIds) : null;
+  if (queue && reason) {
+    ejection = { at: now.toISOString(), sequence: queue.sequence, reason, sha: candidate?.sha ?? null, policyRevision: work.policyRevision };
+    record('ejected', reason, queue.speculation?.tip ?? candidate?.sha);
+    queue = null;
+  } else if (!queue && eligible && !(ejection && candidate && ejection.sha === candidate.sha && ejection.policyRevision === work.policyRevision)) {
+    queueSequence = nextQueueSequence(all);
+    queue = { sequence: queueSequence, enqueuedAt: now.toISOString(), policyRevision: work.policyRevision, speculation: null };
+    ejection = null;
+    record('enqueued');
+  }
+  const shadow = { ...work, queue, queueSequence } as Work;
+  const placement = queue ? queuePlacement(shadow, all.map(item => item.id === work.id ? shadow : item), now.getTime()) : null;
+  const reasons = placement ? placement.reasons
+    : work.observation?.merged || work.stage === 'done' ? []
+    : ejection ? [`Ejected from the merge queue: ${ejection.reason}; a new candidate re-enters at the back of the queue`]
+    : eligible ? ['Candidate has not entered the merge queue'] : [];
+  return { queue, queueSequence, ejection, history, reasons, placement };
 }

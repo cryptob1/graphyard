@@ -1,0 +1,5 @@
+[
+  { "id": "claude-reviewer", "runtime": "claude", "appId": 1550001, "botUserId": 1550002, "displayName": "Claude reviewer" },
+  { "id": "cursor-reviewer", "runtime": "cursor", "appId": 1660001, "botUserId": 1660002, "displayName": "Cursor reviewer" },
+  { "id": "opencode-reviewer", "runtime": "opencode", "appId": 1770001, "botUserId": 1770002, "displayName": "opencode reviewer" }
+]

@@ -1,7 +1,7 @@
-import { test, expect, type Page } from '@playwright/test';
+import { test, expect, type Locator, type Page } from '@playwright/test';
 
 // Browser-only API fixtures: no production requests, credentials, or writes.
-const work = { dependencies: [], plannedFiles: [], scenarioRequirements: [], id: 'fixture-work', key: 'GY-1', title: 'Browser fixture', description: 'Isolated UI audit', type: 'feature', priority: 1, stage: 'review', stageEnteredAt: '2026-01-01T00:00:00Z', ready: true, policy: { review: true, reviewProvider: 'github', checks: ['test'] }, policyRevision: 1, revision: 1, violations: [], workspaces: [], criteria: [{ id: 'AC-1', text: 'Observable behavior', proofs: ['manual:browser'] }], evidence: [], gates: [{ name: 'review', passed: false, reasons: ['Independent review required'] }], submission: { epoch: 1 }, candidate: { pr: 1, sha: 'abcdef123456' } };
+const work = { dependencies: [], plannedFiles: [], scenarioRequirements: [], id: 'fixture-work', key: 'GY-1', title: 'Browser fixture', description: 'Isolated UI audit', type: 'feature', priority: 1, stage: 'review', stageEnteredAt: '2026-01-01T00:00:00Z', ready: true, policy: { review: true, reviewProvider: 'github', checks: ['test'] }, policyRevision: 1, revision: 1, violations: [], workspaces: [], criteria: [{ id: 'AC-1', text: 'Observable behavior', proofs: ['manual:browser'] }], evidence: [], gates: [{ name: 'review', passed: false, reasons: ['Independent review required'] }], submission: { epoch: 1 }, candidate: { pr: 1, sha: 'abcdef1234567890abcdef1234567890abcdef12' } };
 async function fixture(page: Page, role = 'admin') {
   const state = { offline: false, unauthorized: false, writes: 0, pause: false };
   await page.route('**/api/**', async route => {
@@ -14,6 +14,10 @@ async function fixture(page: Page, role = 'admin') {
   });
   await page.goto('/'); return state;
 }
+// Opening a work item goes through the card's own selection control, a sibling of
+// the candidate links rather than a button wrapped around them.
+const cardSelect = (page: Page) => page.getByRole('button', { name: /Browser fixture.*GY-1/ });
+
 async function login(page: Page, value = 'browser-fixture') { await page.getByLabel('Access token').fill(value); await page.getByRole('button', { name: 'Open control plane' }).click(); }
 
 for (const viewport of [{ name: 'desktop', width: 1280, height: 900 }, { name: 'mobile', width: 390, height: 844 }]) {
@@ -21,14 +25,81 @@ for (const viewport of [{ name: 'desktop', width: 1280, height: 900 }, { name: '
     await page.setViewportSize(viewport);
     await page.goto('/docs/how-graphyard-works');
     await expect(page.getByRole('heading', { name: 'How Graphyard works', level: 1 })).toBeVisible();
-    const flow = page.locator('.how-guide > ol');
+    const flow = page.locator('.how-guide > ol').first();
     await expect(flow.locator(':scope > li')).toHaveCount(10);
     const cards = await flow.locator(':scope > li').evaluateAll(elements => elements.map(element => element.getBoundingClientRect().top));
     expect(cards).toEqual([...cards].sort((a, b) => a - b));
     expect(new Set(cards).size).toBe(cards.length);
     await expect(flow.getByText('Setup', { exact: true })).toBeVisible();
     await expect(flow.getByText('Done', { exact: true })).toBeVisible();
-    await expect(page.getByRole('heading', { name: 'Who does what' })).toBeVisible();
+    await expect(page.getByRole('heading', { name: 'Two phases, one clear handoff' })).toBeVisible();
+    const phases = page.getByRole('heading', { name: 'Two phases, one clear handoff' }).locator('xpath=following-sibling::ol[1]/li');
+    await expect(phases).toHaveCount(2);
+    await expect(phases.nth(0)).toContainText('Human operator → one implementation agent');
+    await expect(phases.nth(0)).toContainText('the human operator connects the managed (target) repository and activates its gates');
+    await expect(phases.nth(0)).toContainText('directly supervising a single, worker-scoped implementation agent');
+    await expect(phases.nth(0)).toContainText('never receives the operator or GitHub credentials used for setup');
+    await expect(phases.nth(1)).toContainText('Human → goals, required decisions, oversight');
+    await expect(phases.nth(1)).toContainText('after the managed repository is connected, its gates are active');
+    await expect(phases.nth(1)).toContainText('GY-30 scoped operator automation is configured');
+    await expect(phases.nth(1)).toContainText('supplies goals, required decisions, and oversight');
+    await expect(phases.nth(1)).toContainText('not expected to perform the routine Operator, Master, Worker, or Reviewer/proof-producer duties');
+    await expect(phases.nth(1)).toContainText('shipped and available as an opt-in, least-privilege credential');
+    await expect(phases.nth(1)).toContainText('a configuration step, not future work');
+    await expect(phases.nth(1)).toContainText('this installation provisions the scoped operator-agent principal');
+    await expect(phases.nth(1)).toContainText('the unrestricted human administrator still makes requirements and policy changes');
+    const phaseBoxes = await phases.evaluateAll(elements => elements.map(element => {
+      const box = element.getBoundingClientRect();
+      return { left: box.left, top: box.top, width: box.width };
+    }));
+    if (viewport.name === 'desktop') {
+      expect(Math.abs(phaseBoxes[0].top - phaseBoxes[1].top)).toBeLessThan(2);
+      expect(phaseBoxes[1].left).toBeGreaterThan(phaseBoxes[0].left + phaseBoxes[0].width);
+    } else {
+      expect(phaseBoxes[1].top).toBeGreaterThan(phaseBoxes[0].top);
+    }
+    await expect(page.getByRole('heading', { name: 'Four AI agent sessions' })).toBeVisible();
+    const duties = ['Operator agent', 'Master agent', 'Worker agent', 'Reviewer/proof-producer agent'];
+    for (const duty of duties) await expect(page.getByRole('cell', { name: duty, exact: true })).toBeVisible();
+    const dutiesTable = page.getByRole('heading', { name: 'Four AI agent sessions' }).locator('xpath=following-sibling::table[1]');
+    if (viewport.name === 'mobile') {
+      const geometry = await dutiesTable.evaluate(table => {
+        const cells = Array.from(table.querySelectorAll('tbody td:first-child'));
+        const box = table.getBoundingClientRect();
+        return {
+          clientWidth: table.clientWidth,
+          scrollWidth: table.scrollWidth,
+          right: box.right,
+          viewportWidth: document.documentElement.clientWidth,
+          labels: cells.map(cell => ({
+            width: cell.getBoundingClientRect().width,
+            whiteSpace: getComputedStyle(cell).whiteSpace,
+          })),
+        };
+      });
+      expect(geometry.scrollWidth).toBeGreaterThan(geometry.clientWidth);
+      expect(geometry.right).toBeLessThanOrEqual(geometry.viewportWidth);
+      expect(geometry.labels).toHaveLength(4);
+      for (const label of geometry.labels) {
+        expect(label.width).toBeGreaterThanOrEqual(190);
+        expect(label.whiteSpace).toBe('nowrap');
+      }
+    }
+    const operatorRow = page.getByRole('row', { name: /Operator agent/ });
+    await expect(operatorRow).toContainText('human-approved bounded intent');
+    await expect(operatorRow).toContainText('may add requirements but never remove or rewrite them');
+    await expect(operatorRow).toContainText('Exceptions and approval decisions stay with the human operator');
+    await expect(operatorRow).toContainText('least-privilege, never unrestricted admin authority');
+    await expect(operatorRow).toContainText('GY-30 credential behind this duty is shipped and opt-in');
+    await expect(operatorRow).toContainText('an administrator provisions it per installation');
+    await expect(operatorRow).toContainText('the unrestricted human administrator holds this authority');
+    const separation = page.locator('p', { hasText: 'These are distinct AI sessions' });
+    await expect(separation).toContainText('authenticated principal identities, scoped credentials, and authority checks');
+    await expect(separation).toContainText('must keep the sessions independent');
+    await expect(separation).toContainText('Graphyard does not verify runtime isolation');
+    await expect(separation).toContainText('Worker, Master/coordinator, and Reviewer/proof-producer map to enforced credentials today');
+    await expect(separation).toContainText('shipped credential type that each installation provisions before that session becomes active');
+    await expect(page.getByText('Workers stay untrusted.', { exact: true })).toBeVisible();
     await expect(page.getByText('Graphyard: delivery authority')).toBeVisible();
     await expect(page.getByText('Herdr: runtime supervision')).toBeVisible();
     const bounds = await page.locator('.docs-shell').evaluate(element => ({ width: element.clientWidth, content: element.scrollWidth }));
@@ -83,7 +154,7 @@ async function checkDialog(page: Page, trigger: ReturnType<Page['getByRole']>) {
 }
 test('all three dialogs move, trap, and restore focus and close with Escape', async ({ page }) => {
   const state = await fixture(page); await login(page);
-  await checkDialog(page, page.getByRole('button', { name: /GY-1 P1/ }));
+  await checkDialog(page, cardSelect(page));
   await checkDialog(page, page.getByRole('button', { name: '＋ New work item' }));
   await page.getByRole('button', { name: '✓ Test cases' }).click();
   await checkDialog(page, page.getByRole('button', { name: '＋ New test case' }));
@@ -185,7 +256,7 @@ test('a delayed post-create refresh cannot restore the signed-out session or lea
     eventReads++;
     return eventReads === 1 ? route.fulfill({ json: [{ seq: 1, kind: 'fixture-created', actor: 'fixture', created_at: '2026-01-01T00:00:00Z' }] }) : route.fulfill({ status: 503, json: { error: 'History temporarily unavailable' } });
   });
-  await login(page); await page.getByRole('button', { name: /GY-1 P1/ }).click();
+  await login(page); await cardSelect(page).click();
   await expect(page.getByRole('dialog').getByText('fixture-created', { exact: true })).toBeVisible();
   await expect.poll(() => eventReads, { timeout: 10000 }).toBeGreaterThan(1);
   await expect(page.getByRole('dialog').getByText('fixture-created', { exact: true })).toBeVisible();
@@ -195,7 +266,7 @@ test('history groups observation noise and bounds expanded rows without losing o
   await fixture(page);
   const events = Array.from({ length: 60 }, (_, i) => ({ seq: 60 - i, kind: i < 40 ? 'github.observed' : `work.event-${i}`, actor: 'github', created_at: new Date(Date.UTC(2026, 0, 1, 0, 60 - i)).toISOString() }));
   await page.route('**/api/events**', route => route.fulfill({ json: events }));
-  await login(page); await page.getByRole('button', { name: /GY-1 P1/ }).click();
+  await login(page); await cardSelect(page).click();
   const history = page.getByRole('region', { name: 'Work history', exact: true });
   await expect(history.getByText('github.observed × 40', { exact: true })).toBeVisible();
   await expect(history.locator('.timeline > div')).toHaveCount(20);
@@ -215,7 +286,7 @@ test('history groups observation noise and bounds expanded rows without losing o
  test('unavailable review providers disable selection and explain the missing connection', async ({page}) => {
   await fixture(page);
   await page.route('**/api/status',route=>route.fulfill({json:{actor:{id:'fixture',role:'admin'},github:true,reviewProviders:['github'],repository:'fixture/repository',jobs:[]}}));
-  await login(page);await page.getByRole('button',{name:/GY-1 P1/}).click();
+  await login(page);await cardSelect(page).click();
   await expect(page.getByRole('button',{name:'Use Codex cloud review'})).toBeDisabled();
   await expect(page.getByText(/Codex review is unavailable/)).toBeVisible();
   await page.getByLabel('Close details').click();await page.getByRole('button',{name:'New work item'}).click();
@@ -349,7 +420,7 @@ test('a publish error is not carried into the next form', async ({ page }) => {
 
 test('work details explain missing proof and operator can revise explicit criteria', async ({ page }) => {
   const state = await fixture(page); await login(page);
-  await page.getByRole('button', { name: /GY-1.*Browser fixture/ }).click();
+  await cardSelect(page).click();
   await expect(page.getByText('AC-1 · manual:browser · unmeasured')).toBeVisible();
   await page.getByRole('button', { name: 'Revise requirements', exact: true }).click();
   const form = page.getByRole('form', { name: 'Revise requirements' });
@@ -387,4 +458,181 @@ test('validation view reports failures honestly and bounds request history', asy
   await expect(page.getByText('Browsing history; live updates paused.', { exact: false })).toBeVisible();
   await page.getByRole('button', { name: 'Return to latest' }).click();
   await expect(page.locator('.scenario-card')).toHaveCount(20);
+});
+
+test('merge queue shows each entry with its position, predicted tip, and wait', async ({ page }) => {
+  const enqueuedAt = new Date(Date.now() - 45 * 60_000).toISOString();
+  const headSha = 'a'.repeat(40), baseSha = 'b'.repeat(40), tipSha = 'c'.repeat(40);
+  const entry = (overrides: Record<string, unknown>) => ({ ...work, stage: 'merge', evidence: [], observation: null, ...overrides });
+  const head = entry({ id: 'queue-head', key: 'GY-10', title: 'Head of the queue', candidate: { pr: 10, sha: headSha, baseSha, branch: 'graphyard/gy-10-1', author: 'worker' },
+    observation: { baseTip: baseSha, candidate: { sha: headSha, baseSha } }, gates: [{ name: 'merge', passed: true, reasons: [] }],
+    queue: { sequence: 1, enqueuedAt, policyRevision: 1, speculation: { ref: 'refs/graphyard/queue/gy-10', tip: headSha, base: baseSha, baseTree: 'e'.repeat(40), predecessors: [], policyRevision: 1, publishedAt: enqueuedAt } } });
+  const next = entry({ id: 'queue-next', key: 'GY-11', title: 'Behind the head', candidate: { pr: 11, sha: tipSha, baseSha: headSha, branch: 'graphyard/gy-11-1', author: 'worker' },
+    observation: { baseTip: baseSha, candidate: { sha: tipSha, baseSha: headSha } }, gates: [{ name: 'merge', passed: false, reasons: ['Merge queue position 2 of 2: GY-10 is ahead'] }],
+    queue: { sequence: 2, enqueuedAt, policyRevision: 1, speculation: { ref: 'refs/graphyard/queue/gy-11', tip: tipSha, base: headSha, baseTree: 'd'.repeat(40), predecessors: ['GY-10'], policyRevision: 1, publishedAt: enqueuedAt } } });
+  await page.route('**/api/**', async route => {
+    const path = new URL(route.request().url()).pathname;
+    return route.fulfill({ json: path.endsWith('/status') ? { actor: { id: 'fixture', role: 'admin' }, github: true, reviewProviders: ['github'], repository: 'fixture/repository', jobs: [] }
+      : path.endsWith('/work-snapshot') ? { work: [head, next], now: new Date().toISOString() } : path.endsWith('/work') ? [head, next] : [] });
+  });
+  await page.goto('/'); await login(page);
+  const section = page.locator('section.graph-section').filter({ hasText: 'Merge queue' });
+  await expect(section.getByRole('heading', { name: 'Merge queue' })).toContainText('2');
+  const entries = section.locator('button.card');
+  await expect(entries).toHaveCount(2);
+  await expect(entries.nth(0)).toContainText('1. GY-10');
+  await expect(entries.nth(0)).toContainText('head of queue');
+  await expect(entries.nth(0)).toContainText('Waiting 45m');
+  await expect(entries.nth(0)).toContainText(`predicted tip ${headSha.slice(0, 12)}`);
+  await expect(entries.nth(1)).toContainText('2. GY-11');
+  await expect(entries.nth(1)).toContainText('behind GY-10');
+  await expect(entries.nth(1)).toContainText(`Predicted base ${headSha.slice(0, 12)}`);
+  await expect(entries.nth(1)).toContainText('Merge queue position 2 of 2: GY-10 is ahead');
+  await entries.nth(1).click();
+  const drawer = page.getByRole('dialog', { name: 'Behind the head' });
+  await expect(drawer.getByRole('heading', { name: 'Merge queue' })).toBeVisible();
+  await expect(drawer).toContainText('Position 2 of 2');
+  await expect(drawer).toContainText('refs/graphyard/queue/gy-11');
+});
+
+const prHref = 'https://github.com/fixture/repository/pull/1', commitHref = `https://github.com/fixture/repository/commit/${work.candidate!.sha}`;
+const cardPrLink = (page: Page) => page.getByRole('link', { name: 'PR #1, open pull request for GY-1 in GitHub' });
+const detailPrLink = (page: Page) => page.getByRole('dialog').getByRole('link', { name: 'PR #1, open pull request for GY-1 in GitHub' });
+const detailShaLink = (page: Page) => page.getByRole('dialog').getByRole('link', { name: `${work.candidate!.sha}, open commit for GY-1 in GitHub` });
+const focusRing = { outlineStyle: 'solid', outlineWidth: '2px', outlineColor: 'rgb(183, 215, 141)' };
+const outline = (target: Locator) => target.evaluate(e => { const s = getComputedStyle(e); return { outlineStyle: s.outlineStyle, outlineWidth: s.outlineWidth, outlineColor: s.outlineColor }; });
+// An interactive element nested inside a button (or ARIA button) may be exposed as
+// presentational content, so the dashboard must never nest one.
+const nestedInteractives = (page: Page) => page.evaluate(() => [...document.querySelectorAll('button, [role="button"]')].flatMap(host =>
+  [...host.querySelectorAll('a[href], button, input, select, textarea, [role="button"], [role="link"], [tabindex]')].map(child => `${host.tagName}.${host.className} > ${child.tagName}.${child.className}`)));
+
+test('card and ownership candidate references link to the exact PR and commit in the configured repository', async ({ page }) => {
+  const state = await fixture(page); await login(page);
+  await page.route('https://github.com/**', route => route.fulfill({ body: 'GitHub destination stub' }));
+  const cardLink = cardPrLink(page);
+  await expect(cardLink).toHaveAttribute('href', prHref);
+  await expect(cardLink).toContainText('PR #1');
+  await expect(cardLink).toHaveAttribute('target', '_blank');
+  await expect(cardLink).toHaveAttribute('rel', 'noopener noreferrer');
+  const [popup] = await Promise.all([page.waitForEvent('popup'), cardLink.click()]);
+  expect(popup.url()).toBe(prHref); await popup.close();
+  await expect(page.getByRole('dialog')).toHaveCount(0);
+  await cardSelect(page).click();
+  const dialog = page.getByRole('dialog');
+  await expect(detailPrLink(page)).toHaveAttribute('href', prHref);
+  const shaLink = detailShaLink(page);
+  await expect(shaLink).toHaveAttribute('href', commitHref);
+  for (const link of [detailPrLink(page), shaLink]) {
+    await expect(link).toHaveAttribute('target', '_blank');
+    await expect(link).toHaveAttribute('rel', 'noopener noreferrer');
+  }
+  await expect(shaLink.locator('code')).toHaveText(work.candidate!.sha);
+  await expect(dialog.getByText('PR #1', { exact: true })).toBeVisible();
+  const [commitPopup] = await Promise.all([page.waitForEvent('popup'), shaLink.click()]);
+  expect(commitPopup.url()).toBe(commitHref); await commitPopup.close();
+  expect(state.writes).toBe(0);
+});
+
+test('the card selection control and the candidate PR link are sibling interactive elements', async ({ page }) => {
+  await fixture(page); await login(page);
+  const cardLink = cardPrLink(page);
+  await expect(cardLink).toBeVisible();
+  await expect(cardSelect(page)).toBeVisible();
+  // The link must not sit inside the selection control, and no card may claim the
+  // button role around it: nested interactives can be hidden from assistive tech.
+  expect(await cardLink.evaluate(e => e.closest('button, [role="button"]') !== null)).toBe(false);
+  expect(await page.locator('.card').first().evaluate(e => e.getAttribute('role'))).toBe(null);
+  expect(await nestedInteractives(page)).toEqual([]);
+  await cardSelect(page).click();
+  await expect(detailPrLink(page)).toBeVisible();
+  expect(await detailPrLink(page).evaluate(e => e.closest('button, [role="button"]') !== null)).toBe(false);
+  expect(await detailShaLink(page).evaluate(e => e.closest('button, [role="button"]') !== null)).toBe(false);
+  expect(await nestedInteractives(page)).toEqual([]);
+});
+
+for (const viewport of [{ name: 'desktop', width: 1280, height: 900 }, { name: 'mobile', width: 390, height: 844 }]) {
+  test(`candidate references keep keyboard access, focus treatment, and selection on ${viewport.name}`, async ({ page }) => {
+    await page.setViewportSize(viewport);
+    await fixture(page); await login(page);
+    const cardLink = cardPrLink(page);
+    await expect(cardLink).toBeVisible();
+    const select = cardSelect(page);
+    // Reach the control the way a keyboard user does, so :focus-visible applies.
+    await select.focus(); await page.keyboard.press('Shift+Tab'); await page.keyboard.press('Tab');
+    await expect(select).toBeFocused();
+    expect(await outline(select)).toEqual(focusRing);
+    await page.keyboard.press('Tab');
+    await expect(cardLink).toBeFocused();
+    expect(await outline(cardLink)).toEqual(focusRing);
+    await select.focus(); await page.keyboard.press('Enter');
+    const dialog = page.getByRole('dialog'); await expect(dialog).toBeVisible();
+    await expect(dialog.getByRole('button', { name: /Close/ })).toBeFocused();
+    await page.keyboard.press('Tab');
+    await expect(detailPrLink(page)).toBeFocused();
+    expect(await outline(detailPrLink(page))).toEqual(focusRing);
+    await page.keyboard.press('Tab');
+    await expect(detailShaLink(page)).toBeFocused();
+    expect(await outline(detailShaLink(page))).toEqual(focusRing);
+    // Linking the SHA must not turn it into an unreadable widget: the text stays
+    // selectable with the ordinary gestures, so the SHA is still copyable.
+    await page.route('https://github.com/**', route => route.fulfill({ body: 'GitHub destination stub' }));
+    const shaText = detailShaLink(page).locator('code');
+    expect(await shaText.evaluate(e => getComputedStyle(e).userSelect)).toBe('text');
+    await page.evaluate(() => window.getSelection()?.removeAllRanges());
+    await expect(shaText).toHaveText(work.candidate!.sha);
+    // A wrapped SHA would break the drag gesture below and hide characters on mobile.
+    expect(await shaText.evaluate(e => e.getClientRects().length)).toBe(1);
+    await shaText.dblclick();
+    expect(await page.evaluate(() => window.getSelection()?.toString())).toBe(work.candidate!.sha);
+    await page.evaluate(() => window.getSelection()?.removeAllRanges());
+    const shaBox = (await shaText.boundingBox())!;
+    await page.mouse.move(shaBox.x - 3, shaBox.y + shaBox.height / 2);
+    await page.mouse.down();
+    await page.mouse.move(shaBox.x + shaBox.width + 3, shaBox.y + shaBox.height / 2, { steps: 10 });
+    expect(await page.evaluate(() => window.getSelection()?.toString())).toContain(work.candidate!.sha);
+    await page.mouse.up();
+    await page.keyboard.press('Escape'); await expect(dialog).toHaveCount(0);
+    await expect(page.locator('.card').first()).toBeVisible();
+    await select.focus(); await page.keyboard.press('Enter');
+    await expect(page.getByRole('dialog')).toBeVisible();
+    await expect(page.getByRole('dialog').getByRole('link', { name: 'PR #1, open pull request for GY-1 in GitHub' })).toBeVisible();
+  });
+}
+
+test('an unconfigured GitHub repository renders candidate references as non-link text', async ({ page }) => {
+  await fixture(page);
+  await page.route('**/api/status', route => route.fulfill({ json: { actor: { id: 'fixture', role: 'admin' }, github: false, reviewProviders: ['github'], repository: null, jobs: [] } }));
+  await login(page);
+  await expect(cardPrLink(page)).toHaveCount(0);
+  await expect(page.locator('.card').getByText('PR #1', { exact: true })).toBeVisible();
+  await cardSelect(page).click();
+  const dialog = page.getByRole('dialog');
+  await expect(dialog.getByText('PR #1', { exact: true })).toBeVisible();
+  await expect(dialog.getByText(work.candidate!.sha, { exact: true })).toBeVisible();
+  await expect(dialog.getByRole('link')).toHaveCount(0);
+});
+
+test('legacy abbreviated SHAs and invalid candidate references never become links', async ({ page }) => {
+  await fixture(page);
+  const cases = [
+    { candidate: { pr: 1, sha: 'abcdef123456' }, shaText: 'abcdef123456', prHref, commitHref: null },
+    { candidate: { pr: 0, sha: work.candidate!.sha }, shaText: work.candidate!.sha, prHref: null, commitHref },
+    { candidate: { pr: 1, sha: 'not-a-sha' }, shaText: 'not-a-sha', prHref, commitHref: null }];
+  for (const { candidate, shaText, prHref: expectedPr, commitHref: expectedCommit } of cases) {
+    await page.route('**/api/work-snapshot', route => route.fulfill({ json: { work: [{ ...work, candidate }], now: '2026-01-01T00:00:00Z' } }));
+    await login(page);
+    await expect(page.locator('.card').getByRole('link', { name: /open pull request/ })).toHaveCount(expectedPr ? 1 : 0);
+    if (expectedPr) await expect(page.locator('.card').getByRole('link', { name: /open pull request/ })).toHaveAttribute('href', expectedPr);
+    await cardSelect(page).click();
+    const dialog = page.getByRole('dialog');
+    await expect(dialog.getByText(shaText, { exact: true })).toBeVisible();
+    await expect(dialog.getByRole('link', { name: /open pull request/ })).toHaveCount(expectedPr ? 1 : 0);
+    await expect(dialog.getByRole('link', { name: /open commit/ })).toHaveCount(expectedCommit ? 1 : 0);
+    if (expectedCommit) await expect(dialog.getByRole('link', { name: /open commit/ })).toHaveAttribute('href', expectedCommit);
+    await page.keyboard.press('Escape');
+    await page.getByRole('button', { name: 'Sign out' }).click();
+  }
+  await page.route('**/api/work-snapshot', route => route.fulfill({ json: { work: [{ ...work, candidate: null }], now: '2026-01-01T00:00:00Z' } }));
+  await login(page);
+  await expect(page.locator('.card').getByText('No PR', { exact: true })).toBeVisible();
 });

@@ -11,6 +11,7 @@ import {
   routineIntakeOrigins, sessionKind, slices, validateDelegationPrincipals,
 } from '../src/delegation.js';
 import { assertMergeCandidate, currentMergeCandidates } from '../src/master.js';
+import { queueRef, type QueueSpeculation } from '../src/merge-queue.js';
 import { Engine } from '../src/engine.js';
 import { server } from '../src/server.js';
 import { sliceIds, type Observation, type Principal, type SliceId, type Work } from '../src/model.js';
@@ -33,7 +34,7 @@ const coordinator: Principal = { id: 'merge-broker', role: 'coordinator', sessio
 const aiAdmin: Principal = { id: 'automation-admin', role: 'admin', sessionKind: 'ai', displayName: 'Automation' };
 const undeclaredAdmin: Principal = { id: 'legacy-admin', role: 'admin' };
 const roster = [admin, lead, infraLead, docsLead, workerA, workerB, workerC, reviewer, coordinator, aiAdmin, undeclaredAdmin];
-const head = 'a'.repeat(40), base = 'b'.repeat(40);
+const head = 'a'.repeat(40), base = 'b'.repeat(40), redone = 'c'.repeat(40);
 let database: EmbeddedPostgres, store: Store, engine: Engine;
 let http: ReturnType<typeof server>, url: string;
 const credentials = roster.map(principal => ({ ...principal, token: `delegation-${principal.id}-${'x'.repeat(32)}` }));
@@ -41,10 +42,10 @@ let pr = 500;
 const id = () => randomUUID();
 const input = (title: string, slice?: SliceId) => ({ title, ...(slice ? { slice } : {}), plannedFiles: [`src/${title}.ts`], criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:works'] }] });
 const proof = (overrides: Record<string, unknown> = {}) => ({ proof: 'unit:works', sha: head, baseSha: base, policyRevision: 1, result: 'pass', executed: 4, skipped: 0, ...overrides });
-function observation(work: Work): Observation {
-  return { clockOffset: { min: 0, max: 0 }, candidate: { sha: head, baseSha: base, pr: work.submission!.pr, branch: work.workspaces.at(-1)!.branch, author: 'implementer' },
+function observation(work: Work, sha = head): Observation {
+  return { clockOffset: { min: 0, max: 0 }, candidate: { sha, baseSha: base, pr: work.submission!.pr, branch: work.workspaces.at(-1)!.branch, author: 'implementer' },
     checks: [{ name: 'test', result: 'success', appId: 15368 }, { name: 'typecheck', result: 'success', appId: 15368 }],
-    reviews: [{ reviewer: 'independent-reviewer', sha: head, state: 'APPROVED' }], protected: true, mergeable: true,
+    reviews: [{ reviewer: 'independent-reviewer', sha, state: 'APPROVED' }], protected: true, mergeable: true,
     merged: false, mergeSha: null, files: ['src/delegation.ts'], at: new Date().toISOString() };
 }
 // Drive an item to an observed candidate, then release the lease so later tests
@@ -59,6 +60,31 @@ async function candidate(actor: Principal, title: string, slice?: SliceId) {
   return engine.execute(actor, 'release', work.id, { epoch: work.epoch }, id());
 }
 const reload = async (work: Work) => (await store.list()).find(item => item.id === work.id)!;
+// The merge queue is global and strictly ordered, so a scenario that needs merge
+// authority has to hold its head. Earlier scenarios in this shared store leave
+// their proven candidates queued; returning those to their workers frees the slot
+// without touching any history.
+async function queueHeadFor(work: Work) {
+  for (const item of await store.list())
+    if (item.queue && item.id !== work.id && item.stage !== 'done')
+      await engine.execute(admin, 'rework', item.id, { reason: 'Scenario complete; release the merge queue slot', previousWorkerStopped: true }, id());
+}
+// A proven candidate with Graphyard's queue tip published for it: merge
+// authorization requires a published speculative tip, so delegation refusals are
+// exercised against the same merge-ready state the broker really sees.
+// Publication itself belongs to the merge-queue scenarios.
+async function publish(work: Work, sha = head) {
+  await queueHeadFor(work);
+  const item = await engine.observe(work.id, (await reload(work)).revision, observation(work, sha));
+  const speculation: QueueSpeculation = { ref: queueRef(item.key), tip: item.candidate!.sha, base: item.candidate!.baseSha,
+    baseTree: 'e'.repeat(40), predecessors: [], policyRevision: item.policyRevision, publishedAt: new Date().toISOString() };
+  await store.pool.query("UPDATE work_items SET document=jsonb_set(document,'{queue,speculation}',$2::jsonb) WHERE id=$1", [item.id, JSON.stringify(speculation)]);
+  return engine.observe(item.id, (await reload(item)).revision, observation(item, sha));
+}
+async function proven(work: Work, sha = head) {
+  const observed = await engine.observe(work.id, (await reload(work)).revision, observation(work, sha));
+  return publish(await engine.execute(reviewer, 'evidence', observed.id, proof({ sha }), id()), sha);
+}
 
 before(async () => {
   database = new EmbeddedPostgres({ databaseDir: await mkdtemp(join(tmpdir(), 'graphyard-delegation-')), user: 'graphyard', password: 'testing-only', port: 15448, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
@@ -191,7 +217,7 @@ test('integration:lead-enforcement — violating lead actions are refused server
   // A blocking ruling is durable delivery state, not advice: it revokes merge
   // authorization in its own transaction and the broker refuses independently.
   let ready = await candidate(workerA, 'lead-blocks-delivery', 'product');
-  ready = await engine.execute(reviewer, 'evidence', ready.id, proof(), id());
+  ready = await proven(ready);
   assert.equal(ready.stage, 'merge');
   assert.ok(ready.mergeAuthorization);
   const observedAt = ready.observation!.at;
@@ -235,7 +261,9 @@ test('integration:lead-enforcement — violating lead actions are refused server
   held = await engine.execute(workerA, 'claim', ready.id, {}, id());
   held = await engine.execute(workerA, 'workspace', ready.id, { epoch: held.epoch, host: 'delegation-host', path: `/tmp/delegation/${ready.id}-redo`, branch: held.workspaces[0].branch }, id());
   held = await engine.execute(workerA, 'submit', ready.id, { epoch: held.epoch, pr: held.submission!.pr }, id());
-  held = await engine.observe(ready.id, held.revision, observation(held));
+  // The redone implementation is a new commit, and it is proved afresh: a
+  // candidate ejected from the merge queue never re-enters on the same head.
+  held = await proven(held, redone);
   assert.equal(held.stage, 'merge');
   assert.ok(held.mergeAuthorization, 'authorization is reissued only after the authorized recovery');
   assert.deepEqual(currentMergeCandidates([held], held.observation!.at).map(w => w.key), [held.key]);
@@ -244,7 +272,7 @@ test('integration:lead-enforcement — violating lead actions are refused server
   // A plan rejection blocks the same way and is superseded by the lead's own
   // approval of the revised plan, which is the one lead-side recovery.
   let planned = await candidate(workerB, 'lead-plan-rejection', 'product');
-  planned = await engine.execute(reviewer, 'evidence', planned.id, proof(), id());
+  planned = await proven(planned);
   assert.ok(planned.mergeAuthorization);
   planned = (await recordLeadRuling(store, lead, planned.id, { action: 'reject-plan', ruleId: 'rules/plan-v1#scope', reason: 'Plan exceeds the written scope' }, id())).work;
   assert.equal(planned.leadHold!.action, 'reject-plan');
@@ -268,7 +296,9 @@ test('integration:lead-enforcement — violating lead actions are refused server
   planned = await engine.execute(workerB, 'claim', planned.id, {}, id());
   planned = await engine.execute(workerB, 'workspace', planned.id, { epoch: planned.epoch, host: 'delegation-host', path: `/tmp/delegation/${planned.id}-revised-plan`, branch: planned.workspaces[0].branch }, id());
   planned = await engine.execute(workerB, 'submit', planned.id, { epoch: planned.epoch, pr: planned.submission!.pr }, id());
-  planned = await engine.observe(planned.id, planned.revision, observation(planned));
+  // The revised implementation is a new commit, proved afresh, because reopening
+  // implementation ejected the previous head from the merge queue.
+  planned = await proven(planned, redone);
   assert.ok(planned.mergeAuthorization, 'authorization returns only through a full gate evaluation');
   assert.deepEqual(currentMergeCandidates([planned], planned.observation!.at).map(w => w.key), [planned.key]);
   await engine.execute(workerB, 'release', planned.id, { epoch: planned.epoch }, id());
@@ -383,7 +413,7 @@ test('integration:exact-candidate-validation — trusted evidence binds the exac
   // evidence stops being applicable the moment its producer joins the append-only
   // implementer set, and the recorded evidence row itself is never rewritten.
   let revoked = await candidate(workerC, 'independence-revoked', 'infrastructure');
-  revoked = await engine.execute(reviewer, 'evidence', revoked.id, proof(), id());
+  revoked = await proven(revoked);
   assert.equal(acceptance(revoked), true);
   assert.ok(revoked.mergeAuthorization);
   assert.deepEqual(currentMergeCandidates([revoked], revoked.observation!.at).map(w => w.key), [revoked.key]);
@@ -409,9 +439,13 @@ test('integration:exact-candidate-validation — trusted evidence binds the exac
   // Re-proving it requires a producer still independent of every implementer.
   await assert.rejects(engine.execute({ ...reviewer, role: 'producer', proofs: ['unit:works'] }, 'evidence', revoked.id, proof(), id()), /distinct from its implementers/);
   revoked = await engine.execute({ id: 'second-proof-runner', role: 'producer', proofs: ['unit:works'], sessionKind: 'ai' }, 'evidence', revoked.id, proof(), id());
-  assert.equal(acceptance(revoked), true);
-  assert.ok(revoked.mergeAuthorization);
-  assert.deepEqual(currentMergeCandidates([revoked], revoked.observation!.at).map(w => w.key), [revoked.key]);
+  assert.equal(revoked.candidate!.sha, head, 'the candidate head is still unchanged');
+  assert.equal(acceptance(revoked), true, 'a still-independent producer restores acceptance without any new commit');
+  assert.equal(revoked.gates.find(gate => gate.name === 'acceptance')!.reasons.join(' '), '');
+  // Delivery itself waits for a new candidate: reopening implementation ejected
+  // this head from the merge queue, and an ejected head never re-enters.
+  assert.match(revoked.gates.find(gate => gate.name === 'merge')!.reasons.join(' '), /Ejected from the merge queue/);
+  assert.deepEqual(currentMergeCandidates([revoked], revoked.observation!.at), []);
   await engine.execute(producerWorker, 'release', revoked.id, { epoch: revoked.epoch }, id());
 });
 
@@ -693,7 +727,7 @@ test('integration:automatic-escalation — every trigger escalates and no lead c
   // An unresolved escalation refuses delivery, even for an otherwise merge-ready
   // candidate, and only a human operator can resolve it.
   let ready = await candidate(workerB, 'escalation-blocks-merge', 'product');
-  ready = await engine.execute(reviewer, 'evidence', ready.id, proof(), id());
+  ready = await proven(ready);
   assert.equal(ready.stage, 'merge');
   assert.ok(ready.mergeAuthorization);
   const observedAt = ready.observation!.at;
@@ -727,7 +761,7 @@ test('integration:automatic-escalation — every trigger escalates and no lead c
   // delivery it refuses. The ruling fences the execution in its own transaction,
   // so neither a pending verification nor a verified one can reach GitHub.
   let pending = await candidate(workerB, 'escalation-fences-pending-merge', 'product');
-  pending = await engine.execute(reviewer, 'evidence', pending.id, proof(), id());
+  pending = await proven(pending);
   const pendingGrant = await engine.acquireMerge(coordinator, pending.id, { expectedRevision: pending.revision, sha: head, baseSha: base, policyRevision: pending.policyRevision }, id());
   const heldBack = (await recordLeadRuling(store, lead, pending.id, { action: 'send-back', ruleId: 'rules/plan-v1#scope', reason: 'Out of agreed scope' }, id())).work;
   assert.ok(heldBack.mergeExecution!.fenced, 'a blocking ruling fences the in-flight execution in its own transaction');
@@ -737,7 +771,7 @@ test('integration:automatic-escalation — every trigger escalates and no lead c
   await engine.cancelMerge(coordinator, pending.id, { executionId: pendingGrant.execution.id, reason: 'Lead send-back fenced the execution' }, id());
 
   let inflight = await candidate(workerB, 'escalation-fences-verified-merge', 'product');
-  inflight = await engine.execute(reviewer, 'evidence', inflight.id, proof(), id());
+  inflight = await proven(inflight);
   const inflightGrant = await engine.acquireMerge(coordinator, inflight.id, { expectedRevision: inflight.revision, sha: head, baseSha: base, policyRevision: inflight.policyRevision }, id());
   await engine.verifyMerge(coordinator, inflight.id, { executionId: inflightGrant.execution.id }, { ...observation(inflight), prState: 'open', draft: false }, id());
   const fenced = (await recordLeadRuling(store, lead, inflight.id, { action: 'escalate', ruleId: 'rules/safety-v2#supply-chain', reason: 'Dependency review reopened', trigger: 'security-concern' }, id())).work;
