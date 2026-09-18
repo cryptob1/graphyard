@@ -82,6 +82,9 @@ export interface Work extends Create {
   delivery?: { mergedAt: string; mergeSha: string; authorizationRevision: number };
   evidence: Evidence[]; observation: Observation | null; blocker: string | null;
   escalation?: { trigger: EscalationTrigger; reason: string; at: string; actor: string } | null;
+  // Durable state for a blocking lead ruling. History records the ruling; this
+  // field is what the gate evaluator and the merge broker read independently.
+  leadHold?: { action: BlockingRulingAction; rulingId: string; leadId: string; slice: SliceId; ruleId: string; reason: string; at: string } | null;
   gates: Gate[]; violations: string[];
 }
 export class Refusal extends Error {
@@ -130,11 +133,82 @@ export function raiseEscalation(work: Work, escalation: NonNullable<Work['escala
   return true;
 }
 
+// Rulings that stop delivery until an authorized recovery clears them. A plan
+// rejection is superseded by a later approve-plan from the same slice lead; a
+// send-back is cleared only by the operator rework lifecycle, which reopens
+// implementation. Ranked so a later ruling can raise, but never weaken, a hold.
+export const blockingRulingActions = ['reject-plan', 'send-back'] as const;
+export type BlockingRulingAction = typeof blockingRulingActions[number];
+export const blockingRulingRank: Record<BlockingRulingAction, number> = { 'reject-plan': 1, 'send-back': 2 };
+export function leadHoldRefusal(work: Work): string | null {
+  return work.leadHold
+    ? `Slice lead ${work.leadHold.leadId} ruled ${work.leadHold.action} under rule ${work.leadHold.ruleId}; delivery is blocked until the authorized recovery: ${work.leadHold.reason}`
+    : null;
+}
+// Applied inside the ruling transaction: the hold is recorded, merge
+// authorization is invalidated, and the merge gate refuses in the same write.
+export function holdDelivery(work: Work, hold: NonNullable<Work['leadHold']>) {
+  const standing = work.leadHold;
+  if (standing && blockingRulingRank[standing.action] > blockingRulingRank[hold.action]) return false;
+  const superseded = leadHoldRefusal(work);
+  work.leadHold = hold;
+  work.mergeAuthorization = null;
+  const merge = work.gates.find(gate => gate.name === 'merge');
+  const reason = leadHoldRefusal(work)!;
+  if (merge) {
+    merge.reasons = merge.reasons.filter(entry => entry !== superseded && entry !== reason);
+    merge.reasons.push(reason);
+    merge.passed = false;
+  }
+  return true;
+}
+// Clearing a hold removes its refusal from the merge gate. Merge authorization is
+// not reissued here: only a full gate evaluation may mint it, so the recovery is
+// fail-closed until the next evaluation confirms every other gate still passes.
+export function releaseLeadHold(work: Work) {
+  const reason = leadHoldRefusal(work);
+  work.leadHold = null;
+  const merge = work.gates.find(gate => gate.name === 'merge');
+  if (!reason || !merge) return;
+  merge.reasons = merge.reasons.filter(entry => entry !== reason);
+  merge.passed = merge.reasons.length === 0;
+}
+
+// Every identity that has held an assignment on this item, including superseded
+// epochs and legacy documents that predate the append-only list.
+export function implementerIdentities(work: Work): string[] {
+  return [...new Set([
+    ...(work.implementers ?? []),
+    ...work.workspaces.map(workspace => workspace.owner),
+    ...(work.lastAssignment ? [work.lastAssignment.owner] : []),
+    ...(work.lease ? [work.lease.owner] : []),
+  ])];
+}
+
+// AC-4 independence is a standing property, not a submission-time check. The
+// implementer set is append-only, so trusted evidence whose producer later takes
+// an assignment stops being applicable, without any history being rewritten. The
+// loss is reported only for proofs no still-independent producer has re-proved,
+// so re-proving the same candidate remains possible.
+export function evidenceIndependenceRefusals(work: Work, now = new Date()): string[] {
+  const implementers = implementerIdentities(work);
+  const refusals: string[] = [];
+  for (const proof of new Set(work.criteria.flatMap(criterion => criterion.proofs))) {
+    if (currentEvidence(work, proof, now)) continue;
+    const superseded = work.evidence.filter(evidence => evidence.proof === proof && evidence.trusted && implementers.includes(evidence.producer)
+      && !!work.candidate && evidence.sha === work.candidate.sha && evidence.baseSha === work.candidate.baseSha && evidence.policyRevision === work.policyRevision);
+    for (const producer of new Set(superseded.map(evidence => evidence.producer)))
+      refusals.push(`Trusted ${proof} evidence from ${producer} is no longer independent: ${producer} has since held an assignment on ${work.key}`);
+  }
+  return refusals;
+}
+
 // Shared by gates and human-facing proof previews.
 export function currentEvidence(work: Work, proof: string, now = new Date()): Evidence | undefined {
   const scenario = work.scenarioRequirements?.find(s => s.proof === proof);
   const validation = work.validation?.[proof];
-  const latest = work.evidence.filter(e => e.proof === proof && e.trusted && e.sha === work.candidate?.sha && e.baseSha === work.candidate?.baseSha && e.policyRevision === work.policyRevision
+  const implementers = implementerIdentities(work);
+  const latest = work.evidence.filter(e => e.proof === proof && e.trusted && !implementers.includes(e.producer) && e.sha === work.candidate?.sha && e.baseSha === work.candidate?.baseSha && e.policyRevision === work.policyRevision
     && (!validation || !!validation.attemptId && e.validation?.candidateId === validation.candidateId && e.validation?.requestId === validation.requestId && e.validation?.attemptId === validation.attemptId)
     && (!scenario || e.scenarioRevision === scenario.revision && e.environment === scenario.environment)).at(-1);
   return latest && (!latest.expiresAt || Date.parse(latest.expiresAt) > now.getTime()) ? latest : undefined;
@@ -172,8 +246,11 @@ export function evaluate(work: Work, all: Work[], now: Date, ciAppIds: number[])
     const evidence = currentEvidence(work, proof, now);
     if (!evidence || evidence.result !== 'pass' || evidence.executed < 1 || evidence.skipped !== 0) reasons.push(`${ac.id}: ${proof} needs trusted passing evidence, with executed > 0 and skipped = 0, for this candidate and policy${scenario ? `; scenario v${scenario.revision} in ${scenario.environment}` : ''}`);
   }
+  // Independence is re-decided on every evaluation, so evidence minted before its
+  // producer joined the implementer set refuses acceptance with a named reason.
+  reasons.push(...evidenceIndependenceRefusals(work, now));
   add('acceptance', reasons);
-  add('merge', [...(!fresh ? ['GitHub observation missing or older than two minutes'] : []), ...(!obs?.protected ? ['Required Graphyard check and strict branch protection have not been verified'] : []), ...(!obs?.mergeable && !obs?.merged ? ['Pull request is not mergeable against the current base'] : []), ...(escalationRefusal(work) ? [escalationRefusal(work)!] : [])]);
+  add('merge', [...(!fresh ? ['GitHub observation missing or older than two minutes'] : []), ...(!obs?.protected ? ['Required Graphyard check and strict branch protection have not been verified'] : []), ...(!obs?.mergeable && !obs?.merged ? ['Pull request is not mergeable against the current base'] : []), ...(escalationRefusal(work) ? [escalationRefusal(work)!] : []), ...(leadHoldRefusal(work) ? [leadHoldRefusal(work)!] : [])]);
   const first = gates.find(g => !g.passed);
   const violations = [...work.violations];
   let stage: Stage = !work.ready ? 'backlog' : !work.submission ? (work.lease && Date.parse(work.lease.expiresAt) > now.getTime() ? 'build' : 'ready') : (first?.name === 'ready' ? 'build' : first?.name as Stage ?? 'merge');

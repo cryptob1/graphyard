@@ -16,7 +16,20 @@ Delivered work is an immutable snapshot. A ruling against an item in `done` is r
 
 Rulings and intake are written with an `Idempotency-Key`. Retrying the identical request returns the original ruling or intake item; reusing a key with different input is refused. A lost response therefore never duplicates an immutable ruling, intake item, or history entry.
 
-Humans retain goals, priorities, policy and requirement changes, evidence-definition changes, waivers, destructive or exceptional promotions, and ambiguity resolution. Routine intake from explicit feedback, recorded defects, unfinished dependencies, and verification findings may enter the backlog automatically. Leads must escalate security concerns, suspected requirement weakening, evidence-policy conflict, and lease loss; these escalations cannot be suppressed.
+Humans retain goals, priorities, policy and requirement changes, evidence-definition changes, waivers, destructive or exceptional promotions, and ambiguity resolution. Those human-only origins require a **declared human session**, not merely an administrative role: an `admin` credential that declares `sessionKind: "ai"`, or declares nothing at all, is refused with `ORIGIN intake requires a declared human session; PRINCIPAL is ai|undeclared`. Routine intake from explicit feedback, recorded defects, unfinished dependencies, and verification findings may enter the backlog automatically, and that routine path is unchanged for every intake-capable credential, so operator automation and the single-agent bootstrap flow keep working without declaring a session kind. Leads must escalate security concerns, suspected requirement weakening, evidence-policy conflict, and lease loss; these escalations cannot be suppressed.
+
+## Blocking rulings and their recovery
+
+`reject-plan` and `send-back` are not advice. Each one records a **lead hold** on the work item in the same transaction that appends the ruling: merge authorization is invalidated immediately, the `merge` gate refuses with `Slice lead LEAD ruled ACTION under rule RULE; delivery is blocked until the authorized recovery: REASON`, and the guarded merge broker refuses the item independently of the stored gates. A merge-ready candidate that its slice lead rejects or sends back therefore stops being deliverable at once, and the hold is durable state that survives re-observation and reconciliation — re-evaluation never quietly reissues authorization while it stands.
+
+Holds are ranked, `send-back` over `reject-plan`, and a later ruling may raise a hold but never weakens one. There are exactly two authorized recoveries:
+
+| Standing hold | Authorized recovery |
+| --- | --- |
+| `reject-plan` | A later `approve-plan` ruling from the same slice lead supersedes the rejection of that plan. |
+| `send-back` | Only `graphyard rework GY-N --previous-worker-stopped REASON` from the human operator, which reopens implementation. No ruling clears it. |
+
+Clearing a hold removes its refusal from the `merge` gate but does not mint merge authorization: only a full gate evaluation may do that, so delivery resumes only once every other gate passes again on the observed candidate. A held item appears as a slice bottleneck naming the ruling that blocked it.
 
 ## Independent proof producers
 
@@ -25,6 +38,8 @@ Trusted evidence must come from a `producer` identity that is independent of bot
 - has ever held an assignment on that item, including superseded epochs and earlier workers whose attempt was reworked;
 - holds `slice-lead` authority for any slice; or
 - is a producer credential bound to the item's own slice.
+
+Independence is a standing property, not a one-time check at submission. The implementer set is append-only, so if a producer identity later takes an assignment on the item — for example by claiming during rework — every trusted proof it produced for that candidate stops being applicable at the next gate evaluation. Acceptance refuses with `Trusted PROOF evidence from PRODUCER is no longer independent: PRODUCER has since held an assignment on GY-N`, merge authorization is dropped, and the broker refuses the item independently. Nothing is rewritten: the evidence row stays in history exactly as produced, and resubmitting the unchanged candidate does not revive it. The item becomes acceptable again only when a producer that is still independent of every implementer proves the required proofs afresh.
 
 Configuration is checked the same way at startup: a producer credential may not reuse a lead's principal ID and may not declare a `slice`, because review/proof agents are shared and slice-independent. Workers may still record their own untrusted assertions — they appear as worker assertions and never satisfy an acceptance gate.
 
@@ -53,7 +68,7 @@ Only the human operator clears one, with `graphyard resolve GY-N TRIGGER "audit 
 
 Defaults are three slice leads, two active engineers per slice lead, and one to two shared independent review/proof agents. Capacity is measured in **engineers**, not leases: an engineer holding two items in a slice appears as two claimed items but occupies one seat, and the claim check refuses only when a distinct additional engineer would exceed the limit. The server reads positive integer overrides from `GRAPHYARD_MAX_SLICE_LEADS`, `GRAPHYARD_MAX_ENGINEERS_PER_LEAD`, `GRAPHYARD_MIN_REVIEWERS`, and `GRAPHYARD_MAX_REVIEWERS`; it refuses configurations or claims above those limits with an explicit reason. Once any slice lead is configured, at least `GRAPHYARD_MIN_REVIEWERS` independent review/proof agents are required; bootstrap, which has no leads, needs none.
 
-Lead credentials use `role: "slice-lead"`, `sessionKind: "ai"`, and one of the formal `slice` identifiers. Principal IDs and bearer tokens remain globally unique, and two leads may not share a token. Declare `sessionKind` on every credential: an undeclared session is reported and displayed as undeclared rather than assumed to be human.
+Lead credentials use `role: "slice-lead"`, `sessionKind: "ai"`, and one of the formal `slice` identifiers. Declare `sessionKind: "human"` on the operator credential a person actually uses, because human-only intake is decided from that declaration rather than from the `admin` role. Principal IDs and bearer tokens remain globally unique, and two leads may not share a token. Declare `sessionKind` on every credential: an undeclared session is reported and displayed as undeclared rather than assumed to be human.
 
 ## What the dashboard shows
 

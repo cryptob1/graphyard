@@ -2,7 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { Store, save, wakeJob } from './store.js';
 import { workspacePath, pathsOverlap, validBranch } from './workspace.js';
-import { activeLease, admin, operatorCapability, escalationTriggers, MergeExecutionInProgress, raiseEscalation, requireCurrent, createSchema, criterionSchema, currentEvidence, resourcesSchema, demand, evaluate, proofSchema, type Principal, type Work, type Observation, type ReviewRequest, type OperatorCapability } from './model.js';
+import { activeLease, admin, operatorCapability, escalationTriggers, MergeExecutionInProgress, raiseEscalation, releaseLeadHold, requireCurrent, createSchema, criterionSchema, currentEvidence, resourcesSchema, demand, evaluate, proofSchema, type Principal, type Work, type Observation, type ReviewRequest, type OperatorCapability } from './model.js';
 import { resourceConflicts } from './coordination.js';
 import { activeEngineers, delegationLimits, implementerIdentities, leadMay, producerIndependenceRefusal } from './delegation.js';
 
@@ -194,6 +194,9 @@ export class Engine {
         work.reworkRequested = true;
         work.containmentQuarantine = null;
         work.lease = null;
+        // The authorized recovery from a blocking lead ruling: reopening
+        // implementation clears the hold. Nothing else clears a send-back.
+        releaseLeadHold(work);
       }
       if (command === 'recover') {
         admin(actor);

@@ -10,7 +10,7 @@ import {
   leadMay, leadPermittedActions, leadRulingActions, mergeOrder, producerIndependenceRefusal, recordIntake, recordLeadRuling,
   routineIntakeOrigins, sessionKind, slices, validateDelegationPrincipals,
 } from '../src/delegation.js';
-import { currentMergeCandidates } from '../src/master.js';
+import { assertMergeCandidate, currentMergeCandidates } from '../src/master.js';
 import { Engine } from '../src/engine.js';
 import { server } from '../src/server.js';
 import { sliceIds, type Observation, type Principal, type SliceId, type Work } from '../src/model.js';
@@ -27,7 +27,11 @@ const workerB: Principal = { id: 'engineer-b', role: 'worker', sessionKind: 'ai'
 const workerC: Principal = { id: 'engineer-c', role: 'worker', sessionKind: 'ai' };
 const reviewer: Principal = { id: 'proof-runner', role: 'producer', proofs: ['unit:works', 'manual:audit'], sessionKind: 'ai', displayName: 'Rowan' };
 const coordinator: Principal = { id: 'merge-broker', role: 'coordinator', sessionKind: 'ai' };
-const roster = [admin, lead, infraLead, docsLead, workerA, workerB, workerC, reviewer, coordinator];
+// Admin credentials whose declared session kind is not human: the role alone must
+// never unlock a human-only intake origin.
+const aiAdmin: Principal = { id: 'automation-admin', role: 'admin', sessionKind: 'ai', displayName: 'Automation' };
+const undeclaredAdmin: Principal = { id: 'legacy-admin', role: 'admin' };
+const roster = [admin, lead, infraLead, docsLead, workerA, workerB, workerC, reviewer, coordinator, aiAdmin, undeclaredAdmin];
 const head = 'a'.repeat(40), base = 'b'.repeat(40);
 let database: EmbeddedPostgres, store: Store, engine: Engine;
 let http: ReturnType<typeof server>, url: string;
@@ -182,6 +186,85 @@ test('integration:lead-enforcement — violating lead actions are refused server
   assert.equal(unscoped.payload.slice, 'product');
   assert.equal(unscoped.payload.targetSlice, 'infrastructure');
   assert.match(unscoped.payload.reason, /targets another slice/);
+
+  // A blocking ruling is durable delivery state, not advice: it revokes merge
+  // authorization in its own transaction and the broker refuses independently.
+  let ready = await candidate(workerA, 'lead-blocks-delivery', 'product');
+  ready = await engine.execute(reviewer, 'evidence', ready.id, proof(), id());
+  assert.equal(ready.stage, 'merge');
+  assert.ok(ready.mergeAuthorization);
+  const observedAt = ready.observation!.at;
+  assert.deepEqual(currentMergeCandidates([ready], observedAt).map(w => w.key), [ready.key]);
+  const sentBack = (await recordLeadRuling(store, lead, ready.id, { action: 'send-back', ruleId: 'rules/plan-v1#coverage', reason: 'Negative coverage is missing' }, id())).work;
+  assert.equal(sentBack.leadHold!.action, 'send-back');
+  assert.equal(sentBack.leadHold!.ruleId, 'rules/plan-v1#coverage');
+  assert.equal(sentBack.leadHold!.leadId, lead.id);
+  assert.equal(sentBack.leadHold!.slice, 'product');
+  assert.equal(sentBack.mergeAuthorization, null, 'the ruling transaction revokes merge authorization');
+  assert.equal(sentBack.gates.find(gate => gate.name === 'merge')!.passed, false);
+  assert.match(sentBack.gates.find(gate => gate.name === 'merge')!.reasons.join(' '), /delivery is blocked until the authorized recovery/);
+  assert.deepEqual(currentMergeCandidates([sentBack], observedAt), [], 'the guarded broker cannot select a sent-back item');
+  assert.throws(() => assertMergeCandidate(sentBack, observedAt), /all-gates-passing merge authorization/);
+  assert.equal((await reload(ready)).mergeAuthorization, null);
+  // Re-evaluation never quietly reissues authorization while the hold stands.
+  let held = await reload(ready);
+  held = await engine.observe(ready.id, held.revision, observation(held));
+  assert.equal(held.mergeAuthorization, null);
+  assert.equal(held.leadHold!.action, 'send-back');
+  await engine.reconcile();
+  held = await reload(ready);
+  assert.equal(held.mergeAuthorization, null);
+  assert.equal(held.leadHold!.action, 'send-back');
+  // No further ruling clears a send-back, and the broker refuses to acquire past it.
+  for (const action of ['approve-plan', 'classify-failure', 'request-rerun'] as const)
+    await recordLeadRuling(store, lead, ready.id, { action, ruleId: 'rules/plan-v1#retry', reason: `Attempted ${action}` }, id());
+  held = await reload(ready);
+  assert.equal(held.leadHold!.action, 'send-back', 'only the operator rework lifecycle clears a send-back');
+  await assert.rejects(engine.acquireMerge(coordinator, ready.id, { expectedRevision: held.revision, sha: head, baseSha: base, policyRevision: 1 }, id()), /Merge authorization is no longer current/);
+  await assert.rejects(engine.execute(lead, 'rework', ready.id, { reason: 'Clearing my own hold', previousWorkerStopped: true }, id()), /Slice leads cannot perform lifecycle mutations/);
+  // The held item is reported as a slice bottleneck naming the ruling.
+  const blocked = delegationSnapshot(roster, await store.list(), Date.now()).slices.find(s => s.id === 'product')!;
+  assert.match(blocked.bottlenecks.find(bottleneck => bottleneck.key === held.key)!.reason, /delivery is blocked until the authorized recovery/);
+  // The authorized recovery reopens implementation; delivery becomes selectable
+  // again only after the redone work is observed.
+  held = await engine.execute(admin, 'rework', ready.id, { reason: 'Send-back accepted; reopening implementation', previousWorkerStopped: true }, id());
+  assert.equal(held.leadHold ?? null, null);
+  assert.equal(held.gates.find(gate => gate.name === 'build')!.passed, false);
+  assert.equal(held.mergeAuthorization, null);
+  held = await engine.execute(workerA, 'claim', ready.id, {}, id());
+  held = await engine.execute(workerA, 'workspace', ready.id, { epoch: held.epoch, host: 'delegation-host', path: `/tmp/delegation/${ready.id}-redo`, branch: held.workspaces[0].branch }, id());
+  held = await engine.execute(workerA, 'submit', ready.id, { epoch: held.epoch, pr: held.submission!.pr }, id());
+  held = await engine.observe(ready.id, held.revision, observation(held));
+  assert.equal(held.stage, 'merge');
+  assert.ok(held.mergeAuthorization, 'authorization is reissued only after the authorized recovery');
+  assert.deepEqual(currentMergeCandidates([held], held.observation!.at).map(w => w.key), [held.key]);
+  await engine.execute(workerA, 'release', ready.id, { epoch: held.epoch }, id());
+
+  // A plan rejection blocks the same way and is superseded by the lead's own
+  // approval of the revised plan, which is the one lead-side recovery.
+  let planned = await candidate(workerB, 'lead-plan-rejection', 'product');
+  planned = await engine.execute(reviewer, 'evidence', planned.id, proof(), id());
+  assert.ok(planned.mergeAuthorization);
+  planned = (await recordLeadRuling(store, lead, planned.id, { action: 'reject-plan', ruleId: 'rules/plan-v1#scope', reason: 'Plan exceeds the written scope' }, id())).work;
+  assert.equal(planned.leadHold!.action, 'reject-plan');
+  assert.equal(planned.mergeAuthorization, null);
+  assert.deepEqual(currentMergeCandidates([planned], planned.observation!.at), []);
+  planned = (await recordLeadRuling(store, lead, planned.id, { action: 'approve-plan', ruleId: 'rules/plan-v1#approval', reason: 'Revised plan is inside scope' }, id())).work;
+  assert.equal(planned.leadHold ?? null, null);
+  assert.equal(planned.gates.find(gate => gate.name === 'merge')!.passed, true);
+  planned = await engine.observe(planned.id, planned.revision, observation(planned));
+  assert.ok(planned.mergeAuthorization, 'authorization returns only through a full gate evaluation');
+  assert.deepEqual(currentMergeCandidates([planned], planned.observation!.at).map(w => w.key), [planned.key]);
+
+  // Holds are ranked and never weakened: a send-back raised over a plan rejection
+  // survives both a later rejection and a later approval.
+  const ranked = await engine.execute(admin, 'create', null, input('lead-hold-rank', 'product'), id());
+  const rule = { ruleId: 'rules/plan-v1#scope', reason: 'Scope ruling' };
+  assert.equal((await recordLeadRuling(store, lead, ranked.id, { action: 'reject-plan', ...rule }, id())).work.leadHold!.action, 'reject-plan');
+  assert.equal((await recordLeadRuling(store, lead, ranked.id, { action: 'send-back', ...rule }, id())).work.leadHold!.action, 'send-back');
+  assert.equal((await recordLeadRuling(store, lead, ranked.id, { action: 'reject-plan', ...rule }, id())).work.leadHold!.action, 'send-back');
+  assert.equal((await recordLeadRuling(store, lead, ranked.id, { action: 'approve-plan', ...rule }, id())).work.leadHold!.action, 'send-back');
+  assert.equal((await reload(ranked)).leadHold!.action, 'send-back');
 });
 
 test('integration:ownership-and-delivery-invariants — Graphyard owns leases, worktrees, and the only merge path', async () => {
@@ -259,6 +342,41 @@ test('integration:exact-candidate-validation — trusted evidence binds the exac
   assert.match(recorded.payload.reason, /distinct from its implementers/);
   assert.deepEqual((await reload(coLocated)).evidence, []);
   await engine.execute({ id: reviewer.id, role: 'worker' }, 'release', coLocated.id, { epoch: coLocated.epoch }, id());
+
+  // Independence is a standing property, re-decided on every evaluation: trusted
+  // evidence stops being applicable the moment its producer joins the append-only
+  // implementer set, and the recorded evidence row itself is never rewritten.
+  let revoked = await candidate(workerC, 'independence-revoked', 'infrastructure');
+  revoked = await engine.execute(reviewer, 'evidence', revoked.id, proof(), id());
+  assert.equal(acceptance(revoked), true);
+  assert.ok(revoked.mergeAuthorization);
+  assert.deepEqual(currentMergeCandidates([revoked], revoked.observation!.at).map(w => w.key), [revoked.key]);
+  const evidenceBefore = structuredClone(revoked.evidence);
+  const producerWorker: Principal = { id: reviewer.id, role: 'worker' };
+  revoked = await engine.execute(admin, 'rework', revoked.id, { reason: 'Producer takes over the implementation', previousWorkerStopped: true }, id());
+  revoked = await engine.execute(producerWorker, 'claim', revoked.id, {}, id());
+  assert.ok(implementerIdentities(revoked).includes(reviewer.id));
+  assert.equal(acceptance(revoked), false, 'acceptance recomputes independence against the current implementer set');
+  assert.match(revoked.gates.find(gate => gate.name === 'acceptance')!.reasons.join(' '), new RegExp(`Trusted unit:works evidence from ${reviewer.id} is no longer independent`));
+  assert.equal(revoked.mergeAuthorization, null, 'merge authorization is revoked by the same evaluation');
+  assert.deepEqual(revoked.evidence, evidenceBefore, 'history is recomputed against, never mutated');
+  // Resubmitting the unchanged candidate does not revive the superseded evidence.
+  revoked = await engine.execute(producerWorker, 'workspace', revoked.id, { epoch: revoked.epoch, host: 'delegation-host', path: `/tmp/delegation/${revoked.id}-producer`, branch: revoked.workspaces[0].branch }, id());
+  revoked = await engine.execute(producerWorker, 'submit', revoked.id, { epoch: revoked.epoch, pr: revoked.submission!.pr }, id());
+  revoked = await engine.observe(revoked.id, revoked.revision, observation(revoked));
+  assert.equal(revoked.candidate!.sha, head, 'the candidate head is unchanged');
+  assert.equal(acceptance(revoked), false);
+  assert.equal(revoked.mergeAuthorization, null);
+  assert.notEqual(revoked.stage, 'merge');
+  assert.deepEqual(currentMergeCandidates([revoked], revoked.observation!.at), [], 'the guarded broker refuses it independently');
+  assert.throws(() => assertMergeCandidate(revoked, revoked.observation!.at), /all-gates-passing merge authorization/);
+  // Re-proving it requires a producer still independent of every implementer.
+  await assert.rejects(engine.execute({ ...reviewer, role: 'producer', proofs: ['unit:works'] }, 'evidence', revoked.id, proof(), id()), /distinct from its implementers/);
+  revoked = await engine.execute({ id: 'second-proof-runner', role: 'producer', proofs: ['unit:works'], sessionKind: 'ai' }, 'evidence', revoked.id, proof(), id());
+  assert.equal(acceptance(revoked), true);
+  assert.ok(revoked.mergeAuthorization);
+  assert.deepEqual(currentMergeCandidates([revoked], revoked.observation!.at).map(w => w.key), [revoked.key]);
+  await engine.execute(producerWorker, 'release', revoked.id, { epoch: revoked.epoch }, id());
 });
 
 test('unit:intake-classification — routine and human-only origins are explicitly separated', () => {
@@ -282,6 +400,35 @@ test('integration:intake-authority-routing — routine intake is autonomous, hum
     const item = await recordIntake(store, admin, { origin, title: `Human ${origin}`, description: '' }, id());
     assert.equal(item.state, 'backlog');
   }
+  // The admin role alone is not a human operator: a human-only origin requires a
+  // declared human session, so an AI-declared or unlabelled admin is refused.
+  for (const origin of humanOnlyIntakeOrigins) {
+    await assert.rejects(recordIntake(store, aiAdmin, { origin, title: `AI admin ${origin}`, description: '' }, id()),
+      new RegExp(`${origin} intake requires a declared human session; automation-admin is ai`));
+    await assert.rejects(recordIntake(store, undeclaredAdmin, { origin, title: `Undeclared admin ${origin}`, description: '' }, id()),
+      new RegExp(`${origin} intake requires a declared human session; legacy-admin is undeclared`));
+  }
+  assert.equal((await store.pool.query('SELECT 1 FROM intake_items WHERE title LIKE $1', ['AI admin %'])).rowCount, 0);
+  assert.equal((await store.pool.query('SELECT 1 FROM intake_items WHERE title LIKE $1', ['Undeclared admin %'])).rowCount, 0);
+  assert.equal((await store.events()).filter(event => event.kind === 'intake.created' && /^(AI|Undeclared) admin /.test(event.payload.intake.title)).length, 0);
+  // Routine intake is untouched for those same credentials, so existing operator
+  // automation and the single-agent bootstrap path keep working unchanged.
+  for (const actor of [aiAdmin, undeclaredAdmin]) {
+    const routine = await recordIntake(store, actor, { origin: 'verification-finding', title: `Routine from ${actor.id}`, description: '' }, id());
+    assert.equal(routine.state, 'backlog');
+    assert.equal(routine.submittedBy, actor.id);
+  }
+  // Over HTTP a real AI-declared admin credential is refused the same way.
+  const aiIntake = await fetch(`${url}/api/intake`, { method: 'POST',
+    headers: { Authorization: `Bearer ${credentials.find(c => c.id === aiAdmin.id)!.token}`, 'Content-Type': 'application/json', 'Idempotency-Key': id() },
+    body: JSON.stringify({ origin: 'waiver', title: 'AI waiver over HTTP', description: '' }) });
+  assert.equal(aiIntake.status, 403);
+  assert.match((await aiIntake.json()).error, /waiver intake requires a declared human session/);
+  const humanIntake = await fetch(`${url}/api/intake`, { method: 'POST',
+    headers: { Authorization: `Bearer ${credentials.find(c => c.id === admin.id)!.token}`, 'Content-Type': 'application/json', 'Idempotency-Key': id() },
+    body: JSON.stringify({ origin: 'waiver', title: 'Human waiver over HTTP', description: '' }) });
+  assert.equal(humanIntake.status, 200);
+  assert.equal((await humanIntake.json()).origin, 'waiver');
   await assert.rejects(recordIntake(store, workerA, { origin: 'defect', title: 'Worker intake', description: '' }, id()), /Intake permission required/);
   await assert.rejects(recordIntake(store, reviewer, { origin: 'defect', title: 'Producer intake', description: '' }, id()), /Intake permission required/);
   const rows = await store.pool.query('SELECT origin FROM intake_items');
@@ -575,6 +722,10 @@ test('integration:bootstrap-compatibility — the single-agent bootstrap flow is
   }
   assert.equal(peers.length, 3);
   assert.ok(peers.every(peer => peer.lease));
+  // A bootstrap operator with no declared session kind still files routine intake.
+  const bootstrapIntake = await recordIntake(store, undeclaredAdmin, { origin: 'defect', title: 'Bootstrap defect', description: '' }, id());
+  assert.equal(bootstrapIntake.state, 'backlog');
+  await assert.rejects(recordIntake(store, undeclaredAdmin, { origin: 'goal', title: 'Bootstrap goal', description: '' }, id()), /declared human session/);
   const snapshot = delegationSnapshot([admin, workerA], await store.list(), Date.now());
   assert.deepEqual(snapshot.slices.map(slice => slice.lead), [null, null, null]);
   assert.deepEqual(snapshot.reviewers, []);

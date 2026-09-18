@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import type pg from 'pg';
 import { z } from 'zod';
-import { demand, escalationTriggers, operatorScopeIncludes, raiseEscalation, sliceIds, type Principal, type SliceId, type Work } from './model.js';
+import { blockingRulingActions, demand, escalationTriggers, holdDelivery, implementerIdentities, releaseLeadHold, operatorScopeIncludes, raiseEscalation, leadHoldRefusal, sliceIds, type BlockingRulingAction, type Principal, type SliceId, type Work } from './model.js';
 import { save, type Store } from './store.js';
 import { fileConflicts, resourceConflicts } from './coordination.js';
 
@@ -75,16 +75,7 @@ export function validateDelegationPrincipals(principals: (Principal & { token?: 
   if (leads.length) demand(reviewers.length >= limits.minReviewers, `Slice delegation requires at least ${limits.minReviewers} independent review/proof agent(s): ${reviewers.length} configured`);
 }
 
-// Every identity that has held an assignment on this item, including superseded
-// epochs and legacy documents that predate the append-only list.
-export function implementerIdentities(work: Work): string[] {
-  return [...new Set([
-    ...(work.implementers ?? []),
-    ...work.workspaces.map(workspace => workspace.owner),
-    ...(work.lastAssignment ? [work.lastAssignment.owner] : []),
-    ...(work.lease ? [work.lease.owner] : []),
-  ])];
-}
+export { implementerIdentities } from './model.js';
 
 // AC-4 independence, decided from the work item's own history and the configured
 // roster, so trust cannot be minted by an implementer or by lead authority.
@@ -120,8 +111,8 @@ export function delegationSnapshot(principals: Principal[], work: Work[], now: n
     return { ...slice, lead: lead ? identify(lead.id) : null,
       engineers: [...activeEngineers(items, slice.id, now)].map(identify),
       workers: workers.map(w => ({ key: w.key, ...identify(w.lease!.owner) })),
-      bottlenecks: items.filter(w => w.blocker || w.escalation || w.gates.some(g => !g.passed))
-        .map(w => ({ key: w.key, reason: w.blocker ?? w.escalation?.reason ?? w.gates.find(g => !g.passed)?.reasons[0] ?? 'Awaiting a gate decision' })) };
+      bottlenecks: items.filter(w => w.blocker || w.escalation || w.leadHold || w.gates.some(g => !g.passed))
+        .map(w => ({ key: w.key, reason: w.blocker ?? w.escalation?.reason ?? leadHoldRefusal(w) ?? w.gates.find(g => !g.passed)?.reasons[0] ?? 'Awaiting a gate decision' })) };
   }), reviewers: principals.filter(p => p.role === 'producer').map(p => identify(p.id)) };
 }
 
@@ -145,6 +136,14 @@ export async function recordLeadRuling(store: Store, actor: Principal, id: strin
     // Append-only: a later ruling never overwrites or clears a standing escalation,
     // and raising one refuses the merge gate in this same transaction.
     if (data.action === 'escalate') raiseEscalation(work, { trigger: data.trigger!, reason: data.reason, at: ruling.at, actor: actor.id });
+    // A blocking ruling is not advice: it takes merge authorization away in this
+    // same transaction and leaves durable state the gate and the broker refuse on.
+    if ((blockingRulingActions as readonly string[]).includes(data.action))
+      holdDelivery(work, { action: data.action as BlockingRulingAction, rulingId: ruling.id, leadId: actor.id, slice: actor.slice!, ruleId: data.ruleId, reason: data.reason, at: ruling.at });
+    // The one lead-side recovery: approving a plan supersedes that plan's own
+    // rejection. A send-back demands new implementation, so only the operator
+    // rework lifecycle clears it.
+    if (data.action === 'approve-plan' && work.leadHold?.action === 'reject-plan') releaseLeadHold(work);
     await save(db, work, actor.id, `lead.${data.action}`, now, { ruleId: data.ruleId, reason: data.reason, ...(data.trigger ? { trigger: data.trigger } : {}) });
     return { ruling, work };
   });
@@ -179,7 +178,13 @@ export async function recordEvidenceRefusal(store: Store, actor: Principal, id: 
 export async function recordIntake(store: Store, actor: Principal, input: unknown, key: string) {
   const data = intakeSchema.parse(input);
   demand(actor.role === 'admin' || actor.role === 'operator-agent' || actor.role === 'slice-lead', 'Intake permission required', 403);
-  if (actor.role !== 'admin') demand(classifyIntake(data.origin) === 'routine', `${data.origin} intake is human-only`, 403);
+  // Human-only origins belong to a declared human session, not to a role. An
+  // admin credential that declares `ai`, or declares nothing, is not a human
+  // operator. Routine intake is untouched, so bootstrap coordination is unchanged.
+  if (classifyIntake(data.origin) !== 'routine') {
+    demand(actor.role === 'admin', `${data.origin} intake is human-only`, 403);
+    demand(sessionKind(actor) === 'human', `${data.origin} intake requires a declared human session; ${actor.id} is ${sessionKind(actor)}`, 403);
+  }
   return once(store, actor, key, { command: 'intake', data }, async (db, now) => {
     if (data.sourceWorkId) {
       // Existence is not authority: the cited source must be inside the actor's
