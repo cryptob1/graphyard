@@ -119,16 +119,25 @@ test('isolation refuses overlapping, shared or pre-populated execution boundarie
   await rm(shared);
 }));
 
-test('the container identity is never root, whatever the runner configures', async () => boundary(async ({ plan }) => {
+test('the container identity is explicit and never root', async () => boundary(async ({ plan }) => {
   // `0:0` with a root-owned boundary would otherwise pass every structural check and run
   // both browser phases as root against a hostile deployment.
   for (const runAsUser of ['0:0', '0:10001', '10001:0']) {
     assert.throws(() => executionPlanSchema.parse({ ...plan, runAsUser }), /non-root UID and GID/, runAsUser);
   }
   assert.equal(executionPlanSchema.parse({ ...plan, runAsUser: '10001:10002' }).runAsUser, '10001:10002');
-  // The default is this attestor's own unprivileged identity, and never root either.
-  const { runAsUser: fallback, ...withoutUser } = plan;
-  assert.ok(!executionPlanSchema.parse(withoutUser).runAsUser.split(':').includes('0'));
+  const { runAsUser: _runAsUser, ...withoutUser } = plan;
+  assert.throws(() => executionPlanSchema.parse(withoutUser), /runAsUser/);
+}));
+
+test('the documented distinct container user works with the attestor in the boundary group supplementarily', async () => boundary(async ({ plan }) => {
+  const boundaryGid = Number(runAsUser.split(':')[1]);
+  const containerUid = attestorUid === 10001 ? 10002 : 10001;
+  const documented = { ...plan, runAsUser: `${containerUid}:${boundaryGid}` };
+  assert.notEqual(containerUid, attestorUid, 'the container must not share the attestor account');
+  // Model an attestor whose unrelated primary group is 30001 and whose membership in the
+  // output boundary group is supplementary, as in the setup guide's usermod command.
+  await assert.doesNotReject(isolation(documented, { uid: attestorUid, gids: [30001, boundaryGid] }));
 }));
 
 test('a sticky ancestor is exempt from the mode rule only, never from ownership', async () => {

@@ -52,7 +52,7 @@ export const executionPlanSchema = z.object({
   // Unprivileged, and carrying the group that the attempt boundary is shared through: the
   // container writes its report as a member of that group, and the attestor and collector
   // read it as members of the same group. Never root, and never the runner's own identity.
-  runAsUser: containerUser.default(() => `${process.getuid?.() || 10001}:${process.getgid?.() || 10001}`),
+  runAsUser: containerUser,
   testAccountEnvFile: absolute.optional(),
 }).strict();
 export type ExecutionPlan = z.infer<typeof executionPlanSchema>;
@@ -60,12 +60,12 @@ export type ExecutionPlan = z.infer<typeof executionPlanSchema>;
  * What the runner account configures locally. Everything that decides *what* is approved
  * — the target, the bundle and image digests, the isolated network, the attestor's public
  * key and execution host — comes from the operator-versioned registration through the
- * dispatch grant, never from this file. `runAsUser` is deliberately left unresolved here:
- * the container identity is a fact about the execution host, so the attestor's own
- * default applies when an operator has not pinned one.
+ * dispatch grant, never from this file. `runAsUser` is required because the dedicated
+ * container UID and boundary-group GID are execution-host facts. Defaulting either to
+ * the attestor would collapse identities or select its unrelated primary group.
  */
 export const runnerPlanSchema = executionPlanSchema.omit({ grant: true, runAsUser: true }).extend({
-  runAsUser: containerUser.optional(),
+  runAsUser: containerUser,
   registration: z.object({ id: z.string(), revision: z.number().int().positive() }).strict(),
   // How this host reaches the operator's attestor, for example
   // `sudo -n -u graphyard-attestor /usr/local/bin/graphyard runner supervise`.

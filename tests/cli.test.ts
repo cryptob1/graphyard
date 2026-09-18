@@ -663,7 +663,7 @@ test('the packaged runner path is usable from the CLI and refuses evidence-produ
 
     const plan = join(cwd, 'runner.json');
     await writeFile(plan, JSON.stringify({ registration: { id: 'preview-runner', revision: 1 }, imageRepository: 'example/graphyard-runner',
-      oraclePath: oracle, outputPath: join(cwd, 'out'), timeoutMs: 60_000,
+      oraclePath: oracle, outputPath: join(cwd, 'out'), timeoutMs: 60_000, runAsUser: `${process.getuid!()}:${process.getgid!()}`,
       supervisor: { command: process.execPath, args: [launcher, 'runner', 'supervise'] } }));
     // A producer credential could publish evidence about its own execution.
     await assert.rejects(exec(process.execPath, [launcher, 'runner', 'attempt', plan], { cwd, env }), /worker-scoped runner credential/);
@@ -738,7 +738,7 @@ test('the runner holds authority while the host attestor executes and signs the 
     const attestorEnv = { ...env, GRAPHYARD_ATTESTOR_KEY: key };
     const plan = join(cwd, 'runner.json');
     await writeFile(plan, JSON.stringify({ registration: { id: 'preview-runner', revision: 1 }, imageRepository: 'example/graphyard-runner',
-      oraclePath: oracle, outputPath: output, timeoutMs: 60_000,
+      oraclePath: oracle, outputPath: output, timeoutMs: 60_000, runAsUser: `${process.getuid!()}:${process.getgid!()}`,
       supervisor: { command: process.execPath, args: [launcher, 'runner', 'supervise'] } }));
     const attempt = JSON.parse((await exec(process.execPath, [launcher, 'runner', 'attempt', plan], { cwd, env: attestorEnv, maxBuffer: 8 << 20 })).stdout);
 
@@ -757,7 +757,7 @@ test('the runner holds authority while the host attestor executes and signs the 
     // The attestor refuses to sign at all without a private key of its own, and refuses a
     // key any other account on the host could read.
     const supervision = JSON.stringify({ plan: { grant: attempt.record.grant, imageRepository: 'example/graphyard-runner',
-      oraclePath: oracle, outputPath: output, timeoutMs: 60_000 } });
+      oraclePath: oracle, outputPath: output, timeoutMs: 60_000, runAsUser: `${process.getuid!()}:${process.getgid!()}` } });
     const supervise = (settings: NodeJS.ProcessEnv) => exec(process.execPath, [launcher, 'runner', 'supervise'], { cwd, env: settings, input: `${supervision}\n{"proceed":true}\n` } as any);
     await assert.rejects(supervise(env), /GRAPHYARD_ATTESTOR_KEY/);
     await chmod(key, 0o644);

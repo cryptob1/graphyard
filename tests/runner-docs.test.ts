@@ -22,10 +22,15 @@ test('the documented runner configuration parses as the runner plan the CLI read
   // The collection root, not one attempt's directory: the attestor provisions a fresh
   // boundary per attempt beneath it, which is what lets a second attempt run at all.
   assert.equal(plan.outputPath, '/srv/graphyard/attempts');
+  assert.equal(plan.runAsUser, '10001:20001');
+  assert.notEqual(plan.runAsUser.split(':')[0], plan.runAsUser.split(':')[1], 'the documented container account and boundary group use distinct numeric identities');
   // Nothing that decides what is approved may be configured locally.
   for (const authority of ['grant', 'targetUrl', 'bundleDigest', 'executionNetwork', 'attestationPublicKey', 'executionHost']) {
     assert.throws(() => runnerPlanSchema.parse({ ...sample('supervisor'), [authority]: 'x' }), new RegExp('unrecognized|Unrecognized', 'i'), authority);
   }
+  const { runAsUser: _runAsUser, ...missingContainerIdentity } = sample('supervisor');
+  assert.throws(() => runnerPlanSchema.parse(missingContainerIdentity), /runAsUser/,
+    'the CLI must not guess the container UID or boundary GID from the attestor process');
 });
 
 test('the documented collector configuration carries the whole dispatch authority', () => {
