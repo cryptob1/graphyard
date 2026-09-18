@@ -1,6 +1,7 @@
 import { execFileSync, spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { readdirSync, readFileSync } from 'node:fs';
+import { readdirSync, readFileSync, readlinkSync, realpathSync, statSync } from 'node:fs';
+import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 
 interface Renewal { lease: { epoch: number; expiresAt: string } | null; updatedAt: string }
@@ -215,4 +216,107 @@ export async function supervise(command: string, args: string[], epoch: number, 
       } catch (error) { finish(error); }
     })();
   });
+}
+
+export interface SupervisorProbeTarget { key: string; epoch: number; workspacePath: string }
+export interface SupervisorProbeDeps {
+  platform?: NodeJS.Platform;
+  uid?: number;
+  listProcesses?: () => string[];
+  readCommand?: (pid: number) => string;
+  processOwner?: (pid: number) => number;
+  readCwd?: (pid: number) => string;
+  readCgroup?: (controlGroup: string) => string;
+  resolvePath?: (path: string) => string;
+  run?: (command: string, args: string[]) => string;
+}
+
+const vanished = (error: unknown) => ['ENOENT', 'ESRCH'].includes((error as { code?: string }).code ?? '');
+const detail = (error: unknown) => (error instanceof Error ? error.message : String(error)).replace(/[ -]+/g, ' ').slice(0, 200);
+const scopePattern = /^graphyard-watch-[A-Za-z0-9:@._-]+\.scope$/;
+const liveScope = ['active', 'activating', 'deactivating', 'reloading'];
+
+/**
+ * Observe, on the registered host, whether a contained worker is still running.
+ *
+ * This reports what it could see and what it could not: a signal it failed to collect is
+ * never the same as an absence. Command lines identify a supervisor regardless of its
+ * owner; working directories and containment scopes are readable only for the probing
+ * user's own processes and user manager, which is the boundary local dispatch uses.
+ */
+export function probeSupervisorAbsence(target: SupervisorProbeTarget, deps: SupervisorProbeDeps = {}) {
+  const platform = deps.platform ?? process.platform;
+  const uid = deps.uid ?? (typeof process.getuid === 'function' ? process.getuid()! : 0);
+  const processes: { pid: number; evidence: 'command' | 'workspace' }[] = [];
+  const scopes: { unit: string; activeState: string; processes: number[] }[] = [];
+  const unverifiable: string[] = [];
+  let inaccessible = 0;
+  const record = () => ({ method: 'linux-proc-systemd' as const, platform: String(platform), uid, workspacePath: target.workspacePath, processes, scopes, inaccessible, unverifiable });
+  if (platform !== 'linux') {
+    unverifiable.push(`Supervisor absence requires Linux process and systemd scope inspection; this host reports ${platform}`);
+    return record();
+  }
+  const listProcesses = deps.listProcesses ?? (() => readdirSync('/proc'));
+  const readCommand = deps.readCommand ?? ((pid: number) => readFileSync(`/proc/${pid}/cmdline`, 'utf8'));
+  const processOwner = deps.processOwner ?? ((pid: number) => statSync(`/proc/${pid}`).uid);
+  const readCwd = deps.readCwd ?? ((pid: number) => readlinkSync(`/proc/${pid}/cwd`));
+  const readCgroup = deps.readCgroup ?? ((controlGroup: string) => readFileSync(join('/sys/fs/cgroup', controlGroup, 'cgroup.procs'), 'utf8'));
+  const run = deps.run ?? ((command: string, args: string[]) => String(execFileSync(command, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 15_000 })));
+  const resolvePath = deps.resolvePath ?? ((path: string) => { try { return realpathSync(path); } catch { return path; } });
+  const workspace = resolvePath(target.workspacePath);
+  // A working directory is readable for this user's ordinary processes and withheld for
+  // privileged ones, so an unreadable answer is 'not inspectable', never 'not the worker'.
+  const workspaceMember = (pid: number): 'inside' | 'outside' | 'gone' | 'unreadable' => {
+    try { const cwd = readCwd(pid); return cwd === workspace || cwd.startsWith(`${workspace}/`) ? 'inside' : 'outside'; }
+    catch (error) { return vanished(error) ? 'gone' : 'unreadable'; }
+  };
+  let pids: number[] = [];
+  try { pids = listProcesses().filter(name => /^\d+$/.test(name)).map(Number); }
+  catch (error) { unverifiable.push(`Host process table could not be read: ${detail(error)}`); }
+  for (const pid of pids) {
+    let argv: string[];
+    try { argv = readCommand(pid).split(' ').filter(Boolean); }
+    catch (error) { if (!vanished(error)) unverifiable.push(`Command line of process ${pid} could not be read: ${detail(error)}`); continue; }
+    // The supervisor is identified by its own command line, which every user can read.
+    if (argv.includes('watch') && argv.includes(target.key) && argv.includes(String(target.epoch))) { processes.push({ pid, evidence: 'command' }); continue; }
+    let owner: number;
+    try { owner = processOwner(pid); }
+    catch (error) { if (!vanished(error)) unverifiable.push(`Owner of process ${pid} could not be read: ${detail(error)}`); continue; }
+    // Another user's descendants are outside this sweep; local dispatch runs the worker as
+    // the coordinator's user, and the containment scope below covers the contained tree.
+    if (owner !== uid) continue;
+    const membership = workspaceMember(pid);
+    if (membership === 'inside') processes.push({ pid, evidence: 'workspace' });
+    if (membership === 'unreadable') inaccessible++;
+  }
+  try { run('systemctl', ['--user', 'show-environment']); }
+  catch (error) {
+    unverifiable.push(`systemd user manager is unavailable, so containment scopes cannot be queried: ${detail(error)}`);
+    return record();
+  }
+  let units: string[] = [];
+  try {
+    units = [...new Set(run('systemctl', ['--user', 'list-units', '--all', '--plain', '--no-legend', '--type=scope', 'graphyard-watch-*.scope'])
+      .split(/\r?\n/).map(line => line.trim().replace(/^[^A-Za-z0-9]+/, '').split(/\s+/)[0]).filter(unit => scopePattern.test(unit)))];
+  } catch (error) { unverifiable.push(`Containment scope query failed: ${detail(error)}`); return record(); }
+  for (const unit of units) {
+    try {
+      const properties = run('systemctl', ['--user', 'show', '--property=LoadState', '--property=ActiveState', '--property=ControlGroup', unit]).split(/\r?\n/);
+      const property = (name: string) => properties.find(line => line.startsWith(`${name}=`))?.slice(name.length + 1).trim() ?? '';
+      const activeState = property('ActiveState'), controlGroup = property('ControlGroup');
+      if (!activeState) { unverifiable.push(`systemd reported no state for containment scope ${unit}`); continue; }
+      if (property('LoadState') === 'not-found' || !liveScope.includes(activeState)) { scopes.push({ unit, activeState, processes: [] }); continue; }
+      if (!controlGroup) { unverifiable.push(`Containment scope ${unit} is ${activeState} without a readable control group`); continue; }
+      let members: number[];
+      try { members = readCgroup(controlGroup).split(/\s+/).filter(value => /^\d+$/.test(value)).map(Number); }
+      catch (error) { if (!vanished(error)) throw error; members = []; }
+      // A live scope belongs to another assignment only when every member it still holds
+      // demonstrably works elsewhere. One uninspectable member leaves the scope unresolved.
+      const membership = members.map(pid => [pid, workspaceMember(pid)] as const);
+      for (const [pid] of membership.filter(([, state]) => state === 'unreadable'))
+        unverifiable.push(`Containment scope ${unit} holds process ${pid} whose working directory could not be read`);
+      scopes.push({ unit, activeState, processes: membership.filter(([, state]) => state === 'inside').map(([pid]) => pid) });
+    } catch (error) { unverifiable.push(`Containment scope ${unit} could not be inspected: ${detail(error)}`); }
+  }
+  return record();
 }

@@ -4,6 +4,7 @@ import { Store, save, wakeJob } from './store.js';
 import { workspacePath, pathsOverlap, validBranch } from './workspace.js';
 import { activeLease, admin, assertReviewerProfiles, operatorCapability, MergeExecutionInProgress, requireCurrent, createSchema, criterionSchema, currentEvidence, resourcesSchema, demand, evaluate, exhaustedReviewerProfiles, proofSchema, reviewerProfileFor, reviewerProfileSchema, reviewProviders, reviewProviderOf, type Principal, type ReviewerApp, type ReviewFailover, type Work, type Observation, type ReviewRequest, type OperatorCapability } from './model.js';
 import { resourceConflicts } from './coordination.js';
+import { containmentAttestation, containmentSettlementRefusals, containmentVerificationSchema } from './quarantine.js';
 import { queueHistoryLimit, type QueueSpeculation } from './merge-queue.js';
 
 const epoch = z.number().int().positive();
@@ -34,6 +35,7 @@ const commands = {
   quarantine: z.object({ epoch, settlementHash: z.string().regex(/^[a-f0-9]{64}$/) }).strict(),
   launch: z.object({ epoch, settlementHash: z.string().regex(/^[a-f0-9]{64}$/) }).strict(),
   settle: z.object({ epoch, settlementToken: z.string().regex(/^[a-f0-9]{64}$/) }).strict(),
+  autosettle: z.object({ epoch, settlementHash: z.string().regex(/^[a-f0-9]{64}$/), reason: z.string().trim().min(1).max(2000), verification: containmentVerificationSchema }).strict(),
   release: z.object({ epoch }).strict(),
   workspace: z.object({ epoch, host: z.string().trim().min(1).max(200), path: z.string().startsWith('/').max(1000).refine(p => !/[\u0000-\u001f]/.test(p), 'Invalid path').transform(workspacePath), branch: z.string().max(200).refine(validBranch, 'Invalid Graphyard branch name') }).strict(),
   submit: z.object({ epoch, pr: z.number().int().positive() }).strict(),
@@ -118,11 +120,12 @@ export class Engine {
         if (command === 'ready') demand(work.stage === 'backlog' && !work.ready, 'Only unreleased backlog work can be released');
         if (command === 'unblock') demand(work.blocker, 'Task has no blocker to clear');
       }
-      const deliveredContainmentCleanup = work.stage === 'done' && (command === 'settle' || command === 'recover');
+      const containmentCleanup = ['settle', 'recover', 'autosettle'];
+      const deliveredContainmentCleanup = work.stage === 'done' && containmentCleanup.includes(command);
       preserveAssignment(work);
-      if (!['recover', 'settle'].includes(command) && work.mergeExecution && Date.parse(work.mergeExecution.expiresAt) <= now.getTime()) work.mergeExecution = null;
-      demand(!work.mergeExecution || command === 'heartbeat' || command === 'recover' || command === 'settle', 'A merge execution is active; retry after it completes or expires');
-      if (command !== 'create' && command !== 'settle' && command !== 'recover') demand(work.stage !== 'done', 'Delivered work is immutable; create a follow-up task');
+      if (!containmentCleanup.includes(command) && work.mergeExecution && Date.parse(work.mergeExecution.expiresAt) <= now.getTime()) work.mergeExecution = null;
+      demand(!work.mergeExecution || command === 'heartbeat' || containmentCleanup.includes(command), 'A merge execution is active; retry after it completes or expires');
+      if (command !== 'create' && !containmentCleanup.includes(command)) demand(work.stage !== 'done', 'Delivered work is immutable; create a follow-up task');
       if (command === 'rereview') {
         if (actor.role !== 'admin') { demand(actor.role === 'worker', 'Worker or operator required', 403); activeLease(work, actor, data.epoch, now); }
         demand(work.policy.review && ['codex', 'agent'].includes(reviewProviderOf(work.policy)) && work.submission && !work.observation?.merged, 'Open submitted work with a dispatched review provider is required');
@@ -240,6 +243,16 @@ export class Engine {
           'Containment quarantine is missing, superseded, or owned by another worker');
         demand(createHash('sha256').update(data.settlementToken).digest('hex') === work.containmentQuarantine.settlementHash,
           'Containment settlement capability is invalid');
+        work.containmentQuarantine = null;
+      }
+      if (command === 'autosettle') {
+        // Verified death is proof, not an assertion: the control plane re-checks the fence
+        // deadlines and the reported verification itself before lowering a containment fence.
+        demand(actor.role === 'coordinator' || actor.role === 'admin', 'Coordinator permission required', 403);
+        demand(work.containmentQuarantine?.epoch === data.epoch && work.containmentQuarantine?.settlementHash === data.settlementHash,
+          'Containment quarantine is missing, superseded, or does not match this verification');
+        const refusals = containmentSettlementRefusals(work, data.verification, { now: now.getTime() });
+        demand(!refusals.length, `Automatic containment settlement refused: ${refusals.join('; ')}. ${containmentAttestation(work.key)}`);
         work.containmentQuarantine = null;
       }
       if (command === 'release') work.lease = null;

@@ -7,7 +7,7 @@ All control-plane endpoints except `/healthz` require `Authorization: Bearer TOK
 | Role | Permissions |
 | --- | --- |
 | `admin` | Create/release work, participate as a worker, attest manual proofs |
-| `coordinator` | Read work and integration state for master-agent routing; acquire, verify, or cancel only the engine's bounded merge execution authority |
+| `coordinator` | Read work and integration state for master-agent routing; acquire, verify, or cancel only the engine's bounded merge execution authority; settle a containment quarantine whose supervisor it has verified dead on the registered host |
 | `operator-agent` | Only explicitly configured intent/policy capabilities within a server-enforced repository/work allowlist; never leases, evidence, identity administration, or merge execution |
 | `worker` | Claim work, renew/release own lease, register workspace, report blockers, submit implementation, submit untrusted assertions |
 | `producer` | Submit evidence; only configured `proofs` are trusted |
@@ -46,6 +46,7 @@ Other commands use `POST /api/work/UUID/COMMAND` (display keys also work):
 | `unblock` | Admin: `{"reason":"Contract verified"}`. Operator-agent: `{"expectedRevision":12,"reason":"Contract verified"}` with the current work revision and a nonblank audit reason. |
 | `rework` | `{"reason":"Retry implementation","previousWorkerStopped":true}`; operator only |
 | `recover` | `{"reason":"Verified delivered worker stopped","previousWorkerStopped":true}`; operator only, delivered quarantine only |
+| `autosettle` | `{"epoch":1,"settlementHash":"...","reason":"Supervisor verified dead","verification":{...}}`; coordinator or operator, see [automatic containment settlement](#automatic-containment-settlement) |
 | `claim` | `{}`; returns current lease and epoch |
 | `heartbeat` | `{"epoch":1}` |
 | `release` | `{"epoch":1}` |
@@ -69,6 +70,25 @@ Run `watch` from the registered workspace on its registered host. Every automati
 Submitted work continues through gates without an active implementation lease. To reassign submitted work, an operator must stop the previous process and request `rework`. This clears ownership and closes the build gate while preserving PR attribution. A new claim gets a higher epoch and must register the same PR branch in a fresh host/path. Resubmission closes the rework request. Rework of an observed merged item is refused; create a follow-up instead.
 
 Foreground quarantine now also records a durable startup acknowledgement before process creation. `watch` transactionally acknowledges the exact live epoch, settlement hash, and resource fence with a stable request key, and only a confirmed response permits spawn. That transaction records a separate 120-second launch-authority deadline, longer than the acknowledgement client's three bounded 30-second HTTP attempts and retry delays. Rework cannot clear the quarantine until both its lease and launch authority have expired, so an acknowledgement response still in flight cannot authorize a stale later spawn. The supervisor measures the returned authority against monotonic elapsed request time and refuses spawn if it is no longer valid. A crashed supervisor therefore has a bounded recovery path: after both deadlines expire, an operator who has stopped the supervisor may use the existing stopped-worker rework attestation to clear the fence.
+
+## Automatic containment settlement
+
+A supervisor that dies without settling (a crashed process, an exhausted provider account) leaves an epoch-bound quarantine that no capability can lower, because the capability died with it. The terminal path is an operator attestation. A coordinator that can *prove* the supervisor is gone may settle it instead, with the proof recorded.
+
+`POST /api/work/UUID/autosettle` requires the coordinator or operator role and carries the quarantine's epoch and settlement hash, an audit reason, and a host verification record. The control plane re-checks everything it can check itself and never trusts the report for those facts:
+
+- the quarantine still exists, at exactly that epoch and settlement hash;
+- no lease of another epoch supersedes it;
+- the worker lease and the launch authority have each been expired for at least a 120-second grace window, longer than the acknowledgement client's bounded attempts, so an in-flight response can never authorize a later spawn;
+- the verification names the host and path registered for that epoch;
+- the verification was observed within the last 120 seconds, is not dated after the control-plane clock, and reports clock bounds that agree with it within five seconds;
+- the verification reports Linux process and systemd scope inspection that found no surviving process, no containment scope holding processes of the assigned workspace, and no signal it failed to collect.
+
+The verifying host collects that record from two independent readings. It reads `/proc` for any process whose command line is the `watch` invocation of this work key and epoch — readable for every process regardless of its owner, which is what makes supervisor absence provable — and, among its own user's processes, for any whose working directory is inside the assigned workspace. It then queries its systemd user manager for `graphyard-watch-*.scope` units and resolves the members of every live scope: a live scope belongs to another assignment only when every process it still holds was inspected and works elsewhere. One member whose working directory cannot be read leaves that scope unresolved and refuses.
+
+An unreachable systemd user manager, a failed scope, unit, or cgroup query, an unresolved scope member, an unreadable command line, a non-Linux host, or a still-present process is reported as an unverifiable signal. Every unverifiable signal refuses settlement and directs the operator to the attestation path; only an empty refusal list authorizes it. Privileged host processes outside every containment scope withhold their working directory from this user; because the containment cgroup, not a directory guess, is what holds a contained worker, they are counted in the record as `inaccessible` rather than treated as either a survivor or a missing signal.
+
+Settlement clears the quarantine and nothing else: the lease, gates, candidate, evidence, observation, merge authority, and delivery snapshot are untouched, and a submitted implementation still requires operator rework before reassignment. The verification and its reason are appended to the event ledger. This path is scoped to what it can observe: a supervisor started by another user, on another host, or outside the coordinator's systemd user manager cannot be verified this way, and remains the operator attestation's responsibility.
 
 ## Workspaces
 

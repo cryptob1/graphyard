@@ -50,6 +50,7 @@ Local dispatch requires Linux with a working systemd user manager for durable co
 ```sh
 node "$GRAPHYARD_CLI" master status
 node "$GRAPHYARD_CLI" master dispatch GY-42 codex-primary
+node "$GRAPHYARD_CLI" master settle-containment GY-42 "Supervisor died on provider usage limit"
 node "$GRAPHYARD_CLI" master merge GY-42
 node "$GRAPHYARD_CLI" master merge --all
 ```
@@ -69,6 +70,17 @@ Dispatch:
 7. cleans up and releases only when failed launch shutdown is confirmed.
 
 Prompt delivery is an invitation, not ownership.
+
+## Containment quarantines
+
+A foreground worker runs inside a containment quarantine that its supervisor settles on verified shutdown. When the supervisor itself dies — a crash, a provider usage limit, a killed terminal — the capability dies with it and the fence stays up: the item is undispatchable, its exclusive resources stay reserved, and its requirements stay immutable until someone proves the worker stopped.
+
+`master status` reports every such quarantine on each work row under `containment`, with `counts.quarantined` and `counts.settleableQuarantines` totalling them. For a quarantine whose workspace is registered on this coordinator's host, status also verifies it: it checks that the worker lease and the launch authority have both been expired past their grace window, then inspects this host for any surviving supervisor process, any process running in the assigned workspace, and any live `graphyard-watch` containment scope holding those processes.
+
+- `settleable: true` with no `refusals` means the supervisor is verifiably gone. Run `master settle-containment GY-N "reason"`. The control plane re-checks the deadlines and the verification before clearing the fence, and records the verification in the event ledger.
+- Any `refusals` entry means something could not be proven — the host is unreachable or not the registered one, a scope or process query failed, a process is still present, or the clocks disagree. Automatic settlement refuses, and so does the control plane. Stop the supervisor yourself and use the operator attestation path (`rework GY-N --previous-worker-stopped`, or `recover-containment GY-N --previous-worker-stopped` once the work is delivered).
+
+The record it sends names every process and containment scope it found, and counts the privileged host processes that withheld inspection. Settlement lowers the fence and nothing else. It does not authorize rework, reopen delivered work, or satisfy any gate; a submitted item still needs an operator's rework decision before reassignment. Verification is bounded by what this host can see: a supervisor launched on another machine, by another user, or outside this coordinator's systemd user manager is never reported as absent — those remain the operator's attestation. See [the protocol](protocol.md#automatic-containment-settlement) for the exact checks.
 
 ## Secure multi-machine topology
 
@@ -112,7 +124,7 @@ For the full correctness model, see [GitHub enforcement](github.md) and [archite
 For a dead worker or provider change:
 
 1. stop the old worker and supervisor;
-2. release or let the lease expire;
+2. release or let the lease expire, and settle any containment quarantine it left;
 3. request operator rework if a candidate was already submitted;
 4. claim with the replacement worker at a higher epoch;
 5. create a fresh workspace and preserve the old attempt.
