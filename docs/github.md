@@ -18,6 +18,8 @@ Generate a private key. Configure `GITHUB_APP_ID`, `GITHUB_INSTALLATION_ID`, `GI
 
 The installation ID appears in the installation settings URL. The App ID is in the App's settings. A personal access token is deliberately not a substitute for the dedicated App, because the required check should be bound to a specific producer.
 
+After registration, keeping the App's permissions current is the master's job. `graphyard master browser app-permissions` raises any permission below the set above through the operator's browser profile and verifies it with `gh api apps/SLUG`; `graphyard master browser installation-accept` accepts the permission request that raises for this repository's installation and verifies it with `gh api user/installations`. Both are recorded with screenshots and written to the master's audit ledger; see [GitHub administration through the browser](master-agent.md#github-administration-through-the-browser). Neither flow touches the reviewer App, whose permissions must stay read-only.
+
 ## The reviewer App
 
 Independent review uses a **second, separate App**. The control-plane App observes the repository and publishes the gate check; the reviewer App reads the repository and posts pull-request reviews. Graphyard refuses to bind the control-plane App as the reviewer: an identity cannot independently review the work it gates, and a reviewer that could write code or publish the check would review its own output.
@@ -49,6 +51,8 @@ GitHub may require the App to publish a check before it can be selected in the U
 Graphyard reads classic branch protection and refuses its merge gate unless these settings are present. Ruleset-only protection is not supported by the initial verifier; it refuses conservatively. Do not disable a working organizational ruleset to satisfy the MVP: add supported protection or extend the verifier first.
 
 The service does not automatically overwrite repository protection. For this project's first bootstrap commit, push the initial code before requiring the check, then enable it before agent-driven PRs begin. Record that bootstrap boundary in the work ledger.
+
+Once a classic rule with the App-bound check exists, the master keeps it consistent with the open review policies: `graphyard master protection --apply` patches the review subresource through the API, and `graphyard master browser protection` toggles `strict`, administrator enforcement, and the review settings on the settings page when the API path is unavailable, verifying the result through the API either way.
 
 ## What is checked
 
@@ -138,8 +142,8 @@ A bypassed merge of linked work is recorded as a permanent violation; Graphyard 
 | Symptom | Check |
 | --- | --- |
 | UI says GitHub is disconnected | App ID, installation ID, PEM secret, and server restart |
-| Job shows 401/403 | App key, installation access, permission approval, repository selection |
-| Protection gate refuses | Exact check name, App binding, `strict` left enabled, admin enforcement, force/delete settings |
+| Job shows 401/403 | App key, installation access, permission approval (`master browser installation-accept`), repository selection |
+| Protection gate refuses | Exact check name, App binding, `strict` left enabled, admin enforcement, force/delete settings (`master browser protection`) |
 | Acceptance refuses despite green CI | Proof names, producer allowlist, candidate SHA, base SHA, policy revision, skipped count |
 | PR changed while observed | Normal optimistic concurrency retry; investigate only if persistent |
 | No update after webhook | Signature secret and job errors; periodic polling still runs |
