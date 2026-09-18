@@ -136,6 +136,7 @@ export interface Observation {
   protected: boolean; files: string[]; at: string;
 }
 export interface Gate { name: string; passed: boolean; reasons: string[] }
+export interface ReleaseDelivery { environment: string; policyRevision: number; releaseId: string; releaseRevision: number; generation: number; verifiedAt: string; interval: { from: string; to: string } }
 export interface Work extends Create {
   validation?: Record<string, { candidateId: string; requestId?: string; attemptId?: string }>;
   criteria: Criterion[];
@@ -155,6 +156,13 @@ export interface Work extends Create {
   mergeAuthorization?: { sha: string; baseSha: string; policyRevision: number; at: string } | null;
   mergeExecution?: { id: string; owner: string; sha: string; baseSha: string; policyRevision: number; authorizationRevision: number; issuedAt: string; expiresAt: string; verifiedAt?: string; clockOffset?: { min: number; max: number } } | null;
   delivery?: { mergedAt: string; mergeSha: string; authorizationRevision: number };
+  /**
+   * Independently observed production delivery, one record per environment: the first
+   * release whose verified common interval covered the whole expected manifest while this
+   * item was an included member. Merge completion above is a different fact and keeps its
+   * meaning; a later release containing the same change records nothing here again.
+   */
+  releaseDeliveries?: ReleaseDelivery[];
   evidence: Evidence[]; observation: Observation | null; blocker: string | null;
   gates: Gate[]; violations: string[];
 }
