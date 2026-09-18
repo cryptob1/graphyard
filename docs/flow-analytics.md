@@ -124,8 +124,13 @@ review is waiting on.
 
 - **Window**: 7, 30, or 90 days.
 - **Work type**: `feature`, `bug`, or `chore`.
-- **Stage**: restricts records to those observed while the item was in that stage, and
-  restricts current-state sections to items now in it.
+- **Stage**: selects the cohort of items whose latest durable stage is the requested stage
+  for every item-scoped metric, including WIP, cumulative flow, throughput, lead time,
+  queue/active time, merge-ready dwell, phases, CI, evidence, and operational counts.
+  Historical stage dwell instead selects completed transitions whose `from` stage is the
+  requested stage, across the work-type and slice population; this preserves completed
+  dwell after an item leaves that stage. Repository-wide deployment metrics are explicitly
+  unaffected by the stage filter. Aggregate drill-downs use the same populations.
 - **Delivery slice**: the top-level repository area a work item changes. Observed changed
   files (a trusted GitHub observation) define it; when no candidate has been observed yet,
   the declared planned scope is used and reported separately as `declared` provenance.
@@ -140,6 +145,9 @@ counts) and `exclusions` (each reason with a count and the work items affected, 
 `clock-inverted-transition`, `missing-created-fact`, `ci-start-not-observed`, or
 `deployment-without-observed-merge`). Metrics with no data at all are listed in
 `unavailable` with a reason.
+Deployment exclusions use deterministic non-provider labels; provider deployment IDs are
+never included in the reader-visible report. Exact provider identifiers remain restricted
+to audit roles through the deployment endpoint and authorized drill-downs.
 
 The page shows exactly one state:
 

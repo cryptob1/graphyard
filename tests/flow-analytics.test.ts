@@ -191,9 +191,12 @@ test('integration:flow-analytics-filters-windows', async () => {
   const slice = 'gy35-windows';
   const bug = await submitted(slice, worker, { type: 'bug' });
   const feature = await submitted(slice, second, { type: 'feature' });
+  const stillBuilding = await submitted(slice, worker, { type: 'chore' });
   const now = Date.now();
   await seedFact(bug, 'stage.changed', now - 60 * day, { from: 'build', to: 'review', dwellMs: 5 * day, clockOrder: 'ordered' }, 'build');
-  await seedFact(feature, 'stage.changed', now - 3 * day, { from: 'build', to: 'review', dwellMs: 2 * day, clockOrder: 'ordered' }, 'build');
+  const currentReviewAt = now + 10;
+  await seedFact(feature, 'stage.changed', currentReviewAt, { from: 'build', to: 'review', dwellMs: 2 * day, clockOrder: 'ordered' }, 'build');
+  await settle(new Date(currentReviewAt).toISOString());
 
   const week = (await analyse({ days: 7, slice })).report;
   const month = (await analyse({ days: 30, slice })).report;
@@ -213,9 +216,18 @@ test('integration:flow-analytics-filters-windows', async () => {
   assert.equal(bugs.stageDwell.find(entry => entry.stage === 'build')!.n, 1);
   const elsewhere = (await analyse({ days: 90, slice: 'gy35-core' })).report;
   assert.ok(!elsewhere.bottleneck.categories.some(category => category.items.some(item => item.key === bug.key)));
-  const staged = (await analyse({ days: 90, slice, stage: 'build' })).report;
-  assert.equal(staged.filters.stage, 'build');
-  assert.ok(staged.coverage.facts <= quarter.coverage.facts);
+  const stagedResult = await analyse({ days: 90, slice, stage: 'review' });
+  const staged = stagedResult.report;
+  assert.equal(staged.filters.stage, 'review');
+  assert.equal(staged.coverage.workItems, 1, 'the current-stage cohort excludes work still in build');
+  assert.equal(staged.stageDwell.find(entry => entry.stage === 'build')!.n, 0, 'stage dwell selects the requested from-stage');
+  assert.equal(staged.stageDwell.find(entry => entry.stage === 'review')!.n, 0, 'no completed review dwell is fabricated');
+  assert.equal(staged.wip.find(entry => entry.stage === 'review')!.count, 1);
+  assert.ok(!JSON.stringify(staged).includes(stillBuilding.key), 'item-scoped aggregates exclude work outside the current-stage cohort');
+  const stagedWip = flowDrilldown(stagedResult.dataset, staged, { metric: 'wip', key: 'review' });
+  assert.equal(stagedWip.total, staged.wip.find(entry => entry.stage === 'review')!.count, 'stage-filtered aggregate and drill-down populations match');
+  const stagedDwell = flowDrilldown(stagedResult.dataset, staged, { metric: 'stage-dwell', key: 'review' });
+  assert.equal(stagedDwell.total, staged.stageDwell.find(entry => entry.stage === 'review')!.n, 'selected from-stage dwell matches its drill-down');
   assert.ok(week.availableSlices.includes(slice) && week.availableTypes.includes('bug'));
   const rejected = await api(`/api/analytics/flow?window=45`);
   assert.equal(rejected.status, 400);
@@ -323,6 +335,8 @@ test('integration:flow-analytics-edge-cases', async () => {
   const containedMergeShas = [firstMerge, secondMerge];
   await api('/api/deployments', tokens.producer, { method: 'POST', body: JSON.stringify({ provider: 'railway', externalId: 'release-42', environment: 'production', sha: releaseSha, containedMergeShas, state: 'succeeded', startedAt }) });
   await api('/api/deployments', tokens.producer, { method: 'POST', body: JSON.stringify({ provider: 'railway', externalId: 'release-42', environment: 'production', sha: releaseSha, containedMergeShas, state: 'rolled_back', startedAt: new Date(Date.now() - 3500_000).toISOString() }) });
+  const unlinkedExternalId = 'private-provider-deployment-unlinked';
+  await api('/api/deployments', tokens.producer, { method: 'POST', body: JSON.stringify({ provider: 'railway', externalId: unlinkedExternalId, environment: 'production', sha: '9'.repeat(40), containedMergeShas: ['8'.repeat(40)], state: 'succeeded', startedAt }) });
   const abbreviated = await api('/api/deployments', tokens.producer, { method: 'POST', body: JSON.stringify({ provider: 'railway', externalId: 'abbreviated-sha', environment: 'production', sha: 'abc1234', containedMergeShas, state: 'succeeded', startedAt }) });
   assert.equal(abbreviated.status, 400, 'an abbreviated SHA is refused instead of being silently unlinked');
   const rolled = (await analyse({ slice })).report;
@@ -336,6 +350,13 @@ test('integration:flow-analytics-edge-cases', async () => {
   assert.equal(changedArtifact.status, 409, 'an idempotent replay cannot rewrite any immutable deployment field');
   assert.ok((rolled.operations.deployments.latency.minMs ?? 0) >= 0, 'a deployment observed before its merge never becomes a negative latency');
   assert.ok(rolled.exclusions.some(entry => entry.reason === 'clock-inverted-deployment'));
+  assert.ok(rolled.exclusions.some(entry => entry.reason === 'deployment-without-observed-merge'));
+  assert.ok(!JSON.stringify(rolled.exclusions).includes('release-42'), 'clock-inverted exclusions do not expose provider record IDs');
+  assert.ok(!JSON.stringify(rolled.exclusions).includes(unlinkedExternalId), 'unlinked deployment exclusions do not expose provider record IDs');
+  const readerReport = await api(`/api/analytics/flow?window=30&slice=${slice}`, tokens.reader);
+  assert.equal(readerReport.status, 200);
+  assert.ok(!JSON.stringify(readerReport.body).includes('release-42'));
+  assert.ok(!JSON.stringify(readerReport.body).includes(unlinkedExternalId));
 
   // Outliers are reported, never silently dropped; sparse samples are flagged.
   assert.equal(distribution([1, 1, 1, 1, 1, 1, 1, 1, 1, 1000]).outliers, 1);

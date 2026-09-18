@@ -464,13 +464,22 @@ export function computeFlow(dataset: FlowDataset, query: FlowQuery) {
   });
   const delivered = (item: Work) => latest.has(`${item.id}:delivered`);
   const currentStage = (item: Work) => latest.get(`${item.id}:stage.changed`)?.details.to ?? 'backlog';
+  // A stage filter selects the current-stage cohort for every item-scoped metric.
+  // Stage dwell is the one historical exception: it selects transitions whose
+  // `from` stage is the requested stage, while still honoring the other item filters.
+  // Repository-wide deployment metrics are intentionally unaffected.
   const stageScope = query.stage ? scope.filter(item => currentStage(item) === query.stage) : scope;
+  const scopeIds = new Set(scope.map(item => item.id));
+  const scopedIds = new Set(stageScope.map(item => item.id));
+  const scopedFacts = dataset.facts.filter(fact => scopedIds.has(fact.workId));
 
   // Stage dwell: completed transitions only.
-  const inverted = dataset.facts.filter(fact => fact.kind === 'stage.changed' && fact.details.clockOrder === 'inverted');
+  const inverted = dataset.facts.filter(fact => fact.kind === 'stage.changed' && scopeIds.has(fact.workId)
+    && (!query.stage || fact.details.from === query.stage) && fact.details.clockOrder === 'inverted');
   for (const fact of inverted) exclude('clock-inverted-transition', fact.workKey);
   const stageDwell = stages.map(stage => {
-    const values = dataset.facts.filter(fact => fact.kind === 'stage.changed' && fact.details.from === stage && typeof fact.details.dwellMs === 'number').map(fact => fact.details.dwellMs as number);
+    const values = dataset.facts.filter(fact => fact.kind === 'stage.changed' && scopeIds.has(fact.workId)
+      && (!query.stage || fact.details.from === query.stage) && fact.details.from === stage && typeof fact.details.dwellMs === 'number').map(fact => fact.details.dwellMs as number);
     return { stage, ...distribution(values) };
   });
 
@@ -485,7 +494,7 @@ export function computeFlow(dataset: FlowDataset, query: FlowQuery) {
 
   // Cumulative flow: one reconstructed sample per daily boundary.
   const starts = bucketStarts(from, to);
-  const stagePoints = new Map(scope.map(item => {
+  const stagePoints = new Map(stageScope.map(item => {
     const points = [...(carry.get(`${item.id}:stage.changed`) ? [carry.get(`${item.id}:stage.changed`)!] : []), ...itemFacts(item.id, 'stage.changed')]
       .map(fact => ({ at: time(fact.observedAt)!, value: fact.details.to as string }))
       .sort((a, b) => a.at - b.at);
@@ -495,7 +504,7 @@ export function computeFlow(dataset: FlowDataset, query: FlowQuery) {
   const cumulativeFlow = {
     buckets: starts.map(at => new Date(at).toISOString()),
     truncated: starts.length >= flowLimits.buckets && from + flowLimits.buckets * day < to,
-    series: stages.map(stage => ({ stage, counts: starts.map(at => scope.filter(item => {
+    series: stages.map(stage => ({ stage, counts: starts.map(at => stageScope.filter(item => {
       const entry = stagePoints.get(item.id)!;
       if (entry.created > at || (entry.delivered !== null && entry.delivered <= at && stage !== 'done')) return false;
       return (valueAt(entry.points, at) ?? 'backlog') === stage;
@@ -503,7 +512,7 @@ export function computeFlow(dataset: FlowDataset, query: FlowQuery) {
   };
 
   // Throughput and lead time.
-  const deliveredFacts = dataset.facts.filter(fact => fact.kind === 'delivered' && scope.some(item => item.id === fact.workId));
+  const deliveredFacts = scopedFacts.filter(fact => fact.kind === 'delivered');
   const throughput = starts.map(at => ({ bucket: new Date(at).toISOString(), delivered: deliveredFacts.filter(fact => time(fact.observedAt)! >= at && time(fact.observedAt)! < at + day).length }));
   const leadValues: { key: string; ms: number; at: string }[] = [];
   for (const fact of deliveredFacts) {
@@ -529,7 +538,7 @@ export function computeFlow(dataset: FlowDataset, query: FlowQuery) {
   // loss swallow the replacement's active time.
   const leaseOrder = (a: FlowFact, b: FlowFact) => time(a.observedAt)! - time(b.observedAt)! || (a.kind === 'lease.claimed' ? 1 : 0) - (b.kind === 'lease.claimed' ? 1 : 0);
   let activeTotal = 0, openTotal = 0, idleTotal = 0;
-  const leaseRows = scope.map(item => {
+  const leaseRows = stageScope.map(item => {
     const events = [...leaseKinds.flatMap(kind => itemFacts(item.id, kind))].sort(leaseOrder);
     const before = leaseKinds.map(kind => carry.get(`${item.id}:${kind}`)).filter((fact): fact is FlowFact => !!fact).sort(leaseOrder).at(-1);
     let active = before?.kind === 'lease.claimed' ? from : null;
@@ -557,7 +566,7 @@ export function computeFlow(dataset: FlowDataset, query: FlowQuery) {
   // Merge-ready dwell.
   const mergeReadyValues: number[] = [];
   const mergeReadyCurrent: { key: string; sinceMs: number }[] = [];
-  for (const item of scope) {
+  for (const item of stageScope) {
     const gateFacts = [...(carry.get(`${item.id}:gates.changed`) ? [carry.get(`${item.id}:gates.changed`)!] : []), ...itemFacts(item.id, 'gates.changed')]
       .sort((a, b) => time(a.observedAt)! - time(b.observedAt)!);
     const mergedFact = latest.get(`${item.id}:merged`);
@@ -580,7 +589,7 @@ export function computeFlow(dataset: FlowDataset, query: FlowQuery) {
   // the previous one so a later push never silently extends an earlier measurement.
   interface Episode { key: string; workId: string; sha: string; pr: number | null; startedAt: number; partial: boolean; milestones: Record<string, { at: number | null; source: string; reason?: string }>; facts: FlowFact[] }
   const episodes: Episode[] = [];
-  for (const item of scope) {
+  for (const item of stageScope) {
     const carried = carry.get(`${item.id}:candidate.observed`);
     const ordered = [...(carried ? [carried] : []), ...itemFacts(item.id, 'candidate.observed')]
       .sort((a, b) => time(a.recordedAt)! - time(b.recordedAt)!);
@@ -666,7 +675,7 @@ export function computeFlow(dataset: FlowDataset, query: FlowQuery) {
   if (!ciRuns) unavailable.push({ metric: 'ci', reason: 'No CI check observation was recorded in this window.' });
 
   // Evidence wait, expiry and staleness.
-  const evidenceFacts = dataset.facts.filter(fact => fact.kind === 'evidence.recorded');
+  const evidenceFacts = scopedFacts.filter(fact => fact.kind === 'evidence.recorded');
   const evidenceWait = phases.find(phase => phase.phase === 'review-complete-to-evidence-complete')!;
   const evidence = {
     recorded: evidenceFacts.length,
@@ -681,7 +690,7 @@ export function computeFlow(dataset: FlowDataset, query: FlowQuery) {
 
   // Wait-category timeline, sampled at daily boundaries for queue depth.
   const categoryPoints = new Map<string, { at: number; value: WaitCategory | null }[]>();
-  for (const item of scope) {
+  for (const item of stageScope) {
     const gateFacts = [...(carry.get(`${item.id}:gates.changed`) ? [carry.get(`${item.id}:gates.changed`)!] : []), ...itemFacts(item.id, 'gates.changed')];
     const points = gateFacts.map(fact => ({ at: time(fact.observedAt)!, value: classifyWait(fact.details, false) }));
     const deliveredFact = latest.get(`${item.id}:delivered`);
@@ -690,7 +699,7 @@ export function computeFlow(dataset: FlowDataset, query: FlowQuery) {
   }
   const queueDepth = starts.map(at => {
     const counts: Record<string, number> = {};
-    for (const item of scope) { const value = valueAt(categoryPoints.get(item.id)!, at); if (value) counts[value] = (counts[value] ?? 0) + 1; }
+    for (const item of stageScope) { const value = valueAt(categoryPoints.get(item.id)!, at); if (value) counts[value] = (counts[value] ?? 0) + 1; }
     return { bucket: new Date(at).toISOString(), counts };
   });
   const queueUtilization = [
@@ -723,36 +732,36 @@ export function computeFlow(dataset: FlowDataset, query: FlowQuery) {
     chains.set(id, result);
     return result;
   };
-  const criticalPath = scope.filter(item => !deliveredIds.has(item.id)).map(item => chainOf(item.id, new Set())).sort((a, b) => b.length - a.length)[0] ?? [];
-  const unblocked = scope.filter(item => {
+  const criticalPath = stageScope.filter(item => !deliveredIds.has(item.id)).map(item => chainOf(item.id, new Set())).sort((a, b) => b.length - a.length)[0] ?? [];
+  const unblocked = stageScope.filter(item => {
     const gate = latest.get(`${item.id}:gates.changed`)?.details;
     return !deliveredIds.has(item.id) && gate?.released && !gate.blocker && !(gate.dependencyWaiting ?? []).length;
   }).map(item => item.key);
 
   // Review rounds, findings, rework.
-  const reviewFacts = dataset.facts.filter(fact => fact.kind === 'review.submitted');
+  const reviewFacts = scopedFacts.filter(fact => fact.kind === 'review.submitted');
   const roundsByItem = new Map<string, number>();
   for (const fact of reviewFacts) roundsByItem.set(fact.workKey, (roundsByItem.get(fact.workKey) ?? 0) + 1);
-  const withCandidate = scope.filter(item => latest.has(`${item.id}:candidate.observed`));
-  const reworked = new Set(dataset.facts.filter(fact => fact.kind === 'rework.requested').map(fact => fact.workKey));
+  const withCandidate = stageScope.filter(item => latest.has(`${item.id}:candidate.observed`));
+  const reworked = new Set(scopedFacts.filter(fact => fact.kind === 'rework.requested').map(fact => fact.workKey));
   const review = {
     rounds: countSummary([...roundsByItem.values()]),
     findings: reviewFacts.filter(fact => fact.details.reviewState === 'CHANGES_REQUESTED').length,
     approvals: reviewFacts.filter(fact => fact.details.reviewState === 'APPROVED').length,
     independentApprovals: reviewFacts.filter(fact => fact.details.reviewState === 'APPROVED' && fact.details.independent).length,
-    agentCompletions: dataset.facts.filter(fact => fact.kind === 'review.completed').length,
-    reworkRequests: dataset.facts.filter(fact => fact.kind === 'rework.requested').length,
+    agentCompletions: scopedFacts.filter(fact => fact.kind === 'review.completed').length,
+    reworkRequests: scopedFacts.filter(fact => fact.kind === 'rework.requested').length,
     reworkRate: withCandidate.length ? Number((reworked.size / withCandidate.length).toFixed(4)) : null,
     candidates: withCandidate.length,
   };
   if (!withCandidate.length) unavailable.push({ metric: 'review', reason: 'No candidate was observed for the selected work.' });
 
   const leases = {
-    claims: dataset.facts.filter(fact => fact.kind === 'lease.claimed').length,
-    reassignments: dataset.facts.filter(fact => fact.kind === 'lease.claimed' && fact.details.reassignment).length,
-    releases: dataset.facts.filter(fact => fact.kind === 'lease.released').length,
-    losses: dataset.facts.filter(fact => fact.kind === 'lease.lost').length,
-    expirations: dataset.facts.filter(fact => fact.kind === 'lease.lost' && fact.details.reason === 'expired').length,
+    claims: scopedFacts.filter(fact => fact.kind === 'lease.claimed').length,
+    reassignments: scopedFacts.filter(fact => fact.kind === 'lease.claimed' && fact.details.reassignment).length,
+    releases: scopedFacts.filter(fact => fact.kind === 'lease.released').length,
+    losses: scopedFacts.filter(fact => fact.kind === 'lease.lost').length,
+    expirations: scopedFacts.filter(fact => fact.kind === 'lease.lost' && fact.details.reason === 'expired').length,
     utilizationRatio: queueVsActive.activeRatio, idleCapacityMs: queueVsActive.queueMs,
   };
 
@@ -763,11 +772,12 @@ export function computeFlow(dataset: FlowDataset, query: FlowQuery) {
   };
   const deployedSuccess = dataset.deployments.filter(entry => entry.state === 'succeeded');
   const deploymentLatency: number[] = [];
-  for (const entry of deployedSuccess) {
+  for (const [deploymentIndex, entry] of deployedSuccess.entries()) {
     const merged = dataset.mergedForDeployments.filter(fact => entry.containedMergeShas.includes(fact.details.mergeSha));
-    if (!merged.length) { exclude('deployment-without-observed-merge', entry.externalId); continue; }
+    const exclusionKey = `deployment-observation-${deploymentIndex + 1}`;
+    if (!merged.length) { exclude('deployment-without-observed-merge', exclusionKey); continue; }
     const value = time(entry.startedAt)! - Math.max(...merged.map(fact => time(fact.observedAt)!));
-    if (value < 0) exclude('clock-inverted-deployment', entry.externalId); else deploymentLatency.push(value);
+    if (value < 0) exclude('clock-inverted-deployment', exclusionKey); else deploymentLatency.push(value);
   }
   const deployments = {
     observations: dataset.deployments.length,
@@ -783,9 +793,9 @@ export function computeFlow(dataset: FlowDataset, query: FlowQuery) {
   if (!dataset.deployments.length) unavailable.push({ metric: 'deployments', reason: 'No deployment-provider observation has been recorded for this window. Deployment metrics are unavailable, not zero.' });
 
   const operations = {
-    blockers: counted(dataset.facts.filter(fact => fact.kind === 'blocker.set'), fact => String(fact.details.reason ?? '').slice(0, 200) || null),
-    refusals: counted(dataset.facts.filter(fact => fact.kind === 'gates.changed'), fact => fact.details.firstUnmetReason ? String(fact.details.firstUnmetReason).slice(0, 200) : null),
-    refusalGates: counted(dataset.facts.filter(fact => fact.kind === 'gates.changed'), fact => fact.details.firstUnmet ?? null),
+    blockers: counted(scopedFacts.filter(fact => fact.kind === 'blocker.set'), fact => String(fact.details.reason ?? '').slice(0, 200) || null),
+    refusals: counted(scopedFacts.filter(fact => fact.kind === 'gates.changed'), fact => fact.details.firstUnmetReason ? String(fact.details.firstUnmetReason).slice(0, 200) : null),
+    refusalGates: counted(scopedFacts.filter(fact => fact.kind === 'gates.changed'), fact => fact.details.firstUnmet ?? null),
     criticalPath: { length: criticalPath.length, chain: criticalPath.slice(-flowLimits.distinct) },
     unblocked: { count: unblocked.length, items: unblocked.slice(0, flowLimits.distinct) },
     review, leases, queues: queueUtilization, queueDepth, deployments,
@@ -816,18 +826,18 @@ export function computeFlow(dataset: FlowDataset, query: FlowQuery) {
   };
 
   const sliceSummary = { observed: 0, declared: 0, unclassified: 0 };
-  for (const item of scope) sliceSummary[workSlices(item).provenance]++;
-  const observedTimes = dataset.facts.filter(fact => fact.details.timestampSource === 'github').length;
+  for (const item of stageScope) sliceSummary[workSlices(item).provenance]++;
+  const observedTimes = scopedFacts.filter(fact => fact.details.timestampSource === 'github').length;
   const coverage = {
-    workItems: scope.length, workItemsInRepository: dataset.work.length, selected: dataset.included.length,
-    undelivered: scope.filter(item => !deliveredIds.has(item.id)).length,
+    workItems: stageScope.length, workItemsInRepository: dataset.work.length, selected: dataset.included.length,
+    undelivered: stageScope.filter(item => !deliveredIds.has(item.id)).length,
     withObservedCandidate: withCandidate.length,
     facts: dataset.facts.length, scanned: dataset.scanned, scanLimit: Math.min(query.limit ?? flowLimits.scan, flowLimits.scan), truncated: dataset.truncated,
     workItemScanLimit: flowLimits.work, workItemsTruncated: dataset.workTruncated,
     deploymentScanLimit: flowLimits.deployments, deploymentsTruncated: dataset.deploymentsTruncated,
     deploymentMergeScanLimit: flowLimits.deploymentMerges, deploymentMergesTruncated: dataset.deploymentMergesTruncated,
     oldestFact: dataset.facts[0]?.observedAt ?? null, newestFact: dataset.facts.at(-1)?.observedAt ?? null,
-    providerTimestamps: observedTimes, controlPlaneTimestamps: dataset.facts.length - observedTimes,
+    providerTimestamps: observedTimes, controlPlaneTimestamps: scopedFacts.length - observedTimes,
     slices: sliceSummary,
     projection: { ...dataset.projection, stale: dataset.projection.pendingEvents > 0 },
     sparse: dataset.facts.length < sparseSampleSize,
@@ -866,6 +876,7 @@ export function flowDrilldown(dataset: FlowDataset, report: FlowReport, request:
   const latest = new Map(dataset.latest.map(fact => [`${fact.workId}:${fact.kind}`, fact]));
   const currentStage = (item: Work) => latest.get(`${item.id}:stage.changed`)?.details.to ?? 'backlog';
   const scoped = dataset.included.filter(item => latest.has(`${item.id}:work.created`) && (!report.filters.stage || currentStage(item) === report.filters.stage));
+  const scopedIds = new Set(scoped.map(item => item.id));
   const row = (workKey: string, bucket: string | null, observedAt: string | null, valueMs: number | null, pr: number | null, commit: string | null, detail: string) =>
     rows.push({ workKey, metric, bucket, observedAt, valueMs, pullRequest: pr, commit, detail });
   if (metric === 'bottleneck') {
@@ -884,10 +895,13 @@ export function flowDrilldown(dataset: FlowDataset, report: FlowReport, request:
       row(item.key, stage, since, Math.max(0, time(dataset.to)! - time(since)!), null, null, `In ${stage}`);
     }
   } else if (metric === 'stage-dwell') {
-    for (const fact of dataset.facts.filter(fact => fact.kind === 'stage.changed' && (!key || fact.details.from === key) && typeof fact.details.dwellMs === 'number'))
+    const selectedStage = report.filters.stage;
+    const baseIds = new Set(dataset.included.filter(item => latest.has(`${item.id}:work.created`)).map(item => item.id));
+    for (const fact of dataset.facts.filter(fact => fact.kind === 'stage.changed' && baseIds.has(fact.workId)
+      && (!selectedStage || fact.details.from === selectedStage) && (!key || fact.details.from === key) && typeof fact.details.dwellMs === 'number'))
       row(fact.workKey, String(fact.details.from), fact.observedAt, fact.details.dwellMs, null, null, `${fact.details.from} to ${fact.details.to}`);
   } else if (metric === 'lead-time' || metric === 'throughput') {
-    for (const fact of dataset.facts.filter(fact => fact.kind === 'delivered')) {
+    for (const fact of dataset.facts.filter(fact => fact.kind === 'delivered' && scopedIds.has(fact.workId))) {
       const created = dataset.latest.find(entry => entry.workId === fact.workId && entry.kind === 'work.created');
       const bucket = new Date(Math.floor((time(fact.observedAt)! - time(dataset.from)!) / day) * day + time(dataset.from)!).toISOString();
       if (key && bucket !== key) continue;
@@ -931,7 +945,7 @@ export function flowDrilldown(dataset: FlowDataset, report: FlowReport, request:
       }
     }
   } else if (metric === 'evidence') {
-    for (const fact of dataset.facts.filter(fact => fact.kind === 'evidence.recorded' && (!key || fact.details.proof === key)))
+    for (const fact of dataset.facts.filter(fact => fact.kind === 'evidence.recorded' && scopedIds.has(fact.workId) && (!key || fact.details.proof === key)))
       row(fact.workKey, String(fact.details.proof), fact.observedAt, null, null, fact.details.sha ?? null,
         authorized ? `${fact.details.result}; trusted=${fact.details.trusted}; executed=${fact.details.executed}; skipped=${fact.details.skipped}; evidence=${fact.details.evidenceId}${fact.details.validation ? `; artifactRequest=${fact.details.validation.requestId}` : ''}`
           : `${fact.details.result}; trusted=${fact.details.trusted}; identifiers require an authorized role`);
@@ -944,9 +958,17 @@ export function flowDrilldown(dataset: FlowDataset, report: FlowReport, request:
       for (const fact of gates) {
         const ready = (fact.details.unmet ?? []).length === 0 && fact.details.hasCandidate;
         if (ready && since === null) since = Math.max(time(dataset.from)!, time(fact.observedAt)!);
-        if (!ready) since = null;
+        if (!ready && since !== null) {
+          row(item.key, 'merge-ready', new Date(since).toISOString(), Math.max(0, time(fact.observedAt)! - since), null, null, 'Every gate passed until a later gate observation refused');
+          since = null;
+        }
       }
-      if (since !== null && !latest.has(`${item.id}:merged`)) row(item.key, 'merge-ready', new Date(since).toISOString(), Math.max(0, time(dataset.to)! - since), null, null, 'Every gate passed; merge not yet observed');
+      if (since !== null) {
+        const merged = latest.get(`${item.id}:merged`);
+        const end = merged && time(merged.observedAt)! >= since ? time(merged.observedAt)! : time(dataset.to)!;
+        row(item.key, 'merge-ready', new Date(since).toISOString(), Math.max(0, end - since), merged?.details.pr ?? null, merged?.details.mergeSha ?? null,
+          merged ? 'Every gate passed until the observed merge' : 'Every gate passed; merge not yet observed');
+      }
     }
   } else if (metric === 'deployments') {
     for (const entry of dataset.deployments.filter(entry => !key || entry.environment === key)) {
@@ -956,10 +978,10 @@ export function flowDrilldown(dataset: FlowDataset, report: FlowReport, request:
           authorized ? `${entry.state} via ${entry.provider} ${entry.externalId}` : `${entry.state}; deployment identifiers require an authorized role`);
     }
   } else if (metric === 'review') {
-    for (const fact of dataset.facts.filter(fact => fact.kind === 'review.submitted' && (!key || fact.details.reviewState === key)))
+    for (const fact of dataset.facts.filter(fact => fact.kind === 'review.submitted' && scopedIds.has(fact.workId) && (!key || fact.details.reviewState === key)))
       row(fact.workKey, String(fact.details.reviewState), fact.observedAt, null, null, fact.details.sha ?? null, `independent=${fact.details.independent}; timestamp=${fact.details.timestampSource}`);
   } else if (metric === 'blockers') {
-    for (const fact of dataset.facts.filter(fact => fact.kind === 'blocker.set' && (!key || fact.details.reason === key)))
+    for (const fact of dataset.facts.filter(fact => fact.kind === 'blocker.set' && scopedIds.has(fact.workId) && (!key || fact.details.reason === key)))
       row(fact.workKey, 'blocker', fact.observedAt, null, null, null, String(fact.details.reason ?? ''));
   } else {
     return { metric, key, supported: drilldownMetrics, error: `Unknown drill-down metric; choose one of ${drilldownMetrics.join(', ')}`, columns, rows: [], total: 0, truncated: false };
