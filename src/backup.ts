@@ -11,9 +11,10 @@ import { releaseInfo, schemaVersion } from './release.js';
  * `pg_dump` remains the right tool for a physical copy of the database, but it needs a
  * client that matches the server major version and it says nothing about what Graphyard
  * expects to find inside. This format is what the documented upgrade, backup and restore
- * exercises are held to: every ledger table, the two serial sequences that order work and
- * events, and the schema generation the rows were written at, so a restore into a release
- * that does not know the schema refuses instead of quietly dropping columns.
+ * exercises are held to: every ledger table, the serial sequences that order work, events
+ * and proof-grant history, and the schema generation the rows were written at, so a
+ * restore into a release that does not know the schema refuses instead of quietly
+ * dropping columns.
  *
  * A backup is sensitive. It holds private validation artifacts, evidence and hashed
  * credentials; keep it where the database itself is allowed to be.
@@ -42,11 +43,11 @@ export const backupDigest = (backup: Omit<Backup, 'digest'>) => {
 };
 
 const orderColumns: Record<(typeof ledgerTables)[number], string> = {
-  work_items: 'number', events: 'seq', receipts: 'actor,key', operator_agents: 'id', operator_credentials: 'agent_id,fingerprint', jobs: 'work_id',
+  work_items: 'number', events: 'seq', receipts: 'actor,key', operator_agents: 'id', operator_credentials: 'agent_id,fingerprint', proof_grants: 'principal_id', proof_grant_history: 'seq', jobs: 'work_id',
   webhook_receipts: 'id', validation_definitions: 'kind,id,revision', validation_builds: 'id', validation_candidates: 'id', validation_requests: 'id',
   validation_artifacts: 'id', validation_resources: 'resource', scenarios: 'id,revision', graphyard_schema: 'version',
 };
-const sequences = [{ table: 'work_items', column: 'number' }, { table: 'events', column: 'seq' }] as const;
+const sequences = [{ table: 'work_items', column: 'number' }, { table: 'events', column: 'seq' }, { table: 'proof_grant_history', column: 'seq' }] as const;
 
 /**
  * Read every ledger table from one repeatable-read snapshot. Rows are exported through
@@ -94,7 +95,10 @@ export function verifyBackup(input: unknown): Backup {
  *
  * Empty is a requirement, not a default: restoring over a live ledger would resurrect
  * expired ownership beside current assignments and discard evidence submitted since the
- * backup, which is exactly the outcome the deployment guide warns against. Tables the
+ * backup, which is exactly the outcome the deployment guide warns against. Proof grants
+ * count: a release that already started against the target has materialized its
+ * environment allowlist, and restoring beside that seed would leave two proof authorities
+ * claiming the same principals. Migrate the target with `db migrate` instead. Tables the
  * backup does not carry — added by a later migration — stay empty and are reported, and
  * the migration that follows a restore fills in whatever the newer schema needs.
  */
@@ -105,11 +109,13 @@ export async function restoreBackup(pool: pg.Pool, input: unknown) {
     await db.query('BEGIN');
     await db.query('SELECT pg_advisory_xact_lock(71490321)');
     const current = Number((await db.query('SELECT COALESCE(MAX(version),0) AS version FROM graphyard_schema')).rows[0].version);
-    if (current !== schemaVersion) throw new Error(`Restore requires a database migrated to schema generation ${schemaVersion} (found ${current}); start the release once, or run the migration, then restore`);
+    if (current !== schemaVersion) throw new Error(`Restore requires a database migrated to schema generation ${schemaVersion} (found ${current}); run \`graphyard db migrate\` with the release that took the backup or a newer one, then restore`);
     for (const name of ledgerTables) {
       if (name === 'graphyard_schema') continue;
       const count = Number((await db.query(`SELECT count(*) AS n FROM ${name}`)).rows[0].n);
-      if (count) throw new Error(`Restore requires an empty database: ${name} already holds ${count} row(s). Restoring over live state resurrects expired ownership and discards later evidence`);
+      if (count) throw new Error(`Restore requires an empty database: ${name} already holds ${count} row(s). ${name.startsWith('proof_grant')
+        ? 'A release that started against this database has already seeded proof authority from its environment; restore into a database migrated with `graphyard db migrate` instead, so the backup\'s grants and their history are the only authority'
+        : 'Restoring over live state resurrects expired ownership and discards later evidence'}`);
     }
     const restored: Record<string, number> = {};
     for (const table of backup.tables) {

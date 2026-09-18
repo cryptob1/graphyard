@@ -11,6 +11,7 @@ import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import { Validation } from '../src/validation.js';
 import { defineScenario } from '../src/scenarios.js';
+import { ProofGrants, authorizedForProof } from '../src/proof-grants.js';
 import type { Principal } from '../src/model.js';
 import { backupDigest, backupSchema, createBackup, ledgerCounts, restoreBackup, verifyBackup } from '../src/backup.js';
 import { schemaVersion } from '../src/release.js';
@@ -21,7 +22,8 @@ const worker: Principal = { id: 'implementer', role: 'worker' };
 const runner: Principal = { id: 'runner', role: 'worker' };
 const collector: Principal = { id: 'collector', role: 'producer', proofs: ['e2e:booking'] };
 const builder: Principal = { id: 'builder', role: 'producer' };
-const principals = [operator, worker, runner, collector, builder];
+const auditor: Principal = { id: 'auditor', role: 'producer', proofs: ['manual:audit'] };
+const principals = [operator, worker, runner, collector, builder, auditor];
 const sha = 'a'.repeat(40), base = 'b'.repeat(40), digest = `sha256:${'c'.repeat(64)}`, inputs = `sha256:${'d'.repeat(64)}`;
 let pg: EmbeddedPostgres, port: number, scratch: string;
 const id = () => randomUUID();
@@ -32,7 +34,7 @@ before(async () => {
   scratch = await mkdtemp(join(tmpdir(), 'graphyard-backup-'));
   pg = new EmbeddedPostgres({ databaseDir: join(scratch, 'data'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await pg.initialise(); await pg.start();
-  for (const name of ['source', 'restored', 'occupied', 'cli_restored', 'newer']) await pg.createDatabase(name);
+  for (const name of ['source', 'restored', 'occupied', 'cli_restored', 'newer', 'authority', 'seeded']) await pg.createDatabase(name);
 });
 after(async () => { if (pg) await pg.stop(); });
 
@@ -40,11 +42,18 @@ after(async () => { if (pg) await pg.stop(); });
  * A ledger holding everything the roadmap says an upgrade and restore must preserve: an
  * assignment under a live lease with its registered workspace, the append-only history
  * behind it, two revisions of one scenario, and a validation request that is still
- * pending. Plus the tables an installation accumulates around them.
+ * pending. Plus the tables an installation accumulates around them, and the proof-grant
+ * ledger after the operator has moved it away from the environment seed: one producer
+ * holds a pattern that exists only in the database, another has had its seeded pattern
+ * revoked. Both are what a restore that re-seeded the environment would get wrong.
  */
 async function populate(store: Store) {
   const engine = new Engine(store, [15368], 120, 'test/repository');
   const validation = new Validation(engine, principals, 'test/repository');
+  const grants = new ProofGrants(store, principals);
+  assert.equal((await grants.seed()).length, 3, 'every producer is materialized from the environment');
+  await grants.grant(operator, builder.id, { patterns: ['unit:*'], reason: 'Builder attests unit evidence' }, id());
+  await grants.revoke(operator, auditor.id, { patterns: ['manual:audit'], reason: 'Audit authority withdrawn inside Graphyard' }, id());
   const first = await defineScenario(store, operator, { id: 'booking', title: 'Booking', purpose: 'Prove booking', steps: ['Book'], expected: ['Booked'], environment: 'preview', runner: 'playwright', testPath: 'tests/booking.spec.ts' }, id());
   const second = await defineScenario(store, operator, { id: 'booking', title: 'Booking', purpose: 'Prove booking and cancellation', steps: ['Book', 'Cancel'], expected: ['Booked', 'Cancelled'], environment: 'preview', runner: 'playwright', testPath: 'tests/booking.spec.ts', expectedRevision: first.revision }, id());
   assert.equal(second.revision, first.revision + 1);
@@ -85,7 +94,9 @@ async function snapshot(store: Store) {
   const resources = (await store.pool.query('SELECT resource, request_id FROM validation_resources ORDER BY resource')).rows;
   const artifacts = (await store.pool.query('SELECT id, request_id, attempt_id, name, digest, media_type, encode(bytes, \'hex\') AS bytes, expires_at FROM validation_artifacts ORDER BY id')).rows;
   const definitions = (await store.pool.query('SELECT kind, id, revision, document FROM validation_definitions ORDER BY kind, id, revision')).rows;
-  return { work, events, scenarios, requests, resources, artifacts, definitions };
+  const grants = (await store.pool.query('SELECT principal_id, document FROM proof_grants ORDER BY principal_id')).rows;
+  const grantHistory = (await store.pool.query('SELECT seq, principal_id, document, created_at FROM proof_grant_history ORDER BY seq')).rows;
+  return { work, events, scenarios, requests, resources, artifacts, definitions, grants, grantHistory };
 }
 
 test('the documented backup and restore exercise preserves assignments, history, scenario revisions and pending requests, and the restored ledger keeps ordering', async () => {
@@ -95,8 +106,11 @@ test('the documented backup and restore exercise preserves assignments, history,
   assert.ok(before.work.find(w => w.id === seeded.workId)!.lease, 'the fixture holds a live assignment');
   assert.equal(before.requests.find(r => r.id === seeded.requestId)!.document.state, 'collecting');
   assert.equal(before.scenarios.length, 2);
+  assert.deepEqual(before.grants.map(g => [g.principal_id, g.document.patterns]), [['auditor', []], ['builder', ['unit:*']], ['collector', ['e2e:booking']]]);
+  assert.deepEqual(before.grantHistory.map(h => [Number(h.seq), h.principal_id, h.document.kind]), [[1, 'collector', 'seed'], [2, 'builder', 'seed'], [3, 'auditor', 'seed'], [4, 'builder', 'grant'], [5, 'auditor', 'revoke']]);
 
   const backup = await createBackup(source.pool);
+  assert.ok(backup.sequences.some(s => s.name.endsWith('proof_grant_history_seq_seq') && s.value === 5), 'the grant history sequence travels with the backup');
   assert.equal(backup.schemaVersion, schemaVersion); assert.equal(verifyBackup(backup).format, 'graphyard-backup-v1');
   assert.deepEqual(Object.fromEntries(backup.tables.map(t => [t.name, t.rows.length])), await ledgerCounts(source.pool));
 
@@ -133,7 +147,33 @@ test('the documented backup and restore exercise preserves assignments, history,
   const artifactId = (await restored.pool.query('SELECT id FROM validation_artifacts WHERE request_id=$1', [request.id])).rows[0].id;
   const served = await validation.readArtifact(collector, request.id, artifactId);
   assert.ok(served.bytes.toString('utf8').includes('artifact-bytes-marker'));
+  // Proof authority is the restored ledger, not the environment: the release's bootstrap
+  // seed finds every producer materialized, the revoked pattern stays revoked, the grant
+  // that existed only in the database still authorizes, and new history appends after
+  // the restored history instead of colliding with it.
+  const grants = new ProofGrants(restored, principals);
+  assert.deepEqual(await grants.seed(), [], 'restart after restore does not re-seed the environment allowlist');
+  await restored.transaction(async db => {
+    assert.equal(await authorizedForProof(db, auditor, 'manual:audit'), false);
+    assert.equal(await authorizedForProof(db, builder, 'unit:after'), true);
+  });
+  assert.deepEqual((await grants.history(operator, auditor.id)).map(h => [h.seq, h.kind, h.effective]), [[3, 'seed', ['manual:audit']], [5, 'revoke', []]]);
+  const regranted = await grants.grant(operator, auditor.id, { patterns: ['manual:audit'], reason: 'Audit authority restored after the exercise', expectedRevision: 2 }, id());
+  assert.equal(regranted.revision, 3);
+  assert.deepEqual((await grants.history(operator, auditor.id)).map(h => h.seq), [3, 5, 6]);
   await source.close(); await restored.close();
+});
+
+test('a target the release already started against refuses a restore, because its seeded proof authority would sit beside the backup\'s', async () => {
+  const source = new Store(url('authority')); await source.init();
+  await populate(source);
+  const backup = await createBackup(source.pool);
+  const seeded = new Store(url('seeded')); await seeded.init();
+  // What `graphyard serve` does on first boot with producers in GRAPHYARD_PRINCIPALS.
+  assert.equal((await new ProofGrants(seeded, principals).seed()).length, 3);
+  await assert.rejects(restoreBackup(seeded.pool, backup), /proof_grants already holds 3 row\(s\).*graphyard db migrate/);
+  assert.deepEqual((await ledgerCounts(seeded.pool)).work_items, 0, 'the refused restore wrote nothing');
+  await source.close(); await seeded.close();
 });
 
 test('a tampered, truncated or newer-schema backup refuses, and a newer-schema database refuses this release', async () => {

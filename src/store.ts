@@ -78,8 +78,13 @@ CREATE TABLE IF NOT EXISTS graphyard_schema (
   version int PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT clock_timestamp(), graphyard_version text NOT NULL
 );
 `;
-/** Every table a logical backup carries, in an order a restore can insert without violating references. */
-export const ledgerTables = ['work_items', 'events', 'receipts', 'operator_agents', 'operator_credentials', 'jobs', 'webhook_receipts',
+/**
+ * Every table a logical backup carries, in an order a restore can insert without violating
+ * references. The proof-grant ledger is part of it: after bootstrap it is the whole truth
+ * about who may produce trusted evidence, so a restore that left it empty would let the
+ * next start re-seed the environment allowlist over grants the operator revoked.
+ */
+export const ledgerTables = ['work_items', 'events', 'receipts', 'operator_agents', 'operator_credentials', 'proof_grants', 'proof_grant_history', 'jobs', 'webhook_receipts',
   'validation_definitions', 'validation_builds', 'validation_candidates', 'validation_requests', 'validation_artifacts', 'validation_resources', 'scenarios', 'graphyard_schema'] as const;
 
 export class Store {
