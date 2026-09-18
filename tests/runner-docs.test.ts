@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { execFile } from 'node:child_process';
+import { userInfo } from 'node:os';
 import { promisify } from 'node:util';
 import { attemptGrantSchema, runnerPlanSchema } from '../src/runner-executor.js';
 import { collectorInputSchema } from '../src/runner-collector.js';
@@ -85,8 +86,24 @@ if setpriv --reuid="$runner" --regid=30003 --clear-groups test -r "$root/attempt
   echo 'runner unexpectedly reached the attempt boundary' >&2
   exit 1
 fi`;
-  // Do not request `--setgroups=allow`: GitHub-hosted runners permit subordinate
-  // UID/GID mappings but deliberately deny that /proc write. The namespace still
-  // has CAP_SETGID and can exercise the supplementary-group checks below.
-  await exec('unshare', ['--map-auto', '--map-user=0', '--map-group=0', '--', 'bash', '-c', script]);
+  // Spell out the subordinate ranges instead of combining --map-auto with --map-user.
+  // util-linux versions disagree about whether that combination retains the automatic
+  // range, and a root-only map makes the permission test fail before it exercises the
+  // boundary. The hosted runner and supported Linux setup both provision these ranges.
+  const username = userInfo().username;
+  const subordinate = async (path: string) => {
+    const entry = (await readFile(path, 'utf8')).split('\n').map(line => line.split(':'))
+      .find(([owner]) => owner === username);
+    assert.ok(entry, `${path} must assign subordinate IDs to ${username}`);
+    const start = Number(entry[1]), count = Number(entry[2]);
+    assert.ok(Number.isSafeInteger(start) && Number.isSafeInteger(count) && count > 20_001,
+      `${path} must provide enough subordinate IDs for the documented identities`);
+    return `${start}:${count}`;
+  };
+  const [uids, gids] = await Promise.all([subordinate('/etc/subuid'), subordinate('/etc/subgid')]);
+  await exec('unshare', [
+    '--map-user=0', '--map-group=0',
+    `--map-users=1:${uids}`, `--map-groups=1:${gids}`,
+    '--', 'bash', '-c', script,
+  ]);
 });
