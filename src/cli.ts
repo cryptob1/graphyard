@@ -165,6 +165,11 @@ Environment: GRAPHYARD_URL, GRAPHYARD_TOKEN (individual role-scoped credential)
   list | next                  List all work / claimable work
   create path/to/work.json      Create work with acceptance criteria (operator)
   validation [ACTION file.json] List validation state or submit a protocol command
+  delivery [ACTION file.json]  Show releases and observed delivery, or submit a
+                                release/observation command (build|release|approve|
+                                select|lease|observe|notify|sweep)
+  delivery observations ENV [CURSOR]
+                                Page through an environment's deployment observations
   runner inspect [DIRECTORY]   Discover Playwright inputs without executing repository code
   runner snapshot file.json    Snapshot an explicit source-file list for review (not approval)
   runner bundle-digest DIR      Content identity of an executable oracle bundle for approval
@@ -549,6 +554,13 @@ Never share an operator or producer credential with an implementation agent.`); 
     if (id === 'show-candidate' && args[0]) return print(await api(`validation/candidate/${encodeURIComponent(args[0])}`));
     if (!['define','build','candidate','request','dispatch','ack','heartbeat','result','cancel','settle','retry'].includes(id) || !args[0]) throw new Error('Use validation ACTION file.json');
     return print(await api(`validation/${id}`, JSON.parse(await readFile(args[0], 'utf8'))));
+  }
+  if (command === 'delivery') {
+    if (!id || id === 'status') return print(await api('delivery'));
+    if (id === 'observations' && args[0]) return print(await api(`delivery/observations?environment=${encodeURIComponent(args[0])}${args[1] ? `&cursor=${encodeURIComponent(args[1])}` : ''}`));
+    if (id === 'sweep') return print(await api('delivery/sweep', {}));
+    if (!['build', 'release', 'approve', 'select', 'lease', 'observe', 'notify'].includes(id) || !args[0]) throw new Error('Use delivery [status] | delivery observations ENV [CURSOR] | delivery sweep | delivery ACTION file.json');
+    return print(await api(`delivery/${id}`, JSON.parse(await readFile(args[0], 'utf8'))));
   }
   if (command === 'grants') {
     if (!id || id === 'list') return print(await api('proof-grants'));

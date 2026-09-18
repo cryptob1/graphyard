@@ -24,6 +24,7 @@ Choose one path. The reference guides are there when a gate or integration needs
 - [E2E test-case registry](test-cases.md)
 - [Validation runner protocol](validation.md)
 - [Packaged Playwright runner](runner-setup.md)
+- [Releases and observed production delivery](delivery.md)
 
 ## Understand or contribute
 
