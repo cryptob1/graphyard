@@ -7,7 +7,7 @@ import { z } from 'zod';
 import { Store } from './store.js';
 import { Engine, type Command } from './engine.js';
 import { Refusal, demand, parseReviewerApps, type Principal } from './model.js';
-import { githubFromEnv, installationSettingsUrl, processJob, type GitHub } from './github.js';
+import { githubFromEnv, installationSettingsUrl, processJob, type AppPermissionReport, type GitHub } from './github.js';
 import { controlPlanePermissions, requiredPermissions } from './github-permissions.js';
 import { Validation } from './validation.js';
 import { defineScenario, scenarios } from './scenarios.js';
@@ -213,7 +213,12 @@ async function main() {
   const github = await githubFromEnv();
   // Startup preflight: a permission shortfall is announced before the first job can run
   // into it, and the jobs that need the missing permission are held rather than retried.
-  if (github) for (const line of (await github.preflight()).attention) console.error(`GitHub App permissions: ${line}`);
+  // A passing preflight (startup or periodic) releases holds left by an earlier process.
+  const announcePreflight = async (report: AppPermissionReport) => {
+    for (const line of report.attention) console.error(`GitHub App permissions: ${line}`);
+    if (!report.error && !report.suspended && !report.missing.length) await store.releaseHeldJobs();
+  };
+  if (github) await announcePreflight(await github.preflight());
   const http = server(engine, credentials, github);
   // One-time materialization of the deployment allowlist. Operators manage proof authority
   // inside Graphyard from here on; a later environment edit no longer changes authority.
@@ -229,10 +234,7 @@ async function main() {
       await validation.expireArtifacts(); await validation.reconcile(); await engine.reconcile();
       if (github) {
         const preflight = await github.preflightIfDue();
-        if (preflight) {
-          for (const line of preflight.attention) console.error(`GitHub App permissions: ${line}`);
-          if (!preflight.error && !preflight.suspended && !preflight.missing.length) await store.releaseHeldJobs();
-        }
+        if (preflight) await announcePreflight(preflight);
         await Promise.all(Array.from({ length: 4 }, () => processJob(engine, github)));
       }
     }
