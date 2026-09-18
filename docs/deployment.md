@@ -84,7 +84,7 @@ The sample Compose password is for local development. Set a unique database pass
 - **Secrets by reference.** Set `secrets.existingSecret` to a Secret carrying `DATABASE_URL`, `GRAPHYARD_PRINCIPALS`, `GITHUB_PRIVATE_KEY` (mounted as a file; may be empty until GitHub is connected) and `GITHUB_WEBHOOK_SECRET`. The chart refuses to render with nowhere to hold credentials. `secrets.create=true` renders one from values for evaluation only.
 - **Scheduled backups.** `backup.enabled=true` adds a CronJob running `graphyard db backup` onto a PersistentVolumeClaim, verifying each file and pruning after `backup.retainDays`. Use `backup.persistence.existingClaim` so the backups outlive the release.
 - **Evaluation Postgres.** `postgresql.enabled=true` adds a single-replica StatefulSet on a PersistentVolumeClaim. Production points `DATABASE_URL` at managed Postgres with its own backups.
-- **`helm test`.** The release's health test checks `/healthz` and that the running version is the one the chart deployed.
+- **`helm test`.** The release's health test checks `/healthz` and that the running version is the one the chart deployed. The test pod is kept after it succeeds so `helm test --logs` shows what it saw; the next run replaces it.
 
 ```sh
 kubectl create secret generic graphyard-credentials \

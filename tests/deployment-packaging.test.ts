@@ -43,6 +43,9 @@ test('the chart refuses to render without credentials and renders the documented
   assert.ok(external.stdout.includes(`ghcr.io/cryptob1/graphyard:${packageVersion}`));
   assert.ok(external.stdout.includes('readOnlyRootFilesystem: true') && external.stdout.includes('runAsNonRoot: true'));
   assert.ok(external.stdout.includes('"db", "migrate"') && external.stdout.includes('db backup') && external.stdout.includes('db verify'));
+  const testPod = external.stdout.split(/^---$/m).find(doc => doc.includes('helm.sh/hook: test'));
+  assert.ok(testPod, 'the chart carries a helm test');
+  assert.match(testPod, /helm\.sh\/hook-delete-policy: before-hook-creation$/m, 'the test pod survives success so `helm test --logs` can read it');
   const bundled = spawnSync(helm!, ['template', 'gy', chart, '--set', 'secrets.create=true', '--set', 'postgresql.enabled=true', '--set', 'postgresql.password=evaluation-only', '--set-string', 'secrets.principals=[]'], { encoding: 'utf8' });
   assert.equal(bundled.status, 0, bundled.stderr);
   assert.ok(bundled.stdout.includes('kind: StatefulSet') && bundled.stdout.includes('volumeClaimTemplates'), 'the evaluation database persists on a claim');

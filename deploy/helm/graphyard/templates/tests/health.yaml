@@ -1,4 +1,7 @@
 # `helm test RELEASE`: the release serves /healthz and reports the version the chart deployed.
+# The pod stays after it succeeds so `helm test --logs` and `kubectl logs` can read what it saw;
+# the next `helm test` replaces it. Deleting it on success would remove the logs before Helm
+# collects them.
 apiVersion: v1
 kind: Pod
 metadata:
@@ -7,7 +10,7 @@ metadata:
     {{- include "graphyard.labels" . | nindent 4 }}
   annotations:
     helm.sh/hook: test
-    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+    helm.sh/hook-delete-policy: before-hook-creation
 spec:
   restartPolicy: Never
   securityContext:
