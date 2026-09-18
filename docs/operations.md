@@ -42,6 +42,67 @@ Own-App check webhooks are ignored. Other signed webhook deliveries wake jobs, b
 
 The database merge gate refuses observations older than two minutes. GitHub's last successful check may still exist; it does not expire automatically. Routine master merges acquire a short-lived server authority, transactionally record a final GitHub verification, and freeze relevant Graphyard mutations around the exact-head provider call. A direct GitHub merge has no verified execution and cannot complete its Graphyard work item. Repository rules must restrict alternative merge identities when the merge itself must also be prevented during an outage.
 
+## Bootstrap mode for a self-proving change
+
+An item can require a proof that does not exist yet, because the same change is what introduces the
+harness. The protected harness refuses to run against a base that lacks the contract, so the item
+cannot prove itself and stalls until someone re-sequences requirements by hand. Bootstrap mode is
+the audited way through, and it is an operator decision.
+
+Mark the one criterion whose proof is not yet runnable:
+
+```sh
+graphyard requirements GY-N revision.json
+```
+
+```json
+{
+  "expectedPolicyRevision": 3,
+  "reason": "The herdr-recovery harness ships in this change",
+  "criteria": [
+    {"id": "AC-1", "text": "Herdr recovery is proven end to end", "proofs": ["integration:herdr-recovery"],
+     "bootstrap": {"reason": "This candidate introduces the harness the proof needs",
+                   "contractPaths": ["src/herdr/recovery.ts"]}},
+    {"id": "AC-2", "text": "The supervisor stops cleanly", "proofs": ["unit:supervisor-stop"]}
+  ],
+  "dependencies": [],
+  "plannedFiles": ["src/herdr/", "tests/"],
+  "exclusiveResources": []
+}
+```
+
+The same declaration can be made at creation, or from **Revise requirements** in the dashboard.
+Contract paths must lie inside the item's planned files. Declaring or changing bootstrap mode
+requires the `policy:bootstrap` capability; an operator-agent scoped to `policy:requirements` alone
+is refused, and implementation workers cannot revise their own criteria at all. Graphyard stamps who
+declared the deferral and when, and records the declaration and its reason in append-only history.
+
+A criterion with an `e2e:` proof cannot be deferred: its scenario version is pinned per work item
+and cannot travel with the obligation. Sequence those through the test-case registry instead.
+
+What stays in force: independent review, every required CI check, the merge queue, and every proof
+of every criterion that is not marked. A bootstrap candidate with a failing check or no approval
+does not advance. Bootstrap mode buys sequencing, not a lower bar.
+
+What is owed: the deferred proof becomes an obligation on its contract paths. The next work item
+whose planned files touch that contract inherits the proof as a required criterion automatically —
+its acceptance gate names the originating item and criterion — and that item cannot defer it again.
+The obligation clears only when some change is delivered with trusted, passing, complete evidence
+for that proof. No command retires it.
+
+Review what is outstanding before planning new work:
+
+```sh
+graphyard obligations
+graphyard diagnose GY-N
+```
+
+The dashboard shows the same facts on the work item: a bootstrap badge and the declaring identity on
+the criterion, `deferred` on the required-proof list, inherited obligations on the items that pick
+them up, and a **Bootstrap obligations** ledger of everything still owed. If an obligation has no
+inheritor and the harness now exists on main, create the follow-up item that runs it rather than
+leaving the proof owed indefinitely.
+
 ## Merge bypass
 
 An observed merge with unsatisfied gates creates a permanent violation. Do not backfill evidence and pretend the merge was authorized. Inspect what bypassed protection, repair access rules, and create a follow-up investigation or repair task. v0.1 does not automatically revert code or deploy rollbacks.

@@ -5,11 +5,12 @@ import { resolve } from 'node:path';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { supervise } from './supervisor.js';
 import { inspectRunnerRepository, snapshotRunnerSources } from './runner-setup.js';
+import { inheritedObligations } from './model.js';
 import { assertRepository, availableRuntimes, discover } from './onboarding.js';
 import { startGithubSetup } from './github-setup.js';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
-import { diagnose, fileConflicts, proofPreview, resourceConflicts } from './coordination.js';
+import { diagnose, fileConflicts, obligationLedger, proofPreview, resourceConflicts } from './coordination.js';
 import { applyProposal, loadAppliedSetup, loadProposal, loadConnection, readSetupStatus, repositoryScanDifference, saveProposal, scanProposal, setupDrift, setupRepository, handoff, hostIdSchema } from './repository-setup.js';
 import { assertMasterBinding, assessContainment, buildMasterStatus, continueMergeBatch, currentMergeCandidates, dispatchWork, inspectWorkerCredentials, listHerdrAgents, loadMasterConfig, mergeWork, observeHerdrAgents, readCredentialFile, readWorkerCredential, saveWorkerProfile, setupMaster, snapshotWithClock, startMaster, verifyContainmentDeath, workerProfileSchema } from './master.js';
 import { acknowledgeContainment, containmentCredentials, establishContainment, isConfirmedCoordinationRefusal, revalidateContainment, settleContainment } from './quarantine.js';
@@ -88,7 +89,11 @@ Environment: GRAPHYARD_URL, GRAPHYARD_TOKEN (individual role-scoped credential)
                                 through the local App-manifest browser flow
   status [GY-N]                Control-plane or work status
   diagnose GY-N                Explain blockers, overlap and required proof
-  requirements GY-N file.json  Revise requirements with an audit reason (operator)
+  requirements GY-N file.json  Revise requirements with an audit reason (operator);
+                                a criterion may carry "bootstrap": {reason, contractPaths}
+                                to defer its proofs onto the named contract (operator with
+                                policy:bootstrap). Deferred proofs are never dropped.
+  obligations                  List every deferred bootstrap proof still owed and who inherits it
   list | next                  List all work / claimable work
   create path/to/work.json      Create work with acceptance criteria (operator)
   validation [ACTION file.json] List validation state or submit a protocol command
@@ -304,6 +309,7 @@ Never share an operator or producer credential with an implementation agent.`); 
       limits: ['CI discovery is a proposal, not executed-test inventory', 'Herdr two-host recovery and GitHub refusal-to-acceptance must be demonstrated'] });
   }
   if (command === 'status' && !id) return print(await api('status'));
+  if (command === 'obligations') return print(obligationLedger((await api('work-snapshot')).work));
   if (command === 'scenarios') return print(await api('scenarios'));
   if (command === 'scenario') return print(await api('scenarios', JSON.parse(await readFile(id, 'utf8'))));
   if (command === 'list' || command === 'next') {
@@ -314,7 +320,7 @@ Never share an operator or producer credential with an implementation agent.`); 
   if (command === 'diagnose') {
     const snapshot = await api('work-snapshot'); const item = snapshot.work.find((w: any) => w.id === id || w.key === id);
     if (!item) throw new Error(`Unknown work item ${id}`);
-    return print({ key: item.key, observedAt: snapshot.now, diagnostics: diagnose(item, snapshot.work, Date.parse(snapshot.now), snapshot.jobs), overlaps: fileConflicts(item, snapshot.work), proofs: proofPreview(item) });
+    return print({ key: item.key, observedAt: snapshot.now, diagnostics: diagnose(item, snapshot.work, Date.parse(snapshot.now), snapshot.jobs), overlaps: fileConflicts(item, snapshot.work), proofs: proofPreview(item, snapshot.work), obligations: inheritedObligations(item, snapshot.work) });
   }
   if (command === 'handoff') {
     const [snapshot, status] = await Promise.all([api('work-snapshot'), api('status')]);
