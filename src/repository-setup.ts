@@ -259,10 +259,14 @@ export async function applyProposal(root: string, proposalInput: unknown, depend
 
   const randomToken = dependencies.token ?? (() => randomBytes(32).toString('base64url'));
   const grants = proposal.proofs.filter(proof => proof.command).map(proof => proof.name);
+  // Only principals the operator reviewed in the proposal are registered; apply
+  // never mints a credential the proposal does not declare, so a machine without
+  // an agent runtime gets no worker principal rather than an unreviewed one.
+  const workerPrincipals = [...new Set(proposal.profiles.workers.map(profile => profile.principal))];
   const desired = [
     { id: 'operator', role: 'admin' as const },
     { id: 'master', role: 'coordinator' as const },
-    ...[...new Set(['worker-1', ...proposal.profiles.workers.map(profile => profile.principal)])].map(id => ({ id, role: 'worker' as const })),
+    ...workerPrincipals.map(id => ({ id, role: 'worker' as const })),
     { id: 'evidence', role: 'producer' as const, proofs: grants },
   ];
   let previous: unknown = null;
@@ -314,10 +318,14 @@ export async function applyProposal(root: string, proposalInput: unknown, depend
   if (sameState) unchanged.push('applied setup record');
   else { await atomicWrite(appliedPath, JSON.stringify(state, null, 2), 0o600); applied.push('applied setup record'); }
 
+  const workerStep = workerPrincipals.length
+    ? 'place each worker credential at its profile credentialFile path, then claim work'
+    : 'no agent runtime was detected on this machine, so the proposal declared no worker profile and no worker principal was registered; install an agent CLI and rerun init --scan --apply to add one';
   return { server, applied, unchanged, drift, githubApp,
     githubPending: !githubApp,
+    workerPrincipals,
     principalsFile: resolve(directory, 'principals.json'),
     next: githubApp
-      ? 'Install the principals array as GRAPHYARD_PRINCIPALS on the Graphyard deployment, place each worker credential at its profile credentialFile path, then claim work'
+      ? `Install the principals array as GRAPHYARD_PRINCIPALS on the Graphyard deployment, ${workerStep}`
       : 'Run graphyard github-setup SERVER_URL to register the GitHub App, then rerun init --scan --apply to finish idempotently' };
 }

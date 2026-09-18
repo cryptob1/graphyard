@@ -202,6 +202,40 @@ test('applying a reviewed proposal performs the App flow, registers principals a
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
+test('apply registers only the worker principals the reviewed proposal declares', async () => {
+  const root = await fixtureRepo(nodeRailway);
+  try {
+    // No agent runtime on the machine means no reviewed worker profile, so apply
+    // must not mint an unreviewed worker credential of its own.
+    const proposal = await scanProposal(root, { url: 'https://graphyard.example', runtimes: [] });
+    assert.deepEqual(proposal.profiles.workers, []);
+    await saveProposal(root, proposal);
+    let tokens = 0;
+    const result = await applyProposal(root, proposal, { url: 'https://graphyard.example',
+      githubSetup: async () => ({ appId: 1234, slug: 'graphyard-owner-repo' }),
+      token: () => `secret-${++tokens}-`.padEnd(40, 't'), now: () => new Date('2030-01-01T00:00:00Z') });
+    const registry = JSON.parse(await readFile(join(root, '.graphyard/principals.json'), 'utf8'));
+    assert.deepEqual(registry.principals.map((entry: any) => entry.id), ['operator', 'master', 'evidence']);
+    assert.deepEqual(registry.principals.filter((entry: any) => entry.role === 'worker'), []);
+    assert.deepEqual(result.workerPrincipals, []);
+    assert.match(result.next, /no agent runtime was detected/);
+    assert.deepEqual((await loadAppliedSetup(root))!.artifacts.profiles, ['reviewer']);
+
+    // Declaring a runtime later adds exactly that principal and keeps existing secrets.
+    const withRuntime = await scanProposal(root, { url: 'https://graphyard.example', runtimes: ['codex'] });
+    await saveProposal(root, withRuntime);
+    const second = await applyProposal(root, withRuntime, { url: 'https://graphyard.example',
+      githubSetup: async () => ({ appId: 1234, slug: 'graphyard-owner-repo' }),
+      token: () => `secret-${++tokens}-`.padEnd(40, 't'), now: () => new Date('2030-01-01T00:00:00Z') });
+    assert.deepEqual(second.workerPrincipals, ['worker-1']);
+    const grown = JSON.parse(await readFile(join(root, '.graphyard/principals.json'), 'utf8'));
+    assert.deepEqual(grown.principals.map((entry: any) => entry.id), ['operator', 'master', 'worker-1', 'evidence']);
+    for (const id of ['operator', 'master', 'evidence'])
+      assert.equal(grown.principals.find((entry: any) => entry.id === id).token,
+        registry.principals.find((entry: any) => entry.id === id).token);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
 test('scan chooses and documents topology for three distinct stack fixtures', async () => {
   const cases = [
     { files: nodeRailway, repository: 'owner/orders-api', stack: 'node', target: 'railway', topology: 'ephemeral' },
