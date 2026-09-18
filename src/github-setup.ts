@@ -5,7 +5,7 @@ import { resolve } from 'node:path';
 import { GitHub } from './github.js';
 import { localDirectory } from './onboarding.js';
 
-interface AppCredentials { appId: number; slug: string; privateKey: string; webhookSecret: string; repository: string; installationId?: number; reviewer?: string; botUserId?: number }
+export interface AppCredentials { appId: number; slug: string; privateKey: string; webhookSecret: string; repository: string; installationId?: number; reviewer?: string; botUserId?: number }
 const escape = (value: string) => value.replaceAll('&', '&amp;').replaceAll('"', '&quot;').replaceAll('<', '&lt;').replaceAll('>', '&gt;');
 function manifestOrigin(repository: string, deployment: string) {
   if (!/^[\w.-]+\/[\w.-]+$/.test(repository)) throw new Error('Expected owner/repository');
@@ -41,10 +41,14 @@ export async function startGithubSetup(root: string, repository: string, deploym
   convert?: (code: string) => Promise<any>;
   verify?: (app: AppCredentials, installationId: number) => Promise<void>;
   resolveBot?: (slug: string) => Promise<{ id: number; type: string }>;
+  // A caller that must keep registration credentials outside every repository supplies its own
+  // path, and learns the verified installation through record rather than re-reading the file.
+  file?: string;
+  record?: (app: AppCredentials & { installationId: number }) => Promise<void>;
 } = {}, reviewer?: string) {
   if (reviewer !== undefined && !/^[a-z0-9][a-z0-9._-]{0,63}$/.test(reviewer)) throw new Error('Reviewer name must be a lowercase identifier');
   const directory = await localDirectory(root);
-  const file = resolve(directory, reviewer ? `github-reviewer-${reviewer}.json` : 'github-app.json');
+  const file = dependencies.file ?? resolve(directory, reviewer ? `github-reviewer-${reviewer}.json` : 'github-app.json');
   let app: AppCredentials | undefined;
   try { app = JSON.parse(await readFile(file, 'utf8')); } catch (error: any) { if (error.code !== 'ENOENT') throw error; }
   if (app && app.repository !== repository) throw new Error('Saved App belongs to a different repository');
@@ -120,6 +124,7 @@ export async function startGithubSetup(root: string, repository: string, deploym
         if (!app || !Number.isSafeInteger(installationId) || installationId <= 0) return html(400, '<p>Register the App and select the managed repository first.</p>');
         await verify(app, installationId);
         const next = { ...app, installationId }; await persist(next); app = next;
+        if (dependencies.record) await dependencies.record(next as AppCredentials & { installationId: number });
         res.writeHead(303, { Location: '/' }); return res.end();
       }
       html(404, '<p>Page not found.</p>');
