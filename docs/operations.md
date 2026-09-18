@@ -43,6 +43,12 @@ and the [operating guide](master-agent.md#durable-loop).
 - **Worker profiles.** A failed launch cools its profile off for ten minutes and work routes to
   another profile. `daemon.profiles` holds the reason. A profile that never recovers usually has an
   unreadable credential file or an agent name already taken in Herdr.
+- **GitHub administration.** `master status` reports browser-driven administration under
+  `administration`: the last five audit entries with who did what and whether the API verified it,
+  and `sudo` when a flow is waiting on GitHub's *Confirm access* prompt — approve it on your device
+  and choose the two-digit code shown. A refused flow names its record directory under
+  `.graphyard/master-actions/`; `record.json` and the numbered screenshots show exactly what the
+  page offered. See [GitHub administration through the browser](master-agent.md#github-administration-through-the-browser).
 
 ## Lost worker before submission
 
