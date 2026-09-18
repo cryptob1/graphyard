@@ -50,6 +50,77 @@ Every launch profile carries an approval mode; see [approval modes](#approval-mo
 
 Local dispatch requires Linux with a working systemd user manager for durable containment. On macOS or Linux without user systemd, route work to a separately supervised remote worker instead.
 
+## Durable loop
+
+A chat session is a poor coordinator. Its transcript grows without bound, it dies with its
+provider's credits, and recovering it needs a human to hand the role to another session. The
+deterministic part of coordination does not need a language model at all, so run it as a supervised
+process:
+
+```sh
+node "$GRAPHYARD_CLI" master run              # cycle until stopped
+node "$GRAPHYARD_CLI" master run --once       # one cycle, for cron or a smoke check
+node "$GRAPHYARD_CLI" master run --interval 30
+```
+
+Supervise it with systemd (see [`examples/master/graphyard-master.service`](../examples/master/graphyard-master.service))
+or a Herdr tab. `master init` accepts the loop's settings:
+
+| Flag | Meaning |
+| --- | --- |
+| `--interval SECONDS` | Seconds between cycles, 5–900; default 20 |
+| `--proof-workflow FILE` | Workflow file, such as `acceptance.yml`, that the loop asks GitHub to run when a candidate is missing automatable proof |
+| `--deployment-url URL` | JSON endpoint that reports the commit the running release serves |
+| `--deployment-sha-field PATH` | Dotted field holding that commit; default `commit` |
+
+Each cycle:
+
+1. **closes finished worker sessions** — a launched agent whose principal holds no active lease has
+   no authority left, so its pane is closed rather than left holding a provider seat;
+2. **dispatches claimable work** to a healthy worker profile, through the same launcher
+   `master dispatch` uses: the worker claims under its own identity and the loop holds no lease;
+3. **shepherds reviews and proofs** — one recorded request per exact candidate, a request to the
+   trusted producer workflow when automatable proof is missing, and an escalation for anything only
+   a human or a producer may resolve;
+4. **invokes only the guarded merge**, when automatic merging is enabled;
+5. **verifies the deployed SHA** against what Graphyard recorded as delivered;
+6. **records stage p50/p90** for every open stage plus delivered lead time.
+
+Every action lands in `master status` under `daemon`: the current cycle, its measurements, the
+deployment observation, per-profile health, recent actions, and anything still unresolved.
+
+### Restartability
+
+The loop keeps a private cursor next to the coordinator credential, outside every worktree. It is
+written before and after each external action, so a daemon killed mid-action leaves a record that
+the next start resolves **against Graphyard, not against the cursor**: an assignment that landed is
+closed, one that never landed is released for a fresh attempt, and a review request for a candidate
+that already has one is never sent twice. Restarting is therefore always safe, and the supervisor
+may restart it as often as it likes.
+
+Whether an assignment landed is read from the attempt epoch, which only a claim advances, and never
+from the presence of a submission: an item returned to the worker by `rework` keeps the previous
+attempt's submission until the new attempt resubmits, so treating that as success would leave the
+rework waiting for a dispatch that never comes.
+
+One loop owns a repository at a time. A second refuses while the first is alive; a lock left by a
+killed daemon on the same host is reclaimed as soon as that process is gone.
+
+### What the loop will not do
+
+The daemon holds exactly one credential: the coordinator token. It cannot claim a lease, submit
+evidence, revise requirements, release backlog work, or approve a review, and it refuses to start
+if that credential is also allowed to produce evidence. Provider exhaustion, a failing reviewer, a
+missing manual proof, and an unhealthy worker profile are all escalations, never shortcuts. A
+refused merge is the gate working: the loop records the refusal and keeps cycling.
+
+An unhealthy profile — an unreadable credential, a name already busy in Herdr, or a recent failed
+launch — is routed around for a ten-minute cool-off while other profiles keep receiving work.
+
+Judgment calls stay with an agent or a human: reading a worker's report, deciding whether a review
+finding needs rework, choosing how to route a novel failure. The loop keeps the mechanical steps
+running underneath them.
+
 ## Operate
 
 ```sh
@@ -197,4 +268,4 @@ For a dead worker or provider change:
 4. claim with the replacement worker at a higher epoch;
 5. create a fresh workspace and preserve the old attempt.
 
-The master does not clear blockers, revise requirements, or satisfy human gates on its own. See [operations](operations.md) for recovery commands.
+The master does not clear blockers, revise requirements, or satisfy human gates on its own. See [operations](operations.md) for recovery commands, including [restarting the durable loop](operations.md#master-coordination-loop).

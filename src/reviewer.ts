@@ -4,7 +4,7 @@ import { mkdir, readFile, rm, realpath } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { dirname, resolve } from 'node:path';
 import { z } from 'zod';
-import { assertOutsideWorktrees, atomicPrivateWrite, createdHerdrTab, herdrJson, loadMasterConfig, privateFile, reviewerIdentitySchema, reviewerProfileSchema, stopCreatedHerdrTab, stopHerdrPane, type MasterConfig, type ReviewerIdentity, type ReviewerProfile } from './master.js';
+import { assertOutsideWorktrees, atomicPrivateWrite, createdHerdrTab, herdrJson, loadMasterConfig, privateFile, reviewerIdentitySchema, reviewerProfileSchema, closeHerdrPane, stopCreatedHerdrTab, type MasterConfig, type ReviewerIdentity, type ReviewerProfile } from './master.js';
 import { launchPlan } from './harness.js';
 import type { Work } from './model.js';
 
@@ -235,7 +235,7 @@ export async function reconcileReviews(root: string, config: MasterConfig, depen
     if (!verdict && !expired) continue;
     if (verdict) record.verdict = verdict;
     let closeFailure: string | undefined;
-    try { if (record.pane) stopHerdrPane(record.pane, dependencies.run); }
+    try { if (record.pane) closeHerdrPane(record.pane, dependencies.run); }
     catch (error) { closeFailure = `Herdr could not close pane ${record.pane}: ${error instanceof Error ? error.message : 'unknown reason'}`; }
     if (!closeFailure) await rm(record.sessionDirectory, { recursive: true, force: true });
     record.closeFailure = closeFailure;

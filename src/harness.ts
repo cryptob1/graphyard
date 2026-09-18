@@ -44,7 +44,7 @@ export function masterHarnessPlan(input: { harness: string; root: string; cliPat
     note: `Graphyard generates harness permissions for Claude Code and trust configuration for Codex; ${input.harness} has no generated rules, so its own approval configuration applies.` };
   const cli = `node ${input.cliPath}`;
   const allow: HarnessRule[] = [
-    { rule: `Bash(${cli} master:*)`, why: 'Run the master\'s own coordinator commands: status, dispatch, review, reviewer, protection, harness, merge, and guide.' },
+    { rule: `Bash(${cli} master:*)`, why: 'Run the master\'s own coordinator commands: status, dispatch, review, reviewer, protection, harness, run, merge, and guide.' },
     { rule: `Bash(${cli} status:*)`, why: 'Read control-plane and work-item status without an operator keypress.' },
     { rule: `Bash(${cli} diagnose:*)`, why: 'Explain a refusing gate for an item the master is routing.' },
     { rule: `Bash(${cli} events:*)`, why: 'Read the immutable history the master reports from.' },
