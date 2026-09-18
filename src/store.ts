@@ -30,6 +30,15 @@ CREATE TABLE IF NOT EXISTS operator_credentials (
   token_hash text NOT NULL UNIQUE, valid_from timestamptz NOT NULL, valid_until timestamptz,
   revoked_at timestamptz, PRIMARY KEY(agent_id,fingerprint)
 );
+CREATE TABLE IF NOT EXISTS proof_grants (
+  principal_id text PRIMARY KEY, document jsonb NOT NULL
+);
+CREATE TABLE IF NOT EXISTS proof_grant_history (
+  seq bigserial PRIMARY KEY, principal_id text NOT NULL, document jsonb NOT NULL,
+  created_at timestamptz NOT NULL DEFAULT clock_timestamp()
+);
+DROP TRIGGER IF EXISTS immutable_proof_grant_history ON proof_grant_history;
+CREATE TRIGGER immutable_proof_grant_history BEFORE UPDATE OR DELETE ON proof_grant_history FOR EACH ROW EXECUTE FUNCTION graphyard_immutable();
 CREATE TABLE IF NOT EXISTS jobs (
   work_id uuid PRIMARY KEY REFERENCES work_items(id), available_at timestamptz NOT NULL DEFAULT now(),
   locked_until timestamptz, token uuid, attempts int NOT NULL DEFAULT 0, error text
