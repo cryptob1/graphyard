@@ -22,6 +22,9 @@ test('managed instructions refresh one section and preserve all surrounding oper
   assert.ok(updated.startsWith(original)); assert.ok(updated.endsWith('## Team review\nAsk the maintainer.\n'));
   assert.equal(updated.split('<!-- graphyard -->').length, 2); assert.doesNotMatch(updated, /one.example/);
   assert.equal(managedInstructions(updated, 'https://two.example'), updated);
+  assert.match(updated, /Run `sync GY-N` before every push/); assert.match(updated, /never rebase/);
+  assert.match(updated, /Files outside plannedFiles must match\norigin\/BASE byte-for-byte/); assert.match(updated, /Only an operator can widen plannedFiles/);
+  assert.match(updated, /refused, naming the files and the shipped work/);
   for (const broken of ['<!-- graphyard -->', '<!-- /graphyard --><!-- graphyard -->', first + first]) assert.throws(() => managedInstructions(broken, 'https://example.com'), /markers/);
 });
 

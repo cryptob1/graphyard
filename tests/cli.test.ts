@@ -915,3 +915,51 @@ test('master run executes the durable loop as a supervised process and master st
     await rm(root, { recursive: true, force: true }); await rm(credentialDirectory, { recursive: true, force: true });
   }
 });
+
+test('sync merges origin/BASE without rebasing, passes in-scope and new files, and refuses every out-of-scope file that no longer matches the base', async () => {
+  const cwd = await mkdtemp(join(tmpdir(), 'graphyard-sync-'));
+  const http = createServer((req, res) => { res.setHeader('Content-Type', 'application/json');
+    res.end(JSON.stringify(req.url === '/api/status' ? { baseBranch: 'main', repository: 'owner/project', actor: { id: 'worker-a', role: 'worker' } }
+      : [{ id: 'task', key: 'GY-1', plannedFiles: ['src/scoped/', 'tests/'], workspaces: [{ epoch: 1, host: 'machine-a', path: cwd, branch: 'graphyard/gy-1-1' }] }])); });
+  await new Promise<void>(r => http.listen(0, '127.0.0.1', r));
+  const env = { ...process.env, GRAPHYARD_TOKEN: 'fixture', GRAPHYARD_URL: `http://127.0.0.1:${(http.address() as any).port}` };
+  const origin = join(cwd, 'origin'), clone = join(cwd, 'clone');
+  const git = async (repo: string, ...args: string[]) => (await exec('git', ['-c', 'user.name=Test', '-c', 'user.email=test@localhost', ...args], { cwd: repo })).stdout.trim();
+  const commit = async (repo: string, message: string) => { await git(repo, 'add', '-A'); await git(repo, 'commit', '-q', '-m', message); return git(repo, 'rev-parse', 'HEAD'); };
+  const sync = () => exec(process.execPath, [launcher, 'sync', 'GY-1'], { cwd: clone, env });
+  const refusal = async () => { try { await sync(); assert.fail('sync must exit non-zero'); } catch (error: any) { assert.equal(error.code, 1); return JSON.parse(error.stdout); } };
+  try {
+    await mkdir(origin); await git(origin, 'init', '-q', '--initial-branch', 'main');
+    await mkdir(join(origin, 'src/scoped'), { recursive: true });
+    await writeFile(join(origin, 'src/shipped.ts'), 'export const shipped = 1;\nexport const kept = true;\n'); await writeFile(join(origin, 'src/scoped/feature.ts'), 'feature v0\n');
+    await commit(origin, 'Base');
+    await exec('git', ['clone', '-q', origin, clone]);
+    await git(clone, 'checkout', '-q', '-b', 'graphyard/gy-1-1');
+    await writeFile(join(clone, 'src/scoped/feature.ts'), 'feature v1\n'); const own = await commit(clone, 'Feature');
+    // Meanwhile main ships GY-33's change and a new file.
+    await writeFile(join(origin, 'src/shipped.ts'), 'export const shipped = 2;\nexport const kept = true;\nexport const added = true;\n'); await writeFile(join(origin, 'src/other.ts'), 'export const other = 1;\n');
+    const mainTip = await commit(origin, 'Ship GY-33');
+    const clean = JSON.parse((await sync()).stdout);
+    assert.equal(clean.ok, true); assert.equal(clean.merged, true); assert.equal(clean.baseTip, mainTip); assert.deepEqual(clean.refused, []);
+    assert.deepEqual(clean.files.map((f: any) => [f.path, f.kind]), [['src/scoped/feature.ts', 'in-scope']]);
+    await git(clone, 'merge-base', '--is-ancestor', mainTip, 'HEAD'); await git(clone, 'merge-base', '--is-ancestor', own, 'HEAD');
+    assert.equal(await git(clone, 'rev-list', '--count', '--merges', 'HEAD'), '1', 'the base branch is merged, never rebased');
+    // The worker re-resolves shipped files in favour of its branch and deletes one; a new file is fine.
+    await writeFile(join(clone, 'src/shipped.ts'), 'export const shipped = 2;\nexport const kept = true;\n'); await rm(join(clone, 'src/other.ts'));
+    await mkdir(join(clone, 'tests')); await writeFile(join(clone, 'src/brand-new.ts'), 'export const fresh = 1;\n'); await writeFile(join(clone, 'tests/new.test.ts'), 'test\n'); await commit(clone, 'Bad resolution');
+    const refused = await refusal();
+    assert.equal(refused.ok, false); assert.equal(refused.merged, true);
+    assert.deepEqual(refused.refused, ['src/other.ts: deleted; the base branch still holds it', 'src/shipped.ts: removes 1 line that the base branch holds and adds nothing']);
+    assert.deepEqual(refused.files.filter((f: any) => !f.refused).map((f: any) => [f.path, f.kind]), [['src/brand-new.ts', 'new'], ['src/scoped/feature.ts', 'in-scope'], ['tests/new.test.ts', 'in-scope']]);
+    assert.match(refused.next, /git checkout [0-9a-f]{12} -- PATH/);
+    await git(clone, 'checkout', mainTip, '--', 'src/shipped.ts', 'src/other.ts'); await commit(clone, 'Restore shipped files');
+    assert.equal(JSON.parse((await sync()).stdout).ok, true);
+    // A conflicting base change stops before any scope verdict; nothing is rebased or resolved for the worker.
+    await writeFile(join(origin, 'src/scoped/feature.ts'), 'feature from main\n'); await commit(origin, 'Conflicting change');
+    const conflicted = await refusal();
+    assert.equal(conflicted.merged, false); assert.deepEqual(conflicted.conflicts, ['src/scoped/feature.ts']); assert.match(conflicted.next, /Resolve each conflict/);
+    await git(clone, 'merge', '--abort');
+    await git(clone, 'checkout', '-q', '-b', 'graphyard/gy-9-1');
+    await assert.rejects(sync(), /not one/);
+  } finally { await new Promise<void>(r => http.close(() => r())); await rm(cwd, { recursive: true, force: true }); }
+});

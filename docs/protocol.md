@@ -52,7 +52,7 @@ Other commands use `POST /api/work/UUID/COMMAND` (display keys also work):
 | `release` | `{"epoch":1}` |
 | `blocked` | `{"epoch":1,"reason":"Waiting for API contract"}`; null clears |
 | `workspace` | `{"epoch":1,"host":"build-machine-a","path":"/work/GY-1","branch":"graphyard/gy-1-1"}` |
-| `submit` | `{"epoch":1,"pr":123}` |
+| `submit` | `{"epoch":1,"pr":123}`; the server observes the pull request first and refuses, naming the files, when it reverts, deletes or rewrites files outside `plannedFiles` relative to the base it is bound to, see [regression guard](#submit-time-regression-guard) |
 | `evidence` | See below |
 
 No endpoint sets arbitrary lifecycle state. `complete` in the CLI maps to `submit`, not `done`.
@@ -105,6 +105,14 @@ node /path/to/graphyard/bin/graphyard.mjs register GY-1 workspace.json
 The server never assumes it can run Git on a remote host. Host/path registration is worker-reported; PR branch matching is provider-observed. Workspace cleanup is manual and must preserve uncommitted work.
 
 The quarantine and live lease form the final launch fence. Its idempotent control-plane acknowledgement precedes process creation, and rework is transactionally refused for the entire live-lease response window. A stale, reassigned, expired, mismatched, or ambiguous acknowledgement never spawns the child; the supervisor retains its signal handlers through acknowledgement and any cancellation or settlement.
+
+## Submit-time regression guard
+
+Before `submit` is recorded, the control plane observes the pull request through its GitHub App (outside the coordination transaction) and classifies every changed file against the work item's `plannedFiles`, as described in [coordination](coordination.md#refuse-candidates-that-revert-shipped-code-outside-their-scope). Each file outside scope is compared by blob identity with the commit the candidate is bound to — the base branch tip, or the predicted base of a published speculative tip. The refusal is `409` with the message `Submission refused for GY-N: Candidate changes K files outside its planned files ...; Out-of-scope regression: PATH: DETAIL (shipped by GY-A, GY-B)`, one entry per file. A refused submission writes nothing and has no receipt, so the same idempotency key may be retried after the branch is fixed. The observed head branch must also be the workspace branch registered for the epoch. Without GitHub configured no pre-check runs; the reconciliation job still evaluates the candidate.
+
+Every observation carries `scopeFiles`, one record per changed file: `path`, `status`, `previousPath` for a rename, the head blob `sha`, `additions`, `deletions`, `binary`, and `baseSha` (the blob at the bound base, `null` when absent there, omitted for planned files and for files beyond the 200-lookup budget). The `build` gate re-derives the refusal from the current observation, so a new head is judged again and a refusal never outlives the observation it came from. An observation without `scopeFiles` is refused until a fresh one compares the diff.
+
+`graphyard sync GY-N` is the worker-side half: it merges `origin/BASE` (never rebases), classifies `git diff` against the fetched tip with the same rules, prints the findings as JSON and exits non-zero when any file outside `plannedFiles` differs from the base. `plannedFiles` can be changed only by the operator `requirements` command.
 
 ## Evidence
 

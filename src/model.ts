@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { ejectionReason, nextQueueSequence, queueHistoryLimit, queuePlacement } from './merge-queue.js';
 import type { QueueEjection, QueueEntry, QueueHistoryEntry } from './merge-queue.js';
+import { regressionRefusals } from './regression-guard.js';
 
 export const CHECK_NAME = 'Graphyard / merge';
 export const stages = ['backlog', 'ready', 'build', 'review', 'test', 'acceptance', 'merge', 'done'] as const;
@@ -123,6 +124,18 @@ export interface ReviewFailover {
   profile: string; reviewerApp: string; runtime: string; exhaustion: 'usage-limit' | 'timeout'; reason: string;
   at: string; sha: string; baseSha: string; policyRevision: number; requestCommentId: number; nextProfile: string | null;
 }
+/**
+ * One file the candidate changes, as the provider reports it against the merge base, together
+ * with the blob the candidate's bound base (the base branch tip, or a speculative tip's predicted
+ * base) holds at the same path. `baseSha` is null when that base has no such file and undefined
+ * when the observation never compared it (a file inside the planned scope, or an observation
+ * recorded before the regression guard existed).
+ */
+export interface ScopeFile {
+  path: string; status: 'added' | 'modified' | 'removed' | 'renamed' | 'copied' | 'changed' | 'unchanged';
+  previousPath?: string; sha: string | null; additions: number; deletions: number; binary: boolean;
+  baseSha?: string | null; previousBaseSha?: string | null;
+}
 export interface Observation {
   clockOffset?: { min: number; max: number };
   reviewIds?: number[];
@@ -135,6 +148,8 @@ export interface Observation {
   // base so a speculative binding never hides where the managed branch actually points.
   baseTip?: string; baseTree?: string;
   protected: boolean; files: string[]; at: string;
+  /** The candidate diff compared against its bound base; see regression-guard.ts. */
+  scopeFiles?: ScopeFile[];
 }
 export interface Gate { name: string; passed: boolean; reasons: string[] }
 export interface Work extends Create {
@@ -291,7 +306,10 @@ export function evaluate(work: Work, all: Work[], now: Date, ciAppIds: number[])
   const obs = work.observation;
   const current = !!candidate && !!obs && obs.candidate.sha === candidate.sha && obs.candidate.baseSha === candidate.baseSha;
   const fresh = current && now.getTime() - Date.parse(obs!.at) < 120_000;
-  add('build', [...(!work.submission || work.reworkRequested ? ['Worker has not submitted implementation for this attempt'] : []), ...(!candidate ? ['Pull request has not been independently observed'] : []), ...(!work.workspaces.length ? ['No workspace registered'] : [])]);
+  // A candidate that reverts, deletes or rewrites shipped files outside its planned scope never
+  // reaches review: the refusal names every file and is re-derived from each new observation.
+  add('build', [...(!work.submission || work.reworkRequested ? ['Worker has not submitted implementation for this attempt'] : []), ...(!candidate ? ['Pull request has not been independently observed'] : []), ...(!work.workspaces.length ? ['No workspace registered'] : []),
+    ...(current ? regressionRefusals(work, obs!, all) : [])]);
   const reviews = current ? obs!.reviews : [];
   const changesRequested = reviews.some(r => r.state === 'CHANGES_REQUESTED');
   const agentReview = current ? obs!.agentReview : undefined;
