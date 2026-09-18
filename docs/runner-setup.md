@@ -113,7 +113,9 @@ Provision the collection root once, owned by the attestor and not group- or worl
 ```bash
 groupadd --gid 20001 graphyard-boundary
 useradd -r --uid 10001 -g graphyard-boundary graphyard-container
+useradd -r graphyard-collector
 usermod -aG graphyard-boundary graphyard-attestor
+usermod -aG graphyard-boundary graphyard-collector
 install -d -o graphyard-attestor -g graphyard-boundary -m 2750 /srv/graphyard/attempts
 # Files the container creates must stay readable to the group whatever umask the image
 # uses. A default ACL is what guarantees it; a umask no stricter than 027 also suffices.
@@ -141,6 +143,8 @@ The command reads one supervision request on stdin and answers on stdout. The ru
 The signature covers the request/attempt/epoch, the pinned host, the actual interval, the canonical output path, the artifact digests, the complete container set, **and the execution conclusions the collector acts on**: the outcome, the refusals, the per-phase results, and the bundle digests measured before and after alongside the runner image digest. Binding those is what stops a valid signature for the run that happened from being reattached to a record whose `timed_out` has become `completed`, whose refusals are gone, or whose mismatched digests have been replaced with the approved ones.
 
 Three OS identities are involved and none may be shared: the **attestor**, which owns the approved bundle, the signing key and each attempt boundary; the **runner** worker account, which holds Graphyard authority and can start nothing itself; and the unprivileged, never-root **container user** in `runAsUser`, which writes the report through the boundary group. The attestor refuses when the container user is the account that asked for supervision — under the `sudo` rule that account is `SUDO_UID` — because a runner able to write the boundary could replace the report between the last phase and the measurement, and the attestation would then cover bytes the container never wrote. It also refuses before starting anything if it is not itself a member of the boundary group, since it could not read the report it is being asked to attest.
+
+The attestor also compares `runAsUser` with its own effective UID and refuses that overlap before provisioning or acknowledgement. Supplying the boundary-group GID alongside the attestor UID is not a distinct container identity; it would give container code the same filesystem authority as the signer even if the runner arrived through a different `SUDO_UID`.
 
 The private key is never mounted into either Playwright container, returned to the runner, or placed in Git. Deploy the attestor with its own filesystem and Docker access controls, and give it ownership of the approved bundle; running it under the worker's OS account collapses this boundary and is unsupported.
 

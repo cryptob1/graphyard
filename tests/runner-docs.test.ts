@@ -1,6 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import { attemptGrantSchema, runnerPlanSchema } from '../src/runner-executor.js';
 import { collectorInputSchema } from '../src/runner-collector.js';
 
@@ -10,6 +12,7 @@ import { collectorInputSchema } from '../src/runner-collector.js';
  * than a typo. These parse the published JSON with the exact schemas the commands use.
  */
 const guide = await readFile(new URL('../docs/runner-setup.md', import.meta.url), 'utf8');
+const exec = promisify(execFile);
 const blocks = [...guide.matchAll(/```json\n([\s\S]*?)```/g)].map(match => JSON.parse(match[1]) as any);
 const sample = (key: string) => {
   const found = blocks.filter(block => block && typeof block === 'object' && !Array.isArray(block) && key in block);
@@ -51,4 +54,36 @@ test('the documented collector configuration carries the whole dispatch authorit
   const documented = new Set(Object.keys(collector));
   assert.deepEqual([...documented].filter(key => !(key in shape)), []);
   assert.deepEqual(Object.keys(shape).filter(key => !documented.has(key) && !shape[key].safeParse(undefined).success), []);
+});
+
+test('the documented setgid boundary is writable only by the container and readable by both trusted readers', async () => {
+  assert.match(guide, /usermod -aG graphyard-boundary graphyard-attestor/);
+  assert.match(guide, /usermod -aG graphyard-boundary graphyard-collector/);
+  // Exercise real kernel permission checks with four distinct UIDs in an unprivileged
+  // user namespace. This is the documented primary/supplementary-group layout: the
+  // attestor provisions, the container writes through the setgid group, the attestor
+  // and collector read, and the runner has no access at all.
+  const script = String.raw`set -eu
+root=$(mktemp -d)
+trap 'rm -rf "$root"' EXIT
+attestor=10002
+container=10001
+collector=10003
+runner=10004
+boundary=20001
+chown "$attestor:$boundary" "$root"
+chmod 2750 "$root"
+setpriv --reuid="$attestor" --regid=30001 --groups="$boundary" mkdir "$root/attempts"
+setpriv --reuid="$attestor" --regid=30001 --groups="$boundary" chmod 2770 "$root/attempts"
+setfacl -m "g:$boundary:rwx" -m m::rwx "$root/attempts"
+setfacl -d -m "g:$boundary:rx" -m m::rwx "$root/attempts"
+setpriv --reuid="$container" --regid="$boundary" --clear-groups sh -c 'umask 077; printf approved > "$1/report.json"' sh "$root/attempts"
+test "$(stat -c %g "$root/attempts/report.json")" = "$boundary"
+setpriv --reuid="$attestor" --regid=30001 --groups="$boundary" test -r "$root/attempts/report.json"
+setpriv --reuid="$collector" --regid=30002 --groups="$boundary" test -r "$root/attempts/report.json"
+if setpriv --reuid="$runner" --regid=30003 --clear-groups test -r "$root/attempts/report.json"; then
+  echo 'runner unexpectedly reached the attempt boundary' >&2
+  exit 1
+fi`;
+  await exec('unshare', ['--map-auto', '--map-user=0', '--map-group=0', '--setgroups=allow', '--', 'bash', '-c', script]);
 });

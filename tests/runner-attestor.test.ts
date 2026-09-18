@@ -13,7 +13,8 @@ const attestor = generateKeyPairSync('ed25519');
 const privateKey = attestor.privateKey.export({ type: 'pkcs8', format: 'pem' }).toString();
 const attestationPublicKey = attestor.publicKey.export({ type: 'spki', format: 'pem' }).toString();
 const image = `sha256:${'1'.repeat(64)}`;
-const runAsUser = `${process.getuid!()}:${process.getgid!()}`;
+const containerUid = process.getuid!() === 10001 ? 10002 : 10001;
+const runAsUser = `${containerUid}:${process.getgid!()}`;
 const absent: Settler = async () => 'absent';
 
 const testId = createHash('sha256').update('books are listed').digest('hex');
@@ -91,7 +92,10 @@ test('no execution fact crosses the boundary into the attestor', async () => bou
   // Where the deployment makes the requesting identity knowable, the container may not run
   // as it: the output boundary is private to the container user, so sharing it would let
   // the runner replace the report between the last phase and the measurement.
-  await assert.rejects(superviseAttempt({ plan }, { privateKey, run: reporting(plan), settle: absent, callerUid: process.getuid!() }),
+  await assert.rejects(superviseAttempt({ plan: { ...plan, runAsUser: `${process.getuid!()}:${process.getgid!()}` } },
+    { privateKey, run: reporting(plan), settle: absent, callerUid: process.getuid!() + 1 }),
+    /dedicated account, not as the supervising attestor identity/);
+  await assert.rejects(superviseAttempt({ plan }, { privateKey, run: reporting(plan), settle: absent, callerUid: containerUid }),
     /dedicated account, not as the identity that requested supervision/);
   await assert.doesNotReject(superviseAttempt({ plan }, { privateKey, run: reporting(plan), settle: absent, callerUid: process.getuid!() + 1 }));
 }));

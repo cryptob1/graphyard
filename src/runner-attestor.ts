@@ -31,12 +31,12 @@ export type SupervisionResult = { record: ExecutionRecord; attestation: Executio
  * the request, so a runner cannot choose which key signs its attempt.
  *
  * `callerUid` is the OS identity that asked for supervision, when the deployment makes it
- * knowable — `SUDO_UID` under the documented `sudo` rule. The container user must not be
- * that identity: the attempt boundary is writable by the container user, so a runner
- * sharing it could replace the report between the last phase and the measurement below,
- * and the attestation would then cover bytes the container never wrote. For the same
- * reason the runner account must not be a member of the boundary group, which is a
- * deployment rule this process cannot check for another account.
+ * knowable — `SUDO_UID` under the documented `sudo` rule. The container user must share
+ * neither that identity nor this attestor process's effective UID: the attempt boundary
+ * is writable by the container user, so either overlap collapses the three-party boundary
+ * and lets execution-capable code replace bytes that will later be signed. The runner
+ * account must likewise not be a member of the boundary group, which is a deployment
+ * rule this process cannot check for another account.
  *
  * Preflight provisions this attempt's own boundary under the configured collection root
  * and refuses unless this process can read through the boundary group, so the bytes
@@ -47,7 +47,12 @@ export async function superviseAttempt(input: unknown, options: AttestorIdentity
   run?: Runner; settle?: Settler; now?: () => Date;
 }): Promise<SupervisionResult> {
   const { plan } = supervisionRequestSchema.parse(input);
-  if (options.callerUid !== undefined && Number(plan.runAsUser.split(':')[0]) === options.callerUid) {
+  const containerUid = Number(plan.runAsUser.split(':')[0]);
+  const attestorUid = options.uid ?? process.getuid?.() ?? 0;
+  if (containerUid === attestorUid) {
+    throw new Error('The runner container must run as a dedicated account, not as the supervising attestor identity');
+  }
+  if (options.callerUid !== undefined && containerUid === options.callerUid) {
     throw new Error('The runner container must run as a dedicated account, not as the identity that requested supervision');
   }
   const preflight = await preflightAttempt(plan, { uid: options.uid, gids: options.gids });

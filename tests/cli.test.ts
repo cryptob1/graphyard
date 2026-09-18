@@ -736,9 +736,11 @@ test('the runner holds authority while the host attestor executes and signs the 
     // The host attestor takes its signing key from its own environment. A runner that
     // could name the key could choose one it holds, and attest its own execution.
     const attestorEnv = { ...env, GRAPHYARD_ATTESTOR_KEY: key };
+    const containerUid = process.getuid!() === 10001 ? 10002 : 10001;
+    const runAsUser = `${containerUid}:${process.getgid!()}`;
     const plan = join(cwd, 'runner.json');
     await writeFile(plan, JSON.stringify({ registration: { id: 'preview-runner', revision: 1 }, imageRepository: 'example/graphyard-runner',
-      oraclePath: oracle, outputPath: output, timeoutMs: 60_000, runAsUser: `${process.getuid!()}:${process.getgid!()}`,
+      oraclePath: oracle, outputPath: output, timeoutMs: 60_000, runAsUser,
       supervisor: { command: process.execPath, args: [launcher, 'runner', 'supervise'] } }));
     const attempt = JSON.parse((await exec(process.execPath, [launcher, 'runner', 'attempt', plan], { cwd, env: attestorEnv, maxBuffer: 8 << 20 })).stdout);
 
@@ -757,7 +759,7 @@ test('the runner holds authority while the host attestor executes and signs the 
     // The attestor refuses to sign at all without a private key of its own, and refuses a
     // key any other account on the host could read.
     const supervision = JSON.stringify({ plan: { grant: attempt.record.grant, imageRepository: 'example/graphyard-runner',
-      oraclePath: oracle, outputPath: output, timeoutMs: 60_000, runAsUser: `${process.getuid!()}:${process.getgid!()}` } });
+      oraclePath: oracle, outputPath: output, timeoutMs: 60_000, runAsUser } });
     const supervise = (settings: NodeJS.ProcessEnv) => exec(process.execPath, [launcher, 'runner', 'supervise'], { cwd, env: settings, input: `${supervision}\n{"proceed":true}\n` } as any);
     await assert.rejects(supervise(env), /GRAPHYARD_ATTESTOR_KEY/);
     await chmod(key, 0o644);
