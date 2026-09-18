@@ -125,6 +125,29 @@ A green GitHub job does not prove every behavioral criterion. A dedicated produc
 
 Do not expose that credential to arbitrary PR code. Running untrusted code in a job that can read the producer secret lets that code forge evidence. Use a separately controlled reporter or trusted workflow and artifact verification appropriate to your threat model. This MVP authenticates producers; it does not implement GitHub OIDC attestations or cryptographically inspect uploaded artifacts.
 
+## Post-deployment smoke proof
+
+Trunk is the only pre-merge gate. Once a candidate merges, Graphyard marks it Done on the observed merge and the master loop verifies that the running release reaches the merge commit. A work policy can add one more layer after that, without a staging queue in front of the merge: a trusted producer smoke-tests the live deployment once it serves the merge, and the verdict is bound to that exact commit and this work item.
+
+```json
+{ "policy": { "checks": ["test", "typecheck"], "review": true, "deploySmoke": true } }
+```
+
+`deploySmoke` is a policy, never an acceptance criterion: a criterion gates the merge, and nothing is deployed before the merge. Creating work with `e2e:deploy-smoke` in a criterion's proofs is refused. Staging or a release-candidate branch remain optional for soak or coordinated cutovers; they are not required for this proof.
+
+The sequence, and what each step may do:
+
+1. The [master loop](master-agent.md#durable-loop) observes the deployed commit as before. When the running release serves a delivered item's merge commit — exactly, or through a descendant that contains it — the loop records that observation on the item with `POST /api/work/UUID/deployment` using its coordinator credential. Only a coordinator or an operator may record it, only for delivered work, only naming the item's own merge commit, and only once per delivery: the smoke proof binds to that serving commit, so a later rollout cannot quietly move the target the proof was made against.
+2. The loop asks GitHub to run the trusted smoke workflow (`master init --smoke-workflow deploy-smoke.yml`, see [`.github/workflows/deploy-smoke.yml`](../.github/workflows/deploy-smoke.yml)) with the work UUID, the recorded deployed commit, the merge commit, and the policy revision. One request per deployed commit; the loop holds no producer credential and never produces the verdict.
+3. `scripts/deploy-smoke.mjs run` reads the commit the deployment reports serving (`SMOKE_DEPLOYMENT_URL`, field `SMOKE_SHA_FIELD`), refuses to run unless it is the recorded deployed commit, executes the configured checks (`SMOKE_CHECK_URLS` must answer 2xx; `SMOKE_COMMAND` is an optional command from the trusted checkout), and reads the serving commit again. A target that moved before or during the run is a refusal to attribute, not a failure of the delivered change: no report is produced.
+4. `scripts/deploy-smoke.mjs publish`, in a separate job holding the producer secret, submits `e2e:deploy-smoke` evidence with `sha` = the deployed commit the checks ran against and `baseSha` = the item's merge commit.
+
+Graphyard accepts that evidence only from a producer whose credential is granted `e2e:deploy-smoke` — a worker, an operator, and an ungranted producer are refused outright and nothing untrusted is stored — only after the deployment observation is recorded, only when the policy asked for the proof, and only when `sha` and `baseSha` match the recorded deployed commit and the merge commit. The accepted verdict lands in the delivery snapshot as `delivery.smoke` beside `delivery.deployment`; the merge facts in that snapshot are never rewritten, the gates are not re-evaluated, and the item never leaves Done.
+
+A failed verdict marks the item **delivered with failure**. `master status` lists it under `delivered` with rollback guidance, the loop records the same guidance as an escalation, and the dashboard shows it on the card, in the work detail, and in the post-deploy flow node. See [operations](operations.md#delivered-with-a-failed-smoke-proof) for what to do. A later passing run at the same deployed commit supersedes the verdict for the item's state; every run stays in the evidence ledger.
+
+Grant the smoke producer only `e2e:deploy-smoke` (`graphyard grants grant smoke e2e:deploy-smoke "Post-deployment smoke reporter"`, see [proof authority grants](operations.md#proof-authority-grants)); the reporter checks its live authority before it runs. Do not give an implementation worker that credential, and keep `SMOKE_COMMAND` in the trusted checkout on the managed base branch rather than in candidate code.
+
 ## Enforcement boundary
 
 Graphyard controls its ledger immediately; GitHub check publication happens through a separate API. No transaction spans both systems. There can be a delay between a refusal and revocation of a previously successful check, especially during a GitHub or network outage. GitHub does not automatically expire a successful check when Graphyard goes offline.

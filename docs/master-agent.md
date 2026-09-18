@@ -75,6 +75,7 @@ or a Herdr tab. `master init` accepts the loop's settings:
 | `--proof-workflow FILE` | Workflow file, such as `acceptance.yml`, that the loop asks GitHub to run when a candidate is missing automatable proof |
 | `--deployment-url URL` | JSON endpoint that reports the commit the running release serves |
 | `--deployment-sha-field PATH` | Dotted field holding that commit; default `commit` |
+| `--smoke-workflow FILE` | Workflow file, such as `deploy-smoke.yml`, that the loop asks GitHub to run against the live deployment once it serves a delivery whose policy sets `deploySmoke` |
 
 Each cycle:
 
@@ -86,8 +87,12 @@ Each cycle:
    trusted producer workflow when automatable proof is missing, and an escalation for anything only
    a human or a producer may resolve;
 4. **invokes only the guarded merge**, when automatic merging is enabled;
-5. **verifies the deployed SHA** against what Graphyard recorded as delivered;
-6. **records stage p50/p90** for every open stage plus delivered lead time.
+5. **verifies the deployed SHA** against what Graphyard recorded as delivered, and for a delivery
+   whose policy sets `deploySmoke` records that observation on the item, requests the trusted smoke
+   workflow once per deployed commit, and escalates a failed verdict with rollback guidance (see the
+   [post-deployment smoke proof](github.md#post-deployment-smoke-proof));
+6. **records stage p50/p90** for every open stage, delivered lead time, creation-to-deployment
+   latency, and merge-to-smoke-verdict post-deploy time with the failure count.
 
 Every action lands in `master status` under `daemon`: the current cycle, its measurements, the
 deployment observation, per-profile health, recent actions, and anything still unresolved.
@@ -113,7 +118,9 @@ killed daemon on the same host is reclaimed as soon as that process is gone.
 
 The daemon holds exactly one credential: the coordinator token. It cannot claim a lease, submit
 evidence, revise requirements, release backlog work, or approve a review, and it refuses to start
-if that credential is also allowed to produce evidence. Provider exhaustion, a failing reviewer, a
+if that credential is also allowed to produce evidence. The one fact it writes besides the guarded
+merge is its own deployment observation on a delivered item; the smoke verdict itself comes from
+the workflow's producer, never from the loop. Provider exhaustion, a failing reviewer, a
 missing manual proof, and an unhealthy worker profile are all escalations, never shortcuts. A
 refused merge is the gate working: the loop records the refusal and keeps cycling.
 
@@ -136,6 +143,8 @@ node "$GRAPHYARD_CLI" master merge --all
 ```
 
 Run `status` at startup, after dispatch, when a worker reports completion, and when an integration event arrives. Owners, stages, refusals, merge candidates, and pending and completed reviews come from Graphyard. Missing Herdr telemetry never erases an assignment.
+
+`delivered` lists every delivery whose policy sets `deploySmoke`, with the recorded deployment, the smoke verdict, `postDeployMs`, `productionLatencyMs`, and — for a failed verdict — `rollback` guidance. Act on that guidance through a follow-up item; never backfill evidence or clear the failure. See [operations](operations.md#delivered-with-a-failed-smoke-proof).
 
 For work using the [identity-bound agent review provider](github.md#identity-bound-agent-review-providers), each row carries a `review` object with the currently dispatched reviewer profile and runtime, plus the failover entries recorded for the current candidate; `counts.reviewFailover` totals the items that failed over. A reviewer runs out of quota or goes silent past its timeout, Graphyard records that and moves to the next configured profile on its own — no master action is required. When every profile is exhausted the row is flagged for attention and the review gate stays closed. That is a capacity decision for the operator: add reviewer capacity, wait for quota, or revise the review policy. Never treat exhaustion as an approval, and never merge around a closed review gate.
 

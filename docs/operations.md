@@ -33,6 +33,13 @@ and the [operating guide](master-agent.md#durable-loop).
   delivered items it covers. Items under `pending` are merged but not yet live. It is an observation,
   never a gate; an unreachable probe reports `unavailable` and leaves every delivery pending rather
   than assuming it shipped.
+- **Post-deploy proof.** For a delivery whose policy sets `deploySmoke`, the loop records the
+  deployment on the item once the release serves its merge, requests the trusted smoke workflow
+  (`--smoke-workflow`), and escalates a failed verdict with rollback guidance. `delivered` in master
+  status lists each such item with its state: `awaiting-deployment`, `awaiting-smoke`,
+  `smoke-passed`, or `delivered-with-failure`. `counts.awaitingSmoke` and `counts.postDeployFailures`
+  total them, and the cycle metrics carry `production` (creation to observed deployment),
+  `postDeploy` (merge to verdict) and `postDeployFailures`.
 - **Worker profiles.** A failed launch cools its profile off for ten minutes and work routes to
   another profile. `daemon.profiles` holds the reason. A profile that never recovers usually has an
   unreadable credential file or an agent name already taken in Herdr.
@@ -137,6 +144,28 @@ the criterion, `deferred` on the required-proof list, inherited obligations on t
 them up, and a **Bootstrap obligations** ledger of everything still owed. If an obligation has no
 inheritor and the harness now exists on main, create the follow-up item that runs it rather than
 leaving the proof owed indefinitely.
+
+## Delivered with a failed smoke proof
+
+A delivered item whose trusted post-deployment smoke proof failed stays Done — the merge happened and
+history is never rewritten — and is marked **delivered with failure**. `master status` lists it under
+`delivered` with `rollback` guidance, the loop records the same guidance as an escalation, and the
+dashboard shows the failure on the card, in the work detail's Post-deployment section, and in the
+post-deploy flow node. The guidance names the commit the deployment was serving when the smoke ran,
+the item's merge commit, and the base branch.
+
+1. Decide between rolling the deployment back to the last release whose smoke proof passed and
+   reverting the merge commit on the base branch. A revert is a new work item: it is reviewed,
+   checked, queued and merged under the same gates as any change, and gets its own proof.
+2. Do not backfill passing evidence for the failed delivery, and do not delete the failure. A later
+   run of the smoke workflow at the same deployed commit may supersede the verdict if the failure was
+   in the probe rather than the release; every run stays in the evidence ledger.
+3. If the release moved on before the smoke ran — the deployment now serves a newer commit — the item
+   stays `awaiting-smoke`: the producer refuses to attribute a run to a commit that is no longer
+   serving. The smoke request stops after three attempts; the newer delivery's own proof covers what
+   is live now.
+
+Graphyard v0.1 does not execute rollbacks or reverts itself.
 
 ## Merge bypass
 
