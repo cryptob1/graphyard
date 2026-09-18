@@ -36,9 +36,9 @@ backup:
   persistence:
     existingClaim: exercise-backups
 EOF
-FORWARD_PID=""
-stop_forward() { if [ -n "$FORWARD_PID" ]; then kill "$FORWARD_PID" 2>/dev/null || true; fi; FORWARD_PID=""; }
-cleanup() { stop_forward; rm -f "$VALUES"; }
+FORWARD_PID=""; FORWARD_LOG="$(mktemp)"
+stop_forward() { if [ -n "$FORWARD_PID" ]; then kill "$FORWARD_PID" 2>/dev/null || true; wait "$FORWARD_PID" 2>/dev/null || true; fi; FORWARD_PID=""; }
+cleanup() { stop_forward; rm -f "$VALUES" "$FORWARD_LOG"; }
 trap cleanup EXIT
 
 step() { printf '\n==> %s\n' "$*"; }
@@ -47,15 +47,23 @@ install_args() {
   helm "$1" "$RELEASE" "$CHART" --namespace "$NAMESPACE" --create-namespace --wait --timeout "$HELM_TIMEOUT" \
     --set image.repository="$2" --set image.tag="$TAG" --set image.pullPolicy=Never -f "$VALUES"
 }
+# What an operator needs when the release cannot be reached: the forward's own output, the
+# pods behind the Service, and the server's log.
+diagnose() {
+  echo "--- port-forward output" >&2; cat "$FORWARD_LOG" >&2
+  echo "--- pods, service and endpoints" >&2; k get pods,svc,endpoints -o wide >&2 || true
+  echo "--- server log" >&2; k logs "deploy/$RELEASE-graphyard" --all-containers --tail=100 >&2 || true
+}
 forward() {
   stop_forward
-  k port-forward "svc/$RELEASE-graphyard" 14310:80 >/dev/null 2>&1 &
+  k port-forward --address 127.0.0.1 "svc/$RELEASE-graphyard" 14310:80 >"$FORWARD_LOG" 2>&1 &
   FORWARD_PID=$!
   for _ in $(seq 1 30); do
     if curl -fsS http://127.0.0.1:14310/healthz >/dev/null 2>&1; then return; fi
+    if ! kill -0 "$FORWARD_PID" 2>/dev/null; then break; fi
     sleep 1
   done
-  echo 'port-forward never became reachable' >&2; exit 1
+  echo 'port-forward never became reachable' >&2; diagnose; exit 1
 }
 api() { # api METHOD PATH TOKEN [BODY]
   local method="$1" path="$2" token="$3" body="${4:-}"
