@@ -15,7 +15,7 @@ try {
     if (agentReviews && current.required_pull_request_reviews?.require_code_owner_reviews) throw Object.assign(new Error('Blocked: required CODEOWNERS approval is not supported by the Codex adapter. No protection settings were changed; define an explicit ownership-review policy before migration.'), { code: 'CODE_OWNER_POLICY' });
     const checks = [...(current.required_status_checks?.checks ?? [])].filter(c => c.context !== checkName);
     checks.push({ context: checkName, app_id: app.appId });
-    console.log(JSON.stringify({ repository, branch: 'main', requiredChecks: checks, retainReviewRequirements: !agentReviews, reviewRequirements: agentReviews ? { ...current.required_pull_request_reviews, required_approving_review_count: 0, require_last_push_approval: false } : current.required_pull_request_reviews, apply }, null, 2));
+    console.log(JSON.stringify({ repository, branch: 'main', requiredChecks: checks, requireUpToDate: false, retainReviewRequirements: !agentReviews, reviewRequirements: agentReviews ? { ...current.required_pull_request_reviews, required_approving_review_count: 0, require_last_push_approval: false } : current.required_pull_request_reviews, apply }, null, 2));
     if (apply) {
       if (agentReviews) {
         if (!process.env.GRAPHYARD_URL || !process.env.GRAPHYARD_TOKEN) throw new Error('Server connection required');
@@ -26,7 +26,7 @@ try {
         if (!current.enforce_admins?.enabled) throw new Error('Administrator enforcement is required');
       }
       // Updating only the status-check subresource preserves reviewer/bypass settings.
-      gh(['api', '--method', 'PATCH', `repos/${repository}/branches/main/protection/required_status_checks`, '--input', '-'], JSON.stringify({ strict: true, checks }));
+      gh(['api', '--method', 'PATCH', `repos/${repository}/branches/main/protection/required_status_checks`, '--input', '-'], JSON.stringify({ strict: false, checks }));
       if (agentReviews) gh(['api', '--method', 'PATCH', `repos/${repository}/branches/main/protection/required_pull_request_reviews`, '--input', '-'], JSON.stringify({ required_approving_review_count: 0, require_last_push_approval: false }));
       console.log(agentReviews ? 'App-bound gate retained; native approval count is zero. Task review policies still apply.' : 'App-bound check required. Existing review and administrator protection retained.');
     }

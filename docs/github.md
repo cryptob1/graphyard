@@ -10,7 +10,7 @@ In your personal GitHub developer settings, create a GitHub App with:
 
 - Homepage: your Graphyard URL.
 - Webhook: `https://YOUR-HOST/api/github/webhook`, with a random webhook secret.
-- Repository permissions: Metadata read, Contents read, Pull requests read/write, Issues read (for comment webhooks), Checks read/write, and Administration read (to inspect branch protection).
+- Repository permissions: Metadata read, Contents read/write (to publish speculative merge-queue tips), Pull requests read/write, Issues read (for comment webhooks), Checks read/write, and Administration read (to inspect branch protection).
 - Events: Pull request, Pull request review, Check run, Check suite, Issue comment, and Push.
 - Install only on the repository managed by this Graphyard instance.
 
@@ -24,7 +24,7 @@ Configure protection on the managed base branch:
 
 1. Require status checks before merging.
 2. Require **`Graphyard / merge`**, explicitly bound to this App.
-3. Require the branch to be up to date before merging (`strict`).
+3. Do **not** require the branch to be up to date before merging (`strict` must be off). A queued candidate is deliberately behind the base branch while the entries ahead of it land, so that setting would block every queue landing. The [merge queue](#merge-queue) supersedes it with a stronger binding, and Graphyard refuses its merge gate while it is enabled.
 4. Enforce the rule for administrators.
 5. Disable force pushes and branch deletion.
 6. Remove bypass privileges from implementation agents. Review any rulesets that add alternate paths around protection.
@@ -44,8 +44,45 @@ The service does not automatically overwrite repository protection. For this pro
 - Each acceptance proof has trusted evidence for the current head/base/policy tuple, with a pass result, nonzero executed count, and zero skipped count.
 - GitHub says the PR is mergeable and is not a draft.
 - Required branch protection is independently observed.
+- The candidate is at the head of the merge queue, on the speculative tip it will actually land.
 
 By default the configured CI App ID is `15368`; verify the actual app IDs returned by your check runs and adjust `GITHUB_CI_APP_IDS`. A check with the right name from an unknown App cannot satisfy policy.
+
+## Merge queue
+
+Every candidate lands on the same managed branch, so Graphyard serializes the final hop through one merge queue. The queue exists so that a merge does not invalidate the candidates behind it.
+
+A candidate enters the queue when it passes its own gates: independent review, required checks, and trusted acceptance evidence for the commit it currently offers. Membership is derived from those gates, never requested. No command, operator, or administrator can insert an entry, hold or buy a position, reorder the queue, or merge past the head; there is no bypass path.
+
+Graphyard predicts what each entry will actually land:
+
+- the entry at the head predicts against the current base-branch head;
+- every entry behind it predicts against the validated tip of the entry directly ahead — the base branch plus every earlier queue entry.
+
+Graphyard then merges the predicted base into the candidate branch, publishes the resulting commit under its own `refs/graphyard/queue/KEY` ref, and rebinds the candidate to it. That commit is the **speculative tip**. Required checks, the review, and every acceptance proof must then reference that exact commit; bindings made against the replaced head are refused, not reused. The base recorded for the candidate is the predicted base, not wherever the base branch happens to point.
+
+Every entry is published this way, the head included. A branch that already contains its predicted base needs no new commit — GitHub reports nothing to merge and its own head becomes the tip — but the publication still happens, because it is what proves the validated commit contains the base it was validated on. Nothing lands that Graphyard has not published: a candidate with no published tip for its exact commit is refused at the gate and again immediately before the merge call.
+
+That proof is what replaces GitHub's "require branches to be up to date" setting, which a merge queue cannot use. Strict mode asks only that the branch contain the base-branch head; the queue asks for more — that the commit under test contain the base it was validated on, and that the base branch still carry that base's tree when the merge runs. Graphyard verifies both itself, so the managed branch must have `strict` off and keeps the App-bound required check, administrator enforcement, and the force-push/deletion bans. As before, an out-of-band merge by another identity is detected rather than prevented; restricting those identities remains repository administration.
+
+Because every entry is already validated against the entries ahead of it, merging the head does not invalidate the ones behind. Graphyard keeps an entry bound across an advancing base branch only when the advance leaves the validated base tree unchanged, which is exactly what an earlier queue merge does; the merge then lands the tested tree on the base branch. Any other advance — a direct push or an out-of-band merge — changes that tree, and the merge is refused rather than landing an untested combination.
+
+When the base branch advances outside the queue, only the head re-validates against it. Entries behind it have no predicted base until the head settles; Graphyard then re-bases each of them in turn onto the new chain. The worker is not asked to rebase and no rework is requested: the entry keeps its assignment, workspace, and position, and its stale bindings are refused until the new tip is validated.
+
+An entry leaves the queue by merging, or by an explicit ejection:
+
+| Ejection reason | Trigger |
+| --- | --- |
+| Required CI check did not pass | A required check reported an adverse conclusion on the speculative tip |
+| Review requested changes | A reviewer requested changes on the speculative tip |
+| Proof failed | Trusted evidence for the tip reported a failure |
+| Speculative merge conflicts | The predicted base cannot be merged into the candidate branch |
+| Policy revision changed | Requirements were revised after the entry was queued |
+| Returned for a new attempt | An operator requested rework, or the pull request was closed |
+
+Pending, missing, or still-running validation is not failure and never ejects. Every ejection is recorded in the append-only history with its reason and the tip it applied to, the entries behind it are re-predicted without it, and the ejected commit cannot re-enter. A repaired candidate re-enters at the back of the queue with a new sequence.
+
+Queue position, predicted base, predicted tip, and per-entry wait time appear in `graphyard master status` and on the dashboard. See [master-agent operating mode](master-agent.md#merge-queue).
 
 ## Inspect enforcement
 
@@ -73,7 +110,7 @@ Do not expose that credential to arbitrary PR code. Running untrusted code in a 
 
 Graphyard controls its ledger immediately; GitHub check publication happens through a separate API. No transaction spans both systems. There can be a delay between a refusal and revocation of a previously successful check, especially during a GitHub or network outage. GitHub does not automatically expire a successful check when Graphyard goes offline.
 
-Strict base protection and commit-specific checks prevent common stale-head/base merges, but they do not make GitHub and Postgres one atomic system. The recommended master command narrows that boundary with a short-lived execution authority, a final transactional GitHub re-observation, and an exact-head merge call. Graphyard accepts delivery only when the observed merge follows that verified authority. Restricting every alternative GitHub merge identity still requires repository or organization administration outside Graphyard.
+Commit-specific checks and the queue's published-tip binding prevent common stale-head/base merges, but they do not make GitHub and Postgres one atomic system. The recommended master command narrows that boundary with a short-lived execution authority, a final transactional GitHub re-observation, and an exact-head merge call. Graphyard accepts delivery only when the observed merge follows that verified authority. Restricting every alternative GitHub merge identity still requires repository or organization administration outside Graphyard.
 
 Likewise, a worker with Git credentials can still push its own branch after losing a Graphyard lease. Separate worktrees, individual identities, branch protection, and the `watch` process supervisor reduce interference. They are not a remote filesystem security boundary.
 
@@ -87,7 +124,7 @@ A bypassed merge of linked work is recorded as a permanent violation; Graphyard 
 | --- | --- |
 | UI says GitHub is disconnected | App ID, installation ID, PEM secret, and server restart |
 | Job shows 401/403 | App key, installation access, permission approval, repository selection |
-| Protection gate refuses | Exact check name, App binding, strict mode, admin enforcement, force/delete settings |
+| Protection gate refuses | Exact check name, App binding, `strict` left enabled, admin enforcement, force/delete settings |
 | Acceptance refuses despite green CI | Proof names, producer allowlist, candidate SHA, base SHA, policy revision, skipped count |
 | PR changed while observed | Normal optimistic concurrency retry; investigate only if persistent |
 | No update after webhook | Signature secret and job errors; periodic polling still runs |
@@ -119,7 +156,7 @@ The first command preserves the criteria and CI requirements, increments the pol
 
 ### Branch protection migration
 
-GitHub's native required approval count is separate from Graphyard's gate. For repositories adopting agent review, retain strict checks, enforced administrator protection and the App-bound `Graphyard / merge` check, but remove the native approval-count/last-push requirement once reviewed code supporting the adapter is deployed. Otherwise GitHub will continue demanding a formal approval even after Graphyard passes.
+GitHub's native required approval count is separate from Graphyard's gate. For repositories adopting agent review, retain enforced administrator protection and the App-bound `Graphyard / merge` check (with `strict` off, as the merge queue requires), but remove the native approval-count/last-push requirement once reviewed code supporting the adapter is deployed. Otherwise GitHub will continue demanding a formal approval even after Graphyard passes.
 
 ```sh
 node scripts/protect-github.mjs --plan --agent-reviews
@@ -197,7 +234,7 @@ Like every review-policy revision this preserves criteria and CI requirements, i
 
 ### The verdict contract
 
-Graphyard posts one request comment through its own App, recording the returned comment ID against the exact head SHA, base SHA, policy revision, dispatched profile and a unique correlation marker. The reviewer runtime replies with exactly one pull request comment, posted as its registered App, containing one line:
+Graphyard posts one request comment through its own App, recording the returned comment ID against the exact head SHA, base SHA, policy revision, dispatched profile and a unique correlation marker. For a queued candidate the recorded base is the [speculative tip](#merge-queue)'s validated base, not wherever the base branch currently points, so dispatch binds the reviewer to the commit that will actually land; publishing a new tip changes that binding and requires a fresh request. The reviewer runtime replies with exactly one pull request comment, posted as its registered App, containing one line:
 
 ```
 <!-- graphyard-verdict:MARKER head:FULL_40_CHAR_SHA verdict:approved -->
@@ -215,4 +252,4 @@ Selection is derived from that history, never stored as mutable state, so it is 
 
 ### Limits
 
-The verdict contract is Graphyard's own, so each reviewer runtime needs an integration that authenticates as its App and posts the line — installing the App alone does not make a runtime review anything. A dispatched request is an invitation: a runtime that ignores mentions leaves the gate closed until its timeout converts the silence into failover. Graphyard verifies identity and binding, not review quality, and a runtime with repository write access outside its reviewer App is still outside this boundary. GitHub remains a trusted administration boundary, and the [enforcement boundary](#enforcement-boundary) and merge-broker limits above apply unchanged. Agent review, like Codex review, does not need GitHub's native approval count, so tasks using it rely on the App-bound required check, strict status checks and enforced administrator protection; tasks still using formal GitHub review keep requiring a nonzero approval count, stale-review dismissal and last-push approval.
+The verdict contract is Graphyard's own, so each reviewer runtime needs an integration that authenticates as its App and posts the line — installing the App alone does not make a runtime review anything. A dispatched request is an invitation: a runtime that ignores mentions leaves the gate closed until its timeout converts the silence into failover. Graphyard verifies identity and binding, not review quality, and a runtime with repository write access outside its reviewer App is still outside this boundary. GitHub remains a trusted administration boundary, and the [enforcement boundary](#enforcement-boundary) and merge-broker limits above apply unchanged. Agent review, like Codex review, does not need GitHub's native approval count, so tasks using it rely on the App-bound required check, the merge queue's published-tip binding (with `strict` off) and enforced administrator protection; tasks still using formal GitHub review keep requiring a nonzero approval count, stale-review dismissal and last-push approval.
