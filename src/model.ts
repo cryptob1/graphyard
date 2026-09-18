@@ -37,10 +37,21 @@ export interface AssignmentIdentity { owner: string; epoch: number; displayName?
 export interface Lease { owner: string; epoch: number; expiresAt: string }
 export interface Workspace { host: string; path: string; branch: string; epoch: number; owner: string }
 export interface Candidate { sha: string; baseSha: string; pr: number; branch: string; author: string }
+export type ArtifactKind = 'log' | 'report' | 'screenshot' | 'trace' | 'other';
+export type ArtifactAvailability = 'available' | 'expired' | 'redacted' | 'missing' | 'external';
+export interface EvidenceArtifact {
+  kind: ArtifactKind; label: string; mediaType?: string; size?: number; digest?: string;
+  expiresAt?: string; availability: ArtifactAvailability;
+  /** Public location. External locations are never treated as trusted proof. */
+  url?: string;
+  /** Authenticated Graphyard route components; never contains a bearer credential. */
+  reference?: { requestId: string; artifactId: string };
+}
 export interface Evidence {
   id: string; proof: string; sha: string; baseSha: string; policyRevision: number;
   producer: string; trusted: boolean; result: 'pass' | 'fail';
   executed: number; skipped: number; url?: string; at: string; expiresAt?: string;
+  artifacts?: EvidenceArtifact[];
   scenarioRevision?: number; environment?: string;
   validation?: { candidateId: string; requestId: string; attemptId: string };
 }

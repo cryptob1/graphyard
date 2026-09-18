@@ -369,6 +369,27 @@ test('latest failed evidence supersedes previous passing evidence', async () => 
   w = await engine.execute(producer, 'evidence', w.id, proof(), randomUUID()); assert.equal(w.stage, 'merge');
   w = await engine.execute(producer, 'evidence', w.id, { ...proof(), result: 'fail' }, randomUUID()); assert.equal(w.stage, 'acceptance');
 });
+test('legacy evidence URL remains valid and typed external artifacts do not change trust', async () => {
+  let w = await submitted(); w = await engine.observe(w.id, w.revision, observation(w));
+  w = await engine.execute(producer, 'evidence', w.id, { ...proof(), url: 'https://reports.example.test/legacy' }, randomUUID());
+  assert.equal(w.evidence.at(-1)?.url, 'https://reports.example.test/legacy'); assert.equal(w.evidence.at(-1)?.trusted, true);
+  w = await engine.execute(producer, 'evidence', w.id, { ...proof(), artifacts: [{ kind: 'trace', label: 'browser trace', mediaType: 'application/zip', size: 42, digest: `sha256:${'a'.repeat(64)}`, availability: 'external', url: 'https://reports.example.test/trace' }] }, randomUUID());
+  assert.equal(w.evidence.at(-1)?.artifacts?.[0].kind, 'trace'); assert.equal(w.evidence.at(-1)?.trusted, true);
+  await assert.rejects(engine.execute(producer, 'evidence', w.id, { ...proof(), artifacts: [{ kind: 'report', label: 'unsafe', availability: 'external', url: 'https://user:secret@reports.example.test/report' }] }, randomUUID()), /no credentials/);
+});
+test('redacted evidence artifact descriptors remain explicit and expose no read target', async () => {
+  let w = await submitted();
+  w = await engine.execute(producer, 'evidence', w.id, { ...proof(), artifacts: [{
+    kind: 'screenshot', label: 'Sensitive screenshot withheld', mediaType: 'image/png',
+    digest: `sha256:${'b'.repeat(64)}`, availability: 'redacted',
+  }] }, randomUUID());
+  assert.deepEqual(w.evidence.at(-1)?.artifacts, [{
+    kind: 'screenshot', label: 'Sensitive screenshot withheld', mediaType: 'image/png',
+    digest: `sha256:${'b'.repeat(64)}`, availability: 'redacted',
+  }]);
+  assert.equal(w.evidence.at(-1)?.artifacts?.[0].url, undefined);
+  assert.equal(w.evidence.at(-1)?.artifacts?.[0].reference, undefined);
+});
 test('wrong CI producer, self review, and missing protection fail closed', async () => {
   let w = await submitted(); let obs = observation(w); obs.reviews[0].reviewer = obs.candidate.author;
   w = await engine.observe(w.id, w.revision, obs); assert.equal(w.stage, 'review');
