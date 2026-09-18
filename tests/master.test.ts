@@ -7,7 +7,7 @@ import { execFile, execFileSync } from 'node:child_process';
 import { createServer } from 'node:http';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
-import { assertDispatchable, assertMasterBinding, assertMergeCandidate, assertMergeProtection, assertQueuedLanding, buildMasterStatus, continueMergeBatch, currentMergeCandidates, dispatchWork, githubProviderDelay, inspectWorkerCredentials, loadMasterConfig, managedMasterInstructions, mergeWork, observeHerdrAgents, prepareWorkerLaunch, saveWorkerProfile, setupMaster, startMaster, workerProfileSchema } from '../src/master.js';
+import { assertDispatchable, assertMasterBinding, assessContainment, snapshotWithClock, verifyContainmentDeath, assertMergeCandidate, assertMergeProtection, assertQueuedLanding, buildMasterStatus, continueMergeBatch, currentMergeCandidates, dispatchWork, githubProviderDelay, inspectWorkerCredentials, loadMasterConfig, managedMasterInstructions, mergeWork, observeHerdrAgents, prepareWorkerLaunch, saveWorkerProfile, setupMaster, startMaster, workerProfileSchema } from '../src/master.js';
 import type { Work } from '../src/model.js';
 
 const launcher = fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url));
@@ -449,4 +449,53 @@ test('agent review policies keep Graphyard branch protection without a native ap
   assert.throws(() => assertMergeProtection(protection({ required_status_checks: { strict: true, checks: [{ context: 'Graphyard / merge', app_id: 1234 }] } }), config, agent),
     /requires branches to be up to date/);
   assert.throws(() => assertMergeProtection(protection(), config, work({ policy: { checks: ['test'], review: true } })), /protection changed/);
+});
+
+test('master status reports each containment quarantine and only claims verification it performed', () => {
+  const observedAt = '2030-01-01T12:00:00.000Z';
+  const lapsed = new Date(Date.parse(observedAt) - 600_000).toISOString();
+  const quarantine = { owner: 'worker-a', epoch: 1, at: lapsed, settlementHash: 'a'.repeat(64), launchAcknowledgedAt: lapsed, launchExpiresAt: lapsed, leaseExpiresAt: lapsed };
+  const workspace = { host: 'coordinator-host', path: '/srv/worktrees/GY-42-1', branch: 'graphyard/gy-42-1', epoch: 1, owner: 'worker-a' };
+  const stranded = work({ stage: 'build', submission: null, candidate: null, queue: null, mergeAuthorization: null, lease: null, containmentQuarantine: quarantine, workspaces: [workspace] });
+  const clean = { method: 'linux-proc-systemd' as const, platform: 'linux', uid: 1000, workspacePath: workspace.path, processes: [], scopes: [], inaccessible: 0, unverifiable: [] };
+  const probe = () => clean;
+
+  const unverified = buildMasterStatus({ work: [stranded], now: observedAt }, [], []).work[0];
+  assert.deepEqual({ settleable: unverified.containment?.settleable, refusals: unverified.containment?.refusals, verifiedAt: unverified.containment?.verifiedAt, attestation: unverified.containment?.attestation },
+    { settleable: false, refusals: ['Supervisor absence has not been verified on the registered host'], verifiedAt: null,
+      attestation: 'Confirm the previous worker is stopped and use the operator attestation path: rework GY-42 --previous-worker-stopped REASON, or recover-containment GY-42 --previous-worker-stopped REASON once the work is delivered' });
+  assert.match(unverified.attention!, /Containment quarantine from epoch 1 blocks dispatch/);
+
+  const verified = assessContainment([stranded], { hostId: 'coordinator-host', observedAt, clockOffset: { min: -5, max: 5 }, localNow: new Date(observedAt), probe } as any);
+  const row = buildMasterStatus({ work: [stranded], now: observedAt }, [], [], {}, verified).work[0];
+  assert.deepEqual({ settleable: row.containment?.settleable, refusals: row.containment?.refusals, host: row.containment?.host, verifiedAt: row.containment?.verifiedAt, attestation: row.containment?.attestation },
+    { settleable: true, refusals: [], host: 'coordinator-host', verifiedAt: observedAt, attestation: null });
+  assert.match(row.attention!, /verified settleable; run master settle-containment GY-42/);
+
+  // Another machine's quarantine is not this coordinator's to verify, and a probe that
+  // cannot run is a refusal rather than a silent absence.
+  assert.deepEqual(assessContainment([stranded], { hostId: 'other-host', observedAt, clockOffset: { min: 0, max: 1 }, probe }), {});
+  const broken = assessContainment([stranded], { hostId: 'coordinator-host', observedAt, clockOffset: { min: 0, max: 1 }, probe: () => { throw new Error('systemctl vanished'); } });
+  assert.deepEqual({ settleable: broken['work-id'].settleable, refusals: broken['work-id'].refusals },
+    { settleable: false, refusals: ['Host verification could not be completed: systemctl vanished'] });
+  assert.match(broken['work-id'].attestation, /rework GY-42 --previous-worker-stopped REASON/);
+
+  const live = assessContainment([stranded], { hostId: 'coordinator-host', observedAt, clockOffset: { min: 0, max: 1 }, localNow: new Date(observedAt),
+    probe: () => ({ ...clean, processes: [{ pid: 4242, evidence: 'command' as const }] }) } as any);
+  assert.deepEqual(live['work-id'].settleable, false);
+  assert.match(live['work-id'].refusals[0], /Process 4242 of the contained worker is still present/);
+  assert.equal(verifyContainmentDeath(work({ containmentQuarantine: null }), { hostId: 'coordinator-host', observedAt, clockOffset: { min: 0, max: 1 }, probe }).refusals[0],
+    'No containment quarantine is recorded for this task');
+});
+
+test('the clock the coordinator verifies with is bounded by the read that produced the snapshot', async () => {
+  const times = [1_000, 1_400];
+  const { snapshot, clockOffset } = await snapshotWithClock(async () => ({ work: [], now: new Date(1_200).toISOString() }), () => times.shift()!);
+  assert.deepEqual({ now: snapshot.now, clockOffset }, { now: new Date(1_200).toISOString(), clockOffset: { min: -200, max: 200 } });
+  const unreadable = await snapshotWithClock(async () => ({ work: [], now: 'not-a-time' }), () => 1_000);
+  assert.deepEqual(unreadable.clockOffset, { min: NaN, max: NaN });
+  assert.deepEqual(verifyContainmentDeath(work({ containmentQuarantine: { owner: 'worker-a', epoch: 1, at: '2030-01-01T00:00:00Z', settlementHash: 'a'.repeat(64) },
+    workspaces: [{ host: 'coordinator-host', path: '/srv/worktrees/GY-42-1', branch: 'graphyard/gy-42-1', epoch: 1, owner: 'worker-a' }] }),
+  { hostId: 'coordinator-host', observedAt: '2030-01-01T12:00:00.000Z', clockOffset: unreadable.clockOffset }).refusals,
+  ['The control-plane clock could not be compared with this host']);
 });

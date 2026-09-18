@@ -17,7 +17,7 @@ import { isDeepStrictEqual, parseArgs } from 'node:util';
 import { z } from 'zod';
 import { diagnose, fileConflicts, obligationLedger, proofPreview, resourceConflicts } from './coordination.js';
 import { applyProposal, loadAppliedSetup, loadProposal, loadConnection, readSetupStatus, repositoryScanDifference, saveProposal, scanProposal, setupDrift, setupRepository, handoff, hostIdSchema } from './repository-setup.js';
-import { assertMasterBinding, buildMasterStatus, continueMergeBatch, currentMergeCandidates, dispatchWork, inspectWorkerCredentials, listHerdrAgents, loadMasterConfig, mergeExecutor, observeHerdrAgents, readCredentialFile, readWorkerCredential, saveWorkerProfile, setupMaster, startMaster, workerProfileSchema } from './master.js';
+import { assertMasterBinding, assessContainment, buildMasterStatus, continueMergeBatch, currentMergeCandidates, dispatchWork, inspectWorkerCredentials, listHerdrAgents, loadMasterConfig, mergeExecutor, observeHerdrAgents, readCredentialFile, readWorkerCredential, saveWorkerProfile, setupMaster, snapshotWithClock, startMaster, verifyContainmentDeath, workerProfileSchema } from './master.js';
 import { daemonEffects, daemonSummary, readDaemonState, runDaemon } from './master-daemon.js';
 import { acknowledgeContainment, containmentCredentials, establishContainment, isConfirmedCoordinationRefusal, revalidateContainment, settleContainment } from './quarantine.js';
 
@@ -133,6 +133,9 @@ Environment: GRAPHYARD_URL, GRAPHYARD_TOKEN (individual role-scoped credential)
   master worker add FILE        Add an existing or launchable Herdr worker profile
   master status                 Join Graphyard work truth with Herdr session health
   master dispatch GY-N PROFILE  Invite a worker to claim ready work in a visible tab
+  master settle-containment GY-N REASON
+                                Settle a containment quarantine whose supervisor this
+                                host verifies dead; unverifiable signals refuse
   master merge GY-N|--all       Merge exact authorized candidates without bypasses
   master run [--once] [--interval SECONDS]
                                 Run the durable coordination loop as a supervised process
@@ -222,9 +225,25 @@ Never share an operator or producer credential with an implementation agent.`); 
     if (id === 'status') {
       const runtime = observeHerdrAgents();
       const credentials = await inspectWorkerCredentials(root, master.workers);
+      const { snapshot, clockOffset } = await snapshotWithClock(() => masterApi('work-snapshot'));
+      const containment = assessContainment(snapshot.work, { hostId: master.hostId, observedAt: snapshot.now, clockOffset });
       const daemonState = await readDaemonState(root, master).catch(error => ({ error: error instanceof Error ? error.message : 'Master daemon state is unreadable' }));
       const daemon = 'error' in daemonState ? { running: false, error: daemonState.error } : daemonSummary(daemonState, Date.now(), master.run.intervalSeconds * 1000);
-      return print({ ...buildMasterStatus(await masterApi('work-snapshot'), master.workers, runtime.agents, credentials), autoMerge: master.autoMerge, mergeApproval: master.autoMerge ? 'routine merges permitted after gates pass' : 'explicit operator approval required for each merge', daemon, runtime: { herdr: { available: runtime.available, reason: runtime.reason } } });
+      return print({ ...buildMasterStatus(snapshot, master.workers, runtime.agents, credentials, containment), autoMerge: master.autoMerge, mergeApproval: master.autoMerge ? 'routine merges permitted after gates pass' : 'explicit operator approval required for each merge', daemon, runtime: { herdr: { available: runtime.available, reason: runtime.reason } } });
+    }
+    if (id === 'settle-containment') {
+      if (!args[0] || !args.slice(1).join(' ').trim()) throw new Error('Use master settle-containment GY-N REASON');
+      const { snapshot, clockOffset } = await snapshotWithClock(() => masterApi('work-snapshot'));
+      const work = snapshot.work.find((item: any) => item.id === args[0] || item.key === args[0]);
+      if (!work) throw new Error(`Unknown work item ${args[0]}`);
+      if (!work.containmentQuarantine) throw new Error(`${work.key} has no containment quarantine to settle`);
+      const assessment = verifyContainmentDeath(work, { hostId: master.hostId, observedAt: snapshot.now, clockOffset });
+      if (!assessment.settleable) {
+        console.error(`Automatic containment settlement refused for ${work.key}:\n- ${assessment.refusals.join('\n- ')}\n${assessment.attestation}`);
+        process.exitCode = 1; return;
+      }
+      const settled = await masterMutation(`work/${work.id}/autosettle`, { epoch: assessment.epoch, settlementHash: work.containmentQuarantine.settlementHash, reason: args.slice(1).join(' '), verification: assessment.verification });
+      return print({ key: settled.key, epoch: assessment.epoch, containmentQuarantine: settled.containmentQuarantine, stage: settled.stage, verification: assessment.verification });
     }
     if (id === 'dispatch') {
       if (!args[0]) throw new Error('Use master dispatch GY-N PROFILE');
@@ -262,7 +281,7 @@ Never share an operator or producer credential with an implementation agent.`); 
       const result = await runDaemon(master, state, effects, { once: values.once, intervalMs: intervalSeconds * 1000, identity: { pid: process.pid, host: master.hostId } });
       return print({ repository: master.repository, coordinator: coordinator.actor.id, intervalSeconds, cycles: result.cycles.length, stopped: result.stopped ? 'signal' : 'completed', last: result.cycles.at(-1) ?? null });
     }
-    throw new Error('Use master init, start, worker add, status, dispatch, run, merge, or guide');
+    throw new Error('Use master init, start, worker add, status, dispatch, settle-containment, run, merge, or guide');
   }
   if (command === 'runner') {
     if (id === 'inspect' && args.length <= 1) return print(await inspectRunnerRepository(resolve(args[0] ?? '.')));
