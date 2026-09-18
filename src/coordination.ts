@@ -1,4 +1,4 @@
-import { bootstrapObligations, currentEvidence, inheritedObligations, pathScopesOverlap, type BootstrapObligation, type Work } from './model.js';
+import { bootstrapObligations, currentEvidence, grantsAuthorize, inheritedObligations, pathScopesOverlap, type BootstrapObligation, type ProofAuthority, type Work } from './model.js';
 
 export interface IntegrationJob { work_id: string; available_at: string; locked_until: string | null; error: string | null; held_until?: string | null }
 export interface Diagnostic { kind: string; message: string; next: string }
@@ -47,6 +47,7 @@ export function diagnose(work: Work, all: Work[], now: number, jobs: Integration
     `Declared by ${ac.bootstrap.declaredBy} at ${ac.bootstrap.declaredAt}. Review, CI and every other criterion still gate this item; the deferred proof stays owed on ${ac.bootstrap.contractPaths.join(', ')}.`);
   for (const obligation of inheritedObligations(work, all)) add('bootstrap-obligation', `${obligation.proof} is inherited from ${obligation.key} ${obligation.criterionId} because this item plans to touch ${obligation.contractPaths.join(', ')}`,
     'Produce trusted passing evidence for this proof; a bootstrap deferral cannot be renewed by the change that inherits it.');
+  for (const proof of work.proofGaps ?? []) add('proof-authority-gap', `No principal is authorized to produce ${proof}`, 'Grant the proof name to a producer principal with `graphyard grants grant`; the acceptance gate cannot be satisfied until someone can produce it.');
   for (const violation of work.violations) add('violation', violation, 'An operator must investigate; do not bypass the gate.');
   const first = work.gates.find(g => !g.passed);
   if (work.submission && first) for (const reason of first.reasons) add(`gate-${first.name}`, reason, `Satisfy the ${first.name} gate; new observations and evidence trigger reevaluation.`);
@@ -71,3 +72,14 @@ export function obligationLedger(all: Work[]) {
   return bootstrapObligations(all).map(obligation => ({ ...obligation,
     inheritedBy: all.filter(item => inheritedObligations(item, all).some(other => other.proof === obligation.proof && other.workId === obligation.workId)).map(item => item.key) }));
 }
+
+/**
+ * Which principal, if any, is currently authorized to produce each required proof.
+ * A proof with no authorized producer is a dispatch gap: nobody can ever satisfy it.
+ */
+export function proofAuthorization(work: Work, authorities: readonly ProofAuthority[], all: Work[] = []) {
+  const required = [...new Set([...work.criteria.flatMap(ac => ac.proofs), ...inheritedObligations(work, all).map(obligation => obligation.proof)])];
+  return required.map(proof => ({ proof, producers: authorities.filter(a => grantsAuthorize(a.patterns, proof)).map(a => a.principalId) }));
+}
+export const proofGaps = (work: Work, authorities: readonly ProofAuthority[]) =>
+  proofAuthorization(work, authorities).filter(entry => !entry.producers.length).map(entry => entry.proof);
