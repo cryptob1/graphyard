@@ -263,10 +263,15 @@ test('integration:lead-enforcement — violating lead actions are refused server
   assert.equal(planned.leadHold!.leadId, lead.id);
   planned = (await recordLeadRuling(store, lead, planned.id, { action: 'approve-plan', ruleId: 'rules/plan-v1#approval', reason: 'Revised plan is inside scope' }, id())).work;
   assert.equal(planned.leadHold ?? null, null);
-  assert.equal(planned.gates.find(gate => gate.name === 'merge')!.passed, true);
+  assert.equal(planned.gates.find(gate => gate.name === 'build')!.passed, false, 'plan approval does not revive the previous implementation attempt');
+  assert.equal(planned.mergeAuthorization, null);
+  planned = await engine.execute(workerB, 'claim', planned.id, {}, id());
+  planned = await engine.execute(workerB, 'workspace', planned.id, { epoch: planned.epoch, host: 'delegation-host', path: `/tmp/delegation/${planned.id}-revised-plan`, branch: planned.workspaces[0].branch }, id());
+  planned = await engine.execute(workerB, 'submit', planned.id, { epoch: planned.epoch, pr: planned.submission!.pr }, id());
   planned = await engine.observe(planned.id, planned.revision, observation(planned));
   assert.ok(planned.mergeAuthorization, 'authorization returns only through a full gate evaluation');
   assert.deepEqual(currentMergeCandidates([planned], planned.observation!.at).map(w => w.key), [planned.key]);
+  await engine.execute(workerB, 'release', planned.id, { epoch: planned.epoch }, id());
 
   // Holds are ranked and never weakened: a send-back raised over a plan rejection
   // survives both a later rejection and a later approval.
