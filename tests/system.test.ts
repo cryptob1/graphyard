@@ -251,7 +251,7 @@ test('single-use merge execution freezes relevant mutations through observed mer
   await assert.rejects(engine.observe(w.id, first.revision, observation(w)), /reconciliation is deferred/);
   await assert.rejects(engine.cancelMerge(otherCoordinator, w.id, { executionId: first.execution.id, reason: 'Interfere with another coordinator' }, randomUUID()), /another coordinator/);
   await engine.cancelMerge(coordinator, w.id, { executionId: first.execution.id, reason: 'GitHub refused the merge' }, randomUUID());
-  await assert.rejects(engine.acquireMerge(coordinator, w.id, { expectedRevision: w.revision, sha: head, baseSha: base, policyRevision: w.policyRevision }, acquireKey), /expired, cancelled, or superseded/);
+  await assert.rejects(engine.acquireMerge(coordinator, w.id, { expectedRevision: w.revision, sha: head, baseSha: base, policyRevision: w.policyRevision }, acquireKey), /expired, cancelled, fenced, or superseded/);
   w = (await store.list()).find(item => item.id === w.id)!;
   const secondKey = randomUUID(); const secondInput = { expectedRevision: w.revision, sha: head, baseSha: base, policyRevision: w.policyRevision };
   const second = await engine.acquireMerge(coordinator, w.id, secondInput, secondKey);

@@ -2,9 +2,9 @@ import { createHash, randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { Store, save, wakeJob } from './store.js';
 import { workspacePath, pathsOverlap, validBranch } from './workspace.js';
-import { activeLease, admin, operatorCapability, escalationTriggers, MergeExecutionInProgress, raiseEscalation, releaseLeadHold, requireCurrent, createSchema, criterionSchema, currentEvidence, resourcesSchema, demand, evaluate, proofSchema, type Principal, type Work, type Observation, type ReviewRequest, type OperatorCapability } from './model.js';
+import { activeLease, admin, operatorCapability, escalationTriggers, MergeExecutionInProgress, raiseEscalation, releaseLeadHold, resolveEscalation, standingEscalations, requireCurrent, createSchema, criterionSchema, currentEvidence, resourcesSchema, demand, evaluate, proofSchema, type Principal, type Work, type Observation, type ReviewRequest, type OperatorCapability } from './model.js';
 import { resourceConflicts } from './coordination.js';
-import { activeEngineers, delegationLimits, implementerIdentities, leadMay, producerIndependenceRefusal } from './delegation.js';
+import { activeEngineers, delegationLimits, implementerIdentities, leadMay, producerIndependenceRefusal, sessionKind } from './delegation.js';
 
 const epoch = z.number().int().positive();
 const sha = z.string().regex(/^[a-f0-9]{40}$/);
@@ -18,8 +18,10 @@ const commands = {
   unblock: z.object({ reason: z.string().trim().min(1).max(2000), expectedRevision: z.number().int().positive().optional() }).strict(),
   rework: z.object({ reason: z.string().min(1).max(2000), previousWorkerStopped: z.literal(true) }).strict(),
   // Only a human operator resolves an escalation, and only the one it has read:
-  // naming the standing trigger stops a stale client from clearing a newer one.
-  resolve: z.object({ trigger: z.enum(escalationTriggers), reason: z.string().trim().min(1).max(2000), expectedRevision: z.number().int().positive().optional() }).strict(),
+  // the trigger names which standing concern is cleared, and the revision binds
+  // the request to the incident the operator actually read, so a stale client
+  // cannot clear a later incident that happens to share a trigger.
+  resolve: z.object({ trigger: z.enum(escalationTriggers), reason: z.string().trim().min(1).max(2000), expectedRevision: z.number().int().positive() }).strict(),
   recover: z.object({ reason: z.string().min(1).max(2000), previousWorkerStopped: z.literal(true) }).strict(),
   claim: z.object({}).strict(),
   rereview: z.object({ epoch: epoch.optional() }).strict(),
@@ -179,11 +181,16 @@ export class Engine {
       if (command === 'resolve') {
         // Resolution is a human judgement: no lead, worker, producer, or scoped
         // operator agent may clear the escalation that refuses its own delivery.
+        // An admin credential that declares `ai`, or declares nothing, is not a
+        // human operator, exactly as for human-only intake.
         admin(actor);
-        demand(work.escalation, 'Task has no escalation to resolve');
-        demand(work.escalation.trigger === data.trigger, `Standing escalation is ${work.escalation.trigger}; reload before resolving`);
-        demand(data.expectedRevision === undefined || data.expectedRevision === work.revision, 'Task revision changed; reload before resolving');
-        work.escalation = null;
+        demand(sessionKind(actor) === 'human', `Escalation resolution requires a declared human session; ${actor.id} is ${sessionKind(actor)}`, 403);
+        const standing = standingEscalations(work);
+        demand(standing.length, 'Task has no escalation to resolve');
+        demand(standing.some(entry => entry.trigger === data.trigger), `Standing escalations are ${standing.map(entry => entry.trigger).join(', ')}; reload before resolving`);
+        demand(data.expectedRevision === work.revision, 'Task revision changed; reload before resolving');
+        // Every other standing trigger survives: one resolution clears one concern.
+        resolveEscalation(work, data.trigger);
       }
       if (command === 'rework') {
         admin(actor);
@@ -299,10 +306,10 @@ export class Engine {
         demand(receipt.fingerprint === fingerprint, 'Idempotency key reused with different input');
         this.evaluate(work, all, now);
         const execution = receipt.result?.execution;
-        demand(execution && work.mergeExecution?.id === execution.id
+        demand(execution && work.mergeExecution?.id === execution.id && !work.mergeExecution?.fenced
           && Date.parse(execution.expiresAt) > now.getTime() && work.stage === 'merge' && work.gates.every(gate => gate.passed)
           && !work.violations.length && work.candidate?.sha === execution.sha && work.candidate?.baseSha === execution.baseSha
-          && work.policyRevision === execution.policyRevision, 'Replayed merge execution is expired, cancelled, or superseded');
+          && work.policyRevision === execution.policyRevision, 'Replayed merge execution is expired, cancelled, fenced, or superseded');
         return receipt.result;
       }
       demand(work.revision === data.expectedRevision, 'Task changed before merge execution; retry');
@@ -372,7 +379,7 @@ export class Engine {
         demand(receipt.fingerprint === fingerprint, 'Idempotency key reused with different input');
         const current = (await db.query('SELECT document FROM work_items WHERE id::text=$1 OR document->>\'key\'=$1', [id])).rows[0]?.document as Work | undefined;
         demand(current?.mergeExecution?.id === data.executionId && current.mergeExecution.owner === actor.id && current.mergeExecution.verifiedAt === receipt.result.verifiedAt
-          && Date.parse(current.mergeExecution.expiresAt) > now.getTime(), 'Replayed merge verification is expired, cancelled, or superseded');
+          && !current.mergeExecution.fenced && Date.parse(current.mergeExecution.expiresAt) > now.getTime(), 'Replayed merge verification is expired, cancelled, fenced, or superseded');
         return receipt.result;
       }
       const all: Work[] = (await db.query('SELECT document FROM work_items ORDER BY number')).rows.map(row => row.document);
@@ -380,6 +387,7 @@ export class Engine {
       const execution = work.mergeExecution;
       demand(execution?.id === data.executionId && execution.owner === actor.id && Date.parse(execution.expiresAt) > now.getTime(), 'Merge execution is missing, expired, superseded, or owned by another coordinator');
       demand(!execution.verifiedAt, 'Merge execution was already verified; retry with the original idempotency key');
+      demand(!execution.fenced, `Merge execution was fenced and cannot be verified: ${execution.fenced?.reason}`);
       demand(!observation.merged && observation.prState === 'open' && observation.draft === false, 'Pull request is no longer open and ready for merge');
       demand(observation.candidate.sha === execution.sha && observation.candidate.baseSha === execution.baseSha && observation.candidate.pr === work.submission?.pr
         && work.workspaces.some(workspace => workspace.epoch === work.submission!.epoch && workspace.branch === observation.candidate.branch), 'GitHub candidate changed during merge execution');
@@ -427,10 +435,15 @@ export class Engine {
         if (work.stage === 'done') continue;
         const before = JSON.stringify(work);
         preserveAssignment(work);
-        if (work.mergeExecution && Date.parse(work.mergeExecution.expiresAt) > now.getTime()) continue;
-        if (work.mergeExecution) work.mergeExecution = null;
-        if (work.lease && Date.parse(work.lease.expiresAt) <= now.getTime()) {
-          const lost = work.lease; work.lease = null;
+        const executing = !!work.mergeExecution && Date.parse(work.mergeExecution.expiresAt) > now.getTime();
+        const leaseLost = !!work.lease && Date.parse(work.lease.expiresAt) <= now.getTime();
+        // An in-flight merge execution defers reconciliation, but never a lease
+        // loss: that escalation must reach the record and fence the execution
+        // rather than wait for it, so delivery cannot outrun the concern.
+        if (executing && !leaseLost) continue;
+        if (!executing && work.mergeExecution) work.mergeExecution = null;
+        if (leaseLost) {
+          const lost = work.lease!; work.lease = null;
           raiseEscalation(work, { trigger: 'lease-loss', reason: `Worker ${lost.owner} lost lease epoch ${lost.epoch}`, at: now.toISOString(), actor: 'graphyard' });
         }
         this.evaluate(work, all, now);

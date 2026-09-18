@@ -1,8 +1,8 @@
 import { createHash, randomUUID } from 'node:crypto';
 import type pg from 'pg';
 import { z } from 'zod';
-import { blockingRulingActions, demand, escalationTriggers, holdDelivery, implementerIdentities, releaseLeadHold, operatorScopeIncludes, raiseEscalation, leadHoldRefusal, sliceIds, type BlockingRulingAction, type Principal, type SliceId, type Work } from './model.js';
-import { save, type Store } from './store.js';
+import { blockingRulingActions, demand, escalationTriggers, holdDelivery, implementerIdentities, releaseLeadHold, operatorScopeIncludes, raiseEscalation, leadHoldRefusal, sliceIds, standingEscalations, type BlockingRulingAction, type Principal, type SliceId, type Work } from './model.js';
+import { save, wakeJob, type Store } from './store.js';
 import { fileConflicts, resourceConflicts } from './coordination.js';
 
 export interface DelegationLimits { maxLeads: number; maxEngineersPerLead: number; minReviewers: number; maxReviewers: number }
@@ -20,9 +20,14 @@ const rulingSchema = z.object({
   action: z.enum(leadRulingActions),
   ruleId: z.string().trim().min(1).max(200), reason: z.string().trim().min(1).max(2000),
   trigger: z.enum(escalationTriggers).optional(),
+  // The rejection an approval supersedes, named by its ruling ID, so a delayed
+  // approval prepared against an earlier rejection cannot clear a newer one.
+  supersedes: z.string().uuid().optional(),
+  expectedRevision: z.number().int().positive().optional(),
 }).strict().superRefine((data, ctx) => {
   if (data.action === 'escalate' && !data.trigger) ctx.addIssue({ code: 'custom', message: 'An escalation must name its trigger' });
   if (data.action !== 'escalate' && data.trigger) ctx.addIssue({ code: 'custom', message: 'Only escalations carry a trigger' });
+  if (data.action !== 'approve-plan' && data.supersedes) ctx.addIssue({ code: 'custom', message: 'Only an approve-plan ruling supersedes a standing plan rejection' });
 });
 export const routineIntakeOrigins = ['explicit-feedback', 'defect', 'unfinished-dependency', 'verification-finding'] as const;
 export const humanOnlyIntakeOrigins = ['goal', 'priority', 'policy-change', 'requirement-change', 'evidence-definition-change', 'waiver', 'exceptional-promotion', 'destructive-promotion', 'ambiguity-resolution'] as const;
@@ -58,9 +63,6 @@ export function validateDelegationPrincipals(principals: (Principal & { token?: 
   const leads = principals.filter(p => p.role === 'slice-lead');
   demand(leads.length <= limits.maxLeads, `Slice lead limit exceeded: ${leads.length}/${limits.maxLeads}`);
   for (const lead of leads) demand(lead.sessionKind === 'ai' && lead.slice && sliceIds.includes(lead.slice), 'Slice leads must be AI sessions assigned to a formal slice');
-  demand(new Set(leads.map(p => p.id)).size === leads.length, 'Slice leads require distinct principals and credentials');
-  const leadTokens = leads.map(p => p.token).filter((token): token is string => !!token);
-  demand(new Set(leadTokens).size === leadTokens.length, 'Slice leads require distinct principals and credentials');
   for (const slice of sliceIds) demand(leads.filter(p => p.slice === slice).length <= 1, `Slice ${slice} already has a lead`);
   const reviewers = principals.filter(p => p.role === 'producer');
   demand(reviewers.length <= limits.maxReviewers, `Independent review/proof agent limit exceeded: ${reviewers.length}/${limits.maxReviewers}`);
@@ -71,6 +73,14 @@ export function validateDelegationPrincipals(principals: (Principal & { token?: 
     demand(!leadIds.has(reviewer.id), `Producer ${reviewer.id} cannot also hold slice-lead authority`);
     demand(!reviewer.slice, `Producer ${reviewer.id} must remain independent of every slice`);
   }
+  // Uniqueness is checked across the whole roster, not only among leads: a lead
+  // sharing an ID or credential with a worker, coordinator, or producer is one
+  // identity holding two authorities, which is what separation of duties exists
+  // to prevent. Checked after the role-overlap rules so the specific refusal is
+  // the one the operator reads.
+  demand(new Set(principals.map(p => p.id)).size === principals.length, 'Slice leads require distinct principals and credentials');
+  const tokens = principals.map(p => p.token).filter((token): token is string => !!token);
+  demand(new Set(tokens).size === tokens.length, 'Slice leads require distinct principals and credentials');
   // Bootstrap (no leads) keeps working without any producer configured.
   if (leads.length) demand(reviewers.length >= limits.minReviewers, `Slice delegation requires at least ${limits.minReviewers} independent review/proof agent(s): ${reviewers.length} configured`);
 }
@@ -111,8 +121,8 @@ export function delegationSnapshot(principals: Principal[], work: Work[], now: n
     return { ...slice, lead: lead ? identify(lead.id) : null,
       engineers: [...activeEngineers(items, slice.id, now)].map(identify),
       workers: workers.map(w => ({ key: w.key, ...identify(w.lease!.owner) })),
-      bottlenecks: items.filter(w => w.blocker || w.escalation || w.leadHold || w.gates.some(g => !g.passed))
-        .map(w => ({ key: w.key, reason: w.blocker ?? w.escalation?.reason ?? leadHoldRefusal(w) ?? w.gates.find(g => !g.passed)?.reasons[0] ?? 'Awaiting a gate decision' })) };
+      bottlenecks: items.filter(w => w.blocker || standingEscalations(w).length || w.leadHold || w.gates.some(g => !g.passed))
+        .map(w => ({ key: w.key, reason: w.blocker ?? standingEscalations(w)[0]?.reason ?? leadHoldRefusal(w) ?? w.gates.find(g => !g.passed)?.reasons[0] ?? 'Awaiting a gate decision' })) };
   }), reviewers: principals.filter(p => p.role === 'producer').map(p => identify(p.id)) };
 }
 
@@ -131,6 +141,15 @@ export async function recordLeadRuling(store: Store, actor: Principal, id: strin
     // Delivery is an immutable snapshot. A ruling must never bump a delivered
     // item's revision or attach new escalation state to it; use a follow-up task.
     demand(work.stage !== 'done', 'Delivered work is immutable; rulings cannot rewrite it, so create a follow-up task', 409);
+    demand(data.expectedRevision === undefined || data.expectedRevision === work.revision, 'Task revision changed; reload before ruling');
+    // A hold is owned by the ruling that raised it. An approval clears one only
+    // by naming that ruling, so an approval prepared against an earlier
+    // rejection can never release a newer rejection it never saw.
+    const standingRejection = work.leadHold?.action === 'reject-plan' && work.leadHold.leadId === actor.id ? work.leadHold : null;
+    if (data.action === 'approve-plan') {
+      if (data.supersedes) demand(standingRejection?.rulingId === data.supersedes, standingRejection ? `Standing plan rejection is ruling ${standingRejection.rulingId}; reload before approving` : 'No plan rejection of this lead stands to supersede; reload before approving');
+      else demand(!standingRejection, `Approving over standing plan rejection ${standingRejection?.rulingId} must name the ruling it supersedes`);
+    }
     const ruling = { id: randomUUID(), workId: work.id, leadId: actor.id, slice: actor.slice, ...data, at: now.toISOString() };
     await db.query('INSERT INTO lead_rulings(id,work_id,lead_id,slice_id,action,rule_id,reason) VALUES($1,$2,$3,$4,$5,$6,$7)', [ruling.id, work.id, actor.id, actor.slice, data.action, data.ruleId, data.reason]);
     // Append-only: a later ruling never overwrites or clears a standing escalation,
@@ -141,11 +160,13 @@ export async function recordLeadRuling(store: Store, actor: Principal, id: strin
     if ((blockingRulingActions as readonly string[]).includes(data.action))
       holdDelivery(work, { action: data.action as BlockingRulingAction, rulingId: ruling.id, leadId: actor.id, slice: actor.slice!, ruleId: data.ruleId, reason: data.reason, at: ruling.at });
     // The one lead-side recovery: approving a plan supersedes that plan's own
-    // rejection. A send-back demands new implementation, so only the operator
-    // rework lifecycle clears it.
-    if (data.action === 'approve-plan' && work.leadHold?.action === 'reject-plan' && work.leadHold.leadId === actor.id)
-      releaseLeadHold(work);
-    await save(db, work, actor.id, `lead.${data.action}`, now, { ruleId: data.ruleId, reason: data.reason, ...(data.trigger ? { trigger: data.trigger } : {}) });
+    // rejection, and only the rejection the approval named. A send-back demands
+    // new implementation, so only the operator rework lifecycle clears it.
+    if (data.action === 'approve-plan' && data.supersedes && standingRejection) releaseLeadHold(work);
+    await save(db, work, actor.id, `lead.${data.action}`, now, { ruleId: data.ruleId, reason: data.reason, ...(data.trigger ? { trigger: data.trigger } : {}), ...(data.supersedes ? { supersedes: data.supersedes } : {}) });
+    // A ruling that fenced an in-flight merge execution must reach reconciliation
+    // rather than wait for the execution's own expiry.
+    if (work.mergeExecution?.fenced) await wakeJob(db, work.id);
     return { ruling, work };
   });
 }

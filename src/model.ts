@@ -61,6 +61,7 @@ export interface Observation {
   protected: boolean; files: string[]; at: string;
 }
 export interface Gate { name: string; passed: boolean; reasons: string[] }
+export interface Escalation { trigger: EscalationTrigger; reason: string; at: string; actor: string }
 export interface Work extends Create {
   validation?: Record<string, { candidateId: string; requestId?: string; attemptId?: string }>;
   retiredCriterionIds?: string[];
@@ -78,10 +79,14 @@ export interface Work extends Create {
   scenarioRequirements: { proof: string; revision: number; environment: string; hash: string }[];
   reviewRequest?: ReviewRequest | null;
   mergeAuthorization?: { sha: string; baseSha: string; policyRevision: number; at: string } | null;
-  mergeExecution?: { id: string; owner: string; sha: string; baseSha: string; policyRevision: number; authorizationRevision: number; issuedAt: string; expiresAt: string; verifiedAt?: string; clockOffset?: { min: number; max: number } } | null;
+  mergeExecution?: { id: string; owner: string; sha: string; baseSha: string; policyRevision: number; authorizationRevision: number; issuedAt: string; expiresAt: string; verifiedAt?: string; clockOffset?: { min: number; max: number }; fenced?: { reason: string; at: string } | null } | null;
   delivery?: { mergedAt: string; mergeSha: string; authorizationRevision: number };
   evidence: Evidence[]; observation: Observation | null; blocker: string | null;
-  escalation?: { trigger: EscalationTrigger; reason: string; at: string; actor: string } | null;
+  // `escalations` is the source of truth: every distinct unresolved trigger
+  // stands until it is individually resolved. `escalation` mirrors the oldest
+  // one so legacy documents and readers keep working.
+  escalation?: Escalation | null;
+  escalations?: Escalation[];
   // Durable state for a blocking lead ruling. History records the ruling; this
   // field is what the gate evaluator and the merge broker read independently.
   leadHold?: { action: BlockingRulingAction; rulingId: string; leadId: string; slice: SliceId; ruleId: string; reason: string; at: string } | null;
@@ -115,21 +120,55 @@ export function activeLease(work: Work, actor: Principal, epoch: number, now: Da
   demand(work.lease && work.lease.owner === actor.id && work.lease.epoch === epoch && Date.parse(work.lease.expiresAt) > now.getTime(), 'Lease missing, expired, or superseded; claim the task again');
 }
 
+// Every unresolved trigger stands on its own. A document written before
+// `escalations` existed carries only the singular field, so it is read as a
+// one-entry list rather than migrated in place.
+export function standingEscalations(work: Work): Escalation[] {
+  if (work.escalations) return work.escalations;
+  return work.escalation ? [work.escalation] : [];
+}
+function setEscalations(work: Work, escalations: Escalation[]) {
+  work.escalations = escalations;
+  work.escalation = escalations[0] ?? null;
+}
 // An unresolved escalation refuses delivery. Only a human operator can resolve
 // one, so no lead or automated path can deliver past it.
-export function escalationRefusal(work: Work): string | null {
-  return work.escalation ? `Unresolved ${work.escalation.trigger} escalation requires operator resolution: ${work.escalation.reason}` : null;
+export function escalationRefusals(work: Work): string[] {
+  return standingEscalations(work).map(entry => `Unresolved ${entry.trigger} escalation requires operator resolution: ${entry.reason}`);
 }
-// A standing escalation is never overwritten. Raising one refuses the merge gate
-// and invalidates merge authorization in the same transaction, so a candidate
-// that was already merge-ready cannot be delivered while it stands.
-export function raiseEscalation(work: Work, escalation: NonNullable<Work['escalation']>) {
-  if (work.escalation) return false;
-  work.escalation = escalation;
+export function escalationRefusal(work: Work): string | null { return escalationRefusals(work)[0] ?? null; }
+// A standing escalation is never overwritten, and a later distinct trigger never
+// disappears behind it: each trigger is kept until it is resolved on its own, so
+// resolving one concern cannot silently drop another. Raising one refuses the
+// merge gate, invalidates merge authorization, and fences any in-flight merge
+// execution in the same transaction, so a candidate that was already merge-ready
+// cannot be delivered while it stands.
+export function raiseEscalation(work: Work, escalation: Escalation) {
+  const standing = standingEscalations(work);
+  // One entry per trigger: a repeat of a trigger that already stands is history,
+  // not a second incident, and resolution names a trigger.
+  if (standing.some(entry => entry.trigger === escalation.trigger)) return false;
+  setEscalations(work, [...standing, escalation]);
   work.mergeAuthorization = null;
+  fenceMergeExecution(work, `Unresolved ${escalation.trigger} escalation: ${escalation.reason}`, escalation.at);
   const merge = work.gates.find(gate => gate.name === 'merge');
-  const reason = escalationRefusal(work)!;
-  if (merge && !merge.reasons.includes(reason)) { merge.reasons.push(reason); merge.passed = false; }
+  if (merge) for (const reason of escalationRefusals(work)) if (!merge.reasons.includes(reason)) { merge.reasons.push(reason); merge.passed = false; }
+  return true;
+}
+// Resolving names one standing trigger and leaves every other one standing.
+export function resolveEscalation(work: Work, trigger: EscalationTrigger) {
+  const standing = standingEscalations(work);
+  const remaining = standing.filter(entry => entry.trigger !== trigger);
+  setEscalations(work, remaining);
+  return standing.length - remaining.length;
+}
+// Fencing, not cancelling: the execution row stays so its owner can still cancel
+// or observe it idempotently, but no verification and no provider call may
+// proceed under it. The broker re-reads this between verification and the merge
+// call, so a concern raised mid-flight still stops delivery.
+export function fenceMergeExecution(work: Work, reason: string, at: string) {
+  if (!work.mergeExecution || work.mergeExecution.fenced) return false;
+  work.mergeExecution.fenced = { reason, at };
   return true;
 }
 
@@ -156,6 +195,7 @@ export function holdDelivery(work: Work, hold: NonNullable<Work['leadHold']>) {
   const superseded = leadHoldRefusal(work);
   work.leadHold = hold;
   work.mergeAuthorization = null;
+  fenceMergeExecution(work, `Slice lead ${hold.leadId} ruled ${hold.action} under rule ${hold.ruleId}`, hold.at);
   const merge = work.gates.find(gate => gate.name === 'merge');
   const reason = leadHoldRefusal(work)!;
   if (merge) {
@@ -253,7 +293,7 @@ export function evaluate(work: Work, all: Work[], now: Date, ciAppIds: number[])
   // producer joined the implementer set refuses acceptance with a named reason.
   reasons.push(...evidenceIndependenceRefusals(work, now));
   add('acceptance', reasons);
-  add('merge', [...(!fresh ? ['GitHub observation missing or older than two minutes'] : []), ...(!obs?.protected ? ['Required Graphyard check and strict branch protection have not been verified'] : []), ...(!obs?.mergeable && !obs?.merged ? ['Pull request is not mergeable against the current base'] : []), ...(escalationRefusal(work) ? [escalationRefusal(work)!] : []), ...(leadHoldRefusal(work) ? [leadHoldRefusal(work)!] : [])]);
+  add('merge', [...(!fresh ? ['GitHub observation missing or older than two minutes'] : []), ...(!obs?.protected ? ['Required Graphyard check and strict branch protection have not been verified'] : []), ...(!obs?.mergeable && !obs?.merged ? ['Pull request is not mergeable against the current base'] : []), ...escalationRefusals(work), ...(leadHoldRefusal(work) ? [leadHoldRefusal(work)!] : [])]);
   const first = gates.find(g => !g.passed);
   const violations = [...work.violations];
   let stage: Stage = !work.ready ? 'backlog' : !work.submission ? (work.lease && Date.parse(work.lease.expiresAt) > now.getTime() ? 'build' : 'ready') : (first?.name === 'ready' ? 'build' : first?.name as Stage ?? 'merge');

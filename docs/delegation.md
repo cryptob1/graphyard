@@ -26,8 +26,10 @@ Holds are ranked, `send-back` over `reject-plan`, and a later ruling may raise a
 
 | Standing hold | Authorized recovery |
 | --- | --- |
-| `reject-plan` | A later `approve-plan` ruling from the same slice lead supersedes the rejection of that plan. |
+| `reject-plan` | A later `approve-plan` ruling from the same slice lead that names the rejection it supersedes, as `"supersedes": "RULING-ID"`. |
 | `send-back` | Only `graphyard rework GY-N --previous-worker-stopped REASON` from the human operator, which reopens implementation. No ruling clears it. |
+
+An approval is bound to the rejection it clears. `approve-plan` releases a hold only when its `supersedes` names the standing rejection's own ruling ID, and only for the lead that raised it; an approval naming any other ruling is refused with `Standing plan rejection is ruling RULING-ID; reload before approving`. An `approve-plan` sent while a rejection of that lead stands but naming nothing is refused as well, so a rejection never falls away silently. A delayed approval prepared against an earlier rejection therefore cannot clear a newer one that it never read, and only `approve-plan` may carry `supersedes`. Any ruling may additionally carry `expectedRevision` to pin the work revision it was decided against.
 
 Clearing a hold removes its refusal from the `merge` gate but does not mint merge authorization: only a full gate evaluation may do that, so delivery resumes only once every other gate passes again on the observed candidate. A held item appears as a slice bottleneck naming the ruling that blocked it.
 
@@ -56,19 +58,29 @@ Four triggers raise an automatic, append-only escalation on the work item:
 
 A standing escalation is never overwritten, reclassified, or cleared by a later lead ruling; leads have no path to silence one. An `escalate` ruling must name its trigger, and no other ruling action may carry one.
 
+Each trigger stands on its own. A later distinct concern — a `security-concern` raised while a `lease-loss` still stands — is recorded alongside the standing one rather than dropped behind it, and every standing trigger refuses the `merge` gate with its own reason until it is individually resolved. A repeat of a trigger that already stands is history, not a second incident, so there is at most one unresolved escalation per trigger. Readers see every unresolved concern in `escalations`; `escalation` mirrors the oldest one.
+
 Lease loss is recorded wherever it is observed: by reconciliation when a lease expires, and by the replacement claim itself, which records the expired owner and epoch in the same transaction that overwrites the lease. A replacement can therefore never erase the evidence that an assignment was lost.
 
 ### An unresolved escalation refuses delivery
 
 While an escalation stands, the `merge` gate refuses with `Unresolved TRIGGER escalation requires operator resolution: REASON`, and raising one invalidates any existing merge authorization in the same transaction. The guarded merge broker applies the same rule independently, so an already merge-ready candidate stops being selectable the moment it is escalated.
 
-Only the human operator clears one, with `graphyard resolve GY-N TRIGGER "audit reason"` (`POST /api/work/UUID/resolve`). The request must name the standing trigger, so a stale client cannot clear a newer escalation it never read, and the resolution is itself append-only history carrying its reason. No lead, worker, producer, coordinator, or scoped operator agent may resolve an escalation. Merge authorization is reissued only after the gates pass again.
+Only the human operator clears one, with `graphyard resolve GY-N TRIGGER "audit reason"` (`POST /api/work/UUID/resolve`). The request must name one standing trigger and carry `expectedRevision`, the work revision the operator actually read; a stale client therefore cannot clear a later incident that happens to share a trigger, and clearing one concern leaves every other standing trigger refusing delivery. The resolution is itself append-only history carrying its reason.
+
+Resolution is decided from the declared session, not from the `admin` role, exactly as human-only intake is: an `admin` credential declaring `sessionKind: "ai"` or declaring nothing is refused with `Escalation resolution requires a declared human session; PRINCIPAL is ai`. No lead, worker, producer, coordinator, or scoped operator agent may resolve an escalation. Merge authorization is reissued only after the gates pass again.
+
+### A concern raised mid-merge fences the execution
+
+Raising an escalation or a blocking ruling also **fences** any merge execution in flight, in the same transaction, and wakes reconciliation instead of waiting for the execution's own expiry. A fenced execution can no longer be verified or resumed, and the guarded merge broker re-reads the work item immediately before calling GitHub — after final verification and the clock-ordering delay — refusing the provider call unless the execution still stands unfenced and every gate still passes. A lead `escalate` or `send-back` that lands between verification and the merge call therefore stops the delivery it refuses. The execution row itself is kept rather than deleted, so its owning coordinator can still cancel it idempotently and is never stranded.
+
+Lease loss reaches the record the same way: reconciliation records an expired lease and raises its escalation even while a merge execution is active, rather than deferring until the execution ends.
 
 ## Capacity and identity
 
 Defaults are three slice leads, two active engineers per slice lead, and one to two shared independent review/proof agents. Capacity is measured in **engineers**, not leases: an engineer holding two items in a slice appears as two claimed items but occupies one seat, and the claim check refuses only when a distinct additional engineer would exceed the limit. The server reads positive integer overrides from `GRAPHYARD_MAX_SLICE_LEADS`, `GRAPHYARD_MAX_ENGINEERS_PER_LEAD`, `GRAPHYARD_MIN_REVIEWERS`, and `GRAPHYARD_MAX_REVIEWERS`; it refuses configurations or claims above those limits with an explicit reason. Once any slice lead is configured, at least `GRAPHYARD_MIN_REVIEWERS` independent review/proof agents are required; bootstrap, which has no leads, needs none.
 
-Lead credentials use `role: "slice-lead"`, `sessionKind: "ai"`, and one of the formal `slice` identifiers. Declare `sessionKind: "human"` on the operator credential a person actually uses, because human-only intake is decided from that declaration rather than from the `admin` role. Principal IDs and bearer tokens remain globally unique, and two leads may not share a token. Declare `sessionKind` on every credential: an undeclared session is reported and displayed as undeclared rather than assumed to be human.
+Lead credentials use `role: "slice-lead"`, `sessionKind: "ai"`, and one of the formal `slice` identifiers. Declare `sessionKind: "human"` on the operator credential a person actually uses, because human-only intake is decided from that declaration rather than from the `admin` role. Principal IDs and bearer tokens are checked for global uniqueness across the whole roster, not only among leads: a lead sharing an ID or credential with a worker, coordinator, or producer is one identity holding two authorities. Declare `sessionKind` on every credential: an undeclared session is reported and displayed as undeclared rather than assumed to be human.
 
 ## What the dashboard shows
 

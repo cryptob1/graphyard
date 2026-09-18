@@ -47,7 +47,7 @@ Other commands use `POST /api/work/UUID/COMMAND` (display keys also work):
 | `requirements` | Full criteria, dependencies, plannedFiles, exclusiveResources, expectedPolicyRevision and reason; operator only, see [coordination](coordination.md) |
 | `ready` | Admin: `{}`. Operator-agent: `{"expectedRevision":12,"reason":"Requirements approved"}` with the current work revision and a nonblank audit reason. |
 | `unblock` | Admin: `{"reason":"Contract verified"}`. Operator-agent: `{"expectedRevision":12,"reason":"Contract verified"}` with the current work revision and a nonblank audit reason. |
-| `resolve` | `{"trigger":"security-concern","reason":"Dependency change reviewed"}` with the standing escalation's trigger and a nonblank audit reason; admin only |
+| `resolve` | `{"trigger":"security-concern","expectedRevision":12,"reason":"Dependency change reviewed"}` naming one standing escalation trigger, the current work revision, and a nonblank audit reason; admin credentials declaring `sessionKind: "human"` only |
 | `rework` | `{"reason":"Retry implementation","previousWorkerStopped":true}`; operator only |
 | `recover` | `{"reason":"Verified delivered worker stopped","previousWorkerStopped":true}`; operator only, delivered quarantine only |
 | `claim` | `{}`; returns current lease and epoch |

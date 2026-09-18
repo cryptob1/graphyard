@@ -8,7 +8,7 @@ import { assertRepository, discover, localDirectory, saveDiscovery } from './onb
 import { loadConnection, managedInstructions, serverOrigin } from './repository-setup.js';
 import { resourceConflicts } from './coordination.js';
 import { mergeOrder } from './delegation.js';
-import { evidenceIndependenceRefusals, type Work } from './model.js';
+import { evidenceIndependenceRefusals, standingEscalations, type Work } from './model.js';
 
 const safeEnvironment = z.record(
   z.string().regex(/^[A-Z_][A-Z0-9_]*$/)
@@ -426,14 +426,14 @@ export function assertMergeCandidate(work: Work, observedAt?: string, executionO
   const age = observedAt && work.observation ? Date.parse(observedAt) - Date.parse(work.observation.at) : 0;
   const fresh = !observedAt || !!work.observation && Number.isFinite(age) && age >= 0 && age < 120_000;
   const activeMerge = !!observedAt && !!work.mergeExecution && Date.parse(work.mergeExecution.expiresAt) > Date.parse(observedAt);
-  const resumable = activeMerge && !!executionOwner && work.mergeExecution!.owner === executionOwner
+  const resumable = activeMerge && !!executionOwner && work.mergeExecution!.owner === executionOwner && !work.mergeExecution!.fenced
     && work.mergeExecution!.sha === work.candidate?.sha && work.mergeExecution!.baseSha === work.candidate?.baseSha
     && work.mergeExecution!.policyRevision === work.policyRevision;
   // An unresolved escalation, a standing blocking lead ruling, and trusted
   // evidence whose producer has since implemented the item each refuse delivery
   // in the broker as well as in the gate, so a stale snapshot can never present
   // such an item as selectable.
-  if ((activeMerge && !resumable) || !fresh || work.escalation || work.leadHold || evidenceIndependenceRefusals(work).length || work.stage !== 'merge' || !work.candidate || !work.mergeAuthorization || work.mergeAuthorization.sha !== work.candidate.sha || work.mergeAuthorization.baseSha !== work.candidate.baseSha || work.mergeAuthorization.policyRevision !== work.policyRevision || work.gates.some(gate => !gate.passed) || work.violations.length) throw new Error(`${work.key} does not have a current all-gates-passing merge authorization`);
+  if ((activeMerge && !resumable) || !fresh || standingEscalations(work).length || work.leadHold || evidenceIndependenceRefusals(work).length || work.stage !== 'merge' || !work.candidate || !work.mergeAuthorization || work.mergeAuthorization.sha !== work.candidate.sha || work.mergeAuthorization.baseSha !== work.candidate.baseSha || work.mergeAuthorization.policyRevision !== work.policyRevision || work.gates.some(gate => !gate.passed) || work.violations.length) throw new Error(`${work.key} does not have a current all-gates-passing merge authorization`);
   return { key: work.key, revision: work.revision, pr: work.candidate.pr, sha: work.candidate.sha, baseSha: work.candidate.baseSha, policyRevision: work.policyRevision };
 }
 // Merge order is recomputed from current dependencies and conflicts on every
@@ -455,7 +455,7 @@ export async function continueMergeBatch<T extends { key: string }, R>(items: T[
   }
   return results;
 }
-type MergeExecution = { id: string; owner: string; sha: string; baseSha: string; policyRevision: number; authorizationRevision: number; issuedAt: string; expiresAt: string; verifiedAt?: string };
+type MergeExecution = { id: string; owner: string; sha: string; baseSha: string; policyRevision: number; authorizationRevision: number; issuedAt: string; expiresAt: string; verifiedAt?: string; fenced?: { reason: string; at: string } | null };
 export function assertMergeProtection(protection: any, config: MasterConfig, work: Work) {
   const nativeReview = !!work.policy.review && (work.policy.reviewProvider ?? 'github') !== 'codex';
   const reviews = protection?.required_pull_request_reviews;
@@ -508,6 +508,23 @@ export async function mergeWork(config: MasterConfig, work: Work, freshSnapshot:
     if (delay) await new Promise(resolve => setTimeout(resolve, delay));
     const remainingAfterProtection = remainingAtSnapshot - (performance.now() - authorityBudgetStartedAt);
     if (!Number.isFinite(remainingAfterProtection) || remainingAfterProtection <= 90_000) throw new Error(`${work.key} merge execution no longer has enough time for the provider call after verifying branch protection; retry`);
+    // Verification and the provider call are separated by the clock-ordering
+    // delay, and a lead escalation or blocking ruling can land inside it. The
+    // last thing Graphyard reads before handing the merge to GitHub is the
+    // record itself: the execution must still stand unfenced, and every gate
+    // must still pass. Pinned inputs are not re-aged here, so this adds a
+    // refusal for concerns raised mid-flight without adding a freshness race.
+    const settled = await freshSnapshot(); const final = settled.work.find(item => item.id === work.id);
+    const execution = final?.mergeExecution;
+    if (!final || !execution || execution.id !== granted.execution.id || execution.fenced || Date.parse(execution.expiresAt) <= Date.parse(settled.now))
+      throw new Error(`${work.key} merge execution was fenced, cancelled, or expired after final verification: ${execution?.fenced?.reason ?? 'execution is no longer current'}`);
+    const refusals = [...standingEscalations(final).map(entry => `Unresolved ${entry.trigger} escalation: ${entry.reason}`),
+      ...(final.leadHold ? [`Slice lead ${final.leadHold.leadId} ruled ${final.leadHold.action} under rule ${final.leadHold.ruleId}`] : []),
+      ...final.gates.filter(gate => !gate.passed).flatMap(gate => gate.reasons), ...final.violations];
+    if (refusals.length || !final.mergeAuthorization || final.mergeAuthorization.sha !== authorization.sha
+      || final.mergeAuthorization.baseSha !== authorization.baseSha || final.mergeAuthorization.policyRevision !== authorization.policyRevision
+      || final.candidate?.sha !== authorization.sha || final.candidate.baseSha !== authorization.baseSha)
+      throw new Error(`${work.key} no longer passes every gate after final verification: ${refusals.join('; ') || 'merge authorization was invalidated'}`);
     providerStarted = true;
     const provider = JSON.parse(run('gh', ['api', '--method', 'PUT', `repos/${config.repository}/pulls/${authorization.pr}/merge`, '-f', `sha=${authorization.sha}`, '-f', `merge_method=${config.mergeMethod}`]));
     if (provider.merged !== true || typeof provider.sha !== 'string') {
