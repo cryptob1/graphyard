@@ -24,6 +24,7 @@ Choose one path. The reference guides are there when a gate or integration needs
 - [Validation runner protocol](validation.md)
 - [Packaged Playwright runner](runner-setup.md)
 - [Report adapters](report-adapters.md) — what each supported report format proves, observes and refuses
+- [Releases and observed production delivery](delivery.md)
 
 ## Understand or contribute
 

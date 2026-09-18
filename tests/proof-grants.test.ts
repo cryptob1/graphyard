@@ -270,6 +270,22 @@ test('integration:proof-grants-gap-report closing the gap with a grant clears it
   assert.deepEqual(revised.proofGaps, []);
 });
 
+test('integration:proof-grants-gap-report a policy-required post-deployment proof is reported like a criterion proof', async () => {
+  const covered = 'integration:gap-smoke-covered';
+  await grant(operator, ci.id, [covered]);
+  const create = (deploySmoke: boolean) => engine.execute(operator, 'create', null, { title: 'Smoke authority fixture', policy: { checks: ['test'], review: true, deploySmoke },
+    criteria: [{ id: 'AC-1', text: 'Behavior is proven', proofs: [covered] }] }, id()) as Promise<Work>;
+  assert.deepEqual((await create(false)).proofGaps, []);
+  const work = await create(true);
+  assert.deepEqual(work.proofGaps, ['e2e:deploy-smoke'], 'nobody can produce the smoke proof the policy asks for');
+  await grant(operator, ci.id, ['e2e:deploy-smoke']);
+  const revised = await engine.execute(operator, 'requirements', work.id, {
+    expectedPolicyRevision: work.policyRevision, reason: 'Restate the outcome after granting smoke authority',
+    criteria: [{ id: 'AC-1', text: 'Behavior is proven', proofs: [covered] }], dependencies: [], plannedFiles: [], exclusiveResources: [],
+  }, id()) as Work;
+  assert.deepEqual(revised.proofGaps, []);
+});
+
 test('integration:proof-grants-gap-report the live registry reports who may produce each required proof', async () => {
   const proof = 'integration:gap-live-registry';
   await grant(operator, ci.id, [proof]);

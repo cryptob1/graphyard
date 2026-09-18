@@ -1,0 +1,11 @@
+{
+  "title": "Ship the booking confirmation endpoint",
+  "description": "Trunk stays the only pre-merge gate. After the merge is observed serving in production, a trusted producer smoke-tests the live deployment at that exact commit.",
+  "type": "feature",
+  "priority": 1,
+  "criteria": [
+    { "id": "AC-1", "text": "Confirmations are idempotent", "proofs": ["integration:booking-confirm"] }
+  ],
+  "policy": { "checks": ["test", "typecheck"], "review": true, "deploySmoke": true },
+  "plannedFiles": ["src/booking/"]
+}

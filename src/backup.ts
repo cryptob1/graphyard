@@ -11,8 +11,9 @@ import { releaseInfo, schemaVersion } from './release.js';
  * `pg_dump` remains the right tool for a physical copy of the database, but it needs a
  * client that matches the server major version and it says nothing about what Graphyard
  * expects to find inside. This format is what the documented upgrade, backup and restore
- * exercises are held to: every ledger table, the serial sequences that order work, events
- * and proof-grant history, and the schema generation the rows were written at, so a
+ * exercises are held to: every ledger table — including the releases, approvals and
+ * deployment observations behind observed delivery — the serial sequences that order work,
+ * events, proof-grant history and observations, and the schema generation the rows were written at, so a
  * restore into a release that does not know the schema refuses instead of quietly
  * dropping columns.
  *
@@ -45,9 +46,10 @@ export const backupDigest = (backup: Omit<Backup, 'digest'>) => {
 const orderColumns: Record<(typeof ledgerTables)[number], string> = {
   work_items: 'number', events: 'seq', receipts: 'actor,key', operator_agents: 'id', operator_credentials: 'agent_id,fingerprint', proof_grants: 'principal_id', proof_grant_history: 'seq', jobs: 'work_id',
   webhook_receipts: 'id', validation_definitions: 'kind,id,revision', validation_builds: 'id', validation_candidates: 'id', validation_requests: 'id',
-  validation_artifacts: 'id', validation_resources: 'resource', scenarios: 'id,revision', graphyard_schema: 'version',
+  validation_artifacts: 'id', validation_resources: 'resource', scenarios: 'id,revision', release_builds: 'id', releases: 'id,revision', release_approvals: 'id',
+  delivery_environments: 'environment_id', delivery_observations: 'seq', delivery_leases: 'registration_id', graphyard_schema: 'version',
 };
-const sequences = [{ table: 'work_items', column: 'number' }, { table: 'events', column: 'seq' }, { table: 'proof_grant_history', column: 'seq' }] as const;
+const sequences = [{ table: 'work_items', column: 'number' }, { table: 'events', column: 'seq' }, { table: 'proof_grant_history', column: 'seq' }, { table: 'delivery_observations', column: 'seq' }] as const;
 
 /**
  * Read every ledger table from one repeatable-read snapshot. Rows are exported through

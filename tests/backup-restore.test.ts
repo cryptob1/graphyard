@@ -10,6 +10,7 @@ import EmbeddedPostgres from 'embedded-postgres';
 import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import { Validation } from '../src/validation.js';
+import { Delivery } from '../src/delivery.js';
 import { defineScenario } from '../src/scenarios.js';
 import { ProofGrants, authorizedForProof } from '../src/proof-grants.js';
 import type { Principal } from '../src/model.js';
@@ -23,14 +24,16 @@ const runner: Principal = { id: 'runner', role: 'worker' };
 const collector: Principal = { id: 'collector', role: 'producer', proofs: ['e2e:booking'] };
 const builder: Principal = { id: 'builder', role: 'producer' };
 const auditor: Principal = { id: 'auditor', role: 'producer', proofs: ['manual:audit'] };
-const principals = [operator, worker, runner, collector, builder, auditor];
+const observer: Principal = { id: 'observer', role: 'producer' };
+const promoter: Principal = { id: 'promoter', role: 'producer' };
+const principals = [operator, worker, runner, collector, builder, auditor, observer, promoter];
 const sha = 'a'.repeat(40), base = 'b'.repeat(40), digest = `sha256:${'c'.repeat(64)}`, inputs = `sha256:${'d'.repeat(64)}`;
 let pg: EmbeddedPostgres, port: number, scratch: string;
 const id = () => randomUUID();
 const url = (database: string) => `postgres://graphyard:testing-only@127.0.0.1:${port}/${database}`;
 
 before(async () => {
-  port = Number(process.env.GRAPHYARD_BACKUP_TEST_PORT ?? Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 4);
+  port = Number(process.env.GRAPHYARD_BACKUP_TEST_PORT ?? Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 5);
   scratch = await mkdtemp(join(tmpdir(), 'graphyard-backup-'));
   pg = new EmbeddedPostgres({ databaseDir: join(scratch, 'data'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await pg.initialise(); await pg.start();
@@ -45,13 +48,15 @@ after(async () => { if (pg) await pg.stop(); });
  * pending. Plus the tables an installation accumulates around them, and the proof-grant
  * ledger after the operator has moved it away from the environment seed: one producer
  * holds a pattern that exists only in the database, another has had its seeded pattern
- * revoked. Both are what a restore that re-seeded the environment would get wrong.
+ * revoked. Both are what a restore that re-seeded the environment would get wrong. And the
+ * delivery side of the same environment: an attested release build, the release selected
+ * from it under an approval, the observer's lease and the observation that verified it.
  */
 async function populate(store: Store) {
   const engine = new Engine(store, [15368], 120, 'test/repository');
   const validation = new Validation(engine, principals, 'test/repository');
   const grants = new ProofGrants(store, principals);
-  assert.equal((await grants.seed()).length, 3, 'every producer is materialized from the environment');
+  assert.equal((await grants.seed()).length, 5, 'every producer is materialized from the environment');
   await grants.grant(operator, builder.id, { patterns: ['unit:*'], reason: 'Builder attests unit evidence' }, id());
   await grants.revoke(operator, auditor.id, { patterns: ['manual:audit'], reason: 'Audit authority withdrawn inside Graphyard' }, id());
   const first = await defineScenario(store, operator, { id: 'booking', title: 'Booking', purpose: 'Prove booking', steps: ['Book'], expected: ['Booked'], environment: 'preview', runner: 'playwright', testPath: 'tests/booking.spec.ts' }, id());
@@ -83,6 +88,20 @@ async function populate(store: Store) {
   await validation.collectionAuthority(collector, command);
   await validation.uploadArtifact(collector, { ...command, name: 'report', mediaType: 'application/json', bytes: Buffer.from(JSON.stringify({ format: 'junit-xml-v1', private: 'artifact-bytes-marker' })).toString('base64'), capturePolicy: 'approved-test-data-only' }, id());
   await store.pool.query("INSERT INTO webhook_receipts(id) VALUES('delivery-1')");
+  // Observed delivery for the same environment: a release built, approved, selected and
+  // seen running, so the restored ledger still knows what production is expected to be.
+  const delivery = new Delivery(validation);
+  await validation.define(operator, { kind: 'registration', id: 'observer-1', expectedRevision: 0, principalId: observer.id, role: 'observer', environment, adapterVersion: 'test-v1', proofs: [], enabled: true, services: ['api'] }, id());
+  await validation.define(operator, { kind: 'registration', id: 'promoter-1', expectedRevision: 0, principalId: promoter.id, role: 'promoter', environment, adapterVersion: 'test-v1', proofs: [], enabled: true, services: ['api'] }, id());
+  const releaseBuild: any = await delivery.attestBuild(builder, { registration: { id: 'builder-1', revision: 1 }, sourceSha: sha, buildInputsDigest: inputs, artifacts: [{ service: 'api', digest }], provenanceUrl: 'https://ci.example.test/build/2' }, id());
+  const release: any = await delivery.createRelease(operator, { id: 'release-1', expectedRevision: 0, environment, sourceSha: sha, buildId: releaseBuild.id, manifest: releaseBuild.artifacts, members: [] }, id());
+  const approval: any = await delivery.approve(operator, { release: { id: release.id, revision: release.revision }, environment }, id());
+  await delivery.select(operator, { environment, release: { id: release.id, revision: release.revision }, expectedGeneration: 0, approvalId: approval.id }, id());
+  const lease: any = await delivery.lease(observer, { registration: { id: 'observer-1', revision: 1 } });
+  const now = Date.now(), at = (offsetSeconds: number) => new Date(now + offsetSeconds * 1000).toISOString();
+  await delivery.observe(observer, { registration: { id: 'observer-1', revision: 1 }, epoch: lease.epoch, environment, expectedGeneration: 1, snapshotId: 'snapshot-1', observedAt: at(0), validFrom: at(-60), validTo: at(0),
+    services: [{ service: 'api', complete: true, instances: [{ instance: 'api-1', digest, measurement: 'provider', healthy: true }], deployment: { id: 'dep-api', status: 'success', deployedAt: at(-120) } }] }, id());
+  await delivery.sweep();
   return { engine, validation, workId: w.id, requestId: request.id, scenario: { revision: second.revision, hash: second.hash } };
 }
 
@@ -96,7 +115,12 @@ async function snapshot(store: Store) {
   const definitions = (await store.pool.query('SELECT kind, id, revision, document FROM validation_definitions ORDER BY kind, id, revision')).rows;
   const grants = (await store.pool.query('SELECT principal_id, document FROM proof_grants ORDER BY principal_id')).rows;
   const grantHistory = (await store.pool.query('SELECT seq, principal_id, document, created_at FROM proof_grant_history ORDER BY seq')).rows;
-  return { work, events, scenarios, requests, resources, artifacts, definitions, grants, grantHistory };
+  const releases = (await store.pool.query('SELECT id, revision, document FROM releases ORDER BY id, revision')).rows;
+  const approvals = (await store.pool.query('SELECT id, document FROM release_approvals ORDER BY id')).rows;
+  const environments = (await store.pool.query('SELECT environment_id, document FROM delivery_environments ORDER BY environment_id')).rows;
+  const observations = (await store.pool.query('SELECT seq, id, environment_id, registration_id, snapshot_id, document, received_at FROM delivery_observations ORDER BY seq')).rows;
+  const leases = (await store.pool.query('SELECT registration_id, principal, epoch, expires_at FROM delivery_leases ORDER BY registration_id')).rows;
+  return { work, events, scenarios, requests, resources, artifacts, definitions, grants, grantHistory, releases, approvals, environments, observations, leases };
 }
 
 test('the documented backup and restore exercise preserves assignments, history, scenario revisions and pending requests, and the restored ledger keeps ordering', async () => {
@@ -106,11 +130,14 @@ test('the documented backup and restore exercise preserves assignments, history,
   assert.ok(before.work.find(w => w.id === seeded.workId)!.lease, 'the fixture holds a live assignment');
   assert.equal(before.requests.find(r => r.id === seeded.requestId)!.document.state, 'collecting');
   assert.equal(before.scenarios.length, 2);
-  assert.deepEqual(before.grants.map(g => [g.principal_id, g.document.patterns]), [['auditor', []], ['builder', ['unit:*']], ['collector', ['e2e:booking']]]);
-  assert.deepEqual(before.grantHistory.map(h => [Number(h.seq), h.principal_id, h.document.kind]), [[1, 'collector', 'seed'], [2, 'builder', 'seed'], [3, 'auditor', 'seed'], [4, 'builder', 'grant'], [5, 'auditor', 'revoke']]);
+  assert.deepEqual(before.grants.map(g => [g.principal_id, g.document.patterns]), [['auditor', []], ['builder', ['unit:*']], ['collector', ['e2e:booking']], ['observer', []], ['promoter', []]]);
+  assert.deepEqual(before.grantHistory.map(h => [Number(h.seq), h.principal_id, h.document.kind]), [[1, 'collector', 'seed'], [2, 'builder', 'seed'], [3, 'auditor', 'seed'], [4, 'observer', 'seed'], [5, 'promoter', 'seed'], [6, 'builder', 'grant'], [7, 'auditor', 'revoke']]);
+  assert.equal(before.releases.length, 1); assert.equal(before.approvals.length, 1); assert.equal(before.observations.length, 1); assert.equal(before.leases.length, 1);
+  assert.equal(before.environments[0].document.verification?.status, 'verified', 'the fixture holds a selected release the observer has verified');
 
   const backup = await createBackup(source.pool);
-  assert.ok(backup.sequences.some(s => s.name.endsWith('proof_grant_history_seq_seq') && s.value === 5), 'the grant history sequence travels with the backup');
+  assert.ok(backup.sequences.some(s => s.name.endsWith('proof_grant_history_seq_seq') && s.value === 7), 'the grant history sequence travels with the backup');
+  assert.ok(backup.sequences.some(s => s.name.endsWith('delivery_observations_seq_seq') && s.value === 1), 'the observation sequence travels with the backup');
   assert.equal(backup.schemaVersion, schemaVersion); assert.equal(verifyBackup(backup).format, 'graphyard-backup-v1');
   assert.deepEqual(Object.fromEntries(backup.tables.map(t => [t.name, t.rows.length])), await ledgerCounts(source.pool));
 
@@ -157,10 +184,10 @@ test('the documented backup and restore exercise preserves assignments, history,
     assert.equal(await authorizedForProof(db, auditor, 'manual:audit'), false);
     assert.equal(await authorizedForProof(db, builder, 'unit:after'), true);
   });
-  assert.deepEqual((await grants.history(operator, auditor.id)).map(h => [h.seq, h.kind, h.effective]), [[3, 'seed', ['manual:audit']], [5, 'revoke', []]]);
+  assert.deepEqual((await grants.history(operator, auditor.id)).map(h => [h.seq, h.kind, h.effective]), [[3, 'seed', ['manual:audit']], [7, 'revoke', []]]);
   const regranted = await grants.grant(operator, auditor.id, { patterns: ['manual:audit'], reason: 'Audit authority restored after the exercise', expectedRevision: 2 }, id());
   assert.equal(regranted.revision, 3);
-  assert.deepEqual((await grants.history(operator, auditor.id)).map(h => h.seq), [3, 5, 6]);
+  assert.deepEqual((await grants.history(operator, auditor.id)).map(h => h.seq), [3, 7, 8]);
   await source.close(); await restored.close();
 });
 
@@ -170,8 +197,8 @@ test('a target the release already started against refuses a restore, because it
   const backup = await createBackup(source.pool);
   const seeded = new Store(url('seeded')); await seeded.init();
   // What `graphyard serve` does on first boot with producers in GRAPHYARD_PRINCIPALS.
-  assert.equal((await new ProofGrants(seeded, principals).seed()).length, 3);
-  await assert.rejects(restoreBackup(seeded.pool, backup), /proof_grants already holds 3 row\(s\).*graphyard db migrate/);
+  assert.equal((await new ProofGrants(seeded, principals).seed()).length, 5);
+  await assert.rejects(restoreBackup(seeded.pool, backup), /proof_grants already holds 5 row\(s\).*graphyard db migrate/);
   assert.deepEqual((await ledgerCounts(seeded.pool)).work_items, 0, 'the refused restore wrote nothing');
   await source.close(); await seeded.close();
 });

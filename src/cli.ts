@@ -175,6 +175,11 @@ Environment: GRAPHYARD_URL, GRAPHYARD_TOKEN (individual role-scoped credential)
   list | next                  List all work / claimable work
   create path/to/work.json      Create work with acceptance criteria (operator)
   validation [ACTION file.json] List validation state or submit a protocol command
+  delivery [ACTION file.json]  Show releases and observed delivery, or submit a
+                                release/observation command (build|release|approve|
+                                select|lease|observe|notify|sweep)
+  delivery observations ENV [CURSOR]
+                                Page through an environment's deployment observations
   runner inspect [DIRECTORY]   Discover Playwright inputs without executing repository code
   runner snapshot file.json    Snapshot an explicit source-file list for review (not approval)
   runner bundle-digest DIR      Content identity of an executable oracle bundle for approval
@@ -250,12 +255,12 @@ Never share an operator or producer credential with an implementation agent.`); 
     const root = execFileSync('git', ['rev-parse', '--show-toplevel'], { encoding: 'utf8' }).trim();
     if (id === 'guide') return console.log(await readFile(fileURLToPath(new URL('../docs/master-agent.md', import.meta.url)), 'utf8'));
     if (id === 'init') {
-      const { values } = parseArgs({ args, options: { url: { type: 'string' }, 'token-stdin': { type: 'boolean' }, 'no-auto-merge': { type: 'boolean' }, 'merge-method': { type: 'string' }, 'cli-path': { type: 'string' }, 'host-id': { type: 'string' }, 'herdr-workspace': { type: 'string' }, interval: { type: 'string' }, 'proof-workflow': { type: 'string' }, 'deployment-url': { type: 'string' }, 'deployment-sha-field': { type: 'string' } }, allowPositionals: false });
+      const { values } = parseArgs({ args, options: { url: { type: 'string' }, 'token-stdin': { type: 'boolean' }, 'no-auto-merge': { type: 'boolean' }, 'merge-method': { type: 'string' }, 'cli-path': { type: 'string' }, 'host-id': { type: 'string' }, 'herdr-workspace': { type: 'string' }, interval: { type: 'string' }, 'proof-workflow': { type: 'string' }, 'deployment-url': { type: 'string' }, 'deployment-sha-field': { type: 'string' }, 'smoke-workflow': { type: 'string' } }, allowPositionals: false });
       if (!values['token-stdin']) throw new Error('Use master init --token-stdin so the coordinator credential is not stored in shell history');
       let input = ''; for await (const chunk of process.stdin) { input += chunk; if (input.length > 10_000) throw new Error('Token input is too large'); }
       const masterToken = input.trim(); if (!masterToken) throw new Error('Master coordinator credential is required; setup made no changes');
       const method = values['merge-method']; if (method && !['merge', 'squash', 'rebase'].includes(method)) throw new Error('Merge method must be merge, squash, or rebase');
-      const run = { ...(values.interval ? { intervalSeconds: Number(values.interval) } : {}), ...(values['proof-workflow'] ? { proofWorkflow: values['proof-workflow'] } : {}), ...(values['deployment-url'] ? { deploymentUrl: values['deployment-url'] } : {}), ...(values['deployment-sha-field'] ? { deploymentShaField: values['deployment-sha-field'] } : {}) };
+      const run = { ...(values.interval ? { intervalSeconds: Number(values.interval) } : {}), ...(values['proof-workflow'] ? { proofWorkflow: values['proof-workflow'] } : {}), ...(values['deployment-url'] ? { deploymentUrl: values['deployment-url'] } : {}), ...(values['deployment-sha-field'] ? { deploymentShaField: values['deployment-sha-field'] } : {}), ...(values['smoke-workflow'] ? { smokeWorkflow: values['smoke-workflow'] } : {}) };
       return print(await setupMaster(root, { url: values.url ?? base, token: masterToken, cliPath: resolve(values['cli-path'] ?? await activeCliPath()), hostId: values['host-id'] ?? individualHostId(), herdrWorkspace: values['herdr-workspace'], ...(values['no-auto-merge'] ? { autoMerge: false } : {}), ...(method ? { mergeMethod: method as 'merge' | 'squash' | 'rebase' } : {}), ...(Object.keys(run).length ? { run } : {}) }));
     }
     const master = await loadMasterConfig(root);
@@ -329,7 +334,7 @@ Never share an operator or producer credential with an implementation agent.`); 
       const containment = assessContainment(snapshot.work, { hostId: master.hostId, observedAt: snapshot.now, clockOffset });
       const daemonState = await readDaemonState(root, master).catch(error => ({ error: error instanceof Error ? error.message : 'Master daemon state is unreadable' }));
       const daemon = 'error' in daemonState ? { running: false, error: daemonState.error } : daemonSummary(daemonState, Date.now(), master.run.intervalSeconds * 1000);
-      return print({ ...buildMasterStatus(snapshot, master.workers, runtime.agents, credentials, containment, reviews), autoMerge: master.autoMerge, mergeApproval: master.autoMerge ? 'routine merges permitted after gates pass' : 'explicit operator approval required for each merge',
+      return print({ ...buildMasterStatus(snapshot, master.workers, runtime.agents, credentials, containment, reviews, master.baseBranch), autoMerge: master.autoMerge, mergeApproval: master.autoMerge ? 'routine merges permitted after gates pass' : 'explicit operator approval required for each merge',
         reviewer: master.reviewer ? { identity: `${master.reviewer.slug}[bot]`, appId: master.reviewer.appId, profiles: master.reviewers.map(profile => profile.name) } : null,
         daemon, runtime: { herdr: { available: runtime.available, reason: runtime.reason }, reviews: reviewRuntime } });
     }
@@ -595,6 +600,13 @@ Never share an operator or producer credential with an implementation agent.`); 
     if (id === 'show-candidate' && args[0]) return print(await api(`validation/candidate/${encodeURIComponent(args[0])}`));
     if (!['define','build','candidate','request','dispatch','ack','heartbeat','result','cancel','settle','retry'].includes(id) || !args[0]) throw new Error('Use validation ACTION file.json');
     return print(await api(`validation/${id}`, JSON.parse(await readFile(args[0], 'utf8'))));
+  }
+  if (command === 'delivery') {
+    if (!id || id === 'status') return print(await api('delivery'));
+    if (id === 'observations' && args[0]) return print(await api(`delivery/observations?environment=${encodeURIComponent(args[0])}${args[1] ? `&cursor=${encodeURIComponent(args[1])}` : ''}`));
+    if (id === 'sweep') return print(await api('delivery/sweep', {}));
+    if (!['build', 'release', 'approve', 'select', 'lease', 'observe', 'notify'].includes(id) || !args[0]) throw new Error('Use delivery [status] | delivery observations ENV [CURSOR] | delivery sweep | delivery ACTION file.json');
+    return print(await api(`delivery/${id}`, JSON.parse(await readFile(args[0], 'utf8'))));
   }
   if (command === 'grants') {
     if (!id || id === 'list') return print(await api('proof-grants'));

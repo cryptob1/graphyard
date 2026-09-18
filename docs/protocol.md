@@ -7,7 +7,7 @@ All control-plane endpoints except `/healthz` require `Authorization: Bearer TOK
 | Role | Permissions |
 | --- | --- |
 | `admin` | Create/release work, participate as a worker, attest manual proofs |
-| `coordinator` | Read work and integration state for master-agent routing; acquire, verify, or cancel only the engine's bounded merge execution authority; settle a containment quarantine whose supervisor it has verified dead on the registered host |
+| `coordinator` | Read work and integration state for master-agent routing; acquire, verify, or cancel only the engine's bounded merge execution authority; settle a containment quarantine whose supervisor it has verified dead on the registered host; record the deployment observation on delivered work |
 | `operator-agent` | Only explicitly configured intent/policy capabilities (`intent:create`, `intent:ready`, `intent:unblock`, `policy:requirements`, `policy:review-provider`, `policy:bootstrap`) within a server-enforced repository/work allowlist; never leases, evidence, identity administration, or merge execution |
 | `worker` | Claim work, renew/release own lease, register workspace, report blockers, submit implementation, submit untrusted assertions |
 | `producer` | Submit evidence; only proof names authorized by a live Graphyard grant are trusted |
@@ -56,8 +56,9 @@ Other commands use `POST /api/work/UUID/COMMAND` (display keys also work):
 | `workspace` | `{"epoch":1,"host":"build-machine-a","path":"/work/GY-1","branch":"graphyard/gy-1-1"}` |
 | `submit` | `{"epoch":1,"pr":123}` |
 | `evidence` | See below |
+| `deployment` | `{"sha":"<serving commit>","mergeSha":"<the item's merge commit>","source":"endpoint","observedAt":"2026-09-18T10:00:00Z"}`; coordinator or admin, delivered work only, once per delivery. Whether the serving commit is the merge itself or a descendant is derived, never asserted. See [post-deployment smoke proof](github.md#post-deployment-smoke-proof) |
 
-No endpoint sets arbitrary lifecycle state. `complete` in the CLI maps to `submit`, not `done`.
+No endpoint sets arbitrary lifecycle state. `complete` in the CLI maps to `submit`, not `done`. Delivered work accepts only `deployment` and `e2e:deploy-smoke` evidence, which extend the delivery snapshot without re-evaluating it.
 
 ## Leases
 
@@ -135,6 +136,8 @@ Work creation and every requirement revision record `proofGaps`: the required pr
 
 All required proof names must pass. Evidence is selected for the exact head/base/policy tuple. A later matching failure supersedes an earlier pass. Stale evidence is retained for audit without satisfying the current candidate.
 
+`e2e:deploy-smoke` is the one proof submitted after delivery. For it, `sha` is the deployed commit the checks ran against — the one recorded by the `deployment` command — and `baseSha` is the item's merge commit. It is accepted only from a producer granted that proof, only when the work policy sets `deploySmoke`, only after the deployment observation exists, and only with exactly those two commits and the current policy revision; any other submission is refused rather than stored untrusted. The result is recorded as `delivery.smoke`.
+
 ## Bootstrap mode for a change that introduces its own proof harness
 
 A criterion whose proof does not yet exist cannot be proven by the change that creates it: the
@@ -208,6 +211,10 @@ own deferrals and inherited obligations.
 ## Validation runner API
 
 The [validation protocol](validation.md) documents versioned environments, trusted registrations, immutable candidates, explicit dispatch/ACK, result collection and recovery. Use `graphyard validation` to inspect requests. Automatic runner execution is a later increment.
+
+## Release and delivery API
+
+The [delivery guide](delivery.md) documents release builds, immutable release revisions with explicit membership, operator approvals, generation-fenced selection of an environment's expected release, leased observer and promoter identities, append-only deployment observations and the bounded sweep that derives verification. `GET /api/delivery` returns every environment's delivery state and the release registry; `GET /api/delivery/observations?environment=ID` pages an environment's observations; `POST /api/delivery/{build,release,approve,select,lease,observe,notify}` are the mutations, and `POST /api/delivery/sweep` is the operator's way to drain observations ahead of the two-second tick. A verified release adds `releaseDeliveries` to each included work item; it never changes the item's stage.
 
 ## Supervised shutdown invariants
 

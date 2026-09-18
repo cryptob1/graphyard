@@ -9,6 +9,7 @@ import { Engine, type Command } from './engine.js';
 import { Refusal, demand, parseReviewerApps, type Principal } from './model.js';
 import { githubFromEnv, processJob, type GitHub } from './github.js';
 import { Validation } from './validation.js';
+import { Delivery } from './delivery.js';
 import { defineScenario, scenarios } from './scenarios.js';
 import { OperatorAgents } from './operator-agent.js';
 import { releaseInfo, schemaVersion } from './release.js';
@@ -40,6 +41,7 @@ export function server(engine: Engine, credentials: Credential[], github: GitHub
   demand(!engine.reviewerApps.some(app => app.appId === engine.controlPlaneAppId),
     'A registered reviewer App must be distinct from the Graphyard control-plane App');
   const validation = new Validation(engine, principals.map(p => p.actor), repository);
+  const delivery = new Delivery(validation);
   const operatorAgents = new OperatorAgents(engine.store, repository, credentials.map(credential => ({ id: credential.id, tokenHash: createHash('sha256').update(credential.token).digest('hex') })));
   engine.operatorAuthorizer = operatorAgents.revalidate.bind(operatorAgents);
   // Proof authority is Graphyard state. The configured registry only identifies which
@@ -137,6 +139,24 @@ export function server(engine: Engine, credentials: Credential[], github: GitHub
             : await validation.operatorCommand(actor, command as 'cancel' | 'settle' | 'retry', data, key);
           return send(200, result);
         }
+        // D3: releases, expected-release selection and deployment observations. Reads are
+        // open to every authenticated non-operator-agent credential; each mutation derives its
+        // authority from the credential and the registration it names.
+        if (url.pathname === '/api/delivery' && req.method === 'GET') return send(200, await delivery.status());
+        if (url.pathname === '/api/delivery/observations' && req.method === 'GET') return send(200, await delivery.observations(url.searchParams.get('environment') ?? '', url.searchParams.get('cursor') ?? undefined));
+        const deliveryRoute = url.pathname.match(/^\/api\/delivery\/(build|release|approve|select|lease|observe|notify|sweep)$/);
+        if (deliveryRoute && req.method === 'POST') {
+          const command = deliveryRoute[1], data = JSON.parse((await body(req)).toString() || '{}'), key = String(req.headers['idempotency-key'] ?? '');
+          if (command === 'sweep') { demand(actor.role === 'admin', 'Operator permission required', 403); return send(200, await delivery.sweep()); }
+          const result = command === 'build' ? await delivery.attestBuild(actor, data, key)
+            : command === 'release' ? await delivery.createRelease(actor, data, key)
+            : command === 'approve' ? await delivery.approve(actor, data, key)
+            : command === 'select' ? await delivery.select(actor, data, key)
+            : command === 'lease' ? await delivery.lease(actor, data)
+            : command === 'observe' ? await delivery.observe(actor, data, key)
+            : await delivery.notify(actor, data);
+          return send(200, result);
+        }
         if (url.pathname === '/api/scenarios') {
           if (req.method === 'GET') return send(200, await scenarios(engine.store));
           if (req.method === 'POST') return send(200, await defineScenario(engine.store, actor, JSON.parse((await body(req)).toString()), String(req.headers['idempotency-key'] ?? '')));
@@ -215,12 +235,15 @@ async function main() {
   const seeded = await new ProofGrants(store, credentials.map(({ token, ...actor }) => actor)).seed();
   if (seeded.length) console.log(`Seeded proof grants for ${seeded.map(grant => grant.principalId).join(', ')}`);
   const validation = new Validation(engine, credentials.map(({ token, ...actor }) => actor), github?.config.repository ?? process.env.GITHUB_REPOSITORY ?? '');
+  const delivery = new Delivery(validation);
   await validation.expireArtifacts();
   await validation.reconcile(true);
   let running = false;
   const timer = setInterval(async () => {
     if (running) return; running = true;
-    try { await validation.expireArtifacts(); await validation.reconcile(); await engine.reconcile(); if (github) await Promise.all(Array.from({ length: 4 }, () => processJob(engine, github))); }
+    // The delivery sweep is bounded per tick and resumes from its persisted cursor, so a
+    // backlog of observations drains across ticks without ever skipping one.
+    try { await validation.expireArtifacts(); await validation.reconcile(); await engine.reconcile(); await delivery.sweep(); if (github) await Promise.all(Array.from({ length: 4 }, () => processJob(engine, github))); }
     catch (error) { console.error('reconciliation failed', error instanceof Error ? error.message : 'unknown'); }
     finally { running = false; }
   }, 2000);

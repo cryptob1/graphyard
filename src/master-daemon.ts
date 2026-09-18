@@ -4,7 +4,7 @@ import { chmod, readFile, rename, writeFile } from 'node:fs/promises';
 import { basename, dirname, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { z } from 'zod';
-import { currentEvidence, exhaustedReviewerProfiles, reviewProviderOf, reviewerProfileFor, type Work } from './model.js';
+import { currentEvidence, deliveryState, deploySmokeRequired, exhaustedReviewerProfiles, postDeployMs, productionLatencyMs, reviewProviderOf, reviewerProfileFor, rollbackGuidance, type Work } from './model.js';
 import { assertDispatchable, assertOutsideWorktrees, closeHerdrPane, dispatchWork, inspectWorkerCredentials, listHerdrAgents, mergeExecutor, type HerdrAgent, type MasterConfig, type WorkerProfile } from './master.js';
 
 /**
@@ -14,7 +14,7 @@ import { assertDispatchable, assertOutsideWorktrees, closeHerdrPane, dispatchWor
  * evidence, never calls an operator route, and reaches GitHub only through the guarded merge.
  */
 
-export const daemonActionKinds = ['close', 'dispatch', 'review', 'proof', 'merge', 'deployment', 'escalation'] as const;
+export const daemonActionKinds = ['close', 'dispatch', 'review', 'proof', 'merge', 'deployment', 'smoke', 'escalation'] as const;
 export type DaemonActionKind = typeof daemonActionKinds[number];
 export const daemonActionSchema = z.object({
   kind: z.enum(daemonActionKinds),
@@ -32,11 +32,17 @@ export const daemonActionSchema = z.object({
 export type DaemonAction = z.infer<typeof daemonActionSchema>;
 
 const percentileSchema = z.object({ count: z.number().int().min(0), p50Ms: z.number().int().min(0), p90Ms: z.number().int().min(0) }).strict();
+const noMeasurement = { count: 0, p50Ms: 0, p90Ms: 0 };
 export const cycleMetricsSchema = z.object({
   cycle: z.number().int().min(0), at: z.string(), durationMs: z.number().int().min(0),
   open: z.number().int().min(0), actions: z.number().int().min(0),
   stages: z.record(z.string(), percentileSchema).default({}),
   lead: percentileSchema,
+  // Delivery analytics behind the merge: creation to the observed deployment (PR-to-production
+  // latency), merge to the smoke verdict (post-deploy time), and how many verdicts failed.
+  production: percentileSchema.default(noMeasurement),
+  postDeploy: percentileSchema.default(noMeasurement),
+  postDeployFailures: z.number().int().min(0).default(0),
 }).strict();
 export type CycleMetrics = z.infer<typeof cycleMetricsSchema>;
 
@@ -148,6 +154,11 @@ export function reconcilePendingActions(state: DaemonState, work: Work[], now: n
     } else if (action.kind === 'merge') {
       next.state = item?.observation?.merged || item?.stage === 'done' ? 'done' : 'failed';
       next.detail = next.state === 'done' ? 'Resumed: Graphyard observed the merge' : 'Resumed: no merge was observed; the guarded merge may be attempted again';
+    } else if (action.kind === 'deployment' && action.work) {
+      // Recording a deployment either landed on the delivery snapshot or it did not; a repeat of a
+      // landed record is refused by Graphyard, so retrying is safe.
+      next.state = item?.delivery?.deployment ? 'done' : 'failed';
+      next.detail = next.state === 'done' ? 'Resumed: Graphyard holds the deployment observation' : 'Resumed: no deployment observation was recorded; it may be recorded again';
     } else {
       next.state = 'indeterminate';
       next.detail = `Resumed: the ${action.kind} request was interrupted and its effect is unknown`;
@@ -168,8 +179,10 @@ export function percentiles(values: number[]) {
 }
 
 /**
- * Stage dwell for work still in flight, plus delivered lead time. Both come from the snapshot the
- * cycle already read, so the measurement cannot disagree with the state the cycle acted on.
+ * Stage dwell for work still in flight, delivered lead time, and the post-deploy flow: time to the
+ * observed deployment and time from merge to the smoke verdict, with failures counted. All of it
+ * comes from the snapshot the cycle already read, so the measurement cannot disagree with the
+ * state the cycle acted on.
  */
 export function stageMetrics(work: Work[], now: number) {
   const stages: Record<string, ReturnType<typeof percentiles>> = {};
@@ -177,9 +190,12 @@ export function stageMetrics(work: Work[], now: number) {
   for (const stage of [...new Set(open.map(item => item.stage))].sort()) {
     stages[stage] = percentiles(open.filter(item => item.stage === stage).map(item => now - Date.parse(item.stageEnteredAt)).filter(Number.isFinite));
   }
-  const lead = percentiles(work.filter(item => item.stage === 'done' && item.delivery)
-    .map(item => Date.parse(item.delivery!.mergedAt) - Date.parse(item.createdAt)).filter(value => Number.isFinite(value) && value >= 0));
-  return { stages, lead };
+  const delivered = work.filter(item => item.stage === 'done' && item.delivery);
+  const lead = percentiles(delivered.map(item => Date.parse(item.delivery!.mergedAt) - Date.parse(item.createdAt)).filter(value => Number.isFinite(value) && value >= 0));
+  const production = percentiles(delivered.map(item => productionLatencyMs(item)).filter((value): value is number => value !== null));
+  const postDeploy = percentiles(delivered.map(item => postDeployMs(item, now)).filter((value): value is number => value !== null));
+  const postDeployFailures = delivered.filter(item => deliveryState(item) === 'delivered-with-failure').length;
+  return { stages, lead, production, postDeploy, postDeployFailures };
 }
 
 export function missingProofs(work: Work, now: Date) {
@@ -230,6 +246,10 @@ export interface DaemonEffects {
   requestProof: (work: Work) => void | Promise<void>;
   merge: (work: Work) => Promise<unknown>;
   observeDeployment: (delivered: Work[]) => Promise<DeploymentObservation>;
+  /** Records the coordinator's own deployment observation on the delivered item. */
+  recordDeployment: (work: Work, observation: { sha: string; source: 'endpoint' | 'github-deployment'; observedAt: string }) => Promise<unknown>;
+  /** Asks the provider to run the trusted smoke workflow against the observed deployment. */
+  requestSmoke: (work: Work) => void | Promise<void>;
   agents: () => HerdrAgent[];
   credentials: (profiles: WorkerProfile[]) => Promise<Record<string, { available: boolean; reason: string | null }>>;
   snapshot: () => Promise<{ work: Work[]; now: string }>;
@@ -400,9 +420,54 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
     performed.push(await record(state, deploymentKey, { kind: 'deployment', work: null, principal: null, state: 'failed', detail: `Deployment SHA could not be verified: ${message(error)}`, attempts: (state.actions[deploymentKey]?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist));
   }
 
+  // 5b. The second confidence layer. For each delivery whose policy asks for a smoke proof: record
+  //     the observation on Graphyard once the release serves its merge, ask the provider to run the
+  //     trusted smoke workflow against exactly that commit, and escalate a failed verdict with
+  //     rollback guidance. The loop never produces the verdict: the workflow's producer does.
+  const observed = state.deployment;
+  for (const item of delivered.filter(candidate => deploySmokeRequired(candidate.policy))) {
+    const delivery = item.delivery!;
+    if (!delivery.deployment) {
+      if (observed?.source === 'unavailable' || !observed?.sha || !observed.deployed.includes(item.key)) continue;
+      const key = `deployment:record:${item.id}:${observed.sha}`;
+      if (state.actions[key] && state.actions[key].state !== 'failed') continue;
+      if (!readyToRetry(state.actions[key], state.cycle)) continue;
+      const attempts = (state.actions[key]?.attempts ?? 0) + 1;
+      await record(state, key, { kind: 'deployment', work: item.key, principal: null, state: 'started', detail: `Recording that ${observed.sha.slice(0, 12)} from ${observed.source} serves ${item.key}`, attempts, cycle: state.cycle }, now(), effects.persist);
+      try {
+        await effects.recordDeployment(item, { sha: observed.sha, source: observed.source as 'endpoint' | 'github-deployment', observedAt: observed.at });
+        performed.push(await record(state, key, { kind: 'deployment', work: item.key, principal: null, state: 'done', detail: `Recorded deployment ${observed.sha.slice(0, 12)} (${observed.source}) covering ${item.key} merge ${delivery.mergeSha.slice(0, 12)}; the smoke proof may now be requested`, attempts, cycle: state.cycle }, now(), effects.persist));
+      } catch (error) {
+        performed.push(await record(state, key, { kind: 'deployment', work: item.key, principal: null, state: 'failed', detail: `Could not record the deployment for ${item.key}: ${message(error)}`, attempts, cycle: state.cycle }, now(), effects.persist));
+      }
+      continue;
+    }
+    const outcome = deliveryState(item);
+    if (outcome === 'delivered-with-failure') {
+      const key = `escalation:smoke:${item.id}:${delivery.smoke!.evidenceId}`;
+      if (state.actions[key]?.state !== 'done') performed.push(await record(state, key, { kind: 'escalation', work: item.key, principal: null, state: 'done', detail: rollbackGuidance(item, config.baseBranch)!, attempts: 1, cycle: state.cycle }, now(), effects.persist));
+      continue;
+    }
+    if (outcome !== 'awaiting-smoke') continue;
+    const key = `smoke:${item.id}:${delivery.deployment.sha}`;
+    const previous = state.actions[key];
+    if (previous && (previous.state === 'done' || previous.attempts >= maxProofAttempts || !readyToRetry(previous, state.cycle))) continue;
+    if (!config.run.smokeWorkflow) {
+      if (previous?.state !== 'failed') performed.push(await record(state, key, { kind: 'smoke', work: item.key, principal: null, state: 'failed', detail: `${item.key} is deployed at ${delivery.deployment.sha.slice(0, 12)} and needs its post-deployment smoke proof; configure master init --smoke-workflow so the loop can request it from the trusted producer workflow`, attempts: (previous?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist));
+      continue;
+    }
+    await record(state, key, { kind: 'smoke', work: item.key, principal: null, state: 'started', detail: `Requesting ${config.run.smokeWorkflow} for ${item.key} at ${delivery.deployment.sha.slice(0, 12)}`, attempts: (previous?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist);
+    try {
+      await effects.requestSmoke(item);
+      performed.push(await record(state, key, { kind: 'smoke', work: item.key, principal: null, state: 'done', detail: `Requested trusted smoke workflow ${config.run.smokeWorkflow} for ${item.key} against deployed ${delivery.deployment.sha.slice(0, 12)} (merge ${delivery.mergeSha.slice(0, 12)})`, attempts: state.actions[key].attempts, cycle: state.cycle }, now(), effects.persist));
+    } catch (error) {
+      performed.push(await record(state, key, { kind: 'smoke', work: item.key, principal: null, state: 'failed', detail: `Could not request ${config.run.smokeWorkflow} for ${item.key}: ${message(error)}`, attempts: state.actions[key].attempts, cycle: state.cycle }, now(), effects.persist));
+    }
+  }
+
   // 6. Measure. Every cycle records stage p50/p90 whether or not it acted.
-  const { stages, lead } = stageMetrics(snapshot.work, clock);
-  const metrics = cycleMetricsSchema.parse({ cycle: state.cycle, at: new Date(clock).toISOString(), durationMs: Math.max(0, Math.round(now() - startedAt)), open: open.length, actions: performed.length, stages, lead });
+  const { stages, lead, production, postDeploy, postDeployFailures } = stageMetrics(snapshot.work, clock);
+  const metrics = cycleMetricsSchema.parse({ cycle: state.cycle, at: new Date(clock).toISOString(), durationMs: Math.max(0, Math.round(now() - startedAt)), open: open.length, actions: performed.length, stages, lead, production, postDeploy, postDeployFailures });
   state.metrics.push(metrics);
   state.cycle += 1;
   state.lastCycleAt = new Date(now()).toISOString();
@@ -533,6 +598,11 @@ export function daemonEffects(root: string, config: MasterConfig, deps: {
     },
     merge: work => mergeExecutor(config, deps.snapshot, deps.mutate, deps.executionOwner, randomUUID(), run)(work),
     observeDeployment: delivered => observeDeployment(config, delivered, run),
+    recordDeployment: (work, observation) => deps.mutate(`work/${work.id}/deployment`, { sha: observation.sha, mergeSha: work.delivery!.mergeSha, source: observation.source, observedAt: observation.observedAt }),
+    requestSmoke: work => {
+      run('gh', ['workflow', 'run', config.run.smokeWorkflow!, '--repo', config.repository, '--ref', config.baseBranch,
+        '-f', `work_id=${work.id}`, '-f', `deployed_sha=${work.delivery!.deployment!.sha}`, '-f', `merge_sha=${work.delivery!.mergeSha}`, '-f', `policy_revision=${work.policyRevision}`]);
+    },
     persist: state => writeDaemonState(config, state),
   };
 }
