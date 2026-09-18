@@ -404,15 +404,17 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
         // A refusal is only useful with the path that still works.
         attestation: assessed?.settleable ? null : containmentAttestation(work.key) }
       : null;
+    const gaps = work.proofGaps ?? [];
     const attention = quarantine ? quarantine.settleable
       ? `Containment quarantine from epoch ${quarantine.epoch} is verified settleable; run master settle-containment ${work.key}`
       : `Containment quarantine from epoch ${quarantine.epoch} blocks dispatch: ${quarantine.refusals[0]}`
       : active && (!session || !['working', 'idle'].includes(session.state)) ? `Assigned worker session is ${session?.state ?? 'offline'}`
+      : gaps.length ? `No principal is authorized to produce ${gaps.join(', ')}; grant the proof name before dispatch`
       : review?.exhausted ? `Every configured reviewer profile is exhausted for the current candidate (${review.failedOver.map(entry => `${entry.profile}: ${entry.exhaustion}`).join(', ')})`
       : work.blocker || dwellMs > 3_600_000 ? first?.reasons[0] ?? `Work has remained at ${work.stage} for more than one hour` : null;
-    return { key: work.key, title: work.title, stage: work.stage, owner: active ? work.lease!.owner : null, profile: profile?.name ?? null, session: session?.state ?? null, refusal: first ? { gate: first.name, reason: first.reasons[0] } : null, mergeable, review, containment: quarantine, attention, queue: placement ? queueRow(placement) : null };
+    return { key: work.key, title: work.title, stage: work.stage, owner: active ? work.lease!.owner : null, profile: profile?.name ?? null, session: session?.state ?? null, refusal: first ? { gate: first.name, reason: first.reasons[0] } : null, mergeable, review, proofGaps: gaps, containment: quarantine, attention, queue: placement ? queueRow(placement) : null };
   });
-  return { observedAt: snapshot.now, counts: { open: rows.length, ready: rows.filter(row => row.stage === 'ready').length, active: rows.filter(row => row.owner).length, attention: rows.filter(row => row.attention).length, mergeable: rows.filter(row => row.mergeable).length, reviewsPending: reviews.pending.length, reviewFailover: rows.filter(row => row.review?.failedOver.length).length, queued: placements.length, quarantined: rows.filter(row => row.containment).length, settleableQuarantines: rows.filter(row => row.containment?.settleable).length }, workers: sessions, reviews, work: rows, queue: placements.map(queueRow) };
+  return { observedAt: snapshot.now, counts: { open: rows.length, ready: rows.filter(row => row.stage === 'ready').length, active: rows.filter(row => row.owner).length, attention: rows.filter(row => row.attention).length, proofAuthorityGaps: rows.filter(row => row.proofGaps.length).length, mergeable: rows.filter(row => row.mergeable).length, reviewsPending: reviews.pending.length, reviewFailover: rows.filter(row => row.review?.failedOver.length).length, queued: placements.length, quarantined: rows.filter(row => row.containment).length, settleableQuarantines: rows.filter(row => row.containment?.settleable).length }, workers: sessions, reviews, work: rows, queue: placements.map(queueRow) };
 }
 
 function queueRow(placement: QueuePlacement) {
