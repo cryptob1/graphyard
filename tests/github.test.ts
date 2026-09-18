@@ -257,19 +257,24 @@ test('enforcement inspection selects the dedicated App run before a newer same-n
 test('enforcement inspection refuses snapshots that change during collection', () => {
   const initial = enforcement();
   const changes: [any, RegExp][] = [
-    [{ work: { ...initial.work, revision: 8 }, pull: initial.pull }, /work revision changed/],
-    [{ work: { ...initial.work, candidate: { ...initial.work.candidate, sha: 'c'.repeat(40) } }, pull: initial.pull }, /candidate head changed/],
-    [{ work: { ...initial.work, candidate: { ...initial.work.candidate, baseSha: 'd'.repeat(40) } }, pull: initial.pull }, /candidate base changed/],
-    [{ work: initial.work, pull: { ...initial.pull, head: { sha: 'c'.repeat(40) } } }, /pull request head changed/],
-    [{ work: initial.work, pull: { ...initial.pull, base: { ...initial.pull.base, sha: 'd'.repeat(40) } } }, /pull request base changed/],
-    [{ work: initial.work, pull: { ...initial.pull, state: 'closed' } }, /pull request state changed/],
-    [{ work: initial.work, pull: { ...initial.pull, draft: true } }, /pull request draft changed/],
-    [{ work: initial.work, pull: { ...initial.pull, merged: true } }, /pull request merged changed/],
-    [{ work: initial.work, pull: { ...initial.pull, mergeable: false } }, /pull request mergeable changed/],
-    [{ work: initial.work, pull: { ...initial.pull, mergeable_state: 'blocked' } }, /pull request mergeable state changed/],
+    [{ work: { ...initial.work, revision: 8 } }, /work revision changed/],
+    [{ work: { ...initial.work, candidate: { ...initial.work.candidate, sha: 'c'.repeat(40) } } }, /candidate head changed/],
+    [{ work: { ...initial.work, candidate: { ...initial.work.candidate, baseSha: 'd'.repeat(40) } } }, /candidate base changed/],
+    [{ pull: { ...initial.pull, head: { sha: 'c'.repeat(40) } } }, /pull request head changed/],
+    [{ pull: { ...initial.pull, base: { ...initial.pull.base, sha: 'd'.repeat(40) } } }, /pull request base changed/],
+    [{ pull: { ...initial.pull, base: { ...initial.pull.base, ref: 'release' } } }, /pull request base ref changed/],
+    [{ pull: { ...initial.pull, state: 'closed' } }, /pull request state changed/],
+    [{ pull: { ...initial.pull, draft: true } }, /pull request draft changed/],
+    [{ pull: { ...initial.pull, merged: true } }, /pull request merged changed/],
+    [{ pull: { ...initial.pull, mergeable: false } }, /pull request mergeable changed/],
+    [{ pull: { ...initial.pull, mergeable_state: 'blocked' } }, /pull request mergeable state changed/],
+    [{ protection: { ...initial.protection, enforce_admins: { enabled: false } } }, /branch protection changed/],
+    [{ checkRuns: [{ ...initial.checkRuns[0], conclusion: 'failure' }] }, /check state changed/],
+    [{ checkRuns: [{ ...initial.checkRuns[0], id: 2, started_at: '2026-09-17T05:01:00Z', status: 'in_progress', conclusion: null }, ...initial.checkRuns] }, /check state changed/],
   ];
-  for (const [recheck, expected] of changes) {
-    const report = evaluateEnforcement({ ...initial, recheck });
+  for (const [change, expected] of changes) {
+    const report = evaluateEnforcement({ ...initial, recheck: { work: initial.work, pull: initial.pull,
+      protection: initial.protection, checkRuns: initial.checkRuns, ...change } });
     assert.equal(report.verdict, 'refused');
     assert.equal(report.revalidated, false);
     assert.match(report.refusals.join('\n'), expected);

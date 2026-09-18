@@ -5,7 +5,8 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 
 export const CHECK_NAME = 'Graphyard / merge';
 
-export function evaluateEnforcement({ repository, baseBranch, appId, protection, rulesets = [], pull, checkRuns, work, now, recheck = { work, pull } }) {
+export function evaluateEnforcement({ repository, baseBranch, appId, protection, rulesets = [], pull, checkRuns, work, now,
+  recheck = { work, pull, protection, checkRuns } }) {
   const requireNativeReview = !!work.policy?.review && (work.policy?.reviewProvider ?? 'github') !== 'codex';
   const required = protection?.required_status_checks?.checks ?? [];
   const bound = required.find(c => c.context === CHECK_NAME) ?? null;
@@ -24,6 +25,9 @@ export function evaluateEnforcement({ repository, baseBranch, appId, protection,
   }
   const namedRuns = checkRuns.filter(run => run.name === CHECK_NAME).sort((a, b) => String(b.started_at ?? '').localeCompare(String(a.started_at ?? '')));
   const published = namedRuns.find(run => run.app?.id === appId) ?? namedRuns[0] ?? null;
+  const currentNamedRuns = (recheck.checkRuns ?? []).filter(run => run.name === CHECK_NAME)
+    .sort((a, b) => String(b.started_at ?? '').localeCompare(String(a.started_at ?? '')));
+  const currentPublished = currentNamedRuns.find(run => run.app?.id === appId) ?? currentNamedRuns[0] ?? null;
   const linked = published?.pull_requests?.map(p => p.number) ?? [];
   const gates = (work.gates ?? []).map(gate => ({ name: gate.name, passed: !!gate.passed, reasons: gate.reasons ?? [] }));
   const candidate = work.candidate ?? null;
@@ -42,11 +46,14 @@ export function evaluateEnforcement({ repository, baseBranch, appId, protection,
     ...(recheck.work?.candidate?.baseSha !== candidate?.baseSha ? [`candidate base changed from ${candidate?.baseSha ?? 'missing'} to ${recheck.work?.candidate?.baseSha ?? 'missing'} during inspection`] : []),
     ...(recheck.pull?.head?.sha !== pull.head?.sha ? [`pull request head changed from ${pull.head?.sha ?? 'missing'} to ${recheck.pull?.head?.sha ?? 'missing'} during inspection`] : []),
     ...(recheck.pull?.base?.sha !== pull.base?.sha ? [`pull request base changed from ${pull.base?.sha ?? 'missing'} to ${recheck.pull?.base?.sha ?? 'missing'} during inspection`] : []),
+    ...(recheck.pull?.base?.ref !== pull.base?.ref ? [`pull request base ref changed from ${pull.base?.ref ?? 'missing'} to ${recheck.pull?.base?.ref ?? 'missing'} during inspection`] : []),
     ...(recheck.pull?.state !== pull.state ? [`pull request state changed from ${pull.state ?? 'missing'} to ${recheck.pull?.state ?? 'missing'} during inspection`] : []),
     ...(recheck.pull?.draft !== pull.draft ? [`pull request draft changed from ${pull.draft ?? 'missing'} to ${recheck.pull?.draft ?? 'missing'} during inspection`] : []),
     ...(recheck.pull?.merged !== pull.merged ? [`pull request merged changed from ${pull.merged ?? 'missing'} to ${recheck.pull?.merged ?? 'missing'} during inspection`] : []),
     ...(recheck.pull?.mergeable !== pull.mergeable ? [`pull request mergeable changed from ${pull.mergeable ?? 'missing'} to ${recheck.pull?.mergeable ?? 'missing'} during inspection`] : []),
     ...(recheck.pull?.mergeable_state !== pull.mergeable_state ? [`pull request mergeable state changed from ${pull.mergeable_state ?? 'missing'} to ${recheck.pull?.mergeable_state ?? 'missing'} during inspection`] : []),
+    ...(JSON.stringify(protection) !== JSON.stringify(recheck.protection) ? ['managed branch protection changed during inspection'] : []),
+    ...(JSON.stringify(published) !== JSON.stringify(currentPublished) ? [`${CHECK_NAME} check state changed during inspection`] : []),
   ];
   const observationFinding = !Number.isFinite(observationAge) || observationAge < 0 || observationAge >= 120_000
     ? 'Graphyard observation is missing, future-dated, or older than two minutes' : null;
@@ -105,7 +112,10 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
     // describe live state.
     const currentWork = JSON.parse(execFileSync(process.execPath, [cli, 'status', key], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }));
     const currentPull = gh(`repos/${repository}/pulls/${pr}`);
+    const currentProtection = optional(`repos/${repository}/branches/${encodeURIComponent(baseBranch)}/protection`);
+    const currentCheckRuns = ghPages(`repos/${repository}/commits/${currentPull.head.sha}/check-runs?filter=latest&per_page=100`, 'check_runs');
     console.log(JSON.stringify(evaluateEnforcement({ repository, baseBranch, appId, protection, rulesets,
-      pull, checkRuns, work, now: status.now, recheck: { work: currentWork, pull: currentPull } }), null, 2));
+      pull, checkRuns, work, now: status.now,
+      recheck: { work: currentWork, pull: currentPull, protection: currentProtection, checkRuns: currentCheckRuns } }), null, 2));
   } catch (error) { console.error(error.message); process.exitCode = 1; }
 }
