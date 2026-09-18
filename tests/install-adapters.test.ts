@@ -99,6 +99,30 @@ test('re-applying an existing installation is idempotent: nothing is provisioned
   }
 });
 
+test('adding a worker to an existing installation mints only the new credential', async () => {
+  const first = await harness({ provider: 'compose' });
+  let second: Harness | undefined;
+  try {
+    const initial = await apply(first, 'compose');
+    const envFile = `${coreEnv(initial.session).map(value => `${value.name}=${value.value}`).join('\n')}\n`;
+    second = await harness({ provider: 'compose', installed: true, envFile, protection: satisfiedProtection(null), root: first.root, configHome: first.configHome });
+
+    // Only part of the credential set exists, so preparing cannot claim real fingerprints.
+    const session = await prepareInstall(second.root, { ...inputsFor('compose'), workers: 2 }, second.deps);
+    assert.equal(session.materialized, false);
+    assert.equal(session.tokens.size, initial.session.principals.length);
+
+    await applyInstall(session, await buildPlan(session));
+    assert.equal(session.materialized, true);
+    for (const principal of initial.session.principals) {
+      assert.equal(session.tokens.get(principal.id), initial.session.tokens.get(principal.id), `${principal.id} rotated`);
+    }
+    assert.equal(session.context.databasePassword, initial.session.context.databasePassword);
+    assert.equal(session.principals.filter(principal => principal.role === 'worker').length, 2);
+    assert.ok(session.tokens.get('owner-project-worker-2'), 'the added worker received no credential');
+  } finally { await first.cleanup(); if (second) await second.cleanup(); }
+});
+
 test('Railway secrets are sent over standard input and never appear in a process argument', async () => {
   const fixture = await harness({ provider: 'railway' });
   try {
