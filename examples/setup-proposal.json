@@ -1,0 +1,100 @@
+{
+  "version": 1,
+  "repository": "owner/orders-api",
+  "server": "https://your-graphyard-host",
+  "stack": {
+    "name": "node",
+    "evidence": [
+      "package.json"
+    ],
+    "frameworks": [
+      "vitest"
+    ],
+    "testLayout": [
+      "tests/"
+    ]
+  },
+  "ci": {
+    "system": "github-actions",
+    "jobs": [
+      "test"
+    ]
+  },
+  "checks": [
+    "test",
+    "typecheck"
+  ],
+  "commands": [
+    {
+      "purpose": "test",
+      "command": "npm run test",
+      "check": "test"
+    },
+    {
+      "purpose": "static-analysis",
+      "command": "npm run typecheck",
+      "check": "typecheck"
+    }
+  ],
+  "proofs": [
+    {
+      "name": "integration:test",
+      "command": "npm run test",
+      "check": "test"
+    },
+    {
+      "name": "unit:typecheck",
+      "command": "npm run typecheck",
+      "check": "typecheck"
+    },
+    {
+      "name": "manual:deployed-sha",
+      "command": null,
+      "check": null
+    }
+  ],
+  "deploy": {
+    "target": "railway",
+    "verification": "Deploy the candidate to an isolated Railway environment and verify the reported RAILWAY_GIT_COMMIT_SHA (or an equivalent version endpoint) equals the candidate SHA before recording deploy evidence.",
+    "proofName": "manual:deployed-sha",
+    "evidence": [
+      "railway.json"
+    ]
+  },
+  "environment": {
+    "topology": "ephemeral",
+    "declaration": "Each candidate deploys to its own railway environment built from its commit and destroyed after review. Any backing datastore must be a per-candidate copy seeded from structure, never shared live state."
+  },
+  "policy": {
+    "checks": [
+      "test",
+      "typecheck"
+    ],
+    "review": true,
+    "reviewProvider": "github",
+    "evidenceExpectations": "Automated proofs are submitted only by a trusted producer credential in protected CI, for the exact candidate SHA with executed > 0 and skipped = 0. Manual proofs are inspected and submitted by a separate operator session. Implementation workers never hold producer or admin credentials."
+  },
+  "profiles": {
+    "workers": [
+      {
+        "name": "codex-primary",
+        "principal": "worker-1",
+        "agentName": "owner-orders-api-codex-1",
+        "mode": "launch",
+        "kind": "codex",
+        "credentialFile": "/home/operator/.config/graphyard/workers/codex-primary.token",
+        "agentArgs": [],
+        "environment": {}
+      }
+    ],
+    "reviewer": {
+      "provider": "github",
+      "note": "Reviews are GitHub approvals on the pull request from a reviewer independent of the author; a hosted Codex reviewer can be selected later with reviewpolicy."
+    }
+  },
+  "githubApp": {
+    "name": "Graphyard owner-orders-api",
+    "repository": "owner/orders-api",
+    "flow": "github-setup"
+  }
+}
