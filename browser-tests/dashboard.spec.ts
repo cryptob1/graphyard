@@ -2,6 +2,8 @@ import { test, expect, type Locator, type Page } from '@playwright/test';
 
 // Browser-only API fixtures: no production requests, credentials, or writes.
 const work = { dependencies: [], plannedFiles: [], scenarioRequirements: [], id: 'fixture-work', key: 'GY-1', title: 'Browser fixture', description: 'Isolated UI audit', type: 'feature', priority: 1, stage: 'review', stageEnteredAt: '2026-01-01T00:00:00Z', ready: true, policy: { review: true, reviewProvider: 'github', checks: ['test'] }, policyRevision: 1, revision: 1, violations: [], workspaces: [], criteria: [{ id: 'AC-1', text: 'Observable behavior', proofs: ['manual:browser'] }], evidence: [], gates: [{ name: 'review', passed: false, reasons: ['Independent review required'] }], submission: { epoch: 1 }, candidate: { pr: 1, sha: 'abcdef1234567890abcdef1234567890abcdef12' } };
+const proofGrants = { authorities: [{ principalId: 'ci', role: 'producer', patterns: ['integration:*'], source: 'grant' }, { principalId: 'operator', role: 'admin', patterns: ['manual:*'], source: 'role' }],
+  grants: [{ principalId: 'ci', role: 'producer', patterns: ['integration:*'], revision: 3, createdAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-02T00:00:00Z', seededFrom: ['integration:claim-safety'], lastMutation: { kind: 'grant', actor: 'operator', at: '2026-01-02T00:00:00Z', reason: 'CI produces integration proof', patterns: ['integration:*'] } }] };
 async function fixture(page: Page, role = 'admin') {
   const state = { offline: false, unauthorized: false, writes: 0, pause: false };
   await page.route('**/api/**', async route => {
@@ -10,7 +12,7 @@ async function fixture(page: Page, role = 'admin') {
     if (route.request().headers().authorization !== 'Bearer browser-fixture' || state.unauthorized) return route.fulfill({ status: 401, json: { error: 'Rejected' } });
     if (route.request().method() !== 'GET') state.writes++;
     const path = new URL(route.request().url()).pathname;
-    return route.fulfill({ json: path.endsWith('/status') ? { actor: { id: 'fixture', role }, github: true, reviewProviders: ['github','codex'], repository: 'fixture/repository', jobs: [] } : path.endsWith('/work-snapshot') ? {work:[work],now:'2026-01-01T00:00:00Z'} : path.endsWith('/work') ? [work] : [] });
+    return route.fulfill({ json: path.endsWith('/status') ? { actor: { id: 'fixture', role }, github: true, reviewProviders: ['github','codex'], repository: 'fixture/repository', jobs: [] } : path.endsWith('/work-snapshot') ? {work:[work],now:'2026-01-01T00:00:00Z'} : path.endsWith('/work') ? [work] : path === '/api/proof-grants' ? proofGrants : [] });
   });
   await page.goto('/'); return state;
 }
@@ -596,4 +598,36 @@ test('legacy abbreviated SHAs and invalid candidate references never become link
   await page.route('**/api/work-snapshot', route => route.fulfill({ json: { work: [{ ...work, candidate: null }], now: '2026-01-01T00:00:00Z' } }));
   await login(page);
   await expect(page.locator('.card').getByText('No PR', { exact: true })).toBeVisible();
+});
+
+test('proof authority shows the live grant set, its source, and unproducible required proof', async ({ page }) => {
+  await fixture(page); await login(page);
+  await page.getByRole('button', { name: '⚷ Proof authority' }).click();
+  await expect(page.getByRole('heading', { name: 'Proof authority' })).toBeVisible();
+  // The fixture item requires manual:browser, which the operator role covers, so the only
+  // honest report is that nothing is unproducible.
+  await expect(page.getByText('Every required proof name has at least one authorized producer.')).toBeVisible();
+  await expect(page.getByText('ci · integration:*')).toBeVisible();
+  await expect(page.getByText(/Source: Graphyard grant record .* revision 3 .* CI produces integration proof/)).toBeVisible();
+  await expect(page.getByText(/bootstrap seed only/)).toBeVisible();
+});
+
+test('an operator grants authority through the dashboard and a reader cannot', async ({ page }) => {
+  const state = await fixture(page); await login(page);
+  await page.getByRole('button', { name: '⚷ Proof authority' }).click();
+  let body: any;
+  await page.route('**/api/proof-grants/acceptance/grant', async route => { body = route.request().postDataJSON(); await route.fulfill({ json: proofGrants.grants[0] }); });
+  const form = page.locator('form.grant-form').first();
+  await form.getByLabel('Producer principal').fill('acceptance');
+  await form.getByLabel('Patterns', { exact: true }).fill('manual:gy-43/*, unit:*');
+  await form.getByLabel('Audit reason').fill('Designated acceptance witness');
+  await form.getByRole('button', { name: 'Grant authority' }).click();
+  await expect.poll(() => body).toBeTruthy();
+  expect(body).toEqual({ patterns: ['manual:gy-43/*', 'unit:*'], reason: 'Designated acceptance witness' });
+  expect(state.writes).toBe(0);
+  await page.getByRole('button', { name: 'Sign out' }).click();
+  await fixture(page, 'reader'); await login(page);
+  await page.getByRole('button', { name: '⚷ Proof authority' }).click();
+  await expect(page.getByText('ci · integration:*')).toBeVisible();
+  await expect(page.locator('form.grant-form')).toHaveCount(0);
 });
