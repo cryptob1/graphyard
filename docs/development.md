@@ -12,6 +12,7 @@
 | `src/cli.ts` | Worker protocol, local worktrees, process supervision |
 | `src/onboarding.ts`, `src/github-setup.ts` | Repository discovery and local GitHub App registration |
 | `scripts/*acceptance*.mjs` | Protected HTTP contract harness and separate evidence publisher |
+| `scripts/protect-github.mjs`, `scripts/verify-enforcement.mjs` | Bind the App-owned check; inspect live merge enforcement read-only |
 | `web/` | React graph, board, work form, details and history |
 | `integrations/herdr/` | Native Herdr ledger pane and open action |
 | `tests/` | Real Postgres integration and HTTP tests |

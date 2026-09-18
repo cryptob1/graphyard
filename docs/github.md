@@ -47,6 +47,18 @@ The service does not automatically overwrite repository protection. For this pro
 
 By default the configured CI App ID is `15368`; verify the actual app IDs returned by your check runs and adjust `GITHUB_CI_APP_IDS`. A check with the right name from an unknown App cannot satisfy policy.
 
+## Inspect enforcement
+
+Configured is not enforced. `scripts/verify-enforcement.mjs` joins the live GitHub and Graphyard observations for one submitted work item into a single read-only report:
+
+```sh
+node scripts/verify-enforcement.mjs GY-N [PR_NUMBER]
+```
+
+It reads the managed repository, base branch and dedicated App ID from the live server, then reports which App published `Graphyard / merge` on the exact PR head, the branch-protection settings the merge verifier requires, every Graphyard gate with its refusal reasons, and GitHub's own mergeability. It paginates check runs and refuses a mismatched candidate, a stale Graphyard observation, or a blocking GitHub merge state. Every context branch protection requires — not only `Graphyard / merge` — must have a completed successful run from the App that context is bound to. Immediately before reporting, it re-reads the work item, pull request, required check runs, and branch protection and refuses if their merge-controlling state changed during collection, including the work revision, exact commits, base ref, PR state (`state`, `draft`, `merged`, `mergeable`, or `mergeable_state`), and the run set of every protected required context. It then reads server time once more, after those re-reads, and judges observation freshness against it, so collection time counts against the Graphyard observation exactly as it does for the merge verifier. The verdict is `refused` while any gate, protection requirement or GitHub state would block the merge, and `permitted` only when all of them currently allow it. Notes call out what the verifier does not read, including repository rulesets, and a successful check inherited from another pull request on the same commit.
+
+The report is an inspection artifact, not evidence. It submits nothing, merges nothing and changes no protection. It needs `gh` authenticated with repository administration read and an individual Graphyard credential. Only an operator may attest a `manual:` proof such as `manual:github-enforcement`, and Graphyard re-verifies the exact candidate immediately before any merge, so a `permitted` verdict describes one observation rather than a standing authorization.
+
 ## Trusted test producers
 
 A green GitHub job does not prove every behavioral criterion. A dedicated producer reads the actual test report, verifies the code under test, and sends Graphyard evidence with its credential and an artifact link. Give it only the proof names it can produce.
