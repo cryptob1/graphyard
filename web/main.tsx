@@ -81,7 +81,7 @@ function App() {
       <div className="card-top"><span>{slice.name}</span>{slice.lead ? <SessionBadge kind={slice.lead.sessionKind} suffix="lead"/> : <span className="identity none">No lead assigned</span>}</div>
       <h3>{slice.lead ? slice.lead.displayName ?? slice.lead.id : 'Unassigned'}</h3>
       {slice.lead?.displayName && <p className="muted">Lead session {slice.lead.id}</p>}
-      <p>{slice.workers.length}/{delegation.limits.maxEngineersPerLead} active engineers · {slice.bottlenecks.length} {slice.bottlenecks.length === 1 ? 'bottleneck' : 'bottlenecks'}</p>
+      <p>{(slice.engineers ?? slice.workers).length}/{delegation.limits.maxEngineersPerLead} active engineers · {slice.workers.length} {slice.workers.length === 1 ? 'claimed item' : 'claimed items'} · {slice.bottlenecks.length} {slice.bottlenecks.length === 1 ? 'bottleneck' : 'bottlenecks'}</p>
       <p className="muted">Workers: {slice.workers.length ? slice.workers.map((worker: any) => <span className="session" key={worker.key}>{worker.key} · {worker.displayName ?? worker.id} <SessionBadge kind={worker.sessionKind}/></span>) : 'none'}</p>
       <p className="muted">Bottlenecks: {slice.bottlenecks.length ? slice.bottlenecks.map((bottleneck: any) => `${bottleneck.key} — ${bottleneck.reason}`).join(' · ') : 'none'}</p>
     </div>)}</div>

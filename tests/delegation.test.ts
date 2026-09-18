@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import EmbeddedPostgres from 'embedded-postgres';
 import {
-  classifyIntake, defaultDelegationLimits, delegationLimits, delegationSnapshot, humanOnlyIntakeOrigins, implementerIdentities,
+  activeEngineers, classifyIntake, defaultDelegationLimits, delegationLimits, delegationSnapshot, enforceLeadCapacity, humanOnlyIntakeOrigins, implementerIdentities,
   leadMay, leadPermittedActions, leadRulingActions, mergeOrder, producerIndependenceRefusal, recordIntake, recordLeadRuling,
   routineIntakeOrigins, sessionKind, slices, validateDelegationPrincipals,
 } from '../src/delegation.js';
@@ -110,6 +110,24 @@ test('integration:slice-lead-principals — distinct AI lead credentials and ser
   assert.deepEqual(product.workers.map(w => w.id).sort(), ['engineer-a', 'engineer-b']);
   assert.ok(product.workers.every(w => w.sessionKind === 'ai'));
   for (const item of items.slice(0, 2)) await engine.execute(item.id === items[0].id ? workerA : workerB, 'release', item.id, { epoch: 1 }, id());
+  // Capacity counts engineers, not leases: one worker holding two items in the
+  // slice is two worker rows but a single occupied seat under the lead.
+  const seats: Work[] = [];
+  for (const name of ['seat-one', 'seat-two', 'seat-three', 'seat-four']) {
+    const created = await engine.execute(admin, 'create', null, input(name, 'docs-experience'), id());
+    seats.push(await engine.execute(admin, 'ready', created.id, {}, id()));
+  }
+  await engine.execute(workerA, 'claim', seats[0].id, {}, id());
+  await engine.execute(workerA, 'claim', seats[1].id, {}, id());
+  const docs = delegationSnapshot(roster, await store.list(), Date.now()).slices.find(s => s.id === 'docs-experience')!;
+  assert.deepEqual(docs.engineers.map(engineer => engineer.id), ['engineer-a']);
+  assert.deepEqual(docs.workers.map(worker => worker.id), ['engineer-a', 'engineer-a']);
+  assert.ok(docs.engineers.every(engineer => engineer.sessionKind === 'ai'));
+  // A second distinct engineer still fits the two-seat default; a third is refused.
+  await engine.execute(workerB, 'claim', seats[2].id, {}, id());
+  await assert.rejects(engine.execute(workerC, 'claim', seats[3].id, {}, id()), /Engineer limit for docs-experience exceeded: 2\/2/);
+  for (const [index, actor] of [workerA, workerA, workerB].entries())
+    await engine.execute(actor, 'release', seats[index].id, { epoch: seats[index].epoch + 1 }, id());
 });
 
 test('unit:lead-authority-boundaries — coordination is permitted, implementation and proof are not', () => {
@@ -145,7 +163,25 @@ test('integration:lead-enforcement — violating lead actions are refused server
   assert.equal(refusal.actor, lead.id);
   assert.equal(refusal.payload.attemptedAction, 'claim');
   assert.equal(refusal.payload.slice, 'product');
+  assert.equal(refusal.payload.targetKey, item.key);
+  assert.equal(refusal.payload.targetSlice, 'product');
   assert.equal((await reload(item)).lease, null);
+  // A forbidden request aimed at another slice is still recorded, but the target
+  // slice's own ledger and aggregate stay untouched.
+  const foreign = await engine.execute(admin, 'create', null, input('lead-enforcement-foreign', 'infrastructure'), id());
+  const ledgerBefore = (await store.events(foreign.id)).length;
+  const crossed = await fetch(`${url}/api/work/${foreign.id}/claim`, { method: 'POST',
+    headers: { Authorization: `Bearer ${credentials.find(c => c.id === lead.id)!.token}`, 'Content-Type': 'application/json', 'Idempotency-Key': id() }, body: '{}' });
+  assert.equal(crossed.status, 403);
+  assert.equal((await store.events(foreign.id)).length, ledgerBefore, 'a lead cannot append to another slice ledger');
+  assert.equal((await reload(foreign)).revision, foreign.revision);
+  const unscoped = (await store.events()).find(event => event.kind === 'lead.action.refused' && event.payload.targetKey === foreign.key);
+  assert.equal(unscoped.work_id, null, 'the attempt is history, not a mutation of the target item');
+  assert.equal(unscoped.actor, lead.id);
+  assert.equal(unscoped.payload.attemptedAction, 'claim');
+  assert.equal(unscoped.payload.slice, 'product');
+  assert.equal(unscoped.payload.targetSlice, 'infrastructure');
+  assert.match(unscoped.payload.reason, /targets another slice/);
 });
 
 test('integration:ownership-and-delivery-invariants — Graphyard owns leases, worktrees, and the only merge path', async () => {
@@ -236,30 +272,104 @@ test('unit:intake-classification — routine and human-only origins are explicit
 
 test('integration:intake-authority-routing — routine intake is autonomous, human-only intake is refused for AI', async () => {
   for (const origin of routineIntakeOrigins) {
-    const item = await recordIntake(store, lead, { origin, title: `Routine ${origin}`, description: 'Observed during delivery' });
+    const item = await recordIntake(store, lead, { origin, title: `Routine ${origin}`, description: 'Observed during delivery' }, id());
     assert.equal(item.state, 'backlog');
     assert.equal(item.submittedBy, lead.id);
   }
   for (const origin of humanOnlyIntakeOrigins)
-    await assert.rejects(recordIntake(store, lead, { origin, title: `AI ${origin}`, description: '' }), new RegExp(`${origin} intake is human-only`));
+    await assert.rejects(recordIntake(store, lead, { origin, title: `AI ${origin}`, description: '' }, id()), new RegExp(`${origin} intake is human-only`));
   for (const origin of humanOnlyIntakeOrigins) {
-    const item = await recordIntake(store, admin, { origin, title: `Human ${origin}`, description: '' });
+    const item = await recordIntake(store, admin, { origin, title: `Human ${origin}`, description: '' }, id());
     assert.equal(item.state, 'backlog');
   }
-  await assert.rejects(recordIntake(store, workerA, { origin: 'defect', title: 'Worker intake', description: '' }), /Intake permission required/);
-  await assert.rejects(recordIntake(store, reviewer, { origin: 'defect', title: 'Producer intake', description: '' }), /Intake permission required/);
+  await assert.rejects(recordIntake(store, workerA, { origin: 'defect', title: 'Worker intake', description: '' }, id()), /Intake permission required/);
+  await assert.rejects(recordIntake(store, reviewer, { origin: 'defect', title: 'Producer intake', description: '' }, id()), /Intake permission required/);
   const rows = await store.pool.query('SELECT origin FROM intake_items');
   assert.ok(rows.rowCount! >= routineIntakeOrigins.length + humanOnlyIntakeOrigins.length);
+  // A retried intake is the same intake: immutable backlog entries and their
+  // history must not be duplicated by a lost response.
+  const intakeKey = id(), intakeBody = { origin: 'defect', title: 'Retried defect', description: 'Observed twice' } as const;
+  const countIntake = async () => (await store.pool.query('SELECT 1 FROM intake_items WHERE title=$1', [intakeBody.title])).rowCount;
+  const created = await recordIntake(store, lead, intakeBody, intakeKey);
+  const replayed = await recordIntake(store, lead, intakeBody, intakeKey);
+  assert.equal(replayed.id, created.id);
+  assert.equal(await countIntake(), 1);
+  assert.equal((await store.events()).filter(event => event.kind === 'intake.created' && event.payload.intake.id === created.id).length, 1);
+  await assert.rejects(recordIntake(store, lead, { ...intakeBody, description: 'Changed' }, intakeKey), /Idempotency key reused with different input/);
+  await assert.rejects(recordIntake(store, lead, intakeBody, ''), /Idempotency-Key is required/);
+  // A cited source is authorized, not merely looked up: a lead may only cite its own slice.
+  const ownSlice = await engine.execute(admin, 'create', null, input('intake-source-product', 'product'), id());
+  const otherSlice = await engine.execute(admin, 'create', null, input('intake-source-infra', 'infrastructure'), id());
+  const cited = await recordIntake(store, lead, { origin: 'verification-finding', title: 'Cited own slice', description: '', sourceWorkId: ownSlice.id }, id());
+  assert.equal(cited.sourceWorkId, ownSlice.id);
+  await assert.rejects(recordIntake(store, lead, { origin: 'verification-finding', title: 'Cited another slice', description: '', sourceWorkId: otherSlice.id }, id()), /only their own slice/);
+  assert.equal((await store.pool.query('SELECT 1 FROM intake_items WHERE source_work_id=$1', [otherSlice.id])).rowCount, 0);
+  assert.equal((await store.events(otherSlice.id)).filter(event => event.kind === 'intake.created').length, 0);
+
+  // Scoped operator agents: a second control plane bound to a repository, so
+  // operator-agent scope is live on the delegation and intake routes.
+  const scopedEngine = new Engine(store, [15368], 120, 'owner/delegation'); scopedEngine.roster = roster;
+  const scopedHttp = server(scopedEngine, credentials);
+  await new Promise<void>(resolve => scopedHttp.listen(0, '127.0.0.1', resolve));
+  const scopedUrl = `http://127.0.0.1:${(scopedHttp.address() as { port: number }).port}`;
+  try {
+    const adminToken = credentials.find(c => c.id === admin.id)!.token;
+    const agentToken = `scoped-operator-${'z'.repeat(32)}`;
+    let inScope = await scopedEngine.execute(admin, 'create', null, input('scoped-visible', 'product'), id());
+    inScope = await scopedEngine.execute(admin, 'ready', inScope.id, {}, id());
+    inScope = await scopedEngine.execute(workerA, 'claim', inScope.id, {}, id());
+    let outOfScope = await scopedEngine.execute(admin, 'create', null, input('scoped-hidden', 'infrastructure'), id());
+    outOfScope = await scopedEngine.execute(admin, 'ready', outOfScope.id, {}, id());
+    outOfScope = await scopedEngine.execute(workerB, 'claim', outOfScope.id, {}, id());
+    const setup = { id: `intake-agent-${randomUUID()}`, displayName: 'Intake agent', capabilities: ['intent:create'],
+      scope: { repositories: ['owner/delegation'], workItems: [inScope.id] }, token: agentToken, reason: 'Human enabled scoped intake' };
+    const registered = await fetch(`${scopedUrl}/api/operator-agents`, { method: 'POST',
+      headers: { Authorization: `Bearer ${adminToken}`, 'Content-Type': 'application/json', 'Idempotency-Key': id() }, body: JSON.stringify(setup) });
+    assert.equal(registered.status, 200);
+    const asAgent = (path: string) => fetch(`${scopedUrl}/api/${path}`, { headers: { Authorization: `Bearer ${agentToken}` } });
+    // Delegation reads are filtered by the same scope rule as every other read.
+    const delegation: any = await (await asAgent('delegation')).json();
+    const product = delegation.slices.find((slice: any) => slice.id === 'product');
+    const infrastructure = delegation.slices.find((slice: any) => slice.id === 'infrastructure');
+    assert.deepEqual(product.workers.map((worker: any) => worker.key), [inScope.key]);
+    assert.deepEqual(infrastructure.workers, [], 'out-of-scope owners must not be disclosed');
+    assert.deepEqual(infrastructure.engineers, []);
+    assert.ok(!delegation.slices.some((slice: any) => slice.bottlenecks.some((bottleneck: any) => bottleneck.key === outOfScope.key)));
+    assert.equal(JSON.stringify(delegation).includes(outOfScope.key), false);
+    assert.equal(JSON.stringify(delegation).includes(workerB.id), false);
+    // /api/status embeds the same snapshot and must filter it identically.
+    const status: any = await (await asAgent('status')).json();
+    assert.equal(JSON.stringify(status.delegation).includes(outOfScope.key), false);
+    assert.equal(JSON.stringify(status.delegation).includes(workerB.id), false);
+    // An unscoped admin still sees both.
+    const full: any = await (await fetch(`${scopedUrl}/api/delegation`, { headers: { Authorization: `Bearer ${adminToken}` } })).json();
+    assert.ok(JSON.stringify(full).includes(outOfScope.key));
+    // Citing out-of-scope work is refused, and appends nothing to its history.
+    const intake = (value: unknown) => fetch(`${scopedUrl}/api/intake`, { method: 'POST',
+      headers: { Authorization: `Bearer ${agentToken}`, 'Content-Type': 'application/json', 'Idempotency-Key': id() }, body: JSON.stringify(value) });
+    const refused = await intake({ origin: 'defect', title: 'Out-of-scope citation', description: '', sourceWorkId: outOfScope.id });
+    assert.equal(refused.status, 403);
+    assert.match((await refused.json()).error, /outside this operator-agent scope/);
+    assert.equal((await store.pool.query('SELECT 1 FROM intake_items WHERE source_work_id=$1', [outOfScope.id])).rowCount, 0);
+    assert.equal((await store.events(outOfScope.id)).filter(event => event.kind === 'intake.created').length, 0);
+    const permitted = await intake({ origin: 'defect', title: 'In-scope citation', description: '', sourceWorkId: inScope.id });
+    assert.equal(permitted.status, 200);
+    assert.equal((await permitted.json()).sourceWorkId, inScope.id);
+  } finally {
+    scopedHttp.close();
+    await engine.execute(workerA, 'release', (await store.list()).find(w => w.title === 'scoped-visible')!.id, { epoch: 1 }, id());
+    await engine.execute(workerB, 'release', (await store.list()).find(w => w.title === 'scoped-hidden')!.id, { epoch: 1 }, id());
+  }
 });
 
 test('integration:lead-ruling-history — rulings cite a rule and a reason and cannot be rewritten', async () => {
   let item = await engine.execute(admin, 'create', null, input('ruling-history', 'product'), id());
-  await assert.rejects(recordLeadRuling(store, lead, item.id, { action: 'approve-plan', ruleId: '', reason: 'looks good' }));
-  await assert.rejects(recordLeadRuling(store, lead, item.id, { action: 'approve-plan', ruleId: 'rules/plan-v1#approval', reason: '' }));
-  await assert.rejects(recordLeadRuling(store, lead, item.id, { action: 'approve-plan', ruleId: 'rules/plan-v1#approval' } as never));
-  await assert.rejects(recordLeadRuling(store, lead, item.id, { action: 'escalate', ruleId: 'rules/safety-v2#escalate', reason: 'Unreviewed credential change' }), /trigger/);
-  await assert.rejects(recordLeadRuling(store, lead, item.id, { action: 'send-back', ruleId: 'rules/plan-v1#scope', reason: 'Out of scope', trigger: 'security-concern' }), /trigger/);
-  const approved = await recordLeadRuling(store, lead, item.id, { action: 'approve-plan', ruleId: 'rules/plan-v1#approval', reason: 'Plan satisfies the written scope' });
+  await assert.rejects(recordLeadRuling(store, lead, item.id, { action: 'approve-plan', ruleId: '', reason: 'looks good' }, id()));
+  await assert.rejects(recordLeadRuling(store, lead, item.id, { action: 'approve-plan', ruleId: 'rules/plan-v1#approval', reason: '' }, id()));
+  await assert.rejects(recordLeadRuling(store, lead, item.id, { action: 'approve-plan', ruleId: 'rules/plan-v1#approval' } as never, id()));
+  await assert.rejects(recordLeadRuling(store, lead, item.id, { action: 'escalate', ruleId: 'rules/safety-v2#escalate', reason: 'Unreviewed credential change' }, id()), /trigger/);
+  await assert.rejects(recordLeadRuling(store, lead, item.id, { action: 'send-back', ruleId: 'rules/plan-v1#scope', reason: 'Out of scope', trigger: 'security-concern' }, id()), /trigger/);
+  const approved = await recordLeadRuling(store, lead, item.id, { action: 'approve-plan', ruleId: 'rules/plan-v1#approval', reason: 'Plan satisfies the written scope' }, id());
   assert.equal(approved.ruling.leadId, lead.id);
   assert.equal(approved.ruling.slice, 'product');
   const rows = await store.pool.query('SELECT * FROM lead_rulings WHERE work_id=$1 ORDER BY created_at', [item.id]);
@@ -268,13 +378,36 @@ test('integration:lead-ruling-history — rulings cite a rule and a reason and c
   assert.equal(rows.rows[0].reason, 'Plan satisfies the written scope');
   await assert.rejects(store.pool.query('UPDATE lead_rulings SET reason=$2 WHERE id=$1', [rows.rows[0].id, 'rewritten']), /append-only/);
   await assert.rejects(store.pool.query('DELETE FROM lead_rulings WHERE id=$1', [rows.rows[0].id]), /append-only/);
-  await recordLeadRuling(store, lead, item.id, { action: 'classify-failure', ruleId: 'rules/failure-v1#flaky', reason: 'Runner timeout, not a defect' });
+  await recordLeadRuling(store, lead, item.id, { action: 'classify-failure', ruleId: 'rules/failure-v1#flaky', reason: 'Runner timeout, not a defect' }, id());
   assert.equal((await store.pool.query('SELECT 1 FROM lead_rulings WHERE work_id=$1', [item.id])).rowCount, 2);
   const history = await store.events(item.id);
   assert.ok(history.some(event => event.kind === 'lead.approve-plan' && event.payload.details.ruleId === 'rules/plan-v1#approval'));
   // A lead rules only inside its own slice.
   let elsewhere = await engine.execute(admin, 'create', null, input('ruling-other-slice', 'infrastructure'), id());
-  await assert.rejects(recordLeadRuling(store, lead, elsewhere.id, { action: 'send-back', ruleId: 'rules/plan-v1#scope', reason: 'Wrong slice' }), /own slice/);
+  await assert.rejects(recordLeadRuling(store, lead, elsewhere.id, { action: 'send-back', ruleId: 'rules/plan-v1#scope', reason: 'Wrong slice' }, id()), /own slice/);
+  // A retried ruling is the same ruling: a lost response must not duplicate
+  // immutable history, and the key cannot be replayed with different input.
+  const retryKey = id(), retryBody = { action: 'request-rerun', ruleId: 'rules/failure-v1#rerun', reason: 'Re-run the flaky suite once' } as const;
+  const rulingsBefore = (await store.pool.query('SELECT 1 FROM lead_rulings WHERE work_id=$1', [item.id])).rowCount;
+  const eventsBefore = (await store.events(item.id)).length;
+  const firstTry = await recordLeadRuling(store, lead, item.id, retryBody, retryKey);
+  const replay = await recordLeadRuling(store, lead, item.id, retryBody, retryKey);
+  assert.equal(replay.ruling.id, firstTry.ruling.id);
+  assert.equal(replay.work.revision, firstTry.work.revision);
+  assert.equal((await store.pool.query('SELECT 1 FROM lead_rulings WHERE work_id=$1', [item.id])).rowCount, rulingsBefore! + 1);
+  assert.equal((await store.events(item.id)).length, eventsBefore + 1);
+  await assert.rejects(recordLeadRuling(store, lead, item.id, { ...retryBody, reason: 'Different reason' }, retryKey), /Idempotency key reused with different input/);
+  await assert.rejects(recordLeadRuling(store, lead, item.id, retryBody, ''), /Idempotency-Key is required/);
+  // Delivered work is an immutable snapshot: a ruling can neither bump its
+  // revision nor attach escalation state to it.
+  let delivered = await engine.execute(admin, 'create', null, input('ruling-delivered', 'product'), id());
+  await store.pool.query("UPDATE work_items SET document=jsonb_set(document,'{stage}',to_jsonb('done'::text)) WHERE id=$1", [delivered.id]);
+  const deliveredRevision = (await reload(delivered)).revision;
+  await assert.rejects(recordLeadRuling(store, lead, delivered.id, { action: 'escalate', ruleId: 'rules/safety-v2#late', reason: 'Found after delivery', trigger: 'security-concern' }, id()), /Delivered work is immutable/);
+  delivered = await reload(delivered);
+  assert.equal(delivered.revision, deliveredRevision);
+  assert.equal(delivered.escalation ?? null, null);
+  assert.equal((await store.pool.query('SELECT 1 FROM lead_rulings WHERE work_id=$1', [delivered.id])).rowCount, 0);
 });
 
 test('unit:dynamic-merge-ordering — order follows dependencies and current conflicts, not registration order', () => {
@@ -323,11 +456,11 @@ test('integration:automatic-escalation — every trigger escalates and no lead c
   assert.match(conflict.escalation!.reason, /policy v2 conflicts with current policy v1/);
   // Security concern, raised by a lead ruling that must name its trigger.
   let concern = await engine.execute(admin, 'create', null, input('escalation-security', 'product'), id());
-  const ruled = await recordLeadRuling(store, lead, concern.id, { action: 'escalate', ruleId: 'rules/safety-v2#credential', reason: 'Unreviewed credential change', trigger: 'security-concern' });
+  const ruled = await recordLeadRuling(store, lead, concern.id, { action: 'escalate', ruleId: 'rules/safety-v2#credential', reason: 'Unreviewed credential change', trigger: 'security-concern' }, id());
   assert.equal(ruled.work.escalation!.trigger, 'security-concern');
   // A lead cannot overwrite, replace, or silence a standing escalation.
-  await recordLeadRuling(store, lead, concern.id, { action: 'escalate', ruleId: 'rules/safety-v2#credential', reason: 'Reclassified as routine', trigger: 'lease-loss' });
-  await recordLeadRuling(store, lead, concern.id, { action: 'classify-failure', ruleId: 'rules/failure-v1#flaky', reason: 'Runner timeout' });
+  await recordLeadRuling(store, lead, concern.id, { action: 'escalate', ruleId: 'rules/safety-v2#credential', reason: 'Reclassified as routine', trigger: 'lease-loss' }, id());
+  await recordLeadRuling(store, lead, concern.id, { action: 'classify-failure', ruleId: 'rules/failure-v1#flaky', reason: 'Runner timeout' }, id());
   concern = await reload(concern);
   assert.equal(concern.escalation!.trigger, 'security-concern');
   assert.equal(concern.escalation!.reason, 'Unreviewed credential change');
@@ -342,6 +475,50 @@ test('integration:automatic-escalation — every trigger escalates and no lead c
   const product = delegationSnapshot(roster, await store.list(), Date.now()).slices.find(s => s.id === 'product')!;
   assert.ok(product.bottlenecks.some(bottleneck => bottleneck.key === concern.key));
   assert.ok(product.bottlenecks.every(bottleneck => !!bottleneck.reason));
+  // A replacement claim is itself the proof of lease loss, so the escalation is
+  // recorded in the same transaction that overwrites the expired lease.
+  const expiring = new Engine(store, [15368], 0); expiring.roster = roster;
+  let replaced = await engine.execute(admin, 'create', null, input('escalation-replacement', 'infrastructure'), id());
+  replaced = await engine.execute(admin, 'ready', replaced.id, {}, id());
+  replaced = await expiring.execute(workerA, 'claim', replaced.id, {}, id());
+  const lostEpoch = replaced.epoch;
+  replaced = await engine.execute(workerB, 'claim', replaced.id, {}, id());
+  assert.equal(replaced.lease!.owner, workerB.id, 'the replacement claim still succeeds');
+  assert.equal(replaced.escalation!.trigger, 'lease-loss');
+  assert.match(replaced.escalation!.reason, new RegExp(`${workerA.id} lost lease epoch ${lostEpoch}`));
+  assert.equal(replaced.escalation!.actor, 'graphyard');
+  await engine.execute(workerB, 'release', replaced.id, { epoch: replaced.epoch }, id());
+
+  // An unresolved escalation refuses delivery, even for an otherwise merge-ready
+  // candidate, and only a human operator can resolve it.
+  let ready = await candidate(workerB, 'escalation-blocks-merge', 'product');
+  ready = await engine.execute(reviewer, 'evidence', ready.id, proof(), id());
+  assert.equal(ready.stage, 'merge');
+  assert.ok(ready.mergeAuthorization);
+  const observedAt = ready.observation!.at;
+  assert.deepEqual(currentMergeCandidates([ready], observedAt).map(item => item.key), [ready.key]);
+  const escalated = (await recordLeadRuling(store, lead, ready.id, { action: 'escalate', ruleId: 'rules/safety-v2#supply-chain', reason: 'Unreviewed dependency change', trigger: 'security-concern' }, id())).work;
+  assert.equal(escalated.mergeAuthorization, null, 'merge authorization is invalidated in the escalating transaction');
+  assert.equal(escalated.gates.find(gate => gate.name === 'merge')!.passed, false);
+  assert.match(escalated.gates.find(gate => gate.name === 'merge')!.reasons.join(' '), /Unresolved security-concern escalation/);
+  assert.deepEqual(currentMergeCandidates([escalated], observedAt), [], 'the guarded broker cannot select an escalated item');
+  assert.equal(await reload(ready).then(item => item.mergeAuthorization), null);
+  // Nobody but the operator resolves it, and never a stale or mismatched trigger.
+  await assert.rejects(engine.execute(workerA, 'resolve', ready.id, { trigger: 'security-concern', reason: 'Clearing the block' }, id()), /Operator permission required/);
+  await assert.rejects(engine.execute(lead, 'resolve', ready.id, { trigger: 'security-concern', reason: 'Clearing my own escalation' }, id()), /Slice leads cannot perform lifecycle mutations/);
+  await assert.rejects(engine.execute(reviewer, 'resolve', ready.id, { trigger: 'security-concern', reason: 'Clearing the block' }, id()), /Operator permission required/);
+  await assert.rejects(engine.execute(admin, 'resolve', ready.id, { trigger: 'lease-loss', reason: 'Wrong standing trigger' }, id()), /Standing escalation is security-concern/);
+  let resolved = await engine.execute(admin, 'resolve', ready.id, { trigger: 'security-concern', reason: 'Dependency change reviewed and accepted' }, id());
+  assert.equal(resolved.escalation, null);
+  assert.equal(resolved.gates.find(gate => gate.name === 'merge')!.passed, true);
+  assert.ok(resolved.mergeAuthorization, 'authorization is reissued only after the human resolution');
+  assert.deepEqual(currentMergeCandidates([resolved], resolved.observation!.at).map(item => item.key), [resolved.key]);
+  await assert.rejects(engine.execute(admin, 'resolve', ready.id, { trigger: 'security-concern', reason: 'Again' }, id()), /no escalation to resolve/);
+  // The resolution itself is append-only history with its audit reason.
+  const audit = (await store.events(ready.id)).find(event => event.kind === 'resolve');
+  assert.equal(audit.actor, admin.id);
+  assert.equal(audit.payload.details.reason, 'Dependency change reviewed and accepted');
+  assert.equal(audit.payload.details.trigger, 'security-concern');
 });
 
 test('unit:delegation-limits — configured capacity is server-enforced and refused with an explicit reason', () => {
@@ -356,6 +533,14 @@ test('unit:delegation-limits — configured capacity is server-enforced and refu
   assert.throws(() => validateDelegationPrincipals([lead, { ...reviewer, id: lead.id }]), /cannot also hold slice-lead authority/);
   assert.throws(() => validateDelegationPrincipals([lead, { ...reviewer, slice: 'product' }]), /must remain independent of every slice/);
   assert.throws(() => validateDelegationPrincipals([lead]), /requires at least 1 independent review\/proof agent/);
+  // The lead-facing capacity check counts the same seats the claim path does.
+  const held = (key: string, owner: string, slice: SliceId) => ({ key, slice, lease: { owner, epoch: 1, expiresAt: new Date(Date.now() + 60_000).toISOString() } }) as unknown as Work;
+  const twoItemsOneEngineer = [held('GY-101', 'engineer-a', 'product'), held('GY-102', 'engineer-a', 'product')];
+  enforceLeadCapacity(lead, twoItemsOneEngineer, Date.now(), defaultDelegationLimits);
+  assert.deepEqual([...activeEngineers(twoItemsOneEngineer, 'product', Date.now())], ['engineer-a']);
+  assert.throws(() => enforceLeadCapacity(lead, [...twoItemsOneEngineer, held('GY-103', 'engineer-b', 'product')], Date.now(), defaultDelegationLimits), /Engineer limit for product exceeded: 2\/2/);
+  // Expired leases free the seat they held.
+  assert.deepEqual([...activeEngineers(twoItemsOneEngineer, 'product', Date.now() + 120_000)], []);
   // Two leads and one reviewer remain inside the shared-reviewer defaults.
   validateDelegationPrincipals([admin, lead, infraLead, reviewer]);
   validateDelegationPrincipals([admin, lead, reviewer, { ...reviewer, id: 'second-proof' }]);

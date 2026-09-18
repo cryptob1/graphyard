@@ -6,7 +6,7 @@ import { pathToFileURL } from 'node:url';
 import { z } from 'zod';
 import { Store } from './store.js';
 import { Engine, type Command } from './engine.js';
-import { Refusal, demand, type Principal } from './model.js';
+import { Refusal, demand, operatorScopeIncludes, type Principal } from './model.js';
 import { githubFromEnv, processJob, type GitHub } from './github.js';
 import { Validation } from './validation.js';
 import { defineScenario, scenarios } from './scenarios.js';
@@ -75,10 +75,6 @@ export function server(engine: Engine, credentials: Credential[], github: GitHub
         demand(actor, 'A valid Graphyard bearer token is required', 401);
         if (actor.role === 'operator-agent') demand(actor.scope?.repositories.includes(repository), 'Repository is outside operator-agent scope', 403);
         if (url.pathname === '/api/operator-agents' && req.method === 'GET') return send(200, await operatorAgents.list(actor));
-        if (url.pathname === '/api/delegation' && req.method === 'GET') return send(200, delegationSnapshot(principals.map(p => p.actor), await engine.store.list(), Date.now(), limits));
-        if (url.pathname === '/api/intake' && req.method === 'POST') return send(200, await recordIntake(engine.store, actor, JSON.parse((await body(req)).toString())));
-        const leadRoute = url.pathname.match(/^\/api\/work\/([^/]+)\/lead-ruling$/);
-        if (leadRoute && req.method === 'POST') return send(200, await recordLeadRuling(engine.store, actor, leadRoute[1], JSON.parse((await body(req)).toString())));
         if (url.pathname === '/api/operator-agents' && req.method === 'POST') return send(200, await operatorAgents.setup(actor, JSON.parse((await body(req)).toString()), String(req.headers['idempotency-key'] ?? '')));
         const operatorRoute = url.pathname.match(/^\/api\/operator-agents\/([^/]+)\/(configure|rotate|revoke)$/);
         if (operatorRoute && req.method === 'POST') {
@@ -86,10 +82,18 @@ export function server(engine: Engine, credentials: Credential[], github: GitHub
           return send(200, operatorRoute[2] === 'configure' ? await operatorAgents.configure(actor, operatorRoute[1], data, key)
             : operatorRoute[2] === 'rotate' ? await operatorAgents.rotate(actor, operatorRoute[1], data, key) : await operatorAgents.revoke(actor, operatorRoute[1], data, key));
         }
-        const operatorVisible = (items: any[]) => actor.role !== 'operator-agent' ? items : items.filter(item => actor.scope?.workItems.includes('*') || actor.scope?.workItems.includes(item.id) || actor.scope?.workItems.includes(item.key));
+        const operatorVisible = (items: any[]) => items.filter(item => operatorScopeIncludes(actor, item));
         if (actor.role === 'operator-agent') demand(
-          url.pathname === '/api/status' || url.pathname === '/api/work-snapshot' || url.pathname === '/api/work' || url.pathname === '/api/events' || /^\/api\/work(?:\/[^/]+\/[a-z]+)?$/.test(url.pathname),
+          url.pathname === '/api/status' || url.pathname === '/api/work-snapshot' || url.pathname === '/api/work' || url.pathname === '/api/events'
+          || url.pathname === '/api/delegation' || url.pathname === '/api/intake' || /^\/api\/work(?:\/[^/]+\/[a-z]+)?$/.test(url.pathname),
           'Route is not available to operator agents', 403);
+        // Delegation is a read over work items, so it is filtered by the same scope
+        // rule as every other read; a scoped agent never sees out-of-scope owners,
+        // workers, or bottlenecks here or inside /api/status.
+        if (url.pathname === '/api/delegation' && req.method === 'GET') return send(200, delegationSnapshot(principals.map(p => p.actor), operatorVisible(await engine.store.list()), Date.now(), limits));
+        if (url.pathname === '/api/intake' && req.method === 'POST') return send(200, await recordIntake(engine.store, actor, JSON.parse((await body(req)).toString()), String(req.headers['idempotency-key'] ?? '')));
+        const leadRoute = url.pathname.match(/^\/api\/work\/([^/]+)\/lead-ruling$/);
+        if (leadRoute && req.method === 'POST') return send(200, await recordLeadRuling(engine.store, actor, leadRoute[1], JSON.parse((await body(req)).toString()), String(req.headers['idempotency-key'] ?? '')));
         if (url.pathname === '/api/validation/artifacts' && req.method === 'POST') return send(200, await validation.uploadArtifact(actor, JSON.parse((await body(req, 11_200_000)).toString()), String(req.headers['idempotency-key'] ?? '')));
         const artifactRead = url.pathname.match(/^\/api\/validation\/artifacts\/([^/]+)\/([^/]+)$/);
         if (artifactRead && req.method === 'GET') {
@@ -124,7 +128,7 @@ export function server(engine: Engine, credentials: Credential[], github: GitHub
           const githubPermissions = github ? await github.reviewPermissions() : {};
           const codexAvailable = !!githubRepository && githubPermissions.pull_requests === 'write' && ['read', 'write'].includes(githubPermissions.issues) && githubPermissions.checks === 'write';
           const observedAt = (await engine.store.pool.query('SELECT clock_timestamp() AS now')).rows[0].now as Date;
-          return send(200, { actor, delegation: delegationSnapshot(principals.map(p => p.actor), await engine.store.list(), observedAt.getTime(), limits), repository: repository || null, baseBranch: github?.config.base ?? process.env.GITHUB_BASE_BRANCH ?? 'main', github: !!github, check: 'Graphyard / merge', reviewProviders: codexAvailable ? ['github', 'codex'] : ['github'], githubPermissions, githubRepository, githubAppId: github?.config.appId ?? null, githubInstallationId: github?.config.installationId ?? null, jobs, now: observedAt.toISOString() });
+          return send(200, { actor, delegation: delegationSnapshot(principals.map(p => p.actor), operatorVisible(await engine.store.list()), observedAt.getTime(), limits), repository: repository || null, baseBranch: github?.config.base ?? process.env.GITHUB_BASE_BRANCH ?? 'main', github: !!github, check: 'Graphyard / merge', reviewProviders: codexAvailable ? ['github', 'codex'] : ['github'], githubPermissions, githubRepository, githubAppId: github?.config.appId ?? null, githubInstallationId: github?.config.installationId ?? null, jobs, now: observedAt.toISOString() });
         }
         if (req.method === 'GET' && url.pathname === '/api/work-snapshot') { const snapshot = await engine.store.workSnapshot(); const visibleWork = operatorVisible(snapshot.work); return send(200, { ...snapshot, work: visibleWork, jobs: actor.role === 'operator-agent' ? snapshot.jobs.filter(job => visibleWork.some(work => work.id === job.work_id)) : snapshot.jobs }); }
         if (req.method === 'GET' && url.pathname === '/api/work') return send(200, operatorVisible(await engine.store.list()));

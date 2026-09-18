@@ -2,9 +2,9 @@ import { createHash, randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { Store, save, wakeJob } from './store.js';
 import { workspacePath, pathsOverlap, validBranch } from './workspace.js';
-import { activeLease, admin, operatorCapability, MergeExecutionInProgress, requireCurrent, createSchema, criterionSchema, currentEvidence, resourcesSchema, demand, evaluate, proofSchema, type Principal, type Work, type Observation, type ReviewRequest, type OperatorCapability } from './model.js';
+import { activeLease, admin, operatorCapability, escalationTriggers, MergeExecutionInProgress, raiseEscalation, requireCurrent, createSchema, criterionSchema, currentEvidence, resourcesSchema, demand, evaluate, proofSchema, type Principal, type Work, type Observation, type ReviewRequest, type OperatorCapability } from './model.js';
 import { resourceConflicts } from './coordination.js';
-import { delegationLimits, implementerIdentities, leadMay, producerIndependenceRefusal } from './delegation.js';
+import { activeEngineers, delegationLimits, implementerIdentities, leadMay, producerIndependenceRefusal } from './delegation.js';
 
 const epoch = z.number().int().positive();
 const sha = z.string().regex(/^[a-f0-9]{40}$/);
@@ -17,6 +17,9 @@ const commands = {
   reviewpolicy: z.object({ provider: z.enum(['github', 'codex']), expectedPolicyRevision: z.number().int().positive(), reason: z.string().trim().min(1).max(2000) }).strict(),
   unblock: z.object({ reason: z.string().trim().min(1).max(2000), expectedRevision: z.number().int().positive().optional() }).strict(),
   rework: z.object({ reason: z.string().min(1).max(2000), previousWorkerStopped: z.literal(true) }).strict(),
+  // Only a human operator resolves an escalation, and only the one it has read:
+  // naming the standing trigger stops a stale client from clearing a newer one.
+  resolve: z.object({ trigger: z.enum(escalationTriggers), reason: z.string().trim().min(1).max(2000), expectedRevision: z.number().int().positive().optional() }).strict(),
   recover: z.object({ reason: z.string().min(1).max(2000), previousWorkerStopped: z.literal(true) }).strict(),
   claim: z.object({}).strict(),
   rereview: z.object({ epoch: epoch.optional() }).strict(),
@@ -162,7 +165,7 @@ export class Engine {
         }
         const retired = work.criteria.filter(ac => !data.criteria.some((next: { id: string }) => next.id === ac.id));
         const narrowed = work.criteria.filter(ac => { const next = data.criteria.find((n: { id: string }) => n.id === ac.id); return next && ac.proofs.some(proof => !next.proofs.includes(proof)); });
-        if (retired.length || narrowed.length) work.escalation ??= { trigger: 'requirement-weakening', reason: `Requirement revision retires ${retired.map(ac => ac.id).join(', ') || 'no criterion'} and narrows proofs for ${narrowed.map(ac => ac.id).join(', ') || 'no criterion'}`, at: now.toISOString(), actor: actor.id };
+        if (retired.length || narrowed.length) raiseEscalation(work, { trigger: 'requirement-weakening', reason: `Requirement revision retires ${retired.map(ac => ac.id).join(', ') || 'no criterion'} and narrows proofs for ${narrowed.map(ac => ac.id).join(', ') || 'no criterion'}`, at: now.toISOString(), actor: actor.id });
         work.retiredCriterionIds = [...(work.retiredCriterionIds ?? []), ...retired.map(ac => ac.id)];
         work.criteria = data.criteria; work.dependencies = data.dependencies; work.plannedFiles = data.plannedFiles; work.exclusiveResources = data.exclusiveResources;
         work.scenarioRequirements = pins; work.policyRevision++;
@@ -173,6 +176,15 @@ export class Engine {
       }
       if (command === 'ready') { if (actor.role !== 'operator-agent') admin(actor); work.ready = true; }
       if (command === 'unblock') { if (actor.role !== 'operator-agent') admin(actor); work.blocker = null; }
+      if (command === 'resolve') {
+        // Resolution is a human judgement: no lead, worker, producer, or scoped
+        // operator agent may clear the escalation that refuses its own delivery.
+        admin(actor);
+        demand(work.escalation, 'Task has no escalation to resolve');
+        demand(work.escalation.trigger === data.trigger, `Standing escalation is ${work.escalation.trigger}; reload before resolving`);
+        demand(data.expectedRevision === undefined || data.expectedRevision === work.revision, 'Task revision changed; reload before resolving');
+        work.escalation = null;
+      }
       if (command === 'rework') {
         admin(actor);
         demand(!work.observation?.merged, 'Merged work requires a follow-up task');
@@ -199,10 +211,16 @@ export class Engine {
         const resources = resourceConflicts(work, all, now.getTime());
         demand(!resources.length, `Exclusive resources held: ${resources.map(r => `${r.resource} by ${r.key}`).join(', ')}`);
         if (work.slice) {
-          const activeInSlice = all.filter(item => item.id !== work!.id && item.slice === work!.slice && item.lease && Date.parse(item.lease.expiresAt) > now.getTime()).length;
+          // Capacity is a count of engineers, not of leases: one engineer holding
+          // two items in the slice still occupies one of the lead's seats.
+          const engineers = activeEngineers(all.filter(item => item.id !== work!.id), work.slice, now.getTime());
+          engineers.delete(actor.id);
           const limit = delegationLimits().maxEngineersPerLead;
-          demand(activeInSlice < limit, `Engineer limit for ${work.slice} exceeded: ${activeInSlice}/${limit}`);
+          demand(engineers.size < limit, `Engineer limit for ${work.slice} exceeded: ${engineers.size}/${limit}`);
         }
+        // A replacement claim is itself the proof that the previous assignment was
+        // lost. Record it here so the escalation cannot be erased by the overwrite.
+        if (work.lease) raiseEscalation(work, { trigger: 'lease-loss', reason: `Worker ${work.lease.owner} lost lease epoch ${work.lease.epoch}`, at: now.toISOString(), actor: 'graphyard' });
         work.epoch++;
         work.implementers = [...new Set([...implementerIdentities(work), actor.id])];
         work.lastAssignment = { owner: actor.id, epoch: work.epoch, claimedAt: now.toISOString(), ...(actor.displayName ? { displayName: actor.displayName } : {}), ...(actor.runtime ? { runtime: actor.runtime } : {}) };
@@ -252,7 +270,7 @@ export class Engine {
         demand(!dependent, dependent ?? 'Evidence producer is not independent', 403);
         const trusted = actor.role === 'producer' && !!actor.proofs?.includes(data.proof) || actor.role === 'admin' && data.proof.startsWith('manual:');
         work.evidence.push({ ...data, id: randomUUID(), producer: actor.id, trusted, at: now.toISOString() });
-        if (trusted && data.policyRevision !== work.policyRevision) work.escalation ??= { trigger: 'evidence-policy-conflict', reason: `Evidence policy v${data.policyRevision} conflicts with current policy v${work.policyRevision}`, at: now.toISOString(), actor: actor.id };
+        if (trusted && data.policyRevision !== work.policyRevision) raiseEscalation(work, { trigger: 'evidence-policy-conflict', reason: `Evidence policy v${data.policyRevision} conflicts with current policy v${work.policyRevision}`, at: now.toISOString(), actor: actor.id });
       }
       // Delivery is an immutable snapshot. A late containment cleanup may append
       // its audit/revision metadata, but stale inputs must not re-evaluate it.
@@ -409,7 +427,7 @@ export class Engine {
         if (work.mergeExecution) work.mergeExecution = null;
         if (work.lease && Date.parse(work.lease.expiresAt) <= now.getTime()) {
           const lost = work.lease; work.lease = null;
-          work.escalation ??= { trigger: 'lease-loss', reason: `Worker ${lost.owner} lost lease epoch ${lost.epoch}`, at: now.toISOString(), actor: 'graphyard' };
+          raiseEscalation(work, { trigger: 'lease-loss', reason: `Worker ${lost.owner} lost lease epoch ${lost.epoch}`, at: now.toISOString(), actor: 'graphyard' });
         }
         this.evaluate(work, all, now);
         if (JSON.stringify(work) !== before) {

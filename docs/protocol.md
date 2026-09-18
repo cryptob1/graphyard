@@ -30,12 +30,15 @@ Errors return JSON `{ "error": "actionable reason" }`. Invalid JSON/schema is `4
 | `GET /api/work-snapshot` | Work, integration job metadata and database time from one snapshot |
 | `GET /api/work` | Work aggregates, in creation order |
 | `GET /api/events?work=UUID` | Latest 300 events for one item; omit filter for latest global events |
+| `GET /api/delegation` | Slices, leads, engineers, workers, reviewers and bottlenecks; filtered by operator-agent scope |
 
 The initial list API is unpaginated. Do not use it as an unlimited analytics export. Event payload snapshots can reconstruct historical item revisions; full archival/export pagination is future work.
 
 ## Work commands
 
 Create with `POST /api/work` and the structure in [examples/work.json](../examples/work.json). Required fields are `title` and nonempty `criteria`; each criterion requires a unique `AC-N` ID, text, and at least one proof. The policy defaults to checks `test` and `typecheck`, plus independent review. Dependencies refer to existing UUIDs. Operator requirement revisions explicitly reject cycles. Optional `exclusiveResources` reserves named resources during active ownership; `plannedFiles` supplies advisory overlap scopes.
+
+`POST /api/intake` records a backlog intake item and `POST /api/work/UUID/lead-ruling` records a slice-lead ruling; both require `Idempotency-Key` and replay the original result, so a lost response never duplicates immutable history. See [slice-lead delegation](delegation.md).
 
 Other commands use `POST /api/work/UUID/COMMAND` (display keys also work):
 
@@ -44,6 +47,7 @@ Other commands use `POST /api/work/UUID/COMMAND` (display keys also work):
 | `requirements` | Full criteria, dependencies, plannedFiles, exclusiveResources, expectedPolicyRevision and reason; operator only, see [coordination](coordination.md) |
 | `ready` | Admin: `{}`. Operator-agent: `{"expectedRevision":12,"reason":"Requirements approved"}` with the current work revision and a nonblank audit reason. |
 | `unblock` | Admin: `{"reason":"Contract verified"}`. Operator-agent: `{"expectedRevision":12,"reason":"Contract verified"}` with the current work revision and a nonblank audit reason. |
+| `resolve` | `{"trigger":"security-concern","reason":"Dependency change reviewed"}` with the standing escalation's trigger and a nonblank audit reason; admin only |
 | `rework` | `{"reason":"Retry implementation","previousWorkerStopped":true}`; operator only |
 | `recover` | `{"reason":"Verified delivered worker stopped","previousWorkerStopped":true}`; operator only, delivered quarantine only |
 | `claim` | `{}`; returns current lease and epoch |

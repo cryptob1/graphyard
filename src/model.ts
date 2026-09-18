@@ -96,14 +96,38 @@ export function demand(value: unknown, message: string, status = 409): asserts v
   if (!value) throw new Refusal(message, status);
 }
 export function admin(actor: Principal) { demand(actor.role === 'admin', 'Operator permission required', 403); }
+// One scope rule for every scoped read and mutation, so a route cannot answer
+// with data its own authorization would have refused.
+export function operatorScopeIncludes(actor: Principal, work: { id: string; key: string }) {
+  if (actor.role !== 'operator-agent') return true;
+  return !!actor.scope?.workItems.some(entry => entry === '*' || entry === work.id || entry === work.key);
+}
 export function operatorCapability(actor: Principal, capability: OperatorCapability, work?: Work, repository?: string) {
   if (actor.role === 'admin') return;
   demand(actor.role === 'operator-agent' && actor.capabilities?.includes(capability), `Capability ${capability} is required`, 403);
   demand(!!repository && actor.scope?.repositories.includes(repository), 'Repository is outside this operator-agent scope', 403);
-  if (work) demand(actor.scope?.workItems.includes('*') || actor.scope?.workItems.includes(work.id) || actor.scope?.workItems.includes(work.key), 'Work item is outside this operator-agent scope', 403);
+  if (work) demand(operatorScopeIncludes(actor, work), 'Work item is outside this operator-agent scope', 403);
 }
 export function activeLease(work: Work, actor: Principal, epoch: number, now: Date) {
   demand(work.lease && work.lease.owner === actor.id && work.lease.epoch === epoch && Date.parse(work.lease.expiresAt) > now.getTime(), 'Lease missing, expired, or superseded; claim the task again');
+}
+
+// An unresolved escalation refuses delivery. Only a human operator can resolve
+// one, so no lead or automated path can deliver past it.
+export function escalationRefusal(work: Work): string | null {
+  return work.escalation ? `Unresolved ${work.escalation.trigger} escalation requires operator resolution: ${work.escalation.reason}` : null;
+}
+// A standing escalation is never overwritten. Raising one refuses the merge gate
+// and invalidates merge authorization in the same transaction, so a candidate
+// that was already merge-ready cannot be delivered while it stands.
+export function raiseEscalation(work: Work, escalation: NonNullable<Work['escalation']>) {
+  if (work.escalation) return false;
+  work.escalation = escalation;
+  work.mergeAuthorization = null;
+  const merge = work.gates.find(gate => gate.name === 'merge');
+  const reason = escalationRefusal(work)!;
+  if (merge && !merge.reasons.includes(reason)) { merge.reasons.push(reason); merge.passed = false; }
+  return true;
 }
 
 // Shared by gates and human-facing proof previews.
@@ -149,7 +173,7 @@ export function evaluate(work: Work, all: Work[], now: Date, ciAppIds: number[])
     if (!evidence || evidence.result !== 'pass' || evidence.executed < 1 || evidence.skipped !== 0) reasons.push(`${ac.id}: ${proof} needs trusted passing evidence, with executed > 0 and skipped = 0, for this candidate and policy${scenario ? `; scenario v${scenario.revision} in ${scenario.environment}` : ''}`);
   }
   add('acceptance', reasons);
-  add('merge', [...(!fresh ? ['GitHub observation missing or older than two minutes'] : []), ...(!obs?.protected ? ['Required Graphyard check and strict branch protection have not been verified'] : []), ...(!obs?.mergeable && !obs?.merged ? ['Pull request is not mergeable against the current base'] : [])]);
+  add('merge', [...(!fresh ? ['GitHub observation missing or older than two minutes'] : []), ...(!obs?.protected ? ['Required Graphyard check and strict branch protection have not been verified'] : []), ...(!obs?.mergeable && !obs?.merged ? ['Pull request is not mergeable against the current base'] : []), ...(escalationRefusal(work) ? [escalationRefusal(work)!] : [])]);
   const first = gates.find(g => !g.passed);
   const violations = [...work.violations];
   let stage: Stage = !work.ready ? 'backlog' : !work.submission ? (work.lease && Date.parse(work.lease.expiresAt) > now.getTime() ? 'build' : 'ready') : (first?.name === 'ready' ? 'build' : first?.name as Stage ?? 'merge');

@@ -1,6 +1,7 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
+import type pg from 'pg';
 import { z } from 'zod';
-import { demand, escalationTriggers, sliceIds, type Principal, type SliceId, type Work } from './model.js';
+import { demand, escalationTriggers, operatorScopeIncludes, raiseEscalation, sliceIds, type Principal, type SliceId, type Work } from './model.js';
 import { save, type Store } from './store.js';
 import { fileConflicts, resourceConflicts } from './coordination.js';
 
@@ -31,6 +32,20 @@ export type SessionKind = 'human' | 'ai' | 'undeclared';
 // displayed or treated as human.
 export function sessionKind(principal?: { sessionKind?: 'human' | 'ai' }): SessionKind { return principal?.sessionKind ?? 'undeclared'; }
 export function classifyIntake(origin: string) { return routineIntakeOrigins.includes(origin as any) ? 'routine' : humanOnlyIntakeOrigins.includes(origin as any) ? 'human-only' : 'unknown'; }
+
+// The same receipt/fingerprint contract the engine and validation routes use: a
+// lost response must never duplicate an immutable intake item or lead ruling.
+async function once<T>(store: Store, actor: Principal, key: string, fingerprintInput: unknown, run: (db: pg.PoolClient, now: Date) => Promise<T>): Promise<T> {
+  demand(key && key.length <= 200, 'An Idempotency-Key is required', 400);
+  const fingerprint = createHash('sha256').update(JSON.stringify(fingerprintInput)).digest('hex');
+  return store.transaction(async (db, now) => {
+    const receipt = (await db.query('SELECT * FROM receipts WHERE actor=$1 AND key=$2', [actor.id, key])).rows[0];
+    if (receipt) { demand(receipt.fingerprint === fingerprint, 'Idempotency key reused with different input'); return receipt.result as T; }
+    const result = await run(db, now);
+    await db.query('INSERT INTO receipts(actor,key,fingerprint,result) VALUES($1,$2,$3,$4)', [actor.id, key, fingerprint, JSON.stringify(result)]);
+    return result;
+  });
+}
 
 export function delegationLimits(env: NodeJS.ProcessEnv = process.env): DelegationLimits {
   const integer = (name: string, fallback: number) => { const value = Number(env[name] ?? fallback); demand(Number.isInteger(value) && value > 0, `${name} must be a positive integer`, 500); return value; };
@@ -84,6 +99,12 @@ export function producerIndependenceRefusal(actor: Principal, work: Work, roster
   return null;
 }
 
+// Capacity is measured in engineers. Two items held by one worker are two worker
+// rows but a single occupied seat under the slice lead.
+export function activeEngineers(work: Work[], slice: SliceId, now: number): Set<string> {
+  return new Set(work.filter(w => w.slice === slice && w.lease && Date.parse(w.lease.expiresAt) > now).map(w => w.lease!.owner));
+}
+
 // Every identity the dashboard renders carries its own declared session kind, so
 // the human/AI distinction is read from data instead of assumed from a role.
 export function delegationSnapshot(principals: Principal[], work: Work[], now: number, limits = defaultDelegationLimits) {
@@ -97,6 +118,7 @@ export function delegationSnapshot(principals: Principal[], work: Work[], now: n
     const items = work.filter(w => w.slice === slice.id);
     const workers = items.filter(w => w.lease && Date.parse(w.lease.expiresAt) > now);
     return { ...slice, lead: lead ? identify(lead.id) : null,
+      engineers: [...activeEngineers(items, slice.id, now)].map(identify),
       workers: workers.map(w => ({ key: w.key, ...identify(w.lease!.owner) })),
       bottlenecks: items.filter(w => w.blocker || w.escalation || w.gates.some(g => !g.passed))
         .map(w => ({ key: w.key, reason: w.blocker ?? w.escalation?.reason ?? w.gates.find(g => !g.passed)?.reasons[0] ?? 'Awaiting a gate decision' })) };
@@ -105,49 +127,68 @@ export function delegationSnapshot(principals: Principal[], work: Work[], now: n
 
 export function enforceLeadCapacity(actor: Principal, work: Work[], now: number, limits: DelegationLimits) {
   demand(actor.role === 'slice-lead' && actor.slice, 'Slice lead permission required', 403);
-  const active = work.filter(w => w.slice === actor.slice && w.lease && Date.parse(w.lease.expiresAt) > now);
-  demand(active.length < limits.maxEngineersPerLead, `Engineer limit for ${actor.slice} exceeded: ${active.length}/${limits.maxEngineersPerLead}`);
+  const engineers = activeEngineers(work, actor.slice!, now);
+  demand(engineers.size < limits.maxEngineersPerLead, `Engineer limit for ${actor.slice} exceeded: ${engineers.size}/${limits.maxEngineersPerLead}`);
 }
 
-export async function recordLeadRuling(store: Store, actor: Principal, id: string, input: unknown) {
+export async function recordLeadRuling(store: Store, actor: Principal, id: string, input: unknown, key: string) {
   demand(actor.role === 'slice-lead' && actor.slice, 'Slice lead permission required', 403);
   const data = rulingSchema.parse(input);
-  return store.transaction(async (db, now) => {
+  return once(store, actor, key, { command: 'lead.ruling', id, data }, async (db, now) => {
     const work = (await db.query("SELECT document FROM work_items WHERE id::text=$1 OR document->>'key'=$1", [id])).rows[0]?.document as Work | undefined;
     demand(work, 'Work item not found', 404); demand(work.slice === actor.slice, 'Slice leads may coordinate only their own slice', 403);
+    // Delivery is an immutable snapshot. A ruling must never bump a delivered
+    // item's revision or attach new escalation state to it; use a follow-up task.
+    demand(work.stage !== 'done', 'Delivered work is immutable; rulings cannot rewrite it, so create a follow-up task', 409);
     const ruling = { id: randomUUID(), workId: work.id, leadId: actor.id, slice: actor.slice, ...data, at: now.toISOString() };
     await db.query('INSERT INTO lead_rulings(id,work_id,lead_id,slice_id,action,rule_id,reason) VALUES($1,$2,$3,$4,$5,$6,$7)', [ruling.id, work.id, actor.id, actor.slice, data.action, data.ruleId, data.reason]);
-    // Append-only: a later ruling never overwrites or clears a standing escalation.
-    if (data.action === 'escalate') work.escalation ??= { trigger: data.trigger!, reason: data.reason, at: ruling.at, actor: actor.id };
+    // Append-only: a later ruling never overwrites or clears a standing escalation,
+    // and raising one refuses the merge gate in this same transaction.
+    if (data.action === 'escalate') raiseEscalation(work, { trigger: data.trigger!, reason: data.reason, at: ruling.at, actor: actor.id });
     await save(db, work, actor.id, `lead.${data.action}`, now, { ruleId: data.ruleId, reason: data.reason, ...(data.trigger ? { trigger: data.trigger } : {}) });
     return { ruling, work };
   });
 }
 
 // Refusals are recorded outside the mutation transaction, which rolls back.
-async function recordRefusal(store: Store, actor: Principal, id: string, kind: string, payload: Record<string, unknown>) {
+// `scoped` false writes an unscoped ledger entry: the attempt is still history,
+// but it never appends to a work item the actor has no authority over.
+async function recordRefusal(store: Store, actor: Principal, id: string, kind: string, payload: (work: Work) => Record<string, unknown>, scoped: (work: Work) => boolean = () => true) {
   await store.transaction(async (db, now) => {
     const work = (await db.query("SELECT document FROM work_items WHERE id::text=$1 OR document->>'key'=$1", [id])).rows[0]?.document as Work | undefined;
     demand(work, 'Work item not found', 404);
-    await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, actor.id, kind, JSON.stringify({ ...payload, at: now.toISOString() })]);
+    await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [scoped(work) ? work.id : null, actor.id, kind, JSON.stringify({ ...payload(work), at: now.toISOString() })]);
   });
 }
 
 export async function recordLeadViolation(store: Store, actor: Principal, id: string, attemptedAction: string) {
   demand(actor.role === 'slice-lead', 'Slice lead permission required', 403);
-  await recordRefusal(store, actor, id, 'lead.action.refused', { attemptedAction, slice: actor.slice ?? null, reason: 'Action exceeds slice-lead authority' });
+  // The same slice check rulings use. A forbidden request aimed at another slice
+  // is recorded against no ledger, with both the target and the source named, so
+  // a lead cannot write into a slice it does not coordinate.
+  await recordRefusal(store, actor, id, 'lead.action.refused', work => ({
+    attemptedAction, slice: actor.slice ?? null, targetKey: work.key, targetSlice: work.slice ?? null,
+    reason: work.slice === actor.slice ? 'Action exceeds slice-lead authority' : 'Action exceeds slice-lead authority and targets another slice',
+  }), work => work.slice === actor.slice);
 }
 
 export async function recordEvidenceRefusal(store: Store, actor: Principal, id: string, proof: unknown, reason: string) {
-  await recordRefusal(store, actor, id, 'evidence.producer.refused', { proof: typeof proof === 'string' ? proof : null, producer: actor.id, role: actor.role, reason });
+  await recordRefusal(store, actor, id, 'evidence.producer.refused', () => ({ proof: typeof proof === 'string' ? proof : null, producer: actor.id, role: actor.role, reason }));
 }
 
-export async function recordIntake(store: Store, actor: Principal, input: unknown) {
+export async function recordIntake(store: Store, actor: Principal, input: unknown, key: string) {
   const data = intakeSchema.parse(input);
   demand(actor.role === 'admin' || actor.role === 'operator-agent' || actor.role === 'slice-lead', 'Intake permission required', 403);
   if (actor.role !== 'admin') demand(classifyIntake(data.origin) === 'routine', `${data.origin} intake is human-only`, 403);
-  return store.transaction(async (db, now) => {
-    if (data.sourceWorkId) demand((await db.query('SELECT 1 FROM work_items WHERE id=$1', [data.sourceWorkId])).rowCount, 'Source work item not found', 404);
+  return once(store, actor, key, { command: 'intake', data }, async (db, now) => {
+    if (data.sourceWorkId) {
+      // Existence is not authority: the cited source must be inside the actor's
+      // own scope, or its history would gain an entry from outside that scope.
+      const source = (await db.query('SELECT document FROM work_items WHERE id=$1', [data.sourceWorkId])).rows[0]?.document as Work | undefined;
+      demand(source, 'Source work item not found', 404);
+      demand(operatorScopeIncludes(actor, source), 'Source work item is outside this operator-agent scope', 403);
+      demand(actor.role !== 'slice-lead' || source.slice === actor.slice, 'Slice leads may cite only their own slice', 403);
+    }
     const item = { id: randomUUID(), ...data, submittedBy: actor.id, state: 'backlog', createdAt: now.toISOString() };
     await db.query('INSERT INTO intake_items(id,origin,title,description,source_work_id,submitted_by) VALUES($1,$2,$3,$4,$5,$6)', [item.id, data.origin, data.title, data.description, data.sourceWorkId ?? null, actor.id]);
     await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [data.sourceWorkId ?? null, actor.id, 'intake.created', JSON.stringify({ intake: item })]);
