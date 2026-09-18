@@ -9,7 +9,8 @@ import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import { server } from '../src/server.js';
 import { OperatorAgents } from '../src/operator-agent.js';
-import { ReconciliationRetry, type Principal, type Work, type Observation } from '../src/model.js';
+import { ReconciliationRetry, SpeculativeConflict, type Principal, type Work, type Observation } from '../src/model.js';
+import { predictQueue, queueRef, type QueuePlacement, type QueueSpeculation } from '../src/merge-queue.js';
 import { defineScenario, scenarios } from '../src/scenarios.js';
 import { setTimeout as delay } from 'node:timers/promises';
 import { processJob, type GitHub } from '../src/github.js';
@@ -45,7 +46,14 @@ async function claimed() { const w = await ready(); return engine.execute(worker
 async function submitted() {
   let w = await claimed();
   w = await engine.execute(worker, 'workspace', w.id, { epoch: 1, host: 'machine-a', path: `/tmp/${w.id}`, branch: `graphyard/${w.id}` }, randomUUID());
-  return engine.execute(worker, 'submit', w.id, { epoch: 1, pr: Number(w.key.slice(3)) }, randomUUID());
+  w = await engine.execute(worker, 'submit', w.id, { epoch: 1, pr: Number(w.key.slice(3)) }, randomUUID());
+  // Every candidate lands on the same managed branch, so the merge queue is global. Tests that
+  // assert single-candidate behaviour start from an empty queue; queue behaviour has its own tests.
+  await clearQueue(w.id);
+  return w;
+}
+async function clearQueue(keep?: string) {
+  await store.pool.query("UPDATE work_items SET document=document-'queue' WHERE ($1::uuid IS NULL OR id<>$1) AND document->>'stage'<>'done'", [keep ?? null]);
 }
 function observation(w: Work): Observation {
   return { clockOffset: { min: 0, max: 0 }, candidate: { sha: head, baseSha: base, pr: w.submission!.pr, branch: w.workspaces[0].branch, author: 'implementer' },
@@ -388,6 +396,7 @@ test('capability settlement preserves active and expired merge executions while 
     item = await engine.execute(worker, 'quarantine', item.id, { epoch: 1, settlementHash }, randomUUID());
     item = await engine.execute(worker, 'workspace', item.id, { epoch: 1, host: `merge-settlement-${suffix}`, path: `/tmp/${item.id}-${suffix}`, branch: `graphyard/${item.id}-${suffix}` }, randomUUID());
     item = await engine.execute(worker, 'submit', item.id, { epoch: 1, pr: Number(item.key.slice(3)) }, randomUUID());
+    await clearQueue(item.id);
     item = await engine.observe(item.id, item.revision, observation(item));
     item = await engine.execute(producer, 'evidence', item.id, proof(), randomUUID());
     await engine.acquireMerge(coordinator, item.id, { expectedRevision: item.revision, sha: head, baseSha: base, policyRevision: item.policyRevision }, randomUUID());
@@ -413,6 +422,7 @@ test('non-delivered capability settlement still re-evaluates stale gates', async
   w = await engine.execute(worker, 'quarantine', w.id, { epoch: 1, settlementHash }, randomUUID());
   w = await engine.execute(worker, 'workspace', w.id, { epoch: 1, host: `stale-settlement-${w.id}`, path: `/tmp/${w.id}-stale-settlement`, branch: `graphyard/${w.id}-stale-settlement` }, randomUUID());
   w = await engine.execute(worker, 'submit', w.id, { epoch: 1, pr: Number(w.key.slice(3)) }, randomUUID());
+  await clearQueue(w.id);
   w = await engine.observe(w.id, w.revision, observation(w));
   w = await engine.execute(producer, 'evidence', w.id, proof(), randomUUID());
   assert.equal(w.stage, 'merge'); assert.ok(w.mergeAuthorization);
@@ -435,6 +445,7 @@ test('capability settlement survives the merge-to-done race without weakening de
   w = await engine.execute(worker, 'quarantine', w.id, { epoch: 1, settlementHash }, randomUUID());
   w = await engine.execute(worker, 'workspace', w.id, { epoch: 1, host: 'race-host', path: `/tmp/${w.id}-race`, branch: `graphyard/${w.id}-race` }, randomUUID());
   w = await engine.execute(worker, 'submit', w.id, { epoch: 1, pr: Number(w.key.slice(3)) }, randomUUID());
+  await clearQueue(w.id);
   w = await engine.observe(w.id, w.revision, observation(w));
   w = await engine.execute(producer, 'evidence', w.id, proof(), randomUUID());
   const granted = await engine.acquireMerge(coordinator, w.id, { expectedRevision: w.revision, sha: head, baseSha: base, policyRevision: w.policyRevision }, randomUUID());
@@ -470,6 +481,7 @@ test('operator stopped-worker recovery clears only a delivered containment quara
   w = await engine.execute(worker, 'quarantine', w.id, { epoch: 1, settlementHash }, randomUUID());
   w = await engine.execute(worker, 'workspace', w.id, { epoch: 1, host: 'recovery-host', path: `/tmp/${w.id}-recovery`, branch: `graphyard/${w.id}-recovery` }, randomUUID());
   w = await engine.execute(worker, 'submit', w.id, { epoch: 1, pr: Number(w.key.slice(3)) }, randomUUID());
+  await clearQueue(w.id);
   w = await engine.observe(w.id, w.revision, observation(w));
   w = await engine.execute(producer, 'evidence', w.id, proof(), randomUUID());
   const granted = await engine.acquireMerge(coordinator, w.id, { expectedRevision: w.revision, sha: head, baseSha: base, policyRevision: w.policyRevision }, randomUUID());
@@ -636,6 +648,7 @@ test('E2E definitions are versioned, immutable, operator-owned, and pinned by wo
   w = await engine.execute(worker, 'claim', w.id, {}, randomUUID());
   w = await engine.execute(worker, 'workspace', w.id, { epoch: 1, host: 'e2e-host', path: `/tmp/${w.id}`, branch: `graphyard/${w.id}` }, randomUUID());
   w = await engine.execute(worker, 'submit', w.id, { epoch: 1, pr: Number(w.key.slice(3)) }, randomUUID());
+  await clearQueue(w.id);
   w = await engine.observe(w.id, w.revision, observation(w));
   const reporter: Principal = { id: 'e2e-reporter', role: 'producer', proofs: ['e2e:booking-sms'] };
   for (const binding of [{}, { scenarioRevision: 2, environment: 'staging' }, { scenarioRevision: 1, environment: 'production' }]) {
@@ -988,4 +1001,170 @@ test('formal review identities stay excluded after revisions regardless of clock
   assert.equal(w.formalReviewBaseline, undefined);
   w = await engine.observe(w.id, w.revision, { ...observation(w), reviewIds: [100, 101, 102], reviews: [{ ...existing, id: 102 }] });
   assert.equal(w.gates.find(g => g.name === 'review')!.passed, false);
+});
+
+const sha40 = (label: string) => label.padEnd(40, '0');
+function tip(w: Work, candidate: { sha: string; baseSha: string }, extra: Partial<Observation> = {}): Observation {
+  return { clockOffset: { min: 0, max: 0 },
+    candidate: { ...candidate, pr: w.submission!.pr, branch: w.workspaces.at(-1)!.branch, author: 'implementer' },
+    checks: [{ name: 'test', result: 'success', appId: 15368 }, { name: 'typecheck', result: 'success', appId: 15368 }],
+    reviews: [{ reviewer: 'reviewer', sha: candidate.sha, state: 'APPROVED' }], protected: true, mergeable: true,
+    merged: false, mergeSha: null, prState: 'open', draft: false, baseTip: candidate.baseSha,
+    files: ['src/engine.ts'], at: new Date().toISOString(), ...extra };
+}
+async function validated(w: Work, candidate: { sha: string; baseSha: string }, extra: Partial<Observation> = {}) {
+  const observed = await engine.observe(w.id, w.revision, tip(w, candidate, extra));
+  return engine.execute(producer, 'evidence', observed.id, { ...proof(), sha: candidate.sha, baseSha: candidate.baseSha }, randomUUID());
+}
+async function reload(w: Work) { return (await store.list()).find(item => item.id === w.id)!; }
+async function placementOf(w: Work) { return predictQueue(await store.list(), Date.now()).find(entry => entry.id === w.id)!; }
+async function onlyJob(w: Work) {
+  await store.pool.query("UPDATE jobs SET available_at=now()+interval '1 hour'");
+  await store.pool.query('UPDATE jobs SET available_at=now(),locked_until=NULL,token=NULL WHERE work_id=$1', [w.id]);
+}
+function queueAdapter(observation: (w: Work) => Observation, speculation: (w: Work, placement: QueuePlacement) => QueueSpeculation, seen: { key: string; base: string | null; predecessors: string[] }[] = []) {
+  return { seen, adapter: {
+    observe: async (w: Work) => observation(w),
+    publishSpeculativeTip: async (w: Work, placement: QueuePlacement) => {
+      seen.push({ key: w.key, base: placement.predictedBase, predecessors: placement.predecessors });
+      return speculation(w, placement);
+    },
+    publish: async () => { throw new Error('the replaced head must not receive a check publication'); },
+  } as unknown as GitHub };
+}
+const predicted = (w: Work, placement: QueuePlacement, tipSha: string, baseTree: string): QueueSpeculation =>
+  ({ ref: queueRef(w.key), tip: tipSha, base: placement.predictedBase!, baseTree, predecessors: placement.predecessors, policyRevision: w.policyRevision, publishedAt: new Date().toISOString() });
+
+test('a queued candidate is validated on the speculative tip it will land, and an earlier merge does not invalidate it', async () => {
+  const main = sha40('a1'), firstHead = sha40('a2'), secondHead = sha40('a3'), secondTip = sha40('a4'), mainTree = sha40('a5'), mergeSha = sha40('a6');
+  let first = await submitted(), second = await submitted();
+  first = await validated(first, { sha: firstHead, baseSha: main });
+  second = await validated(second, { sha: secondHead, baseSha: main });
+  const head = await placementOf(first), behind = await placementOf(second);
+  assert.equal(head.position, 0); assert.equal(head.predictedBase, main); assert.equal(head.current, true);
+  assert.equal(behind.position, 1); assert.equal(behind.predictedBase, firstHead, 'the entry behind predicts against the tip the head will land');
+  assert.equal(behind.current, false);
+  second = await reload(second);
+  assert.equal(second.mergeAuthorization, null);
+  assert.match(second.gates.find(gate => gate.name === 'merge')!.reasons.join(' '), /position 2 of 2/);
+
+  await onlyJob(second);
+  const { seen, adapter } = queueAdapter(w => tip(w, { sha: secondHead, baseSha: main }), (w, placement) => predicted(w, placement, secondTip, mainTree));
+  await processJob(engine, adapter);
+  assert.deepEqual(seen, [{ key: second.key, base: firstHead, predecessors: [first.key] }]);
+  second = await reload(second);
+  assert.equal(second.queue!.speculation!.tip, secondTip);
+  assert.equal(second.queue!.speculation!.ref, `refs/graphyard/queue/${second.key.toLowerCase()}`);
+  assert.equal((await store.events(second.id)).filter(event => event.kind === 'queue.predicted').length, 1);
+
+  second = await engine.observe(second.id, second.revision, tip(second, { sha: secondTip, baseSha: firstHead }, { baseTip: main, reviews: [{ reviewer: 'reviewer', sha: secondHead, state: 'APPROVED' }] }));
+  assert.equal(second.candidate!.baseSha, firstHead, 'the candidate binds to the predicted base rather than the base branch');
+  assert.equal(second.gates.find(gate => gate.name === 'review')!.passed, false, 'approval of the replaced head does not approve the speculative tip');
+  assert.equal(second.gates.find(gate => gate.name === 'acceptance')!.passed, false, 'proof of the replaced head does not prove the speculative tip');
+  second = await validated(second, { sha: secondTip, baseSha: firstHead }, { baseTip: main });
+  assert.equal(second.gates.find(gate => gate.name === 'acceptance')!.passed, true);
+  assert.match(second.gates.find(gate => gate.name === 'merge')!.reasons.join(' '), /position 2 of 2/, 'a fully validated entry still waits its turn');
+
+  first = await reload(first);
+  const granted = await engine.acquireMerge(coordinator, first.id, { expectedRevision: first.revision, sha: firstHead, baseSha: main, policyRevision: first.policyRevision }, randomUUID());
+  const verified = await engine.verifyMerge(coordinator, first.id, { executionId: granted.execution.id }, tip(first, { sha: firstHead, baseSha: main }), randomUUID());
+  await delay(5); const mergedAt = ((await store.pool.query('SELECT clock_timestamp() AS now')).rows[0].now as Date).toISOString(); await delay(5);
+  first = await engine.observe(first.id, verified.revision, tip(first, { sha: firstHead, baseSha: main }, { merged: true, mergeSha, mergedAt }));
+  assert.equal(first.stage, 'done');
+
+  second = await reload(second);
+  const evidenceBefore = second.evidence.length;
+  second = await engine.observe(second.id, second.revision, tip(second, { sha: secondTip, baseSha: firstHead }, { baseTip: mergeSha, baseTree: mainTree }));
+  assert.equal((await placementOf(second)).position, 0);
+  assert.equal(second.evidence.length, evidenceBefore, 'no new proof was required after the merge ahead of it');
+  assert.ok(second.gates.every(gate => gate.passed), second.gates.flatMap(gate => gate.reasons).join('; '));
+  assert.equal(second.mergeAuthorization!.sha, secondTip);
+  assert.equal(second.mergeAuthorization!.baseSha, firstHead);
+});
+
+test('main advancing outside the queue re-validates the head and re-bases the entries behind it without rework', async () => {
+  const main = sha40('b1'), firstHead = sha40('b2'), secondHead = sha40('b3'), secondTip = sha40('b4'), mainTree = sha40('b5');
+  const outside = sha40('b6'), outsideTree = sha40('b7'), firstTip = sha40('b8'), secondRebase = sha40('b9');
+  let first = await submitted(), second = await submitted();
+  first = await validated(first, { sha: firstHead, baseSha: main });
+  second = await validated(second, { sha: secondHead, baseSha: main });
+  await onlyJob(second);
+  const initial = queueAdapter(w => tip(w, { sha: secondHead, baseSha: main }), (w, placement) => predicted(w, placement, secondTip, mainTree));
+  await processJob(engine, initial.adapter);
+  second = await validated(await reload(second), { sha: secondTip, baseSha: firstHead }, { baseTip: main });
+  assert.ok(second.queue!.speculation);
+
+  // Someone lands a commit on the managed branch outside the queue.
+  first = await engine.observe(first.id, (await reload(first)).revision, tip(first, { sha: firstHead, baseSha: main }, { baseTip: outside, baseTree: outsideTree }));
+  assert.equal(first.mergeAuthorization, null, 'the stale binding is refused, not reused');
+  assert.match(first.gates.find(gate => gate.name === 'merge')!.reasons.join(' '), /Speculative tip on predicted base/);
+  const waiting = await placementOf(second);
+  assert.equal(waiting.predictedBase, null); assert.equal(waiting.publishable, false);
+  assert.match(waiting.reasons.at(-1)!, /Waiting for .* to publish its speculative tip/, 'only the queue head is re-validated against the new base');
+  assert.equal((await placementOf(first)).publishable, true);
+
+  await onlyJob(first);
+  const headRun = queueAdapter(w => tip(w, { sha: firstHead, baseSha: main }, { baseTip: outside, baseTree: outsideTree }), (w, placement) => predicted(w, placement, firstTip, outsideTree));
+  await processJob(engine, headRun.adapter);
+  assert.deepEqual(headRun.seen, [{ key: first.key, base: outside, predecessors: [] }]);
+  first = await validated(await reload(first), { sha: firstTip, baseSha: outside }, { baseTip: outside });
+  assert.ok(first.gates.every(gate => gate.passed));
+
+  const rebased = await placementOf(second);
+  assert.equal(rebased.predictedBase, firstTip, 'the entry behind is re-predicted onto the new head tip');
+  assert.equal(rebased.publishable, true);
+  await onlyJob(second);
+  const behindRun = queueAdapter(w => tip(w, { sha: secondTip, baseSha: firstHead }, { baseTip: outside }), (w, placement) => predicted(w, placement, secondRebase, outsideTree));
+  await processJob(engine, behindRun.adapter);
+  assert.deepEqual(behindRun.seen, [{ key: second.key, base: firstTip, predecessors: [first.key] }]);
+  second = await reload(second);
+  assert.equal(second.queue!.speculation!.tip, secondRebase);
+  assert.equal(second.reworkRequested, false, 'Graphyard re-based the entry; the worker was not asked to redo anything');
+  assert.equal(second.submission!.epoch, 1); assert.equal(second.workspaces.length, 1);
+  second = await engine.observe(second.id, second.revision, tip(second, { sha: secondRebase, baseSha: firstTip }, { baseTip: outside, reviews: [{ reviewer: 'reviewer', sha: secondTip, state: 'APPROVED' }] }));
+  assert.equal(second.gates.find(gate => gate.name === 'acceptance')!.passed, false, 'the binding made against the superseded tip is refused');
+  assert.equal(second.gates.find(gate => gate.name === 'review')!.passed, false);
+});
+
+test('a failed speculative validation ejects the entry with a reason and re-predicts the queue without it', async () => {
+  const main = sha40('c1'), firstHead = sha40('c2'), secondHead = sha40('c3'), thirdHead = sha40('c4'), thirdTip = sha40('c5'), mainTree = sha40('c6');
+  let first = await submitted(), second = await submitted(), third = await submitted();
+  first = await validated(first, { sha: firstHead, baseSha: main });
+  second = await validated(second, { sha: secondHead, baseSha: main });
+  third = await validated(third, { sha: thirdHead, baseSha: main });
+  assert.deepEqual((await placementOf(third)).predecessors, [first.key, second.key]);
+
+  second = await engine.observe(second.id, (await reload(second)).revision, tip(second, { sha: secondHead, baseSha: main }, { checks: [{ name: 'test', result: 'failure', appId: 15368 }, { name: 'typecheck', result: 'success', appId: 15368 }] }));
+  assert.equal(second.queue, null);
+  assert.match(second.queueEjection!.reason, /Required CI check test did not pass on speculative tip/);
+  assert.equal(second.queueHistory!.at(-1)!.event, 'ejected');
+  assert.ok((await store.events(second.id)).some(event => event.payload.work.queueEjection?.reason === second.queueEjection!.reason), 'the ejection and its reason are in the append-only history');
+  assert.deepEqual((await placementOf(third)).predecessors, [first.key], 'the entries behind are re-predicted without the ejected entry');
+  assert.equal((await placementOf(third)).predictedBase, firstHead);
+
+  // A repaired candidate returns to the back of the queue; the failed commit cannot re-enter.
+  second = await engine.observe(second.id, second.revision, tip(second, { sha: secondHead, baseSha: main }));
+  assert.equal(second.queue, null);
+  assert.match(second.gates.find(gate => gate.name === 'merge')!.reasons.join(' '), /Ejected from the merge queue/);
+  second = await validated(second, { sha: sha40('c7'), baseSha: main });
+  assert.ok(second.queue); assert.ok(second.queue!.sequence > third.queue!.sequence);
+
+  // No identity can buy a position, reorder the queue, or merge past the head.
+  await assert.rejects(engine.execute(operator, 'queue' as any, third.id, {}, randomUUID()), /Unknown command/);
+  third = await reload(third);
+  await assert.rejects(engine.acquireMerge(operator, third.id, { expectedRevision: third.revision, sha: thirdHead, baseSha: main, policyRevision: third.policyRevision }, randomUUID()), /Merge authorization is no longer current/);
+  await assert.rejects(engine.acquireMerge(coordinator, third.id, { expectedRevision: third.revision, sha: thirdHead, baseSha: main, policyRevision: third.policyRevision }, randomUUID()), /Merge authorization is no longer current/);
+
+  await onlyJob(third);
+  const conflicted = {
+    observe: async (w: Work) => tip(w, { sha: thirdHead, baseSha: main }),
+    publishSpeculativeTip: async () => { throw new SpeculativeConflict(`Speculative merge of ${firstHead.slice(0, 12)} into graphyard/third conflicts and cannot be resolved by Graphyard`); },
+    publish: async () => {},
+  } as unknown as GitHub;
+  await processJob(engine, conflicted);
+  third = await reload(third);
+  assert.equal(third.queue, null);
+  assert.match(third.queueEjection!.reason, /conflicts and cannot be resolved by Graphyard/);
+  assert.equal((await store.events(third.id)).filter(event => event.kind === 'queue.ejected').length, 1);
+  assert.equal(thirdTip.length, 40);
 });

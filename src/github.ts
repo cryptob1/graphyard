@@ -1,9 +1,10 @@
-import { MergeExecutionInProgress, ReconciliationRetry, requireCurrent } from './model.js';
+import { MergeExecutionInProgress, ReconciliationRetry, Refusal, SpeculativeConflict, requireCurrent } from './model.js';
 import { createSign, randomUUID } from 'node:crypto';
 import { observeCodex } from './codex-review.js';
 import { readFile } from 'node:fs/promises';
 import type { Engine } from './engine.js';
 import { demand, type Observation, type Work, type ReviewRequest } from './model.js';
+import { queuePlacement, queueRef, type QueuePlacement, type QueueSpeculation } from './merge-queue.js';
 
 export const CHECK_NAME = 'Graphyard / merge';
 export interface GitHubConfig { repository: string; base: string; appId: number; installationId: number; privateKey: string }
@@ -117,7 +118,12 @@ export class GitHub {
     ]);
     const latest = new Map<string, any>();
     for (const r of reviews) if (['APPROVED', 'CHANGES_REQUESTED', 'DISMISSED'].includes(r.state)) latest.set(r.user.login, r);
-    const candidateBase = pr.merged && work.candidate && work.candidate.sha === pr.head.sha ? work.candidate.baseSha : pr.base.sha;
+    // A published speculative tip carries its own validated base. The candidate stays bound to
+    // that exact commit while the managed branch advances underneath it through queue merges.
+    const speculation = work.queue?.speculation;
+    const speculative = !!speculation && speculation.tip === pr.head.sha && speculation.policyRevision === work.policyRevision;
+    const candidateBase = pr.merged && work.candidate && work.candidate.sha === pr.head.sha ? work.candidate.baseSha : speculative ? speculation!.base : pr.base.sha;
+    const baseTree = speculative && speculation!.base !== pr.base.sha ? await this.commitTree(pr.base.sha) : undefined;
     const agentReview = work.policy.review && work.policy.reviewProvider === 'codex' ? !pr.merged && (pr.state !== 'open' || pr.draft !== false)
       ? { provider: 'codex' as const, sha: pr.head.sha, approved: false, reason: pr.draft ? 'Pull request is draft; mark it ready to request code review' : 'Pull request is not open; reopen it to request code review' }
       : await observeCodex(this, pr.number, pr.head.sha, reviews, pr.user.id, work.reviewRequest, candidateBase, work.policyRevision, this.config.appId) : undefined;
@@ -132,6 +138,7 @@ export class GitHub {
       reviews: [...latest.values()].map(r => ({ id: r.id, reviewer: r.user.login, sha: r.commit_id, state: r.state, submittedAt: r.submitted_at })),
       prState: pr.state, draft: pr.draft, merged: pr.merged, mergeSha: pr.merge_commit_sha, mergedAt: pr.merged_at, mergeable: pr.mergeable === true && !pr.draft && pr.state === 'open',
       protected: protectedBranch, files: files.map(f => f.filename), at: startedAt,
+      baseTip: pr.base.sha, ...(baseTree ? { baseTree } : {}),
     };
   }
   async verify(work: Work): Promise<Observation> {
@@ -160,6 +167,50 @@ export class GitHub {
     demand(comment.performed_via_github_app?.id === this.config.appId && comment.user?.type === 'Bot' && comment.body === body && Number.isSafeInteger(comment.id) && Number.isFinite(Date.parse(comment.created_at)), 'Review dispatch did not return an authenticated Graphyard comment', 502);
     return { commentId: comment.id, sha: work.candidate.sha, baseSha: work.candidate.baseSha, policyRevision: work.policyRevision, body, createdAt: comment.created_at };
   }
+  async commitTree(sha: string): Promise<string> {
+    const commit = await this.request(`/commits/${sha}`);
+    const tree = commit?.commit?.tree?.sha;
+    demand(typeof tree === 'string' && /^[a-f0-9]{40}$/.test(tree), `GitHub did not return a readable tree for ${sha}`, 502);
+    return tree;
+  }
+  /** Returns the new head, or null when the branch already contains the merged commit. */
+  async mergeBranch(branch: string, head: string, message: string): Promise<string | null> {
+    let result: any;
+    try { result = await this.request('/merges', 'POST', { base: branch, head, commit_message: message }); }
+    catch (error) {
+      if (error instanceof Refusal && /\(409\)/.test(error.message)) throw new SpeculativeConflict(`Speculative merge of ${head.slice(0, 12)} into ${branch} conflicts and cannot be resolved by Graphyard`);
+      throw error;
+    }
+    if (result === null) return null;
+    demand(typeof result?.sha === 'string' && /^[a-f0-9]{40}$/.test(result.sha), 'GitHub returned an invalid speculative merge commit', 502);
+    return result.sha;
+  }
+  async publishRef(ref: string, sha: string) {
+    try { await this.request(`/git/${ref}`, 'PATCH', { sha, force: true }); }
+    catch (error) {
+      if (!(error instanceof Refusal) || !/\(404\)|\(422\)/.test(error.message)) throw error;
+      await this.request('/git/refs', 'POST', { ref, sha });
+    }
+  }
+  /**
+   * Builds the commit the queued candidate will actually land: the predicted base (the base
+   * branch plus every entry ahead of it) with this candidate merged in. The result is published
+   * under a Graphyard-owned ref and pushed onto the candidate branch, so the PR head, the
+   * required checks, the review, and every proof all bind to that one exact commit.
+   */
+  async publishSpeculativeTip(work: Work, placement: QueuePlacement, beforeWrite: () => Promise<void> = async () => {}): Promise<QueueSpeculation> {
+    demand(work.candidate && work.queue && placement.predictedBase, 'A queued candidate with a predicted base is required');
+    const pr = await this.request(`/pulls/${work.candidate!.pr}`);
+    requireCurrent(pr.head.sha === work.candidate!.sha && pr.base.ref === this.config.base && pr.state === 'open' && pr.draft === false,
+      'Pull request changed before speculative prediction; retry');
+    const baseTree = await this.commitTree(placement.predictedBase!);
+    await beforeWrite();
+    const merged = await this.mergeBranch(pr.head.ref, placement.predictedBase!, `Graphyard speculative tip for ${work.key} behind ${placement.predecessors.join(', ') || this.config.base}`);
+    const tip = merged ?? pr.head.sha;
+    const ref = queueRef(work.key);
+    await this.publishRef(ref, tip);
+    return { ref, tip, base: placement.predictedBase!, baseTree, predecessors: placement.predecessors, policyRevision: work.policyRevision, publishedAt: new Date().toISOString() };
+  }
   async publish(work: Work, forcedReason?: string, beforeWrite: () => Promise<void> = async () => {}) {
     if (!work.candidate) return;
     const reasons = [...work.gates.flatMap(g => g.reasons), ...work.violations, ...(forcedReason ? [forcedReason] : [])];
@@ -180,6 +231,22 @@ export async function githubFromEnv() {
   const privateKey = process.env.GITHUB_PRIVATE_KEY ?? await readFile(process.env.GITHUB_PRIVATE_KEY_FILE!, 'utf8');
   return new GitHub({ repository: process.env.GITHUB_REPOSITORY, base: process.env.GITHUB_BASE_BRANCH ?? 'main', appId: Number(process.env.GITHUB_APP_ID), installationId: Number(process.env.GITHUB_INSTALLATION_ID), privateKey });
 }
+/**
+ * Moves one queued candidate onto the tip it is predicted to land. Entries publish head-first:
+ * an entry with no predicted base yet simply waits for the one ahead of it to settle.
+ */
+async function advanceQueue(engine: Engine, github: GitHub, work: Work, job: { work_id: string; token: string }, guard: (snapshot: Work, success: boolean) => () => Promise<void>) {
+  const all = await engine.store.list();
+  const placement = queuePlacement(work, all.map(item => item.id === work.id ? work : item), Date.now());
+  if (!placement || placement.current || !placement.publishable) return { work, published: false };
+  try {
+    const speculation = await github.publishSpeculativeTip(work, placement, guard(work, false));
+    return { work: await engine.bindSpeculativeTip(work.id, work.revision, speculation, job.token), published: true };
+  } catch (error) {
+    if (!(error instanceof SpeculativeConflict)) throw error;
+    return { work: await engine.ejectFromQueue(work.id, work.revision, error.message, job.token), published: false };
+  }
+}
 export async function processJob(engine: Engine, github: GitHub) {
   const job = await engine.store.takeJob();
   if (!job) return;
@@ -199,6 +266,12 @@ export async function processJob(engine: Engine, github: GitHub) {
       if (!observation.merged && observation.prState === 'open' && observation.draft === false && work.policy.review && work.policy.reviewProvider === 'codex' && (!work.reviewRequest || work.reviewRequest.sha !== work.candidate?.sha || work.reviewRequest.baseSha !== work.candidate?.baseSha || work.reviewRequest.policyRevision !== work.policyRevision)) {
         const request = await github.requestCodex(work, guard(work, false));
         work = await engine.bindReviewRequest(work.id, work.revision, request, job.token);
+      }
+      if (!observation.merged && observation.prState === 'open' && observation.draft === false) {
+        const advanced = await advanceQueue(engine, github, work, job, guard);
+        work = advanced.work;
+        // A freshly published tip replaces the PR head; the next observation binds the gates to it.
+        if (advanced.published) { await engine.store.finishJob(job.work_id, job.token, undefined, true); return; }
       }
       if (!observation.merged) await github.publish(work, undefined, guard(work, work.gates.every(g => g.passed) && !work.violations.length));
     }

@@ -4,6 +4,7 @@ import { Store, save, wakeJob } from './store.js';
 import { workspacePath, pathsOverlap, validBranch } from './workspace.js';
 import { activeLease, admin, operatorCapability, MergeExecutionInProgress, requireCurrent, createSchema, criterionSchema, currentEvidence, resourcesSchema, demand, evaluate, proofSchema, type Principal, type Work, type Observation, type ReviewRequest, type OperatorCapability } from './model.js';
 import { resourceConflicts } from './coordination.js';
+import { queueHistoryLimit, type QueueSpeculation } from './merge-queue.js';
 
 const epoch = z.number().int().positive();
 const sha = z.string().regex(/^[a-f0-9]{40}$/);
@@ -370,6 +371,43 @@ export class Engine {
       this.evaluate(work, all, now); await save(db, work, 'github', 'review.requested', now); return work;
     });
   }
+  /** Records the Graphyard-published speculative tip this candidate must now be validated on. */
+  async bindSpeculativeTip(id: string, expectedRevision: number, speculation: QueueSpeculation, jobToken: string) {
+    return this.store.transaction(async (db, now) => {
+      const job = (await db.query('SELECT 1 FROM jobs WHERE work_id=$1 AND token=$2 AND locked_until>$3', [id, jobToken, now])).rows[0];
+      requireCurrent(job, 'Integration job lease expired or superseded');
+      const all: Work[] = (await db.query('SELECT document FROM work_items ORDER BY number')).rows.map(r => r.document);
+      const work = all.find(w => w.id === id);
+      requireCurrent(work && work.revision === expectedRevision && work.stage !== 'done' && !work.observation?.merged, 'Task changed while the speculative tip was built');
+      demand(!work.mergeExecution || Date.parse(work.mergeExecution.expiresAt) <= now.getTime(), 'Merge execution is active');
+      requireCurrent(work.queue && speculation.policyRevision === work.policyRevision, 'Queue entry or policy changed while the speculative tip was built');
+      work.queue!.speculation = speculation;
+      work.queueHistory = [...(work.queueHistory ?? []), { at: now.toISOString(), event: 'predicted' as const, sequence: work.queue!.sequence, tip: speculation.tip }].slice(-queueHistoryLimit);
+      this.evaluate(work, all, now);
+      await save(db, work, 'graphyard', 'queue.predicted', now, { tip: speculation.tip, base: speculation.base, ref: speculation.ref, predecessors: speculation.predecessors });
+      await wakeJob(db, work.id);
+      return work;
+    });
+  }
+  /** Removes an entry whose speculative validation cannot succeed, with the reason on the record. */
+  async ejectFromQueue(id: string, expectedRevision: number, reason: string, jobToken: string) {
+    return this.store.transaction(async (db, now) => {
+      const job = (await db.query('SELECT 1 FROM jobs WHERE work_id=$1 AND token=$2 AND locked_until>$3', [id, jobToken, now])).rows[0];
+      requireCurrent(job, 'Integration job lease expired or superseded');
+      const all: Work[] = (await db.query('SELECT document FROM work_items ORDER BY number')).rows.map(r => r.document);
+      const work = all.find(w => w.id === id);
+      requireCurrent(work && work.revision === expectedRevision && work.stage !== 'done', 'Task changed before the queue ejection');
+      requireCurrent(work.queue, 'Queue entry already left the merge queue');
+      const sequence = work.queue!.sequence;
+      work.queueEjection = { at: now.toISOString(), sequence, reason, sha: work.candidate?.sha ?? null, policyRevision: work.policyRevision };
+      work.queueHistory = [...(work.queueHistory ?? []), { at: now.toISOString(), event: 'ejected' as const, sequence, reason, ...(work.queue!.speculation ? { tip: work.queue!.speculation.tip } : {}) }].slice(-queueHistoryLimit);
+      work.queue = null;
+      this.evaluate(work, all, now);
+      await save(db, work, 'graphyard', 'queue.ejected', now, { sequence, reason });
+      for (const behind of all) if (behind.queue && behind.id !== work.id) await wakeJob(db, behind.id);
+      return work;
+    });
+  }
   evaluate(work: Work, all: Work[], now: Date) {
     const result = evaluate(work, all, now, this.ciAppIds);
     if (work.stage !== result.stage) work.stageEnteredAt = now.toISOString();
@@ -463,6 +501,8 @@ export class Engine {
           work.mergeExecution = null;
           work.delivery = { mergedAt: observation.mergedAt!, mergeSha: observation.mergeSha, authorizationRevision: authorizationRevision! };
           await db.query('DELETE FROM jobs WHERE work_id=$1', [work.id]);
+          // The queue shifted: every entry behind this one has a new position and predicted base.
+          for (const behind of all) if (behind.queue && behind.id !== work.id) await wakeJob(db, behind.id);
         } else {
           work.mergeExecution = null;
           if (!work.violations.includes(violation)) work.violations.push(violation);

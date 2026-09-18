@@ -10,7 +10,7 @@ In your personal GitHub developer settings, create a GitHub App with:
 
 - Homepage: your Graphyard URL.
 - Webhook: `https://YOUR-HOST/api/github/webhook`, with a random webhook secret.
-- Repository permissions: Metadata read, Contents read, Pull requests read/write, Issues read (for comment webhooks), Checks read/write, and Administration read (to inspect branch protection).
+- Repository permissions: Metadata read, Contents read/write (to publish speculative merge-queue tips), Pull requests read/write, Issues read (for comment webhooks), Checks read/write, and Administration read (to inspect branch protection).
 - Events: Pull request, Pull request review, Check run, Check suite, Issue comment, and Push.
 - Install only on the repository managed by this Graphyard instance.
 
@@ -44,8 +44,41 @@ The service does not automatically overwrite repository protection. For this pro
 - Each acceptance proof has trusted evidence for the current head/base/policy tuple, with a pass result, nonzero executed count, and zero skipped count.
 - GitHub says the PR is mergeable and is not a draft.
 - Required branch protection is independently observed.
+- The candidate is at the head of the merge queue, on the speculative tip it will actually land.
 
 By default the configured CI App ID is `15368`; verify the actual app IDs returned by your check runs and adjust `GITHUB_CI_APP_IDS`. A check with the right name from an unknown App cannot satisfy policy.
+
+## Merge queue
+
+Every candidate lands on the same managed branch, so Graphyard serializes the final hop through one merge queue. The queue exists so that a merge does not invalidate the candidates behind it.
+
+A candidate enters the queue when it passes its own gates: independent review, required checks, and trusted acceptance evidence for the commit it currently offers. Membership is derived from those gates, never requested. No command, operator, or administrator can insert an entry, hold or buy a position, reorder the queue, or merge past the head; there is no bypass path.
+
+Graphyard predicts what each entry will actually land:
+
+- the entry at the head predicts against the current base-branch head;
+- every entry behind it predicts against the validated tip of the entry directly ahead — the base branch plus every earlier queue entry.
+
+When a candidate is not already sitting on its predicted base, Graphyard merges that base into the candidate branch, publishes the resulting commit under its own `refs/graphyard/queue/KEY` ref, and rebinds the candidate to it. That commit is the **speculative tip**. Required checks, the review, and every acceptance proof must then reference that exact commit; bindings made against the replaced head are refused, not reused. The base recorded for the candidate is the predicted base, not wherever the base branch happens to point.
+
+Because every entry is already validated against the entries ahead of it, merging the head does not invalidate the ones behind. Graphyard keeps an entry bound across an advancing base branch only when the advance leaves the validated base tree unchanged, which is exactly what an earlier queue merge does; the merge then lands the tested tree on the base branch. Any other advance — a direct push or an out-of-band merge — changes that tree, and the merge is refused rather than landing an untested combination.
+
+When the base branch advances outside the queue, only the head re-validates against it. Entries behind it have no predicted base until the head settles; Graphyard then re-bases each of them in turn onto the new chain. The worker is not asked to rebase and no rework is requested: the entry keeps its assignment, workspace, and position, and its stale bindings are refused until the new tip is validated.
+
+An entry leaves the queue by merging, or by an explicit ejection:
+
+| Ejection reason | Trigger |
+| --- | --- |
+| Required CI check did not pass | A required check reported an adverse conclusion on the speculative tip |
+| Review requested changes | A reviewer requested changes on the speculative tip |
+| Proof failed | Trusted evidence for the tip reported a failure |
+| Speculative merge conflicts | The predicted base cannot be merged into the candidate branch |
+| Policy revision changed | Requirements were revised after the entry was queued |
+| Returned for a new attempt | An operator requested rework, or the pull request was closed |
+
+Pending, missing, or still-running validation is not failure and never ejects. Every ejection is recorded in the append-only history with its reason and the tip it applied to, the entries behind it are re-predicted without it, and the ejected commit cannot re-enter. A repaired candidate re-enters at the back of the queue with a new sequence.
+
+Queue position, predicted base, predicted tip, and per-entry wait time appear in `graphyard master status` and on the dashboard. See [master-agent operating mode](master-agent.md#merge-queue).
 
 ## Trusted test producers
 

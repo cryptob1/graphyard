@@ -7,7 +7,7 @@ import { execFile, execFileSync } from 'node:child_process';
 import { createServer } from 'node:http';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
-import { assertDispatchable, assertMasterBinding, assertMergeCandidate, assertMergeProtection, buildMasterStatus, continueMergeBatch, currentMergeCandidates, dispatchWork, githubProviderDelay, inspectWorkerCredentials, loadMasterConfig, managedMasterInstructions, mergeWork, observeHerdrAgents, prepareWorkerLaunch, saveWorkerProfile, setupMaster, startMaster, workerProfileSchema } from '../src/master.js';
+import { assertDispatchable, assertMasterBinding, assertMergeCandidate, assertMergeProtection, assertQueuedLanding, buildMasterStatus, continueMergeBatch, currentMergeCandidates, dispatchWork, githubProviderDelay, inspectWorkerCredentials, loadMasterConfig, managedMasterInstructions, mergeWork, observeHerdrAgents, prepareWorkerLaunch, saveWorkerProfile, setupMaster, startMaster, workerProfileSchema } from '../src/master.js';
 import type { Work } from '../src/model.js';
 
 const launcher = fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url));
@@ -355,4 +355,41 @@ test('merge-all selection and execution do not let refusing work starve eligible
     return { key: item.key, result: 'merged' };
   });
   assert.deepEqual(batch, [{ key: 'GY-50', result: 'refused', reason: 'candidate changed' }, { key: 'GY-51', result: 'merged' }]);
+});
+
+const queueEntry = (sequence: number, enqueuedAt: string, speculation: any = null) => ({ sequence, enqueuedAt, policyRevision: 2, speculation });
+
+test('master status reports queue position, predicted tip, and per-entry wait time', () => {
+  const observedAt = '2030-01-01T01:00:00Z';
+  const head = work({ id: 'head-id', key: 'GY-42', observation: { at: observedAt, baseTip: 'b'.repeat(40), candidate: { sha: 'a'.repeat(40), baseSha: 'b'.repeat(40), pr: 42, branch: 'graphyard/gy-42-1', author: 'worker' } } as any, queue: queueEntry(1, '2030-01-01T00:30:00Z') } as Partial<Work>);
+  const next = work({ id: 'next-id', key: 'GY-43', candidate: { sha: 'd'.repeat(40), baseSha: 'a'.repeat(40), pr: 43, branch: 'graphyard/gy-43-1', author: 'worker' },
+    observation: { at: observedAt, baseTip: 'b'.repeat(40), candidate: { sha: 'd'.repeat(40), baseSha: 'a'.repeat(40), pr: 43, branch: 'graphyard/gy-43-1', author: 'worker' } } as any,
+    queue: queueEntry(2, '2030-01-01T00:45:00Z', { ref: 'refs/graphyard/queue/gy-43', tip: 'd'.repeat(40), base: 'a'.repeat(40), baseTree: 'e'.repeat(40), predecessors: ['GY-42'], policyRevision: 2, publishedAt: observedAt }),
+    gates: [{ name: 'merge', passed: false, reasons: ['Merge queue position 2 of 2: GY-42 is ahead'] }] } as Partial<Work>);
+  const status = buildMasterStatus({ work: [head, next], now: observedAt }, [], []);
+  assert.equal(status.counts.queued, 2);
+  assert.deepEqual(status.queue.map(entry => [entry.key, entry.position, entry.size]), [['GY-42', 1, 2], ['GY-43', 2, 2]]);
+  assert.equal(status.queue[0].predictedBase, 'b'.repeat(40));
+  assert.equal(status.queue[0].predictedTip, 'a'.repeat(40));
+  assert.equal(status.queue[0].waitMinutes, 30);
+  assert.equal(status.queue[1].predictedBase, 'a'.repeat(40), 'the entry behind predicts against the tip ahead of it');
+  assert.deepEqual(status.queue[1].ahead, ['GY-42']);
+  assert.equal(status.queue[1].validated, true);
+  assert.equal(status.queue[1].waitMinutes, 15);
+  assert.equal(status.work[1].queue!.position, 2);
+  assert.equal(status.work[1].mergeable, false, 'only the queue head can hold a merge authorization');
+});
+
+test('a merge only proceeds while the validated tip still lands its tested tree', () => {
+  const tip = 'a'.repeat(40), validatedBase = 'b'.repeat(40), baseTree = 'e'.repeat(40), advanced = 'f'.repeat(40);
+  const queued = work({ queue: queueEntry(1, '2030-01-01T00:30:00Z', { ref: 'refs/graphyard/queue/gy-42', tip, base: validatedBase, baseTree, predecessors: ['GY-41'], policyRevision: 2, publishedAt: '2030-01-01T00:31:00Z' }) } as Partial<Work>);
+  const authorization = { sha: tip, baseSha: validatedBase };
+  const reads: string[][] = [];
+  const run = (tree: string) => (_command: string, args: string[]) => { reads.push(args); return JSON.stringify({ commit: { tree: { sha: tree } } }); };
+  assert.doesNotThrow(() => assertQueuedLanding(queued, authorization, validatedBase, 'owner/project', run('unused')));
+  assert.equal(reads.length, 0, 'an unchanged base needs no extra provider call');
+  assert.doesNotThrow(() => assertQueuedLanding(queued, authorization, advanced, 'owner/project', run(baseTree)));
+  assert.deepEqual(reads[0], ['api', `repos/owner/project/commits/${advanced}`]);
+  assert.throws(() => assertQueuedLanding(queued, authorization, advanced, 'owner/project', run('9'.repeat(40))), /would no longer land its tested tree/);
+  assert.throws(() => assertQueuedLanding(work(), authorization, advanced, 'owner/project', run(baseTree)), /moved away from the validated base/);
 });

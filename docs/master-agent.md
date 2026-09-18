@@ -92,6 +92,17 @@ The command never uses an admin bypass. Graphyard marks Done only after independ
 
 Use `master init --no-auto-merge` when an operator must approve each merge request. This preference does not weaken the checks.
 
+## Merge queue
+
+Candidates that pass their own gates enter a single merge queue and land in order. `master status` reports the queue directly:
+
+- `queue` lists every entry with its `position`, `size`, `predictedBase`, `predictedTip`, `ahead` keys, `validated` flag, `waitMinutes`, and refusal `reasons`;
+- each work row carries the same placement under `queue`, and `counts.queued` totals the entries.
+
+Only the head of the queue can hold a merge authorization, so `master merge --all` merges one entry per pass and the rest stay refused with an explicit position reason. That is normal, not a fault. Immediately before the provider call the master also rechecks that the base branch still lets the validated tip land its tested tree: either the base is exactly the commit the candidate was validated on, or it advanced only through earlier queue merges, which leave that tree untouched. Any other advance refuses the merge.
+
+Entries behind the head are re-based by Graphyard, not by the worker. Do not request rework, reassign, or ask an agent to rebase a queued candidate because its position or predicted tip changed; check `queue` and the entry's refusal reason first. An entry that fails its speculative validation is ejected with a recorded reason and must be repaired and re-queued — there is no command to reinsert or reorder it. The mechanism and its invariants are in [GitHub enforcement](github.md#merge-queue).
+
 For the full correctness model, see [GitHub enforcement](github.md) and [architecture](architecture.md).
 
 ## Recovery
