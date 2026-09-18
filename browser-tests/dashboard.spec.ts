@@ -21,14 +21,81 @@ for (const viewport of [{ name: 'desktop', width: 1280, height: 900 }, { name: '
     await page.setViewportSize(viewport);
     await page.goto('/docs/how-graphyard-works');
     await expect(page.getByRole('heading', { name: 'How Graphyard works', level: 1 })).toBeVisible();
-    const flow = page.locator('.how-guide > ol');
+    const flow = page.locator('.how-guide > ol').first();
     await expect(flow.locator(':scope > li')).toHaveCount(10);
     const cards = await flow.locator(':scope > li').evaluateAll(elements => elements.map(element => element.getBoundingClientRect().top));
     expect(cards).toEqual([...cards].sort((a, b) => a - b));
     expect(new Set(cards).size).toBe(cards.length);
     await expect(flow.getByText('Setup', { exact: true })).toBeVisible();
     await expect(flow.getByText('Done', { exact: true })).toBeVisible();
-    await expect(page.getByRole('heading', { name: 'Who does what' })).toBeVisible();
+    await expect(page.getByRole('heading', { name: 'Two phases, one clear handoff' })).toBeVisible();
+    const phases = page.getByRole('heading', { name: 'Two phases, one clear handoff' }).locator('xpath=following-sibling::ol[1]/li');
+    await expect(phases).toHaveCount(2);
+    await expect(phases.nth(0)).toContainText('Human operator → one implementation agent');
+    await expect(phases.nth(0)).toContainText('the human operator connects the managed (target) repository and activates its gates');
+    await expect(phases.nth(0)).toContainText('directly supervising a single, worker-scoped implementation agent');
+    await expect(phases.nth(0)).toContainText('never receives the operator or GitHub credentials used for setup');
+    await expect(phases.nth(1)).toContainText('Human → goals, required decisions, oversight');
+    await expect(phases.nth(1)).toContainText('after the managed repository is connected, its gates are active');
+    await expect(phases.nth(1)).toContainText('GY-30 scoped operator automation is configured');
+    await expect(phases.nth(1)).toContainText('supplies goals, required decisions, and oversight');
+    await expect(phases.nth(1)).toContainText('not expected to perform the routine Operator, Master, Worker, or Reviewer/proof-producer duties');
+    await expect(phases.nth(1)).toContainText('shipped and available as an opt-in, least-privilege credential');
+    await expect(phases.nth(1)).toContainText('a configuration step, not future work');
+    await expect(phases.nth(1)).toContainText('this installation provisions the scoped operator-agent principal');
+    await expect(phases.nth(1)).toContainText('the unrestricted human administrator still makes requirements and policy changes');
+    const phaseBoxes = await phases.evaluateAll(elements => elements.map(element => {
+      const box = element.getBoundingClientRect();
+      return { left: box.left, top: box.top, width: box.width };
+    }));
+    if (viewport.name === 'desktop') {
+      expect(Math.abs(phaseBoxes[0].top - phaseBoxes[1].top)).toBeLessThan(2);
+      expect(phaseBoxes[1].left).toBeGreaterThan(phaseBoxes[0].left + phaseBoxes[0].width);
+    } else {
+      expect(phaseBoxes[1].top).toBeGreaterThan(phaseBoxes[0].top);
+    }
+    await expect(page.getByRole('heading', { name: 'Four AI agent sessions' })).toBeVisible();
+    const duties = ['Operator agent', 'Master agent', 'Worker agent', 'Reviewer/proof-producer agent'];
+    for (const duty of duties) await expect(page.getByRole('cell', { name: duty, exact: true })).toBeVisible();
+    const dutiesTable = page.getByRole('heading', { name: 'Four AI agent sessions' }).locator('xpath=following-sibling::table[1]');
+    if (viewport.name === 'mobile') {
+      const geometry = await dutiesTable.evaluate(table => {
+        const cells = Array.from(table.querySelectorAll('tbody td:first-child'));
+        const box = table.getBoundingClientRect();
+        return {
+          clientWidth: table.clientWidth,
+          scrollWidth: table.scrollWidth,
+          right: box.right,
+          viewportWidth: document.documentElement.clientWidth,
+          labels: cells.map(cell => ({
+            width: cell.getBoundingClientRect().width,
+            whiteSpace: getComputedStyle(cell).whiteSpace,
+          })),
+        };
+      });
+      expect(geometry.scrollWidth).toBeGreaterThan(geometry.clientWidth);
+      expect(geometry.right).toBeLessThanOrEqual(geometry.viewportWidth);
+      expect(geometry.labels).toHaveLength(4);
+      for (const label of geometry.labels) {
+        expect(label.width).toBeGreaterThanOrEqual(190);
+        expect(label.whiteSpace).toBe('nowrap');
+      }
+    }
+    const operatorRow = page.getByRole('row', { name: /Operator agent/ });
+    await expect(operatorRow).toContainText('human-approved bounded intent');
+    await expect(operatorRow).toContainText('may add requirements but never remove or rewrite them');
+    await expect(operatorRow).toContainText('Exceptions and approval decisions stay with the human operator');
+    await expect(operatorRow).toContainText('least-privilege, never unrestricted admin authority');
+    await expect(operatorRow).toContainText('GY-30 credential behind this duty is shipped and opt-in');
+    await expect(operatorRow).toContainText('an administrator provisions it per installation');
+    await expect(operatorRow).toContainText('the unrestricted human administrator holds this authority');
+    const separation = page.locator('p', { hasText: 'These are distinct AI sessions' });
+    await expect(separation).toContainText('authenticated principal identities, scoped credentials, and authority checks');
+    await expect(separation).toContainText('must keep the sessions independent');
+    await expect(separation).toContainText('Graphyard does not verify runtime isolation');
+    await expect(separation).toContainText('Worker, Master/coordinator, and Reviewer/proof-producer map to enforced credentials today');
+    await expect(separation).toContainText('shipped credential type that each installation provisions before that session becomes active');
+    await expect(page.getByText('Workers stay untrusted.', { exact: true })).toBeVisible();
     await expect(page.getByText('Graphyard: delivery authority')).toBeVisible();
     await expect(page.getByText('Herdr: runtime supervision')).toBeVisible();
     const bounds = await page.locator('.docs-shell').evaluate(element => ({ width: element.clientWidth, content: element.scrollWidth }));
@@ -222,6 +289,89 @@ test('scenario loading, failure, retry and real empty library are distinct', asy
   await expect(page.getByText('Describe the behavior you need to prove.')).toHaveCount(0);
   failing = false; await page.getByRole('button', { name: 'Retry loading test cases' }).click();
   await expect(page.getByText('Describe the behavior you need to prove.')).toBeVisible();
+  await expect(page.getByRole('alert')).toHaveCount(0);
+});
+
+const savedScenario = { id: 'saved-case', title: 'Saved case', purpose: 'Proves the library survives a failed re-read', setup: ['a condition'], steps: ['an action'], expected: ['an assertion'], environment: 'staging', runner: 'Playwright', testPath: 'tests/e2e/saved.spec.ts', revision: 1, hash: 'abc123', createdAt: '2026-01-01T00:00:00Z', createdBy: 'fixture' };
+async function publishCase(page: Page, id: string) {
+  await page.getByRole('button', { name: '＋ New test case' }).click();
+  await page.getByLabel('Stable ID').fill(id);
+  await page.getByLabel('Title', { exact: true }).fill('Published case');
+  await page.getByLabel('Purpose').fill('Publishes while the catalog read fails');
+  await page.getByLabel('Steps — one action per line').fill('an action');
+  await page.getByLabel('Expected results — one assertion per line').fill('an assertion');
+  await page.getByLabel('Test file in Git').fill('tests/e2e/published.spec.ts');
+  await page.getByRole('button', { name: 'Publish test case' }).click();
+}
+
+test('a failed re-read keeps already-observed test cases visible and marks them stale', async ({ page }) => {
+  await fixture(page); let reads = false;
+  await page.route('**/api/scenarios', route => route.request().method() === 'POST' ? (reads = true, route.fulfill({ json: savedScenario }))
+    : reads ? route.fulfill({ status: 503, json: { error: 'Runner catalog unavailable' } }) : route.fulfill({ json: [savedScenario] }));
+  await login(page); await page.getByRole('button', { name: 'Test cases', exact: false }).click();
+  await expect(page.getByRole('heading', { name: 'Saved case' })).toBeVisible();
+  await publishCase(page, 'published-case');
+  await expect(page.getByRole('alert')).toContainText('unavailable');
+  await expect(page.getByRole('heading', { name: 'Saved case' })).toBeVisible();
+  await expect(page.getByText('Previously loaded definitions are shown; they may be stale.')).toBeVisible();
+  await expect(page.getByText('Describe the behavior you need to prove.')).toHaveCount(0);
+});
+
+test('a failed re-read reports unknown contents instead of claiming an empty or shown library', async ({ page }) => {
+  await fixture(page); let reads = false;
+  await page.route('**/api/scenarios', route => route.request().method() === 'POST' ? (reads = true, route.fulfill({ json: savedScenario }))
+    : reads ? route.fulfill({ status: 503, json: { error: 'Runner catalog unavailable' } }) : route.fulfill({ json: [] }));
+  await login(page); await page.getByRole('button', { name: 'Test cases', exact: false }).click();
+  await expect(page.getByText('Describe the behavior you need to prove.')).toBeVisible();
+  await publishCase(page, 'published-case');
+  await expect(page.getByRole('alert')).toContainText('unavailable');
+  await expect(page.getByText('Describe the behavior you need to prove.')).toHaveCount(0);
+  await expect(page.getByText('Previously loaded definitions are shown; they may be stale.')).toHaveCount(0);
+  await expect(page.getByText('The library could not be re-read; its current contents are unknown.')).toBeVisible();
+  await expect(page.getByText('Test cases could not be re-read. Retry to observe the library.')).toBeVisible();
+});
+
+test('a rejected publish never reports the library as unread or stale', async ({ page }) => {
+  await fixture(page);
+  await page.route('**/api/scenarios', route => route.request().method() === 'POST'
+    ? route.fulfill({ status: 400, json: { error: 'Stable ID exceeds 100 characters' } }) : route.fulfill({ json: [savedScenario] }));
+  await login(page); await page.getByRole('button', { name: 'Test cases', exact: false }).click();
+  await expect(page.getByRole('heading', { name: 'Saved case' })).toBeVisible();
+  await publishCase(page, 'rejected-case');
+  await expect(page.getByRole('alert')).toContainText('Stable ID exceeds 100 characters');
+  await page.getByRole('button', { name: 'Close form' }).click();
+  await expect(page.getByRole('heading', { name: 'Saved case' })).toBeVisible();
+  await expect(page.getByRole('alert')).toHaveCount(0);
+  await expect(page.getByText('Previously loaded definitions are shown; they may be stale.')).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Retry loading test cases' })).toHaveCount(0);
+});
+
+test('a rejected publish leaves a confirmed empty library reported as empty', async ({ page }) => {
+  await fixture(page);
+  await page.route('**/api/scenarios', route => route.request().method() === 'POST'
+    ? route.fulfill({ status: 400, json: { error: 'Stable ID exceeds 100 characters' } }) : route.fulfill({ json: [] }));
+  await login(page); await page.getByRole('button', { name: 'Test cases', exact: false }).click();
+  await expect(page.getByText('Describe the behavior you need to prove.')).toBeVisible();
+  await publishCase(page, 'rejected-case');
+  await expect(page.getByRole('alert')).toContainText('Stable ID exceeds 100 characters');
+  await page.getByRole('button', { name: 'Close form' }).click();
+  await expect(page.getByText('Describe the behavior you need to prove.')).toBeVisible();
+  await expect(page.getByRole('alert')).toHaveCount(0);
+  await expect(page.getByText('The library could not be re-read; its current contents are unknown.')).toHaveCount(0);
+  await expect(page.getByText('Test cases could not be re-read. Retry to observe the library.')).toHaveCount(0);
+});
+
+test('a publish error is not carried into the next form', async ({ page }) => {
+  await fixture(page); let reject = true;
+  await page.route('**/api/scenarios', route => route.request().method() === 'POST'
+    ? (reject ? route.fulfill({ status: 400, json: { error: 'Stable ID exceeds 100 characters' } }) : route.fulfill({ json: savedScenario }))
+    : route.fulfill({ json: [] }));
+  await login(page); await page.getByRole('button', { name: 'Test cases', exact: false }).click();
+  await expect(page.getByText('Describe the behavior you need to prove.')).toBeVisible();
+  await publishCase(page, 'rejected-case');
+  await expect(page.getByRole('alert')).toContainText('Stable ID exceeds 100 characters');
+  await page.getByRole('button', { name: 'Close form' }).click();
+  reject = false; await page.getByRole('button', { name: '＋ New test case' }).click();
   await expect(page.getByRole('alert')).toHaveCount(0);
 });
 
