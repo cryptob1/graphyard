@@ -49,7 +49,7 @@ Existing E2E proof names retain their pinned scenario version. Newly added E2E p
 
 ## Detect overlap without pretending to understand every API
 
-`plannedFiles` can contain exact repository-relative paths or directory prefixes ending in `/`, `/*`, or `/**`. For this advisory feature all three directory forms include descendants. Arbitrary glob expressions, renames across historical paths, generated-file relationships and semantic dependencies are not inferred.
+`plannedFiles` can contain exact repository-relative paths or directory prefixes ending in `/`, `/*`, or `/**`. All three directory forms include descendants, for overlap warnings and for the [regression guard](#refuse-candidates-that-revert-shipped-code-outside-their-scope) alike. Arbitrary glob expressions, renames across historical paths, generated-file relationships and semantic dependencies are not inferred.
 
 Graphyard compares planned paths and provider-observed PR files against other unfinished ready, assigned or submitted work. Cards show the other work keys; details show the overlapping scopes. Backlog-only peers are omitted until scheduled. Warnings may use the last observed diff; they are not proof of current filesystem contents. Overlap does not block a claim: two compatible edits may legitimately touch the same file. Coordinate or add an explicit dependency when ordering is required.
 

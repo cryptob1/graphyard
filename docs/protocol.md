@@ -37,7 +37,7 @@ The initial list API is unpaginated. Do not use it as an unlimited analytics exp
 
 ## Work commands
 
-Create with `POST /api/work` and the structure in [examples/work.json](../examples/work.json). Required fields are `title` and nonempty `criteria`; each criterion requires a unique `AC-N` ID, text, and at least one proof, and may carry an operator-only `bootstrap` declaration. The policy defaults to checks `test` and `typecheck`, plus independent review. Dependencies refer to existing UUIDs. Operator requirement revisions explicitly reject cycles. Optional `exclusiveResources` reserves named resources during active ownership; `plannedFiles` supplies advisory overlap scopes.
+Create with `POST /api/work` and the structure in [examples/work.json](../examples/work.json). Required fields are `title` and nonempty `criteria`; each criterion requires a unique `AC-N` ID, text, and at least one proof, and may carry an operator-only `bootstrap` declaration. The policy defaults to checks `test` and `typecheck`, plus independent review. Dependencies refer to existing UUIDs. Operator requirement revisions explicitly reject cycles. Optional `exclusiveResources` reserves named resources during active ownership; `plannedFiles` declares the change boundary the [regression guard](#submit-time-regression-guard) enforces at submit and the scopes overlap warnings compare.
 
 Other commands use `POST /api/work/UUID/COMMAND` (display keys also work):
 

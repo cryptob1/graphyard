@@ -934,6 +934,8 @@ test('sync merges origin/BASE without rebasing, passes in-scope and new files, a
     await writeFile(join(origin, 'src/shipped.ts'), 'export const shipped = 1;\nexport const kept = true;\n'); await writeFile(join(origin, 'src/scoped/feature.ts'), 'feature v0\n');
     await commit(origin, 'Base');
     await exec('git', ['clone', '-q', origin, clone]);
+    // sync runs the worker's own git merge, so the clone carries the identity a worker's checkout has.
+    await git(clone, 'config', 'user.name', 'Test'); await git(clone, 'config', 'user.email', 'test@localhost');
     await git(clone, 'checkout', '-q', '-b', 'graphyard/gy-1-1');
     await writeFile(join(clone, 'src/scoped/feature.ts'), 'feature v1\n'); const own = await commit(clone, 'Feature');
     // Meanwhile main ships GY-33's change and a new file.
