@@ -19,11 +19,14 @@ import { isDeepStrictEqual, parseArgs } from 'node:util';
 import { z } from 'zod';
 import { diagnose, fileConflicts, obligationLedger, proofPreview, resourceConflicts } from './coordination.js';
 import { applyProposal, loadAppliedSetup, loadProposal, loadConnection, readSetupStatus, repositoryScanDifference, saveProposal, scanProposal, setupDrift, setupRepository, handoff, hostIdSchema } from './repository-setup.js';
-import { assertMasterBinding, buildMasterStatus, continueMergeBatch, currentMergeCandidates, dispatchWork, inspectWorkerCredentials, listHerdrAgents, loadMasterConfig, mergeExecutor, observeHerdrAgents, readCredentialFile, readWorkerCredential, saveWorkerProfile, setupMaster, startMaster, workerProfileSchema } from './master.js';
+import { assertMasterBinding, assessContainment, buildMasterStatus, continueMergeBatch, currentMergeCandidates, dispatchWork, inspectWorkerCredentials, listHerdrAgents, loadMasterConfig, masterHarness, mergeExecutor, observeHerdrAgents, readCredentialFile, readWorkerCredential, saveWorkerProfile, setupMaster, snapshotWithClock, startMaster, verifyContainmentDeath, workerProfileSchema } from './master.js';
 import { daemonEffects, daemonSummary, readDaemonState, runDaemon } from './master-daemon.js';
 import { createBackup, ledgerCounts, restoreBackup, verifyBackup } from './backup.js';
 import { Store } from './store.js';
 import { releaseInfo, schemaVersion } from './release.js';
+import { bindReviewer, launchReview, readReviewLedger, reconcileReviews, reviewerCredentialDirectory, saveReviewerProfile, summarizeReviews, verifyReviewerInstallation } from './reviewer.js';
+import { applyProtection, protectionPlan, readProtection } from './protection.js';
+import { writeHarnessPermissions } from './harness.js';
 import { acknowledgeContainment, containmentCredentials, establishContainment, isConfirmedCoordinationRefusal, revalidateContainment, settleContainment } from './quarantine.js';
 
 try { process.loadEnvFile(); } catch (error: any) { if (error.code !== 'ENOENT') throw error; }
@@ -136,8 +139,19 @@ Environment: GRAPHYARD_URL, GRAPHYARD_TOKEN (individual role-scoped credential)
                                 Install the recommended master-agent operating mode
   master start AGENT_KIND       Launch the dedicated visible Herdr master session
   master worker add FILE        Add an existing or launchable Herdr worker profile
+  master reviewer setup [--name NAME]     Register the separate reviewer GitHub App in a
+                                browser flow; NAME defaults to reviewer and must keep the
+                                generated App name within GitHub's 34-character limit
+  master reviewer bind FILE --key-stdin   Bind an existing reviewer App (IDs in FILE, PEM on stdin)
+  master reviewer add FILE      Add a reviewer launch profile
+  master review GY-N [PROFILE]  Launch the bound reviewer on the exact current candidate
+  master protection [--apply]   Reconcile branch protection with every open review policy
+  master harness [KIND] [--apply]  Generate the master's own harness permissions
   master status                 Join Graphyard work truth with Herdr session health
   master dispatch GY-N PROFILE  Invite a worker to claim ready work in a visible tab
+  master settle-containment GY-N REASON
+                                Settle a containment quarantine whose supervisor this
+                                host verifies dead; unverifiable signals refuse
   master merge GY-N|--all       Merge exact authorized candidates without bypasses
   master run [--once] [--interval SECONDS]
                                 Run the durable coordination loop as a supervised process
@@ -257,12 +271,76 @@ Never share an operator or producer credential with an implementation agent.`); 
       return print(await startMaster(root, kind.data, agentArgs, listHerdrAgents()));
     }
     if (id === 'worker' && args[0] === 'add' && args[1]) return print(await saveWorkerProfile(root, JSON.parse(await readFile(args[1], 'utf8')), credential => masterApi('status', credential)));
+    if (id === 'reviewer') {
+      if (args[0] === 'add' && args[1]) return print(await saveReviewerProfile(root, JSON.parse(await readFile(args[1], 'utf8'))));
+      if (args[0] === 'bind' && args[1]) {
+        const { values, positionals } = parseArgs({ args: args.slice(1), options: { 'key-stdin': { type: 'boolean' } }, allowPositionals: true });
+        if (!values['key-stdin']) throw new Error('Use master reviewer bind FILE --key-stdin so the reviewer private key is not stored in shell history');
+        let input = ''; for await (const chunk of process.stdin) { input += chunk; if (input.length > 20_000) throw new Error('Reviewer key input is too large'); }
+        const identity = JSON.parse(await readFile(positionals[0], 'utf8'));
+        return print(await bindReviewer(root, { appId: Number(identity.appId), installationId: Number(identity.installationId), slug: String(identity.slug), privateKey: input.trim() }, verifyReviewerInstallation));
+      }
+      if (args[0] === 'setup') {
+        const { values } = parseArgs({ args: args.slice(1), options: { deployment: { type: 'string' }, port: { type: 'string' }, name: { type: 'string' } }, allowPositionals: false });
+        const deployment = values.deployment ?? master.url;
+        if (!deployment.startsWith('https://')) throw new Error('Reviewer App registration needs the deployed HTTPS origin; pass --deployment https://YOUR-GRAPHYARD-HOST');
+        const registrations = reviewerCredentialDirectory(master);
+        await mkdir(registrations, { recursive: true, mode: 0o700 });
+        const setup = await startGithubSetup(root, master.repository, deployment, Number(values.port ?? 4312), {
+          file: resolve(registrations, `${master.repository.replace('/', '-')}-registration.json`),
+          record: async app => { await bindReviewer(root, { appId: app.appId, installationId: app.installationId, slug: app.slug, privateKey: app.privateKey }, verifyReviewerInstallation); },
+        }, values.name ?? 'reviewer');
+        console.log(`Open ${setup.url} in your browser and register the reviewer App. It is a second App, separate from the Graphyard control-plane App, and it cannot write code. Credentials stay outside this repository with mode 0600. Press Ctrl+C when the page reports the installation is verified.`);
+        const stop = () => setup.http.close(); process.once('SIGINT', stop); process.once('SIGTERM', stop); return;
+      }
+      throw new Error('Use master reviewer setup, master reviewer bind FILE --key-stdin, or master reviewer add FILE');
+    }
+    if (id === 'review') {
+      if (!args[0]) throw new Error('Use master review GY-N [PROFILE]');
+      const snapshot = await masterApi('work-snapshot');
+      const work = snapshot.work.find((item: any) => item.id === args[0] || item.key === args[0]);
+      if (!work) throw new Error(`Unknown work item ${args[0]}`);
+      return print(await launchReview(root, work, args[1], listHerdrAgents(), snapshot.now));
+    }
+    if (id === 'protection') {
+      const { values } = parseArgs({ args, options: { apply: { type: 'boolean' } }, allowPositionals: false });
+      const snapshot = await masterApi('work-snapshot');
+      if (values.apply) return print(await applyProtection(master, snapshot.work));
+      return print({ ...protectionPlan(readProtection(master), master, snapshot.work), apply: false, next: 'Rerun with --apply to reconcile branch protection with these policies' });
+    }
+    if (id === 'harness') {
+      const { values, positionals } = parseArgs({ args, options: { apply: { type: 'boolean' } }, allowPositionals: true });
+      const kind = workerProfileSchema.shape.kind.safeParse(positionals[0] ?? 'claude');
+      if (!kind.success) throw new Error('Use master harness with a supported agent kind such as claude or codex');
+      return print(await writeHarnessPermissions(root, masterHarness(root, master, kind.data!), !!values.apply));
+    }
     if (id === 'status') {
       const runtime = observeHerdrAgents();
       const credentials = await inspectWorkerCredentials(root, master.workers);
+      let reviews = summarizeReviews((await readReviewLedger(root)).reviews), reviewRuntime = { available: true, reason: null as string | null };
+      try { reviews = summarizeReviews((await reconcileReviews(root, master)).reviews); }
+      catch (error) { reviewRuntime = { available: false, reason: `Reviewer verdicts could not be reconciled with GitHub: ${error instanceof Error ? error.message : 'unknown reason'}` }; }
+      const { snapshot, clockOffset } = await snapshotWithClock(() => masterApi('work-snapshot'));
+      const containment = assessContainment(snapshot.work, { hostId: master.hostId, observedAt: snapshot.now, clockOffset });
       const daemonState = await readDaemonState(root, master).catch(error => ({ error: error instanceof Error ? error.message : 'Master daemon state is unreadable' }));
       const daemon = 'error' in daemonState ? { running: false, error: daemonState.error } : daemonSummary(daemonState, Date.now(), master.run.intervalSeconds * 1000);
-      return print({ ...buildMasterStatus(await masterApi('work-snapshot'), master.workers, runtime.agents, credentials), autoMerge: master.autoMerge, mergeApproval: master.autoMerge ? 'routine merges permitted after gates pass' : 'explicit operator approval required for each merge', daemon, runtime: { herdr: { available: runtime.available, reason: runtime.reason } } });
+      return print({ ...buildMasterStatus(snapshot, master.workers, runtime.agents, credentials, containment, reviews), autoMerge: master.autoMerge, mergeApproval: master.autoMerge ? 'routine merges permitted after gates pass' : 'explicit operator approval required for each merge',
+        reviewer: master.reviewer ? { identity: `${master.reviewer.slug}[bot]`, appId: master.reviewer.appId, profiles: master.reviewers.map(profile => profile.name) } : null,
+        daemon, runtime: { herdr: { available: runtime.available, reason: runtime.reason }, reviews: reviewRuntime } });
+    }
+    if (id === 'settle-containment') {
+      if (!args[0] || !args.slice(1).join(' ').trim()) throw new Error('Use master settle-containment GY-N REASON');
+      const { snapshot, clockOffset } = await snapshotWithClock(() => masterApi('work-snapshot'));
+      const work = snapshot.work.find((item: any) => item.id === args[0] || item.key === args[0]);
+      if (!work) throw new Error(`Unknown work item ${args[0]}`);
+      if (!work.containmentQuarantine) throw new Error(`${work.key} has no containment quarantine to settle`);
+      const assessment = verifyContainmentDeath(work, { hostId: master.hostId, observedAt: snapshot.now, clockOffset });
+      if (!assessment.settleable) {
+        console.error(`Automatic containment settlement refused for ${work.key}:\n- ${assessment.refusals.join('\n- ')}\n${assessment.attestation}`);
+        process.exitCode = 1; return;
+      }
+      const settled = await masterMutation(`work/${work.id}/autosettle`, { epoch: assessment.epoch, settlementHash: work.containmentQuarantine.settlementHash, reason: args.slice(1).join(' '), verification: assessment.verification });
+      return print({ key: settled.key, epoch: assessment.epoch, containmentQuarantine: settled.containmentQuarantine, stage: settled.stage, verification: assessment.verification });
     }
     if (id === 'dispatch') {
       if (!args[0]) throw new Error('Use master dispatch GY-N PROFILE');
@@ -300,7 +378,7 @@ Never share an operator or producer credential with an implementation agent.`); 
       const result = await runDaemon(master, state, effects, { once: values.once, intervalMs: intervalSeconds * 1000, identity: { pid: process.pid, host: master.hostId } });
       return print({ repository: master.repository, coordinator: coordinator.actor.id, intervalSeconds, cycles: result.cycles.length, stopped: result.stopped ? 'signal' : 'completed', last: result.cycles.at(-1) ?? null });
     }
-    throw new Error('Use master init, start, worker add, status, dispatch, run, merge, or guide');
+    throw new Error('Use master init, start, worker add, reviewer, review, protection, harness, status, dispatch, settle-containment, run, merge, or guide');
   }
   if (command === 'runner') {
     if (id === 'inspect' && args.length <= 1) return print(await inspectRunnerRepository(resolve(args[0] ?? '.')));

@@ -22,6 +22,8 @@ node "$GRAPHYARD_CLI" master start codex
 
 At the token prompt, paste the token, press Enter, then press Ctrl-D to send EOF. Use `master start claude` if preferred. Setup preserves existing repository instructions and stores the coordinator token outside the repository.
 
+`master start` also installs the master's own harness permissions for harnesses that have a command classifier. See [harness permissions](#harness-permissions).
+
 Run the coordinator under a dedicated OS identity or machine. Implementation agents running as the same OS user may read its GitHub CLI credentials; Graphyard tokens cannot create a filesystem boundary.
 
 ## Add a worker
@@ -30,9 +32,10 @@ Use a template:
 
 - [Codex](../examples/master/codex-worker.json)
 - [Claude](../examples/master/claude-worker.json)
+- [Cursor](../examples/master/cursor-worker.json)
 - [existing session](../examples/master/existing-worker.json)
 
-A launch profile points to a mode-0600 worker-token file outside every repository worktree:
+Keep profile files in the ignored `.graphyard/profiles/` directory so the master can write them itself. A launch profile points to a mode-0600 worker-token file outside every repository worktree:
 
 ```sh
 node "$GRAPHYARD_CLI" master worker add /path/to/profile.json
@@ -40,6 +43,8 @@ node "$GRAPHYARD_CLI" master status
 ```
 
 Provider login and Graphyard identity are separate. Profiles cannot contain Graphyard variables or secret-looking environment values.
+
+Every launch profile carries an approval mode; see [approval modes](#approval-modes).
 
 `launch` profiles are supervised and can receive new work. `existing` profiles add health visibility for a session that already owns work; Graphyard will not inject a new assignment into an unsupervised process.
 
@@ -121,11 +126,13 @@ running underneath them.
 ```sh
 node "$GRAPHYARD_CLI" master status
 node "$GRAPHYARD_CLI" master dispatch GY-42 codex-primary
+node "$GRAPHYARD_CLI" master review GY-42
+node "$GRAPHYARD_CLI" master settle-containment GY-42 "Supervisor died on provider usage limit"
 node "$GRAPHYARD_CLI" master merge GY-42
 node "$GRAPHYARD_CLI" master merge --all
 ```
 
-Run `status` at startup, after dispatch, when a worker reports completion, and when an integration event arrives. Owners, stages, refusals, and merge candidates come from Graphyard. Missing Herdr telemetry never erases an assignment.
+Run `status` at startup, after dispatch, when a worker reports completion, and when an integration event arrives. Owners, stages, refusals, merge candidates, and pending and completed reviews come from Graphyard. Missing Herdr telemetry never erases an assignment.
 
 For work using the [identity-bound agent review provider](github.md#identity-bound-agent-review-providers), each row carries a `review` object with the currently dispatched reviewer profile and runtime, plus the failover entries recorded for the current candidate; `counts.reviewFailover` totals the items that failed over. A reviewer runs out of quota or goes silent past its timeout, Graphyard records that and moves to the next configured profile on its own — no master action is required. When every profile is exhausted the row is flagged for attention and the review gate stays closed. That is a capacity decision for the operator: add reviewer capacity, wait for quota, or revise the review policy. Never treat exhaustion as an approval, and never merge around a closed review gate.
 
@@ -140,6 +147,93 @@ Dispatch:
 7. cleans up and releases only when failed launch shutdown is confirmed.
 
 Prompt delivery is an invitation, not ownership.
+
+## Approval modes
+
+A launched session that stops to ask "run everything?" or "trust this folder?" is a session the master cannot start without a keypress. Each profile therefore carries `approvals`:
+
+| Mode | Behaviour |
+| --- | --- |
+| `auto` (default) | Graphyard adds that runtime's own non-interactive startup contract when it launches the session. |
+| `prompt` | Graphyard adds nothing; a human answers the runtime's prompts in the session tab. |
+
+| Runtime | What `auto` adds | What it removes | What it costs |
+| --- | --- | --- | --- |
+| Claude Code | `--permission-mode bypassPermissions` | tool-approval prompts | the command classifier stops classifying for that session |
+| Codex | `--ask-for-approval never --sandbox workspace-write` | directory-trust and per-command approval | only the workspace-write sandbox still limits a command |
+| Cursor | `--force --trust` | "Run Everything" and fresh-worktree workspace trust | every proposed command runs in the assigned worktree |
+| opencode | `OPENCODE_PERMISSION={"edit":"allow","bash":"allow","webfetch":"allow"}` | edit, bash, and webfetch prompts | edits, shell commands, and fetches happen without asking |
+
+The trade-off is real: an `auto` session runs whatever it decides to run inside its own worktree, under its own provider and Graphyard credentials. What it cannot do is change: it still holds only a worker credential, still works in one assigned worktree, and still cannot merge, produce trusted evidence, or weaken a requirement. Use `prompt` when a human should stay in the loop for a particular profile. A profile that already sets the runtime's own approval flags keeps exactly those; Graphyard never overrides an explicit choice.
+
+`master worker add` and `master reviewer add` print the resolved launch contract, so what a profile will start with is visible before it starts.
+
+## Independent review
+
+The reviewer is a separate GitHub identity: not the pull-request author, and not the Graphyard control-plane App that publishes the gate check.
+
+```sh
+node "$GRAPHYARD_CLI" master reviewer setup
+node "$GRAPHYARD_CLI" master reviewer add /path/to/reviewer-profile.json
+node "$GRAPHYARD_CLI" master review GY-42 claude-reviewer
+```
+
+Templates: [Claude](../examples/master/claude-reviewer.json), [Cursor](../examples/master/cursor-reviewer.json), [opencode](../examples/master/opencode-reviewer.json).
+
+`master reviewer setup` registers the reviewer App through the same local manifest flow as repository setup, with reviewer-only permissions (Metadata read, Contents read, Pull requests write). It refuses to reuse the control-plane App, stores the private key and IDs outside every worktree with mode 0600, and records only the App ID, installation ID, and slug in master configuration. `master reviewer bind FILE --key-stdin` binds an App you already created; the file carries the IDs and the PEM arrives on standard input.
+
+`master review GY-N [PROFILE]`:
+
+1. verifies the exact current candidate — submitted, independently observed within the last two minutes, open, not a draft, not awaiting rework, and on a policy that expects a GitHub verdict;
+2. mints an installation token scoped to this repository, to read and review only, valid for at most an hour, and refuses a token that could write code;
+3. writes that token to a private `GH_CONFIG_DIR` outside the repository, never to a command line;
+4. launches the reviewer profile in its own Herdr tab with a read-only prompt naming the exact head, base, and policy revision, and the commit-bound command that posts the verdict;
+5. records the request in `.graphyard/reviews.json`.
+
+`master status` reconciles pending requests: when the reviewer identity posts an `APPROVED` or `CHANGES_REQUESTED` review on that exact commit, Graphyard closes the session, removes its credential directory, and moves the record to completed. A verdict on another commit, from another identity, or a bare comment settles nothing. An unanswered request expires with its token. If Herdr cannot confirm the pane is gone, the record stays pending with the reason attached rather than claiming the credential was withdrawn.
+
+A reviewer session holds no Graphyard credential and no lease. Its verdict is an ordinary GitHub review: Graphyard's review gate still requires an approval of the current head from someone other than the author, and the merge gate still rechecks everything.
+
+## Branch protection
+
+GitHub's native approval requirement and a work item's review policy must agree, or one of them is unenforceable. Reconcile them after selecting or switching a policy:
+
+```sh
+node "$GRAPHYARD_CLI" master protection
+node "$GRAPHYARD_CLI" master protection --apply
+```
+
+The plan prints the open items on each provider, the current review settings, and the exact changes. `--apply` patches only the review subresource, leaving the App-bound `Graphyard / merge` check, the merge queue's `strict`-off setting, and administrator enforcement as observed, then re-reads protection and refuses unless GitHub reports the reconciled state.
+
+- Open items on `github` review: at least one required approval, last-push approval, and stale-review dismissal.
+- Open items on `codex` or `agent` review: native approval count zero and no last-push approval, so Graphyard's own gate decides. Both providers share this side: the split is the model's `nativeReviewRequired`, which only the `github` provider satisfies, so a policy Graphyard accepts is never one the branch cannot enforce.
+- A mix of native and non-native items: refused, naming the conflicting items and their providers. Move the open items onto one provider first; leaving protection inconsistent with an open item's policy is not an option Graphyard offers.
+- `strict` ("require branches to be up to date") left enabled, missing administrator enforcement or App-bound check, or a required CODEOWNERS approval: refused before any change. The [merge queue](github.md#merge-queue) needs `strict` off.
+
+## Harness permissions
+
+A master running inside a harness with its own command classifier stops on its own routine commands until someone approves them. `master start claude` writes project-scoped rules to `.claude/settings.local.json` (git-ignored, machine-specific) before the session starts; `master harness claude` previews them and `master harness claude --apply` writes them. Every rule prints the reason it exists.
+
+Allowed: the master's own CLI subcommands at their absolute path, `herdr`, read-only `gh pr` commands, `jq`, the audited-thread wrapper `scripts/resolve-thread.mjs`, and writes to `.graphyard/profiles/`.
+
+Denied: `gh pr merge`, raw `gh api` calls, `git push`, and reads of the coordinator credential home, `.graphyard/connection.json`, `*.pem`, and `*.token`.
+
+Existing entries are never removed and regeneration is idempotent. `master harness codex` prints the `trust_level = "trusted"` block for `$CODEX_HOME/config.toml` instead of editing that shared user file.
+
+A harness allowlist is a prompt policy, not an authority boundary. The enforced boundary stays branch protection plus the App-bound Graphyard check: Graphyard's guarded merge is the only path that rechecks the exact candidate before delivery.
+
+## Containment quarantines
+
+A foreground worker runs inside a containment quarantine that its supervisor settles on verified shutdown. When the supervisor itself dies — a crash, a provider usage limit, a killed terminal — the capability dies with it and the fence stays up: the item is undispatchable, its exclusive resources stay reserved, and its requirements stay immutable until someone proves the worker stopped.
+
+`master status` reports every such quarantine on each work row under `containment`, with `counts.quarantined` and `counts.settleableQuarantines` totalling them. For a quarantine whose workspace is registered on this coordinator's host, status also verifies it: it checks that the worker lease and the launch authority have both been expired past their grace window — measured from the lease deadline the quarantine retains, since reconciliation clears the expired lease record long before that window closes — then inspects this host for any surviving supervisor process, any process running in the assigned workspace, and any live `graphyard-watch` containment scope.
+
+A live scope is dismissed only when every member it still holds is positively attributed to another assignment, by following that member's ancestry to a live supervisor naming a different work key or epoch. Another worker's scope on the same machine is therefore ordinary; an orphaned scope left by a dead supervisor is not, and it fences until an operator attests.
+
+- `settleable: true` with no `refusals` means the supervisor is verifiably gone. Run `master settle-containment GY-N "reason"`. The control plane re-checks the deadlines and the verification before clearing the fence, and records the verification in the event ledger.
+- Any `refusals` entry means something could not be proven — the host is unreachable or not the registered one, a scope or process query failed, a process is still present, or the clocks disagree. Automatic settlement refuses, and so does the control plane. Stop the supervisor yourself and use the operator attestation path (`rework GY-N --previous-worker-stopped`, or `recover-containment GY-N --previous-worker-stopped` once the work is delivered).
+
+The record it sends names every process and containment scope it found, and counts the privileged host processes that withheld inspection. Settlement lowers the fence and nothing else. It does not authorize rework, reopen delivered work, or satisfy any gate; a submitted item still needs an operator's rework decision before reassignment. Verification is bounded by what this host can see: a supervisor launched on another machine, by another user, or outside this coordinator's systemd user manager is never reported as absent — those remain the operator's attestation. See [the protocol](protocol.md#automatic-containment-settlement) for the exact checks.
 
 ## Secure multi-machine topology
 
@@ -183,7 +277,7 @@ For the full correctness model, see [GitHub enforcement](github.md) and [archite
 For a dead worker or provider change:
 
 1. stop the old worker and supervisor;
-2. release or let the lease expire;
+2. release or let the lease expire, and settle any containment quarantine it left;
 3. request operator rework if a candidate was already submitted;
 4. claim with the replacement worker at a higher epoch;
 5. create a fresh workspace and preserve the old attempt.

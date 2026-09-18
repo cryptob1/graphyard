@@ -41,6 +41,14 @@ and the [operating guide](master-agent.md#durable-loop).
 
 The lease expires after 120 seconds without a heartbeat. Reconciliation clears the lease; a new worker can claim with a higher epoch. Old API mutations refuse. Preserve the old worktree for inspection and create a new branch/path for the new attempt. Do not assume the old process has stopped merely because its lease expired.
 
+## Supervisor died leaving a containment quarantine
+
+A foreground worker's supervisor settles its containment quarantine on verified shutdown. If the supervisor itself dies first, the fence stays up on purpose: the item is undispatchable, its exclusive resources stay reserved, and its requirements stay immutable. Expired authority is not evidence that a process stopped.
+
+Two paths lower it. On the machine that ran the worker, `graphyard master settle-containment GY-N "reason"` verifies, on that host, that the worker lease and launch authority have both been expired past their grace window — the lease deadline is retained on the quarantine, so reconciliation clearing the lease record does not shorten it — and that no supervisor process, no workspace process, and no live containment scope holding a process it cannot attribute to another assignment survives; the control plane re-checks all of it and records the verification. `master status` shows the same assessment per work row under `containment` before you run anything. Anything it cannot prove — an unreachable host, a failed scope or process query, a surviving process, disagreeing clocks — refuses.
+
+When it refuses, or when the worker ran on a machine, user, or systemd manager this coordinator cannot inspect, confirm the worker stopped yourself and use the attestation path: `graphyard rework GY-N --previous-worker-stopped "reason"` for undelivered work, or `graphyard recover-containment GY-N --previous-worker-stopped "reason"` once the work is delivered. Never attest a stop you have not confirmed; the fence exists to prevent two workers in one workspace.
+
 ## Blocked item with no owner
 
 An operator can clear an existing blocker with `graphyard unblock GY-N "Contract verified"`. The CLI sends the task revision it just read and the reason is recorded in the event ledger; stale requests and attempts to clear no blocker are refused. Scoped operator agents similarly release unreleased backlog work with `graphyard ready GY-N "Requirements approved"`, which carries the current revision and reason. Workers may only clear their own blockers while holding the current lease. After the operator resolves an abandoned blocker and the old lease expires, a new worker can claim normally.
