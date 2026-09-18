@@ -1,0 +1,8 @@
+{
+  "name": "opencode-reviewer",
+  "agentName": "review-opencode-1",
+  "kind": "opencode",
+  "agentArgs": [],
+  "approvals": "prompt",
+  "environment": {}
+}

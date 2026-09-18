@@ -1631,12 +1631,12 @@ test('the status API reports the App permission preflight and held jobs, and mas
     assert.equal(status.heldJobs, 1);
     assert.equal(status.jobs.find((job: any) => job.work_id === w.id).error, shortfall);
     const snapshot = await store.workSnapshot();
-    const master = buildMasterStatus(snapshot, [], [], {}, {}, status);
+    const master = buildMasterStatus(snapshot, [], [], {}, {}, undefined, status);
     assert.equal(master.controlPlane.attention[0], shortfall);
     assert.match(master.controlPlane.attention[1], /1 integration job is held/);
     assert.deepEqual(master.controlPlane.appPermissions!.missing, [{ permission: 'contents', required: 'write', features: ['merge-queue'] }]);
     assert.equal(master.counts.attention, master.work.filter(row => row.attention).length + 2);
-    const quiet = buildMasterStatus(snapshot, [], [], {}, {}, { ...status, appPermissions: { ...status.appPermissions, missing: [], attention: [] }, heldJobs: 0 });
+    const quiet = buildMasterStatus(snapshot, [], [], {}, {}, undefined, { ...status, appPermissions: { ...status.appPermissions, missing: [], attention: [] }, heldJobs: 0 });
     assert.deepEqual(quiet.controlPlane.attention, []);
     await store.releaseHeldJobs();
   } finally { await new Promise<void>(resolve => http.close(() => resolve())); }
