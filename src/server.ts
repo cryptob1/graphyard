@@ -101,7 +101,11 @@ export function server(engine: Engine, credentials: Credential[], github: GitHub
         if (url.pathname === '/api/validation/definitions' && req.method === 'GET') return send(200, await validation.definitions(url.searchParams.get('cursor') ?? undefined));
         const candidateRead = url.pathname.match(/^\/api\/validation\/candidate\/([^/]+)$/);
         if (candidateRead && req.method === 'GET') return send(200, await validation.readCandidate(candidateRead[1]));
-        const validationRoute = url.pathname.match(/^\/api\/validation\/(define|build|candidate|request|dispatch|ack|heartbeat|result|cancel|settle|retry)$/);
+        // The host attestor's independent read of what it is about to execute. Read-only,
+        // and refused to the worker and producer credentials that run and collect.
+        const attemptRead = url.pathname.match(/^\/api\/validation\/attempt\/([^/]+)$/);
+        if (attemptRead && req.method === 'GET') return send(200, await validation.attemptAuthority(actor, attemptRead[1]));
+        const validationRoute = url.pathname.match(/^\/api\/validation\/(define|build|candidate|request|dispatch|ack|heartbeat|collection-authority|collection-heartbeat|result|cancel|settle|retry)$/);
         if (validationRoute && req.method === 'POST') {
           const command = validationRoute[1], data = JSON.parse((await body(req)).toString()), key = String(req.headers['idempotency-key'] ?? '');
           const result = command === 'define' ? await validation.define(actor, data, key)
@@ -111,6 +115,8 @@ export function server(engine: Engine, credentials: Credential[], github: GitHub
             : command === 'dispatch' ? await validation.dispatch(actor, data, key)
             : command === 'result' ? await validation.result(actor, data, key)
             : command === 'ack' || command === 'heartbeat' ? await validation.runnerCommand(actor, command, data, key)
+            : command === 'collection-heartbeat' ? await validation.collectionHeartbeat(actor, data, key)
+            : command === 'collection-authority' ? await validation.collectionAuthority(actor, data)
             : await validation.operatorCommand(actor, command as 'cancel' | 'settle' | 'retry', data, key);
           return send(200, result);
         }

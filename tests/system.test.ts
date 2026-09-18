@@ -10,14 +10,14 @@ import { Engine } from '../src/engine.js';
 import { server } from '../src/server.js';
 import { OperatorAgents } from '../src/operator-agent.js';
 import { ReconciliationRetry, SpeculativeConflict, deliveryState, rollbackGuidance, type Principal, type Work, type Observation } from '../src/model.js';
-import { buildMasterStatus } from '../src/master.js';
 import { stageMetrics } from '../src/master-daemon.js';
 import { predictQueue, queueRef, type QueuePlacement, type QueueSpeculation } from '../src/merge-queue.js';
 import { defineScenario, scenarios } from '../src/scenarios.js';
 import { setTimeout as delay } from 'node:timers/promises';
 import { processJob, type GitHub } from '../src/github.js';
-import { acknowledgeContainment, isConfirmedCoordinationRefusal } from '../src/quarantine.js';
-import { supervise } from '../src/supervisor.js';
+import { acknowledgeContainment, containmentGraceMs, isConfirmedCoordinationRefusal } from '../src/quarantine.js';
+import { probeSupervisorAbsence, supervise } from '../src/supervisor.js';
+import { assertDispatchable, assessContainment, buildMasterStatus, snapshotWithClock } from '../src/master.js';
 // @ts-expect-error The trusted runner intentionally uses dependency-free JavaScript outside the candidate source.
 import { exercise } from '../scripts/acceptance-contract.mjs';
 
@@ -226,6 +226,114 @@ test('expired quarantines reserve shared resources until settlement or operator 
   await assert.rejects(engine.execute(other, 'claim', recoveryPeer.id, {}, randomUUID()), /Exclusive resources held/);
   await engine.execute(operator, 'rework', recoveryOwner.id, { reason: 'Expired supervisor was stopped', previousWorkerStopped: true }, randomUUID());
   assert.equal((await engine.execute(other, 'claim', recoveryPeer.id, {}, randomUUID())).epoch, 1);
+});
+async function quarantinedByDeadSupervisor(hostId = 'coordinator-host') {
+  const settlementToken = randomUUID().replaceAll('-', '').padEnd(64, '9').slice(0, 64);
+  const settlementHash = createHash('sha256').update(settlementToken).digest('hex');
+  let w = await claimed();
+  const path = `/srv/graphyard/worktrees/${w.key}-1`;
+  w = await engine.execute(worker, 'workspace', w.id, { epoch: 1, host: hostId, path, branch: `graphyard/${w.id}` }, randomUUID());
+  w = await engine.execute(worker, 'quarantine', w.id, { epoch: 1, settlementHash }, randomUUID());
+  w = await engine.execute(worker, 'launch', w.id, { epoch: 1, settlementHash }, randomUUID());
+  // The supervisor dies without settling: every authority lapses beyond the grace window.
+  // The lease deadline lapses on the quarantine too, exactly as an unrenewed lease does:
+  // reconciliation then clears the lease record without shortening the window.
+  const lapsed = new Date(Date.now() - containmentGraceMs - 600_000).toISOString();
+  await store.pool.query(`UPDATE work_items SET document=jsonb_set(jsonb_set(jsonb_set(document,'{lease,expiresAt}',to_jsonb($2::text)),
+    '{containmentQuarantine,launchExpiresAt}',to_jsonb($2::text)),'{containmentQuarantine,leaseExpiresAt}',to_jsonb($2::text)) WHERE id=$1`, [w.id, lapsed]);
+  await engine.reconcile();
+  assert.equal((await store.list()).find(item => item.id === w.id)!.lease, null, 'reconciliation clears the expired lease record');
+  return { work: (await store.list()).find(item => item.id === w.id)!, settlementHash, settlementToken, path, hostId };
+}
+const deadProbe = (workspacePath: string, overrides: Partial<ReturnType<typeof probeSupervisorAbsence>> = {}) => () =>
+  ({ method: 'linux-proc-systemd' as const, platform: 'linux', uid: 1000, workspacePath, processes: [], scopes: [], inaccessible: 0, unverifiable: [], ...overrides });
+
+test('master status verifies supervisor death on the registered host and the coordinator settles it with recorded evidence', async () => {
+  const { work, settlementHash, path, hostId } = await quarantinedByDeadSupervisor();
+  const headers = { Authorization: `Bearer ${'m'.repeat(32)}`, 'Content-Type': 'application/json' };
+  const { snapshot, clockOffset } = await snapshotWithClock(async () => (await (await fetch(`${url}/api/work-snapshot`, { headers })).json()) as { work: Work[]; now: string });
+  // A live containment scope on the host belongs to another assignment only because every
+  // member it holds was attributed to one; it does not fence this quarantine.
+  const containment = assessContainment(snapshot.work, { hostId, observedAt: snapshot.now, clockOffset,
+    probe: deadProbe(path, { scopes: [{ unit: 'graphyard-watch-9-x.scope', activeState: 'active', processes: [], attributed: [4242] }] }) });
+  const status = buildMasterStatus(snapshot, [], [], {}, containment);
+  const row = status.work.find(entry => entry.key === work.key)!;
+  assert.deepEqual({ settleable: row.containment?.settleable, refusals: row.containment?.refusals, host: row.containment?.host, epoch: row.containment?.epoch },
+    { settleable: true, refusals: [], host: hostId, epoch: 1 });
+  assert.equal(status.counts.settleableQuarantines >= 1, true);
+  assert.match(row.attention!, new RegExp(`verified settleable; run master settle-containment ${work.key}`));
+
+  const verification = containment[work.id].verification!;
+  const settled: any = await (await fetch(`${url}/api/work/${work.id}/autosettle`, { method: 'POST', headers: { ...headers, 'Idempotency-Key': randomUUID() },
+    body: JSON.stringify({ epoch: 1, settlementHash, reason: 'Supervisor verified dead on the registered host', verification }) })).json();
+  assert.equal(settled.containmentQuarantine, null);
+  const event = (await store.events(work.id)).find(entry => entry.kind === 'autosettle')!;
+  assert.equal(event.actor, coordinator.id);
+  assert.deepEqual(event.payload.details.verification, verification, 'the verification that authorized settlement is appended to history');
+  assert.equal(event.payload.details.reason, 'Supervisor verified dead on the registered host');
+  // The fence is gone, so the item is dispatchable again without an operator attestation.
+  const fresh = (await store.list()).find(item => item.id === work.id)!;
+  assert.doesNotThrow(() => assertDispatchable(fresh, [fresh], new Date().toISOString()));
+  assert.equal((await engine.execute(other, 'claim', work.id, {}, randomUUID())).epoch, 2);
+});
+
+test('every unverifiable containment signal refuses automatic settlement and keeps the attestation path', async () => {
+  const { work, settlementHash, settlementToken, path, hostId } = await quarantinedByDeadSupervisor();
+  const now = () => new Date().toISOString();
+  const evidence = (overrides: Record<string, unknown> = {}) => ({ method: 'linux-proc-systemd', host: hostId, uid: 1000, platform: 'linux', workspacePath: path,
+    observedAt: now(), clockOffset: { min: -20, max: 20 }, processes: [], scopes: [], inaccessible: 0, unverifiable: [], ...overrides });
+  const settle = (verification: unknown, actor = coordinator, body: Record<string, unknown> = {}) =>
+    engine.execute(actor, 'autosettle', work.id, { epoch: 1, settlementHash, reason: 'Automatic settlement attempt', verification, ...body }, randomUUID());
+
+  await assert.rejects(settle(evidence(), worker), /Coordinator permission required/);
+  await assert.rejects(settle(evidence(), coordinator, { settlementHash: 'f'.repeat(64) }), /does not match this verification/);
+  await assert.rejects(settle(evidence(), coordinator, { epoch: 2 }), /missing, superseded, or does not match/);
+  await assert.rejects(settle(evidence({ processes: [{ pid: 4242, evidence: 'command' }] })), /Process 4242 of the contained worker is still present/);
+  await assert.rejects(settle(evidence({ unverifiable: ['systemd user manager is unavailable'] })), /Host verification was incomplete/);
+  await assert.rejects(settle(evidence({ scopes: [{ unit: 'graphyard-watch-3-x.scope', activeState: 'active', processes: [9], attributed: [] }] })),
+    /still holds 1 process\(es\) that are not attributed to another assignment/);
+  await assert.rejects(settle(evidence({ scopes: [{ unit: 'graphyard-watch-3-x.scope', activeState: 'active', processes: [9], attributed: [10] }] })), /still holds 1 process/);
+  await assert.rejects(settle(evidence({ host: 'another-host' })), /registered on coordinator-host/);
+  await assert.rejects(settle(evidence({ workspacePath: '/srv/elsewhere' })), /is registered at/);
+  await assert.rejects(settle(evidence({ platform: 'darwin' })), /Linux process and scope inspection/);
+  await assert.rejects(settle(evidence({ observedAt: new Date(Date.now() - 600_000).toISOString() })), /older than 120s/);
+  await assert.rejects(settle(evidence({ clockOffset: { min: 30_000, max: 30_100 } })), /clocks disagree/);
+  for (const refusal of [settle(evidence({ processes: [{ pid: 1, evidence: 'workspace' }] }))])
+    await assert.rejects(refusal, /rework .* --previous-worker-stopped REASON/, 'every refusal names the operator attestation path');
+
+  // Reconciliation has already cleared the lease record, so the grace window is only as
+  // long as the deadline the quarantine retained: a fresh one fences with no lease at all.
+  const retainLease = (expiresAt: string | null) => store.pool.query(
+    expiresAt === null ? `UPDATE work_items SET document=document #- '{containmentQuarantine,leaseExpiresAt}' WHERE id=$1`
+      : `UPDATE work_items SET document=jsonb_set(document,'{containmentQuarantine,leaseExpiresAt}',to_jsonb($2::text)) WHERE id=$1`,
+    expiresAt === null ? [work.id] : [work.id, expiresAt]);
+  assert.equal((await store.list()).find(item => item.id === work.id)!.lease, null);
+  await retainLease(new Date(Date.now() - 1_000).toISOString());
+  await assert.rejects(settle(evidence()), /Worker lease for epoch 1 has not been expired for the required 120s grace window/);
+  await retainLease(null);
+  await assert.rejects(settle(evidence()), /records no worker-lease deadline/);
+  await retainLease(new Date(Date.now() - containmentGraceMs - 600_000).toISOString());
+
+  // A live supervisor is fenced even when the host reports nothing: the deadlines rule.
+  await store.pool.query(`UPDATE work_items SET document=jsonb_set(document,'{lease}',$2::jsonb) WHERE id=$1`,
+    [work.id, JSON.stringify({ owner: worker.id, epoch: 1, expiresAt: new Date(Date.now() + 60_000).toISOString() })]);
+  await assert.rejects(settle(evidence()), /Worker lease for epoch 1 has not been expired/);
+  await store.pool.query(`UPDATE work_items SET document=jsonb_set(document,'{containmentQuarantine,launchExpiresAt}',to_jsonb($2::text)) WHERE id=$1`,
+    [work.id, new Date(Date.now() - 1_000).toISOString()]);
+  await store.pool.query(`UPDATE work_items SET document=jsonb_set(document,'{lease,expiresAt}',to_jsonb($2::text)) WHERE id=$1`,
+    [work.id, new Date(Date.now() - 1_000).toISOString()]);
+  await assert.rejects(settle(evidence()), /Launch authority for epoch 1 has not been expired/);
+
+  // Nothing above lowered the fence, and both existing settlement paths still work.
+  const fenced = (await store.list()).find(item => item.id === work.id)!;
+  assert.equal(fenced.containmentQuarantine?.epoch, 1);
+  await assert.rejects(engine.execute(other, 'claim', work.id, {}, randomUUID()), /quarantined.*epoch 1/);
+  assert.equal((await engine.execute(worker, 'settle', work.id, { epoch: 1, settlementToken }, randomUUID())).containmentQuarantine, null);
+
+  const stranded = await quarantinedByDeadSupervisor('another-machine');
+  const localHost = assessContainment([stranded.work], { hostId, observedAt: new Date().toISOString(), clockOffset: { min: 0, max: 5 }, probe: deadProbe(stranded.path) });
+  assert.deepEqual(localHost, {}, 'a quarantine registered on another host is not this coordinator to verify');
+  assert.equal((await engine.execute(operator, 'rework', stranded.work.id, { reason: 'Operator attested the stopped worker', previousWorkerStopped: true }, randomUUID())).containmentQuarantine, null);
 });
 test('dependencies and explicit blockers refuse claims', async () => {
   const parent = await create(); let child = await create([parent.id]); child = await engine.execute(operator, 'ready', child.id, {}, randomUUID());
@@ -1157,7 +1265,7 @@ test('a failed deploy-smoke proof is delivered-with-failure with rollback guidan
   assert.match(guidance, new RegExp(`${w.key} is delivered with a failed post-deployment smoke proof`));
   assert.ok(guidance.includes(servingSha) && guidance.includes(mergeSha) && /revert .* on main/.test(guidance) && /Do not backfill/.test(guidance));
   const snapshot = await store.workSnapshot();
-  const status = buildMasterStatus(snapshot, [], [], {}, 'main');
+  const status = buildMasterStatus(snapshot, [], [], {}, {}, { pending: [], completed: [] }, 'main');
   const row = status.delivered.find(entry => entry.key === w.key)!;
   assert.equal(row.state, 'delivered-with-failure'); assert.equal(row.rollback, guidance); assert.equal(row.smoke!.result, 'fail'); assert.equal(row.deployment!.sha, servingSha);
   assert.ok(status.counts.postDeployFailures >= 1);
