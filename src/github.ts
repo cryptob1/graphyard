@@ -3,9 +3,9 @@ import { createSign, randomUUID } from 'node:crypto';
 import { observeCodex } from './codex-review.js';
 import { readFile } from 'node:fs/promises';
 import type { Engine } from './engine.js';
-import { demand, type Observation, type Work, type ReviewRequest } from './model.js';
+import { CHECK_NAME, demand, type Observation, type Work, type ReviewRequest } from './model.js';
+export { CHECK_NAME };
 
-export const CHECK_NAME = 'Graphyard / merge';
 export interface GitHubConfig { repository: string; base: string; appId: number; installationId: number; privateKey: string }
 export class GitHub {
   private token = '';

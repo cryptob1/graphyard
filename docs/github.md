@@ -18,6 +18,20 @@ Generate a private key. Configure `GITHUB_APP_ID`, `GITHUB_INSTALLATION_ID`, `GI
 
 The installation ID appears in the installation settings URL. The App ID is in the App's settings. A personal access token is deliberately not a substitute for the dedicated App, because the required check should be bound to a specific producer.
 
+## The reviewer App
+
+Independent review uses a **second, separate App**. The control-plane App observes the repository and publishes the gate check; the reviewer App reads the repository and posts pull-request reviews. Graphyard refuses to bind the control-plane App as the reviewer: an identity cannot independently review the work it gates, and a reviewer that could write code or publish the check would review its own output.
+
+Register it with `graphyard master reviewer setup`, or create it manually with:
+
+- Repository permissions: Metadata read, Contents read, Pull requests write. Nothing else — no Checks, no Administration, no Contents write.
+- No webhook events; Graphyard never listens to this App.
+- Installed only on the managed repository.
+
+Then bind it: `graphyard master reviewer bind FILE --key-stdin`, with the App ID, installation ID, and slug in `FILE` and the PEM on standard input. Binding verifies the installation covers the managed repository and refuses an installation that can write code, checks, or administration. The private key and IDs are stored outside every worktree with mode 0600; master configuration records only the App ID, installation ID, slug, and that file's path.
+
+Each `graphyard master review GY-N` mints a fresh installation token scoped to this repository with `contents: read` and `pull_requests: write`, valid for at most one hour. Graphyard refuses a token that reports a longer life or broader permissions, hands it to the session through a private `GH_CONFIG_DIR` rather than a command line or environment secret, and removes it when the verdict closes the session. A review posted by `SLUG[bot]` on the exact head commit is an ordinary GitHub approval: it satisfies the native protection requirement and Graphyard's review gate, both of which still require the approval to be on the current head and from someone other than the pull-request author.
+
 ## Require the check
 
 Configure protection on the managed base branch:
@@ -102,6 +116,8 @@ graphyard rereview GY-N
 The first command preserves the criteria and CI requirements, increments the policy revision, appends audit history, invalidates prior acceptance evidence, and queues reconciliation. Workers cannot change policy. A currently leased worker can request re-review with `rereview GY-N EPOCH`; operators do not need an epoch. Head/base/policy changes cause a new request during reconciliation. The dashboard exposes provider selection and re-review to operators. Old evidence remains visible but must be regenerated for the new policy revision.
 
 ### Branch protection migration
+
+`graphyard master protection` reconciles the native requirement with the review policy of every open item, and `--apply` performs it after a printed plan. It patches only the review subresource, preserves the App-bound check, strict mode and administrator enforcement, re-reads protection afterwards, and refuses a repository whose open items disagree about their review provider, or whose protection is missing those invariants or requires CODEOWNERS approval. The manual helper below remains for one-off migrations.
 
 GitHub's native required approval count is separate from Graphyard's gate. For repositories adopting agent review, retain strict checks, enforced administrator protection and the App-bound `Graphyard / merge` check, but remove the native approval-count/last-push requirement once reviewed code supporting the adapter is deployed. Otherwise GitHub will continue demanding a formal approval even after Graphyard passes.
 

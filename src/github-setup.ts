@@ -5,12 +5,20 @@ import { resolve } from 'node:path';
 import { GitHub } from './github.js';
 import { localDirectory } from './onboarding.js';
 
-interface AppCredentials { appId: number; slug: string; privateKey: string; webhookSecret: string; repository: string; installationId?: number }
+export interface AppCredentials { appId: number; slug: string; privateKey: string; webhookSecret: string; repository: string; installationId?: number }
+export type AppRole = 'control-plane' | 'reviewer';
 const escape = (value: string) => value.replaceAll('&', '&amp;').replaceAll('"', '&quot;').replaceAll('<', '&lt;').replaceAll('>', '&gt;');
-export function appManifest(repository: string, deployment: string, callback: string) {
+// The reviewer App is a second, separate identity. It can read the repository and write reviews;
+// it never gates, never publishes a check, and never writes code.
+export function appManifest(repository: string, deployment: string, callback: string, role: AppRole = 'control-plane') {
   if (!/^[\w.-]+\/[\w.-]+$/.test(repository)) throw new Error('Expected owner/repository');
   const url = new URL(deployment);
   if (url.protocol !== 'https:' || url.username || url.password || url.search || url.hash || url.pathname !== '/') throw new Error('Use the deployed HTTPS origin, without credentials or a path');
+  if (role === 'reviewer') return { name: `Graphyard reviewer ${repository.replace('/', '-')}`, url: url.origin, public: false,
+    hook_attributes: { url: `${url.origin}/api/github/webhook`, active: false },
+    redirect_url: `${callback}/created`, setup_url: `${callback}/installed`,
+    default_permissions: { metadata: 'read', contents: 'read', pull_requests: 'write' },
+    default_events: [] as string[] };
   return { name: `Graphyard ${repository.replace('/', '-')}`, url: url.origin, public: false,
     hook_attributes: { url: `${url.origin}/api/github/webhook`, active: true },
     redirect_url: `${callback}/created`, setup_url: `${callback}/installed`,
@@ -20,9 +28,10 @@ export function appManifest(repository: string, deployment: string, callback: st
 export async function startGithubSetup(root: string, repository: string, deployment: string, port = 4311, dependencies: {
   convert?: (code: string) => Promise<any>;
   verify?: (app: AppCredentials, installationId: number) => Promise<void>;
-} = {}) {
-  const directory = await localDirectory(root);
-  const file = resolve(directory, 'github-app.json');
+  file?: string;
+  record?: (app: AppCredentials & { installationId: number }) => Promise<void>;
+} = {}, role: AppRole = 'control-plane') {
+  const file = dependencies.file ?? resolve(await localDirectory(root), 'github-app.json');
   let app: AppCredentials | undefined;
   try { app = JSON.parse(await readFile(file, 'utf8')); } catch (error: any) { if (error.code !== 'ENOENT') throw error; }
   if (app && app.repository !== repository) throw new Error('Saved App belongs to a different repository');
@@ -62,8 +71,11 @@ export async function startGithubSetup(root: string, repository: string, deploym
       if (url.pathname === '/') {
         if (app?.installationId) return html(200, '<p>App registered and installation verified. Credentials are saved locally with restricted file permissions. You may close setup and configure Railway.</p>');
         if (app) return html(200, `<p>App registered. Install it only on ${escape(repository)}.</p><a href="https://github.com/apps/${encodeURIComponent(app.slug)}/installations/new">Install GitHub App</a>`);
-        const manifest = appManifest(repository, deployment, `http://${address}`);
-        return html(200, `<p>Register a private App for <strong>${escape(repository)}</strong>. GitHub will ask you to sign in, name the App, and choose the repository.</p><p>The App reads code and branch protection, publishes its gate check, and writes PR review requests. It cannot write source code. Credentials return directly to this machine; no key copying is needed.</p><form method="post" action="https://github.com/settings/apps/new?state=${state}"><input type="hidden" name="manifest" value="${escape(JSON.stringify(manifest))}"><button>Register Graphyard App →</button></form>`);
+        const manifest = appManifest(repository, deployment, `http://${address}`, role);
+        const purpose = role === 'reviewer'
+          ? 'This is the independent <strong>reviewer</strong> identity, separate from the Graphyard control-plane App. It reads the repository and writes pull-request reviews. It cannot write source code, publish the Graphyard check, or read branch protection.'
+          : 'The App reads code and branch protection, publishes its gate check, and writes PR review requests. It cannot write source code.';
+        return html(200, `<p>Register a private App for <strong>${escape(repository)}</strong>. GitHub will ask you to sign in, name the App, and choose the repository.</p><p>${purpose} Credentials return directly to this machine; no key copying is needed.</p><form method="post" action="https://github.com/settings/apps/new?state=${state}"><input type="hidden" name="manifest" value="${escape(JSON.stringify(manifest))}"><button>Register Graphyard App →</button></form>`);
       }
       if (url.pathname === '/created') {
         const received = Buffer.from(url.searchParams.get('state') ?? ''), expected = Buffer.from(state);
@@ -82,13 +94,14 @@ export async function startGithubSetup(root: string, repository: string, deploym
         if (!app || !Number.isSafeInteger(installationId) || installationId <= 0) return html(400, '<p>Register the App and select the managed repository first.</p>');
         await verify(app, installationId);
         const next = { ...app, installationId }; await persist(next); app = next;
+        if (dependencies.record) await dependencies.record(next as AppCredentials & { installationId: number });
         res.writeHead(303, { Location: '/' }); return res.end();
       }
       html(404, '<p>Page not found.</p>');
     } catch { html(502, '<p>Setup could not complete. Credentials are never included in this page or its logs. Check the App installation and restart setup to resume from saved credentials.</p>'); }
   });
   // Validate before binding; port 0 is useful for isolated tests.
-  appManifest(repository, deployment, 'http://127.0.0.1');
+  appManifest(repository, deployment, 'http://127.0.0.1', role);
   await new Promise<void>((accept, reject) => { http.once('error', reject); http.listen(port, '127.0.0.1', accept); });
   return { http, url: `http://127.0.0.1:${(http.address() as any).port}`, file };
 }

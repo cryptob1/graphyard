@@ -1,5 +1,6 @@
 import { z } from 'zod';
 
+export const CHECK_NAME = 'Graphyard / merge';
 export const stages = ['backlog', 'ready', 'build', 'review', 'test', 'acceptance', 'merge', 'done'] as const;
 export type Stage = typeof stages[number];
 export const proofSchema = z.string().regex(/^(unit|integration|e2e|manual):[a-zA-Z0-9._/-]+$/);
