@@ -361,6 +361,8 @@ test('card and ownership candidate references link to the exact PR and commit in
   const cardLink = cardPrLink(page);
   await expect(cardLink).toHaveAttribute('href', prHref);
   await expect(cardLink).toContainText('PR #1');
+  await expect(cardLink).toHaveAttribute('target', '_blank');
+  await expect(cardLink).toHaveAttribute('rel', 'noopener noreferrer');
   const [popup] = await Promise.all([page.waitForEvent('popup'), cardLink.click()]);
   expect(popup.url()).toBe(prHref); await popup.close();
   await expect(page.getByRole('dialog')).toHaveCount(0);
@@ -369,6 +371,10 @@ test('card and ownership candidate references link to the exact PR and commit in
   await expect(detailPrLink(page)).toHaveAttribute('href', prHref);
   const shaLink = detailShaLink(page);
   await expect(shaLink).toHaveAttribute('href', commitHref);
+  for (const link of [detailPrLink(page), shaLink]) {
+    await expect(link).toHaveAttribute('target', '_blank');
+    await expect(link).toHaveAttribute('rel', 'noopener noreferrer');
+  }
   await expect(shaLink.locator('code')).toHaveText('abcdef123456');
   await expect(dialog.getByText('PR #1', { exact: true })).toBeVisible();
   const [commitPopup] = await Promise.all([page.waitForEvent('popup'), shaLink.click()]);
@@ -388,9 +394,26 @@ for (const viewport of [{ name: 'desktop', width: 1280, height: 900 }, { name: '
     await expect(dialog.getByRole('button', { name: /Close/ })).toBeFocused();
     await page.keyboard.press('Tab');
     await expect(detailPrLink(page)).toBeFocused();
-    expect(['solid', 'auto']).toContain(await detailPrLink(page).evaluate(e => getComputedStyle(e).outlineStyle));
+    const ring = { outlineStyle: 'solid', outlineWidth: '2px', outlineColor: 'rgb(183, 215, 141)' };
+    expect(await detailPrLink(page).evaluate(e => { const s = getComputedStyle(e); return { outlineStyle: s.outlineStyle, outlineWidth: s.outlineWidth, outlineColor: s.outlineColor }; })).toEqual(ring);
     await page.keyboard.press('Tab');
     await expect(detailShaLink(page)).toBeFocused();
+    expect(await detailShaLink(page).evaluate(e => { const s = getComputedStyle(e); return { outlineStyle: s.outlineStyle, outlineWidth: s.outlineWidth, outlineColor: s.outlineColor }; })).toEqual(ring);
+    // Linking the SHA must not turn it into an unreadable widget: the text stays
+    // selectable with the ordinary gestures, so the SHA is still copyable.
+    await page.route('https://github.com/**', route => route.fulfill({ body: 'GitHub destination stub' }));
+    const shaText = detailShaLink(page).locator('code');
+    expect(await shaText.evaluate(e => getComputedStyle(e).userSelect)).toBe('text');
+    await page.evaluate(() => window.getSelection()?.removeAllRanges());
+    await shaText.dblclick();
+    expect(await page.evaluate(() => window.getSelection()?.toString())).toBe('abcdef123456');
+    await page.evaluate(() => window.getSelection()?.removeAllRanges());
+    const shaBox = (await shaText.boundingBox())!;
+    await page.mouse.move(shaBox.x - 3, shaBox.y + shaBox.height / 2);
+    await page.mouse.down();
+    await page.mouse.move(shaBox.x + shaBox.width - 2, shaBox.y + shaBox.height / 2, { steps: 10 });
+    expect(await page.evaluate(() => window.getSelection()?.toString())).toContain('abcdef123456');
+    await page.mouse.up();
     await page.keyboard.press('Escape'); await expect(dialog).toHaveCount(0);
     await expect(page.locator('.card').first()).toBeVisible();
     await card.focus(); await page.keyboard.press('Enter');
