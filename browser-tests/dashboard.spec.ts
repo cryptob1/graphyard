@@ -43,9 +43,43 @@ for (const viewport of [{ name: 'desktop', width: 1280, height: 900 }, { name: '
     await expect(phases.nth(1)).toContainText('planned and not active today');
     await expect(phases.nth(1)).toContainText('until the scoped operator-agent principal is provisioned');
     await expect(phases.nth(1)).toContainText('only from the unrestricted human administrator');
+    const phaseBoxes = await phases.evaluateAll(elements => elements.map(element => {
+      const box = element.getBoundingClientRect();
+      return { left: box.left, top: box.top, width: box.width };
+    }));
+    if (viewport.name === 'desktop') {
+      expect(Math.abs(phaseBoxes[0].top - phaseBoxes[1].top)).toBeLessThan(2);
+      expect(phaseBoxes[1].left).toBeGreaterThan(phaseBoxes[0].left + phaseBoxes[0].width);
+    } else {
+      expect(phaseBoxes[1].top).toBeGreaterThan(phaseBoxes[0].top);
+    }
     await expect(page.getByRole('heading', { name: 'Four AI agent sessions' })).toBeVisible();
     const duties = ['Operator agent', 'Master agent', 'Worker agent', 'Reviewer/proof-producer agent'];
     for (const duty of duties) await expect(page.getByRole('cell', { name: duty, exact: true })).toBeVisible();
+    const dutiesTable = page.getByRole('heading', { name: 'Four AI agent sessions' }).locator('xpath=following-sibling::table[1]');
+    if (viewport.name === 'mobile') {
+      const geometry = await dutiesTable.evaluate(table => {
+        const cells = Array.from(table.querySelectorAll('tbody td:first-child'));
+        const box = table.getBoundingClientRect();
+        return {
+          clientWidth: table.clientWidth,
+          scrollWidth: table.scrollWidth,
+          right: box.right,
+          viewportWidth: document.documentElement.clientWidth,
+          labels: cells.map(cell => ({
+            width: cell.getBoundingClientRect().width,
+            whiteSpace: getComputedStyle(cell).whiteSpace,
+          })),
+        };
+      });
+      expect(geometry.scrollWidth).toBeGreaterThan(geometry.clientWidth);
+      expect(geometry.right).toBeLessThanOrEqual(geometry.viewportWidth);
+      expect(geometry.labels).toHaveLength(4);
+      for (const label of geometry.labels) {
+        expect(label.width).toBeGreaterThanOrEqual(190);
+        expect(label.whiteSpace).toBe('nowrap');
+      }
+    }
     const operatorRow = page.getByRole('row', { name: /Operator agent/ });
     await expect(operatorRow).toContainText('human-approved bounded intent');
     await expect(operatorRow).toContainText('may add requirements but never remove or rewrite them');
