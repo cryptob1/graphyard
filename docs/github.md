@@ -171,7 +171,7 @@ The first command preserves the criteria and CI requirements, increments the pol
 
 ### Branch protection migration
 
-`graphyard master protection` reconciles the native requirement with the review policy of every open item, and `--apply` performs it after a printed plan. It patches only the review subresource, preserves the App-bound check, the merge queue's `strict`-off setting and administrator enforcement, re-reads protection afterwards, and refuses a repository whose open items disagree about their review provider, or whose protection is missing those invariants or requires CODEOWNERS approval. The manual helper below remains for one-off migrations.
+`graphyard master protection` reconciles the native requirement with the review policy of every open item, and `--apply` performs it after a printed plan. It patches only the review subresource, preserves the App-bound check, the merge queue's `strict`-off setting and administrator enforcement, re-reads protection afterwards, and refuses a repository whose open items disagree about whether a native approval is required (`github` against `codex` or `agent`), or whose protection is missing those invariants or requires CODEOWNERS approval. The manual helper below remains for one-off migrations.
 
 GitHub's native required approval count is separate from Graphyard's gate. For repositories adopting agent review, retain enforced administrator protection and the App-bound `Graphyard / merge` check (with `strict` off, as the merge queue requires), but remove the native approval-count/last-push requirement once reviewed code supporting the adapter is deployed. Otherwise GitHub will continue demanding a formal approval even after Graphyard passes.
 

@@ -134,8 +134,8 @@ node "$GRAPHYARD_CLI" master protection --apply
 The plan prints the open items on each provider, the current review settings, and the exact changes. `--apply` patches only the review subresource, leaving the App-bound `Graphyard / merge` check, the merge queue's `strict`-off setting, and administrator enforcement as observed, then re-reads protection and refuses unless GitHub reports the reconciled state.
 
 - Open items on `github` review: at least one required approval, last-push approval, and stale-review dismissal.
-- Open items on `codex` review: native approval count zero, so Graphyard's own gate decides.
-- A mix of both: refused, naming the conflicting items. Move the open items onto one provider first; leaving protection inconsistent with an open item's policy is not an option Graphyard offers.
+- Open items on `codex` or `agent` review: native approval count zero and no last-push approval, so Graphyard's own gate decides. Both providers share this side: the split is the model's `nativeReviewRequired`, which only the `github` provider satisfies, so a policy Graphyard accepts is never one the branch cannot enforce.
+- A mix of native and non-native items: refused, naming the conflicting items and their providers. Move the open items onto one provider first; leaving protection inconsistent with an open item's policy is not an option Graphyard offers.
 - `strict` ("require branches to be up to date") left enabled, missing administrator enforcement or App-bound check, or a required CODEOWNERS approval: refused before any change. The [merge queue](github.md#merge-queue) needs `strict` off.
 
 ## Harness permissions

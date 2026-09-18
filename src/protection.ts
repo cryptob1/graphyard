@@ -1,25 +1,28 @@
 import { execFileSync } from 'node:child_process';
-import { CHECK_NAME, type Work } from './model.js';
+import { CHECK_NAME, nativeReviewRequired, reviewProviderOf, reviewProviders, type ReviewProvider, type Work } from './model.js';
 
 export interface ReviewProtection { mode: 'native' | 'agent'; requiredApprovals: number; requireLastPushApproval: boolean; dismissStaleReviews: boolean }
 export type ProtectionRun = (command: string, args: string[], input?: string) => string;
 const protectionRun: ProtectionRun = (command, args, input) => execFileSync(command, args, { input, encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'], timeout: 60_000 });
 
 // One branch cannot satisfy both review policies at once, so a mixed set of open items refuses
-// instead of silently leaving one of them unenforceable.
+// instead of silently leaving one of them unenforceable. The split is the model's own
+// nativeReviewRequired: only `github` needs GitHub's approval count; `codex` and `agent` both
+// need it at zero so Graphyard's identity-bound gate decides.
 export function requiredReviewProtection(work: Work[]) {
   const open = work.filter(item => item.stage !== 'done' && item.policy.review);
-  const github = open.filter(item => (item.policy.reviewProvider ?? 'github') === 'github').map(item => item.key).sort();
-  const codex = open.filter(item => item.policy.reviewProvider === 'codex').map(item => item.key).sort();
-  if (github.length && codex.length) throw new Error(`Branch protection cannot match both open review policies: ${github.join(', ')} require a native GitHub approval and ${codex.join(', ')} require the native approval count to be zero. Move the open items onto one review provider, then reconcile protection.`);
-  const protection: ReviewProtection = codex.length
+  const items = Object.fromEntries(reviewProviders.map(provider => [provider, open.filter(item => reviewProviderOf(item.policy) === provider).map(item => item.key).sort()])) as Record<ReviewProvider, string[]>;
+  const native = open.filter(item => nativeReviewRequired(item.policy)).map(item => item.key).sort();
+  const gated = open.filter(item => !nativeReviewRequired(item.policy)).map(item => `${item.key} (${reviewProviderOf(item.policy)})`).sort();
+  if (native.length && gated.length) throw new Error(`Branch protection cannot match both open review policies: ${native.join(', ')} require a native GitHub approval and ${gated.join(', ')} require the native approval count to be zero. Move the open items onto one review provider, then reconcile protection.`);
+  const protection: ReviewProtection = gated.length
     ? { mode: 'agent', requiredApprovals: 0, requireLastPushApproval: false, dismissStaleReviews: true }
     : { mode: 'native', requiredApprovals: 1, requireLastPushApproval: true, dismissStaleReviews: true };
-  return { protection, github, codex };
+  return { protection, items };
 }
 
 export function protectionPlan(current: any, config: { repository: string; baseBranch: string; githubAppId: number }, work: Work[]) {
-  const { protection, github, codex } = requiredReviewProtection(work);
+  const { protection, items } = requiredReviewProtection(work);
   const reviews = current?.required_pull_request_reviews, checks = current?.required_status_checks;
   const observed = { requiredApprovals: Number(reviews?.required_approving_review_count ?? 0), requireLastPushApproval: reviews?.require_last_push_approval === true, dismissStaleReviews: reviews?.dismiss_stale_reviews === true };
   const blockers = [
@@ -37,7 +40,7 @@ export function protectionPlan(current: any, config: { repository: string; baseB
     ...(observed.requireLastPushApproval === protection.requireLastPushApproval ? [] : [`require_last_push_approval ${observed.requireLastPushApproval} to ${protection.requireLastPushApproval}`]),
     ...(observed.dismissStaleReviews === protection.dismissStaleReviews ? [] : [`dismiss_stale_reviews ${observed.dismissStaleReviews} to ${protection.dismissStaleReviews}`]),
   ];
-  return { repository: config.repository, branch: config.baseBranch, mode: protection.mode, items: { github, codex }, current: observed, desired: protection, changes, blockers,
+  return { repository: config.repository, branch: config.baseBranch, mode: protection.mode, items, current: observed, desired: protection, changes, blockers,
     consistent: !changes.length && !blockers.length,
     refusal: blockers.length ? `Branch protection is missing settings Graphyard cannot reconcile for you: ${blockers.join('; ')}` : null };
 }
