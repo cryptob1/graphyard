@@ -861,3 +861,57 @@ test('the runner holds authority while the host attestor executes and signs the 
     await assert.rejects(supervise(attestorEnv), /private key must be a private regular file/);
   } finally { await new Promise<void>(r => http.close(() => r())); await rm(cwd, { recursive: true, force: true }); }
 });
+
+test('master run executes the durable loop as a supervised process and master status reports its cursor', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'graphyard-master-run-'));
+  const credentialDirectory = await mkdtemp(join(tmpdir(), 'graphyard-master-run-credentials-'));
+  const credentialFile = join(credentialDirectory, 'coordinator.token');
+  let proofScoped = false;
+  const now = () => new Date().toISOString();
+  const snapshot = {
+    now: now(),
+    work: [
+      { id: 'blocked-1', key: 'GY-70', title: 'Needs an operator', stage: 'ready', ready: true, blocker: 'Waiting on an external contract', priority: 1, epoch: 0, dependencies: [], criteria: [{ id: 'AC-1', text: 'Proven', proofs: ['integration:loop'] }], policy: { checks: ['test'], review: true }, plannedFiles: [], workspaces: [], evidence: [], gates: [{ name: 'ready', passed: false, reasons: ['Waiting on an external contract'] }], violations: [], createdAt: now(), updatedAt: now(), stageEnteredAt: now(), lease: null, candidate: null, submission: null, reworkRequested: false, scenarioRequirements: [], observation: null, revision: 1, policyRevision: 1 },
+    ],
+  };
+  const http = createServer((req, res) => {
+    res.setHeader('Content-Type', 'application/json');
+    if (req.url === '/api/status') return res.end(JSON.stringify({ actor: { id: 'master', role: 'coordinator', ...(proofScoped ? { proofs: ['integration:loop'] } : {}) }, repository: 'owner/project', baseBranch: 'main', githubAppId: 1234 }));
+    if (req.url === '/api/work-snapshot') return res.end(JSON.stringify({ ...snapshot, now: now() }));
+    res.statusCode = 404; res.end('{}');
+  });
+  await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));
+  const url = `http://127.0.0.1:${(http.address() as any).port}`;
+  try {
+    await exec('git', ['init', '-q'], { cwd: root });
+    await exec('git', ['remote', 'add', 'origin', 'https://github.com/owner/project.git'], { cwd: root });
+    await writeFile(credentialFile, 'coordinator-token-'.padEnd(40, 'x'), { mode: 0o600 });
+    await mkdir(join(root, '.graphyard'));
+    await writeFile(join(root, '.graphyard/master.json'), JSON.stringify({ version: 1, url, credentialFile, cliPath: launcher, repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'machine-a', masterAgentName: 'graphyard-master-project', autoMerge: true, mergeMethod: 'merge', workers: [], run: { intervalSeconds: 5, deploymentShaField: 'commit' } }), { mode: 0o600 });
+    const env = { ...process.env, GRAPHYARD_URL: url, GRAPHYARD_TOKEN: undefined, GRAPHYARD_TOKEN_FILE: undefined };
+
+    const first = JSON.parse((await exec(process.execPath, [launcher, 'master', 'run', '--once'], { cwd: root, env })).stdout);
+    assert.equal(first.cycles, 1); assert.equal(first.coordinator, 'master'); assert.equal(first.intervalSeconds, 5);
+    const cursor = join(credentialDirectory, 'coordinator.daemon.json');
+    assert.equal((await stat(cursor)).mode & 0o777, 0o600, 'the durable cursor is private');
+    const state = JSON.parse(await readFile(cursor, 'utf8'));
+    assert.equal(state.cycle, 1); assert.equal(state.lock, null, 'a completed run releases its lock for the supervisor restart');
+    assert.equal(state.metrics.length, 1, 'every cycle records stage percentiles');
+
+    // A restart continues the same cursor rather than starting over.
+    await exec(process.execPath, [launcher, 'master', 'run', '--once', '--interval', '30'], { cwd: root, env });
+    assert.equal(JSON.parse(await readFile(cursor, 'utf8')).cycle, 2);
+
+    const status = JSON.parse((await exec(process.execPath, [launcher, 'master', 'status'], { cwd: root, env })).stdout);
+    assert.equal(status.daemon.cycle, 2);
+    assert.ok(status.daemon.metrics, 'master status shows what the loop measured');
+    assert.deepEqual(status.daemon.unresolved, []);
+
+    await assert.rejects(exec(process.execPath, [launcher, 'master', 'run', '--once', '--interval', '2'], { cwd: root, env }), /whole seconds between 5 and 900/);
+    proofScoped = true;
+    await assert.rejects(exec(process.execPath, [launcher, 'master', 'run', '--once'], { cwd: root, env }), /refuses a credential that is also allowed to produce evidence/);
+  } finally {
+    await new Promise<void>(resolve => http.close(() => resolve()));
+    await rm(root, { recursive: true, force: true }); await rm(credentialDirectory, { recursive: true, force: true });
+  }
+});
