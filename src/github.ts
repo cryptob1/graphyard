@@ -104,9 +104,20 @@ export class GitHub {
   async protection(requireNativeReview = false) {
     try {
       const p = await this.request(`/branches/${encodeURIComponent(this.config.base)}/protection`);
-      return (!requireNativeReview || p.required_pull_request_reviews?.required_approving_review_count >= 1 && p.required_pull_request_reviews?.dismiss_stale_reviews && p.required_pull_request_reviews?.require_last_push_approval) && !!p.required_status_checks?.strict && !!p.enforce_admins?.enabled && !p.allow_force_pushes?.enabled && !p.allow_deletions?.enabled
+      // `strict` must be off: a queued tip is deliberately behind the base branch, and the merge
+      // queue supersedes that setting with a published tip that already contains its validated base.
+      return (!requireNativeReview || p.required_pull_request_reviews?.required_approving_review_count >= 1 && p.required_pull_request_reviews?.dismiss_stale_reviews && p.required_pull_request_reviews?.require_last_push_approval) && p.required_status_checks?.strict === false && !!p.enforce_admins?.enabled && !p.allow_force_pushes?.enabled && !p.allow_deletions?.enabled
         && p.required_status_checks.checks?.some((c: any) => c.context === CHECK_NAME && c.app_id === this.config.appId);
     } catch { return false; }
+  }
+  /**
+   * The base a candidate is legitimately bound to. A published speculative tip carries the base it
+   * was built on, and the managed branch advances underneath it while the entries ahead of it land,
+   * so the live `pr.base.sha` is not that binding. Every other candidate binds to the live base.
+   */
+  private boundBase(work: Work, pr: any): string {
+    const speculation = work.queue?.speculation;
+    return speculation && speculation.tip === pr.head.sha && speculation.policyRevision === work.policyRevision ? speculation.base : pr.base.sha;
   }
   async observe(work: Work): Promise<Observation> {
     const startedAt = new Date().toISOString();
@@ -120,10 +131,9 @@ export class GitHub {
     for (const r of reviews) if (['APPROVED', 'CHANGES_REQUESTED', 'DISMISSED'].includes(r.state)) latest.set(r.user.login, r);
     // A published speculative tip carries its own validated base. The candidate stays bound to
     // that exact commit while the managed branch advances underneath it through queue merges.
-    const speculation = work.queue?.speculation;
-    const speculative = !!speculation && speculation.tip === pr.head.sha && speculation.policyRevision === work.policyRevision;
-    const candidateBase = pr.merged && work.candidate && work.candidate.sha === pr.head.sha ? work.candidate.baseSha : speculative ? speculation!.base : pr.base.sha;
-    const baseTree = speculative && speculation!.base !== pr.base.sha ? await this.commitTree(pr.base.sha) : undefined;
+    const bound = this.boundBase(work, pr);
+    const candidateBase = pr.merged && work.candidate && work.candidate.sha === pr.head.sha ? work.candidate.baseSha : bound;
+    const baseTree = bound !== pr.base.sha ? await this.commitTree(pr.base.sha) : undefined;
     const agentReview = work.policy.review && work.policy.reviewProvider === 'codex' ? !pr.merged && (pr.state !== 'open' || pr.draft !== false)
       ? { provider: 'codex' as const, sha: pr.head.sha, approved: false, reason: pr.draft ? 'Pull request is draft; mark it ready to request code review' : 'Pull request is not open; reopen it to request code review' }
       : await observeCodex(this, pr.number, pr.head.sha, reviews, pr.user.id, work.reviewRequest, candidateBase, work.policyRevision, this.config.appId) : undefined;
@@ -160,7 +170,7 @@ export class GitHub {
   async requestCodex(work: Work, beforeWrite: () => Promise<void>): Promise<ReviewRequest> {
     demand(work.candidate && work.policy.review && work.policy.reviewProvider === 'codex', 'Candidate with Codex review policy required');
     const pr = await this.request(`/pulls/${work.candidate.pr}`);
-    requireCurrent(pr.head.sha === work.candidate.sha && pr.base.sha === work.candidate.baseSha && pr.state === 'open' && pr.draft === false, 'PR changed before review dispatch; retry');
+    requireCurrent(pr.head.sha === work.candidate.sha && this.boundBase(work, pr) === work.candidate.baseSha && pr.state === 'open' && pr.draft === false, 'PR changed before review dispatch; retry');
     const body = `@codex review\n\n<!-- graphyard-review:${randomUUID()} head:${work.candidate.sha} base:${work.candidate.baseSha} policy:${work.policyRevision} -->`;
     await beforeWrite();
     const comment = await this.request(`/issues/${work.candidate.pr}/comments`, 'POST', { body });
@@ -218,7 +228,7 @@ export class GitHub {
     const body = { name: CHECK_NAME, head_sha: work.candidate.sha, status: 'completed', conclusion: reasons.length ? 'failure' : 'success', external_id: work.id,
       output: { title: reasons.length ? 'REFUSED' : 'All required gates passed', summary: (reasons.length ? reasons.map(r => `- ${r}`).join('\n') : `Candidate ${work.candidate.sha}; base ${work.candidate.baseSha}; policy ${work.policyRevision}`).slice(0, 60000) } };
     const pr = await this.request(`/pulls/${work.candidate.pr}`);
-    if (!reasons.length || !forcedReason) requireCurrent(pr.head.sha === work.candidate.sha && pr.base.sha === work.candidate.baseSha, 'PR changed before check publication; retry');
+    if (!reasons.length || !forcedReason) requireCurrent(pr.head.sha === work.candidate.sha && this.boundBase(work, pr) === work.candidate.baseSha, 'PR changed before check publication; retry');
     if (!reasons.length) requireCurrent(pr.state === 'open' && !pr.draft && pr.base.ref === this.config.base, 'PR is closed, draft, or retargeted; refusing success');
     await beforeWrite();
     if (existing?.status === body.status && existing.conclusion === body.conclusion && existing.external_id === body.external_id

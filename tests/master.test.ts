@@ -20,10 +20,12 @@ async function repository() {
   return root;
 }
 const coordinatorStatus = async () => new Response(JSON.stringify({ actor: { id: 'master', role: 'coordinator' }, repository: 'owner/project', baseBranch: 'main', githubAppId: 1234 }));
-const validProtection = { required_pull_request_reviews: { required_approving_review_count: 1, dismiss_stale_reviews: true, require_last_push_approval: true }, required_status_checks: { strict: true, checks: [{ context: 'Graphyard / merge', app_id: 1234 }] }, enforce_admins: { enabled: true }, allow_force_pushes: { enabled: false }, allow_deletions: { enabled: false } };
+const validProtection = { required_pull_request_reviews: { required_approving_review_count: 1, dismiss_stale_reviews: true, require_last_push_approval: true }, required_status_checks: { strict: false, checks: [{ context: 'Graphyard / merge', app_id: 1234 }] }, enforce_admins: { enabled: true }, allow_force_pushes: { enabled: false }, allow_deletions: { enabled: false } };
 function work(overrides: Partial<Work> = {}) {
   const candidate = { sha: 'a'.repeat(40), baseSha: 'b'.repeat(40), pr: 42, branch: 'graphyard/gy-42-1', author: 'worker' };
-  return { id: 'work-id', key: 'GY-42', title: 'Prove the master flow', description: '', type: 'feature', priority: 1, dependencies: [], criteria: [{ id: 'AC-1', text: 'Works', proofs: ['integration:master'] }], policy: { checks: ['test'], review: true }, plannedFiles: [], stage: 'merge', revision: 9, policyRevision: 2, createdAt: '', updatedAt: '', stageEnteredAt: '', ready: true, epoch: 1, lease: null, workspaces: [], candidate, submission: { epoch: 1, pr: 42 }, reworkRequested: false, scenarioRequirements: [], evidence: [], observation: null, blocker: null, gates: [{ name: 'merge', passed: true, reasons: [] }], violations: [], mergeAuthorization: { sha: candidate.sha, baseSha: candidate.baseSha, policyRevision: 2, at: new Date().toISOString() }, ...overrides } as Work;
+  const queue = { sequence: 1, enqueuedAt: '2030-01-01T00:30:00Z', policyRevision: 2,
+    speculation: { ref: 'refs/graphyard/queue/gy-42', tip: candidate.sha, base: candidate.baseSha, baseTree: 'e'.repeat(40), predecessors: [], policyRevision: 2, publishedAt: '2030-01-01T00:31:00Z' } };
+  return { id: 'work-id', key: 'GY-42', queue, title: 'Prove the master flow', description: '', type: 'feature', priority: 1, dependencies: [], criteria: [{ id: 'AC-1', text: 'Works', proofs: ['integration:master'] }], policy: { checks: ['test'], review: true }, plannedFiles: [], stage: 'merge', revision: 9, policyRevision: 2, createdAt: '', updatedAt: '', stageEnteredAt: '', ready: true, epoch: 1, lease: null, workspaces: [], candidate, submission: { epoch: 1, pr: 42 }, reworkRequested: false, scenarioRequirements: [], evidence: [], observation: null, blocker: null, gates: [{ name: 'merge', passed: true, reasons: [] }], violations: [], mergeAuthorization: { sha: candidate.sha, baseSha: candidate.baseSha, policyRevision: 2, at: new Date().toISOString() }, ...overrides } as Work;
 }
 
 test('master instructions are managed idempotently without replacing repository rules', () => {
@@ -277,6 +279,7 @@ test('routine merge is exact-candidate, double-checked, and never uses an admin 
   assert.deepEqual(calls[4].slice(0, 3), ['api', '--method', 'PUT']); assert.ok(calls[4].includes(`sha=${candidate.candidate!.sha}`)); assert.equal(calls[4].includes('--admin'), false);
   assert.doesNotThrow(() => assertMergeProtection(validProtection, config, candidate));
   assert.throws(() => assertMergeProtection({ ...validProtection, required_status_checks: { ...validProtection.required_status_checks, checks: [] } }, config, candidate), /protection changed/);
+  assert.throws(() => assertMergeProtection({ ...validProtection, required_status_checks: { ...validProtection.required_status_checks, strict: true } }, config, candidate), /requires branches to be up to date/);
   assert.throws(() => assertMergeCandidate(work({ gates: [{ name: 'acceptance', passed: false, reasons: ['Human approval required'] }] })), /does not have/);
   let reads = 0; await assert.rejects(mergeWork(config, candidate, async () => ({ work: [reads++ ? work({ revision: 10 }) : candidate], now: new Date().toISOString() }), acquire, cancel, verify, () => JSON.stringify({ headRefOid: candidate.candidate!.sha, baseRefOid: candidate.candidate!.baseSha, baseRefName: 'main', state: 'OPEN', isDraft: false })), /changed after/);
   await assert.rejects(mergeWork(config, candidate, async () => ({ work: [candidate], now: new Date().toISOString() }), acquire, cancel, verify, () => JSON.stringify({ headRefOid: candidate.candidate!.sha, baseRefOid: candidate.candidate!.baseSha, baseRefName: 'release', state: 'OPEN', isDraft: false })), /changed on GitHub/);
@@ -361,7 +364,7 @@ const queueEntry = (sequence: number, enqueuedAt: string, speculation: any = nul
 
 test('master status reports queue position, predicted tip, and per-entry wait time', () => {
   const observedAt = '2030-01-01T01:00:00Z';
-  const head = work({ id: 'head-id', key: 'GY-42', observation: { at: observedAt, baseTip: 'b'.repeat(40), candidate: { sha: 'a'.repeat(40), baseSha: 'b'.repeat(40), pr: 42, branch: 'graphyard/gy-42-1', author: 'worker' } } as any, queue: queueEntry(1, '2030-01-01T00:30:00Z') } as Partial<Work>);
+  const head = work({ id: 'head-id', key: 'GY-42', observation: { at: observedAt, baseTip: 'b'.repeat(40), candidate: { sha: 'a'.repeat(40), baseSha: 'b'.repeat(40), pr: 42, branch: 'graphyard/gy-42-1', author: 'worker' } } as any, queue: queueEntry(1, '2030-01-01T00:30:00Z', { ref: 'refs/graphyard/queue/gy-42', tip: 'a'.repeat(40), base: 'b'.repeat(40), baseTree: 'e'.repeat(40), predecessors: [], policyRevision: 2, publishedAt: '2030-01-01T00:31:00Z' }) } as Partial<Work>);
   const next = work({ id: 'next-id', key: 'GY-43', candidate: { sha: 'd'.repeat(40), baseSha: 'a'.repeat(40), pr: 43, branch: 'graphyard/gy-43-1', author: 'worker' },
     observation: { at: observedAt, baseTip: 'b'.repeat(40), candidate: { sha: 'd'.repeat(40), baseSha: 'a'.repeat(40), pr: 43, branch: 'graphyard/gy-43-1', author: 'worker' } } as any,
     queue: queueEntry(2, '2030-01-01T00:45:00Z', { ref: 'refs/graphyard/queue/gy-43', tip: 'd'.repeat(40), base: 'a'.repeat(40), baseTree: 'e'.repeat(40), predecessors: ['GY-42'], policyRevision: 2, publishedAt: observedAt }),
@@ -391,5 +394,6 @@ test('a merge only proceeds while the validated tip still lands its tested tree'
   assert.doesNotThrow(() => assertQueuedLanding(queued, authorization, advanced, 'owner/project', run(baseTree)));
   assert.deepEqual(reads[0], ['api', `repos/owner/project/commits/${advanced}`]);
   assert.throws(() => assertQueuedLanding(queued, authorization, advanced, 'owner/project', run('9'.repeat(40))), /would no longer land its tested tree/);
-  assert.throws(() => assertQueuedLanding(work(), authorization, advanced, 'owner/project', run(baseTree)), /moved away from the validated base/);
+  assert.throws(() => assertQueuedLanding(work({ queue: null } as Partial<Work>), authorization, validatedBase, 'owner/project', run(baseTree)), /no published merge-queue tip/);
+  assert.throws(() => assertQueuedLanding(work({ queue: { ...queued.queue!, speculation: { ...queued.queue!.speculation!, tip: '7'.repeat(40) } } } as Partial<Work>), authorization, validatedBase, 'owner/project', run(baseTree)), /no published merge-queue tip/);
 });

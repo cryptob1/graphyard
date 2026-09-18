@@ -10,6 +10,7 @@ function fixture() {
   const pr: any = { number: 10, head: { sha: head, ref: 'graphyard/task', repo: { full_name: 'owner/repo' } }, base: { sha: base, ref: 'main', repo: { full_name: 'owner/repo' } }, user: { login: 'author' }, merged: false, mergeable: true, draft: false, state: 'open', merge_commit_sha: null };
   let reviews: any[] = [];
   let protectedBranch = true;
+  let upToDateRequired = false;
   const github = new GitHub({ repository: 'owner/repo', base: 'main', appId: 1234, installationId: 1, privateKey: 'not-used-in-adapter-test' });
   const mutations: Record<string, () => any> = {};
   github.request = async (path, method = 'GET', body) => {
@@ -17,7 +18,7 @@ function fixture() {
     if (method !== 'GET') return path in mutations ? mutations[path]() : { id: 12 };
     if (/^\/commits\/[a-f0-9]{40}$/.test(path)) return { sha: path.slice(9), commit: { tree: { sha: `f${path.slice(10)}` } } };
     if (path === '/pulls/10') return structuredClone(pr);
-    if (path.includes('/protection')) return { required_pull_request_reviews: { required_approving_review_count: 1, dismiss_stale_reviews: true, require_last_push_approval: true }, required_status_checks: { strict: true, checks: [{ context: CHECK_NAME, app_id: protectedBranch ? 1234 : 999 }] }, enforce_admins: { enabled: true }, allow_force_pushes: { enabled: false }, allow_deletions: { enabled: false } };
+    if (path.includes('/protection')) return { required_pull_request_reviews: { required_approving_review_count: 1, dismiss_stale_reviews: true, require_last_push_approval: true }, required_status_checks: { strict: upToDateRequired, checks: [{ context: CHECK_NAME, app_id: protectedBranch ? 1234 : 999 }] }, enforce_admins: { enabled: true }, allow_force_pushes: { enabled: false }, allow_deletions: { enabled: false } };
     if (path.includes('/reviews')) return reviews;
     if (path.includes('/files')) return [{ filename: 'src/claims.ts' }];
     if (path.includes('check_name=')) return { check_runs: [{ id: 12, name: CHECK_NAME, app: { id: 1234 } }] };
@@ -25,7 +26,8 @@ function fixture() {
     throw new Error(`Unexpected request ${path}`);
   };
   const work = { id: 'task-id', key: 'GY-41', policy: { review: true, checks: ['test'] }, submission: { pr: 10, epoch: 1 }, candidate: { sha: head, baseSha: base, pr: 10 }, policyRevision: 1, revision: 3, gates: [{ name: 'acceptance', passed: false, reasons: ['AC-1 requires proof'] }], violations: [] } as unknown as Work;
-  return { github, calls, pr, work, mutations, reviews: (r: any[]) => { reviews = r; }, protection: (p: boolean) => { protectedBranch = p; } };
+  return { github, calls, pr, work, mutations, reviews: (r: any[]) => { reviews = r; }, protection: (p: boolean) => { protectedBranch = p; },
+    requireUpToDate: (required: boolean) => { upToDateRequired = required; } };
 }
 test('GitHub adapter binds observations to repository, base, current reviews, and producer', async () => {
   const f = fixture(); f.reviews([{ id: 10, user: { login: 'reviewer' }, commit_id: head, state: 'APPROVED' }, { id: 11, user: { login: 'reviewer' }, commit_id: head, state: 'CHANGES_REQUESTED', submitted_at: '2026-01-01T00:01:00Z' }]);
@@ -46,6 +48,11 @@ test('final verification refuses gate changes after the initial collection', asy
 });
 test('App binding is mandatory even when a check with the correct name is required', async () => {
   const f = fixture(); f.protection(false); assert.equal(await f.github.protection(), false);
+});
+test('a base branch that still requires branches to be up to date cannot carry the merge queue', async () => {
+  const f = fixture(); assert.equal(await f.github.protection(), true);
+  f.requireUpToDate(true);
+  assert.equal(await f.github.protection(), false, 'a queued tip is behind the base branch by design, so `strict` would block every landing');
 });
 test('observing a merge preserves the tested pre-merge base candidate', async () => {
   const f = fixture(); f.pr.merged = true; f.pr.base.sha = 'c'.repeat(40);
@@ -217,4 +224,36 @@ test('observation binds a published speculative tip to its validated base and re
   queued(f.work, { ref: 'refs/graphyard/queue/gy-41', tip: 'e'.repeat(40), base: predictedBase, baseTree: 'basetree'.padEnd(40, '0'), predecessors: [], policyRevision: 1, publishedAt: '2026-09-17T00:00:00.000Z' });
   const superseded = await f.github.observe(f.work);
   assert.equal(superseded.candidate.baseSha, base, 'a speculation for another commit cannot rebind this head');
+});
+
+/** A queue entry after Graphyard rebound it: the PR still targets a base branch that has moved on. */
+function boundToSpeculativeTip(f: ReturnType<typeof fixture>) {
+  queued(f.work, { ref: 'refs/graphyard/queue/gy-41', tip: head, base: predictedBase, baseTree: `f${'c'.repeat(39)}`, predecessors: ['GY-40'], policyRevision: 1, publishedAt: '2026-09-17T00:00:00.000Z' });
+  f.work.candidate!.baseSha = predictedBase;
+  return f;
+}
+
+test('the required check is published on a speculative tip whose base branch has moved on', async () => {
+  const f = boundToSpeculativeTip(fixture());
+  f.work.gates = [{ name: 'merge', passed: true, reasons: [] }];
+  await f.github.publish(f.work);
+  const call = f.calls.find(c => c.method === 'PATCH')!;
+  assert.equal(call.body.conclusion, 'success', 'the live base differs from the validated base by design and must not refuse the write');
+  assert.equal(call.body.head_sha, head);
+  assert.match(call.body.output.summary, new RegExp(`base ${predictedBase}`));
+});
+
+test('a head bound to no speculation still refuses publication when the base branch moved', async () => {
+  const f = fixture(); f.work.candidate!.baseSha = predictedBase;
+  await assert.rejects(f.github.publish(f.work), /changed before check publication/);
+});
+
+test('Codex dispatch binds a speculative base rather than refusing the moved base branch', async () => {
+  const f = boundToSpeculativeTip(fixture()); f.work.policy.reviewProvider = 'codex';
+  const original = f.github.request;
+  f.github.request = async (path, method, body: any) => method === 'POST' ? { id: 77, body: body.body, performed_via_github_app: { id: 1234 }, user: { type: 'Bot' }, created_at: new Date().toISOString() } : original(path, method, body);
+  const request = await f.github.requestCodex(f.work, async () => {});
+  assert.equal(request.sha, head);
+  assert.equal(request.baseSha, predictedBase, 'the review is requested for the commit the tip will land on');
+  assert.match(request.body, new RegExp(`base:${predictedBase}`));
 });

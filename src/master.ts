@@ -458,20 +458,27 @@ export function assertMergeProtection(protection: any, config: MasterConfig, wor
   const nativeReview = !!work.policy.review && (work.policy.reviewProvider ?? 'github') !== 'codex';
   const reviews = protection?.required_pull_request_reviews;
   const checks = protection?.required_status_checks;
+  // "Require branches to be up to date" cannot coexist with a merge queue: a queued tip is
+  // deliberately behind the base branch while the entries ahead of it land. Graphyard replaces that
+  // setting with a stronger binding of its own — every landing is a published speculative tip that
+  // already contains its validated base, rechecked against the live base tree immediately before
+  // the provider call — so it is required to be off rather than left to fail at the merge API.
+  if (checks?.strict !== false) throw new Error(`${work.key} managed-branch protection still requires branches to be up to date; the merge queue supersedes that setting and no queued tip can land while it is enabled`);
   const protectedBranch = (!nativeReview || reviews?.required_approving_review_count >= 1 && reviews?.dismiss_stale_reviews === true && reviews?.require_last_push_approval === true)
-    && checks?.strict === true && protection?.enforce_admins?.enabled === true && protection?.allow_force_pushes?.enabled !== true && protection?.allow_deletions?.enabled !== true
+    && protection?.enforce_admins?.enabled === true && protection?.allow_force_pushes?.enabled !== true && protection?.allow_deletions?.enabled !== true
     && Array.isArray(checks?.checks) && checks.checks.some((check: any) => check?.context === 'Graphyard / merge' && check?.app_id === config.githubAppId);
   if (!protectedBranch) throw new Error(`${work.key} managed-branch protection changed after merge authorization; Graphyard refused the merge`);
 }
 /**
- * The validated commit must still land its tested tree. Either the base branch is exactly the
- * commit the candidate was validated on, or it has only advanced through earlier queue merges,
- * which leave that tree untouched. Any other advance refuses the merge.
+ * The validated commit must still land its tested tree. Only a Graphyard-published speculative tip
+ * may land, because publication is what proves the validated commit already contains its base. The
+ * base branch must then still be exactly that base, or have advanced only through earlier queue
+ * merges, which leave its tree untouched. Any other advance refuses the merge.
  */
 export function assertQueuedLanding(work: Work, authorization: { sha: string; baseSha: string }, baseRefOid: string, repository: string, run: (command: string, args: string[]) => string) {
-  if (baseRefOid === authorization.baseSha) return;
   const speculation = work.queue?.speculation;
-  if (!speculation || speculation.tip !== authorization.sha || speculation.base !== authorization.baseSha || !speculation.baseTree) throw new Error(`${work.key} base branch moved away from the validated base before merge`);
+  if (!speculation || speculation.tip !== authorization.sha || speculation.base !== authorization.baseSha || !speculation.baseTree) throw new Error(`${work.key} has no published merge-queue tip for the authorized commit; the queue is the only path onto the base branch`);
+  if (baseRefOid === authorization.baseSha) return;
   const commit = JSON.parse(run('gh', ['api', `repos/${repository}/commits/${baseRefOid}`]));
   if (commit?.commit?.tree?.sha !== speculation.baseTree) throw new Error(`${work.key} base branch advanced outside the merge queue; the validated tip would no longer land its tested tree`);
 }

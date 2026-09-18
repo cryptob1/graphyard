@@ -423,7 +423,7 @@ test('merge queue shows each entry with its position, predicted tip, and wait', 
   const entry = (overrides: Record<string, unknown>) => ({ ...work, stage: 'merge', evidence: [], observation: null, ...overrides });
   const head = entry({ id: 'queue-head', key: 'GY-10', title: 'Head of the queue', candidate: { pr: 10, sha: headSha, baseSha, branch: 'graphyard/gy-10-1', author: 'worker' },
     observation: { baseTip: baseSha, candidate: { sha: headSha, baseSha } }, gates: [{ name: 'merge', passed: true, reasons: [] }],
-    queue: { sequence: 1, enqueuedAt, policyRevision: 1, speculation: null } });
+    queue: { sequence: 1, enqueuedAt, policyRevision: 1, speculation: { ref: 'refs/graphyard/queue/gy-10', tip: headSha, base: baseSha, baseTree: 'e'.repeat(40), predecessors: [], policyRevision: 1, publishedAt: enqueuedAt } } });
   const next = entry({ id: 'queue-next', key: 'GY-11', title: 'Behind the head', candidate: { pr: 11, sha: tipSha, baseSha: headSha, branch: 'graphyard/gy-11-1', author: 'worker' },
     observation: { baseTip: baseSha, candidate: { sha: tipSha, baseSha: headSha } }, gates: [{ name: 'merge', passed: false, reasons: ['Merge queue position 2 of 2: GY-10 is ahead'] }],
     queue: { sequence: 2, enqueuedAt, policyRevision: 1, speculation: { ref: 'refs/graphyard/queue/gy-11', tip: tipSha, base: headSha, baseTree: 'd'.repeat(40), predecessors: ['GY-10'], policyRevision: 1, publishedAt: enqueuedAt } } });

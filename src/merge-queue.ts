@@ -48,7 +48,10 @@ export function predictQueue(all: Work[], now: number): QueuePlacement[] {
     // Re-binding to that advance needs no new commit, so no proof or review is invalidated.
     const treeEquivalent = position === 0 && published && !!work.observation?.baseTree && work.observation.baseTree === speculation!.baseTree;
     const onPrediction = !!candidate && !!predictedBase && candidate.baseSha === predictedBase;
-    const current = position === 0 ? onPrediction || treeEquivalent : onPrediction && published;
+    // Only a Graphyard-published tip may land. Publication is what proves the validated commit
+    // already contains its predicted base, so the merge result is that commit's tested tree even
+    // though the candidate branch is deliberately behind the base branch while it waits its turn.
+    const current = published && (onPrediction || treeEquivalent);
     const reasons: string[] = [];
     if (position > 0) reasons.push(`Merge queue position ${position + 1} of ${entries.length}: ${entries[position - 1].key} is ahead`);
     if (!current) reasons.push(predictedBase

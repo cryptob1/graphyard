@@ -85,7 +85,7 @@ A master merge succeeds only when Graphyard has a current authorization for the 
 - every gate and current evidence;
 - PR head, base, draft state, and mergeability;
 - CI producer identity and current-head review;
-- strict branch protection and the App-owned required check;
+- branch protection and the App-owned required check, including that "require branches to be up to date" is off, which the merge queue requires;
 - a short-lived, single-use merge execution.
 
 The command never uses an admin bypass. Graphyard marks Done only after independently observing the matching merge. Direct or late merges remain visible violations.
@@ -99,7 +99,7 @@ Candidates that pass their own gates enter a single merge queue and land in orde
 - `queue` lists every entry with its `position`, `size`, `predictedBase`, `predictedTip`, `ahead` keys, `validated` flag, `waitMinutes`, and refusal `reasons`;
 - each work row carries the same placement under `queue`, and `counts.queued` totals the entries.
 
-Only the head of the queue can hold a merge authorization, so `master merge --all` merges one entry per pass and the rest stay refused with an explicit position reason. That is normal, not a fault. Immediately before the provider call the master also rechecks that the base branch still lets the validated tip land its tested tree: either the base is exactly the commit the candidate was validated on, or it advanced only through earlier queue merges, which leave that tree untouched. Any other advance refuses the merge.
+Only the head of the queue can hold a merge authorization, so `master merge --all` merges one entry per pass and the rest stay refused with an explicit position reason. That is normal, not a fault. Immediately before the provider call the master also rechecks that what lands is a Graphyard-published queue tip for exactly the authorized commit, and that the base branch still lets it land its tested tree: either the base is exactly the commit the candidate was validated on, or it advanced only through earlier queue merges, which leave that tree untouched. Any other advance, or an authorization with no published tip behind it, refuses the merge.
 
 Entries behind the head are re-based by Graphyard, not by the worker. Do not request rework, reassign, or ask an agent to rebase a queued candidate because its position or predicted tip changed; check `queue` and the entry's refusal reason first. An entry that fails its speculative validation is ejected with a recorded reason and must be repaired and re-queued — there is no command to reinsert or reorder it. The mechanism and its invariants are in [GitHub enforcement](github.md#merge-queue).
 

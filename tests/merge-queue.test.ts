@@ -40,6 +40,12 @@ function enqueue(item: Work, sequence: number, speculation: QueueEntry['speculat
   item.queueSequence = sequence;
   return item;
 }
+/** An entry after Graphyard published its speculative tip: what every landing now requires. */
+function published(item: Work, predecessors: string[] = []) {
+  item.queue!.speculation = { ref: queueRef(item.key), tip: item.candidate!.sha, base: item.candidate!.baseSha,
+    baseTree: commit('maintree'), predecessors, policyRevision: item.policyRevision, publishedAt: now.toISOString() };
+  return item;
+}
 /** A candidate already sitting on the tip of the entry ahead of it, as Graphyard would rebase it. */
 function behind(item: Work, predecessor: Work, predecessors: string[] = [predecessor.key]) {
   const tip = commit(`${item.key}tip`), base = predecessor.candidate!.sha;
@@ -67,7 +73,7 @@ test('a re-entering candidate takes a fresh sequence at the back and never recla
 });
 
 test('entries predict against the tip ahead of them, so every position validates in parallel', () => {
-  const head = enqueue(work('GY-1'), 1);
+  const head = published(enqueue(work('GY-1'), 1));
   const second = behind(enqueue(work('GY-2'), 2), head);
   const third = behind(enqueue(work('GY-3'), 3), second, ['GY-1', 'GY-2']);
   const [a, b, c] = predictQueue([head, second, third], now.getTime());
@@ -92,6 +98,15 @@ test('an entry whose predecessor has not published waits instead of predicting a
   assert.match(b.reasons.at(-1)!, /Waiting for GY-1 to publish its speculative tip/);
 });
 
+test('a candidate Graphyard has not published a tip for cannot land, however current its base looks', () => {
+  const head = enqueue(work('GY-1'), 1);
+  const unpublished = predictQueue([head], now.getTime())[0];
+  assert.equal(unpublished.current, false, 'only a published tip provably contains the base it was validated on');
+  assert.equal(unpublished.publishable, true, 'so Graphyard publishes one rather than asking the worker for anything');
+  assert.match(unpublished.reasons[0], /has not been published and validated/);
+  assert.equal(predictQueue([published(head)], now.getTime())[0].current, true);
+});
+
 test('a base advance that leaves the validated tree untouched keeps the binding; any other advance refuses it', () => {
   const head = enqueue(work('GY-1'), 1);
   const tip = commit('GY-1tip'), validatedBase = commit('predecessor');
@@ -107,7 +122,7 @@ test('a base advance that leaves the validated tree untouched keeps the binding;
 });
 
 test('removing an entry re-predicts the entries behind it without that entry', () => {
-  const head = enqueue(work('GY-1'), 1);
+  const head = published(enqueue(work('GY-1'), 1));
   const second = behind(enqueue(work('GY-2'), 2), head);
   const third = behind(enqueue(work('GY-3'), 3), second, ['GY-1', 'GY-2']);
   const remaining = predictQueue([head, third], now.getTime());
@@ -150,7 +165,7 @@ test('evaluation enqueues a proven candidate, ejects a failed one, and refuses i
   const entered = evaluate(item, [item], now, ciAppIds);
   assert.equal(entered.queue?.sequence, 1);
   assert.deepEqual(entered.queueHistory!.map(entry => entry.event), ['enqueued']);
-  assert.deepEqual(entered.gates.find(gate => gate.name === 'merge')!.reasons, []);
+  assert.match(entered.gates.find(gate => gate.name === 'merge')!.reasons[0], /has not been published and validated/);
   Object.assign(item, entered);
   item.observation = observation(item, { checks: [{ name: 'test', result: 'failure', appId: 15368 }] });
   const ejected = evaluate(item, [item], now, ciAppIds);
@@ -170,7 +185,7 @@ test('evaluation enqueues a proven candidate, ejects a failed one, and refuses i
 });
 
 test('a queued entry behind the head has no merge authorization, and the queue ref is Graphyard-owned', () => {
-  const head = enqueue(work('GY-1'), 1);
+  const head = published(enqueue(work('GY-1'), 1));
   const second = behind(enqueue(work('GY-2'), 2), head);
   const all = [head, second];
   assert.deepEqual(evaluate(head, all, now, ciAppIds).gates.find(gate => gate.name === 'merge')!.reasons, []);
