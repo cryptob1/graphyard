@@ -50,6 +50,27 @@ The UI keeps its token in session storage. Sign out on shared machines. Producer
 
 Environment files, `.graphyard/`, and private-key file extensions are excluded from Git and Docker build context. Only `.env.example` is allowed in Git. CI runs a pinned, checksum-verified Gitleaks release against all fetched history. GitHub secret scanning and push protection are enabled on the public upstream repository. A clean scan is not a guarantee against unknown secret formats: if a credential is ever committed, revoke it first, then handle history and cached copies. Local Compose and isolated-test passwords are public development fixtures, never production credentials.
 
+## Setup proposals and drift
+
+`graphyard init --scan` replaces hand-authored setup with a reviewed proposal. The scan reads package manifests, CI workflows, deploy configuration, and the test layout, then writes `.graphyard/setup-proposal.json` (ignored by Git, mode 0600) proposing required check names, build/test commands with proof names, deploy verification, the candidate environment topology, review provider, worker/reviewer profiles for runtimes found on that machine, and the GitHub App registration. It changes nothing else.
+
+`graphyard init --scan --apply` applies exactly the stored proposal after an operator review: it performs the GitHub App manifest flow, writes the managed `AGENTS.md` section, records principals and proof grants in `.graphyard/principals.json` (install the array as `GRAPHYARD_PRINCIPALS` on the deployment), and writes profile files under `.graphyard/profiles/`. Principals come only from the reviewed proposal: apply registers the operator, coordinator, and producer principals plus exactly the worker principals the proposal's profiles declare, so a machine with no agent runtime gets no worker credential rather than an unreviewed one; install an agent CLI and rerun `init --scan --apply` to add one. Applying is idempotent: unchanged artifacts are left alone, existing principal tokens are preserved so a re-run never invalidates a deployed configuration, operator-edited profiles are reported as drift and kept rather than overwritten, and a repository that changed after apply is reported as drift by later scans. If the repository changes between review and apply, apply refuses and the stored proposal is left untouched.
+
+### Environment topology chosen by the scan
+
+The candidate-bound-environment invariant is declared explicitly in every proposal: ephemeral where the stack allows, pooled or partial with data isolation where it does not.
+
+| Detected stack | Deploy target | Topology chosen | Declaration |
+| --- | --- | --- | --- |
+| Node package with `railway.json`/`railway.toml` | Railway | `ephemeral` | Each candidate deploys to its own Railway environment built from its commit and destroyed after review; backing datastores must be per-candidate copies seeded from structure, never shared live state. |
+| Python project with `Dockerfile`/compose | Container registry | `pooled` | Candidates deploy as isolated containers, but a shared backing datastore (compose database, driver dependency, or connection URL) was detected; every candidate must receive isolated data — a per-candidate schema or database seeded from structure only — so concurrent candidates cannot observe each other. |
+| Static site (`index.html`, `.nojekyll`/`CNAME`) | GitHub Pages | `ephemeral` | Each candidate deploys to a disposable static target created from its own commit and discarded after review; nothing persists between candidates. |
+| Any stack with no deploy configuration | none | `partial` | Only CI-level isolation exists; the operator must add a deploy target or accept partial environment verification, and any shared backing service requires declared data isolation between candidates. |
+
+Railway, Vercel, and Fly detections choose the same ephemeral pattern as the Railway row, with target-specific SHA verification instructions (for example, comparing `RAILWAY_GIT_COMMIT_SHA`, Vercel deployment metadata, or `fly status` releases with the candidate SHA). Container deployments propose SHA-tagged images and digest verification. The pooled choice is deliberate conservatism: containers are disposable, but the detected datastore is not, so the proposal requires isolation instead of assuming per-candidate copies the platform has not promised.
+
+Drift is informational, never auto-repaired: rerun `init --scan`, compare the refreshed proposal against what was applied, and reapply only after operator review. `graphyard doctor` reports the stored proposal, the applied setup record, and current drift.
+
 ## Scale limits
 
 The kernel serializes short coordination mutations. The initial reconciler processes up to four provider jobs per tick per replica. The list API returns all work, while the event API returns the most recent 300 events. These are deliberate MVP bounds, not a benchmark claiming hundreds of agents at production load. Monitor latency, database lock wait, job lag, memory, and GitHub rate limits before increasing concurrency.
