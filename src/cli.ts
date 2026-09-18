@@ -2,24 +2,33 @@ import { readFile, mkdir, realpath, stat, writeFile } from 'node:fs/promises';
 import { createHash, randomUUID } from 'node:crypto';
 import { hostname } from 'node:os';
 import { resolve } from 'node:path';
-import { execFileSync, spawnSync } from 'node:child_process';
+import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import { supervise } from './supervisor.js';
-import { inspectRunnerRepository, snapshotRunnerSources } from './runner-setup.js';
+import { inspectRunnerRepository, oracleBundleDigest, snapshotRunnerSources } from './runner-setup.js';
+import { accountFileDigest, assertRunnerCredentialScope, attemptGrantSchema, authorityWatch, containerNames, executionRecordSchema, observeContainers, runnerPlanSchema } from './runner-executor.js';
+import { assembleResult, collectArtifacts, collectionBinding, collectionInputs, collectorInputSchema, verifyExecutionAttestation } from './runner-collector.js';
+import { superviseAttempt, supervisionRequestSchema } from './runner-attestor.js';
 import { inheritedObligations } from './model.js';
 import { assertRepository, availableRuntimes, discover } from './onboarding.js';
 import { startGithubSetup } from './github-setup.js';
 import { fileURLToPath } from 'node:url';
-import { parseArgs } from 'node:util';
+import { createInterface } from 'node:readline';
+import { isDeepStrictEqual, parseArgs } from 'node:util';
+import { z } from 'zod';
 import { diagnose, fileConflicts, obligationLedger, proofAuthorization, proofPreview, resourceConflicts } from './coordination.js';
 import { applyProposal, loadAppliedSetup, loadProposal, loadConnection, readSetupStatus, repositoryScanDifference, saveProposal, scanProposal, setupDrift, setupRepository, handoff, hostIdSchema } from './repository-setup.js';
-import { assertMasterBinding, buildMasterStatus, continueMergeBatch, currentMergeCandidates, dispatchWork, inspectWorkerCredentials, listHerdrAgents, loadMasterConfig, mergeExecutor, observeHerdrAgents, readCredentialFile, readWorkerCredential, saveWorkerProfile, setupMaster, startMaster, workerProfileSchema } from './master.js';
+import { assertMasterBinding, assessContainment, buildMasterStatus, continueMergeBatch, currentMergeCandidates, dispatchWork, inspectWorkerCredentials, listHerdrAgents, loadMasterConfig, mergeExecutor, observeHerdrAgents, readCredentialFile, readWorkerCredential, saveWorkerProfile, setupMaster, snapshotWithClock, startMaster, verifyContainmentDeath, workerProfileSchema } from './master.js';
 import { daemonEffects, daemonSummary, readDaemonState, runDaemon } from './master-daemon.js';
 import { acknowledgeContainment, containmentCredentials, establishContainment, isConfirmedCoordinationRefusal, revalidateContainment, settleContainment } from './quarantine.js';
 
 try { process.loadEnvFile(); } catch (error: any) { if (error.code !== 'ENOENT') throw error; }
 const [command, id, ...args] = process.argv.slice(2);
 let connection: Awaited<ReturnType<typeof loadConnection>>;
-if (command === 'master') connection = null;
+// The host attestor never uses the repository's connection file. It has a Graphyard
+// credential of its own — read-only, and named by an environment variable its own sudo
+// rule sets — precisely so the identity that invokes it cannot choose which credential,
+// or which server, it verifies attempt authority against.
+if (command === 'master' || (command === 'runner' && id === 'supervise')) connection = null;
 else try { connection = await loadConnection(process.cwd()); } catch { console.error('Invalid or insecure Graphyard connection file. Inspect local configuration; credential values are omitted.'); process.exit(1); }
 const base = process.env.GRAPHYARD_URL ?? connection?.url ?? 'http://127.0.0.1:4310';
 let savedToken: string | undefined;
@@ -52,6 +61,51 @@ async function api(path: string, data?: unknown, requestId = process.env.GRAPHYA
   return body;
 }
 const print = (value: unknown) => console.log(JSON.stringify(value, null, 2));
+
+/**
+ * Hand one attempt to the operator's host attestor and wait for the record it signed.
+ *
+ * The runner writes the plan, acknowledges the attempt once the attestor reports a clean
+ * preflight, and reads back the execution record and attestation. It observes nothing
+ * about the run itself, so there is no execution fact here for it to author: a runner
+ * that rewrote the record it forwards would only invalidate the signature over it.
+ * Losing attempt authority terminates the attestor, which aborts and settles.
+ */
+function superviseThroughAttestor(supervisor: { command: string; args: string[] }, request: unknown, acknowledge: () => Promise<void>, signal: AbortSignal, timeoutMs: number) {
+  return new Promise<{ record: unknown; attestation: unknown; collection: unknown }>((settled, refused) => {
+    const child = spawn(supervisor.command, supervisor.args, { stdio: ['pipe', 'pipe', 'pipe'] });
+    let out = '', diagnostics = '', done = false, acknowledged = false;
+    const stop = () => child.kill('SIGTERM');
+    const finish = (report: () => void) => { if (done) return; done = true; clearTimeout(timer); signal.removeEventListener('abort', stop); report(); };
+    const timer = setTimeout(() => child.kill('SIGKILL'), timeoutMs);
+    if (signal.aborted) stop(); else signal.addEventListener('abort', stop, { once: true });
+    child.stdout.setEncoding('utf8'); child.stderr.setEncoding('utf8');
+    child.stderr.on('data', chunk => { if (diagnostics.length < 4096) diagnostics += chunk; });
+    child.stdout.on('data', chunk => {
+      if (out.length > 16_777_216) return;
+      out += chunk;
+      const end = out.indexOf('\n');
+      if (acknowledged || end === -1) return;
+      acknowledged = true;
+      let ready: any; try { ready = JSON.parse(out.slice(0, end)); } catch { /* reported below */ }
+      out = out.slice(end + 1);
+      if (ready?.preflight !== 'ready') { child.kill('SIGTERM'); finish(() => refused(new Error('The host attestor did not report a clean preflight; no container was started'))); return; }
+      void acknowledge().then(() => child.stdin.end(`${JSON.stringify({ proceed: true })}\n`),
+        (error: any) => { child.kill('SIGTERM'); finish(() => refused(error)); });
+    });
+    child.on('error', () => finish(() => refused(new Error(`The host attestor could not be started, so nothing was executed or acknowledged: ${supervisor.command}`))));
+    child.on('close', code => finish(() => {
+      const detail = diagnostics.trim() || `exit ${code}`;
+      if (!acknowledged) return refused(new Error(`The execution boundary refused before acknowledgement; this attempt was never acknowledged and expires without holding protected resources: ${detail}`));
+      try { settled(z.object({ record: executionRecordSchema, attestation: z.unknown(), collection: z.unknown() }).parse(JSON.parse(out))); }
+      catch { refused(new Error(`The host attestor returned no signed execution record: ${detail}`)); }
+    }));
+    // The attestor may refuse and exit before reading the whole request; that is reported
+    // through its exit, not as an unhandled pipe error here.
+    child.stdin.on('error', () => {});
+    child.stdin.write(`${JSON.stringify(request)}\n`);
+  });
+}
 const interactiveGithubSetup = (root: string) => async (repository: string, deployment: string) => {
   const setup = await startGithubSetup(root, repository, deployment);
   console.log(`Open ${setup.url} in your browser. On SSH, forward port 4311 to this machine first. Credentials stay in .graphyard/github-app.json; do not share that file. Setup finishes automatically once the App is installed; press Ctrl+C to finish later and rerun init --scan --apply.`);
@@ -79,6 +133,9 @@ Environment: GRAPHYARD_URL, GRAPHYARD_TOKEN (individual role-scoped credential)
   master worker add FILE        Add an existing or launchable Herdr worker profile
   master status                 Join Graphyard work truth with Herdr session health
   master dispatch GY-N PROFILE  Invite a worker to claim ready work in a visible tab
+  master settle-containment GY-N REASON
+                                Settle a containment quarantine whose supervisor this
+                                host verifies dead; unverifiable signals refuse
   master merge GY-N|--all       Merge exact authorized candidates without bypasses
   master run [--once] [--interval SECONDS]
                                 Run the durable coordination loop as a supervised process
@@ -99,6 +156,11 @@ Environment: GRAPHYARD_URL, GRAPHYARD_TOKEN (individual role-scoped credential)
   validation [ACTION file.json] List validation state or submit a protocol command
   runner inspect [DIRECTORY]   Discover Playwright inputs without executing repository code
   runner snapshot file.json    Snapshot an explicit source-file list for review (not approval)
+  runner bundle-digest DIR      Content identity of an executable oracle bundle for approval
+  runner account-digest FILE    Measure an approved test-account env file for registration
+  runner attempt file.json      Hold one dispatched attempt while the host attestor runs it
+  runner supervise              Host attestor: run one attempt and attest what it observed
+  runner collect file.json      Verify one attempt and publish a trusted result (collector)
   scenarios                    List versioned E2E test-case definitions
   scenario file.json           Publish a scenario version (operator)
   ready GY-N REASON            Release backlog item with an audit reason (operator)
@@ -168,9 +230,25 @@ Never share an operator or producer credential with an implementation agent.`); 
     if (id === 'status') {
       const runtime = observeHerdrAgents();
       const credentials = await inspectWorkerCredentials(root, master.workers);
+      const { snapshot, clockOffset } = await snapshotWithClock(() => masterApi('work-snapshot'));
+      const containment = assessContainment(snapshot.work, { hostId: master.hostId, observedAt: snapshot.now, clockOffset });
       const daemonState = await readDaemonState(root, master).catch(error => ({ error: error instanceof Error ? error.message : 'Master daemon state is unreadable' }));
       const daemon = 'error' in daemonState ? { running: false, error: daemonState.error } : daemonSummary(daemonState, Date.now(), master.run.intervalSeconds * 1000);
-      return print({ ...buildMasterStatus(await masterApi('work-snapshot'), master.workers, runtime.agents, credentials), autoMerge: master.autoMerge, mergeApproval: master.autoMerge ? 'routine merges permitted after gates pass' : 'explicit operator approval required for each merge', daemon, runtime: { herdr: { available: runtime.available, reason: runtime.reason } } });
+      return print({ ...buildMasterStatus(snapshot, master.workers, runtime.agents, credentials, containment), autoMerge: master.autoMerge, mergeApproval: master.autoMerge ? 'routine merges permitted after gates pass' : 'explicit operator approval required for each merge', daemon, runtime: { herdr: { available: runtime.available, reason: runtime.reason } } });
+    }
+    if (id === 'settle-containment') {
+      if (!args[0] || !args.slice(1).join(' ').trim()) throw new Error('Use master settle-containment GY-N REASON');
+      const { snapshot, clockOffset } = await snapshotWithClock(() => masterApi('work-snapshot'));
+      const work = snapshot.work.find((item: any) => item.id === args[0] || item.key === args[0]);
+      if (!work) throw new Error(`Unknown work item ${args[0]}`);
+      if (!work.containmentQuarantine) throw new Error(`${work.key} has no containment quarantine to settle`);
+      const assessment = verifyContainmentDeath(work, { hostId: master.hostId, observedAt: snapshot.now, clockOffset });
+      if (!assessment.settleable) {
+        console.error(`Automatic containment settlement refused for ${work.key}:\n- ${assessment.refusals.join('\n- ')}\n${assessment.attestation}`);
+        process.exitCode = 1; return;
+      }
+      const settled = await masterMutation(`work/${work.id}/autosettle`, { epoch: assessment.epoch, settlementHash: work.containmentQuarantine.settlementHash, reason: args.slice(1).join(' '), verification: assessment.verification });
+      return print({ key: settled.key, epoch: assessment.epoch, containmentQuarantine: settled.containmentQuarantine, stage: settled.stage, verification: assessment.verification });
     }
     if (id === 'dispatch') {
       if (!args[0]) throw new Error('Use master dispatch GY-N PROFILE');
@@ -208,12 +286,192 @@ Never share an operator or producer credential with an implementation agent.`); 
       const result = await runDaemon(master, state, effects, { once: values.once, intervalMs: intervalSeconds * 1000, identity: { pid: process.pid, host: master.hostId } });
       return print({ repository: master.repository, coordinator: coordinator.actor.id, intervalSeconds, cycles: result.cycles.length, stopped: result.stopped ? 'signal' : 'completed', last: result.cycles.at(-1) ?? null });
     }
-    throw new Error('Use master init, start, worker add, status, dispatch, run, merge, or guide');
+    throw new Error('Use master init, start, worker add, status, dispatch, settle-containment, run, merge, or guide');
   }
   if (command === 'runner') {
     if (id === 'inspect' && args.length <= 1) return print(await inspectRunnerRepository(resolve(args[0] ?? '.')));
     if (id === 'snapshot' && args.length === 1) return print(await snapshotRunnerSources(process.cwd(), JSON.parse(await readFile(args[0], 'utf8'))));
-    throw new Error('Use runner inspect [DIRECTORY] or runner snapshot file.json');
+    if (id === 'bundle-digest' && args.length === 1) return print(await oracleBundleDigest(resolve(args[0])));
+    // What an operator registers as `testAccountDigest` on the runner registration. It is
+    // read here only to be measured: the entries never leave this process, and approving
+    // them is a separate operator action against Graphyard.
+    if (id === 'account-digest' && args.length === 1) return print({ testAccountDigest: await accountFileDigest(resolve(args[0])) });
+    if (id === 'attempt' && args.length === 1) {
+      // Runner path. This credential is a worker registration: it can acknowledge and
+      // hold attempt authority, but it neither executes nor authors any execution fact.
+      const { registration, supervisor, ...plan } = runnerPlanSchema.parse(JSON.parse(await readFile(args[0], 'utf8')));
+      assertRunnerCredentialScope(await api('status'));
+      const dispatched = await api('validation/dispatch', { registration });
+      if (!dispatched.request) return print({ dispatched: false, reason: dispatched.reason });
+      const grant = attemptGrantSchema.parse({ requestId: dispatched.request.id, attemptId: dispatched.attempt.id, epoch: dispatched.attempt.epoch,
+        runner: registration, bundleDigest: dispatched.bundle.digest, runnerImageDigest: dispatched.bundle.runnerImageDigest,
+        executionHost: dispatched.executionAuthority.host, attestationPublicKey: dispatched.executionAuthority.attestationPublicKey,
+        executionNetwork: dispatched.executionAuthority.network,
+        // Never the runner's own configuration: which approved account material this
+        // attempt may run with is operator-versioned authority like the target and network.
+        testAccountDigest: dispatched.executionAuthority.testAccountDigest ?? null,
+        targetUrl: dispatched.environment.url, deadline: dispatched.request.deadline });
+      const attemptCommand = { requestId: grant.requestId, attemptId: grant.attemptId, epoch: grant.epoch };
+      // A rejected heartbeat is the server saying this epoch may no longer act. The
+      // container boundary fences the host, not the target, so the supervised execution
+      // is aborted rather than left exercising the target until the request deadline.
+      const authority = new AbortController();
+      let beat = 0;
+      const attemptAuthority = authorityWatch();
+      let heartbeat: NodeJS.Timeout | undefined, authorityDeadline: NodeJS.Timeout | undefined;
+      // Acknowledgement happens between the attestor's preflight and its first container.
+      // Every local refusal therefore still precedes the ACK: an unacknowledged attempt
+      // expires and releases its runner, environment and external reservations, while an
+      // acknowledged one holds them until an operator settles it by hand.
+      const acknowledge = async () => {
+        await api('validation/ack', attemptCommand, `${grant.attemptId}-ack`);
+        attemptAuthority.renewed();
+        heartbeat = setInterval(() => { void api('validation/heartbeat', attemptCommand, `${grant.attemptId}-beat-${++beat}`)
+          .then(() => attemptAuthority.renewed())
+          .catch((error: unknown) => { attemptAuthority.failed(error); if (attemptAuthority.lost) authority.abort(); }); }, 20_000);
+        authorityDeadline = setInterval(() => { if (attemptAuthority.lost) authority.abort(); }, 1_000);
+      };
+      try {
+        const supervised = await superviseThroughAttestor(supervisor, { plan: { ...plan, grant } }, acknowledge, authority.signal, plan.timeoutMs * 2 + 120_000);
+        return print({ dispatched: true, environment: { instance: dispatched.environment.instance, url: dispatched.environment.url },
+          expected: { instance: dispatched.environment.instance, artifacts: dispatched.build.artifacts }, ...supervised });
+      } finally { clearInterval(heartbeat); clearInterval(authorityDeadline); }
+    }
+    if (id === 'supervise' && args.length === 0) {
+      // The operator-controlled host attestor. It runs under an OS identity the worker
+      // cannot act as, owns the approved bytes and the signing key, and is reachable from
+      // the runner only through this pipe. It signs the attempt it supervised itself; no
+      // command anywhere signs an execution record that arrived from somewhere else.
+      const keyFile = process.env.GRAPHYARD_ATTESTOR_KEY;
+      if (!keyFile) throw new Error('The host attestor requires GRAPHYARD_ATTESTOR_KEY to name its Ed25519 private key; the signing key is never taken from the supervision request');
+      const privateFile = async (path: string, subject: string) => {
+        const info = await stat(path);
+        if (!info.isFile() || info.mode & 0o077) throw new Error(`Host-attestor ${subject} must be a private regular file (mode 0600)`);
+        if (info.uid !== (process.getuid?.() ?? -1)) throw new Error(`Host-attestor ${subject} must belong to the supervising identity`);
+        return (await readFile(path, 'utf8'));
+      };
+      const key = await privateFile(keyFile, 'private key');
+      // The attestor's own read-only credential and server. Both are named by environment
+      // variables the attestor's sudo rule supplies, never by the supervision request: a
+      // runner that could choose either would be choosing what "current authority" means.
+      const authorityUrl = process.env.GRAPHYARD_ATTESTOR_URL, tokenFile = process.env.GRAPHYARD_ATTESTOR_TOKEN_FILE;
+      if (!authorityUrl || !tokenFile) throw new Error('The host attestor requires GRAPHYARD_ATTESTOR_URL and GRAPHYARD_ATTESTOR_TOKEN_FILE; it verifies attempt authority against Graphyard itself rather than trusting the process that invoked it');
+      const attestorToken = (await privateFile(tokenFile, 'Graphyard credential')).trim();
+      if (!attestorToken) throw new Error('Host-attestor Graphyard credential file is empty');
+      const authorityOrigin = new URL(authorityUrl).origin;
+      /** What Graphyard currently holds for this attempt. Never what the caller says. */
+      const readAttemptAuthority = async (requestId: string) => {
+        const response = await fetch(`${authorityOrigin}/api/validation/attempt/${encodeURIComponent(requestId)}`,
+          { headers: { Authorization: `Bearer ${attestorToken}` }, redirect: 'error', signal: AbortSignal.timeout(30_000) });
+        const body = await response.json();
+        if (!response.ok) throw new Error(`Attempt authority could not be read independently, so no container was started: ${JSON.stringify(body)}`);
+        return z.object({ grant: attemptGrantSchema, state: z.string().min(1).max(50), acknowledged: z.boolean(),
+          expiresAt: z.iso.datetime(), now: z.iso.datetime() }).parse(body);
+      };
+      const lines = createInterface({ input: process.stdin })[Symbol.asyncIterator]();
+      const nextLine = async () => { const { value, done } = await lines.next(); if (done) throw new Error('The supervision channel closed before the attempt could proceed'); return String(value); };
+      const request = supervisionRequestSchema.parse(JSON.parse(await nextLine()));
+      // Before anything is provisioned: the plan must carry exactly the authority Graphyard
+      // dispatched. A schema-valid plan naming another target, network, bundle or image is
+      // a fabrication regardless of who put it on the pipe.
+      const dispatched = await readAttemptAuthority(request.plan.grant.requestId);
+      if (!isDeepStrictEqual(dispatched.grant, request.plan.grant)) throw new Error('The supervision request does not carry the attempt authority Graphyard dispatched; nothing was provisioned');
+      const authority = new AbortController();
+      const abort = () => authority.abort();
+      process.on('SIGTERM', abort); process.on('SIGINT', abort);
+      // Preflight has passed and no container has started yet. The runner acknowledges
+      // now; without its confirmation nothing is executed.
+      const ready = async () => {
+        process.stdout.write(`${JSON.stringify({ preflight: 'ready' })}\n`);
+        if (JSON.parse(await nextLine())?.proceed !== true) throw new Error('The attempt was not acknowledged; no container was started');
+        // The caller's `proceed` only says it has finished trying; it is a sequencing
+        // signal and never the authority to execute. What starts containers is this
+        // process's own re-read: the attempt must still be the current one, carry the same
+        // authority, have been acknowledged by the runner under its own credential, and
+        // hold an unexpired lease. `collecting` fails here too, so an attempt cannot start
+        // a container after the collector has observed settlement.
+        const current = await readAttemptAuthority(request.plan.grant.requestId);
+        if (!isDeepStrictEqual(current.grant, request.plan.grant)) throw new Error('Attempt authority changed between preflight and execution; no container was started');
+        if (current.state !== 'running' || !current.acknowledged) throw new Error(`Graphyard does not hold this attempt as acknowledged and executing (state ${current.state}); no container was started`);
+        if (Date.parse(current.expiresAt) <= Date.parse(current.now)) throw new Error('The attempt lease has expired; no container was started');
+      };
+      // Under the documented `sudo` rule the runner's own identity is knowable, and the
+      // container must not run as it: the output boundary is private to the container user.
+      const callerUid = /^[0-9]{1,10}$/.test(process.env.SUDO_UID ?? '') ? Number(process.env.SUDO_UID) : undefined;
+      try { process.stdout.write(`${JSON.stringify(await superviseAttempt(request, { privateKey: key, ready, signal: authority.signal, callerUid }))}\n`); return; }
+      finally { process.off('SIGTERM', abort); process.off('SIGINT', abort); }
+    }
+    if (id === 'collect' && args.length === 1) {
+      // Collector path. Separate credential, separate host: it re-reads the authority,
+      // measures the target itself and never trusts candidate-authored JSON.
+      const input = collectorInputSchema.parse(JSON.parse(await readFile(args[0], 'utf8')));
+      const attemptCommand = { requestId: input.grant.requestId, attemptId: input.grant.attemptId, epoch: input.grant.epoch };
+      let collectionBeat = 0, renewCollection: NodeJS.Timeout | undefined;
+      const collectionAuthority = authorityWatch();
+      try {
+      // A local mistake must not spend the attempt's one collection transition. Taking
+      // collection authority moves the live request to `collecting` and revokes the
+      // runner's heartbeats, and neither can be undone: a configuration whose record does
+      // not even bind to the grant and output path it was written with is refused here,
+      // while the attempt can still be collected again from a corrected configuration.
+      // This check is on caller-supplied values and so decides nothing; the binding that
+      // matters is the one below, against the authority the collector re-read itself.
+      const collectedFrom = await realpath(resolve(input.outputPath));
+      const local = collectionBinding({ grant: input.grant, execution: input.record, collectedFrom });
+      if (local.reasons.length) throw new Error(`Collection refused before taking collection authority: ${local.reasons.join('; ')}`);
+      // Bind authority, record and boundary before anything is read or published: an
+      // immutable artifact name published for the wrong bytes cannot be taken back.
+      // Taking collection authority also revokes the runner's, so nothing this collector
+      // observes — settlement above all — can be invalidated by a container started next.
+      const grant = attemptGrantSchema.parse(await api('validation/collection-authority', attemptCommand));
+      const binding = collectionBinding({ grant, execution: input.record, collectedFrom });
+      if (binding.reasons.length) throw new Error(`Collection refused before reading the execution boundary: ${binding.reasons.join('; ')}`);
+      await api('validation/collection-heartbeat', attemptCommand, `${input.grant.attemptId}-collection-beat-${++collectionBeat}`);
+      collectionAuthority.renewed();
+      // Renewed under exactly the rule the executing runner follows: a confirmed refusal
+      // ends this collection for good, while one lost packet does not abandon the only
+      // path that publishes this attempt's result.
+      renewCollection = setInterval(() => { void api('validation/collection-heartbeat', attemptCommand, `${input.grant.attemptId}-collection-beat-${++collectionBeat}`)
+        .then(() => collectionAuthority.renewed()).catch((error: unknown) => collectionAuthority.failed(error)); }, 20_000);
+      // Settlement is the collector's own observation of the execution host, never the
+      // runner's claim about itself.
+      const settlementObservations = await observeContainers(containerNames(grant.attemptId), { dockerHost: grant.executionHost });
+      // Read every approved kind the boundary holds, whatever this collector publishes:
+      // behaviour cannot be verified from the execution report alone, and a kind left
+      // unread would look like output the approved reporter never wrote. Only the upload
+      // below is narrowed to the configured subset.
+      const collected = await collectArtifacts(collectedFrom, collectionInputs(input.requiredArtifacts));
+      // Verify the host attestation, and the digests of the bytes just read, *before* the
+      // first upload. An artifact name is published once per attempt and cannot be taken
+      // back: a live grant plus schema-valid forged boundary files would otherwise consume
+      // the names this attempt's real evidence needs, and no later correct collection could
+      // republish them. Unattested bytes are therefore never uploaded — but the attempt
+      // still publishes its refusal below, because a blocked attempt is a visible state
+      // rather than a collection that quietly disappears.
+      const attested = verifyExecutionAttestation(grant, input.record, collected, input.executionAttestation);
+      const publish = attested.reasons.length ? new Set<string>() : new Set(input.requiredArtifacts);
+      const uploaded: { name: string; digest: string; url: string }[] = [];
+      const failures: string[] = [];
+      for (const artifact of collected.artifacts.filter(a => publish.has(a.name))) {
+        if (collectionAuthority.lost) throw new Error('Collection authority could not be renewed; no artifact or result was published');
+        try {
+          const body = { requestId: grant.requestId, attemptId: grant.attemptId, epoch: grant.epoch,
+            name: artifact.name, mediaType: artifact.mediaType, bytes: artifact.bytes.toString('base64'), capturePolicy: 'approved-test-data-only' };
+          let stored: any, error: unknown;
+          for (let retry = 0; retry < 3 && !stored; retry++) try { stored = await api('validation/artifacts', body, `${grant.attemptId}-artifact-${artifact.name}`); } catch (caught) { error = caught; }
+          if (!stored) throw error;
+          uploaded.push({ name: artifact.name, digest: stored.digest, url: stored.url });
+        } catch { failures.push(`Private storage rejected required artifact ${artifact.name}`); }
+      }
+      const assembled = assembleResult({ grant, execution: input.record, collectedFrom, expected: input.expected, observations: input.observations,
+        maxGapMs: input.maxGapMs, requiredArtifacts: input.requiredArtifacts, cancelled: input.cancelled, settlementObservations,
+        collected: { artifacts: collected.artifacts, reasons: [...collected.reasons, ...failures] }, uploaded, executionAttestation: input.executionAttestation });
+      if (!assembled.report) throw new Error(`Collection refused: ${assembled.refusals.join('; ')}`);
+      if (collectionAuthority.lost) throw new Error('Collection authority could not be renewed; no result was published');
+      return print({ refusals: assembled.refusals, report: assembled.report, result: await api('validation/result', assembled.report, `${grant.attemptId}-result`) });
+      } finally { if (renewCollection) clearInterval(renewCollection); }
+    }
+    throw new Error('Use runner inspect|snapshot|bundle-digest|attempt|supervise|collect');
   }
   if (command === 'validation') {
     if (!id || id === 'requests') return print(await api('validation' + (args[0] ? `?cursor=${encodeURIComponent(args[0])}` : '')));

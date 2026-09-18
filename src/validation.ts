@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from 'node:crypto';
+import { createHash, createPublicKey, randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { isDeepStrictEqual } from 'node:util';
 import type pg from 'pg';
@@ -20,7 +20,7 @@ const safeHttpUrl = (value: string) => { try { const parsed = new URL(value); re
 const externalUrl = z.url().max(2000).refine(safeHttpUrl, 'Artifact URL must be HTTP(S) without credentials');
 export const definitionSchema = z.discriminatedUnion('kind', [
   z.object({ ...base, kind: z.literal('environment'), repository: z.string().regex(/^[\w.-]+\/[\w.-]+$/), url: z.url().max(2000).refine(s => { const u = new URL(s); return u.protocol === 'https:' && !u.username && !u.password && !u.hash && !u.search; }, 'Use HTTPS without credentials, query or fragment'), instance: name, immutable: z.literal(true), services: resourceNames, resources: resourceNames }).strict(),
-  z.object({ ...base, kind: z.literal('registration'), principalId: name, role: z.enum(['runner', 'collector', 'builder']), environment: ref, adapterVersion: name, proofs: z.array(proofSchema).max(50), enabled: z.boolean() }).strict(),
+  z.object({ ...base, kind: z.literal('registration'), principalId: name, role: z.enum(['runner', 'collector', 'builder']), environment: ref, adapterVersion: name, proofs: z.array(proofSchema).max(50), enabled: z.boolean(), executionHost: z.string().min(1).max(500).optional(), attestationPublicKey: z.string().min(32).max(4096).optional(), executionNetwork: z.string().min(1).max(60).optional(), testAccountDigest: digest.optional() }).strict(),
   z.object({ ...base, kind: z.literal('bundle'), scenario: name, scenarioRevision: revision, scenarioHash: z.string().regex(/^[a-f0-9]{64}$/), digest, runnerImageDigest: digest }).strict(),
 ]);
 type DefinitionInput = z.infer<typeof definitionSchema>;
@@ -34,15 +34,15 @@ const candidateSchema = z.object({ workId: z.uuid(), expectedWorkRevision: revis
 export type ValidationCandidate = z.infer<typeof candidateSchema> & { id: string; sourceSha: string; baseSha: string; policyRevision: number; scenario: { revision: number; hash: string; environment: string }; createdAt: string; createdBy: string };
 const requestSchema = z.object({ candidateId: z.uuid(), expectedWorkRevision: revision, runner: ref, collector: ref, deadline: z.iso.datetime(), maxAttempts: z.number().int().min(1).max(5) }).strict();
 export type Attempt = { id: string; epoch: number; dispatchedAt: string; expiresAt: string; acknowledgedAt?: string; finishedAt?: string; state: 'dispatched' | 'running' | 'completed' | 'expired' | 'cancelled' | 'superseded'; settled: boolean };
-export type ValidationRequest = z.infer<typeof requestSchema> & { id: string; workId: string; proof: string; state: 'queued' | 'dispatched' | 'running' | 'completed' | 'cancelled' | 'expired' | 'superseded'; attempts: Attempt[]; createdAt: string; createdBy: string; result?: { accepted: boolean; passed: boolean; reasons: string[] } };
+export type ValidationRequest = z.infer<typeof requestSchema> & { id: string; workId: string; proof: string; state: 'queued' | 'dispatched' | 'running' | 'collecting' | 'completed' | 'cancelled' | 'expired' | 'superseded'; attempts: Attempt[]; createdAt: string; createdBy: string; result?: { accepted: boolean; passed: boolean; reasons: string[] } };
 const commandSchema = z.object({ requestId: z.uuid(), attemptId: z.uuid(), epoch: revision }).strict();
 const reportSchema = commandSchema.extend({
   execution: z.enum(['completed', 'cancelled', 'timed_out']), behavior: z.enum(['passed', 'failed', 'blocked', 'unmeasured']),
   executed: z.number().int().min(0).max(1_000_000), skipped: z.number().int().min(0).max(1_000_000), inventoryComplete: z.boolean(),
-  target: z.object({ instance: name, artifacts, measurement: z.enum(['provider', 'host-attestation', 'unknown']), coversEntireRun: z.boolean() }).strict(),
+  target: z.object({ instance: name, artifacts, measurement: z.enum(['provider', 'host-attestation', 'unknown']), coversEntireRun: z.boolean(), attribution: z.enum(['matched', 'mismatched', 'changed', 'unknown']) }).strict(),
   bundleDigest: digest, runnerImageDigest: digest,
   artifacts: z.array(z.object({ name, digest, url: z.union([externalUrl, z.string().regex(/^graphyard-artifact:\/\/[^?#]+\/[0-9a-f-]{36}\/[0-9a-f-]{36}$/)]) }).strict()).max(30),
-  executionSettled: z.boolean(),
+  artifactState: z.enum(['verified', 'missing', 'upload-failed', 'expired']), executionSettled: z.boolean(),
 }).strict();
 type Report = z.infer<typeof reportSchema>;
 const hash = (v: unknown) => createHash('sha256').update(JSON.stringify(v)).digest('hex');
@@ -164,6 +164,20 @@ export class Validation {
         const principal = this.principals.find(p => p.id === data.principalId);
         demand(!data.enabled || principal && principal.role === (data.role === 'runner' ? 'worker' : 'producer'), 'Registration principal must have the appropriate separate role');
         if (data.enabled && data.role === 'collector') demand(principal && await authorizedForEveryProof(db, principal, data.proofs), 'Collector cannot exceed its granted proof authority');
+        if (data.enabled && data.role === 'runner') {
+          // A local socket only. The attestor measures the approved bundle and the attempt
+          // boundary on its own filesystem, while a remote daemon would resolve the same
+          // mount pathnames on a different one — attesting bytes nobody measured.
+          demand(data.executionHost && /^unix:\/\/\//.test(data.executionHost) && data.attestationPublicKey, 'Runner registration must pin a local unix:// Docker socket as its execution host, and a trusted attestor public key');
+          // Docker resolves a network name against every network the daemon already has.
+          // Left to runner configuration, it could attach the browser container to the
+          // networks carrying databases and other internal services, so the approved
+          // isolated network is operator-versioned authority like the host and key.
+          demand(!!data.executionNetwork && /^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,59}$/.test(data.executionNetwork) && !['host', 'bridge', 'default', 'none'].includes(data.executionNetwork), 'Runner registration must pin a dedicated isolated Docker network');
+          let keyType: string | undefined; try { keyType = createPublicKey(data.attestationPublicKey).asymmetricKeyType; } catch { /* invalid key */ }
+          demand(keyType === 'ed25519', 'Runner host attestor must use a valid Ed25519 public key');
+        }
+        if (data.role !== 'runner') demand(!data.executionHost && !data.attestationPublicKey && !data.executionNetwork && !data.testAccountDigest, 'Only runner registrations may configure execution authority');
       }
       if (data.kind === 'bundle') {
         const s = (await db.query('SELECT document FROM scenarios WHERE id=$1 AND revision=$2', [data.scenario, data.scenarioRevision])).rows[0]?.document as Scenario | undefined;
@@ -250,7 +264,11 @@ export class Validation {
         w.validation![c.proof] = { candidateId: c.id, requestId: r.id, attemptId: attempt.id };
         await this.changed(db, w, actor.id, 'dispatched', now, { requestId: r.id, attempt, resources });
         const build = (await db.query('SELECT document FROM validation_builds WHERE id=$1', [c.buildAttestationId])).rows[0].document as BuildAttestation;
-        return { request: r, candidate: c, build, environment, bundle: await this.definition(db, 'bundle', c.bundle), attempt };
+        return { request: r, candidate: c, build, environment, bundle: await this.definition(db, 'bundle', c.bundle), attempt,
+          // Which approved test-account material the attempt may run with travels with the
+          // rest of the execution authority. Left to the runner, the choice of account —
+          // and of the privileges its evidence would cover — would be the runner's.
+          executionAuthority: { host: registration.executionHost!, attestationPublicKey: registration.attestationPublicKey!, network: registration.executionNetwork!, testAccountDigest: registration.testAccountDigest ?? null } };
       }
       return { request: null, reason: 'No eligible request or protected resources are still reserved' };
     });
@@ -268,6 +286,81 @@ export class Validation {
       await this.persist(db, r); await this.event(db, actor.id, command, { requestId: r.id, attempt: a }, r.workId); return r;
     });
   }
+  async collectionHeartbeat(actor: Principal, input: unknown, key: string) {
+    demand(actor.role === 'producer', 'A separate trusted collector is required', 403); const data = commandSchema.parse(input);
+    return this.withReceipt(actor, 'collection-heartbeat', data, key, async (db, now) => {
+      await this.reconcileWithin(db, now);
+      const r = await this.request(db, data.requestId), a = r.attempts.at(-1);
+      const registration = await this.registration(db, r.collector, 'collector');
+      demand(registration.principalId === actor.id && await authorizedForProof(db, actor, r.proof), 'Wrong collector principal or proof authority', 403);
+      demand(a && a.id === data.attemptId && a.epoch === data.epoch && r.state === 'collecting' && Date.parse(a.expiresAt) > now.getTime(), 'Attempt lease expired, cancelled or superseded, or collection authority was never taken over');
+      a.expiresAt = new Date(Math.min(now.getTime() + 60_000, Date.parse(r.deadline))).toISOString();
+      await this.persist(db, r); await this.event(db, actor.id, 'collection-heartbeat', { requestId: r.id, attempt: a }, r.workId); return r;
+    });
+  }
+  /**
+   * The collection handoff. Taking authority is what *ends* the runner's: `collecting`
+   * refuses further ACKs and heartbeats, so the runner aborts instead of starting or
+   * restarting a container after the collector has observed settlement.
+   */
+  async collectionAuthority(actor: Principal, input: unknown) {
+    demand(actor.role === 'producer', 'A separate trusted collector is required', 403); const data = commandSchema.parse(input);
+    return this.store.transaction(async (db, now) => {
+      await this.reconcileWithin(db, now);
+      const r = await this.request(db, data.requestId), a = r.attempts.at(-1), c = await this.candidate(db, r.candidateId);
+      const collector = await this.registration(db, r.collector, 'collector');
+      demand(collector.principalId === actor.id && await authorizedForProof(db, actor, r.proof), 'Wrong collector principal or proof authority', 403);
+      demand(a && a.id === data.attemptId && a.epoch === data.epoch, 'Attempt authority differs', 403);
+      demand(['running', 'collecting'].includes(r.state) && Date.parse(a.expiresAt) > now.getTime() && Date.parse(r.deadline) > now.getTime(), 'Attempt lease expired, cancelled or superseded');
+      if (r.state !== 'collecting') {
+        // Revoke execution authority first, then extend the lease for the collector.
+        r.state = 'collecting'; a.expiresAt = new Date(Math.min(now.getTime() + 60_000, Date.parse(r.deadline))).toISOString();
+        await this.persist(db, r); await this.event(db, actor.id, 'collecting', { requestId: r.id, attempt: a }, r.workId);
+      }
+      const runner = await this.definition(db, 'registration', r.runner, false) as Registration;
+      const environment = await this.definition(db, 'environment', c.environment, false) as Environment;
+      const bundle = await this.definition(db, 'bundle', c.bundle, false) as Bundle;
+      return { requestId: r.id, attemptId: a.id, epoch: a.epoch, runner: r.runner,
+        executionHost: runner.executionHost, attestationPublicKey: runner.attestationPublicKey, executionNetwork: runner.executionNetwork,
+        bundleDigest: bundle.digest, runnerImageDigest: bundle.runnerImageDigest, targetUrl: environment.url, deadline: r.deadline,
+        testAccountDigest: runner.testAccountDigest ?? null };
+    });
+  }
+  /**
+   * What the host attestor reads for itself before it starts a container.
+   *
+   * The attestor is handed a plan by the runner over a pipe, and a caller that can invoke
+   * it can say anything on that pipe — including `proceed` for an attempt Graphyard never
+   * dispatched, never acknowledged, or has already taken back. So the attestor verifies
+   * the authority here instead: this returns the attempt authority Graphyard currently
+   * holds, with the lease state needed to decide whether it may still be executed.
+   *
+   * It is a read: no attempt state changes, and the credential that may call it is
+   * read-only. An attestor that could also acknowledge, heartbeat or publish would be the
+   * runner and the collector at once, which is the separation this whole path exists for.
+   */
+  async attemptAuthority(actor: Principal, requestId: string) {
+    demand(actor.role === 'admin' || actor.role === 'reader', 'A read-only attestor credential is required', 403);
+    z.uuid().parse(requestId);
+    return this.store.transaction(async (db, now) => {
+      const r = await this.request(db, requestId), a = r.attempts.at(-1);
+      demand(a, 'No attempt has been dispatched for this request', 404);
+      const c = await this.candidate(db, r.candidateId);
+      const runner = await this.definition(db, 'registration', r.runner, false) as Registration;
+      const environment = await this.definition(db, 'environment', c.environment, false) as Environment;
+      const bundle = await this.definition(db, 'bundle', c.bundle, false) as Bundle;
+      return {
+        grant: { requestId: r.id, attemptId: a!.id, epoch: a!.epoch, runner: r.runner,
+          executionHost: runner.executionHost, attestationPublicKey: runner.attestationPublicKey, executionNetwork: runner.executionNetwork,
+          bundleDigest: bundle.digest, runnerImageDigest: bundle.runnerImageDigest, targetUrl: environment.url, deadline: r.deadline,
+          testAccountDigest: runner.testAccountDigest ?? null },
+        // `running` is the only state in which an attempt may still start a container:
+        // `dispatched` has not been acknowledged, and `collecting` means the collector has
+        // already taken authority and observed settlement.
+        state: r.state, acknowledged: !!a!.acknowledgedAt, expiresAt: a!.expiresAt, now: now.toISOString(),
+      };
+    });
+  }
   async result(actor: Principal, input: unknown, key: string) {
     demand(actor.role === 'producer', 'A separate trusted collector is required', 403); const data = reportSchema.parse(input);
     return this.withReceipt(actor, 'result', data, key, async (db, now) => {
@@ -279,7 +372,7 @@ export class Validation {
       const w = (await db.query('SELECT document FROM work_items WHERE id=$1', [r.workId])).rows[0]?.document as Work;
       const rejection: string[] = [];
       try { await this.registration(db, r.runner, 'runner'); await this.registration(db, r.collector, 'collector'); await this.valid(db, c, w); } catch { rejection.push('Candidate or registration authority was revoked or superseded'); }
-      if (!a || a.id !== data.attemptId || a.epoch !== data.epoch || current.state !== 'running' || Date.parse(a.expiresAt) <= now.getTime() || Date.parse(r.deadline) <= now.getTime()) rejection.push('Result does not hold the current live acknowledged attempt');
+      if (!a || a.id !== data.attemptId || a.epoch !== data.epoch || current.state !== 'collecting' || Date.parse(a.expiresAt) <= now.getTime() || Date.parse(r.deadline) <= now.getTime()) rejection.push('Result does not hold the current live acknowledged attempt under collection authority');
       if (w.validation?.[r.proof]?.candidateId !== c.id || w.validation?.[r.proof]?.requestId !== r.id || w.validation?.[r.proof]?.attemptId !== a?.id) rejection.push('A newer validation selection supersedes this result');
       if (rejection.length) {
         const result = { accepted: false, passed: false, reasons: rejection };
@@ -343,7 +436,7 @@ export class Validation {
       await this.registration(db, r.runner, 'runner');
       const c = await this.candidate(db, r.candidateId), w = await this.work(db, r.workId, now); await this.valid(db, c, w);
       demand(c.artifactStorage === 'postgres' && c.requiredArtifacts.includes(data.name), 'Artifact storage or name is not authorized');
-      demand(a && a.id === data.attemptId && a.epoch === data.epoch && r.state === 'running' && Date.parse(a.expiresAt) > now.getTime() && Date.parse(r.deadline) > now.getTime() && w.validation?.[r.proof]?.requestId === r.id, 'Artifact attempt authority expired or superseded');
+      demand(a && a.id === data.attemptId && a.epoch === data.epoch && r.state === 'collecting' && Date.parse(a.expiresAt) > now.getTime() && Date.parse(r.deadline) > now.getTime() && w.validation?.[r.proof]?.requestId === r.id, 'Artifact attempt authority expired or superseded, or collection authority was never taken over');
       demand(!(await db.query('SELECT id FROM validation_artifacts WHERE request_id=$1 AND attempt_id=$2 AND name=$3', [r.id, a.id, data.name])).rowCount, 'Artifact name already published; reuse the original idempotency key');
       const id = randomUUID(), expiresAt = new Date(now.getTime() + 7 * 86_400_000).toISOString();
       await db.query('INSERT INTO validation_artifacts(id,request_id,attempt_id,name,digest,created_at,expires_at,media_type,bytes) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)', [id, r.id, a.id, data.name, digest, now, expiresAt, data.mediaType, bytes]);
@@ -389,9 +482,9 @@ export class Validation {
     const reasons: string[] = [];
     if (data.execution !== 'completed' || data.behavior !== 'passed') reasons.push('Execution and behavior must both pass');
     if (!data.inventoryComplete || data.executed < 1 || data.skipped !== 0) reasons.push('Required inventory is missing, empty or skipped');
-    if (data.target.measurement === 'unknown' || !data.target.coversEntireRun || data.target.instance !== e.instance || !same([...data.target.artifacts].sort((a,b) => a.service.localeCompare(b.service)), [...build.artifacts].sort((a,b) => a.service.localeCompare(b.service)))) reasons.push('Independent whole-run target attribution is missing or mismatched');
+    if (data.target.attribution !== 'matched' || data.target.measurement === 'unknown' || !data.target.coversEntireRun || data.target.instance !== e.instance || !same([...data.target.artifacts].sort((a,b) => a.service.localeCompare(b.service)), [...build.artifacts].sort((a,b) => a.service.localeCompare(b.service)))) reasons.push('Independent whole-run target attribution is missing or mismatched');
     if (data.bundleDigest !== b.digest || data.runnerImageDigest !== b.runnerImageDigest) reasons.push('Executed oracle bundle or runner image differs from approval');
-    if (new Set(data.artifacts.map(a => a.name)).size !== data.artifacts.length || c.requiredArtifacts.some(n => !data.artifacts.some(a => a.name === n))) reasons.push('Required execution artifacts are missing or ambiguous');
+    if (data.artifactState !== 'verified' || new Set(data.artifacts.map(a => a.name)).size !== data.artifacts.length || c.requiredArtifacts.some(n => !data.artifacts.some(a => a.name === n))) reasons.push('Required execution artifacts are missing or ambiguous');
     // Private Graphyard routes exist only for Postgres-backed storage; external storage
     // must cite safe public locations, and Postgres binding is enforced by row matching.
     if (c.artifactStorage === 'external' && data.artifacts.some(a => !safeHttpUrl(a.url))) reasons.push('External-storage artifacts must reference safe HTTP(S) locations; private Graphyard artifact routes require Postgres storage');
@@ -406,7 +499,7 @@ export class Validation {
       const r = await this.request(db, data.requestId), a = r.attempts.at(-1);
       demand((a?.epoch ?? 0) === data.epoch, 'Attempt epoch changed');
       if (command === 'settle') {
-        demand(a && !['dispatched', 'running'].includes(r.state) && data.settlementEvidence, 'Terminate/cancel first and provide independent settlement evidence');
+        demand(a && !['dispatched', 'running', 'collecting'].includes(r.state) && data.settlementEvidence, 'Terminate/cancel first and provide independent settlement evidence');
         a.settled = true; await db.query('DELETE FROM validation_resources WHERE request_id=$1', [r.id]);
       } else if (command === 'retry') {
         demand(a && a.settled && ['expired', 'completed', 'cancelled'].includes(r.state) && r.attempts.length < r.maxAttempts && Date.parse(r.deadline) > now.getTime(), 'Retry needs settled prior execution, time and attempt budget');
@@ -415,7 +508,7 @@ export class Validation {
         await this.registration(db, r.runner, 'runner'); await this.registration(db, r.collector, 'collector');
         r.state = 'queued'; delete r.result;
       } else {
-        demand(['queued', 'dispatched', 'running'].includes(r.state), 'Request is already terminal');
+        demand(['queued', 'dispatched', 'running', 'collecting'].includes(r.state), 'Request is already terminal');
         await this.endActiveAttempt(db, r, 'cancelled', now);
         r.state = 'cancelled';
         // Running cancellation is not physical termination. Only never-ACKed
@@ -428,7 +521,7 @@ export class Validation {
   }
   private async endActiveAttempt(db: pg.PoolClient, r: ValidationRequest, state: 'cancelled' | 'expired' | 'superseded', now: Date) {
     const a = r.attempts.at(-1);
-    if (!a || !['dispatched', 'running'].includes(r.state)) return;
+    if (!a || !['dispatched', 'running', 'collecting'].includes(r.state)) return;
     if (r.state === 'dispatched') {
       // ACK and revocation/termination serialize on the same coordination lock.
       // A later ACK cannot succeed, so this attempt never acquired execution authority.
@@ -452,7 +545,7 @@ export class Validation {
         FROM work_items w CROSS JOIN LATERAL jsonb_each(COALESCE(w.document->'validation','{}'::jsonb)) v
         WHERE w.document->>'stage'<>'done' AND v.value ? 'requestId'
       )
-      SELECT document FROM validation_requests WHERE document->>'state' IN ('queued','dispatched','running')
+      SELECT document FROM validation_requests WHERE document->>'state' IN ('queued','dispatched','running','collecting')
       UNION ALL
       SELECT r.document FROM selected s JOIN validation_requests r ON r.id=s.request_id
       JOIN validation_candidates c ON c.id=(r.document->>'candidateId')::uuid
@@ -468,7 +561,7 @@ export class Validation {
       const a = r.attempts.at(-1);
       if (invalid) {
         await this.endActiveAttempt(db, r, 'superseded', now); r.state = 'superseded';
-      } else if (r.state !== 'completed' && (Date.parse(r.deadline) <= now.getTime() || a && ['dispatched', 'running'].includes(r.state) && Date.parse(a.expiresAt) <= now.getTime())) {
+      } else if (r.state !== 'completed' && (Date.parse(r.deadline) <= now.getTime() || a && ['dispatched', 'running', 'collecting'].includes(r.state) && Date.parse(a.expiresAt) <= now.getTime())) {
         // Unacknowledged runners are prohibited from starting. Their expired ACK
         // cannot succeed; no execution was authorized, so those slots are reusable.
         await this.endActiveAttempt(db, r, 'expired', now); r.state = 'expired';

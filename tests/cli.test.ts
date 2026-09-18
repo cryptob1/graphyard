@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { execFile, spawnSync } from 'node:child_process';
+import { execFile, spawn, spawnSync } from 'node:child_process';
 import { promisify } from 'node:util';
 import { chmod, mkdtemp, mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir, hostname } from 'node:os';
@@ -8,6 +8,9 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createServer } from 'node:http';
 import { setTimeout as delay } from 'node:timers/promises';
+import { createHash, generateKeyPairSync, randomUUID, verify } from 'node:crypto';
+import { realpath } from 'node:fs/promises';
+import { executionAttestationPayload } from '../src/runner-collector.js';
 import { captureTrackedRoot, linuxProcessRecord, signalTrackedProcesses, supervise, systemdContainment } from '../src/supervisor.js';
 import { acknowledgeContainment, containmentCredentials, establishContainment, isConfirmedCoordinationRefusal, revalidateContainment, settleContainment } from '../src/quarantine.js';
 
@@ -639,6 +642,225 @@ test('rework worktree reopens the exact observed PR branch while preserving its 
     for(const invalid of ['',join(cwd,'missing.mjs')])await assert.rejects(commands({...env,GRAPHYARD_CLI:invalid}),/launcher/);
   } finally {await new Promise<void>(r=>http.close(()=>r()));await rm(cwd,{recursive:true,force:true});}
  });
+
+test('the packaged runner path is usable from the CLI and refuses evidence-producer credentials', async () => {
+  const cwd = await mkdtemp(join(tmpdir(), 'graphyard-runner-cli-'));
+  let role = 'producer';
+  let collectionAuthority: unknown;
+  const posts: string[] = [];
+  const http = createServer((req, res) => {
+    res.setHeader('Content-Type', 'application/json');
+    if (req.url === '/api/status') { res.end(JSON.stringify({ actor: { id: 'preview-runner', role, ...(role === 'producer' ? { proofs: ['e2e:booking'] } : {}) } })); return; }
+    if (req.url === '/api/validation/collection-authority') { posts.push(String(req.url)); res.end(JSON.stringify(collectionAuthority)); return; }
+    posts.push(String(req.url)); res.end('{}');
+  });
+  await new Promise<void>(r => http.listen(0, '127.0.0.1', r));
+  const env = { ...process.env, GRAPHYARD_TOKEN: 'test-only', GRAPHYARD_URL: `http://127.0.0.1:${(http.address() as any).port}` };
+  try {
+    const oracle = join(cwd, 'oracle'); await mkdir(oracle); await mkdir(join(cwd, 'out'), { mode: 0o700 }); await mkdir(join(cwd, 'boundary'), { mode: 0o700 });
+    await writeFile(join(oracle, 'suite.spec.ts'), 'approved assertion');
+    const bundle = JSON.parse((await exec(process.execPath, [launcher, 'runner', 'bundle-digest', oracle], { cwd, env })).stdout);
+    assert.match(bundle.digest, /^sha256:[a-f0-9]{64}$/);
+    assert.deepEqual(bundle.files.map((f: any) => f.path), ['suite.spec.ts']);
+
+    const plan = join(cwd, 'runner.json');
+    await writeFile(plan, JSON.stringify({ registration: { id: 'preview-runner', revision: 1 }, imageRepository: 'example/graphyard-runner',
+      oraclePath: oracle, outputPath: join(cwd, 'out'), timeoutMs: 60_000, runAsUser: `${process.getuid!()}:${process.getgid!()}`,
+      supervisor: { command: process.execPath, args: [launcher, 'runner', 'supervise'] } }));
+    // A producer credential could publish evidence about its own execution.
+    await assert.rejects(exec(process.execPath, [launcher, 'runner', 'attempt', plan], { cwd, env }), /worker-scoped runner credential/);
+    assert.deepEqual(posts, []);
+    role = 'worker';
+    // A worker credential proceeds to dispatch; the stub offers no eligible request.
+    assert.equal(JSON.parse((await exec(process.execPath, [launcher, 'runner', 'attempt', plan], { cwd, env })).stdout).dispatched, false);
+    assert.deepEqual(posts, ['/api/validation/dispatch']);
+
+    await writeFile(join(cwd, 'collect.json'), JSON.stringify({ grant: {}, record: {}, outputPath: join(cwd, 'out'), requiredArtifacts: ['report'], expected: { instance: 'x', artifacts: [] }, observations: [] }));
+    await assert.rejects(exec(process.execPath, [launcher, 'runner', 'collect', join(cwd, 'collect.json')], { cwd, env }));
+    assert.deepEqual(posts, ['/api/validation/dispatch']);
+
+    // A record that does not even bind to the configuration it arrived with is refused
+    // before any authority is taken: taking collection authority moves the live request to
+    // `collecting` and revokes the runner's heartbeats, and neither can be undone, so a
+    // local mistake must not spend the attempt's one collection transition.
+    const grant = { requestId: randomUUID(), attemptId: randomUUID(), epoch: 1, runner: { id: 'preview-runner', revision: 1 },
+      executionHost: 'unix:///var/run/docker.sock', attestationPublicKey: 'test-public-key-material-at-least-32-bytes', executionNetwork: 'gy-test',
+      bundleDigest: bundle.digest, runnerImageDigest: `sha256:${'b'.repeat(64)}`, targetUrl: 'https://preview.example.test/', deadline: '2026-09-16T01:00:00.000Z',
+      testAccountDigest: null };
+    collectionAuthority = grant;
+    const record = { grant, startedAt: '2026-09-16T00:00:00.000Z', finishedAt: '2026-09-16T00:01:00.000Z',
+      phases: [{ phase: 'enumerate', exitCode: 0, timedOut: false, durationMs: 1 }, { phase: 'execute', exitCode: 0, timedOut: false, durationMs: 2 }],
+      bundleDigestBefore: bundle.digest, bundleDigestAfter: bundle.digest, runnerImageDigest: grant.runnerImageDigest,
+      outcome: 'completed', refusals: [], outputPath: '/srv/graphyard/attempts/previous',
+      settlement: { settled: true, containers: [{ name: `graphyard-enumerate-${grant.attemptId}`, state: 'absent' }, { name: `graphyard-execute-${grant.attemptId}`, state: 'absent' }] } };
+    await writeFile(join(cwd, 'stale.json'), JSON.stringify({ grant, record, outputPath: join(cwd, 'out'), requiredArtifacts: ['inventory', 'report'],
+      expected: { instance: 'preview-7f3a', artifacts: [{ service: 'api', digest: `sha256:${'c'.repeat(64)}` }] }, observations: [], executionAttestation: {} }));
+    await assert.rejects(exec(process.execPath, [launcher, 'runner', 'collect', join(cwd, 'stale.json')], { cwd, env }),
+      /before taking collection authority: The collected directory is not the output boundary this execution recorded/);
+    assert.deepEqual(posts, ['/api/validation/dispatch'], 'no collection transition is spent on a locally invalid configuration');
+
+    // What the collector re-reads still decides. A configuration that binds to itself but
+    // not to the authority Graphyard holds takes collection authority — the runner may no
+    // longer act either way — and is then refused before the boundary is read.
+    const boundaryPath = await realpath(join(cwd, 'boundary'));
+    const bound = { ...record, outputPath: boundaryPath };
+    collectionAuthority = { ...grant, epoch: 2 };
+    await writeFile(join(cwd, 'superseded.json'), JSON.stringify({ grant, record: bound, outputPath: boundaryPath, requiredArtifacts: ['inventory', 'report'],
+      expected: { instance: 'preview-7f3a', artifacts: [{ service: 'api', digest: `sha256:${'c'.repeat(64)}` }] }, observations: [], executionAttestation: {} }));
+    await assert.rejects(exec(process.execPath, [launcher, 'runner', 'collect', join(cwd, 'superseded.json')], { cwd, env }),
+      /before reading the execution boundary: The execution record does not hold the authority the collector independently re-read/);
+    assert.deepEqual(posts, ['/api/validation/dispatch', '/api/validation/collection-authority']);
+    collectionAuthority = grant;
+
+    // Uploading is gated on the host attestation, never the other way round. A live grant
+    // and a boundary full of schema-valid reports still publishes no artifact when the
+    // attestation does not cover those bytes: an artifact name is immutable for the
+    // attempt, so consuming it here would lock out the real evidence for good. The
+    // refusal itself is still published, because a blocked attempt is a visible state.
+    const boundary = boundaryPath;
+    const testId = createHash('sha256').update('books are listed').digest('hex');
+    const inventory = { format: 'graphyard-playwright-v1', declared: [{ id: testId, expected: 'passed', location: { file: 'suite.spec.ts', line: 1, column: 1 } }], executions: [], steps: [], errors: 0, overflow: false, status: 'passed' };
+    await writeFile(join(boundary, 'inventory.json'), JSON.stringify(inventory));
+    await writeFile(join(boundary, 'report.json'), JSON.stringify({ ...inventory, executions: [{ id: testId, status: 'passed', retry: 0 }] }));
+    const collected = { ...record, outputPath: boundary };
+    // A structurally valid attestation that covers none of the collected bytes, and whose
+    // signature cannot verify against the pinned key.
+    const unattested = { payload: executionAttestationPayload({ grant, execution: collected as any, artifacts: [] }), signature: 'AAAA' };
+    await writeFile(join(cwd, 'unattested.json'), JSON.stringify({ grant, record: collected, outputPath: boundary, requiredArtifacts: ['inventory', 'report'],
+      expected: { instance: 'preview-7f3a', artifacts: [{ service: 'api', digest: `sha256:${'c'.repeat(64)}` }] }, observations: [], executionAttestation: unattested }));
+    const refused = JSON.parse((await exec(process.execPath, [launcher, 'runner', 'collect', join(cwd, 'unattested.json')], { cwd, env })).stdout);
+    assert.equal(refused.report.behavior, 'blocked');
+    assert.ok(refused.refusals.some((r: string) => /signature is invalid/.test(r)));
+    const called: string[] = [...posts];
+    assert.ok(!called.includes('/api/validation/artifacts'), 'no artifact name is consumed for bytes the attestor did not measure');
+    assert.ok(called.includes('/api/validation/result'), 'the refusal is still published rather than silently dropped');
+    await assert.rejects(exec(process.execPath, [launcher, 'runner', 'nonsense'], { cwd, env }), /Use runner inspect/);
+  } finally { await new Promise<void>(r => http.close(() => r())); await rm(cwd, { recursive: true, force: true }); }
+});
+
+test('the runner holds authority while the host attestor executes and signs the attempt', async () => {
+  const cwd = await mkdtemp(join(tmpdir(), 'graphyard-supervision-'));
+  const posts: string[] = [];
+  const requestId = randomUUID(), attemptId = randomUUID();
+  const { publicKey, privateKey } = generateKeyPairSync('ed25519');
+  const attestationPublicKey = publicKey.export({ type: 'spki', format: 'pem' }).toString();
+  const deadline = new Date(Date.now() + 600_000).toISOString();
+  let bundleDigest = '';
+  // The attempt authority Graphyard holds, and the lease state the attestor reads for
+  // itself. `dispatched` until the runner acknowledges under its own worker credential.
+  let attempt = { state: 'dispatched', acknowledged: false };
+  const authorityReads: string[] = [];
+  const authority = () => ({ requestId, attemptId, epoch: 1, runner: { id: 'preview-runner', revision: 1 },
+    executionHost: 'unix:///var/run/docker.sock', attestationPublicKey, executionNetwork: 'gy-isolated',
+    bundleDigest, runnerImageDigest: `sha256:${'b'.repeat(64)}`, targetUrl: 'https://preview.example.test/', deadline, testAccountDigest: null });
+  const http = createServer((req, res) => {
+    res.setHeader('Content-Type', 'application/json');
+    if (req.url === '/api/status') { res.end(JSON.stringify({ actor: { id: 'preview-runner', role: 'worker' } })); return; }
+    if (req.url === `/api/validation/attempt/${requestId}`) {
+      authorityReads.push(attempt.state);
+      res.end(JSON.stringify({ grant: authority(), ...attempt, expiresAt: new Date(Date.now() + 60_000).toISOString(), now: new Date().toISOString() }));
+      return;
+    }
+    posts.push(String(req.url).replace('/api/validation/', ''));
+    if (req.url === '/api/validation/ack') { attempt = { state: 'running', acknowledged: true }; res.end('{}'); return; }
+    if (req.url !== '/api/validation/dispatch') { res.end('{}'); return; }
+    res.end(JSON.stringify({
+      request: { id: requestId, deadline },
+      attempt: { id: attemptId, epoch: 1 },
+      bundle: { digest: bundleDigest, runnerImageDigest: `sha256:${'b'.repeat(64)}` },
+      environment: { instance: 'preview-7f3a', url: 'https://preview.example.test/' },
+      build: { artifacts: [{ service: 'api', digest: `sha256:${'c'.repeat(64)}` }] },
+      // The approved execution boundary is operator-versioned authority, not runner input.
+      executionAuthority: { host: 'unix:///var/run/docker.sock', network: 'gy-isolated', attestationPublicKey, testAccountDigest: null },
+    }));
+  });
+  await new Promise<void>(r => http.listen(0, '127.0.0.1', r));
+  // Whether this host happens to have a working Docker daemon must not decide what the
+  // attempt observes. This stub answers every invocation the way an unreachable daemon
+  // does, so the attestor can start no container and can confirm no container removed.
+  const fakeBin = join(cwd, 'fake-bin');
+  const env = { ...process.env, PATH: `${fakeBin}:${process.env.PATH}`, GRAPHYARD_TOKEN: 'test-only', GRAPHYARD_URL: `http://127.0.0.1:${(http.address() as any).port}` };
+  try {
+    await mkdir(fakeBin);
+    await writeFile(join(fakeBin, 'docker'), '#!/bin/sh\nexit 1\n'); await chmod(join(fakeBin, 'docker'), 0o755);
+    const oracle = join(cwd, 'oracle'), output = join(cwd, 'out'), key = join(cwd, 'attestor.key');
+    await mkdir(oracle, { mode: 0o755 }); await mkdir(output, { mode: 0o700 });
+    await writeFile(join(oracle, 'suite.spec.ts'), 'approved assertion');
+    await writeFile(key, privateKey.export({ type: 'pkcs8', format: 'pem' }).toString(), { mode: 0o600 });
+    bundleDigest = JSON.parse((await exec(process.execPath, [launcher, 'runner', 'bundle-digest', oracle], { cwd, env })).stdout).digest;
+
+    // The host attestor takes its signing key, its server and its read-only credential
+    // from its own environment. A runner that could name any of them could choose a key it
+    // holds, or a server that answers whatever it likes about current attempt authority.
+    const attestorToken = join(cwd, 'attestor.token');
+    await writeFile(attestorToken, 'attestor-read-only\n', { mode: 0o600 });
+    const attestorEnv = { ...env, GRAPHYARD_ATTESTOR_KEY: key, GRAPHYARD_ATTESTOR_URL: env.GRAPHYARD_URL, GRAPHYARD_ATTESTOR_TOKEN_FILE: attestorToken };
+    const containerUid = process.getuid!() === 10001 ? 10002 : 10001;
+    const runAsUser = `${containerUid}:${process.getgid!()}`;
+    const plan = join(cwd, 'runner.json');
+    await writeFile(plan, JSON.stringify({ registration: { id: 'preview-runner', revision: 1 }, imageRepository: 'example/graphyard-runner',
+      oraclePath: oracle, outputPath: output, timeoutMs: 60_000, runAsUser,
+      supervisor: { command: process.execPath, args: [launcher, 'runner', 'supervise'] } }));
+    const attempted = JSON.parse((await exec(process.execPath, [launcher, 'runner', 'attempt', plan], { cwd, env: attestorEnv, maxBuffer: 8 << 20 })).stdout);
+
+    // Acknowledgement sits between the attestor's preflight and its first container.
+    assert.deepEqual(posts, ['dispatch', 'ack']);
+    // And the attestor checked the control plane itself, twice: once before provisioning
+    // anything, and once after the runner claimed to have acknowledged. The second read is
+    // what actually releases the containers, so `proceed` on the pipe decides nothing.
+    assert.deepEqual(authorityReads, ['dispatched', 'running']);
+    // The runner observed nothing: it forwards the record the attestor signed. No
+    // container could run here, so the attempt is blocked — and blocked is what it
+    // reports, over the attestor's signature rather than the runner's word.
+    assert.equal(attempted.record.grant.executionNetwork, 'gy-isolated');
+    assert.equal(attempted.record.outcome, 'failed');
+    assert.ok(attempted.record.refusals.some((r: string) => /settlement is unverified/.test(r)));
+    assert.equal(attempted.attestation.payload.attemptId, attemptId);
+    assert.ok(verify(null, Buffer.from(JSON.stringify(attempted.attestation.payload)),
+      attestationPublicKey, Buffer.from(attempted.attestation.signature, 'base64')));
+
+    // The attestor refuses to sign at all without a private key of its own, and refuses a
+    // key any other account on the host could read.
+    const attempt2Grant = attempted.record.grant;
+    const supervision = JSON.stringify({ plan: { grant: attempt2Grant, imageRepository: 'example/graphyard-runner',
+      oraclePath: oracle, outputPath: output, timeoutMs: 60_000, runAsUser } });
+    // The attestor reads its supervision request from stdin, so the two lines have to be
+    // written to a live pipe and the stream closed — `execFile` has no `input` option, and
+    // an unwritten pipe would leave a command that gets as far as reading waiting forever.
+    const supervise = (settings: NodeJS.ProcessEnv, request = supervision) => new Promise<string>((settled, refused) => {
+      const child = spawn(process.execPath, [launcher, 'runner', 'supervise'], { cwd, env: settings as NodeJS.ProcessEnv, stdio: ['pipe', 'pipe', 'pipe'] });
+      let out = '', diagnostics = '';
+      child.stdout.setEncoding('utf8'); child.stderr.setEncoding('utf8');
+      child.stdout.on('data', chunk => { out += chunk; });
+      child.stderr.on('data', chunk => { diagnostics += chunk; });
+      child.on('error', refused);
+      child.on('close', code => code === 0 ? settled(out) : refused(new Error(diagnostics || `supervise exited ${code}`)));
+      child.stdin.end(`${request}\n{"proceed":true}\n`);
+    });
+    await assert.rejects(supervise(env), /GRAPHYARD_ATTESTOR_KEY/);
+
+    // `proceed: true` on the pipe is a sequencing signal, not authority. Whatever the
+    // caller says, the attestor starts containers only for the attempt Graphyard holds.
+    const substituted = JSON.stringify({ plan: { ...JSON.parse(supervision).plan,
+      grant: { ...attempt2Grant, targetUrl: 'https://attacker.example.test/' } } });
+    await assert.rejects(supervise(attestorEnv, substituted), /does not carry the attempt authority Graphyard dispatched/);
+    // An attempt nobody acknowledged, and one whose authority the collector has already
+    // taken over, are both refused before the first container rather than executed.
+    for (const held of [{ state: 'dispatched', acknowledged: false }, { state: 'collecting', acknowledged: true }]) {
+      attempt = held;
+      await assert.rejects(supervise(attestorEnv), /does not hold this attempt as acknowledged and executing/);
+    }
+    attempt = { state: 'running', acknowledged: true };
+    // A missing or world-readable credential refuses just as the signing key does: an
+    // attestor that cannot verify authority independently must not execute at all.
+    await assert.rejects(supervise({ ...attestorEnv, GRAPHYARD_ATTESTOR_TOKEN_FILE: undefined }), /GRAPHYARD_ATTESTOR_URL and GRAPHYARD_ATTESTOR_TOKEN_FILE/);
+    await chmod(attestorToken, 0o644);
+    await assert.rejects(supervise(attestorEnv), /Graphyard credential must be a private regular file/);
+    await chmod(attestorToken, 0o600);
+    await chmod(key, 0o644);
+    await assert.rejects(supervise(attestorEnv), /private key must be a private regular file/);
+  } finally { await new Promise<void>(r => http.close(() => r())); await rm(cwd, { recursive: true, force: true }); }
+});
 
 test('master run executes the durable loop as a supervised process and master status reports its cursor', async () => {
   const root = await mkdtemp(join(tmpdir(), 'graphyard-master-run-'));

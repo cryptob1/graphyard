@@ -5,6 +5,7 @@ import { authorizedForProof, unauthorizedProofs } from './proof-grants.js';
 import { workspacePath, pathsOverlap, validBranch } from './workspace.js';
 import { activeLease, admin, assertReviewerProfiles, operatorCapability, MergeExecutionInProgress, requireCurrent, createSchema, criterionSchema, currentEvidence, inheritedObligations, pathScopeContains, requiredProofs, resourcesSchema, demand, evaluate, exhaustedReviewerProfiles, proofSchema, reviewerProfileFor, reviewerProfileSchema, reviewProviders, reviewProviderOf, type Criterion, type Principal, type ReviewerApp, type ReviewFailover, type Work, type Observation, type ReviewRequest, type OperatorCapability } from './model.js';
 import { resourceConflicts } from './coordination.js';
+import { containmentAttestation, containmentSettlementRefusals, containmentVerificationSchema } from './quarantine.js';
 import { queueHistoryLimit, type QueueSpeculation } from './merge-queue.js';
 
 const epoch = z.number().int().positive();
@@ -35,6 +36,7 @@ const commands = {
   quarantine: z.object({ epoch, settlementHash: z.string().regex(/^[a-f0-9]{64}$/) }).strict(),
   launch: z.object({ epoch, settlementHash: z.string().regex(/^[a-f0-9]{64}$/) }).strict(),
   settle: z.object({ epoch, settlementToken: z.string().regex(/^[a-f0-9]{64}$/) }).strict(),
+  autosettle: z.object({ epoch, settlementHash: z.string().regex(/^[a-f0-9]{64}$/), reason: z.string().trim().min(1).max(2000), verification: containmentVerificationSchema }).strict(),
   release: z.object({ epoch }).strict(),
   workspace: z.object({ epoch, host: z.string().trim().min(1).max(200), path: z.string().startsWith('/').max(1000).refine(p => !/[\u0000-\u001f]/.test(p), 'Invalid path').transform(workspacePath), branch: z.string().max(200).refine(validBranch, 'Invalid Graphyard branch name') }).strict(),
   submit: z.object({ epoch, pr: z.number().int().positive() }).strict(),
@@ -64,6 +66,18 @@ function authorizeOperatorCommand(actor: Principal, command: Command, data: any,
 function preserveAssignment(work: Work) {
   if (work.lease && (!work.lastAssignment || work.lastAssignment.epoch < work.lease.epoch))
     work.lastAssignment = { owner: work.lease.owner, epoch: work.lease.epoch };
+}
+
+// A quarantine outlives the lease that raised it: reconciliation clears an expired lease,
+// and release, rework and changed requirements clear a live one. The deadline automatic
+// settlement measures its grace window from is therefore retained on the quarantine, which
+// only proof removes. It only ever moves forward, and only for the quarantined epoch.
+function retainQuarantineFence(work: Work) {
+  const quarantine = work.containmentQuarantine;
+  if (!quarantine || !work.lease || work.lease.epoch !== quarantine.epoch) return;
+  const retained = quarantine.leaseExpiresAt ? Date.parse(quarantine.leaseExpiresAt) : -Infinity;
+  const live = Date.parse(work.lease.expiresAt);
+  if (Number.isFinite(live) && !(live <= retained)) quarantine.leaseExpiresAt = work.lease.expiresAt;
 }
 export class Engine {
   operatorAuthorizer?: (db: any, now: Date, actor: Principal) => Promise<Principal>;
@@ -154,11 +168,12 @@ export class Engine {
         if (command === 'ready') demand(work.stage === 'backlog' && !work.ready, 'Only unreleased backlog work can be released');
         if (command === 'unblock') demand(work.blocker, 'Task has no blocker to clear');
       }
-      const deliveredContainmentCleanup = work.stage === 'done' && (command === 'settle' || command === 'recover');
-      preserveAssignment(work);
-      if (!['recover', 'settle'].includes(command) && work.mergeExecution && Date.parse(work.mergeExecution.expiresAt) <= now.getTime()) work.mergeExecution = null;
-      demand(!work.mergeExecution || command === 'heartbeat' || command === 'recover' || command === 'settle', 'A merge execution is active; retry after it completes or expires');
-      if (command !== 'create' && command !== 'settle' && command !== 'recover') demand(work.stage !== 'done', 'Delivered work is immutable; create a follow-up task');
+      const containmentCleanup = ['settle', 'recover', 'autosettle'];
+      const deliveredContainmentCleanup = work.stage === 'done' && containmentCleanup.includes(command);
+      preserveAssignment(work); retainQuarantineFence(work);
+      if (!containmentCleanup.includes(command) && work.mergeExecution && Date.parse(work.mergeExecution.expiresAt) <= now.getTime()) work.mergeExecution = null;
+      demand(!work.mergeExecution || command === 'heartbeat' || containmentCleanup.includes(command), 'A merge execution is active; retry after it completes or expires');
+      if (command !== 'create' && !containmentCleanup.includes(command)) demand(work.stage !== 'done', 'Delivered work is immutable; create a follow-up task');
       if (command === 'rereview') {
         if (actor.role !== 'admin') { demand(actor.role === 'worker', 'Worker or operator required', 403); activeLease(work, actor, data.epoch, now); }
         demand(work.policy.review && ['codex', 'agent'].includes(reviewProviderOf(work.policy)) && work.submission && !work.observation?.merged, 'Open submitted work with a dispatched review provider is required');
@@ -282,6 +297,16 @@ export class Engine {
           'Containment settlement capability is invalid');
         work.containmentQuarantine = null;
       }
+      if (command === 'autosettle') {
+        // Verified death is proof, not an assertion: the control plane re-checks the fence
+        // deadlines and the reported verification itself before lowering a containment fence.
+        demand(actor.role === 'coordinator' || actor.role === 'admin', 'Coordinator permission required', 403);
+        demand(work.containmentQuarantine?.epoch === data.epoch && work.containmentQuarantine?.settlementHash === data.settlementHash,
+          'Containment quarantine is missing, superseded, or does not match this verification');
+        const refusals = containmentSettlementRefusals(work, data.verification, { now: now.getTime() });
+        demand(!refusals.length, `Automatic containment settlement refused: ${refusals.join('; ')}. ${containmentAttestation(work.key)}`);
+        work.containmentQuarantine = null;
+      }
       if (command === 'release') work.lease = null;
       if (command === 'blocked') work.blocker = data.reason;
       if (command === 'workspace') {
@@ -303,6 +328,7 @@ export class Engine {
         const trusted = await authorizedForProof(db, actor, data.proof);
         work.evidence.push({ ...data, id: randomUUID(), producer: actor.id, trusted, at: now.toISOString() });
       }
+      retainQuarantineFence(work);
       // Delivery is an immutable snapshot. A late containment cleanup may append
       // its audit/revision metadata, but stale inputs must not re-evaluate it.
       if (!deliveredContainmentCleanup) this.evaluate(work, all, now);
@@ -535,7 +561,7 @@ export class Engine {
       for (const work of all) {
         if (work.stage === 'done') continue;
         const before = JSON.stringify(work);
-        preserveAssignment(work);
+        preserveAssignment(work); retainQuarantineFence(work);
         if (work.mergeExecution && Date.parse(work.mergeExecution.expiresAt) > now.getTime()) continue;
         if (work.mergeExecution) work.mergeExecution = null;
         if (work.lease && Date.parse(work.lease.expiresAt) <= now.getTime()) work.lease = null;
