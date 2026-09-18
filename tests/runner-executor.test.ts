@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { oracleBundleDigest } from '../src/runner-setup.js';
-import { accountFileDigest, approvedAccountDigest, assertAncestryFixed, assertIsolation, assertRunnerCredentialScope, attemptBoundaryPath, boundaryIdentity, containerEnvironment, containerNames, executeAttempt, executionCommand, executionPlanSchema, observeContainers, preflightAttempt, type ExecutionPlan, type Runner, type Settler } from '../src/runner-executor.js';
+import { accountFileDigest, approvedAccountDigest, assertAncestryFixed, assertIsolation, assertRunnerCredentialScope, attemptBoundaryPath, authorityWatch, boundaryIdentity, containerEnvironment, containerNames, executeAttempt, executionCommand, executionPlanSchema, observeContainers, preflightAttempt, type ExecutionPlan, type Runner, type Settler } from '../src/runner-executor.js';
 
 const image = `sha256:${'1'.repeat(64)}`;
 const runAsUser = `${process.getuid!()}:${process.getgid!()}`;
@@ -227,9 +227,18 @@ test('approved test-account variables are passed by value, never by reopened pat
 
   // Docker reopens `--env-file` when the container starts. Nothing in the command refers
   // to the path, so rewriting the file after preflight changes nothing that executes.
-  const argv = executionCommand(accounts, 'execute', preflight.testAccountEnv).argv;
+  const command = executionCommand(accounts, 'execute', preflight.testAccountEnv);
+  const argv = command.argv;
   assert.ok(!argv.includes('--env-file') && !argv.some(a => a.includes(shared)));
-  assert.ok(argv.includes('TEST_ACCOUNT_USER=booking-bot'));
+  // Named on the command line, valued only in the environment of the `docker` process the
+  // attestor starts: a command line is readable by every local account through the process
+  // listing, and the runner account is exactly who must not read the approved password.
+  assert.deepEqual(argv.filter((a, i) => argv[i - 1] === '--env' && /^TEST_ACCOUNT/.test(a)), ['TEST_ACCOUNT_USER', 'TEST_ACCOUNT_PASSWORD']);
+  for (const secret of ['booking-bot', 'approved secret']) assert.ok(!argv.some(a => a.includes(secret)), secret);
+  assert.deepEqual(command.processEnv, { TEST_ACCOUNT_USER: 'booking-bot', TEST_ACCOUNT_PASSWORD: 'approved secret' });
+  // Non-secret container wiring stays inline, where what was executed remains visible.
+  assert.ok(argv.includes(`GRAPHYARD_TARGET_URL=${accounts.grant.targetUrl}`));
+  assert.deepEqual(executionCommand(plan, 'enumerate').processEnv, {}, 'a container with no approved material forwards nothing by name');
   await writeFile(shared, 'NODE_OPTIONS=--require=/tmp/forge.js\n', { mode: 0o600 });
   assert.deepEqual(executionCommand(accounts, 'execute', preflight.testAccountEnv).argv, argv);
   assert.equal(containerEnvironment(accounts, 'execute', preflight.testAccountEnv).NODE_OPTIONS, undefined);
@@ -400,3 +409,37 @@ test('an elapsed attempt deadline refuses execution instead of running unauthori
   assert.deepEqual(record.phases, []);
   assert.ok(record.refusals.some(r => /deadline elapsed/.test(r)));
 }));
+
+test('a renewed attempt authority survives a lost packet but never a confirmed refusal', () => {
+  let clock = 0;
+  const watch = authorityWatch({ staleAfterMs: 50_000, now: () => clock });
+  assert.equal(watch.lost, false);
+
+  // A transport error is not a decision. Until the authority it renews has actually gone
+  // stale the attempt keeps its lease, and a renewal that then succeeds proves it — the
+  // execution or collection it guards is not abandoned over one dropped packet.
+  clock = 20_000; watch.failed(new Error('socket hang up'));
+  assert.equal(watch.lost, false);
+  clock = 40_000; watch.renewed();
+  assert.equal(watch.lost, false);
+
+  // Nothing renewing it at all is authority lost just the same, which counting failures
+  // would never notice: the attempt stops acting rather than running past its lease.
+  clock = 90_001;
+  assert.equal(watch.lost, true);
+  clock = 90_002; watch.renewed();
+  assert.equal(watch.lost, false);
+
+  // A failure while the last renewal is already stale ends it immediately.
+  clock = 140_003; watch.failed(new Error('socket hang up'));
+  assert.equal(watch.lost, true);
+
+  // A refusal the server confirmed is authority taken away, and no later success takes
+  // that back: whatever this attempt could still do, it is no longer allowed to.
+  const refused = authorityWatch({ now: () => clock });
+  const refusal = Object.assign(new Error('superseded'), { confirmedRefusal: true });
+  clock += 1_000; refused.failed(refusal);
+  assert.equal(refused.lost, true);
+  clock += 1_000; refused.renewed();
+  assert.equal(refused.lost, true, 'a confirmed refusal is never recovered from');
+});

@@ -679,8 +679,10 @@ test('the packaged runner path is usable from the CLI and refuses evidence-produ
     await assert.rejects(exec(process.execPath, [launcher, 'runner', 'collect', join(cwd, 'collect.json')], { cwd, env }));
     assert.deepEqual(posts, ['/api/validation/dispatch']);
 
-    // A live grant with another attempt's output directory is refused before any
-    // artifact is uploaded: an artifact name is immutable once published for an attempt.
+    // A record that does not even bind to the configuration it arrived with is refused
+    // before any authority is taken: taking collection authority moves the live request to
+    // `collecting` and revokes the runner's heartbeats, and neither can be undone, so a
+    // local mistake must not spend the attempt's one collection transition.
     const grant = { requestId: randomUUID(), attemptId: randomUUID(), epoch: 1, runner: { id: 'preview-runner', revision: 1 },
       executionHost: 'unix:///var/run/docker.sock', attestationPublicKey: 'test-public-key-material-at-least-32-bytes', executionNetwork: 'gy-test',
       bundleDigest: bundle.digest, runnerImageDigest: `sha256:${'b'.repeat(64)}`, targetUrl: 'https://preview.example.test/', deadline: '2026-09-16T01:00:00.000Z',
@@ -693,15 +695,29 @@ test('the packaged runner path is usable from the CLI and refuses evidence-produ
       settlement: { settled: true, containers: [{ name: `graphyard-enumerate-${grant.attemptId}`, state: 'absent' }, { name: `graphyard-execute-${grant.attemptId}`, state: 'absent' }] } };
     await writeFile(join(cwd, 'stale.json'), JSON.stringify({ grant, record, outputPath: join(cwd, 'out'), requiredArtifacts: ['inventory', 'report'],
       expected: { instance: 'preview-7f3a', artifacts: [{ service: 'api', digest: `sha256:${'c'.repeat(64)}` }] }, observations: [], executionAttestation: {} }));
-    await assert.rejects(exec(process.execPath, [launcher, 'runner', 'collect', join(cwd, 'stale.json')], { cwd, env }), /output boundary this execution recorded/);
+    await assert.rejects(exec(process.execPath, [launcher, 'runner', 'collect', join(cwd, 'stale.json')], { cwd, env }),
+      /before taking collection authority: The collected directory is not the output boundary this execution recorded/);
+    assert.deepEqual(posts, ['/api/validation/dispatch'], 'no collection transition is spent on a locally invalid configuration');
+
+    // What the collector re-reads still decides. A configuration that binds to itself but
+    // not to the authority Graphyard holds takes collection authority — the runner may no
+    // longer act either way — and is then refused before the boundary is read.
+    const boundaryPath = await realpath(join(cwd, 'boundary'));
+    const bound = { ...record, outputPath: boundaryPath };
+    collectionAuthority = { ...grant, epoch: 2 };
+    await writeFile(join(cwd, 'superseded.json'), JSON.stringify({ grant, record: bound, outputPath: boundaryPath, requiredArtifacts: ['inventory', 'report'],
+      expected: { instance: 'preview-7f3a', artifacts: [{ service: 'api', digest: `sha256:${'c'.repeat(64)}` }] }, observations: [], executionAttestation: {} }));
+    await assert.rejects(exec(process.execPath, [launcher, 'runner', 'collect', join(cwd, 'superseded.json')], { cwd, env }),
+      /before reading the execution boundary: The execution record does not hold the authority the collector independently re-read/);
     assert.deepEqual(posts, ['/api/validation/dispatch', '/api/validation/collection-authority']);
+    collectionAuthority = grant;
 
     // Uploading is gated on the host attestation, never the other way round. A live grant
     // and a boundary full of schema-valid reports still publishes no artifact when the
     // attestation does not cover those bytes: an artifact name is immutable for the
     // attempt, so consuming it here would lock out the real evidence for good. The
     // refusal itself is still published, because a blocked attempt is a visible state.
-    const boundary = await realpath(join(cwd, 'boundary'));
+    const boundary = boundaryPath;
     const testId = createHash('sha256').update('books are listed').digest('hex');
     const inventory = { format: 'graphyard-playwright-v1', declared: [{ id: testId, expected: 'passed', location: { file: 'suite.spec.ts', line: 1, column: 1 } }], executions: [], steps: [], errors: 0, overflow: false, status: 'passed' };
     await writeFile(join(boundary, 'inventory.json'), JSON.stringify(inventory));

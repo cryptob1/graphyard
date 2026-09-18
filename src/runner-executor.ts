@@ -159,6 +159,35 @@ export function assertRunnerCredentialScope(status: unknown) {
   return actor as { id: string; role: 'worker' };
 }
 
+/**
+ * The rule every background-renewed attempt authority follows, in one place because the
+ * executing runner and the collecting host must not answer it differently.
+ *
+ * A renewal the server *confirmed* it refuses is authority being taken away: this attempt
+ * may no longer act, and no later success takes that back — the refusal was a decision,
+ * not a lost packet. A transport error or a 5xx is not a decision, so it only ends the
+ * attempt once the authority it renews has actually gone stale; until then a renewal that
+ * succeeds afterwards proves the lease is current, and treating the first dropped packet
+ * as fatal would abandon executions and collections that still hold their lease.
+ * Authority is equally lost when nothing renews it at all, which a failure count alone
+ * never notices.
+ */
+export function authorityWatch(options: { staleAfterMs?: number; now?: () => number } = {}) {
+  const staleAfterMs = options.staleAfterMs ?? 50_000, now = options.now ?? Date.now;
+  let renewedAt = now(), refused = false, failure: unknown;
+  return {
+    /** A renewal the server accepted. */
+    renewed() { renewedAt = now(); if (!refused) failure = undefined; },
+    /** A renewal that did not land, with whatever the attempt was told. */
+    failed(error: unknown) {
+      if ((error as { confirmedRefusal?: boolean } | null)?.confirmedRefusal) { refused = true; failure = error; }
+      else if (now() - renewedAt >= staleAfterMs) failure = error;
+    },
+    /** Whether this attempt may no longer act on anything its authority covers. */
+    get lost() { return failure !== undefined || now() - renewedAt >= staleAfterMs; },
+  };
+}
+
 /** Both container names are derived from the attempt alone, so a collector that never
  * saw the plan can name exactly the containers this attempt was allowed to start. */
 export const containerNames = (attemptId: string) => (['enumerate', 'execute'] as Phase[]).map(phase => `graphyard-${phase}-${attemptId}`);
@@ -171,6 +200,19 @@ export const containerName = (plan: ExecutionPlan, phase: Phase) => `graphyard-$
  * still live against the target.
  */
 const dockerArgv = (dockerHost: string | undefined, argv: string[]) => (dockerHost ? ['--host', dockerHost, ...argv] : argv);
+/**
+ * How one container variable is named on the Docker command line.
+ *
+ * Approved test-account entries are credentials, and a command line is public on an
+ * ordinary host: any local identity can read another account's arguments through the
+ * process listing or `/proc/<pid>/cmdline`, which would hand the runner account — the one
+ * account this boundary exists to keep out — the password the operator approved. Those
+ * entries are therefore named without their values and Docker reads each value from the
+ * environment of the `docker` process this attestor starts, which the runner cannot see.
+ * Everything else the container receives is non-secret wiring and stays inline, where it
+ * remains visible to an operator watching what was executed.
+ */
+const commandEnvArgv = (key: string, value: string) => (testAccountKey.test(key) ? ['--env', key] : ['--env', `${key}=${value}`]);
 export function executionCommand(plan: ExecutionPlan, phase: Phase, testAccount: TestAccountEnv = {}) {
   const p = executionPlanSchema.parse(plan);
   const env = containerEnvironment(p, phase, testAccount);
@@ -186,9 +228,13 @@ export function executionCommand(plan: ExecutionPlan, phase: Phase, testAccount:
       `--mount=type=bind,source=${p.outputPath},target=/output`,
       '--tmpfs=/scratch:rw,noexec,nosuid,nodev,size=512m',
       '--workdir', '/scratch',
-      ...Object.entries(env).flatMap(([key, value]) => ['--env', `${key}=${value}`]),
+      ...Object.entries(env).flatMap(([key, value]) => commandEnvArgv(key, value)),
       `${p.imageRepository}@${p.grant.runnerImageDigest}`, phase]),
     env,
+    // The environment the `docker` process itself must carry for the variables named
+    // without a value above. It holds only this attempt's approved material, so nothing
+    // else of the attestor's environment is forwarded by name.
+    processEnv: Object.fromEntries(Object.entries(env).filter(([key]) => testAccountKey.test(key))),
   };
 }
 
@@ -410,15 +456,18 @@ async function readTestAccountEnv(path: string, pinned: string): Promise<TestAcc
 }
 
 export type PhaseResult = { phase: Phase; exitCode: number; timedOut: boolean; durationMs: number };
-export type Runner = (command: { file: string; argv: string[] }, timeoutMs: number, signal?: AbortSignal) => Promise<{ exitCode: number; timedOut: boolean }>;
+export type Runner = (command: { file: string; argv: string[]; processEnv?: Record<string, string> }, timeoutMs: number, signal?: AbortSignal) => Promise<{ exitCode: number; timedOut: boolean }>;
 /** `absent` is the only state that proves this attempt can no longer act on shared resources. */
 export type ContainerState = 'absent' | 'present' | 'unknown';
 export type Settler = (name: string) => Promise<ContainerState>;
 
-const spawnProcess = (file: string, argv: string[], timeoutMs: number, signal?: AbortSignal) => new Promise<{ exitCode: number; timedOut: boolean }>(resolve => {
+const spawnProcess = (file: string, argv: string[], timeoutMs: number, signal?: AbortSignal, processEnv?: Record<string, string>) => new Promise<{ exitCode: number; timedOut: boolean }>(resolve => {
   // Candidate-influenced stdout/stderr is never captured or forwarded: it can carry
   // test-account credentials, and the report file is the only accepted channel.
-  const child = spawn(file, argv, { stdio: 'ignore' });
+  // `processEnv` carries the approved test-account values that the command line names
+  // without them; the attestor's own environment is otherwise passed through unchanged so
+  // the Docker CLI keeps the configuration it needs to reach the pinned socket.
+  const child = spawn(file, argv, { stdio: 'ignore', env: processEnv && Object.keys(processEnv).length ? { ...process.env, ...processEnv } : process.env });
   let timedOut = false, done = false;
   const stop = () => child.kill('SIGKILL');
   const finish = (exitCode: number) => { if (done) return; done = true; clearTimeout(timer); signal?.removeEventListener('abort', stop); resolve({ exitCode, timedOut }); };
@@ -429,7 +478,7 @@ const spawnProcess = (file: string, argv: string[], timeoutMs: number, signal?: 
   child.on('error', () => finish(127));
   child.on('close', code => finish(code ?? 1));
 });
-const dockerRunner: Runner = (command, timeoutMs, signal) => spawnProcess(command.file, command.argv, timeoutMs, signal);
+const dockerRunner: Runner = (command, timeoutMs, signal) => spawnProcess(command.file, command.argv, timeoutMs, signal, command.processEnv);
 async function inspectContainer(name: string, dockerHost?: string): Promise<ContainerState> {
   return new Promise(resolve => {
     const child = spawn('docker', dockerArgv(dockerHost, ['inspect', '--type=container', name]), { stdio: ['ignore', 'ignore', 'pipe'] });

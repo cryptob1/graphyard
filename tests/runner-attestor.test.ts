@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, writeFile, rename, rm, realpath, chmod } from 'node:fs/promises';
+import { mkdtemp, mkdir, readdir, writeFile, rename, rm, realpath, chmod } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createHash, generateKeyPairSync, randomUUID } from 'node:crypto';
@@ -126,6 +126,35 @@ test('preflight completes before acknowledgement, and an unacknowledged attempt 
   assert.equal(asked, false);
   assert.deepEqual(started, []);
   assert.ok(oracle);
+}));
+
+test('a key that cannot produce this attempt\'s signature is refused before acknowledgement', async () => boundary(async ({ output, plan }) => {
+  const started: string[] = [];
+  const watching: Runner = async command => { started.push(String(command.argv.at(-1))); return { exitCode: 0, timedOut: false }; };
+  const unusable = async (key: string, expected: RegExp) => {
+    started.length = 0;
+    let asked = false;
+    await assert.rejects(superviseAttempt({ plan }, { privateKey: key, run: watching, settle: absent, ready: async () => { asked = true; } }), expected);
+    // Nothing was acknowledged and nothing was provisioned, so the attempt expires and
+    // releases its reservations instead of holding them for an operator to settle.
+    assert.equal(asked, false, 'an attempt that cannot be attested is never acknowledged');
+    assert.deepEqual(started, []);
+    assert.deepEqual(await readdir(output).catch(() => []), [], 'no attempt boundary is provisioned');
+  };
+
+  // Malformed, and the right kind of key but not the one this attempt authority pins.
+  await unusable('-----BEGIN PRIVATE KEY-----\nnot a key\n-----END PRIVATE KEY-----\n', /cannot produce an Ed25519 signature/);
+  await unusable(generateKeyPairSync('ed25519').privateKey.export({ type: 'pkcs8', format: 'pem' }).toString(),
+    /does not correspond to the attestation public key/);
+  // An RSA key signs, but never what the collector will verify with the pinned key.
+  await unusable(generateKeyPairSync('rsa', { modulusLength: 2048 }).privateKey.export({ type: 'pkcs8', format: 'pem' }).toString(), /Ed25519|does not correspond/);
+
+  // The key the grant pins still supervises the attempt, and the probe leaves nothing
+  // behind that could be replayed: the signature the collector accepts is over this
+  // attempt's own attestation payload.
+  const supervised = await superviseAttempt({ plan }, { privateKey, run: reporting(plan), settle: absent });
+  const collected = await collectArtifacts(supervised.record.outputPath, ['inventory', 'report']);
+  assert.deepEqual(verifyExecutionAttestation(plan.grant, supervised.record, collected, supervised.attestation).reasons, []);
 }));
 
 test('a boundary swapped out from under the measurement is never signed', async () => boundary(async ({ collection, output, plan }) => {

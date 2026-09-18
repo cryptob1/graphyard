@@ -1,4 +1,4 @@
-import { sign as signBytes } from 'node:crypto';
+import { sign as signBytes, verify as verifySignature } from 'node:crypto';
 import { z } from 'zod';
 import { boundaryUnchanged, executeAttempt, executionPlanSchema, preflightAttempt, type AttestorIdentity, type ExecutionRecord, type Runner, type Settler } from './runner-executor.js';
 import { artifactKinds, attestationBytes, collectArtifacts, executionAttestationPayload, type ExecutionAttestation } from './runner-collector.js';
@@ -12,6 +12,33 @@ import { artifactKinds, attestationBytes, collectArtifacts, executionAttestation
 export const supervisionRequestSchema = z.object({ plan: executionPlanSchema }).strict();
 export type SupervisionRequest = z.infer<typeof supervisionRequestSchema>;
 export type SupervisionResult = { record: ExecutionRecord; attestation: ExecutionAttestation; collection: { artifacts: { name: string; digest: string }[]; reasons: string[] } };
+
+/**
+ * The bytes a signing probe covers. They say what the probe is for and carry no attempt
+ * fact, so a signature over them can never be replayed as an attestation: `attestationBytes`
+ * covers a JSON payload, which this is not.
+ */
+const signingProbe = Buffer.from('graphyard-attestor-signing-probe');
+/**
+ * Establish, before anything is acknowledged, that this process can actually produce the
+ * signature the collector will require.
+ *
+ * The private key is otherwise first used after both containers have run. A malformed,
+ * encrypted, wrong-type or simply unrelated key would then be discovered at the end of an
+ * attempt that had already been acknowledged and had already exercised the target, leaving
+ * an acknowledged attempt whose reservations only an operator can release and whose
+ * execution can never be attested. Signing a probe and verifying it against the public key
+ * this attempt authority pins establishes both usability and correspondence while a refusal
+ * still costs nothing: the attempt stays unacknowledged and expires.
+ */
+export function assertAttestationKeyCorresponds(privateKey: string, attestationPublicKey: string) {
+  let probe: Buffer;
+  try { probe = signBytes(null, signingProbe, privateKey); }
+  catch { throw new Error('The host attestor private key cannot produce an Ed25519 signature; no attempt was acknowledged'); }
+  let corresponds = false;
+  try { corresponds = verifySignature(null, signingProbe, attestationPublicKey, probe); } catch { corresponds = false; }
+  if (!corresponds) throw new Error('The host attestor private key does not correspond to the attestation public key this attempt authority pins; no attempt was acknowledged');
+}
 
 /**
  * Supervise one authorized attempt and attest what this process observed.
@@ -55,6 +82,9 @@ export async function superviseAttempt(input: unknown, options: AttestorIdentity
   if (options.callerUid !== undefined && containerUid === options.callerUid) {
     throw new Error('The runner container must run as a dedicated account, not as the identity that requested supervision');
   }
+  // Before the boundary is provisioned, and well before the ACK: a key that cannot sign
+  // what this attempt's authority pins is a local refusal, not a failed execution.
+  assertAttestationKeyCorresponds(options.privateKey, plan.grant.attestationPublicKey);
   const preflight = await preflightAttempt(plan, { uid: options.uid, gids: options.gids });
   await options.ready?.();
   const record = await executeAttempt(plan, { preflight, signal: options.signal, run: options.run, settle: options.settle, now: options.now, uid: options.uid, gids: options.gids });
