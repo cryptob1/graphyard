@@ -13,8 +13,11 @@ export function CandidatePr({ repository, candidate, workKey }: { repository: un
   return href ? <a className="candidate-link" href={href} aria-label={label} onClick={event => event.stopPropagation()} {...external}>{text}</a> : <span>{text}</span>;
 }
 
-export function CandidateSha({ repository, sha }: { repository: unknown; sha: unknown }) {
-  const short = String(sha).slice(0, 12);
+export function CandidateSha({ repository, sha, workKey }: { repository: unknown; sha: unknown; workKey?: string }) {
+  // The whole candidate SHA stays on screen: an operator reads, selects, and copies
+  // the exact commit the gates decided on, never an abbreviation of it.
+  const text = String(sha);
+  const label = `${text}, open commit${workKey ? ` for ${workKey}` : ''} in GitHub`;
   const href = candidateCommitUrl(repository, sha);
-  return href ? <a className="candidate-link" href={href} aria-label={`Open commit ${short} in GitHub`} {...external}><code>{short}</code></a> : <code>{short}</code>;
+  return href ? <a className="candidate-link" href={href} aria-label={label} onClick={event => event.stopPropagation()} {...external}><code>{text}</code></a> : <code>{text}</code>;
 }
