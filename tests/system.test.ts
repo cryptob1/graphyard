@@ -34,6 +34,7 @@ before(async () => {
   database = new EmbeddedPostgres({ databaseDir: await mkdtemp(join(tmpdir(), 'graphyard-test-')), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('graphyard_test');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/graphyard_test`); await store.init(); engine = new Engine(store, [15368], 120, 'owner/project');
+  engine.reviewerApps = reviewerApps; engine.controlPlaneAppId = GRAPHYARD_APP;
   http = server(engine, [{ ...operator, token: 'o'.repeat(32) }, { ...worker, token: 'w'.repeat(32) }, { ...coordinator, token: 'm'.repeat(32) }, ...probeWorkers]);
   await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));
   url = `http://127.0.0.1:${(http.address() as any).port}`;
@@ -54,6 +55,34 @@ function observation(w: Work): Observation {
     merged: false, mergeSha: null, files: ['src/claims.ts'], at: new Date().toISOString() };
 }
 function proof() { return { proof: 'integration:claim-safety', sha: head, baseSha: base, policyRevision: 1, result: 'pass', executed: 12, skipped: 0 }; }
+const GRAPHYARD_APP = 1234;
+const reviewerApps = [
+  { id: 'claude-reviewer', runtime: 'claude', appId: 55_001, botUserId: 55_002 },
+  { id: 'cursor-reviewer', runtime: 'cursor', appId: 66_001, botUserId: 66_002 },
+];
+const agentProfiles = [
+  { name: 'claude-reviewer', runtime: 'claude', reviewerApp: 'claude-reviewer' },
+  { name: 'cursor-reviewer', runtime: 'cursor', reviewerApp: 'cursor-reviewer', timeoutSeconds: 900 },
+];
+async function leasedJob(id: string) {
+  const token = randomUUID();
+  await store.pool.query("INSERT INTO jobs(work_id) VALUES($1) ON CONFLICT(work_id) DO NOTHING", [id]);
+  await store.pool.query("UPDATE jobs SET token=$2,locked_until=now()+interval '90 seconds' WHERE work_id=$1", [id, token]);
+  return token;
+}
+function agentRequest(w: Work, profile = 'claude-reviewer', commentId = 700) {
+  return { commentId, sha: head, baseSha: base, policyRevision: w.policyRevision, body: `review ${profile}`, createdAt: new Date().toISOString(),
+    provider: 'agent' as const, profile, reviewerApp: profile, marker: '44444444-4444-4444-8444-444444444444' };
+}
+function agentVerdict(w: Work, request: ReturnType<typeof agentRequest>, overrides: Record<string, unknown> = {}): Observation {
+  return { ...observation(w), reviews: [], prState: 'open', draft: false,
+    agentReview: { provider: 'agent', sha: head, approved: true, reason: 'Registered reviewer approved this commit',
+      requestId: request.commentId, profile: request.profile, reviewerApp: request.reviewerApp, ...overrides } };
+}
+async function agentReviewed() {
+  let w = await submitted(); w = await engine.observe(w.id, w.revision, observation(w));
+  return engine.execute(operator, 'reviewpolicy', w.id, { provider: 'agent', reviewerProfiles: agentProfiles, expectedPolicyRevision: 1, reason: 'Adopt identity-bound agent review' }, randomUUID());
+}
 
 test('32 racing agents across independent connection pools acquire exactly one lease', async () => {
   const work = await ready(); const second = new Store(store.pool.options.connectionString!); const replica = new Engine(second);
@@ -1009,4 +1038,157 @@ test('formal review identities stay excluded after revisions regardless of clock
   assert.equal(w.formalReviewBaseline, undefined);
   w = await engine.observe(w.id, w.revision, { ...observation(w), reviewIds: [100, 101, 102], reviews: [{ ...existing, id: 102 }] });
   assert.equal(w.gates.find(g => g.name === 'review')!.passed, false);
+});
+
+test('agent review policy requires registered reviewer profiles and an operator identity', async () => {
+  let w = await submitted(); w = await engine.observe(w.id, w.revision, observation(w));
+  w = await engine.execute(producer, 'evidence', w.id, proof(), randomUUID());
+  const intent = { provider: 'agent', expectedPolicyRevision: 1, reason: 'Adopt identity-bound agent review' };
+  await assert.rejects(engine.execute(operator, 'reviewpolicy', w.id, intent, randomUUID()), /Reviewer profiles are required/);
+  await assert.rejects(engine.execute(operator, 'reviewpolicy', w.id, { ...intent, reviewerProfiles: [{ name: 'ghost', runtime: 'claude', reviewerApp: 'ghost' }] }, randomUUID()), /not registered/);
+  await assert.rejects(engine.execute(operator, 'reviewpolicy', w.id, { ...intent, reviewerProfiles: [{ name: 'claude-reviewer', runtime: 'cursor', reviewerApp: 'claude-reviewer' }] }, randomUUID()), /registered runtime/);
+  await assert.rejects(engine.execute(worker, 'reviewpolicy', w.id, { ...intent, reviewerProfiles: agentProfiles }, randomUUID()), /Operator/);
+  await assert.rejects(engine.execute(operator, 'reviewpolicy', w.id, { provider: 'codex', reviewerProfiles: agentProfiles, expectedPolicyRevision: 1, reason: 'Mixed intent' }, randomUUID()), /rejected for every other provider/);
+  w = await engine.execute(operator, 'reviewpolicy', w.id, { ...intent, reviewerProfiles: agentProfiles }, randomUUID());
+  assert.equal(w.policyRevision, 2); assert.equal(w.policy.reviewProvider, 'agent');
+  assert.deepEqual(w.policy.reviewerProfiles?.map(profile => profile.name), ['claude-reviewer', 'cursor-reviewer']);
+  assert.equal(w.policy.reviewerProfiles![0].timeoutSeconds, 1800);
+  assert.equal(w.observation, null); assert.equal(w.reviewRequest, null);
+  // Acceptance evidence for the previous policy revision no longer counts.
+  assert.equal(w.evidence.length, 1); assert.equal(w.gates.find(gate => gate.name === 'acceptance')?.passed, false);
+  assert.equal((await store.events(w.id)).find(event => event.kind === 'reviewpolicy').payload.details.reason, intent.reason);
+  await assert.rejects(engine.execute(operator, 'reviewpolicy', w.id, { ...intent, expectedPolicyRevision: 2, reviewerProfiles: agentProfiles }, randomUUID()), /already selected/);
+  // Reordering the same identities is a real policy change and is accepted.
+  w = await engine.execute(operator, 'reviewpolicy', w.id, { ...intent, expectedPolicyRevision: 2, reviewerProfiles: [agentProfiles[1], agentProfiles[0]] }, randomUUID());
+  assert.deepEqual(w.policy.reviewerProfiles?.map(profile => profile.name), ['cursor-reviewer', 'claude-reviewer']);
+  // Returning to formal GitHub review drops the reviewer profiles entirely.
+  w = await engine.execute(operator, 'reviewpolicy', w.id, { provider: 'github', expectedPolicyRevision: 3, reason: 'Return to formal approval' }, randomUUID());
+  assert.equal(w.policy.reviewerProfiles, undefined); assert.equal(w.policy.reviewProvider, 'github');
+});
+
+test('agent approval satisfies review only for the dispatched profile and registered App', async () => {
+  let w = await agentReviewed();
+  w = await engine.observe(w.id, w.revision, observation(w));
+  const token = await leasedJob(w.id);
+  const request = agentRequest(w);
+  await assert.rejects(engine.bindReviewRequest(w.id, w.revision, { ...request, profile: 'cursor-reviewer', reviewerApp: 'cursor-reviewer' }, token), /currently selected reviewer profile/);
+  await assert.rejects(engine.bindReviewRequest(w.id, w.revision, { ...request, marker: undefined }, token), /currently selected reviewer profile/);
+  await assert.rejects(engine.bindReviewRequest(w.id, w.revision, { ...request, provider: 'codex' }, token), /candidate or policy changed/);
+  w = await engine.bindReviewRequest(w.id, w.revision, request, token);
+  assert.equal(w.reviewRequest?.profile, 'claude-reviewer');
+  assert.equal(w.observation?.agentReview?.approved, false);
+  assert.match(w.gates.find(gate => gate.name === 'review')!.reasons[0], /Waiting for reviewer profile claude-reviewer/);
+  w = await engine.observe(w.id, w.revision, agentVerdict(w, request));
+  assert.equal(w.gates.find(gate => gate.name === 'review')?.passed, true);
+  for (const forged of [{ requestId: 999 }, { profile: 'cursor-reviewer' }, { reviewerApp: 'cursor-reviewer' }, { sha: 'c'.repeat(40) }, { provider: 'codex' }]) {
+    w = await engine.observe(w.id, w.revision, agentVerdict(w, request, forged));
+    assert.equal(w.gates.find(gate => gate.name === 'review')?.passed, false, JSON.stringify(forged));
+    w = await engine.observe(w.id, w.revision, agentVerdict(w, request));
+    assert.equal(w.gates.find(gate => gate.name === 'review')?.passed, true, JSON.stringify(forged));
+  }
+  // A native change request still blocks an approved agent verdict.
+  w = await engine.observe(w.id, w.revision, { ...agentVerdict(w, request), reviews: [{ reviewer: 'human', sha: head, state: 'CHANGES_REQUESTED' }] });
+  assert.equal(w.gates.find(gate => gate.name === 'review')?.passed, false);
+});
+
+test('provider exhaustion fails over to the next profile and records it in history', async () => {
+  let w = await agentReviewed();
+  w = await engine.observe(w.id, w.revision, observation(w));
+  const token = await leasedJob(w.id);
+  await assert.rejects(engine.failoverReviewRequest(w.id, w.revision, { exhaustion: 'usage-limit', reason: 'quota' }, token), /current agent review request/);
+  const first = agentRequest(w);
+  w = await engine.bindReviewRequest(w.id, w.revision, first, token);
+  await assert.rejects(engine.failoverReviewRequest(w.id, w.revision, { exhaustion: 'timeout', reason: 'silent' }, randomUUID()), ReconciliationRetry);
+  w = await engine.failoverReviewRequest(w.id, w.revision, { exhaustion: 'usage-limit', reason: 'claude-reviewer reported exhausted usage limits' }, token);
+  assert.equal(w.reviewRequest, null); assert.equal(w.reviewFailovers?.length, 1);
+  assert.equal(w.reviewFailovers![0].profile, 'claude-reviewer'); assert.equal(w.reviewFailovers![0].nextProfile, 'cursor-reviewer');
+  assert.equal(w.reviewFailovers![0].exhaustion, 'usage-limit'); assert.equal(w.reviewFailovers![0].requestCommentId, first.commentId);
+  assert.match(w.gates.find(gate => gate.name === 'review')!.reasons[0], /failed over to cursor-reviewer/);
+  const failoverEvent = (await store.events(w.id)).find(event => event.kind === 'review.failover');
+  assert.equal(failoverEvent.payload.details.profile, 'claude-reviewer'); assert.equal(failoverEvent.payload.details.sha, head);
+  // The superseded profile can no longer be rebound, and its old verdict cannot approve.
+  await assert.rejects(engine.bindReviewRequest(w.id, w.revision, agentRequest(w), token), /currently selected reviewer profile/);
+  w = await engine.observe(w.id, w.revision, agentVerdict(w, first));
+  assert.equal(w.gates.find(gate => gate.name === 'review')?.passed, false);
+  w = await engine.observe(w.id, w.revision, observation(w));
+  const second = agentRequest(w, 'cursor-reviewer', 701);
+  w = await engine.bindReviewRequest(w.id, w.revision, second, token);
+  w = await engine.failoverReviewRequest(w.id, w.revision, { exhaustion: 'timeout', reason: 'no verdict within 900 seconds' }, token);
+  assert.equal(w.reviewFailovers?.length, 2); assert.equal(w.reviewFailovers![1].nextProfile, null);
+  assert.match(w.gates.find(gate => gate.name === 'review')!.reasons[0], /Every configured reviewer profile is exhausted/);
+  assert.equal(w.stage, 'review');
+  // Re-review restarts failover at the first configured profile without approving anything.
+  w = await engine.execute(operator, 'rereview', w.id, {}, randomUUID());
+  assert.deepEqual(w.reviewFailovers, []);
+  w = await engine.observe(w.id, w.revision, observation(w));
+  w = await engine.bindReviewRequest(w.id, w.revision, agentRequest(w, 'claude-reviewer', 702), token);
+  assert.equal(w.reviewRequest?.profile, 'claude-reviewer');
+  assert.ok((await store.events(w.id)).some(event => event.kind === 'review.failover'));
+});
+
+test('reconciliation dispatches, fails over, and stops without approving when reviewers are exhausted', async () => {
+  let w = await agentReviewed();
+  const dispatched: string[] = []; let exhaust: string | null = null; let publications = 0;
+  const adapter = {
+    reviewerAppFor: (profile: any) => profile && reviewerApps.find(app => app.id === profile.reviewerApp),
+    observe: async (work: Work) => {
+      const request = work.reviewRequest;
+      if (!request?.profile) return { ...observation(work), reviews: [], prState: 'open' as const, draft: false };
+      return { ...observation(work), reviews: [], prState: 'open' as const, draft: false,
+        agentReview: { provider: 'agent' as const, sha: head, approved: false, profile: request.profile, reviewerApp: request.reviewerApp,
+          reason: `${request.profile} is exhausted`, ...(exhaust === request.profile ? { exhausted: true, exhaustion: 'usage-limit' as const } : {}) } };
+    },
+    requestAgentReview: async (work: Work, profile: any, app: any, guard: () => Promise<void>) => {
+      await guard(); dispatched.push(profile.name);
+      assert.equal(app.id, profile.reviewerApp);
+      return agentRequest(work, profile.name, 800 + dispatched.length);
+    },
+    publish: async (_work: Work, forced: unknown, guard: () => Promise<void>) => { assert.equal(forced, undefined); await guard(); publications++; },
+  } as unknown as GitHub;
+  const run = async () => {
+    await store.pool.query("UPDATE jobs SET available_at=now()+interval '1 hour'");
+    await store.pool.query('UPDATE jobs SET available_at=now() WHERE work_id=$1', [w.id]);
+    await processJob(engine, adapter);
+    w = (await store.list()).find(item => item.id === w.id)!;
+  };
+  await run();
+  assert.deepEqual(dispatched, ['claude-reviewer']); assert.equal(w.reviewRequest?.profile, 'claude-reviewer');
+  exhaust = 'claude-reviewer'; await run();
+  assert.deepEqual(dispatched, ['claude-reviewer', 'cursor-reviewer']);
+  assert.equal(w.reviewFailovers?.length, 1); assert.equal(w.reviewRequest?.profile, 'cursor-reviewer');
+  exhaust = 'cursor-reviewer'; await run();
+  assert.equal(w.reviewFailovers?.length, 2); assert.equal(w.reviewRequest, null);
+  assert.deepEqual(dispatched, ['claude-reviewer', 'cursor-reviewer']);
+  assert.equal(w.gates.find(gate => gate.name === 'review')?.passed, false);
+  // A stalled reviewer never becomes an approval, and the job stays healthy for retries.
+  await run();
+  assert.equal(w.gates.find(gate => gate.name === 'review')?.passed, false);
+  assert.equal((await store.pool.query('SELECT error FROM jobs WHERE work_id=$1', [w.id])).rows[0].error, null);
+  assert.ok(publications >= 4);
+});
+
+test('existing GitHub and Codex review policies keep their original behavior', async () => {
+  // A default policy still requires an independent formal approval, registry or not.
+  let native = await submitted();
+  native = await engine.observe(native.id, native.revision, { ...observation(native), reviews: [] });
+  assert.equal(native.policy.reviewProvider, undefined);
+  assert.match(native.gates.find(gate => gate.name === 'review')!.reasons[0], /Independent approval of the current commit/);
+  native = await engine.observe(native.id, native.revision, { ...observation(native), reviews: [{ reviewer: 'implementer', sha: head, state: 'APPROVED' }] });
+  assert.equal(native.gates.find(gate => gate.name === 'review')?.passed, false);
+  native = await engine.observe(native.id, native.revision, observation(native));
+  assert.equal(native.gates.find(gate => gate.name === 'review')?.passed, true);
+  // A Codex policy still binds to its own provider record and rejects an agent verdict.
+  let codex = await submitted();
+  codex = await engine.observe(codex.id, codex.revision, observation(codex));
+  codex = await engine.execute(operator, 'reviewpolicy', codex.id, { provider: 'codex', expectedPolicyRevision: 1, reason: 'Keep hosted Codex review' }, randomUUID());
+  assert.equal(codex.policy.reviewerProfiles, undefined);
+  codex = await engine.observe(codex.id, codex.revision, observation(codex));
+  const token = await leasedJob(codex.id);
+  const request = { commentId: 8124, sha: head, baseSha: base, policyRevision: codex.policyRevision, body: '@codex review', createdAt: new Date().toISOString() };
+  codex = await engine.bindReviewRequest(codex.id, codex.revision, request, token);
+  assert.equal(codex.reviewRequest?.provider, undefined);
+  codex = await engine.observe(codex.id, codex.revision, { ...observation(codex), reviews: [], agentReview: { provider: 'agent', sha: head, approved: true, reason: 'agent', requestId: 8124, profile: 'claude-reviewer', reviewerApp: 'claude-reviewer' } });
+  assert.equal(codex.gates.find(gate => gate.name === 'review')?.passed, false);
+  codex = await engine.observe(codex.id, codex.revision, { ...observation(codex), reviews: [], agentReview: { provider: 'codex', sha: head, approved: true, reason: 'Clean review', requestId: 8124 } });
+  assert.equal(codex.gates.find(gate => gate.name === 'review')?.passed, true);
 });

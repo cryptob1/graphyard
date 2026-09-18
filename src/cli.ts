@@ -80,7 +80,9 @@ Environment: GRAPHYARD_URL, GRAPHYARD_TOKEN (individual role-scoped credential)
   master merge GY-N|--all       Merge exact authorized candidates without bypasses
   master guide                  Print the complete master-agent operating guide
   doctor                       Inspect local discovery and live integration readiness
-  github-setup HTTPS_URL        Register a GitHub App through a local browser flow
+  github-setup HTTPS_URL [--reviewer NAME]
+                                Register the control-plane or a reviewer GitHub App
+                                through the local App-manifest browser flow
   status [GY-N]                Control-plane or work status
   diagnose GY-N                Explain blockers, overlap and required proof
   requirements GY-N file.json  Revise requirements with an audit reason (operator)
@@ -96,8 +98,10 @@ Environment: GRAPHYARD_URL, GRAPHYARD_TOKEN (individual role-scoped credential)
   rework GY-N --previous-worker-stopped REASON  Authorize reassignment (operator)
   recover-containment GY-N --previous-worker-stopped REASON
                                 Release delivered work's stopped-worker quarantine (operator)
-  rereview GY-N [EPOCH]         Request a fresh Codex review (operator or current worker)
-  reviewpolicy GY-N github|codex POLICY_REVISION REASON  Revise reviewer source (operator)
+  rereview GY-N [EPOCH]         Request a fresh provider review (operator or current worker)
+  reviewpolicy GY-N github|codex|agent POLICY_REVISION REASON [--profiles FILE]
+                                Revise reviewer source; agent review reads its ordered
+                                reviewer profiles from FILE (operator)
   operator-agent list          Inspect configured identities, scopes and redacted fingerprints (admin)
   operator-agent setup FILE --token-stdin  Create a scoped identity; FILE contains no secret (admin)
   operator-agent configure ID FILE          Revise capabilities/scope with expectedRevision (admin)
@@ -268,8 +272,9 @@ Never share an operator or producer credential with an implementation agent.`); 
     const discovered = await discover(root);
     if (command === 'github-setup') {
       if (!discovered.repository) throw new Error('Set origin to the GitHub repository being managed first');
-      const setup = await startGithubSetup(root, discovered.repository, id);
-      console.log(`Open ${setup.url} in your browser. On SSH, forward port 4311 to this machine first. Credentials stay in .graphyard/github-app.json; do not share that file. Press Ctrl+C when finished.`);
+      const { values } = parseArgs({ args, options: { reviewer: { type: 'string' } }, allowPositionals: false });
+      const setup = await startGithubSetup(root, discovered.repository, id, 4311, {}, values.reviewer);
+      console.log(`Open ${setup.url} in your browser. On SSH, forward port 4311 to this machine first. Credentials stay in ${setup.file}; do not share that file. Press Ctrl+C when finished.`);
       const stop = () => setup.http.close(); process.once('SIGINT', stop); process.once('SIGTERM', stop); return;
     }
     let live: any = null, failure: string | undefined;
@@ -306,7 +311,14 @@ Never share an operator or producer credential with an implementation agent.`); 
   if (command === 'requirements') return print(await mutate(command, JSON.parse(await readFile(args[0], 'utf8'))));
   if (command === 'events') return print(await api(`events?work=${work.id}`));
   if (command === 'rereview') return print(await mutate(command, args[0] ? { epoch: Number(args[0]) } : {}));
-  if (command === 'reviewpolicy') return print(await mutate(command, { provider: args[0], expectedPolicyRevision: Number(args[1]), reason: args.slice(2).join(' ') }));
+  if (command === 'reviewpolicy') {
+    const flag = args.indexOf('--profiles');
+    const profilesFile = flag < 0 ? undefined : args[flag + 1];
+    if (flag >= 0 && !profilesFile) throw new Error('Pass the reviewer profile file after --profiles');
+    const positional = flag < 0 ? args : [...args.slice(0, flag), ...args.slice(flag + 2)];
+    return print(await mutate(command, { provider: positional[0], expectedPolicyRevision: Number(positional[1]), reason: positional.slice(2).join(' '),
+      ...(profilesFile ? { reviewerProfiles: JSON.parse(await readFile(profilesFile, 'utf8')) } : {}) }));
+  }
   if (command === 'ready') return print(await mutate(command, args.length ? { expectedRevision: work.revision, reason: args.join(' ') } : {}));
   if (command === 'claim') return print(await mutate(command, {}));
   if (command === 'unblock') return print(await mutate('unblock', { expectedRevision: work.revision, reason: args.join(' ') }));
