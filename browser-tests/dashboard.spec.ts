@@ -456,6 +456,9 @@ for (const viewport of [{ name: 'desktop', width: 1280, height: 900 }, { name: '
     const cardLink = cardPrLink(page);
     await expect(cardLink).toBeVisible();
     const card = page.locator('.card').first();
+    await card.focus();
+    await page.keyboard.press('Tab');
+    await expect(cardLink).toBeFocused();
     await card.focus(); await page.keyboard.press('Enter');
     const dialog = page.getByRole('dialog'); await expect(dialog).toBeVisible();
     await expect(dialog.getByRole('button', { name: /Close/ })).toBeFocused();
