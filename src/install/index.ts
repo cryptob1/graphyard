@@ -251,8 +251,8 @@ export async function buildPlan(session: InstallSession): Promise<InstallPlan> {
   const reviewPhrase = plannedReviews > session.reviewCount
     ? `${plannedReviews} approving review(s), the stricter count this branch already requires`
     : `at least ${session.reviewCount} approving review(s) for the ${session.reviewPolicy} review policy`;
-  if (protection && !protectionOk) drift.push({ action: 'github.protection', field: 'branch protection', expected: `strict checks ${[...session.requiredChecks, CHECK_NAME].join(', ')}; at least ${session.reviewCount} approving review(s); admin enforcement; conversation resolution`, observed: describeProtection(protection) });
-  actions.push({ id: 'github.protection', target: 'github', state: protectionOk ? 'satisfied' : protection ? 'update' : 'create', title: `Require strict status checks (${[...session.requiredChecks, CHECK_NAME].join(', ')}), ${reviewPhrase}, conversation resolution, and administrator enforcement on ${session.inputs.baseBranch}` });
+  if (protection && !protectionOk) drift.push({ action: 'github.protection', field: 'branch protection', expected: `required checks ${[...session.requiredChecks, CHECK_NAME].join(', ')} with "up to date" off for the merge queue; at least ${session.reviewCount} approving review(s); admin enforcement; conversation resolution`, observed: describeProtection(protection) });
+  actions.push({ id: 'github.protection', target: 'github', state: protectionOk ? 'satisfied' : protection ? 'update' : 'create', title: `Require status checks (${[...session.requiredChecks, CHECK_NAME].join(', ')}) with "require branches to be up to date" off, which the merge queue needs, ${reviewPhrase}, conversation resolution, and administrator enforcement on ${session.inputs.baseBranch}` });
   if (session.inputs.reviewer) actions.push({ id: 'github.reviewer', target: 'github', state: record?.reviewers.some(reviewer => reviewer.name === session.inputs.reviewer) ? 'satisfied' : 'create', title: `Register the reviewer App "${session.inputs.reviewer}" and add its identity to GRAPHYARD_REVIEWER_APPS`, human: 'One additional browser confirmation, because a reviewer is a separate GitHub identity with no control-plane authority.' });
 
   actions.push({ id: 'verify.status', target: 'graphyard', state: 'update', title: 'Verify authenticated GET /api/status reports the admin actor, the managed repository, and the bound App' });
@@ -348,7 +348,7 @@ export async function applyInstall(session: InstallSession, plan: InstallPlan): 
     || (await detectCiAppIds(gh, session.inputs.repository, session.inputs.baseBranch, null)).some(entry => entry.appId === facts.appId);
   const applied = protectionSatisfied(protectionInputs, current) ? null : await applyProtection(gh, { ...protectionInputs, graphyardAppId: mergeCheckExists ? facts.appId : null });
   const protectionDetail = applied
-    ? `strict checks ${applied.required_status_checks.checks.map(check => check.context).join(', ')}; ${applied.required_pull_request_reviews.required_approving_review_count} approving review(s); admin enforcement`
+    ? `required checks ${applied.required_status_checks.checks.map(check => check.context).join(', ')} ("up to date" off for the merge queue); ${applied.required_pull_request_reviews.required_approving_review_count} approving review(s); admin enforcement`
     : `already matches the ${session.reviewPolicy} review policy`;
 
   const status = await authenticatedStatus(session, url);

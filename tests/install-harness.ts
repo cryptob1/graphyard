@@ -67,7 +67,8 @@ export function githubResponses(state: FakeState, repository = REPOSITORY, branc
 }
 
 export const satisfiedProtection = (appId: number | null, reviewCount = 1) => ({
-  required_status_checks: { strict: true, checks: [{ context: 'test', app_id: null }, { context: 'typecheck', app_id: null }, ...(appId ? [{ context: 'Graphyard / merge', app_id: appId }] : [])] },
+  // `strict` off is part of a satisfied branch: the merge queue supersedes "up to date".
+  required_status_checks: { strict: false, checks: [{ context: 'test', app_id: null }, { context: 'typecheck', app_id: null }, ...(appId ? [{ context: 'Graphyard / merge', app_id: appId }] : [])] },
   enforce_admins: { enabled: true },
   required_conversation_resolution: { enabled: true },
   required_pull_request_reviews: { required_approving_review_count: reviewCount, dismiss_stale_reviews: true, require_last_push_approval: true },

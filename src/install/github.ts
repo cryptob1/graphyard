@@ -110,7 +110,6 @@ export async function verifyDelivery(app: AppClient, since: number, wait: (ms: n
 // ---------------------------------------------------------------------------
 
 export interface ProtectionInputs { repository: string; branch: string; requiredChecks: string[]; graphyardAppId: number | null; reviewCount: number }
-export interface ProtectionState { strict: boolean; checks: { context: string; app_id: number | null }[]; reviewCount: number; enforceAdmins: boolean; conversationResolution: boolean }
 
 export async function readProtection(gh: GitHubCli, repository: string, branch: string): Promise<any | null> {
   return ghJson(gh, ['api', `repos/${repository}/branches/${branch}/protection`], null);
@@ -130,6 +129,12 @@ export function effectiveReviewCount(inputs: ProtectionInputs, current: any | nu
  * Read-modify-write. The installer adds what Graphyard requires and never removes a check,
  * reviewer restriction, or bypass rule the repository already chose, and never relaxes a
  * protection the repository already applies.
+ *
+ * The single setting it deliberately clears is `strict` ("require branches to be up to
+ * date"). The merge queue supersedes it: a queued candidate is intentionally behind the base
+ * branch while the entries ahead of it land on a speculative tip that already contains its
+ * validated base, and Graphyard's own merge gate refuses every candidate while `strict` is
+ * on. Leaving it enabled installs a branch on which no candidate can ever land.
  */
 export function protectionPayload(inputs: ProtectionInputs, current: any | null) {
   const existing: { context: string; app_id: number | null }[] = (current?.required_status_checks?.checks ?? []).map((check: any) => ({ context: String(check.context), app_id: check.app_id ?? null }));
@@ -146,13 +151,16 @@ export function protectionPayload(inputs: ProtectionInputs, current: any | null)
   const reviewCount = effectiveReviewCount(inputs, current);
   const dismissal = reviews?.dismissal_restrictions;
   return {
-    required_status_checks: { strict: true, checks },
+    required_status_checks: { strict: false, checks },
     enforce_admins: true,
     required_pull_request_reviews: {
       required_approving_review_count: reviewCount,
-      dismiss_stale_reviews: reviews?.dismiss_stale_reviews ?? true,
+      // A branch that requires approvals must also dismiss stale ones and re-approve the last
+      // push, or an approval of a superseded commit would satisfy the merge gate. Raising these
+      // runs in the same direction as raising the count: a stronger existing choice still wins.
+      dismiss_stale_reviews: reviewCount > 0 || (reviews?.dismiss_stale_reviews ?? true),
       require_code_owner_reviews: reviews?.require_code_owner_reviews ?? false,
-      require_last_push_approval: reviews?.require_last_push_approval ?? reviewCount > 0,
+      require_last_push_approval: reviewCount > 0 || (reviews?.require_last_push_approval ?? false),
       // Who may dismiss a review is the repository's decision; re-send it or GitHub drops it.
       ...(dismissal ? { dismissal_restrictions: { users: (dismissal.users ?? []).map((user: any) => user.login), teams: (dismissal.teams ?? []).map((team: any) => team.slug), apps: (dismissal.apps ?? []).map((app: any) => app.slug) } } : {}),
     },
@@ -174,13 +182,15 @@ export function protectionPayload(inputs: ProtectionInputs, current: any | null)
  * re-apply can skip the write. It has to test every term of that payload the installer
  * insists on: a branch that can still be force-pushed or deleted is not protected, however
  * many checks and reviewers it requires, because the commit evidence is bound to can be
- * replaced underneath it.
+ * replaced underneath it; and a branch still required to be up to date is one the merge gate
+ * refuses, so both are drift the installer repairs rather than a match it may skip.
  */
 export function protectionSatisfied(inputs: ProtectionInputs, current: any | null) {
   if (!current) return false;
   const checks: any[] = current.required_status_checks?.checks ?? [];
   const has = (context: string, appId: number | null) => checks.some(check => check.context === context && (appId === null || Number(check.app_id) === appId));
-  return !!current.required_status_checks?.strict
+  const reviews = current.required_pull_request_reviews;
+  return current.required_status_checks?.strict === false
     && inputs.requiredChecks.every(context => has(context, null))
     && (!inputs.graphyardAppId || has(CHECK_NAME, inputs.graphyardAppId))
     && !!current.enforce_admins?.enabled
@@ -188,7 +198,9 @@ export function protectionSatisfied(inputs: ProtectionInputs, current: any | nul
     && !current.allow_force_pushes?.enabled
     && !current.allow_deletions?.enabled
     // A repository that requires more reviewers than the policy asks for already satisfies it.
-    && Number(current.required_pull_request_reviews?.required_approving_review_count ?? -1) >= inputs.reviewCount;
+    && Number(reviews?.required_approving_review_count ?? -1) >= inputs.reviewCount
+    // Approvals only bind a candidate when a stale one is dismissed and the last push is approved.
+    && (inputs.reviewCount === 0 || (!!reviews?.dismiss_stale_reviews && !!reviews?.require_last_push_approval));
 }
 
 export async function applyProtection(gh: GitHubCli, inputs: ProtectionInputs) {

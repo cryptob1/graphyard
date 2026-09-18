@@ -155,13 +155,19 @@ The installer performs the plan in order:
 7. Writes `GITHUB_APP_ID`, `GITHUB_INSTALLATION_ID`, `GITHUB_PRIVATE_KEY`, and `GITHUB_WEBHOOK_SECRET` to the server and redeploys.
 8. Points the App webhook at `https://YOUR-HOST/api/github/webhook` with the secret the server holds.
 9. Detects the GitHub App IDs publishing checks on the base branch and sets `GITHUB_CI_APP_IDS`.
-10. Applies branch protection: strict status checks, conversation resolution, administrator enforcement,
-    no force pushes, no branch deletion, and at least the approving-review count of the chosen review
-    policy. Protection is read-modify-write and only ever tightens: an existing check, reviewer
-    restriction, dismissal restriction, higher review count, or branch lock is preserved, so
-    `--review-policy agent` never lowers a branch that already requires human approvals. A branch that
-    still allows force pushes or deletion is reported as drift and corrected, whatever else it already
-    requires: evidence is bound to a commit, and a force push replaces the commit underneath it.
+10. Applies branch protection: the required status checks, conversation resolution, administrator
+    enforcement, no force pushes, no branch deletion, and at least the approving-review count of the
+    chosen review policy — with stale approvals dismissed and the last push approved whenever the
+    policy requires approvals at all, so an approval always binds the commit that merges.
+    "Require branches to be up to date before merging" (`strict`) is turned **off**: the
+    [merge queue](github.md#merge-queue) supersedes it by publishing a speculative tip that already
+    contains its validated base, and Graphyard's own merge gate refuses every candidate while it is
+    on. Apart from that one setting, protection is read-modify-write and only ever tightens: an
+    existing check, reviewer restriction, dismissal restriction, higher review count, or branch lock
+    is preserved, so `--review-policy agent` never lowers a branch that already requires human
+    approvals. A branch that still allows force pushes or deletion, or still requires branches to be
+    up to date, is reported as drift and corrected, whatever else it already requires: evidence is
+    bound to a commit, and a force push replaces the commit underneath it.
 11. Verifies authenticated `GET /api/status` and one real webhook delivery.
 12. Registers master, reviewer, and worker profiles for the authenticated agent runtimes on this machine, and binds Herdr when it is installed.
 
@@ -202,7 +208,7 @@ installer continues on its own.
   "check": "Graphyard / merge",
   "principals": [ { "id": "owner-repo-operator", "role": "admin", "fingerprint": "…", "tokenFile": "…" } ],
   "github": { "appId": 123456, "installationId": 654321, "ciAppIds": [15368] },
-  "protection": "strict checks test, typecheck; 1 approving review(s); admin enforcement",
+  "protection": "required checks test, typecheck (\"up to date\" off for the merge queue); 1 approving review(s); admin enforcement",
   "health": true,
   "status": { "role": "admin", "repository": "OWNER/REPO" },
   "webhook": { "delivered": true, "statusCode": 202 },

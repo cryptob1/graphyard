@@ -148,7 +148,8 @@ test('the App-bound merge check is required only once Graphyard has published it
     const put = fresh.transport.commands.find(command => command.args.includes('--method') && command.args.includes('PUT'))!;
     const payload = JSON.parse(put.input!);
     assert.ok(!payload.required_status_checks.checks.some((check: any) => check.context === CHECK_NAME), 'a check that does not exist yet must not be required');
-    assert.equal(payload.required_status_checks.strict, true);
+    // The merge queue lands a candidate that is deliberately behind the base branch.
+    assert.equal(payload.required_status_checks.strict, false);
     assert.equal(payload.enforce_admins, true);
     assert.equal(payload.required_conversation_resolution, true);
     assert.equal(payload.required_pull_request_reviews.required_approving_review_count, 1);
@@ -174,7 +175,7 @@ test('the agent review policy sets zero native approvals without relaxing any ot
     const payload = JSON.parse(fixture.transport.commands.find(command => command.args.includes('PUT'))!.input!);
     assert.equal(payload.required_pull_request_reviews.required_approving_review_count, 0);
     assert.equal(payload.enforce_admins, true);
-    assert.equal(payload.required_status_checks.strict, true);
+    assert.equal(payload.required_status_checks.strict, false);
     assert.deepEqual(summary.reviewers, [{ name: 'claude', appId: GRAPHYARD_APP_ID + 1, botUserId: 900_001 }]);
     const environment = bundle(fixture, 'server.env')!;
     assert.match(environment.content, /GRAPHYARD_REVIEWER_APPS=\[\{"id":"claude"/);

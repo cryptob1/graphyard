@@ -114,7 +114,12 @@ test('branch protection is read-modify-write and matches the chosen review polic
     lock_branch: { enabled: true },
   };
   const payload = protectionPayload({ repository: 'owner/project', branch: 'main', requiredChecks: ['test', 'typecheck'], graphyardAppId: 4242, reviewCount: 1 }, current);
-  assert.equal(payload.required_status_checks.strict, true);
+  // "Require branches to be up to date" stays off: the merge queue lands a queued candidate that
+  // is deliberately behind the base branch, and Graphyard's merge gate refuses while it is on.
+  assert.equal(payload.required_status_checks.strict, false);
+  // The branch requires approvals but dismissed none; an approval must bind the commit it is on.
+  assert.equal(payload.required_pull_request_reviews.dismiss_stale_reviews, true);
+  assert.equal(payload.required_pull_request_reviews.require_last_push_approval, true);
   // The repository's own check survives; Graphyard's is bound to its App.
   assert.deepEqual(payload.required_status_checks.checks.map(check => check.context), ['lint', 'test', 'typecheck', CHECK_NAME]);
   assert.equal(payload.required_status_checks.checks.find(check => check.context === CHECK_NAME)!.app_id, 4242);
@@ -140,10 +145,18 @@ test('branch protection is read-modify-write and matches the chosen review polic
   assert.equal(fresh.required_pull_request_reviews.required_approving_review_count, 1);
   assert.equal(fresh.required_pull_request_reviews.require_last_push_approval, true);
   assert.equal(fresh.lock_branch, false);
+  assert.equal(fresh.required_pull_request_reviews.dismiss_stale_reviews, true);
+  assert.equal(fresh.required_status_checks.strict, false);
   const freshAgent = protectionPayload({ repository: 'owner/project', branch: 'main', requiredChecks: ['test'], graphyardAppId: 4242, reviewCount: 0 }, null);
   assert.equal(freshAgent.required_pull_request_reviews.required_approving_review_count, 0);
   assert.equal(freshAgent.required_pull_request_reviews.require_last_push_approval, false);
   assert.equal(freshAgent.enforce_admins, true);
+  assert.equal(freshAgent.required_status_checks.strict, false);
+
+  // A branch that keeps "up to date" on is drift the installer repairs: leaving it would install a
+  // repository whose merge gate refuses every candidate the queue publishes.
+  const upToDate = { ...satisfiedProtection(4242), required_status_checks: { ...satisfiedProtection(4242).required_status_checks, strict: true } };
+  assert.equal(protectionSatisfied({ repository: 'owner/project', branch: 'main', requiredChecks: ['test', 'typecheck'], graphyardAppId: 4242, reviewCount: 1 }, upToDate), false, 'a strict branch was reported as satisfying protection');
 
   const inputs = { repository: 'owner/project', branch: 'main', requiredChecks: ['test', 'typecheck'], graphyardAppId: 4242, reviewCount: 1 };
   assert.equal(protectionSatisfied(inputs, null), false);
@@ -152,6 +165,9 @@ test('branch protection is read-modify-write and matches the chosen review polic
   assert.equal(protectionSatisfied(inputs, satisfiedProtection(4242, 0)), false, 'too few required reviews is drift, not a match');
   assert.equal(protectionSatisfied(inputs, satisfiedProtection(4242, 3)), true, 'a stricter review count already satisfies the policy');
   assert.equal(protectionSatisfied(inputs, { ...satisfiedProtection(4242), enforce_admins: { enabled: false } }), false);
+  // An approval that survives the next push does not bind the candidate that finally merges.
+  assert.equal(protectionSatisfied(inputs, { ...satisfiedProtection(4242), required_pull_request_reviews: { required_approving_review_count: 1, dismiss_stale_reviews: false, require_last_push_approval: true } }), false, 'undismissed stale approvals were reported as satisfying protection');
+  assert.equal(protectionSatisfied(inputs, { ...satisfiedProtection(4242), required_pull_request_reviews: { required_approving_review_count: 1, dismiss_stale_reviews: true, require_last_push_approval: false } }), false, 'an unapproved last push was reported as satisfying protection');
 
   // A branch whose head can be replaced or removed is not protected, whatever else it requires:
   // evidence is bound to a commit, and a force push swaps the commit out from under it.
