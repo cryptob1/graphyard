@@ -44,14 +44,14 @@ export default function ValidationView({ api, work }: { api: (path: string) => P
   const recent = [...requests].sort((a,b) => b.createdAt.localeCompare(a.createdAt) || b.id.localeCompare(a.id));
   return <><header><div className="breadcrumb">Verification <span>/</span> Validation requests</div><a href="/docs/validation">Protocol guide ↗</a></header>
     <div className="page-heading"><div><div className="eyebrow">FROM REQUIREMENT TO PROOF</div><h1>Validation requests</h1><p>See which candidate is queued, running, or waiting for a verified result.</p></div></div>
-    <div className="notice">This release coordinates external runners. The packaged Playwright runner and guided execution setup are still planned.</div>
+    <div className="notice">The packaged Playwright runner and separate collector ship in this release. Rich captures (traces, screenshots, videos) stay disabled until their protection policy is implemented, and the runner still needs an independently approved bundle and runner image.</div>
     {!following && <div className="notice">Browsing history; live updates paused. <button onClick={() => { viewEpoch.current++; setLoadingOlder(false); setFollowing(true); setRetry(n => n + 1); setLoaded(false); setRequests([]); setNextCursor(null); setError(''); }}>Return to latest</button></div>}
     {error && <div role="alert" className="notice danger">{error} {loaded && 'Previously loaded data may be stale.'} <button disabled={loadingOlder} onClick={() => following ? setRetry(n => n + 1) : void older()}>Retry validation requests</button></div>}
     {!loaded && !error && <p role="status">Loading validation requests…</p>}
     {loaded && !error && !requests.length && <div className="empty"><h2>No validation requested yet.</h2><p>Configure an approved environment, test bundle and separate runner/collector identities, then create a pinned request.</p><a href="/docs/validation">Set up the validation protocol ↗</a></div>}
     <div className="scenario-list">{recent.map(r => {
       const c = candidates.find(c => c.id === r.candidateId), attempt = r.attempts.at(-1), item = work.find(w => w.id === r.workId);
-      const waitingSettlement = attempt && !attempt.settled && !['queued', 'dispatched', 'running'].includes(r.state);
+      const waitingSettlement = attempt && !attempt.settled && !['queued', 'dispatched', 'running', 'collecting'].includes(r.state);
       return <article className="scenario-card" key={r.id}><div className="card-top"><span>{item?.key ?? r.workId} · {r.proof}</span><strong>{r.state}</strong></div><h2>{item?.title ?? 'Validation request'}</h2>
         <p>{c ? `${c.environment.id} · source ${c.sourceSha.slice(0,10)} · policy ${c.policyRevision}` : `Candidate ${r.candidateId}`}</p>
         <p>Runner: {r.runner.id} · collector: {r.collector.id}</p><p>{attempt ? `Attempt ${attempt.epoch} of ${r.maxAttempts}` : 'Not dispatched'} · deadline {new Date(r.deadline).toLocaleString()}</p>

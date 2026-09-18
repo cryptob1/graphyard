@@ -1,6 +1,6 @@
 import { before, after, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { randomUUID } from 'node:crypto';
+import { generateKeyPairSync, randomUUID } from 'node:crypto';
 import { mkdtemp } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -19,6 +19,7 @@ const runner: Principal = { id: 'runner', role: 'worker' };
 const collector: Principal = { id: 'collector', role: 'producer', proofs: [] };
 const builder: Principal = { id: 'builder', role: 'producer' };
 const principals = [operator, worker, runner, collector, builder];
+const attestationPublicKey = generateKeyPairSync('ed25519').publicKey.export({ type: 'spki', format: 'pem' }).toString();
 const sha = 'a'.repeat(40), base = 'b'.repeat(40), digest = `sha256:${'c'.repeat(64)}`, inputs = `sha256:${'d'.repeat(64)}`;
 let pg: EmbeddedPostgres, store: Store, engine: Engine, validation: Validation;
 let serial = 0;
@@ -32,12 +33,13 @@ after(async () => { if (store) await store.close(); if (pg) await pg.stop(); });
 const id = () => randomUUID();
 async function definitions(): Promise<Definition[]> { return (await store.pool.query('SELECT document FROM validation_definitions ORDER BY kind,id,revision DESC')).rows.map(r => r.document); }
 async function current(workId: string) { return (await store.list()).find(w => w.id === workId)!; }
-async function fixture(artifactStorage: 'external' | 'postgres' = 'external') {
+/** `runnerAuthority` adds execution authority the operator pinned on the runner registration. */
+async function fixture(artifactStorage: 'external' | 'postgres' = 'external', runnerAuthority: Record<string, unknown> = {}) {
   const n = ++serial, environment = { id: `preview-${n}`, revision: 1 }, runnerRef = { id: `runner-${n}`, revision: 1 }, collectorRef = { id: `collector-${n}`, revision: 1 }, builderRef = { id: `builder-${n}`, revision: 1 }, bundle = { id: `bundle-${n}`, revision: 1 }, proof = `e2e:scenario-${n}`;
   collector.proofs!.push(proof);
   const scenario = await defineScenario(store, operator, { id: `scenario-${n}`, title: 'Behavior', purpose: 'Prove behavior', steps: ['Execute'], expected: ['Correct'], environment: environment.id, runner: 'playwright', testPath: 'tests/behavior.spec.ts' }, id());
   await validation.define(operator, { kind: 'environment', id: environment.id, expectedRevision: 0, repository: 'test/repository', url: 'https://preview.example.test', instance: `instance-${n}`, immutable: true, services: ['api'], resources: [`test-account-${n}`] }, id());
-  for (const [ref, actor, role] of [[runnerRef, runner, 'runner'], [collectorRef, collector, 'collector'], [builderRef, builder, 'builder']] as const) await validation.define(operator, { kind: 'registration', id: ref.id, expectedRevision: 0, principalId: actor.id, role, environment, adapterVersion: 'test-v1', proofs: role === 'collector' ? [proof] : [], enabled: true }, id());
+  for (const [ref, actor, role] of [[runnerRef, runner, 'runner'], [collectorRef, collector, 'collector'], [builderRef, builder, 'builder']] as const) await validation.define(operator, { kind: 'registration', id: ref.id, expectedRevision: 0, principalId: actor.id, role, environment, adapterVersion: 'test-v1', proofs: role === 'collector' ? [proof] : [], enabled: true, ...(role === 'runner' ? { executionHost: 'unix:///var/run/docker.sock', attestationPublicKey, executionNetwork: 'gy-isolated', ...runnerAuthority } : {}) }, id());
   await validation.define(operator, { kind: 'bundle', id: bundle.id, expectedRevision: 0, scenario: scenario.id, scenarioRevision: scenario.revision, scenarioHash: scenario.hash, digest, runnerImageDigest: inputs }, id());
   let w = await engine.execute(operator, 'create', null, { title: 'Validation fixture', criteria: [{ id: 'AC-1', text: 'Behavior is proven', proofs: [proof] }] }, id());
   w = await engine.execute(operator, 'ready', w.id, {}, id()); w = await engine.execute(worker, 'claim', w.id, {}, id());
@@ -54,17 +56,20 @@ async function fixture(artifactStorage: 'external' | 'postgres' = 'external') {
 async function start(f: Awaited<ReturnType<typeof fixture>>) {
   const d: any = await validation.dispatch(runner, { registration: f.runnerRef }, id()); assert.equal(d.request.id, f.r.id);
   const command = { requestId: f.r.id, attemptId: d.attempt.id, epoch: d.attempt.epoch };
-  await validation.runnerCommand(runner, 'ack', command, id()); return command;
+  await validation.runnerCommand(runner, 'ack', command, id());
+  // Publishing anything about an attempt happens under collection authority, which
+  // revokes the runner's before settlement can be observed.
+  await validation.collectionAuthority(collector, command); return command;
 }
 function report(f: Awaited<ReturnType<typeof fixture>>, command: { requestId: string; attemptId: string; epoch: number }) {
-  return { ...command, execution: 'completed', behavior: 'passed', executed: 2, skipped: 0, inventoryComplete: true, target: { instance: `instance-${f.n}`, artifacts: [{ service: 'api', digest }], measurement: 'provider', coversEntireRun: true }, bundleDigest: digest, runnerImageDigest: inputs, artifacts: [{ name: 'report', digest, url: 'https://private.example.test/report' }], executionSettled: true };
+  return { ...command, execution: 'completed', behavior: 'passed', executed: 2, skipped: 0, inventoryComplete: true, target: { instance: `instance-${f.n}`, artifacts: [{ service: 'api', digest }], measurement: 'provider', coversEntireRun: true, attribution: 'matched' }, bundleDigest: digest, runnerImageDigest: inputs, artifacts: [{ name: 'report', digest, url: 'https://private.example.test/report' }], artifactState: 'verified', executionSettled: true };
 }
 async function expire(f: Awaited<ReturnType<typeof fixture>>) {
   await store.pool.query("UPDATE validation_requests SET document=jsonb_set(document,'{attempts,0,expiresAt}',to_jsonb('2000-01-01T00:00:00Z'::text)) WHERE id=$1", [f.r.id]); await validation.reconcile();
 }
 async function cleanup(f: Awaited<ReturnType<typeof fixture>>) {
   const r = (await validation.list()).requests.find(r => r.id === f.r.id)!;
-  if (['queued', 'dispatched', 'running'].includes(r.state)) await validation.operatorCommand(operator, 'cancel', { requestId: r.id, epoch: r.attempts.at(-1)?.epoch ?? 0, reason: 'Test process never launched' }, id());
+  if (['queued', 'dispatched', 'running', 'collecting'].includes(r.state)) await validation.operatorCommand(operator, 'cancel', { requestId: r.id, epoch: r.attempts.at(-1)?.epoch ?? 0, reason: 'Test process never launched' }, id());
   const a = r.attempts.at(-1); if (a && !a.settled) await validation.operatorCommand(operator, 'settle', { requestId: r.id, epoch: a.epoch, reason: 'Fixture has no external process', settlementEvidence: 'https://tests.example.test/no-process' }, id());
 }
 
@@ -92,6 +97,8 @@ test('independent pools race one runner slot and restart preserves dispatch/ACK/
     const receipt = id(); const ack = await replica.runnerCommand(runner, 'ack', command, receipt);
     assert.deepEqual(await replica.runnerCommand(runner, 'ack', command, receipt), ack);
     assert.equal((await replica.list()).requests.find(r => r.id === f.r.id)?.state, 'running');
+    await replica.collectionAuthority(collector, command);
+    assert.equal((await replica.list()).requests.find(r => r.id === f.r.id)?.state, 'collecting');
     const outcome: any = await replica.result(collector, report(f, command), id()); assert.equal(outcome.passed, true);
     assert.equal((await current(f.w.id)).gates.find(g => g.name === 'acceptance')?.passed, true);
   } finally { await cleanup(f); await second.close(); }
@@ -145,12 +152,12 @@ test('cancellation preserves history and rejects late success without losing its
   assert.equal((await store.events(f.w.id)).filter(e => e.kind === 'validation.result-rejected').length, 1); await cleanup(f);
 });
 test('empty, skipped, mismatched, unknown and incomplete reports never pass', async () => {
-  for (const change of [{ executed: 0 }, { skipped: 1 }, { artifacts: [] }, { inventoryComplete: false }, { bundleDigest: inputs }, { executionSettled: false }, { behavior: 'blocked' }]) {
+  for (const change of [{ executed: 0 }, { skipped: 1 }, { artifacts: [] }, { artifactState: 'upload-failed' }, { artifactState: 'expired' }, { inventoryComplete: false }, { bundleDigest: inputs }, { executionSettled: false }, { behavior: 'blocked' }]) {
     const f = await fixture(), command = await start(f);
     const result: any = await validation.result(collector, { ...report(f, command), ...change }, id()); assert.equal(result.accepted, true); assert.equal(result.passed, false);
     assert.equal((await current(f.w.id)).gates.find(g => g.name === 'acceptance')?.passed, false); await cleanup(f);
   }
-  for (const change of [{ measurement: 'unknown' }, { coversEntireRun: false }, { instance: 'wrong' }, { artifacts: [{ service: 'api', digest: inputs }] }]) {
+  for (const change of [{ measurement: 'unknown' }, { coversEntireRun: false }, { attribution: 'changed' }, { attribution: 'mismatched' }, { attribution: 'unknown' }, { instance: 'wrong' }, { artifacts: [{ service: 'api', digest: inputs }] }]) {
     const f = await fixture(), command = await start(f), good = report(f, command);
     const result: any = await validation.result(collector, { ...good, target: { ...good.target, ...change } }, id()); assert.equal(result.passed, false); await cleanup(f);
   }
@@ -162,6 +169,36 @@ test('new source invalidates running attempts and worker cannot publish trusted 
   const w = await current(f.w.id); await engine.observe(w.id, w.revision, { ...w.observation!, candidate: { ...w.candidate!, sha: 'f'.repeat(40) }, at: new Date().toISOString() });
   const result: any = await validation.result(collector, report(f, command), id()); assert.equal(result.accepted, false); await cleanup(f);
 });
+test('collection authority fences the runner before settlement can release resources', async () => {
+  const f = await fixture('postgres'), d: any = await validation.dispatch(runner, { registration: f.runnerRef }, id());
+  const command = { requestId: f.r.id, attemptId: d.attempt.id, epoch: d.attempt.epoch };
+  await validation.runnerCommand(runner, 'ack', command, id());
+
+  // Settlement observed while the runner may still act proves nothing: a container can be
+  // started again after the observation. Nothing is publishable before the handoff.
+  await assert.rejects(validation.collectionHeartbeat(collector, command, id()), /collection authority was never taken over/);
+  await assert.rejects(validation.uploadArtifact(collector, { ...command, name: 'report', mediaType: 'application/json', bytes: Buffer.from('{}').toString('base64'), capturePolicy: 'approved-test-data-only' }, id()), /collection authority was never taken over/);
+  const early: any = await validation.result(collector, report(f, command), id());
+  assert.equal(early.accepted, false);
+  assert.ok(early.reasons.some((r: string) => /collection authority/.test(r)));
+  assert.equal((await current(f.w.id)).evidence.length, 0);
+
+  const authority: any = await validation.collectionAuthority(collector, command);
+  assert.equal(authority.attemptId, d.attempt.id);
+  assert.equal((await validation.list()).requests.find(r => r.id === f.r.id)?.state, 'collecting');
+  // The runner's lease is gone: it cannot renew, and it cannot start another phase.
+  await assert.rejects(validation.runnerCommand(runner, 'heartbeat', command, id()), /expired, cancelled or superseded/);
+  await assert.rejects(validation.runnerCommand(runner, 'ack', command, id()), /expired, cancelled or superseded/);
+  // Recovery still cannot release the barrier under an active collection.
+  await assert.rejects(validation.operatorCommand(operator, 'settle', { requestId: f.r.id, epoch: command.epoch, reason: 'Premature', settlementEvidence: 'https://tests.example.test/premature' }, id()), /Terminate\/cancel first/);
+  // The handoff is idempotent for a collector that re-reads its authority mid-collection.
+  await validation.collectionAuthority(collector, command);
+  await validation.collectionHeartbeat(collector, command, id());
+  const outcome: any = await validation.result(collector, { ...report(f, command), artifacts: [] }, id());
+  assert.equal(outcome.accepted, true);
+  await cleanup(f);
+});
+
 test('HTTP validation endpoints enforce authenticated roles', async () => {
   const http = server(engine, [{ ...worker, token: 'w'.repeat(32) }]);
   await new Promise<void>(r => http.listen(0, '127.0.0.1', r));
@@ -169,7 +206,16 @@ test('HTTP validation endpoints enforce authenticated roles', async () => {
     const url = `http://127.0.0.1:${(http.address() as any).port}/api/validation`;
     assert.equal((await fetch(url)).status, 401);
     assert.equal((await fetch(url, { headers: { Authorization: `Bearer ${'w'.repeat(32)}` } })).status, 200);
-    assert.equal((await fetch(`${url}/define`, { method: 'POST', headers: { Authorization: `Bearer ${'w'.repeat(32)}`, 'Content-Type': 'application/json', 'Idempotency-Key': id() }, body: '{}' })).status, 403);
+    // Every command the packaged runner and collector call must be routed. An unmatched
+    // path answers 404, which the collector cannot distinguish from a missing request,
+    // so it would never publish a result at all.
+    const post = (command: string) => fetch(`${url}/${command}`, { method: 'POST', headers: { Authorization: `Bearer ${'w'.repeat(32)}`, 'Content-Type': 'application/json', 'Idempotency-Key': id() }, body: '{}' });
+    for (const command of ['define', 'build', 'candidate', 'request', 'dispatch', 'ack', 'heartbeat', 'collection-authority', 'collection-heartbeat', 'result', 'cancel', 'settle', 'retry']) {
+      assert.notEqual((await post(command)).status, 404, command);
+    }
+    assert.equal((await post('define')).status, 403);
+    // The collection commands are the collector's, and this worker is not one.
+    for (const command of ['collection-authority', 'collection-heartbeat']) assert.equal((await post(command)).status, 403, command);
   } finally { await new Promise<void>(r => http.close(() => r())); }
 });
 
@@ -227,6 +273,92 @@ test('authorized build producers still cannot attest a mismatched source or inco
   const good = { registration: f.builderRef, workId: f.w.id, expectedWorkRevision: (await current(f.w.id)).revision, sourceSha: sha, baseSha: base, buildInputsDigest: inputs, artifacts: [{ service: 'api', digest }], provenanceUrl: 'https://ci.example.test/build/2' };
   await assert.rejects(validation.attestBuild(builder, { ...good, sourceSha: 'f'.repeat(40) }, id()), /Build source differs/);
   await assert.rejects(validation.attestBuild(builder, { ...good, artifacts: [{ service: 'wrong-service', digest }] }, id()), /complete service manifest/);
+  await cleanup(f);
+});
+
+test('the execution boundary a runner may use is operator-versioned, not runner configuration', async () => {
+  const f = await fixture();
+  const n = `net-${f.n}`;
+  const base = { kind: 'registration' as const, id: n, expectedRevision: 0, principalId: runner.id, role: 'runner' as const, environment: f.environment, adapterVersion: 'test-v1', proofs: [], enabled: true, executionHost: 'unix:///var/run/docker.sock', attestationPublicKey };
+  // Docker resolves a network name against every network the daemon already has, so an
+  // unpinned one lets a runner attach the browser container to databases and other
+  // internal services. The approved isolated network is authority, like the host and key.
+  await assert.rejects(validation.define(operator, base, id()), /dedicated isolated Docker network/);
+  for (const executionNetwork of ['host', 'bridge', 'default', 'none', 'not a network'])
+    await assert.rejects(validation.define(operator, { ...base, executionNetwork }, id()), /dedicated isolated Docker network/);
+  // Only a runner registration configures an execution boundary at all.
+  await assert.rejects(validation.define(operator, { ...base, id: `${n}-c`, principalId: collector.id, role: 'collector', proofs: [f.proof], executionNetwork: 'gy-isolated' }, id()), /Only runner registrations/);
+  // A remote daemon would resolve the attempt's bind-mount pathnames on a filesystem the
+  // attestor never measured, so only a local socket may be pinned.
+  for (const executionHost of ['ssh://graphyard@runner-1.example.test', 'tcp://10.0.0.4:2376', 'unix://relative.sock'])
+    await assert.rejects(validation.define(operator, { ...base, id: `${n}-h`, executionHost, executionNetwork: 'gy-isolated' }, id()), /local unix:\/\/ Docker socket/);
+  // The runner learns the approved network from dispatch; it is never in its own input.
+  const dispatched: any = await validation.dispatch(runner, { registration: f.runnerRef }, id());
+  assert.equal(dispatched.executionAuthority.network, 'gy-isolated');
+  const command = { requestId: f.r.id, attemptId: dispatched.attempt.id, epoch: 1 };
+  await validation.runnerCommand(runner, 'ack', command, id());
+  assert.equal((await validation.collectionAuthority(collector, command) as any).executionNetwork, 'gy-isolated');
+  await cleanup(f);
+});
+
+test('which approved test-account material an attempt may use is operator-versioned too', async () => {
+  const f = await fixture();
+  const n = `acct-${f.n}`;
+  const testAccountDigest = `sha256:${'e'.repeat(64)}`;
+  const base = { kind: 'registration' as const, id: n, expectedRevision: 0, principalId: runner.id, role: 'runner' as const, environment: f.environment, adapterVersion: 'test-v1', proofs: [], enabled: true, executionHost: 'unix:///var/run/docker.sock', attestationPublicKey, executionNetwork: 'gy-isolated' };
+  // It is execution authority, so only a runner registration may carry it at all.
+  await assert.rejects(validation.define(operator, { ...base, id: `${n}-c`, principalId: collector.id, role: 'collector', proofs: [f.proof], testAccountDigest }, id()), /Only runner registrations/);
+  await assert.doesNotReject(validation.define(operator, { ...base, testAccountDigest }, id()));
+  // Approving none is the default, and says so explicitly rather than by omission: the
+  // attestor refuses a plan that names an env file when nothing is approved.
+  const none: any = await validation.dispatch(runner, { registration: f.runnerRef }, id());
+  assert.equal(none.executionAuthority.testAccountDigest, null);
+  await cleanup(f);
+
+  // A registration that does approve material carries the digest through dispatch and
+  // through both independent re-reads, so the runner never chooses which account — and
+  // which privileges its evidence would cover — the target-facing phase signs in as.
+  const g = await fixture('external', { testAccountDigest });
+  const d: any = await validation.dispatch(runner, { registration: g.runnerRef }, id());
+  assert.equal(d.executionAuthority.testAccountDigest, testAccountDigest);
+  const command = { requestId: g.r.id, attemptId: d.attempt.id, epoch: d.attempt.epoch };
+  assert.equal((await validation.attemptAuthority({ id: 'attestor', role: 'reader' }, g.r.id) as any).grant.testAccountDigest, testAccountDigest);
+  await validation.runnerCommand(runner, 'ack', command, id());
+  assert.equal((await validation.collectionAuthority(collector, command) as any).testAccountDigest, testAccountDigest);
+  await cleanup(g);
+});
+test('the host attestor reads current attempt authority itself, under a read-only credential', async () => {
+  const f = await fixture();
+  const d: any = await validation.dispatch(runner, { registration: f.runnerRef }, id());
+  const command = { requestId: f.r.id, attemptId: d.attempt.id, epoch: d.attempt.epoch };
+  const attestor: Principal = { id: 'attestor', role: 'reader' };
+
+  // Before the ACK the attempt carries authority but may not be executed: the attestor's
+  // second read is what releases containers, so `dispatched` has to be visible here.
+  const dispatched: any = await validation.attemptAuthority(attestor, f.r.id);
+  assert.equal(dispatched.state, 'dispatched');
+  assert.equal(dispatched.acknowledged, false);
+  // The authority it returns is the same one the runner was dispatched, field for field,
+  // so a plan carrying a substituted target or network cannot match it.
+  assert.deepEqual(dispatched.grant, { requestId: f.r.id, attemptId: d.attempt.id, epoch: d.attempt.epoch, runner: f.runnerRef,
+    executionHost: 'unix:///var/run/docker.sock', attestationPublicKey, executionNetwork: 'gy-isolated',
+    bundleDigest: digest, runnerImageDigest: inputs, targetUrl: 'https://preview.example.test', deadline: f.requestInput.deadline,
+    testAccountDigest: null });
+
+  await validation.runnerCommand(runner, 'ack', command, id());
+  const running: any = await validation.attemptAuthority(attestor, f.r.id);
+  assert.equal(running.state, 'running');
+  assert.equal(running.acknowledged, true);
+  assert.ok(Date.parse(running.expiresAt) > Date.parse(running.now));
+
+  // Once the collector has taken over, the attempt must start no further container.
+  await validation.collectionAuthority(collector, command);
+  assert.equal((await validation.attemptAuthority(attestor, f.r.id) as any).state, 'collecting');
+
+  // The credential is read-only and separate: the runner and the collector cannot use it
+  // to look up authority, and it can do nothing else. Reading changed no attempt state.
+  for (const other of [runner, collector, builder, worker]) await assert.rejects(validation.attemptAuthority(other, f.r.id), /read-only attestor credential/);
+  assert.equal((await validation.list()).requests.find(r => r.id === f.r.id)?.state, 'collecting');
   await cleanup(f);
 });
 
