@@ -2,6 +2,7 @@ import { z } from 'zod';
 import { ejectionReason, nextQueueSequence, queueHistoryLimit, queuePlacement } from './merge-queue.js';
 import type { QueueEjection, QueueEntry, QueueHistoryEntry } from './merge-queue.js';
 
+export const CHECK_NAME = 'Graphyard / merge';
 export const stages = ['backlog', 'ready', 'build', 'review', 'test', 'acceptance', 'merge', 'done'] as const;
 export type Stage = typeof stages[number];
 export const proofSchema = z.string().regex(/^(unit|integration|e2e|manual):[a-zA-Z0-9._/-]+$/);
@@ -146,7 +147,7 @@ export interface Work extends Create {
   id: string; key: string; stage: Stage; revision: number; policyRevision: number;
   createdAt: string; updatedAt: string; stageEnteredAt: string; ready: boolean;
   epoch: number; lease: Lease | null; lastAssignment?: AssignmentIdentity; workspaces: Workspace[]; candidate: Candidate | null;
-  containmentQuarantine?: { owner: string; epoch: number; at: string; settlementHash: string; launchAcknowledgedAt?: string; launchExpiresAt?: string } | null;
+  containmentQuarantine?: { owner: string; epoch: number; at: string; settlementHash: string; launchAcknowledgedAt?: string; launchExpiresAt?: string; leaseExpiresAt?: string } | null;
   submission: { epoch: number; pr: number } | null;
   queue?: QueueEntry | null; queueSequence?: number; queueEjection?: QueueEjection | null; queueHistory?: QueueHistoryEntry[];
   reworkRequested: boolean;

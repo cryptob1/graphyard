@@ -51,6 +51,12 @@ worker must claim the item under its own identity and use the assigned worktree.
 Treat prompt delivery as an invitation, never as ownership. Use durable handoffs
 when an agent, provider account, machine, or context window changes.
 
+Independent review is launched, never performed by the master:
+`graphyard master review GY-N [PROFILE]` verifies the exact candidate, launches the
+bound reviewer identity read-only, and `master status` closes that session when the
+verdict lands. Never approve a candidate yourself. Reconcile branch protection with
+`graphyard master protection` after any review-policy change.
+
 Check the automatic-merge preference in master status. When disabled, wait for
 explicit operator approval for each merge. Otherwise routine merges may use
 `graphyard master merge --all`. The command rechecks the
