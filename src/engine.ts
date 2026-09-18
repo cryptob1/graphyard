@@ -227,6 +227,15 @@ export class Engine {
         `Worker startup for epoch ${work.containmentQuarantine?.epoch} remains fenced; stop its supervisor and wait for both lease and launch authority expiry before recovery`);
         work.reworkRequested = true;
         work.containmentQuarantine = null;
+        // Reassignment discards whatever assignment still stood. A lease dropped
+        // here was never released by its worker, and clearing it is the last
+        // moment the loss is visible: reconcile only ever sees an expired lease,
+        // and the replacement claim guards on `work.lease`, which is now null.
+        // So the loss is recorded here, exactly as those two paths record it.
+        // The operator's stopped-worker attestation authorizes the reassignment;
+        // it does not decide whether the incident reaches the record.
+        preserveAssignment(work);
+        if (work.lease) raiseEscalation(work, { trigger: 'lease-loss', reason: `Worker ${work.lease.owner} lost lease epoch ${work.lease.epoch}`, at: now.toISOString(), actor: 'graphyard' });
         work.lease = null;
         // Reopening implementation is the authorized recovery for send-back.
         // A plan rejection remains owned by its originating lead and can only

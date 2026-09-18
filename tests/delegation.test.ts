@@ -213,6 +213,41 @@ test('integration:lead-enforcement — violating lead actions are refused server
   assert.equal(unscoped.payload.slice, 'product');
   assert.equal(unscoped.payload.targetSlice, 'infrastructure');
   assert.match(unscoped.payload.reason, /targets another slice/);
+  // The merge routes match above the generic work route. Routing order decides
+  // which handler answers a forbidden request; it must never decide whether the
+  // attempt reaches the ledger, so each one records its own refusal.
+  const asLead = (path: string, payload: unknown) => fetch(`${url}${path}`, { method: 'POST',
+    headers: { Authorization: `Bearer ${credentials.find(c => c.id === lead.id)!.token}`, 'Content-Type': 'application/json', 'Idempotency-Key': id() }, body: JSON.stringify(payload) });
+  for (const [route, payload] of [
+    ['merge-acquire', { expectedRevision: item.revision, sha: head, baseSha: base, policyRevision: 1 }],
+    ['merge-cancel', { executionId: id(), reason: 'Lead cancels the broker execution' }],
+    ['merge-verify', { executionId: id() }],
+  ] as const) {
+    const refused = await asLead(`/api/work/${item.id}/${route}`, payload);
+    assert.equal(refused.status, 403, route);
+    assert.match((await refused.json()).error, /Slice leads cannot perform lifecycle mutations/, route);
+    const recorded = (await store.events(item.id)).filter(event => event.kind === 'lead.action.refused' && event.payload.attemptedAction === route);
+    assert.equal(recorded.length, 1, `${route} is refused and recorded exactly once`);
+    assert.equal(recorded[0].actor, lead.id);
+    assert.equal(recorded[0].payload.slice, 'product');
+    assert.equal(recorded[0].payload.targetKey, item.key);
+    assert.equal(recorded[0].payload.targetSlice, 'product');
+  }
+  assert.equal((await reload(item)).mergeExecution ?? null, null, 'no refused merge call left execution state behind');
+  // Creating work names no existing item, so there is no ledger to append to.
+  // The attempt is still history: it is recorded unscoped, with a null target.
+  const creation = await asLead('/api/work', input('lead-creates-work', 'product'));
+  assert.equal(creation.status, 403);
+  assert.match((await creation.json()).error, /Slice leads cannot perform lifecycle mutations/);
+  assert.equal((await store.list()).some(work => work.title === 'lead-creates-work'), false, 'the refused creation never reaches the backlog');
+  const attempted = (await store.events()).filter(event => event.kind === 'lead.action.refused' && event.payload.attemptedAction === 'create');
+  assert.equal(attempted.length, 1);
+  assert.equal(attempted[0].work_id, null, 'a creation refusal belongs to no work item ledger');
+  assert.equal(attempted[0].actor, lead.id);
+  assert.equal(attempted[0].payload.slice, 'product');
+  assert.equal(attempted[0].payload.targetKey, null);
+  assert.equal(attempted[0].payload.targetSlice, null);
+  assert.match(attempted[0].payload.reason, /exceeds slice-lead authority/);
 
   // A blocking ruling is durable delivery state, not advice: it revokes merge
   // authorization in its own transaction and the broker refuses independently.
@@ -723,6 +758,47 @@ test('integration:automatic-escalation — every trigger escalates and no lead c
   assert.match(replaced.escalation!.reason, new RegExp(`${workerA.id} lost lease epoch ${lostEpoch}`));
   assert.equal(replaced.escalation!.actor, 'graphyard');
   await engine.execute(workerB, 'release', replaced.id, { epoch: replaced.epoch }, id());
+
+  // Operator rework discards whatever assignment still stood, and that is the
+  // last moment the loss is visible: reconciliation only ever sees an expired
+  // lease, and the replacement claim guards on a lease this path has already
+  // cleared. A worker stopped after submitting never released its own lease, so
+  // the incident is recorded here rather than falling between the two.
+  let stranded = await engine.execute(admin, 'create', null, input('escalation-rework-lease', 'infrastructure'), id());
+  stranded = await engine.execute(admin, 'ready', stranded.id, {}, id());
+  stranded = await engine.execute(workerA, 'claim', stranded.id, {}, id());
+  const strandedEpoch = stranded.epoch;
+  stranded = await engine.execute(workerA, 'workspace', stranded.id, { epoch: strandedEpoch, host: 'delegation-host', path: `/tmp/delegation/${stranded.id}`, branch: `graphyard/${stranded.key.toLowerCase()}-${strandedEpoch}` }, id());
+  stranded = await engine.execute(workerA, 'submit', stranded.id, { epoch: strandedEpoch, pr: ++pr }, id());
+  assert.ok(stranded.lease, 'the stopped worker never released the lease it submitted under');
+  stranded = await engine.execute(admin, 'rework', stranded.id, { reason: 'Worker session was closed after submission', previousWorkerStopped: true }, id());
+  assert.equal(stranded.lease, null);
+  assert.equal(stranded.escalation!.trigger, 'lease-loss');
+  assert.match(stranded.escalation!.reason, new RegExp(`${workerA.id} lost lease epoch ${strandedEpoch}`));
+  assert.equal(stranded.escalation!.actor, 'graphyard');
+  assert.equal(stranded.lastAssignment!.owner, workerA.id, 'the discarded assignment is still attributable');
+  assert.match(stranded.gates.find(gate => gate.name === 'merge')!.reasons.join(' '), /Unresolved lease-loss escalation/);
+  // Reconciliation has no expired lease left to notice, so a record that was not
+  // written here can never be recovered later.
+  await engine.reconcile();
+  stranded = await reload(stranded);
+  assert.deepEqual(stranded.escalations!.map(entry => entry.trigger), ['lease-loss']);
+  // The replacement engineer still claims the reopened item, and the claim
+  // neither clears the standing incident nor records a second one.
+  stranded = await engine.execute(workerB, 'claim', stranded.id, {}, id());
+  assert.equal(stranded.lease!.owner, workerB.id);
+  assert.deepEqual(stranded.escalations!.map(entry => entry.trigger), ['lease-loss'], 'the incident survives the replacement claim');
+  await assert.rejects(engine.execute(lead, 'resolve', stranded.id, { trigger: 'lease-loss', reason: 'Reassigned already', expectedRevision: stranded.revision }, id()), /Slice leads cannot perform lifecycle mutations/);
+  stranded = await engine.execute(admin, 'resolve', stranded.id, { trigger: 'lease-loss', reason: 'Replacement engineer assigned and verified', expectedRevision: stranded.revision }, id());
+  assert.deepEqual(stranded.escalations, []);
+  await engine.execute(workerB, 'release', stranded.id, { epoch: stranded.epoch }, id());
+  // Rework that discards no assignment raises nothing: the incident is the lost
+  // lease, not the reassignment that follows it.
+  let reopened = await engine.execute(admin, 'create', null, input('escalation-rework-unleased', 'infrastructure'), id());
+  reopened = await engine.execute(admin, 'ready', reopened.id, {}, id());
+  reopened = await engine.execute(admin, 'rework', reopened.id, { reason: 'Reopened before anyone claimed it', previousWorkerStopped: true }, id());
+  assert.equal(reopened.escalation ?? null, null);
+  assert.deepEqual(reopened.escalations ?? [], []);
 
   // An unresolved escalation refuses delivery, even for an otherwise merge-ready
   // candidate, and only a human operator can resolve it.

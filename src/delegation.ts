@@ -173,23 +173,28 @@ export async function recordLeadRuling(store: Store, actor: Principal, id: strin
 
 // Refusals are recorded outside the mutation transaction, which rolls back.
 // `scoped` false writes an unscoped ledger entry: the attempt is still history,
-// but it never appends to a work item the actor has no authority over.
-async function recordRefusal(store: Store, actor: Principal, id: string, kind: string, payload: (work: Work) => Record<string, unknown>, scoped: (work: Work) => boolean = () => true) {
+// but it never appends to a work item the actor has no authority over. A refusal
+// that names no existing item — creating work, or a call against an unknown id —
+// has no ledger to append to at all and is therefore always unscoped, but it is
+// still written: a forbidden request must never be silent history.
+async function recordRefusal(store: Store, actor: Principal, id: string | null, kind: string, payload: (work?: Work) => Record<string, unknown>, scoped: (work: Work) => boolean = () => true) {
   await store.transaction(async (db, now) => {
-    const work = (await db.query("SELECT document FROM work_items WHERE id::text=$1 OR document->>'key'=$1", [id])).rows[0]?.document as Work | undefined;
-    demand(work, 'Work item not found', 404);
-    await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [scoped(work) ? work.id : null, actor.id, kind, JSON.stringify({ ...payload(work), at: now.toISOString() })]);
+    const work = id ? (await db.query("SELECT document FROM work_items WHERE id::text=$1 OR document->>'key'=$1", [id])).rows[0]?.document as Work | undefined : undefined;
+    await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work && scoped(work) ? work.id : null, actor.id, kind, JSON.stringify({ ...payload(work), at: now.toISOString() })]);
   });
 }
 
-export async function recordLeadViolation(store: Store, actor: Principal, id: string, attemptedAction: string) {
+// Every forbidden lead request is recorded here, whatever route refused it, so
+// the ledger does not depend on which handler happened to match first.
+export async function recordLeadViolation(store: Store, actor: Principal, id: string | null, attemptedAction: string) {
   demand(actor.role === 'slice-lead', 'Slice lead permission required', 403);
   // The same slice check rulings use. A forbidden request aimed at another slice
   // is recorded against no ledger, with both the target and the source named, so
-  // a lead cannot write into a slice it does not coordinate.
+  // a lead cannot write into a slice it does not coordinate. A request that names
+  // no item carries a null target and is recorded unscoped for the same reason.
   await recordRefusal(store, actor, id, 'lead.action.refused', work => ({
-    attemptedAction, slice: actor.slice ?? null, targetKey: work.key, targetSlice: work.slice ?? null,
-    reason: work.slice === actor.slice ? 'Action exceeds slice-lead authority' : 'Action exceeds slice-lead authority and targets another slice',
+    attemptedAction, slice: actor.slice ?? null, targetKey: work?.key ?? null, targetSlice: work?.slice ?? null,
+    reason: !work || work.slice === actor.slice ? 'Action exceeds slice-lead authority' : 'Action exceeds slice-lead authority and targets another slice',
   }), work => work.slice === actor.slice);
 }
 

@@ -147,8 +147,19 @@ export function server(engine: Engine, credentials: Credential[], github: GitHub
           if (actor.role === 'operator-agent') { demand(id, 'Operator-agent history reads require a scoped work item', 403); const item = (await engine.store.list()).find(w => w.id === id); demand(item && operatorVisible([item]).length, 'Work item is outside this operator-agent scope', 403); }
           return send(200, await engine.store.events(id));
         }
+        // Every mutating work route refuses a slice lead the same way and leaves
+        // the same ledger entry. Routing order decides which handler matches
+        // first; it must never decide whether the attempt is recorded.
+        const refuseLead = async (id: string | null, attemptedAction: string) => {
+          if (actor.role !== 'slice-lead') return;
+          await recordLeadViolation(engine.store, actor, id, attemptedAction);
+          demand(false, 'Slice leads cannot perform lifecycle mutations', 403);
+        };
         const mergeRoute = url.pathname.match(/^\/api\/work\/([^/]+)\/merge-(acquire|cancel|verify)$/);
         if (req.method === 'POST' && mergeRoute) {
+          // These routes sit above the generic work route, so their own refusal
+          // is recorded here rather than inherited from a handler never reached.
+          await refuseLead(mergeRoute[1], `merge-${mergeRoute[2]}`);
           const data = JSON.parse((await body(req)).toString() || '{}'), key = String(req.headers['idempotency-key'] ?? '');
           if (mergeRoute[2] === 'acquire') return send(200, await engine.acquireMerge(actor, mergeRoute[1], data, key));
           if (mergeRoute[2] === 'cancel') return send(200, await engine.cancelMerge(actor, mergeRoute[1], data, key));
@@ -168,7 +179,9 @@ export function server(engine: Engine, credentials: Credential[], github: GitHub
         const match = url.pathname.match(/^\/api\/work(?:\/([^/]+)\/([a-z]+))?$/);
         if (req.method === 'POST' && match) {
           const attempted = match[2] ?? 'create';
-          if (actor.role === 'slice-lead') { if (match[1]) await recordLeadViolation(engine.store, actor, match[1], attempted); demand(false, 'Slice leads cannot perform lifecycle mutations', 403); }
+          // Creating work names no existing item, so the refusal is recorded
+          // unscoped rather than dropped for want of a ledger to append to.
+          await refuseLead(match[1] ?? null, attempted);
           const raw = await body(req);
           if (attempted === 'evidence' && match[1] && actor.role !== 'worker') {
             const item = (await engine.store.list()).find(w => w.id === match[1] || w.key === match[1]);
