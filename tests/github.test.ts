@@ -296,6 +296,25 @@ test('agent dispatch records the profile, identity and correlation marker for th
   await assert.rejects(f.github.requestAgentReview(f.work, reviewerProfile, reviewerApp, async () => {}), /agent review policy required/);
 });
 
+test('agent dispatch binds a speculative base rather than refusing the moved base branch', async () => {
+  const f = boundToSpeculativeTip(agentFixture());
+  const original = f.github.request;
+  f.github.request = async (path, method, body: any) => method === 'POST'
+    ? { id: 457, body: body.body, performed_via_github_app: { id: 1234 }, user: { type: 'Bot' }, created_at: new Date().toISOString() }
+    : original(path, method, body);
+  const request = await f.github.requestAgentReview(f.work, reviewerProfile, reviewerApp, async () => {});
+  assert.equal(request.sha, head);
+  assert.equal(request.baseSha, predictedBase, 'the review is requested for the commit the tip will land on');
+  assert.match(request.body, new RegExp(`base:${predictedBase} policy:1`));
+  assert.ok(request.body.includes(`Review head \`${head}\` against base \`${predictedBase}\``), 'the reviewer is instructed to review the tip against its validated base');
+  // The binding is to this published tip only: a speculation for another commit, or none at all,
+  // must still refuse a candidate whose base no longer matches the live base branch.
+  f.work.queue!.speculation!.tip = 'e'.repeat(40);
+  await assert.rejects(f.github.requestAgentReview(f.work, reviewerProfile, reviewerApp, async () => {}), /changed before review dispatch/);
+  queued(f.work);
+  await assert.rejects(f.github.requestAgentReview(f.work, reviewerProfile, reviewerApp, async () => {}), /changed before review dispatch/);
+});
+
 test('agent observation resolves the registered identity and never requires native approval', async () => {
   const f = agentFixture();
   const waiting = await f.github.observe(f.work);

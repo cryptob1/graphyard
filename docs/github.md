@@ -234,7 +234,7 @@ Like every review-policy revision this preserves criteria and CI requirements, i
 
 ### The verdict contract
 
-Graphyard posts one request comment through its own App, recording the returned comment ID against the exact head SHA, base SHA, policy revision, dispatched profile and a unique correlation marker. The reviewer runtime replies with exactly one pull request comment, posted as its registered App, containing one line:
+Graphyard posts one request comment through its own App, recording the returned comment ID against the exact head SHA, base SHA, policy revision, dispatched profile and a unique correlation marker. For a queued candidate the recorded base is the [speculative tip](#merge-queue)'s validated base, not wherever the base branch currently points, so dispatch binds the reviewer to the commit that will actually land; publishing a new tip changes that binding and requires a fresh request. The reviewer runtime replies with exactly one pull request comment, posted as its registered App, containing one line:
 
 ```
 <!-- graphyard-verdict:MARKER head:FULL_40_CHAR_SHA verdict:approved -->

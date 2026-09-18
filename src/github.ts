@@ -195,7 +195,7 @@ export class GitHub {
     demand(app.appId !== this.config.appId, 'The Graphyard control-plane App cannot be dispatched as a reviewer');
     demand((work.policy.reviewerProfiles ?? []).some(configured => configured.name === profile.name && configured.reviewerApp === profile.reviewerApp), 'Reviewer profile is not configured on this policy');
     const pr = await this.request(`/pulls/${work.candidate.pr}`);
-    requireCurrent(pr.head.sha === work.candidate.sha && pr.base.sha === work.candidate.baseSha && pr.state === 'open' && pr.draft === false, 'PR changed before review dispatch; retry');
+    requireCurrent(pr.head.sha === work.candidate.sha && this.boundBase(work, pr) === work.candidate.baseSha && pr.state === 'open' && pr.draft === false, 'PR changed before review dispatch; retry');
     demand(pr.user?.id !== app.botUserId, 'Reviewer identity must be independent of the pull request author');
     const marker = randomUUID();
     const body = `${profile.mention ? `${profile.mention} review\n\n` : ''}Graphyard requests an independent code review from reviewer profile \`${profile.name}\` (runtime \`${profile.runtime}\`).
