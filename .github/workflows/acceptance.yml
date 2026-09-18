@@ -39,7 +39,8 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always() && hashFiles('acceptance.json') != ''
         with:
-          name: graphyard-acceptance
+          # Attempt-scoped so a re-run can never download or attribute an earlier attempt's report.
+          name: graphyard-acceptance-${{ github.run_attempt }}
           path: acceptance.json
           if-no-files-found: error
           retention-days: 14
@@ -56,7 +57,7 @@ jobs:
       - uses: actions/setup-node@v4
         with: { node-version: '24' }
       - uses: actions/download-artifact@v4
-        with: { name: graphyard-acceptance, path: reports }
+        with: { name: 'graphyard-acceptance-${{ github.run_attempt }}', path: reports }
       - name: Publish independently produced acceptance evidence
         run: node scripts/publish-acceptance.mjs reports/acceptance.json
         env:
@@ -65,4 +66,5 @@ jobs:
           GRAPHYARD_PR: ${{ inputs.pr }}
           GRAPHYARD_WORK_ID: ${{ inputs.work_id }}
           GRAPHYARD_POLICY_REVISION: ${{ inputs.policy_revision }}
+          GRAPHYARD_ARTIFACT_NAME: graphyard-acceptance-${{ github.run_attempt }}
           GITHUB_TOKEN: ${{ github.token }}

@@ -21,8 +21,12 @@ export function validateArtifactProvenance(run, artifacts, expected) {
   // Publication is the final job in this same run, so provider status is normally
   // in_progress here. A later retry may observe the completed run.
   if (!['in_progress', 'completed'].includes(run.status) || run.status === 'completed' && !['success', 'failure'].includes(run.conclusion) || run.event !== 'workflow_dispatch') throw new Error('GitHub run is not the protected acceptance invocation');
-  const matches = artifacts.filter(artifact => artifact.name === expected.artifactName);
-  if (matches.length !== 1) throw new Error('Expected exactly one acceptance artifact for this run');
+  // Artifacts are listed for the whole run, not per attempt, and a superseded attempt's
+  // upload survives. Only an upload created after this attempt started belongs to it.
+  const startedAt = Date.parse(run.run_started_at ?? '');
+  if (!Number.isFinite(startedAt)) throw new Error('GitHub run attempt does not report when it started');
+  const matches = artifacts.filter(artifact => artifact.name === expected.artifactName && Date.parse(artifact.created_at ?? '') >= startedAt);
+  if (matches.length !== 1) throw new Error(`Expected exactly one acceptance artifact from run attempt ${expected.runAttempt}`);
   const artifact = matches[0];
   if (artifact.expired || !Number.isSafeInteger(artifact.id) || artifact.id < 1 || !Number.isSafeInteger(artifact.size_in_bytes) || artifact.size_in_bytes < 1 || !/^sha256:[a-f0-9]{64}$/.test(artifact.digest ?? '') || !artifact.archive_download_url || !artifact.created_at) throw new Error('Acceptance artifact provenance is incomplete or expired');
   return { provider: 'github-actions', repository: expected.repository, workflowCommit: expected.harnessCommit, runId: String(run.id), runAttempt: run.run_attempt,
@@ -30,12 +34,17 @@ export function validateArtifactProvenance(run, artifacts, expected) {
 }
 export async function observeArtifactProvenance(expected, token, fetcher = fetch) {
   if (!token) throw new Error('GitHub token is required to verify artifact provenance');
+  if (!/^[\w.-]+\/[\w.-]+$/.test(expected.repository ?? '')) throw new Error('Invalid repository for artifact provenance');
+  if (!/^[1-9]\d*$/.test(String(expected.runId ?? '')) || !/^[1-9]\d*$/.test(String(expected.runAttempt ?? ''))) throw new Error('Invalid run identity for artifact provenance');
+  if (!/^[\w.-]{1,200}$/.test(expected.artifactName ?? '')) throw new Error('Invalid artifact name for artifact provenance');
   const get = async path => {
     const response = await fetcher(`https://api.github.com/repos/${expected.repository}/actions/${path}`, { headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json' }, signal: AbortSignal.timeout(15000) });
     if (!response.ok) throw new Error(`Cannot verify GitHub artifact provenance (${response.status})`);
     return response.json();
   };
-  const [run, listing] = await Promise.all([get(`runs/${expected.runId}`), get(`runs/${expected.runId}/artifacts?per_page=100`)]);
+  // The attempt-scoped run pins head, status and start time to this invocation even
+  // once a later attempt exists; the unscoped run would report that newer attempt.
+  const [run, listing] = await Promise.all([get(`runs/${expected.runId}/attempts/${expected.runAttempt}`), get(`runs/${expected.runId}/artifacts?per_page=100`)]);
   if (!Array.isArray(listing.artifacts) || listing.total_count !== listing.artifacts.length) throw new Error('Complete GitHub artifact inventory is unavailable');
   return validateArtifactProvenance(run, listing.artifacts, expected);
 }
@@ -63,7 +72,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
     const expected = {
       repository: process.env.GITHUB_REPOSITORY, harnessCommit: process.env.GITHUB_SHA, runId: process.env.GITHUB_RUN_ID, runAttempt: process.env.GITHUB_RUN_ATTEMPT,
       workId: process.env.GRAPHYARD_WORK_ID, pr: process.env.GRAPHYARD_PR, policyRevision: process.env.GRAPHYARD_POLICY_REVISION,
-      artifactName: process.env.GRAPHYARD_ARTIFACT_NAME ?? 'graphyard-acceptance',
+      artifactName: process.env.GRAPHYARD_ARTIFACT_NAME ?? `graphyard-acceptance-${process.env.GITHUB_RUN_ATTEMPT}`,
     };
     const provenance = await observeArtifactProvenance(expected, process.env.GITHUB_TOKEN);
     await publishReport(report, { url: process.env.GRAPHYARD_URL, token: process.env.GRAPHYARD_PRODUCER_TOKEN, expected, provenance });
