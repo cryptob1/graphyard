@@ -152,6 +152,13 @@ test('branch protection is read-modify-write and matches the chosen review polic
   assert.equal(protectionSatisfied(inputs, satisfiedProtection(4242, 0)), false, 'too few required reviews is drift, not a match');
   assert.equal(protectionSatisfied(inputs, satisfiedProtection(4242, 3)), true, 'a stricter review count already satisfies the policy');
   assert.equal(protectionSatisfied(inputs, { ...satisfiedProtection(4242), enforce_admins: { enabled: false } }), false);
+
+  // A branch whose head can be replaced or removed is not protected, whatever else it requires:
+  // evidence is bound to a commit, and a force push swaps the commit out from under it.
+  assert.equal(protectionSatisfied(inputs, { ...satisfiedProtection(4242), allow_force_pushes: { enabled: true } }), false, 'a force-pushable branch was reported as satisfying protection');
+  assert.equal(protectionSatisfied(inputs, { ...satisfiedProtection(4242), allow_deletions: { enabled: true } }), false, 'a deletable branch was reported as satisfying protection');
+  assert.equal(fresh.allow_force_pushes, false);
+  assert.equal(fresh.allow_deletions, false);
 });
 
 test('repositoryRoot refuses to install from outside a checkout', async () => {

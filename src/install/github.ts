@@ -169,6 +169,13 @@ export function protectionPayload(inputs: ProtectionInputs, current: any | null)
   };
 }
 
+/**
+ * True when the branch already enforces everything `protectionPayload` would write, so a
+ * re-apply can skip the write. It has to test every term of that payload the installer
+ * insists on: a branch that can still be force-pushed or deleted is not protected, however
+ * many checks and reviewers it requires, because the commit evidence is bound to can be
+ * replaced underneath it.
+ */
 export function protectionSatisfied(inputs: ProtectionInputs, current: any | null) {
   if (!current) return false;
   const checks: any[] = current.required_status_checks?.checks ?? [];
@@ -178,6 +185,8 @@ export function protectionSatisfied(inputs: ProtectionInputs, current: any | nul
     && (!inputs.graphyardAppId || has(CHECK_NAME, inputs.graphyardAppId))
     && !!current.enforce_admins?.enabled
     && !!current.required_conversation_resolution?.enabled
+    && !current.allow_force_pushes?.enabled
+    && !current.allow_deletions?.enabled
     // A repository that requires more reviewers than the policy asks for already satisfies it.
     && Number(current.required_pull_request_reviews?.required_approving_review_count ?? -1) >= inputs.reviewCount;
 }

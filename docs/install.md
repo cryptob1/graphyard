@@ -156,10 +156,12 @@ The installer performs the plan in order:
 8. Points the App webhook at `https://YOUR-HOST/api/github/webhook` with the secret the server holds.
 9. Detects the GitHub App IDs publishing checks on the base branch and sets `GITHUB_CI_APP_IDS`.
 10. Applies branch protection: strict status checks, conversation resolution, administrator enforcement,
-    and at least the approving-review count of the chosen review policy. Protection is read-modify-write
-    and only ever tightens: an existing check, reviewer restriction, dismissal restriction, higher review
-    count, or branch lock is preserved, so `--review-policy agent` never lowers a branch that already
-    requires human approvals.
+    no force pushes, no branch deletion, and at least the approving-review count of the chosen review
+    policy. Protection is read-modify-write and only ever tightens: an existing check, reviewer
+    restriction, dismissal restriction, higher review count, or branch lock is preserved, so
+    `--review-policy agent` never lowers a branch that already requires human approvals. A branch that
+    still allows force pushes or deletion is reported as drift and corrected, whatever else it already
+    requires: evidence is bound to a commit, and a force push replaces the commit underneath it.
 11. Verifies authenticated `GET /api/status` and one real webhook delivery.
 12. Registers master, reviewer, and worker profiles for the authenticated agent runtimes on this machine, and binds Herdr when it is installed.
 

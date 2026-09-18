@@ -71,6 +71,8 @@ export const satisfiedProtection = (appId: number | null, reviewCount = 1) => ({
   enforce_admins: { enabled: true },
   required_conversation_resolution: { enabled: true },
   required_pull_request_reviews: { required_approving_review_count: reviewCount, dismiss_stale_reviews: true, require_last_push_approval: true },
+  allow_force_pushes: { enabled: false },
+  allow_deletions: { enabled: false },
 });
 
 export interface Harness {

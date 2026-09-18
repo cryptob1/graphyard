@@ -278,7 +278,7 @@ export async function buildPlan(session: InstallSession): Promise<InstallPlan> {
 
 function describeProtection(protection: any) {
   const checks = (protection?.required_status_checks?.checks ?? []).map((check: any) => `${check.context}${check.app_id ? ` (app ${check.app_id})` : ''}`);
-  return `strict=${!!protection?.required_status_checks?.strict}; checks ${checks.join(', ') || 'none'}; reviews ${protection?.required_pull_request_reviews?.required_approving_review_count ?? 0}; enforce_admins=${!!protection?.enforce_admins?.enabled}; conversation_resolution=${!!protection?.required_conversation_resolution?.enabled}`;
+  return `strict=${!!protection?.required_status_checks?.strict}; checks ${checks.join(', ') || 'none'}; reviews ${protection?.required_pull_request_reviews?.required_approving_review_count ?? 0}; enforce_admins=${!!protection?.enforce_admins?.enabled}; conversation_resolution=${!!protection?.required_conversation_resolution?.enabled}; force_pushes=${!!protection?.allow_force_pushes?.enabled}; deletions=${!!protection?.allow_deletions?.enabled}`;
 }
 
 // ---------------------------------------------------------------------------
