@@ -4,7 +4,7 @@ import { Store, save, wakeJob } from './store.js';
 import { workspacePath, pathsOverlap, validBranch } from './workspace.js';
 import { activeLease, admin, operatorCapability, MergeExecutionInProgress, requireCurrent, createSchema, criterionSchema, currentEvidence, resourcesSchema, demand, evaluate, proofSchema, type Principal, type Work, type Observation, type ReviewRequest, type OperatorCapability } from './model.js';
 import { resourceConflicts } from './coordination.js';
-import { delegationLimits } from './delegation.js';
+import { delegationLimits, implementerIdentities, leadMay, producerIndependenceRefusal } from './delegation.js';
 
 const epoch = z.number().int().positive();
 const sha = z.string().regex(/^[a-f0-9]{40}$/);
@@ -56,9 +56,13 @@ function preserveAssignment(work: Work) {
 }
 export class Engine {
   operatorAuthorizer?: (db: any, now: Date, actor: Principal) => Promise<Principal>;
+  // Configured roster, used to refuse trust minted by lead or slice-bound identities.
+  roster: Principal[] = [];
   constructor(public store: Store, public ciAppIds: number[] = [15368], public leaseSeconds = 120, public repository = process.env.GITHUB_REPOSITORY ?? '') {}
   async execute(actor: Principal, command: Command, id: string | null, input: unknown, key: string) {
     demand(Object.hasOwn(commands, command), 'Unknown command', 404);
+    // Leads coordinate through rulings; no lifecycle command is lead-permitted.
+    demand(actor.role !== 'slice-lead' || leadMay(command), 'Slice leads cannot perform lifecycle mutations', 403);
     demand(key && key.length <= 200, 'An Idempotency-Key is required', 400);
     const data: any = commands[command].parse(input);
     const fingerprint = createHash('sha256').update(JSON.stringify({ command, id, data })).digest('hex');
@@ -156,7 +160,10 @@ export class Engine {
           demand(scenario, `Register E2E scenario ${proof.slice(4)} first`);
           pins.push({ proof, revision: scenario.revision, environment: scenario.environment, hash: scenario.hash });
         }
-        work.retiredCriterionIds = [...(work.retiredCriterionIds ?? []), ...work.criteria.filter(ac => !data.criteria.some((next: { id: string }) => next.id === ac.id)).map(ac => ac.id)];
+        const retired = work.criteria.filter(ac => !data.criteria.some((next: { id: string }) => next.id === ac.id));
+        const narrowed = work.criteria.filter(ac => { const next = data.criteria.find((n: { id: string }) => n.id === ac.id); return next && ac.proofs.some(proof => !next.proofs.includes(proof)); });
+        if (retired.length || narrowed.length) work.escalation ??= { trigger: 'requirement-weakening', reason: `Requirement revision retires ${retired.map(ac => ac.id).join(', ') || 'no criterion'} and narrows proofs for ${narrowed.map(ac => ac.id).join(', ') || 'no criterion'}`, at: now.toISOString(), actor: actor.id };
+        work.retiredCriterionIds = [...(work.retiredCriterionIds ?? []), ...retired.map(ac => ac.id)];
         work.criteria = data.criteria; work.dependencies = data.dependencies; work.plannedFiles = data.plannedFiles; work.exclusiveResources = data.exclusiveResources;
         work.scenarioRequirements = pins; work.policyRevision++;
         work.formalReviewResetRequired = true; work.formalReviewBaseline = undefined;
@@ -197,6 +204,7 @@ export class Engine {
           demand(activeInSlice < limit, `Engineer limit for ${work.slice} exceeded: ${activeInSlice}/${limit}`);
         }
         work.epoch++;
+        work.implementers = [...new Set([...implementerIdentities(work), actor.id])];
         work.lastAssignment = { owner: actor.id, epoch: work.epoch, claimedAt: now.toISOString(), ...(actor.displayName ? { displayName: actor.displayName } : {}), ...(actor.runtime ? { runtime: actor.runtime } : {}) };
         work.lease = { owner: actor.id, epoch: work.epoch, expiresAt: new Date(now.getTime() + this.leaseSeconds * 1000).toISOString() };
       }
@@ -238,9 +246,13 @@ export class Engine {
       }
       if (command === 'evidence') {
         demand(actor.role === 'producer' || actor.role === 'worker' || actor.role === 'admin', 'Evidence submission is not permitted', 403);
-        const trusted = actor.role === 'producer' && actor.id !== work.lastAssignment?.owner && !!actor.proofs?.includes(data.proof) || actor.role === 'admin' && data.proof.startsWith('manual:');
+        // Workers may still record their own untrusted assertions; every identity
+        // that could mint trust must be independent of the implementation and the lead.
+        const dependent = actor.role === 'worker' ? null : producerIndependenceRefusal(actor, work, this.roster);
+        demand(!dependent, dependent ?? 'Evidence producer is not independent', 403);
+        const trusted = actor.role === 'producer' && !!actor.proofs?.includes(data.proof) || actor.role === 'admin' && data.proof.startsWith('manual:');
         work.evidence.push({ ...data, id: randomUUID(), producer: actor.id, trusted, at: now.toISOString() });
-        if (trusted && data.policyRevision !== work.policyRevision) work.escalation = { trigger: 'evidence-policy-conflict', reason: `Evidence policy v${data.policyRevision} conflicts with current policy v${work.policyRevision}`, at: now.toISOString(), actor: actor.id };
+        if (trusted && data.policyRevision !== work.policyRevision) work.escalation ??= { trigger: 'evidence-policy-conflict', reason: `Evidence policy v${data.policyRevision} conflicts with current policy v${work.policyRevision}`, at: now.toISOString(), actor: actor.id };
       }
       // Delivery is an immutable snapshot. A late containment cleanup may append
       // its audit/revision metadata, but stale inputs must not re-evaluate it.

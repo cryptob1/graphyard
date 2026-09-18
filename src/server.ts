@@ -11,7 +11,7 @@ import { githubFromEnv, processJob, type GitHub } from './github.js';
 import { Validation } from './validation.js';
 import { defineScenario, scenarios } from './scenarios.js';
 import { OperatorAgents } from './operator-agent.js';
-import { delegationLimits, delegationSnapshot, recordIntake, recordLeadRuling, recordLeadViolation, validateDelegationPrincipals } from './delegation.js';
+import { delegationLimits, delegationSnapshot, producerIndependenceRefusal, recordEvidenceRefusal, recordIntake, recordLeadRuling, recordLeadViolation, validateDelegationPrincipals } from './delegation.js';
 
 export const principalSchema = z.array(z.object({ id: z.string().min(1), role: z.enum(['admin', 'coordinator', 'slice-lead', 'worker', 'producer', 'reader']), token: z.string().min(32), proofs: z.array(z.string()).optional(), displayName: z.string().trim().min(1).max(100).regex(/^[^\u0000-\u001f\u007f]+$/).optional(), runtime: z.string().trim().min(1).max(80).regex(/^[^\u0000-\u001f\u007f]+$/).optional(), slice: z.enum(['product', 'infrastructure', 'docs-experience']).optional(), sessionKind: z.enum(['human', 'ai']).optional() }).strict()).min(1);
 export type Credential = Principal & { token: string };
@@ -24,6 +24,8 @@ export function server(engine: Engine, credentials: Credential[], github: GitHub
   const limits = delegationLimits();
   validateDelegationPrincipals(credentials, limits);
   const principals = credentials.map(({ token, ...actor }) => ({ actor, hash: createHash('sha256').update(token).digest() }));
+  // The engine decides evidence trust and must see the same roster as this server.
+  engine.roster = principals.map(p => p.actor);
   // The engine is constructed with the repository that this control plane is
   // authorized to coordinate.  GITHUB_REPOSITORY is merely a process default
   // (and is automatically set to the CI checkout), so it must not override an
@@ -152,9 +154,21 @@ export function server(engine: Engine, credentials: Credential[], github: GitHub
         }
         const match = url.pathname.match(/^\/api\/work(?:\/([^/]+)\/([a-z]+))?$/);
         if (req.method === 'POST' && match) {
-          if (actor.role === 'slice-lead') { if (match[1]) await recordLeadViolation(engine.store, actor, match[1], match[2] ?? 'create'); demand(false, 'Slice leads cannot perform lifecycle mutations', 403); }
+          const attempted = match[2] ?? 'create';
+          if (actor.role === 'slice-lead') { if (match[1]) await recordLeadViolation(engine.store, actor, match[1], attempted); demand(false, 'Slice leads cannot perform lifecycle mutations', 403); }
           const raw = await body(req);
-          const result = await engine.execute(actor, (match[2] ?? 'create') as Command, match[1] ?? null, JSON.parse(raw.toString() || '{}'), String(req.headers['idempotency-key'] ?? ''));
+          if (attempted === 'evidence' && match[1] && actor.role !== 'worker') {
+            const item = (await engine.store.list()).find(w => w.id === match[1] || w.key === match[1]);
+            const dependent = item ? producerIndependenceRefusal(actor, item, engine.roster) : null;
+            if (item && dependent) {
+              // An unparsable body is still a recorded refusal; the engine repeats this decision.
+              let proof: unknown = null;
+              try { proof = JSON.parse(raw.toString() || '{}')?.proof; } catch { proof = null; }
+              await recordEvidenceRefusal(engine.store, actor, item.id, proof, dependent);
+              demand(false, dependent, 403);
+            }
+          }
+          const result = await engine.execute(actor, attempted as Command, match[1] ?? null, JSON.parse(raw.toString() || '{}'), String(req.headers['idempotency-key'] ?? ''));
           return send(200, result);
         }
         return send(404, { error: 'Route not found' });

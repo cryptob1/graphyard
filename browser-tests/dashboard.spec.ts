@@ -10,7 +10,7 @@ async function fixture(page: Page, role = 'admin') {
     if (route.request().headers().authorization !== 'Bearer browser-fixture' || state.unauthorized) return route.fulfill({ status: 401, json: { error: 'Rejected' } });
     if (route.request().method() !== 'GET') state.writes++;
     const path = new URL(route.request().url()).pathname;
-    return route.fulfill({ json: path.endsWith('/status') ? { actor: { id: 'fixture', role, sessionKind: role === 'admin' ? 'human' : 'ai' }, github: true, reviewProviders: ['github','codex'], repository: 'fixture/repository', jobs: [], delegation: { limits: { maxLeads: 3, maxEngineersPerLead: 2, minReviewers: 1, maxReviewers: 2 }, slices: [{ id: 'product', name: 'Product', lead: { id: 'product-lead', displayName: 'Pine', sessionKind: 'ai' }, workers: [{ key: 'GY-1', principal: 'engineer-a' }], bottlenecks: ['GY-1'] }, { id: 'infrastructure', name: 'Infrastructure', lead: null, workers: [], bottlenecks: [] }, { id: 'docs-experience', name: 'Docs/experience', lead: null, workers: [], bottlenecks: [] }], reviewers: [{ id: 'reviewer-a', sessionKind: 'ai' }] } } : path.endsWith('/work-snapshot') ? {work:[work],now:'2026-01-01T00:00:00Z'} : path.endsWith('/work') ? [work] : [] });
+    return route.fulfill({ json: path.endsWith('/status') ? { actor: { id: 'fixture', role, sessionKind: role === 'admin' ? 'human' : 'ai' }, github: true, reviewProviders: ['github','codex'], repository: 'fixture/repository', jobs: [], delegation: { limits: { maxLeads: 3, maxEngineersPerLead: 2, minReviewers: 1, maxReviewers: 2 }, slices: [{ id: 'product', name: 'Product', lead: { id: 'product-lead', displayName: 'Pine', role: 'slice-lead', sessionKind: 'ai' }, workers: [{ key: 'GY-1', id: 'engineer-a', displayName: 'Atlas', role: 'worker', sessionKind: 'ai' }, { key: 'GY-2', id: 'human-pair', displayName: 'Rivera', role: 'worker', sessionKind: 'human' }], bottlenecks: [{ key: 'GY-1', reason: 'Independent review required' }] }, { id: 'infrastructure', name: 'Infrastructure', lead: null, workers: [], bottlenecks: [] }, { id: 'docs-experience', name: 'Docs/experience', lead: null, workers: [], bottlenecks: [] }], reviewers: [{ id: 'reviewer-a', displayName: 'Rowan', role: 'producer', sessionKind: 'ai' }, { id: 'legacy-proof', displayName: null, role: 'producer', sessionKind: 'undeclared' }] } } : path.endsWith('/work-snapshot') ? {work:[work],now:'2026-01-01T00:00:00Z'} : path.endsWith('/work') ? [work] : [] });
   });
   await page.goto('/'); return state;
 }
@@ -103,15 +103,41 @@ test('reader has no creation controls; graph filters and search still work', asy
   await expect(page.getByRole('button', { name: '＋ New test case' })).toHaveCount(0);
 });
 
-test('slice view distinguishes human and AI sessions and exposes roles and bottlenecks', async ({ page }) => {
+test('slice view names leads, workers, reviewers and bottlenecks and labels each session kind from data', async ({ page }) => {
   await fixture(page); await login(page);
   const slices = page.getByRole('region', { name: 'Delivery slices' });
   await expect(slices.getByText('Product', { exact: true })).toBeVisible();
   await expect(slices.getByText('Pine')).toBeVisible();
-  await expect(slices.getByText('AI lead', { exact: true }).first()).toBeVisible();
-  await expect(slices.getByText('Human', { exact: true })).toBeVisible();
-  await expect(slices.getByText(/1\/2 active engineers · 1 bottlenecks/)).toBeVisible();
-  await expect(slices.getByText(/independent reviewer\/proof session/)).toBeVisible();
+  // Only the slice that actually has a lead is labelled with a lead's session kind.
+  await expect(slices.getByText('AI lead', { exact: true })).toHaveCount(1);
+  await expect(slices.getByText('No lead assigned', { exact: true })).toHaveCount(2);
+  await expect(slices.getByText('Unassigned', { exact: true })).toHaveCount(2);
+  const product = slices.locator('.slice-card').first();
+  await expect(product).toContainText('2/2 active engineers · 1 bottleneck');
+  // Workers, reviewers and bottlenecks are named, and each identity carries its declared kind.
+  await expect(product).toContainText('GY-1 · Atlas');
+  await expect(product).toContainText('GY-2 · Rivera');
+  await expect(product.locator('.session .identity.ai')).toHaveCount(1);
+  await expect(product.locator('.session .identity.human')).toHaveCount(1);
+  await expect(product).toContainText('GY-1 — Independent review required');
+  await expect(slices.locator('.slice-card').nth(1)).toContainText('Bottlenecks: none');
+  await expect(slices).toContainText('Independent review/proof sessions (2):');
+  await expect(slices).toContainText('Rowan');
+  await expect(slices).toContainText('legacy-proof');
+  await expect(slices.getByText('Session kind undeclared', { exact: true })).toHaveCount(1);
+  // The signed-in session states its own kind.
+  const session = page.locator('.sidebar-bottom');
+  await expect(session).toContainText('fixture · admin');
+  await expect(session.locator('.identity.human')).toHaveCount(1);
+  await expect(session.locator('.identity.ai')).toHaveCount(0);
+});
+
+test('an AI session is labelled AI in the signed-in session summary', async ({ page }) => {
+  await fixture(page, 'worker'); await login(page);
+  const session = page.locator('.sidebar-bottom');
+  await expect(session).toContainText('fixture · worker');
+  await expect(session.locator('.identity.ai')).toHaveCount(1);
+  await expect(session.locator('.identity.human')).toHaveCount(0);
 });
 
 test('a delayed post-create refresh cannot restore the signed-out session or leak into a new login', async ({ page }) => {

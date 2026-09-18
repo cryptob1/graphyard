@@ -37,6 +37,7 @@ Every box is a checkpoint. A blocked box explains what is missing; it is not an 
 | **Master** | Watches Graphyard and runtime health; dispatches ready work; routes durable handoffs; requests routine merges when policy allows. | Does not implement work, hold worker leases, produce evidence, or override Graphyard. Dispatch is an invitation, not ownership. |
 | **Worker** | Claims under its own identity; uses the assigned worktree; builds, tests, opens the PR, and submits the candidate. | Must stop after lease loss. Cannot self-review, grant itself trusted proof credentials, or change requirements merely to pass. |
 | **Reviewer / proof producer** | Independently reviews the candidate or runs an approved proof and reports evidence for its allowlisted proof name. | Does not inherit trust from the worker. Evidence must match the exact candidate and requirements; it cannot authorize unrelated work. |
+| **Slice lead** (optional) | Coordinates one formal slice: approves or rejects plans, classifies failures, requests reruns, sends work back, and escalates, always citing a written rule ID and a reason. | Does not implement, hold a worker lease, submit evidence, bypass a gate, or merge. See [slice-lead delegation](delegation.md). |
 
 One person may operate more than one tool, but the credentials and duties stay separate. In particular, an implementation session never becomes a trusted evidence producer just because it ran a test.
 

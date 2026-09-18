@@ -12,6 +12,8 @@ export const policySchema = z.object({
 export const resourcesSchema = z.array(z.string().regex(/^[a-z0-9][a-z0-9._:/-]*$/).max(200)).max(30).refine(v => new Set(v).size === v.length, 'Resource names must be unique');
 export const sliceIds = ['product', 'infrastructure', 'docs-experience'] as const;
 export type SliceId = typeof sliceIds[number];
+export const escalationTriggers = ['lease-loss', 'evidence-policy-conflict', 'security-concern', 'requirement-weakening'] as const;
+export type EscalationTrigger = typeof escalationTriggers[number];
 export const createSchema = z.object({
   title: z.string().min(1).max(200), description: z.string().max(20000).default(''),
   type: z.enum(['feature', 'bug', 'chore']).default('feature'),
@@ -64,6 +66,9 @@ export interface Work extends Create {
   retiredCriterionIds?: string[];
   formalReviewResetRequired?: boolean;
   formalReviewBaseline?: { pr: number; policyRevision: number; reviewIds: number[] };
+  // Append-only identities that have held an assignment. Trusted proof producers
+  // must stay independent of every one of them, not only the latest assignment.
+  implementers?: string[];
   id: string; key: string; stage: Stage; revision: number; policyRevision: number;
   createdAt: string; updatedAt: string; stageEnteredAt: string; ready: boolean;
   epoch: number; lease: Lease | null; lastAssignment?: AssignmentIdentity; workspaces: Workspace[]; candidate: Candidate | null;
@@ -76,7 +81,7 @@ export interface Work extends Create {
   mergeExecution?: { id: string; owner: string; sha: string; baseSha: string; policyRevision: number; authorizationRevision: number; issuedAt: string; expiresAt: string; verifiedAt?: string; clockOffset?: { min: number; max: number } } | null;
   delivery?: { mergedAt: string; mergeSha: string; authorizationRevision: number };
   evidence: Evidence[]; observation: Observation | null; blocker: string | null;
-  escalation?: { trigger: 'lease-loss' | 'evidence-policy-conflict' | 'security-concern' | 'requirement-weakening'; reason: string; at: string; actor: string } | null;
+  escalation?: { trigger: EscalationTrigger; reason: string; at: string; actor: string } | null;
   gates: Gate[]; violations: string[];
 }
 export class Refusal extends Error {

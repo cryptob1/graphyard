@@ -7,6 +7,7 @@ import { z } from 'zod';
 import { assertRepository, discover, localDirectory, saveDiscovery } from './onboarding.js';
 import { loadConnection, managedInstructions, serverOrigin } from './repository-setup.js';
 import { resourceConflicts } from './coordination.js';
+import { mergeOrder } from './delegation.js';
 import type { Work } from './model.js';
 
 const safeEnvironment = z.record(
@@ -431,11 +432,16 @@ export function assertMergeCandidate(work: Work, observedAt?: string, executionO
   if ((activeMerge && !resumable) || !fresh || work.stage !== 'merge' || !work.candidate || !work.mergeAuthorization || work.mergeAuthorization.sha !== work.candidate.sha || work.mergeAuthorization.baseSha !== work.candidate.baseSha || work.mergeAuthorization.policyRevision !== work.policyRevision || work.gates.some(gate => !gate.passed) || work.violations.length) throw new Error(`${work.key} does not have a current all-gates-passing merge authorization`);
   return { key: work.key, revision: work.revision, pr: work.candidate.pr, sha: work.candidate.sha, baseSha: work.candidate.baseSha, policyRevision: work.policyRevision };
 }
+// Merge order is recomputed from current dependencies and conflicts on every
+// batch; registration order carries no authority.
 export function currentMergeCandidates(work: Work[], observedAt: string, executionOwner?: string) {
+  const observed = Date.parse(observedAt);
+  const order = mergeOrder(work, Number.isFinite(observed) ? observed : Date.now());
+  const rank = (item: Work) => order.indexOf(item.key) + 1 || Number.MAX_SAFE_INTEGER;
   return work.filter(item => {
     try { assertMergeCandidate(item, observedAt, executionOwner); return true; }
     catch { return false; }
-  });
+  }).sort((a, b) => rank(a) - rank(b) || a.key.localeCompare(b.key));
 }
 export async function continueMergeBatch<T extends { key: string }, R>(items: T[], action: (item: T) => Promise<R>) {
   const results: (R | { key: string; result: 'refused'; reason: string })[] = [];
