@@ -8,6 +8,35 @@
 - Keep backups and verify a restore in an isolated environment periodically.
 - Monitor Postgres size: events contain work snapshots and evidence is retained. The MVP has no automatic retention pruning.
 
+## Master coordination loop
+
+`graphyard master run` is the durable coordinator. Run it under systemd or Herdr, never as a chat
+session: see [`examples/master/graphyard-master.service`](../examples/master/graphyard-master.service)
+and the [operating guide](master-agent.md#durable-loop).
+
+- **Health.** `graphyard master status` reports the loop under `daemon`. `running` is false when no
+  cycle has completed within three intervals. `lagMs` is the age of the last cycle, `unresolved`
+  lists actions interrupted mid-flight, and `escalations` lists what the loop deliberately left for
+  a person. `journalctl --user -u graphyard-master` has the per-action log.
+- **Restart.** Stop and start it freely. The cursor beside the coordinator credential is written
+  before and after every external action and is reconciled against Graphyard on the next start, so a
+  restart never re-dispatches an assignment that landed and never loses one that did not. Do not
+  edit or delete the cursor to force a retry; change the Graphyard state the loop is reading.
+- **Two loops.** A second daemon refuses while the first is alive. If a coordinator machine was
+  reimaged or lost, the abandoned lock on another host clears after three intervals (at least two
+  minutes); confirm the old process is really gone before starting elsewhere.
+- **Stuck at a stage.** The loop does not clear blockers, revise requirements, release backlog work,
+  approve reviews, or produce evidence, and it cannot: it holds only the coordinator credential. An
+  item that stays put is waiting on an operator action recorded in `escalations` — reviewer capacity,
+  an operator-witnessed proof, a blocker, or an approval.
+- **Deployment lag.** `daemon.deployment` names the commit the running release serves and which
+  delivered items it covers. Items under `pending` are merged but not yet live. It is an observation,
+  never a gate; an unreachable probe reports `unavailable` and leaves every delivery pending rather
+  than assuming it shipped.
+- **Worker profiles.** A failed launch cools its profile off for ten minutes and work routes to
+  another profile. `daemon.profiles` holds the reason. A profile that never recovers usually has an
+  unreadable credential file or an agent name already taken in Herdr.
+
 ## Lost worker before submission
 
 The lease expires after 120 seconds without a heartbeat. Reconciliation clears the lease; a new worker can claim with a higher epoch. Old API mutations refuse. Preserve the old worktree for inspection and create a new branch/path for the new attempt. Do not assume the old process has stopped merely because its lease expired.
