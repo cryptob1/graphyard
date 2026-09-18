@@ -2,6 +2,8 @@ import { readFile } from 'node:fs/promises';
 import { pathToFileURL } from 'node:url';
 import { requiredCases } from './acceptance-contract.mjs';
 
+// GitHub's maximum page size, and a bound on how many pages one run's inventory may take.
+const PAGE_SIZE = 100, PAGE_LIMIT = 100;
 export function validateReport(report, expected) {
   if (report.schema !== 1 || !['pass', 'fail'].includes(report.result) || report.proof !== 'integration:claim-safety' || !Number.isSafeInteger(report.executed) || report.executed < 0 || report.executed > requiredCases.length || !Number.isSafeInteger(report.skipped) || report.skipped < 0 || report.skipped > requiredCases.length) throw new Error('Incomplete acceptance report');
   if (!Array.isArray(report.cases) || report.cases.length !== requiredCases.length || requiredCases.some(id => report.cases.filter(c => c.id === id && ['pass', 'fail', 'skipped'].includes(c.result)).length !== 1)) throw new Error('Required acceptance case inventory is incomplete');
@@ -42,11 +44,34 @@ export async function observeArtifactProvenance(expected, token, fetcher = fetch
     if (!response.ok) throw new Error(`Cannot verify GitHub artifact provenance (${response.status})`);
     return response.json();
   };
+  // GitHub pages a run's artifacts and keeps every attempt's uploads, so this attempt's
+  // report legitimately sits beyond the first page once a run has been retried enough.
+  // Walk the whole inventory under a bounded page count, and refuse a listing that moves
+  // while it is read: a changing total or a repeated artifact means the pages no longer
+  // describe one inventory, and a short page before the total is a truncated one.
+  const inventory = async () => {
+    const artifacts = [], seen = new Set();
+    let total = null;
+    for (let page = 1; page <= PAGE_LIMIT; page++) {
+      const listing = await get(`runs/${expected.runId}/artifacts?per_page=${PAGE_SIZE}&page=${page}`);
+      if (!Array.isArray(listing.artifacts) || !Number.isSafeInteger(listing.total_count) || listing.total_count < 0) throw new Error('Complete GitHub artifact inventory is unavailable');
+      if (total === null) total = listing.total_count;
+      else if (listing.total_count !== total) throw new Error('GitHub artifact inventory changed while it was read');
+      for (const artifact of listing.artifacts) {
+        if (!Number.isSafeInteger(artifact?.id)) throw new Error('Complete GitHub artifact inventory is unavailable');
+        if (seen.has(artifact.id)) throw new Error('GitHub artifact inventory changed while it was read');
+        seen.add(artifact.id); artifacts.push(artifact);
+      }
+      if (artifacts.length > total) throw new Error('GitHub artifact inventory changed while it was read');
+      if (artifacts.length === total) return artifacts;
+      if (listing.artifacts.length < PAGE_SIZE) throw new Error('Complete GitHub artifact inventory is unavailable');
+    }
+    throw new Error('GitHub artifact inventory exceeded the pagination safety limit');
+  };
   // The attempt-scoped run pins head, status and start time to this invocation even
   // once a later attempt exists; the unscoped run would report that newer attempt.
-  const [run, listing] = await Promise.all([get(`runs/${expected.runId}/attempts/${expected.runAttempt}`), get(`runs/${expected.runId}/artifacts?per_page=100`)]);
-  if (!Array.isArray(listing.artifacts) || listing.total_count !== listing.artifacts.length) throw new Error('Complete GitHub artifact inventory is unavailable');
-  return validateArtifactProvenance(run, listing.artifacts, expected);
+  const [run, artifacts] = await Promise.all([get(`runs/${expected.runId}/attempts/${expected.runAttempt}`), inventory()]);
+  return validateArtifactProvenance(run, artifacts, expected);
 }
 export async function publishReport(report, configuration, fetcher = fetch) {
   validateReport(report, configuration.expected);
