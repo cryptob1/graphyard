@@ -399,6 +399,34 @@ test('work details explain missing proof and operator can revise explicit criter
   expect(body.reason).toBe('New behavior discovered during planning'); expect(state.writes).toBe(0);
 });
 
+test('releases view labels verification precisely, shows membership and reports failures honestly', async ({ page }) => {
+  await fixture(page); let fail = true;
+  const release = { id: 'release-1', revision: 1, environment: { id: 'production', revision: 1 }, sourceSha: 'a'.repeat(40), buildId: 'build', manifest: [{ service: 'api', digest: `sha256:${'1'.repeat(64)}` }], manifestHash: 'h', createdAt: '2026-01-01T00:00:00Z', createdBy: 'operator',
+    members: [{ workId: work.id, key: 'GY-1', mergeSha: 'e'.repeat(40), included: true }, { workId: 'other', key: 'GY-2', mergeSha: 'f'.repeat(40), included: false, note: 'Reverted' }] };
+  const environment = { environmentId: 'production', generation: 2, expected: { releaseId: 'release-1', releaseRevision: 1, manifestHash: 'h', buildId: 'build', policyRevision: 1, approvalId: null, selectedAt: '2026-01-01T00:00:00Z', selectedBy: 'operator' },
+    history: [{ generation: 1, releaseId: 'release-0', releaseRevision: 1, policyRevision: 1, selectedAt: '2025-12-31T00:00:00Z', selectedBy: 'operator', outcome: 'verified', verifiedAt: '2025-12-31T00:10:00Z', supersededAt: '2026-01-01T00:00:00Z' }, { generation: 2, releaseId: 'release-1', releaseRevision: 1, policyRevision: 1, selectedAt: '2026-01-01T00:00:00Z', selectedBy: 'operator', outcome: 'selected' }],
+    coverage: {}, verification: { generation: 2, status: 'mismatched', reasons: ['Instance api-1 of api runs sha256:ffff instead of sha256:1111'], interval: null, evaluatedAt: '2026-01-01T00:01:00Z', verifiedAt: null },
+    incidents: [{ id: 'incident', generation: 1, releaseId: 'release-0', releaseRevision: 1, at: '2025-12-31T01:00:00Z', observationId: 'obs', reasons: ['Instance api-1 of api is unhealthy'] }], cursor: 9, lastNotification: { at: '2026-01-01T00:00:30Z', provider: 'railway', payloadHash: 'x' } };
+  await page.route('**/api/delivery', route => route.fulfill(fail ? { status: 503, json: { error: 'Delivery state unavailable' } } : { json: { environments: [environment], releases: [release], now: '2026-01-01T00:02:00Z' } }));
+  await login(page); await page.getByRole('button', { name: '⇈ Releases' }).click();
+  await expect(page.getByRole('heading', { name: 'Releases', level: 1 })).toBeVisible();
+  await expect(page.getByRole('alert')).toContainText('Delivery state unavailable');
+  await expect(page.getByText('No release selected yet.')).toHaveCount(0);
+  fail = false; await page.getByRole('button', { name: 'Retry loading releases' }).click();
+  const card = page.locator('.scenario-card'); await expect(card).toHaveCount(1);
+  await expect(card).toContainText('production · generation 2');
+  await expect(card).toContainText('Running artifacts differ from the expected release');
+  await expect(card).toContainText('Instance api-1 of api runs sha256:ffff instead of sha256:1111');
+  await expect(card).toContainText('✓ GY-1 · merge eeeeeeeeeeee');
+  await expect(card).toContainText('× GY-2 · merge ffffffffffff · excluded (reverted) · Reverted');
+  await expect(card).toContainText('Incidents (1)');
+  await expect(card).toContainText('a hint to observe again, not proof');
+  await card.getByText('Selection history (2)').click();
+  await expect(card).toContainText('Generation 1 · release-0 r1 · verified');
+  await expect(card).toContainText('Generation 2 · release-1 r1 · selected');
+  await expect(page.getByText('Verified in production')).toHaveCount(0);
+});
+
 test('validation view reports failures honestly and bounds request history', async ({ page }) => {
   await fixture(page); let fail = true;
   const requests = Array.from({ length: 25 }, (_, i) => ({ id: `request-${i}`, workId: work.id, proof: 'e2e:behavior', candidateId: 'candidate', runner: { id: 'runner' }, collector: { id: 'collector' }, state: 'expired', attempts: [{ id: `attempt-${i}`, epoch: 1, state: 'expired', settled: false, dispatchedAt: '2026-01-01T00:00:00Z' }], maxAttempts: 2, deadline: '2026-01-01T01:00:00Z', createdAt: '2026-01-01T00:00:00Z' }));

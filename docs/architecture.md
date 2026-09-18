@@ -27,6 +27,8 @@ flowchart LR
 
 `receipts` stores the result of each successful command under `(principal, idempotency key)` plus a fingerprint of the command. Retries return the original result. A key reused for different input refuses. Read fresh status after replaying an old claim response; an idempotent replay is not a renewed lease.
 
+`releases`, `release_builds`, `release_approvals` and `delivery_observations` are immutable like the event ledger; `delivery_environments` holds each environment's derived delivery state with the observation cursor its sweep resumes from, and `delivery_leases` the epoch each running observer or promoter currently holds.
+
 `jobs` is a durable integration queue, with next-attempt time, owner token, lease expiry, error, and attempt count. It is created transactionally with PR submission. Jobs are processed with Postgres `FOR UPDATE SKIP LOCKED`, then acknowledged with the exact owner token. GitHub calls occur outside coordination transactions.
 
 Database triggers reject updates and deletes to the event ledger. This is an application audit guarantee, not tamper-proof storage against a database administrator. Backups and database access controls still matter.
@@ -72,6 +74,8 @@ The graph shows the first refusing stage; the card contains all refusal reasons.
 The board is a view of evaluated state. There is no drag-to-done API. Current dwell metrics measure how long items have been in their present stage; they are not historical throughput percentiles.
 
 Before a merge can complete work, Graphyard must have recorded an authorization for the same head, base, and policy and a final GitHub verification under a short-lived, single-use execution authority. While that authority is active, requirement, evidence, validation, reconciliation, and non-matching observation mutations are refused. Final verification is a transactional, idempotent mutation that re-evaluates the current GitHub observation, records its timestamp, and must precede the provider-reported merge interval. This freezes the control-plane decision while the external GitHub merge runs without holding a database transaction open. A confirmed failed client cancels the authority; an abandoned or uncertain attempt expires. The engine consults ledger snapshots at the reported merge time, so an outage or later failure does not erase historical authorization. The delivery record references the authorization revision and observed merge SHA. Later differing checks remain visible as a follow-up warning.
+
+Merge completion is not production delivery. Releases, expected-release selection and append-only deployment observations are separate records with their own authority boundaries, and an environment's verification is derived by a bounded, cursor-resumable sweep over what service-scoped observers measured; see [releases and observed production delivery](delivery.md). A verified release attributes its included members once per environment in `releaseDeliveries`, beside — never instead of — the merge record.
 
 Evidence received after an earlier merge cannot retroactively invent approval. A direct external merge without a verified execution authority remains visible as an unauthorized merge and cannot complete the work item. Because GitHub reports merge time with whole-second precision, the master waits until the next timestamp boundary after final verification before invoking the provider. Artifact verification remains necessary to prove that the merged artifact itself was tested.
 
