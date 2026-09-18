@@ -52,11 +52,13 @@ The runner runs under a **worker** registration. The CLI refuses to start if the
 
 | Registration field | What it pins |
 | --- | --- |
-| `executionHost` | the Docker endpoint the collector will inspect |
+| `executionHost` | the local Docker socket every attempt command is addressed to |
 | `attestationPublicKey` | the Ed25519 public key of the host attestor |
 | `executionNetwork` | the dedicated isolated Docker network the target-facing phase may join |
 
 Changing any of them requires a new registration revision, and none is accepted from a runner or collector input file. `executionNetwork` matters as much as the other two: Docker resolves a network name against every network the daemon already has, so a runner-chosen name could attach the browser container to the networks carrying databases and other internal services. The built-in `host`, `bridge`, `default` and `none` names are refused at registration.
+
+`executionHost` must be a local `unix://` socket, and a remote `ssh://` or `tcp://` endpoint is refused at registration. Preflight measures the approved bundle, the attempt boundary and every directory leading to them on the filesystem the attestor can see, while `--mount` sources are resolved by whichever daemon actually starts the container. Against a remote daemon those are two different filesystems: the same pathnames could mount bytes nobody measured, or nothing at all, with every host-side check passing. Attestor and daemon therefore share a host, and so does the collector — see [Collect, verify and publish](#collect-verify-and-publish). What the trust boundary actually requires is three separate *identities*, not three separate machines.
 
 ```bash
 graphyard runner attempt runner.json > execution.json
@@ -126,21 +128,65 @@ The attestor then creates `/srv/graphyard/attempts/ATTEMPT_ID` mode 2770 for eac
 
 **Every attempt gets a fresh directory, and that is what makes retries work.** The boundary has to be empty at preflight — a leftover `report.json` from an earlier run would otherwise be measured, signed and published as this attempt's behaviour. Nothing removes a completed attempt's artifacts either, because its collector still has to read them, possibly hours later from another host. A single static output directory would therefore refuse the emptiness check on every attempt after the first. Per-attempt directories make that a non-issue; what they cost is disk, so give the collection root a retention policy and remove settled attempt directories as the attestor, never as the runner.
 
-If the runner image writes its report mode 0600, the trusted readers get `EACCES` and the attempt is refused with exactly that reason rather than reported as a missing artifact. Fix it at the boundary — the default ACL above, or a umask no stricter than 027 in the image — not by widening the boundary.
+The packaged image writes each report mode 0640 under `umask 027`, so it stays readable to the boundary group. If some other image writes its report mode 0600, the trusted readers get `EACCES` and the attempt is refused with exactly that reason rather than reported as a missing artifact. Fix it at the boundary — the default ACL above, or a umask no stricter than 027 in the image — not by widening the boundary.
+
+## The approved runner image
+
+`docker/runner/Dockerfile` in this repository builds the image the two phases run in. It is the supported answer to "what do I pin as `runnerImageDigest`":
+
+```bash
+docker build -f docker/runner/Dockerfile -t REGISTRY/graphyard-runner:VERSION .
+docker push REGISTRY/graphyard-runner:VERSION
+```
+
+Pin the pushed manifest digest, not the tag. Every attempt addresses the image as `REPOSITORY@sha256:...`, where `REPOSITORY` is the local `imageRepository` in the runner configuration and the digest is operator-versioned authority from the bundle definition.
+
+The image carries the browsers, the Playwright runtime pinned to the release this repository reviewed, and the Graphyard reporter. Its entrypoint takes exactly one argument — the phase — and turns it into a Playwright invocation:
+
+| Phase | Command | Writes |
+| --- | --- | --- |
+| `enumerate` | `playwright test --config /oracle/playwright.config.ts --reporter <built-in> --list` | `$GRAPHYARD_REPORT_FILE` |
+| `execute` | the same, without `--list` | `$GRAPHYARD_REPORT_FILE` |
+
+`--list` reports the declared suite without running a test body, which is what makes the approved inventory something the target cannot shape.
+
+**The bundle supplies assertions, not a runtime.** `/oracle` is mounted read-only and must contain `playwright.config.ts` (or `.js`/`.mjs`) plus the reviewed specs and helpers. Module resolution for those specs is provided by the image, so `import { test } from '@playwright/test'` resolves to the approved runtime without `NODE_PATH` or `NODE_OPTIONS` — both are refused at the container boundary precisely because they redirect resolution. Nothing is installed from the bundle, and `node_modules` inside a bundle refuses at `bundle-digest`.
+
+The specs read the approved target from `GRAPHYARD_TARGET_URL`, which is present in the `execute` phase only. A configuration that hardcodes a `baseURL`, or that reaches the network during `enumerate`, is not usable on this path.
+
+The image sets no `USER`: the attestor supplies `--user` from `runAsUser`, and that account exists on the execution host rather than in the image. The entrypoint refuses an unknown phase, a missing report destination, a bundle with no Playwright configuration, and a report file that already exists — each before starting a browser, so a refusal is never mistaken for a test result.
 
 ## The host attestor
 
 Execution happens inside a small host-attestor service, under an OS identity the implementation worker cannot act as. Generate an Ed25519 keypair, store the private key mode 0600 owned by that identity, and pin the public key, the Docker endpoint and the isolated network in the runner registration.
 
 ```bash
-GRAPHYARD_ATTESTOR_KEY=/etc/graphyard/attestor.key graphyard runner supervise
+GRAPHYARD_ATTESTOR_KEY=/etc/graphyard/attestor.key \
+GRAPHYARD_ATTESTOR_URL=https://graphyard.example.test \
+GRAPHYARD_ATTESTOR_TOKEN_FILE=/etc/graphyard/attestor.token \
+  graphyard runner supervise
 ```
 
-The command reads one supervision request on stdin and answers on stdout. The runner reaches it through the `supervisor` entry in its own configuration — a `sudo` rule restricted to this command is the expected deployment, because `sudo`'s environment reset is what stops the runner from choosing which key signs. The attestor refuses to start if `GRAPHYARD_ATTESTOR_KEY` is unset, if the key is not a private (mode 0600) regular file, or if it belongs to another identity. It holds no Graphyard credential and never contacts the control plane.
+The command reads one supervision request on stdin and answers on stdout. The runner reaches it through the `supervisor` entry in its own configuration — a `sudo` rule restricted to this command is the expected deployment, because `sudo`'s environment reset is what stops the runner from choosing which key signs, which server is consulted, or which credential is used. Set all three variables in that rule. The attestor refuses to start if `GRAPHYARD_ATTESTOR_KEY` is unset, if the key is not a private (mode 0600) regular file, or if it belongs to another identity, and it applies the same two checks to its credential file.
+
+### The attestor verifies authority itself
+
+The attestor holds a **read-only** Graphyard credential of its own — role `reader`, no proof scope, and never the runner's or the collector's. It uses it for exactly one thing: `GET /api/validation/attempt/REQUEST_ID`, which returns the attempt authority Graphyard currently holds plus the lease state. Nothing about the attempt changes; an attestor that could also acknowledge, heartbeat or publish would be the runner and the collector at once.
+
+It reads twice, and both reads gate execution:
+
+| When | What it requires |
+| --- | --- |
+| Before provisioning anything | the plan's `grant` is exactly the authority Graphyard dispatched |
+| After the runner says it acknowledged | the same authority, `state: running`, an acknowledged attempt, and an unexpired lease |
+
+The acknowledgement handshake on the pipe is a *sequencing* signal — it says the runner has finished trying — and never the authority to execute. Anything that can invoke the supervisor can write `{"proceed":true}`, so a schema-valid plan for an attempt Graphyard never dispatched, never acknowledged, or has already taken back would otherwise start containers against a live target. Because `collecting` fails the second read, an attempt also cannot start a container after the collector has observed settlement and Graphyard has released its reservations.
+
+The credential is not a way around the boundary: it cannot dispatch, acknowledge, upload an artifact or publish a result, and the attestor still signs only what its own `executeAttempt` observed.
 
 **The attestor signs what it observed, not what it was handed.** It performs preflight, starts both containers, measures the approved bundle before and after, settles the containers, and reads the output boundary — all itself. The record it returns is the one its own execution produced; the only thing that crosses the boundary from the runner is the plan, and the request schema has nowhere to put an interval, an exit code, a measured digest or a container state. This is the whole point of the signature: a compromised runner can still fabricate an execution record and a matching passing report in a directory it can write, but it cannot obtain an attestation over them, and the collector publishes nothing without one.
 
-The signature covers the request/attempt/epoch, the pinned host, the actual interval, the canonical output path, the artifact digests, the complete container set, **and the execution conclusions the collector acts on**: the outcome, the refusals, the per-phase results, and the bundle digests measured before and after alongside the runner image digest. Binding those is what stops a valid signature for the run that happened from being reattached to a record whose `timed_out` has become `completed`, whose refusals are gone, or whose mismatched digests have been replaced with the approved ones.
+The signature covers the request/attempt/epoch, the pinned host, the actual interval, the canonical output path, the artifact digests, the complete container set, **the execution conclusions the collector acts on** — the outcome, the refusals, the per-phase results, and the bundle digests measured before and after alongside the runner image digest — **and the dispatch authority the run happened under**: the approved target, the execution network, and a digest of the whole grant. Binding the conclusions is what stops a valid signature for the run that happened from being reattached to a record whose `timed_out` has become `completed`, whose refusals are gone, or whose mismatched digests have been replaced with the approved ones. Binding the authority is what stops the other direction: a runner that hands the attestor a plan naming its own target or Docker network, obtains a real signature over that run, and then presents the collector with the record carrying the grant Graphyard actually issued. The request, attempt and epoch never change in that swap, so identifying the attempt alone would not catch it; the grant digest covers every field, including ones added later.
 
 Three OS identities are involved and none may be shared: the **attestor**, which owns the approved bundle, the signing key and each attempt boundary; the **runner** worker account, which holds Graphyard authority and can start nothing itself; and the unprivileged, never-root **container user** in `runAsUser`, which writes the report through the boundary group. The attestor refuses when the container user is the account that asked for supervision — under the `sudo` rule that account is `SUDO_UID` — because a runner able to write the boundary could replace the report between the last phase and the measurement, and the attestation would then cover bytes the container never wrote. It also refuses before starting anything if it is not itself a member of the boundary group, since it could not read the report it is being asked to attest.
 
@@ -150,7 +196,9 @@ The private key is never mounted into either Playwright container, returned to t
 
 ## Collect, verify and publish
 
-The collector runs elsewhere, under a **separate producer credential** scoped to the proof. Never give it to the runner, and never give the runner's credential to the collector.
+The collector runs under a **separate producer credential** scoped to the proof. Never give it to the runner, and never give the runner's credential to the collector.
+
+It runs as its own OS account on the execution host, because settlement is observed on the pinned local Docker socket. Separate *identity* is what the boundary requires — the collector cannot execute, the runner cannot publish, and neither is the attestor — and sharing a machine does not weaken any of that. Add the collector to the boundary group, give it read access to the Docker socket, and give it no access to the approved bundle or the attestor's key.
 
 ```bash
 graphyard runner collect collector.json
@@ -163,7 +211,7 @@ graphyard runner collect collector.json
     "attemptId": "b1d7c05e-8a24-4f6b-93ec-2f7a1d905c38",
     "epoch": 1,
     "runner": { "id": "preview-runner", "revision": 1 },
-    "executionHost": "ssh://graphyard@runner-1.example.test",
+    "executionHost": "unix:///var/run/docker.sock",
     "attestationPublicKey": "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEA2HzeK/2WAQf7BPIiVqXL5Mx9WMOOQ7KdQaUMVaBUHFM=\n-----END PUBLIC KEY-----\n",
     "executionNetwork": "gy-preview-isolated",
     "bundleDigest": "sha256:3f9a1c7d2e5b4086a1d3c6f8092b4e7a5d1c8f30b2a69e4d7c05f1a8b3e6d924",
@@ -187,13 +235,13 @@ The collector re-reads the dispatch authority itself and compares it with the ex
 
 `requiredArtifacts` is this collector's own configuration, and it decides what is *uploaded*, not what is verified. Every approved kind the boundary holds is read whatever the upload list says: behaviour cannot be verified from the execution report without the inventory enumerated offline, and a kind left unread would look like output the approved reporter never wrote. The attestor likewise measures every kind, so a collector publishing a subset still publishes bytes the attestor saw; anything rewritten after attestation no longer matches a measured digest and refuses. A required name with no collector implementation still refuses explicitly.
 
-It then reads the output boundary directly. Only the approved reporter's structure is accepted: arbitrary candidate-authored JSON is not proof that a command ran, and any file the approved reporter did not write refuses collection. The enumerated inventory is compared against actual execution — empty, skipped, expected-failing, missing, duplicated, retried, inconsistent and truncated reports all refuse.
+It then reads the output boundary directly, and **verifies the host attestation against the bytes it just read before it uploads anything**. An artifact name is published once per attempt and cannot be taken back: a live grant plus schema-valid forged boundary files would otherwise consume the names this attempt's real evidence needs, and no later correct collection could republish them. Only the approved reporter's structure is accepted: arbitrary candidate-authored JSON is not proof that a command ran, and any file the approved reporter did not write refuses collection. The enumerated inventory is compared against actual execution — empty, skipped, expected-failing, missing, duplicated, retried, inconsistent and truncated reports all refuse.
 
 ### Settlement is observed, not reported
 
 `executionSettled` in the published result is the collector's own observation, never a field copied from the execution record. The collector derives both container names for the attempt from the grant — `graphyard-enumerate-ATTEMPT` and `graphyard-execute-ATTEMPT` — and inspects each one itself, read-only; it never removes anything, so observing cannot manufacture an `absent`. Only `absent` for exactly those containers settles the attempt and lets Graphyard release its protected reservations. A record whose settlement does not account for exactly those containers, or that claims settlement the collector cannot see, is refused as blocked and the barrier stays closed until an operator supplies independent settlement evidence.
 
-This is why the collector needs reachability to the execution host's container runtime. It uses the `executionHost` pinned in the operator-versioned runner registration; a collector cannot redirect inspection to a daemon where the attempt's containers merely happen to be absent. The attestor addresses that same endpoint for **every** runtime command — the two `docker run` invocations, the force-removal and its own confirming inspection — rather than whichever context its environment happens to default to. Running and removing on one daemon while the collector confirms absence on another would let a failed removal read as a settled attempt with its container still live against the target. Scope that endpoint to inspection. Docker transport, daemon, and authentication failures are `unknown`; only Docker's specific “no such container/object” response establishes absence. The runner cannot publish evidence, and the collector cannot execute.
+This is why the collector needs reachability to the execution host's container runtime, and why it runs on that host. It uses the `executionHost` pinned in the operator-versioned runner registration; a collector cannot redirect inspection to a daemon where the attempt's containers merely happen to be absent. The attestor addresses that same endpoint for **every** runtime command — the two `docker run` invocations, the force-removal and its own confirming inspection — rather than whichever context its environment happens to default to. Running and removing on one daemon while the collector confirms absence on another would let a failed removal read as a settled attempt with its container still live against the target. Scope that endpoint to inspection. Docker transport, daemon, and authentication failures are `unknown`; only Docker's specific “no such container/object” response establishes absence. The runner cannot publish evidence, and the collector cannot execute.
 
 ### Collection revokes execution authority
 
@@ -228,6 +276,7 @@ The published result reports execution, behaviour, inventory, attribution and ar
 
 - The target must be immutable and operator-configured; the adapter has no mutable-target support, so a URL taken from arbitrary PR output is not acceptable input.
 - Trace, screenshot and video capture are unimplemented under the protection policy and are refused, so failure diagnosis relies on the data-minimised step trace plus the target's own logs.
+- The attestor, the Docker daemon and the collector share one host, because preflight measures the mounted bytes on the attestor's own filesystem. A remote `ssh://` or `tcp://` execution endpoint is refused rather than trusted; supporting one needs preflight to run on the daemon host, which this path does not do. The three identities remain separate.
 - Container isolation is specified and asserted here, but a container boundary is a claim about this executor's configuration, not a proof of sufficient isolation against arbitrary hostile code. The oracle bundle and runner image are trusted, reviewed inputs; the untrusted code in this path is the deployed candidate, reached over the network.
 - Settlement is verified through the container runtime. External side effects a test caused in a shared system are not settled by removing a container; use approved test accounts and fresh isolated resources, or refuse dispatch.
 

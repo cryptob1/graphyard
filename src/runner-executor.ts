@@ -13,11 +13,21 @@ const targetUrl = z.url().max(2000).refine(s => { const u = new URL(s); return u
  * arbitrary one can attach the browser to databases and other internal services. The
  * approved name is operator-versioned authority, never runner configuration. */
 const dockerNetwork = z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,60}$/).refine(value => !['host', 'bridge', 'default', 'none'].includes(value), 'Use a dedicated operator-approved Docker network');
-/** The pinned Docker endpoint, in the form the operator registration enforces. Every
+/**
+ * The pinned Docker endpoint, in the form the operator registration enforces. Every
  * runtime command an attempt issues is addressed to it, so it has to be a daemon address
  * rather than free text: a value the CLI would read as another flag, or an unreachable
- * default context, is exactly how removal and inspection end up on different daemons. */
-const dockerEndpoint = z.string().min(1).max(500).regex(/^(?:ssh|tcp|unix):\/\/[^\s]+$/, 'The pinned execution host must be an ssh://, tcp:// or unix:// Docker endpoint');
+ * default context, is exactly how removal and inspection end up on different daemons.
+ *
+ * Only a local socket is accepted. Preflight measures the approved bundle, the attempt
+ * boundary and their ancestry on the filesystem the attestor can see, while `--mount`
+ * sources are interpreted by whichever daemon runs the container. Over `ssh://` or
+ * `tcp://` those are two different filesystems, so the same pathnames could mount bytes
+ * nobody measured — or resolve to nothing at all — while every host-side check passed.
+ * A remote endpoint is only safe once preflight itself runs on the daemon host, which
+ * this path does not do, so it is refused rather than trusted.
+ */
+const dockerEndpoint = z.string().min(1).max(500).regex(/^unix:\/\/\/[^\s]+$/, 'The pinned execution host must be a local unix:// Docker socket: the attestor measures the mounted bytes on its own filesystem, which only holds for a daemon on the same host');
 /**
  * The unprivileged container identity. UID or GID zero is refused: a runner configuration
  * could otherwise name `0:0`, provide a root-owned boundary, satisfy every structural

@@ -38,7 +38,7 @@ async function fixture(artifactStorage: 'external' | 'postgres' = 'external') {
   collector.proofs!.push(proof);
   const scenario = await defineScenario(store, operator, { id: `scenario-${n}`, title: 'Behavior', purpose: 'Prove behavior', steps: ['Execute'], expected: ['Correct'], environment: environment.id, runner: 'playwright', testPath: 'tests/behavior.spec.ts' }, id());
   await validation.define(operator, { kind: 'environment', id: environment.id, expectedRevision: 0, repository: 'test/repository', url: 'https://preview.example.test', instance: `instance-${n}`, immutable: true, services: ['api'], resources: [`test-account-${n}`] }, id());
-  for (const [ref, actor, role] of [[runnerRef, runner, 'runner'], [collectorRef, collector, 'collector'], [builderRef, builder, 'builder']] as const) await validation.define(operator, { kind: 'registration', id: ref.id, expectedRevision: 0, principalId: actor.id, role, environment, adapterVersion: 'test-v1', proofs: role === 'collector' ? [proof] : [], enabled: true, ...(role === 'runner' ? { executionHost: 'ssh://runner.test', attestationPublicKey, executionNetwork: 'gy-isolated' } : {}) }, id());
+  for (const [ref, actor, role] of [[runnerRef, runner, 'runner'], [collectorRef, collector, 'collector'], [builderRef, builder, 'builder']] as const) await validation.define(operator, { kind: 'registration', id: ref.id, expectedRevision: 0, principalId: actor.id, role, environment, adapterVersion: 'test-v1', proofs: role === 'collector' ? [proof] : [], enabled: true, ...(role === 'runner' ? { executionHost: 'unix:///var/run/docker.sock', attestationPublicKey, executionNetwork: 'gy-isolated' } : {}) }, id());
   await validation.define(operator, { kind: 'bundle', id: bundle.id, expectedRevision: 0, scenario: scenario.id, scenarioRevision: scenario.revision, scenarioHash: scenario.hash, digest, runnerImageDigest: inputs }, id());
   let w = await engine.execute(operator, 'create', null, { title: 'Validation fixture', criteria: [{ id: 'AC-1', text: 'Behavior is proven', proofs: [proof] }] }, id());
   w = await engine.execute(operator, 'ready', w.id, {}, id()); w = await engine.execute(worker, 'claim', w.id, {}, id());
@@ -278,7 +278,7 @@ test('authorized build producers still cannot attest a mismatched source or inco
 test('the execution boundary a runner may use is operator-versioned, not runner configuration', async () => {
   const f = await fixture();
   const n = `net-${f.n}`;
-  const base = { kind: 'registration' as const, id: n, expectedRevision: 0, principalId: runner.id, role: 'runner' as const, environment: f.environment, adapterVersion: 'test-v1', proofs: [], enabled: true, executionHost: 'ssh://runner.test', attestationPublicKey };
+  const base = { kind: 'registration' as const, id: n, expectedRevision: 0, principalId: runner.id, role: 'runner' as const, environment: f.environment, adapterVersion: 'test-v1', proofs: [], enabled: true, executionHost: 'unix:///var/run/docker.sock', attestationPublicKey };
   // Docker resolves a network name against every network the daemon already has, so an
   // unpinned one lets a runner attach the browser container to databases and other
   // internal services. The approved isolated network is authority, like the host and key.
@@ -287,6 +287,10 @@ test('the execution boundary a runner may use is operator-versioned, not runner 
     await assert.rejects(validation.define(operator, { ...base, executionNetwork }, id()), /dedicated isolated Docker network/);
   // Only a runner registration configures an execution boundary at all.
   await assert.rejects(validation.define(operator, { ...base, id: `${n}-c`, principalId: collector.id, role: 'collector', proofs: [f.proof], executionNetwork: 'gy-isolated' }, id()), /Only runner registrations/);
+  // A remote daemon would resolve the attempt's bind-mount pathnames on a filesystem the
+  // attestor never measured, so only a local socket may be pinned.
+  for (const executionHost of ['ssh://graphyard@runner-1.example.test', 'tcp://10.0.0.4:2376', 'unix://relative.sock'])
+    await assert.rejects(validation.define(operator, { ...base, id: `${n}-h`, executionHost, executionNetwork: 'gy-isolated' }, id()), /local unix:\/\/ Docker socket/);
   // The runner learns the approved network from dispatch; it is never in its own input.
   const dispatched: any = await validation.dispatch(runner, { registration: f.runnerRef }, id());
   assert.equal(dispatched.executionAuthority.network, 'gy-isolated');
@@ -295,6 +299,40 @@ test('the execution boundary a runner may use is operator-versioned, not runner 
   assert.equal((await validation.collectionAuthority(collector, command) as any).executionNetwork, 'gy-isolated');
   await cleanup(f);
 });
+test('the host attestor reads current attempt authority itself, under a read-only credential', async () => {
+  const f = await fixture();
+  const d: any = await validation.dispatch(runner, { registration: f.runnerRef }, id());
+  const command = { requestId: f.r.id, attemptId: d.attempt.id, epoch: d.attempt.epoch };
+  const attestor: Principal = { id: 'attestor', role: 'reader' };
+
+  // Before the ACK the attempt carries authority but may not be executed: the attestor's
+  // second read is what releases containers, so `dispatched` has to be visible here.
+  const dispatched: any = await validation.attemptAuthority(attestor, f.r.id);
+  assert.equal(dispatched.state, 'dispatched');
+  assert.equal(dispatched.acknowledged, false);
+  // The authority it returns is the same one the runner was dispatched, field for field,
+  // so a plan carrying a substituted target or network cannot match it.
+  assert.deepEqual(dispatched.grant, { requestId: f.r.id, attemptId: d.attempt.id, epoch: d.attempt.epoch, runner: f.runnerRef,
+    executionHost: 'unix:///var/run/docker.sock', attestationPublicKey, executionNetwork: 'gy-isolated',
+    bundleDigest: digest, runnerImageDigest: inputs, targetUrl: 'https://preview.example.test', deadline: f.requestInput.deadline });
+
+  await validation.runnerCommand(runner, 'ack', command, id());
+  const running: any = await validation.attemptAuthority(attestor, f.r.id);
+  assert.equal(running.state, 'running');
+  assert.equal(running.acknowledged, true);
+  assert.ok(Date.parse(running.expiresAt) > Date.parse(running.now));
+
+  // Once the collector has taken over, the attempt must start no further container.
+  await validation.collectionAuthority(collector, command);
+  assert.equal((await validation.attemptAuthority(attestor, f.r.id) as any).state, 'collecting');
+
+  // The credential is read-only and separate: the runner and the collector cannot use it
+  // to look up authority, and it can do nothing else. Reading changed no attempt state.
+  for (const other of [runner, collector, builder, worker]) await assert.rejects(validation.attemptAuthority(other, f.r.id), /read-only attestor credential/);
+  assert.equal((await validation.list()).requests.find(r => r.id === f.r.id)?.state, 'collecting');
+  await cleanup(f);
+});
+
 test('builder and collector registrations cannot collapse onto one producer principal', async () => {
   const f = await fixture();
   const shared = { id: `shared-builder-${f.n}`, revision: 1 };

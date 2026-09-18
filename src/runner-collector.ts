@@ -26,9 +26,35 @@ const conclusionsSchema = z.object({
 type Conclusions = z.infer<typeof conclusionsSchema>;
 const conclusions = (source: Conclusions): Conclusions => ({ outcome: source.outcome, refusals: source.refusals, phases: source.phases,
   bundleDigestBefore: source.bundleDigestBefore, bundleDigestAfter: source.bundleDigestAfter, runnerImageDigest: source.runnerImageDigest });
+/**
+ * Stable bytes for one attempt's authority. Keys are sorted at every level, so the digest
+ * identifies the authority itself rather than the order some JSON encoder happened to
+ * produce, and the parsed grant is hashed rather than whatever extra text arrived with it.
+ */
+const canonical = (value: unknown): string =>
+  Array.isArray(value) ? `[${value.map(canonical).join(',')}]`
+  : value !== null && typeof value === 'object'
+    ? `{${Object.keys(value as object).sort().map(key => `${JSON.stringify(key)}:${canonical((value as Record<string, unknown>)[key])}`).join(',')}}`
+    : JSON.stringify(value) ?? 'null';
+/**
+ * The digest of the whole dispatch authority an attempt ran under.
+ *
+ * Naming only the grant fields that happen to be interesting today is what let a
+ * substituted `targetUrl` or `executionNetwork` survive: the runner could hand the
+ * attestor a plan carrying its own target, obtain a valid signature over it, and then
+ * present the record with the real grant restored, because nothing signed contradicted
+ * the swap. Hashing the entire grant means any field the attestor did not run under
+ * fails verification against the authority the collector re-read for itself.
+ */
+export const grantDigest = (grant: unknown) => `sha256:${createHash('sha256').update(canonical(attemptGrantSchema.parse(grant))).digest('hex')}`;
 const executionAttestationPayloadSchema = z.object({
   requestId: z.uuid(), attemptId: z.uuid(), epoch: z.number().int().positive(),
   executionHost: z.string().min(1).max(500), outputPath: z.string().min(1).max(4096),
+  // The two grant fields that decide what the attested run actually touched: which
+  // deployment the browser was pointed at, and which Docker network it could reach.
+  targetUrl: z.string().min(1).max(2000), executionNetwork: z.string().min(1).max(60),
+  // ...and the authority as a whole, so no future grant field is silently unattested.
+  grantDigest: digest,
   startedAt: z.iso.datetime(), finishedAt: z.iso.datetime(),
   ...conclusionsSchema.shape,
   artifacts: z.array(z.object({ name, digest }).strict()).max(30),
@@ -48,7 +74,8 @@ export const attestationBytes = (payload: ExecutionAttestationPayload) => Buffer
 export function executionAttestationPayload(input: { grant: AttemptGrant; execution: ExecutionRecord; artifacts: { name: string; digest: string }[] }): ExecutionAttestationPayload {
   const { grant, execution } = input;
   return executionAttestationPayloadSchema.parse({ requestId: grant.requestId, attemptId: grant.attemptId, epoch: grant.epoch,
-    executionHost: grant.executionHost, outputPath: execution.outputPath, startedAt: execution.startedAt, finishedAt: execution.finishedAt,
+    executionHost: grant.executionHost, targetUrl: grant.targetUrl, executionNetwork: grant.executionNetwork, grantDigest: grantDigest(grant),
+    outputPath: execution.outputPath, startedAt: execution.startedAt, finishedAt: execution.finishedAt,
     ...conclusions(execution),
     artifacts: input.artifacts.map(({ name, digest }) => ({ name, digest })).sort((a, b) => a.name.localeCompare(b.name)),
     containers: [...execution.settlement.containers].sort((a, b) => a.name.localeCompare(b.name)) });
@@ -63,6 +90,10 @@ export function verifyExecutionAttestation(grantInput: unknown, executionInput: 
   const reasons: string[] = [];
   if (p.requestId !== grant.requestId || p.attemptId !== grant.attemptId || p.epoch !== grant.epoch) reasons.push('Host attestation is not bound to this attempt authority');
   if (p.executionHost !== grant.executionHost) reasons.push('Host attestation did not come from the execution host pinned by the runner registration');
+  // The attested run must have exercised the authority this collector re-read, not a
+  // plan the runner edited on its way to the attestor and restored on the way back.
+  if (p.targetUrl !== grant.targetUrl || p.executionNetwork !== grant.executionNetwork) reasons.push('Host attestation covers a different approved target or execution network than this attempt authority');
+  if (p.grantDigest !== grantDigest(grant)) reasons.push('Host attestation is not bound to the whole dispatch authority this collector re-read');
   if (resolve(p.outputPath) !== execution.outputPath || p.startedAt !== execution.startedAt || p.finishedAt !== execution.finishedAt) reasons.push('Host attestation is not bound to this execution interval and output boundary');
   if (!isDeepStrictEqual(conclusions(p), conclusions(execution))) reasons.push('Host attestation does not bind the execution outcome, refusals, phase results and measured digests this record claims');
   // The attestor measures every artifact kind the boundary held; this collector may be

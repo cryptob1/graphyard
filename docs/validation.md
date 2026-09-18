@@ -81,7 +81,7 @@ Define separate runner, collector and builder registrations:
   "role": "runner",
   "environment": {"id": "preview", "revision": 1},
   "adapterVersion": "custom-v1",
-  "executionHost": "ssh://graphyard-inspect@preview-runner.internal",
+  "executionHost": "unix:///var/run/docker.sock",
   "attestationPublicKey": "-----BEGIN PUBLIC KEY-----\n…\n-----END PUBLIC KEY-----\n",
   "executionNetwork": "gy-preview-isolated",
   "proofs": [],
@@ -89,7 +89,7 @@ Define separate runner, collector and builder registrations:
 }
 ```
 
-Runner registrations must pin the exact container host the collector inspects, the public key of an operator-controlled host attestor, and the dedicated isolated network the target-facing phase may join; the attestor private key must be inaccessible to the runner worker. `executionNetwork` is authority for the same reason as the other two: a container runtime resolves a network name against every network it already has, so an unpinned one lets a runner attach the browser to internal services. The built-in `host`, `bridge`, `default` and `none` names refuse. Use `role: collector` and its allowed `e2e:...` proofs for the collector; use `role: builder` for the build producer. Non-runner registrations omit `executionHost`, `attestationPublicKey` and `executionNetwork`. These must reference separately configured principals with the roles in the table above.
+Runner registrations must pin the exact container host the collector inspects, the public key of an operator-controlled host attestor, and the dedicated isolated network the target-facing phase may join; the attestor private key must be inaccessible to the runner worker. `executionHost` must be a local `unix://` socket: the supported executor measures the bundle and the attempt boundary on the attestor's own filesystem, and a remote daemon would resolve the same bind-mount pathnames somewhere that was never measured, so `ssh://` and `tcp://` endpoints refuse. `executionNetwork` is authority for the same reason as the other two: a container runtime resolves a network name against every network it already has, so an unpinned one lets a runner attach the browser to internal services. The built-in `host`, `bridge`, `default` and `none` names refuse. Use `role: collector` and its allowed `e2e:...` proofs for the collector; use `role: builder` for the build producer. Non-runner registrations omit `executionHost`, `attestationPublicKey` and `executionNetwork`. These must reference separately configured principals with the roles in the table above.
 
 Approve a `kind: bundle` definition with `id`, `expectedRevision`, `scenario`, `scenarioRevision`, `scenarioHash`, `digest` and `runnerImageDigest`. Digests use `sha256:` plus 64 lowercase hex characters. The bundle digest must cover all executable assertions, transitive helpers, fixtures, configuration and lockfiles. The runner image pins runtime dependencies. Changed executable bytes require a new scenario revision and work pinned to it, even if published under a different bundle ID. Existing E2E scenario pins cannot be upgraded in place yet: create a follow-up work item pinned to the new revision, preserving the earlier item for history. Do not remove and re-add a proof to work around this boundary. D1 records the operator's approval; D2's isolated executor must enforce immutable approved bytes throughout execution.
 

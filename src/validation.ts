@@ -164,7 +164,10 @@ export class Validation {
         demand(!data.enabled || principal && principal.role === (data.role === 'runner' ? 'worker' : 'producer'), 'Registration principal must have the appropriate separate role');
         if (data.enabled && data.role === 'collector') demand(data.proofs.length && data.proofs.every(p => principal?.proofs?.includes(p)), 'Collector cannot exceed configured proof scope');
         if (data.enabled && data.role === 'runner') {
-          demand(data.executionHost && /^(?:ssh|tcp|unix):\/\//.test(data.executionHost) && data.attestationPublicKey, 'Runner registration must pin its execution host and trusted attestor public key');
+          // A local socket only. The attestor measures the approved bundle and the attempt
+          // boundary on its own filesystem, while a remote daemon would resolve the same
+          // mount pathnames on a different one — attesting bytes nobody measured.
+          demand(data.executionHost && /^unix:\/\/\//.test(data.executionHost) && data.attestationPublicKey, 'Runner registration must pin a local unix:// Docker socket as its execution host, and a trusted attestor public key');
           // Docker resolves a network name against every network the daemon already has.
           // Left to runner configuration, it could attach the browser container to the
           // networks carrying databases and other internal services, so the approved
@@ -316,6 +319,40 @@ export class Validation {
       return { requestId: r.id, attemptId: a.id, epoch: a.epoch, runner: r.runner,
         executionHost: runner.executionHost, attestationPublicKey: runner.attestationPublicKey, executionNetwork: runner.executionNetwork,
         bundleDigest: bundle.digest, runnerImageDigest: bundle.runnerImageDigest, targetUrl: environment.url, deadline: r.deadline };
+    });
+  }
+  /**
+   * What the host attestor reads for itself before it starts a container.
+   *
+   * The attestor is handed a plan by the runner over a pipe, and a caller that can invoke
+   * it can say anything on that pipe — including `proceed` for an attempt Graphyard never
+   * dispatched, never acknowledged, or has already taken back. So the attestor verifies
+   * the authority here instead: this returns the attempt authority Graphyard currently
+   * holds, with the lease state needed to decide whether it may still be executed.
+   *
+   * It is a read: no attempt state changes, and the credential that may call it is
+   * read-only. An attestor that could also acknowledge, heartbeat or publish would be the
+   * runner and the collector at once, which is the separation this whole path exists for.
+   */
+  async attemptAuthority(actor: Principal, requestId: string) {
+    demand(actor.role === 'admin' || actor.role === 'reader', 'A read-only attestor credential is required', 403);
+    z.uuid().parse(requestId);
+    return this.store.transaction(async (db, now) => {
+      const r = await this.request(db, requestId), a = r.attempts.at(-1);
+      demand(a, 'No attempt has been dispatched for this request', 404);
+      const c = await this.candidate(db, r.candidateId);
+      const runner = await this.definition(db, 'registration', r.runner, false) as Registration;
+      const environment = await this.definition(db, 'environment', c.environment, false) as Environment;
+      const bundle = await this.definition(db, 'bundle', c.bundle, false) as Bundle;
+      return {
+        grant: { requestId: r.id, attemptId: a!.id, epoch: a!.epoch, runner: r.runner,
+          executionHost: runner.executionHost, attestationPublicKey: runner.attestationPublicKey, executionNetwork: runner.executionNetwork,
+          bundleDigest: bundle.digest, runnerImageDigest: bundle.runnerImageDigest, targetUrl: environment.url, deadline: r.deadline },
+        // `running` is the only state in which an attempt may still start a container:
+        // `dispatched` has not been acknowledged, and `collecting` means the collector has
+        // already taken authority and observed settlement.
+        state: r.state, acknowledged: !!a!.acknowledgedAt, expiresAt: a!.expiresAt, now: now.toISOString(),
+      };
     });
   }
   async result(actor: Principal, input: unknown, key: string) {

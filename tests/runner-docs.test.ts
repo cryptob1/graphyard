@@ -44,7 +44,10 @@ test('the documented collector configuration carries the whole dispatch authorit
   // input validation: the first names the daemon settlement is observed on, the second the
   // key the host attestation is verified against.
   const grant = attemptGrantSchema.parse(collector.grant);
-  assert.match(grant.executionHost, /^(?:ssh|tcp|unix):\/\//);
+  // Local socket only: preflight measures the mounted bytes on the attestor's own
+  // filesystem, which says nothing about what a remote daemon would resolve those same
+  // mount pathnames to.
+  assert.match(grant.executionHost, /^unix:\/\/\//);
   assert.match(grant.attestationPublicKey, /BEGIN PUBLIC KEY/);
   // The collector reads the attempt's own boundary, which the execution record names.
   assert.equal(collector.outputPath, `/srv/graphyard/attempts/${grant.attemptId}`);

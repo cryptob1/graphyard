@@ -7,14 +7,14 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
 import { createHash, generateKeyPairSync, randomUUID, sign as signBytes } from 'node:crypto';
-import { assembleResult, attestationBytes, attributeExecution, collectArtifacts, collectionBinding, collectionInputs, deriveSettlement, executionAttestationPayload, selfReportedObservation, type TargetObservation } from '../src/runner-collector.js';
+import { assembleResult, attestationBytes, attributeExecution, collectArtifacts, collectionBinding, collectionInputs, deriveSettlement, executionAttestationPayload, grantDigest, selfReportedObservation, verifyExecutionAttestation, type TargetObservation } from '../src/runner-collector.js';
 import { containerNames, type AttemptGrant, type ExecutionRecord } from '../src/runner-executor.js';
 
 const run = promisify(execFile);
 const bundle = `sha256:${'a'.repeat(64)}`, image = `sha256:${'b'.repeat(64)}`;
 const attestor = generateKeyPairSync('ed25519');
 const grant: AttemptGrant = { requestId: randomUUID(), attemptId: randomUUID(), epoch: 1, runner: { id: 'preview-runner', revision: 1 },
-  executionHost: 'ssh://runner.test', attestationPublicKey: attestor.publicKey.export({ type: 'spki', format: 'pem' }).toString(), executionNetwork: 'gy-isolated',
+  executionHost: 'unix:///var/run/docker.sock', attestationPublicKey: attestor.publicKey.export({ type: 'spki', format: 'pem' }).toString(), executionNetwork: 'gy-isolated',
   bundleDigest: bundle, runnerImageDigest: image, targetUrl: 'https://preview.example.test/', deadline: '2026-09-16T01:00:00.000Z' };
 const startedAt = '2026-09-16T00:00:00.000Z', finishedAt = '2026-09-16T00:01:00.000Z';
 const expected = { instance: 'preview-7f3a', artifacts: [{ service: 'api', digest: `sha256:${'c'.repeat(64)}` }] };
@@ -153,10 +153,43 @@ test('worker-authored output cannot pass without the pinned host attestor', () =
   assert.equal(forged.report!.behavior, 'blocked');
   assert.ok(forged.refusals.some(r => /signature is invalid/.test(r)));
   const signed = attestation(record(), collectedOf(inventoryOf(['books']), executionOf(['books'])));
-  const wrongHost = { ...signed, payload: { ...signed.payload, executionHost: 'ssh://other-runner.test' } };
+  const wrongHost = { ...signed, payload: { ...signed.payload, executionHost: 'unix:///var/run/other-docker.sock' } };
   const redirected = assemble({ executionAttestation: wrongHost });
   assert.equal(redirected.report!.behavior, 'blocked');
   assert.ok(redirected.refusals.some(r => /execution host pinned/.test(r)));
+});
+
+test('an attestation obtained for a substituted grant does not verify against the real authority', () => {
+  // The attack this closes: a compromised runner hands the attestor a schema-valid plan
+  // whose grant names its own target or Docker network, gets a real signature over that
+  // run, and then presents the collector with the record carrying the authority the
+  // server actually issued. Binding the attempt by id alone would let it through, because
+  // the request, attempt and epoch never changed.
+  const sign = (over: Partial<AttemptGrant>) => {
+    const substituted = { ...grant, ...over };
+    const collected = collectedOf(inventoryOf(['books']), executionOf(['books']));
+    const payload = executionAttestationPayload({ grant: substituted, execution: record({ grant: substituted }), artifacts: collected.artifacts });
+    return { payload, signature: signBytes(null, attestationBytes(payload), attestor.privateKey.export({ type: 'pkcs8', format: 'pem' }).toString()).toString('base64') };
+  };
+  for (const [over, pattern] of [
+    [{ targetUrl: 'https://attacker.example.test/' }, /different approved target or execution network/],
+    [{ executionNetwork: 'gy-internal' }, /different approved target or execution network/],
+    // Every other grant field is covered too, through the digest of the whole authority.
+    [{ bundleDigest: `sha256:${'f'.repeat(64)}` }, /whole dispatch authority/],
+    [{ deadline: '2026-09-16T02:00:00.000Z' }, /whole dispatch authority/],
+    [{ runner: { id: 'other-runner', revision: 1 } }, /whole dispatch authority/],
+  ] as [Partial<AttemptGrant>, RegExp][]) {
+    // The record's own grant is put back to the authority the collector re-read, which is
+    // exactly what `collectionBinding` requires and what made the swap survive before.
+    const reasons = verifyExecutionAttestation(grant, record(), { artifacts: [] }, sign(over)).reasons;
+    assert.ok(reasons.some(r => pattern.test(r)), `${JSON.stringify(over)}: ${reasons.join('; ')}`);
+    const laundered = assemble({ executionAttestation: sign(over) });
+    assert.equal(laundered.report!.behavior, 'blocked');
+  }
+  // The digest identifies the authority, not the key order it happened to arrive in.
+  const reordered = Object.fromEntries(Object.entries(grant).reverse());
+  assert.equal(grantDigest(reordered), grantDigest(grant));
+  assert.notEqual(grantDigest({ ...grant, targetUrl: 'https://other.example.test/' }), grantDigest(grant));
 });
 
 test('a signature obtained for one execution cannot be reused after its conclusions change', () => {

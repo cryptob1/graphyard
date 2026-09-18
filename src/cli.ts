@@ -6,13 +6,13 @@ import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import { supervise } from './supervisor.js';
 import { inspectRunnerRepository, oracleBundleDigest, snapshotRunnerSources } from './runner-setup.js';
 import { assertRunnerCredentialScope, attemptGrantSchema, containerNames, executionRecordSchema, observeContainers, runnerPlanSchema } from './runner-executor.js';
-import { assembleResult, collectArtifacts, collectionBinding, collectionInputs, collectorInputSchema } from './runner-collector.js';
-import { superviseAttempt } from './runner-attestor.js';
+import { assembleResult, collectArtifacts, collectionBinding, collectionInputs, collectorInputSchema, verifyExecutionAttestation } from './runner-collector.js';
+import { superviseAttempt, supervisionRequestSchema } from './runner-attestor.js';
 import { assertRepository, discover } from './onboarding.js';
 import { startGithubSetup } from './github-setup.js';
 import { fileURLToPath } from 'node:url';
 import { createInterface } from 'node:readline';
-import { parseArgs } from 'node:util';
+import { isDeepStrictEqual, parseArgs } from 'node:util';
 import { z } from 'zod';
 import { diagnose, fileConflicts, proofPreview, resourceConflicts } from './coordination.js';
 import { loadConnection, setupRepository, handoff, hostIdSchema } from './repository-setup.js';
@@ -22,9 +22,10 @@ import { acknowledgeContainment, containmentCredentials, establishContainment, i
 try { process.loadEnvFile(); } catch (error: any) { if (error.code !== 'ENOENT') throw error; }
 const [command, id, ...args] = process.argv.slice(2);
 let connection: Awaited<ReturnType<typeof loadConnection>>;
-// The host attestor holds no control-plane credential: it signs what it supervised and
-// never speaks to Graphyard. Requiring a connection file there would be a reason to give
-// that identity a token it must not have.
+// The host attestor never uses the repository's connection file. It has a Graphyard
+// credential of its own — read-only, and named by an environment variable its own sudo
+// rule sets — precisely so the identity that invokes it cannot choose which credential,
+// or which server, it verifies attempt authority against.
 if (command === 'master' || (command === 'runner' && id === 'supervise')) connection = null;
 else try { connection = await loadConnection(process.cwd()); } catch { console.error('Invalid or insecure Graphyard connection file. Inspect local configuration; credential values are omitted.'); process.exit(1); }
 const base = process.env.GRAPHYARD_URL ?? connection?.url ?? 'http://127.0.0.1:4310';
@@ -273,12 +274,38 @@ Never share an operator or producer credential with an implementation agent.`); 
       // command anywhere signs an execution record that arrived from somewhere else.
       const keyFile = process.env.GRAPHYARD_ATTESTOR_KEY;
       if (!keyFile) throw new Error('The host attestor requires GRAPHYARD_ATTESTOR_KEY to name its Ed25519 private key; the signing key is never taken from the supervision request');
-      const keyInfo = await stat(keyFile);
-      if (!keyInfo.isFile() || keyInfo.mode & 0o077) throw new Error('Host-attestor private key must be a private regular file (mode 0600)');
-      if (keyInfo.uid !== (process.getuid?.() ?? -1)) throw new Error('Host-attestor private key must belong to the supervising identity');
+      const privateFile = async (path: string, subject: string) => {
+        const info = await stat(path);
+        if (!info.isFile() || info.mode & 0o077) throw new Error(`Host-attestor ${subject} must be a private regular file (mode 0600)`);
+        if (info.uid !== (process.getuid?.() ?? -1)) throw new Error(`Host-attestor ${subject} must belong to the supervising identity`);
+        return (await readFile(path, 'utf8'));
+      };
+      const key = await privateFile(keyFile, 'private key');
+      // The attestor's own read-only credential and server. Both are named by environment
+      // variables the attestor's sudo rule supplies, never by the supervision request: a
+      // runner that could choose either would be choosing what "current authority" means.
+      const authorityUrl = process.env.GRAPHYARD_ATTESTOR_URL, tokenFile = process.env.GRAPHYARD_ATTESTOR_TOKEN_FILE;
+      if (!authorityUrl || !tokenFile) throw new Error('The host attestor requires GRAPHYARD_ATTESTOR_URL and GRAPHYARD_ATTESTOR_TOKEN_FILE; it verifies attempt authority against Graphyard itself rather than trusting the process that invoked it');
+      const attestorToken = (await privateFile(tokenFile, 'Graphyard credential')).trim();
+      if (!attestorToken) throw new Error('Host-attestor Graphyard credential file is empty');
+      const authorityOrigin = new URL(authorityUrl).origin;
+      /** What Graphyard currently holds for this attempt. Never what the caller says. */
+      const readAttemptAuthority = async (requestId: string) => {
+        const response = await fetch(`${authorityOrigin}/api/validation/attempt/${encodeURIComponent(requestId)}`,
+          { headers: { Authorization: `Bearer ${attestorToken}` }, redirect: 'error', signal: AbortSignal.timeout(30_000) });
+        const body = await response.json();
+        if (!response.ok) throw new Error(`Attempt authority could not be read independently, so no container was started: ${JSON.stringify(body)}`);
+        return z.object({ grant: attemptGrantSchema, state: z.string().min(1).max(50), acknowledged: z.boolean(),
+          expiresAt: z.iso.datetime(), now: z.iso.datetime() }).parse(body);
+      };
       const lines = createInterface({ input: process.stdin })[Symbol.asyncIterator]();
       const nextLine = async () => { const { value, done } = await lines.next(); if (done) throw new Error('The supervision channel closed before the attempt could proceed'); return String(value); };
-      const request = JSON.parse(await nextLine());
+      const request = supervisionRequestSchema.parse(JSON.parse(await nextLine()));
+      // Before anything is provisioned: the plan must carry exactly the authority Graphyard
+      // dispatched. A schema-valid plan naming another target, network, bundle or image is
+      // a fabrication regardless of who put it on the pipe.
+      const dispatched = await readAttemptAuthority(request.plan.grant.requestId);
+      if (!isDeepStrictEqual(dispatched.grant, request.plan.grant)) throw new Error('The supervision request does not carry the attempt authority Graphyard dispatched; nothing was provisioned');
       const authority = new AbortController();
       const abort = () => authority.abort();
       process.on('SIGTERM', abort); process.on('SIGINT', abort);
@@ -287,11 +314,21 @@ Never share an operator or producer credential with an implementation agent.`); 
       const ready = async () => {
         process.stdout.write(`${JSON.stringify({ preflight: 'ready' })}\n`);
         if (JSON.parse(await nextLine())?.proceed !== true) throw new Error('The attempt was not acknowledged; no container was started');
+        // The caller's `proceed` only says it has finished trying; it is a sequencing
+        // signal and never the authority to execute. What starts containers is this
+        // process's own re-read: the attempt must still be the current one, carry the same
+        // authority, have been acknowledged by the runner under its own credential, and
+        // hold an unexpired lease. `collecting` fails here too, so an attempt cannot start
+        // a container after the collector has observed settlement.
+        const current = await readAttemptAuthority(request.plan.grant.requestId);
+        if (!isDeepStrictEqual(current.grant, request.plan.grant)) throw new Error('Attempt authority changed between preflight and execution; no container was started');
+        if (current.state !== 'running' || !current.acknowledged) throw new Error(`Graphyard does not hold this attempt as acknowledged and executing (state ${current.state}); no container was started`);
+        if (Date.parse(current.expiresAt) <= Date.parse(current.now)) throw new Error('The attempt lease has expired; no container was started');
       };
       // Under the documented `sudo` rule the runner's own identity is knowable, and the
       // container must not run as it: the output boundary is private to the container user.
       const callerUid = /^[0-9]{1,10}$/.test(process.env.SUDO_UID ?? '') ? Number(process.env.SUDO_UID) : undefined;
-      try { process.stdout.write(`${JSON.stringify(await superviseAttempt(request, { privateKey: await readFile(keyFile, 'utf8'), ready, signal: authority.signal, callerUid }))}\n`); return; }
+      try { process.stdout.write(`${JSON.stringify(await superviseAttempt(request, { privateKey: key, ready, signal: authority.signal, callerUid }))}\n`); return; }
       finally { process.off('SIGTERM', abort); process.off('SIGINT', abort); }
     }
     if (id === 'collect' && args.length === 1) {
@@ -319,7 +356,15 @@ Never share an operator or producer credential with an implementation agent.`); 
       // unread would look like output the approved reporter never wrote. Only the upload
       // below is narrowed to the configured subset.
       const collected = await collectArtifacts(collectedFrom, collectionInputs(input.requiredArtifacts));
-      const publish = new Set(input.requiredArtifacts);
+      // Verify the host attestation, and the digests of the bytes just read, *before* the
+      // first upload. An artifact name is published once per attempt and cannot be taken
+      // back: a live grant plus schema-valid forged boundary files would otherwise consume
+      // the names this attempt's real evidence needs, and no later correct collection could
+      // republish them. Unattested bytes are therefore never uploaded — but the attempt
+      // still publishes its refusal below, because a blocked attempt is a visible state
+      // rather than a collection that quietly disappears.
+      const attested = verifyExecutionAttestation(grant, input.record, collected, input.executionAttestation);
+      const publish = attested.reasons.length ? new Set<string>() : new Set(input.requiredArtifacts);
       const uploaded: { name: string; digest: string; url: string }[] = [];
       const failures: string[] = [];
       for (const artifact of collected.artifacts.filter(a => publish.has(a.name))) {
