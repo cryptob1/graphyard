@@ -26,8 +26,13 @@ test('the manifest flow completes with one browser confirmation and returns cred
     const state = page.match(/state=([a-f0-9]+)/)![1];
     const manifest = JSON.parse(page.match(/name="manifest" value="([^"]+)"/)![1].replaceAll('&quot;', '"').replaceAll('&amp;', '&'));
     assert.equal(manifest.hook_attributes.url, webhookUrlFor('https://graphyard.example.test'));
-    await fetch(`${setupUrl}/created?code=install-test&state=${state}`);
-    await fetch(`${setupUrl}/installed?installation_id=500`);
+    // Both callbacks redirect back to the setup page. Do not follow the redirect: the flow
+    // finishes the moment /installed persists the installation id and immediately closes the
+    // setup server, so a followed redirect races that shutdown for a page this test never reads.
+    const created = await fetch(`${setupUrl}/created?code=install-test&state=${state}`, { redirect: 'manual' });
+    assert.equal(created.status, 303);
+    const installed = await fetch(`${setupUrl}/installed?installation_id=500`, { redirect: 'manual' });
+    assert.equal(installed.status, 303);
 
     const facts = await flow;
     assert.equal(facts.appId, GRAPHYARD_APP_ID);
