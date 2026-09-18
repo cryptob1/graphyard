@@ -234,10 +234,14 @@ async function quarantinedByDeadSupervisor(hostId = 'coordinator-host') {
   w = await engine.execute(worker, 'workspace', w.id, { epoch: 1, host: hostId, path, branch: `graphyard/${w.id}` }, randomUUID());
   w = await engine.execute(worker, 'quarantine', w.id, { epoch: 1, settlementHash }, randomUUID());
   w = await engine.execute(worker, 'launch', w.id, { epoch: 1, settlementHash }, randomUUID());
-  // The supervisor dies without settling: both authorities lapse beyond the grace window.
+  // The supervisor dies without settling: every authority lapses beyond the grace window.
+  // The lease deadline lapses on the quarantine too, exactly as an unrenewed lease does:
+  // reconciliation then clears the lease record without shortening the window.
   const lapsed = new Date(Date.now() - containmentGraceMs - 600_000).toISOString();
-  await store.pool.query(`UPDATE work_items SET document=jsonb_set(jsonb_set(document,'{lease,expiresAt}',to_jsonb($2::text)),'{containmentQuarantine,launchExpiresAt}',to_jsonb($2::text)) WHERE id=$1`, [w.id, lapsed]);
+  await store.pool.query(`UPDATE work_items SET document=jsonb_set(jsonb_set(jsonb_set(document,'{lease,expiresAt}',to_jsonb($2::text)),
+    '{containmentQuarantine,launchExpiresAt}',to_jsonb($2::text)),'{containmentQuarantine,leaseExpiresAt}',to_jsonb($2::text)) WHERE id=$1`, [w.id, lapsed]);
   await engine.reconcile();
+  assert.equal((await store.list()).find(item => item.id === w.id)!.lease, null, 'reconciliation clears the expired lease record');
   return { work: (await store.list()).find(item => item.id === w.id)!, settlementHash, settlementToken, path, hostId };
 }
 const deadProbe = (workspacePath: string, overrides: Partial<ReturnType<typeof probeSupervisorAbsence>> = {}) => () =>
@@ -247,7 +251,10 @@ test('master status verifies supervisor death on the registered host and the coo
   const { work, settlementHash, path, hostId } = await quarantinedByDeadSupervisor();
   const headers = { Authorization: `Bearer ${'m'.repeat(32)}`, 'Content-Type': 'application/json' };
   const { snapshot, clockOffset } = await snapshotWithClock(async () => (await (await fetch(`${url}/api/work-snapshot`, { headers })).json()) as { work: Work[]; now: string });
-  const containment = assessContainment(snapshot.work, { hostId, observedAt: snapshot.now, clockOffset, probe: deadProbe(path) });
+  // A live containment scope on the host belongs to another assignment only because every
+  // member it holds was attributed to one; it does not fence this quarantine.
+  const containment = assessContainment(snapshot.work, { hostId, observedAt: snapshot.now, clockOffset,
+    probe: deadProbe(path, { scopes: [{ unit: 'graphyard-watch-9-x.scope', activeState: 'active', processes: [], attributed: [4242] }] }) });
   const status = buildMasterStatus(snapshot, [], [], {}, containment);
   const row = status.work.find(entry => entry.key === work.key)!;
   assert.deepEqual({ settleable: row.containment?.settleable, refusals: row.containment?.refusals, host: row.containment?.host, epoch: row.containment?.epoch },
@@ -282,7 +289,9 @@ test('every unverifiable containment signal refuses automatic settlement and kee
   await assert.rejects(settle(evidence(), coordinator, { epoch: 2 }), /missing, superseded, or does not match/);
   await assert.rejects(settle(evidence({ processes: [{ pid: 4242, evidence: 'command' }] })), /Process 4242 of the contained worker is still present/);
   await assert.rejects(settle(evidence({ unverifiable: ['systemd user manager is unavailable'] })), /Host verification was incomplete/);
-  await assert.rejects(settle(evidence({ scopes: [{ unit: 'graphyard-watch-3-x.scope', activeState: 'active', processes: [9] }] })), /still holds 1 process/);
+  await assert.rejects(settle(evidence({ scopes: [{ unit: 'graphyard-watch-3-x.scope', activeState: 'active', processes: [9], attributed: [] }] })),
+    /still holds 1 process\(es\) that are not attributed to another assignment/);
+  await assert.rejects(settle(evidence({ scopes: [{ unit: 'graphyard-watch-3-x.scope', activeState: 'active', processes: [9], attributed: [10] }] })), /still holds 1 process/);
   await assert.rejects(settle(evidence({ host: 'another-host' })), /registered on coordinator-host/);
   await assert.rejects(settle(evidence({ workspacePath: '/srv/elsewhere' })), /is registered at/);
   await assert.rejects(settle(evidence({ platform: 'darwin' })), /Linux process and scope inspection/);
@@ -290,6 +299,19 @@ test('every unverifiable containment signal refuses automatic settlement and kee
   await assert.rejects(settle(evidence({ clockOffset: { min: 30_000, max: 30_100 } })), /clocks disagree/);
   for (const refusal of [settle(evidence({ processes: [{ pid: 1, evidence: 'workspace' }] }))])
     await assert.rejects(refusal, /rework .* --previous-worker-stopped REASON/, 'every refusal names the operator attestation path');
+
+  // Reconciliation has already cleared the lease record, so the grace window is only as
+  // long as the deadline the quarantine retained: a fresh one fences with no lease at all.
+  const retainLease = (expiresAt: string | null) => store.pool.query(
+    expiresAt === null ? `UPDATE work_items SET document=document #- '{containmentQuarantine,leaseExpiresAt}' WHERE id=$1`
+      : `UPDATE work_items SET document=jsonb_set(document,'{containmentQuarantine,leaseExpiresAt}',to_jsonb($2::text)) WHERE id=$1`,
+    expiresAt === null ? [work.id] : [work.id, expiresAt]);
+  assert.equal((await store.list()).find(item => item.id === work.id)!.lease, null);
+  await retainLease(new Date(Date.now() - 1_000).toISOString());
+  await assert.rejects(settle(evidence()), /Worker lease for epoch 1 has not been expired for the required 120s grace window/);
+  await retainLease(null);
+  await assert.rejects(settle(evidence()), /records no worker-lease deadline/);
+  await retainLease(new Date(Date.now() - containmentGraceMs - 600_000).toISOString());
 
   // A live supervisor is fenced even when the host reports nothing: the deadlines rule.
   await store.pool.query(`UPDATE work_items SET document=jsonb_set(document,'{lease}',$2::jsonb) WHERE id=$1`,

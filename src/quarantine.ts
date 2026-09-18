@@ -158,7 +158,13 @@ export const containmentVerificationSchema = z.object({
   /** Local clock minus control-plane clock, bounded by the read that produced it. */
   clockOffset: z.object({ min: z.number().int().min(-86_400_000).max(86_400_000), max: z.number().int().min(-86_400_000).max(86_400_000) }).strict(),
   processes: z.array(z.object({ pid: z.number().int().positive(), evidence: z.enum(['command', 'workspace']) }).strict()).max(200),
-  scopes: z.array(z.object({ unit: z.string().min(1).max(200), activeState: z.string().min(1).max(40), processes: z.array(z.number().int().positive()).max(200) }).strict()).max(50),
+  scopes: z.array(z.object({
+    unit: z.string().min(1).max(200), activeState: z.string().min(1).max(40),
+    /** Members a live scope still holds that were not attributed to another assignment. */
+    processes: z.array(z.number().int().positive()).max(200),
+    /** Members that descend from a live supervisor of a different work key or epoch. */
+    attributed: z.array(z.number().int().positive()).max(200).default([]),
+  }).strict()).max(50),
   /** Privileged host processes outside every containment scope that withheld inspection. */
   inaccessible: z.number().int().min(0),
   unverifiable: z.array(z.string().min(1).max(500)).max(50),
@@ -193,8 +199,14 @@ export function containmentSettlementRefusals(
   }
   if (verification.platform !== 'linux') refusals.push(`Supervisor absence was not established by Linux process and scope inspection; the host reports ${verification.platform}`);
   if (work.lease && work.lease.epoch !== quarantine.epoch) refusals.push(`A lease for epoch ${work.lease.epoch} supersedes quarantined epoch ${quarantine.epoch}`);
-  const leaseExpiry = work.lease ? Date.parse(work.lease.expiresAt) : null;
-  if (leaseExpiry !== null && !(leaseExpiry + grace <= now)) refusals.push(`Worker lease for epoch ${quarantine.epoch} has not been expired for the required ${seconds(grace)}s grace window`);
+  // Reconciliation clears an expired lease, so the live record is only sometimes present.
+  // The quarantine retains its own deadline; the later of the two is the fence, and a
+  // quarantine that records neither cannot prove its grace window has passed at all.
+  if (work.lease && !Number.isFinite(Date.parse(work.lease.expiresAt))) refusals.push(`Worker lease for epoch ${work.lease.epoch} carries no readable expiry`);
+  const deadlines = [work.lease?.expiresAt, quarantine.leaseExpiresAt].map(value => value ? Date.parse(value) : NaN).filter(Number.isFinite);
+  const leaseExpiry = deadlines.length ? Math.max(...deadlines) : null;
+  if (leaseExpiry === null) refusals.push(`Quarantined epoch ${quarantine.epoch} records no worker-lease deadline, so its ${seconds(grace)}s grace window cannot be established`);
+  else if (!(leaseExpiry + grace <= now)) refusals.push(`Worker lease for epoch ${quarantine.epoch} has not been expired for the required ${seconds(grace)}s grace window`);
   const launchExpiry = quarantine.launchExpiresAt ? Date.parse(quarantine.launchExpiresAt) : null;
   if (launchExpiry !== null && !(launchExpiry + grace <= now)) refusals.push(`Launch authority for epoch ${quarantine.epoch} has not been expired for the required ${seconds(grace)}s grace window`);
   const observed = Date.parse(verification.observedAt);
@@ -209,6 +221,6 @@ export function containmentSettlementRefusals(
   for (const process of verification.processes)
     refusals.push(`Process ${process.pid} of the contained worker is still present on ${verification.host} (matched by ${process.evidence === 'command' ? 'supervisor command line' : 'assigned workspace'})`);
   for (const scope of verification.scopes.filter(entry => entry.processes.length))
-    refusals.push(`Containment scope ${scope.unit} is ${scope.activeState} and still holds ${scope.processes.length} process(es) of the assigned workspace`);
+    refusals.push(`Containment scope ${scope.unit} is ${scope.activeState} and still holds ${scope.processes.length} process(es) that are not attributed to another assignment`);
   return refusals;
 }

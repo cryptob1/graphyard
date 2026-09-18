@@ -66,6 +66,18 @@ function preserveAssignment(work: Work) {
   if (work.lease && (!work.lastAssignment || work.lastAssignment.epoch < work.lease.epoch))
     work.lastAssignment = { owner: work.lease.owner, epoch: work.lease.epoch };
 }
+
+// A quarantine outlives the lease that raised it: reconciliation clears an expired lease,
+// and release, rework and changed requirements clear a live one. The deadline automatic
+// settlement measures its grace window from is therefore retained on the quarantine, which
+// only proof removes. It only ever moves forward, and only for the quarantined epoch.
+function retainQuarantineFence(work: Work) {
+  const quarantine = work.containmentQuarantine;
+  if (!quarantine || !work.lease || work.lease.epoch !== quarantine.epoch) return;
+  const retained = quarantine.leaseExpiresAt ? Date.parse(quarantine.leaseExpiresAt) : -Infinity;
+  const live = Date.parse(work.lease.expiresAt);
+  if (Number.isFinite(live) && !(live <= retained)) quarantine.leaseExpiresAt = work.lease.expiresAt;
+}
 export class Engine {
   operatorAuthorizer?: (db: any, now: Date, actor: Principal) => Promise<Principal>;
   // Reviewer identities and the control-plane App are deployment facts, not client input.
@@ -122,7 +134,7 @@ export class Engine {
       }
       const containmentCleanup = ['settle', 'recover', 'autosettle'];
       const deliveredContainmentCleanup = work.stage === 'done' && containmentCleanup.includes(command);
-      preserveAssignment(work);
+      preserveAssignment(work); retainQuarantineFence(work);
       if (!containmentCleanup.includes(command) && work.mergeExecution && Date.parse(work.mergeExecution.expiresAt) <= now.getTime()) work.mergeExecution = null;
       demand(!work.mergeExecution || command === 'heartbeat' || containmentCleanup.includes(command), 'A merge execution is active; retry after it completes or expires');
       if (command !== 'create' && !containmentCleanup.includes(command)) demand(work.stage !== 'done', 'Delivered work is immutable; create a follow-up task');
@@ -275,6 +287,7 @@ export class Engine {
         const trusted = actor.role === 'producer' && !!actor.proofs?.includes(data.proof) || actor.role === 'admin' && data.proof.startsWith('manual:');
         work.evidence.push({ ...data, id: randomUUID(), producer: actor.id, trusted, at: now.toISOString() });
       }
+      retainQuarantineFence(work);
       // Delivery is an immutable snapshot. A late containment cleanup may append
       // its audit/revision metadata, but stale inputs must not re-evaluate it.
       if (!deliveredContainmentCleanup) this.evaluate(work, all, now);
@@ -507,7 +520,7 @@ export class Engine {
       for (const work of all) {
         if (work.stage === 'done') continue;
         const before = JSON.stringify(work);
-        preserveAssignment(work);
+        preserveAssignment(work); retainQuarantineFence(work);
         if (work.mergeExecution && Date.parse(work.mergeExecution.expiresAt) > now.getTime()) continue;
         if (work.mergeExecution) work.mergeExecution = null;
         if (work.lease && Date.parse(work.lease.expiresAt) <= now.getTime()) work.lease = null;

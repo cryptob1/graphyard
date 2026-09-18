@@ -13,7 +13,8 @@ function quarantined(overrides: Partial<{ lease: any; workspaces: any[]; quarant
     lease: 'lease' in overrides ? overrides.lease : { owner: 'worker-a', epoch: 3, expiresAt: expired(containmentGraceMs + 60_000) },
     workspaces: overrides.workspaces ?? [{ host, path, branch: 'graphyard/gy-45-3', epoch: 3, owner: 'worker-a' }],
     containmentQuarantine: 'quarantine' in overrides ? overrides.quarantine
-      : { owner: 'worker-a', epoch: 3, at: expired(3_600_000), settlementHash: 'a'.repeat(64), launchAcknowledgedAt: expired(3_600_000), launchExpiresAt: expired(containmentGraceMs + 30_000) },
+      : { owner: 'worker-a', epoch: 3, at: expired(3_600_000), settlementHash: 'a'.repeat(64), launchAcknowledgedAt: expired(3_600_000),
+        launchExpiresAt: expired(containmentGraceMs + 30_000), leaseExpiresAt: expired(containmentGraceMs + 60_000) },
   };
 }
 function verification(overrides: Partial<ContainmentVerification> = {}): ContainmentVerification {
@@ -30,18 +31,36 @@ test('verified supervisor death is the only state that authorizes automatic sett
   // An acknowledgement that never happened leaves no launch authority to expire.
   assert.deepEqual(refusals(quarantined({ quarantine: { owner: 'worker-a', epoch: 3, at: expired(3_600_000), settlementHash: 'a'.repeat(64) } })), []);
   assert.deepEqual(refusals(quarantined({ lease: null })), []);
-  assert.deepEqual(refusals(quarantined(), verification({ scopes: [{ unit: 'graphyard-watch-9-x.scope', activeState: 'inactive', processes: [] }] })), []);
+  assert.deepEqual(refusals(quarantined(), verification({ scopes: [{ unit: 'graphyard-watch-9-x.scope', activeState: 'inactive', processes: [], attributed: [] }] })), []);
 });
 
 test('an unexpired lease or launch authority refuses settlement until its grace window passes', () => {
+  const graceSeconds = containmentGraceMs / 1000;
   assert.deepEqual(refusals(quarantined({ lease: { owner: 'worker-a', epoch: 3, expiresAt: new Date(now + 60_000).toISOString() } })),
-    [`Worker lease for epoch 3 has not been expired for the required ${containmentGraceMs / 1000}s grace window`]);
+    [`Worker lease for epoch 3 has not been expired for the required ${graceSeconds}s grace window`]);
   assert.deepEqual(refusals(quarantined({ lease: { owner: 'worker-a', epoch: 3, expiresAt: expired(containmentGraceMs - 1_000) } })).length, 1, 'expiry inside the grace window is not yet death');
   assert.deepEqual(refusals(quarantined({ quarantine: { ...quarantined().containmentQuarantine, launchExpiresAt: expired(containmentGraceMs - 1_000) } })),
-    [`Launch authority for epoch 3 has not been expired for the required ${containmentGraceMs / 1000}s grace window`]);
-  assert.deepEqual(refusals(quarantined({ lease: { owner: 'worker-a', epoch: 3, expiresAt: 'not-a-time' } })).length, 1);
+    [`Launch authority for epoch 3 has not been expired for the required ${graceSeconds}s grace window`]);
+  assert.deepEqual(refusals(quarantined({ lease: { owner: 'worker-a', epoch: 3, expiresAt: 'not-a-time' } })),
+    ['Worker lease for epoch 3 carries no readable expiry']);
   assert.deepEqual(refusals(quarantined({ lease: { owner: 'worker-b', epoch: 4, expiresAt: expired(3_600_000) } })),
     ['A lease for epoch 4 supersedes quarantined epoch 3']);
+
+  // Reconciliation clears an expired lease long before the grace window closes, so the
+  // deadline the quarantine retained is what the window is measured from.
+  const retained = (leaseExpiresAt: string | undefined) =>
+    refusals(quarantined({ lease: null, quarantine: { ...quarantined().containmentQuarantine, leaseExpiresAt } }));
+  assert.deepEqual(retained(expired(containmentGraceMs - 1_000)),
+    [`Worker lease for epoch 3 has not been expired for the required ${graceSeconds}s grace window`], 'a cleared lease record does not skip the window');
+  assert.deepEqual(retained(new Date(now + 60_000).toISOString()).length, 1);
+  assert.deepEqual(retained(expired(containmentGraceMs + 1_000)), []);
+  assert.deepEqual(retained(undefined),
+    [`Quarantined epoch 3 records no worker-lease deadline, so its ${graceSeconds}s grace window cannot be established`]);
+  // Whichever deadline is later rules: neither record can shorten the other's window.
+  assert.deepEqual(refusals(quarantined({ lease: { owner: 'worker-a', epoch: 3, expiresAt: expired(containmentGraceMs - 1_000) },
+    quarantine: { ...quarantined().containmentQuarantine, leaseExpiresAt: expired(containmentGraceMs + 600_000) } })).length, 1);
+  assert.deepEqual(refusals(quarantined({ lease: { owner: 'worker-a', epoch: 3, expiresAt: expired(containmentGraceMs + 600_000) },
+    quarantine: { ...quarantined().containmentQuarantine, leaseExpiresAt: expired(containmentGraceMs - 1_000) } })).length, 1);
 });
 
 test('settlement is bound to the registered workspace of the quarantined epoch', () => {
@@ -59,10 +78,11 @@ test('a live process, live scope, or incomplete probe refuses instead of assumin
     [`Process 4242 of the contained worker is still present on ${host} (matched by supervisor command line)`]);
   assert.deepEqual(refusals(quarantined(), verification({ processes: [{ pid: 77, evidence: 'workspace' }] })),
     [`Process 77 of the contained worker is still present on ${host} (matched by assigned workspace)`]);
-  assert.deepEqual(refusals(quarantined(), verification({ scopes: [{ unit: 'graphyard-watch-1-a.scope', activeState: 'active', processes: [51, 52] }] })),
-    ['Containment scope graphyard-watch-1-a.scope is active and still holds 2 process(es) of the assigned workspace']);
-  // A live scope whose every member was inspected and works elsewhere is another assignment.
-  assert.deepEqual(refusals(quarantined(), verification({ scopes: [{ unit: 'graphyard-watch-1-a.scope', activeState: 'active', processes: [] }] })), []);
+  assert.deepEqual(refusals(quarantined(), verification({ scopes: [{ unit: 'graphyard-watch-1-a.scope', activeState: 'active', processes: [51, 52], attributed: [] }] })),
+    ['Containment scope graphyard-watch-1-a.scope is active and still holds 2 process(es) that are not attributed to another assignment']);
+  // A live scope holds another assignment only when every member it kept was attributed to one.
+  assert.deepEqual(refusals(quarantined(), verification({ scopes: [{ unit: 'graphyard-watch-1-a.scope', activeState: 'active', processes: [], attributed: [51] }] })), []);
+  assert.deepEqual(refusals(quarantined(), verification({ scopes: [{ unit: 'graphyard-watch-1-a.scope', activeState: 'active', processes: [52], attributed: [51] }] })).length, 1);
   assert.deepEqual(refusals(quarantined(), verification({ unverifiable: ['Containment scope graphyard-watch-1-a.scope holds process 51 whose working directory could not be read'] })).length, 1);
   // Privileged host processes outside every containment scope are recorded, not guessed at.
   assert.deepEqual(refusals(quarantined(), verification({ inaccessible: 12 })), []);
@@ -86,20 +106,24 @@ test('a stale, future, or unbounded observation is not evidence about the presen
     ['Host verification reported inconsistent clock bounds']);
 });
 
-function probeDeps(overrides: SupervisorProbeDeps = {}, processes: Record<number, { argv: string[]; uid?: number; cwd?: string }> = {}): SupervisorProbeDeps {
+type FakeProcess = { argv: string[]; uid?: number; cwd?: string; ppid?: number };
+function probeDeps(overrides: SupervisorProbeDeps = {}, processes: Record<number, FakeProcess> = {}): SupervisorProbeDeps {
   const table = new Map(Object.entries(processes).map(([pid, record]) => [Number(pid), record]));
   const present = (pid: number) => { const record = table.get(pid); if (!record) throw Object.assign(new Error('gone'), { code: 'ENOENT' }); return record; };
   return {
     platform: 'linux', uid: 1000, resolvePath: value => value,
     listProcesses: () => [...table.keys()].map(String),
-    readCommand: pid => present(pid).argv.join(' '),
+    readCommand: pid => present(pid).argv.join('\0'),
     processOwner: pid => present(pid).uid ?? 1000,
     readCwd: pid => present(pid).cwd ?? '/',
+    // Unparented processes were reparented away from whatever started them.
+    readParent: pid => present(pid).ppid ?? 1,
     readCgroup: () => '',
     run: (_command, args) => args.includes('list-units') ? '' : args.includes('show-environment') ? 'LANG=C\n' : '',
     ...overrides,
   };
 }
+const supervisorOf = (key: string, epoch: number) => ['node', '/opt/graphyard/bin/graphyard.mjs', 'watch', key, String(epoch), '--', 'claude'];
 
 test('host probing reports a dead supervisor only when every signal was collected', () => {
   const clean = probeSupervisorAbsence(target, probeDeps({}, { 10: { argv: ['/usr/bin/bash'] }, 11: { argv: ['node', 'server.js'], cwd: '/srv/other' } }));
@@ -144,35 +168,54 @@ test('an unreadable process, scope query, or systemd manager stays unverifiable'
 
 test('containment scopes are attributed to the assigned workspace before they are dismissed', () => {
   const properties = (unit: string, state: string, group = `/user.slice/${unit}`) => `LoadState=loaded\nActiveState=${state}\nControlGroup=${group}\n`;
-  const withScope = (state: string, members: string, processes: Record<number, { argv: string[]; uid?: number; cwd?: string }> = {}, extra: SupervisorProbeDeps = {}) =>
+  const withScope = (state: string, members: string, processes: Record<number, FakeProcess> = {}, extra: SupervisorProbeDeps = {}) =>
     probeSupervisorAbsence(target, probeDeps({
       run: (_command, args) => args.includes('list-units') ? '  graphyard-watch-7-abc.scope loaded active running Graphyard\n'
         : args.includes('show') ? properties('graphyard-watch-7-abc.scope', state) : '',
       readCgroup: () => members, ...extra,
     }, processes));
+  // A member working outside the workspace is not thereby another assignment's: the scope
+  // name carries the supervisor's PID, never the work key, so it cannot excuse anyone.
   const holding = withScope('active', '81\n82\n', { 81: { argv: ['claude'], cwd: path }, 82: { argv: ['sh'], cwd: '/tmp' } });
-  assert.deepEqual(holding.scopes, [{ unit: 'graphyard-watch-7-abc.scope', activeState: 'active', processes: [81] }]);
-  assert.deepEqual(withScope('inactive', '').scopes, [{ unit: 'graphyard-watch-7-abc.scope', activeState: 'inactive', processes: [] }]);
+  assert.deepEqual(holding.scopes, [{ unit: 'graphyard-watch-7-abc.scope', activeState: 'active', processes: [81, 82], attributed: [] }]);
+  assert.deepEqual(withScope('inactive', '').scopes, [{ unit: 'graphyard-watch-7-abc.scope', activeState: 'inactive', processes: [], attributed: [] }]);
   const emptyCgroup = probeSupervisorAbsence(target, probeDeps({
     run: (_command, args) => args.includes('list-units') ? 'graphyard-watch-7-abc.scope loaded active running Graphyard\n'
       : args.includes('show') ? properties('graphyard-watch-7-abc.scope', 'active') : '',
     readCgroup: () => { throw Object.assign(new Error('gone'), { code: 'ENOENT' }); },
   }));
-  assert.deepEqual(emptyCgroup.scopes, [{ unit: 'graphyard-watch-7-abc.scope', activeState: 'active', processes: [] }]);
+  assert.deepEqual(emptyCgroup.scopes, [{ unit: 'graphyard-watch-7-abc.scope', activeState: 'active', processes: [], attributed: [] }]);
   const unreadable = probeSupervisorAbsence(target, probeDeps({
     run: (_command, args) => args.includes('list-units') ? 'graphyard-watch-7-abc.scope loaded active running Graphyard\n'
       : args.includes('show') ? properties('graphyard-watch-7-abc.scope', 'active') : '',
     readCgroup: () => { throw Object.assign(new Error('permission denied'), { code: 'EACCES' }); },
   }));
   assert.match(unreadable.unverifiable[0], /Containment scope graphyard-watch-7-abc.scope could not be inspected/);
-  // Inside a live containment scope an uninspectable member is a missing signal, not noise.
+  // Inside a live containment scope an uninspectable member holds the fence up.
   const opaqueMember = withScope('active', '83\n', { 83: { argv: ['claude'] } }, { readCwd: () => { throw Object.assign(new Error('permission denied'), { code: 'EACCES' }); } });
-  assert.deepEqual(opaqueMember.scopes, [{ unit: 'graphyard-watch-7-abc.scope', activeState: 'active', processes: [] }]);
-  assert.deepEqual(opaqueMember.unverifiable, ['Containment scope graphyard-watch-7-abc.scope holds process 83 whose working directory could not be read']);
-  // Another assignment's live scope, fully inspected, does not fence this one.
-  const neighbour = withScope('active', '84\n', { 84: { argv: ['claude'], cwd: '/srv/graphyard/worktrees/GY-51-2' } });
+  assert.deepEqual(opaqueMember.scopes, [{ unit: 'graphyard-watch-7-abc.scope', activeState: 'active', processes: [83], attributed: [] }]);
+  // A member that exited while the scope was being read is gone, not a survivor.
+  const departed = withScope('active', '83\n', {}, { readCwd: () => { throw Object.assign(new Error('gone'), { code: 'ESRCH' }); } });
+  assert.deepEqual(departed.scopes, [{ unit: 'graphyard-watch-7-abc.scope', activeState: 'active', processes: [], attributed: [] }]);
+  // Another assignment's live scope is dismissed only by the supervisor its members descend
+  // from: a different work key or epoch, read from that live process's own command line.
+  const neighbour = withScope('active', '84\n', { 84: { argv: ['claude'], cwd: '/srv/graphyard/worktrees/GY-51-2', ppid: 90 }, 90: { argv: supervisorOf('GY-51', 2) } });
   assert.deepEqual({ scopes: neighbour.scopes, unverifiable: neighbour.unverifiable },
-    { scopes: [{ unit: 'graphyard-watch-7-abc.scope', activeState: 'active', processes: [] }], unverifiable: [] });
+    { scopes: [{ unit: 'graphyard-watch-7-abc.scope', activeState: 'active', processes: [], attributed: [84] }], unverifiable: [] });
+  // The same scope, whose supervisor died and left the worker reparented, still fences.
+  const orphan = withScope('active', '84\n', { 84: { argv: ['claude'], cwd: '/srv/graphyard/worktrees/GY-51-2', ppid: 1 } });
+  assert.deepEqual(orphan.scopes, [{ unit: 'graphyard-watch-7-abc.scope', activeState: 'active', processes: [84], attributed: [] }]);
+  // This assignment's own supervisor never attributes its descendants elsewhere.
+  const ours = withScope('active', '85\n', { 85: { argv: ['claude'], cwd: '/tmp', ppid: 91 }, 91: { argv: supervisorOf(target.key, target.epoch) } });
+  assert.deepEqual(ours.scopes, [{ unit: 'graphyard-watch-7-abc.scope', activeState: 'active', processes: [85], attributed: [] }]);
+  // An ordinary command that merely carries a 'watch' argument attributes nothing.
+  const lookalike = withScope('active', '86\n', { 86: { argv: ['claude'], cwd: '/tmp', ppid: 92 }, 92: { argv: ['npm', 'run', 'watch', 'GY-51', '2'] } });
+  assert.deepEqual(lookalike.scopes, [{ unit: 'graphyard-watch-7-abc.scope', activeState: 'active', processes: [86], attributed: [] }]);
+  // Ancestry is followed past intermediate processes and survives a broken parent link.
+  const nested = withScope('active', '87\n', { 87: { argv: ['bash'], cwd: '/tmp', ppid: 88 }, 88: { argv: ['claude'], ppid: 93 }, 93: { argv: supervisorOf('GY-51', 2) } });
+  assert.deepEqual(nested.scopes, [{ unit: 'graphyard-watch-7-abc.scope', activeState: 'active', processes: [], attributed: [87] }]);
+  const broken = withScope('active', '87\n', { 87: { argv: ['bash'], cwd: '/tmp', ppid: 88 } });
+  assert.deepEqual(broken.scopes, [{ unit: 'graphyard-watch-7-abc.scope', activeState: 'active', processes: [87], attributed: [] }]);
   const stateless = probeSupervisorAbsence(target, probeDeps({
     run: (_command, args) => args.includes('list-units') ? 'graphyard-watch-7-abc.scope loaded active running Graphyard\n' : args.includes('show') ? 'LoadState=loaded\n' : '',
   }));
