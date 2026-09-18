@@ -160,6 +160,75 @@ test('draft and closed PRs expose actionable review waits without requesting pro
   }
 });
 
+const reviewerApp = { id: 'claude-reviewer', runtime: 'claude', appId: 55_001, botUserId: 55_002 };
+const reviewerProfile = { name: 'claude-reviewer', runtime: 'claude', reviewerApp: 'claude-reviewer', timeoutSeconds: 1800 };
+function agentFixture() {
+  const f = fixture();
+  f.github.config.reviewerApps = [reviewerApp];
+  f.work.policy.reviewProvider = 'agent';
+  f.work.policy.reviewerProfiles = [reviewerProfile];
+  f.pr.user.id = 12_345;
+  return f;
+}
+
+test('agent dispatch records the profile, identity and correlation marker for the exact candidate', async () => {
+  const f = agentFixture(); const original = f.github.request;
+  f.github.request = async (path, method, body: any) => method === 'POST'
+    ? { id: 456, body: body.body, performed_via_github_app: { id: 1234 }, user: { type: 'Bot' }, created_at: new Date().toISOString() }
+    : original(path, method, body);
+  let checked = false;
+  const request = await f.github.requestAgentReview(f.work, reviewerProfile, reviewerApp, async () => { checked = true; });
+  assert.equal(checked, true); assert.equal(request.commentId, 456); assert.equal(request.provider, 'agent');
+  assert.equal(request.profile, 'claude-reviewer'); assert.equal(request.reviewerApp, 'claude-reviewer');
+  assert.equal(request.sha, head); assert.equal(request.baseSha, base); assert.equal(request.policyRevision, 1);
+  assert.match(request.body, new RegExp(`graphyard-verdict:${request.marker} head:${head} verdict:approved`));
+  assert.match(request.body, /reviewer-app:claude-reviewer/);
+  await assert.rejects(f.github.requestAgentReview(f.work, reviewerProfile, reviewerApp, async () => { throw Error('Lease lost'); }), /Lease lost/);
+  // The control-plane App, an unconfigured profile, a mismatched identity and the PR author all refuse.
+  await assert.rejects(f.github.requestAgentReview(f.work, reviewerProfile, { ...reviewerApp, appId: 1234 }, async () => {}), /control-plane App/);
+  await assert.rejects(f.github.requestAgentReview(f.work, { ...reviewerProfile, name: 'other' }, reviewerApp, async () => {}), /not configured on this policy/);
+  await assert.rejects(f.github.requestAgentReview(f.work, { ...reviewerProfile, runtime: 'cursor' }, reviewerApp, async () => {}), /does not match its registered App identity/);
+  f.pr.user.id = reviewerApp.botUserId;
+  await assert.rejects(f.github.requestAgentReview(f.work, reviewerProfile, reviewerApp, async () => {}), /independent of the pull request author/);
+  f.pr.user.id = 12_345; f.pr.head.sha = 'd'.repeat(40);
+  await assert.rejects(f.github.requestAgentReview(f.work, reviewerProfile, reviewerApp, async () => {}), /changed/);
+  f.work.policy.reviewProvider = 'codex';
+  await assert.rejects(f.github.requestAgentReview(f.work, reviewerProfile, reviewerApp, async () => {}), /agent review policy required/);
+});
+
+test('agent observation resolves the registered identity and never requires native approval', async () => {
+  const f = agentFixture();
+  const waiting = await f.github.observe(f.work);
+  assert.equal(waiting.agentReview?.provider, 'agent'); assert.equal(waiting.agentReview?.approved, false);
+  assert.equal(waiting.agentReview?.profile, 'claude-reviewer');
+  assert.match(waiting.agentReview!.reason, /must dispatch a review to this profile/);
+  // Agent review does not depend on GitHub's own required-approval configuration.
+  const unprotected = agentFixture(); const original = unprotected.github.request;
+  unprotected.github.request = async (path, method, body) => {
+    const result = await original(path, method, body);
+    if (path.includes('/protection')) result.required_pull_request_reviews.required_approving_review_count = 0;
+    return result;
+  };
+  assert.equal((await unprotected.github.observe(unprotected.work)).protected, true);
+  // An unregistered or control-plane App identity cannot be dispatched to at all.
+  const unregistered = agentFixture(); unregistered.github.config.reviewerApps = [];
+  assert.match((await unregistered.github.observe(unregistered.work)).agentReview!.reason, /is not registered with this control plane/);
+  const selfReview = agentFixture(); selfReview.github.config.reviewerApps = [{ ...reviewerApp, appId: 1234 }];
+  assert.match((await selfReview.github.observe(selfReview.work)).agentReview!.reason, /is not registered with this control plane/);
+  // Once every profile is exhausted the observation says so instead of falling back.
+  const exhausted = agentFixture();
+  exhausted.work.candidate = { sha: head, baseSha: base, pr: 10, branch: 'graphyard/task', author: 'author' };
+  exhausted.work.reviewFailovers = [{ profile: 'claude-reviewer', reviewerApp: 'claude-reviewer', runtime: 'claude', exhaustion: 'usage-limit', reason: 'quota', at: new Date().toISOString(), sha: head, baseSha: base, policyRevision: 1, requestCommentId: 5, nextProfile: null }];
+  assert.match((await exhausted.github.observe(exhausted.work)).agentReview!.reason, /Every configured reviewer profile is exhausted/);
+  // Draft and closed pull requests still wait without requesting provider evidence.
+  for (const state of [{ state: 'open', draft: true }, { state: 'closed', draft: false }]) {
+    const pending = agentFixture(); Object.assign(pending.pr, state);
+    const observed = await pending.github.observe(pending.work);
+    assert.equal(observed.agentReview?.approved, false);
+    assert.match(observed.agentReview!.reason, /mark it ready|reopen/);
+    assert.ok(!pending.calls.some(call => call.path.includes('/comments')));
+  }
+});
 
 function enforcement(overrides: any = {}) {
   const now = '2026-09-17T05:00:00.000Z';
