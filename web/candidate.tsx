@@ -6,7 +6,8 @@ const external = { target: '_blank', rel: 'noopener noreferrer' } as const;
 
 export function CandidatePr({ repository, candidate, workKey }: { repository: unknown; candidate: { pr: number }; workKey?: string }) {
   const pr = candidate?.pr;
-  const label = `Open pull request #${pr}${workKey ? ` for ${workKey}` : ''} in GitHub`;
+  // The accessible name starts with the visible text so voice control can act on what it reads.
+  const label = `PR #${pr}, open pull request${workKey ? ` for ${workKey}` : ''} in GitHub`;
   const href = candidatePrUrl(repository, pr);
   const text: ReactNode = `PR #${pr}`;
   return href ? <a className="candidate-link" href={href} aria-label={label} onClick={event => event.stopPropagation()} {...external}>{text}</a> : <span>{text}</span>;
