@@ -28,6 +28,24 @@ test('the packaged release names one version everywhere it is stamped', () => {
   assert.ok(Number.isInteger(schemaVersion) && schemaVersion >= 1);
 });
 
+// The workloads in a rendered chart whose labels a Service's selector matches, by kind.
+// `kubectl port-forward svc/…` picks any pod the selector matches, so for the control-plane
+// Service the answer has to be the Deployment alone: not the database, a Job or the test pod.
+const selectedBy = (rendered: string, service: string) => {
+  const docs = rendered.split(/^---$/m);
+  const unquote = (value: string) => value.trim().replace(/^"(.*)"$/, '$1');
+  const blocks = (doc: string, key: string) => [...doc.matchAll(new RegExp(`^( *)${key}:\\n((?:\\1 +\\S.*\\n)+)`, 'gm'))]
+    .map(m => Object.fromEntries(m[2].trim().split('\n').map(line => { const [k, ...v] = line.trim().split(':'); return [k, unquote(v.join(':'))]; })));
+  const serviceDoc = docs.find(doc => /^kind: Service$/m.test(doc) && doc.includes(`name: ${service}\n`));
+  assert.ok(serviceDoc, `the chart renders Service ${service}`);
+  const [selector] = blocks(serviceDoc!, 'selector');
+  assert.ok(selector && Object.keys(selector).length > 0, 'the Service has a selector');
+  const workloads = ['Deployment', 'StatefulSet', 'Job', 'CronJob', 'Pod'];
+  return docs.map(doc => ({ doc, kind: /^kind: (\S+)$/m.exec(doc)?.[1] ?? '' })).filter(({ kind }) => workloads.includes(kind))
+    .filter(({ doc }) => blocks(doc, 'labels').some(labels => Object.entries(selector).every(([k, v]) => labels[k] === v)))
+    .map(({ kind }) => kind).sort();
+};
+
 test('the chart refuses to render without credentials and renders the documented topology with them', { skip: helm ? false : 'helm is not installed' }, () => {
   const chart = resolve('deploy/helm/graphyard');
   const lint = spawnSync(helm!, ['lint', chart, '--strict', '--set', 'secrets.existingSecret=graphyard-credentials'], { encoding: 'utf8' });
@@ -43,6 +61,7 @@ test('the chart refuses to render without credentials and renders the documented
   assert.ok(external.stdout.includes(`ghcr.io/cryptob1/graphyard:${packageVersion}`));
   assert.ok(external.stdout.includes('readOnlyRootFilesystem: true') && external.stdout.includes('runAsNonRoot: true'));
   assert.ok(external.stdout.includes('"db", "migrate"') && external.stdout.includes('db backup') && external.stdout.includes('db verify'));
+  assert.deepEqual(selectedBy(external.stdout, 'gy-graphyard'), ['Deployment'], 'the Service selects the control-plane pods and nothing else');
   const testPod = external.stdout.split(/^---$/m).find(doc => doc.includes('helm.sh/hook: test'));
   assert.ok(testPod, 'the chart carries a helm test');
   assert.match(testPod, /helm\.sh\/hook-delete-policy: before-hook-creation$/m, 'the test pod survives success so `helm test --logs` can read it');
@@ -51,6 +70,8 @@ test('the chart refuses to render without credentials and renders the documented
   assert.ok(bundled.stdout.includes('kind: StatefulSet') && bundled.stdout.includes('volumeClaimTemplates'), 'the evaluation database persists on a claim');
   assert.ok(bundled.stdout.includes('helm.sh/hook: pre-upgrade\n'), 'with the bundled database the hook waits for upgrades');
   assert.ok(bundled.stdout.includes('DATABASE_URL: "postgres://graphyard:evaluation-only@gy-graphyard-postgresql:5432/graphyard"'));
+  assert.deepEqual(selectedBy(bundled.stdout, 'gy-graphyard'), ['Deployment'], 'the Service never selects the evaluation database, the migration Job or the test pod');
+  assert.deepEqual(selectedBy(bundled.stdout, 'gy-graphyard-postgresql'), ['StatefulSet']);
   for (const missing of [['secrets.create=true'], ['secrets.create=true', 'secrets.principals=x'], ['postgresql.enabled=true', 'secrets.existingSecret=creds']]) {
     const refused = spawnSync(helm!, ['template', 'gy', chart, ...missing.flatMap(v => ['--set', v])], { encoding: 'utf8' });
     assert.notEqual(refused.status, 0, missing.join(' '));

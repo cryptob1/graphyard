@@ -23,6 +23,16 @@ app.kubernetes.io/name: {{ include "graphyard.name" . }}
 app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end -}}
 
+{{/*
+The control-plane pods, and nothing else in the release. Every workload carries a component
+label beside the release selector so the Service (and `kubectl port-forward svc/…`, which
+picks any pod the selector matches) never lands on the database, a Job or the test pod.
+*/}}
+{{- define "graphyard.serverSelectorLabels" -}}
+{{ include "graphyard.selectorLabels" . }}
+app.kubernetes.io/component: server
+{{- end -}}
+
 {{/* The version the image tag names, with any @sha256 digest stripped. */}}
 {{- define "graphyard.version" -}}
 {{- $tag := default .Chart.AppVersion .Values.image.tag -}}

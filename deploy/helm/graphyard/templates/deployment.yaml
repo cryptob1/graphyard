@@ -4,11 +4,12 @@ metadata:
   name: {{ include "graphyard.fullname" . }}
   labels:
     {{- include "graphyard.labels" . | nindent 4 }}
+    app.kubernetes.io/component: server
 spec:
   replicas: {{ .Values.replicaCount }}
   selector:
     matchLabels:
-      {{- include "graphyard.selectorLabels" . | nindent 6 }}
+      {{- include "graphyard.serverSelectorLabels" . | nindent 6 }}
   # Replicas share the Postgres ledger; coordination locks and job leases live there, so a
   # rolling update needs no sticky sessions and the additive schema serves both versions.
   strategy:
@@ -17,7 +18,7 @@ spec:
   template:
     metadata:
       labels:
-        {{- include "graphyard.selectorLabels" . | nindent 8 }}
+        {{- include "graphyard.serverSelectorLabels" . | nindent 8 }}
       annotations:
         checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
         {{- with .Values.podAnnotations }}
