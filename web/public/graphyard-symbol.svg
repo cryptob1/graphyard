@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" fill="none">
+  <title>Graphyard</title>
+  <path d="M47 12H30C19 12 12 19 12 30S19 48 30 48H47V30H33M47 30V47C47 56 41 60 32 60H25" stroke="#c5e69b" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+  <g fill="#c5e69b"><circle cx="47" cy="12" r="5"/><circle cx="12" cy="30" r="5"/><circle cx="47" cy="30" r="5"/><circle cx="25" cy="60" r="3"/></g>
+</svg>
