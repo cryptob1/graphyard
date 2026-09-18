@@ -369,6 +369,19 @@ test('legacy evidence URL remains valid and typed external artifacts do not chan
   assert.equal(w.evidence.at(-1)?.artifacts?.[0].kind, 'trace'); assert.equal(w.evidence.at(-1)?.trusted, true);
   await assert.rejects(engine.execute(producer, 'evidence', w.id, { ...proof(), artifacts: [{ kind: 'report', label: 'unsafe', availability: 'external', url: 'https://user:secret@reports.example.test/report' }] }, randomUUID()), /no credentials/);
 });
+test('redacted evidence artifact descriptors remain explicit and expose no read target', async () => {
+  let w = await submitted();
+  w = await engine.execute(producer, 'evidence', w.id, { ...proof(), artifacts: [{
+    kind: 'screenshot', label: 'Sensitive screenshot withheld', mediaType: 'image/png',
+    digest: `sha256:${'b'.repeat(64)}`, availability: 'redacted',
+  }] }, randomUUID());
+  assert.deepEqual(w.evidence.at(-1)?.artifacts, [{
+    kind: 'screenshot', label: 'Sensitive screenshot withheld', mediaType: 'image/png',
+    digest: `sha256:${'b'.repeat(64)}`, availability: 'redacted',
+  }]);
+  assert.equal(w.evidence.at(-1)?.artifacts?.[0].url, undefined);
+  assert.equal(w.evidence.at(-1)?.artifacts?.[0].reference, undefined);
+});
 test('wrong CI producer, self review, and missing protection fail closed', async () => {
   let w = await submitted(); let obs = observation(w); obs.reviews[0].reviewer = obs.candidate.author;
   w = await engine.observe(w.id, w.revision, obs); assert.equal(w.stage, 'review');
