@@ -85,5 +85,8 @@ if setpriv --reuid="$runner" --regid=30003 --clear-groups test -r "$root/attempt
   echo 'runner unexpectedly reached the attempt boundary' >&2
   exit 1
 fi`;
-  await exec('unshare', ['--map-auto', '--map-user=0', '--map-group=0', '--setgroups=allow', '--', 'bash', '-c', script]);
+  // Do not request `--setgroups=allow`: GitHub-hosted runners permit subordinate
+  // UID/GID mappings but deliberately deny that /proc write. The namespace still
+  // has CAP_SETGID and can exercise the supplementary-group checks below.
+  await exec('unshare', ['--map-auto', '--map-user=0', '--map-group=0', '--', 'bash', '-c', script]);
 });
