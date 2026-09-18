@@ -140,11 +140,53 @@ An observed merge with unsatisfied gates creates a permanent violation. Do not b
 
 Scoped post-bootstrap operator automation uses the transactional credential registry and secret-safe CLI described in [Scoped operator-agent automation](operator-automation.md). It must never use an entry from `GRAPHYARD_PRINCIPALS` with the `admin` role.
 
-Add or rotate principals in `GRAPHYARD_PRINCIPALS`, then redeploy. Use a unique ID for each coordinator and worker identity and a unique secret for every principal. Rotation invalidates the old credential on restarted replicas; coordinate rolling replicas so old credentials do not remain accepted indefinitely. Revoke GitHub App keys separately from worker credentials. A coordinator is read-only at the Graphyard API boundary; its local GitHub CLI access separately controls whether it can invoke the guarded routine-merge flow.
+Add or rotate principals in `GRAPHYARD_PRINCIPALS`, then redeploy. Which proof names a producer may attest is *not* configured there after bootstrap; see [Proof authority grants](#proof-authority-grants). Use a unique ID for each coordinator and worker identity and a unique secret for every principal. Rotation invalidates the old credential on restarted replicas; coordinate rolling replicas so old credentials do not remain accepted indefinitely. Revoke GitHub App keys separately from worker credentials. A coordinator is read-only at the Graphyard API boundary; its local GitHub CLI access separately controls whether it can invoke the guarded routine-merge flow.
 
 The UI keeps its token in session storage. Sign out on shared machines. Producer credentials should be held by trusted reporters, never by arbitrary PR code. Logs intentionally omit tokens, but operator-provided blocker text and evidence URLs can still contain sensitive data; avoid submitting secrets as engineering metadata.
 
 Environment files, `.graphyard/`, and private-key file extensions are excluded from Git and Docker build context. Only `.env.example` is allowed in Git. CI runs a pinned, checksum-verified Gitleaks release against all fetched history. GitHub secret scanning and push protection are enabled on the public upstream repository. A clean scan is not a guarantee against unknown secret formats: if a credential is ever committed, revoke it first, then handle history and cached copies. Local Compose and isolated-test passwords are public development fixtures, never production credentials.
+
+## Proof authority grants
+
+Proof authority is Graphyard state, not deployment configuration. An operator grants a
+producer principal the right to produce trusted evidence for exact proof names or bounded
+patterns, and every change takes effect on the next request without a restart or redeploy.
+
+```
+graphyard grants                                   # live authority per principal and its source
+graphyard grants grant ci "integration:*,unit:*" "CI runner produces integration and unit proof"
+graphyard grants grant witness "manual:gy-43/*" "Designated acceptance witness for GY-43"
+graphyard grants revoke ci "integration:claim-safety" "Runner decommissioned"
+graphyard grants history ci                        # append-only record of every change
+```
+
+The dashboard shows the same live set under **Proof authority**, including which required
+proof names currently have no authorized producer. Only an `admin` may grant or revoke.
+
+A pattern is one of three shapes and nothing else:
+
+| Pattern | Authorizes | Does not authorize |
+| --- | --- | --- |
+| `integration:claim-safety` | exactly that name | `integration:claim-safety-extra` |
+| `integration:*` | every `integration:` proof | any other proof kind |
+| `manual:gy-43/*` | `manual:gy-43/docs-ui` and deeper | `manual:gy-43`, `manual:gy-430/docs` |
+
+Authority is bounded by role before it is bounded by name. `worker`, `reader`,
+`coordinator` and `operator-agent` principals can never receive a grant, so an
+implementation agent cannot acquire producer authority by any route. An `admin` holds the
+`manual:*` operator-witness lane by role and cannot be granted anything further. Trust
+still follows the credential: a grant names a principal that already exists in
+`GRAPHYARD_PRINCIPALS`, and adding a new producer identity still requires a credential.
+
+`GRAPHYARD_PRINCIPALS[].proofs` is a bootstrap seed only. On startup Graphyard
+materializes each producer's environment allowlist into a grant record once; from then on
+the grant record decides. A later environment edit neither adds authority nor resurrects a
+revoked name, and a restart never undoes a revocation. Naming a new proof no longer
+requires editing production configuration.
+
+Every grant and revoke appends an immutable history row and an event, recording the actor,
+the reason, the patterns applied, and the resulting effective set. Read one principal's
+record with `graphyard grants history ID`; the ledger itself rejects updates and deletes.
 
 ## Setup proposals and drift
 
