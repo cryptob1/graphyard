@@ -174,6 +174,7 @@ export interface Observation {
   protected: boolean; files: string[]; at: string;
 }
 export interface Gate { name: string; passed: boolean; reasons: string[] }
+export interface ReleaseDelivery { environment: string; policyRevision: number; releaseId: string; releaseRevision: number; generation: number; verifiedAt: string; interval: { from: string; to: string } }
 /** What the running release served when Graphyard's coordinator observed it covering this merge. */
 export interface DeploymentObservation {
   sha: string; mergeSha: string; source: 'endpoint' | 'github-deployment'; observedAt: string;
@@ -207,6 +208,13 @@ export interface Work extends Create {
   mergeAuthorization?: { sha: string; baseSha: string; policyRevision: number; at: string } | null;
   mergeExecution?: { id: string; owner: string; sha: string; baseSha: string; policyRevision: number; authorizationRevision: number; issuedAt: string; expiresAt: string; verifiedAt?: string; clockOffset?: { min: number; max: number } } | null;
   delivery?: Delivery;
+  /**
+   * Independently observed production delivery, one record per environment: the first
+   * release whose verified common interval covered the whole expected manifest while this
+   * item was an included member. Merge completion above is a different fact and keeps its
+   * meaning; a later release containing the same change records nothing here again.
+   */
+  releaseDeliveries?: ReleaseDelivery[];
   /** Required proof names that had no authorized producer when intent was last recorded. */
   proofGaps?: string[];
   evidence: Evidence[]; observation: Observation | null; blocker: string | null;

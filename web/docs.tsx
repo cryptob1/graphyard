@@ -9,7 +9,7 @@ const pages = [
   ['operator-automation', 'Operator automation'],
   ['coordination', 'Coordination & recovery drills'],
   ['visual-identity', 'Visual identity'],
-  ['test-cases', 'E2E test cases'], ['validation', 'Validation runner protocol'], ['runner-setup', 'Runner preparation & artifacts'],
+  ['test-cases', 'E2E test cases'], ['validation', 'Validation runner protocol'], ['runner-setup', 'Runner preparation & artifacts'], ['delivery', 'Releases & observed delivery'],
   ['first-pr', 'Graphyard repository bootstrap'],
   ['turnkey-delivery-roadmap', 'Turnkey E2E & delivery roadmap'],
   ['history/implementation-audit-2026-09-13', 'Historical implementation audit'],

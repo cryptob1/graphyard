@@ -76,6 +76,25 @@ CREATE TABLE IF NOT EXISTS validation_resources (resource text PRIMARY KEY, requ
 CREATE TABLE IF NOT EXISTS scenarios (id text NOT NULL, revision int NOT NULL, document jsonb NOT NULL, PRIMARY KEY(id,revision));
 DROP TRIGGER IF EXISTS immutable_scenarios ON scenarios;
 CREATE TRIGGER immutable_scenarios BEFORE UPDATE OR DELETE ON scenarios FOR EACH ROW EXECUTE FUNCTION graphyard_immutable();
+CREATE TABLE IF NOT EXISTS release_builds (id uuid PRIMARY KEY, document jsonb NOT NULL);
+DROP TRIGGER IF EXISTS immutable_release_builds ON release_builds;
+CREATE TRIGGER immutable_release_builds BEFORE UPDATE OR DELETE ON release_builds FOR EACH ROW EXECUTE FUNCTION graphyard_immutable();
+CREATE TABLE IF NOT EXISTS releases (id text NOT NULL, revision int NOT NULL, document jsonb NOT NULL, PRIMARY KEY(id,revision));
+DROP TRIGGER IF EXISTS immutable_releases ON releases;
+CREATE TRIGGER immutable_releases BEFORE UPDATE OR DELETE ON releases FOR EACH ROW EXECUTE FUNCTION graphyard_immutable();
+CREATE TABLE IF NOT EXISTS release_approvals (id uuid PRIMARY KEY, document jsonb NOT NULL);
+DROP TRIGGER IF EXISTS immutable_release_approvals ON release_approvals;
+CREATE TRIGGER immutable_release_approvals BEFORE UPDATE OR DELETE ON release_approvals FOR EACH ROW EXECUTE FUNCTION graphyard_immutable();
+CREATE TABLE IF NOT EXISTS delivery_environments (environment_id text PRIMARY KEY, document jsonb NOT NULL);
+CREATE TABLE IF NOT EXISTS delivery_observations (
+  seq bigserial PRIMARY KEY, id uuid NOT NULL UNIQUE, environment_id text NOT NULL, registration_id text NOT NULL,
+  snapshot_id text NOT NULL, document jsonb NOT NULL, received_at timestamptz NOT NULL,
+  UNIQUE(registration_id,snapshot_id)
+);
+CREATE INDEX IF NOT EXISTS delivery_observation_environment ON delivery_observations(environment_id,seq);
+DROP TRIGGER IF EXISTS immutable_delivery_observations ON delivery_observations;
+CREATE TRIGGER immutable_delivery_observations BEFORE UPDATE OR DELETE ON delivery_observations FOR EACH ROW EXECUTE FUNCTION graphyard_immutable();
+CREATE TABLE IF NOT EXISTS delivery_leases (registration_id text PRIMARY KEY, principal text NOT NULL, epoch int NOT NULL, expires_at timestamptz NOT NULL);
 `;
 
 export class Store {

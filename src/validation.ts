@@ -19,14 +19,21 @@ const ref = z.object({ id: name, revision }).strict();
 const safeHttpUrl = (value: string) => { try { const parsed = new URL(value); return ['http:', 'https:'].includes(parsed.protocol) && !parsed.username && !parsed.password; } catch { return false; } };
 const externalUrl = z.url().max(2000).refine(safeHttpUrl, 'Artifact URL must be HTTP(S) without credentials');
 export const definitionSchema = z.discriminatedUnion('kind', [
-  z.object({ ...base, kind: z.literal('environment'), repository: z.string().regex(/^[\w.-]+\/[\w.-]+$/), url: z.url().max(2000).refine(s => { const u = new URL(s); return u.protocol === 'https:' && !u.username && !u.password && !u.hash && !u.search; }, 'Use HTTPS without credentials, query or fragment'), instance: name, immutable: z.literal(true), services: resourceNames, resources: resourceNames }).strict(),
-  z.object({ ...base, kind: z.literal('registration'), principalId: name, role: z.enum(['runner', 'collector', 'builder']), environment: ref, adapterVersion: name, proofs: z.array(proofSchema).max(50), enabled: z.boolean(), executionHost: z.string().min(1).max(500).optional(), attestationPublicKey: z.string().min(32).max(4096).optional(), executionNetwork: z.string().min(1).max(60).optional(), testAccountDigest: digest.optional() }).strict(),
+  // `delivery` is the environment's release policy: how recent a verified common interval
+  // must be, and whether selecting an expected release needs a separate operator approval.
+  // Absent, the defaults are the conservative ones.
+  z.object({ ...base, kind: z.literal('environment'), repository: z.string().regex(/^[\w.-]+\/[\w.-]+$/), url: z.url().max(2000).refine(s => { const u = new URL(s); return u.protocol === 'https:' && !u.username && !u.password && !u.hash && !u.search; }, 'Use HTTPS without credentials, query or fragment'), instance: name, immutable: z.literal(true), services: resourceNames, resources: resourceNames, delivery: z.object({ freshnessSeconds: z.number().int().min(30).max(86_400), approvalRequired: z.boolean() }).strict().optional() }).strict(),
+  // Observer and promoter registrations are D3's deployment identities: an observer reports
+  // runtime facts for its named services only, a promoter may define and select the expected
+  // release. `services` is required for both and refused for every other role.
+  z.object({ ...base, kind: z.literal('registration'), principalId: name, role: z.enum(['runner', 'collector', 'builder', 'observer', 'promoter']), environment: ref, adapterVersion: name, proofs: z.array(proofSchema).max(50), enabled: z.boolean(), executionHost: z.string().min(1).max(500).optional(), attestationPublicKey: z.string().min(32).max(4096).optional(), executionNetwork: z.string().min(1).max(60).optional(), testAccountDigest: digest.optional(), services: resourceNames.optional() }).strict(),
   z.object({ ...base, kind: z.literal('bundle'), scenario: name, scenarioRevision: revision, scenarioHash: z.string().regex(/^[a-f0-9]{64}$/), digest, runnerImageDigest: digest }).strict(),
 ]);
 type DefinitionInput = z.infer<typeof definitionSchema>;
 export type Definition = DefinitionInput & { revision: number; createdAt: string; createdBy: string };
-type Environment = Definition & { kind: 'environment' };
-type Registration = Definition & { kind: 'registration' };
+export type Environment = Definition & { kind: 'environment' };
+export type Registration = Definition & { kind: 'registration' };
+export const deliveryPolicy = (environment: Environment) => environment.delivery ?? { freshnessSeconds: 300, approvalRequired: true };
 type Bundle = Definition & { kind: 'bundle' };
 const attestationSchema = z.object({ registration: ref, workId: z.uuid(), expectedWorkRevision: revision, sourceSha: sha, baseSha: sha, buildInputsDigest: digest, artifacts, provenanceUrl: z.url().max(2000) }).strict();
 export type BuildAttestation = z.infer<typeof attestationSchema> & { id: string; producer: string; at: string; repository: string };
@@ -82,13 +89,13 @@ export class Validation {
     return { ...candidate, build };
   }
   private async event(db: pg.PoolClient, actor: string, kind: string, payload: unknown, workId?: string) { await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [workId ?? null, actor, `validation.${kind}`, JSON.stringify(payload)]); }
-  private async definition(db: pg.PoolClient, kind: Definition['kind'], selected: { id: string; revision: number }, current = true): Promise<Definition> {
+  async definition(db: pg.PoolClient, kind: Definition['kind'], selected: { id: string; revision: number }, current = true): Promise<Definition> {
     const rows = (await db.query('SELECT document FROM validation_definitions WHERE kind=$1 AND id=$2 ORDER BY revision DESC', [kind, selected.id])).rows;
     const found = rows.find(r => r.document.revision === selected.revision)?.document as Definition | undefined;
     demand(found && (!current || rows[0].document.revision === selected.revision), 'Definition missing or authorization generation superseded');
     return found;
   }
-  private async registration(db: pg.PoolClient, selected: { id: string; revision: number }, role: Registration['role']): Promise<Registration> {
+  async registration(db: pg.PoolClient, selected: { id: string; revision: number }, role: Registration['role']): Promise<Registration> {
     const r = await this.definition(db, 'registration', selected) as Registration;
     const p = this.principals.find(p => p.id === r.principalId);
     demand(r.enabled && r.role === role && p && p.role === (role === 'runner' ? 'worker' : 'producer'), 'Registration revoked or principal role is not authorized');
@@ -178,6 +185,11 @@ export class Validation {
           demand(keyType === 'ed25519', 'Runner host attestor must use a valid Ed25519 public key');
         }
         if (data.role !== 'runner') demand(!data.executionHost && !data.attestationPublicKey && !data.executionNetwork && !data.testAccountDigest, 'Only runner registrations may configure execution authority');
+        if (data.role === 'observer' || data.role === 'promoter') {
+          const environment = await this.definition(db, 'environment', data.environment, false) as Environment;
+          demand(!!data.services?.length && data.services.every(service => environment.services.includes(service)), 'Observer and promoter registrations must name services of their environment');
+          demand(!data.proofs.length, 'Deployment identities carry no proof scope');
+        } else demand(!data.services, 'Only observer and promoter registrations are service-scoped');
       }
       if (data.kind === 'bundle') {
         const s = (await db.query('SELECT document FROM scenarios WHERE id=$1 AND revision=$2', [data.scenario, data.scenarioRevision])).rows[0]?.document as Scenario | undefined;
