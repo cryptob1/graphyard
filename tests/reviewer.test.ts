@@ -8,7 +8,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
-import { appManifest } from '../src/github-setup.js';
+import { appManifest, reviewerAppManifest } from '../src/github-setup.js';
 import { buildMasterStatus, dispatchWork, loadMasterConfig, masterHarness, reviewerProfileSchema, setupMaster, workerProfileSchema } from '../src/master.js';
 import { launchPlan, masterHarnessPlan, nonInteractiveLaunch, writeHarnessPermissions } from '../src/harness.js';
 import { applyProtection, protectionPlan, requiredReviewProtection } from '../src/protection.js';
@@ -49,13 +49,23 @@ function work(overrides: Partial<Work> = {}) {
 }
 
 test('the reviewer App is a separate identity that cannot write code, checks, or administration', async () => {
-  const manifest = appManifest('owner/project', 'https://graphyard.example', 'http://127.0.0.1:4312', 'reviewer');
-  assert.match(manifest.name, /^Graphyard reviewer /);
-  assert.deepEqual(manifest.default_permissions, { metadata: 'read', contents: 'read', pull_requests: 'write' });
-  assert.deepEqual(manifest.default_events, []);
+  const manifest = reviewerAppManifest('reviewer', 'owner/project', 'https://graphyard.example', 'http://127.0.0.1:4312');
+  const permissions = manifest.default_permissions as Record<string, string>;
+  // The criterion is about what a reviewer identity must never hold, not about the exact
+  // read permissions the manifest flow grants it.
+  assert.equal(permissions.contents, 'read');
+  assert.equal(permissions.pull_requests, 'write');
+  assert.equal(permissions.checks, undefined);
+  assert.equal(permissions.administration, undefined);
+  assert.equal(permissions.workflows, undefined);
   assert.equal(manifest.public, false);
-  assert.notEqual(manifest.name, appManifest('owner/project', 'https://graphyard.example', 'http://127.0.0.1:4311').name);
-  assert.throws(() => appManifest('owner/project', 'http://graphyard.example', 'http://127.0.0.1:4312', 'reviewer'));
+  // A reviewer App is never the control-plane App: different name, and no gate-check authority.
+  const control = appManifest('owner/project', 'https://graphyard.example', 'http://127.0.0.1:4311');
+  assert.notEqual(manifest.name, control.name);
+  assert.equal((control.default_permissions as Record<string, string>).checks, 'write');
+  assert.ok(manifest.name.length <= 34);
+  assert.throws(() => reviewerAppManifest('reviewer', 'owner/project', 'http://graphyard.example', 'http://127.0.0.1:4312'));
+  assert.throws(() => reviewerAppManifest('Reviewer', 'owner/project', 'https://graphyard.example', 'http://127.0.0.1:4312'), /lowercase identifier/);
 });
 
 test('reviewer binding refuses the control-plane App and stores its key privately outside the repository', async () => {

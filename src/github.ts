@@ -1,12 +1,13 @@
 import { MergeExecutionInProgress, ReconciliationRetry, requireCurrent } from './model.js';
 import { createSign, randomUUID } from 'node:crypto';
 import { observeCodex } from './codex-review.js';
+import { observeAgentReview } from './agent-review.js';
 import { readFile } from 'node:fs/promises';
 import type { Engine } from './engine.js';
-import { CHECK_NAME, demand, type Observation, type Work, type ReviewRequest } from './model.js';
+import { CHECK_NAME, demand, nativeReviewRequired, parseReviewerApps, reviewerProfileFor, reviewProviderOf, type Observation, type ReviewerApp, type ReviewerProfile, type Work, type ReviewRequest } from './model.js';
 export { CHECK_NAME };
 
-export interface GitHubConfig { repository: string; base: string; appId: number; installationId: number; privateKey: string }
+export interface GitHubConfig { repository: string; base: string; appId: number; installationId: number; privateKey: string; reviewerApps?: ReviewerApp[] }
 export class GitHub {
   private token = '';
   private expires = 0;
@@ -113,14 +114,19 @@ export class GitHub {
     demand(pr.base.repo.full_name.toLowerCase() === this.config.repository.toLowerCase() && pr.head.repo?.full_name.toLowerCase() === this.config.repository.toLowerCase(), 'MVP requires same-repository pull requests');
     demand(pr.base.ref === this.config.base, 'Pull request targets an unmanaged branch');
     const [checks, reviews, protectedBranch, files] = await Promise.all([
-      this.pages(`/commits/${pr.head.sha}/check-runs?filter=latest`, 'check_runs'), this.pages(`/pulls/${pr.number}/reviews`), this.protection(work.policy.review && work.policy.reviewProvider !== 'codex'), this.pages(`/pulls/${pr.number}/files`),
+      this.pages(`/commits/${pr.head.sha}/check-runs?filter=latest`, 'check_runs'), this.pages(`/pulls/${pr.number}/reviews`), this.protection(nativeReviewRequired(work.policy)), this.pages(`/pulls/${pr.number}/files`),
     ]);
     const latest = new Map<string, any>();
     for (const r of reviews) if (['APPROVED', 'CHANGES_REQUESTED', 'DISMISSED'].includes(r.state)) latest.set(r.user.login, r);
     const candidateBase = pr.merged && work.candidate && work.candidate.sha === pr.head.sha ? work.candidate.baseSha : pr.base.sha;
-    const agentReview = work.policy.review && work.policy.reviewProvider === 'codex' ? !pr.merged && (pr.state !== 'open' || pr.draft !== false)
-      ? { provider: 'codex' as const, sha: pr.head.sha, approved: false, reason: pr.draft ? 'Pull request is draft; mark it ready to request code review' : 'Pull request is not open; reopen it to request code review' }
-      : await observeCodex(this, pr.number, pr.head.sha, reviews, pr.user.id, work.reviewRequest, candidateBase, work.policyRevision, this.config.appId) : undefined;
+    const provider = reviewProviderOf(work.policy);
+    const unready = !pr.merged && (pr.state !== 'open' || pr.draft !== false)
+      ? pr.draft ? 'Pull request is draft; mark it ready to request code review' : 'Pull request is not open; reopen it to request code review' : null;
+    const agentReview = !work.policy.review || provider === 'github' ? undefined
+      : provider === 'codex' ? unready
+        ? { provider: 'codex' as const, sha: pr.head.sha, approved: false, reason: unready }
+        : await observeCodex(this, pr.number, pr.head.sha, reviews, pr.user.id, work.reviewRequest, candidateBase, work.policyRevision, this.config.appId)
+      : await this.observeAgent(work, pr, reviews, candidateBase, unready);
     const confirmed = await this.request(`/pulls/${work.submission!.pr}`);
     demand(confirmed.head.sha === pr.head.sha && confirmed.base.sha === pr.base.sha && confirmed.base.ref === pr.base.ref && confirmed.head.ref === pr.head.ref
       && confirmed.state === pr.state && confirmed.draft === pr.draft && confirmed.merged === pr.merged, 'PR changed while collecting evidence; retry');
@@ -150,6 +156,46 @@ export class GitHub {
     await response.body?.cancel();
     return time;
   }
+  /** Resolve a policy profile to the numeric App identity registered with this control plane. */
+  reviewerAppFor(profile: ReviewerProfile | null | undefined): ReviewerApp | undefined {
+    if (!profile) return undefined;
+    const app = (this.config.reviewerApps ?? []).find(entry => entry.id === profile.reviewerApp && entry.runtime === profile.runtime);
+    return app && app.appId !== this.config.appId ? app : undefined;
+  }
+  private async observeAgent(work: Work, pr: any, reviews: any[], candidateBase: string, unready: string | null) {
+    const profile = reviewerProfileFor(work);
+    const app = this.reviewerAppFor(profile);
+    if (!profile) return { provider: 'agent' as const, sha: pr.head.sha, approved: false,
+      reason: 'Every configured reviewer profile is exhausted for this candidate; add reviewer capacity or select another review provider' };
+    if (!app) return { provider: 'agent' as const, sha: pr.head.sha, approved: false, profile: profile.name, reviewerApp: profile.reviewerApp,
+      reason: `Reviewer App ${profile.reviewerApp} is not registered with this control plane as an independent ${profile.runtime} reviewer identity` };
+    if (unready) return { provider: 'agent' as const, sha: pr.head.sha, approved: false, profile: profile.name, reviewerApp: app.id, reason: unready };
+    return observeAgentReview(this, pr.number, pr.head.sha, reviews, pr.user.id, work.reviewRequest, candidateBase, work.policyRevision, this.config.appId, profile, app);
+  }
+  async requestAgentReview(work: Work, profile: ReviewerProfile, app: ReviewerApp, beforeWrite: () => Promise<void>): Promise<ReviewRequest> {
+    demand(work.candidate && work.policy.review && reviewProviderOf(work.policy) === 'agent', 'Candidate with agent review policy required');
+    demand(app.id === profile.reviewerApp && app.runtime === profile.runtime, 'Reviewer profile does not match its registered App identity');
+    demand(app.appId !== this.config.appId, 'The Graphyard control-plane App cannot be dispatched as a reviewer');
+    demand((work.policy.reviewerProfiles ?? []).some(configured => configured.name === profile.name && configured.reviewerApp === profile.reviewerApp), 'Reviewer profile is not configured on this policy');
+    const pr = await this.request(`/pulls/${work.candidate.pr}`);
+    requireCurrent(pr.head.sha === work.candidate.sha && pr.base.sha === work.candidate.baseSha && pr.state === 'open' && pr.draft === false, 'PR changed before review dispatch; retry');
+    demand(pr.user?.id !== app.botUserId, 'Reviewer identity must be independent of the pull request author');
+    const marker = randomUUID();
+    const body = `${profile.mention ? `${profile.mention} review\n\n` : ''}Graphyard requests an independent code review from reviewer profile \`${profile.name}\` (runtime \`${profile.runtime}\`).
+
+Review head \`${work.candidate.sha}\` against base \`${work.candidate.baseSha}\` and post exactly one verdict comment through the registered reviewer GitHub App \`${app.id}\`, containing one line:
+
+\`<!-- graphyard-verdict:${marker} head:${work.candidate.sha} verdict:approved -->\`
+
+Use \`verdict:changes-requested\` with the findings, or \`verdict:usage-limit\` when the runtime has no remaining quota so Graphyard can fail over to the next configured profile.
+
+<!-- graphyard-review:${marker} provider:agent profile:${profile.name} reviewer-app:${app.id} head:${work.candidate.sha} base:${work.candidate.baseSha} policy:${work.policyRevision} -->`;
+    await beforeWrite();
+    const comment = await this.request(`/issues/${work.candidate.pr}/comments`, 'POST', { body });
+    demand(comment.performed_via_github_app?.id === this.config.appId && comment.user?.type === 'Bot' && comment.body === body && Number.isSafeInteger(comment.id) && Number.isFinite(Date.parse(comment.created_at)), 'Review dispatch did not return an authenticated Graphyard comment', 502);
+    return { commentId: comment.id, sha: work.candidate.sha, baseSha: work.candidate.baseSha, policyRevision: work.policyRevision, body,
+      createdAt: comment.created_at, provider: 'agent', profile: profile.name, reviewerApp: app.id, marker };
+  }
   async requestCodex(work: Work, beforeWrite: () => Promise<void>): Promise<ReviewRequest> {
     demand(work.candidate && work.policy.review && work.policy.reviewProvider === 'codex', 'Candidate with Codex review policy required');
     const pr = await this.request(`/pulls/${work.candidate.pr}`);
@@ -178,7 +224,8 @@ export class GitHub {
 export async function githubFromEnv() {
   if (!process.env.GITHUB_APP_ID || !process.env.GITHUB_REPOSITORY) return null;
   const privateKey = process.env.GITHUB_PRIVATE_KEY ?? await readFile(process.env.GITHUB_PRIVATE_KEY_FILE!, 'utf8');
-  return new GitHub({ repository: process.env.GITHUB_REPOSITORY, base: process.env.GITHUB_BASE_BRANCH ?? 'main', appId: Number(process.env.GITHUB_APP_ID), installationId: Number(process.env.GITHUB_INSTALLATION_ID), privateKey });
+  const reviewerApps = parseReviewerApps(process.env.GRAPHYARD_REVIEWER_APPS);
+  return new GitHub({ repository: process.env.GITHUB_REPOSITORY, base: process.env.GITHUB_BASE_BRANCH ?? 'main', appId: Number(process.env.GITHUB_APP_ID), installationId: Number(process.env.GITHUB_INSTALLATION_ID), privateKey, reviewerApps });
 }
 export async function processJob(engine: Engine, github: GitHub) {
   const job = await engine.store.takeJob();
@@ -196,9 +243,29 @@ export async function processJob(engine: Engine, github: GitHub) {
     if (work?.submission && work.stage !== 'done') {
       const observation = await github.observe(work);
       work = await engine.observe(work.id, work.revision, observation, job.token);
-      if (!observation.merged && observation.prState === 'open' && observation.draft === false && work.policy.review && work.policy.reviewProvider === 'codex' && (!work.reviewRequest || work.reviewRequest.sha !== work.candidate?.sha || work.reviewRequest.baseSha !== work.candidate?.baseSha || work.reviewRequest.policyRevision !== work.policyRevision)) {
+      const provider = reviewProviderOf(work.policy);
+      const dispatchable = !observation.merged && observation.prState === 'open' && observation.draft === false && work.policy.review;
+      const unbound = (item: Work, profile?: string) => !item.reviewRequest || item.reviewRequest.sha !== item.candidate?.sha
+        || item.reviewRequest.baseSha !== item.candidate?.baseSha || item.reviewRequest.policyRevision !== item.policyRevision
+        || profile !== undefined && item.reviewRequest.profile !== profile;
+      if (dispatchable && provider === 'codex' && unbound(work)) {
         const request = await github.requestCodex(work, guard(work, false));
         work = await engine.bindReviewRequest(work.id, work.revision, request, job.token);
+      }
+      if (dispatchable && provider === 'agent') {
+        let current: Work = work;
+        const review = current.observation?.agentReview;
+        // Exhaustion of the dispatched profile releases the request so the next profile is selected.
+        if (review?.exhausted && review.exhaustion && !unbound(current, review.profile) && review.sha === current.candidate?.sha) {
+          current = await engine.failoverReviewRequest(current.id, current.revision, { exhaustion: review.exhaustion, reason: review.reason }, job.token);
+        }
+        const profile = reviewerProfileFor(current);
+        const app = github.reviewerAppFor(profile);
+        if (profile && app && unbound(current, profile.name)) {
+          const request = await github.requestAgentReview(current, profile, app, guard(current, false));
+          current = await engine.bindReviewRequest(current.id, current.revision, request, job.token);
+        }
+        work = current;
       }
       if (!observation.merged) await github.publish(work, undefined, guard(work, work.gates.every(g => g.passed) && !work.violations.length));
     }
