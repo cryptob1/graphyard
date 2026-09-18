@@ -315,25 +315,26 @@ test('master harness writes the allow rules the browser flows need, each with a 
     const plan = masterHarness(root, config, 'claude');
     const allow = plan.allow.map(entry => entry.rule), deny = plan.deny.map(entry => entry.rule);
     for (const entry of [...plan.allow, ...plan.deny]) assert.ok(entry.why.length > 30, `${entry.rule} must explain itself`);
-    assert.ok(allow.includes('Bash(agent-browser *)'), 'agent-browser is allowed');
+    assert.ok(!allow.some(rule => rule.includes('agent-browser')), 'the session never drives agent-browser itself; only master browser does');
     assert.ok(allow.includes(`Bash(node ${config.cliPath} master browser:*)`), 'the browser flows are allowed');
     assert.ok(allow.includes(`Bash(node ${config.cliPath} master review:*)`), 'the reviewer launcher is allowed');
     assert.ok(allow.includes('Bash(gh api repos/owner/project/branches/main/protection*)'), 'protection reads are allowed');
     assert.ok(allow.includes('Bash(gh api --method PATCH repos/owner/project/branches/main/protection/*)'), 'protection subresource writes are allowed');
-    assert.ok(allow.includes('Bash(gh api user/installations*)') && allow.includes('Bash(gh api --method PUT user/installations/*/repositories/*)'), 'installation reads and repository grants are allowed');
+    assert.ok(allow.includes('Bash(gh api user/installations*)'), 'installation reads are allowed');
+    assert.ok(!allow.some(rule => /PUT|POST|DELETE/.test(rule)), 'no allow rule writes to an installation or replaces protection; only PATCH subresources and the browser flows do');
     assert.ok(allow.includes('Bash(gh api apps/*)') && allow.includes('Bash(gh api user)'));
     assert.ok(allow.includes('Read(./.graphyard/master-actions/**)'), 'the recorded flows are readable');
     assert.match(plan.note, /classifier otherwise refuses/);
     assert.ok(plan.allow.filter(entry => entry.rule.includes('gh api')).every(entry => /classifier|verify|audit|before and after/.test(entry.why)), 'each gh api rule states why the classifier would otherwise refuse it or what it verifies');
     for (const rule of allow) assert.doesNotMatch(rule, /merge|access_tokens|reviews|graphql|\.pem|\.token|credential|cookies/i, `allow rule ${rule} must not reach a merge, a verdict, or a credential`);
-    for (const rule of ['Bash(gh pr merge:*)', 'Bash(gh pr review:*)', 'Bash(gh api *merge*)', 'Bash(gh api *pulls/*/reviews*)', 'Bash(gh api *access_tokens*)', 'Bash(gh api graphql*)', 'Bash(gh api * DELETE *)', 'Bash(gh api --method PUT repos/*)', 'Bash(agent-browser *cookies*)', 'Bash(agent-browser *state*)', 'Bash(agent-browser *restore*)', 'Bash(agent-browser *auth*)', 'Bash(git push:*)', 'Read(**/*.pem)', 'Read(**/*.token)']) assert.ok(deny.includes(rule), `${rule} must be denied`);
+    for (const rule of ['Bash(gh pr merge:*)', 'Bash(gh pr review:*)', 'Bash(gh api *merge*)', 'Bash(gh api *pulls/*/reviews*)', 'Bash(gh api *access_tokens*)', 'Bash(gh api graphql*)', 'Bash(gh api *DELETE*)', 'Bash(gh api *PUT*)', 'Bash(gh api *POST*)', 'Bash(agent-browser *)', 'Bash(git push:*)', 'Read(**/*.pem)', 'Read(**/*.token)']) assert.ok(deny.includes(rule), `${rule} must be denied`);
     assert.ok(!deny.includes('Bash(gh api:*)'), 'the blanket gh api deny would override every allow above');
     const plain = masterHarnessPlan({ harness: 'claude', root, cliPath: config.cliPath, repository: 'org/repo', baseBranch: 'release/2026', credentialHome: '/home/x/.config/graphyard' });
     assert.ok(plain.allow.some(entry => entry.rule === 'Bash(gh api repos/org/repo/branches/release%2F2026/protection*)'), 'the base branch is encoded exactly as the CLI requests it');
     const written = await writeHarnessPermissions(root, plan, true);
     assert.equal(written.applied, true);
     const settings = JSON.parse(await readFile(join(root, '.claude/settings.local.json'), 'utf8'));
-    assert.ok(settings.permissions.allow.includes('Bash(agent-browser *)')); assert.ok(settings.permissions.deny.includes('Bash(gh api *merge*)'));
+    assert.ok(settings.permissions.deny.includes('Bash(agent-browser *)')); assert.ok(settings.permissions.deny.includes('Bash(gh api *merge*)'));
     assert.deepEqual((await writeHarnessPermissions(root, plan, true)).added, []);
   } finally { await cleanup(); }
 });
@@ -401,7 +402,8 @@ test('the master CLI stores the browser profile, refuses flows without one, and 
     const waiting = JSON.parse((await cli(['master', 'status'])).stdout);
     assert.equal(waiting.administration.sudo.code, '58'); assert.match(waiting.administration.sudo.instruction, /choose 58/);
     const harness = JSON.parse((await cli(['master', 'harness', 'claude'])).stdout);
-    assert.ok(harness.added.some((entry: any) => entry.rule === 'Bash(agent-browser *)' && entry.why));
+    assert.ok(harness.added.some((entry: any) => entry.list === 'allow' && entry.rule === `Bash(node ${launcher} master browser:*)` && entry.why));
+    assert.ok(harness.added.some((entry: any) => entry.list === 'deny' && entry.rule === 'Bash(agent-browser *)' && /identity/.test(entry.why)));
   } finally {
     await new Promise<void>(accept => server.close(() => accept()));
     await rm(root, { recursive: true, force: true }); await rm(credentialDirectory, { recursive: true, force: true });
