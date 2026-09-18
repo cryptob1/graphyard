@@ -194,9 +194,10 @@ export class Engine {
         work.reworkRequested = true;
         work.containmentQuarantine = null;
         work.lease = null;
-        // The authorized recovery from a blocking lead ruling: reopening
-        // implementation clears the hold. Nothing else clears a send-back.
-        releaseLeadHold(work);
+        // Reopening implementation is the authorized recovery for send-back.
+        // A plan rejection remains owned by its originating lead and can only
+        // be superseded by that lead's later approve-plan ruling.
+        if (work.leadHold?.action === 'send-back') releaseLeadHold(work);
       }
       if (command === 'recover') {
         admin(actor);

@@ -149,7 +149,10 @@ export function leadHoldRefusal(work: Work): string | null {
 // authorization is invalidated, and the merge gate refuses in the same write.
 export function holdDelivery(work: Work, hold: NonNullable<Work['leadHold']>) {
   const standing = work.leadHold;
-  if (standing && blockingRulingRank[standing.action] > blockingRulingRank[hold.action]) return false;
+  // A ruling may strengthen a standing hold, but it cannot replace an
+  // equal-ranked hold and thereby transfer that hold's recovery authority to a
+  // different lead. The later ruling remains in append-only history.
+  if (standing && blockingRulingRank[standing.action] >= blockingRulingRank[hold.action]) return false;
   const superseded = leadHoldRefusal(work);
   work.leadHold = hold;
   work.mergeAuthorization = null;

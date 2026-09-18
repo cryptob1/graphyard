@@ -143,7 +143,8 @@ export async function recordLeadRuling(store: Store, actor: Principal, id: strin
     // The one lead-side recovery: approving a plan supersedes that plan's own
     // rejection. A send-back demands new implementation, so only the operator
     // rework lifecycle clears it.
-    if (data.action === 'approve-plan' && work.leadHold?.action === 'reject-plan') releaseLeadHold(work);
+    if (data.action === 'approve-plan' && work.leadHold?.action === 'reject-plan' && work.leadHold.leadId === actor.id)
+      releaseLeadHold(work);
     await save(db, work, actor.id, `lead.${data.action}`, now, { ruleId: data.ruleId, reason: data.reason, ...(data.trigger ? { trigger: data.trigger } : {}) });
     return { ruling, work };
   });

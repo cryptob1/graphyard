@@ -20,6 +20,7 @@ import { Store } from '../src/store.js';
 // one executed case per required proof.
 const admin: Principal = { id: 'human-operator', role: 'admin', sessionKind: 'human', displayName: 'Operator' };
 const lead: Principal = { id: 'product-lead', role: 'slice-lead', slice: 'product', sessionKind: 'ai', displayName: 'Pine' };
+const replacementProductLead: Principal = { id: 'replacement-product-lead', role: 'slice-lead', slice: 'product', sessionKind: 'ai', displayName: 'Cedar' };
 const infraLead: Principal = { id: 'infra-lead', role: 'slice-lead', slice: 'infrastructure', sessionKind: 'ai' };
 const docsLead: Principal = { id: 'docs-lead', role: 'slice-lead', slice: 'docs-experience', sessionKind: 'ai' };
 const workerA: Principal = { id: 'engineer-a', role: 'worker', sessionKind: 'ai' };
@@ -249,6 +250,17 @@ test('integration:lead-enforcement — violating lead actions are refused server
   assert.equal(planned.leadHold!.action, 'reject-plan');
   assert.equal(planned.mergeAuthorization, null);
   assert.deepEqual(currentMergeCandidates([planned], planned.observation!.at), []);
+  // A replacement lead for the same slice cannot take ownership of or clear
+  // the originating lead's rejection, including by issuing an equal-rank hold.
+  planned = (await recordLeadRuling(store, replacementProductLead, planned.id, { action: 'reject-plan', ruleId: 'rules/plan-v1#replacement', reason: 'Replacement lead review' }, id())).work;
+  assert.equal(planned.leadHold!.leadId, lead.id);
+  planned = (await recordLeadRuling(store, replacementProductLead, planned.id, { action: 'approve-plan', ruleId: 'rules/plan-v1#approval', reason: 'Replacement lead approves' }, id())).work;
+  assert.equal(planned.leadHold!.leadId, lead.id);
+  // Operator rework is mapped only to send-back and cannot bypass the lead's
+  // retained authority over a reject-plan hold.
+  planned = await engine.execute(admin, 'rework', planned.id, { reason: 'Implementation redo does not approve the plan', previousWorkerStopped: true }, id());
+  assert.equal(planned.leadHold!.action, 'reject-plan');
+  assert.equal(planned.leadHold!.leadId, lead.id);
   planned = (await recordLeadRuling(store, lead, planned.id, { action: 'approve-plan', ruleId: 'rules/plan-v1#approval', reason: 'Revised plan is inside scope' }, id())).work;
   assert.equal(planned.leadHold ?? null, null);
   assert.equal(planned.gates.find(gate => gate.name === 'merge')!.passed, true);
