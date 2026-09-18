@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { oracleBundleDigest } from '../src/runner-setup.js';
-import { assertIsolation, assertRunnerCredentialScope, boundaryIdentity, containerEnvironment, containerNames, executeAttempt, executionCommand, executionPlanSchema, observeContainers, preflightAttempt, type ExecutionPlan, type Runner, type Settler } from '../src/runner-executor.js';
+import { assertAncestryFixed, assertIsolation, assertRunnerCredentialScope, attemptBoundaryPath, boundaryIdentity, containerEnvironment, containerNames, executeAttempt, executionCommand, executionPlanSchema, observeContainers, preflightAttempt, type ExecutionPlan, type Runner, type Settler } from '../src/runner-executor.js';
 
 const image = `sha256:${'1'.repeat(64)}`;
 const runAsUser = `${process.getuid!()}:${process.getgid!()}`;
@@ -14,20 +14,27 @@ const runAsUser = `${process.getuid!()}:${process.getgid!()}`;
 // mid-attempt. These fixtures own the oracle tree, so they stand in for the attestor;
 // `nobody` stands in for any other identity, whose ownership must be refused.
 const foreignUid = 65534;
-async function boundary(run: (paths: { oracle: string; output: string; plan: ExecutionPlan }) => Promise<void>, files: Record<string, string> = { 'playwright.config.ts': 'export default {};', 'suite.spec.ts': 'approved assertion' }) {
+async function boundary(run: (paths: { oracle: string; collection: string; output: string; plan: ExecutionPlan }) => Promise<void>, files: Record<string, string> = { 'playwright.config.ts': 'export default {};', 'suite.spec.ts': 'approved assertion' }) {
   const root = await mkdtemp(join(tmpdir(), 'graphyard-executor-'));
-  const oracle = join(root, 'oracle'), output = join(root, 'output');
-  await mkdir(oracle, { mode: 0o755 }); await mkdir(output, { mode: 0o700 });
+  const oracle = join(root, 'oracle'), collection = join(root, 'output');
+  await mkdir(oracle, { mode: 0o755 }); await mkdir(collection, { mode: 0o755 });
   for (const [path, content] of Object.entries(files)) await writeFile(join(oracle, path), content);
   const bundle = await oracleBundleDigest(oracle);
   const plan: ExecutionPlan = { grant: { requestId: randomUUID(), attemptId: randomUUID(), epoch: 1, runner: { id: 'preview-runner', revision: 1 },
       executionHost: 'unix:///var/run/docker.sock', attestationPublicKey: 'test-public-key-material-at-least-32-bytes',
       executionNetwork: 'gy-isolated',
       bundleDigest: bundle.digest, runnerImageDigest: image, targetUrl: 'https://preview.example.test/', deadline: new Date(Date.now() + 600_000).toISOString() },
-    imageRepository: 'ghcr.io/example/graphyard-runner', oraclePath: oracle, outputPath: output, timeoutMs: 60_000, memoryMb: 2048, cpus: 2, pidsLimit: 256, runAsUser };
-  try { await run({ oracle, output, plan }); } finally { await rm(root, { recursive: true, force: true }); }
+    imageRepository: 'ghcr.io/example/graphyard-runner', oraclePath: oracle, outputPath: collection, timeoutMs: 60_000, memoryMb: 2048, cpus: 2, pidsLimit: 256, runAsUser };
+  // Preflight provisions one boundary per attempt beneath the collection root. The fixture
+  // creates the same directory so the structural checks can also be exercised directly.
+  const output = attemptBoundaryPath(plan);
+  await mkdir(output); await chmod(output, 0o2770);
+  try { await run({ oracle, collection, output, plan }); } finally { await rm(root, { recursive: true, force: true }); }
 }
 const attestorUid = process.getuid!();
+/** `assertIsolation` against the boundary this attempt was provisioned, as preflight does. */
+const isolation = (plan: ExecutionPlan, options: { uid?: number; gids?: number[] } = {}, boundaryPath?: string) =>
+  assertIsolation(plan, { ...options, boundaryPath: boundaryPath ?? attemptBoundaryPath(plan) });
 const settledRunner: Runner = async () => ({ exitCode: 0, timedOut: false });
 const absent: Settler = async () => 'absent';
 const at = (start: number) => { let n = start; return () => new Date(n += 1000); };
@@ -50,6 +57,10 @@ test('bundle identity covers every regular file and refuses symlinks, generated 
 test('the execution command pins the image, mounts approved bytes read-only and carries no credentials', async () => boundary(async ({ plan }) => {
   const execute = executionCommand(plan, 'execute'), enumerate = executionCommand(plan, 'enumerate');
   const argv = execute.argv.join(' ');
+  // Every runtime command is addressed to the endpoint the registration pinned, including
+  // the `run` that starts the container the collector will later look for.
+  assert.deepEqual(execute.argv.slice(0, 3), ['--host', plan.grant.executionHost, 'run']);
+  assert.deepEqual(enumerate.argv.slice(0, 3), ['--host', plan.grant.executionHost, 'run']);
   assert.ok(argv.includes(`${plan.imageRepository}@${image}`));
   assert.ok(argv.includes(`--mount=type=bind,source=${plan.oraclePath},target=/oracle,readonly`));
   assert.ok(argv.includes(`--mount=type=bind,source=${plan.outputPath},target=/output`));
@@ -71,34 +82,70 @@ test('a runner credential may never carry evidence-producer scope', () => {
   }
 });
 
-test('isolation refuses overlapping, shared or pre-populated execution boundaries', async () => boundary(async ({ oracle, output, plan }) => {
-  await assert.doesNotReject(assertIsolation(plan, { uid: attestorUid }));
-  await mkdir(join(oracle, 'nested'), { mode: 0o700 });
-  await assert.rejects(assertIsolation({ ...plan, outputPath: join(oracle, 'nested') }, { uid: attestorUid }), /must not overlap/);
-  await assert.rejects(assertIsolation({ ...plan, outputPath: oracle }, { uid: attestorUid }), /must not overlap/);
+test('isolation refuses overlapping, shared or pre-populated execution boundaries', async () => boundary(async ({ oracle, collection, output, plan }) => {
+  await assert.doesNotReject(isolation(plan, { uid: attestorUid }));
+  await mkdir(join(oracle, 'nested')); await chmod(join(oracle, 'nested'), 0o2770);
+  await assert.rejects(isolation(plan, { uid: attestorUid }, join(oracle, 'nested')), /must not overlap/);
+  await assert.rejects(isolation(plan, { uid: attestorUid }, oracle), /must not overlap/);
   await rm(join(oracle, 'nested'), { recursive: true });
   await writeFile(join(oracle, 'regular.txt'), 'not a directory');
-  await assert.rejects(assertIsolation({ ...plan, outputPath: join(oracle, 'regular.txt') }, { uid: attestorUid }), /must be a directory/);
+  await assert.rejects(isolation(plan, { uid: attestorUid }, join(oracle, 'regular.txt')), /must be a directory/);
   await rm(join(oracle, 'regular.txt'));
   await chmod(oracle, 0o777);
-  await assert.rejects(assertIsolation(plan, { uid: attestorUid }), /group- or world-writable/);
+  await assert.rejects(isolation(plan, { uid: attestorUid }), /group- or world-writable/);
   await chmod(oracle, 0o755);
-  await chmod(output, 0o755);
-  await assert.rejects(assertIsolation(plan, { uid: attestorUid }), /private to the collector/);
-  await chmod(output, 0o700);
-  await assert.rejects(assertIsolation({ ...plan, runAsUser: '65534:65534' }, { uid: attestorUid }), /owned by the unprivileged container user/);
+  // The boundary is shared by three accounts that must not be the same: the attestor owns
+  // it, the container writes through the group named in `runAsUser`, and no identity
+  // outside that group may traverse it at all.
+  await chmod(output, 0o2777);
+  await assert.rejects(isolation(plan, { uid: attestorUid }), /closed to every identity outside the trusted boundary group/);
+  await chmod(output, 0o2700);
+  await assert.rejects(isolation(plan, { uid: attestorUid }), /group read, write and traverse access/);
+  await chmod(output, 0o2770);
+  await assert.rejects(isolation({ ...plan, runAsUser: `${attestorUid}:65534` }, { uid: attestorUid }), /group-owned by the container's group/);
+  // Without membership of that group the attestor could not read the report the container
+  // writes, so it refuses now rather than as an EACCES once the target has been exercised.
+  await assert.rejects(isolation(plan, { uid: attestorUid, gids: [65534] }), /must belong to the boundary group/);
   await writeFile(join(output, 'planted.json'), '{}');
-  await assert.rejects(assertIsolation(plan, { uid: attestorUid }), /must be empty/);
+  await assert.rejects(isolation(plan, { uid: attestorUid }), /must be empty/);
   await rm(join(output, 'planted.json'));
-  const shared = join(output, '..', 'accounts.env');
+  const shared = join(collection, 'accounts.env');
   await writeFile(shared, 'TEST_ACCOUNT=approved', { mode: 0o644 });
-  await assert.rejects(assertIsolation({ ...plan, testAccountEnvFile: shared }, { uid: attestorUid }), /private regular file/);
+  await assert.rejects(isolation({ ...plan, testAccountEnvFile: shared }, { uid: attestorUid }), /private regular file/);
   await chmod(shared, 0o600);
-  await assert.doesNotReject(assertIsolation({ ...plan, testAccountEnvFile: shared }, { uid: attestorUid }));
+  await assert.doesNotReject(isolation({ ...plan, testAccountEnvFile: shared }, { uid: attestorUid }));
   await writeFile(shared, 'NODE_OPTIONS=--require=/tmp/forge.js', { mode: 0o600 });
-  await assert.rejects(assertIsolation({ ...plan, testAccountEnvFile: shared }, { uid: attestorUid }), /only TEST_ACCOUNT/);
+  await assert.rejects(isolation({ ...plan, testAccountEnvFile: shared }, { uid: attestorUid }), /only TEST_ACCOUNT/);
   await rm(shared);
 }));
+
+test('the container identity is never root, whatever the runner configures', async () => boundary(async ({ plan }) => {
+  // `0:0` with a root-owned boundary would otherwise pass every structural check and run
+  // both browser phases as root against a hostile deployment.
+  for (const runAsUser of ['0:0', '0:10001', '10001:0']) {
+    assert.throws(() => executionPlanSchema.parse({ ...plan, runAsUser }), /non-root UID and GID/, runAsUser);
+  }
+  assert.equal(executionPlanSchema.parse({ ...plan, runAsUser: '10001:10002' }).runAsUser, '10001:10002');
+  // The default is this attestor's own unprivileged identity, and never root either.
+  const { runAsUser: fallback, ...withoutUser } = plan;
+  assert.ok(!executionPlanSchema.parse(withoutUser).runAsUser.split(':').includes('0'));
+}));
+
+test('a sticky ancestor is exempt from the mode rule only, never from ownership', async () => {
+  // POSIX sticky rules stop other writers from renaming an entry, which is why a shared
+  // `/tmp` is tolerated. They leave the directory's own owner able to rename any child,
+  // so a runner-owned mode-1777 parent could still swap the oracle tree or the boundary
+  // aside during execution and restore it before the closing inode and digest checks.
+  const root = await mkdtemp(join(tmpdir(), 'graphyard-sticky-'));
+  const sticky = join(root, 'sticky'), child = join(sticky, 'boundary');
+  await mkdir(sticky); await chmod(sticky, 0o1777);
+  await mkdir(child, { mode: 0o700 });
+  try {
+    await assert.doesNotReject(assertAncestryFixed(child, attestorUid, 'collection boundary'));
+    await assert.rejects(assertAncestryFixed(child, foreignUid, 'collection boundary'),
+      /leading to the collection boundary must be owned by the supervising attestor identity or by root/);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
 
 test('an oracle tree any other account can rewrite is refused before any container starts', async () => boundary(async ({ oracle, plan }) => {
   // A read-only container mount does not stop host-side writes. Whoever owns the approved
@@ -106,42 +153,44 @@ test('an oracle tree any other account can rewrite is refused before any contain
   // one. "Not owned by the account that runs the container" is not enough either, because
   // the runner asking for supervision is a third account again: the bytes must belong to
   // the supervising attestor itself, so no one else on the host can touch them.
-  await assert.rejects(assertIsolation(plan, { uid: foreignUid }), /owned by the supervising attestor identity or by root/);
-  await assert.rejects(preflightAttempt(plan, { uid: foreignUid }), /owned by the supervising attestor identity or by root/);
+  await assert.rejects(isolation(plan, { uid: foreignUid }), /owned by the supervising attestor identity or by root/);
+  // Preflight provisions the boundary first, so a collection root belonging to another
+  // account is refused before any directory is created beneath it.
+  await assert.rejects(preflightAttempt(plan, { uid: foreignUid }), /owned by the supervising attestor identity/);
   // Every entry counts, not just the root: one writable approved file is enough.
   await chmod(join(oracle, 'suite.spec.ts'), 0o666);
-  await assert.rejects(assertIsolation(plan, { uid: attestorUid }), /must not be (?:group|world)-writable throughout execution/);
+  await assert.rejects(isolation(plan, { uid: attestorUid }), /must not be (?:group|world)-writable throughout execution/);
   await chmod(join(oracle, 'suite.spec.ts'), 0o644);
   await mkdir(join(oracle, 'helpers')); await chmod(join(oracle, 'helpers'), 0o775);
-  await assert.rejects(assertIsolation(plan, { uid: attestorUid }), /must not be group-writable throughout execution/);
+  await assert.rejects(isolation(plan, { uid: attestorUid }), /must not be group-writable throughout execution/);
   await rm(join(oracle, 'helpers'), { recursive: true });
   // A directory someone else could rename redirects the mount, so the path leading to the
   // approved bytes is held to the same rule. Sticky shared parents such as `/tmp` are the
   // documented exception, since only an entry's owner can rename it there.
   assert.ok((await stat(tmpdir())).mode & 0o1000, 'the fixture root is a sticky shared directory');
-  await assert.doesNotReject(assertIsolation(plan, { uid: attestorUid }));
+  await assert.doesNotReject(isolation(plan, { uid: attestorUid }));
 }));
 
-test('a collection boundary whose pathname another account controls is refused, and a replaced one is recorded', async () => boundary(async ({ output, plan }) => {
+test('a collection boundary whose pathname another account controls is refused, and a replaced one is recorded', async () => boundary(async ({ collection, output, plan }) => {
   // Checking the output directory's own ownership, mode and emptiness says nothing about
   // who may rename it. An account that can write a parent can move the checked directory
   // aside and leave an earlier attempt's passing output at the same pathname, which both
   // the container mount and the attestor's measurement would follow.
-  const shared = join(output, '..', 'shared');
+  const shared = join(collection, 'shared');
   await mkdir(shared); await chmod(shared, 0o777);
   const exposed = join(shared, 'attempt');
-  await mkdir(exposed, { mode: 0o700 });
-  await assert.rejects(assertIsolation({ ...plan, outputPath: exposed }, { uid: attestorUid }), /leading to the collection boundary must not be group- or world-writable/);
+  await mkdir(exposed); await chmod(exposed, 0o2770);
+  await assert.rejects(isolation(plan, { uid: attestorUid }, exposed), /leading to the collection boundary must not be group- or world-writable/);
   await chmod(shared, 0o755);
-  await assert.doesNotReject(assertIsolation({ ...plan, outputPath: exposed }, { uid: attestorUid }));
+  await assert.doesNotReject(isolation(plan, { uid: attestorUid }, exposed));
   await rm(shared, { recursive: true });
 
   // And if the pathname is redirected anyway, the attempt says so rather than reporting
   // whatever directory now answers to the recorded path.
   const swapping: Runner = async command => {
     if (command.argv.at(-1) === 'execute') {
-      await rename(output, join(output, '..', 'displaced'));
-      await mkdir(output, { mode: 0o700 });
+      await rename(output, join(collection, 'displaced'));
+      await mkdir(output); await chmod(output, 0o2770);
       await writeFile(join(output, 'report.json'), JSON.stringify({ passed: 'an older attempt' }));
     }
     return { exitCode: 0, timedOut: false };
@@ -151,8 +200,8 @@ test('a collection boundary whose pathname another account controls is refused, 
   assert.equal(swapped.outcome, 'failed');
 }));
 
-test('approved test-account variables are passed by value, never by reopened pathname', async () => boundary(async ({ output, plan }) => {
-  const shared = join(output, '..', 'accounts.env');
+test('approved test-account variables are passed by value, never by reopened pathname', async () => boundary(async ({ collection, plan }) => {
+  const shared = join(collection, 'accounts.env');
   await writeFile(shared, '# approved\nTEST_ACCOUNT_USER=booking-bot\nTEST_ACCOUNT_PASSWORD=approved secret\n', { mode: 0o600 });
   const withAccounts = { ...plan, testAccountEnvFile: shared };
   const preflight = await preflightAttempt(withAccounts, { uid: attestorUid });
@@ -242,6 +291,8 @@ test('failed enumeration stops the attempt, and a failing execution still reache
 
 test('every local refusal happens before acknowledgement, and preflight bytes carry into execution', async () => boundary(async ({ oracle, output, plan }) => {
   const preflight = await preflightAttempt(plan, { uid: attestorUid });
+  // The boundary preflight approved is this attempt's own directory, not the shared root.
+  assert.equal(preflight.outputPath, await realpath(attemptBoundaryPath(plan)));
   assert.deepEqual(preflight, { oraclePath: await realpath(oracle), outputPath: await realpath(output),
     outputBoundary: await boundaryIdentity(output), bundleDigest: plan.grant.bundleDigest, testAccountEnv: {} });
 

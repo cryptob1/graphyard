@@ -5,8 +5,8 @@ import { resolve } from 'node:path';
 import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import { supervise } from './supervisor.js';
 import { inspectRunnerRepository, oracleBundleDigest, snapshotRunnerSources } from './runner-setup.js';
-import { assertRunnerCredentialScope, attemptGrantSchema, containerNames, executionPlanSchema, executionRecordSchema, observeContainers } from './runner-executor.js';
-import { assembleResult, collectArtifacts, collectionBinding, collectionInputs, targetObservationSchema } from './runner-collector.js';
+import { assertRunnerCredentialScope, attemptGrantSchema, containerNames, executionRecordSchema, observeContainers, runnerPlanSchema } from './runner-executor.js';
+import { assembleResult, collectArtifacts, collectionBinding, collectionInputs, collectorInputSchema } from './runner-collector.js';
 import { superviseAttempt } from './runner-attestor.js';
 import { assertRepository, discover } from './onboarding.js';
 import { startGithubSetup } from './github-setup.js';
@@ -58,22 +58,6 @@ async function api(path: string, data?: unknown, requestId = process.env.GRAPHYA
   return body;
 }
 const print = (value: unknown) => console.log(JSON.stringify(value, null, 2));
-
-/**
- * What the runner account configures locally. Everything that decides *what* is approved
- * — the target, the bundle and image digests, the isolated network, the attestor's public
- * key and execution host — comes from the operator-versioned registration through the
- * dispatch grant, never from this file. `runAsUser` is deliberately left unresolved here:
- * the container identity is a fact about the execution host, so the attestor's own
- * default applies when an operator has not pinned one.
- */
-const runnerPlanSchema = executionPlanSchema.omit({ grant: true, runAsUser: true }).extend({
-  runAsUser: z.string().regex(/^[0-9]{1,10}:[0-9]{1,10}$/).optional(),
-  registration: z.object({ id: z.string(), revision: z.number().int().positive() }).strict(),
-  // How this host reaches the operator's attestor, for example
-  // `sudo -n -u graphyard-attestor /usr/local/bin/graphyard runner supervise`.
-  supervisor: z.object({ command: z.string().min(1).max(4096), args: z.array(z.string().max(4096)).max(32).default([]) }).strict(),
-}).strict();
 
 /**
  * Hand one attempt to the operator's host attestor and wait for the record it signed.
@@ -309,11 +293,7 @@ Never share an operator or producer credential with an implementation agent.`); 
     if (id === 'collect' && args.length === 1) {
       // Collector path. Separate credential, separate host: it re-reads the authority,
       // measures the target itself and never trusts candidate-authored JSON.
-      const input = z.object({ grant: attemptGrantSchema, record: executionRecordSchema, outputPath: z.string(), requiredArtifacts: z.array(z.string()).min(1).max(30),
-        expected: z.object({ instance: z.string(), artifacts: z.array(z.object({ service: z.string(), digest: z.string() }).strict()).min(1) }).strict(),
-        observations: z.array(targetObservationSchema).max(5000), maxGapMs: z.number().int().min(1000).max(600_000).default(30_000), cancelled: z.boolean().default(false),
-        executionAttestation: z.unknown() })
-        .strict().parse(JSON.parse(await readFile(args[0], 'utf8')));
+      const input = collectorInputSchema.parse(JSON.parse(await readFile(args[0], 'utf8')));
       const attemptCommand = { requestId: input.grant.requestId, attemptId: input.grant.attemptId, epoch: input.grant.epoch };
       let collectionBeat = 0, collectionAuthorityError: unknown, renewCollection: NodeJS.Timeout | undefined;
       try {

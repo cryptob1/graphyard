@@ -187,7 +187,16 @@ export async function collectArtifacts(outputDirectory: string, required: string
     const kind = artifactKinds[required];
     if (!kind) { reasons.push(`Artifact ${required} has no collector implementation meeting the capture policy; disable it rather than uploading unprotected evidence`); continue; }
     let bytes: Buffer;
-    try { bytes = await readPrivateFile(root, kind.file, 8_388_608); } catch { reasons.push(`Required artifact ${required} is missing or unreadable at the execution boundary`); continue; }
+    // The container writes as its own identity, so the trusted readers reach its output
+    // through the boundary group. A permission failure is reported as exactly that: it is
+    // a deployment fault to fix, not a missing artifact or a candidate behaviour signal.
+    try { bytes = await readPrivateFile(root, kind.file, 8_388_608); }
+    catch (error: any) {
+      reasons.push(error?.code === 'EACCES'
+        ? `Required artifact ${required} is not readable by this trusted identity; the runner container must write it readable to the boundary group (a default ACL on the collection root, or a umask no stricter than 027)`
+        : `Required artifact ${required} is missing or unreadable at the execution boundary`);
+      continue;
+    }
     let document: unknown;
     try { document = runnerReport.parse(JSON.parse(bytes.toString('utf8'))); }
     catch { reasons.push(`Required artifact ${required} is not an approved data-minimised report`); continue; }
@@ -229,6 +238,15 @@ export function deriveSettlement(attemptId: string, observations: unknown) {
   const settled = expected.every(name => state.get(name) === 'absent') && observed.every(o => expected.includes(o.name));
   return { settled, expected, observed };
 }
+
+/** Exactly what `runner collect` reads from its configuration file. The authority itself
+ * is re-read from the control plane; this is the collector's own local wiring. */
+export const collectorInputSchema = z.object({
+  grant: attemptGrantSchema, record: executionRecordSchema, outputPath: z.string(), requiredArtifacts: z.array(z.string()).min(1).max(30),
+  expected: z.object({ instance: z.string(), artifacts: z.array(z.object({ service: z.string(), digest: z.string() }).strict()).min(1) }).strict(),
+  observations: z.array(targetObservationSchema).max(5_000), maxGapMs: z.number().int().min(1_000).max(600_000).default(30_000), cancelled: z.boolean().default(false),
+  executionAttestation: z.unknown(),
+}).strict();
 
 export type ArtifactState = 'verified' | 'missing' | 'upload-failed' | 'expired';
 export type CollectorResult = {

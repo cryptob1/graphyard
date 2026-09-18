@@ -1,13 +1,13 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, writeFile, rename, rm, realpath } from 'node:fs/promises';
+import { mkdtemp, mkdir, writeFile, rename, rm, realpath, chmod } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createHash, generateKeyPairSync, randomUUID } from 'node:crypto';
 import { oracleBundleDigest } from '../src/runner-setup.js';
 import { superviseAttempt, supervisionRequestSchema } from '../src/runner-attestor.js';
 import { collectArtifacts, verifyExecutionAttestation } from '../src/runner-collector.js';
-import type { ExecutionPlan, ExecutionRecord, Runner, Settler } from '../src/runner-executor.js';
+import { attemptBoundaryPath, type ExecutionPlan, type ExecutionRecord, type Runner, type Settler } from '../src/runner-executor.js';
 
 const attestor = generateKeyPairSync('ed25519');
 const privateKey = attestor.privateKey.export({ type: 'pkcs8', format: 'pem' }).toString();
@@ -20,36 +20,41 @@ const testId = createHash('sha256').update('books are listed').digest('hex');
 const inventory = { format: 'graphyard-playwright-v1', declared: [{ id: testId, expected: 'passed', location: { file: 'suite.spec.ts', line: 1, column: 1 } }], executions: [], steps: [], errors: 0, overflow: false, status: 'passed' };
 const passing = { ...inventory, executions: [{ id: testId, status: 'passed', retry: 0 }], steps: [{ test: testId, sequence: 1, durationMs: 4, failed: false }] };
 
-/** A container that writes the approved reporter's structure into the output boundary. */
+/** A container that writes the approved reporter's structure into the attempt boundary. */
 const reporting = (plan: ExecutionPlan, report: unknown = passing): Runner => async command => {
   const phase = command.argv.at(-1);
-  await writeFile(join(plan.outputPath, phase === 'enumerate' ? 'inventory.json' : 'report.json'), JSON.stringify(phase === 'enumerate' ? inventory : report));
+  await writeFile(join(attemptBoundaryPath(plan), phase === 'enumerate' ? 'inventory.json' : 'report.json'), JSON.stringify(phase === 'enumerate' ? inventory : report));
   return { exitCode: 0, timedOut: false };
 };
 
-async function boundary(run: (paths: { oracle: string; output: string; plan: ExecutionPlan }) => Promise<void>) {
+async function boundary(run: (paths: { oracle: string; collection: string; output: string; plan: ExecutionPlan }) => Promise<void>) {
   const root = await mkdtemp(join(tmpdir(), 'graphyard-attestor-'));
-  const oracle = join(root, 'oracle'), output = join(root, 'output');
-  await mkdir(oracle, { mode: 0o755 }); await mkdir(output, { mode: 0o700 });
+  const oracle = join(root, 'oracle'), collection = join(root, 'output');
+  await mkdir(oracle, { mode: 0o755 }); await mkdir(collection, { mode: 0o755 });
   await writeFile(join(oracle, 'suite.spec.ts'), 'approved assertion');
   const bundle = await oracleBundleDigest(oracle);
   const plan: ExecutionPlan = {
     grant: { requestId: randomUUID(), attemptId: randomUUID(), epoch: 1, runner: { id: 'preview-runner', revision: 1 },
       executionHost: 'unix:///var/run/docker.sock', attestationPublicKey, executionNetwork: 'gy-isolated',
       bundleDigest: bundle.digest, runnerImageDigest: image, targetUrl: 'https://preview.example.test/', deadline: new Date(Date.now() + 600_000).toISOString() },
-    imageRepository: 'ghcr.io/example/graphyard-runner', oraclePath: await realpath(oracle), outputPath: await realpath(output),
+    imageRepository: 'ghcr.io/example/graphyard-runner', oraclePath: await realpath(oracle), outputPath: await realpath(collection),
     timeoutMs: 60_000, memoryMb: 2048, cpus: 2, pidsLimit: 256, runAsUser };
-  try { await run({ oracle, output, plan }); } finally { await rm(root, { recursive: true, force: true }); }
+  // The attestor provisions this attempt's own boundary under the collection root, so a
+  // retry or a second assignment never meets the previous attempt's leftover artifacts.
+  const output = attemptBoundaryPath(plan);
+  try { await run({ oracle, collection, output, plan }); } finally { await rm(root, { recursive: true, force: true }); }
 }
 
-test('the attestor signs the attempt it ran, so a fabricated record cannot borrow its signature', async () => boundary(async ({ plan }) => {
+test('the attestor signs the attempt it ran, so a fabricated record cannot borrow its signature', async () => boundary(async ({ output, plan }) => {
   const supervised = await superviseAttempt({ plan }, { privateKey, run: reporting(plan), settle: absent });
+  // The signed boundary is this attempt's own directory beneath the configured root.
+  assert.equal(supervised.record.outputPath, await realpath(output));
   // Every signed fact is this process's own observation: it started the containers,
   // measured the approved bytes, settled the containers and read the boundary itself.
   assert.deepEqual(supervised.record.phases.map(p => p.phase), ['enumerate', 'execute']);
   assert.deepEqual(supervised.record.refusals, []);
   assert.equal(supervised.record.outcome, 'completed');
-  const collected = await collectArtifacts(plan.outputPath, ['inventory', 'report']);
+  const collected = await collectArtifacts(supervised.record.outputPath, ['inventory', 'report']);
   assert.deepEqual(verifyExecutionAttestation(plan.grant, supervised.record, collected, supervised.attestation).reasons, []);
 
   // What a compromised runner can still do: fabricate a record, and fabricate a report to
@@ -60,7 +65,7 @@ test('the attestor signs the attempt it ran, so a fabricated record cannot borro
   // A blocked attempt cannot be laundered into a clean one either: the conclusions the
   // collector acts on — the outcome, the refusals, the phase results and the measured
   // digests — are signed alongside the interval.
-  await rm(join(plan.outputPath, 'inventory.json')); await rm(join(plan.outputPath, 'report.json'));
+  await rm(join(supervised.record.outputPath, 'inventory.json')); await rm(join(supervised.record.outputPath, 'report.json'));
   const blocked = await superviseAttempt({ plan: { ...plan, grant: { ...plan.grant, bundleDigest: `sha256:${'9'.repeat(64)}` } } },
     { privateKey, run: reporting(plan), settle: absent });
   assert.ok(blocked.record.refusals.some(r => /differ from the pinned digest/.test(r)));
@@ -118,16 +123,16 @@ test('preflight completes before acknowledgement, and an unacknowledged attempt 
   assert.ok(oracle);
 }));
 
-test('a boundary swapped out from under the measurement is never signed', async () => boundary(async ({ output, plan }) => {
+test('a boundary swapped out from under the measurement is never signed', async () => boundary(async ({ collection, output, plan }) => {
   // The attestor measures the output boundary by pathname. A runner that can redirect
   // that pathname could otherwise have an older attempt's passing report measured and
   // signed as this execution's own bytes, so the identity preflight approved is checked
   // again before anything is attested — and nothing is signed when it no longer holds.
-  const displaced = join(output, '..', 'displaced');
+  const displaced = join(collection, 'displaced');
   const swapping: Runner = async command => {
     if (command.argv.at(-1) === 'execute') {
       await rename(output, displaced);
-      await mkdir(output, { mode: 0o700 });
+      await mkdir(output); await chmod(output, 0o2770);
       await writeFile(join(output, 'report.json'), JSON.stringify(passing));
       await writeFile(join(output, 'inventory.json'), JSON.stringify(inventory));
     }
@@ -138,17 +143,40 @@ test('a boundary swapped out from under the measurement is never signed', async 
   await rename(displaced, output);
 }));
 
-test('the attestation covers every artifact kind the boundary held, whatever the collector publishes', async () => boundary(async ({ plan }) => {
+test('the attestation covers every artifact kind the boundary held, whatever the collector publishes', async () => boundary(async ({ output, plan }) => {
   const supervised = await superviseAttempt({ plan }, { privateKey, run: reporting(plan), settle: absent });
   assert.deepEqual(supervised.collection.artifacts.map(a => a.name), ['inventory', 'report']);
 
   // A collector configured to publish only the report still publishes bytes this attestor
   // measured, so the subset verifies.
-  const subset = await collectArtifacts(plan.outputPath, ['report']);
+  const subset = await collectArtifacts(output, ['report']);
   assert.deepEqual(verifyExecutionAttestation(plan.grant, supervised.record, subset, supervised.attestation).reasons, []);
 
   // Bytes rewritten after the attestation are not the bytes that were observed.
-  await writeFile(join(plan.outputPath, 'report.json'), JSON.stringify({ ...passing, steps: [] }));
-  const rewritten = await collectArtifacts(plan.outputPath, ['inventory', 'report']);
+  await writeFile(join(output, 'report.json'), JSON.stringify({ ...passing, steps: [] }));
+  const rewritten = await collectArtifacts(output, ['inventory', 'report']);
   assert.ok(verifyExecutionAttestation(plan.grant, supervised.record, rewritten, supervised.attestation).reasons.some(r => /differ from the host-attested boundary/.test(r)));
+}));
+
+test('each attempt is given its own boundary, so a retry never meets the last one\'s artifacts', async () => boundary(async ({ collection, output, plan }) => {
+  const first = await superviseAttempt({ plan }, { privateKey, run: reporting(plan), settle: absent });
+  assert.deepEqual(first.collection.artifacts.map(a => a.name), ['inventory', 'report']);
+
+  // Nothing removes a completed attempt's `inventory.json` and `report.json` — the
+  // collector still has to read them, possibly from another host and well after the run.
+  // A single static output directory would therefore refuse the emptiness check on every
+  // later attempt, and the packaged runner could not process a second one without manual
+  // filesystem work. The attempt the grant authorizes names its own directory instead.
+  const retry: ExecutionPlan = { ...plan, grant: { ...plan.grant, attemptId: randomUUID() } };
+  const second = await superviseAttempt({ plan: retry }, { privateKey, run: reporting(retry), settle: absent });
+  assert.deepEqual(second.record.refusals, []);
+  assert.equal(second.record.outcome, 'completed');
+  assert.notEqual(second.record.outputPath, first.record.outputPath);
+  assert.equal(second.record.outputPath, join(await realpath(collection), retry.grant.attemptId));
+  // The first attempt's bytes are still where its collector will look for them.
+  assert.deepEqual((await collectArtifacts(output, ['inventory', 'report'])).artifacts.map(a => a.name), ['inventory', 'report']);
+
+  // Reusing one attempt's own boundary is still refused: a leftover report must never be
+  // measured and signed as a later execution's behaviour.
+  await assert.rejects(superviseAttempt({ plan }, { privateKey, run: reporting(plan), settle: absent }), /must be empty before an attempt/);
 }));

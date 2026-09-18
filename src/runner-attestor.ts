@@ -1,6 +1,6 @@
 import { sign as signBytes } from 'node:crypto';
 import { z } from 'zod';
-import { boundaryUnchanged, executeAttempt, executionPlanSchema, preflightAttempt, type ExecutionRecord, type Runner, type Settler } from './runner-executor.js';
+import { boundaryUnchanged, executeAttempt, executionPlanSchema, preflightAttempt, type AttestorIdentity, type ExecutionRecord, type Runner, type Settler } from './runner-executor.js';
 import { artifactKinds, attestationBytes, collectArtifacts, executionAttestationPayload, type ExecutionAttestation } from './runner-collector.js';
 
 /**
@@ -32,21 +32,27 @@ export type SupervisionResult = { record: ExecutionRecord; attestation: Executio
  *
  * `callerUid` is the OS identity that asked for supervision, when the deployment makes it
  * knowable — `SUDO_UID` under the documented `sudo` rule. The container user must not be
- * that identity: the output boundary is private to the container user, so a runner
+ * that identity: the attempt boundary is writable by the container user, so a runner
  * sharing it could replace the report between the last phase and the measurement below,
- * and the attestation would then cover bytes the container never wrote.
+ * and the attestation would then cover bytes the container never wrote. For the same
+ * reason the runner account must not be a member of the boundary group, which is a
+ * deployment rule this process cannot check for another account.
+ *
+ * Preflight provisions this attempt's own boundary under the configured collection root
+ * and refuses unless this process can read through the boundary group, so the bytes
+ * measured below are reachable before any container is started.
  */
-export async function superviseAttempt(input: unknown, options: {
+export async function superviseAttempt(input: unknown, options: AttestorIdentity & {
   privateKey: string; ready?: () => Promise<void>; signal?: AbortSignal; callerUid?: number;
-  run?: Runner; settle?: Settler; now?: () => Date; uid?: number;
+  run?: Runner; settle?: Settler; now?: () => Date;
 }): Promise<SupervisionResult> {
   const { plan } = supervisionRequestSchema.parse(input);
   if (options.callerUid !== undefined && Number(plan.runAsUser.split(':')[0]) === options.callerUid) {
     throw new Error('The runner container must run as a dedicated account, not as the identity that requested supervision');
   }
-  const preflight = await preflightAttempt(plan, { uid: options.uid });
+  const preflight = await preflightAttempt(plan, { uid: options.uid, gids: options.gids });
   await options.ready?.();
-  const record = await executeAttempt(plan, { preflight, signal: options.signal, run: options.run, settle: options.settle, now: options.now, uid: options.uid });
+  const record = await executeAttempt(plan, { preflight, signal: options.signal, run: options.run, settle: options.settle, now: options.now, uid: options.uid, gids: options.gids });
   // Every kind the boundary may hold is measured, so the attestation does not depend on
   // how the separate collector happens to be configured. The collector publishes its own
   // required subset and each of those digests must match one measured here.

@@ -1,5 +1,5 @@
 import { constants, type Stats } from 'node:fs';
-import { lstat, open, readdir, realpath, stat } from 'node:fs/promises';
+import { chmod, lstat, mkdir, open, readdir, realpath, stat } from 'node:fs/promises';
 import { spawn } from 'node:child_process';
 import { dirname, relative, resolve, sep } from 'node:path';
 import { z } from 'zod';
@@ -13,6 +13,19 @@ const targetUrl = z.url().max(2000).refine(s => { const u = new URL(s); return u
  * arbitrary one can attach the browser to databases and other internal services. The
  * approved name is operator-versioned authority, never runner configuration. */
 const dockerNetwork = z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,60}$/).refine(value => !['host', 'bridge', 'default', 'none'].includes(value), 'Use a dedicated operator-approved Docker network');
+/** The pinned Docker endpoint, in the form the operator registration enforces. Every
+ * runtime command an attempt issues is addressed to it, so it has to be a daemon address
+ * rather than free text: a value the CLI would read as another flag, or an unreachable
+ * default context, is exactly how removal and inspection end up on different daemons. */
+const dockerEndpoint = z.string().min(1).max(500).regex(/^(?:ssh|tcp|unix):\/\/[^\s]+$/, 'The pinned execution host must be an ssh://, tcp:// or unix:// Docker endpoint');
+/**
+ * The unprivileged container identity. UID or GID zero is refused: a runner configuration
+ * could otherwise name `0:0`, provide a root-owned boundary, satisfy every structural
+ * check and run both browser phases as root against a hostile deployment — which is also
+ * what commonly forces Chromium out of its own sandbox.
+ */
+const containerUser = z.string().regex(/^[0-9]{1,10}:[0-9]{1,10}$/)
+  .refine(value => value.split(':').every(part => Number(part) !== 0), 'The runner container must run as a non-root UID and GID');
 
 /** Exactly the fields a runner may act on. A dispatch response is authority, not a suggestion. */
 export const attemptGrantSchema = z.object({
@@ -21,7 +34,7 @@ export const attemptGrantSchema = z.object({
   // These values come from the operator-versioned runner registration. They bind
   // collection to one host and to an attestor whose private key is unavailable to
   // the implementation worker.
-  executionHost: z.string().min(1).max(500),
+  executionHost: dockerEndpoint,
   attestationPublicKey: z.string().min(32).max(4096),
   executionNetwork: dockerNetwork,
   bundleDigest: digest, runnerImageDigest: digest, targetUrl, deadline: z.iso.datetime(),
@@ -36,12 +49,28 @@ export const executionPlanSchema = z.object({
   memoryMb: z.number().int().min(256).max(16_384).default(2048),
   cpus: z.number().min(0.5).max(16).default(2),
   pidsLimit: z.number().int().min(32).max(4096).default(256),
-  // Unprivileged, and the same identity that owns the collector's output directory:
-  // the container must be able to write its report without the collector needing root.
-  runAsUser: z.string().regex(/^[0-9]{1,10}:[0-9]{1,10}$/).default(() => `${process.getuid?.() ?? 10001}:${process.getgid?.() ?? 10001}`),
+  // Unprivileged, and carrying the group that the attempt boundary is shared through: the
+  // container writes its report as a member of that group, and the attestor and collector
+  // read it as members of the same group. Never root, and never the runner's own identity.
+  runAsUser: containerUser.default(() => `${process.getuid?.() || 10001}:${process.getgid?.() || 10001}`),
   testAccountEnvFile: absolute.optional(),
 }).strict();
 export type ExecutionPlan = z.infer<typeof executionPlanSchema>;
+/**
+ * What the runner account configures locally. Everything that decides *what* is approved
+ * — the target, the bundle and image digests, the isolated network, the attestor's public
+ * key and execution host — comes from the operator-versioned registration through the
+ * dispatch grant, never from this file. `runAsUser` is deliberately left unresolved here:
+ * the container identity is a fact about the execution host, so the attestor's own
+ * default applies when an operator has not pinned one.
+ */
+export const runnerPlanSchema = executionPlanSchema.omit({ grant: true, runAsUser: true }).extend({
+  runAsUser: containerUser.optional(),
+  registration: z.object({ id: z.string(), revision: z.number().int().positive() }).strict(),
+  // How this host reaches the operator's attestor, for example
+  // `sudo -n -u graphyard-attestor /usr/local/bin/graphyard runner supervise`.
+  supervisor: z.object({ command: z.string().min(1).max(4096), args: z.array(z.string().max(4096)).max(32).default([]) }).strict(),
+}).strict();
 export type Phase = 'enumerate' | 'execute';
 /** Both phases write through the approved reporter built into the pinned image. */
 export const reportFiles: Record<Phase, string> = { enumerate: 'inventory.json', execute: 'report.json' };
@@ -89,13 +118,21 @@ export function assertRunnerCredentialScope(status: unknown) {
  * saw the plan can name exactly the containers this attempt was allowed to start. */
 export const containerNames = (attemptId: string) => (['enumerate', 'execute'] as Phase[]).map(phase => `graphyard-${phase}-${attemptId}`);
 export const containerName = (plan: ExecutionPlan, phase: Phase) => `graphyard-${phase}-${plan.grant.attemptId}`;
+/**
+ * Address a Docker command to the endpoint the runner registration pinned. The attestor's
+ * own default context is not that endpoint: if it were used for `run` and removal while
+ * the collector inspects the registered one, a failed removal on the real daemon would
+ * still read as `absent` on the other, and the attempt would settle with its container
+ * still live against the target.
+ */
+const dockerArgv = (dockerHost: string | undefined, argv: string[]) => (dockerHost ? ['--host', dockerHost, ...argv] : argv);
 export function executionCommand(plan: ExecutionPlan, phase: Phase, testAccount: TestAccountEnv = {}) {
   const p = executionPlanSchema.parse(plan);
   const env = containerEnvironment(p, phase, testAccount);
   const memory = `${p.memoryMb}m`;
   return {
     file: 'docker',
-    argv: ['run', '--rm', '--name', containerName(p, phase),
+    argv: dockerArgv(p.grant.executionHost, ['run', '--rm', '--name', containerName(p, phase),
       // Enumeration is offline: the approved inventory cannot depend on the target.
       '--network', phase === 'enumerate' ? 'none' : p.grant.executionNetwork,
       '--read-only', '--cap-drop=ALL', '--security-opt=no-new-privileges', '--user', p.runAsUser,
@@ -105,7 +142,7 @@ export function executionCommand(plan: ExecutionPlan, phase: Phase, testAccount:
       '--tmpfs=/scratch:rw,noexec,nosuid,nodev,size=512m',
       '--workdir', '/scratch',
       ...Object.entries(env).flatMap(([key, value]) => ['--env', `${key}=${value}`]),
-      `${p.imageRepository}@${p.grant.runnerImageDigest}`, phase],
+      `${p.imageRepository}@${p.grant.runnerImageDigest}`, phase]),
     env,
   };
 }
@@ -114,7 +151,7 @@ async function directory(path: string) {
   const resolved = await realpath(path);
   const info = await stat(resolved);
   if (!info.isDirectory()) throw new Error(`Execution boundary path must be a directory: ${path}`);
-  return { path: resolved, mode: info.mode & 0o777, uid: info.uid, identity: { dev: info.dev, ino: info.ino } };
+  return { path: resolved, mode: info.mode & 0o777, uid: info.uid, gid: info.gid, identity: { dev: info.dev, ino: info.ino } };
 }
 
 /**
@@ -175,17 +212,62 @@ async function assertOracleImmutable(root: string, attestorUid: number) {
  * different directory — an earlier attempt's passing output, or a weakened oracle tree —
  * at the same path, and every later `docker run` mount and host-side measurement follows
  * the name. So no identity but the supervising attestor (or root) may control a
- * component of the path. Sticky ancestors such as `/tmp` are accepted: only an entry's
- * own owner can rename or remove it there.
+ * component of the path.
+ *
+ * A sticky shared directory such as `/tmp` may still be group- or world-writable, because
+ * the sticky bit means only an entry's own owner can rename or remove it there. That
+ * exemption is about the *writers*, never about the directory itself: POSIX sticky rules
+ * leave the directory's own owner able to rename any child, so a runner-owned mode-1777
+ * parent would let the runner swap the oracle tree or the output boundary aside during
+ * execution and put the original back before the closing inode and digest checks.
+ * Ownership is therefore required of every ancestor, sticky or not.
  */
-async function assertAncestryFixed(root: string, attestorUid: number, subject: string) {
+export async function assertAncestryFixed(root: string, attestorUid: number, subject: string) {
   for (let path = dirname(root), previous = ''; path !== previous; previous = path, path = dirname(path)) {
     const info = await lstat(path);
-    if (info.mode & 0o1000) continue;
     if (info.uid !== attestorUid && info.uid !== 0) throw new Error(`Every directory leading to the ${subject} must be owned by the supervising attestor identity or by root: ${path}`);
-    if (info.mode & 0o022) throw new Error(`Every directory leading to the ${subject} must not be group- or world-writable: ${path}`);
+    if (!(info.mode & 0o1000) && info.mode & 0o022) throw new Error(`Every directory leading to the ${subject} must not be group- or world-writable: ${path}`);
   }
 }
+
+/**
+ * The mode a provisioned attempt boundary carries. The attestor owns it, the container's
+ * group may create and read files in it, and no identity outside that group can even
+ * traverse it. The setgid bit hands that same group to every file the container writes,
+ * so the trusted readers keep access to output they do not own.
+ */
+export const attemptBoundaryMode = 0o2770;
+/** Where one attempt's output lives, under the configured collection root. */
+export const attemptBoundaryPath = (plan: ExecutionPlan) => resolve(plan.outputPath, plan.grant.attemptId);
+/**
+ * Provision this attempt's own output boundary.
+ *
+ * A single static output directory cannot be reused: nothing removes the previous
+ * attempt's `inventory.json` and `report.json`, so the emptiness check — which is what
+ * stops an older passing report from being measured as this attempt's behaviour — would
+ * refuse every retry and every subsequent assignment until someone cleaned up by hand.
+ * The attempt the grant authorizes names its own directory instead, and the attestor
+ * creates it: only the identity that creates a directory can own it without root, and the
+ * trusted readers need to read, and eventually remove, output the container wrote.
+ */
+async function provisionAttemptBoundary(plan: ExecutionPlan, attestorUid: number) {
+  const root = await directory(plan.outputPath);
+  if (root.uid !== attestorUid) throw new Error('The collection root must be owned by the supervising attestor identity, which provisions each attempt boundary beneath it');
+  if (root.mode & 0o022) throw new Error('The collection root must not be group- or world-writable');
+  const path = resolve(root.path, plan.grant.attemptId);
+  try { await mkdir(path); } catch (error: any) { if (error?.code !== 'EEXIST') throw error; }
+  // `mkdir`'s mode argument is masked by the attestor's umask, which would silently drop
+  // the group access the container writes through, so the boundary mode is set explicitly.
+  await chmod(path, attemptBoundaryMode);
+  return path;
+}
+
+/** The identity the supervising attestor checks against, and the groups it can read through. */
+export type AttestorIdentity = { uid?: number; gids?: number[] };
+const attestorIdentity = (options: AttestorIdentity) => ({
+  uid: options.uid ?? process.getuid?.() ?? 0,
+  gids: options.gids ?? [...(process.getgroups?.() ?? []), process.getgid?.() ?? 0],
+});
 
 /**
  * Structural checks before any container starts. The approved bytes and the writable
@@ -194,24 +276,39 @@ async function assertAncestryFixed(root: string, attestorUid: number, subject: s
  * must be empty so a previous or candidate-planted file cannot be mistaken for this
  * attempt's output.
  *
- * `uid` is the supervising attestor identity that must own the approved bytes; it
- * defaults to this process's own, because this runs inside the attestor.
+ * The boundary is shared between three identities that must not be the same account, and
+ * a directory private to any one of them would break the other two. The attestor owns it,
+ * so it can provision it, read it afterwards and remove it. The container writes into it
+ * as a member of the group named in `runAsUser`. The attestor — and the separately
+ * identified collector, on its own host — reads what the container wrote through that
+ * same group, which is why membership is required here rather than discovered as an
+ * `EACCES` after the phases have already exercised the target. Everything outside that
+ * group, the runner account above all, cannot even traverse it.
+ *
+ * `uid` and `gids` are the supervising attestor's identity; they default to this
+ * process's own, because this runs inside the attestor. `boundaryPath` is the directory
+ * provisioned for this attempt, defaulting to the configured path for callers that
+ * prepared one themselves.
  */
-export async function assertIsolation(plan: ExecutionPlan, options: { uid?: number } = {}) {
+export async function assertIsolation(plan: ExecutionPlan, options: AttestorIdentity & { boundaryPath?: string } = {}) {
   const p = executionPlanSchema.parse(plan);
-  const attestorUid = options.uid ?? process.getuid?.() ?? 0;
-  const oracle = await directory(p.oraclePath), output = await directory(p.outputPath);
+  const { uid: attestorUid, gids: attestorGids } = attestorIdentity(options);
+  const oracle = await directory(p.oraclePath), output = await directory(options.boundaryPath ?? p.outputPath);
   if (contains(oracle.path, output.path) || contains(output.path, oracle.path)) throw new Error('Approved oracle bytes and the writable output path must not overlap');
   if (oracle.mode & 0o022) throw new Error('The approved oracle directory must not be group- or world-writable');
   await assertAncestryFixed(oracle.path, attestorUid, 'approved oracle bundle');
   await assertOracleImmutable(oracle.path, attestorUid);
-  if (output.mode & 0o077) throw new Error('The collector output directory must be private to the collector');
-  if (output.uid !== Number(p.runAsUser.split(':')[0])) throw new Error('The collector output directory must be owned by the unprivileged container user');
+  const containerGid = Number(p.runAsUser.split(':')[1]);
+  if (output.mode & 0o007) throw new Error('The collection boundary must be closed to every identity outside the trusted boundary group');
+  if (output.uid !== attestorUid) throw new Error('The collection boundary must be owned by the supervising attestor identity that provisioned it');
+  if (output.gid !== containerGid) throw new Error("The collection boundary must be group-owned by the container's group, so the container can write its report and the trusted readers can read it");
+  if ((output.mode & 0o070) !== 0o070) throw new Error("The collection boundary must grant its group read, write and traverse access; the container writes its report through that group");
+  if (!attestorGids.includes(containerGid)) throw new Error('The supervising attestor must belong to the boundary group in runAsUser; it cannot otherwise read the output the container writes');
   // The output directory's own mode keeps the runner out of it; its ancestry is what
   // keeps the runner from putting a different directory at the same pathname, which
   // both the container mount and the attestor's post-execution measurement would follow.
   await assertAncestryFixed(output.path, attestorUid, 'collection boundary');
-  if ((await readdir(output.path)).length) throw new Error('The collector output directory must be empty before an attempt');
+  if ((await readdir(output.path)).length) throw new Error('The collection boundary must be empty before an attempt');
   const testAccountEnv = p.testAccountEnvFile ? await readTestAccountEnv(p.testAccountEnvFile) : {};
   return { oraclePath: oracle.path, outputPath: output.path, outputBoundary: output.identity, testAccountEnv };
 }
@@ -261,7 +358,6 @@ const spawnProcess = (file: string, argv: string[], timeoutMs: number, signal?: 
   child.on('close', code => finish(code ?? 1));
 });
 const dockerRunner: Runner = (command, timeoutMs, signal) => spawnProcess(command.file, command.argv, timeoutMs, signal);
-const dockerArgv = (dockerHost: string | undefined, argv: string[]) => (dockerHost ? ['--host', dockerHost, ...argv] : argv);
 async function inspectContainer(name: string, dockerHost?: string): Promise<ContainerState> {
   return new Promise(resolve => {
     const child = spawn('docker', dockerArgv(dockerHost, ['inspect', '--type=container', name]), { stdio: ['ignore', 'ignore', 'pipe'] });
@@ -288,10 +384,12 @@ export async function observeContainers(names: string[], options: { dockerHost?:
  * Killing `docker run` does not stop the container it started, so settlement is an
  * independent observation: force removal, then confirm the name no longer resolves.
  * Anything else stays `unknown`, and the execution-resource barrier remains closed.
+ * Both commands address the same pinned endpoint the attempt ran on, because removing on
+ * one daemon and confirming absence on another proves nothing about the live container.
  */
-const dockerSettler: Settler = async name => {
-  await spawnProcess('docker', ['rm', '--force', name], 30_000);
-  return inspectContainer(name);
+export const dockerSettler = (dockerHost: string): Settler => async name => {
+  await spawnProcess('docker', dockerArgv(dockerHost, ['rm', '--force', name]), 30_000);
+  return inspectContainer(name, dockerHost);
 };
 
 /** What a collector may accept as an execution record. It is data, never authority. */
@@ -313,9 +411,10 @@ export type Preflight = { oraclePath: string; outputPath: string; outputBoundary
  * unacknowledged, so it expires and releases its reservations instead of blocking them
  * until an operator settles by hand.
  */
-export async function preflightAttempt(plan: unknown, options: { uid?: number } = {}): Promise<Preflight> {
+export async function preflightAttempt(plan: unknown, options: AttestorIdentity = {}): Promise<Preflight> {
   const p = executionPlanSchema.parse(plan);
-  const paths = await assertIsolation(p, options);
+  const boundaryPath = await provisionAttemptBoundary(p, attestorIdentity(options).uid);
+  const paths = await assertIsolation(p, { ...options, boundaryPath });
   return { ...paths, bundleDigest: (await oracleBundleDigest(paths.oraclePath)).digest };
 }
 
@@ -327,12 +426,12 @@ export async function preflightAttempt(plan: unknown, options: { uid?: number } 
  * about acceptance. `signal` carries loss of attempt authority: an aborted attempt stops
  * talking to the target and settles.
  */
-export async function executeAttempt(plan: unknown, options: { run?: Runner; settle?: Settler; now?: () => Date; preflight?: Preflight; signal?: AbortSignal; uid?: number } = {}): Promise<ExecutionRecord> {
+export async function executeAttempt(plan: unknown, options: AttestorIdentity & { run?: Runner; settle?: Settler; now?: () => Date; preflight?: Preflight; signal?: AbortSignal } = {}): Promise<ExecutionRecord> {
   const p = executionPlanSchema.parse(plan);
   const now = options.now ?? (() => new Date());
-  const run = options.run ?? dockerRunner, settle = options.settle ?? dockerSettler;
+  const run = options.run ?? dockerRunner, settle = options.settle ?? dockerSettler(p.grant.executionHost);
   const signal = options.signal;
-  const paths = options.preflight ?? await preflightAttempt(p, { uid: options.uid });
+  const paths = options.preflight ?? await preflightAttempt(p, { uid: options.uid, gids: options.gids });
   // The exact canonical roots checked and hashed in preflight are the roots mounted.
   // Never resolve a worker-replaceable symlink a second time in `docker run`.
   const mountedPlan: ExecutionPlan = { ...p, oraclePath: paths.oraclePath, outputPath: paths.outputPath };
