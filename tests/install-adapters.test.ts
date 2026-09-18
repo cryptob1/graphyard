@@ -1,0 +1,204 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
+import { join } from 'node:path';
+import { applyInstall, buildPlan, coreEnv, prepareInstall } from '../src/install/index.js';
+import { fakeTransport, type Transport } from '../src/install/transport.js';
+import { CHECK_NAME } from '../src/install/github.js';
+import type { Provider } from '../src/install/types.js';
+import { harness, satisfiedProtection, GRAPHYARD_APP_ID, CI_APP_ID, type Harness } from './install-harness.js';
+
+const inputsFor = (provider: Provider) => ({ repository: 'owner/project', provider,
+  ...(provider === 'railway' || provider === 'compose' ? {} : { sshHost: '203.0.113.10', sshUser: 'root', domain: 'graphyard.example.test' }) });
+
+const bundle = (fixture: Harness, name: string) => {
+  const stores = [fixture.transport.files, ...[...fixture.remotes.values()].map(remote => remote.files)];
+  for (const store of stores) for (const [path, file] of store) if (path.endsWith(`/${name}`)) return file;
+  return null;
+};
+
+async function apply(fixture: Harness, provider: Provider) {
+  const session = await prepareInstall(fixture.root, inputsFor(provider), fixture.deps);
+  return { session, summary: await applyInstall(session, await buildPlan(session)) };
+}
+
+test('--apply provisions Postgres and the application, sets every variable, and reaches a healthy HTTPS URL on each adapter', async () => {
+  const expectedUrl: Record<Provider, string> = {
+    railway: 'https://graphyard-owner-project.up.railway.app',
+    hetzner: 'https://graphyard.example.test',
+    'docker-host': 'https://graphyard.example.test',
+    compose: 'http://127.0.0.1:4310',
+  };
+  for (const provider of ['railway', 'hetzner', 'docker-host', 'compose'] as Provider[]) {
+    const fixture = await harness({ provider });
+    try {
+      const { session, summary } = await apply(fixture, provider);
+      assert.equal(summary.url, expectedUrl[provider], `${provider} URL`);
+      assert.equal(summary.health, true);
+      assert.equal(summary.webhookUrl, `${expectedUrl[provider]}/api/github/webhook`);
+      assert.equal(summary.status.role, 'admin');
+      assert.equal(summary.status.repository, 'owner/project');
+      assert.equal(summary.github?.appId, GRAPHYARD_APP_ID);
+      assert.deepEqual(summary.github?.ciAppIds, [CI_APP_ID]);
+      assert.equal(summary.webhook.delivered, true, `${provider} webhook: ${summary.webhook.detail}`);
+
+      const lines = fixture.allCommandLines();
+      if (provider === 'railway') {
+        assert.ok(lines.some(line => line.includes('railway add --database postgres')), 'Postgres was not provisioned');
+        assert.ok(lines.some(line => line.includes('railway up --service')), 'the application was not deployed');
+        assert.ok(lines.some(line => line.includes('railway domain --service')), 'no HTTPS domain was obtained');
+      } else {
+        const compose = bundle(fixture, 'compose.yaml')!;
+        assert.ok(compose, `${provider} wrote no Compose bundle`);
+        assert.match(compose.content, /image: postgres:17-alpine/);
+        // Hetzner keeps the ledger on the attached volume; the others use a named volume.
+        assert.ok(compose.content.includes(provider === 'hetzner' ? '"/mnt/graphyard/postgres:/var/lib/postgresql/data"' : '"graphyard-data:/var/lib/postgresql/data"'), `${provider} Postgres storage is not durable`);
+        assert.ok(lines.some(line => line.includes('up -d --remove-orphans')), `${provider} did not start the stack`);
+        const environment = bundle(fixture, 'server.env')!;
+        assert.equal(environment.mode, 0o600);
+        assert.equal(bundle(fixture, 'db.env')!.mode, 0o600);
+        for (const name of ['HOST', 'PORT', 'DATABASE_URL', 'GRAPHYARD_PRINCIPALS', 'GITHUB_REPOSITORY', 'GITHUB_BASE_BRANCH', 'GITHUB_APP_ID', 'GITHUB_INSTALLATION_ID', 'GITHUB_PRIVATE_KEY', 'GITHUB_WEBHOOK_SECRET', 'GITHUB_CI_APP_IDS']) {
+          assert.ok(environment.content.includes(`${name}=`), `${provider} did not set ${name}`);
+        }
+        if (provider !== 'compose') assert.match(bundle(fixture, 'Caddyfile')!.content, /graphyard\.example\.test \{/);
+      }
+
+      const record = JSON.parse(await readFile(join(session.directory, 'install.json'), 'utf8'));
+      assert.equal(record.url, expectedUrl[provider]);
+      assert.equal(record.github.appId, GRAPHYARD_APP_ID);
+      assert.equal(record.principals.length, session.principals.length);
+    } finally { await fixture.cleanup(); }
+  }
+});
+
+test('re-applying an existing installation is idempotent: nothing is provisioned twice and no credential rotates', async () => {
+  for (const provider of ['railway', 'hetzner', 'docker-host', 'compose'] as Provider[]) {
+    const first = await harness({ provider });
+    let second: Harness | undefined;
+    try {
+      const initial = await apply(first, provider);
+      const envFile = provider === 'railway'
+        ? JSON.stringify(Object.fromEntries(coreEnv(initial.session).map(value => [value.name, value.value])))
+        : `${coreEnv(initial.session).map(value => `${value.name}=${value.value}`).join('\n')}\n`;
+      second = await harness({ provider, installed: true, envFile, protection: satisfiedProtection(null), root: first.root, configHome: first.configHome });
+      const again = await apply(second, provider);
+
+      assert.equal(again.summary.url, initial.summary.url);
+      const lines = second.allCommandLines();
+      for (const creation of ['railway init', 'railway add --database', 'railway add --service', 'hcloud server create', 'hcloud volume create']) {
+        assert.ok(!lines.some(line => line.includes(creation)), `${provider} re-ran ${creation}`);
+      }
+      // Tokens are the installation's identity: a second apply must not invalidate live workers.
+      for (const principal of initial.session.principals) {
+        assert.equal(again.session.tokens.get(principal.id), initial.session.tokens.get(principal.id), `${provider} rotated ${principal.id}`);
+      }
+      assert.equal(again.session.context.databasePassword, initial.session.context.databasePassword);
+      const record = JSON.parse(await readFile(join(initial.session.directory, 'install.json'), 'utf8'));
+      assert.equal(record.createdAt, JSON.parse(await readFile(join(again.session.directory, 'install.json'), 'utf8')).createdAt);
+    } finally { await first.cleanup(); if (second) await second.cleanup(); }
+  }
+});
+
+test('Railway secrets are sent over standard input and never appear in a process argument', async () => {
+  const fixture = await harness({ provider: 'railway' });
+  try {
+    const { session } = await apply(fixture, 'railway');
+    const secrets = ['GRAPHYARD_PRINCIPALS', 'GITHUB_PRIVATE_KEY', 'GITHUB_WEBHOOK_SECRET'];
+    for (const name of secrets) {
+      const command = fixture.transport.commands.find(entry => entry.args.includes('--stdin') && entry.args.includes(name));
+      assert.ok(command, `${name} was not sent over stdin`);
+      assert.ok(command!.input && command!.input.length > 0);
+    }
+    for (const command of fixture.transport.commands) {
+      for (const token of session.tokens.values()) assert.ok(!command.args.some(argument => argument.includes(token)), 'a credential reached a process argument');
+    }
+    // Plain values still go through --set, so a re-run can compare them without decryption.
+    assert.ok(fixture.commandLines().some(line => line.includes('--set HOST=0.0.0.0')));
+  } finally { await fixture.cleanup(); }
+});
+
+test('the App-bound merge check is required only once Graphyard has published it', async () => {
+  const fresh = await harness({ provider: 'compose' });
+  try {
+    const { summary } = await apply(fresh, 'compose');
+    const put = fresh.transport.commands.find(command => command.args.includes('--method') && command.args.includes('PUT'))!;
+    const payload = JSON.parse(put.input!);
+    assert.ok(!payload.required_status_checks.checks.some((check: any) => check.context === CHECK_NAME), 'a check that does not exist yet must not be required');
+    assert.equal(payload.required_status_checks.strict, true);
+    assert.equal(payload.enforce_admins, true);
+    assert.equal(payload.required_conversation_resolution, true);
+    assert.equal(payload.required_pull_request_reviews.required_approving_review_count, 1);
+    assert.ok(summary.nextSteps.some(step => step.includes(CHECK_NAME)), 'the operator must be told to rerun once the check exists');
+  } finally { await fresh.cleanup(); }
+
+  const published = await harness({ provider: 'compose', protection: { required_status_checks: { strict: false, checks: [{ context: CHECK_NAME, app_id: null }] }, enforce_admins: { enabled: false }, required_pull_request_reviews: { required_approving_review_count: 0 } } });
+  try {
+    const { summary } = await apply(published, 'compose');
+    const put = published.transport.commands.filter(command => command.args.includes('--method') && command.args.includes('PUT')).at(-1)!;
+    const payload = JSON.parse(put.input!);
+    const merge = payload.required_status_checks.checks.find((check: any) => check.context === CHECK_NAME);
+    assert.equal(merge.app_id, GRAPHYARD_APP_ID, 'the merge check must be bound to the Graphyard App');
+    assert.ok(!summary.nextSteps.some(step => step.includes(CHECK_NAME)));
+  } finally { await published.cleanup(); }
+});
+
+test('the agent review policy sets zero native approvals without relaxing any other protection', async () => {
+  const fixture = await harness({ provider: 'compose' });
+  try {
+    const session = await prepareInstall(fixture.root, { repository: 'owner/project', provider: 'compose', reviewPolicy: 'agent', reviewer: 'claude' }, fixture.deps);
+    const summary = await applyInstall(session, await buildPlan(session));
+    const payload = JSON.parse(fixture.transport.commands.find(command => command.args.includes('PUT'))!.input!);
+    assert.equal(payload.required_pull_request_reviews.required_approving_review_count, 0);
+    assert.equal(payload.enforce_admins, true);
+    assert.equal(payload.required_status_checks.strict, true);
+    assert.deepEqual(summary.reviewers, [{ name: 'claude', appId: GRAPHYARD_APP_ID + 1, botUserId: 900_001 }]);
+    const environment = bundle(fixture, 'server.env')!;
+    assert.match(environment.content, /GRAPHYARD_REVIEWER_APPS=\[\{"id":"claude"/);
+  } finally { await fixture.cleanup(); }
+});
+
+test('apply refuses to change anything when preflight is incomplete', async () => {
+  const fixture = await harness({ provider: 'railway' });
+  try {
+    const broken = { ...fixture.deps, transport: { ...fixture.transport, exec: async (program: string, args: string[], options: any = {}) => {
+      if (program === 'railway' && args[0] === 'whoami') { if (!options.allowFailure) throw new Error('railway exited with 1'); return { stdout: '', stderr: 'Unauthorized', code: 1 }; }
+      return fixture.transport.exec(program, args, options);
+    } } };
+    const session = await prepareInstall(fixture.root, inputsFor('railway'), broken as any);
+    const plan = await buildPlan(session);
+    await assert.rejects(applyInstall(session, plan), /Preflight is incomplete[\s\S]*railway login/);
+    assert.ok(!fixture.commandLines().some(line => line.includes('railway init')));
+  } finally { await fixture.cleanup(); }
+});
+
+test('the Hetzner server keeps Postgres on its attached volume and waits for cloud-init', async () => {
+  const fixture = await harness({ provider: 'hetzner' });
+  try {
+    const { session } = await apply(fixture, 'hetzner');
+    const lines = fixture.commandLines();
+    assert.ok(lines.some(line => line.includes('hcloud volume create --name graphyard-owner-project-data')));
+    assert.ok(lines.some(line => line.includes('hcloud volume attach graphyard-owner-project-data')));
+
+    const create = fixture.transport.commands.find(command => command.program === 'hcloud' && command.args[0] === 'server' && command.args[1] === 'create')!;
+    assert.ok(create.input, 'cloud-init was not supplied over stdin');
+    assert.match(create.input!, /docker-compose-plugin/);
+    assert.match(create.input!, /scsi-0HC_Volume_/);
+    assert.match(create.input!, /\/mnt\/graphyard ext4/);
+    assert.ok(!create.input!.includes(session.context.databasePassword), 'cloud-init must not carry a credential');
+
+    // The bundle is only written after the remote Docker daemon answers.
+    const remote = [...fixture.remotes.values()][0];
+    const dockerReady = remote.commands.findIndex(command => command.program === 'docker' && command.args[0] === 'version');
+    assert.ok(dockerReady >= 0, 'provisioning did not wait for Docker');
+    assert.ok([...remote.files.keys()].some(path => path.endsWith('/compose.yaml')));
+  } finally { await fixture.cleanup(); }
+});
+
+test('a server whose Docker never appears fails the install with the server named', async () => {
+  const fixture = await harness({ provider: 'hetzner' });
+  try {
+    const unreachable = fakeTransport({ responses: [{ match: 'docker version', result: { stdout: '', stderr: 'connection refused', code: 1 } }] });
+    const session = await prepareInstall(fixture.root, inputsFor('hetzner'), { ...fixture.deps, ssh: () => unreachable as Transport });
+    await assert.rejects(applyInstall(session, await buildPlan(session)), /Docker did not become available on graphyard-owner-project/);
+  } finally { await fixture.cleanup(); }
+});

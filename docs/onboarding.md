@@ -1,6 +1,10 @@
 # Onboard a repository
 
-This is the supported path from an existing GitHub repository to Graphyard, Herdr, one master, and one worker. Start with one worker; add capacity after the first PR reaches Done.
+This is the supported path from an existing GitHub repository to a working fleet. One
+command installs the control plane — see [install](install.md) for the full runbook — and
+this guide covers what surrounds it: the human prompts, adding machines, starting the
+master, and proving the first pull request. Start with one worker; add capacity after the
+first PR reaches Done.
 
 ```mermaid
 flowchart LR
@@ -16,11 +20,13 @@ You keep talking directly to the master. The master reads work and gate state fr
 
 The initial setup works with one worker. Add more workers or machines only after the first PR has completed the full loop.
 
-Do not create an operator-agent credential during this bootstrap. After the repository is connected and its gates have completed the protected loop, a human administrator may optionally configure [scoped operator automation](operator-automation.md). That mode keeps Operator, Master, Worker, and Reviewer/proof-producer as four distinct AI sessions; it does not replace human goals, approvals, exceptions, or oversight.
-
 ## Before you start
 
-You need Node 24, Git, Docker, Herdr 0.7.1+, a Graphyard checkout, a GitHub repository, and a Railway account or another Docker host. Agent providers such as Codex or Claude must already be authenticated on the machine that runs them. The coordinator also needs GitHub CLI authenticated as an identity allowed to merge the protected base branch.
+You need Node 24, Git, a Graphyard checkout, a GitHub repository you administer, and access
+to one supported provider. The GitHub CLI must be authenticated as an identity that
+administers the base branch. Agent providers such as Codex or Claude must already be signed
+in on the machine that runs them; Herdr 0.7.1+ is optional and is bound automatically when
+it is installed.
 
 Graphyard is not published to npm yet. In the commands below:
 
@@ -28,44 +34,60 @@ Graphyard is not published to npm yet. In the commands below:
 export GRAPHYARD_CLI=/absolute/path/to/graphyard/bin/graphyard.mjs
 ```
 
-For every `--token-stdin` prompt, paste the token, press Enter, then press Ctrl-D to send EOF.
+## 1. Install the control plane
 
-## 1. Deploy one control plane
-
-Use one Graphyard server and one Postgres database for all workers. Follow [deployment](deployment.md) for Railway or Docker Compose.
-
-Create a separate cryptographically random token of at least 32 characters for each role:
-
-| Role | Use |
-| --- | --- |
-| `admin` | Setup, work creation, requirements, and recovery |
-| `coordinator` | Master status and guarded merge authority |
-| `worker` | One identity per concurrent implementation session |
-| `reader` | Read-only dashboards |
-| `producer` | Only the proof names that runner may submit |
-
-Set `GRAPHYARD_PRINCIPALS`, `GITHUB_REPOSITORY`, `GITHUB_BASE_BRANCH`, and `GITHUB_CI_APP_IDS` on the server. Never give an implementation worker an admin, coordinator, or producer token.
-
-Open the Graphyard URL and sign in with the admin token.
-
-## 2. Connect GitHub
-
-From the repository being managed:
+One command replaces the former sequence of deploying a server, generating a token per role,
+setting eleven variables, creating a domain, running the GitHub App flow, configuring the
+webhook and branch protection, discovering CI App IDs, connecting a worker, and initializing
+the master.
 
 ```sh
 cd /path/to/your-repository
-node "$GRAPHYARD_CLI" github-setup https://YOUR-GRAPHYARD-HOST
+node "$GRAPHYARD_CLI" install --provider railway --repo OWNER/REPO --workers 1 --plan
+node "$GRAPHYARD_CLI" install --provider railway --repo OWNER/REPO --workers 1 --apply
 ```
 
-This guided flow supports personal-account Apps. For organization-owned repositories, create the App manually using [GitHub enforcement](github.md#create-and-install-the-app).
+Follow [install](install.md) for the full runbook: preconditions, per-step verification, and
+failure handling. Providers are `railway`, `hetzner`, `docker-host`, and `compose`.
 
-Install the App only on the managed repository and copy its private values into the Graphyard service. Configure normal CI and review protection now. The new `Graphyard / merge` check may appear only after the first linked PR; require it as soon as Graphyard publishes it, before merging.
+You are prompted for exactly four things:
 
-Confirm the exact CI check names and their GitHub App IDs. GitHub Actions uses App ID `15368`; other CI providers do not.
+| Prompt | What to do |
+| --- | --- |
+| Which provider | Already answered by `--provider` |
+| Provider login | Run the login command the installer prints, once |
+| The GitHub App confirmation | Open the printed page, confirm the App, install it on this repository |
+| Plan approval | Read the plan, then rerun with `--apply` |
 
-## 3. Connect a worker and Herdr
+The installer generates one credential per role, stores each under
+`~/.config/graphyard/<install>/` with mode `0600`, and never prints one. Add
+`--producer-proof NAME` for each proof a CI runner may submit; without it no producer
+principal is created, which is the safe default. Add `--reviewer NAME` to also register a
+separate reviewer GitHub App for [agent review](github.md#identity-bound-agent-review-providers).
 
-On a worker machine, from a worker-only checkout:
+Do not create an operator-agent credential during this bootstrap. After the repository is
+connected and its gates have completed the protected loop, a human administrator may
+optionally configure [scoped operator automation](operator-automation.md). That mode keeps
+Operator, Master, Worker, and Reviewer/proof-producer as four distinct AI sessions; it does
+not replace human goals, approvals, exceptions, or oversight.
+
+## 2. Read the summary
+
+`--apply` ends with a redacted summary. Confirm `health`, `status.role`, `status.repository`,
+`webhook.delivered`, `protection`, and the registered profiles, then work through its
+`nextSteps`. Those steps are generated from what actually happened, so they are the
+authoritative list of anything still missing — commonly a rerun once Graphyard has published
+`Graphyard / merge` on the first pull request.
+
+Open the Graphyard URL and sign in with the admin credential named in the summary.
+
+## 3. Add machines and capacity
+
+The installer configures this machine: the repository connection, the Herdr plugin when
+Herdr is present, the master profile, and one worker profile per `--workers`.
+
+For another worker machine, rerun the installer there with a higher `--workers` count, or
+connect that machine alone against the existing control plane:
 
 ```sh
 cd /path/to/your-repository
@@ -76,54 +98,44 @@ node "$GRAPHYARD_CLI" init \
   --token-stdin
 ```
 
-Supply that worker's token on standard input. Setup:
+Supply that machine's own worker token on standard input; paste it, press Enter, then
+Ctrl-D. Setup verifies the repository and worker identity, updates one managed section in
+`AGENTS.md`, adds the `.graphyard/` ignore rule, stores the private connection locally, and
+links and enables the Herdr plugin. Commit `AGENTS.md` and `.gitignore`. Never commit
+`.graphyard/`. Give every concurrent session a different worker identity and host ID.
 
-- verifies the repository and worker identity;
-- updates one managed section in `AGENTS.md`;
-- adds the `.graphyard/` ignore rule;
-- stores the private connection locally;
-- links and enables the Herdr plugin.
-
-Commit `AGENTS.md` and `.gitignore`. Never commit `.graphyard/`. Repeat on each worker machine with a different worker identity and host ID.
-
-## 4. Start the master
-
-Use a clean checkout under a dedicated coordinator OS identity or machine. It must not contain a worker connection or expose its merge-capable GitHub CLI credentials to implementation agents.
-
-```sh
-cd /path/to/coordinator-checkout
-herdr workspace list
-node "$GRAPHYARD_CLI" master init \
-  --url https://YOUR-GRAPHYARD-HOST \
-  --herdr-workspace HERDR_WORKSPACE_ID \
-  --token-stdin
-node "$GRAPHYARD_CLI" master start codex
-```
-
-Supply the coordinator token. Use `master start claude` if preferred. Commit the managed `AGENTS.md` update.
-
-The master reads Graphyard truth, watches runtime health, routes work, and requests guarded merges. It does not implement work or submit evidence.
-
-## 5. Add workers
-
-For a trusted worker on the coordinator host, start from a template:
+Worker profile templates, for a profile added by hand:
 
 - [Codex](../examples/master/codex-worker.json)
 - [Claude](../examples/master/claude-worker.json)
 - [existing Herdr session](../examples/master/existing-worker.json)
-
-Store each worker token in a mode-0600 file outside the repository, edit the template, then:
 
 ```sh
 node "$GRAPHYARD_CLI" master worker add /path/to/profile.json
 node "$GRAPHYARD_CLI" master status
 ```
 
-Local launch profiles share the coordinator host. They require Linux with a working systemd user manager for durable containment. Use them only for trusted dogfooding or inside a real OS/container boundary that hides coordinator GitHub credentials. On macOS or a Linux host without user systemd, use the remote-worker flow below.
+Local launch profiles share the coordinator host. They require Linux with a working systemd
+user manager for durable containment. Use them only for trusted dogfooding or inside a real
+OS or container boundary that hides coordinator GitHub credentials. On macOS, or a Linux host
+without user systemd, run workers on other machines with GitHub identities that can push
+branches and open pull requests but cannot merge the protected base branch. Version 0.1 does
+not remotely launch supervised Herdr tabs across hosts; the master selects work and the
+remote worker claims it.
 
-For the recommended separated setup, workers run on other machines with GitHub identities that can push branches and open PRs but cannot merge the protected base branch. Version 0.1 does not remotely launch supervised Herdr tabs across hosts; the master selects work and the remote worker claims it.
+## 4. Start the master
 
-## 6. Prove the first PR
+```sh
+node "$GRAPHYARD_CLI" master start codex
+```
+
+Use the agent kind reported as `profiles.master.kind` in the summary. The master reads
+Graphyard truth, watches runtime health, routes work, and requests guarded merges. It does
+not implement work or submit evidence. Run it from a checkout under a dedicated coordinator
+OS identity that does not expose its merge-capable GitHub CLI credentials to implementation
+agents.
+
+## 5. Prove the first PR
 
 Create a small real work item in the UI. Use the repository's exact CI check names and acceptance proofs.
 
@@ -157,8 +169,12 @@ Done means Graphyard observed that authorized merge. It does not yet mean deploy
 
 Before adding more workers, stop one worker, let its lease expire, reclaim with another identity, and confirm the old epoch can no longer heartbeat or submit.
 
-## Current manual steps
+## What is still manual
 
-Version 0.1 still requires an operator to deploy the server, provision identities, configure GitHub protection, authenticate agent providers, and connect project-specific trusted evidence. A hosted signup flow and general turnkey E2E execution are not shipped.
+The installer covers deployment, identities, GitHub integration, protection, profiles, and
+verification. A person still authenticates the provider CLI, the GitHub CLI, and each agent
+runtime, confirms the GitHub App in the browser, approves the plan, and connects
+project-specific trusted evidence by granting a producer its proof names. A hosted signup
+flow and general turnkey E2E execution are not shipped.
 
 Use the [documentation index](README.md) for deeper setup, operations, and protocol details.

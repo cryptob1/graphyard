@@ -4,13 +4,14 @@ Choose one path. The reference guides are there when a gate or integration needs
 
 ## Start here
 
-1. [How Graphyard works](how-graphyard-works.md) — the lifecycle and authority model in five minutes.
-2. [Onboard a repository](onboarding.md) — Railway, GitHub, Herdr, master, workers, and the first PR.
-3. [Quickstart](quickstart.md) — run Graphyard locally for evaluation.
+1. [Install Graphyard](install.md) — the one command, and the agent-executable runbook behind it. **Start here.**
+2. [How Graphyard works](how-graphyard-works.md) — the lifecycle and authority model in five minutes.
+3. [Onboard a repository](onboarding.md) — the human prompts, more machines, the master, and the first PR.
+4. [Quickstart](quickstart.md) — install locally with `--provider compose` for evaluation.
 
 ## Operate Graphyard
 
-- [Deployment](deployment.md) — Railway, Docker Compose, backups, and upgrades.
+- [Deployment](deployment.md) — provider reference behind the installer, the variables table, a manual fallback, backups, and upgrades.
 - [GitHub enforcement](github.md) — App permissions, branch protection, CI producers, and Codex review.
 - [Herdr integration](herdr.md) — worker installation and multi-machine use.
 - [Master-agent mode](master-agent.md) — routing, recovery, and guarded merges.

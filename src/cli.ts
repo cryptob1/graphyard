@@ -13,11 +13,13 @@ import { diagnose, fileConflicts, proofPreview, resourceConflicts } from './coor
 import { loadConnection, setupRepository, handoff, hostIdSchema } from './repository-setup.js';
 import { assertMasterBinding, buildMasterStatus, continueMergeBatch, currentMergeCandidates, dispatchWork, inspectWorkerCredentials, listHerdrAgents, loadMasterConfig, mergeWork, observeHerdrAgents, readCredentialFile, readWorkerCredential, saveWorkerProfile, setupMaster, startMaster, workerProfileSchema } from './master.js';
 import { acknowledgeContainment, containmentCredentials, establishContainment, isConfirmedCoordinationRefusal, revalidateContainment, settleContainment } from './quarantine.js';
+import { applyInstall, buildPlan, prepareInstall, providers, type InstallInputs } from './install/index.js';
+import { runManifestFlow } from './install/manifest.js';
 
 try { process.loadEnvFile(); } catch (error: any) { if (error.code !== 'ENOENT') throw error; }
 const [command, id, ...args] = process.argv.slice(2);
 let connection: Awaited<ReturnType<typeof loadConnection>>;
-if (command === 'master') connection = null;
+if (command === 'master' || command === 'install') connection = null;
 else try { connection = await loadConnection(process.cwd()); } catch { console.error('Invalid or insecure Graphyard connection file. Inspect local configuration; credential values are omitted.'); process.exit(1); }
 const base = process.env.GRAPHYARD_URL ?? connection?.url ?? 'http://127.0.0.1:4310';
 let savedToken: string | undefined;
@@ -55,6 +57,13 @@ async function main() {
     console.log(`Graphyard 0.1 — distributed work, explicit proof
 
 Environment: GRAPHYARD_URL, GRAPHYARD_TOKEN (individual role-scoped credential)
+  install --provider railway|hetzner|docker-host|compose --repo OWNER/NAME
+          [--plan|--apply] [--domain HOST] [--workers N] [--reviewer NAME]
+          [--producer-proof PROOF] [--ssh-host HOST] [--ssh-user USER]
+                                Install or reconcile a complete control plane.
+                                --plan prints every action with secrets redacted and
+                                changes nothing; --apply executes the same plan.
+                                See docs/install.md for the agent-executable runbook.
   init [--url URL] [--herdr] [--token-stdin]  Configure repository instructions and Herdr
   master init --token-stdin [--herdr-workspace ID]
                                 Install the recommended master-agent operating mode
@@ -215,6 +224,40 @@ Never share an operator or producer credential with an implementation agent.`); 
       return print(await api(`operator-agents/${encodeURIComponent(args[0])}/revoke`, { reason: args.slice(1).join(' ') }));
     }
     throw new Error('Use operator-agent list, setup, configure, rotate, or revoke');
+  }
+  if (command === 'install') {
+    const { values } = parseArgs({ args: process.argv.slice(3), options: {
+      provider: { type: 'string' }, repo: { type: 'string' }, plan: { type: 'boolean' }, apply: { type: 'boolean' },
+      domain: { type: 'string' }, workers: { type: 'string' }, reviewer: { type: 'string' }, image: { type: 'string' },
+      'producer-proof': { type: 'string', multiple: true }, 'base-branch': { type: 'string' }, 'review-policy': { type: 'string' },
+      'required-check': { type: 'string', multiple: true }, 'review-count': { type: 'string' },
+      'ssh-host': { type: 'string' }, 'ssh-user': { type: 'string' }, 'server-name': { type: 'string' },
+      'server-type': { type: 'string' }, location: { type: 'string' }, logs: { type: 'boolean' },
+    }, allowPositionals: false });
+    if (!values.repo) throw new Error('Use --repo OWNER/NAME');
+    if (!values.provider || !providers.includes(values.provider as any)) throw new Error(`Use --provider ${providers.join('|')}`);
+    if (values.plan && values.apply) throw new Error('Choose either --plan or --apply');
+    const reviewPolicy = values['review-policy'];
+    if (reviewPolicy && !['github', 'agent'].includes(reviewPolicy)) throw new Error('Use --review-policy github or agent');
+    const inputs: InstallInputs = { repository: values.repo, provider: values.provider as InstallInputs['provider'],
+      ...(values['base-branch'] ? { baseBranch: values['base-branch'] } : {}),
+      ...(values.domain ? { domain: values.domain } : {}), ...(values.workers ? { workers: Number(values.workers) } : {}),
+      ...(values.reviewer ? { reviewer: values.reviewer } : {}), ...(values.image ? { image: values.image } : {}),
+      ...(values['producer-proof']?.length ? { producerProofs: values['producer-proof'] } : {}),
+      ...(reviewPolicy ? { reviewPolicy: reviewPolicy as 'github' | 'agent' } : {}),
+      ...(values['required-check']?.length ? { requiredChecks: values['required-check'] } : {}),
+      ...(values['review-count'] ? { reviewCount: Number(values['review-count']) } : {}),
+      ...(values['ssh-host'] ? { sshHost: values['ssh-host'] } : {}), ...(values['ssh-user'] ? { sshUser: values['ssh-user'] } : {}),
+      ...(values['server-name'] ? { serverName: values['server-name'] } : {}),
+      ...(values['server-type'] ? { serverType: values['server-type'] } : {}), ...(values.location ? { location: values.location } : {}) };
+    const session = await prepareInstall(process.cwd(), inputs, {
+      cliPath: await activeCliPath(), hostId: individualHostId(), log: line => console.error(line),
+      githubApp: request => runManifestFlow(request.root, request.repository, request.origin, { reviewer: request.reviewer, announce: line => console.error(line) }),
+    }, values.apply ? 'apply' : 'plan');
+    if (values.logs) return console.log(await session.adapter.logs(session.context));
+    const plan = await buildPlan(session);
+    if (!values.apply) return print(plan);
+    return print(await applyInstall(session, plan));
   }
   if (command === 'init') {
     const root = execFileSync('git', ['rev-parse', '--show-toplevel'], { encoding: 'utf8' }).trim();

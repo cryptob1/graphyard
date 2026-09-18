@@ -156,9 +156,18 @@ Acceptance checks:
 
 After D2 works, add adapters based on actual user demand: supported unit/integration report formats, additional E2E frameworks and deployment providers. Each adapter must declare what it can prove, what is independently observed, supported versions and failure semantics. Contract fixtures cover real payloads and unknown formats fail visibly; avoid another brittle prose approval dependency.
 
-Provide versioned Docker images and documented upgrade, backup and restore procedures. Railway should remain a supported guided deployment. Add a Helm chart when the actual deployment topology and Kubernetes operating requirements are established; a chart should ship with tested persistence, secrets, migrations and upgrade behavior rather than merely wrap the container.
+Provide versioned Docker images and documented upgrade, backup and restore procedures. Add a Helm chart when the actual deployment topology and Kubernetes operating requirements are established; a chart should ship with tested persistence, secrets, migrations and upgrade behavior rather than merely wrap the container.
 
-`graphyard init` should propose the repository graph, discover supported CI/tests, guide credential creation, configure Herdr and managed AGENTS instructions, and validate a first real PR. Detection must not silently authorize privileged integrations. Show an explicit readiness checklist for the selected completion profile.
+Installation itself has shipped: `graphyard install` provisions Postgres and the
+application on Railway, Hetzner, a Docker host, or local Compose, generates one credential
+per role, completes the GitHub App, webhook, branch protection and CI identity discovery,
+registers agent profiles, and verifies the result. See [install](install.md). Detection still
+does not silently authorize a privileged integration: a proof producer is created only from
+an explicit `--producer-proof` grant, and the App-bound merge check is required only once
+Graphyard has published it.
+
+What remains here is breadth rather than the first path: more deployment providers behind the
+same adapter interface, and a readiness checklist for each selected completion profile.
 
 Acceptance checks:
 
