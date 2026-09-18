@@ -7,7 +7,7 @@ import { z } from 'zod';
 import { assertRepository, discover, localDirectory, saveDiscovery } from './onboarding.js';
 import { loadConnection, managedInstructions, serverOrigin } from './repository-setup.js';
 import { resourceConflicts } from './coordination.js';
-import type { Work } from './model.js';
+import { exhaustedReviewerProfiles, nativeReviewRequired, reviewerProfileFor, reviewProviderOf, type Work } from './model.js';
 import { predictQueue, type QueuePlacement } from './merge-queue.js';
 
 const safeEnvironment = z.record(
@@ -220,6 +220,16 @@ export async function saveWorkerProfile(root: string, profileInput: unknown, ver
 }
 
 type HerdrAgent = { name?: string; pane_id?: string; agent?: string; agent_status?: string; cwd?: string; foreground_cwd?: string; tokens?: Record<string, string> };
+// Reviewer failover is a capacity decision the operator must see, not a silent retry.
+function reviewState(work: Work) {
+  if (reviewProviderOf(work.policy) !== 'agent') return null;
+  const failedOver = (work.reviewFailovers ?? []).filter(failover => failover.sha === work.candidate?.sha
+    && failover.baseSha === work.candidate?.baseSha && failover.policyRevision === work.policyRevision)
+    .map(({ profile, runtime, exhaustion, reason, at, nextProfile }) => ({ profile, runtime, exhaustion, reason, at, nextProfile }));
+  const active = reviewerProfileFor(work);
+  return { provider: 'agent' as const, profile: active?.name ?? null, runtime: active?.runtime ?? null,
+    exhausted: !active && !!work.policy.reviewerProfiles?.length && !!exhaustedReviewerProfiles(work).length, failedOver };
+}
 export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profiles: WorkerProfile[], agents: HerdrAgent[], credentialHealth: Record<string, { available: boolean; reason: string | null }> = {}) {
   const now = Date.parse(snapshot.now);
   const sessions = profiles.map(profile => {
@@ -241,11 +251,13 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
       && work.mergeAuthorization.policyRevision === work.policyRevision
       && work.gates.every(gate => gate.passed) && !work.violations.length;
     const dwellMs = now - Date.parse(work.stageEnteredAt);
+    const review = reviewState(work);
     const attention = active && (!session || !['working', 'idle'].includes(session.state)) ? `Assigned worker session is ${session?.state ?? 'offline'}`
+      : review?.exhausted ? `Every configured reviewer profile is exhausted for the current candidate (${review.failedOver.map(entry => `${entry.profile}: ${entry.exhaustion}`).join(', ')})`
       : work.blocker || dwellMs > 3_600_000 ? first?.reasons[0] ?? `Work has remained at ${work.stage} for more than one hour` : null;
-    return { key: work.key, title: work.title, stage: work.stage, owner: active ? work.lease!.owner : null, profile: profile?.name ?? null, session: session?.state ?? null, refusal: first ? { gate: first.name, reason: first.reasons[0] } : null, mergeable, attention, queue: placement ? queueRow(placement) : null };
+    return { key: work.key, title: work.title, stage: work.stage, owner: active ? work.lease!.owner : null, profile: profile?.name ?? null, session: session?.state ?? null, refusal: first ? { gate: first.name, reason: first.reasons[0] } : null, mergeable, review, attention, queue: placement ? queueRow(placement) : null };
   });
-  return { observedAt: snapshot.now, counts: { open: rows.length, ready: rows.filter(row => row.stage === 'ready').length, active: rows.filter(row => row.owner).length, attention: rows.filter(row => row.attention).length, mergeable: rows.filter(row => row.mergeable).length, queued: placements.length }, workers: sessions, work: rows, queue: placements.map(queueRow) };
+  return { observedAt: snapshot.now, counts: { open: rows.length, ready: rows.filter(row => row.stage === 'ready').length, active: rows.filter(row => row.owner).length, attention: rows.filter(row => row.attention).length, mergeable: rows.filter(row => row.mergeable).length, reviewFailover: rows.filter(row => row.review?.failedOver.length).length, queued: placements.length }, workers: sessions, work: rows, queue: placements.map(queueRow) };
 }
 
 function queueRow(placement: QueuePlacement) {
@@ -455,7 +467,7 @@ export async function continueMergeBatch<T extends { key: string }, R>(items: T[
 }
 type MergeExecution = { id: string; owner: string; sha: string; baseSha: string; policyRevision: number; authorizationRevision: number; issuedAt: string; expiresAt: string; verifiedAt?: string };
 export function assertMergeProtection(protection: any, config: MasterConfig, work: Work) {
-  const nativeReview = !!work.policy.review && (work.policy.reviewProvider ?? 'github') !== 'codex';
+  const nativeReview = nativeReviewRequired(work.policy);
   const reviews = protection?.required_pull_request_reviews;
   const checks = protection?.required_status_checks;
   // "Require branches to be up to date" cannot coexist with a merge queue: a queued tip is

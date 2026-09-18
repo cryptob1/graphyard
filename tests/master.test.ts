@@ -397,3 +397,56 @@ test('a merge only proceeds while the validated tip still lands its tested tree'
   assert.throws(() => assertQueuedLanding(work({ queue: null } as Partial<Work>), authorization, validatedBase, 'owner/project', run(baseTree)), /no published merge-queue tip/);
   assert.throws(() => assertQueuedLanding(work({ queue: { ...queued.queue!, speculation: { ...queued.queue!.speculation!, tip: '7'.repeat(40) } } } as Partial<Work>), authorization, validatedBase, 'owner/project', run(baseTree)), /no published merge-queue tip/);
 });
+
+test('master status surfaces reviewer failover and exhausted reviewer capacity', () => {
+  const profiles = [
+    { name: 'claude-reviewer', runtime: 'claude', reviewerApp: 'claude-reviewer', timeoutSeconds: 1800 },
+    { name: 'cursor-reviewer', runtime: 'cursor', reviewerApp: 'cursor-reviewer', timeoutSeconds: 900 },
+  ];
+  const candidate = { sha: 'a'.repeat(40), baseSha: 'b'.repeat(40), pr: 42, branch: 'graphyard/gy-42-1', author: 'worker' };
+  const failover = (profile: string, runtime: string, exhaustion: 'usage-limit' | 'timeout', nextProfile: string | null, overrides: Record<string, unknown> = {}) =>
+    ({ profile, reviewerApp: profile, runtime, exhaustion, reason: `${profile} exhausted`, at: '2030-01-01T00:00:00Z', sha: candidate.sha, baseSha: candidate.baseSha, policyRevision: 2, requestCommentId: 5, nextProfile, ...overrides });
+  const agentPolicy = { checks: ['test'], review: true, reviewProvider: 'agent' as const, reviewerProfiles: profiles };
+  const pending = work({ stage: 'review', policy: agentPolicy, gates: [{ name: 'review', passed: false, reasons: ['Waiting for reviewer profile cursor-reviewer'] }],
+    reviewFailovers: [failover('claude-reviewer', 'claude', 'usage-limit', 'cursor-reviewer')] });
+  const dispatched = buildMasterStatus({ work: [pending], now: '2030-01-01T00:05:00Z' }, [], []);
+  assert.equal(dispatched.work[0].review!.provider, 'agent');
+  assert.equal(dispatched.work[0].review!.profile, 'cursor-reviewer');
+  assert.equal(dispatched.work[0].review!.runtime, 'cursor');
+  assert.equal(dispatched.work[0].review!.exhausted, false);
+  assert.deepEqual(dispatched.work[0].review!.failedOver.map(entry => [entry.profile, entry.exhaustion, entry.nextProfile]), [['claude-reviewer', 'usage-limit', 'cursor-reviewer']]);
+  assert.equal(dispatched.counts.reviewFailover, 1);
+  assert.equal(dispatched.work[0].attention, null);
+  const exhausted = work({ stage: 'review', policy: agentPolicy, gates: [{ name: 'review', passed: false, reasons: ['Every configured reviewer profile is exhausted for this candidate'] }],
+    reviewFailovers: [failover('claude-reviewer', 'claude', 'usage-limit', 'cursor-reviewer'), failover('cursor-reviewer', 'cursor', 'timeout', null)] });
+  const stalled = buildMasterStatus({ work: [exhausted], now: '2030-01-01T00:05:00Z' }, [], []);
+  assert.equal(stalled.work[0].review!.profile, null); assert.equal(stalled.work[0].review!.exhausted, true);
+  assert.match(stalled.work[0].attention!, /Every configured reviewer profile is exhausted/);
+  assert.match(stalled.work[0].attention!, /cursor-reviewer: timeout/);
+  assert.equal(stalled.counts.attention, 1);
+  // Failover recorded for a superseded candidate is history, not a current capacity problem.
+  const rebased = work({ stage: 'review', policy: agentPolicy, gates: [{ name: 'review', passed: false, reasons: ['Waiting'] }],
+    reviewFailovers: [failover('claude-reviewer', 'claude', 'usage-limit', null, { sha: 'c'.repeat(40) })] });
+  const fresh = buildMasterStatus({ work: [rebased], now: '2030-01-01T00:05:00Z' }, [], []);
+  assert.deepEqual(fresh.work[0].review!.failedOver, []); assert.equal(fresh.work[0].review!.profile, 'claude-reviewer');
+  assert.equal(fresh.counts.reviewFailover, 0);
+  // Codex and formal GitHub policies expose no agent reviewer state at all.
+  for (const policy of [{ checks: ['test'], review: true }, { checks: ['test'], review: true, reviewProvider: 'codex' as const }])
+    assert.equal(buildMasterStatus({ work: [work({ policy })], now: '2030-01-01T00:05:00Z' }, [], []).work[0].review, null);
+});
+
+test('agent review policies keep Graphyard branch protection without a native approval count', () => {
+  const config = { version: 1 as const, url: 'https://graphyard.example', credentialFile: '/outside/master.token', cliPath: launcher, repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'machine-a', masterAgentName: 'graphyard-master-project', autoMerge: true, mergeMethod: 'merge' as const, workers: [] };
+  const protection = (overrides: Record<string, unknown> = {}) => ({ required_pull_request_reviews: { required_approving_review_count: 0 },
+    required_status_checks: { strict: false, checks: [{ context: 'Graphyard / merge', app_id: 1234 }] }, enforce_admins: { enabled: true }, ...overrides });
+  const agent = work({ policy: { checks: ['test'], review: true, reviewProvider: 'agent', reviewerProfiles: [{ name: 'claude-reviewer', runtime: 'claude', reviewerApp: 'claude-reviewer', timeoutSeconds: 1800 }] } });
+  assert.doesNotThrow(() => assertMergeProtection(protection(), config, agent));
+  // Graphyard's own required check and admin enforcement still apply.
+  for (const weakened of [{ required_status_checks: { strict: false, checks: [] } }, { enforce_admins: { enabled: false } },
+    { required_status_checks: { strict: false, checks: [{ context: 'Graphyard / merge', app_id: 999 }] } }, { allow_force_pushes: { enabled: true } }])
+    assert.throws(() => assertMergeProtection(protection(weakened), config, agent), /protection changed/);
+  // The merge queue supersedes "require branches to be up to date" for agent review too.
+  assert.throws(() => assertMergeProtection(protection({ required_status_checks: { strict: true, checks: [{ context: 'Graphyard / merge', app_id: 1234 }] } }), config, agent),
+    /requires branches to be up to date/);
+  assert.throws(() => assertMergeProtection(protection(), config, work({ policy: { checks: ['test'], review: true } })), /protection changed/);
+});
