@@ -40,10 +40,10 @@ for (const viewport of [{ name: 'desktop', width: 1280, height: 900 }, { name: '
     await expect(phases.nth(1)).toContainText('GY-30 scoped operator automation is configured');
     await expect(phases.nth(1)).toContainText('supplies goals, required decisions, and oversight');
     await expect(phases.nth(1)).toContainText('not expected to perform the routine Operator, Master, Worker, or Reviewer/proof-producer duties');
-    await expect(phases.nth(1)).toContainText('not its present state');
-    await expect(phases.nth(1)).toContainText('planned and not active today');
-    await expect(phases.nth(1)).toContainText('until the scoped operator-agent principal is provisioned');
-    await expect(phases.nth(1)).toContainText('only from the unrestricted human administrator');
+    await expect(phases.nth(1)).toContainText('shipped and available as an opt-in, least-privilege credential');
+    await expect(phases.nth(1)).toContainText('a configuration step, not future work');
+    await expect(phases.nth(1)).toContainText('this installation provisions the scoped operator-agent principal');
+    await expect(phases.nth(1)).toContainText('the unrestricted human administrator still makes requirements and policy changes');
     const phaseBoxes = await phases.evaluateAll(elements => elements.map(element => {
       const box = element.getBoundingClientRect();
       return { left: box.left, top: box.top, width: box.width };
@@ -86,15 +86,15 @@ for (const viewport of [{ name: 'desktop', width: 1280, height: 900 }, { name: '
     await expect(operatorRow).toContainText('may add requirements but never remove or rewrite them');
     await expect(operatorRow).toContainText('Exceptions and approval decisions stay with the human operator');
     await expect(operatorRow).toContainText('least-privilege, never unrestricted admin authority');
-    await expect(operatorRow).toContainText('future-facing until GY-30 automation is provisioned');
-    await expect(operatorRow).toContainText('no scoped operator-agent credential exists');
-    await expect(operatorRow).toContainText('only the unrestricted human administrator holds this authority');
+    await expect(operatorRow).toContainText('GY-30 credential behind this duty is shipped and opt-in');
+    await expect(operatorRow).toContainText('an administrator provisions it per installation');
+    await expect(operatorRow).toContainText('the unrestricted human administrator holds this authority');
     const separation = page.locator('p', { hasText: 'These are distinct AI sessions' });
     await expect(separation).toContainText('authenticated principal identities, scoped credentials, and authority checks');
     await expect(separation).toContainText('must keep the sessions independent');
     await expect(separation).toContainText('Graphyard does not verify runtime isolation');
     await expect(separation).toContainText('Worker, Master/coordinator, and Reviewer/proof-producer map to enforced credentials today');
-    await expect(separation).toContainText('designed contract, not an active credential');
+    await expect(separation).toContainText('shipped credential type that each installation provisions before that session becomes active');
     await expect(page.getByText('Workers stay untrusted.', { exact: true })).toBeVisible();
     await expect(page.getByText('Graphyard: delivery authority')).toBeVisible();
     await expect(page.getByText('Herdr: runtime supervision')).toBeVisible();
