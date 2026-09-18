@@ -4,10 +4,12 @@ import { mkdtemp, writeFile, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { resolve, join } from 'node:path';
 import { execFile } from 'node:child_process';
+import { createRequire } from 'node:module';
 import { promisify } from 'node:util';
-import { fileURLToPath } from 'node:url';
 import { verifyRunnerReport } from '../src/runner-report.js';
 const run = promisify(execFile), id = 'a'.repeat(64);
+const require = createRequire(import.meta.url);
+const playwrightCli = resolve(require.resolve('playwright'), '..', 'cli.js');
 const inventory = { format: 'graphyard-playwright-v1', declared: [{ id, expected: 'passed', location: { file: 'fixture.spec.ts', line: 1, column: 1 } }], executions: [], steps: [], errors: 0, overflow: false, status: 'passed' };
 const execution = { ...inventory, executions: [{ id, status: 'passed', retry: 0 }] };
 test('report verifier refuses empty, skipped, missing, inconsistent, expected-failing and retry reports', () => {
@@ -25,9 +27,10 @@ test('real Playwright enumeration/execution produces attributable inventory and 
     await writeFile(spec, `import { test, expect } from '@playwright/test'; test('private-title-marker', async () => { console.log('private-stdout-marker'); await test.step('private-step-marker', async () => { expect(1).toBe(1); }); });`);
     async function capture(name: string, list: boolean) {
       const path = join(root, name);
-      let failed = false;
-      try { await run(process.execPath, [fileURLToPath(import.meta.resolve('@playwright/test/cli')), 'test', '--config', config, ...(list ? ['--list'] : [])], { env: { ...process.env, GRAPHYARD_REPORT_FILE: path }, timeout: 30_000 }); } catch { failed = true; }
-      return { report: JSON.parse(await readFile(path, 'utf8')), failed };
+      let failed = false, failure: unknown;
+      try { await run(process.execPath, [playwrightCli, 'test', '--config', config, ...(list ? ['--list'] : [])], { env: { ...process.env, GRAPHYARD_REPORT_FILE: path }, timeout: 30_000 }); } catch (cause) { failed = true; failure = cause; }
+      try { return { report: JSON.parse(await readFile(path, 'utf8')), failed }; }
+      catch (cause) { throw new Error(`Playwright did not write ${name}`, { cause: failure ?? cause }); }
     }
     const listed = await capture('list.json', true), passed = await capture('pass.json', false);
     assert.equal(passed.report.declared[0].location.file, 'fixture.spec.ts');
