@@ -1,8 +1,12 @@
 import { writeFile, mkdir } from 'node:fs/promises';
 import { execFileSync } from 'node:child_process';
 import { resolve } from 'node:path';
-const { GITHUB_REPOSITORY: repository, GH_TOKEN: token, GRAPHYARD_PR: prText, GRAPHYARD_WORK_ID: workId, GRAPHYARD_POLICY_REVISION: revisionText } = process.env;
+import { contract } from './contracts.mjs';
+const { GITHUB_REPOSITORY: repository, GH_TOKEN: token, GRAPHYARD_PR: prText, GRAPHYARD_WORK_ID: workId, GRAPHYARD_POLICY_REVISION: revisionText, GRAPHYARD_PROOF: proof } = process.env;
 if (!/^[\w.-]+\/[\w.-]+$/.test(repository ?? '') || !/^\d+$/.test(prText ?? '') || !/^[0-9a-f-]{36}$/.test(workId ?? '') || !/^[1-9]\d*$/.test(revisionText ?? '')) throw new Error('Invalid acceptance input');
+// Resolve the requested proof against this protected checkout before fetching candidate code, so a
+// proof whose contract has not reached protected main fails here instead of part-way through a run.
+contract(proof ?? '');
 const response = await fetch(`https://api.github.com/repos/${repository}/pulls/${prText}`, { headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json' }, signal: AbortSignal.timeout(15000) });
 if (!response.ok) throw new Error(`Cannot read PR (${response.status})`);
 const pr = await response.json();

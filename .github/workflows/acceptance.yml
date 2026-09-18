@@ -13,13 +13,11 @@ on:
         required: true
         default: '1'
       proof:
-        description: Trusted contract to execute
+        # Validated against the protected registry in scripts/contracts.mjs rather than a
+        # duplicated option list, so requiring a proof cannot depend on editing this file.
+        description: Trusted contract to execute, as registered in scripts/contracts.mjs
         required: true
-        type: choice
         default: integration:claim-safety
-        options:
-          - integration:claim-safety
-          - integration:herdr-recovery
 permissions:
   contents: read
 jobs:
@@ -33,6 +31,8 @@ jobs:
         with: { ref: '${{ github.sha }}', persist-credentials: false }
       - uses: actions/setup-node@v4
         with: { node-version: '24' }
+      # Refuses before any candidate code is fetched when this protected checkout does not
+      # register the requested proof, which is the bootstrap ordering rule made explicit.
       - name: Prepare candidate from provider facts
         run: node scripts/prepare-acceptance.mjs
         env:
@@ -40,6 +40,7 @@ jobs:
           GRAPHYARD_PR: ${{ inputs.pr }}
           GRAPHYARD_WORK_ID: ${{ inputs.work_id }}
           GRAPHYARD_POLICY_REVISION: ${{ inputs.policy_revision }}
+          GRAPHYARD_PROOF: ${{ inputs.proof }}
       - name: Build isolated candidate
         run: docker build --tag graphyard-acceptance candidate
       - name: Execute protected HTTP contract against candidate

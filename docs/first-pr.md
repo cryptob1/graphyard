@@ -36,15 +36,22 @@ Graphyard's own repository uses a protected acceptance workflow to prove its HTT
      -f proof=integration:claim-safety
    ```
 
-   Work requiring `integration:herdr-recovery` dispatches the same workflow with
-   `-f proof=integration:herdr-recovery`. That contract waits out the candidate's real
-   lease and launch fences, so its exercise job runs for several minutes.
+   `proof` is resolved against the registry in `scripts/contracts.mjs` in the protected
+   checkout this run uses, and the dispatch is refused before any candidate code is fetched
+   when that checkout does not register it. Work requiring `integration:herdr-recovery`
+   dispatches the same workflow with `-f proof=integration:herdr-recovery`. That contract
+   waits out the candidate's real lease and launch fences, so its exercise job runs for
+   several minutes.
 
 7. Confirm current-head review, CI, trusted acceptance evidence, branch protection, and guarded merge all pass. Push a new commit once to verify old proof becomes stale.
 
 ## Trust boundary
 
 The exercise job runs candidate code with disposable principals. A separate `graphyard-reporting` environment holds the producer credential and publishes only the fixed inventories registered in `scripts/contracts.mjs`, and only for the proof the dispatch selected. A report cannot rename, widen, or shrink the case list its own proof requires. PR code never receives the production Graphyard token.
+
+## Adding a trusted contract
+
+Because a trusted run executes only protected source, a contract must reach protected `main` before any work item may require its proof. Land the harness, its registry entry, and its unprivileged CI job as their own change, gated by review, CI and the proofs that already exist; then require the new proof of later work. A dispatch that names a proof the protected checkout does not register is refused in the preparation step, before candidate code is fetched. The CI job for the new contract runs the identical fixed inventory against every candidate, so the change that introduces a contract is still executed end to end — it simply publishes no trusted evidence.
 
 `integration:claim-safety` covers API authorization, competing claims, stale epochs, worker evidence trust, and unfinished dependencies. `integration:herdr-recovery` covers [cross-machine lease recovery](herdr.md#automated-recovery-contract). Neither proves arbitrary product behavior or production delivery, and neither replaces the [two-machine operational drill](coordination.md#two-machine-operational-drill) on real hosts.
 
