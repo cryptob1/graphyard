@@ -28,7 +28,7 @@ const id = () => randomUUID();
 const url = (database: string) => `postgres://graphyard:testing-only@127.0.0.1:${port}/${database}`;
 
 before(async () => {
-  port = Number(process.env.GRAPHYARD_BACKUP_TEST_PORT ?? Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 3);
+  port = Number(process.env.GRAPHYARD_BACKUP_TEST_PORT ?? Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 4);
   scratch = await mkdtemp(join(tmpdir(), 'graphyard-backup-'));
   pg = new EmbeddedPostgres({ databaseDir: join(scratch, 'data'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await pg.initialise(); await pg.start();
