@@ -158,7 +158,8 @@ export class Engine {
         const { reason: _reason, ...intent } = data;
         work = { ...intent, criteria, id: randomUUID(), key: '', stage: 'backlog', revision: 0, policyRevision: 1, createdAt: created, updatedAt: created, stageEnteredAt: created,
           ready: false, epoch: 0, lease: null, workspaces: [], candidate: null, submission: null, reworkRequested: false, scenarioRequirements, evidence: [], observation: null, blocker: null, gates: [], violations: [] };
-        work!.proofGaps = await unauthorizedProofs(db, this.principals, proofNames);
+        // A policy-required post-deployment proof needs an authorized producer as much as a criterion proof does.
+        work!.proofGaps = await unauthorizedProofs(db, this.principals, [...proofNames, ...(deploySmokeRequired(data.policy) ? [deploySmokeProof] : [])]);
         const inserted = await db.query('INSERT INTO work_items(id,document) VALUES($1,$2) RETURNING number', [work!.id, JSON.stringify(work)]);
         work!.key = `GY-${inserted.rows[0].number}`;
         all.push(work!);
@@ -245,7 +246,7 @@ export class Engine {
         work.dependencies = data.dependencies; work.plannedFiles = data.plannedFiles; work.exclusiveResources = data.exclusiveResources;
         work.scenarioRequirements = pins; work.policyRevision++;
         this.refuseRenewedDeferral(work, all);
-        work.proofGaps = await unauthorizedProofs(db, this.principals, proofs);
+        work.proofGaps = await unauthorizedProofs(db, this.principals, [...proofs, ...(deploySmokeRequired(work.policy) ? [deploySmokeProof] : [])]);
         work.formalReviewResetRequired = true; work.formalReviewBaseline = undefined;
         work.lease = null; work.observation = null; work.mergeAuthorization = null; work.reviewRequest = null;
         // A submitted implementation must be explicitly reconsidered for changed intent.

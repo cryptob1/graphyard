@@ -75,7 +75,9 @@ export async function publishSmoke(report, configuration, fetcher = fetch) {
     if (!response.ok) throw new Error(`Graphyard refused reporter request (${response.status})`); return response.json();
   };
   const status = await request('status');
-  if (status.actor?.role !== 'producer' || !status.actor.proofs?.includes(smokeProof)) throw new Error('Reporter identity is not a producer authorized for e2e:deploy-smoke');
+  // Authority is the live grant set, not the credential's environment seed; a producer sees only its own.
+  const authority = status.actor?.role === 'producer' ? (await request('proof-grants')).authorities?.find(entry => entry.principalId === status.actor.id) : undefined;
+  if (!authority?.patterns?.some(pattern => pattern === smokeProof || pattern === 'e2e:*')) throw new Error('Reporter identity is not a producer authorized for e2e:deploy-smoke');
   const work = (await request('work')).find(item => item.id === report.workId);
   if (!work || work.stage !== 'done' || !work.policy?.deploySmoke) throw new Error('Work is not a delivered item whose policy requires e2e:deploy-smoke');
   if (work.policyRevision !== report.policyRevision || work.delivery?.mergeSha !== report.baseSha) throw new Error('Delivery merge commit or policy changed; rerun the smoke proof from current Graphyard state');

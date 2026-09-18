@@ -142,7 +142,7 @@ Graphyard accepts that evidence only from a producer whose credential is granted
 
 A failed verdict marks the item **delivered with failure**. `master status` lists it under `delivered` with rollback guidance, the loop records the same guidance as an escalation, and the dashboard shows it on the card, in the work detail, and in the post-deploy flow node. See [operations](operations.md#delivered-with-a-failed-smoke-proof) for what to do. A later passing run at the same deployed commit supersedes the verdict for the item's state; every run stays in the evidence ledger.
 
-Grant the smoke producer only `e2e:deploy-smoke`; do not give an implementation worker that credential, and keep `SMOKE_COMMAND` in the trusted checkout on the managed base branch rather than in candidate code.
+Grant the smoke producer only `e2e:deploy-smoke` (`graphyard grants grant smoke e2e:deploy-smoke "Post-deployment smoke reporter"`, see [proof authority grants](operations.md#proof-authority-grants)); the reporter checks its live authority before it runs. Do not give an implementation worker that credential, and keep `SMOKE_COMMAND` in the trusted checkout on the managed base branch rather than in candidate code.
 
 ## Enforcement boundary
 

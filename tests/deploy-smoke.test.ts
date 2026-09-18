@@ -39,9 +39,10 @@ test('the smoke reporter rejects incomplete reports and binds the verdict to the
   }
   assert.doesNotThrow(() => validateSmokeReport(report(), expected));
   const item: any = { id: workId, stage: 'done', policyRevision: 1, policy: { deploySmoke: true }, delivery: { mergeSha: merge, deployment: { sha: deployed } } };
-  const sent: any[] = []; let producer = { role: 'producer', proofs: [smokeProof] };
+  const sent: any[] = []; let producer = { id: 'smoke', role: 'producer', proofs: [smokeProof] }; let granted = [smokeProof];
   const fetcher = async (url: string, init: any) => {
     if (url.endsWith('/status')) return new Response(JSON.stringify({ actor: producer }));
+    if (url.endsWith('/proof-grants')) return new Response(JSON.stringify({ authorities: [{ principalId: producer.id, role: producer.role, patterns: granted, source: 'grant' }] }));
     if (url.endsWith('/work')) return new Response(JSON.stringify([item]));
     sent.push(JSON.parse(init.body)); return new Response('{}');
   };
@@ -56,7 +57,12 @@ test('the smoke reporter rejects incomplete reports and binds the verdict to the
   await assert.rejects(publishSmoke(report(), config, fetcher), /has not recorded a deployment/);
   item.delivery.deployment = { sha: deployed }; item.policy.deploySmoke = false;
   await assert.rejects(publishSmoke(report(), config, fetcher), /policy requires/);
-  item.policy.deploySmoke = true; producer = { role: 'producer', proofs: ['integration:claim-safety'] };
+  item.policy.deploySmoke = true; granted = ['integration:claim-safety'];
+  await assert.rejects(publishSmoke(report(), config, fetcher), /not a producer authorized/, 'the environment seed still lists the proof; the live grant set decides');
+  granted = ['e2e:*'];
+  await publishSmoke(report(), config, fetcher);
+  assert.equal(sent.length, 3, 'a whole-kind grant authorizes the smoke proof');
+  producer = { id: 'smoke', role: 'worker', proofs: [smokeProof] };
   await assert.rejects(publishSmoke(report(), config, fetcher), /not a producer authorized/);
-  assert.equal(sent.length, 2);
+  assert.equal(sent.length, 3);
 });
