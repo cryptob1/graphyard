@@ -37,7 +37,7 @@ let pg: EmbeddedPostgres, store: Store, engine: Engine, validation: Validation, 
 let http: ReturnType<typeof server>, url: string;
 let serial = 0;
 before(async () => {
-  const port = Number(process.env.GRAPHYARD_DELIVERY_TEST_PORT ?? Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 3);
+  const port = Number(process.env.GRAPHYARD_DELIVERY_TEST_PORT ?? Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 4);
   pg = new EmbeddedPostgres({ databaseDir: await mkdtemp(join(tmpdir(), 'graphyard-delivery-')), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await pg.initialise(); await pg.start(); await pg.createDatabase('delivery_test');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/delivery_test`); await store.init();

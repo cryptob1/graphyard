@@ -10,7 +10,7 @@ All control-plane endpoints except `/healthz` require `Authorization: Bearer TOK
 | `coordinator` | Read work and integration state for master-agent routing; acquire, verify, or cancel only the engine's bounded merge execution authority; settle a containment quarantine whose supervisor it has verified dead on the registered host |
 | `operator-agent` | Only explicitly configured intent/policy capabilities (`intent:create`, `intent:ready`, `intent:unblock`, `policy:requirements`, `policy:review-provider`, `policy:bootstrap`) within a server-enforced repository/work allowlist; never leases, evidence, identity administration, or merge execution |
 | `worker` | Claim work, renew/release own lease, register workspace, report blockers, submit implementation, submit untrusted assertions |
-| `producer` | Submit evidence; only configured `proofs` are trusted |
+| `producer` | Submit evidence; only proof names authorized by a live Graphyard grant are trusted |
 | `reader` | Inspect work, status, events |
 
 Except for operator-agents, all roles can read engineering metadata in this single-repository installation and have no per-item read ACL in v0.1. Operator-agent reads are restricted to their server-enforced repository/work scope allowlist. Each independent worker process should have a distinct principal; sharing a token makes processes indistinguishable.
@@ -30,6 +30,8 @@ Errors return JSON `{ "error": "actionable reason" }`. Invalid JSON/schema is `4
 | `GET /api/work-snapshot` | Work, integration job metadata and database time from one snapshot |
 | `GET /api/work` | Work aggregates, in creation order |
 | `GET /api/events?work=UUID` | Latest 300 events for one item; omit filter for latest global events |
+| `GET /api/proof-grants` | Live proof authority per principal, and the grant records behind it |
+| `GET /api/proof-grants/ID/history` | Append-only grant history for one principal |
 
 The initial list API is unpaginated. Do not use it as an unlimited analytics export. Event payload snapshots can reconstruct historical item revisions; full archival/export pagination is future work.
 
@@ -123,7 +125,13 @@ The quarantine and live lease form the final launch fence. Its idempotent contro
 
 SHA fields are full 40-character lowercase Git SHAs. Results are `pass` or `fail`. Counts must be nonnegative integers. For manual acceptance, executed means the number of criteria actually inspected, not a fabricated test count.
 
-The server supplies evidence ID, identity, timestamp, and trust. Clients cannot set `trusted` or `producer`. Unknown fields are rejected. A producer may submit a non-allowlisted proof, but it remains untrusted. A producer is a trust boundary, not a guarantee that its test was well designed.
+The server supplies evidence ID, identity, timestamp, and trust. Clients cannot set `trusted` or `producer`. Unknown fields are rejected. A producer may submit an unauthorized proof, but it remains untrusted. A producer is a trust boundary, not a guarantee that its test was well designed.
+
+### Proof authority
+
+Trust is decided against the live grant set inside each mutation transaction, never against process configuration. `POST /api/proof-grants/ID/grant` and `POST /api/proof-grants/ID/revoke` take `{ "patterns": [...], "reason": "...", "expectedRevision": N }` and require the `admin` role; `expectedRevision` is optional and refuses a stale write when supplied. A pattern is an exact proof name, a whole kind such as `integration:*`, or a bounded prefix such as `manual:gy-43/*`; nothing else parses. Grants apply only to `producer` principals — `worker`, `reader`, `coordinator` and `operator-agent` are refused with `403` — while `admin` holds the `manual:*` lane by role. Validation collector registrations are bounded by the same live authority, so revoking a grant immediately withdraws a collector's scope. Environment allowlists seed the grant store once at startup and decide nothing afterwards. See [Proof authority grants](operations.md#proof-authority-grants).
+
+Work creation and every requirement revision record `proofGaps`: the required proof names that had no authorized producer at that moment. A nonempty list means the acceptance gate cannot be satisfied by anyone, and it is visible in `graphyard status`, `graphyard diagnose`, and the dashboard before the item is dispatched.
 
 All required proof names must pass. Evidence is selected for the exact head/base/policy tuple. A later matching failure supersedes an earlier pass. Stale evidence is retained for audit without satisfying the current candidate.
 

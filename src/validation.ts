@@ -4,6 +4,7 @@ import { isDeepStrictEqual } from 'node:util';
 import type pg from 'pg';
 import { admin, demand, proofSchema, type EvidenceArtifact, type Principal, type Work } from './model.js';
 import { save, wakeJob } from './store.js';
+import { authorizedForEveryProof, authorizedForProof } from './proof-grants.js';
 import { Engine } from './engine.js';
 import type { Scenario } from './scenarios.js';
 
@@ -98,7 +99,7 @@ export class Validation {
     const r = await this.definition(db, 'registration', selected) as Registration;
     const p = this.principals.find(p => p.id === r.principalId);
     demand(r.enabled && r.role === role && p && p.role === (role === 'runner' ? 'worker' : 'producer'), 'Registration revoked or principal role is not authorized');
-    if (role === 'collector') demand(r.proofs.every(proof => p.proofs?.includes(proof)), 'Collector proof scope revoked');
+    if (role === 'collector') demand(await authorizedForEveryProof(db, p, r.proofs), 'Collector proof authority was revoked');
     // Environment revisions revoke old dispatch authority too.
     await this.definition(db, 'environment', r.environment);
     return r;
@@ -169,7 +170,7 @@ export class Validation {
         await this.definition(db, 'environment', data.environment, data.enabled);
         const principal = this.principals.find(p => p.id === data.principalId);
         demand(!data.enabled || principal && principal.role === (data.role === 'runner' ? 'worker' : 'producer'), 'Registration principal must have the appropriate separate role');
-        if (data.enabled && data.role === 'collector') demand(data.proofs.length && data.proofs.every(p => principal?.proofs?.includes(p)), 'Collector cannot exceed configured proof scope');
+        if (data.enabled && data.role === 'collector') demand(principal && await authorizedForEveryProof(db, principal, data.proofs), 'Collector cannot exceed its granted proof authority');
         if (data.enabled && data.role === 'runner') {
           // A local socket only. The attestor measures the approved bundle and the attempt
           // boundary on its own filesystem, while a remote daemon would resolve the same
@@ -303,7 +304,7 @@ export class Validation {
       await this.reconcileWithin(db, now);
       const r = await this.request(db, data.requestId), a = r.attempts.at(-1);
       const registration = await this.registration(db, r.collector, 'collector');
-      demand(registration.principalId === actor.id && actor.proofs?.includes(r.proof), 'Wrong collector principal or proof scope', 403);
+      demand(registration.principalId === actor.id && await authorizedForProof(db, actor, r.proof), 'Wrong collector principal or proof authority', 403);
       demand(a && a.id === data.attemptId && a.epoch === data.epoch && r.state === 'collecting' && Date.parse(a.expiresAt) > now.getTime(), 'Attempt lease expired, cancelled or superseded, or collection authority was never taken over');
       a.expiresAt = new Date(Math.min(now.getTime() + 60_000, Date.parse(r.deadline))).toISOString();
       await this.persist(db, r); await this.event(db, actor.id, 'collection-heartbeat', { requestId: r.id, attempt: a }, r.workId); return r;
@@ -320,7 +321,7 @@ export class Validation {
       await this.reconcileWithin(db, now);
       const r = await this.request(db, data.requestId), a = r.attempts.at(-1), c = await this.candidate(db, r.candidateId);
       const collector = await this.registration(db, r.collector, 'collector');
-      demand(collector.principalId === actor.id && actor.proofs?.includes(r.proof), 'Wrong collector principal or proof scope', 403);
+      demand(collector.principalId === actor.id && await authorizedForProof(db, actor, r.proof), 'Wrong collector principal or proof authority', 403);
       demand(a && a.id === data.attemptId && a.epoch === data.epoch, 'Attempt authority differs', 403);
       demand(['running', 'collecting'].includes(r.state) && Date.parse(a.expiresAt) > now.getTime() && Date.parse(r.deadline) > now.getTime(), 'Attempt lease expired, cancelled or superseded');
       if (r.state !== 'collecting') {
@@ -377,7 +378,7 @@ export class Validation {
     return this.withReceipt(actor, 'result', data, key, async (db, now) => {
       const r = await this.request(db, data.requestId);
       const pinned = await this.definition(db, 'registration', r.collector, false) as Registration;
-      demand(pinned.principalId === actor.id && actor.proofs?.includes(r.proof), 'Wrong collector principal or proof scope', 403);
+      demand(pinned.principalId === actor.id && await authorizedForProof(db, actor, r.proof), 'Wrong collector principal or proof authority', 403);
       await this.reconcileWithin(db, now);
       const current = await this.request(db, r.id), a = current.attempts.at(-1), c = await this.candidate(db, r.candidateId);
       const w = (await db.query('SELECT document FROM work_items WHERE id=$1', [r.workId])).rows[0]?.document as Work;
@@ -443,7 +444,7 @@ export class Validation {
     return this.withReceipt(actor, 'artifact', { ...metadata, digest }, key, async (db, now) => {
       const r = await this.request(db, data.requestId), a = r.attempts.at(-1);
       const collector = await this.registration(db, r.collector, 'collector');
-      demand(collector.principalId === actor.id && actor.proofs?.includes(r.proof), 'Wrong collector principal or proof scope', 403);
+      demand(collector.principalId === actor.id && await authorizedForProof(db, actor, r.proof), 'Wrong collector principal or proof authority', 403);
       await this.registration(db, r.runner, 'runner');
       const c = await this.candidate(db, r.candidateId), w = await this.work(db, r.workId, now); await this.valid(db, c, w);
       demand(c.artifactStorage === 'postgres' && c.requiredArtifacts.includes(data.name), 'Artifact storage or name is not authorized');
@@ -466,7 +467,8 @@ export class Validation {
       if (actor.role === 'producer') await this.registration(db, r.collector, 'collector');
       // This single-repository server grants readers repository-wide audit access.
       // Workers see only their assigned work; producers see only their collection request.
-      demand(actor.role === 'admin' || actor.role === 'reader' || actor.role === 'worker' && w?.lastAssignment?.owner === actor.id || actor.role === 'producer' && collector.principalId === actor.id && actor.proofs?.includes(r.proof), 'Artifact access is not authorized for this request', 403);
+      const collecting = actor.role === 'producer' && collector.principalId === actor.id && await authorizedForProof(db, actor, r.proof);
+      demand(actor.role === 'admin' || actor.role === 'reader' || actor.role === 'worker' && w?.lastAssignment?.owner === actor.id || collecting, 'Artifact access is not authorized for this request', 403);
       const row = (await db.query('SELECT name,digest,expires_at,media_type,bytes FROM validation_artifacts WHERE id=$1 AND request_id=$2', [artifactId, requestId])).rows[0];
       demand(row, 'Artifact not found for this request', 404);
       demand(row.bytes && row.expires_at > now, 'Artifact retention expired', 410);
