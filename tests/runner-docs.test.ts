@@ -57,25 +57,59 @@ test('the documented collector configuration carries the whole dispatch authorit
   assert.deepEqual(Object.keys(shape).filter(key => !documented.has(key) && !shape[key].safeParse(undefined).success), []);
 });
 
+
+/**
+ * Changing UID, GID and file ownership are real kernel permission checks, so the boundary
+ * can only be exercised by a process actually allowed to make them. A hosted runner denies
+ * every capability inside an unprivileged user namespace — the namespace is created, but
+ * chown, setpriv and mounting a private tmpfs all return EPERM — while granting genuine
+ * privilege through passwordless sudo. A developer machine is usually the other way round.
+ * Run the identical script under whichever the environment actually offers: the four
+ * identities, the modes and every assertion below are the same either way.
+ */
+const elevated = async (command: string[]): Promise<[string, string[]]> => {
+  if (process.getuid?.() === 0) return [command[0], command.slice(1)];
+  try {
+    await exec('sudo', ['-n', 'true']);
+    return ['sudo', ['-n', '--', ...command]];
+  } catch {
+    // Namespace root over this account's subordinate ranges. Spell the ranges out instead
+    // of combining --map-auto with --map-user: util-linux versions disagree about whether
+    // that combination retains the automatic range, and a root-only map makes the
+    // permission test fail before it ever exercises the boundary.
+    const username = userInfo().username;
+    const subordinate = async (path: string) => {
+      const entry = (await readFile(path, 'utf8')).split('\n').map(line => line.split(':'))
+        .find(([owner]) => owner === username);
+      assert.ok(entry, `${path} must assign subordinate IDs to ${username} to exercise the boundary`);
+      const start = Number(entry[1]), count = Number(entry[2]);
+      assert.ok(Number.isSafeInteger(start) && Number.isSafeInteger(count) && count > 20_001,
+        `${path} must provide enough subordinate IDs for the documented identities`);
+      return `${start}:${count}`;
+    };
+    const [uids, gids] = await Promise.all([subordinate('/etc/subuid'), subordinate('/etc/subgid')]);
+    return ['unshare', [
+      '--map-user=0', '--map-group=0',
+      `--map-users=1:${uids}`, `--map-groups=1:${gids}`,
+      '--', ...command,
+    ]];
+  }
+};
+
 test('the documented setgid boundary is writable only by the container and readable by both trusted readers', async () => {
   assert.match(guide, /usermod -aG graphyard-boundary graphyard-attestor/);
   assert.match(guide, /usermod -aG graphyard-boundary graphyard-collector/);
-  // Exercise real kernel permission checks with four distinct UIDs in an unprivileged
-  // user namespace. This is the documented primary/supplementary-group layout: the
-  // attestor provisions, the container writes through the setgid group, the attestor
-  // and collector read, and the runner has no access at all.
+  // Four distinct UIDs in the documented primary/supplementary-group layout: the attestor
+  // provisions, the container writes through the setgid group, the attestor and collector
+  // read, and the runner has no access at all.
   const script = String.raw`set -eu
-root=$(mktemp -d)
-trap 'umount "$root" 2>/dev/null || true; rm -rf "$root"' EXIT
-# GitHub mounts /tmp from the host with ownership changes to subordinate IDs
-# disabled. Use a namespace-private tmpfs so these are real kernel permission
-# checks without depending on the hosted runner's backing filesystem policy.
-mount -t tmpfs -o mode=0755 graphyard-boundary-test "$root"
 attestor=10002
 container=10001
 collector=10003
 runner=10004
 boundary=20001
+root=$(mktemp -d)
+trap 'rm -rf "$root"' EXIT
 chown "$attestor:$boundary" "$root"
 chmod 2750 "$root"
 setpriv --reuid="$attestor" --regid=30001 --groups="$boundary" mkdir "$root/attempts"
@@ -90,25 +124,5 @@ if setpriv --reuid="$runner" --regid=30003 --clear-groups test -r "$root/attempt
   echo 'runner unexpectedly reached the attempt boundary' >&2
   exit 1
 fi`;
-  // Spell out the subordinate ranges instead of combining --map-auto with --map-user.
-  // util-linux versions disagree about whether that combination retains the automatic
-  // range, and a root-only map makes the permission test fail before it exercises the
-  // boundary. The hosted runner and supported Linux setup both provision these ranges.
-  const username = userInfo().username;
-  const subordinate = async (path: string) => {
-    const entry = (await readFile(path, 'utf8')).split('\n').map(line => line.split(':'))
-      .find(([owner]) => owner === username);
-    assert.ok(entry, `${path} must assign subordinate IDs to ${username}`);
-    const start = Number(entry[1]), count = Number(entry[2]);
-    assert.ok(Number.isSafeInteger(start) && Number.isSafeInteger(count) && count > 20_001,
-      `${path} must provide enough subordinate IDs for the documented identities`);
-    return `${start}:${count}`;
-  };
-  const [uids, gids] = await Promise.all([subordinate('/etc/subuid'), subordinate('/etc/subgid')]);
-  await exec('unshare', [
-    '--mount',
-    '--map-user=0', '--map-group=0',
-    `--map-users=1:${uids}`, `--map-groups=1:${gids}`,
-    '--', 'bash', '-c', script,
-  ]);
+  await exec(...(await elevated(['bash', '-c', script])));
 });
