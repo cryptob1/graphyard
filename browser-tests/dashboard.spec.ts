@@ -32,10 +32,11 @@ for (const viewport of [{ name: 'desktop', width: 1280, height: 900 }, { name: '
     const phases = page.getByRole('heading', { name: 'Two phases, one clear handoff' }).locator('xpath=following-sibling::ol[1]/li');
     await expect(phases).toHaveCount(2);
     await expect(phases.nth(0)).toContainText('Human operator → one implementation agent');
-    await expect(phases.nth(0)).toContainText("the human operator connects Graphyard's own repository and activates its gates");
+    await expect(phases.nth(0)).toContainText('the human operator connects the managed (target) repository and activates its gates');
     await expect(phases.nth(0)).toContainText('directly supervising a single, worker-scoped implementation agent');
     await expect(phases.nth(0)).toContainText('never receives the operator or GitHub credentials used for setup');
     await expect(phases.nth(1)).toContainText('Human → goals, required decisions, oversight');
+    await expect(phases.nth(1)).toContainText('after the managed repository is connected, its gates are active');
     await expect(phases.nth(1)).toContainText('GY-30 scoped operator automation is configured');
     await expect(phases.nth(1)).toContainText('supplies goals, required decisions, and oversight');
     await expect(phases.nth(1)).toContainText('not expected to perform the routine Operator, Master, Worker, or Reviewer/proof-producer duties');
