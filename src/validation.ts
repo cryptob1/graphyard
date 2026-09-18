@@ -2,7 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { isDeepStrictEqual } from 'node:util';
 import type pg from 'pg';
-import { admin, demand, proofSchema, type Principal, type Work } from './model.js';
+import { admin, demand, proofSchema, type EvidenceArtifact, type Principal, type Work } from './model.js';
 import { save, wakeJob } from './store.js';
 import { Engine } from './engine.js';
 import type { Scenario } from './scenarios.js';
@@ -15,6 +15,8 @@ const base = { id: name, expectedRevision: z.number().int().min(0) };
 const resourceNames = z.array(name).min(1).max(30).refine(a => new Set(a).size === a.length, 'Resources must be unique');
 const artifacts = z.array(z.object({ service: name, digest }).strict()).min(1).max(30).refine(a => new Set(a.map(x => x.service)).size === a.length, 'Services must be unique');
 const ref = z.object({ id: name, revision }).strict();
+const safeHttpUrl = (value: string) => { try { const parsed = new URL(value); return ['http:', 'https:'].includes(parsed.protocol) && !parsed.username && !parsed.password; } catch { return false; } };
+const externalUrl = z.url().max(2000).refine(safeHttpUrl, 'Artifact URL must be HTTP(S) without credentials');
 export const definitionSchema = z.discriminatedUnion('kind', [
   z.object({ ...base, kind: z.literal('environment'), repository: z.string().regex(/^[\w.-]+\/[\w.-]+$/), url: z.url().max(2000).refine(s => { const u = new URL(s); return u.protocol === 'https:' && !u.username && !u.password && !u.hash && !u.search; }, 'Use HTTPS without credentials, query or fragment'), instance: name, immutable: z.literal(true), services: resourceNames, resources: resourceNames }).strict(),
   z.object({ ...base, kind: z.literal('registration'), principalId: name, role: z.enum(['runner', 'collector', 'builder']), environment: ref, adapterVersion: name, proofs: z.array(proofSchema).max(50), enabled: z.boolean() }).strict(),
@@ -38,7 +40,7 @@ const reportSchema = commandSchema.extend({
   executed: z.number().int().min(0).max(1_000_000), skipped: z.number().int().min(0).max(1_000_000), inventoryComplete: z.boolean(),
   target: z.object({ instance: name, artifacts, measurement: z.enum(['provider', 'host-attestation', 'unknown']), coversEntireRun: z.boolean() }).strict(),
   bundleDigest: digest, runnerImageDigest: digest,
-  artifacts: z.array(z.object({ name, digest, url: z.url().max(2000) }).strict()).max(30),
+  artifacts: z.array(z.object({ name, digest, url: z.union([externalUrl, z.string().regex(/^graphyard-artifact:\/\/[^?#]+\/[0-9a-f-]{36}\/[0-9a-f-]{36}$/)]) }).strict()).max(30),
   executionSettled: z.boolean(),
 }).strict();
 type Report = z.infer<typeof reportSchema>;
@@ -285,20 +287,28 @@ export class Validation {
       }
       const reasons = await this.reportReasons(db, c, data);
       let expiresAt: string | undefined;
+      const evidenceArtifacts: EvidenceArtifact[] = [];
       if (c.artifactStorage === 'postgres') {
-        const stored = (await db.query('SELECT id,name,digest,expires_at FROM validation_artifacts WHERE request_id=$1 AND attempt_id=$2 AND bytes IS NOT NULL AND expires_at>$3', [r.id, a!.id, now])).rows;
+        const stored = (await db.query('SELECT id,name,digest,expires_at,media_type,octet_length(bytes) AS size,bytes IS NOT NULL AS retained FROM validation_artifacts WHERE request_id=$1 AND attempt_id=$2', [r.id, a!.id])).rows;
         for (const required of c.requiredArtifacts) {
           const supplied = data.artifacts.find(x => x.name === required);
           const actual = stored.find(x => x.name === required && supplied?.digest === x.digest && supplied?.url === this.artifactUrl(r.id, x.id));
-          if (!actual) reasons.push(`Private artifact ${required} is missing, expired or mismatched`);
-          else if (!expiresAt || actual.expires_at.toISOString() < expiresAt) expiresAt = actual.expires_at.toISOString();
+          if (!actual || !actual.retained || actual.expires_at <= now) reasons.push(`Private artifact ${required} is missing, expired or mismatched`);
+          if (actual) {
+            const artifactExpiry = actual.expires_at.toISOString();
+            if (!expiresAt || artifactExpiry < expiresAt) expiresAt = artifactExpiry;
+            evidenceArtifacts.push({ kind: this.artifactKind(actual.name, actual.media_type), label: actual.name, mediaType: actual.media_type, size: Number(actual.size ?? 0), digest: actual.digest, expiresAt: artifactExpiry,
+              availability: !actual.retained ? 'missing' : actual.expires_at <= now ? 'expired' : 'available', reference: { requestId: r.id, artifactId: actual.id } });
+          } else evidenceArtifacts.push({ kind: this.artifactKind(required), label: required, availability: 'missing' });
         }
-      }
+      } else evidenceArtifacts.push(...data.artifacts.map(artifact => safeHttpUrl(artifact.url)
+        ? { kind: this.artifactKind(artifact.name), label: artifact.name, digest: artifact.digest, availability: 'external' as const, url: artifact.url }
+        : { kind: this.artifactKind(artifact.name), label: artifact.name, digest: artifact.digest, availability: 'missing' as const }));
       const result = { accepted: true, passed: reasons.length === 0, reasons };
       current.state = 'completed'; current.result = result; a!.state = 'completed'; a!.finishedAt = now.toISOString(); a!.settled = data.executionSettled;
       if (a!.settled) await db.query('DELETE FROM validation_resources WHERE request_id=$1', [r.id]);
       await this.persist(db, current);
-      w.evidence.push({ id: randomUUID(), proof: c.proof, sha: c.sourceSha, baseSha: c.baseSha, policyRevision: c.policyRevision, producer: actor.id, trusted: true, result: result.passed ? 'pass' : 'fail', executed: data.executed, skipped: data.skipped, at: now.toISOString(), ...(expiresAt ? { expiresAt } : {}), scenarioRevision: c.scenario.revision, environment: c.scenario.environment, validation: { candidateId: c.id, requestId: r.id, attemptId: a!.id } });
+      w.evidence.push({ id: randomUUID(), proof: c.proof, sha: c.sourceSha, baseSha: c.baseSha, policyRevision: c.policyRevision, producer: actor.id, trusted: true, result: result.passed ? 'pass' : 'fail', executed: data.executed, skipped: data.skipped, at: now.toISOString(), ...(expiresAt ? { expiresAt } : {}), artifacts: evidenceArtifacts, scenarioRevision: c.scenario.revision, environment: c.scenario.environment, validation: { candidateId: c.id, requestId: r.id, attemptId: a!.id } });
       await this.changed(db, w, actor.id, 'result', now, { requestId: r.id, attemptId: a!.id, report: data, result }); return result;
     });
   }
@@ -306,9 +316,17 @@ export class Validation {
     // A route identifier, not a bearer URL: the HTTP API always requires authentication.
     return `graphyard-artifact://${this.repository}/${requestId}/${artifactId}`;
   }
+  private artifactKind(label: string, mediaType?: string): EvidenceArtifact['kind'] {
+    if (mediaType?.startsWith('image/')) return 'screenshot';
+    const value = label.toLowerCase();
+    if (value.includes('trace')) return 'trace';
+    if (value.includes('log')) return 'log';
+    if (value.includes('report')) return 'report';
+    return 'other';
+  }
   async uploadArtifact(actor: Principal, input: unknown, key: string) {
     demand(actor.role === 'producer', 'A separate trusted collector is required', 403);
-    const data = commandSchema.extend({ name, mediaType: z.enum(['application/json', 'application/zip', 'image/png']),
+    const data = commandSchema.extend({ name, mediaType: z.enum(['application/json', 'application/zip', 'image/png', 'text/plain']),
       bytes: z.string().min(4).max(11_184_812),
       capturePolicy: z.literal('approved-test-data-only') }).strict().parse(input);
     const bytes = Buffer.from(data.bytes, 'base64');
@@ -344,12 +362,12 @@ export class Validation {
       // This single-repository server grants readers repository-wide audit access.
       // Workers see only their assigned work; producers see only their collection request.
       demand(actor.role === 'admin' || actor.role === 'reader' || actor.role === 'worker' && w?.lastAssignment?.owner === actor.id || actor.role === 'producer' && collector.principalId === actor.id && actor.proofs?.includes(r.proof), 'Artifact access is not authorized for this request', 403);
-      const row = (await db.query('SELECT digest,expires_at,media_type,bytes FROM validation_artifacts WHERE id=$1 AND request_id=$2', [artifactId, requestId])).rows[0];
+      const row = (await db.query('SELECT name,digest,expires_at,media_type,bytes FROM validation_artifacts WHERE id=$1 AND request_id=$2', [artifactId, requestId])).rows[0];
       demand(row, 'Artifact not found for this request', 404);
       demand(row.bytes && row.expires_at > now, 'Artifact retention expired', 410);
       demand(`sha256:${createHash('sha256').update(row.bytes).digest('hex')}` === row.digest, 'Artifact integrity check failed', 503);
       await this.event(db, actor.id, 'artifact-read', { requestId, artifactId }, r.workId);
-      return { bytes: row.bytes as Buffer, mediaType: row.media_type as string, digest: row.digest as string };
+      return { bytes: row.bytes as Buffer, name: row.name as string, mediaType: row.media_type as string, digest: row.digest as string };
     });
   }
   async expireArtifacts() {
@@ -372,6 +390,9 @@ export class Validation {
     if (data.target.measurement === 'unknown' || !data.target.coversEntireRun || data.target.instance !== e.instance || !same([...data.target.artifacts].sort((a,b) => a.service.localeCompare(b.service)), [...build.artifacts].sort((a,b) => a.service.localeCompare(b.service)))) reasons.push('Independent whole-run target attribution is missing or mismatched');
     if (data.bundleDigest !== b.digest || data.runnerImageDigest !== b.runnerImageDigest) reasons.push('Executed oracle bundle or runner image differs from approval');
     if (new Set(data.artifacts.map(a => a.name)).size !== data.artifacts.length || c.requiredArtifacts.some(n => !data.artifacts.some(a => a.name === n))) reasons.push('Required execution artifacts are missing or ambiguous');
+    // Private Graphyard routes exist only for Postgres-backed storage; external storage
+    // must cite safe public locations, and Postgres binding is enforced by row matching.
+    if (c.artifactStorage === 'external' && data.artifacts.some(a => !safeHttpUrl(a.url))) reasons.push('External-storage artifacts must reference safe HTTP(S) locations; private Graphyard artifact routes require Postgres storage');
     if (!data.executionSettled) reasons.push('Execution settlement is unverified; resources remain reserved');
     return reasons;
   }

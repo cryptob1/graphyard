@@ -1,6 +1,6 @@
 import React, { useEffect, useState, useRef } from 'react';
 import { createRoot } from 'react-dom/client';
-import { stages, type Work, type Stage } from '../src/model';
+import { stages, type Evidence, type EvidenceArtifact, type Work, type Stage } from '../src/model';
 import './style.css';
 import Docs from './docs';
 import ScenarioLibrary from './scenarios';
@@ -12,6 +12,47 @@ import RequirementsEditor from './requirements';
 import { assignment } from './assignment';
 
 function age(time: string) { const minutes = Math.max(0, Math.floor((Date.now() - Date.parse(time)) / 60000)); return minutes < 60 ? `${minutes}m` : `${Math.floor(minutes / 60)}h ${minutes % 60}m`; }
+function artifactLabel(artifact: EvidenceArtifact) {
+  const size = artifact.size === undefined ? '' : ` · ${artifact.size < 1024 ? `${artifact.size} B` : `${(artifact.size / 1024).toFixed(1)} KiB`}`;
+  return `${artifact.kind} · ${artifact.mediaType ?? 'type unknown'}${size}`;
+}
+function safeExternalUrl(value?: string) {
+  if (!value) return undefined;
+  try { const url = new URL(value); return ['http:', 'https:'].includes(url.protocol) && !url.username && !url.password ? value : undefined; } catch { return undefined; }
+}
+function EvidenceArtifacts({ evidence, token, observedAt }: { evidence: Evidence; token: string; observedAt: number }) {
+  const artifacts: EvidenceArtifact[] = evidence.artifacts?.length ? evidence.artifacts : evidence.url ? [{ kind: 'other', label: 'Legacy evidence link', availability: 'external', url: evidence.url }] : [];
+  const [preview, setPreview] = useState<{ key: string; kind: 'image' | 'text'; value: string } | null>(null);
+  const [error, setError] = useState('');
+  async function openPrivate(artifact: EvidenceArtifact, download: boolean) {
+    if (!artifact.reference) return;
+    setError('');
+    const path = `/api/validation/artifacts/${artifact.reference.requestId}/${artifact.reference.artifactId}${download ? '' : '?preview=1'}`;
+    try {
+      const response = await fetch(path, { headers: { Authorization: `Bearer ${token}` } });
+      if (!response.ok) throw new Error(response.status === 410 ? 'Artifact retention expired.' : response.status === 403 ? 'You are not authorized to read this artifact.' : 'Artifact is unavailable.');
+      const blob = await response.blob();
+      if (download) {
+        const href = URL.createObjectURL(blob), anchor = document.createElement('a'); anchor.href = href; anchor.download = artifact.label; anchor.click(); URL.revokeObjectURL(href); return;
+      }
+      const key = `${artifact.reference.requestId}:${artifact.reference.artifactId}`;
+      if (artifact.mediaType === 'image/png') { const reader = new FileReader(); reader.onload = () => setPreview({ key, kind: 'image', value: String(reader.result) }); reader.readAsDataURL(blob); }
+      else setPreview({ key, kind: 'text', value: await blob.text() });
+    } catch (cause) { setError((cause as Error).message); }
+  }
+  if (!artifacts.length) return <p className="artifact-empty">No artifacts attached.</p>;
+  return <div className="artifacts">{artifacts.map((artifact, index) => {
+    const status = artifact.availability === 'available' && Number.isFinite(observedAt) && artifact.expiresAt && Date.parse(artifact.expiresAt) <= observedAt ? 'expired' : artifact.availability;
+    const key = artifact.reference ? `${artifact.reference.requestId}:${artifact.reference.artifactId}` : `${artifact.url}:${index}`;
+    const previewable = artifact.reference && artifact.size !== undefined && artifact.size <= 1_000_000 && ['image/png', 'application/json', 'text/plain'].includes(artifact.mediaType ?? '');
+    return <div className="artifact" key={key}><div><strong>{artifact.label}</strong><small>{artifactLabel(artifact)}</small><small>Status: {status}{artifact.expiresAt ? ` · retained until ${new Date(artifact.expiresAt).toLocaleString()}` : ''}</small><small title={artifact.digest}>{artifact.digest ? `SHA-256 ${artifact.digest.slice(7, 19)}…` : 'Digest unavailable'}</small></div><div className="artifact-actions">
+      {status === 'external' && safeExternalUrl(artifact.url) && <a href={safeExternalUrl(artifact.url)} target="_blank" rel="noreferrer noopener">Open external ↗</a>}
+      {status === 'external' && artifact.url && !safeExternalUrl(artifact.url) && <small>Unsafe external URL refused</small>}
+      {status === 'available' && previewable && <button type="button" onClick={() => void openPrivate(artifact, false)}>{preview?.key === key ? 'Refresh preview' : 'Preview'}</button>}
+      {status === 'available' && artifact.reference && <button type="button" onClick={() => void openPrivate(artifact, true)}>Download</button>}
+    </div>{preview?.key === key && (preview.kind === 'image' ? <img className="artifact-preview" src={preview.value} alt={`Preview of ${artifact.label}`}/> : <pre className="artifact-preview">{preview.value}</pre>)}</div>;
+  })}{error && <p role="alert" className="notice danger">{error}</p>}</div>;
+}
 function App() {
   const [token, setToken] = useState(sessionStorage.getItem('graphyard-token') ?? '');
   const sessionEpoch = useRef(0);
@@ -89,7 +130,7 @@ function App() {
       {fileConflicts(item, work).map(c => <div className="notice" key={c.key}>Possible overlap with {c.key}: {c.paths.join(', ')}. Coordinate the changes; this warning does not establish a semantic conflict.</div>)}
       <h3>Code review</h3><p>Provider: {item.policy.reviewProvider === 'codex' ? 'Codex cloud' : item.policy.reviewProvider === 'agent' ? 'Identity-bound agent reviewers' : 'Formal GitHub approval'}</p>{item.policy.reviewProvider === 'agent' && <p className="muted">Reviewer profiles in failover order: {(item.policy.reviewerProfiles ?? []).map(p => `${p.name} (${p.runtime})`).join(' → ') || 'none configured'}</p>}{item.observation?.agentReview && <p>{item.observation.agentReview.reason}</p>}{(item.reviewFailovers ?? []).filter(f => f.sha === item.candidate?.sha && f.baseSha === item.candidate?.baseSha && f.policyRevision === item.policyRevision).map(f => <p className="amber" key={`${f.profile}-${f.at}`}>Failover: {f.profile} exhausted ({f.exhaustion}) · {f.nextProfile ? `dispatched to ${f.nextProfile}` : 'no reviewer profile remains'}</p>)}{status?.actor?.role === 'admin' && item.stage !== 'done' && item.policy.review && <><>{!codexAvailable && <p className="muted">Codex review is unavailable. Verify the GitHub App connection and accept its required permission updates.</p>}</><p className="muted">Changing provider creates a policy revision and requires fresh acceptance evidence. Agent reviewer profiles are configured through the CLI or API because they name registered reviewer App identities.</p><button disabled={busy || (item.policy.reviewProvider ?? 'github') === 'github' && !codexAvailable} onClick={() => action(item.id, 'reviewpolicy', { provider: (item.policy.reviewProvider ?? 'github') === 'github' ? 'codex' : 'github', expectedPolicyRevision: item.policyRevision, reason: 'Operator changed review provider through dashboard' })}>Use {(item.policy.reviewProvider ?? 'github') === 'github' ? 'Codex cloud' : 'formal GitHub'} review</button>{(item.policy.reviewProvider ?? 'github') !== 'github' && item.submission && <button disabled={busy || !codexAvailable} onClick={() => action(item.id, 'rereview')}>Request fresh {item.policy.reviewProvider === 'codex' ? 'Codex' : 'agent'} review</button>}</>}<h3>Gate decisions</h3>{item.gates.map(g => <div className="gate" key={g.name}><strong className={g.passed ? 'green-text' : 'amber'}>{g.passed ? '✓' : '○'} {g.name}</strong>{g.reasons.map(r => <p key={r}>{r}</p>)}</div>)}<h3>Acceptance criteria</h3>{item.criteria.map(ac => <div className="criterion" key={ac.id}><strong>{ac.id} · {ac.text}</strong><p>{ac.proofs.join(' + ')}</p></div>)}<h3>Required proof</h3>{proofPreview(item).map(p => <div className="criterion" key={`${p.criterion}:${p.proof}`}><strong>{p.criterion} · {p.proof} · {p.status}</strong><p>{p.scenario ? `Scenario v${p.scenario.revision} in ${p.scenario.environment}` : 'Requires an authorized producer or manual operator evidence'} · current candidate and policy v{item.policyRevision}</p></div>)}
       {status?.actor?.role === 'admin' && item.stage !== 'done' && <button disabled={busy || assignment(item, observedAt).active} onClick={() => setEditingRequirements(v => !v)}>Revise requirements</button>}
-      {editingRequirements && <RequirementsEditor key={`${item.id}:${item.policyRevision}`} item={item} all={work} api={api} onSaved={async () => { const epoch = sessionEpoch.current; setEditingRequirements(false); await refresh(epoch); }}/>}<h3>Evidence ({item.evidence.length})</h3>{item.evidence.map(e => <div className="criterion" key={e.id}><strong>{e.result === 'pass' ? '✓' : '×'} {e.proof}</strong><p>{e.trusted ? 'Trusted producer' : 'Worker assertion'} · {e.producer} · {e.sha.slice(0, 8)} · {e.executed} executed / {e.skipped} skipped</p></div>)}
+      {editingRequirements && <RequirementsEditor key={`${item.id}:${item.policyRevision}`} item={item} all={work} api={api} onSaved={async () => { const epoch = sessionEpoch.current; setEditingRequirements(false); await refresh(epoch); }}/>}<h3>Evidence ({item.evidence.length})</h3>{item.evidence.map(e => <div className="criterion evidence-row" key={e.id}><strong>{e.result === 'pass' ? '✓' : '×'} {e.proof}</strong><p>{e.trusted ? 'Trusted producer' : 'Worker assertion'} · {e.producer} · {e.sha.slice(0, 8)} · {e.executed} executed / {e.skipped} skipped</p><EvidenceArtifacts evidence={e} token={token} observedAt={observedAt}/></div>)}
       <History key={item.id} events={events}/>{!item.ready && status?.actor?.role === 'admin' && <button disabled={busy} onClick={() => action(item.id, 'ready')}>Release to ready</button>}</section></Dialog>}
     {creating && <Dialog onClose={() => setCreating(false)}><section className="modal" role="dialog" aria-modal="true" aria-label="New work item"><button className="close" aria-label="Close form" onClick={() => setCreating(false)}>×</button><div className="eyebrow">DEFINE THE OUTCOME</div><h2>New work item</h2><form onSubmit={async e => { e.preventDefault(); const f = new FormData(e.currentTarget); const epoch = sessionEpoch.current; setBusy(true); try { const created = await api('work', { title: f.get('title'), description: f.get('description'), criteria: [{ id: 'AC-1', text: f.get('criterion'), proofs: [f.get('proof')] }], dependencies: f.get('dependency') ? [f.get('dependency')] : [], plannedFiles: String(f.get('plannedFiles')).split(',').map(s => s.trim()).filter(Boolean), exclusiveResources: String(f.get('exclusiveResources')).split(',').map(s => s.trim()).filter(Boolean), policy: { review: true, reviewProvider: f.get('reviewProvider'), checks: String(f.get('checks')).split(',').map(s => s.trim()).filter(Boolean) } }); if (epoch !== sessionEpoch.current) return; setCreating(false); await refresh(epoch); if (epoch === sessionEpoch.current) setSelected(created.id); } catch (e) { if (epoch === sessionEpoch.current) setError((e as Error).message); } finally { if (epoch === sessionEpoch.current) setBusy(false); } }}><label>Title<input name="title" required maxLength={200} placeholder="What needs to change?"/></label><label>Description<textarea name="description" rows={3}/></label><label>Acceptance criterion<input name="criterion" required placeholder="What observable behavior proves success?"/></label><label>Required proof<input name="proof" required pattern="(unit|integration|e2e|manual):[a-zA-Z0-9._/-]+" placeholder="integration:claim-safety"/></label><label>Planned files or directories (comma separated)<input name="plannedFiles" placeholder="src/booking/, src/sms/send.ts"/></label><label>Exclusive resources (comma separated)<input name="exclusiveResources" placeholder="staging:sms-test-account"/></label><label>Code review provider<select name="reviewProvider" defaultValue="github"><option value="codex" disabled={!codexAvailable}>Codex cloud review{codexAvailable ? '' : ' (unavailable)'}</option><option value="github">Formal GitHub approval</option></select></label>{!codexAvailable && <p className="muted">Codex review is unavailable. Verify the GitHub App connection and accept its required permission updates.</p>}<label>Required CI checks<input name="checks" defaultValue="test, typecheck" required/></label><label>Depends on<select name="dependency"><option value="">No dependency</option>{work.map(w => <option key={w.id} value={w.id}>{w.key} · {w.title}</option>)}</select></label><p className="muted">Created in backlog. Independent review is required from the selected provider. Use the CLI to define multiple criteria or dependencies.</p>{error && <p role="alert" className="amber">{error}</p>}<button disabled={busy}>{busy ? 'Creating…' : 'Create work item'}</button></form></section></Dialog>}
   </div>;

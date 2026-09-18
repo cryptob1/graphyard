@@ -90,7 +90,11 @@ export function server(engine: Engine, credentials: Credential[], github: GitHub
         const artifactRead = url.pathname.match(/^\/api\/validation\/artifacts\/([^/]+)\/([^/]+)$/);
         if (artifactRead && req.method === 'GET') {
           const artifact = await validation.readArtifact(actor, artifactRead[1], artifactRead[2]);
-          res.writeHead(200, { 'Content-Type': 'application/octet-stream', 'Content-Disposition': 'attachment; filename="graphyard-artifact"', 'Content-Length': artifact.bytes.length });
+          const safePreview = artifact.bytes.length <= 1_000_000 && (artifact.mediaType === 'image/png' || artifact.mediaType === 'application/json' || artifact.mediaType === 'text/plain');
+          const preview = url.searchParams.get('preview') === '1' && safePreview;
+          const filename = artifact.name.replace(/[^a-zA-Z0-9._-]/g, '_') || 'graphyard-artifact';
+          res.writeHead(200, { 'Content-Type': preview ? artifact.mediaType : 'application/octet-stream', 'Content-Disposition': `${preview ? 'inline' : 'attachment'}; filename="${filename}"`, 'Content-Length': artifact.bytes.length,
+            'X-Content-Type-Options': 'nosniff', 'Content-Security-Policy': "default-src 'none'; sandbox", 'Cache-Control': 'no-store' });
           return res.end(artifact.bytes);
         }
         if (url.pathname === '/api/validation' && req.method === 'GET') return send(200, await validation.list(url.searchParams.get('cursor') ?? undefined));
