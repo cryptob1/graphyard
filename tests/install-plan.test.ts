@@ -1,11 +1,16 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { execFile as execFileCallback } from 'node:child_process';
 import { stat } from 'node:fs/promises';
+import { fileURLToPath } from 'node:url';
+import { promisify } from 'node:util';
 import { buildPlan, coreEnv, githubEnv, materializeInstall, prepareInstall, repositoryRoot } from '../src/install/index.js';
 import { protectionPayload, protectionSatisfied, CHECK_NAME } from '../src/install/github.js';
 import { fingerprint } from '../src/install/secrets.js';
 import { installIdFor, REDACTED } from '../src/install/types.js';
 import { appKey, harness, satisfiedProtection, WEBHOOK_SECRET, GRAPHYARD_APP_ID } from './install-harness.js';
+
+const execFile = promisify(execFileCallback);
 
 test('an install id is derived from owner/name and rejects anything else', () => {
   assert.equal(installIdFor('Owner/Project'), 'owner-project');
@@ -179,4 +184,20 @@ test('branch protection is read-modify-write and matches the chosen review polic
 
 test('repositoryRoot refuses to install from outside a checkout', async () => {
   assert.throws(() => repositoryRoot('/'), /Run graphyard install from the checkout/);
+});
+
+test('the CLI accepts every option the runbook documents and refuses a count that is not a number', async () => {
+  const launcher = fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url));
+  const run = async (args: string[]) => {
+    const result = await execFile(process.execPath, [launcher, 'install', '--provider', 'compose', '--repo', 'owner/project', ...args], { cwd: '/', env: { ...process.env, GRAPHYARD_URL: '', GRAPHYARD_TOKEN: '' } })
+      .then(() => ({ code: 0, stderr: '' }), (error: any) => ({ code: error.code ?? 1, stderr: String(error.stderr ?? '') }));
+    assert.notEqual(result.code, 0);
+    return result.stderr;
+  };
+  // Every documented flag must parse. Reaching the checkout check proves the option was accepted.
+  for (const args of [['--port', '4400'], ['--workers', '3'], ['--review-count', '2'], ['--required-check', 'lint'], ['--domain', 'graphyard.example'], ['--base-branch', 'trunk'], ['--producer-proof', 'unit:example'], ['--reviewer', 'claude'], ['--review-policy', 'agent']]) {
+    assert.match(await run([...args, '--plan']), /Run graphyard install from the checkout/, `${args[0]} was not accepted by the CLI`);
+  }
+  // A silently NaN count would install no worker principal at all, or an unusable port.
+  for (const flag of ['--workers', '--port', '--review-count']) assert.match(await run([flag, 'many', '--plan']), new RegExp(`${flag} takes a whole number`));
 });

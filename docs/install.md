@@ -98,6 +98,8 @@ Add the options the instruction called for:
 | `--ssh-host HOST` / `--ssh-user USER` | Target for `docker-host` |
 | `--base-branch NAME` | Protected base branch (default `main`) |
 | `--port N` | Host port for a local `compose` install (default 4310) |
+| `--required-check NAME` | Also require this existing CI check on the base branch; repeatable |
+| `--review-count N` | Approving reviews to require, when the policy's default is not what you want |
 
 **Expected output** is a JSON plan:
 

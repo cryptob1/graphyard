@@ -59,7 +59,7 @@ async function main() {
 Environment: GRAPHYARD_URL, GRAPHYARD_TOKEN (individual role-scoped credential)
   install --provider railway|hetzner|docker-host|compose --repo OWNER/NAME
           [--plan|--apply] [--domain HOST] [--workers N] [--reviewer NAME]
-          [--producer-proof PROOF] [--ssh-host HOST] [--ssh-user USER]
+          [--producer-proof PROOF] [--ssh-host HOST] [--ssh-user USER] [--port N]
                                 Install or reconcile a complete control plane.
                                 --plan prints every action with secrets redacted and
                                 changes nothing; --apply executes the same plan.
@@ -232,21 +232,25 @@ Never share an operator or producer credential with an implementation agent.`); 
       'producer-proof': { type: 'string', multiple: true }, 'base-branch': { type: 'string' }, 'review-policy': { type: 'string' },
       'required-check': { type: 'string', multiple: true }, 'review-count': { type: 'string' },
       'ssh-host': { type: 'string' }, 'ssh-user': { type: 'string' }, 'server-name': { type: 'string' },
-      'server-type': { type: 'string' }, location: { type: 'string' }, logs: { type: 'boolean' },
+      'server-type': { type: 'string' }, location: { type: 'string' }, port: { type: 'string' }, logs: { type: 'boolean' },
     }, allowPositionals: false });
     if (!values.repo) throw new Error('Use --repo OWNER/NAME');
     if (!values.provider || !providers.includes(values.provider as any)) throw new Error(`Use --provider ${providers.join('|')}`);
     if (values.plan && values.apply) throw new Error('Choose either --plan or --apply');
     const reviewPolicy = values['review-policy'];
     if (reviewPolicy && !['github', 'agent'].includes(reviewPolicy)) throw new Error('Use --review-policy github or agent');
+    // A count that silently became NaN would install a control plane with no worker principal
+    // or an unusable port, so a non-numeric value stops the command instead.
+    const count = (flag: string, value: string) => { const parsed = Number(value); if (!Number.isSafeInteger(parsed) || parsed < 0) throw new Error(`--${flag} takes a whole number`); return parsed; };
     const inputs: InstallInputs = { repository: values.repo, provider: values.provider as InstallInputs['provider'],
       ...(values['base-branch'] ? { baseBranch: values['base-branch'] } : {}),
-      ...(values.domain ? { domain: values.domain } : {}), ...(values.workers ? { workers: Number(values.workers) } : {}),
+      ...(values.domain ? { domain: values.domain } : {}), ...(values.workers ? { workers: count('workers', values.workers) } : {}),
+      ...(values.port ? { port: count('port', values.port) } : {}),
       ...(values.reviewer ? { reviewer: values.reviewer } : {}), ...(values.image ? { image: values.image } : {}),
       ...(values['producer-proof']?.length ? { producerProofs: values['producer-proof'] } : {}),
       ...(reviewPolicy ? { reviewPolicy: reviewPolicy as 'github' | 'agent' } : {}),
       ...(values['required-check']?.length ? { requiredChecks: values['required-check'] } : {}),
-      ...(values['review-count'] ? { reviewCount: Number(values['review-count']) } : {}),
+      ...(values['review-count'] ? { reviewCount: count('review-count', values['review-count']) } : {}),
       ...(values['ssh-host'] ? { sshHost: values['ssh-host'] } : {}), ...(values['ssh-user'] ? { sshUser: values['ssh-user'] } : {}),
       ...(values['server-name'] ? { serverName: values['server-name'] } : {}),
       ...(values['server-type'] ? { serverType: values['server-type'] } : {}), ...(values.location ? { location: values.location } : {}) };
