@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { stat } from 'node:fs/promises';
-import { buildPlan, coreEnv, githubEnv, prepareInstall, repositoryRoot } from '../src/install/index.js';
+import { buildPlan, coreEnv, githubEnv, materializeInstall, prepareInstall, repositoryRoot } from '../src/install/index.js';
 import { protectionPayload, protectionSatisfied, CHECK_NAME } from '../src/install/github.js';
 import { fingerprint } from '../src/install/secrets.js';
 import { installIdFor, REDACTED } from '../src/install/types.js';
@@ -52,8 +52,14 @@ test('--plan produces a complete ordered plan and redacts every value that is a 
     assert.equal(session.tokens.size, 0, 'planning must not generate a credential');
     await assert.rejects(stat(session.directory), { code: 'ENOENT' }, 'planning must not create the installation directory');
 
-    // Once applied, the same plan reports the real fingerprints of what exists.
+    // Preparing an --apply run creates nothing either: the credentials are minted only after
+    // the preflight gate inside applyInstall, so a refused apply leaves the machine untouched.
     const applied = await prepareInstall(fixture.root, { repository: 'owner/project', provider: 'railway' }, fixture.deps, 'apply');
+    assert.equal(applied.materialized, false);
+    await assert.rejects(stat(applied.directory), { code: 'ENOENT' }, 'preparing an apply created the installation directory');
+
+    // Once the credentials exist, the same plan reports the real fingerprints of what exists.
+    await materializeInstall(applied);
     const materialized = await buildPlan(applied);
     const written = materialized.actions.find(action => action.id === 'provider.env.core')!.values!.find(value => value.name === 'GRAPHYARD_PRINCIPALS')!;
     assert.equal(written.value, REDACTED);

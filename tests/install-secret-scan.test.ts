@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { readFile, readdir, stat } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
-import { applyInstall, buildPlan, prepareInstall } from '../src/install/index.js';
+import { applyInstall, buildPlan, materializeInstall, prepareInstall } from '../src/install/index.js';
 import { fakeTransport, type Transport } from '../src/install/transport.js';
 import type { Provider } from '../src/install/types.js';
 import { allText, githubResponses, harness, providerResponses } from './install-harness.js';
@@ -61,7 +61,7 @@ test('a secret is redacted even when a provider echoes it back in its logs', asy
       ...providerResponses('compose', { installed: false, workdir: `${fixture.configHome}/owner-project/compose`, service: 'graphyard-owner-project' }),
       ...githubResponses(fixture.state),
     ] });
-    const session = await prepareInstall(fixture.root, inputsFor('compose'), { ...fixture.deps, transport: transport as Transport });
+    const session = await materializeInstall(await prepareInstall(fixture.root, inputsFor('compose'), { ...fixture.deps, transport: transport as Transport }));
     leak.value = session.tokens.values().next().value!;
     const logs = await session.adapter.logs(session.context);
     assert.ok(!logs.includes(leak.value), 'provider logs must be scrubbed before they are shown');
@@ -73,7 +73,7 @@ test('a secret is redacted even when a provider echoes it back in its logs', asy
 test('the installer refuses to emit a document that would disclose a credential', async () => {
   const fixture = await harness({ provider: 'compose' });
   try {
-    const session = await prepareInstall(fixture.root, inputsFor('compose'), fixture.deps);
+    const session = await materializeInstall(await prepareInstall(fixture.root, inputsFor('compose'), fixture.deps));
     const token = session.tokens.values().next().value!;
     assert.throws(() => session.vault.assertClean(`{"note":"${token}"}`, 'the installation summary'), /Refusing to emit the installation summary/);
     assert.ok(session.vault.exposes(token));

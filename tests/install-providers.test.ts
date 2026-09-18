@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { stat } from 'node:fs/promises';
-import { buildPlan, coreEnv, prepareInstall } from '../src/install/index.js';
+import { buildPlan, coreEnv, materializeInstall, prepareInstall } from '../src/install/index.js';
 import { variableMarker } from '../src/install/adapters.js';
 import type { Provider } from '../src/install/types.js';
 import { harness, satisfiedProtection, type Harness } from './install-harness.js';
@@ -52,7 +52,7 @@ test('re-planning an existing installation reports it as satisfied instead of pr
     const first = await harness({ provider });
     let second: Harness | undefined;
     try {
-      const session = await prepareInstall(first.root, inputsFor(provider), first.deps);
+      const session = await materializeInstall(await prepareInstall(first.root, inputsFor(provider), first.deps));
       const envFile = renderEnv(provider, coreEnv(session));
       second = await harness({ provider, installed: true, envFile, protection: satisfiedProtection(null), root: first.root, configHome: first.configHome });
       const plan = await buildPlan(await prepareInstall(second.root, inputsFor(provider), second.deps, 'plan'));
@@ -71,7 +71,7 @@ test('a changed value is reported as drift with a redacted comparison, never as 
   const first = await harness({ provider: 'compose' });
   let second: Harness | undefined;
   try {
-    const session = await prepareInstall(first.root, inputsFor('compose'), first.deps);
+    const session = await materializeInstall(await prepareInstall(first.root, inputsFor('compose'), first.deps));
     const core = coreEnv(session);
     const drifted = core.map(value => value.name === 'GITHUB_BASE_BRANCH' ? { ...value, value: 'trunk' }
       : value.name === 'GRAPHYARD_PRINCIPALS' ? { ...value, value: '[{"id":"stale","role":"admin","token":"stale-token-value-0123456789abcd"}]' }
@@ -101,7 +101,7 @@ test('changing the provider or domain of an existing installation is reported as
   const first = await harness({ provider: 'compose' });
   let second: Harness | undefined;
   try {
-    const session = await prepareInstall(first.root, inputsFor('compose'), first.deps);
+    const session = await materializeInstall(await prepareInstall(first.root, inputsFor('compose'), first.deps));
     const { writeInstallRecord, Vault, installRecordSchema } = await import('../src/install/secrets.js');
     const now = new Date().toISOString();
     await writeInstallRecord(session.directory, installRecordSchema.parse({ version: 1, installId: session.installId, repository: 'owner/project', provider: 'compose', baseBranch: 'main', reviewPolicy: 'github', domain: 'old.example.test', url: 'http://127.0.0.1:4310', principals: [], github: null, reviewers: [], profiles: [], createdAt: now, updatedAt: now }), new Vault());

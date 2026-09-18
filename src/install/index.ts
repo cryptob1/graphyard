@@ -81,19 +81,21 @@ export async function prepareInstall(cwd: string, rawInputs: InstallInputs, depe
   if (detected.repository && detected.repository.toLowerCase() !== rawInputs.repository.toLowerCase()) throw new Error(`This checkout is ${detected.repository}; rerun from ${rawInputs.repository} or correct --repo`);
   const vault = new Vault();
   const directory = installDirectory(installId, dependencies.configHome);
-  // Planning inspects; only applying creates. A plan must leave the filesystem untouched.
-  if (mode === 'apply') await prepareInstallDirectory(directory, root);
-  else assertOutsideRepository(directory, root);
+  // Preparing inspects; it never creates, in either mode. `--apply` has to be able to refuse
+  // on a failed preflight having changed nothing, so the credential directory, the tokens and
+  // the database password are minted by `materializeInstall` after that gate — not here.
+  assertOutsideRepository(directory, root);
   const principals = plannedPrincipals(installId, { workers: rawInputs.workers, producerProofs: rawInputs.producerProofs });
-  const tokens = await ensureTokens(directory, principals, vault, mode === 'apply');
+  const tokens = await ensureTokens(directory, principals, vault, false);
   const record = await readInstallRecord(directory);
   const reviewPolicy = rawInputs.reviewPolicy ?? 'github';
   const inputs = { ...rawInputs, provider, baseBranch: rawInputs.baseBranch ?? 'main' };
   const transport = dependencies.transport ?? localTransport();
   const ssh = dependencies.ssh ?? ((host: string, user = inputs.sshUser ?? 'root') => sshTransport(host, user, transport));
   // A self-hosted database password is generated once and reused, so re-apply never
-  // rewrites a running database's credential out from under it.
-  const databasePassword = vault.add(await stableDatabasePassword(directory, mode === 'apply'));
+  // rewrites a running database's credential out from under it. An installation that already
+  // exists yields its real value here, which is what keeps drift reporting exact on re-apply.
+  const databasePassword = vault.add(await stableDatabasePassword(directory, false));
   const materialized = tokens.size === principals.length && !!databasePassword;
   const context: AdapterContext = {
     provider, repository: inputs.repository, installId,
@@ -115,6 +117,23 @@ export async function prepareInstall(cwd: string, rawInputs: InstallInputs, depe
     reviewCount: reviewPolicy === 'agent' ? 0 : Math.max(0, inputs.reviewCount ?? 1),
     deps: { fetch: dependencies.fetch ?? fetch, now: dependencies.now ?? Date.now, wait: dependencies.wait ?? ((ms: number) => new Promise(accept => setTimeout(accept, ms))), log: dependencies.log ?? (() => {}), ...dependencies },
   };
+}
+
+/**
+ * Creates what an installation owns on this machine: the credential directory, one token per
+ * principal, and the self-hosted database password. It runs only after the preflight gate has
+ * passed, so a refused `--apply` leaves the machine exactly as it found it. Idempotent — an
+ * existing installation keeps every credential it already has.
+ */
+export async function materializeInstall(session: InstallSession): Promise<InstallSession> {
+  if (session.mode !== 'apply') throw new Error('Apply requires a session prepared in apply mode; --plan sessions create nothing');
+  if (session.materialized) return session;
+  await prepareInstallDirectory(session.directory, session.root);
+  for (const [principal, token] of await ensureTokens(session.directory, session.principals, session.vault, true)) session.tokens.set(principal, token);
+  session.context.databasePassword = session.vault.add(await stableDatabasePassword(session.directory, true));
+  session.materialized = session.tokens.size === session.principals.length && !!session.context.databasePassword;
+  if (!session.materialized) throw new Error(`Could not generate one credential per principal under ${session.directory}`);
+  return session;
 }
 
 /** Generated once and reused: a re-apply must not lock a running database out of itself. */
@@ -275,10 +294,13 @@ export interface InstallSummary {
 
 export async function applyInstall(session: InstallSession, plan: InstallPlan): Promise<InstallSummary> {
   const { adapter, context, deps, vault } = session;
-  if (session.mode !== 'apply' || !session.materialized) throw new Error('Apply requires a session prepared in apply mode; --plan sessions create nothing');
+  if (session.mode !== 'apply') throw new Error('Apply requires a session prepared in apply mode; --plan sessions create nothing');
   const log = (line: string) => deps.log(vault.scrub(line));
+  // The gate comes before anything is written, so "changed nothing" is literally true: at this
+  // point not even a credential file exists yet for a first install.
   const blocked = plan.preflight.filter(item => !item.ok);
   if (blocked.length) throw new Error(`Preflight is incomplete; the installer changed nothing.\n${blocked.map(item => `- ${item.name}: ${item.detail}${item.fix ? `\n  Run: ${item.fix}` : ''}`).join('\n')}`);
+  await materializeInstall(session);
 
   const observation = await adapter.observe(context);
   log(`Provisioning ${context.provider} for ${session.inputs.repository}`);

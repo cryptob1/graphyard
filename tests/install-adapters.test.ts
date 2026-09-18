@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFile } from 'node:fs/promises';
+import { readFile, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import { applyInstall, buildPlan, coreEnv, prepareInstall } from '../src/install/index.js';
 import { fakeTransport, type Transport } from '../src/install/transport.js';
@@ -168,6 +168,13 @@ test('apply refuses to change anything when preflight is incomplete', async () =
     const plan = await buildPlan(session);
     await assert.rejects(applyInstall(session, plan), /Preflight is incomplete[\s\S]*railway login/);
     assert.ok(!fixture.commandLines().some(line => line.includes('railway init')));
+
+    // "Changed nothing" is literal: a refused apply mints no credential and no database
+    // password, so an operator who stops here has nothing on disk to clean up or rotate.
+    await assert.rejects(stat(session.directory), { code: 'ENOENT' }, 'a refused apply created the installation directory');
+    assert.equal(session.materialized, false);
+    assert.equal(session.tokens.size, 0);
+    assert.equal(session.vault.size, 0, 'a refused apply generated a secret');
   } finally { await fixture.cleanup(); }
 });
 

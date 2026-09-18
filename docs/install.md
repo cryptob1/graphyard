@@ -126,8 +126,10 @@ Add the options the instruction called for:
   `github.protection`, `verify.status`, and `verify.webhook`.
 
 **If a preflight item is `false`**, its `fix` field holds the exact command to run. Run it,
-then rerun `--plan`. Do not continue with a failing preflight: `--apply` refuses to start
-and changes nothing.
+then rerun `--plan`. Do not continue with a failing preflight: `--apply` rechecks preflight
+itself, refuses to start, and changes nothing — it creates no credential directory, generates
+no token, and writes no database password until every item passes. Stopping here leaves
+nothing on this machine to clean up or rotate.
 
 ## Step 2 — approve the plan
 
@@ -142,7 +144,9 @@ node "$GRAPHYARD_CLI" install --provider PROVIDER --repo OWNER/REPO --apply
 
 The installer performs the plan in order:
 
-1. Generates one credential per principal under `~/.config/graphyard/<install>/tokens/` (mode `0600`).
+1. Rechecks preflight, then generates one credential per principal under
+   `~/.config/graphyard/<install>/tokens/` (mode `0600`). Nothing is written before that check
+   passes; an existing installation keeps the credentials it already has.
 2. Provisions Postgres and the application container on the provider.
 3. Sets `HOST`, `PORT`, `DATABASE_URL`, `GRAPHYARD_PRINCIPALS`, `GITHUB_REPOSITORY`, and `GITHUB_BASE_BRANCH`.
 4. Deploys and obtains a public HTTPS URL.
@@ -256,7 +260,7 @@ made on the provider, or a sign that two installations are pointed at one reposi
 
 | Symptom | Cause | Action |
 | --- | --- | --- |
-| `Preflight is incomplete` | a CLI is missing or not authenticated | run the `fix` command printed for that item, then rerun |
+| `Preflight is incomplete` | a CLI is missing or not authenticated | nothing was created; run the `fix` command printed for that item, then rerun |
 | `Run graphyard install from the checkout of the repository being managed` | wrong working directory | `cd` into the `OWNER/REPO` checkout |
 | `This checkout is X; rerun from Y` | `--repo` and the Git origin disagree | correct `--repo` or change directory |
 | `did not become healthy` | the container cannot start or reach Postgres | `node "$GRAPHYARD_CLI" install --provider PROVIDER --repo OWNER/REPO --logs` |
