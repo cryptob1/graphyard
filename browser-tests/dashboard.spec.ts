@@ -86,6 +86,11 @@ for (const viewport of [{ name: 'desktop', width: 1280, height: 900 }, { name: '
   await expect(page.getByRole('list', { name: 'Weekly delivery counts' }).getByRole('listitem')).toHaveCount(12);
   await expect(page.getByRole('link', { name: /PR #42/ })).toHaveAttribute('href', 'https://github.com/fixture/repository/pull/42');
   await expect(page.getByRole('link', { name: /Commit abcdef12/ })).toHaveAttribute('href', 'https://github.com/fixture/repository/commit/abcdef1234567890abcdef1234567890abcdef12');
+  // Deployment times are the provider's clock carried onto the repository clock with the
+  // bracket the collector measured. The method note must say that rather than describe the
+  // durations as exact, which would overstate values known only to that precision.
+  await expect(page.locator('.pulse-method')).toContainText('carried onto the repository clock at ingestion using the offset bracket the collector measured');
+  await expect(page.getByText('EXACT VERIFIED CONTAINMENT')).toHaveCount(0);
   const shell = page.locator('.shell'); expect((await shell.evaluate(element => element.scrollWidth <= element.clientWidth))).toBe(true);
 });
 

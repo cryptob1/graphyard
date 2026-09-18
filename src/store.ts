@@ -14,6 +14,15 @@ import type { IntegrationJob } from './coordination.js';
 export const DELIVERY_REPOSITORY_INSTANT =
   "graphyard_instant(COALESCE(payload->'work'->'delivery'->>'mergedAtRepository',payload->'work'->'delivery'->>'mergedAt'))";
 
+/**
+ * What makes an event an accepted-delivery record. Written once so the two indexes, the
+ * window scan, and the global first-delivery probe all select exactly the same set of
+ * rows: a work item is delivered once, and which event is its first must not depend on
+ * which query is asking.
+ */
+export const DELIVERY_EVENT_PREDICATE =
+  "kind='github.observed' AND payload->'work'->'delivery'->>'mergedAt' IS NOT NULL";
+
 export const migration = `
 CREATE TABLE IF NOT EXISTS work_items (
   id uuid PRIMARY KEY, number bigserial UNIQUE, document jsonb NOT NULL
@@ -49,7 +58,14 @@ CREATE OR REPLACE FUNCTION graphyard_instant(value text) RETURNS timestamptz
 DROP INDEX IF EXISTS events_delivery_time;
 DROP INDEX IF EXISTS events_delivery_instant;
 CREATE INDEX IF NOT EXISTS events_delivery_repository_instant ON events (${DELIVERY_REPOSITORY_INSTANT},work_id,seq)
-  WHERE kind='github.observed' AND payload->'work'->'delivery'->>'mergedAt' IS NOT NULL;
+  WHERE ${DELIVERY_EVENT_PREDICATE};
+-- A work item is delivered once, at its first accepted-delivery event, whether or not
+-- that event falls in the reporting window. The pulse therefore has to identify the
+-- globally first one for each candidate it finds, and this keys that question directly:
+-- one (work_id, seq) probe returning a single tuple per candidate, rather than a walk of
+-- the item's history looking for the earliest event that happens to carry a delivery.
+CREATE INDEX IF NOT EXISTS events_delivery_first ON events (work_id,seq)
+  WHERE ${DELIVERY_EVENT_PREDICATE};
 -- Recent-delivery quality is read from the immutable snapshot each delivery cites by
 -- revision, so that lookup must be an exact probe rather than a walk of one work
 -- item's history. Revisions are written by save() as canonical JSON integers, so the
@@ -65,34 +81,68 @@ CREATE TABLE IF NOT EXISTS production_observations (
   id uuid PRIMARY KEY, provider text NOT NULL, deployment_id text NOT NULL,
   status text NOT NULL CHECK (status IN ('succeeded','failed','superseded')),
   kind text NOT NULL CHECK (kind IN ('deployment','rollback')),
+  -- deployed_at is the provider's own clock, retained exactly as reported. The repository
+  -- clock is this database's, and nothing after ingestion can relate the two, so the
+  -- bracket the collector measured is recorded with the observation and the deployment
+  -- instant is carried onto the repository clock here, once: deployed_at_repository is
+  -- the earliest repository instant the deployment can have happened at and
+  -- deployed_at_repository_max the latest. Every comparison the pulse makes against a
+  -- merge, and every duration it publishes, reads those rather than deployed_at.
   deployed_at timestamptz NOT NULL, observed_at timestamptz NOT NULL,
+  deployed_at_repository timestamptz, deployed_at_repository_max timestamptz,
+  clock_offset_min_ms bigint, clock_offset_max_ms bigint,
   commit_sha text, artifact_digest text, source_url text NOT NULL,
   producer text NOT NULL, document jsonb NOT NULL,
   UNIQUE(provider,deployment_id,status)
 );
--- deployed_at/status/kind are copied from the immutable observation written in the
--- same transaction so the per-merge lookup can be satisfied, ordered, and capped
--- entirely from one index instead of sorting every mapping for a merge SHA.
+-- The repository deployment instants, status, and kind are copied from the immutable
+-- observation written in the same transaction so the per-merge lookup can be satisfied,
+-- ordered, and capped entirely from one index instead of sorting every mapping for a
+-- merge SHA.
 CREATE TABLE IF NOT EXISTS production_observation_merges (
   observation_id uuid NOT NULL REFERENCES production_observations(id), merge_sha text NOT NULL,
   deployed_at timestamptz NOT NULL, status text NOT NULL, kind text NOT NULL,
+  deployed_at_repository timestamptz, deployed_at_repository_max timestamptz,
   PRIMARY KEY(observation_id,merge_sha)
 );
--- Databases created before the ordering columns existed are upgraded in place from
--- the immutable observations they already reference; the append-only guard is
--- reinstated below, so no recorded observation can be altered outside this step.
+-- Databases created before the ordering and clock-anchor columns existed are upgraded in
+-- place from the immutable observations they already reference; the append-only guard is
+-- reinstated below, so no recorded observation can be altered outside this step. An
+-- observation recorded before the offset was measured has no bracket to apply, so its
+-- provider timestamp stands as the only reading of the instant available for it, with a
+-- zero-width offset recorded to say exactly that.
+DROP TRIGGER IF EXISTS immutable_production_observations ON production_observations;
 DROP TRIGGER IF EXISTS immutable_production_observation_merges ON production_observation_merges;
+ALTER TABLE production_observations ADD COLUMN IF NOT EXISTS deployed_at_repository timestamptz;
+ALTER TABLE production_observations ADD COLUMN IF NOT EXISTS deployed_at_repository_max timestamptz;
+ALTER TABLE production_observations ADD COLUMN IF NOT EXISTS clock_offset_min_ms bigint;
+ALTER TABLE production_observations ADD COLUMN IF NOT EXISTS clock_offset_max_ms bigint;
+UPDATE production_observations SET deployed_at_repository=deployed_at, deployed_at_repository_max=deployed_at,
+  clock_offset_min_ms=0, clock_offset_max_ms=0 WHERE deployed_at_repository IS NULL;
+ALTER TABLE production_observations ALTER COLUMN deployed_at_repository SET NOT NULL,
+  ALTER COLUMN deployed_at_repository_max SET NOT NULL,
+  ALTER COLUMN clock_offset_min_ms SET NOT NULL, ALTER COLUMN clock_offset_max_ms SET NOT NULL;
 ALTER TABLE production_observation_merges ADD COLUMN IF NOT EXISTS deployed_at timestamptz;
 ALTER TABLE production_observation_merges ADD COLUMN IF NOT EXISTS status text;
 ALTER TABLE production_observation_merges ADD COLUMN IF NOT EXISTS kind text;
-UPDATE production_observation_merges m SET deployed_at=o.deployed_at, status=o.status, kind=o.kind
-  FROM production_observations o WHERE o.id=m.observation_id AND m.deployed_at IS NULL;
+ALTER TABLE production_observation_merges ADD COLUMN IF NOT EXISTS deployed_at_repository timestamptz;
+ALTER TABLE production_observation_merges ADD COLUMN IF NOT EXISTS deployed_at_repository_max timestamptz;
+UPDATE production_observation_merges m SET deployed_at=o.deployed_at, status=o.status, kind=o.kind,
+    deployed_at_repository=o.deployed_at_repository, deployed_at_repository_max=o.deployed_at_repository_max
+  FROM production_observations o
+  WHERE o.id=m.observation_id AND (m.deployed_at IS NULL OR m.deployed_at_repository IS NULL);
 ALTER TABLE production_observation_merges ALTER COLUMN deployed_at SET NOT NULL,
-  ALTER COLUMN status SET NOT NULL, ALTER COLUMN kind SET NOT NULL;
+  ALTER COLUMN status SET NOT NULL, ALTER COLUMN kind SET NOT NULL,
+  ALTER COLUMN deployed_at_repository SET NOT NULL, ALTER COLUMN deployed_at_repository_max SET NOT NULL;
 DROP INDEX IF EXISTS production_merges_lookup;
-CREATE INDEX IF NOT EXISTS production_merges_deploy_order ON production_observation_merges(merge_sha,deployed_at,observation_id)
+-- Keyed on the repository instant, because that is the clock the lookup orders by and the
+-- clock the published durations are measured on. Keyed on the provider timestamp the cap
+-- would stop at the wrong 101 observations whenever the provider clock is offset.
+DROP INDEX IF EXISTS production_merges_deploy_order;
+CREATE INDEX IF NOT EXISTS production_merges_repository_order ON production_observation_merges(merge_sha,deployed_at_repository,observation_id)
   WHERE status='succeeded' AND kind='deployment';
-CREATE INDEX IF NOT EXISTS production_deployment_time ON production_observations(deployed_at,id) WHERE status='succeeded' AND kind='deployment';
+DROP INDEX IF EXISTS production_deployment_time;
+CREATE INDEX IF NOT EXISTS production_deployment_repository_time ON production_observations(deployed_at_repository,id) WHERE status='succeeded' AND kind='deployment';
 CREATE INDEX IF NOT EXISTS production_deployment_state ON production_observations(provider,deployment_id,status);
 DROP TRIGGER IF EXISTS immutable_production_observations ON production_observations;
 CREATE TRIGGER immutable_production_observations BEFORE UPDATE OR DELETE ON production_observations FOR EACH ROW EXECUTE FUNCTION graphyard_immutable();

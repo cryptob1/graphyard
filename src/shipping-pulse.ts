@@ -1,6 +1,6 @@
 import type pg from 'pg';
 import { currentEvidence, type Work } from './model.js';
-import { DELIVERY_REPOSITORY_INSTANT } from './store.js';
+import { DELIVERY_EVENT_PREDICATE, DELIVERY_REPOSITORY_INSTANT } from './store.js';
 
 export const SHIPPING_PULSE_WEEKS = 12;
 export const SHIPPING_PULSE_LIMIT = 1000;
@@ -97,12 +97,19 @@ function average(values: number[]) { return values.length ? values.reduce((sum, 
 function p90(values: number[]) { return values.length ? [...values].sort((a, b) => a - b)[Math.ceil(values.length * 0.9) - 1] : null; }
 
 /**
- * Reads immutable create and accepted-delivery events only. The database clock is the
- * repository clock, and every instant this compares against it is carried onto it first:
- * GitHub's merge and pull-request timestamps are its own clock, related to the repository
- * clock only through the bounded offset each delivery recorded at merge verification.
- * Comparing them raw would move a delivery across a window boundary or bias its duration
- * by the whole offset. Both ends of every published interval are inclusive.
+ * Reads immutable create and accepted-delivery events only. A work item contributes one
+ * delivery, its first, and that is settled across the whole ledger before any window,
+ * count, or bucket is applied.
+ *
+ * The database clock is the repository clock, and every instant this compares against it
+ * is carried onto it first. Three clocks produce the timestamps involved: GitHub's, for
+ * the merge and pull-request times, related to the repository clock through the bounded
+ * offset each delivery recorded at merge verification; each deployment provider's, related
+ * through the bracket its collector measured at ingestion; and the repository's own, for
+ * the append-only intent event. Comparing any of them raw would move a delivery across a
+ * window boundary, discard a real deployment as preceding its own merge, or bias a
+ * published duration by the whole offset. Both ends of every published interval are
+ * inclusive.
  */
 export async function shippingPulse(pool: pg.Pool): Promise<ShippingPulse> {
   const clock = await pool.query("SELECT statement_timestamp() AS now");
@@ -111,17 +118,33 @@ export async function shippingPulse(pool: pg.Pool): Promise<ShippingPulse> {
   const rangeStart = new Date(currentWeek);
   rangeStart.setUTCDate(rangeStart.getUTCDate() - 7 * (SHIPPING_PULSE_WEEKS - 1));
   const result = await pool.query<DeliveryRow>(`
-    WITH delivery_events AS (
+    WITH windowed AS (
+      -- Candidates: delivery-bearing events whose recorded instant falls in the window.
+      -- A work item can appear here more than once - a re-observation writes another
+      -- snapshot, and a snapshot written after the delivery carries it forward - so this
+      -- narrows to the earliest such event per work item and nothing else. It cannot yet
+      -- decide that event is the item's delivery, because the window hides everything
+      -- before it.
       SELECT DISTINCT ON (work_id) work_id, seq, payload->'work' AS work,
         ${DELIVERY_REPOSITORY_INSTANT} AS merged_at
       FROM events
-      WHERE kind = 'github.observed'
-        AND payload->'work'->'delivery'->>'mergedAt' IS NOT NULL
+      WHERE ${DELIVERY_EVENT_PREDICATE}
         AND ${DELIVERY_REPOSITORY_INSTANT} BETWEEN $1 AND $2
       ORDER BY work_id ASC, seq ASC
     ), exact_deliveries AS (
-      SELECT work_id, seq, work, merged_at FROM delivery_events
-      ORDER BY merged_at DESC, work_id ASC LIMIT $3
+      -- Deduplication is global, and happens before anything is counted, bucketed, or
+      -- ranked: a work item is delivered once, at its first accepted-delivery event
+      -- anywhere in the ledger. Keeping the earliest in-window event instead would count
+      -- a later snapshot of an older delivery as a delivery inside this window, inflating
+      -- the counts and the weekly bars and attributing the work to the wrong week. One
+      -- indexed (work_id, seq) probe per candidate answers it exactly; a candidate whose
+      -- first delivery event lies before the window simply falls away here.
+      SELECT w.work_id, w.work, w.merged_at FROM windowed w
+      WHERE w.seq = (
+        SELECT first.seq FROM events first
+        WHERE first.work_id = w.work_id AND ${DELIVERY_EVENT_PREDICATE}
+        ORDER BY first.seq ASC LIMIT 1)
+      ORDER BY w.merged_at DESC, w.work_id ASC LIMIT $3
     ), ranked AS (
       SELECT work_id, work, merged_at,
         row_number() OVER (ORDER BY merged_at DESC, work_id ASC) AS rank_position FROM exact_deliveries
@@ -164,12 +187,23 @@ export async function shippingPulse(pool: pg.Pool): Promise<ShippingPulse> {
       SELECT created_at FROM events
       WHERE work_id=d.work_id AND kind='create' ORDER BY seq ASC LIMIT 1
     ) intent ON true
+    -- Both endpoints on the repository clock. deployed_at_repository is the earliest
+    -- repository instant a deployment can have occurred at and deployed_at_repository_max
+    -- the latest, carried across at ingestion with the offset bracket the collector
+    -- measured; d.merged_at is likewise the earliest repository instant of the merge.
+    -- A deployment counts as post-merge when its latest bound reaches the merge: the
+    -- containment proof already establishes that it deployed that merge, so a narrower
+    -- test would discard a real deployment over two clocks each measured to within twenty
+    -- seconds. Where the two brackets overlap, the merge instant is the deployment's own
+    -- lower bound - it cannot have run before the commit it contains - so the reported
+    -- instant is clamped to it rather than allowed to read as a negative duration.
     LEFT JOIN LATERAL (
-      SELECT min(o.deployed_at) FILTER (WHERE o.deployed_at>=d.merged_at AND NOT o.superseded) AS production_at,
+      SELECT CASE WHEN count(*) FILTER (WHERE NOT o.superseded AND o.deployed_at_repository_max>=d.merged_at) > 0
+          THEN greatest(min(o.deployed_at_repository) FILTER (WHERE NOT o.superseded AND o.deployed_at_repository_max>=d.merged_at), d.merged_at) END AS production_at,
         count(*) AS production_matches,
         count(*) FILTER (WHERE o.superseded) AS superseded_matches
       FROM (
-        SELECT pom.deployed_at, EXISTS (
+        SELECT pom.deployed_at_repository, pom.deployed_at_repository_max, EXISTS (
             SELECT 1 FROM production_observations later
             WHERE later.provider=source.provider AND later.deployment_id=source.deployment_id
               AND later.status='superseded') AS superseded
@@ -177,7 +211,7 @@ export async function shippingPulse(pool: pg.Pool): Promise<ShippingPulse> {
         JOIN production_observations source ON source.id=pom.observation_id
         WHERE pom.merge_sha=lower(d.work->'delivery'->>'mergeSha')
           AND pom.status='succeeded' AND pom.kind='deployment'
-        ORDER BY pom.deployed_at ASC, pom.observation_id ASC LIMIT $4
+        ORDER BY pom.deployed_at_repository ASC, pom.observation_id ASC LIMIT $4
       ) o
     ) production ON true
     ORDER BY d.merged_at DESC, d.work_id ASC`,

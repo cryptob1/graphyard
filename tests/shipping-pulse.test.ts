@@ -5,11 +5,11 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import EmbeddedPostgres from 'embedded-postgres';
-import { Store, DELIVERY_REPOSITORY_INSTANT } from '../src/store.js';
+import { Store, DELIVERY_EVENT_PREDICATE, DELIVERY_REPOSITORY_INSTANT } from '../src/store.js';
 import { shippingPulse, SHIPPING_PULSE_LIMIT } from '../src/shipping-pulse.js';
 import { Engine } from '../src/engine.js';
 import { server } from '../src/server.js';
-import { ProductionDelivery, PRODUCTION_CLOCK_SKEW_MS } from '../src/production-delivery.js';
+import { ProductionDelivery, PRODUCTION_CLOCK_PRECISION_MS } from '../src/production-delivery.js';
 
 let database: EmbeddedPostgres; let store: Store;
 before(async () => {
@@ -56,6 +56,42 @@ test('pulse uses exact append-only deliveries, deduplicates, orders, and compute
   assert.deepEqual(pulse.recent[1].quality.violations, ['Observed policy context']);
 });
 
+test('deduplication is global, so a delivery from before the window is never recounted inside it', async () => {
+  const before = await shippingPulse(store.pool);
+  const now = (await store.pool.query('SELECT statement_timestamp() AS now')).rows[0].now as Date;
+  const id = randomUUID();
+  // Delivered well outside the 12-week reporting window - and outside any scan of it.
+  const deliveredAt = new Date(now.getTime() - 200 * 86_400_000);
+  const base = {
+    id, key: 'GY-RECOUNT', title: 'Delivered long ago', revision: 2,
+    candidate: { pr: 600, sha: 'a'.repeat(40), baseSha: 'b'.repeat(40) }, policyRevision: 1,
+    evidence: [], criteria: [], violations: [],
+  };
+  const delivery = (mergedAt: Date) => ({ mergedAt: mergedAt.toISOString(), mergedAtRepository: mergedAt.toISOString(), repositoryClockOffsetMs: 0, mergeSha: '5'.repeat(40), authorizationRevision: 1 });
+  await store.pool.query('INSERT INTO work_items(id,document) VALUES($1,$2)', [id, { id }]);
+  await store.pool.query("INSERT INTO events(work_id,actor,kind,payload) VALUES($1,'github','github.observed',$2)", [id, { work: { ...base, delivery: delivery(deliveredAt) } }]);
+  // Months later the item is observed again - a re-observation, a follow-up check, any
+  // event that carries the work document forward. This snapshot still describes the same
+  // single delivery, but a lifecycle field moved its recorded merge time into the window.
+  // Filtering the window before deduplicating would treat this event as the item's first
+  // delivery, count a second delivery for a work item that shipped once, and file it under
+  // the wrong week. Deduplicating globally first settles the item on its real first
+  // delivery event, which is outside the window, so the window contains nothing for it.
+  const inWindow = new Date(now.getTime() - 3 * 86_400_000);
+  await store.pool.query("INSERT INTO events(work_id,actor,kind,payload) VALUES($1,'github','github.observed',$2)", [id, { work: { ...base, revision: 3, delivery: delivery(inWindow) } }]);
+  const after = await shippingPulse(store.pool);
+  assert.equal(after.counts.days7 - before.counts.days7, 0, 'a delivery from before the window is not recounted inside it');
+  assert.equal(after.counts.days30 - before.counts.days30, 0);
+  assert.equal(after.weeks.reduce((sum, week) => sum + week.count, 0) - before.weeks.reduce((sum, week) => sum + week.count, 0), 0);
+  assert.equal(after.recent.filter(item => item.key === 'GY-RECOUNT').length, 0);
+  // The scanned event range still reaches the later snapshot, so the regression is about
+  // ordering deduplication before filtering rather than about how far the scan reaches.
+  const scanned = await store.pool.query(`SELECT count(*)::int AS matches FROM events
+    WHERE ${DELIVERY_EVENT_PREDICATE} AND work_id=$1 AND ${DELIVERY_REPOSITORY_INSTANT} BETWEEN $2 AND $3`,
+    [id, new Date(now.getTime() - 84 * 86_400_000).toISOString(), now.toISOString()]);
+  assert.equal(scanned.rows[0].matches, 1, 'the later delivery-bearing snapshot is inside the scanned window');
+});
+
 test('bounded aggregation is served by the delivery and production-merge indexes', async () => {
   // Asserted with sequential scans disabled: the question is whether the indexed key can
   // satisfy the pulse predicate and ordering at all, not what a planner prefers on a small
@@ -77,12 +113,24 @@ test('bounded aggregation is served by the delivery and production-merge indexes
     assert.match(plan, /Index Scan using events_delivery_repository_instant/);
     assert.match(plan, /Index Cond:[^\n]*graphyard_instant/);
     assert.doesNotMatch(plan, /Filter:[^\n]*graphyard_instant/);
-    const lookup = await explain(`SELECT pom.deployed_at FROM production_observation_merges pom
+    // Global deduplication costs one probe per in-window candidate, and that probe has to
+    // be an exact index lookup: the first delivery-bearing event for a work item is not
+    // findable from the window index, and scanning the item's history for it would put an
+    // unbounded walk inside a per-row subquery.
+    const firstDelivery = await explain(`SELECT first.seq FROM events first
+      WHERE first.work_id=$1 AND ${DELIVERY_EVENT_PREDICATE}
+      ORDER BY first.seq ASC LIMIT 1`, [randomUUID()]);
+    assert.match(firstDelivery, /Index Only Scan using events_delivery_first/);
+    assert.match(firstDelivery, /Index Cond: \(work_id =/);
+    assert.doesNotMatch(firstDelivery, /Sort Key/);
+    const lookup = await explain(`SELECT pom.observation_id FROM production_observation_merges pom
       WHERE pom.merge_sha=$1 AND pom.status='succeeded' AND pom.kind='deployment'
-      ORDER BY pom.deployed_at ASC, pom.observation_id ASC LIMIT 101`, ['c'.repeat(40)]);
-    // The cap stops the scan because the index already supplies deployment order; an index
-    // keyed on observation_id would have to sort every mapping for the merge SHA first.
-    assert.match(lookup, /Index Only Scan using production_merges_deploy_order/);
+      ORDER BY pom.deployed_at_repository ASC, pom.observation_id ASC LIMIT 101`, ['c'.repeat(40)]);
+    // The cap stops the scan because the index already supplies deployment order on the
+    // repository clock - the clock the durations are published on. Keyed on observation_id
+    // it would sort every mapping for the merge SHA first; keyed on the raw provider
+    // timestamp the cap would stop at the wrong 101 whenever that clock is offset.
+    assert.match(lookup, /Index Only Scan using production_merges_repository_order/);
     assert.match(lookup, /Index Cond: \(merge_sha =/);
     assert.doesNotMatch(lookup, /Sort Key/);
     const authorization = await explain(`SELECT e.payload->'work' FROM events e
@@ -107,8 +155,11 @@ test('PR-to-production uses exact retained containment and excludes superseded, 
   const superseded = await ledgerDelivery(6, 2, '103', 12);
   const invalid = await ledgerDelivery(5, 2, '104', -1);
   const observedNow = (await store.pool.query('SELECT statement_timestamp() AS now')).rows[0].now as Date;
+  // This provider's clock was measured to stand with the repository's, so the recorded
+  // repository instants equal the reported ones and the arithmetic below is unchanged.
+  const clockOffset = { min: 0, max: 0 };
   const observe = (deploymentId: string, status: 'succeeded' | 'superseded', kind: 'deployment' | 'rollback', hoursAgo: number, mergeShas: string[]) => delivery.observe(producer, {
-    provider: 'railway', deploymentId, status, kind, deployedAt: new Date(observedNow.getTime() - hoursAgo * 3_600_000).toISOString(),
+    provider: 'railway', deploymentId, status, kind, deployedAt: new Date(observedNow.getTime() - hoursAgo * 3_600_000).toISOString(), clockOffset,
     commitSha: 'd'.repeat(40), sourceUrl: `https://railway.example/deployment/${deploymentId}`, mergeShas,
   }, randomUUID());
   await observe('shared', 'succeeded', 'deployment', 1, [first.work.delivery.mergeSha, second.work.delivery.mergeSha]);
@@ -123,10 +174,10 @@ test('PR-to-production uses exact retained containment and excludes superseded, 
   // production-delivery history; a deployment observer scoped to one provider must not
   // reach another. Neither denial is repaired by widening the proof allowlist.
   await assert.rejects(() => delivery.observe({ id: 'test-collector', role: 'producer', proofs: ['integration:pulse'] },
-    { provider: 'railway', deploymentId: 'forged', status: 'succeeded', kind: 'deployment', deployedAt: new Date(observedNow.getTime() - 3_600_000).toISOString(), commitSha: 'd'.repeat(40), sourceUrl: 'https://railway.example/deployment/forged', mergeShas: [first.work.delivery.mergeSha] },
+    { provider: 'railway', deploymentId: 'forged', status: 'succeeded', kind: 'deployment', deployedAt: new Date(observedNow.getTime() - 3_600_000).toISOString(), clockOffset, commitSha: 'd'.repeat(40), sourceUrl: 'https://railway.example/deployment/forged', mergeShas: [first.work.delivery.mergeSha] },
     randomUUID()), /no deployment-observer authority/);
   await assert.rejects(() => delivery.observe({ id: 'other-provider-observer', role: 'producer', deploymentProviders: ['fly'] },
-    { provider: 'railway', deploymentId: 'out-of-scope', status: 'succeeded', kind: 'deployment', deployedAt: new Date(observedNow.getTime() - 3_600_000).toISOString(), commitSha: 'd'.repeat(40), sourceUrl: 'https://railway.example/deployment/out-of-scope', mergeShas: [first.work.delivery.mergeSha] },
+    { provider: 'railway', deploymentId: 'out-of-scope', status: 'succeeded', kind: 'deployment', deployedAt: new Date(observedNow.getTime() - 3_600_000).toISOString(), clockOffset, commitSha: 'd'.repeat(40), sourceUrl: 'https://railway.example/deployment/out-of-scope', mergeShas: [first.work.delivery.mergeSha] },
     randomUUID()), /does not cover this provider/);
   const pulse = await shippingPulse(store.pool);
   assert.deepEqual({ average: pulse.prToProduction.averageHours, median: pulse.prToProduction.medianHours, p90: pulse.prToProduction.p90Hours }, { average: 115, median: 29, p90: 299 });
@@ -264,7 +315,7 @@ test('repository-clock comparisons use the merge instant the delivery carried on
   await record('GY-CLOCK-INTENT', newest, '2'.repeat(40),
     { intentAt: new Date(newest.getTime() - offsetMs + 300_000), prCreatedAt: new Date(newest.getTime() - offsetMs + 120_000) });
   await new ProductionDelivery(store).observe({ id: 'deployment-observer', role: 'producer', deploymentProviders: ['railway'] }, {
-    provider: 'railway', deploymentId: 'clock-order', status: 'succeeded', kind: 'deployment', deployedAt: new Date(now.getTime() - 30_000).toISOString(),
+    provider: 'railway', deploymentId: 'clock-order', status: 'succeeded', kind: 'deployment', deployedAt: new Date(now.getTime() - 30_000).toISOString(), clockOffset: { min: 0, max: 0 },
     commitSha: 'a'.repeat(40), sourceUrl: 'https://railway.example/deployment/clock-order', mergeShas: ['2'.repeat(40)],
   }, randomUUID());
   const after = await shippingPulse(store.pool);
@@ -276,22 +327,88 @@ test('repository-clock comparisons use the merge instant the delivery carried on
     'a pull request created after its own merge stays an ordering violation once both provider times are carried across together');
 });
 
-test('a deployment reported from a provider clock slightly ahead of the repository is retained, not refused', async () => {
+test('production durations are measured on one clock whether the provider runs fast or slow', async () => {
+  const before = await shippingPulse(store.pool);
+  const delivery = new ProductionDelivery(store);
+  const producer = { id: 'deployment-observer', role: 'producer' as const, deploymentProviders: ['fast', 'slow'] };
+  const now = (await store.pool.query('SELECT statement_timestamp() AS now')).rows[0].now as Date;
+  // Two deliveries an hour apart on the repository clock, each deployed exactly one hour
+  // after its own merge. Nothing about the deployments differs except the clock that
+  // timestamped them.
+  const record = async (key: string, mergeSha: string, mergedAgoHours: number) => {
+    const id = randomUUID(), mergedAt = new Date(now.getTime() - mergedAgoHours * 3_600_000);
+    const work = {
+      id, key, title: key, revision: 2, candidate: { pr: 700, sha: 'a'.repeat(40), baseSha: 'b'.repeat(40) }, policyRevision: 1,
+      observation: { prCreatedAt: new Date(mergedAt.getTime() - 3_600_000).toISOString() },
+      delivery: { mergedAt: mergedAt.toISOString(), mergedAtRepository: mergedAt.toISOString(), repositoryClockOffsetMs: 0, mergeSha, authorizationRevision: 1 },
+      evidence: [], criteria: [], violations: [],
+    };
+    await store.pool.query('INSERT INTO work_items(id,document) VALUES($1,$2)', [id, { id }]);
+    await store.pool.query("INSERT INTO events(work_id,actor,kind,payload) VALUES($1,'github','github.observed',$2)", [id, { work }]);
+    return mergedAt;
+  };
+  const fastMerge = await record('GY-FAST-CLOCK', '3'.repeat(40), 10);
+  const slowMerge = await record('GY-SLOW-CLOCK', '4'.repeat(40), 9);
+  const aheadMs = 2 * 3_600_000;
+  // A provider clock running two hours fast stamps a deployment that really happened one
+  // hour after its merge as three hours after it. Reported raw, the published
+  // merge-to-production duration is inflated by the entire offset.
+  await delivery.observe(producer, {
+    provider: 'fast', deploymentId: 'ahead', status: 'succeeded', kind: 'deployment',
+    deployedAt: new Date(fastMerge.getTime() + 3_600_000 + aheadMs).toISOString(), clockOffset: { min: -aheadMs, max: -aheadMs },
+    commitSha: 'b'.repeat(40), sourceUrl: 'https://railway.example/deployment/ahead', mergeShas: ['3'.repeat(40)],
+  }, randomUUID());
+  // A provider clock running two hours slow stamps the same deployment an hour *before*
+  // its own merge. Compared raw against the repository merge instant it is discarded as
+  // unverifiable, losing a real production endpoint rather than merely biasing one.
+  await delivery.observe(producer, {
+    provider: 'slow', deploymentId: 'behind', status: 'succeeded', kind: 'deployment',
+    deployedAt: new Date(slowMerge.getTime() + 3_600_000 - aheadMs).toISOString(), clockOffset: { min: aheadMs, max: aheadMs },
+    commitSha: 'c'.repeat(40), sourceUrl: 'https://railway.example/deployment/behind', mergeShas: ['4'.repeat(40)],
+  }, randomUUID());
+  const after = await shippingPulse(store.pool);
+  assert.equal(after.prToProduction.sampleSize - before.prToProduction.sampleSize, 2,
+    'a deployment stamped before its merge by a slow provider clock is still a verified endpoint');
+  assert.equal((after.prToProduction.exclusions['no-verifiable-production-deployment'] ?? 0)
+    - (before.prToProduction.exclusions['no-verifiable-production-deployment'] ?? 0), 0);
+  // Both deployments ran one hour after their merge and two hours after their pull request
+  // was created, whichever clock is asked. The ledger holds earlier deliveries too, so the
+  // two new samples are read out of the published averages by weight. The tolerance covers
+  // only the tenth-of-an-hour rounding the response applies; reading the fast provider's
+  // timestamp raw would contribute three hours per sample instead of one.
+  const weighted = (pulse: Awaited<ReturnType<typeof shippingPulse>>, hours: number | null) => (hours ?? 0) * pulse.prToProduction.sampleSize;
+  const tolerance = 0.05 * (before.prToProduction.sampleSize + after.prToProduction.sampleSize);
+  const contributed = (pick: (value: typeof after.prToProduction) => number | null) =>
+    weighted(after, pick(after.prToProduction)) - weighted(before, pick(before.prToProduction));
+  assert.ok(Math.abs(contributed(value => value.split.mergeToProductionAverageHours) - 2) <= tolerance,
+    'each deployment contributes the one hour it actually took, not the offset of the clock that stamped it');
+  assert.ok(Math.abs(contributed(value => value.split.prToMergeAverageHours) - 2) <= tolerance);
+  assert.ok(Math.abs(contributed(value => value.averageHours) - 4) <= tolerance);
+});
+
+test('a deployment whose measured clock bracket is too wide or still in the future is refused', async () => {
   const delivery = new ProductionDelivery(store);
   const producer = { id: 'deployment-observer', role: 'producer' as const, deploymentProviders: ['railway'] };
   const now = (await store.pool.query('SELECT statement_timestamp() AS now')).rows[0].now as Date;
-  const reported = (aheadMs: number) => ({
-    provider: 'railway', deploymentId: `skew-${aheadMs}`, status: 'succeeded' as const, kind: 'deployment' as const,
-    deployedAt: new Date(now.getTime() + aheadMs).toISOString(), commitSha: 'b'.repeat(40),
-    sourceUrl: `https://railway.example/deployment/skew-${aheadMs}`, mergeShas: ['b'.repeat(40)],
+  const reported = (deploymentId: string, deployedAt: Date, clockOffset: { min: number; max: number }) => ({
+    provider: 'railway', deploymentId, status: 'succeeded' as const, kind: 'deployment' as const,
+    deployedAt: deployedAt.toISOString(), clockOffset, commitSha: 'b'.repeat(40),
+    sourceUrl: `https://railway.example/deployment/${deploymentId}`, mergeShas: ['b'.repeat(40)],
   });
-  // A finished deployment whose provider clock runs a little fast is real production
-  // history; refusing it loses the observation until a collector happens to retry later.
-  const accepted = await delivery.observe(producer, reported(PRODUCTION_CLOCK_SKEW_MS / 2), randomUUID());
+  // A bracket this wide does not locate the deployment on the repository clock well enough
+  // to attribute it to an instant, so it is refused rather than normalized by its midpoint.
+  await assert.rejects(() => delivery.observe(producer, reported('imprecise', new Date(now.getTime() - 3_600_000),
+    { min: 0, max: PRODUCTION_CLOCK_PRECISION_MS * 2 }), randomUUID()), /measured to within/);
+  await assert.rejects(() => delivery.observe(producer, reported('inverted', new Date(now.getTime() - 3_600_000),
+    { min: 1000, max: -1000 }), randomUUID()), /inverted/);
+  // A provider clock running fast no longer loses the observation: the measured offset
+  // carries the timestamp back onto the repository clock, where it is already in the past.
+  const accepted = await delivery.observe(producer, reported('fast-but-real', new Date(now.getTime() + 60_000), { min: -120_000, max: -110_000 }), randomUUID());
   assert.equal(accepted.status, 'succeeded');
-  // Past the bounded allowance the timestamp is no longer explainable as clock skew, so it
-  // is still refused rather than recorded as an observed fact.
-  await assert.rejects(() => delivery.observe(producer, reported(PRODUCTION_CLOCK_SKEW_MS * 4), randomUUID()), /ahead of the repository clock/);
+  assert.ok(Date.parse(accepted.deployedAtRepository) <= now.getTime());
+  // Even at its earliest bound this one has not happened yet, so no reading of the two
+  // clocks makes the report possible and it is refused rather than recorded as fact.
+  await assert.rejects(() => delivery.observe(producer, reported('impossible', new Date(now.getTime() + 600_000), { min: 0, max: 0 }), randomUUID()), /still in the future/);
 });
 
 test('API requires authentication and bounded larger histories are explicitly partial', async () => {
@@ -317,15 +434,15 @@ test('API requires authentication and bounded larger histories are explicitly pa
     assert.equal(denied.status, 403);
     // A configured producer without an explicit deployment-observer scope is denied over
     // HTTP too, so a proof-collector credential cannot reach the ingestion path at all.
-    const unscoped = await fetch(`${origin}/api/production-observations`, { method: 'POST', headers: { Authorization: `Bearer ${'c'.repeat(32)}`, 'Content-Type': 'application/json', 'Idempotency-Key': randomUUID() }, body: JSON.stringify({ provider: 'railway', deploymentId: 'deploy-unscoped', status: 'succeeded', kind: 'deployment', deployedAt: new Date(Date.now() - 3_600_000).toISOString(), commitSha: 'e'.repeat(40), sourceUrl: 'https://railway.app/deploy/unscoped', mergeShas: ['f'.repeat(40)] }) });
+    const unscoped = await fetch(`${origin}/api/production-observations`, { method: 'POST', headers: { Authorization: `Bearer ${'c'.repeat(32)}`, 'Content-Type': 'application/json', 'Idempotency-Key': randomUUID() }, body: JSON.stringify({ provider: 'railway', deploymentId: 'deploy-unscoped', status: 'succeeded', kind: 'deployment', deployedAt: new Date(Date.now() - 3_600_000).toISOString(), clockOffset: { min: 0, max: 0 }, commitSha: 'e'.repeat(40), sourceUrl: 'https://railway.app/deploy/unscoped', mergeShas: ['f'.repeat(40)] }) });
     assert.equal(unscoped.status, 403);
     assert.match((await unscoped.json()).error ?? '', /deployment-observer authority/);
     // An over-long key would otherwise reach the receipts primary key and exceed the
     // B-tree entry limit, turning a valid observation into a 500.
-    const oversized = await fetch(`${origin}/api/production-observations`, { method: 'POST', headers: { Authorization: `Bearer ${'p'.repeat(32)}`, 'Content-Type': 'application/json', 'Idempotency-Key': 'k'.repeat(3000) }, body: JSON.stringify({ provider: 'railway', deploymentId: 'deploy-oversized', status: 'succeeded', kind: 'deployment', deployedAt: new Date(Date.now() - 3_600_000).toISOString(), commitSha: 'e'.repeat(40), sourceUrl: 'https://railway.app/deploy/oversized', mergeShas: ['f'.repeat(40)] }) });
+    const oversized = await fetch(`${origin}/api/production-observations`, { method: 'POST', headers: { Authorization: `Bearer ${'p'.repeat(32)}`, 'Content-Type': 'application/json', 'Idempotency-Key': 'k'.repeat(3000) }, body: JSON.stringify({ provider: 'railway', deploymentId: 'deploy-oversized', status: 'succeeded', kind: 'deployment', deployedAt: new Date(Date.now() - 3_600_000).toISOString(), clockOffset: { min: 0, max: 0 }, commitSha: 'e'.repeat(40), sourceUrl: 'https://railway.app/deploy/oversized', mergeShas: ['f'.repeat(40)] }) });
     assert.equal(oversized.status, 400);
     assert.match((await oversized.json()).error ?? '', /Idempotency-Key/);
-    const accepted = await fetch(`${origin}/api/production-observations`, { method: 'POST', headers: { Authorization: `Bearer ${'p'.repeat(32)}`, 'Content-Type': 'application/json', 'Idempotency-Key': 'k'.repeat(200) }, body: JSON.stringify({ provider: 'railway', deploymentId: 'deploy-bounded', status: 'succeeded', kind: 'deployment', deployedAt: new Date(Date.now() - 3_600_000).toISOString(), commitSha: 'e'.repeat(40), sourceUrl: 'https://railway.app/deploy/bounded', mergeShas: ['f'.repeat(40)] }) });
+    const accepted = await fetch(`${origin}/api/production-observations`, { method: 'POST', headers: { Authorization: `Bearer ${'p'.repeat(32)}`, 'Content-Type': 'application/json', 'Idempotency-Key': 'k'.repeat(200) }, body: JSON.stringify({ provider: 'railway', deploymentId: 'deploy-bounded', status: 'succeeded', kind: 'deployment', deployedAt: new Date(Date.now() - 3_600_000).toISOString(), clockOffset: { min: 0, max: 0 }, commitSha: 'e'.repeat(40), sourceUrl: 'https://railway.app/deploy/bounded', mergeShas: ['f'.repeat(40)] }) });
     assert.equal(accepted.status, 200);
   } finally { await new Promise<void>(resolve => http.close(() => resolve())); }
 });
