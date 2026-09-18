@@ -4,7 +4,7 @@ import { hostname } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { discover } from '../onboarding.js';
 import { adapterFor, secretNamesFor, variableMarker, type AdapterContext, type AdapterObservation, type ProviderAdapter, DEFAULT_IMAGE } from './adapters.js';
-import { applyProtection, appClient, configureWebhook, detectCiAppIds, headSha, githubCli, installationClient, protectionSatisfied, readProtection, readWebhookConfig, triggerDelivery, verifyDelivery, webhookUrlFor, CHECK_NAME, type AppFacts, type DeliveryProof } from './github.js';
+import { applyProtection, appClient, configureWebhook, detectCiAppIds, effectiveReviewCount, headSha, githubCli, installationClient, protectionSatisfied, readProtection, readWebhookConfig, triggerDelivery, verifyDelivery, webhookUrlFor, CHECK_NAME, type AppFacts, type DeliveryProof } from './github.js';
 import { detectHerdr, detectRuntimes, masterRuntime, reviewerProfiles, workerProfiles, type DetectedRuntime, type HerdrState, type ReviewerProfileDraft, type WorkerProfileDraft } from './runtimes.js';
 import { assertOutsideRepository, ensureTokens, fingerprint, installDirectory, installRecordSchema, plannedPrincipals, prepareInstallDirectory, principalOfRole, principalsVariable, readInstallRecord, tokenFile, workerPrincipals, writeInstallRecord, Vault, type InstallRecord } from './secrets.js';
 import { localTransport, sshTransport, type Transport } from './transport.js';
@@ -225,8 +225,13 @@ export async function buildPlan(session: InstallSession): Promise<InstallPlan> {
   const protection = preflight.some(item => item.name === 'GitHub CLI' && item.ok) ? await readProtection(gh, session.inputs.repository, session.inputs.baseBranch) : null;
   const protectionInputs = { repository: session.inputs.repository, branch: session.inputs.baseBranch, requiredChecks: session.requiredChecks, graphyardAppId: record?.github?.appId ?? null, reviewCount: session.reviewCount };
   const protectionOk = protectionSatisfied(protectionInputs, protection);
-  if (protection && !protectionOk) drift.push({ action: 'github.protection', field: 'branch protection', expected: `strict checks ${[...session.requiredChecks, CHECK_NAME].join(', ')}; ${session.reviewCount} approving review(s); admin enforcement; conversation resolution`, observed: describeProtection(protection) });
-  actions.push({ id: 'github.protection', target: 'github', state: protectionOk ? 'satisfied' : protection ? 'update' : 'create', title: `Require strict status checks (${[...session.requiredChecks, CHECK_NAME].join(', ')}), ${session.reviewCount} approving review(s) for the ${session.reviewPolicy} review policy, conversation resolution, and administrator enforcement on ${session.inputs.baseBranch}` });
+  // A branch that already demands more reviewers keeps its own count; the plan says so.
+  const plannedReviews = effectiveReviewCount(protectionInputs, protection);
+  const reviewPhrase = plannedReviews > session.reviewCount
+    ? `${plannedReviews} approving review(s), the stricter count this branch already requires`
+    : `at least ${session.reviewCount} approving review(s) for the ${session.reviewPolicy} review policy`;
+  if (protection && !protectionOk) drift.push({ action: 'github.protection', field: 'branch protection', expected: `strict checks ${[...session.requiredChecks, CHECK_NAME].join(', ')}; at least ${session.reviewCount} approving review(s); admin enforcement; conversation resolution`, observed: describeProtection(protection) });
+  actions.push({ id: 'github.protection', target: 'github', state: protectionOk ? 'satisfied' : protection ? 'update' : 'create', title: `Require strict status checks (${[...session.requiredChecks, CHECK_NAME].join(', ')}), ${reviewPhrase}, conversation resolution, and administrator enforcement on ${session.inputs.baseBranch}` });
   if (session.inputs.reviewer) actions.push({ id: 'github.reviewer', target: 'github', state: record?.reviewers.some(reviewer => reviewer.name === session.inputs.reviewer) ? 'satisfied' : 'create', title: `Register the reviewer App "${session.inputs.reviewer}" and add its identity to GRAPHYARD_REVIEWER_APPS`, human: 'One additional browser confirmation, because a reviewer is a separate GitHub identity with no control-plane authority.' });
 
   actions.push({ id: 'verify.status', target: 'graphyard', state: 'update', title: 'Verify authenticated GET /api/status reports the admin actor, the managed repository, and the bound App' });

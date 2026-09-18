@@ -5,7 +5,7 @@ import { applyInstall, buildPlan, prepareInstall } from '../src/install/index.js
 import { appJwt, detectCiAppIds, githubCli, protectionSatisfied, webhookUrlFor, CHECK_NAME, VERIFICATION_CHECK } from '../src/install/github.js';
 import { runManifestFlow } from '../src/install/manifest.js';
 import { appManifest, reviewerAppManifest } from '../src/github-setup.js';
-import { appKey, harness, temporaryRepository, CI_APP_ID, GRAPHYARD_APP_ID, WEBHOOK_SECRET } from './install-harness.js';
+import { appKey, harness, satisfiedProtection, temporaryRepository, CI_APP_ID, GRAPHYARD_APP_ID, WEBHOOK_SECRET } from './install-harness.js';
 import { rm } from 'node:fs/promises';
 
 test('the manifest flow completes with one browser confirmation and returns credentials to this machine', async () => {
@@ -78,6 +78,28 @@ test('the installer writes the App credentials to the server, points the webhook
     assert.ok(put, 'branch protection was not applied');
     assert.equal(summary.protection.includes('admin enforcement'), true);
     assert.match(summary.protection, /1 approving review/);
+  } finally { await fixture.cleanup(); }
+});
+
+test('applying protection to a stricter branch raises what Graphyard needs without lowering what the repository already requires', async () => {
+  // The branch demands two approvals and is locked; the agent review policy demands none.
+  const current = { ...satisfiedProtection(null, 2), lock_branch: { enabled: true } };
+  const fixture = await harness({ provider: 'railway', protection: current });
+  try {
+    const session = await prepareInstall(fixture.root, { repository: 'owner/project', provider: 'railway', reviewPolicy: 'agent' }, fixture.deps);
+    const plan = await buildPlan(session);
+    const action = plan.actions.find(item => item.id === 'github.protection')!;
+    assert.match(action.title, /2 approving review\(s\), the stricter count this branch already requires/);
+
+    const summary = await applyInstall(session, plan);
+    const put = fixture.transport.commands.find(command => command.args.includes('PUT') && command.args.some(argument => argument.includes('/protection')))!;
+    const payload = JSON.parse(put.input!);
+    assert.equal(payload.required_pull_request_reviews.required_approving_review_count, 2, 'the installer lowered an existing review requirement');
+    assert.equal(payload.required_pull_request_reviews.require_last_push_approval, true);
+    assert.equal(payload.lock_branch, true, 'the installer unlocked a locked branch');
+    assert.equal(payload.enforce_admins, true);
+    assert.equal(payload.required_conversation_resolution, true);
+    assert.match(summary.protection, /2 approving review/);
   } finally { await fixture.cleanup(); }
 });
 

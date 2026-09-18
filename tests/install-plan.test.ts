@@ -103,8 +103,9 @@ test('preflight names the exact command to run when a CLI is missing or unauthen
 test('branch protection is read-modify-write and matches the chosen review policy', () => {
   const current = {
     required_status_checks: { strict: false, checks: [{ context: 'lint', app_id: 77 }] },
-    required_pull_request_reviews: { required_approving_review_count: 2, dismiss_stale_reviews: false, require_code_owner_reviews: true, require_last_push_approval: true },
+    required_pull_request_reviews: { required_approving_review_count: 2, dismiss_stale_reviews: false, require_code_owner_reviews: true, require_last_push_approval: true, dismissal_restrictions: { users: [{ login: 'release-manager' }], teams: [{ slug: 'platform' }], apps: [] } },
     restrictions: { users: [{ login: 'release-manager' }], teams: [], apps: [] },
+    lock_branch: { enabled: true },
   };
   const payload = protectionPayload({ repository: 'owner/project', branch: 'main', requiredChecks: ['test', 'typecheck'], graphyardAppId: 4242, reviewCount: 1 }, current);
   assert.equal(payload.required_status_checks.strict, true);
@@ -117,18 +118,33 @@ test('branch protection is read-modify-write and matches the chosen review polic
   assert.equal(payload.allow_force_pushes, false);
   assert.equal(payload.required_pull_request_reviews.require_code_owner_reviews, true);
   assert.deepEqual(payload.restrictions, { users: ['release-manager'], teams: [], apps: [] });
+  assert.deepEqual(payload.required_pull_request_reviews.dismissal_restrictions, { users: ['release-manager'], teams: ['platform'], apps: [] });
+  // The branch already asks for two reviewers; a policy that asks for one does not lower it.
+  assert.equal(payload.required_pull_request_reviews.required_approving_review_count, 2);
+  assert.equal(payload.lock_branch, true, 'a locked branch stays locked');
 
-  // The agent review policy moves the count to zero without weakening admin enforcement.
+  // Neither does the agent review policy, which asks for none.
   const agent = protectionPayload({ repository: 'owner/project', branch: 'main', requiredChecks: [], graphyardAppId: 4242, reviewCount: 0 }, current);
-  assert.equal(agent.required_pull_request_reviews.required_approving_review_count, 0);
-  assert.equal(agent.required_pull_request_reviews.require_last_push_approval, false);
+  assert.equal(agent.required_pull_request_reviews.required_approving_review_count, 2);
+  assert.equal(agent.required_pull_request_reviews.require_last_push_approval, true);
   assert.equal(agent.enforce_admins, true);
+
+  // On an unprotected branch the policy's own count is what gets applied.
+  const fresh = protectionPayload({ repository: 'owner/project', branch: 'main', requiredChecks: ['test'], graphyardAppId: 4242, reviewCount: 1 }, null);
+  assert.equal(fresh.required_pull_request_reviews.required_approving_review_count, 1);
+  assert.equal(fresh.required_pull_request_reviews.require_last_push_approval, true);
+  assert.equal(fresh.lock_branch, false);
+  const freshAgent = protectionPayload({ repository: 'owner/project', branch: 'main', requiredChecks: ['test'], graphyardAppId: 4242, reviewCount: 0 }, null);
+  assert.equal(freshAgent.required_pull_request_reviews.required_approving_review_count, 0);
+  assert.equal(freshAgent.required_pull_request_reviews.require_last_push_approval, false);
+  assert.equal(freshAgent.enforce_admins, true);
 
   const inputs = { repository: 'owner/project', branch: 'main', requiredChecks: ['test', 'typecheck'], graphyardAppId: 4242, reviewCount: 1 };
   assert.equal(protectionSatisfied(inputs, null), false);
   assert.equal(protectionSatisfied(inputs, satisfiedProtection(4242)), true);
   assert.equal(protectionSatisfied(inputs, satisfiedProtection(null)), false, 'an unbound merge check is not the App-bound check');
-  assert.equal(protectionSatisfied(inputs, satisfiedProtection(4242, 0)), false, 'a weakened review count is drift, not a match');
+  assert.equal(protectionSatisfied(inputs, satisfiedProtection(4242, 0)), false, 'too few required reviews is drift, not a match');
+  assert.equal(protectionSatisfied(inputs, satisfiedProtection(4242, 3)), true, 'a stricter review count already satisfies the policy');
   assert.equal(protectionSatisfied(inputs, { ...satisfiedProtection(4242), enforce_admins: { enabled: false } }), false);
 });
 

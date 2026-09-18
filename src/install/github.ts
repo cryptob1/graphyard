@@ -117,8 +117,19 @@ export async function readProtection(gh: GitHubCli, repository: string, branch: 
 }
 
 /**
+ * The repository may already require more than Graphyard asks for. Its own setting wins:
+ * the installer raises a weaker count to what the review policy needs and never lowers a
+ * stronger one, so `--review-policy agent` cannot turn a two-reviewer branch into zero.
+ */
+export function effectiveReviewCount(inputs: ProtectionInputs, current: any | null) {
+  const existing = Number(current?.required_pull_request_reviews?.required_approving_review_count ?? 0);
+  return Math.max(Number.isSafeInteger(existing) && existing > 0 ? existing : 0, inputs.reviewCount);
+}
+
+/**
  * Read-modify-write. The installer adds what Graphyard requires and never removes a check,
- * reviewer restriction, or bypass rule the repository already chose.
+ * reviewer restriction, or bypass rule the repository already chose, and never relaxes a
+ * protection the repository already applies.
  */
 export function protectionPayload(inputs: ProtectionInputs, current: any | null) {
   const existing: { context: string; app_id: number | null }[] = (current?.required_status_checks?.checks ?? []).map((check: any) => ({ context: String(check.context), app_id: check.app_id ?? null }));
@@ -132,14 +143,18 @@ export function protectionPayload(inputs: ProtectionInputs, current: any | null)
   // The merge gate is bound to Graphyard's App: another producer cannot publish it.
   if (inputs.graphyardAppId) upsert(CHECK_NAME, inputs.graphyardAppId);
   const reviews = current?.required_pull_request_reviews;
+  const reviewCount = effectiveReviewCount(inputs, current);
+  const dismissal = reviews?.dismissal_restrictions;
   return {
     required_status_checks: { strict: true, checks },
     enforce_admins: true,
     required_pull_request_reviews: {
-      required_approving_review_count: inputs.reviewCount,
+      required_approving_review_count: reviewCount,
       dismiss_stale_reviews: reviews?.dismiss_stale_reviews ?? true,
       require_code_owner_reviews: reviews?.require_code_owner_reviews ?? false,
-      require_last_push_approval: inputs.reviewCount > 0 ? (reviews?.require_last_push_approval ?? true) : false,
+      require_last_push_approval: reviews?.require_last_push_approval ?? reviewCount > 0,
+      // Who may dismiss a review is the repository's decision; re-send it or GitHub drops it.
+      ...(dismissal ? { dismissal_restrictions: { users: (dismissal.users ?? []).map((user: any) => user.login), teams: (dismissal.teams ?? []).map((team: any) => team.slug), apps: (dismissal.apps ?? []).map((app: any) => app.slug) } } : {}),
     },
     restrictions: current?.restrictions
       ? { users: (current.restrictions.users ?? []).map((user: any) => user.login), teams: (current.restrictions.teams ?? []).map((team: any) => team.slug), apps: (current.restrictions.apps ?? []).map((app: any) => app.slug) }
@@ -149,7 +164,7 @@ export function protectionPayload(inputs: ProtectionInputs, current: any | null)
     allow_deletions: false,
     required_linear_history: current?.required_linear_history?.enabled ?? false,
     block_creations: current?.block_creations?.enabled ?? false,
-    lock_branch: false,
+    lock_branch: current?.lock_branch?.enabled ?? false,
     allow_fork_syncing: current?.allow_fork_syncing?.enabled ?? false,
   };
 }
@@ -163,7 +178,8 @@ export function protectionSatisfied(inputs: ProtectionInputs, current: any | nul
     && (!inputs.graphyardAppId || has(CHECK_NAME, inputs.graphyardAppId))
     && !!current.enforce_admins?.enabled
     && !!current.required_conversation_resolution?.enabled
-    && Number(current.required_pull_request_reviews?.required_approving_review_count ?? -1) === inputs.reviewCount;
+    // A repository that requires more reviewers than the policy asks for already satisfies it.
+    && Number(current.required_pull_request_reviews?.required_approving_review_count ?? -1) >= inputs.reviewCount;
 }
 
 export async function applyProtection(gh: GitHubCli, inputs: ProtectionInputs) {

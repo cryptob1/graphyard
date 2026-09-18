@@ -94,7 +94,7 @@ Add the options the instruction called for:
 | `--workers N` | Number of concurrent implementation sessions (default 1) |
 | `--producer-proof NAME` | Allow a CI producer to submit exactly this proof; repeatable |
 | `--reviewer NAME` | Also register a separate reviewer GitHub App |
-| `--review-policy github\|agent` | Native approvals (default) or Graphyard-bound agent review |
+| `--review-policy github\|agent` | Native approvals (default) or Graphyard-bound agent review. It raises a weaker branch to the policy's count and never lowers a stricter one |
 | `--ssh-host HOST` / `--ssh-user USER` | Target for `docker-host` |
 | `--base-branch NAME` | Protected base branch (default `main`) |
 | `--port N` | Host port for a local `compose` install (default 4310) |
@@ -151,7 +151,11 @@ The installer performs the plan in order:
 7. Writes `GITHUB_APP_ID`, `GITHUB_INSTALLATION_ID`, `GITHUB_PRIVATE_KEY`, and `GITHUB_WEBHOOK_SECRET` to the server and redeploys.
 8. Points the App webhook at `https://YOUR-HOST/api/github/webhook` with the secret the server holds.
 9. Detects the GitHub App IDs publishing checks on the base branch and sets `GITHUB_CI_APP_IDS`.
-10. Applies branch protection: strict status checks, conversation resolution, administrator enforcement, and the approving-review count of the chosen review policy.
+10. Applies branch protection: strict status checks, conversation resolution, administrator enforcement,
+    and at least the approving-review count of the chosen review policy. Protection is read-modify-write
+    and only ever tightens: an existing check, reviewer restriction, dismissal restriction, higher review
+    count, or branch lock is preserved, so `--review-policy agent` never lowers a branch that already
+    requires human approvals.
 11. Verifies authenticated `GET /api/status` and one real webhook delivery.
 12. Registers master, reviewer, and worker profiles for the authenticated agent runtimes on this machine, and binds Herdr when it is installed.
 
