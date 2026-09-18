@@ -7,7 +7,7 @@ import { z } from 'zod';
 import { assertRepository, discover, localDirectory, saveDiscovery } from './onboarding.js';
 import { loadConnection, managedInstructions, serverOrigin } from './repository-setup.js';
 import { resourceConflicts } from './coordination.js';
-import { exhaustedReviewerProfiles, nativeReviewRequired, reviewerProfileFor, reviewProviderOf, type Work } from './model.js';
+import { deliveryState, deploySmokeRequired, exhaustedReviewerProfiles, nativeReviewRequired, postDeployMs, productionLatencyMs, reviewerProfileFor, reviewProviderOf, rollbackGuidance, type Work } from './model.js';
 import { predictQueue, type QueuePlacement } from './merge-queue.js';
 
 const safeEnvironment = z.record(
@@ -33,13 +33,14 @@ export const workerProfileSchema = z.object({
 });
 export type WorkerProfile = z.infer<typeof workerProfileSchema>;
 
-// Durable-loop settings. The daemon adds no credential of its own: a proof workflow is requested
-// from the provider, which holds the trusted producer secret, and a deployment probe only reads.
+// Durable-loop settings. The daemon adds no credential of its own: a proof or smoke workflow is
+// requested from the provider, which holds the trusted producer secret, and a deployment probe only reads.
 export const masterRunSchema = z.object({
   intervalSeconds: z.number().int().min(5).max(900).default(20),
   proofWorkflow: z.string().trim().min(1).max(200).regex(/^[A-Za-z0-9][A-Za-z0-9._-]*$/, 'Name the trusted producer workflow file, such as acceptance.yml').optional(),
   deploymentUrl: z.string().url().max(500).optional(),
   deploymentShaField: z.string().trim().min(1).max(100).regex(/^[A-Za-z0-9_]+(?:\.[A-Za-z0-9_]+)*$/).default('commit'),
+  smokeWorkflow: z.string().trim().min(1).max(200).regex(/^[A-Za-z0-9][A-Za-z0-9._-]*$/, 'Name the trusted post-deployment smoke workflow file, such as deploy-smoke.yml').optional(),
 }).strict();
 export type MasterRun = z.infer<typeof masterRunSchema>;
 
@@ -241,7 +242,7 @@ function reviewState(work: Work) {
   return { provider: 'agent' as const, profile: active?.name ?? null, runtime: active?.runtime ?? null,
     exhausted: !active && !!work.policy.reviewerProfiles?.length && !!exhaustedReviewerProfiles(work).length, failedOver };
 }
-export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profiles: WorkerProfile[], agents: HerdrAgent[], credentialHealth: Record<string, { available: boolean; reason: string | null }> = {}) {
+export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profiles: WorkerProfile[], agents: HerdrAgent[], credentialHealth: Record<string, { available: boolean; reason: string | null }> = {}, baseBranch = 'main') {
   const now = Date.parse(snapshot.now);
   const sessions = profiles.map(profile => {
     const agent = agents.find(candidate => candidate.name === profile.agentName);
@@ -268,7 +269,24 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
       : work.blocker || dwellMs > 3_600_000 ? first?.reasons[0] ?? `Work has remained at ${work.stage} for more than one hour` : null;
     return { key: work.key, title: work.title, stage: work.stage, owner: active ? work.lease!.owner : null, profile: profile?.name ?? null, session: session?.state ?? null, refusal: first ? { gate: first.name, reason: first.reasons[0] } : null, mergeable, review, attention, queue: placement ? queueRow(placement) : null };
   });
-  return { observedAt: snapshot.now, counts: { open: rows.length, ready: rows.filter(row => row.stage === 'ready').length, active: rows.filter(row => row.owner).length, attention: rows.filter(row => row.attention).length, mergeable: rows.filter(row => row.mergeable).length, reviewFailover: rows.filter(row => row.review?.failedOver.length).length, queued: placements.length }, workers: sessions, work: rows, queue: placements.map(queueRow) };
+  const delivered = snapshot.work.filter(work => work.stage === 'done' && work.delivery && deploySmokeRequired(work.policy)).map(work => deliveredRow(work, now, baseBranch));
+  return { observedAt: snapshot.now,
+    counts: { open: rows.length, ready: rows.filter(row => row.stage === 'ready').length, active: rows.filter(row => row.owner).length, attention: rows.filter(row => row.attention).length, mergeable: rows.filter(row => row.mergeable).length, reviewFailover: rows.filter(row => row.review?.failedOver.length).length, queued: placements.length,
+      awaitingSmoke: delivered.filter(row => row.state === 'awaiting-deployment' || row.state === 'awaiting-smoke').length, postDeployFailures: delivered.filter(row => row.state === 'delivered-with-failure').length },
+    workers: sessions, work: rows, queue: placements.map(queueRow), delivered };
+}
+
+/**
+ * The second confidence layer, per delivered item that asked for it: what the release served, what
+ * the trusted producer found, and — on a failure — exactly what to roll back. Failures stay listed;
+ * nothing here ages out or is cleared by a later delivery.
+ */
+function deliveredRow(work: Work, now: number, baseBranch: string) {
+  const { mergedAt, mergeSha, deployment, smoke } = work.delivery!;
+  return { key: work.key, title: work.title, mergedAt, mergeSha, state: deliveryState(work)!,
+    deployment: deployment ? { sha: deployment.sha, covers: deployment.covers, source: deployment.source, observedAt: deployment.observedAt } : null,
+    smoke: smoke ? { result: smoke.result, sha: smoke.sha, producer: smoke.producer, at: smoke.at, executed: smoke.executed, skipped: smoke.skipped, url: smoke.url ?? null } : null,
+    postDeployMs: postDeployMs(work, now), productionLatencyMs: productionLatencyMs(work), rollback: rollbackGuidance(work, baseBranch) };
 }
 
 function queueRow(placement: QueuePlacement) {

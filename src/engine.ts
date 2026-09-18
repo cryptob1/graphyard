@@ -2,7 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { Store, save, wakeJob } from './store.js';
 import { workspacePath, pathsOverlap, validBranch } from './workspace.js';
-import { activeLease, admin, assertReviewerProfiles, operatorCapability, MergeExecutionInProgress, requireCurrent, createSchema, criterionSchema, currentEvidence, inheritedObligations, pathScopeContains, requiredProofs, resourcesSchema, demand, evaluate, exhaustedReviewerProfiles, proofSchema, reviewerProfileFor, reviewerProfileSchema, reviewProviders, reviewProviderOf, type Criterion, type Principal, type ReviewerApp, type ReviewFailover, type Work, type Observation, type ReviewRequest, type OperatorCapability } from './model.js';
+import { activeLease, admin, assertReviewerProfiles, operatorCapability, MergeExecutionInProgress, requireCurrent, createSchema, criterionSchema, currentEvidence, deploySmokeProof, deploySmokeRequired, inheritedObligations, pathScopeContains, requiredProofs, resourcesSchema, demand, evaluate, exhaustedReviewerProfiles, proofSchema, reviewerProfileFor, reviewerProfileSchema, reviewProviders, reviewProviderOf, type Criterion, type Principal, type ReviewerApp, type ReviewFailover, type Work, type Observation, type ReviewRequest, type OperatorCapability } from './model.js';
 import { resourceConflicts } from './coordination.js';
 import { queueHistoryLimit, type QueueSpeculation } from './merge-queue.js';
 
@@ -39,6 +39,9 @@ const commands = {
   submit: z.object({ epoch, pr: z.number().int().positive() }).strict(),
   blocked: z.object({ epoch, reason: z.string().max(2000).nullable() }).strict(),
   evidence: z.object({ proof: proofSchema, sha, baseSha: sha, policyRevision: z.number().int().positive(), result: z.enum(['pass', 'fail']), executed: z.number().int().min(0), skipped: z.number().int().min(0), url: publicArtifactUrl.optional(), artifacts: z.array(evidenceArtifact).max(30).optional(), scenarioRevision: z.number().int().positive().optional(), environment: z.string().min(1).max(100).optional() }).strict(),
+  // The coordinator's observation of the running release covering a delivered merge. It names the
+  // serving commit and where it was read; whether it is exact is derived, never asserted.
+  deployment: z.object({ sha, mergeSha: sha, source: z.enum(['endpoint', 'github-deployment']), observedAt: z.iso.datetime() }).strict(),
 } as const;
 const mergeAcquireSchema = z.object({ expectedRevision: z.number().int().positive(), sha, baseSha: sha, policyRevision: z.number().int().positive() }).strict();
 const mergeCancelSchema = z.object({ executionId: z.string().uuid(), reason: z.string().trim().min(1).max(2000) }).strict();
@@ -149,11 +152,14 @@ export class Engine {
         if (command === 'ready') demand(work.stage === 'backlog' && !work.ready, 'Only unreleased backlog work can be released');
         if (command === 'unblock') demand(work.blocker, 'Task has no blocker to clear');
       }
+      // The only commands a delivered item still accepts: containment cleanup, and the two
+      // post-deployment facts that extend the delivery snapshot without reopening the merge.
+      const postDeployment = command === 'deployment' || command === 'evidence' && data.proof === deploySmokeProof;
       const deliveredContainmentCleanup = work.stage === 'done' && (command === 'settle' || command === 'recover');
       preserveAssignment(work);
-      if (!['recover', 'settle'].includes(command) && work.mergeExecution && Date.parse(work.mergeExecution.expiresAt) <= now.getTime()) work.mergeExecution = null;
-      demand(!work.mergeExecution || command === 'heartbeat' || command === 'recover' || command === 'settle', 'A merge execution is active; retry after it completes or expires');
-      if (command !== 'create' && command !== 'settle' && command !== 'recover') demand(work.stage !== 'done', 'Delivered work is immutable; create a follow-up task');
+      if (!['recover', 'settle'].includes(command) && !postDeployment && work.mergeExecution && Date.parse(work.mergeExecution.expiresAt) <= now.getTime()) work.mergeExecution = null;
+      demand(!work.mergeExecution || command === 'heartbeat' || command === 'recover' || command === 'settle' || postDeployment, 'A merge execution is active; retry after it completes or expires');
+      if (command !== 'create' && command !== 'settle' && command !== 'recover' && !postDeployment) demand(work.stage !== 'done', 'Delivered work is immutable; create a follow-up task');
       if (command === 'rereview') {
         if (actor.role !== 'admin') { demand(actor.role === 'worker', 'Worker or operator required', 403); activeLease(work, actor, data.epoch, now); }
         demand(work.policy.review && ['codex', 'agent'].includes(reviewProviderOf(work.policy)) && work.submission && !work.observation?.merged, 'Open submitted work with a dispatched review provider is required');
@@ -291,16 +297,41 @@ export class Engine {
         work.submission = { epoch: data.epoch, pr: data.pr };
         work.reworkRequested = false;
       }
+      if (command === 'deployment') {
+        demand(actor.role === 'coordinator' || actor.role === 'admin', 'Coordinator permission required', 403);
+        demand(work.stage === 'done' && !!work.delivery, 'A deployment observation is recorded only for delivered work');
+        demand(data.mergeSha === work.delivery!.mergeSha, 'Deployment observation names another merge commit');
+        // One observation per delivery: the smoke proof binds to exactly this serving commit, so a
+        // later rollout cannot quietly move the target the proof was made against.
+        demand(!work.delivery!.deployment, 'Delivery already has a recorded deployment observation');
+        demand(Date.parse(data.observedAt) <= now.getTime() + 60_000 && Date.parse(data.observedAt) >= Date.parse(work.delivery!.mergedAt) - 60_000, 'Deployment observation time must fall between the merge and now');
+        work.delivery!.deployment = { sha: data.sha, mergeSha: data.mergeSha, source: data.source, observedAt: data.observedAt,
+          covers: data.sha === data.mergeSha ? 'exact' : 'descendant', at: now.toISOString(), observer: actor.id };
+      }
       if (command === 'evidence') {
         demand(actor.role === 'producer' || actor.role === 'worker' || actor.role === 'admin', 'Evidence submission is not permitted', 403);
         const trusted = actor.role === 'producer' && !!actor.proofs?.includes(data.proof) || actor.role === 'admin' && data.proof.startsWith('manual:');
-        work.evidence.push({ ...data, id: randomUUID(), producer: actor.id, trusted, at: now.toISOString() });
+        if (data.proof === deploySmokeProof) {
+          // Post-deployment proof is a trust boundary with no untrusted tier: it is accepted only
+          // from a producer granted the proof, only once Graphyard has observed the deployment,
+          // and only bound to that observed serving commit and this item's merge commit.
+          demand(trusted, `${deploySmokeProof} evidence is accepted only from a producer authorized for that proof`, 403);
+          demand(deploySmokeRequired(work.policy), `Work policy does not require ${deploySmokeProof}`);
+          demand(work.stage === 'done' && !!work.delivery, `${deploySmokeProof} evidence is accepted only after delivery`);
+          demand(!!work.delivery!.deployment, 'Graphyard has not observed a deployment covering this delivery');
+          demand(data.sha === work.delivery!.deployment!.sha && data.baseSha === work.delivery!.mergeSha,
+            `${deploySmokeProof} evidence must name the observed deployed commit ${work.delivery!.deployment!.sha} as sha and merge commit ${work.delivery!.mergeSha} as baseSha`);
+          demand(data.policyRevision === work.policyRevision, 'Policy revision does not match this delivery');
+        }
+        const evidence = { ...data, id: randomUUID(), producer: actor.id, trusted, at: now.toISOString() };
+        work.evidence.push(evidence);
+        if (data.proof === deploySmokeProof) work.delivery!.smoke = { evidenceId: evidence.id, result: data.result, sha: data.sha, mergeSha: data.baseSha, producer: actor.id, at: evidence.at, executed: data.executed, skipped: data.skipped, ...(data.url ? { url: data.url } : {}) };
       }
-      // Delivery is an immutable snapshot. A late containment cleanup may append
-      // its audit/revision metadata, but stale inputs must not re-evaluate it.
-      if (!deliveredContainmentCleanup) this.evaluate(work, all, now);
+      // Delivery is an immutable snapshot. A late containment cleanup or a post-deployment fact may
+      // append its audit/revision metadata, but stale inputs must not re-evaluate it.
+      if (!deliveredContainmentCleanup && !postDeployment) this.evaluate(work, all, now);
       await save(db, work, actor.id, command, now, command === 'settle' ? { epoch: data.epoch } : actor.role === 'operator-agent' ? { before, intent: data, reason: data.reason ?? null } : data);
-      if (work.submission && !['heartbeat', 'release', 'claim', 'workspace'].includes(command)) await wakeJob(db, work.id);
+      if (work.submission && !postDeployment && !['heartbeat', 'release', 'claim', 'workspace'].includes(command)) await wakeJob(db, work.id);
       await db.query('INSERT INTO receipts(actor,key,fingerprint,result) VALUES($1,$2,$3,$4)', [actor.id, key, fingerprint, JSON.stringify(work)]);
       return work;
     });
