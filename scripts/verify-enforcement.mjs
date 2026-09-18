@@ -18,7 +18,10 @@ export function evaluateEnforcement({ repository, baseBranch, appId, protection,
   else {
     if (!bound) protectionFindings.push(`Required status checks do not include ${CHECK_NAME}`);
     else if (bound.app_id !== appId) protectionFindings.push(`${CHECK_NAME} is bound to App ${bound.app_id ?? 'any producer'} rather than the dedicated App ${appId}`);
-    if (!protection.required_status_checks?.strict) protectionFindings.push('Branches are not required to be up to date before merging (strict)');
+    // The merge queue supersedes "require branches to be up to date": a queued tip is deliberately
+    // behind the base branch while the entries ahead of it land, and Graphyard's own merge gate refuses
+    // while strict is on. Reporting strict as required would refuse every correctly configured landing.
+    if (protection.required_status_checks?.strict) protectionFindings.push('Branches are still required to be up to date before merging (strict); the merge queue supersedes that setting and Graphyard refuses its merge gate while it is enabled');
     if (!protection.enforce_admins?.enabled) protectionFindings.push('Protection is not enforced for administrators');
     if (protection.allow_force_pushes?.enabled) protectionFindings.push('Force pushes are allowed on the managed base branch');
     if (protection.allow_deletions?.enabled) protectionFindings.push('Deletion of the managed base branch is allowed');
