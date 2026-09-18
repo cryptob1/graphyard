@@ -12,7 +12,7 @@ async function fixture(page: Page, role = 'admin') {
     if (route.request().headers().authorization !== 'Bearer browser-fixture' || state.unauthorized) return route.fulfill({ status: 401, json: { error: 'Rejected' } });
     if (route.request().method() !== 'GET') state.writes++;
     const path = new URL(route.request().url()).pathname;
-    return route.fulfill({ json: path.endsWith('/status') ? { actor: { id: 'fixture', role }, github: true, reviewProviders: ['github','codex'], repository: 'fixture/repository', jobs: [] } : path.endsWith('/work-snapshot') ? {work:[work],now:'2026-01-01T00:00:00Z'} : path.endsWith('/work') ? [work] : path === '/api/proof-grants' ? proofGrants : [] });
+    return route.fulfill({ json: path.endsWith('/status') ? { actor: { id: 'fixture', role, sessionKind: role === 'admin' ? 'human' : 'ai' }, github: true, reviewProviders: ['github','codex'], repository: 'fixture/repository', jobs: [], delegation: { limits: { maxLeads: 3, maxEngineersPerLead: 2, minReviewers: 1, maxReviewers: 2 }, slices: [{ id: 'product', name: 'Product', lead: { id: 'product-lead', displayName: 'Pine', role: 'slice-lead', sessionKind: 'ai' }, engineers: [{ id: 'engineer-a', displayName: 'Atlas', role: 'worker', sessionKind: 'ai' }, { id: 'human-pair', displayName: 'Rivera', role: 'worker', sessionKind: 'human' }], workers: [{ key: 'GY-1', id: 'engineer-a', displayName: 'Atlas', role: 'worker', sessionKind: 'ai' }, { key: 'GY-2', id: 'human-pair', displayName: 'Rivera', role: 'worker', sessionKind: 'human' }, { key: 'GY-3', id: 'engineer-a', displayName: 'Atlas', role: 'worker', sessionKind: 'ai' }], bottlenecks: [{ key: 'GY-1', reason: 'Independent review required' }] }, { id: 'infrastructure', name: 'Infrastructure', lead: null, workers: [], bottlenecks: [] }, { id: 'docs-experience', name: 'Docs/experience', lead: null, workers: [], bottlenecks: [] }], reviewers: [{ id: 'reviewer-a', displayName: 'Rowan', role: 'producer', sessionKind: 'ai' }, { id: 'legacy-proof', displayName: null, role: 'producer', sessionKind: 'undeclared' }] } } : path.endsWith('/work-snapshot') ? {work:[work],now:'2026-01-01T00:00:00Z'} : path.endsWith('/work') ? [work] : path === '/api/proof-grants' ? proofGrants : [] });
   });
   await page.goto('/'); return state;
 }
@@ -174,6 +174,45 @@ test('reader has no creation controls; graph filters and search still work', asy
   await page.getByRole('button', { name: '✓ Test cases' }).click();
   await expect(page.getByRole('heading', { name: 'Test-case library' })).toBeVisible();
   await expect(page.getByRole('button', { name: '＋ New test case' })).toHaveCount(0);
+});
+
+test('slice view names leads, workers, reviewers and bottlenecks and labels each session kind from data', async ({ page }) => {
+  await fixture(page); await login(page);
+  const slices = page.getByRole('region', { name: 'Delivery slices' });
+  await expect(slices.getByText('Product', { exact: true })).toBeVisible();
+  await expect(slices.getByText('Pine')).toBeVisible();
+  // Only the slice that actually has a lead is labelled with a lead's session kind.
+  await expect(slices.getByText('AI lead', { exact: true })).toHaveCount(1);
+  await expect(slices.getByText('No lead assigned', { exact: true })).toHaveCount(2);
+  await expect(slices.getByText('Unassigned', { exact: true })).toHaveCount(2);
+  const product = slices.locator('.slice-card').first();
+  // Capacity is engineers, not leases: Atlas holds GY-1 and GY-3 but occupies one seat.
+  await expect(product).toContainText('2/2 active engineers · 3 claimed items · 1 bottleneck');
+  // Workers, reviewers and bottlenecks are named, and each identity carries its declared kind.
+  await expect(product).toContainText('GY-1 · Atlas');
+  await expect(product).toContainText('GY-2 · Rivera');
+  await expect(product).toContainText('GY-3 · Atlas');
+  await expect(product.locator('.session .identity.ai')).toHaveCount(2);
+  await expect(product.locator('.session .identity.human')).toHaveCount(1);
+  await expect(product).toContainText('GY-1 — Independent review required');
+  await expect(slices.locator('.slice-card').nth(1)).toContainText('Bottlenecks: none');
+  await expect(slices).toContainText('Independent review/proof sessions (2):');
+  await expect(slices).toContainText('Rowan');
+  await expect(slices).toContainText('legacy-proof');
+  await expect(slices.getByText('Session kind undeclared', { exact: true })).toHaveCount(1);
+  // The signed-in session states its own kind.
+  const session = page.locator('.sidebar-bottom');
+  await expect(session).toContainText('fixture · admin');
+  await expect(session.locator('.identity.human')).toHaveCount(1);
+  await expect(session.locator('.identity.ai')).toHaveCount(0);
+});
+
+test('an AI session is labelled AI in the signed-in session summary', async ({ page }) => {
+  await fixture(page, 'worker'); await login(page);
+  const session = page.locator('.sidebar-bottom');
+  await expect(session).toContainText('fixture · worker');
+  await expect(session.locator('.identity.ai')).toHaveCount(1);
+  await expect(session.locator('.identity.human')).toHaveCount(0);
 });
 
 test('a delayed post-create refresh cannot restore the signed-out session or leak into a new login', async ({ page }) => {
@@ -397,6 +436,34 @@ test('work details explain missing proof and operator can revise explicit criter
   await expect(form).toHaveCount(0);
   expect(body.expectedPolicyRevision).toBe(1); expect(body.criteria[1]).toEqual({ id: 'AC-2', text: 'An explicit second outcome', proofs: ['integration:second'] });
   expect(body.reason).toBe('New behavior discovered during planning'); expect(state.writes).toBe(0);
+});
+
+test('releases view labels verification precisely, shows membership and reports failures honestly', async ({ page }) => {
+  await fixture(page); let fail = true;
+  const release = { id: 'release-1', revision: 1, environment: { id: 'production', revision: 1 }, sourceSha: 'a'.repeat(40), buildId: 'build', manifest: [{ service: 'api', digest: `sha256:${'1'.repeat(64)}` }], manifestHash: 'h', createdAt: '2026-01-01T00:00:00Z', createdBy: 'operator',
+    members: [{ workId: work.id, key: 'GY-1', mergeSha: 'e'.repeat(40), included: true }, { workId: 'other', key: 'GY-2', mergeSha: 'f'.repeat(40), included: false, note: 'Reverted' }] };
+  const environment = { environmentId: 'production', generation: 2, expected: { releaseId: 'release-1', releaseRevision: 1, manifestHash: 'h', buildId: 'build', policyRevision: 1, approvalId: null, selectedAt: '2026-01-01T00:00:00Z', selectedBy: 'operator' },
+    history: [{ generation: 1, releaseId: 'release-0', releaseRevision: 1, policyRevision: 1, selectedAt: '2025-12-31T00:00:00Z', selectedBy: 'operator', outcome: 'verified', verifiedAt: '2025-12-31T00:10:00Z', supersededAt: '2026-01-01T00:00:00Z' }, { generation: 2, releaseId: 'release-1', releaseRevision: 1, policyRevision: 1, selectedAt: '2026-01-01T00:00:00Z', selectedBy: 'operator', outcome: 'selected' }],
+    coverage: {}, verification: { generation: 2, status: 'mismatched', reasons: ['Instance api-1 of api runs sha256:ffff instead of sha256:1111'], interval: null, evaluatedAt: '2026-01-01T00:01:00Z', verifiedAt: null },
+    incidents: [{ id: 'incident', generation: 1, releaseId: 'release-0', releaseRevision: 1, at: '2025-12-31T01:00:00Z', observationId: 'obs', reasons: ['Instance api-1 of api is unhealthy'] }], cursor: 9, lastNotification: { at: '2026-01-01T00:00:30Z', provider: 'railway', payloadHash: 'x' } };
+  await page.route('**/api/delivery', route => route.fulfill(fail ? { status: 503, json: { error: 'Delivery state unavailable' } } : { json: { environments: [environment], releases: [release], now: '2026-01-01T00:02:00Z' } }));
+  await login(page); await page.getByRole('button', { name: '⇈ Releases' }).click();
+  await expect(page.getByRole('heading', { name: 'Releases', level: 1 })).toBeVisible();
+  await expect(page.getByRole('alert')).toContainText('Delivery state unavailable');
+  await expect(page.getByText('No release selected yet.')).toHaveCount(0);
+  fail = false; await page.getByRole('button', { name: 'Retry loading releases' }).click();
+  const card = page.locator('.scenario-card'); await expect(card).toHaveCount(1);
+  await expect(card).toContainText('production · generation 2');
+  await expect(card).toContainText('Running artifacts differ from the expected release');
+  await expect(card).toContainText('Instance api-1 of api runs sha256:ffff instead of sha256:1111');
+  await expect(card).toContainText('✓ GY-1 · merge eeeeeeeeeeee');
+  await expect(card).toContainText('× GY-2 · merge ffffffffffff · excluded (reverted) · Reverted');
+  await expect(card).toContainText('Incidents (1)');
+  await expect(card).toContainText('a hint to observe again, not proof');
+  await card.getByText('Selection history (2)').click();
+  await expect(card).toContainText('Generation 1 · release-0 r1 · verified');
+  await expect(card).toContainText('Generation 2 · release-1 r1 · selected');
+  await expect(page.getByText('Verified in production')).toHaveCount(0);
 });
 
 test('validation view reports failures honestly and bounds request history', async ({ page }) => {

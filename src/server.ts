@@ -6,14 +6,16 @@ import { pathToFileURL } from 'node:url';
 import { z } from 'zod';
 import { Store } from './store.js';
 import { Engine, type Command } from './engine.js';
-import { Refusal, demand, parseReviewerApps, type Principal } from './model.js';
+import { Refusal, demand, operatorScopeIncludes, parseReviewerApps, type Principal } from './model.js';
 import { githubFromEnv, processJob, type GitHub } from './github.js';
 import { Validation } from './validation.js';
+import { Delivery } from './delivery.js';
 import { defineScenario, scenarios } from './scenarios.js';
 import { OperatorAgents } from './operator-agent.js';
+import { delegationLimits, delegationSnapshot, producerIndependenceRefusal, recordEvidenceRefusal, recordIntake, recordLeadRuling, recordLeadViolation, validateDelegationPrincipals } from './delegation.js';
 import { ProofGrants } from './proof-grants.js';
 
-export const principalSchema = z.array(z.object({ id: z.string().min(1), role: z.enum(['admin', 'coordinator', 'worker', 'producer', 'reader']), token: z.string().min(32), proofs: z.array(z.string()).optional(), displayName: z.string().trim().min(1).max(100).regex(/^[^\u0000-\u001f\u007f]+$/).optional(), runtime: z.string().trim().min(1).max(80).regex(/^[^\u0000-\u001f\u007f]+$/).optional() }).strict()).min(1);
+export const principalSchema = z.array(z.object({ id: z.string().min(1), role: z.enum(['admin', 'coordinator', 'slice-lead', 'worker', 'producer', 'reader']), token: z.string().min(32), proofs: z.array(z.string()).optional(), displayName: z.string().trim().min(1).max(100).regex(/^[^\u0000-\u001f\u007f]+$/).optional(), runtime: z.string().trim().min(1).max(80).regex(/^[^\u0000-\u001f\u007f]+$/).optional(), slice: z.enum(['product', 'infrastructure', 'docs-experience']).optional(), sessionKind: z.enum(['human', 'ai']).optional() }).strict()).min(1);
 export type Credential = Principal & { token: string };
 async function body(req: IncomingMessage, limit = 1_000_000) {
   const chunks: Buffer[] = []; let size = 0;
@@ -21,6 +23,8 @@ async function body(req: IncomingMessage, limit = 1_000_000) {
   return Buffer.concat(chunks);
 }
 export function server(engine: Engine, credentials: Credential[], github: GitHub | null = null) {
+  const limits = delegationLimits();
+  validateDelegationPrincipals(credentials, limits);
   const principals = credentials.map(({ token, ...actor }) => ({ actor, hash: createHash('sha256').update(token).digest() }));
   // The engine is constructed with the repository that this control plane is
   // authorized to coordinate.  GITHUB_REPOSITORY is merely a process default
@@ -39,6 +43,7 @@ export function server(engine: Engine, credentials: Credential[], github: GitHub
   demand(!engine.reviewerApps.some(app => app.appId === engine.controlPlaneAppId),
     'A registered reviewer App must be distinct from the Graphyard control-plane App');
   const validation = new Validation(engine, principals.map(p => p.actor), repository);
+  const delivery = new Delivery(validation);
   const operatorAgents = new OperatorAgents(engine.store, repository, credentials.map(credential => ({ id: credential.id, tokenHash: createHash('sha256').update(credential.token).digest('hex') })));
   engine.operatorAuthorizer = operatorAgents.revalidate.bind(operatorAgents);
   // Proof authority is Graphyard state. The configured registry only identifies which
@@ -96,10 +101,18 @@ export function server(engine: Engine, credentials: Credential[], github: GitHub
           return send(200, operatorRoute[2] === 'configure' ? await operatorAgents.configure(actor, operatorRoute[1], data, key)
             : operatorRoute[2] === 'rotate' ? await operatorAgents.rotate(actor, operatorRoute[1], data, key) : await operatorAgents.revoke(actor, operatorRoute[1], data, key));
         }
-        const operatorVisible = (items: any[]) => actor.role !== 'operator-agent' ? items : items.filter(item => actor.scope?.workItems.includes('*') || actor.scope?.workItems.includes(item.id) || actor.scope?.workItems.includes(item.key));
+        const operatorVisible = (items: any[]) => items.filter(item => operatorScopeIncludes(actor, item));
         if (actor.role === 'operator-agent') demand(
-          url.pathname === '/api/status' || url.pathname === '/api/work-snapshot' || url.pathname === '/api/work' || url.pathname === '/api/events' || /^\/api\/work(?:\/[^/]+\/[a-z]+)?$/.test(url.pathname),
+          url.pathname === '/api/status' || url.pathname === '/api/work-snapshot' || url.pathname === '/api/work' || url.pathname === '/api/events'
+          || url.pathname === '/api/delegation' || url.pathname === '/api/intake' || /^\/api\/work(?:\/[^/]+\/[a-z]+)?$/.test(url.pathname),
           'Route is not available to operator agents', 403);
+        // Delegation is a read over work items, so it is filtered by the same scope
+        // rule as every other read; a scoped agent never sees out-of-scope owners,
+        // workers, or bottlenecks here or inside /api/status.
+        if (url.pathname === '/api/delegation' && req.method === 'GET') return send(200, delegationSnapshot(principals.map(p => p.actor), operatorVisible(await engine.store.list()), Date.now(), limits));
+        if (url.pathname === '/api/intake' && req.method === 'POST') return send(200, await recordIntake(engine.store, actor, JSON.parse((await body(req)).toString()), String(req.headers['idempotency-key'] ?? '')));
+        const leadRoute = url.pathname.match(/^\/api\/work\/([^/]+)\/lead-ruling$/);
+        if (leadRoute && req.method === 'POST') return send(200, await recordLeadRuling(engine.store, actor, leadRoute[1], JSON.parse((await body(req)).toString()), String(req.headers['idempotency-key'] ?? '')));
         if (url.pathname === '/api/validation/artifacts' && req.method === 'POST') return send(200, await validation.uploadArtifact(actor, JSON.parse((await body(req, 11_200_000)).toString()), String(req.headers['idempotency-key'] ?? '')));
         const artifactRead = url.pathname.match(/^\/api\/validation\/artifacts\/([^/]+)\/([^/]+)$/);
         if (artifactRead && req.method === 'GET') {
@@ -134,6 +147,24 @@ export function server(engine: Engine, credentials: Credential[], github: GitHub
             : await validation.operatorCommand(actor, command as 'cancel' | 'settle' | 'retry', data, key);
           return send(200, result);
         }
+        // D3: releases, expected-release selection and deployment observations. Reads are
+        // open to every authenticated non-operator-agent credential; each mutation derives its
+        // authority from the credential and the registration it names.
+        if (url.pathname === '/api/delivery' && req.method === 'GET') return send(200, await delivery.status());
+        if (url.pathname === '/api/delivery/observations' && req.method === 'GET') return send(200, await delivery.observations(url.searchParams.get('environment') ?? '', url.searchParams.get('cursor') ?? undefined));
+        const deliveryRoute = url.pathname.match(/^\/api\/delivery\/(build|release|approve|select|lease|observe|notify|sweep)$/);
+        if (deliveryRoute && req.method === 'POST') {
+          const command = deliveryRoute[1], data = JSON.parse((await body(req)).toString() || '{}'), key = String(req.headers['idempotency-key'] ?? '');
+          if (command === 'sweep') { demand(actor.role === 'admin', 'Operator permission required', 403); return send(200, await delivery.sweep()); }
+          const result = command === 'build' ? await delivery.attestBuild(actor, data, key)
+            : command === 'release' ? await delivery.createRelease(actor, data, key)
+            : command === 'approve' ? await delivery.approve(actor, data, key)
+            : command === 'select' ? await delivery.select(actor, data, key)
+            : command === 'lease' ? await delivery.lease(actor, data)
+            : command === 'observe' ? await delivery.observe(actor, data, key)
+            : await delivery.notify(actor, data);
+          return send(200, result);
+        }
         if (url.pathname === '/api/scenarios') {
           if (req.method === 'GET') return send(200, await scenarios(engine.store));
           if (req.method === 'POST') return send(200, await defineScenario(engine.store, actor, JSON.parse((await body(req)).toString()), String(req.headers['idempotency-key'] ?? '')));
@@ -144,7 +175,7 @@ export function server(engine: Engine, credentials: Credential[], github: GitHub
           const githubPermissions = github ? await github.reviewPermissions() : {};
           const dispatchAvailable = !!githubRepository && githubPermissions.pull_requests === 'write' && ['read', 'write'].includes(githubPermissions.issues) && githubPermissions.checks === 'write';
           const observedAt = (await engine.store.pool.query('SELECT clock_timestamp() AS now')).rows[0].now as Date;
-          return send(200, { actor, repository: repository || null, baseBranch: github?.config.base ?? process.env.GITHUB_BASE_BRANCH ?? 'main', github: !!github, check: 'Graphyard / merge', reviewProviders: ['github', ...(dispatchAvailable ? ['codex'] : []), ...(dispatchAvailable && engine.reviewerApps.length ? ['agent'] : [])], reviewerApps: engine.reviewerApps, githubPermissions, githubRepository, githubAppId: github?.config.appId ?? null, githubInstallationId: github?.config.installationId ?? null, jobs, now: observedAt.toISOString() });
+          return send(200, { actor, delegation: delegationSnapshot(principals.map(p => p.actor), operatorVisible(await engine.store.list()), observedAt.getTime(), limits), repository: repository || null, baseBranch: github?.config.base ?? process.env.GITHUB_BASE_BRANCH ?? 'main', github: !!github, check: 'Graphyard / merge', reviewProviders: ['github', ...(dispatchAvailable ? ['codex'] : []), ...(dispatchAvailable && engine.reviewerApps.length ? ['agent'] : [])], reviewerApps: engine.reviewerApps, githubPermissions, githubRepository, githubAppId: github?.config.appId ?? null, githubInstallationId: github?.config.installationId ?? null, jobs, now: observedAt.toISOString() });
         }
         if (req.method === 'GET' && url.pathname === '/api/work-snapshot') { const snapshot = await engine.store.workSnapshot(); const visibleWork = operatorVisible(snapshot.work); return send(200, { ...snapshot, work: visibleWork, jobs: actor.role === 'operator-agent' ? snapshot.jobs.filter(job => visibleWork.some(work => work.id === job.work_id)) : snapshot.jobs }); }
         if (req.method === 'GET' && url.pathname === '/api/work') return send(200, operatorVisible(await engine.store.list()));
@@ -154,8 +185,19 @@ export function server(engine: Engine, credentials: Credential[], github: GitHub
           if (actor.role === 'operator-agent') { demand(id, 'Operator-agent history reads require a scoped work item', 403); const item = (await engine.store.list()).find(w => w.id === id); demand(item && operatorVisible([item]).length, 'Work item is outside this operator-agent scope', 403); }
           return send(200, await engine.store.events(id));
         }
+        // Every mutating work route refuses a slice lead the same way and leaves
+        // the same ledger entry. Routing order decides which handler matches
+        // first; it must never decide whether the attempt is recorded.
+        const refuseLead = async (id: string | null, attemptedAction: string) => {
+          if (actor.role !== 'slice-lead') return;
+          await recordLeadViolation(engine.store, actor, id, attemptedAction);
+          demand(false, 'Slice leads cannot perform lifecycle mutations', 403);
+        };
         const mergeRoute = url.pathname.match(/^\/api\/work\/([^/]+)\/merge-(acquire|cancel|verify)$/);
         if (req.method === 'POST' && mergeRoute) {
+          // These routes sit above the generic work route, so their own refusal
+          // is recorded here rather than inherited from a handler never reached.
+          await refuseLead(mergeRoute[1], `merge-${mergeRoute[2]}`);
           const data = JSON.parse((await body(req)).toString() || '{}'), key = String(req.headers['idempotency-key'] ?? '');
           if (mergeRoute[2] === 'acquire') return send(200, await engine.acquireMerge(actor, mergeRoute[1], data, key));
           if (mergeRoute[2] === 'cancel') return send(200, await engine.cancelMerge(actor, mergeRoute[1], data, key));
@@ -174,8 +216,23 @@ export function server(engine: Engine, credentials: Credential[], github: GitHub
         }
         const match = url.pathname.match(/^\/api\/work(?:\/([^/]+)\/([a-z]+))?$/);
         if (req.method === 'POST' && match) {
+          const attempted = match[2] ?? 'create';
+          // Creating work names no existing item, so the refusal is recorded
+          // unscoped rather than dropped for want of a ledger to append to.
+          await refuseLead(match[1] ?? null, attempted);
           const raw = await body(req);
-          const result = await engine.execute(actor, (match[2] ?? 'create') as Command, match[1] ?? null, JSON.parse(raw.toString() || '{}'), String(req.headers['idempotency-key'] ?? ''));
+          if (attempted === 'evidence' && match[1] && actor.role !== 'worker') {
+            const item = (await engine.store.list()).find(w => w.id === match[1] || w.key === match[1]);
+            const dependent = item ? producerIndependenceRefusal(actor, item, engine.principals) : null;
+            if (item && dependent) {
+              // An unparsable body is still a recorded refusal; the engine repeats this decision.
+              let proof: unknown = null;
+              try { proof = JSON.parse(raw.toString() || '{}')?.proof; } catch { proof = null; }
+              await recordEvidenceRefusal(engine.store, actor, item.id, proof, dependent);
+              demand(false, dependent, 403);
+            }
+          }
+          const result = await engine.execute(actor, attempted as Command, match[1] ?? null, JSON.parse(raw.toString() || '{}'), String(req.headers['idempotency-key'] ?? ''));
           return send(200, result);
         }
         return send(404, { error: 'Route not found' });
@@ -212,12 +269,15 @@ async function main() {
   const seeded = await new ProofGrants(store, credentials.map(({ token, ...actor }) => actor)).seed();
   if (seeded.length) console.log(`Seeded proof grants for ${seeded.map(grant => grant.principalId).join(', ')}`);
   const validation = new Validation(engine, credentials.map(({ token, ...actor }) => actor), github?.config.repository ?? process.env.GITHUB_REPOSITORY ?? '');
+  const delivery = new Delivery(validation);
   await validation.expireArtifacts();
   await validation.reconcile(true);
   let running = false;
   const timer = setInterval(async () => {
     if (running) return; running = true;
-    try { await validation.expireArtifacts(); await validation.reconcile(); await engine.reconcile(); if (github) await Promise.all(Array.from({ length: 4 }, () => processJob(engine, github))); }
+    // The delivery sweep is bounded per tick and resumes from its persisted cursor, so a
+    // backlog of observations drains across ticks without ever skipping one.
+    try { await validation.expireArtifacts(); await validation.reconcile(); await engine.reconcile(); await delivery.sweep(); if (github) await Promise.all(Array.from({ length: 4 }, () => processJob(engine, github))); }
     catch (error) { console.error('reconciliation failed', error instanceof Error ? error.message : 'unknown'); }
     finally { running = false; }
   }, 2000);

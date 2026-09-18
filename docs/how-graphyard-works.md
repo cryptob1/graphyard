@@ -43,6 +43,8 @@ Every box is a checkpoint. A blocked box explains what is missing; it is not an 
 | **Worker agent** | Claims work, uses its assigned worktree, builds, tests, opens the PR, and submits the candidate. It stops on lease loss. |
 | **Reviewer/proof-producer agent** | Independently reviews the exact candidate or reports an approved proof. It does not inherit trust from the worker. |
 
+A fifth session joins only where slice delegation is configured: a **slice lead agent** coordinates one formal slice — approving or rejecting plans, classifying failures, requesting reruns, sending work back, and escalating, always citing a written rule ID and a reason — and never implements, holds a worker lease, submits evidence, bypasses a gate, or merges. See [slice-lead delegation](delegation.md).
+
 These are distinct AI sessions, even if they use the same provider or account. Graphyard enforces separation with **authenticated principal identities, scoped credentials, and authority checks**. The runtime or deployment—for example, Herdr—must keep the sessions independent; Graphyard does not verify runtime isolation. Separation is only as real as the principals Graphyard knows: Worker, Master/coordinator, and Reviewer/proof-producer map to enforced credentials today, and the scoped Operator agent uses a shipped credential type that each installation provisions before that session becomes active.
 
 ## The boundaries that do not move
