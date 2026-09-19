@@ -1,21 +1,42 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { Store, save, wakeJob } from './store.js';
+import { authorizedForProof, unauthorizedProofs } from './proof-grants.js';
 import { workspacePath, pathsOverlap, validBranch } from './workspace.js';
-import { activeLease, admin, operatorCapability, MergeExecutionInProgress, requireCurrent, createSchema, criterionSchema, currentEvidence, resourcesSchema, demand, evaluate, proofSchema, type Principal, type Work, type Observation, type ReviewRequest, type OperatorCapability } from './model.js';
+import { activeLease, admin, assertReviewerProfiles, operatorCapability, escalationTriggers, MergeExecutionInProgress, raiseEscalation, releaseLeadHold, resolveEscalation, standingEscalations, requireCurrent, createSchema, criterionSchema, currentEvidence, deploySmokeProof, deploySmokeRequired, inheritedObligations, pathScopeContains, requiredProofs, resourcesSchema, demand, evaluate, exhaustedReviewerProfiles, proofSchema, reviewerProfileFor, reviewerProfileSchema, reviewProviders, reviewProviderOf, type Criterion, type Principal, type ReviewerApp, type ReviewFailover, type Work, type Observation, type ReviewRequest, type OperatorCapability } from './model.js';
 import { resourceConflicts } from './coordination.js';
+import { containmentAttestation, containmentSettlementRefusals, containmentVerificationSchema } from './quarantine.js';
+import { activeEngineers, delegationLimits, implementerIdentities, leadMay, producerIndependenceRefusal, sessionKind } from './delegation.js';
+import { queueHistoryLimit, type QueueSpeculation } from './merge-queue.js';
+import { githubFromEnv } from './github.js';
+import { regressionRefusals } from './regression-guard.js';
 
 const epoch = z.number().int().positive();
 const sha = z.string().regex(/^[a-f0-9]{40}$/);
+const publicArtifactUrl = z.url().max(2000).refine(value => {
+  const parsed = new URL(value);
+  return ['http:', 'https:'].includes(parsed.protocol) && !parsed.username && !parsed.password;
+}, 'Artifact URLs must be HTTP(S) and contain no credentials');
+const evidenceArtifact = z.object({
+  kind: z.enum(['log', 'report', 'screenshot', 'trace', 'other']), label: z.string().trim().min(1).max(200),
+  mediaType: z.string().trim().min(1).max(200).optional(), size: z.number().int().min(0).optional(),
+  digest: z.string().regex(/^sha256:[a-f0-9]{64}$/).optional(), expiresAt: z.iso.datetime().optional(),
+  availability: z.enum(['available', 'expired', 'redacted', 'missing', 'upload-failed', 'external']), url: publicArtifactUrl.optional(),
+}).strict().refine(value => value.availability === 'external' ? !!value.url : !value.url, 'Only external artifacts may carry a public URL');
 // Longer than acknowledgeContainment's three 30-second HTTP attempts plus retry delays.
 export const launchFenceMs = 120_000;
 const commands = {
   create: createSchema.extend({ reason: z.string().trim().min(1).max(2000).optional() }),
   ready: z.object({ expectedRevision: z.number().int().positive().optional(), reason: z.string().trim().min(1).max(2000).optional() }).strict(),
   requirements: z.object({ expectedPolicyRevision: z.number().int().positive(), reason: z.string().trim().min(1).max(2000), criteria: z.array(criterionSchema).min(1).max(50), dependencies: z.array(z.string().uuid()).max(50), plannedFiles: createSchema.shape.plannedFiles, exclusiveResources: resourcesSchema }).strict(),
-  reviewpolicy: z.object({ provider: z.enum(['github', 'codex']), expectedPolicyRevision: z.number().int().positive(), reason: z.string().trim().min(1).max(2000) }).strict(),
+  reviewpolicy: z.object({ provider: z.enum(reviewProviders), reviewerProfiles: z.array(reviewerProfileSchema).min(1).max(10).optional(), expectedPolicyRevision: z.number().int().positive(), reason: z.string().trim().min(1).max(2000) }).strict(),
   unblock: z.object({ reason: z.string().trim().min(1).max(2000), expectedRevision: z.number().int().positive().optional() }).strict(),
   rework: z.object({ reason: z.string().min(1).max(2000), previousWorkerStopped: z.literal(true) }).strict(),
+  // Only a human operator resolves an escalation, and only the one it has read:
+  // the trigger names which standing concern is cleared, and the revision binds
+  // the request to the incident the operator actually read, so a stale client
+  // cannot clear a later incident that happens to share a trigger.
+  resolve: z.object({ trigger: z.enum(escalationTriggers), reason: z.string().trim().min(1).max(2000), expectedRevision: z.number().int().positive() }).strict(),
   recover: z.object({ reason: z.string().min(1).max(2000), previousWorkerStopped: z.literal(true) }).strict(),
   claim: z.object({}).strict(),
   rereview: z.object({ epoch: epoch.optional() }).strict(),
@@ -23,15 +44,19 @@ const commands = {
   quarantine: z.object({ epoch, settlementHash: z.string().regex(/^[a-f0-9]{64}$/) }).strict(),
   launch: z.object({ epoch, settlementHash: z.string().regex(/^[a-f0-9]{64}$/) }).strict(),
   settle: z.object({ epoch, settlementToken: z.string().regex(/^[a-f0-9]{64}$/) }).strict(),
+  autosettle: z.object({ epoch, settlementHash: z.string().regex(/^[a-f0-9]{64}$/), reason: z.string().trim().min(1).max(2000), verification: containmentVerificationSchema }).strict(),
   release: z.object({ epoch }).strict(),
   workspace: z.object({ epoch, host: z.string().trim().min(1).max(200), path: z.string().startsWith('/').max(1000).refine(p => !/[\u0000-\u001f]/.test(p), 'Invalid path').transform(workspacePath), branch: z.string().max(200).refine(validBranch, 'Invalid Graphyard branch name') }).strict(),
   submit: z.object({ epoch, pr: z.number().int().positive() }).strict(),
   blocked: z.object({ epoch, reason: z.string().max(2000).nullable() }).strict(),
-  evidence: z.object({ proof: proofSchema, sha, baseSha: sha, policyRevision: z.number().int().positive(), result: z.enum(['pass', 'fail']), executed: z.number().int().min(0), skipped: z.number().int().min(0), url: z.string().url().max(2000).optional(), scenarioRevision: z.number().int().positive().optional(), environment: z.string().min(1).max(100).optional(), provenance: z.object({
+  evidence: z.object({ proof: proofSchema, sha, baseSha: sha, policyRevision: z.number().int().positive(), result: z.enum(['pass', 'fail']), executed: z.number().int().min(0), skipped: z.number().int().min(0), url: publicArtifactUrl.optional(), artifacts: z.array(evidenceArtifact).max(30).optional(), scenarioRevision: z.number().int().positive().optional(), environment: z.string().min(1).max(100).optional(), provenance: z.object({
     provider: z.literal('github-actions'), repository: z.string().regex(/^[\w.-]+\/[\w.-]+$/), workflowCommit: sha,
     runId: z.string().regex(/^[1-9]\d*$/), runAttempt: z.number().int().positive(),
-    artifact: z.object({ id: z.number().int().positive(), name: z.string().min(1).max(200), digest: z.string().regex(/^sha256:[a-f0-9]{64}$/), url: z.string().url().max(2000), createdAt: z.iso.datetime() }).strict(),
+    artifact: z.object({ id: z.number().int().positive(), name: z.string().min(1).max(200), digest: z.string().regex(/^sha256:[a-f0-9]{64}$/), url: publicArtifactUrl, createdAt: z.iso.datetime() }).strict(),
   }).strict().optional() }).strict(),
+  // The coordinator's observation of the running release covering a delivered merge. It names the
+  // serving commit and where it was read; whether it is exact is derived, never asserted.
+  deployment: z.object({ sha, mergeSha: sha, source: z.enum(['endpoint', 'github-deployment']), observedAt: z.iso.datetime() }).strict(),
 } as const;
 const mergeAcquireSchema = z.object({ expectedRevision: z.number().int().positive(), sha, baseSha: sha, policyRevision: z.number().int().positive() }).strict();
 const mergeCancelSchema = z.object({ executionId: z.string().uuid(), reason: z.string().trim().min(1).max(2000) }).strict();
@@ -57,14 +82,81 @@ function preserveAssignment(work: Work) {
   if (work.lease && (!work.lastAssignment || work.lastAssignment.epoch < work.lease.epoch))
     work.lastAssignment = { owner: work.lease.owner, epoch: work.lease.epoch };
 }
+
+// A quarantine outlives the lease that raised it: reconciliation clears an expired lease,
+// and release, rework and changed requirements clear a live one. The deadline automatic
+// settlement measures its grace window from is therefore retained on the quarantine, which
+// only proof removes. It only ever moves forward, and only for the quarantined epoch.
+function retainQuarantineFence(work: Work) {
+  const quarantine = work.containmentQuarantine;
+  if (!quarantine || !work.lease || work.lease.epoch !== quarantine.epoch) return;
+  const retained = quarantine.leaseExpiresAt ? Date.parse(quarantine.leaseExpiresAt) : -Infinity;
+  const live = Date.parse(work.lease.expiresAt);
+  if (Number.isFinite(live) && !(live <= retained)) quarantine.leaseExpiresAt = work.lease.expiresAt;
+}
 export class Engine {
   operatorAuthorizer?: (db: any, now: Date, actor: Principal) => Promise<Principal>;
+  // The configured credential registry, used to report which required proof names
+  // currently have an authorized producer. Authority itself lives in the grant store.
+  principals: Principal[] = [];
+  // Reviewer identities and the control-plane App are deployment facts, not client input.
+  reviewerApps: ReviewerApp[] = [];
+  controlPlaneAppId?: number;
+  /**
+   * Observes the pull request a worker submits before the submission is recorded, so a candidate
+   * that reverts shipped code outside its planned files is refused at `complete` instead of after
+   * review. Left undefined, the deployment's GitHub App (from the environment) observes; null
+   * disables the pre-check, and every later observation still re-derives the refusal.
+   */
+  submissionObserver: ((work: Work) => Promise<Observation>) | null | undefined = undefined;
   constructor(public store: Store, public ciAppIds: number[] = [15368], public leaseSeconds = 120, public repository = process.env.GITHUB_REPOSITORY ?? '') {}
-  async execute(actor: Principal, command: Command, id: string | null, input: unknown, key: string) {
+  private async observeSubmission(actor: Principal, id: string | null, data: { epoch: number; pr: number }, key: string): Promise<Observation | null> {
+    if (this.submissionObserver === undefined) { const github = await githubFromEnv(); this.submissionObserver = github ? probe => github.observe(probe) : null; }
+    if (!this.submissionObserver || !id) return null;
+    // A replayed submission returns its receipt; it must not depend on the provider again.
+    if ((await this.store.pool.query('SELECT 1 FROM receipts WHERE actor=$1 AND key=$2', [actor.id, key])).rowCount) return null;
+    const work = (await this.store.list()).find(w => w.id === id || w.key === id);
+    if (!work || work.stage === 'done' || !work.workspaces.some(w => w.epoch === data.epoch)) return null;
+    return this.submissionObserver({ ...work, submission: { epoch: data.epoch, pr: data.pr } });
+  }
+  /**
+   * Bootstrap deferral is an operator act. It requires the explicit policy:bootstrap capability,
+   * a reason, and a contract scope inside the task's own planned files. The audit fields are
+   * stamped from the authenticated actor and the server clock, never taken from the request, and
+   * an unchanged declaration keeps its original attribution across later revisions.
+   */
+  private declareBootstrap(actor: Principal, data: any, previous: Criterion[], policyRevision: number, now: Date, work?: Work): Criterion[] {
+    return data.criteria.map((ac: any): Criterion => {
+      if (!ac.bootstrap) return { id: ac.id, text: ac.text, proofs: ac.proofs };
+      const prior = previous.find(existing => existing.id === ac.id)?.bootstrap;
+      const unchanged = !!prior && prior.reason === ac.bootstrap.reason && JSON.stringify(prior.contractPaths) === JSON.stringify(ac.bootstrap.contractPaths);
+      if (!unchanged) operatorCapability(actor, 'policy:bootstrap', work, this.repository);
+      // An E2E proof pins a scenario revision, environment and hash on its own work item. An
+      // inherited obligation carries no pin, so deferring one would let the heir satisfy it
+      // against an unbound scenario version. Sequence those through the scenario registry.
+      demand(!ac.proofs.some((proof: string) => proof.startsWith('e2e:')),
+        `Criterion ${ac.id} cannot use bootstrap mode: an E2E proof pins a scenario version that an inherited obligation cannot carry forward`);
+      demand(ac.bootstrap.contractPaths.every((path: string) => data.plannedFiles.some((planned: string) => pathScopeContains(planned, path))),
+        `Bootstrap contract paths for ${ac.id} must lie inside the task's planned files`);
+      return { id: ac.id, text: ac.text, proofs: ac.proofs, bootstrap: unchanged ? prior! : { ...ac.bootstrap, declaredBy: actor.id, declaredAt: now.toISOString(), policyRevision } };
+    });
+  }
+  /** A deferral can never be renewed by the very change that inherited the obligation. */
+  private refuseRenewedDeferral(work: Work, all: Work[]) {
+    for (const obligation of inheritedObligations(work, all)) {
+      const renewed = work.criteria.find(ac => ac.bootstrap && ac.proofs.includes(obligation.proof));
+      demand(!renewed, `${renewed?.id}: ${obligation.proof} is already a bootstrap obligation inherited from ${obligation.key} ${obligation.criterionId} and cannot be deferred again`);
+    }
+  }
+  async execute(actor: Principal, command: Command, id: string | null, input: unknown, key: string, context: { observation?: Observation } = {}) {
     demand(Object.hasOwn(commands, command), 'Unknown command', 404);
+    // Leads coordinate through rulings; no lifecycle command is lead-permitted.
+    demand(actor.role !== 'slice-lead' || leadMay(command), 'Slice leads cannot perform lifecycle mutations', 403);
     demand(key && key.length <= 200, 'An Idempotency-Key is required', 400);
     const data: any = commands[command].parse(input);
     const fingerprint = createHash('sha256').update(JSON.stringify({ command, id, data })).digest('hex');
+    // Provider I/O stays outside the coordination transaction.
+    const observation = command === 'submit' ? context.observation ?? await this.observeSubmission(actor, id, data, key) : null;
     return this.store.transaction(async (db, now) => {
       if (actor.role === 'operator-agent') {
         demand(this.operatorAuthorizer, 'Operator-agent authorization is unavailable', 503);
@@ -83,8 +175,10 @@ export class Engine {
         if (actor.role === 'operator-agent') {
           authorizeOperatorCommand(actor, command, data, undefined, this.repository);
         } else admin(actor);
+        if (reviewProviderOf(data.policy) === 'agent') assertReviewerProfiles(data.policy.reviewerProfiles, this.reviewerApps, this.controlPlaneAppId);
         demand(data.dependencies.every((dep: string) => all.some(w => w.id === dep)), 'Unknown dependency');
         demand(new Set(data.criteria.map((ac: { id: string }) => ac.id)).size === data.criteria.length, 'Criterion IDs must be unique');
+        const criteria = this.declareBootstrap(actor, data, [], 1, now);
         const scenarioRequirements: Work['scenarioRequirements'] = [];
         const proofNames: string[] = [...new Set<string>(data.criteria.flatMap((ac: { proofs: string[] }) => ac.proofs))];
         for (const proof of proofNames.filter(p => p.startsWith('e2e:'))) {
@@ -94,11 +188,14 @@ export class Engine {
         }
         const created = now.toISOString();
         const { reason: _reason, ...intent } = data;
-        work = { ...intent, id: randomUUID(), key: '', stage: 'backlog', revision: 0, policyRevision: 1, createdAt: created, updatedAt: created, stageEnteredAt: created,
+        work = { ...intent, criteria, id: randomUUID(), key: '', stage: 'backlog', revision: 0, policyRevision: 1, createdAt: created, updatedAt: created, stageEnteredAt: created,
           ready: false, epoch: 0, lease: null, workspaces: [], candidate: null, submission: null, reworkRequested: false, scenarioRequirements, evidence: [], observation: null, blocker: null, gates: [], violations: [] };
+        // A policy-required post-deployment proof needs an authorized producer as much as a criterion proof does.
+        work!.proofGaps = await unauthorizedProofs(db, this.principals, [...proofNames, ...(deploySmokeRequired(data.policy) ? [deploySmokeProof] : [])]);
         const inserted = await db.query('INSERT INTO work_items(id,document) VALUES($1,$2) RETURNING number', [work!.id, JSON.stringify(work)]);
         work!.key = `GY-${inserted.rows[0].number}`;
         all.push(work!);
+        this.refuseRenewedDeferral(work!, all);
       }
       demand(work, 'Work item not found', 404);
       if (actor.role === 'operator-agent') {
@@ -107,23 +204,39 @@ export class Engine {
         if (command === 'ready') demand(work.stage === 'backlog' && !work.ready, 'Only unreleased backlog work can be released');
         if (command === 'unblock') demand(work.blocker, 'Task has no blocker to clear');
       }
-      const deliveredContainmentCleanup = work.stage === 'done' && (command === 'settle' || command === 'recover');
-      preserveAssignment(work);
-      if (!['recover', 'settle'].includes(command) && work.mergeExecution && Date.parse(work.mergeExecution.expiresAt) <= now.getTime()) work.mergeExecution = null;
-      demand(!work.mergeExecution || command === 'heartbeat' || command === 'recover' || command === 'settle', 'A merge execution is active; retry after it completes or expires');
-      if (command !== 'create' && command !== 'settle' && command !== 'recover') demand(work.stage !== 'done', 'Delivered work is immutable; create a follow-up task');
+      // The only commands a delivered item still accepts: containment cleanup, and the two
+      // post-deployment facts that extend the delivery snapshot without reopening the merge.
+      const postDeployment = command === 'deployment' || command === 'evidence' && data.proof === deploySmokeProof;
+      const containmentCleanup = ['settle', 'recover', 'autosettle'];
+      const deliveredContainmentCleanup = work.stage === 'done' && containmentCleanup.includes(command);
+      preserveAssignment(work); retainQuarantineFence(work);
+      if (!containmentCleanup.includes(command) && !postDeployment && work.mergeExecution && Date.parse(work.mergeExecution.expiresAt) <= now.getTime()) work.mergeExecution = null;
+      demand(!work.mergeExecution || command === 'heartbeat' || containmentCleanup.includes(command) || postDeployment, 'A merge execution is active; retry after it completes or expires');
+      if (command !== 'create' && !containmentCleanup.includes(command) && !postDeployment) demand(work.stage !== 'done', 'Delivered work is immutable; create a follow-up task');
       if (command === 'rereview') {
         if (actor.role !== 'admin') { demand(actor.role === 'worker', 'Worker or operator required', 403); activeLease(work, actor, data.epoch, now); }
-        demand(work.policy.review && work.policy.reviewProvider === 'codex' && work.submission && !work.observation?.merged, 'Open submitted work with Codex review policy required');
+        demand(work.policy.review && ['codex', 'agent'].includes(reviewProviderOf(work.policy)) && work.submission && !work.observation?.merged, 'Open submitted work with a dispatched review provider is required');
         work.reviewRequest = null; work.observation = null; work.mergeAuthorization = null;
+        // Re-review restarts failover at the first configured profile; the event ledger keeps
+        // every superseded exhaustion record for this candidate.
+        work.reviewFailovers = (work.reviewFailovers ?? []).filter(failover => failover.sha !== work.candidate?.sha
+          || failover.baseSha !== work.candidate?.baseSha || failover.policyRevision !== work.policyRevision);
       }
       if (command === 'reviewpolicy') {
         if (actor.role !== 'operator-agent') admin(actor);
         demand(!work.observation?.merged, 'Merged work requires a follow-up task');
         demand(work.policy.review, 'Task must already require review');
         demand(work.policyRevision === data.expectedPolicyRevision, 'Policy revision changed; reload before revising');
-        demand((work.policy.reviewProvider ?? 'github') !== data.provider, 'Review provider is already selected');
-        work.policy = { ...work.policy, reviewProvider: data.provider };
+        demand(data.provider === 'agent' ? !!data.reviewerProfiles : !data.reviewerProfiles, 'Reviewer profiles are required for agent review and rejected for every other provider');
+        demand(reviewProviderOf(work.policy) !== data.provider || JSON.stringify(work.policy.reviewerProfiles ?? null) !== JSON.stringify(data.reviewerProfiles ?? null), 'Review provider and reviewer profiles are already selected');
+        if (data.provider === 'agent') {
+          assertReviewerProfiles(data.reviewerProfiles, this.reviewerApps, this.controlPlaneAppId);
+          demand(new Set(data.reviewerProfiles.map((profile: { name: string }) => profile.name)).size === data.reviewerProfiles.length
+            && new Set(data.reviewerProfiles.map((profile: { reviewerApp: string }) => profile.reviewerApp)).size === data.reviewerProfiles.length,
+          'Reviewer profile names and reviewer Apps must be unique');
+        }
+        const { reviewerProfiles: _previousProfiles, ...rest } = work.policy;
+        work.policy = { ...rest, reviewProvider: data.provider, ...(data.provider === 'agent' ? { reviewerProfiles: data.reviewerProfiles } : {}) };
         work.policyRevision++;
         work.formalReviewResetRequired = true; work.formalReviewBaseline = undefined;
         work.observation = null; work.mergeAuthorization = null; work.reviewRequest = null;
@@ -150,6 +263,7 @@ export class Engine {
           return all.find(w => w.id === id)!.dependencies.some(dep => reachesWork(dep, visited));
         };
         demand(!data.dependencies.some((dep: string) => reachesWork(dep)), 'Dependencies would create a cycle');
+        const revised = this.declareBootstrap(actor, data, work.criteria, work.policyRevision + 1, now, work);
         const pins: Work['scenarioRequirements'] = [];
         const proofs = [...new Set<string>(data.criteria.flatMap((ac: { proofs: string[] }) => ac.proofs))];
         for (const proof of proofs.filter(p => p.startsWith('e2e:'))) {
@@ -159,9 +273,15 @@ export class Engine {
           demand(scenario, `Register E2E scenario ${proof.slice(4)} first`);
           pins.push({ proof, revision: scenario.revision, environment: scenario.environment, hash: scenario.hash });
         }
+        const retired = work.criteria.filter(ac => !data.criteria.some((next: { id: string }) => next.id === ac.id));
+        const narrowed = work.criteria.filter(ac => { const next = data.criteria.find((n: { id: string }) => n.id === ac.id); return next && ac.proofs.some(proof => !next.proofs.includes(proof)); });
+        if (retired.length || narrowed.length) raiseEscalation(work, { trigger: 'requirement-weakening', reason: `Requirement revision retires ${retired.map(ac => ac.id).join(', ') || 'no criterion'} and narrows proofs for ${narrowed.map(ac => ac.id).join(', ') || 'no criterion'}`, at: now.toISOString(), actor: actor.id });
         work.retiredCriterionIds = [...(work.retiredCriterionIds ?? []), ...work.criteria.filter(ac => !data.criteria.some((next: { id: string }) => next.id === ac.id)).map(ac => ac.id)];
-        work.criteria = data.criteria; work.dependencies = data.dependencies; work.plannedFiles = data.plannedFiles; work.exclusiveResources = data.exclusiveResources;
+        work.criteria = revised;
+        work.dependencies = data.dependencies; work.plannedFiles = data.plannedFiles; work.exclusiveResources = data.exclusiveResources;
         work.scenarioRequirements = pins; work.policyRevision++;
+        this.refuseRenewedDeferral(work, all);
+        work.proofGaps = await unauthorizedProofs(db, this.principals, [...proofs, ...(deploySmokeRequired(work.policy) ? [deploySmokeProof] : [])]);
         work.formalReviewResetRequired = true; work.formalReviewBaseline = undefined;
         work.lease = null; work.observation = null; work.mergeAuthorization = null; work.reviewRequest = null;
         // A submitted implementation must be explicitly reconsidered for changed intent.
@@ -169,6 +289,20 @@ export class Engine {
       }
       if (command === 'ready') { if (actor.role !== 'operator-agent') admin(actor); work.ready = true; }
       if (command === 'unblock') { if (actor.role !== 'operator-agent') admin(actor); work.blocker = null; }
+      if (command === 'resolve') {
+        // Resolution is a human judgement: no lead, worker, producer, or scoped
+        // operator agent may clear the escalation that refuses its own delivery.
+        // An admin credential that declares `ai`, or declares nothing, is not a
+        // human operator, exactly as for human-only intake.
+        admin(actor);
+        demand(sessionKind(actor) === 'human', `Escalation resolution requires a declared human session; ${actor.id} is ${sessionKind(actor)}`, 403);
+        const standing = standingEscalations(work);
+        demand(standing.length, 'Task has no escalation to resolve');
+        demand(standing.some(entry => entry.trigger === data.trigger), `Standing escalations are ${standing.map(entry => entry.trigger).join(', ')}; reload before resolving`);
+        demand(data.expectedRevision === work.revision, 'Task revision changed; reload before resolving');
+        // Every other standing trigger survives: one resolution clears one concern.
+        resolveEscalation(work, data.trigger);
+      }
       if (command === 'rework') {
         admin(actor);
         demand(!work.observation?.merged, 'Merged work requires a follow-up task');
@@ -177,7 +311,20 @@ export class Engine {
         `Worker startup for epoch ${work.containmentQuarantine?.epoch} remains fenced; stop its supervisor and wait for both lease and launch authority expiry before recovery`);
         work.reworkRequested = true;
         work.containmentQuarantine = null;
+        // Reassignment discards whatever assignment still stood. A lease dropped
+        // here was never released by its worker, and clearing it is the last
+        // moment the loss is visible: reconcile only ever sees an expired lease,
+        // and the replacement claim guards on `work.lease`, which is now null.
+        // So the loss is recorded here, exactly as those two paths record it.
+        // The operator's stopped-worker attestation authorizes the reassignment;
+        // it does not decide whether the incident reaches the record.
+        preserveAssignment(work);
+        if (work.lease) raiseEscalation(work, { trigger: 'lease-loss', reason: `Worker ${work.lease.owner} lost lease epoch ${work.lease.epoch}`, at: now.toISOString(), actor: 'graphyard' });
         work.lease = null;
+        // Reopening implementation is the authorized recovery for send-back.
+        // A plan rejection remains owned by its originating lead and can only
+        // be superseded by that lead's later approve-plan ruling.
+        if (work.leadHold?.action === 'send-back') releaseLeadHold(work);
       }
       if (command === 'recover') {
         admin(actor);
@@ -194,7 +341,19 @@ export class Engine {
         demand(!work.submission || work.reworkRequested, 'Implementation is submitted; an operator must request rework before reassignment');
         const resources = resourceConflicts(work, all, now.getTime());
         demand(!resources.length, `Exclusive resources held: ${resources.map(r => `${r.resource} by ${r.key}`).join(', ')}`);
+        if (work.slice) {
+          // Capacity is a count of engineers, not of leases: one engineer holding
+          // two items in the slice still occupies one of the lead's seats.
+          const engineers = activeEngineers(all.filter(item => item.id !== work!.id), work.slice, now.getTime());
+          engineers.delete(actor.id);
+          const limit = delegationLimits().maxEngineersPerLead;
+          demand(engineers.size < limit, `Engineer limit for ${work.slice} exceeded: ${engineers.size}/${limit}`);
+        }
+        // A replacement claim is itself the proof that the previous assignment was
+        // lost. Record it here so the escalation cannot be erased by the overwrite.
+        if (work.lease) raiseEscalation(work, { trigger: 'lease-loss', reason: `Worker ${work.lease.owner} lost lease epoch ${work.lease.epoch}`, at: now.toISOString(), actor: 'graphyard' });
         work.epoch++;
+        work.implementers = [...new Set([...implementerIdentities(work), actor.id])];
         work.lastAssignment = { owner: actor.id, epoch: work.epoch, claimedAt: now.toISOString(), ...(actor.displayName ? { displayName: actor.displayName } : {}), ...(actor.runtime ? { runtime: actor.runtime } : {}) };
         work.lease = { owner: actor.id, epoch: work.epoch, expiresAt: new Date(now.getTime() + this.leaseSeconds * 1000).toISOString() };
       }
@@ -219,6 +378,16 @@ export class Engine {
           'Containment settlement capability is invalid');
         work.containmentQuarantine = null;
       }
+      if (command === 'autosettle') {
+        // Verified death is proof, not an assertion: the control plane re-checks the fence
+        // deadlines and the reported verification itself before lowering a containment fence.
+        demand(actor.role === 'coordinator' || actor.role === 'admin', 'Coordinator permission required', 403);
+        demand(work.containmentQuarantine?.epoch === data.epoch && work.containmentQuarantine?.settlementHash === data.settlementHash,
+          'Containment quarantine is missing, superseded, or does not match this verification');
+        const refusals = containmentSettlementRefusals(work, data.verification, { now: now.getTime() });
+        demand(!refusals.length, `Automatic containment settlement refused: ${refusals.join('; ')}. ${containmentAttestation(work.key)}`);
+        work.containmentQuarantine = null;
+      }
       if (command === 'release') work.lease = null;
       if (command === 'blocked') work.blocker = data.reason;
       if (command === 'workspace') {
@@ -231,19 +400,57 @@ export class Engine {
         demand(work.workspaces.some(w => w.epoch === data.epoch), 'Register the assignment workspace first');
         demand(!all.some(w => w.id !== work!.id && w.submission?.pr === data.pr), 'Pull request is already linked to another task');
         demand(!work.submission || work.submission.pr === data.pr, 'A submitted task cannot switch pull requests');
+        if (observation) {
+          demand(observation.candidate.pr === data.pr, 'Observed pull request does not match the submission');
+          demand(work.workspaces.some(w => w.epoch === data.epoch && w.branch === observation.candidate.branch), 'PR branch does not match the assigned workspace');
+          const regressions = regressionRefusals(work, observation, all);
+          demand(!regressions.length, `Submission refused for ${work.key}: ${regressions.join('; ')}`);
+        }
         work.submission = { epoch: data.epoch, pr: data.pr };
         work.reworkRequested = false;
       }
+      if (command === 'deployment') {
+        demand(actor.role === 'coordinator' || actor.role === 'admin', 'Coordinator permission required', 403);
+        demand(work.stage === 'done' && !!work.delivery, 'A deployment observation is recorded only for delivered work');
+        demand(data.mergeSha === work.delivery!.mergeSha, 'Deployment observation names another merge commit');
+        // One observation per delivery: the smoke proof binds to exactly this serving commit, so a
+        // later rollout cannot quietly move the target the proof was made against.
+        demand(!work.delivery!.deployment, 'Delivery already has a recorded deployment observation');
+        demand(Date.parse(data.observedAt) <= now.getTime() + 60_000 && Date.parse(data.observedAt) >= Date.parse(work.delivery!.mergedAt) - 60_000, 'Deployment observation time must fall between the merge and now');
+        work.delivery!.deployment = { sha: data.sha, mergeSha: data.mergeSha, source: data.source, observedAt: data.observedAt,
+          covers: data.sha === data.mergeSha ? 'exact' : 'descendant', at: now.toISOString(), observer: actor.id };
+      }
       if (command === 'evidence') {
         demand(actor.role === 'producer' || actor.role === 'worker' || actor.role === 'admin', 'Evidence submission is not permitted', 403);
-        const trusted = actor.role === 'producer' && !!actor.proofs?.includes(data.proof) || actor.role === 'admin' && data.proof.startsWith('manual:');
-        work.evidence.push({ ...data, id: randomUUID(), producer: actor.id, trusted, at: now.toISOString() });
+        // Workers may still record their own untrusted assertions; every identity
+        // that could mint trust must be independent of the implementation and the lead.
+        const dependent = actor.role === 'worker' ? null : producerIndependenceRefusal(actor, work, this.principals);
+        demand(!dependent, dependent ?? 'Evidence producer is not independent', 403);
+        // Trust is decided by the live grant set, never by the deployment environment.
+        const trusted = await authorizedForProof(db, actor, data.proof);
+        if (data.proof === deploySmokeProof) {
+          // Post-deployment proof is a trust boundary with no untrusted tier: it is accepted only
+          // from a producer granted the proof, only once Graphyard has observed the deployment,
+          // and only bound to that observed serving commit and this item's merge commit.
+          demand(trusted, `${deploySmokeProof} evidence is accepted only from a producer authorized for that proof`, 403);
+          demand(deploySmokeRequired(work.policy), `Work policy does not require ${deploySmokeProof}`);
+          demand(work.stage === 'done' && !!work.delivery, `${deploySmokeProof} evidence is accepted only after delivery`);
+          demand(!!work.delivery!.deployment, 'Graphyard has not observed a deployment covering this delivery');
+          demand(data.sha === work.delivery!.deployment!.sha && data.baseSha === work.delivery!.mergeSha,
+            `${deploySmokeProof} evidence must name the observed deployed commit ${work.delivery!.deployment!.sha} as sha and merge commit ${work.delivery!.mergeSha} as baseSha`);
+          demand(data.policyRevision === work.policyRevision, 'Policy revision does not match this delivery');
+        }
+        const evidence = { ...data, id: randomUUID(), producer: actor.id, trusted, at: now.toISOString() };
+        work.evidence.push(evidence);
+        if (data.proof === deploySmokeProof) work.delivery!.smoke = { evidenceId: evidence.id, result: data.result, sha: data.sha, mergeSha: data.baseSha, producer: actor.id, at: evidence.at, executed: data.executed, skipped: data.skipped, ...(data.url ? { url: data.url } : {}) };
+        if (trusted && data.policyRevision !== work.policyRevision) raiseEscalation(work, { trigger: 'evidence-policy-conflict', reason: `Evidence policy v${data.policyRevision} conflicts with current policy v${work.policyRevision}`, at: now.toISOString(), actor: actor.id });
       }
-      // Delivery is an immutable snapshot. A late containment cleanup may append
-      // its audit/revision metadata, but stale inputs must not re-evaluate it.
-      if (!deliveredContainmentCleanup) this.evaluate(work, all, now);
+      retainQuarantineFence(work);
+      // Delivery is an immutable snapshot. A late containment cleanup or a post-deployment fact may
+      // append its audit/revision metadata, but stale inputs must not re-evaluate it.
+      if (!deliveredContainmentCleanup && !postDeployment) this.evaluate(work, all, now);
       await save(db, work, actor.id, command, now, command === 'settle' ? { epoch: data.epoch } : actor.role === 'operator-agent' ? { before, intent: data, reason: data.reason ?? null } : data);
-      if (work.submission && !['heartbeat', 'release', 'claim', 'workspace'].includes(command)) await wakeJob(db, work.id);
+      if (work.submission && !postDeployment && !['heartbeat', 'release', 'claim', 'workspace'].includes(command)) await wakeJob(db, work.id);
       await db.query('INSERT INTO receipts(actor,key,fingerprint,result) VALUES($1,$2,$3,$4)', [actor.id, key, fingerprint, JSON.stringify(work)]);
       return work;
     });
@@ -262,10 +469,10 @@ export class Engine {
         demand(receipt.fingerprint === fingerprint, 'Idempotency key reused with different input');
         this.evaluate(work, all, now);
         const execution = receipt.result?.execution;
-        demand(execution && work.mergeExecution?.id === execution.id
+        demand(execution && work.mergeExecution?.id === execution.id && !work.mergeExecution?.fenced
           && Date.parse(execution.expiresAt) > now.getTime() && work.stage === 'merge' && work.gates.every(gate => gate.passed)
           && !work.violations.length && work.candidate?.sha === execution.sha && work.candidate?.baseSha === execution.baseSha
-          && work.policyRevision === execution.policyRevision, 'Replayed merge execution is expired, cancelled, or superseded');
+          && work.policyRevision === execution.policyRevision, 'Replayed merge execution is expired, cancelled, fenced, or superseded');
         return receipt.result;
       }
       demand(work.revision === data.expectedRevision, 'Task changed before merge execution; retry');
@@ -278,7 +485,7 @@ export class Engine {
         && authorization.sha === data.sha && authorization.baseSha === data.baseSha && authorization.policyRevision === data.policyRevision
         && work.candidate?.sha === data.sha && work.candidate.baseSha === data.baseSha && Number.isFinite(age) && age >= 0 && age < 120_000,
       'Merge authorization is no longer current');
-      const requiredEvidence = [...new Set(work.criteria.flatMap(criterion => criterion.proofs))].map(proof => currentEvidence(work, proof, now));
+      const requiredEvidence = requiredProofs(work, all).map(proof => currentEvidence(work, proof, now));
       const validityDeadlines = [now.getTime() + 120_000, Date.parse(work.observation!.at) + 120_000,
         ...requiredEvidence.flatMap(evidence => evidence?.expiresAt ? [Date.parse(evidence.expiresAt)] : [])];
       const expiresAt = Math.min(...validityDeadlines);
@@ -335,7 +542,7 @@ export class Engine {
         demand(receipt.fingerprint === fingerprint, 'Idempotency key reused with different input');
         const current = (await db.query('SELECT document FROM work_items WHERE id::text=$1 OR document->>\'key\'=$1', [id])).rows[0]?.document as Work | undefined;
         demand(current?.mergeExecution?.id === data.executionId && current.mergeExecution.owner === actor.id && current.mergeExecution.verifiedAt === receipt.result.verifiedAt
-          && Date.parse(current.mergeExecution.expiresAt) > now.getTime(), 'Replayed merge verification is expired, cancelled, or superseded');
+          && !current.mergeExecution.fenced && Date.parse(current.mergeExecution.expiresAt) > now.getTime(), 'Replayed merge verification is expired, cancelled, fenced, or superseded');
         return receipt.result;
       }
       const all: Work[] = (await db.query('SELECT document FROM work_items ORDER BY number')).rows.map(row => row.document);
@@ -343,6 +550,7 @@ export class Engine {
       const execution = work.mergeExecution;
       demand(execution?.id === data.executionId && execution.owner === actor.id && Date.parse(execution.expiresAt) > now.getTime(), 'Merge execution is missing, expired, superseded, or owned by another coordinator');
       demand(!execution.verifiedAt, 'Merge execution was already verified; retry with the original idempotency key');
+      demand(!execution.fenced, `Merge execution was fenced and cannot be verified: ${execution.fenced?.reason}`);
       demand(!observation.merged && observation.prState === 'open' && observation.draft === false, 'Pull request is no longer open and ready for merge');
       demand(observation.candidate.sha === execution.sha && observation.candidate.baseSha === execution.baseSha && observation.candidate.pr === work.submission?.pr
         && work.workspaces.some(workspace => workspace.epoch === work.submission!.epoch && workspace.branch === observation.candidate.branch), 'GitHub candidate changed during merge execution');
@@ -368,10 +576,92 @@ export class Engine {
       const work = all.find(w => w.id === id);
       requireCurrent(work && work.revision === expectedRevision && work.stage !== 'done' && !work.observation?.merged, 'Task changed during review dispatch');
       demand(!work.mergeExecution || Date.parse(work.mergeExecution.expiresAt) <= now.getTime(), 'Merge execution is active');
-      demand(work.policy.review && work.policy.reviewProvider === 'codex' && request.sha === work.candidate?.sha && request.baseSha === work.candidate?.baseSha && request.policyRevision === work.policyRevision, 'Review request candidate or policy changed');
+      const provider = reviewProviderOf(work.policy);
+      demand(work.policy.review && (request.provider ?? 'codex') === provider && ['codex', 'agent'].includes(provider)
+        && request.sha === work.candidate?.sha && request.baseSha === work.candidate?.baseSha && request.policyRevision === work.policyRevision, 'Review request candidate or policy changed');
+      if (provider === 'agent') {
+        const selected = reviewerProfileFor(work);
+        demand(!!selected && selected.name === request.profile && selected.reviewerApp === request.reviewerApp && !!request.marker,
+          'Review request does not name the currently selected reviewer profile');
+      }
       work.reviewRequest = request;
-      if (work.observation) work.observation.agentReview = { provider: 'codex', sha: request.sha, approved: false, reason: 'Waiting for dispatched Codex review' };
+      if (work.observation) work.observation.agentReview = provider === 'agent'
+        ? { provider: 'agent', sha: request.sha, approved: false, profile: request.profile, reviewerApp: request.reviewerApp, reason: `Waiting for reviewer profile ${request.profile} to post a verdict through its registered App` }
+        : { provider: 'codex', sha: request.sha, approved: false, reason: 'Waiting for dispatched Codex review' };
       this.evaluate(work, all, now); await save(db, work, 'github', 'review.requested', now); return work;
+    });
+  }
+  /** Records the Graphyard-published speculative tip this candidate must now be validated on. */
+  async bindSpeculativeTip(id: string, expectedRevision: number, speculation: QueueSpeculation, jobToken: string) {
+    return this.store.transaction(async (db, now) => {
+      const job = (await db.query('SELECT 1 FROM jobs WHERE work_id=$1 AND token=$2 AND locked_until>$3', [id, jobToken, now])).rows[0];
+      requireCurrent(job, 'Integration job lease expired or superseded');
+      const all: Work[] = (await db.query('SELECT document FROM work_items ORDER BY number')).rows.map(r => r.document);
+      const work = all.find(w => w.id === id);
+      requireCurrent(work && work.revision === expectedRevision && work.stage !== 'done' && !work.observation?.merged, 'Task changed while the speculative tip was built');
+      demand(!work.mergeExecution || Date.parse(work.mergeExecution.expiresAt) <= now.getTime(), 'Merge execution is active');
+      requireCurrent(work.queue && speculation.policyRevision === work.policyRevision, 'Queue entry or policy changed while the speculative tip was built');
+      work.queue!.speculation = speculation;
+      work.queueHistory = [...(work.queueHistory ?? []), { at: now.toISOString(), event: 'predicted' as const, sequence: work.queue!.sequence, tip: speculation.tip }].slice(-queueHistoryLimit);
+      this.evaluate(work, all, now);
+      await save(db, work, 'graphyard', 'queue.predicted', now, { tip: speculation.tip, base: speculation.base, ref: speculation.ref, predecessors: speculation.predecessors });
+      await wakeJob(db, work.id);
+      return work;
+    });
+  }
+  /** Removes an entry whose speculative validation cannot succeed, with the reason on the record. */
+  async ejectFromQueue(id: string, expectedRevision: number, reason: string, jobToken: string) {
+    return this.store.transaction(async (db, now) => {
+      const job = (await db.query('SELECT 1 FROM jobs WHERE work_id=$1 AND token=$2 AND locked_until>$3', [id, jobToken, now])).rows[0];
+      requireCurrent(job, 'Integration job lease expired or superseded');
+      const all: Work[] = (await db.query('SELECT document FROM work_items ORDER BY number')).rows.map(r => r.document);
+      const work = all.find(w => w.id === id);
+      requireCurrent(work && work.revision === expectedRevision && work.stage !== 'done', 'Task changed before the queue ejection');
+      requireCurrent(work.queue, 'Queue entry already left the merge queue');
+      const sequence = work.queue!.sequence;
+      work.queueEjection = { at: now.toISOString(), sequence, reason, sha: work.candidate?.sha ?? null, policyRevision: work.policyRevision };
+      work.queueHistory = [...(work.queueHistory ?? []), { at: now.toISOString(), event: 'ejected' as const, sequence, reason, ...(work.queue!.speculation ? { tip: work.queue!.speculation.tip } : {}) }].slice(-queueHistoryLimit);
+      work.queue = null;
+      this.evaluate(work, all, now);
+      await save(db, work, 'graphyard', 'queue.ejected', now, { sequence, reason });
+      for (const behind of all) if (behind.queue && behind.id !== work.id) await wakeJob(db, behind.id);
+      return work;
+    });
+  }
+  /**
+   * Record provider exhaustion for the dispatched reviewer profile and release the request so
+   * the next configured profile is selected. Failing over never approves anything: when no
+   * profile remains, the review gate stays closed with the exhaustion recorded in history.
+   */
+  async failoverReviewRequest(id: string, expectedRevision: number, input: { exhaustion: 'usage-limit' | 'timeout'; reason: string }, jobToken: string) {
+    return this.store.transaction(async (db, now) => {
+      const job = (await db.query('SELECT 1 FROM jobs WHERE work_id=$1 AND token=$2 AND locked_until>$3', [id, jobToken, now])).rows[0];
+      requireCurrent(job, 'Integration job lease expired or superseded');
+      const all: Work[] = (await db.query('SELECT document FROM work_items ORDER BY number')).rows.map(r => r.document);
+      const work = all.find(w => w.id === id);
+      requireCurrent(work && work.revision === expectedRevision && work.stage !== 'done' && !work.observation?.merged, 'Task changed during review failover');
+      demand(!work.mergeExecution || Date.parse(work.mergeExecution.expiresAt) <= now.getTime(), 'Merge execution is active');
+      const request = work.reviewRequest;
+      demand(work.policy.review && reviewProviderOf(work.policy) === 'agent' && request?.provider === 'agent'
+        && request.sha === work.candidate?.sha && request.baseSha === work.candidate?.baseSha && request.policyRevision === work.policyRevision,
+      'Review failover requires a current agent review request');
+      const dispatched = reviewerProfileFor(work);
+      demand(dispatched && dispatched.name === request!.profile && dispatched.reviewerApp === request!.reviewerApp, 'Review failover must name the currently dispatched reviewer profile');
+      const exhausted = new Set([...exhaustedReviewerProfiles(work), dispatched!.name]);
+      const next = (work.policy.reviewerProfiles ?? []).find(profile => !exhausted.has(profile.name)) ?? null;
+      const failover: ReviewFailover = { profile: dispatched!.name, reviewerApp: dispatched!.reviewerApp, runtime: dispatched!.runtime,
+        exhaustion: input.exhaustion, reason: input.reason.slice(0, 500), at: now.toISOString(), sha: request!.sha, baseSha: request!.baseSha,
+        policyRevision: request!.policyRevision, requestCommentId: request!.commentId, nextProfile: next?.name ?? null };
+      // The complete sequence stays in the append-only ledger; the document keeps recent entries.
+      work.reviewFailovers = [...(work.reviewFailovers ?? []), failover].slice(-100);
+      work.reviewRequest = null;
+      if (work.observation) work.observation.agentReview = { provider: 'agent', sha: failover.sha, approved: false,
+        profile: next?.name, reviewerApp: next?.reviewerApp,
+        reason: next ? `Reviewer profile ${failover.profile} is exhausted (${failover.exhaustion}); Graphyard failed over to ${next.name}`
+          : `Every configured reviewer profile is exhausted for this candidate; the last was ${failover.profile} (${failover.exhaustion})` };
+      this.evaluate(work, all, now);
+      await save(db, work, 'github', 'review.failover', now, failover);
+      return work;
     });
   }
   evaluate(work: Work, all: Work[], now: Date) {
@@ -389,10 +679,18 @@ export class Engine {
       for (const work of all) {
         if (work.stage === 'done') continue;
         const before = JSON.stringify(work);
-        preserveAssignment(work);
-        if (work.mergeExecution && Date.parse(work.mergeExecution.expiresAt) > now.getTime()) continue;
-        if (work.mergeExecution) work.mergeExecution = null;
-        if (work.lease && Date.parse(work.lease.expiresAt) <= now.getTime()) work.lease = null;
+        preserveAssignment(work); retainQuarantineFence(work);
+        const executing = !!work.mergeExecution && Date.parse(work.mergeExecution.expiresAt) > now.getTime();
+        const leaseLost = !!work.lease && Date.parse(work.lease.expiresAt) <= now.getTime();
+        // An in-flight merge execution defers reconciliation, but never a lease
+        // loss: that escalation must reach the record and fence the execution
+        // rather than wait for it, so delivery cannot outrun the concern.
+        if (executing && !leaseLost) continue;
+        if (!executing && work.mergeExecution) work.mergeExecution = null;
+        if (leaseLost) {
+          const lost = work.lease!; work.lease = null;
+          raiseEscalation(work, { trigger: 'lease-loss', reason: `Worker ${lost.owner} lost lease epoch ${lost.epoch}`, at: now.toISOString(), actor: 'graphyard' });
+        }
         this.evaluate(work, all, now);
         if (JSON.stringify(work) !== before) {
           await save(db, work, 'graphyard', 'reconciled', now);
@@ -442,7 +740,9 @@ export class Engine {
         }
         const past = authorizedSnapshot || !executionValid ? undefined : (await db.query("SELECT payload->'work' AS work FROM events WHERE work_id=$1 AND created_at<$2 AND payload ? 'work' ORDER BY seq DESC LIMIT 1", [id, new Date(cutoff)])).rows[0]?.work as Work | undefined;
         const authorization = past?.mergeAuthorization;
-        const evidenceValid = past ? [...new Set(past.criteria.flatMap(criterion => criterion.proofs))].every(proof => !!currentEvidence(past, proof, new Date(cutoff - 1))) : false;
+        // Exactly the acceptance gate's demand at the merge cutoff: a bootstrap criterion's
+        // deferred proofs are excluded, and an inherited obligation is re-checked here too.
+        const evidenceValid = past ? requiredProofs(past, all).every(proof => !!currentEvidence(past, proof, new Date(cutoff - 1))) : false;
         if (!authorizedSnapshot && past && authorization && authorization.sha === observation.candidate.sha && authorization.baseSha === observation.candidate.baseSha && authorization.policyRevision === past.policyRevision
           && past.submission?.pr === observation.candidate.pr && past.gates.every(g => g.passed) && !past.violations.length
           && evidenceValid && past.observation && cutoff - Date.parse(past.observation.at) < 120_000 && Date.parse(authorization.at) < mergedTime) {
@@ -453,7 +753,7 @@ export class Engine {
       work.observation = observation;
       // Snapshot all provider review identities after the revision. Approvals in this
       // first observation never count, regardless of clock skew or future reevaluation.
-      if (work.formalReviewResetRequired && work.policy.reviewProvider !== 'codex' && !work.formalReviewBaseline && observation.reviewIds
+      if (work.formalReviewResetRequired && reviewProviderOf(work.policy) === 'github' && !work.formalReviewBaseline && observation.reviewIds
         && observation.reviewIds.every(id => Number.isSafeInteger(id) && id > 0)
         && observation.reviews.every(r => Number.isSafeInteger(r.id) && observation.reviewIds!.includes(r.id!))) {
         work.formalReviewBaseline = { pr: observation.candidate.pr, policyRevision: work.policyRevision, reviewIds: [...observation.reviewIds] };
@@ -467,6 +767,8 @@ export class Engine {
           work.mergeExecution = null;
           work.delivery = { mergedAt: observation.mergedAt!, mergeSha: observation.mergeSha, authorizationRevision: authorizationRevision! };
           await db.query('DELETE FROM jobs WHERE work_id=$1', [work.id]);
+          // The queue shifted: every entry behind this one has a new position and predicted base.
+          for (const behind of all) if (behind.queue && behind.id !== work.id) await wakeJob(db, behind.id);
         } else {
           work.mergeExecution = null;
           if (!work.violations.includes(violation)) work.violations.push(violation);
