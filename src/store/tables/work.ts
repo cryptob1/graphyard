@@ -31,7 +31,11 @@ export const jobs = defineTable({
   locked_until timestamptz, token uuid, attempts int NOT NULL DEFAULT 0, error text
 );
 ALTER TABLE jobs ADD COLUMN IF NOT EXISTS generation bigint NOT NULL DEFAULT 0;
-ALTER TABLE jobs ADD COLUMN IF NOT EXISTS claimed_generation bigint NOT NULL DEFAULT 0;`,
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS claimed_generation bigint NOT NULL DEFAULT 0;
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS held_until timestamptz;
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS held_reason text;
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS refusals int NOT NULL DEFAULT 0;
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS held_on text;`,
 });
 export const webhookReceipts = defineTable({
   name: 'webhook_receipts', orderBy: 'id',

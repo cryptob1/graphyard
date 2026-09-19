@@ -2,7 +2,7 @@ import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { parseArgs } from 'node:util';
 import { availableRuntimes, discover } from '../onboarding.js';
-import { startGithubSetup } from '../github-setup.js';
+import { startGithubSetup, updateAppPermissions } from '../github-setup.js';
 import { applyProposal, loadAppliedSetup, loadProposal, readSetupStatus, repositoryScanDifference, saveProposal, scanProposal, setupDrift, setupRepository } from '../repository-setup.js';
 import { defineCommands } from './registry.js';
 import { readSecretFromStdin } from './context.js';
@@ -76,9 +76,13 @@ export const installCommands = defineCommands([
       const discovered = await discover(root);
       let live: any = null, failure: string | undefined;
       try { live = await context.api('status'); } catch (error: any) { failure = error.message; }
+      const appPermissions = live?.appPermissions ?? null;
       return context.print({ discovered, server: context.base, cliPath: await context.activeCliPath(), hostId: context.individualHostId(), connected: !!live, githubConfigured: !!live?.github, role: live?.actor?.role, failure,
         setup: await readSetupStatus(root).catch((error: any) => ({ error: error.message })),
-        next: !live ? 'Configure GRAPHYARD_URL and an individual token' : !live.github ? 'Complete github-setup and configure the server App credentials' : 'Submit a real PR and inspect every gate; configured is not proof of enforcement',
+        appPermissions: appPermissions ? { verifiedAt: appPermissions.verifiedAt, missing: appPermissions.missing, attention: appPermissions.attention, installationUrl: appPermissions.installationUrl } : null,
+        heldJobs: live?.heldJobs ?? 0,
+        next: !live ? 'Configure GRAPHYARD_URL and an individual token' : !live.github ? 'Complete github-setup and configure the server App credentials'
+          : appPermissions?.missing?.length ? `Run graphyard github-setup --update-permissions: ${appPermissions.attention[0]}` : 'Submit a real PR and inspect every gate; configured is not proof of enforcement',
         limits: ['CI discovery is a proposal, not executed-test inventory', 'Herdr two-host recovery and GitHub refusal-to-acceptance must be demonstrated'] });
     },
   },
@@ -88,13 +92,27 @@ export const installCommands = defineCommands([
       '  github-setup HTTPS_URL [--reviewer NAME]',
       '                                Register the control-plane or a reviewer GitHub App',
       '                                through the local App-manifest browser flow',
+      '  github-setup --update-permissions [--reviewer NAME] [--wait SECONDS]',
+      '                                Compare a registered App with its declared permissions,',
+      '                                print the exact migration steps, and verify acceptance',
     ],
     async run(context) {
       const root = context.repositoryRoot();
       const discovered = await discover(root);
       if (!discovered.repository) throw new Error('Set origin to the GitHub repository being managed first');
-      const { values } = parseArgs({ args: context.args, options: { reviewer: { type: 'string' } }, allowPositionals: false });
-      const setup = await startGithubSetup(root, discovered.repository, context.id!, 4311, {}, values.reviewer);
+      const { values, positionals } = parseArgs({ args: [context.id, ...context.args].filter((value): value is string => value !== undefined), options: { reviewer: { type: 'string' }, 'update-permissions': { type: 'boolean' }, wait: { type: 'string' } }, allowPositionals: true });
+      if (values['update-permissions']) {
+        const waitSeconds = values.wait === undefined ? 0 : Number(values.wait);
+        if (!Number.isInteger(waitSeconds) || waitSeconds < 0 || waitSeconds > 3600) throw new Error('Use --wait with whole seconds up to 3600');
+        const result = await updateAppPermissions(root, { reviewer: values.reviewer, waitMs: waitSeconds * 1000 });
+        context.print(result);
+        if (!result.verified) process.exitCode = 1;
+        return;
+      }
+      if (values.wait !== undefined) throw new Error('--wait only applies to --update-permissions');
+      const deployment = positionals[0];
+      if (!deployment || positionals.length > 1) throw new Error('Use github-setup HTTPS_URL to register an App, or github-setup --update-permissions to migrate a registered one');
+      const setup = await startGithubSetup(root, discovered.repository, deployment, 4311, {}, values.reviewer);
       console.log(`Open ${setup.url} in your browser. On SSH, forward port 4311 to this machine first. Credentials stay in ${setup.file}; do not share that file. Press Ctrl+C when finished.`);
       const stop = () => setup.http.close(); process.once('SIGINT', stop); process.once('SIGTERM', stop);
     },

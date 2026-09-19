@@ -1,4 +1,4 @@
-<!-- page: Operate Graphyard | 7 | dependencies, requirement revisions, overlap, and shared resources. -->
+<!-- page: Operate Graphyard | 8 | dependencies, requirement revisions, overlap, and shared resources. -->
 # Coordinating independent agents
 
 Graphyard owns assignment authority and evidence admissibility. Herdr owns processes. Git owns source history. This guide describes coordination features implemented in this change; the two-host operational trial is still a separate validation task.

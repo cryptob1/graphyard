@@ -1,4 +1,4 @@
-<!-- page: Operate Graphyard | 8 | least-privilege operator agents with server-enforced scope. -->
+<!-- page: Operate Graphyard | 9 | least-privilege operator agents with server-enforced scope. -->
 # Scoped operator-agent automation
 
 ## Bootstrap boundary

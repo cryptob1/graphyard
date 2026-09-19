@@ -15,6 +15,7 @@ The sections below are generated from each page's `<!-- page: Section | order | 
 ## Operate Graphyard
 
 - [Deployment](deployment.md) — Railway, Docker Compose, backups, and upgrades.
+- [Install and upgrade](install.md) — the shortest install path and the App-permission migration an upgrade can require.
 - [GitHub enforcement](github.md) — App permissions, branch protection, CI producers, and Codex review.
 - [Herdr integration](herdr.md) — worker installation and multi-machine use.
 - [Master-agent operating mode](master-agent.md) — routing, recovery, and guarded merges.

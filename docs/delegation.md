@@ -1,4 +1,4 @@
-<!-- page: Operate Graphyard | 5 | bounded product, infrastructure, and docs/experience coordination. -->
+<!-- page: Operate Graphyard | 6 | bounded product, infrastructure, and docs/experience coordination. -->
 # Slice-lead delegation
 
 Graphyard can scale delivery through three formal slices: **product**, **infrastructure**, and **docs/experience** (`docs-experience` in API data). A slice lead is a dedicated AI coordinator session with its own `slice-lead` principal and credential. It is not an implementation worker, reviewer, proof producer, or merge authority.
