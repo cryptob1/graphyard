@@ -8,6 +8,7 @@ import EmbeddedPostgres from 'embedded-postgres';
 import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import { Validation, type ValidationRequest, type ValidationCandidate } from '../src/validation.js';
+import { acknowledgeAttempt } from '../src/runner-executor.js';
 import { defineScenario } from '../src/scenarios.js';
 import { type Principal, type Work, evaluate } from '../src/model.js';
 import { server } from '../src/server.js';
@@ -94,9 +95,24 @@ test('independent pools race one runner slot and restart preserves dispatch/ACK/
     const d = results.find(r => r.request); assert.deepEqual(d.build.artifacts, [{ service: 'api', digest }]); assert.equal(d.build.producer, builder.id); const command = { requestId: f.r.id, attemptId: d.attempt.id, epoch: 1 };
     await assert.rejects(replica.runnerCommand(worker, 'ack', command, id()), /Wrong runner/);
     await assert.rejects(replica.runnerCommand(runner, 'heartbeat', command, id()), /ACK/);
-    const receipt = id(); const ack = await replica.runnerCommand(runner, 'ack', command, receipt);
-    assert.deepEqual(await replica.runnerCommand(runner, 'ack', command, receipt), ack);
+    // The runner's acknowledgement against the real service, with the first response lost
+    // after the commit: the retry replays the receipt, and the replayed request document is
+    // what the runner accepts as its confirmation — so the replay must be a confirmation.
+    let sends = 0;
+    const confirmed = await acknowledgeAttempt(async (path, body, key) => {
+      assert.equal(path, 'validation/ack');
+      const result = await replica.runnerCommand(runner, 'ack', body, key);
+      if (++sends === 1) throw new TypeError('fetch failed');
+      return result;
+    }, command, { retryMs: 0, sleep: async () => {} });
+    assert.equal(confirmed.sends, 2);
+    const ack: any = await replica.runnerCommand(runner, 'ack', command, `${command.attemptId}-ack`);
+    assert.deepEqual(await replica.runnerCommand(runner, 'ack', command, `${command.attemptId}-ack`), ack);
+    assert.equal(ack.attempts.at(-1).acknowledgedAt, confirmed.acknowledgedAt);
     assert.equal((await replica.list()).requests.find(r => r.id === f.r.id)?.state, 'running');
+    // A different key is a second acknowledgement, and the service refuses it as such:
+    // the runner retries with its stable key precisely so it never sends one.
+    await assert.rejects(replica.runnerCommand(runner, 'ack', command, id()), /Attempt already acknowledged/);
     await replica.collectionAuthority(collector, command);
     assert.equal((await replica.list()).requests.find(r => r.id === f.r.id)?.state, 'collecting');
     const outcome: any = await replica.result(collector, report(f, command), id()); assert.equal(outcome.passed, true);

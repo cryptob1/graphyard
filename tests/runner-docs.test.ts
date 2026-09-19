@@ -4,7 +4,7 @@ import { readFile } from 'node:fs/promises';
 import { execFile } from 'node:child_process';
 import { userInfo } from 'node:os';
 import { promisify } from 'node:util';
-import { attemptGrantSchema, runnerPlanSchema } from '../src/runner-executor.js';
+import { acknowledgementRetry, attemptGrantSchema, runnerPlanSchema } from '../src/runner-executor.js';
 import { collectorInputSchema } from '../src/runner-collector.js';
 
 /**
@@ -133,4 +133,18 @@ if setpriv --reuid="$runner" --regid=30003 --clear-groups test -r "$root/attempt
   exit 1
 fi`;
   await exec(...(await elevated(['bash', '-c', script])));
+});
+
+test('the documented acknowledgement retry contract states the bound the runner enforces', () => {
+  const section = guide.slice(guide.indexOf('### The acknowledgement is retried, never repeated'));
+  const contract = section.slice(0, section.indexOf('\n### ', 10) === -1 ? undefined : section.indexOf('\n### ', 10));
+  assert.ok(contract.includes('`ATTEMPT_ID-ack`'), 'the stable request key is documented');
+  assert.match(contract, /identical body/);
+  assert.match(contract, /already-acknowledged answer is success/);
+  assert.match(contract, /confirmed refusal is a decision/);
+  assert.ok(contract.includes(`At most **${acknowledgementRetry.attempts} sends**`), 'the send bound matches the code');
+  assert.ok(contract.includes(`no send starts more than **${acknowledgementRetry.windowMs / 1000} seconds** after the first`), 'the time bound matches the code');
+  const pauses = Array.from({ length: acknowledgementRetry.attempts - 1 }, (_, i) => acknowledgementRetry.retryMs * 2 ** i / 1000);
+  assert.ok(contract.includes(`paused ${pauses.slice(0, -1).join(', ')} and ${pauses.at(-1)} seconds apart`), 'the pauses match the code');
+  assert.match(contract, /No heartbeat is sent and the attestor is not told to proceed until the acknowledgement is confirmed/);
 });
