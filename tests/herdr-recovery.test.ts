@@ -11,7 +11,7 @@ import { Engine, launchFenceMs } from '../src/engine.js';
 import { server } from '../src/server.js';
 import type { Principal } from '../src/model.js';
 // @ts-expect-error The trusted runner intentionally uses dependency-free JavaScript outside the candidate source.
-import { exercise, requiredCases, requiredFences } from '../scripts/herdr-recovery-contract.mjs';
+import { createInventory, exercise as run, requiredCases, requiredFences } from '../scripts/herdr-recovery-contract.mjs';
 // @ts-expect-error Dependency-free protected workflow script.
 import { contract, contracts, requireStagedContract } from '../scripts/contracts.mjs';
 
@@ -24,6 +24,9 @@ const operator: Principal = { id: 'recovery-operator', role: 'admin' };
 const machines = [1, 2].map(n => ({ id: `recovery-machine-${n}`, role: 'worker' as const, token: `test-machine-${n}-${'x'.repeat(32)}` }));
 let pg: EmbeddedPostgres; let store: Store; let http: ReturnType<typeof server>; let url: string;
 const identities = () => [{ ...operator, token: 'r'.repeat(32) }, ...machines];
+// The trusted runner hands the contract a fresh ledger bound to its own inventory; this suite does
+// the same, and supplies the short fences only after it. `fences` is what each test varies.
+const exercise = (target: string, principals: unknown[], fences?: typeof shortFences, inventory = createInventory()) => run(target, principals, inventory, fences);
 before(async () => {
   const port = Number(process.env.GRAPHYARD_HERDR_RECOVERY_TEST_PORT ?? Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 7);
   pg = new EmbeddedPostgres({ databaseDir: await mkdtemp(join(tmpdir(), 'graphyard-recovery-')), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
@@ -82,8 +85,13 @@ test('each fence minimum is enforced on its own, not behind the other', async ()
 });
 
 test('a candidate that lets every racing claim win cannot produce passing evidence', async () => {
+  // The ledger attributes the interruption: the racing case stays failing, nothing after it ran,
+  // so the trusted runner reports exactly that instead of an all-skipped or all-failed inventory.
+  const inventory = createInventory();
   await withoutRefusal('/claim', async weakened =>
-    assert.rejects(exercise(weakened, identities(), shortFences), /Expected values to be strictly equal/));
+    assert.rejects(exercise(weakened, identities(), shortFences, inventory), /Expected values to be strictly equal/));
+  assert.deepEqual(inventory.cases, requiredCases.map((id: string) => ({ id, result: id === 'exclusive-claim' ? 'fail' : 'skipped' })));
+  assert.equal(inventory.executed, 1); assert.equal(inventory.skipped, requiredCases.length - 1); assert.equal(inventory.complete, false);
 });
 
 test('a candidate that recovers containment before its launch fence expires cannot pass', async () => {

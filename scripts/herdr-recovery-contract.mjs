@@ -4,8 +4,11 @@
 import assert from 'node:assert/strict';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
+import { createInventory as createCaseInventory } from './case-inventory.mjs';
 
 export const requiredCases = ['exclusive-claim', 'expiry-recovery', 'stale-owner-refused', 'isolated-worktrees', 'supervised-fence-recovery'];
+// Bound to this contract's fixed inventory; see case-inventory.mjs for the ledger semantics.
+export const createInventory = () => createCaseInventory(requiredCases);
 // Every command an owner may only issue while holding its own current lease. `rereview` is lease-scoped
 // for workers too: a superseded owner must not be able to reset review state and requeue integration work.
 const leaseScopedCommands = ['heartbeat', 'release', 'workspace', 'submit', 'blocked', 'quarantine', 'launch', 'rereview'];
@@ -19,7 +22,7 @@ const recoveryBudgetMs = 600_000;
 // contract grants a candidate is never larger than one observed window. A wider window fails the run.
 const measurementWindowMs = 10_000;
 
-export async function exercise(url, principals, fences = requiredFences) {
+export async function exercise(url, principals, inventory = createInventory(), fences = requiredFences) {
   const operator = principals.find(p => p.role === 'admin');
   const workers = principals.filter(p => p.role === 'worker');
   assert.ok(operator && workers.length >= 2);
@@ -27,7 +30,6 @@ export async function exercise(url, principals, fences = requiredFences) {
   const settlementToken = randomBytes(32).toString('hex');
   const settlementHash = createHash('sha256').update(settlementToken).digest('hex');
   const recovery = { reason: 'Supervised machine stopped; recovering on the second machine', previousWorkerStopped: true };
-  const cases = [];
   async function request(path, actor, data, status = 200) {
     const response = await fetch(`${url}/api/${path}`, { method: data === undefined ? 'GET' : 'POST',
       headers: { ...(actor ? { Authorization: `Bearer ${actor.token}` } : {}), 'Content-Type': 'application/json', 'Idempotency-Key': randomUUID() },
@@ -68,6 +70,7 @@ export async function exercise(url, principals, fences = requiredFences) {
   // established containment, acknowledged launch, and then stopped without settling.
   const unsupervised = await create('Cross-machine recovery after lease expiry');
   const supervised = await create('Cross-machine recovery after supervised worker loss');
+  inventory.begin('exclusive-claim');
   const beforeRace = await candidateNow(), raceStarted = Date.now();
   const contested = await Promise.all(machines.flatMap(machine => Array.from({ length: 8 }, async () => {
     const response = await fetch(`${url}/api/work/${unsupervised.id}/claim`, { method: 'POST', headers: { Authorization: `Bearer ${machine.actor.token}`, 'Content-Type': 'application/json', 'Idempotency-Key': randomUUID() }, body: '{}', signal: AbortSignal.timeout(10_000) });
@@ -82,8 +85,9 @@ export async function exercise(url, principals, fences = requiredFences) {
   assertFence('The claimed lease', work.lease.expiresAt, beforeRace, afterRace, fences.leaseMs);
   const history = await request(`events?work=${unsupervised.id}`, operator);
   assert.equal(history.filter(e => e.kind === 'claim').length, 1);
-  cases.push('exclusive-claim');
+  inventory.pass('exclusive-claim');
 
+  inventory.begin('expiry-recovery');
   await request(`work/${unsupervised.id}/workspace`, stopped.actor, worktree(stopped, unsupervised, 1));
   await request(`work/${supervised.id}/claim`, stopped.actor, {});
   await request(`work/${supervised.id}/workspace`, stopped.actor, worktree(stopped, supervised, 1));
@@ -113,23 +117,26 @@ export async function exercise(url, principals, fences = requiredFences) {
   work = await request(`work/${unsupervised.id}/claim`, replacement.actor, {});
   assert.equal(work.epoch, 2); assert.equal(work.lease.owner, replacement.actor.id);
   assert.equal(work.lastAssignment.owner, replacement.actor.id); assert.equal(work.lastAssignment.epoch, 2);
-  cases.push('expiry-recovery');
+  inventory.pass('expiry-recovery');
 
+  inventory.begin('stale-owner-refused');
   for (const command of leaseScopedCommands) {
     const refusal = await request(`work/${unsupervised.id}/${command}`, stopped.actor, staleBody(command, unsupervised, stopped), 409);
     assert.match(refusal.error, /Lease missing, expired, or superseded/);
   }
   assert.match((await request(`work/${unsupervised.id}/claim`, stopped.actor, {}, 409)).error, /active owner/);
-  cases.push('stale-owner-refused');
+  inventory.pass('stale-owner-refused');
 
+  inventory.begin('isolated-worktrees');
   const reserved = worktree(stopped, unsupervised, 1), own = worktree(replacement, unsupervised, 2);
   for (const overlapping of [{ ...own, host: reserved.host, path: `${reserved.path}/src` }, { ...own, branch: reserved.branch }])
     assert.match((await request(`work/${unsupervised.id}/workspace`, replacement.actor, overlapping, 409)).error, /already reserved or overlaps/);
   work = await request(`work/${unsupervised.id}/workspace`, replacement.actor, own);
   assert.deepEqual(work.workspaces.map(w => [w.owner, w.host, w.path, w.epoch]),
     [[stopped.actor.id, reserved.host, reserved.path, 1], [replacement.actor.id, own.host, own.path, 2]]);
-  cases.push('isolated-worktrees');
+  inventory.pass('isolated-worktrees');
 
+  inventory.begin('supervised-fence-recovery');
   assert.match((await request(`work/${supervised.id}/claim`, replacement.actor, {}, 409)).error, /quarantined by unverified containment/);
   await request(`work/${supervised.id}/rework`, operator, recovery);
   assert.match((await request(`work/${supervised.id}/settle`, stopped.actor, { epoch: 1, settlementToken }, 409)).error, /Containment quarantine is missing/);
@@ -137,8 +144,8 @@ export async function exercise(url, principals, fences = requiredFences) {
   assert.equal(work.epoch, 2); assert.equal(work.lease.owner, replacement.actor.id); assert.equal(work.containmentQuarantine, null);
   work = await request(`work/${supervised.id}/workspace`, replacement.actor, worktree(replacement, supervised, 2));
   assert.equal(work.workspaces.length, 2);
-  cases.push('supervised-fence-recovery');
+  inventory.pass('supervised-fence-recovery');
 
-  assert.deepEqual(cases, requiredCases);
-  return cases.map(id => ({ id, result: 'pass' }));
+  assert.deepEqual(inventory.cases, requiredCases.map(id => ({ id, result: 'pass' })));
+  return inventory.cases;
 }

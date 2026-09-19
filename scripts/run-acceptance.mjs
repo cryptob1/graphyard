@@ -8,12 +8,15 @@ import { contract } from './contracts.mjs';
 
 const [metadataFile, image, output, proof = 'integration:claim-safety'] = process.argv.slice(2);
 if (!metadataFile || !image || !output) throw new Error('Usage: run-acceptance metadata.json image output.json [proof]');
-const { exercise, requiredCases } = contract(proof);
+const { exercise, createInventory } = contract(proof);
 const metadata = JSON.parse(await readFile(metadataFile, 'utf8'));
 const scratch = await mkdtemp(join(tmpdir(), 'graphyard-acceptance-'));
 const suffix = randomBytes(6).toString('hex'), network = `gy-${suffix}`, db = `${network}-db`, app = `${network}-app`;
 const docker = (...args) => execFileSync('docker', args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
-let result = { ...metadata, schema: 1, proof, result: 'fail', cases: requiredCases.map(id => ({ id, result: 'fail' })), executed: 0, skipped: 0 };
+// The inventory is bound to the selected proof and filled in as cases run, so an interruption
+// still reports the completed, failing and genuinely unexecuted parts instead of an all-skipped report.
+const inventory = createInventory();
+let passed = false;
 try {
   docker('network', 'create', network);
   docker('run', '-d', '--name', db, '--network', network, '--network-alias', 'database', '-e', 'POSTGRES_PASSWORD=acceptance-only', '-e', 'POSTGRES_DB=graphyard', 'postgres:17-alpine');
@@ -36,13 +39,15 @@ try {
     await new Promise(r => setTimeout(r, 1000));
   }
   if (!ready) throw new Error('Candidate did not become healthy');
-  const cases = await exercise(url, principals);
-  result = { ...result, result: 'pass', cases, executed: cases.length }; console.log(`Trusted acceptance completed: ${cases.length} cases passed.`);
+  await exercise(url, principals, inventory);
+  passed = inventory.complete; console.log(`Trusted acceptance completed: ${inventory.executed} cases passed.`);
 } catch { console.error('Trusted acceptance failed. No passing evidence was produced.'); process.exitCode = 1; }
 finally {
   // Do not print candidate logs: candidate-controlled output may contain test credentials.
   spawnSync('docker', ['rm', '-f', app, db], { stdio: 'ignore' });
   spawnSync('docker', ['network', 'rm', network], { stdio: 'ignore' });
   await rm(scratch, { recursive: true, force: true });
+  const result = { ...metadata, schema: 1, proof, result: passed && inventory.complete ? 'pass' : 'fail',
+    cases: inventory.cases, executed: inventory.executed, skipped: inventory.skipped };
   await writeFile(resolve(output), JSON.stringify(result, null, 2));
 }
