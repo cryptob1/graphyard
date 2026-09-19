@@ -7,7 +7,7 @@ Graphyard remains the source of truth. Herdr only reports live session health. T
 
 ## Install
 
-Requires Node 24, Herdr 0.7.1 or newer, a Graphyard checkout, and GitHub CLI authenticated as an identity allowed to merge the protected base branch.
+Requires Node 24, Herdr 0.7.1 or newer, a Graphyard checkout, and GitHub CLI authenticated as an identity allowed to merge the protected base branch. Muse profiles require Herdr 0.9.1 or newer, which recognizes kind `muse` natively, and an installed, provider-authenticated `muse` executable on the coordinator host.
 
 Create a `coordinator` principal on the Graphyard server. From a clean coordinator checkout, list Herdr workspaces and bind the master to this repository's workspace:
 
@@ -37,6 +37,7 @@ Use a template:
 - [Codex](../examples/master/codex-worker.json)
 - [Claude](../examples/master/claude-worker.json)
 - [Cursor](../examples/master/cursor-worker.json)
+- [Muse](../examples/master/muse-worker.json)
 - [existing session](../examples/master/existing-worker.json)
 
 Keep profile files in the ignored `.graphyard/profiles/` directory so the master can write them itself. A launch profile points to a mode-0600 worker-token file outside every repository worktree:
@@ -51,6 +52,21 @@ Provider login and Graphyard identity are separate. Profiles cannot contain Grap
 Every launch profile carries an approval mode; see [approval modes](#approval-modes).
 
 `launch` profiles are supervised and can receive new work. `existing` profiles add health visibility for a session that already owns work; Graphyard will not inject a new assignment into an unsupervised process.
+
+### Muse
+
+Muse is an adapter at the runtime boundary, not a second control plane. A profile with `kind: "muse"` (template: [`muse-worker.json`](../examples/master/muse-worker.json)) goes through exactly the path every other launched runtime takes:
+
+1. `master dispatch` reads the profile's own mode-0600 worker credential and refuses one that does not authenticate as that profile's principal with the `worker` role;
+2. the claim and the assigned worktree are created under that credential alone — the tab receives `GRAPHYARD_TOKEN_FILE` for the Muse worker's file, never `GRAPHYARD_TOKEN`, the coordinator token, an operator token, a trusted evidence-producer token, or another worker's file;
+3. Herdr starts the installed `muse` binary inside `graphyard watch`, so the supervisor heartbeats the lease, filters server credentials out of the environment, and terminates the process on lease loss or epoch supersession;
+4. the prompt is delivered only after Herdr reports the session ready; a launch that never becomes visible, blocks before it is ready, or refuses the prompt is closed and its epoch released, and one Herdr cannot confirm closed keeps the epoch fenced.
+
+Prerequisites: Herdr 0.9.1 or newer and a `muse` executable on the coordinator host that is already logged in to its provider (`muse login`); provider credentials live in that login, never in the profile. Graphyard generates no `auto` startup contract for Muse yet, so the template carries Muse's own non-interactive flags in `agentArgs` (`--approval-mode never --trust-workspace`); `master worker add` reports that Graphyard added nothing. Muse's OS sandbox stays on with those flags; use `--yolo` in `agentArgs` only when that trade-off is acceptable for the profile.
+
+Herdr reports a Muse session as `working`, `idle`, `blocked`, `done`, or absent, which `master status` shows as `offline`. Those states are health telemetry only: a working session does not extend a lease, an exited or missing session does not release one, and a session named after a principal does not become its owner. Graphyard's authenticated lease and epoch remain the sole ownership and lifecycle authority; a `blocked`, `done`, or `offline` session under an active lease is flagged for attention, and an expired lease shows no owner regardless of what Muse reports.
+
+There is no supported unsupervised path: do not start `muse` directly for dispatched work, adopt an already-running Muse session with an `existing` profile (it stays observable only), reuse the coordinator credential, or grant the Muse worker principal operator or trusted evidence-producer authority.
 
 Local dispatch requires Linux with a working systemd user manager for durable containment. On macOS or Linux without user systemd, route work to a separately supervised remote worker instead.
 
@@ -353,6 +369,7 @@ A launched session that stops to ask "run everything?" or "trust this folder?" i
 | Codex | `--ask-for-approval never --sandbox workspace-write` | directory-trust and per-command approval | only the workspace-write sandbox still limits a command |
 | Cursor | `--force --trust` | "Run Everything" and fresh-worktree workspace trust | every proposed command runs in the assigned worktree |
 | opencode | `OPENCODE_PERMISSION={"edit":"allow","bash":"allow","webfetch":"allow"}` | edit, bash, and webfetch prompts | edits, shell commands, and fetches happen without asking |
+| Muse | nothing generated; the [template](../examples/master/muse-worker.json) passes `--approval-mode never --trust-workspace` in `agentArgs` | tool-approval and workspace-trust prompts | tool calls run without asking inside Muse's own sandbox |
 
 The trade-off is real: an `auto` session runs whatever it decides to run inside its own worktree, under its own provider and Graphyard credentials. What it cannot do is change: it still holds only a worker credential, still works in one assigned worktree, and still cannot merge, produce trusted evidence, or weaken a requirement. Use `prompt` when a human should stay in the loop for a particular profile. A profile that already sets the runtime's own approval flags keeps exactly those; Graphyard never overrides an explicit choice.
 
