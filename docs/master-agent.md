@@ -1,8 +1,8 @@
 # Master-agent operating mode
 
-The master is a dedicated coordinator session. It reads Graphyard, watches Herdr health, routes ready work, handles handoffs, requests guarded merges, and administers the managed repository's GitHub App, installation, and branch protection — through the API when it can and through the operator's own browser profile when only a GitHub page can do it. It does not implement work, hold worker leases, or produce evidence.
+The master is the coordinator: a `coordinator` principal run as the durable `master run` loop plus an optional visible master session. It reads Graphyard, watches Herdr session health, routes ready work, handles handoffs, requests guarded merges, and administers the managed repository's GitHub App, installation, and branch protection — through the API when it can and through the human operator's own browser profile when only a GitHub page can do it. It does not implement work, hold worker leases, or produce evidence.
 
-Graphyard remains the source of truth. Herdr only reports live session health.
+Graphyard remains the source of truth. Herdr only reports live session health. Terms follow the [glossary](glossary.md).
 
 ## Install
 
@@ -27,7 +27,7 @@ At the token prompt, paste the token, press Enter, then press Ctrl-D to send EOF
 
 `master start` also installs the master's own harness permissions for harnesses that have a command classifier. See [harness permissions](#harness-permissions).
 
-Run the coordinator under a dedicated OS identity or machine. Implementation agents running as the same OS user may read its GitHub CLI credentials; Graphyard tokens cannot create a filesystem boundary.
+Run the coordinator under a dedicated OS identity or machine. Worker sessions running as the same OS user may read its GitHub CLI credentials; Graphyard tokens cannot create a filesystem boundary.
 
 ## Add a worker
 
@@ -127,9 +127,9 @@ refused merge is the gate working: the loop records the refusal and keeps cyclin
 An unhealthy profile — an unreadable credential, a name already busy in Herdr, or a recent failed
 launch — is routed around for a ten-minute cool-off while other profiles keep receiving work.
 
-Judgment calls stay with an agent or a human: reading a worker's report, deciding whether a review
-finding needs rework, choosing how to route a novel failure. The loop keeps the mechanical steps
-running underneath them.
+Judgment calls stay with the visible master session or the human operator: reading a worker's
+report, deciding whether a review finding needs rework, choosing how to route a novel failure. The
+loop keeps the mechanical steps running underneath them.
 
 ## Operate
 
@@ -251,7 +251,7 @@ A browser-driven change is therefore as attributable as a CLI one, and a refusal
 ### The only operator interactions left
 
 - **Device approval.** When GitHub answers with its *Confirm access* page, the flow clicks *Use GitHub Mobile*, reads the two-digit pairing code, writes it to `.graphyard/master-actions/sudo.json`, and reports it in the session output and in `master status` under `administration.sudo` with the instruction to approve the prompt on your device and choose that code. It then waits with a bounded, retrying poll — three seconds between reads, three minutes in total, and an expired code re-issued at most three times — and continues where it was once the approval lands. A prompt nobody approves fails with the code and the rerun command rather than hanging; a prompt without a GitHub Mobile option is refused rather than guessed at with a password or authenticator.
-- **Human-only decisions.** The guides mark these human-only: choosing which review provider an item uses, releasing backlog work, revising requirements, clearing blockers, satisfying a manual proof, authorizing rework, and approving a merge when automatic merging is disabled stay with a person. The flows change nothing outside the three targets above.
+- **Human-only decisions.** The guides mark these human-only: choosing which review provider an item uses, releasing backlog work, revising requirements, clearing blockers, satisfying a manual proof, authorizing rework, and approving a merge when automatic merging is disabled stay with the human operator. The flows change nothing outside the three targets above.
 
 ### What the master must never do
 
@@ -329,7 +329,7 @@ For a dead worker or provider change:
 4. claim with the replacement worker at a higher epoch;
 5. create a fresh workspace and preserve the old attempt.
 
-The master does not clear blockers, revise requirements, or satisfy human gates on its own. See [operations](operations.md) for recovery commands, including [restarting the durable loop](operations.md#master-coordination-loop).
+The master does not clear blockers, revise requirements, or satisfy human gates on its own. See [operations](operations.md) for recovery commands, including [restarting the durable loop](operations-reference.md#master-coordination-loop).
 
 ## Master commands
 

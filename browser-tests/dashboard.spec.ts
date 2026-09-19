@@ -109,6 +109,63 @@ for (const viewport of [{ name: 'desktop', width: 1280, height: 900 }, { name: '
   });
 }
 
+// The rendered diagrams and the glossary-driven pages must read on a phone as well as a desktop:
+// every diagram loads as an image with its alt text, its legend is visible, and no page scrolls
+// sideways. Nothing here touches the API.
+for (const viewport of [{ name: 'desktop', width: 1280, height: 900 }, { name: 'mobile', width: 390, height: 844 }]) {
+  test(`docs diagrams and glossary pages are accessible and fit the ${viewport.name} viewport`, async ({ page }) => {
+    await page.setViewportSize(viewport);
+    const fits = async () => {
+      const bounds = await page.locator('.docs-shell').evaluate(element => ({ width: element.clientWidth, content: element.scrollWidth, page: document.documentElement.scrollWidth, viewport: document.documentElement.clientWidth }));
+      expect(bounds.content).toBeLessThanOrEqual(bounds.width);
+      expect(bounds.page).toBeLessThanOrEqual(bounds.viewport);
+    };
+    const diagramsLoad = async (expected: number) => {
+      const images = page.locator('img.docs-diagram');
+      await expect(images).toHaveCount(expected);
+      for (const image of await images.all()) {
+        await image.scrollIntoViewIfNeeded();
+        await expect(image).toBeVisible();
+        expect((await image.getAttribute('alt'))?.length ?? 0).toBeGreaterThan(40);
+        await expect.poll(() => image.evaluate(element => (element as HTMLImageElement).complete && (element as HTMLImageElement).naturalWidth > 0)).toBe(true);
+        const geometry = await image.evaluate(element => { const img = element as HTMLImageElement; const box = img.getBoundingClientRect(); return { natural: img.naturalWidth, complete: img.complete, width: box.width, right: box.right, viewport: document.documentElement.clientWidth }; });
+        expect(geometry.complete).toBe(true);
+        expect(geometry.natural).toBeGreaterThan(0);
+        expect(geometry.width).toBeGreaterThan(200);
+        expect(geometry.right).toBeLessThanOrEqual(geometry.viewport);
+      }
+    };
+
+    await page.goto('/docs/how-graphyard-works');
+    await expect(page.getByRole('heading', { name: 'How Graphyard works', level: 1 })).toBeVisible();
+    await diagramsLoad(2);
+    await expect(page.getByText('Text equivalent of the diagram above. Phase 1, bootstrap:', { exact: false })).toBeVisible();
+    await expect(page.getByRole('link', { name: "glossary's diagram legend" }).first()).toHaveAttribute('href', '/docs/glossary#diagram-legend');
+    await fits();
+
+    await page.goto('/docs/glossary');
+    await expect(page.getByRole('heading', { name: 'Glossary', level: 1 })).toBeVisible();
+    for (const term of ['1. Human operator (human authority)', '2. AI agent', '3. Agent session (Herdr-managed session or runtime)', '4. Principal, role, and credential', '5. Worker lease and worktree', '6. Independent reviewer and proof producer', '7. Graphyard control plane', '8. Herdr runtime']) {
+      await expect(page.getByRole('heading', { name: term, level: 3 })).toBeVisible();
+    }
+    await expect(page.getByRole('heading', { name: 'Diagram legend', level: 2 })).toBeVisible();
+    await expect(page.getByRole('cell', { name: 'Amber rounded box' })).toBeVisible();
+    await fits();
+
+    await page.goto('/docs/architecture');
+    await diagramsLoad(1);
+    await fits();
+
+    await page.goto('/docs/operations');
+    await expect(page.getByRole('heading', { name: 'Operations and recovery', level: 1 })).toBeVisible();
+    for (const heading of ['Daily checklist', 'Incident decision tree', 'Recovery recipes', 'Safety facts that never change', 'Deeper references']) await expect(page.getByRole('heading', { name: heading, level: 2 })).toBeVisible();
+    await expect(page.getByRole('link', { name: 'lost worker' })).toHaveAttribute('href', '#lost-worker-before-submission');
+    await expect(page.getByRole('main').getByRole('link', { name: 'Operations reference', exact: true })).toHaveAttribute('href', '/docs/operations-reference');
+    await expect(page.locator('img.docs-diagram')).toHaveCount(0);
+    await fits();
+  });
+}
+
 test('invalid login remains on login; whitespace is trimmed and loading never claims empty work', async ({ page }) => {
   const state = await fixture(page);
   await login(page, 'invalid');

@@ -1,6 +1,6 @@
 # Coordinating independent agents
 
-Graphyard owns assignment authority and evidence admissibility. Herdr owns processes. Git owns source history. This guide describes coordination features implemented in this change; the two-host operational trial is still a separate validation task.
+Graphyard owns assignment authority and evidence admissibility. Herdr owns session processes. Git owns source history. This guide describes the shipped coordination features; the two-host operational trial is still a separate validation task. Terms follow the [glossary](glossary.md).
 
 ## Start with an observable requirement
 
@@ -20,7 +20,7 @@ Work details show required proofs as **unmeasured**, **incomplete**, **failed**,
 
 ## Revise requirements explicitly
 
-Operators can use **Revise requirements** in work details, or:
+The human operator can use **Revise requirements** in work details, or:
 
 ```sh
 graphyard requirements GY-N revision.json
@@ -41,7 +41,7 @@ Example `revision.json`:
 
 The command replaces the full requirements document; omitted criteria are removed, not implicitly retained. Keep the same criterion ID when clarifying the same obligation. Removed IDs are retired and cannot be recycled for unrelated requirements. Dependencies must name existing items and cannot form a cycle.
 
-Stop the worker and release its lease first. Only an operator may revise requirements; implementation workers cannot weaken their own gates. Concurrent edits compare the expected policy revision. Every successful revision records the authenticated actor, reason, complete requirements and new policy revision in append-only history. Historical snapshots retain previous criteria.
+Stop the worker and release its lease first. Only the human operator's `admin` credential may revise requirements this way (a scoped operator agent may only add); workers cannot weaken their own gates. Concurrent edits compare the expected policy revision. Every successful revision records the authenticated actor, reason, complete requirements and new policy revision in append-only history. Historical snapshots retain previous criteria.
 
 All previous acceptance evidence remains in history but becomes inapplicable to the new policy. Review requests, observations and merge authorization are invalidated. Previously submitted work requires a new claimed attempt and resubmission on its existing PR branch. GitHub check revocation is asynchronous: suspend merging until the refusing check is visible, as with rework. Delivered or observed-merged work requires a follow-up task.
 
@@ -57,7 +57,7 @@ Graphyard compares planned paths and provider-observed PR files against other un
 
 Optional `exclusiveResources` names declare resources that cannot be assigned concurrently, such as `staging:sms-test-account`. Names are case-sensitive lowercase identifiers using letters, digits, `.`, `_`, `:`, `/`, and `-`. Give the same real resource the same name throughout this single-repository installation.
 
-Claiming work atomically reserves all declared names for that assignment. A conflicting active assignment refuses the whole claim. `next` and master dispatch exclude work with busy resources. Reservations normally follow the worker lease: release or expiry makes them claimable again, and an old heartbeat cannot recover expired authority. If an assignment has a containment quarantine, however, all of its declared resources remain reserved after lease expiry. They become available only after the quarantine is cleared: by verified capability settlement, by a coordinator that verified the supervisor dead on the registered host ([automatic containment settlement](protocol.md#automatic-containment-settlement)), or by operator-confirmed stopped-worker recovery. Rework performs that recovery for undelivered work and authorizes reassignment. On delivered work, capability settlement or `recover-containment --previous-worker-stopped` removes only the quarantine and releases its resource fence. It appends required audit/revision metadata without re-evaluating stale observation or evidence, preserving Done, recorded gates, candidate, evidence, observation, merge authorization, and the delivery snapshot. Non-delivered settlement retains normal gate evaluation. Submission alone does not release an active lease.
+Claiming work atomically reserves all declared names for that assignment. A conflicting active assignment refuses the whole claim. `next` and master dispatch exclude work with busy resources. Reservations normally follow the worker lease: release or expiry makes them claimable again, and an old heartbeat cannot recover expired authority. If an assignment has a containment quarantine, however, all of its declared resources remain reserved after lease expiry. They become available only after the quarantine is cleared: by verified capability settlement, by a coordinator that verified the supervisor dead on the registered host ([automatic containment settlement](protocol.md#automatic-containment-settlement)), or by the human operator's confirmed stopped-worker recovery. Rework performs that recovery for undelivered work and authorizes reassignment. On delivered work, capability settlement or `recover-containment --previous-worker-stopped` removes only the quarantine and releases its resource fence. It appends required audit/revision metadata without re-evaluating stale observation or evidence, preserving Done, recorded gates, candidate, evidence, observation, merge authorization, and the delivery snapshot. Non-delivered settlement retains normal gate evaluation. Submission alone does not release an active lease.
 
 These are coordination reservations, not physical locks on an external account or environment. A disconnected process may still access external systems using its credentials. Use supervised workers and verify that the old process has stopped before touching shared resources. Runner-specific resource fencing and leases spanning independent E2E execution are part of future runner orchestration. Never treat a resource name as a substitute for an access-control boundary.
 
@@ -73,9 +73,9 @@ Released and expired assignments are described as no longer authoritative; the U
 
 ## Two-machine operational drill
 
-Run this with two real hosts, two distinct worker principals, and an operator. Isolated tests using independent connection pools are useful but are **not** evidence that this drill ran.
+Run this with two real hosts, two distinct worker principals, and the human operator. Isolated tests using independent connection pools are useful but are **not** evidence that this drill ran.
 
-1. Connect both hosts with `graphyard init --herdr --token-stdin`; check distinct host IDs and principal IDs. Keep operator and producer credentials off both worker environments.
+1. Connect both hosts with `graphyard init --herdr --token-stdin`; check distinct host IDs and principal IDs. Keep `admin` and `producer` credentials off both worker environments.
 2. Create a small real work item with a repository test as its acceptance proof. Concurrently claim it from both hosts. Record one winner and one refusal, then register the winner's worktree.
 3. Run the winner through `watch`. Interrupt its connection to Graphyard while retaining logs. Confirm the supervisor terminates its child before treating the host as stopped.
 4. After server-clock lease expiry, claim from the other host. Record the higher epoch and fresh registered workspace. Preserve the first workspace for inspection.

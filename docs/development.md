@@ -8,15 +8,15 @@
 | `src/store.ts` | Postgres schema, transactions, immutable events, job leasing |
 | `src/engine.ts` | Authenticated commands, ownership, evidence, reconciliation |
 | `src/github.ts` | App authentication, provider observations, check publishing |
-| `src/server.ts` | HTTP authentication, validation, webhook, static UI, worker loop |
-| `src/cli.ts` | Worker protocol, local worktrees, process supervision |
+| `src/server.ts` | HTTP authentication, validation, webhook, static UI, reconciliation worker |
+| `src/cli.ts` | Worker protocol, assigned worktrees, session supervision |
 | `src/onboarding.ts`, `src/github-setup.ts` | Repository discovery and local GitHub App registration |
 | `scripts/*acceptance*.mjs` | Protected HTTP contract harness and separate evidence publisher |
 | `scripts/protect-github.mjs`, `scripts/verify-enforcement.mjs` | Bind the App-owned check; inspect live merge enforcement read-only |
 | `web/` | React graph, board, work form, details and history |
 | `integrations/herdr/` | Native Herdr ledger pane and open action |
 | `tests/` | Real Postgres integration and HTTP tests |
-| `docs/` | User, architecture, deployment, protocol, and recovery guides |
+| `docs/` | Guides, the [glossary](glossary.md), and the rendered diagrams under `docs/diagrams/` (regenerate with `node scripts/render-docs-diagrams.mjs`; `npm run docs:check` verifies links, anchors, and diagram files) |
 
 ## Validate a change
 
@@ -45,7 +45,7 @@ The [repository bootstrap guide](first-pr.md) documents Graphyard's protected re
 5. Multi-repository delivery graphs and release coordination.
 6. Pagination, archival export, and measured fleet-scale load tests.
 
-Each task should define an observable outcome and trusted proof names before an implementation agent claims it. Do not weaken policy to get the system's own PRs through its gates. A future policy-engine migration needs an explicit bootstrap/recovery procedure under operator control.
+Each task should define an observable outcome and trusted proof names before a worker claims it. Do not weaken policy to get the system's own PRs through its gates. A future policy-engine migration needs an explicit bootstrap/recovery procedure under the human operator's control.
 
 ## Contributing
 

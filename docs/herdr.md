@@ -1,6 +1,6 @@
 # Herdr integration
 
-Herdr runs visible agent sessions. Graphyard remains authoritative for work ownership, leases, evidence, and progression.
+Herdr is the runtime that launches, shows, and stops agent sessions. Graphyard remains authoritative for work ownership, leases, evidence, and progression. Terms follow the [glossary](glossary.md).
 
 ## Install the plugin
 
@@ -35,19 +35,19 @@ release GY-1 1
 quit
 ```
 
-`claim` returns an epoch. It does not prove an agent started. `handoff` prints the assigned workspace and launch command. Run workers under lease supervision:
+`claim` returns an epoch. It does not prove a session started. `handoff` prints the assigned worktree and launch command. Run worker sessions under lease supervision:
 
 ```sh
 node "$GRAPHYARD_CLI" watch GY-1 EPOCH -- YOUR_AGENT_COMMAND
 ```
 
-A direct `watch` invocation stops the worker process group on Unix. On Windows it can stop only the direct child, so use external containment if the agent may spawn descendants. Master-created foreground Herdr launches require Linux with a working systemd user manager. See [operations](operations.md) for recovery.
+A direct `watch` invocation stops the worker process group on Unix. On Windows it can stop only the direct child, so use external containment if the worker session may spawn descendants. Master-created foreground Herdr launches require Linux with a working systemd user manager. See [operations](operations.md) for recovery.
 
 ## Master mode
 
 For several workers, use the [master-agent mode](master-agent.md). It joins Graphyard work state with Herdr session health, dispatches trusted local launch profiles, and requests guarded merges.
 
-A visible session is health information, not ownership. Graphyard recognizes ownership only after the worker's authenticated claim.
+A visible session is health information, not ownership. Graphyard recognizes ownership only after the worker principal's authenticated claim.
 
 ## Multiple machines
 
@@ -64,13 +64,13 @@ Local master launch profiles run on the coordinator host. Version 0.1 does not r
 
 ## Assignment names
 
-Optional `displayName` and `runtime` fields in `GRAPHYARD_PRINCIPALS` control labels such as **Atlas · Codex**. The authenticated principal still determines ownership. Renaming a principal affects future claims and does not rewrite history.
+Optional `displayName` and `runtime` fields in `GRAPHYARD_PRINCIPALS` control labels such as **Atlas · Codex**. The authenticated principal, not the label or the runtime, determines ownership. Renaming a principal affects future claims and does not rewrite history.
 
 ## First fleet check
 
 Before scaling:
 
-1. race two identities for one item and confirm one claim wins;
+1. race two worker principals for one item and confirm one claim wins;
 2. stop the winner and reclaim after lease expiry;
 3. confirm the old epoch is refused;
 4. submit stale evidence and confirm acceptance stays closed;

@@ -2,17 +2,17 @@
 
 Graphyard records which release each environment is expected to run, and verifies it only from what authenticated, service-scoped observers measured actually running. Desired state, provider-reported deployment success and independently observed runtime state are three separate records, and a merge that completed work is a fourth: a green merge never stands in for verified production behavior.
 
-**This is D3 of the [delivery roadmap](turnkey-delivery-roadmap.md): the release model, the observation protocol and bounded reconciliation.** It ships no provider adapter. An observer is a process an operator runs with its own producer credential that reads a provider or host and submits what it measured; the packaged runner path in [runner setup](runner-setup.md) is unrelated to it. Railway's API reports deployment status and the commit a build was requested for, not the digest of the bytes each instance serves, so a Railway observer built on it today could only report `unknown` runtime identity — which this protocol refuses to verify. That refusal is the design: where independent runtime identity cannot be established, the environment shows unknown instead of falling back to an application self-report. Behavioral checks against production (a validation request bound to a release rather than to a work item's candidate) are not part of this increment.
+**This is D3 of the [delivery roadmap](turnkey-delivery-roadmap.md): the release model, the observation protocol and bounded reconciliation.** It ships no provider adapter. An observer is a process the human operator runs with its own `producer` credential that reads a provider or host and submits what it measured; the packaged runner path in [runner setup](runner-setup.md) is unrelated to it. Railway's API reports deployment status and the commit a build was requested for, not the digest of the bytes each instance serves, so a Railway observer built on it today could only report `unknown` runtime identity — which this protocol refuses to verify. That refusal is the design: where independent runtime identity cannot be established, the environment shows unknown instead of falling back to an application self-report. Behavioral checks against production (a validation request bound to a release rather than to a work item's candidate) are not part of this increment.
 
 ## Records and who may change them
 
 | Record | Written by | Meaning |
 | --- | --- | --- |
-| Environment `delivery` policy | Operator, as an environment definition revision | Freshness bound for a verified interval; whether selection needs an approval |
+| Environment `delivery` policy | Human operator (`admin`), as an environment definition revision | Freshness bound for a verified interval; whether selection needs an approval |
 | Release build | `producer` with a `builder` registration | Source → artifact manifest for one environment, independently established |
-| Release revision | Operator, or `producer` with a `promoter` registration and a current lease | Immutable manifest, source and explicit membership |
-| Approval | Operator | Binds one release revision, manifest hash, build and policy revision |
-| Expected release selection | Operator or promoter | Advances the environment's generation; fenced by `expectedGeneration` |
+| Release revision | Human operator (`admin`), or `producer` with a `promoter` registration and a current lease | Immutable manifest, source and explicit membership |
+| Approval | Human operator (`admin`) | Binds one release revision, manifest hash, build and policy revision |
+| Expected release selection | Human operator (`admin`) or promoter | Advances the environment's generation; fenced by `expectedGeneration` |
 | Deployment observation | `producer` with an `observer` registration and a current lease | Append-only runtime facts for the observer's services |
 | Notification | Any authenticated non-worker credential | A provider webhook relayed as a hint; recorded, never authoritative |
 | Verification, incidents, attribution | Graphyard's bounded sweep | Derived from observations; never asserted by a client |

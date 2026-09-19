@@ -1,22 +1,16 @@
 # Onboard a repository
 
-This is the supported path from an existing GitHub repository to Graphyard, Herdr, one master, and one worker. Start with one worker; add capacity after the first PR reaches Done.
+This is the supported path from an existing GitHub repository to Graphyard, Herdr, one master, and one worker. Start with one worker; add capacity after the first PR reaches Done. Roles are defined in the [glossary](glossary.md).
 
-```mermaid
-flowchart LR
-  O[Operator] --> G[Graphyard]
-  M[Master] --> G
-  W[Worker] --> G
-  W --> P[GitHub PR]
-  P --> G
-  R[Reviewer and trusted runner] --> G
-```
+![Who holds which authority in Graphyard: the human operator sends human-only decisions to the Graphyard control plane; the Herdr runtime hosts the master, slice lead, and worker sessions, each with one credential; the reviewer, proof producer, and optional operator agent sit beside them; sessions send authenticated commands to Graphyard, the worker pushes its branch and opens the pull request on GitHub, the reviewer approves the exact head, and Graphyard observes GitHub facts and merges only through the guarded path.](diagrams/roles-and-authority.svg)
 
-You keep talking directly to the master. The master reads work and gate state from Graphyard, dispatches ready items to supervised workers, notices stalls, and performs routine exact-candidate merges when every configured gate passes. Workers write code in Graphyard-assigned worktrees. GitHub owns code review and CI facts; trusted runners produce acceptance evidence.
+Text equivalent: you, the **human operator**, hold the `admin` credential and make the human-only decisions. The **master** (`coordinator`) reads work and gate state from Graphyard, dispatches ready items to supervised **workers** (`worker`, each with its own lease and assigned worktree), notices stalls, and performs routine exact-candidate merges when every configured gate passes. Workers push branches and open pull requests on GitHub; the **reviewer** (a separate GitHub identity) approves the exact head; **proof producers** (`producer`) submit acceptance evidence; Graphyard observes GitHub and merges only through the guarded path. Herdr hosts the sessions and reports their health. A fuller description accompanies the same diagram in [How Graphyard works](how-graphyard-works.md#four-ai-agent-sessions).
+
+You keep talking directly to the master. GitHub owns code review and CI facts; proof producers produce acceptance evidence.
 
 The initial setup works with one worker. Add more workers or machines only after the first PR has completed the full loop.
 
-Do not create an operator-agent credential during this bootstrap. After the repository is connected and its gates have completed the protected loop, a human administrator may optionally configure [scoped operator automation](operator-automation.md). That mode keeps Operator, Master, Worker, and Reviewer/proof-producer as four distinct AI sessions; it does not replace human goals, approvals, exceptions, or oversight.
+Do not create an operator-agent credential during this bootstrap. After the repository is connected and its gates have completed the protected loop, the human operator may optionally configure [scoped operator automation](operator-automation.md). That mode keeps operator agent, master, worker, and reviewer/proof producer as four distinct AI agent sessions; it does not replace human goals, approvals, exceptions, or oversight.
 
 ## Before you start
 
@@ -34,17 +28,17 @@ For every `--token-stdin` prompt, paste the token, press Enter, then press Ctrl-
 
 Use one Graphyard server and one Postgres database for all workers. Follow [deployment](deployment.md) for Railway or Docker Compose.
 
-Create a separate cryptographically random token of at least 32 characters for each role:
+Create one principal with a separate cryptographically random token of at least 32 characters for each role:
 
-| Role | Use |
-| --- | --- |
-| `admin` | Setup, work creation, requirements, and recovery |
-| `coordinator` | Master status and guarded merge authority |
-| `worker` | One identity per concurrent implementation session |
-| `reader` | Read-only dashboards |
-| `producer` | Only the proof names that runner may submit |
+| Role | Held by | Use |
+| --- | --- | --- |
+| `admin` | The human operator; declare `sessionKind: "human"` | Setup, work creation, requirements, and recovery |
+| `coordinator` | The master | Master status and guarded merge authority |
+| `worker` | One worker session each | One principal per concurrent worker session |
+| `reader` | Dashboards | Read-only dashboards |
+| `producer` | A proof producer (CI or trusted runner) | Only the proof names its grant allows |
 
-Set `GRAPHYARD_PRINCIPALS`, `GITHUB_REPOSITORY`, `GITHUB_BASE_BRANCH`, and `GITHUB_CI_APP_IDS` on the server. Never give an implementation worker an admin, coordinator, or producer token.
+Set `GRAPHYARD_PRINCIPALS`, `GITHUB_REPOSITORY`, `GITHUB_BASE_BRANCH`, and `GITHUB_CI_APP_IDS` on the server. Never give a worker an `admin`, `coordinator`, or `producer` token.
 
 Open the Graphyard URL and sign in with the admin token.
 
@@ -90,7 +84,7 @@ Commit `AGENTS.md` and `.gitignore`. Never commit `.graphyard/`. Repeat on each 
 
 ## 4. Start the master
 
-Use a clean checkout under a dedicated coordinator OS identity or machine. It must not contain a worker connection or expose its merge-capable GitHub CLI credentials to implementation agents.
+Use a clean checkout under a dedicated coordinator OS identity or machine. It must not contain a worker connection or expose its merge-capable GitHub CLI credentials to worker sessions.
 
 ```sh
 cd /path/to/coordinator-checkout
@@ -199,7 +193,7 @@ node "$GRAPHYARD_CLI" master status
 
 `master status` lists pending and completed reviews. When the reviewer posts its verdict on that exact commit, Graphyard closes the session and removes its credential.
 
-Connect that evidence before merging. Version 0.1 has no general-purpose runner: put a narrowly scoped `producer` token in protected CI that pull-request code cannot read, then submit the current candidate's actual result. For a criterion explicitly defined with a `manual:` proof, use a separate admin-authenticated operator session to inspect and submit it; never expose that credential to the worker checkout. An admin cannot certify automated proof names. See [evidence submission](protocol.md#evidence).
+Connect that evidence before merging. Version 0.1 has no general-purpose runner: put a narrowly scoped `producer` token in protected CI that pull-request code cannot read, then submit the current candidate's actual result. For a criterion explicitly defined with a `manual:` proof, the human operator inspects and submits it from a separate `admin`-authenticated terminal or dashboard sign-in; never expose that credential to the worker checkout. An `admin` cannot certify automated proof names. See [evidence submission](protocol.md#evidence).
 
 When `Graphyard / merge` first appears, add it to branch protection — with "require branches to be up to date" off, which the [merge queue](github.md#merge-queue) requires. After every gate passes:
 
@@ -213,6 +207,6 @@ Before adding more workers, stop one worker, let its lease expire, reclaim with 
 
 ## Current manual steps
 
-Version 0.1 still requires an operator to deploy the server, provision identities, authenticate agent providers, sign the browser profile in to GitHub once, approve GitHub's *Confirm access* prompt on their device when a page asks for it, and connect project-specific trusted evidence. Registering each App is still a first-time click in the manifest flow; App permission updates, installation acceptance, and branch-protection reconciliation are the master's (`master browser …` and `master protection --apply`), and Graphyard still refuses to create protection that is missing the `Graphyard / merge` binding or a classic rule for the base branch. Decisions the guides mark human-only — releasing work, revising requirements, choosing review providers, clearing blockers, manual proofs, rework, and merge approval without automatic merging — stay with you. A hosted signup flow and general turnkey E2E execution are not shipped.
+Version 0.1 still requires the human operator to deploy the server, provision principals, authenticate agent providers, sign the browser profile in to GitHub once, approve GitHub's *Confirm access* prompt on their device when a page asks for it, and connect project-specific trusted evidence. Registering each App is still a first-time click in the manifest flow; App permission updates, installation acceptance, and branch-protection reconciliation are the master's (`master browser …` and `master protection --apply`), and Graphyard still refuses to create protection that is missing the `Graphyard / merge` binding or a classic rule for the base branch. Decisions the guides mark human-only — releasing work, revising requirements, choosing review providers, clearing blockers, manual proofs, rework, and merge approval without automatic merging — stay with you. A hosted signup flow and general turnkey E2E execution are not shipped.
 
 Use the [documentation index](README.md) for deeper setup, operations, and protocol details.

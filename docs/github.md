@@ -44,13 +44,13 @@ Configure protection on the managed base branch:
 3. Do **not** require the branch to be up to date before merging (`strict` must be off). A queued candidate is deliberately behind the base branch while the entries ahead of it land, so that setting would block every queue landing. The [merge queue](#merge-queue) supersedes it with a stronger binding, and Graphyard refuses its merge gate while it is enabled.
 4. Enforce the rule for administrators.
 5. Disable force pushes and branch deletion.
-6. Remove bypass privileges from implementation agents. Review any rulesets that add alternate paths around protection.
+6. Remove bypass privileges from worker identities. Review any rulesets that add alternate paths around protection.
 
 GitHub may require the App to publish a check before it can be selected in the UI. Submit a linked PR to Graphyard; its initially failing check supplies that name. GitHub plan/repository capabilities may restrict branch protection; if protection cannot be enabled, this is not an enforced installation.
 
 Graphyard reads classic branch protection and refuses its merge gate unless these settings are present. Ruleset-only protection is not supported by the initial verifier; it refuses conservatively. Do not disable a working organizational ruleset to satisfy the MVP: add supported protection or extend the verifier first.
 
-The service does not automatically overwrite repository protection. For this project's first bootstrap commit, push the initial code before requiring the check, then enable it before agent-driven PRs begin. Record that bootstrap boundary in the work ledger.
+The service does not automatically overwrite repository protection. For this project's first bootstrap commit, push the initial code before requiring the check, then enable it before worker-authored PRs begin. Record that bootstrap boundary in the work ledger.
 
 Once a classic rule with the App-bound check exists, the master keeps it consistent with the open review policies: `graphyard master protection --apply` patches the review subresource through the API, and `graphyard master browser protection` toggles `strict`, administrator enforcement, and the review settings on the settings page when the API path is unavailable, verifying the result through the API either way.
 
@@ -146,7 +146,7 @@ Graphyard accepts that evidence only from a producer whose credential is granted
 
 A failed verdict marks the item **delivered with failure**. `master status` lists it under `delivered` with rollback guidance, the loop records the same guidance as an escalation, and the dashboard shows it on the card, in the work detail, and in the post-deploy flow node. See [operations](operations.md#delivered-with-a-failed-smoke-proof) for what to do. A later passing run at the same deployed commit supersedes the verdict for the item's state; every run stays in the evidence ledger.
 
-Grant the smoke producer only `e2e:deploy-smoke` (`graphyard grants grant smoke e2e:deploy-smoke "Post-deployment smoke reporter"`, see [proof authority grants](operations.md#proof-authority-grants)); the reporter checks its live authority before it runs. Do not give an implementation worker that credential, and keep `SMOKE_COMMAND` in the trusted checkout on the managed base branch rather than in candidate code.
+Grant the smoke producer only `e2e:deploy-smoke` (`graphyard grants grant smoke e2e:deploy-smoke "Post-deployment smoke reporter"`, see [proof authority grants](operations-reference.md#proof-authority-grants)); the reporter checks its live authority before it runs. Do not give an implementation worker that credential, and keep `SMOKE_COMMAND` in the trusted checkout on the managed base branch rather than in candidate code.
 
 ## Enforcement boundary
 

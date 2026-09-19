@@ -43,6 +43,6 @@ The exercise job runs candidate code with disposable principals. A separate `gra
 
 This proof covers API authorization, competing claims, stale epochs, worker evidence trust, and unfinished dependencies. It does not prove arbitrary product behavior, cross-machine recovery, or production delivery.
 
-The refused and permitted reports are the operator's inspection record for the `manual:github-enforcement` criterion. They are not evidence: an operator inspects them and attests the proof from a separate admin session, and Graphyard re-verifies the exact candidate before merging.
+The refused and permitted reports are the human operator's inspection record for the `manual:github-enforcement` criterion. They are not evidence: the human operator inspects them and attests the proof from a separate `admin`-authenticated terminal, and Graphyard re-verifies the exact candidate before merging.
 
 After this loop succeeds, route further Graphyard work through Graphyard-assigned worktrees. See [development](development.md) for repository rules and [GitHub enforcement](github.md#inspect-enforcement) for the general integration model.

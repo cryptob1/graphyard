@@ -18,7 +18,7 @@ Graphyard ships one application Docker image and uses a separate Postgres servic
 | `DATABASE_URL` | Reference `${{Postgres.DATABASE_URL}}` to use Railway private networking |
 | `HOST` | `0.0.0.0` for Railway/container ingress |
 | `PORT` | `4310`, or the port supplied by Railway |
-| `GRAPHYARD_PRINCIPALS` | JSON array of individual operator, coordinator, worker, reader, and proof-producer credentials |
+| `GRAPHYARD_PRINCIPALS` | JSON array of principals: the human operator's `admin`, the master's `coordinator`, `slice-lead`, `worker`, `reader`, and `producer` credentials, each with a `sessionKind` |
 | `GITHUB_REPOSITORY` | `owner/repository`; one repository per control plane |
 | `GITHUB_BASE_BRANCH` | Usually `main` |
 | `GITHUB_APP_ID` | Dedicated Graphyard GitHub App ID |
@@ -46,7 +46,7 @@ railway domain --service graphyard --port 4310
 
 Do not paste secrets into committed configuration, screenshots, or issue reports. Each worker should receive only its own token. The initial provisioning helper in `scripts/provision-railway.mjs` is specific to this project's personal Railway deployment; generic installs should follow the variables table.
 
-For a multi-agent installation, add one `coordinator` principal for the recommended [master-agent operating mode](master-agent.md). This identity can read control-plane state but cannot claim work, revise requirements, or submit evidence. Keep its token in the master's ignored mode-0600 configuration. Give every concurrent implementation session a different `worker` principal.
+For a multi-agent installation, add one `coordinator` principal for the recommended [master-agent operating mode](master-agent.md). This principal can read control-plane state and request the guarded merge but cannot claim work, revise requirements, or submit evidence. Keep its token in the master's ignored mode-0600 configuration. Give every concurrent implementation session a different `worker` principal.
 
 The checked-in `.railway/railway.ts` describes this project's existing personal deployment, including preserved values. It is not a universal fresh-project template: adapt resource/source identities and supply your own secrets before planning a new installation. `preserve()` retains existing values; it does not generate credentials for new services.
 
@@ -58,7 +58,7 @@ cp .env.example .env
 docker compose --profile full up -d --build
 ```
 
-The database volume `graphyard-data` holds durable state. Both published ports bind loopback by default. Put a TLS reverse proxy in front of port 4310 if remote workers need access. Never expose Postgres publicly just so agents can connect; agents use the HTTP API.
+The database volume `graphyard-data` holds durable state. Both published ports bind loopback by default. Put a TLS reverse proxy in front of port 4310 if remote workers need access. Never expose Postgres publicly just so agent sessions can connect; sessions use the HTTP API.
 
 The sample Compose password is for local development. Set a unique database password for any shared installation and update `DATABASE_URL` accordingly.
 
