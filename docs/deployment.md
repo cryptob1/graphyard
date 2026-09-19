@@ -1,3 +1,4 @@
+<!-- page: Operate Graphyard | 1 | Railway, Docker Compose, backups, and upgrades. -->
 # Deployment
 
 If this is the first Graphyard installation for a repository, follow [Repository onboarding](onboarding.md) for the complete sequence through Herdr, the master, workers, and the first PR. This guide is the deployment reference for that path.

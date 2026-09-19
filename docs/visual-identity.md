@@ -1,3 +1,4 @@
+<!-- page: Understand or contribute | 4 | the marks, palette, and voice the dashboard and docs share. -->
 # Graphyard visual identity
 
 The proposed mark draws a lowercase **g** as a connected path. Three visible nodes suggest independently owned work joining a delivery flow; the descending path leaves room for the next step. The symbol is original vector geometry, not a font glyph or a generated bitmap.
