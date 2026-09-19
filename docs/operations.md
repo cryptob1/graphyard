@@ -4,7 +4,7 @@ Three minutes for the human operator. Detail: [operations reference](operations-
 
 ## Daily checklist
 
-- `/healthz` returns 200 and confirms database connectivity.
+- `/healthz` returns 200 with database connectivity.
 - `/api/status` shows no persistent integration errors.
 - `graphyard master status`: `daemon.running` true, `unresolved` empty, every `escalations` entry owned.
 - The delivery graph shows no stale observations or unexplained blockers.
@@ -14,7 +14,7 @@ Three minutes for the human operator. Detail: [operations reference](operations-
 ## Incident decision tree
 
 - **An item is not moving.** Read the refusal on the card.
-  - A gate names a cause → fix it; the same gate re-evaluates. Never weaken requirements.
+  - A gate names a cause → fix it; it re-evaluates. Never weaken requirements.
   - Listed in `escalations` → a declared human session runs `graphyard resolve GY-N TRIGGER "reason"`. No AI principal can.
   - Lease expired, nothing submitted → [lost worker](#lost-worker-before-submission).
   - Submitted, needs another attempt → [rework](#rework-a-submitted-implementation).
@@ -44,15 +44,15 @@ This fences old commands, closes the build gate, and records a `lease-loss` esca
 
 ### Settle a containment quarantine
 
-A dead supervisor leaves the fence up on purpose. When `master status` shows `settleable: true` with no refusals, run `graphyard master settle-containment GY-N "reason"`; the control plane re-verifies. Otherwise confirm the worker stopped yourself, then attest: `rework … --previous-worker-stopped` (undelivered) or `graphyard recover-containment GY-N --previous-worker-stopped "reason"` (delivered). Never attest a stop you have not confirmed. [Detail](operations-reference.md#supervisor-died-leaving-a-containment-quarantine)
+A dead supervisor leaves the fence up deliberately. When `master status` shows `settleable: true` with no refusals, run `graphyard master settle-containment GY-N "reason"`; the control plane re-verifies. Otherwise confirm the worker stopped yourself, then attest: `rework … --previous-worker-stopped` (undelivered) or `graphyard recover-containment GY-N --previous-worker-stopped "reason"` (delivered). Never attest a stop you have not confirmed. [Detail](operations-reference.md#supervisor-died-leaving-a-containment-quarantine)
 
 ### Restart the master loop
 
-Restart `graphyard master run` freely; its cursor reconciles against Graphyard on start, so nothing is dispatched twice or lost. Never edit the cursor. A second loop refuses while the first is alive. [Detail](operations-reference.md#master-coordination-loop)
+Restart `graphyard master run` freely: its cursor reconciles on start; nothing is dispatched twice or lost. Never edit the cursor. A second loop refuses while the first is alive. [Detail](operations-reference.md#master-coordination-loop)
 
 ### GitHub jobs and outages
 
-Jobs retry after 45 seconds and recover expired leases after 90. Check App access, protection, and the registered branch. The merge gate refuses observations older than two minutes; a direct GitHub merge has no verified execution and cannot complete its item. [Detail](operations-reference.md#github-job-fails)
+Jobs retry after 45 seconds and recover expired leases after 90. Check App access, protection, and the registered branch. A missing App permission (`appPermissions`) holds its jobs until accepted; fix with `github-setup --update-permissions`. The merge gate refuses observations older than two minutes; a direct GitHub merge has no verified execution and cannot complete its item. [Detail](operations-reference.md#github-job-fails)
 
 ### Merge bypass
 
@@ -60,11 +60,11 @@ An observed merge with unsatisfied gates is a permanent violation. Never backfil
 
 ### Delivered with a failed smoke proof
 
-The item stays Done, marked delivered with failure. Roll back or revert through a new work item under the same gates; never delete the failure or backfill a pass. [Detail](operations-reference.md#delivered-with-a-failed-smoke-proof)
+The item stays Done, delivered with failure. Roll back or revert through a new work item under the same gates; never delete the failure or backfill a pass. [Detail](operations-reference.md#delivered-with-a-failed-smoke-proof)
 
 ## Bootstrap mode
 
-The human operator may defer one criterion whose proof harness ships in the same change: a `bootstrap` declaration naming `contractPaths` inside the planned files. It needs `policy:bootstrap`, leaves every other gate in force, and becomes an obligation inherited by the next item touching those paths. [Detail](operations-reference.md#bootstrap-mode-for-a-self-proving-change)
+The human operator may defer one criterion whose proof harness ships in the same change: a `bootstrap` declaration naming `contractPaths` inside the planned files. It needs `policy:bootstrap`, leaves every other gate in force, and becomes an obligation for the next item touching those paths. [Detail](operations-reference.md#bootstrap-mode-for-a-self-proving-change)
 
 ## Safety facts that never change
 

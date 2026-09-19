@@ -7,7 +7,8 @@ import { z } from 'zod';
 import { Store } from './store.js';
 import { Engine, type Command } from './engine.js';
 import { Refusal, demand, operatorScopeIncludes, parseReviewerApps, type Principal } from './model.js';
-import { githubFromEnv, processJob, type GitHub } from './github.js';
+import { githubFromEnv, installationFingerprint, installationSettingsUrl, processJob, type AppPermissionReport, type GitHub } from './github.js';
+import { controlPlanePermissions, requiredPermissions } from './github-permissions.js';
 import { Validation } from './validation.js';
 import { Delivery } from './delivery.js';
 import { defineScenario, scenarios } from './scenarios.js';
@@ -179,12 +180,16 @@ export function server(engine: Engine, credentials: Credential[], github: GitHub
           if (req.method === 'POST') return send(200, await defineScenario(engine.store, actor, JSON.parse((await body(req)).toString()), String(req.headers['idempotency-key'] ?? '')));
         }
         if (req.method === 'GET' && url.pathname === '/api/status') {
-          const jobs = actor.role === 'operator-agent' ? [] : (await engine.store.pool.query('SELECT work_id,available_at,locked_until,attempts,error FROM jobs WHERE error IS NOT NULL ORDER BY available_at LIMIT 50')).rows;
+          const jobs = actor.role === 'operator-agent' ? [] : (await engine.store.pool.query('SELECT work_id,available_at,locked_until,attempts,error,held_until FROM jobs WHERE error IS NOT NULL ORDER BY available_at LIMIT 50')).rows;
           const githubRepository = github ? await github.reviewRepository() : null;
           const githubPermissions = github ? await github.reviewPermissions() : {};
           const dispatchAvailable = !!githubRepository && githubPermissions.pull_requests === 'write' && ['read', 'write'].includes(githubPermissions.issues) && githubPermissions.checks === 'write';
+          // The declared-permission preflight: what the installation grants against what every
+          // feature needs, with the operator sentences the dashboard and master status raise.
+          const appPermissions = github ? github.permissionReport() ?? { appId: github.config.appId, installationId: github.config.installationId, app: String(github.config.appId), account: null, installationUrl: installationSettingsUrl(github.config.installationId), observedAt: null, verifiedAt: null, error: 'Permission preflight has not run yet', suspended: false, required: requiredPermissions(controlPlanePermissions), granted: null, missing: [], blockedFeatures: [], attention: ['GitHub App permissions have not been verified yet; the preflight runs at startup and every five minutes'] } : null;
+          const heldJobs = actor.role === 'operator-agent' ? 0 : (await engine.store.heldJobs()).length;
           const observedAt = (await engine.store.pool.query('SELECT clock_timestamp() AS now')).rows[0].now as Date;
-          return send(200, { actor, delegation: delegationSnapshot(principals.map(p => p.actor), operatorVisible(await engine.store.list()), observedAt.getTime(), limits), repository: repository || null, baseBranch: github?.config.base ?? process.env.GITHUB_BASE_BRANCH ?? 'main', github: !!github, check: 'Graphyard / merge', reviewProviders: ['github', ...(dispatchAvailable ? ['codex'] : []), ...(dispatchAvailable && engine.reviewerApps.length ? ['agent'] : [])], reviewerApps: engine.reviewerApps, githubPermissions, githubRepository, githubAppId: github?.config.appId ?? null, githubInstallationId: github?.config.installationId ?? null, jobs, now: observedAt.toISOString() });
+          return send(200, { actor, delegation: delegationSnapshot(principals.map(p => p.actor), operatorVisible(await engine.store.list()), observedAt.getTime(), limits), repository: repository || null, baseBranch: github?.config.base ?? process.env.GITHUB_BASE_BRANCH ?? 'main', github: !!github, check: 'Graphyard / merge', reviewProviders: ['github', ...(dispatchAvailable ? ['codex'] : []), ...(dispatchAvailable && engine.reviewerApps.length ? ['agent'] : [])], reviewerApps: engine.reviewerApps, githubPermissions, githubRepository, githubAppId: github?.config.appId ?? null, githubInstallationId: github?.config.installationId ?? null, appPermissions, heldJobs, jobs, now: observedAt.toISOString() });
         }
         if (req.method === 'GET' && url.pathname === '/api/work-snapshot') { const snapshot = await engine.store.workSnapshot(); const visibleWork = operatorVisible(snapshot.work); return send(200, { ...snapshot, work: visibleWork, jobs: actor.role === 'operator-agent' ? snapshot.jobs.filter(job => visibleWork.some(work => work.id === job.work_id)) : snapshot.jobs }); }
         if (req.method === 'GET' && url.pathname === '/api/work') return send(200, operatorVisible(await engine.store.list()));
@@ -272,6 +277,16 @@ async function main() {
   const engine = new Engine(store, (process.env.GITHUB_CI_APP_IDS ?? '15368').split(',').map(Number));
   engine.reviewerApps = parseReviewerApps(process.env.GRAPHYARD_REVIEWER_APPS);
   const github = await githubFromEnv();
+  // Startup preflight: a permission shortfall is announced before the first job can run
+  // into it, and the jobs that need the missing permission are held rather than retried.
+  // A passing preflight (startup or periodic) releases holds decided against a different
+  // installation, including holds left by an earlier process; a hold decided against this same
+  // installation (a 403 the declaration does not explain) keeps its bounded expiry.
+  const announcePreflight = async (report: AppPermissionReport) => {
+    for (const line of report.attention) console.error(`GitHub App permissions: ${line}`);
+    if (!report.error && !report.suspended && !report.missing.length) await store.releaseHeldJobs(installationFingerprint(report));
+  };
+  if (github) await announcePreflight(await github.preflight());
   const artifacts = { backend: artifactBackendFromEnv(), capacityBytes: artifactCapacityFromEnv() };
   const http = server(engine, credentials, github, artifacts);
   // One-time materialization of the deployment allowlist. Operators manage proof authority
@@ -289,7 +304,14 @@ async function main() {
     if (running) return; running = true;
     // The delivery sweep is bounded per tick and resumes from its persisted cursor, so a
     // backlog of observations drains across ticks without ever skipping one.
-    try { await validation.expireArtifacts(); await validation.reconcile(); await engine.reconcile(); await delivery.sweep(); if (github) await Promise.all(Array.from({ length: 4 }, () => processJob(engine, github))); }
+    try {
+      await validation.expireArtifacts(); await validation.reconcile(); await engine.reconcile(); await delivery.sweep();
+      if (github) {
+        const preflight = await github.preflightIfDue();
+        if (preflight) await announcePreflight(preflight);
+        await Promise.all(Array.from({ length: 4 }, () => processJob(engine, github)));
+      }
+    }
     catch (error) { console.error('reconciliation failed', error instanceof Error ? error.message : 'unknown'); }
     finally { running = false; }
   }, 2000);

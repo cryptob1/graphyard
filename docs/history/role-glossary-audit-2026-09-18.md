@@ -82,6 +82,14 @@ Read with no ambiguous instance: the `sync` command text in `coordination.md` an
 
 A later merge of `main` brought GY-3 (trusted CI inventory provenance), which extends the *Trusted test producers* section of `github.md`. Read with no ambiguous instance: *producer*, *publisher*, *reporter*, and *harness* there name the proof-producer identity and the pieces of the bundled acceptance workflow, and *the exercise job receives no producer token* restates an evidence-trust boundary without weakening it. No rewrite was needed. GY-38 (dashboard durations) followed and added a formatter paragraph to `architecture.md`; it names no role, session, or authority, so it was read with no ambiguous instance.
 
+GY-52 (declared App permissions) followed with `install.md` (new, added to the in-app navigation), the *App permissions* section of `github.md`, and passages in `master-agent.md`, `onboarding.md`, and the old operations page:
+
+| Page | Before | After | Reason |
+| --- | --- | --- | --- |
+| `master-agent.md` (GY-52) | "A permission shortfall is an operator action, not a merge decision" | "A permission shortfall is an administration action — the human operator, or the master through the operator's browser profile — not a merge decision" | Which operator: `github.md` makes keeping App permissions current the master's browser-flow job, so bare *operator* read as if only the human could act. |
+
+Read with no ambiguous instance: `install.md` (*its owner* is the App's GitHub owner; *worker identities are never Apps* names the role), the `github.md` permission tables (*never an agent's changes* means any agent, where the role does not matter), and the *master status* attention paragraph. The paragraph GY-52 added to the old operations page — permission errors hold jobs rather than retry — now lives in `operations-reference.md` under *GitHub job fails*, and the primary page's *GitHub jobs and outages* recipe gained one sentence pointing at it; six filler words elsewhere on the primary page were removed to keep the 650-word budget, none from a safety statement.
+
 ## Concision samples (before / after)
 
 | Page | Before | After |
