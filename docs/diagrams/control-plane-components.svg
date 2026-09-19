@@ -50,7 +50,7 @@
 <text x="32" y="619.2" font-size="14" font-weight="400" fill="#d8ecf9" text-anchor="start">releases and delivery observations. Triggers reject ledger edits.</text>
 <line x1="280" y1="507.9200000000001" x2="280" y2="547.9200000000001" stroke="#9fb39c" stroke-width="2.5" marker-end="url(#arrow)"/>
 <text x="290" y="533.9" font-size="13" font-weight="400" fill="#b8c6b7" text-anchor="start">aggregate + event in one transaction</text>
-<rect x="20" y="684.0000000000001" width="236" height="160.0" rx="4" fill="#182a36" stroke="#8fc1e6" stroke-width="2"/>
+<rect x="20" y="684.0000000000001" width="230" height="160.0" rx="4" fill="#182a36" stroke="#8fc1e6" stroke-width="2"/>
 <text x="32" y="714.0" font-size="16" font-weight="650" fill="#d8ecf9" text-anchor="start">Reconciliation worker</text>
 <text x="32" y="732.8" font-size="14" font-weight="400" fill="#d8ecf9" text-anchor="start">Two-second tick: expires</text>
 <text x="32" y="751.3" font-size="14" font-weight="400" fill="#d8ecf9" text-anchor="start">leases, leases jobs with</text>
@@ -58,17 +58,17 @@
 <text x="32" y="788.3" font-size="14" font-weight="400" fill="#d8ecf9" text-anchor="start">observations, publishes the</text>
 <text x="32" y="806.7" font-size="14" font-weight="400" fill="#d8ecf9" text-anchor="start">required check, runs the</text>
 <text x="32" y="825.2" font-size="14" font-weight="400" fill="#d8ecf9" text-anchor="start">guarded merge.</text>
-<rect x="304" y="684.0000000000001" width="236" height="123.0" rx="4" fill="#262d28" stroke="#b8c2bb" stroke-width="2"/>
-<text x="316" y="714.0" font-size="16" font-weight="650" fill="#e3e9e3" text-anchor="start">GitHub</text>
-<text x="316" y="732.8" font-size="14" font-weight="400" fill="#e3e9e3" text-anchor="start">PR, reviews, checks, branch</text>
-<text x="316" y="751.3" font-size="14" font-weight="400" fill="#e3e9e3" text-anchor="start">protection, merge facts.</text>
-<text x="316" y="769.8" font-size="14" font-weight="400" fill="#e3e9e3" text-anchor="start">Read by the worker; never</text>
-<text x="316" y="788.3" font-size="14" font-weight="400" fill="#e3e9e3" text-anchor="start">trusted from a session.</text>
+<rect x="310" y="684.0000000000001" width="230" height="123.0" rx="4" fill="#262d28" stroke="#b8c2bb" stroke-width="2"/>
+<text x="322" y="714.0" font-size="16" font-weight="650" fill="#e3e9e3" text-anchor="start">GitHub</text>
+<text x="322" y="732.8" font-size="14" font-weight="400" fill="#e3e9e3" text-anchor="start">PR, reviews, checks, branch</text>
+<text x="322" y="751.3" font-size="14" font-weight="400" fill="#e3e9e3" text-anchor="start">protection, merge facts.</text>
+<text x="322" y="769.8" font-size="14" font-weight="400" fill="#e3e9e3" text-anchor="start">Read by the worker; never</text>
+<text x="322" y="788.3" font-size="14" font-weight="400" fill="#e3e9e3" text-anchor="start">trusted from a session.</text>
 <line x1="158" y1="640.0000000000001" x2="158" y2="680.0000000000001" stroke="#9fb39c" stroke-width="2.5" marker-end="url(#arrow)"/>
 <text x="168" y="666.0" font-size="13" font-weight="400" fill="#b8c6b7" text-anchor="start">jobs</text>
-<line x1="260" y1="718.0000000000001" x2="300" y2="718.0000000000001" stroke="#9fb39c" stroke-width="2.5" marker-end="url(#arrow)"/>
-<line x1="300" y1="718.0000000000001" x2="260" y2="718.0000000000001" stroke="#9fb39c" stroke-width="2.5" marker-end="url(#arrow)"/>
-<line x1="300" y1="758.0000000000001" x2="260" y2="758.0000000000001" stroke="#9fb39c" stroke-width="1.5" stroke-dasharray="6 5" marker-end="url(#arrow)"/>
+<line x1="254" y1="718.0000000000001" x2="306" y2="718.0000000000001" stroke="#9fb39c" stroke-width="2.5" marker-end="url(#arrow)"/>
+<line x1="306" y1="718.0000000000001" x2="254" y2="718.0000000000001" stroke="#9fb39c" stroke-width="2.5" marker-end="url(#arrow)"/>
+<line x1="306" y1="758.0000000000001" x2="254" y2="758.0000000000001" stroke="#9fb39c" stroke-width="1.5" stroke-dasharray="6 5" marker-end="url(#arrow)"/>
 <text x="280" y="779.5" font-size="12" font-weight="400" fill="#b8c6b7" text-anchor="middle">webhook</text>
 <text x="20" y="870.6" font-size="13" font-weight="400" fill="#b8c6b7" text-anchor="start">Solid pair: the worker reads PR, CI, review, and protection facts and</text>
 <text x="20" y="887.7" font-size="13" font-weight="400" fill="#b8c6b7" text-anchor="start">publishes the "Graphyard / merge" check. Dashed: a signed webhook only</text>

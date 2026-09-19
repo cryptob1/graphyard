@@ -120,7 +120,7 @@ function rolesAndAuthority() {
   c.arrow(human.cx, human.bottom, human.cx, human.bottom + 44, { label: 'human-only decisions', labelSide: 'right' });
   y = human.bottom + 46;
   const gy = c.box({ x: 20, y, w: 520, kind: 'graphyard', title: 'Graphyard control plane', body: 'Server, Postgres, dashboard, and CLI. Records ownership (lease + epoch), requirements, the candidate (PR, head SHA, base SHA), evidence, gate decisions, and merge authorization. Gates are deterministic; there is no lifecycle-state endpoint and no merge bypass.' });
-  y = gy.bottom + 72;
+  y = gy.bottom + 88;
   // Sessions row: Herdr container on the left with the three runtime-hosted roles, independent identities on the right.
   const herdrTop = y;
   const index = c.mark();
@@ -132,7 +132,8 @@ function rolesAndAuthority() {
   const producer = c.box({ x: 352, y: reviewer.bottom + 10, w: 188, kind: 'agent', title: 'Proof producer', body: 'CI workflow or trusted runner. Submits evidence bound to head, base, and policy revision.', tags: ['producer', 'grant'] });
   const opAgent = c.box({ x: 352, y: producer.bottom + 10, w: 188, kind: 'agent', title: 'Operator agent', body: 'Optional, scoped. Adds intent and requirements; never removes them.', tags: ['operator-agent'] });
   const sessionsBottom = Math.max(worker.bottom + 12, opAgent.bottom);
-  c.arrow(180, herdrTop - 4, 180, gy.bottom + 4, { label: 'claim, heartbeat, submit, dispatch, merge request: each under its own credential', labelSide: 'right', labelWidth: 200 });
+  // The two upward arrows carry their labels on opposite outer sides so the lines never share a column.
+  c.arrow(180, herdrTop - 4, 180, gy.bottom + 4, { label: 'claim, heartbeat, submit, dispatch, merge request: each under its own credential', labelSide: 'left', labelWidth: 190 });
   c.arrow(446, herdrTop - 4, 446, gy.bottom + 4, { label: 'evidence, bounded intent', labelSide: 'left', labelWidth: 120 });
   y = sessionsBottom + 56;
   const github = c.box({ x: 20, y, w: 520, kind: 'external', title: 'GitHub', body: 'Pull request, reviews, CI checks, branch protection, and the observed merge. Graphyard reads these facts; it never trusts a session’s report of them.' });
@@ -196,8 +197,9 @@ function controlPlaneComponents() {
   c.arrow(api.cx, api.bottom + 2, api.cx, engine.y - 4, { label: 'authenticated commands', labelSide: 'right' });
   const db = c.box({ x: 20, y: engine.bottom + 46, w: 520, kind: 'graphyard', title: 'Postgres', body: 'work_items aggregate, append-only events and receipts, jobs queue, releases and delivery observations. Triggers reject ledger edits.' });
   c.arrow(engine.cx, engine.bottom + 2, engine.cx, db.y - 4, { label: 'aggregate + event in one transaction', labelSide: 'right' });
-  const recon = c.box({ x: 20, y: db.bottom + 46, w: 236, kind: 'graphyard', title: 'Reconciliation worker', body: 'Two-second tick: expires leases, leases jobs with SKIP LOCKED, applies observations, publishes the required check, runs the guarded merge.' });
-  const github = c.box({ x: 304, y: db.bottom + 46, w: 236, kind: 'external', title: 'GitHub', body: 'PR, reviews, checks, branch protection, merge facts. Read by the worker; never trusted from a session.' });
+  // A 60 px gap between these two boxes keeps the "webhook" label clear of both outlines.
+  const recon = c.box({ x: 20, y: db.bottom + 46, w: 230, kind: 'graphyard', title: 'Reconciliation worker', body: 'Two-second tick: expires leases, leases jobs with SKIP LOCKED, applies observations, publishes the required check, runs the guarded merge.' });
+  const github = c.box({ x: 310, y: db.bottom + 46, w: 230, kind: 'external', title: 'GitHub', body: 'PR, reviews, checks, branch protection, merge facts. Read by the worker; never trusted from a session.' });
   c.arrow(db.x + 138, db.bottom + 2, db.x + 138, recon.y - 4, { label: 'jobs', labelSide: 'right' });
   c.both(recon.x + recon.w + 4, recon.y + 34, github.x - 4, github.y + 34);
   c.arrow(github.x - 4, github.y + 74, recon.x + recon.w + 4, recon.y + 74, { dashed: true, thick: false });

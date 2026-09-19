@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs';
 import { test, expect, type Locator, type Page } from '@playwright/test';
 
 // Browser-only API fixtures: no production requests, credentials, or writes.
@@ -163,6 +164,39 @@ for (const viewport of [{ name: 'desktop', width: 1280, height: 900 }, { name: '
     await expect(page.getByRole('main').getByRole('link', { name: 'Operations reference', exact: true })).toHaveAttribute('href', '/docs/operations-reference');
     await expect(page.locator('img.docs-diagram')).toHaveCount(0);
     await fits();
+  });
+}
+
+// The committed SVGs must read clearly at their native width: no two text elements may overlap,
+// and no arrow label may cross a box outline. Measured with the browser's own text metrics.
+for (const file of ['roles-and-authority', 'bootstrap-vs-normal', 'control-plane-components']) {
+  test(`docs diagram ${file}.svg has no overlapping or clipped labels`, async ({ page }) => {
+    const svg = readFileSync(new URL(`../docs/diagrams/${file}.svg`, import.meta.url), 'utf8');
+    const [width, height] = svg.match(/viewBox="0 0 (\d+) (\d+)"/)!.slice(1).map(Number);
+    await page.setViewportSize({ width, height });
+    await page.setContent(`<html><body style="margin:0">${svg}</body></html>`);
+    const report = await page.evaluate(() => {
+      const bounds = (element: SVGGraphicsElement) => { const box = element.getBBox(); return { x: box.x, y: box.y, w: box.width, h: box.height }; };
+      const overlap = (a: { x: number; y: number; w: number; h: number }, b: { x: number; y: number; w: number; h: number }) =>
+        Math.min(a.x + a.w, b.x + b.w) - Math.max(a.x, b.x) > 0 && Math.min(a.y + a.h, b.y + b.h) - Math.max(a.y, b.y) > 0;
+      const texts = [...document.querySelectorAll('text')].map(text => ({ text: text.textContent?.trim() ?? '', ...bounds(text) })).filter(text => text.w > 0);
+      const collisions: string[] = [];
+      for (let i = 0; i < texts.length; i++) for (let j = i + 1; j < texts.length; j++) if (overlap(texts[i], texts[j])) collisions.push(`${texts[i].text} / ${texts[j].text}`);
+      // Boxes are every rect except the background; a label straddling an outline is neither inside nor clear of it.
+      const boxes = [...document.querySelectorAll('rect')].slice(1).map(rect => bounds(rect)).filter(rect => rect.w > 60);
+      const labels = [...document.querySelectorAll('text')].filter(text => text.getAttribute('fill') === '#b8c6b7').map(text => ({ text: text.textContent?.trim() ?? '', ...bounds(text) }));
+      const clipped: string[] = [];
+      for (const label of labels) for (const box of boxes) {
+        const inside = label.x >= box.x && label.x + label.w <= box.x + box.w && label.y >= box.y && label.y + label.h <= box.y + box.h;
+        if (!inside && overlap(label, box)) clipped.push(label.text);
+      }
+      return { textCount: texts.length, collisions, clipped, minX: Math.min(...texts.map(text => text.x)), maxX: Math.max(...texts.map(text => text.x + text.w)) };
+    });
+    expect(report.textCount).toBeGreaterThan(40);
+    expect(report.collisions).toEqual([]);
+    expect(report.clipped).toEqual([]);
+    expect(report.minX).toBeGreaterThanOrEqual(0);
+    expect(report.maxX).toBeLessThanOrEqual(width);
   });
 }
 
