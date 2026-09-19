@@ -34,6 +34,25 @@ item is the only record that lets the loop stop without it. Never satisfy the
 deployment step from a local checkout, a stale observation, or a delivery the
 release has since moved past.
 
+The deployment step is `master verify-deployment GY-N`, run once per delivered item
+after the merge is observed; it is never a pre-merge gate. It observes the deployed
+release through the probe configured with `master init --deployment-url`, checks
+that the launcher checkout is that exact release with no uncommitted changes, reads
+the instructions the release emits (`master guide`, and a fresh `init` into a scratch
+checkout outside the repository), and records the observation on the item bound to
+the exact commit observed. Each refusal names its cause and the fix:
+
+- *unobserved*: no probe is configured or it did not answer — configure
+  `--deployment-url` or wait for the endpoint, then rerun;
+- *stale*: the observation is older than five minutes — rerun; the command observes
+  afresh each time;
+- *does not serve the merge yet*: the rollout is lagging — keep cycling; record a
+  follow-up item only for a genuinely external cause;
+- *local checkout*: the launcher is at another commit or is dirty — `git fetch` and
+  check out the deployed commit in the Graphyard checkout, then rerun;
+- *already records deployment*: the release moved on after verification — verify
+  the new release through a follow-up item.
+
 ## Daily checks
 
 - `/healthz` should return 200 and confirm database connectivity.

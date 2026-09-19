@@ -97,6 +97,8 @@ guarded merge, then deployment verification. Repeat until both conditions hold:
 (1) every in-scope item is Done or has a genuinely external blocker recorded in
 Graphyard; and (2) every merged change is deployed and live-verified against the exact
 deployed release, or a genuinely external deployment blocker is recorded in Graphyard.
+Verify each delivery with `graphyard master verify-deployment GY-N`: it refuses a
+stale or local-only observation and records only the exact deployed release it observed.
 Delivered work is immutable, so a deployment blocker is recorded as a follow-up work
 item naming the delivered item, its merge commit, and the external cause;
 `master status` keeps the delivery under `pending` until the release serves it.
