@@ -150,6 +150,11 @@ export interface Evidence {
   executed: number; skipped: number; url?: string; at: string; expiresAt?: string;
   artifacts?: EvidenceArtifact[];
   scenarioRevision?: number; environment?: string;
+  provenance?: {
+    provider: 'github-actions'; repository: string; workflowCommit: string;
+    runId: string; runAttempt: number;
+    artifact: { id: number; name: string; digest: string; url: string; createdAt: string };
+  };
   validation?: { candidateId: string; requestId: string; attemptId: string };
 }
 export interface ReviewRequest {
