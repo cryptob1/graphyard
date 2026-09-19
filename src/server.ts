@@ -15,6 +15,7 @@ import { OperatorAgents } from './operator-agent.js';
 import { releaseInfo, schemaVersion } from './release.js';
 import { delegationLimits, delegationSnapshot, producerIndependenceRefusal, recordEvidenceRefusal, recordIntake, recordLeadRuling, recordLeadViolation, validateDelegationPrincipals } from './delegation.js';
 import { ProofGrants } from './proof-grants.js';
+import { artifactBackendFromEnv, artifactCapacityFromEnv, type ArtifactBackend } from './artifacts.js';
 
 export const principalSchema = z.array(z.object({ id: z.string().min(1), role: z.enum(['admin', 'coordinator', 'slice-lead', 'worker', 'producer', 'reader']), token: z.string().min(32), proofs: z.array(z.string()).optional(), displayName: z.string().trim().min(1).max(100).regex(/^[^\u0000-\u001f\u007f]+$/).optional(), runtime: z.string().trim().min(1).max(80).regex(/^[^\u0000-\u001f\u007f]+$/).optional(), slice: z.enum(['product', 'infrastructure', 'docs-experience']).optional(), sessionKind: z.enum(['human', 'ai']).optional() }).strict()).min(1);
 export type Credential = Principal & { token: string };
@@ -23,7 +24,7 @@ async function body(req: IncomingMessage, limit = 1_000_000) {
   for await (const chunk of req) { size += chunk.length; demand(size <= limit, 'Request exceeds size limit', 413); chunks.push(chunk); }
   return Buffer.concat(chunks);
 }
-export function server(engine: Engine, credentials: Credential[], github: GitHub | null = null) {
+export function server(engine: Engine, credentials: Credential[], github: GitHub | null = null, artifacts: { backend: ArtifactBackend | null; capacityBytes: number } = { backend: null, capacityBytes: artifactCapacityFromEnv() }) {
   const limits = delegationLimits();
   validateDelegationPrincipals(credentials, limits);
   const principals = credentials.map(({ token, ...actor }) => ({ actor, hash: createHash('sha256').update(token).digest() }));
@@ -44,6 +45,7 @@ export function server(engine: Engine, credentials: Credential[], github: GitHub
   demand(!engine.reviewerApps.some(app => app.appId === engine.controlPlaneAppId),
     'A registered reviewer App must be distinct from the Graphyard control-plane App');
   const validation = new Validation(engine, principals.map(p => p.actor), repository);
+  validation.artifactBackend = artifacts.backend; validation.artifactCapacityBytes = artifacts.capacityBytes;
   const delivery = new Delivery(validation);
   const operatorAgents = new OperatorAgents(engine.store, repository, credentials.map(credential => ({ id: credential.id, tokenHash: createHash('sha256').update(credential.token).digest('hex') })));
   engine.operatorAuthorizer = operatorAgents.revalidate.bind(operatorAgents);
@@ -128,6 +130,9 @@ export function server(engine: Engine, credentials: Credential[], github: GitHub
           return res.end(artifact.bytes);
         }
         if (url.pathname === '/api/validation' && req.method === 'GET') return send(200, await validation.list(url.searchParams.get('cursor') ?? undefined));
+        // D4: runner capacity, queue dwell, reserved resources and a diagnosed next step per live request.
+        if (url.pathname === '/api/validation/capacity' && req.method === 'GET') return send(200, await validation.capacity());
+        if (url.pathname === '/api/validation/artifacts/migrate' && req.method === 'POST') return send(200, await validation.migrateArtifacts(actor, JSON.parse((await body(req)).toString() || '{}')));
         if (url.pathname === '/api/validation/definitions' && req.method === 'GET') return send(200, await validation.definitions(url.searchParams.get('cursor') ?? undefined));
         const candidateRead = url.pathname.match(/^\/api\/validation\/candidate\/([^/]+)$/);
         if (candidateRead && req.method === 'GET') return send(200, await validation.readCandidate(candidateRead[1]));
@@ -155,7 +160,7 @@ export function server(engine: Engine, credentials: Credential[], github: GitHub
         // authority from the credential and the registration it names.
         if (url.pathname === '/api/delivery' && req.method === 'GET') return send(200, await delivery.status());
         if (url.pathname === '/api/delivery/observations' && req.method === 'GET') return send(200, await delivery.observations(url.searchParams.get('environment') ?? '', url.searchParams.get('cursor') ?? undefined));
-        const deliveryRoute = url.pathname.match(/^\/api\/delivery\/(build|release|approve|select|lease|observe|notify|sweep)$/);
+        const deliveryRoute = url.pathname.match(/^\/api\/delivery\/(build|release|approve|select|lease|observe|notify|sweep|rollback|rollback-claim|rollback-settle|rollback-resolve)$/);
         if (deliveryRoute && req.method === 'POST') {
           const command = deliveryRoute[1], data = JSON.parse((await body(req)).toString() || '{}'), key = String(req.headers['idempotency-key'] ?? '');
           if (command === 'sweep') { demand(actor.role === 'admin', 'Operator permission required', 403); return send(200, await delivery.sweep()); }
@@ -165,6 +170,10 @@ export function server(engine: Engine, credentials: Credential[], github: GitHub
             : command === 'select' ? await delivery.select(actor, data, key)
             : command === 'lease' ? await delivery.lease(actor, data)
             : command === 'observe' ? await delivery.observe(actor, data, key)
+            : command === 'rollback' ? await delivery.requestRollback(actor, data, key)
+            : command === 'rollback-claim' ? await delivery.claimRollback(actor, data, key)
+            : command === 'rollback-settle' ? await delivery.settleRollback(actor, data, key)
+            : command === 'rollback-resolve' ? await delivery.resolveRollback(actor, data, key)
             : await delivery.notify(actor, data);
           return send(200, result);
         }
@@ -266,13 +275,16 @@ async function main() {
   const engine = new Engine(store, (process.env.GITHUB_CI_APP_IDS ?? '15368').split(',').map(Number));
   engine.reviewerApps = parseReviewerApps(process.env.GRAPHYARD_REVIEWER_APPS);
   const github = await githubFromEnv();
-  const http = server(engine, credentials, github);
+  const artifacts = { backend: artifactBackendFromEnv(), capacityBytes: artifactCapacityFromEnv() };
+  const http = server(engine, credentials, github, artifacts);
   // One-time materialization of the deployment allowlist. Operators manage proof authority
   // inside Graphyard from here on; a later environment edit no longer changes authority.
   const seeded = await new ProofGrants(store, credentials.map(({ token, ...actor }) => actor)).seed();
   if (seeded.length) console.log(`Seeded proof grants for ${seeded.map(grant => grant.principalId).join(', ')}`);
   const validation = new Validation(engine, credentials.map(({ token, ...actor }) => actor), github?.config.repository ?? process.env.GITHUB_REPOSITORY ?? '');
+  validation.artifactBackend = artifacts.backend; validation.artifactCapacityBytes = artifacts.capacityBytes;
   const delivery = new Delivery(validation);
+  console.log(`Artifact storage: ${artifacts.backend?.label ?? 'postgres'}; capacity ${artifacts.capacityBytes} bytes`);
   await validation.expireArtifacts();
   await validation.reconcile(true);
   let running = false;

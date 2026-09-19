@@ -183,9 +183,15 @@ Environment: GRAPHYARD_URL, GRAPHYARD_TOKEN (individual role-scoped credential)
   list | next                  List all work / claimable work
   create path/to/work.json      Create work with acceptance criteria (operator)
   validation [ACTION file.json] List validation state or submit a protocol command
+  validation capacity          Runner capacity, queue dwell, reserved resources and the
+                                diagnosed next step for every live request
+  validation artifact-migrate TARGET [LIMIT]
+                                Move retained artifacts between postgres and the configured
+                                external backend, verifying each digest (operator)
   delivery [ACTION file.json]  Show releases and observed delivery, or submit a
                                 release/observation command (build|release|approve|
-                                select|lease|observe|notify|sweep)
+                                select|lease|observe|notify|sweep|rollback|rollback-claim|
+                                rollback-settle|rollback-resolve)
   delivery observations ENV [CURSOR]
                                 Page through an environment's deployment observations
   runner inspect [DIRECTORY]   Discover Playwright inputs without executing repository code
@@ -613,6 +619,8 @@ Never share an operator or producer credential with an implementation agent.`); 
   }
   if (command === 'validation') {
     if (!id || id === 'requests') return print(await api('validation' + (args[0] ? `?cursor=${encodeURIComponent(args[0])}` : '')));
+    if (id === 'capacity') return print(await api('validation/capacity'));
+    if (id === 'artifact-migrate' && args[0]) return print(await api('validation/artifacts/migrate', { target: args[0], ...(args[1] ? { limit: Number(args[1]) } : {}) }));
     if (id === 'artifact-upload' && args.length === 1) return print(await api('validation/artifacts', JSON.parse(await readFile(args[0], 'utf8'))));
     if (id === 'artifact-download' && args.length === 3) {
       const token = await individualToken(); if (!token) throw new Error('An individual Graphyard credential is required');
@@ -632,7 +640,7 @@ Never share an operator or producer credential with an implementation agent.`); 
     if (!id || id === 'status') return print(await api('delivery'));
     if (id === 'observations' && args[0]) return print(await api(`delivery/observations?environment=${encodeURIComponent(args[0])}${args[1] ? `&cursor=${encodeURIComponent(args[1])}` : ''}`));
     if (id === 'sweep') return print(await api('delivery/sweep', {}));
-    if (!['build', 'release', 'approve', 'select', 'lease', 'observe', 'notify'].includes(id) || !args[0]) throw new Error('Use delivery [status] | delivery observations ENV [CURSOR] | delivery sweep | delivery ACTION file.json');
+    if (!['build', 'release', 'approve', 'select', 'lease', 'observe', 'notify', 'rollback', 'rollback-claim', 'rollback-settle', 'rollback-resolve'].includes(id) || !args[0]) throw new Error('Use delivery [status] | delivery observations ENV [CURSOR] | delivery sweep | delivery ACTION file.json');
     return print(await api(`delivery/${id}`, JSON.parse(await readFile(args[0], 'utf8'))));
   }
   if (command === 'grants') {

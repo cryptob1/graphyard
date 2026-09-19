@@ -35,7 +35,7 @@ const id = () => randomUUID();
 const url = (database: string) => `postgres://graphyard:testing-only@127.0.0.1:${port}/${database}`;
 
 before(async () => {
-  port = Number(process.env.GRAPHYARD_BACKUP_TEST_PORT ?? Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 5);
+  port = Number(process.env.GRAPHYARD_BACKUP_TEST_PORT ?? Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 6);
   scratch = await mkdtemp(join(tmpdir(), 'graphyard-backup-'));
   pg = new EmbeddedPostgres({ databaseDir: join(scratch, 'data'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await pg.initialise(); await pg.start();
@@ -52,7 +52,8 @@ after(async () => { if (pg) await pg.stop(); });
  * holds a pattern that exists only in the database, another has had its seeded pattern
  * revoked. Both are what a restore that re-seeded the environment would get wrong. And the
  * delivery side of the same environment: an attested release build, the release selected
- * from it under an approval, the observer's lease and the observation that verified it.
+ * from it under an approval, the observer's lease and the observation that verified it,
+ * then a second release selected over it and a rollback requested back to the first.
  * And the delegation ledger: a slice lead's standing ruling over an item in its slice and
  * an intake item citing it, both immutable rows a restore has to carry as history.
  */
@@ -108,6 +109,14 @@ async function populate(store: Store) {
   await delivery.observe(observer, { registration: { id: 'observer-1', revision: 1 }, epoch: lease.epoch, environment, expectedGeneration: 1, snapshotId: 'snapshot-1', observedAt: at(0), validFrom: at(-60), validTo: at(0),
     services: [{ service: 'api', complete: true, instances: [{ instance: 'api-1', digest, measurement: 'provider', healthy: true }], deployment: { id: 'dep-api', status: 'success', deployedAt: at(-120) } }] }, id());
   await delivery.sweep();
+  // Recovery: a second release supersedes the verified one, and the operator asks for a
+  // rollback to the release that was verified, so the restored ledger still carries the
+  // open rollback and the history it was judged against.
+  const secondBuild: any = await delivery.attestBuild(builder, { registration: { id: 'builder-1', revision: 1 }, sourceSha: base, buildInputsDigest: inputs, artifacts: [{ service: 'api', digest: inputs }], provenanceUrl: 'https://ci.example.test/build/3' }, id());
+  const secondRelease: any = await delivery.createRelease(operator, { id: 'release-2', expectedRevision: 0, environment, sourceSha: base, buildId: secondBuild.id, manifest: secondBuild.artifacts, members: [] }, id());
+  const secondApproval: any = await delivery.approve(operator, { release: { id: secondRelease.id, revision: secondRelease.revision }, environment }, id());
+  await delivery.select(operator, { environment, release: { id: secondRelease.id, revision: secondRelease.revision }, expectedGeneration: 1, approvalId: secondApproval.id }, id());
+  await delivery.requestRollback(operator, { environment, target: { id: release.id, revision: release.revision }, expectedGeneration: 2, reason: 'Release two degraded' }, id());
   return { engine, validation, workId: w.id, requestId: request.id, scenario: { revision: second.revision, hash: second.hash } };
 }
 
@@ -128,7 +137,9 @@ async function snapshot(store: Store) {
   const leases = (await store.pool.query('SELECT registration_id, principal, epoch, expires_at FROM delivery_leases ORDER BY registration_id')).rows;
   const rulings = (await store.pool.query('SELECT id, work_id, lead_id, slice_id, action, rule_id, reason, created_at FROM lead_rulings ORDER BY created_at, id')).rows;
   const intake = (await store.pool.query('SELECT id, origin, title, description, source_work_id, submitted_by, created_at FROM intake_items ORDER BY created_at, id')).rows;
-  return { work, events, scenarios, requests, resources, artifacts, definitions, grants, grantHistory, releases, approvals, environments, observations, leases, rulings, intake };
+  const polls = (await store.pool.query('SELECT registration_id, principal, polled_at, granted_request_id FROM validation_runner_polls ORDER BY registration_id')).rows;
+  const rollbacks = (await store.pool.query('SELECT id, environment_id, generation, document, created_at FROM delivery_rollbacks ORDER BY created_at, id')).rows;
+  return { work, events, scenarios, requests, resources, artifacts, definitions, grants, grantHistory, releases, approvals, environments, observations, leases, rulings, intake, polls, rollbacks };
 }
 
 test('the documented backup and restore exercise preserves assignments, history, scenario revisions and pending requests, and the restored ledger keeps ordering', async () => {
@@ -140,11 +151,15 @@ test('the documented backup and restore exercise preserves assignments, history,
   assert.equal(before.scenarios.length, 2);
   assert.deepEqual(before.grants.map(g => [g.principal_id, g.document.patterns]), [['auditor', []], ['builder', ['unit:*']], ['collector', ['e2e:booking']], ['observer', []], ['promoter', []]]);
   assert.deepEqual(before.grantHistory.map(h => [Number(h.seq), h.principal_id, h.document.kind]), [[1, 'collector', 'seed'], [2, 'builder', 'seed'], [3, 'auditor', 'seed'], [4, 'observer', 'seed'], [5, 'promoter', 'seed'], [6, 'builder', 'grant'], [7, 'auditor', 'revoke']]);
-  assert.equal(before.releases.length, 1); assert.equal(before.approvals.length, 1); assert.equal(before.observations.length, 1); assert.equal(before.leases.length, 1);
-  assert.equal(before.environments[0].document.verification?.status, 'verified', 'the fixture holds a selected release the observer has verified');
+  assert.equal(before.approvals.length, 2); assert.equal(before.observations.length, 1); assert.equal(before.leases.length, 1);
+  assert.equal(before.environments[0].document.verification?.status, 'unobserved', 'the fixture holds a newly selected second release');
+  assert.deepEqual(before.environments[0].document.history.map((h: any) => [h.releaseId, h.outcome]).filter((h: any) => h[1] === 'verified'), [['release-1', 'verified']], 'the first release was verified before it was superseded');
   assert.deepEqual(before.rulings.map(r => [r.lead_id, r.action]), [[lead.id, 'send-back']], 'the fixture holds a standing slice-lead ruling');
   assert.deepEqual(before.intake.map(i => [i.origin, i.submitted_by]), [['verification-finding', operator.id]], 'the fixture holds an intake item citing sliced work');
   assert.equal(before.work.find(w => w.slice === 'product')!.leadHold?.action, 'send-back');
+  assert.deepEqual(before.polls.map(p => [p.registration_id, p.granted_request_id]), [['runner-1', seeded.requestId]], 'the fixture holds the runner poll that granted the request');
+  assert.deepEqual(before.rollbacks.map(r => [r.environment_id, r.generation, r.document.state]), [['preview', 3, 'requested']], 'the fixture holds an open rollback, its own generation, back to the verified release');
+  assert.equal(before.releases.length, 2, 'two releases, the second superseding the verified first');
 
   const backup = await createBackup(source.pool);
   assert.ok(backup.sequences.some(s => s.name.endsWith('proof_grant_history_seq_seq') && s.value === 7), 'the grant history sequence travels with the backup');

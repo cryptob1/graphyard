@@ -26,6 +26,7 @@ Choose one path. The reference guides are there when a gate or integration needs
 - [Packaged Playwright runner](runner-setup.md)
 - [Report adapters](report-adapters.md) — what each supported report format proves, observes and refuses
 - [Releases and observed production delivery](delivery.md)
+- [Runner capacity, artifact operations and delivery recovery](recovery.md)
 
 ## Understand or contribute
 
