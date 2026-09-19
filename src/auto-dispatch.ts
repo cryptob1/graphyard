@@ -53,6 +53,12 @@ export const dispatchRetryMinMs = 30_000, dispatchRetryMaxMs = 600_000, dispatch
  */
 export const dispatchReadTimeoutMs = 8_000, tickRetryMinMs = 1_000;
 export const tickRetryDelay = (failures: number, intervalMs: number, minMs = tickRetryMinMs) => Math.min(minMs * 2 ** Math.max(0, failures - 1), Math.max(minMs, intervalMs));
+/**
+ * The bound on the next snapshot read. A fixed bound below what the server needs under load would
+ * leave dispatch blind for good, each retry timing out as the last did; so every consecutive failure
+ * doubles it, never past the interval (or the base bound, when that is already longer).
+ */
+export const tickReadTimeout = (failures: number, intervalMs: number, baseMs = dispatchReadTimeoutMs) => Math.min(baseMs * 2 ** Math.max(0, failures), Math.max(baseMs, intervalMs));
 
 export function emptyDispatchCursor(config: MasterConfig): DispatchCursor {
   return dispatchCursorSchema.parse({ version: 1, url: config.url, repository: config.repository });
@@ -218,7 +224,7 @@ export async function runAutoDispatch(config: MasterConfig, cursor: DispatchCurs
         if (reload.refused && reload.refused !== refused) log(`[graphyard-dispatch] ${reload.refused}`);
         refused = reload.refused;
       }
-      const tick = await runDispatchTick(config, cursor, effects, now, options.readTimeoutMs);
+      const tick = await runDispatchTick(config, cursor, effects, now, tickReadTimeout(cursor.consecutiveFailures, interval, options.readTimeoutMs));
       ticks.push(tick);
       for (const launch of tick.launched) log(`[graphyard-dispatch] launched ${launch.kind} for ${launch.work} ${launch.sha.slice(0, 12)} on ${launch.profile}${launch.group ? ` (${launch.group}: ${launch.proofs?.join(', ')})` : ''}`);
       for (const refusal of tick.refused) log(`[graphyard-dispatch] ${refusal.kind} launch for ${refusal.work} refused (attempt ${refusal.attempts}): ${refusal.reason}`);

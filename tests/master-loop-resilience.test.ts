@@ -12,7 +12,7 @@ import { assertOutsideWorktrees, autonomousSession, buildMasterStatus, dispatchW
 import { writeHarnessPermissions } from '../src/harness.js';
 import { bindReviewer, launchReview, readReviewLedger, reconcileReviews, removeReviewerProfile, reviewerBindingHealth, reviewerRegistrationFile, reviewIdleGraceMs, reviewPrompt, saveReviewerProfile, summarizeReviews, type ReviewRecord } from '../src/reviewer.js';
 import { launchProducer, producerIdleGraceMs, producerPrompt, readProducerLedger, reconcileProducers, sessionRetries, sessionRetry, sessionRetryBaseMs, sessionRetryLimit, summarizeProducers, type ProducerRecord } from '../src/producer.js';
-import { emptyDispatchCursor, readDispatchCursor, runAutoDispatch, runDispatchTick, type DispatchEffects } from '../src/auto-dispatch.js';
+import { emptyDispatchCursor, readDispatchCursor, runAutoDispatch, runDispatchTick, tickReadTimeout, type DispatchEffects } from '../src/auto-dispatch.js';
 import { emptyDaemonState, noteConfigReload, readDaemonState, runCycle, runDaemon, type DaemonEffects } from '../src/master-daemon.js';
 // @ts-expect-error Dependency-free operator script.
 import { assertRosterSafe, awaitServedTokens, generatedProducer, mergeRoster, parseOptions, pendingSecretSyncs, rosterPreview, secretsDue, secretSyncRecord, secretsToSync } from '../scripts/configure-integrations.mjs';
@@ -237,6 +237,25 @@ test('integration:master-config-reload — a running loop adopts master.json cha
     assert.match(result.ticks[0].waiting.find(entry => entry.kind === 'producer')!.reason, /no producer profile is configured/);
     assert.ok(log.includes('producer:unit:producer-a'), 'the reloaded profile launched without a restart');
   } finally { await rm(dispatchDirectory, { recursive: true, force: true }); }
+});
+
+test('integration:loop-read-bound-widens — a snapshot read slower than the dispatcher bound is not retried at that bound forever: each failure doubles it, capped at the interval', async () => {
+  const config = masterConfig('/nonexistent/coordinator.token');
+  const stopping = new AbortController(), log: string[] = [];
+  let reads = 0;
+  // A server that always needs 60ms, against a 20ms bound: a fixed bound would never read it.
+  const effects = stubDispatch(() => [], [], {
+    snapshot: async () => { reads++; await new Promise(resolve => setTimeout(resolve, 60)); return { work: [], now: new Date().toISOString() }; },
+    persist: async state => { if (state.lastSuccessAt) stopping.abort(); },
+  });
+  const guard = setTimeout(() => stopping.abort(), 10_000);
+  try {
+    const run = await runAutoDispatch(config, emptyDispatchCursor(config), effects, { intervalMs: 60_000, signal: stopping.signal, log: line => log.push(line), readTimeoutMs: 20, retryMinMs: 1 });
+    assert.equal(run.ticks.length, 1, `recovered after ${reads} reads: ${log.join(' | ')}`);
+    assert.deepEqual(log.map(line => line.match(/timed out after (\d+)ms/)?.[1]), ['20', '40']);
+  } finally { clearTimeout(guard); }
+  assert.deepEqual([0, 1, 2, 3, 10].map(failures => tickReadTimeout(failures, 30_000)), [8_000, 16_000, 30_000, 30_000, 30_000]);
+  assert.equal(tickReadTimeout(4, 1_000), 8_000, 'a short interval never shrinks the base bound');
 });
 
 test('integration:master-profile-management — producer profiles can be replaced and removed, reviewer profiles removed, and status flags an unbound reviewer App and a Herdr workspace that no longer exists', async () => {

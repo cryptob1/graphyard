@@ -285,6 +285,11 @@ for each (profile, agent, state, verdict or per-proof outcome, and how long it h
 cadence, last tick and failures, and `counts.dispatchRequested` and `counts.dispatchRunning`
 total the requests and the sessions running for them.
 
+A tick whose snapshot read fails or times out is retried promptly with a widening wait, and
+each consecutive failure doubles the bound on the next read (8 s, 16 s, 32 s…), up to the
+dispatch interval or the 8 s base, whichever is longer. A server that has merely become slower than the bound is therefore read on a
+later attempt instead of timing out on every retry and leaving the dispatcher blind for good.
+
 ### Managing profiles
 
 Profiles change while the loop runs; it adopts each change on its next tick.
