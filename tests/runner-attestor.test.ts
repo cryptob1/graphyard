@@ -38,7 +38,7 @@ async function boundary(run: (paths: { oracle: string; collection: string; outpu
     grant: { requestId: randomUUID(), attemptId: randomUUID(), epoch: 1, runner: { id: 'preview-runner', revision: 1 },
       executionHost: 'unix:///var/run/docker.sock', attestationPublicKey, executionNetwork: 'gy-isolated',
       bundleDigest: bundle.digest, runnerImageDigest: image, targetUrl: 'https://preview.example.test/', deadline: new Date(Date.now() + 600_000).toISOString(),
-      testAccountDigest: null },
+      reportFormat: 'graphyard-playwright-v1', testAccountDigest: null },
     imageRepository: 'ghcr.io/example/graphyard-runner', oraclePath: await realpath(oracle), outputPath: await realpath(collection),
     timeoutMs: 60_000, memoryMb: 2048, cpus: 2, pidsLimit: 256, runAsUser };
   // The attestor provisions this attempt's own boundary under the collection root, so a

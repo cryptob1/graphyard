@@ -55,10 +55,10 @@ the exact commit observed. Each refusal names its cause and the fix:
 
 ## Daily checks
 
-- `/healthz` should return 200 and confirm database connectivity.
+- `/healthz` should return 200, confirm database connectivity, and name the release (`version`, `revision`) and schema generation you expect to be running.
 - Authenticated `/api/status` should show no persistent integration errors.
 - Inspect the delivery graph for old work, stale observations, and blockers.
-- Keep backups and verify a restore in an isolated environment periodically.
+- Keep backups and verify a restore in an isolated environment periodically: `graphyard db backup`, `db verify` and `db restore` are the shipped procedure — see [backup, upgrade, rollback](deployment.md#backup-upgrade-rollback).
 - Monitor Postgres size: events contain work snapshots and evidence is retained. The MVP has no automatic retention pruning.
 
 ## Master coordination loop
@@ -293,6 +293,12 @@ requires editing production configuration.
 Every grant and revoke appends an immutable history row and an event, recording the actor,
 the reason, the patterns applied, and the resulting effective set. Read one principal's
 record with `graphyard grants history ID`; the ledger itself rejects updates and deletes.
+
+## Readiness checklist per completion profile
+
+`graphyard doctor --profile through-merge|preview-validation|production-verification` prints an explicit checklist for the selected [completion profile](turnkey-delivery-roadmap.md#product-promise-and-boundary). Every item states what was observed and, when it is `missing` or `unknown`, the direct command or setting that resolves it: the repository remote, the control-plane connection and the credential's role, the reviewed-and-applied setup proposal and its drift, the dedicated GitHub App and the permissions it lacks, discovered required checks, worker profiles, the review provider, and — for preview validation — the Playwright suite, the immutable environment, runner/collector/builder registrations and the approved bundle. Detected test frameworks are mapped to the [report adapter](report-adapters.md) that accepts their output; a framework with no adapter is reported as unsupported with the recovery, never as covered.
+
+`unknown` is never `ready`: an item the command could not judge (no server, a worker credential that cannot read validation definitions) says what it depends on. `production-verification` stays `missing` until release observations ship (roadmap D3); until then production verification is an explicit manual proof. A ready checklist is configuration, not evidence — the first real PR still has to pass every gate visibly.
 
 ## Setup proposals and drift
 

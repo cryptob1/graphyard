@@ -15,7 +15,7 @@ const bundle = `sha256:${'a'.repeat(64)}`, image = `sha256:${'b'.repeat(64)}`;
 const attestor = generateKeyPairSync('ed25519');
 const grant: AttemptGrant = { requestId: randomUUID(), attemptId: randomUUID(), epoch: 1, runner: { id: 'preview-runner', revision: 1 },
   executionHost: 'unix:///var/run/docker.sock', attestationPublicKey: attestor.publicKey.export({ type: 'spki', format: 'pem' }).toString(), executionNetwork: 'gy-isolated',
-  bundleDigest: bundle, runnerImageDigest: image, targetUrl: 'https://preview.example.test/', deadline: '2026-09-16T01:00:00.000Z', testAccountDigest: null };
+  bundleDigest: bundle, runnerImageDigest: image, targetUrl: 'https://preview.example.test/', deadline: '2026-09-16T01:00:00.000Z', reportFormat: 'graphyard-playwright-v1', testAccountDigest: null };
 const startedAt = '2026-09-16T00:00:00.000Z', finishedAt = '2026-09-16T00:01:00.000Z';
 const expected = { instance: 'preview-7f3a', artifacts: [{ service: 'api', digest: `sha256:${'c'.repeat(64)}` }] };
 const seen = (at: string, over: Partial<TargetObservation> = {}): TargetObservation => ({ at, measurement: 'provider', ...expected, ...over });
@@ -296,7 +296,7 @@ test('collection accepts only approved reporter output from the attempt boundary
     const collected = await collectArtifacts(output, required);
     assert.equal(collected.complete, true);
     assert.deepEqual(collected.artifacts.map(a => a.name), ['inventory', 'report']);
-    assert.ok(collected.artifacts.every(a => a.mediaType === 'application/json' && /^sha256:[a-f0-9]{64}$/.test(a.digest)));
+    assert.ok(collected.artifacts.every(a => a.published.mediaType === 'application/json' && /^sha256:[a-f0-9]{64}$/.test(a.digest) && a.published.digest === a.digest));
 
     // Rich captures that cannot yet meet the protection policy are refused, not uploaded.
     const unprotected = await collectArtifacts(output, [...required, 'trace']);
@@ -389,5 +389,58 @@ test('a real Playwright attempt is collected end to end, and a broken assertion 
     const trace = JSON.parse(await readFile(join(output, 'report.json'), 'utf8'));
     assert.ok(trace.steps.some((s: { failed: boolean }) => s.failed));
     assert.ok(!JSON.stringify(broken.report).includes('private-error-marker'));
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test('a JUnit-pinned attempt is collected through its adapter: raw bytes are attested, only the structure is published, and a Playwright grant refuses the same boundary', async () => {
+  const { inventoryFormat, normaliseJunit } = await import('../src/report-adapters.js');
+  const root = await mkdtemp(join(tmpdir(), 'graphyard-collect-junit-'));
+  try {
+    const output = join(root, 'output'); await mkdir(output, { mode: 0o700 });
+    const xml = await readFile(resolve('tests/fixtures/reports/pytest-8.xml'));
+    const enumerated = normaliseJunit(xml.toString('utf8'));
+    await writeFile(join(output, 'inventory.json'), JSON.stringify({ format: inventoryFormat, tests: enumerated.tests.map(t => ({ id: t.id })), overflow: false }));
+    await writeFile(join(output, 'report.xml'), xml);
+    const junitGrant: AttemptGrant = { ...grant, reportFormat: 'junit-xml-v1' };
+    const collected = await collectArtifacts(output, required, junitGrant.reportFormat);
+    assert.equal(collected.complete, true, collected.reasons.join('; '));
+    const report = collected.artifacts.find(a => a.name === 'report')!;
+    // The boundary digest is the raw XML the attestor measures; the published projection is
+    // JSON with a different digest and none of the producer's text.
+    assert.equal(report.digest, `sha256:${createHash('sha256').update(xml).digest('hex')}`);
+    assert.notEqual(report.published.digest, report.digest); assert.equal(report.published.mediaType, 'application/json');
+    assert.ok(!report.published.bytes.toString('utf8').includes('private-value-marker'));
+
+    const execution = record({ grant: junitGrant });
+    const payload = executionAttestationPayload({ grant: junitGrant, execution, artifacts: collected.artifacts.map(({ name, digest }) => ({ name, digest })) });
+    const signed = { payload, signature: signBytes(null, attestationBytes(payload), attestor.privateKey.export({ type: 'pkcs8', format: 'pem' }).toString()).toString('base64') };
+    const uploaded = collected.artifacts.map(a => ({ name: a.name, digest: a.published.digest, url: `graphyard-artifact://owner/repo/${grant.requestId}/${a.name}` }));
+    const junitAbsent = containerNames(junitGrant.attemptId).map(name => ({ name, state: 'absent' as const }));
+    const assembled = assembleResult({ grant: junitGrant, execution, collectedFrom: outputPath, expected, observations: covering, maxGapMs: 30_000,
+      collected, uploaded, settlementObservations: junitAbsent, requiredArtifacts: required, executionAttestation: signed });
+    assert.deepEqual(assembled.refusals, []);
+    assert.equal(assembled.report!.behavior, 'passed'); assert.equal(assembled.report!.executed, 3); assert.equal(assembled.report!.artifactState, 'verified');
+    assert.deepEqual(assembled.report!.artifacts.map(a => a.digest), uploaded.map(a => a.digest));
+    // Uploading the raw bytes instead of the published projection is an upload failure.
+    const raw = assembleResult({ grant: junitGrant, execution, collectedFrom: outputPath, expected, observations: covering, maxGapMs: 30_000,
+      collected, uploaded: collected.artifacts.map(a => ({ name: a.name, digest: a.digest, url: `graphyard-artifact://owner/repo/${grant.requestId}/${a.name}` })), settlementObservations: junitAbsent, requiredArtifacts: required, executionAttestation: signed });
+    assert.equal(raw.report!.artifactState, 'upload-failed');
+    // The format is authority, not a property of the bytes: the Playwright-pinned grant
+    // refuses this boundary, and a JUnit-pinned grant refuses a Playwright boundary.
+    const asPlaywright = await collectArtifacts(output, required);
+    assert.equal(asPlaywright.complete, false);
+    assert.ok(asPlaywright.reasons.some(r => /missing or unreadable/.test(r)) && asPlaywright.reasons.some(r => /pinned graphyard-playwright-v1 format/.test(r)));
+    await rm(join(output, 'report.xml')); await writeFile(join(output, 'report.json'), JSON.stringify(executionOf(['books'])));
+    const asJunit = await collectArtifacts(output, required, 'junit-xml-v1');
+    assert.ok(asJunit.reasons.some(r => /the approved reporter did not write/.test(r)));
+    // A broken run under the same inventory fails, and still publishes no text.
+    await rm(join(output, 'report.json')); await writeFile(join(output, 'report.xml'), await readFile(resolve('tests/fixtures/reports/pytest-8-failed.xml')));
+    const broken = await collectArtifacts(output, required, 'junit-xml-v1');
+    const brokenPayload = executionAttestationPayload({ grant: junitGrant, execution, artifacts: broken.artifacts.map(({ name, digest }) => ({ name, digest })) });
+    const failed = assembleResult({ grant: junitGrant, execution, collectedFrom: outputPath, expected, observations: covering, maxGapMs: 30_000,
+      collected: broken, uploaded: broken.artifacts.map(a => ({ name: a.name, digest: a.published.digest, url: `graphyard-artifact://owner/repo/${grant.requestId}/${a.name}` })), settlementObservations: junitAbsent, requiredArtifacts: required,
+      executionAttestation: { payload: brokenPayload, signature: signBytes(null, attestationBytes(brokenPayload), attestor.privateKey.export({ type: 'pkcs8', format: 'pem' }).toString()).toString('base64') } });
+    assert.equal(failed.report!.behavior, 'failed'); assert.equal(failed.report!.skipped, 1);
+    assert.ok(!broken.artifacts.find(a => a.name === 'report')!.published.bytes.toString('utf8').includes('private-error-marker'));
   } finally { await rm(root, { recursive: true, force: true }); }
 });

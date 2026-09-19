@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuites tests="3" failures="0" errors="0" time="0.052">
+	<testsuite name="example.com/orders" tests="3" failures="0" errors="0" id="0" hostname="build-7" time="0.052" timestamp="2026-09-18T10:30:00Z">
+		<properties>
+			<property name="go.version" value="go1.27.1 linux/amd64"></property>
+		</properties>
+		<testcase name="TestCreateOrder" classname="example.com/orders" time="0.020"></testcase>
+		<testcase name="TestCancelOrder" classname="example.com/orders" time="0.012"></testcase>
+		<testcase name="TestCancelOrder/already_cancelled" classname="example.com/orders" time="0.001"></testcase>
+	</testsuite>
+</testsuites>

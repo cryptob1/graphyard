@@ -305,5 +305,19 @@ test('CLI init --scan applies nothing without approval and --apply enforces the 
     const status = JSON.parse(await runCli(root, ['doctor'], env));
     assert.equal(status.setup.githubApp.appId, 99);
     assert.equal(status.setup.drift.length, 1);
+    // The readiness checklist is part of doctor: with no server it cannot be ready, every
+    // item states what was observed and the direct recovery, and drift is a missing item.
+    assert.equal(status.readiness.profile, 'through-merge'); assert.equal(status.readiness.ready, false);
+    const byId = Object.fromEntries(status.readiness.items.map((item: any) => [item.id, item]));
+    assert.equal(byId.server.status, 'missing'); assert.match(byId.server.recovery, /GRAPHYARD_TOKEN/);
+    assert.equal(byId['setup-proposal'].status, 'missing'); assert.match(byId['setup-proposal'].detail, /drift/);
+    assert.equal(byId['test-formats'].status, 'ready'); assert.match(byId['test-formats'].detail, /vitest → junit-xml-v1/);
+    assert.equal(byId['github-app'].status, 'unknown'); assert.match(byId['github-app'].recovery, /GITHUB_APP_ID/);
+    assert.ok(status.readiness.items.every((item: any) => item.status === 'ready' || typeof item.recovery === 'string'));
+    assert.equal(status.next, status.readiness.next);
+    const preview = JSON.parse(await runCli(root, ['doctor', '--profile', 'preview-validation'], env));
+    assert.ok(preview.readiness.items.some((item: any) => item.id === 'runner-registration' && item.status === 'unknown'));
+    assert.equal(preview.readiness.items.find((item: any) => item.id === 'e2e-suite').status, 'missing');
+    await assert.rejects(runCli(root, ['doctor', '--profile', 'done'], env), /Unknown completion profile/);
   } finally { await rm(root, { recursive: true, force: true }); }
 });
