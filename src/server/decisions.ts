@@ -3,16 +3,31 @@ import type pg from 'pg';
 import { z } from 'zod';
 import { Refusal, demand, resolveEscalation, standingEscalations, type Principal, type Work } from '../model.js';
 import { save, wakeJob } from '../store.js';
-import { approvalConflict, approveCapability, assertDecisionAuthority, decisionApprovalSchema, decisionInputs, decisionPrecondition, decisionRequestSchema, foldDecisions, requiredDecisionCapabilities, type Decision } from '../model/approval.js';
+import { approvalConflict, approveCapability, assertDecisionAuthority, decisionApprovalSchema, decisionInputs, decisionPrecondition, decisionRequestSchema, foldDecisions, requiredDecisionCapabilities, type Decision, type DecisionState } from '../model/approval.js';
 import type { Services } from './routes.js';
 
 type Db = pg.PoolClient;
+/**
+ * Terminal states only this module records: a decision overtaken by a revision race ('stale')
+ * and one its requester took back ('withdrawn'). The model's fold predates them, so they are
+ * folded on top of it from the same ledger.
+ */
+type TerminalState = 'stale' | 'withdrawn';
+export type DecisionRecord = Omit<Decision, 'state'> & { state: DecisionState | TerminalState; race: { expected: unknown; current: unknown } | null };
 const digest = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex');
 const findWork = async (db: Db, id: string): Promise<Work | undefined> =>
   (await db.query('SELECT document FROM work_items WHERE id::text=$1 OR document->>\'key\'=$1 FOR UPDATE', [id])).rows[0]?.document;
-async function readDecisions(db: { query: Db['query'] }, work: Work) {
+async function readDecisions(db: { query: Db['query'] }, work: Work): Promise<DecisionRecord[]> {
   const rows = (await db.query("SELECT actor, kind, payload, created_at FROM events WHERE work_id=$1 AND kind LIKE 'decision.%' ORDER BY seq", [work.id])).rows;
-  return foldDecisions(work.id, rows.map(row => ({ kind: row.kind, actor: row.actor, at: new Date(row.created_at).toISOString(), payload: row.payload })));
+  const events = rows.map(row => ({ kind: row.kind as string, actor: row.actor as string, at: new Date(row.created_at).toISOString(), payload: row.payload }));
+  const decisions: DecisionRecord[] = foldDecisions(work.id, events).map(decision => ({ ...decision, race: null }));
+  for (const event of events) {
+    const decision = decisions.find(entry => entry.id === event.payload?.id);
+    if (!decision) continue;
+    if (event.kind === 'decision.stale') Object.assign(decision, { state: 'stale', outcome: event.payload.reason ?? null, race: { expected: event.payload.expected ?? null, current: event.payload.current ?? null } });
+    if (event.kind === 'decision.withdrawn') Object.assign(decision, { state: 'withdrawn', outcome: event.payload.reason ?? null });
+  }
+  return decisions;
 }
 const record = (db: Db, work: Work, actor: string, kind: string, payload: unknown) =>
   db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, actor, kind, JSON.stringify(payload)]);
@@ -25,14 +40,14 @@ async function receipt(db: Db, actor: Principal, key: string, fingerprint: strin
   demand(key && key.length <= 200, 'An Idempotency-Key is required', 400);
   const row = (await db.query('SELECT * FROM receipts WHERE actor=$1 AND key=$2', [actor.id, key])).rows[0];
   if (row) demand(row.fingerprint === fingerprint, 'Idempotency key reused with different input');
-  return row?.result as Decision | undefined;
+  return row?.result as DecisionRecord | undefined;
 }
 
 /**
  * The requester's authority is re-read when the decision is applied: a revoked operator agent,
  * or one that lost the capability or the item's scope, no longer carries its request.
  */
-async function requesterAuthority(services: Services, db: Db, decision: Decision, work: Work) {
+async function requesterAuthority(services: Services, db: Db, decision: Pick<Decision, 'requestedBy' | 'action' | 'input'>, work: Work) {
   let requester = services.principals.find(entry => entry.actor.id === decision.requestedBy)?.actor;
   if (!requester) {
     const agent = (await db.query('SELECT document FROM operator_agents WHERE id=$1', [decision.requestedBy])).rows[0]?.document;
@@ -50,8 +65,13 @@ export async function listDecisions(services: Services, actor: Principal, id: st
   return { key: work!.key, decisions: await readDecisions(services.engine.store.pool, work!) };
 }
 
-/** Record a decision request. Nothing about the item changes until an independent approval. */
+/**
+ * Record a decision request. Nothing about the item changes until an independent approval.
+ * The same route also carries withdrawal: `{ action: 'withdraw', decision, reason }` takes the
+ * caller's own request back instead of creating one.
+ */
 export async function requestDecision(services: Services, caller: Principal, id: string, body: unknown, key: string) {
+  if ((body as any)?.action === 'withdraw') return withdrawDecision(services, caller, id, body, key);
   const data = decisionRequestSchema.parse(body);
   const input = decisionInputs[data.action].parse(data.input);
   const fingerprint = digest({ id, action: data.action, input, reason: data.reason });
@@ -71,10 +91,61 @@ export async function requestDecision(services: Services, caller: Principal, id:
   });
 }
 
+const withdrawalSchema = z.object({ decision: z.string().uuid(), reason: decisionRequestSchema.shape.reason }).strict();
+
+/**
+ * The requester's way out of a request that must not wait for an approver: recorded as
+ * 'withdrawn' — terminal, with the reason — so a new request of the same action is accepted.
+ */
+export async function withdrawDecision(services: Services, caller: Principal, id: string, body: unknown, key: string) {
+  const { action: _action, ...rest } = (body ?? {}) as Record<string, unknown>;
+  const data = withdrawalSchema.parse(rest);
+  const fingerprint = digest({ id, withdraw: data.decision, reason: data.reason });
+  return services.engine.store.transaction(async (db, now) => {
+    const actor = await authenticated(services, db, now, caller);
+    const replay = await receipt(db, actor, key, fingerprint); if (replay) return replay;
+    const work = await findWork(db, id); demand(work, 'Work item not found', 404);
+    const decision = (await readDecisions(db, work!)).find(entry => entry.id === data.decision);
+    demand(decision, `Decision ${data.decision} does not exist on ${work!.key}`, 404);
+    demand(actor.id === decision!.requestedBy, `Only the requester may withdraw decision ${decision!.id}; ${decision!.requestedBy} requested it`, 403);
+    demand(decision!.state === 'requested', `Decision ${decision!.id} is already ${decision!.state}; only a requested decision can be withdrawn`, 409);
+    await record(db, work!, actor.id, 'decision.withdrawn', { id: decision!.id, action: decision!.action, reason: data.reason });
+    const result = (await readDecisions(db, work!)).find(entry => entry.id === decision!.id)!;
+    await db.query('INSERT INTO receipts(actor,key,fingerprint,result) VALUES($1,$2,$3,$4)', [actor.id, key, fingerprint, JSON.stringify(result)]);
+    return result;
+  });
+}
+
 // A refused approval is part of the item's history even though its transaction rolled back.
 async function recordRefusal(services: Services, actor: Principal, workId: string, decision: string, conflict: string) {
   await services.engine.store.transaction(db => db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)',
     [workId, actor.id, 'decision.refused', JSON.stringify({ id: decision, conflict, approver: { id: actor.id, role: actor.role } })]));
+}
+
+/** The pinned target a revision race moved away, with both sides; null when no pin was hit. */
+interface StaleRace { expected: unknown; current: unknown }
+/**
+ * Whether approval failed on a pin that can never match again: the item revision, the policy
+ * revision or the candidate moved past the one the decision was requested against, and
+ * revisions never move back. Resolve is absent on purpose — it is pinned to the escalation
+ * trigger still standing, not to the whole revision.
+ */
+function decisionRace(decision: Pick<Decision, 'action' | 'input'>, work: Work): StaleRace | null {
+  if (decision.action === 'requirements' && decision.input.expectedPolicyRevision !== work.policyRevision)
+    return { expected: { policyRevision: decision.input.expectedPolicyRevision }, current: { policyRevision: work.policyRevision } };
+  if ((decision.action === 'attest' || decision.action === 'merge') && (!work.candidate || work.candidate.sha !== decision.input.sha
+    || work.candidate.baseSha !== decision.input.baseSha || work.policyRevision !== decision.input.policyRevision))
+    return { expected: { sha: decision.input.sha, baseSha: decision.input.baseSha, policyRevision: decision.input.policyRevision },
+      current: { sha: work.candidate?.sha ?? null, baseSha: work.candidate?.baseSha ?? null, policyRevision: work.policyRevision } };
+  if ((decision.action === 'release' || decision.action === 'unblock') && decision.input.expectedRevision !== work.revision)
+    return { expected: { revision: decision.input.expectedRevision }, current: { revision: work.revision } };
+  return null;
+}
+
+/** A decision a race made permanently unappliable is settled as 'stale' in its own transaction. */
+async function recordStale(services: Services, stale: { actor: Principal; workId: string; decision: Pick<Decision, 'id' | 'action'>; reason: string } & StaleRace) {
+  await services.engine.store.transaction(db => db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)',
+    [stale.workId, stale.actor.id, 'decision.stale', JSON.stringify({ id: stale.decision.id, action: stale.decision.action, reason: stale.reason, expected: stale.expected, current: stale.current, observedBy: { id: stale.actor.id, role: stale.actor.role } })]));
 }
 
 /**
@@ -88,7 +159,8 @@ export async function approveDecision(services: Services, caller: Principal, id:
   const data = decisionApprovalSchema.parse(body);
   const fingerprint = digest({ id, ...data });
   const refusal: { value?: { actor: Principal; workId: string; conflict: string } } = {};
-  let approved: { decision: Decision; work: Work; approver: Principal } | undefined;
+  const stale: { value?: { actor: Principal; workId: string; decision: Pick<Decision, 'id' | 'action'>; reason: string } & StaleRace } = {};
+  let approved: { decision: DecisionRecord; work: Work; approver: Principal } | undefined;
   try {
     const settled = await services.engine.store.transaction(async (db, now) => {
       const actor = await authenticated(services, db, now, caller);
@@ -105,8 +177,21 @@ export async function approveDecision(services: Services, caller: Principal, id:
       const resuming = decision!.state === 'approved' && decision!.approvedBy === actor.id;
       demand(decision!.state === 'requested' || resuming, `Decision ${decision!.id} is already ${decision!.state}${decision!.approvedBy ? ` (approved by ${decision!.approvedBy})` : ''}`, 409);
       await requesterAuthority(services, db, decision!, work!);
-      const precondition = resuming ? null : decisionPrecondition(decision!.action, decision!.input, work!);
-      demand(!precondition, `${precondition}; the decision was not applied`, 409);
+      let precondition = resuming ? null : decisionPrecondition(decision!.action, decision!.input, work!);
+      // A resolve decision is pinned to the escalation trigger still standing, not to the item's
+      // whole revision: a heartbeat, workspace registration or dispatch between the request and
+      // the approval moves the revision without invalidating the request.
+      if (decision!.action === 'resolve' && precondition?.startsWith('Task revision changed')) {
+        const standing = standingEscalations(work!).some(entry => entry.trigger === decision!.input.trigger);
+        precondition = standing ? null : `No standing ${decision!.input.trigger} escalation; standing: ${standingEscalations(work!).map(entry => entry.trigger).join(', ') || 'none'}`;
+      }
+      if (precondition) {
+        // A pin the item has moved past can never hold again, so the decision would stay
+        // 'requested' forever and block every re-request; settle it as stale instead.
+        const race = decisionRace(decision!, work!);
+        if (race) stale.value = { actor, workId: work!.id, decision: decision!, reason: `${precondition}; the decision was not applied`, ...race };
+        demand(false, `${precondition}; the decision was not applied`, 409);
+      }
       if (!resuming) await record(db, work!, actor.id, 'decision.approved', { id: decision!.id, action: decision!.action, reason: data.reason, requestedBy: decision!.requestedBy, approver: { id: actor.id, role: actor.role } });
       if (decision!.action === 'resolve' || decision!.action === 'merge') {
         const outcome = decision!.action === 'merge'
@@ -120,6 +205,7 @@ export async function approveDecision(services: Services, caller: Principal, id:
     if (settled) return settled;
   } catch (error) {
     if (refusal.value) await recordRefusal(services, refusal.value.actor, refusal.value.workId, data.decision, refusal.value.conflict);
+    if (stale.value) await recordStale(services, stale.value);
     throw error;
   }
   const { decision, work, approver } = approved!;
@@ -145,7 +231,7 @@ async function finish(db: Db, work: Work, approver: Principal, decisionId: strin
  * decision is the replacement for that session, so resolution is applied here, under the same
  * lock and with the same effects: one trigger cleared, gates re-evaluated, history appended.
  */
-async function resolveInTransaction(services: Services, db: Db, now: Date, work: Work, decision: Decision, approver: Principal, approvalReason: string) {
+async function resolveInTransaction(services: Services, db: Db, now: Date, work: Work, decision: DecisionRecord, approver: Principal, approvalReason: string) {
   const target = standingEscalations(work).find(entry => entry.trigger === decision.input.trigger)!;
   resolveEscalation(work, decision.input.trigger);
   const all: Work[] = (await db.query('SELECT document FROM work_items ORDER BY number')).rows.map(row => row.document.id === work.id ? work : row.document);
@@ -160,7 +246,7 @@ async function resolveInTransaction(services: Services, db: Db, now: Date, work:
   return `Resolved ${decision.input.trigger} on ${work.key}`;
 }
 
-async function applyThroughEngine(services: Services, decision: Decision, approver: Principal, approvalReason: string) {
+async function applyThroughEngine(services: Services, decision: DecisionRecord, approver: Principal, approvalReason: string) {
   // The requester acts, with the authority the two-party decision grants for this one input.
   const actor: Principal = { id: decision.requestedBy, role: 'admin', sessionKind: 'ai', displayName: `${decision.requestedBy} (decision ${decision.id} approved by ${approver.id})` };
   const reason = `${decision.reason} [decision ${decision.id}, requested by ${decision.requestedBy}, approved by ${approver.id}: ${approvalReason}]`.slice(0, 2000);

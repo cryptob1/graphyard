@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 import { startGithubSetup } from '../github-setup.js';
 import { resourceConflicts } from '../coordination.js';
-import { approvedMerges, assertMasterBinding, autonomySubcommands, continueMergeBatch, runAutonomyCommand, currentMergeCandidates, dispatchWork, listHerdrAgents, loadMasterConfig, masterHarness, mergeExecutor, mergeProtocolSkew, readCredentialFile, readWorkerCredential, saveProducerProfile, saveWorkerProfile, setupMaster, snapshotWithClock, startMaster, verifyContainmentDeath, workerProfileSchema } from '../master.js';
+import { agentToken, approvedMerges, assertMasterBinding, autonomySubcommands, continueMergeBatch, runAutonomyCommand, currentMergeCandidates, dispatchWork, listHerdrAgents, loadMasterConfig, masterHarness, mergeExecutor, mergeProtocolSkew, readCredentialFile, readWorkerCredential, saveProducerProfile, saveWorkerProfile, setupMaster, snapshotWithClock, startMaster, verifyContainmentDeath, workerProfileSchema } from '../master.js';
 import { cliCommit } from '../protocol-version.js';
 import { daemonEffects, readDaemonState, runDaemon, type DaemonState } from '../master-daemon.js';
 import { verificationEffects, verifyDeployment } from '../master-verification.js';
@@ -30,15 +30,12 @@ export const masterCommands = defineCommands([
     help: [
       '  master init --token-stdin [--herdr-workspace ID] [--browser-profile PROFILE]',
       '              [--dispatch-interval SECONDS] [--reviewer-profile NAME] [--producer-timeout MINUTES]',
-      '                                Install the recommended master-agent operating mode;',
-      "                                PROFILE is the operator's Chrome profile the master",
-      '                                administers GitHub through; the dispatch settings bound the',
-      '                                automatic reviewer and producer launches',
+      '                                Install the recommended master-agent operating mode; PROFILE is',
+      "                                the operator's Chrome profile; the dispatch settings bound",
       '  master start AGENT_KIND       Launch the dedicated visible Herdr master session',
       '  master worker add FILE        Add an existing or launchable Herdr worker profile',
-      '  master reviewer setup [--name NAME]     Register the separate reviewer GitHub App in a',
-      '                                browser flow; NAME defaults to reviewer and must keep the',
-      "                                generated App name within GitHub's 34-character limit",
+      '  master reviewer setup [--name NAME]     Register the separate reviewer GitHub App; NAME',
+      "                                defaults to reviewer, within GitHub's 34-character limit",
       '  master reviewer bind FILE --key-stdin   Bind an existing reviewer App (IDs in FILE, PEM on stdin)',
       '  master reviewer add FILE      Add a reviewer launch profile',
       '  master producer add FILE      Add a proof-producer launch profile (own producer credential)',
@@ -47,30 +44,29 @@ export const masterCommands = defineCommands([
       '  master protection [--apply]   Reconcile branch protection with every open review policy',
       '  master browser FLOW [--dry-run]',
       "                                Perform GitHub administration through the operator's browser",
-      '                                profile: app-permissions, installation-accept, or protection.',
-      '                                Recorded with screenshots, verified via the API, audited',
-      "  master harness [KIND] [--apply]  Generate the master's own harness permissions",
-      '  master status                 Join Graphyard work truth with Herdr session health; the',
-      '                                dispatch order, planned-file overlaps holding items, and',
-      '                                which open candidates git cannot merge with each other',
+      '                                profile: app-permissions, installation-accept, or protection;',
+      '                                recorded, API-verified, audited',
+      '  master harness [KIND] [--apply]  Generate the master\'s own harness permissions',
+      '  master status                 Graphyard work truth joined with Herdr session health, the',
+      '                                dispatch order, overlaps and merge conflicts',
       '  master dispatch GY-N PROFILE [--allow-overlap]',
       '                                Invite a worker to claim ready work in a visible tab; an',
-      '                                item whose planned files overlap a claimed or unmerged',
-      '                                item is held unless --allow-overlap is passed',
+      '                                item whose planned files overlap a claimed or unmerged item',
+      '                                is held unless --allow-overlap is passed',
       '  master settle-containment GY-N REASON',
-      '                                Settle a containment quarantine whose supervisor this',
-      '                                host verifies dead; unverifiable signals refuse',
+      '                                Settle a containment quarantine whose supervisor this host',
+      '                                verifies dead; unverifiable signals refuse',
       '  master merge GY-N|--all       Merge exact authorized candidates without bypasses',
-      '  master verify-deployment GY-N Verify that the deployed release serves a delivery and',
-      '                                emits the current instructions; refuse stale or local-only',
-      '                                observations, record the exact release observed',
+      '  master verify-deployment GY-N Verify that the deployed release serves a delivery; refuse',
+      '                                stale or local-only observations, record the exact release',
       '  master run [--once] [--interval SECONDS]',
-      '                                Run the durable coordination loop as a supervised process;',
-      '                                it launches the reviewer and the proof producers for every',
-      '                                submitted head within 30 seconds of the request',
+      '                                Run the durable coordination loop as a supervised process; it',
+      '                                launches the reviewer and proof producers for every submitted',
+      '                                head within 30 seconds of the request',
       '  master autonomy [--admin-token-stdin --apply]  Provision the master and approver identities',
       '  master create FILE|release GY-N|unblock GY-N|requirements GY-N FILE REASON  Own intent',
       '  master decide GY-N ACTION [JSON|@FILE] REASON  Request a two-party decision',
+      '  master withdraw GY-N DECISION REASON  Take back the master\'s own requested decision',
       '  master decisions GY-N | approver GY-N DECISION [KIND] | approve GY-N DECISION REASON',
       '  master principals [--apply]   Preview or apply a roster rotation keeping live principals',
       '  master restart                Restart this host\'s master loop detached',
@@ -98,8 +94,8 @@ export const masterCommands = defineCommands([
         const response = await fetch(`${master.url}/api/${path}`, { headers: { ...headers, Authorization: `Bearer ${credential}` }, signal: AbortSignal.timeout(timeoutMs) });
         const body = await response.json(); if (!response.ok) throw new Error(JSON.stringify(body)); return body;
       };
-      const masterMutation = async (path: string, data: unknown, requestId: string = randomUUID()) => {
-        const response = await fetch(`${master.url}/api/${path}`, { method: 'POST', headers: { Authorization: `Bearer ${masterToken}`, 'Content-Type': 'application/json', 'Idempotency-Key': requestId }, body: JSON.stringify(data), signal: AbortSignal.timeout(30_000) });
+      const masterMutation = async (path: string, data: unknown, requestId: string = randomUUID(), credential: string = masterToken) => {
+        const response = await fetch(`${master.url}/api/${path}`, { method: 'POST', headers: { Authorization: `Bearer ${credential}`, 'Content-Type': 'application/json', 'Idempotency-Key': requestId }, body: JSON.stringify(data), signal: AbortSignal.timeout(30_000) });
         const result = await response.json(); if (!response.ok) { const error = new Error(JSON.stringify(result)); (error as any).confirmedRefusal = response.status >= 400 && response.status < 500; throw error; } return result;
       };
       const coordinator = await masterApi('status'); assertMasterBinding(master, coordinator);
@@ -223,6 +219,11 @@ export const masterCommands = defineCommands([
         const results = args[0] === '--all' ? await continueMergeBatch(selected, mergeOne) : [await mergeOne(selected[0])];
         return print({ requestId: outerRequest, results });
       }
+      if (id === 'withdraw') {
+        // Runs under the operator-agent identity that made the request; the server resolves GY-N.
+        if (!args[0] || !args[1] || !args.slice(2).join(' ').trim()) throw new Error('Use master withdraw GY-N DECISION REASON');
+        return print(await masterMutation(`work/${encodeURIComponent(args[0])}/decide`, { action: 'withdraw', decision: args[1], reason: args.slice(2).join(' ') }, randomUUID(), await agentToken(root, master, 'operatorAgent')));
+      }
       if (id === 'verify-deployment') {
         if (!args[0]) throw new Error('Use master verify-deployment GY-N');
         const snapshot = await masterApi('work-snapshot');
@@ -261,7 +262,7 @@ export const masterCommands = defineCommands([
         return print({ repository: master.repository, coordinator: coordinator.actor.id, intervalSeconds, dispatchIntervalSeconds: master.run.dispatchIntervalSeconds, cycles: result.cycles.length, stopped: result.stopped ? 'signal' : 'completed', last: result.cycles.at(-1) ?? null,
           dispatch: { ticks: dispatched.ticks.length, launched: dispatched.ticks.reduce((total, tick) => total + tick.launched.length, 0), refused: dispatched.ticks.reduce((total, tick) => total + tick.refused.length, 0), last: dispatched.ticks.at(-1) ?? null } });
       }
-      throw new Error(`Use master init, start, worker add, producer add, reviewer, review, protection, browser, harness, status, dispatch, settle-containment, run, merge, verify-deployment, ${autonomySubcommands.join(', ')}, or guide`);
+      throw new Error(`There is no master ${id}; use master guide for the subcommands`);
     },
   },
 ]);

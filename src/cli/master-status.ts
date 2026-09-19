@@ -1,10 +1,33 @@
 import { probeCandidateConflicts } from '../conflicts.js';
-import { agentOwner, assessContainment, buildMasterStatus, humanOwner, inspectWorkerCredentials, mergeProtocolSkew, observeHerdrAgents, snapshotWithClock, type MasterConfig } from '../master.js';
+import { agentOwner, assessContainment, buildMasterStatus, humanOwner, inspectWorkerCredentials, mergeProtocolSkew, observeHerdrAgents, snapshotWithClock, type AttentionItem, type MasterConfig } from '../master.js';
 import { daemonSummary, readDaemonState } from '../master-daemon.js';
 import { readReviewLedger, reconcileReviews, summarizeReviews } from '../reviewer.js';
 import { readProducerLedger, reconcileProducers, summarizeProducers } from '../producer.js';
 import { dispatchSummary, readDispatchCursor } from '../auto-dispatch.js';
 import { readAdministrationLedger, readSudoState, summarizeAdministration } from '../master-browser.js';
+
+/**
+ * Terminal decisions nothing waits on any more: a stale one — approval refused on a revision or
+ * candidate race, so its pin can never hold again — and a withdrawn one the requester took back.
+ * A stale decision raises master attention with the re-request command, which the control plane
+ * now accepts immediately; a withdrawn one is listed for the record.
+ */
+async function terminalDecisions(masterApi: (path: string) => Promise<any>, work: { id: string; key: string; stage: string }[]) {
+  const listed: { work: string; id: string; action: string; state: string; reason: string | null; race?: unknown }[] = [];
+  const attentionItems: AttentionItem[] = [];
+  for (const item of work) {
+    if (item.stage === 'done') continue;
+    const history = await masterApi(`work/${item.id}/decisions`).catch(() => null);
+    for (const decision of history?.decisions ?? []) {
+      if (decision.state !== 'stale' && decision.state !== 'withdrawn') continue;
+      listed.push({ work: item.key, id: decision.id, action: decision.action, state: decision.state, reason: decision.outcome ?? null, ...(decision.race ? { race: decision.race } : {}) });
+      if (decision.state === 'stale')
+        attentionItems.push({ subject: item.key, text: `Decision ${decision.id} (${decision.action}) is stale: ${decision.outcome ?? 'the item moved past it'}; request it again, the stale decision no longer blocks`,
+          ...agentOwner('master', `graphyard master decide ${item.key} ${decision.action} [JSON|@FILE] REASON, then graphyard master approver ${item.key} DECISION`, 'approver') });
+    }
+  }
+  return { listed, attentionItems };
+}
 
 /**
  * The `master status` report: Graphyard work truth joined with Herdr session health, the local
@@ -36,7 +59,8 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
   const sudo = administration.sudo;
   const attentionItems = sudo ? [...status.attentionItems, { subject: 'installation', text: sudo.instruction,
     ...(Date.parse(sudo.deadline) <= Date.now() ? agentOwner('master', `graphyard master browser ${sudo.flow}`) : humanOwner('issuing credentials to people', sudo.instruction)) }] : status.attentionItems;
-  return { ...status, attentionItems, autoMerge: master.autoMerge, mergeApproval: master.autoMerge ? 'routine merges permitted after gates pass' : 'each merge needs an approved merge decision: graphyard master decide GY-N merge REASON, approved by the approver agent',
+  const decisions = await terminalDecisions(masterApi, snapshot.work);
+  return { ...status, attentionItems: [...attentionItems, ...decisions.attentionItems], terminalDecisions: decisions.listed, autoMerge: master.autoMerge, mergeApproval: master.autoMerge ? 'routine merges permitted after gates pass' : 'each merge needs an approved merge decision: graphyard master decide GY-N merge REASON, approved by the approver agent',
     versionSkew: mergeProtocolSkew(coordinator, cli), cli,
     reviewer: master.reviewer ? { identity: `${master.reviewer.slug}[bot]`, appId: master.reviewer.appId, profiles: master.reviewers.map(profile => profile.name), automatic: master.run.reviewerProfile ?? (master.reviewers.length === 1 ? master.reviewers[0].name : null) } : null,
     producerProfiles: master.producers.map(profile => ({ name: profile.name, principal: profile.principal, kind: profile.kind, agentName: profile.agentName })),
