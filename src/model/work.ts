@@ -78,7 +78,12 @@ export interface Observation {
 export interface Gate { name: string; passed: boolean; reasons: string[] }
 export interface Escalation { trigger: EscalationTrigger; reason: string; at: string; actor: string }
 export interface Work extends Create {
-  validation?: Record<string, { candidateId: string; requestId?: string; attemptId?: string }>;
+  /**
+   * The current validation selection per proof. `reanchor` is set when the selected request's
+   * target moved and automatic re-anchoring could not create a fresh request yet; the
+   * authoritative history is the attribution ledger, this is the standing binding.
+   */
+  validation?: Record<string, { candidateId: string; requestId?: string; attemptId?: string; reanchor?: { state: 'blocked'; reasons: string[]; supersededRequestId: string; environmentId: string; at: string } }>;
   criteria: Criterion[];
   retiredCriterionIds?: string[];
   formalReviewResetRequired?: boolean;

@@ -23,6 +23,12 @@ export interface Evidence {
     artifact: { id: number; name: string; digest: string; url: string; createdAt: string };
   };
   validation?: { candidateId: string; requestId: string; attemptId: string };
+  /** What a validation result was attributed to: the exact manifest, compatibility signature and independently observed target; see docs/attribution.md. */
+  attribution?: EvidenceAttribution;
+}
+export interface EvidenceAttribution {
+  manifestHash: string; digestHash: string; signature: string; environmentId: string; environmentRevision: number;
+  targetKind: 'immutable-preview' | 'shared-staging'; targetState: 'unobserved' | 'matched' | 'mismatched' | 'unknown'; targetObservationIds: string[];
 }
 
 // Every identity that has held an assignment on this item, including superseded

@@ -8,6 +8,7 @@ import { scenarioTables } from './tables/scenarios.js';
 import { deliveryTables } from './tables/delivery.js';
 import { productionTables } from './tables/production.js';
 import { flowTables } from './tables/flow.js';
+import { attributionTables } from './tables/attribution.js';
 import { schemaGenerationTables } from './tables/schema-generation.js';
 
 /**
@@ -16,7 +17,8 @@ import { schemaGenerationTables } from './tables/schema-generation.js';
  */
 export const tables: readonly TableDefinition[] = [
   ...workTables, ...delegationTables, ...operatorAgentTables, ...proofGrantTables,
-  ...validationTables, ...scenarioTables, ...deliveryTables, ...productionTables, ...flowTables, ...schemaGenerationTables,
+  ...validationTables, ...scenarioTables, ...deliveryTables, ...productionTables, ...flowTables, ...attributionTables,
+  ...schemaGenerationTables,
 ];
 
 /** The additive startup migration: the append-only trigger function, then each table's DDL. */
