@@ -1,6 +1,7 @@
 import type pg from 'pg';
 import type { Store } from './store.js';
 import { stages, type Stage, type Work } from './model.js';
+import { queueSequencingReason } from './merge-queue.js';
 
 // Delivery-flow analytics.
 //
@@ -228,12 +229,19 @@ export function deriveFacts(event: LedgerEvent, state: ProjectionState): FlowFac
   const firstUnmet = gates.find(g => !g.passed);
   const dependencyWaiting = (gates.find(g => g.name === 'ready')?.reasons ?? [])
     .flatMap(reason => { const match = /^Dependency (\S+) is unfinished$/.exec(reason); return match ? [match[1]] : []; });
-  const gateKey = JSON.stringify([work.stage, unmet, dependencyWaiting, !!work.candidate, blocker, !!work.ready, work.violations?.length ?? 0]);
+  // The merge queue owns the last hop: a proven candidate holds a queue entry while it waits
+  // its turn and its speculative tip. Those sequencing reasons are recorded apart from real
+  // merge refusals (protection, mergeability, freshness, escalation, ejection) so the wait
+  // classification can tell "queued and ready" from "blocked" without reading live state.
+  const queued = !!work.queue;
+  const mergeBlockers = (gates.find(g => g.name === 'merge')?.reasons ?? []).filter(reason => !queueSequencingReason(reason)).length;
+  const gateKey = JSON.stringify([work.stage, unmet, dependencyWaiting, !!work.candidate, blocker, !!work.ready, work.violations?.length ?? 0, queued, mergeBlockers > 0]);
   if (gateKey !== state.gateKey)
     push('gates.changed', recordedAt, 'graphyard', String(sourceEvent), {
       stage: work.stage, unmet, firstUnmet: firstUnmet?.name ?? null, firstUnmetReason: firstUnmet?.reasons[0] ?? null,
       reasons: (firstUnmet?.reasons ?? []).slice(0, 5), dependencyWaiting, hasCandidate: !!work.candidate,
       released: !!work.ready, blocker, violations: work.violations?.length ?? 0, pr: work.candidate?.pr ?? null,
+      queued, mergeBlockers,
     });
 
   state.created = true;
@@ -379,10 +387,21 @@ export const waitCategories: { id: WaitCategory; label: string; definition: stri
   { id: 'implementation', label: 'In implementation', definition: 'Released, unblocked, and no pull-request candidate has been independently observed yet.' },
   { id: 'review', label: 'Waiting on review', definition: 'A candidate is observed and the review gate has not been satisfied for it.' },
   { id: 'evidence', label: 'Waiting on acceptance evidence', definition: 'Review is satisfied and at least one required proof still lacks trusted passing evidence for the candidate.' },
-  { id: 'merge-blocked', label: 'Merge blocked', definition: 'Review and acceptance are satisfied but the merge gate still refuses (protection, mergeability, or observation freshness).' },
-  { id: 'merge-ready', label: 'Merge ready', definition: 'Every gate passed on the current candidate and the merge has not been observed yet.' },
+  { id: 'merge-blocked', label: 'Merge blocked', definition: 'Review and acceptance are satisfied but the merge gate refuses for a reason other than queue sequencing: protection, mergeability, observation freshness, an escalation or hold, or ejection from the merge queue.' },
+  { id: 'merge-ready', label: 'Merge ready', definition: 'Every other gate passed on the current candidate and the merge has not been observed yet: the item holds a merge-queue entry and is only waiting its turn or its speculative tip, or every gate passed.' },
   { id: 'delivered', label: 'Delivered', definition: 'An authorized merge was independently observed.' },
 ];
+/**
+ * A durable gate fact whose candidate is merge ready: no gate refuses, or only the merge gate
+ * refuses and solely to sequence a queued entry. Facts recorded before queue fields existed
+ * carry neither `queued` nor `mergeBlockers`, so they are merge ready only when no gate refuses.
+ */
+export function mergeReadyGate(gate: Record<string, any> | undefined): boolean {
+  if (!gate || !gate.hasCandidate) return false;
+  const unmet: string[] = gate.unmet ?? [];
+  if (!unmet.length) return true;
+  return unmet.length === 1 && unmet[0] === 'merge' && gate.queued === true && gate.mergeBlockers === 0;
+}
 // Classification is read back from the durable gate fact, never from a live client claim.
 export function classifyWait(gate: Record<string, any> | undefined, delivered: boolean): WaitCategory | null {
   if (delivered) return 'delivered';
@@ -394,8 +413,8 @@ export function classifyWait(gate: Record<string, any> | undefined, delivered: b
   if (!gate.hasCandidate) return 'implementation';
   if (unmet.includes('review')) return 'review';
   if (unmet.includes('acceptance')) return 'evidence';
-  if (unmet.includes('merge') || unmet.length) return 'merge-blocked';
-  return 'merge-ready';
+  if (mergeReadyGate(gate)) return 'merge-ready';
+  return 'merge-blocked';
 }
 
 function percentile(sorted: number[], p: number): number | null {
@@ -426,7 +445,7 @@ export const metricDefinitions: Record<string, { label: string; formula: string;
   throughput: { label: 'Throughput', formula: 'Count of delivered facts per daily bucket. A delivered fact is written only when an authorized merge is independently observed.', sources: ['flow_facts:delivered'] },
   leadTime: { label: 'Lead time', formula: 'Delivered observation time minus the work-created time, per delivered item in the window.', sources: ['flow_facts:work.created', 'flow_facts:delivered'] },
   queueVsActive: { label: 'Queue versus active work time', formula: 'Active time is the union of lease intervals clipped to the window. Queue time is released, undelivered time in the window with no active lease.', sources: ['flow_facts:lease.claimed', 'flow_facts:lease.released', 'flow_facts:lease.lost'] },
-  mergeReadyDwell: { label: 'Merge-ready dwell', formula: 'Interval from the gate fact where no gate refuses to the observed merge, or to the observation time for items still merge ready.', sources: ['flow_facts:gates.changed', 'flow_facts:merged'] },
+  mergeReadyDwell: { label: 'Merge-ready dwell', formula: 'Interval from the gate fact where the candidate became merge ready (no gate refuses, or only merge-queue sequencing remains) to the observed merge, or to the observation time for items still merge ready.', sources: ['flow_facts:gates.changed', 'flow_facts:merged'] },
   phases: { label: 'Phase durations', formula: 'Per candidate episode (one commit under review), the interval between consecutive milestones. A milestone uses the independently observed provider timestamp when the provider supplies one.', sources: ['flow_facts:candidate.observed', 'flow_facts:review.submitted', 'flow_facts:review.completed', 'flow_facts:gates.changed', 'flow_facts:merge.authorized', 'flow_facts:merged', 'deployment_observations'] },
   ci: { label: 'CI duration, failure and retry', formula: 'Per check name and commit, the interval between the first pending observation and the first terminal observation. Durations are bounded by Graphyard observation intervals, not by provider start timestamps.', sources: ['flow_facts:check.observed'] },
   evidence: { label: 'Evidence wait, expiry and staleness', formula: 'Wait is review completion to the gate fact where acceptance stops refusing. Expiry counts recorded evidence whose expiry precedes the observation time; staleness counts evidence bound to a superseded commit.', sources: ['flow_facts:evidence.recorded', 'flow_facts:gates.changed'] },
@@ -572,7 +591,7 @@ export function computeFlow(dataset: FlowDataset, query: FlowQuery) {
     const mergedFact = latest.get(`${item.id}:merged`);
     let readySince: number | null = null;
     for (const fact of gateFacts) {
-      const ready = (fact.details.unmet ?? []).length === 0 && fact.details.hasCandidate;
+      const ready = mergeReadyGate(fact.details);
       const at = Math.max(from, time(fact.observedAt)!);
       if (ready && readySince === null) readySince = at;
       if (!ready && readySince !== null) { mergeReadyValues.push(Math.max(0, at - readySince)); readySince = null; }
@@ -707,6 +726,7 @@ export function computeFlow(dataset: FlowDataset, query: FlowQuery) {
     { queue: 'proof', categories: ['evidence'], definition: 'Items whose required proofs still lack trusted passing evidence.' },
     { queue: 'operator', categories: ['backlog', 'blocked'], definition: 'Items waiting on an operator decision: unreleased intent or a recorded blocker.' },
     { queue: 'worker', categories: ['implementation'], definition: 'Released, unblocked items with no observed candidate yet.' },
+    { queue: 'merge', categories: ['merge-ready'], definition: 'Proven candidates waiting in the merge queue or for the merge itself to be observed.' },
   ].map(queue => {
     const depths = queueDepth.map(sample => queue.categories.reduce((sum, category) => sum + (sample.counts[category] ?? 0), 0));
     return { queue: queue.queue, definition: queue.definition, samples: depths.length, averageDepth: depths.length ? Number((depths.reduce((a, b) => a + b, 0) / depths.length).toFixed(2)) : null, maxDepth: depths.length ? Math.max(...depths) : null };
@@ -956,10 +976,10 @@ export function flowDrilldown(dataset: FlowDataset, report: FlowReport, request:
         .sort((a, b) => time(a.observedAt)! - time(b.observedAt)!);
       let since: number | null = null;
       for (const fact of gates) {
-        const ready = (fact.details.unmet ?? []).length === 0 && fact.details.hasCandidate;
+        const ready = mergeReadyGate(fact.details);
         if (ready && since === null) since = Math.max(time(dataset.from)!, time(fact.observedAt)!);
         if (!ready && since !== null) {
-          row(item.key, 'merge-ready', new Date(since).toISOString(), Math.max(0, time(fact.observedAt)! - since), null, null, 'Every gate passed until a later gate observation refused');
+          row(item.key, 'merge-ready', new Date(since).toISOString(), Math.max(0, time(fact.observedAt)! - since), null, null, 'Merge ready until a later gate observation refused');
           since = null;
         }
       }
@@ -967,7 +987,7 @@ export function flowDrilldown(dataset: FlowDataset, report: FlowReport, request:
         const merged = latest.get(`${item.id}:merged`);
         const end = merged && time(merged.observedAt)! >= since ? time(merged.observedAt)! : time(dataset.to)!;
         row(item.key, 'merge-ready', new Date(since).toISOString(), Math.max(0, end - since), merged?.details.pr ?? null, merged?.details.mergeSha ?? null,
-          merged ? 'Every gate passed until the observed merge' : 'Every gate passed; merge not yet observed');
+          merged ? 'Merge ready until the observed merge' : 'Merge ready (queued or every gate passed); merge not yet observed');
       }
     }
   } else if (metric === 'deployments') {

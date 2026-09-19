@@ -55,6 +55,14 @@ and stage filters do not narrow them.
 Repeating a deployment identity is accepted only when every immutable observation field and
 contained merge identity matches the original record.
 
+Graphyard's own [release and observed-delivery records](delivery.md) (`work.delivery`, the
+`delivery_observations` table, and `e2e:deploy-smoke` evidence) are a separate lineage. Flow
+analytics does not yet read them: deployment frequency, latency, failure, and rollback come
+only from `POST /api/deployments` observations, and a repository whose deployments are
+observed solely through the release pipeline reports deployment metrics as unavailable rather
+than inferring them from the other lineage. Joining the two is future work and would be a
+documented metric change, not a silent one.
+
 ## Timezone, windows, and buckets
 
 All timestamps are **UTC**. A window is the half-open interval `[from, to)` where `to` is
@@ -79,7 +87,7 @@ block of every report and in every export.
 | Throughput | Delivered facts per daily bucket. A delivered fact is written only when an authorized merge is independently observed. |
 | Lead time | Delivered observation time minus work-created time, reported as a daily trend and as p50/p75/p90 bands. |
 | Queue versus active work time | Active time is the union of lease intervals clipped to the window. Queue time is released, undelivered time with no active lease. |
-| Merge-ready dwell | From the gate fact where no gate refuses to the observed merge, or to the observation instant for items still merge ready. |
+| Merge-ready dwell | From the gate fact where the candidate became merge ready (no gate refuses, or only merge-queue sequencing remains) to the observed merge, or to the observation instant for items still merge ready. |
 | Phase durations | Per candidate episode: pull-request created, review start, review complete, evidence complete, merge authorized, merged, production. |
 | CI duration, failure, retry | Per check name and commit, first pending observation to first terminal observation, plus terminal failures and repeat terminal transitions. |
 | Evidence wait, expiry, staleness | Wait is review completion to the completing evidence record. Expiry counts evidence whose expiry precedes the observation instant; staleness counts evidence bound to a superseded commit. |
@@ -113,8 +121,18 @@ durable gate fact:
 4. **In implementation** — released and unblocked, no candidate observed yet.
 5. **Waiting on review** — a candidate is observed and the review gate is not satisfied for it.
 6. **Waiting on acceptance evidence** — review is satisfied, a required proof is still missing trusted passing evidence.
-7. **Merge blocked** — review and acceptance pass, the merge gate still refuses.
-8. **Merge ready** — every gate passes and no merge has been observed.
+7. **Merge blocked** — review and acceptance pass, the merge gate refuses for a reason other
+   than queue sequencing: protection, mergeability, observation freshness, an escalation or
+   hold, or ejection from the merge queue.
+8. **Merge ready** — no merge has been observed and either every gate passes or the item holds
+   a merge-queue entry and the merge gate is only sequencing it (waiting its turn or its
+   speculative tip).
+
+The merge queue owns the last hop, so a proven candidate normally sits in **merge ready** with
+`unmet: ["merge"]` while Graphyard publishes and validates its speculative tip. The gate fact
+records `queued` and `mergeBlockers` (merge-gate reasons that are not queue sequencing) so this
+distinction is read back from the ledger, never from live queue state. Facts recorded before
+those fields existed are merge ready only when no gate refuses.
 
 An item whose worker was replaced still appears under **waiting on review** while its
 observed candidate has no satisfying approval: the candidate, not the assignment, is what

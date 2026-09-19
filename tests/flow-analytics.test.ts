@@ -9,9 +9,10 @@ import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import { server } from '../src/server.js';
 import type { Observation, Principal, Work } from '../src/model.js';
+import { queueRef, type QueueSpeculation } from '../src/merge-queue.js';
 import {
   classifyWait, computeFlow, deriveFacts, distribution, flowDrilldown, flowExport, flowLimits,
-  projectFlow, readFlow, workSlices, type FlowQuery, type FlowWindow, type ProjectionState,
+  mergeReadyGate, projectFlow, readFlow, workSlices, type FlowQuery, type FlowWindow, type ProjectionState,
 } from '../src/flow-analytics.js';
 
 const operator: Principal = { id: 'operator', role: 'admin' };
@@ -27,7 +28,7 @@ let database: EmbeddedPostgres; let store: Store; let engine: Engine;
 let http: ReturnType<typeof server>; let url: string; let pullRequest = 500;
 
 before(async () => {
-  const port = Number(process.env.GRAPHYARD_FLOW_TEST_PORT ?? Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 2);
+  const port = Number(process.env.GRAPHYARD_FLOW_TEST_PORT ?? Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 8);
   database = new EmbeddedPostgres({ databaseDir: await mkdtemp(join(tmpdir(), 'graphyard-flow-')), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('graphyard_flow');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/graphyard_flow`);
@@ -65,7 +66,7 @@ function observation(work: Work, slice: string, overrides: Partial<Observation> 
     candidate: { sha: head, baseSha: base, pr: work.submission!.pr, branch: work.workspaces.at(-1)!.branch, author: 'implementer', createdAt: new Date(Date.now() - 3 * 3600_000).toISOString() },
     checks: [{ name: 'test', result: 'success', appId: 15368 }, { name: 'typecheck', result: 'success', appId: 15368 }],
     reviews: [], protected: true, mergeable: true, merged: false, mergeSha: null,
-    files: [`${slice}/changed.ts`], at: new Date().toISOString(), ...overrides,
+    files: [`${slice}/changed.ts`], scopeFiles: [], at: new Date().toISOString(), ...overrides,
   };
 }
 function approval(sha = head, id = 9001, submittedAt = new Date(Date.now() - 3600_000).toISOString()) {
@@ -239,9 +240,20 @@ async function settle(instant: string) {
   const wait = Date.parse(instant) + 5 - Date.now();
   if (wait > 0) await new Promise(resolve => setTimeout(resolve, wait));
 }
+// A merge authorization now requires the candidate to hold the head of the global merge queue
+// with Graphyard's speculative tip published for it. The queue is shared by every fixture in
+// this file, so the other entries step aside and this candidate's tip is published the way
+// tests/system.test.ts does; queue publication itself is proven by the merge-queue tests.
 async function deliver(work: Work, slice: string, mergeSha: string, overrides: Partial<Observation> = {}) {
   const current = () => (store.list()).then(items => items.find(item => item.id === work.id)!);
+  await store.pool.query("UPDATE work_items SET document=document-'queue' WHERE id<>$1 AND document->>'stage'<>'done'", [work.id]);
   let latest = await current();
+  assert.ok(latest.queue, 'a proven candidate holds a merge-queue entry');
+  const speculation: QueueSpeculation = { ref: queueRef(latest.key), tip: head, base, baseTree: 'f'.repeat(40), predecessors: [], policyRevision: latest.policyRevision, publishedAt: new Date().toISOString() };
+  await store.pool.query("UPDATE work_items SET document=jsonb_set(document,'{queue,speculation}',$2::jsonb) WHERE id=$1", [latest.id, JSON.stringify(speculation)]);
+  latest = await current();
+  latest = await engine.observe(latest.id, latest.revision, { ...observation(latest, slice, overrides), prState: 'open', draft: false });
+  assert.ok(latest.gates.every(gate => gate.passed), `the published tip clears the merge gate: ${JSON.stringify(latest.gates.find(gate => !gate.passed)?.reasons)}`);
   const granted = await engine.acquireMerge(coordinator, work.id, { expectedRevision: latest.revision, sha: head, baseSha: base, policyRevision: latest.policyRevision }, randomUUID());
   const verified = await engine.verifyMerge(coordinator, work.id, { executionId: granted.execution.id }, { ...observation(latest, slice, overrides), prState: 'open', draft: false }, randomUUID());
   const mergedAt = new Date(Math.ceil((Date.parse(verified.verifiedAt) + 1) / 1000) * 1000).toISOString().replace(/\.\d+Z$/, 'Z');
@@ -431,7 +443,7 @@ test('integration:flow-analytics-operations', async () => {
   assert.equal(operations.leases.reassignments, 1, 'a second epoch on the same item is a reassignment');
   assert.ok(operations.leases.losses >= 1);
   assert.ok(operations.leases.utilizationRatio !== null && operations.leases.idleCapacityMs >= 0);
-  assert.deepEqual(operations.queues.map(queue => queue.queue), ['reviewer', 'proof', 'operator', 'worker']);
+  assert.deepEqual(operations.queues.map(queue => queue.queue), ['reviewer', 'proof', 'operator', 'worker', 'merge']);
   assert.ok(operations.queues.every(queue => queue.samples === 30 && queue.maxDepth !== null && queue.definition.length > 20));
   assert.equal(operations.queueDepth.length, 30);
   assert.ok(operations.deployments.observations >= 0);
@@ -480,6 +492,30 @@ test('integration:flow-analytics-bottleneck-summary', async () => {
   assert.equal(snapshot.scope.filters.slice, slice);
   assert.ok(snapshot.categories.every(category => category.definition.length > 20));
   assert.ok(snapshot.categories.find(category => category.id === 'review')!.items.every(item => item.waitingMs !== null && item.key.startsWith('GY-')));
+
+  // Merge readiness is read from the durable gate fact: the proven candidate holds a merge-queue
+  // entry and the merge gate only sequences it, which is not a refusal. A queued candidate whose
+  // pull request stops being mergeable is merge blocked until a later observation clears it.
+  const readyGate = (await analyse({ slice })).dataset.latest.find(fact => fact.workId === observed.id && fact.kind === 'gates.changed')!.details;
+  assert.deepEqual(readyGate.unmet, ['merge']);
+  assert.equal(readyGate.queued, true);
+  assert.equal(readyGate.mergeBlockers, 0);
+  assert.ok(readyGate.reasons.every((reason: string) => /merge queue|speculative tip/i.test(reason)), `only queue sequencing remains: ${JSON.stringify(readyGate.reasons)}`);
+  let queued = (await store.list()).find(item => item.id === observed.id)!;
+  await engine.observe(queued.id, queued.revision, observation(queued, slice, { reviews: approval(head, 9600), mergeable: false }));
+  const conflicted = (await analyse({ slice })).report.bottleneck;
+  assert.equal(conflicted.categories.find(category => category.id === 'merge-blocked')!.count, 1, 'a queued but unmergeable candidate is blocked, not ready');
+  assert.equal(conflicted.categories.find(category => category.id === 'merge-ready')!.count, 0);
+  queued = (await store.list()).find(item => item.id === observed.id)!;
+  await engine.observe(queued.id, queued.revision, observation(queued, slice, { reviews: approval(head, 9600) }));
+  assert.equal((await analyse({ slice })).report.bottleneck.categories.find(category => category.id === 'merge-ready')!.count, 1);
+  const gate = (overrides: Record<string, unknown>) => ({ released: true, hasCandidate: true, dependencyWaiting: [], blocker: null, unmet: ['merge'], ...overrides });
+  assert.equal(classifyWait(gate({ queued: true, mergeBlockers: 0 }), false), 'merge-ready');
+  assert.equal(classifyWait(gate({ queued: true, mergeBlockers: 1 }), false), 'merge-blocked');
+  assert.equal(classifyWait(gate({ queued: false, mergeBlockers: 0 }), false), 'merge-blocked', 'an ejected or never-queued candidate is not merge ready');
+  assert.equal(classifyWait(gate({}), false), 'merge-blocked', 'a fact recorded before queue fields existed is never promoted');
+  assert.equal(classifyWait(gate({ unmet: [] }), false), 'merge-ready');
+  assert.equal(mergeReadyGate(gate({ unmet: ['acceptance', 'merge'], queued: true, mergeBlockers: 0 })), false);
 
   // The summary is computed from durable observations: a new approval moves the count.
   const promoted = reviewWaits[1];
