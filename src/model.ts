@@ -124,6 +124,11 @@ export const operatorCredentialHash = Symbol('operatorCredentialHash');
 export interface Principal {
   id: string; role: 'admin' | 'operator-agent' | 'coordinator' | 'slice-lead' | 'worker' | 'producer' | 'reader';
   proofs?: string[]; displayName?: string; runtime?: string;
+  // Deployment observation is a separate lane from acceptance-proof collection. A
+  // producer's `proofs` allowlist grants no authority here and is never widened to
+  // cover it: recording provider deployments requires this explicit per-provider
+  // scope, so a build or test collector cannot forge production-delivery history.
+  deploymentProviders?: string[];
   slice?: SliceId; sessionKind?: 'human' | 'ai';
   capabilities?: OperatorCapability[];
   scope?: { repositories: string[]; workItems: string[] };
@@ -188,7 +193,7 @@ export interface Observation {
   clockOffset?: { min: number; max: number };
   reviewIds?: number[];
   agentReview?: AgentReview;
-  prState?: 'open' | 'closed'; draft?: boolean;
+  prState?: 'open' | 'closed'; draft?: boolean; prCreatedAt?: string;
   candidate: Candidate; checks: { name: string; result: string; appId: number }[];
   reviews: { reviewer: string; sha: string; state: string; id?: number; submittedAt?: string }[];
   merged: boolean; mergeSha: string | null; mergedAt?: string | null; mergeable: boolean;
@@ -215,7 +220,17 @@ export interface SmokeOutcome { evidenceId: string; result: 'pass' | 'fail'; sha
  * The delivery snapshot. Merge facts are frozen at observation; the post-deployment facts are
  * appended once each is independently observed and never rewrite the merge.
  */
-export interface Delivery { mergedAt: string; mergeSha: string; authorizationRevision: number; deployment?: DeploymentObservation; smoke?: SmokeOutcome }
+// `mergedAt` is GitHub's own merge timestamp, kept exactly as the provider reported it.
+// `evidenceAsOf` is the repository-clock instant at which the authorizing snapshot's
+// evidence applicability was judged, preserved because the provider merge timestamp
+// alone cannot reproduce it once the two clocks disagree. For the same reason
+// `repositoryClockOffsetMs` preserves the lower bound of the GitHub-to-repository clock
+// offset measured at merge verification, and `mergedAtRepository` is the merge instant
+// carried onto the repository clock with it: the earliest repository instant the merge
+// can have happened at. Every repository-clock comparison - window membership, weekly
+// bucketing, and intent-to-merge duration - reads those rather than re-deriving them,
+// because a reader has no way to recover the offset later.
+export interface Delivery { mergedAt: string; mergeSha: string; authorizationRevision: number; evidenceAsOf?: string; mergedAtRepository?: string; repositoryClockOffsetMs?: number; deployment?: DeploymentObservation; smoke?: SmokeOutcome }
 export interface Work extends Create {
   validation?: Record<string, { candidateId: string; requestId?: string; attemptId?: string }>;
   criteria: Criterion[];

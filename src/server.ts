@@ -12,11 +12,13 @@ import { Validation } from './validation.js';
 import { Delivery } from './delivery.js';
 import { defineScenario, scenarios } from './scenarios.js';
 import { OperatorAgents } from './operator-agent.js';
+import { shippingPulse } from './shipping-pulse.js';
+import { ProductionDelivery } from './production-delivery.js';
 import { delegationLimits, delegationSnapshot, producerIndependenceRefusal, recordEvidenceRefusal, recordIntake, recordLeadRuling, recordLeadViolation, validateDelegationPrincipals } from './delegation.js';
 import { ProofGrants } from './proof-grants.js';
 import { artifactBackendFromEnv, artifactCapacityFromEnv, type ArtifactBackend } from './artifacts.js';
 
-export const principalSchema = z.array(z.object({ id: z.string().min(1), role: z.enum(['admin', 'coordinator', 'slice-lead', 'worker', 'producer', 'reader']), token: z.string().min(32), proofs: z.array(z.string()).optional(), displayName: z.string().trim().min(1).max(100).regex(/^[^\u0000-\u001f\u007f]+$/).optional(), runtime: z.string().trim().min(1).max(80).regex(/^[^\u0000-\u001f\u007f]+$/).optional(), slice: z.enum(['product', 'infrastructure', 'docs-experience']).optional(), sessionKind: z.enum(['human', 'ai']).optional() }).strict()).min(1);
+export const principalSchema = z.array(z.object({ id: z.string().min(1), role: z.enum(['admin', 'coordinator', 'slice-lead', 'worker', 'producer', 'reader']), token: z.string().min(32), proofs: z.array(z.string()).optional(), deploymentProviders: z.array(z.string().trim().min(1).max(40)).max(20).optional(), displayName: z.string().trim().min(1).max(100).regex(/^[^\u0000-\u001f\u007f]+$/).optional(), runtime: z.string().trim().min(1).max(80).regex(/^[^\u0000-\u001f\u007f]+$/).optional(), slice: z.enum(['product', 'infrastructure', 'docs-experience']).optional(), sessionKind: z.enum(['human', 'ai']).optional() }).strict()).min(1);
 export type Credential = Principal & { token: string };
 async function body(req: IncomingMessage, limit = 1_000_000) {
   const chunks: Buffer[] = []; let size = 0;
@@ -47,6 +49,7 @@ export function server(engine: Engine, credentials: Credential[], github: GitHub
   validation.artifactBackend = artifacts.backend; validation.artifactCapacityBytes = artifacts.capacityBytes;
   const delivery = new Delivery(validation);
   const operatorAgents = new OperatorAgents(engine.store, repository, credentials.map(credential => ({ id: credential.id, tokenHash: createHash('sha256').update(credential.token).digest('hex') })));
+  const productionDelivery = new ProductionDelivery(engine.store);
   engine.operatorAuthorizer = operatorAgents.revalidate.bind(operatorAgents);
   // Proof authority is Graphyard state. The configured registry only identifies which
   // principals exist and what role each holds; the grant store decides what they may prove.
@@ -116,6 +119,7 @@ export function server(engine: Engine, credentials: Credential[], github: GitHub
         const leadRoute = url.pathname.match(/^\/api\/work\/([^/]+)\/lead-ruling$/);
         if (leadRoute && req.method === 'POST') return send(200, await recordLeadRuling(engine.store, actor, leadRoute[1], JSON.parse((await body(req)).toString()), String(req.headers['idempotency-key'] ?? '')));
         if (url.pathname === '/api/validation/artifacts' && req.method === 'POST') return send(200, await validation.uploadArtifact(actor, JSON.parse((await body(req, 11_200_000)).toString()), String(req.headers['idempotency-key'] ?? '')));
+        if (url.pathname === '/api/production-observations' && req.method === 'POST') return send(200, await productionDelivery.observe(actor, JSON.parse((await body(req)).toString()), String(req.headers['idempotency-key'] ?? '')));
         const artifactRead = url.pathname.match(/^\/api\/validation\/artifacts\/([^/]+)\/([^/]+)$/);
         if (artifactRead && req.method === 'GET') {
           const artifact = await validation.readArtifact(actor, artifactRead[1], artifactRead[2]);
@@ -187,6 +191,7 @@ export function server(engine: Engine, credentials: Credential[], github: GitHub
           return send(200, { actor, delegation: delegationSnapshot(principals.map(p => p.actor), operatorVisible(await engine.store.list()), observedAt.getTime(), limits), repository: repository || null, baseBranch: github?.config.base ?? process.env.GITHUB_BASE_BRANCH ?? 'main', github: !!github, check: 'Graphyard / merge', reviewProviders: ['github', ...(dispatchAvailable ? ['codex'] : []), ...(dispatchAvailable && engine.reviewerApps.length ? ['agent'] : [])], reviewerApps: engine.reviewerApps, githubPermissions, githubRepository, githubAppId: github?.config.appId ?? null, githubInstallationId: github?.config.installationId ?? null, jobs, now: observedAt.toISOString() });
         }
         if (req.method === 'GET' && url.pathname === '/api/work-snapshot') { const snapshot = await engine.store.workSnapshot(); const visibleWork = operatorVisible(snapshot.work); return send(200, { ...snapshot, work: visibleWork, jobs: actor.role === 'operator-agent' ? snapshot.jobs.filter(job => visibleWork.some(work => work.id === job.work_id)) : snapshot.jobs }); }
+        if (req.method === 'GET' && url.pathname === '/api/shipping-pulse') return send(200, await shippingPulse(engine.store.pool));
         if (req.method === 'GET' && url.pathname === '/api/work') return send(200, operatorVisible(await engine.store.list()));
         if (req.method === 'GET' && url.pathname === '/api/events') {
           const id = url.searchParams.get('work') ?? undefined;
