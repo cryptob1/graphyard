@@ -1,7 +1,10 @@
-import { Sent, defineRoutes, parseJson } from '../routes.js';
+import { refuseCiProducer } from '../../model/ci-proofs.js';
+import { Next, Sent, defineRoutes, parseJson } from '../routes.js';
 
 /** The validation runner protocol: artifacts, definitions, candidates, attempts and commands. */
 export const validationRoutes = defineRoutes('validation', [
+  // The CI producer's only lane is CI-produced evidence; it never uploads, collects, reuses or replays.
+  { method: 'POST', path: /^\/api\/validation(?:\/|$)/, handle: async ({ actor }) => { refuseCiProducer(actor, 'the validation protocol'); return Next; } },
   { method: 'POST', path: '/api/validation/artifacts', handle: async context => context.services.validation.uploadArtifact(context.actor, await parseJson(context, 11_200_000), context.idempotencyKey()) },
   {
     method: 'GET', path: /^\/api\/validation\/artifacts\/([^/]+)\/([^/]+)$/,

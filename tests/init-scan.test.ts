@@ -295,7 +295,10 @@ test('CLI init --scan applies nothing without approval and --apply enforces the 
     assert.match(await readFile(join(root, 'AGENTS.md'), 'utf8'), /Graphyard coordination/);
     const appliedProposal = JSON.parse(await readFile(join(root, '.graphyard/setup-proposal.json'), 'utf8'));
     const registry = JSON.parse(await readFile(join(root, '.graphyard/principals.json'), 'utf8'));
-    assert.equal(registry.principals.length, 3 + new Set(appliedProposal.profiles.workers.map((worker: any) => worker.principal)).size);
+    // operator, master, the evidence producer, the CI producer, and one worker per reviewed profile.
+    assert.equal(registry.principals.length, 4 + new Set(appliedProposal.profiles.workers.map((worker: any) => worker.principal)).size);
+    assert.deepEqual(registry.principals.at(-1), { ...registry.principals.at(-1), id: "ci-proofs", role: "producer", runtime: "github-actions", proofs: ["unit:*", "integration:*"] });
+    assert.deepEqual(applied.ciProofs.grants, ["unit:*", "integration:*"]); assert.ok(applied.ciProofs.next.some((step: string) => step.includes("GRAPHYARD_CI_PRODUCER_TOKEN")));
     for (const principal of registry.principals) assert.doesNotMatch(principal.token, /test-only/);
 
     await addFile(root, 'compose.yaml', 'services:\n  db:\n    image: postgres:16\n');

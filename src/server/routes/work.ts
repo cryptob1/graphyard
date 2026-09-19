@@ -1,6 +1,7 @@
 import { demand, type Principal } from '../../model.js';
 import type { Command } from '../../engine.js';
 import { producerIndependenceRefusal, recordEvidenceRefusal, recordLeadViolation } from '../../delegation.js';
+import { ciRunBindingSchema, isCiProducer, observeCiCheckRun, type CiRunObservation } from '../../model/ci-proofs.js';
 import { defineRoutes, parseJson, type RouteContext } from '../routes.js';
 
 // Every mutating work route refuses a slice lead the same way and leaves the same
@@ -59,7 +60,20 @@ export const workRoutes = defineRoutes('work', [
           demand(false, dependent, 403);
         }
       }
-      return engine.execute(actor, attempted as Command, id ?? null, JSON.parse(raw.toString() || '{}'), context.idempotencyKey());
+      const input = JSON.parse(raw.toString() || '{}');
+      // CI-produced evidence is verified against the job GitHub reports, read here with the
+      // control plane's own App so provider I/O stays outside the coordination transaction.
+      // The engine repeats every judgement; this only supplies the observation it needs.
+      let ciRun: CiRunObservation | null | undefined;
+      if (attempted === 'evidence' && id && isCiProducer(actor as Principal)) {
+        const { services: { github, repository } } = context;
+        demand(github, 'GitHub integration is required to verify CI-produced evidence', 503);
+        const binding = ciRunBindingSchema.safeParse(input?.ciRun);
+        // A job GitHub cannot report (unknown id, a refused read) leaves nothing to verify against;
+        // the engine then refuses the record as unobserved rather than answering a server error.
+        try { ciRun = binding.success ? observeCiCheckRun(repository, await github.request(`/check-runs/${binding.data.jobId}`)) : null; } catch { ciRun = null; }
+      }
+      return engine.execute(actor, attempted as Command, id ?? null, input, context.idempotencyKey(), ciRun === undefined ? {} : { ciRun });
     },
   },
 ]);

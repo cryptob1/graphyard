@@ -6,6 +6,7 @@ import { contracts } from './contracts.mjs';
 import { register } from 'tsx/esm/api';
 register();
 const { delegationLimitAssignments, readDeployedDelegationLimits } = await import('../src/install/limits.ts');
+const { ciProducerId, ciProducerSecret, ciProducerGrants, withCiProducer } = await import('../src/install/ci-proofs.ts');
 const apply = process.argv.includes('--apply');
 const root = new URL('../', import.meta.url), repository = 'cryptob1/graphyard';
 const url = 'https://graphyard-production.up.railway.app';
@@ -16,7 +17,7 @@ try {
   try { app = JSON.parse(await readFile(new URL('.graphyard/github-app.json', root), 'utf8')); } catch (error) { if (error.code !== 'ENOENT') throw error; }
   if (!apply) {
     console.log(JSON.stringify({ repository, url, appRegistered: !!app?.appId, installationVerified: !!app?.installationId,
-      changes: ['Restrict graphyard-reporting environment to main only', 'Send App credentials to Railway secret variables', `Generate a producer scoped to ${Object.keys(contracts).join(' and ')} in memory; store only in Railway and the restricted GitHub environment`, 'Derive the GRAPHYARD_MAX_*/MIN_* capacity variables from the principal set including that producer, report drift against the deployed values, and set them beside GRAPHYARD_PRINCIPALS', 'Set Graphyard URL on that environment', 'Stage variables without deploying; preview Railway IaC before rollout'],
+      changes: ['Restrict graphyard-reporting environment to main only', 'Send App credentials to Railway secret variables', `Generate a producer scoped to ${Object.keys(contracts).join(' and ')} in memory; store only in Railway and the restricted GitHub environment`, `Generate the ${ciProducerId} CI producer scoped to ${ciProducerGrants.join(' and ')} (never manual:* or e2e:*) with runtime github-actions (its token is kept when .graphyard/credentials.json carries one, otherwise rotated like the reporter credential); store it only in Railway and as ${ciProducerSecret} in the restricted environment`, 'Derive the GRAPHYARD_MAX_*/MIN_* capacity variables from the principal set including that producer, report drift against the deployed values, and set them beside GRAPHYARD_PRINCIPALS', 'Set Graphyard URL on that environment', 'Stage variables without deploying; preview Railway IaC before rollout'],
       blockedBy: !app?.installationId ? 'Complete graphyard github-setup and install the App first' : null }, null, 2));
     process.exit(0);
   }
@@ -32,7 +33,10 @@ try {
   if (policies.length !== 1 || policies[0].name !== 'main' || policies[0].type !== 'branch') throw new Error('Reporter environment must allow only main');
   // The reporter may publish exactly the protected contract inventories and nothing else.
   const producer = { id: 'trusted-acceptance', role: 'producer', proofs: Object.keys(contracts), token: randomBytes(32).toString('hex') };
-  const roster = [...principals.filter(p => p.id !== producer.id), producer];
+  // The CI lane's producer publishes what the protected workflow ran on each candidate push. Its
+  // token is kept when credentials.json carries one; otherwise a rerun rotates it with the secret.
+  const roster = withCiProducer([...principals.filter(p => p.id !== producer.id), producer]);
+  const ciProducer = roster.find(p => p.id === ciProducerId);
   // The producer generated here counts toward GRAPHYARD_MAX_REVIEWERS like every other one, so the
   // capacity variables are derived from the roster this run deploys — not from credentials.json
   // alone — and drift against what the deployment runs with now is reported before they are set.
@@ -52,6 +56,7 @@ try {
   for (const [key, value] of Object.entries(variables)) execFileSync('npx', [...railway, 'variable', 'set', '--service', 'graphyard', '--skip-deploys', '--stdin', key], { input: value, stdio: ['pipe', 'ignore', 'pipe'] });
   stage = 'store restricted reporter credential';
   gh(['secret', 'set', 'GRAPHYARD_PRODUCER_TOKEN', '--repo', repository, '--env', 'graphyard-reporting'], producer.token);
+  gh(['secret', 'set', ciProducerSecret, '--repo', repository, '--env', 'graphyard-reporting'], ciProducer.token);
   gh(['variable', 'set', 'GRAPHYARD_URL', '--repo', repository, '--env', 'graphyard-reporting', '--body', url]);
   console.log(`Integrations configured without printing credentials; capacity set to ${limits.lines.join(' ')}${limits.drift.length ? ` (corrected ${limits.drift.map(entry => entry.variable).join(', ')})` : ''}. No deployment triggered. Preview .railway/railway.ts, deploy reviewed code, then verify the App-owned check before requiring it.`);
 } catch { console.error(`Configuration stopped at: ${stage}. No credential values are logged. Correct the setup and rerun; a rerun rotates the dedicated reporter credential.`); process.exitCode = 1; }
