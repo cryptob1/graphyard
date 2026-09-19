@@ -31,11 +31,34 @@ pushing on lease loss; an expired or superseded epoch does not authorize more wo
 Register the assigned host/path/branch before submission. Do not reuse another
 assignment's worktree or quietly remove historical reservations.
 
+Run `sync GY-N` before every push. It merges the base branch (`git fetch origin &&
+git merge origin/BASE`; never rebase) and lists every file outside the item's
+plannedFiles that no longer matches origin/BASE. Files outside plannedFiles must match
+origin/BASE byte-for-byte: restore them, never re-resolve a merge in favour of your
+branch. Only an operator can widen plannedFiles, through an audited requirements revision.
+
 Submit the PR with `complete GY-N EPOCH PR_NUMBER`. This reports implementation
-completion; it does not set Done. CI, trusted evidence, independent review, and
-Graphyard's merge gate decide progression. Report blockers explicitly.
+completion and ends your lease in the same transaction; it does not set Done. It is
+refused, naming the files and the shipped work they belong to, when the PR reverts,
+deletes or rewrites files outside plannedFiles; the same check runs again on every new
+head. Make `complete` your last action: do not heartbeat, edit, or push after it. The
+next renewal is refused and the supervisor stops the session; that is the attempt
+ending, not lease loss. CI, trusted evidence, independent review, and Graphyard's
+merge gate decide progression. Report blockers explicitly.
 Never use an operator/producer token for implementation or weaken proof requirements.
 Herdr runs sessions; Graphyard remains the source of ownership truth.
+
+A dedicated master coordinator must keep cycling: status, dispatch ready work,
+shepherd review and proof collection, guarded merge, then deployment verification.
+Repeat until both conditions hold: (1) every in-scope item is Done or has a genuinely
+external blocker recorded in Graphyard; and (2) every merged change is deployed and
+live-verified against the exact deployed release, or a genuinely external deployment
+blocker is recorded in Graphyard. Delivered work is immutable, so a deployment
+blocker is recorded as a follow-up work item naming the delivered item, its merge
+commit, and the external cause; the delivery stays pending until the release serves it.
+An observed merge alone does not end the loop. Ordinary review findings, rework,
+idle workers, and proof setup are not stopping conditions. Close finished agent
+sessions as part of the cycle.
 <!-- /graphyard -->
 
 <!-- graphyard-master -->
@@ -71,6 +94,20 @@ triggers GitHub Mobile and reports the two-digit code in `master status`; approv
 that prompt on their device, and decisions the docs mark human-only, are the only
 operator interactions left. Never store, export, or reuse the profile's cookies
 outside those flows.
+
+Keep cycling: status, dispatch ready work, shepherd review and proof collection,
+guarded merge, then deployment verification. Repeat until both conditions hold:
+(1) every in-scope item is Done or has a genuinely external blocker recorded in
+Graphyard; and (2) every merged change is deployed and live-verified against the exact
+deployed release, or a genuinely external deployment blocker is recorded in Graphyard.
+Verify each delivery with `graphyard master verify-deployment GY-N`: it refuses a
+stale or local-only observation and records only the exact deployed release it observed.
+Delivered work is immutable, so a deployment blocker is recorded as a follow-up work
+item naming the delivered item, its merge commit, and the external cause;
+`master status` keeps the delivery under `pending` until the release serves it.
+An observed merge alone does not end the loop. Ordinary review findings, rework,
+idle workers, and proof setup are not stopping conditions. Close finished agent
+sessions as part of the cycle.
 
 Check the automatic-merge preference in master status. When disabled, wait for
 explicit operator approval for each merge. Otherwise routine merges may use
