@@ -25,6 +25,16 @@ export interface AppPermissionReport {
   required: Record<string, PermissionLevel>; granted: Record<string, string> | null;
   missing: PermissionShortfall[]; blockedFeatures: PermissionFeature[]; attention: string[];
 }
+/**
+ * The installation a hold was decided against: identity, suspension and the granted levels of
+ * the last verified reading. A hold is released when a passing preflight reports a different
+ * fingerprint, never because the same installation was read again. Null until a reading exists.
+ */
+export function installationFingerprint(report: AppPermissionReport | null): string | null {
+  if (!report?.granted) return null;
+  const granted = Object.fromEntries(Object.entries(report.granted).sort(([a], [b]) => a.localeCompare(b)));
+  return JSON.stringify({ appId: report.appId, installationId: report.installationId, suspended: report.suspended, granted });
+}
 /** App-level endpoints authenticate with a short JWT signed by the App private key. */
 export function appJwt(appId: number, privateKey: string, now = Date.now()) {
   const issued = Math.floor(now / 1000);
@@ -415,7 +425,7 @@ async function advanceQueue(engine: Engine, github: GitHub, work: Work, job: { w
     return { work: await engine.ejectFromQueue(work.id, work.revision, error.message, job.token), published: false, held: null };
   }
 }
-/** A held job waits this long before one bounded re-check, unless a passing preflight releases it first. */
+/** A held job waits this long before one bounded re-check, unless a preflight sees the installation change first. */
 export const permissionHoldMs = 30 * 60_000;
 /** Consecutive permission refusals a job may retry at the normal cadence before it is held. */
 export const permissionRefusalLimit = 3;
@@ -434,12 +444,15 @@ export async function processJob(engine: Engine, github: GitHub) {
   // held with the operator-facing reason instead of retrying into a 403. Adapters without a
   // preflight (test doubles) hold nothing.
   const hold = (feature: PermissionFeature) => github.permissionShortfall?.(feature) ?? null;
+  // Every hold records the installation it was decided against, so a later preflight releases
+  // it only when the installation actually changed (see Store.releaseHeldJobs).
+  const heldOn = () => installationFingerprint(github.permissionReport?.() ?? null);
   let held: string | null = null;
   try {
     work = (await engine.store.list()).find(w => w.id === job.work_id);
     if (work?.submission && work.stage !== 'done') {
       held = hold('observation');
-      if (held) { await engine.store.holdJob(job.work_id, job.token, held, permissionHoldMs); return; }
+      if (held) { await engine.store.holdJob(job.work_id, job.token, held, permissionHoldMs, heldOn()); return; }
       const observation = await github.observe(work);
       work = await engine.observe(work.id, work.revision, observation, job.token);
       const provider = reviewProviderOf(work.policy);
@@ -485,7 +498,7 @@ export async function processJob(engine: Engine, github: GitHub) {
       }
     }
     if (work?.stage === 'done') await engine.store.pool.query('DELETE FROM jobs WHERE work_id=$1 AND token=$2', [job.work_id, job.token]);
-    if (held) await engine.store.holdJob(job.work_id, job.token, held, permissionHoldMs);
+    if (held) await engine.store.holdJob(job.work_id, job.token, held, permissionHoldMs, heldOn());
     else await engine.store.finishJob(job.work_id, job.token);
   } catch (error) {
     const message = error instanceof Error ? error.message : 'GitHub reconciliation failed';
@@ -499,8 +512,10 @@ export async function processJob(engine: Engine, github: GitHub) {
     if (latest?.candidate && latest.stage !== 'done' && !hold('check')) try { await github.publish(latest, 'Reconciliation failed; fresh verification required', guard(latest, false)); } catch { /* Durable retry follows. */ }
     // A permission refusal is not transient: after a bounded number of ordinary retries the
     // job is held with the reason, and the next preflight either confirms the shortfall or
-    // releases it once the permission is accepted.
-    if (error instanceof GitHubPermissionRefusal) { await engine.store.refuseJob(job.work_id, job.token, message, permissionRefusalLimit, permissionHoldMs); return; }
+    // releases it once the installation changed. A refusal the declaration does not explain
+    // (the preflight already passes) therefore stays held for the bounded hold, one attempt
+    // per hold, instead of being released into the same 403 by every passing preflight.
+    if (error instanceof GitHubPermissionRefusal) { await engine.store.refuseJob(job.work_id, job.token, message, permissionRefusalLimit, permissionHoldMs, heldOn()); return; }
     await engine.store.finishJob(job.work_id, job.token, error instanceof ReconciliationRetry ? undefined : message, error instanceof ReconciliationRetry);
   }
 }

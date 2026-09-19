@@ -14,7 +14,7 @@ import { stageMetrics } from '../src/master-daemon.js';
 import { predictQueue, queueRef, type QueuePlacement, type QueueSpeculation } from '../src/merge-queue.js';
 import { defineScenario, scenarios } from '../src/scenarios.js';
 import { setTimeout as delay } from 'node:timers/promises';
-import { GitHubPermissionRefusal, permissionHoldMs, permissionRefusalLimit, processJob, type GitHub } from '../src/github.js';
+import { GitHubPermissionRefusal, installationFingerprint, permissionHoldMs, permissionRefusalLimit, processJob, type AppPermissionReport, type GitHub } from '../src/github.js';
 import { acknowledgeContainment, containmentGraceMs, isConfirmedCoordinationRefusal } from '../src/quarantine.js';
 import { probeSupervisorAbsence, supervise } from '../src/supervisor.js';
 import { assertDispatchable, assessContainment, buildMasterStatus, snapshotWithClock } from '../src/master.js';
@@ -1620,7 +1620,7 @@ test('existing GitHub and Codex review policies keep their original behavior', a
 // integration:app-permissions-preflight
 const shortfall = 'App graphyard-owner-project lacks Contents: write (installed with read), which the merge queue needs to publish speculative merge-queue tips; accept the pending permission request at https://github.com/settings/installations/4242';
 async function jobRow(w: Work) {
-  return (await store.pool.query("SELECT error,token,held_reason,held_until,refusals,attempts,held_until>now() AS held,available_at<=now() AS due FROM jobs WHERE work_id=$1", [w.id])).rows[0];
+  return (await store.pool.query("SELECT error,token,held_reason,held_until,held_on,refusals,attempts,held_until>now() AS held,available_at<=now() AS due FROM jobs WHERE work_id=$1", [w.id])).rows[0];
 }
 test('a queued candidate whose tip needs a missing App permission is held with the operator reason instead of retried into a 403', async () => {
   const main = sha40('d1'), headSha = sha40('d2'), mainTree = sha40('d3');
@@ -1689,21 +1689,42 @@ test('a job whose observation needs a missing permission is held before any GitH
   await store.releaseHeldJobs();
 });
 // integration:github-error-classification
+const grantedReport = (granted: Record<string, string>, suspended = false): AppPermissionReport => ({ appId: 1234, installationId: 4242, app: 'graphyard-owner-project', account: 'owner', installationUrl: 'https://github.com/settings/installations/4242', observedAt: new Date().toISOString(), verifiedAt: new Date().toISOString(), error: null, suspended,
+  required: { contents: 'write' }, granted, missing: [], blockedFeatures: [], attention: [] });
+const fullyGranted = { administration: 'read', checks: 'write', contents: 'write', issues: 'read', metadata: 'read', pull_requests: 'write' };
 test('an unexpected permission refusal retries a bounded number of times, then holds with its reason rather than accumulating attempts', async () => {
   let w = await submitted(); w = await engine.observe(w.id, w.revision, observation(w));
-  const refusing = { observe: async () => { throw new GitHubPermissionRefusal('GitHub GET /repos/owner/project/pulls/1 failed (403): the installed App lacks a permission this request needs', 'permission'); }, publish: async () => {} } as unknown as GitHub;
+  // The preflight passes: this 403 is one the declaration does not explain.
+  const refusing = { observe: async () => { throw new GitHubPermissionRefusal('GitHub GET /repos/owner/project/pulls/1 failed (403): the installed App lacks a permission this request needs', 'permission'); }, publish: async () => {}, permissionReport: () => grantedReport(fullyGranted) } as unknown as GitHub;
   for (let attempt = 1; attempt < permissionRefusalLimit; attempt++) {
     await onlyJob(w); await processJob(engine, refusing);
     const row = await jobRow(w);
-    assert.equal(row.refusals, attempt); assert.equal(row.held_reason, null); assert.match(row.error, /failed \(403\)/);
+    assert.equal(row.refusals, attempt); assert.equal(row.held_reason, null); assert.equal(row.held_on, null); assert.match(row.error, /failed \(403\)/);
   }
   await onlyJob(w); await processJob(engine, refusing);
   const held = await jobRow(w);
   assert.equal(held.refusals, permissionRefusalLimit); assert.equal(held.held, true); assert.match(held.held_reason, /failed \(403\)/);
   assert.equal(held.error, held.held_reason);
+  assert.equal(held.held_on, installationFingerprint(grantedReport(fullyGranted)), 'the hold records the installation it was decided against');
   await store.pool.query('UPDATE jobs SET available_at=now() WHERE work_id=$1', [w.id]);
   await store.pool.query("UPDATE jobs SET available_at=now()+interval '1 hour' WHERE work_id<>$1", [w.id]);
   assert.equal(await store.takeJob(), undefined, 'the held job is not retried');
+  // The refusal brings the preflight forward; when it passes against the unchanged installation
+  // the hold stays, so the job costs one attempt per bounded hold rather than three per preflight.
+  assert.equal(await store.releaseHeldJobs(installationFingerprint(grantedReport({ ...fullyGranted }))), 0, 'an unchanged installation releases nothing');
+  assert.equal((await jobRow(w)).held, true); assert.equal((await jobRow(w)).refusals, permissionRefusalLimit);
+  assert.equal(await store.takeJob(), undefined, 'still not retried');
+  // A different installation reading (a permission accepted, a suspension lifted) releases it at once.
+  assert.equal(await store.releaseHeldJobs(installationFingerprint(grantedReport({ ...fullyGranted, workflows: 'write' }))), 1, 'a changed installation releases the hold');
+  const released = await jobRow(w);
+  assert.equal(released.held, null); assert.equal(released.held_on, null); assert.equal(released.refusals, 0); assert.equal(released.due, true);
+  // Once the bounded hold expires the job re-checks once, and the same refusal holds it again immediately.
+  await onlyJob(w); await processJob(engine, refusing);
+  await store.pool.query('UPDATE jobs SET refusals=$2 WHERE work_id=$1', [w.id, permissionRefusalLimit]);
+  await store.pool.query('UPDATE jobs SET held_until=now(),available_at=now() WHERE work_id=$1', [w.id]);
+  await processJob(engine, refusing);
+  const reheld = await jobRow(w);
+  assert.equal(reheld.held, true); assert.equal(reheld.refusals, permissionRefusalLimit + 1); assert.ok(reheld.held_until.getTime() > Date.now() + permissionHoldMs - 5_000, 'held for another bounded period');
   // A rate-limit or transport failure is still the ordinary durable retry, and success clears the counter.
   await store.releaseHeldJobs();
   const failing = { observe: async () => { throw new Error('GitHub GET /pulls/1 failed (503)'); }, publish: async () => {} } as unknown as GitHub;
@@ -1714,6 +1735,27 @@ test('an unexpected permission refusal retries a bounded number of times, then h
   await onlyJob(w); await processJob(engine, healthy);
   const cleared = await jobRow(w);
   assert.equal(cleared.error, null); assert.equal(cleared.refusals, 0);
+});
+test('a hold decided against a permission shortfall is released by the preflight that sees the permission accepted, not by one that re-reads the same shortfall', async () => {
+  const legacy = grantedReport({ ...fullyGranted, contents: 'read' });
+  assert.equal(installationFingerprint(null), null); assert.equal(installationFingerprint({ ...legacy, granted: null }), null, 'no reading, no fingerprint');
+  assert.equal(installationFingerprint(legacy), installationFingerprint(grantedReport({ contents: 'read', pull_requests: 'write', metadata: 'read', issues: 'read', checks: 'write', administration: 'read' })), 'key order does not matter');
+  assert.notEqual(installationFingerprint(legacy), installationFingerprint(grantedReport({ ...fullyGranted, contents: 'read' }, true)), 'suspension is part of the reading');
+  assert.notEqual(installationFingerprint(legacy), installationFingerprint({ ...legacy, installationId: 1 }), 'so is the installation identity');
+  let w = await submitted(); w = await engine.observe(w.id, w.revision, observation(w));
+  await onlyJob(w);
+  const adapter = { observe: async (item: Work) => observation(item), publish: async () => {}, permissionShortfall: (feature: string) => feature === 'check' ? shortfall : null, permissionReport: () => legacy } as unknown as GitHub;
+  await processJob(engine, adapter);
+  const held = await jobRow(w);
+  assert.equal(held.held, true); assert.equal(held.held_reason, shortfall); assert.equal(held.held_on, installationFingerprint(legacy));
+  assert.equal(await store.releaseHeldJobs(installationFingerprint(legacy)), 0, 'the same shortfall read again is not acceptance');
+  assert.equal(await store.releaseHeldJobs(installationFingerprint(grantedReport(fullyGranted))), 1, 'Contents: write accepted');
+  assert.equal((await jobRow(w)).held, null);
+  // A hold placed before any reading existed is released by whichever preflight passes first.
+  await onlyJob(w);
+  await processJob(engine, { ...adapter, permissionReport: () => null } as unknown as GitHub);
+  assert.equal((await jobRow(w)).held, true); assert.equal((await jobRow(w)).held_on, null);
+  assert.equal(await store.releaseHeldJobs(installationFingerprint(grantedReport(fullyGranted))), 1);
 });
 test('the status API reports the App permission preflight and held jobs, and master status raises them as control-plane attention', async () => {
   const report = { appId: 1234, installationId: 4242, app: 'graphyard-owner-project', account: 'owner', installationUrl: 'https://github.com/settings/installations/4242', observedAt: new Date().toISOString(), verifiedAt: new Date().toISOString(), error: null, suspended: false,

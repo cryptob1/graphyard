@@ -38,7 +38,7 @@ export function diagnose(work: Work, all: Work[], now: number, jobs: Integration
   for (const r of resourceConflicts(work, all, now)) add('resource-busy', `${r.resource} is reserved by ${r.key}`, 'Wait for the owner to release its lease; do not use the resource concurrently.');
   const job = jobs.find(j => j.work_id === work.id);
   const held = !!job?.held_until && Date.parse(job.held_until) > now;
-  if (held) add('integration-held', job!.error ?? 'Integration work is held on a GitHub App permission', `Held rather than retried: accept the App permission and the next preflight releases it, or it re-checks once at ${job!.held_until}.`);
+  if (held) add('integration-held', job!.error ?? 'Integration work is held on a GitHub App permission', `Held rather than retried: accept the App permission and the preflight that sees the installation change releases it, or it re-checks once at ${job!.held_until}.`);
   else if (job?.error) add('integration-error', job.error, `Automatic retry is scheduled at ${job.available_at}; inspect integration configuration if failures persist.`);
   if (work.submission && !work.observation) add('unobserved', 'Submitted PR has not been observed for the current requirements', 'Check the GitHub connection and reconciliation job; missing observation is not success.');
   if (work.submission && work.observation && now - Date.parse(work.observation.at) >= 120000) add('stale-observation', 'GitHub observation is older than two minutes', 'Restore provider connectivity; the merge gate requires a fresh observation.');

@@ -61,6 +61,7 @@ ALTER TABLE jobs ADD COLUMN IF NOT EXISTS claimed_generation bigint NOT NULL DEF
 ALTER TABLE jobs ADD COLUMN IF NOT EXISTS held_until timestamptz;
 ALTER TABLE jobs ADD COLUMN IF NOT EXISTS held_reason text;
 ALTER TABLE jobs ADD COLUMN IF NOT EXISTS refusals int NOT NULL DEFAULT 0;
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS held_on text;
 CREATE TABLE IF NOT EXISTS webhook_receipts (id text PRIMARY KEY, created_at timestamptz NOT NULL DEFAULT now());
 CREATE TABLE IF NOT EXISTS validation_definitions (
   kind text NOT NULL, id text NOT NULL, revision int NOT NULL, document jsonb NOT NULL,
@@ -148,30 +149,41 @@ export class Store {
     return result.rows[0] as { work_id: string; token: string; attempts: number } | undefined;
   }
   async finishJob(id: string, token: string, error?: string, retry = false) {
-    await this.pool.query(`UPDATE jobs SET token=NULL,locked_until=NULL,error=$3,held_until=NULL,held_reason=NULL,refusals=CASE WHEN $3::text IS NULL THEN 0 ELSE refusals END,
+    await this.pool.query(`UPDATE jobs SET token=NULL,locked_until=NULL,error=$3,held_until=NULL,held_reason=NULL,held_on=NULL,refusals=CASE WHEN $3::text IS NULL THEN 0 ELSE refusals END,
       available_at=now()+ CASE WHEN generation<>claimed_generation THEN interval '0 seconds' WHEN $4::boolean THEN interval '2 seconds' WHEN $3::text IS NULL THEN interval '20 seconds' ELSE interval '45 seconds' END
       WHERE work_id=$1 AND token=$2 AND locked_until>clock_timestamp()`, [id, token, error ?? null, retry]);
   }
   /**
    * Parks a job that needs a permission the App does not hold. Webhook wakeups move
-   * `available_at` but never lift a hold; only a passing preflight or the hold's own bounded
-   * expiry lets the job run again, so a missing permission costs one attempt per hold.
+   * `available_at` but never lift a hold; only a preflight that sees a different installation
+   * or the hold's own bounded expiry lets the job run again, so a missing permission costs one
+   * attempt per hold. `heldOn` is the installation the hold was decided against
+   * (`installationFingerprint`), so a preflight that merely re-reads the same installation
+   * does not release it.
    */
-  async holdJob(id: string, token: string, reason: string, holdMs: number) {
-    await this.pool.query(`UPDATE jobs SET token=NULL,locked_until=NULL,error=$3,held_reason=$3,held_until=now()+($4::text||' milliseconds')::interval,available_at=now()+($4::text||' milliseconds')::interval
-      WHERE work_id=$1 AND token=$2 AND locked_until>clock_timestamp()`, [id, token, reason, String(Math.max(0, Math.floor(holdMs)))]);
+  async holdJob(id: string, token: string, reason: string, holdMs: number, heldOn: string | null = null) {
+    await this.pool.query(`UPDATE jobs SET token=NULL,locked_until=NULL,error=$3,held_reason=$3,held_on=$5,held_until=now()+($4::text||' milliseconds')::interval,available_at=now()+($4::text||' milliseconds')::interval
+      WHERE work_id=$1 AND token=$2 AND locked_until>clock_timestamp()`, [id, token, reason, String(Math.max(0, Math.floor(holdMs))), heldOn]);
   }
   /** A permission refusal retries at the ordinary cadence a bounded number of times, then holds. */
-  async refuseJob(id: string, token: string, reason: string, limit: number, holdMs: number) {
+  async refuseJob(id: string, token: string, reason: string, limit: number, holdMs: number, heldOn: string | null = null) {
     await this.pool.query(`UPDATE jobs SET token=NULL,locked_until=NULL,error=$3,refusals=refusals+1,
       held_reason=CASE WHEN refusals+1>=$4::int THEN $3 ELSE NULL END,
+      held_on=CASE WHEN refusals+1>=$4::int THEN $6::text ELSE NULL END,
       held_until=CASE WHEN refusals+1>=$4::int THEN now()+($5::text||' milliseconds')::interval ELSE NULL END,
       available_at=CASE WHEN refusals+1>=$4::int THEN now()+($5::text||' milliseconds')::interval ELSE now()+interval '45 seconds' END
-      WHERE work_id=$1 AND token=$2 AND locked_until>clock_timestamp()`, [id, token, reason, limit, String(Math.max(0, Math.floor(holdMs)))]);
+      WHERE work_id=$1 AND token=$2 AND locked_until>clock_timestamp()`, [id, token, reason, limit, String(Math.max(0, Math.floor(holdMs))), heldOn]);
   }
-  /** Once the preflight sees every declared permission, held jobs run again immediately. */
-  async releaseHeldJobs() {
-    const result = await this.pool.query('UPDATE jobs SET held_until=NULL,held_reason=NULL,refusals=0,available_at=now() WHERE held_reason IS NOT NULL OR held_until IS NOT NULL');
+  /**
+   * Once the preflight sees every declared permission, held jobs run again immediately — except
+   * a job held against this very installation state (`heldOn` equal to `installation`): its
+   * 403 is one the declaration does not explain, and re-reading an unchanged installation is
+   * not a reason to attempt it again. Such a job waits for its bounded expiry or for the
+   * installation to change. Without an installation every hold is released.
+   */
+  async releaseHeldJobs(installation: string | null = null) {
+    const result = await this.pool.query(`UPDATE jobs SET held_until=NULL,held_reason=NULL,held_on=NULL,refusals=0,available_at=now()
+      WHERE (held_reason IS NOT NULL OR held_until IS NOT NULL) AND ($1::text IS NULL OR held_on IS NULL OR held_on<>$1::text)`, [installation]);
     return result.rowCount ?? 0;
   }
   /** Jobs currently parked on a permission shortfall, for status and attention reporting. */

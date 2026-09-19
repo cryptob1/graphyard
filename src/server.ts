@@ -7,7 +7,7 @@ import { z } from 'zod';
 import { Store } from './store.js';
 import { Engine, type Command } from './engine.js';
 import { Refusal, demand, operatorScopeIncludes, parseReviewerApps, type Principal } from './model.js';
-import { githubFromEnv, installationSettingsUrl, processJob, type AppPermissionReport, type GitHub } from './github.js';
+import { githubFromEnv, installationFingerprint, installationSettingsUrl, processJob, type AppPermissionReport, type GitHub } from './github.js';
 import { controlPlanePermissions, requiredPermissions } from './github-permissions.js';
 import { Validation } from './validation.js';
 import { Delivery } from './delivery.js';
@@ -270,10 +270,12 @@ async function main() {
   const github = await githubFromEnv();
   // Startup preflight: a permission shortfall is announced before the first job can run
   // into it, and the jobs that need the missing permission are held rather than retried.
-  // A passing preflight (startup or periodic) releases holds left by an earlier process.
+  // A passing preflight (startup or periodic) releases holds decided against a different
+  // installation, including holds left by an earlier process; a hold decided against this same
+  // installation (a 403 the declaration does not explain) keeps its bounded expiry.
   const announcePreflight = async (report: AppPermissionReport) => {
     for (const line of report.attention) console.error(`GitHub App permissions: ${line}`);
-    if (!report.error && !report.suspended && !report.missing.length) await store.releaseHeldJobs();
+    if (!report.error && !report.suspended && !report.missing.length) await store.releaseHeldJobs(installationFingerprint(report));
   };
   if (github) await announcePreflight(await github.preflight());
   const http = server(engine, credentials, github);
