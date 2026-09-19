@@ -53,6 +53,7 @@ deployment, and for the manual fallback below.
 | `GITHUB_PRIVATE_KEY` | Full PEM key in a secret variable; alternatively mount `GITHUB_PRIVATE_KEY_FILE` |
 | `GITHUB_WEBHOOK_SECRET` | Shared secret for GitHub signature verification |
 | `GITHUB_CI_APP_IDS` | Comma-separated IDs of trusted CI Apps; the installer discovers these from the checks published on the base branch |
+| `GRAPHYARD_ARTIFACT_BACKEND` | Optional `postgres` (default) or `s3`; with `s3`, the `GRAPHYARD_ARTIFACT_S3_*` variables and optional `GRAPHYARD_ARTIFACT_CAPACITY_BYTES` described in [recovery](recovery.md#artifact-backends-capacity-and-migration) |
 | `GRAPHYARD_REVIEWER_APPS` | Optional JSON array registering reviewer GitHub App identities for [agent review](github.md#identity-bound-agent-review-providers); contains no secrets |
 
 The app starts without GitHub credentials so that setup can proceed, but merge gates remain

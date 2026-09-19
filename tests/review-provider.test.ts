@@ -29,7 +29,7 @@ function work(overrides: Partial<Work> = {}): Work {
       provider: 'agent', profile: 'claude-reviewer', reviewerApp: 'claude-reviewer', marker: '11111111-1111-4111-8111-111111111111' },
     observation: { candidate: { sha: head, baseSha: base, pr: 7, branch: 'graphyard/gy-42-1', author: 'implementer' },
       checks: [{ name: 'test', result: 'success', appId: 15368 }], reviews: [], merged: false, mergeSha: null, mergeable: true,
-      protected: true, files: [], at: now, prState: 'open', draft: false,
+      protected: true, files: [], scopeFiles: [], at: now, prState: 'open', draft: false,
       agentReview: { provider: 'agent', sha: head, approved: true, reason: 'approved', requestId: 900, profile: 'claude-reviewer', reviewerApp: 'claude-reviewer' } },
     ...overrides,
   } as Work;

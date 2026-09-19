@@ -18,6 +18,23 @@ Generate a private key. Configure `GITHUB_APP_ID`, `GITHUB_INSTALLATION_ID`, `GI
 
 The installation ID appears in the installation settings URL. The App ID is in the App's settings. A personal access token is deliberately not a substitute for the dedicated App, because the required check should be bound to a specific producer.
 
+After registration, keeping the App's permissions current is the master's job. `graphyard master browser app-permissions` raises any permission below the set above through the operator's browser profile and verifies it with `gh api apps/SLUG`; `graphyard master browser installation-accept` accepts the permission request that raises for this repository's installation and verifies it with `gh api user/installations`. Both are recorded with screenshots and written to the master's audit ledger; see [GitHub administration through the browser](master-agent.md#github-administration-through-the-browser). Neither flow touches the reviewer App, whose permissions must stay read-only.
+
+## The reviewer App
+
+Independent review uses a **second, separate App**. The control-plane App observes the repository and publishes the gate check; the reviewer App reads the repository and posts pull-request reviews. Graphyard refuses to bind the control-plane App as the reviewer: an identity cannot independently review the work it gates, and a reviewer that could write code or publish the check would review its own output.
+
+Register it with `graphyard master reviewer setup` (`--name NAME` when the default `reviewer`
+would push the generated App name past GitHub's 34-character limit), which uses the same
+reviewer manifest as [identity-bound agent review providers](#identity-bound-agent-review-providers) below, or create it manually with:
+
+- Repository permissions: Metadata read, Contents read, Pull requests write, Issues read. Never Checks, Administration, Workflows, or Contents write — those are what make an identity a gate rather than a reviewer.
+- Installed only on the managed repository.
+
+Then bind it: `graphyard master reviewer bind FILE --key-stdin`, with the App ID, installation ID, and slug in `FILE` and the PEM on standard input. Binding verifies the installation covers the managed repository and refuses an installation that can write code, checks, or administration. The private key and IDs are stored outside every worktree with mode 0600; master configuration records only the App ID, installation ID, slug, and that file's path.
+
+Each `graphyard master review GY-N` mints a fresh installation token scoped to this repository with `contents: read` and `pull_requests: write`, valid for at most one hour. Graphyard refuses a token that reports a longer life or broader permissions, hands it to the session through a private `GH_CONFIG_DIR` rather than a command line or environment secret, and removes it when the verdict closes the session. A review posted by `SLUG[bot]` on the exact head commit is an ordinary GitHub approval: it satisfies the native protection requirement and Graphyard's review gate, both of which still require the approval to be on the current head and from someone other than the pull-request author.
+
 ## Require the check
 
 Configure protection on the managed base branch:
@@ -34,6 +51,8 @@ GitHub may require the App to publish a check before it can be selected in the U
 Graphyard reads classic branch protection and refuses its merge gate unless these settings are present. Ruleset-only protection is not supported by the initial verifier; it refuses conservatively. Do not disable a working organizational ruleset to satisfy the MVP: add supported protection or extend the verifier first.
 
 The service does not automatically overwrite repository protection. For this project's first bootstrap commit, push the initial code before requiring the check, then enable it before agent-driven PRs begin. Record that bootstrap boundary in the work ledger.
+
+Once a classic rule with the App-bound check exists, the master keeps it consistent with the open review policies: `graphyard master protection --apply` patches the review subresource through the API, and `graphyard master browser protection` toggles `strict`, administrator enforcement, and the review settings on the settings page when the API path is unavailable, verifying the result through the API either way.
 
 ## What is checked
 
@@ -102,9 +121,32 @@ Work cards and the work-detail Ownership section show `PR #N`, and Ownership sho
 
 ## Trusted test producers
 
-A green GitHub job does not prove every behavioral criterion. A dedicated producer reads the actual test report, verifies the code under test, and sends Graphyard evidence with its credential and an artifact link. Give it only the proof names it can produce.
+A green GitHub job does not prove every behavioral criterion. A dedicated producer reads the actual test report, verifies the code under test, and sends Graphyard evidence with its credential. Give it only the proof names it can produce. The included protected acceptance publisher also resolves its own workflow run attempt and that attempt's single, nonempty, unexpired artifact through GitHub's API. It preserves the workflow commit, run ID and attempt, candidate head/base, executed/skipped counts, and the artifact ID, name, digest, creation time, and authenticated archive URL in the evidence ledger. GitHub lists artifacts per run rather than per attempt, so the bundled workflow names each upload after its attempt and the publisher additionally refuses any upload created before its own attempt started; ambiguity refuses rather than resolves. That inventory is read across every page of the run's artifacts under a bounded page count, so a retried run whose retained uploads outgrow one page still resolves its own report; a listing that changes while it is read, a page short of the reported total, or one that never completes refuses instead. Re-running the publish job alone therefore cannot republish an earlier attempt's report: re-run the whole workflow, or dispatch it again. A missing digest, duplicate artifact, stale candidate, empty inventory, or skipped test refuses passing publication; a complete failed inventory is retained as failing evidence.
 
-Do not expose that credential to arbitrary PR code. Running untrusted code in a job that can read the producer secret lets that code forge evidence. Use a separately controlled reporter or trusted workflow and artifact verification appropriate to your threat model. This MVP authenticates producers; it does not implement GitHub OIDC attestations or cryptographically inspect uploaded artifacts.
+Do not expose that credential to arbitrary PR code. Running untrusted code in a job that can read the producer secret lets that code forge evidence. The `graphyard-reporting` environment must remain restricted to the default branch; the exercise job receives no producer token, and the publishing job checks out the default-branch reporter. Artifact metadata proves which GitHub object was consumed, not that candidate-authored report bytes are truthful. Keep the executable inventory and its assertions in the independently controlled harness, as the bundled acceptance workflow does. That harness records each case as it runs, so an interrupted exercise reports the cases that completed, the case that failed, and the cases that genuinely never executed instead of collapsing to an all-skipped report. This MVP authenticates producers; it does not implement GitHub OIDC attestations or cryptographically inspect uploaded artifacts.
+
+## Post-deployment smoke proof
+
+Trunk is the only pre-merge gate. Once a candidate merges, Graphyard marks it Done on the observed merge and the master loop verifies that the running release reaches the merge commit. A work policy can add one more layer after that, without a staging queue in front of the merge: a trusted producer smoke-tests the live deployment once it serves the merge, and the verdict is bound to that exact commit and this work item.
+
+```json
+{ "policy": { "checks": ["test", "typecheck"], "review": true, "deploySmoke": true } }
+```
+
+`deploySmoke` is a policy, never an acceptance criterion: a criterion gates the merge, and nothing is deployed before the merge. Creating work with `e2e:deploy-smoke` in a criterion's proofs is refused. Staging or a release-candidate branch remain optional for soak or coordinated cutovers; they are not required for this proof.
+
+The sequence, and what each step may do:
+
+1. The [master loop](master-agent.md#durable-loop) observes the deployed commit as before. When the running release serves a delivered item's merge commit — exactly, or through a descendant that contains it — the loop records that observation on the item with `POST /api/work/UUID/deployment` using its coordinator credential. Only a coordinator or an operator may record it, only for delivered work, only naming the item's own merge commit, and only once per delivery: the smoke proof binds to that serving commit, so a later rollout cannot quietly move the target the proof was made against.
+2. The loop asks GitHub to run the trusted smoke workflow (`master init --smoke-workflow deploy-smoke.yml`, see [`.github/workflows/deploy-smoke.yml`](../.github/workflows/deploy-smoke.yml)) with the work UUID, the recorded deployed commit, the merge commit, and the policy revision. One request per deployed commit; the loop holds no producer credential and never produces the verdict.
+3. `scripts/deploy-smoke.mjs run` reads the commit the deployment reports serving (`SMOKE_DEPLOYMENT_URL`, field `SMOKE_SHA_FIELD`), refuses to run unless it is the recorded deployed commit, executes the configured checks (`SMOKE_CHECK_URLS` must answer 2xx; `SMOKE_COMMAND` is an optional command from the trusted checkout), and reads the serving commit again. A target that moved before or during the run is a refusal to attribute, not a failure of the delivered change: no report is produced.
+4. `scripts/deploy-smoke.mjs publish`, in a separate job holding the producer secret, submits `e2e:deploy-smoke` evidence with `sha` = the deployed commit the checks ran against and `baseSha` = the item's merge commit.
+
+Graphyard accepts that evidence only from a producer whose credential is granted `e2e:deploy-smoke` — a worker, an operator, and an ungranted producer are refused outright and nothing untrusted is stored — only after the deployment observation is recorded, only when the policy asked for the proof, and only when `sha` and `baseSha` match the recorded deployed commit and the merge commit. The accepted verdict lands in the delivery snapshot as `delivery.smoke` beside `delivery.deployment`; the merge facts in that snapshot are never rewritten, the gates are not re-evaluated, and the item never leaves Done.
+
+A failed verdict marks the item **delivered with failure**. `master status` lists it under `delivered` with rollback guidance, the loop records the same guidance as an escalation, and the dashboard shows it on the card, in the work detail, and in the post-deploy flow node. See [operations](operations.md#delivered-with-a-failed-smoke-proof) for what to do. A later passing run at the same deployed commit supersedes the verdict for the item's state; every run stays in the evidence ledger.
+
+Grant the smoke producer only `e2e:deploy-smoke` (`graphyard grants grant smoke e2e:deploy-smoke "Post-deployment smoke reporter"`, see [proof authority grants](operations.md#proof-authority-grants)); the reporter checks its live authority before it runs. Do not give an implementation worker that credential, and keep `SMOKE_COMMAND` in the trusted checkout on the managed base branch rather than in candidate code.
 
 ## Enforcement boundary
 
@@ -123,8 +165,8 @@ A bypassed merge of linked work is recorded as a permanent violation; Graphyard 
 | Symptom | Check |
 | --- | --- |
 | UI says GitHub is disconnected | App ID, installation ID, PEM secret, and server restart |
-| Job shows 401/403 | App key, installation access, permission approval, repository selection |
-| Protection gate refuses | Exact check name, App binding, `strict` left enabled, admin enforcement, force/delete settings |
+| Job shows 401/403 | App key, installation access, permission approval (`master browser installation-accept`), repository selection |
+| Protection gate refuses | Exact check name, App binding, `strict` left enabled, admin enforcement, force/delete settings (`master browser protection`) |
 | Acceptance refuses despite green CI | Proof names, producer allowlist, candidate SHA, base SHA, policy revision, skipped count |
 | PR changed while observed | Normal optimistic concurrency retry; investigate only if persistent |
 | No update after webhook | Signature secret and job errors; periodic polling still runs |
@@ -155,6 +197,8 @@ graphyard rereview GY-N
 The first command preserves the criteria and CI requirements, increments the policy revision, appends audit history, invalidates prior acceptance evidence, and queues reconciliation. Workers cannot change policy. A currently leased worker can request re-review with `rereview GY-N EPOCH`; operators do not need an epoch. Head/base/policy changes cause a new request during reconciliation. The dashboard exposes provider selection and re-review to operators. Old evidence remains visible but must be regenerated for the new policy revision.
 
 ### Branch protection migration
+
+`graphyard master protection` reconciles the native requirement with the review policy of every open item, and `--apply` performs it after a printed plan. It patches only the review subresource, preserves the App-bound check, the merge queue's `strict`-off setting and administrator enforcement, re-reads protection afterwards, and refuses a repository whose open items disagree about whether a native approval is required (`github` against `codex` or `agent`), or whose protection is missing those invariants or requires CODEOWNERS approval. The manual helper below remains for one-off migrations.
 
 GitHub's native required approval count is separate from Graphyard's gate. For repositories adopting agent review, retain enforced administrator protection and the App-bound `Graphyard / merge` check (with `strict` off, as the merge queue requires), but remove the native approval-count/last-push requirement once reviewed code supporting the adapter is deployed. Otherwise GitHub will continue demanding a formal approval even after Graphyard passes.
 

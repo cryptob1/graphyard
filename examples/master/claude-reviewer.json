@@ -1,0 +1,10 @@
+{
+  "name": "claude-reviewer",
+  "agentName": "review-claude-1",
+  "kind": "claude",
+  "agentArgs": [],
+  "approvals": "auto",
+  "environment": {
+    "CLAUDE_CONFIG_DIR": "/home/operator/.config/claude-reviewer"
+  }
+}

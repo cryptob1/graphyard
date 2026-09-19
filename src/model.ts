@@ -1,11 +1,60 @@
 import { z } from 'zod';
 import { ejectionReason, nextQueueSequence, queueHistoryLimit, queuePlacement } from './merge-queue.js';
 import type { QueueEjection, QueueEntry, QueueHistoryEntry } from './merge-queue.js';
+import { regressionRefusals } from './regression-guard.js';
 
+export const CHECK_NAME = 'Graphyard / merge';
 export const stages = ['backlog', 'ready', 'build', 'review', 'test', 'acceptance', 'merge', 'done'] as const;
 export type Stage = typeof stages[number];
 export const proofSchema = z.string().regex(/^(unit|integration|e2e|manual):[a-zA-Z0-9._/-]+$/);
-export const criterionSchema = z.object({ id: z.string().regex(/^AC-\d+$/), text: z.string().min(1).max(2000), proofs: z.array(proofSchema).min(1).max(20) }).strict();
+/**
+ * The post-deployment smoke proof. It is required through the work policy, never through an
+ * acceptance criterion: a criterion gates the merge, and nothing is deployed before the merge.
+ */
+export const deploySmokeProof = 'e2e:deploy-smoke';
+// Proof authority is granted inside Graphyard, never inferred from a deployment
+// environment. A grant names either an exact proof, a whole proof kind, or a bounded
+// prefix ending in `/*`; nothing else widens a producer's authority.
+export const grantPatternSchema = z.string().max(150).regex(/^(unit|integration|e2e|manual):(?:\*|[a-zA-Z0-9._-]+(?:\/[a-zA-Z0-9._-]+)*(?:\/\*)?)$/);
+export function proofMatchesGrant(pattern: string, proof: string): boolean {
+  const separator = pattern.indexOf(':');
+  const kind = pattern.slice(0, separator), scope = pattern.slice(separator + 1);
+  if (!proof.startsWith(`${kind}:`)) return false;
+  const name = proof.slice(kind.length + 1);
+  if (!name) return false;
+  if (scope === '*') return true;
+  // A bounded prefix authorizes strictly below its own path segment, never the
+  // segment itself and never a sibling that merely shares a textual prefix.
+  if (scope.endsWith('/*')) { const prefix = scope.slice(0, -1); return name.startsWith(prefix) && name.length > prefix.length; }
+  return name === scope;
+}
+export const grantsAuthorize = (patterns: readonly string[], proof: string) => patterns.some(pattern => proofMatchesGrant(pattern, proof));
+/** Roles that can never hold proof authority, however a grant is requested. */
+export const ungrantableRoles = ['worker', 'reader', 'coordinator', 'operator-agent'] as const;
+export interface ProofGrant {
+  principalId: string; role: 'producer'; patterns: string[]; revision: number;
+  createdAt: string; updatedAt: string;
+  /** The environment allowlist this record was materialized from, for audit only. */
+  seededFrom: string[];
+  lastMutation: { kind: 'seed' | 'grant' | 'revoke'; actor: string; at: string; reason: string; patterns: string[] };
+}
+/** One principal's effective proof authority, with the source that currently decides it. */
+export interface ProofAuthority { principalId: string; role: Principal['role']; patterns: string[]; source: 'grant' | 'environment' | 'role' }
+// Bootstrap mode: an operator may defer a criterion's proofs for the single change that
+// introduces the harness those proofs depend on. The proof is never dropped. It becomes a
+// standing obligation on the named contract paths, and the next change touching those paths
+// inherits it as a required proof. Workers can never declare it.
+export const bootstrapDeclarationSchema = z.object({
+  reason: z.string().trim().min(1).max(2000),
+  contractPaths: z.array(z.string().trim().min(1).max(500)).min(1).max(20)
+    .refine(paths => new Set(paths).size === paths.length, 'Bootstrap contract paths must be unique'),
+}).strict();
+export type BootstrapDeclaration = z.infer<typeof bootstrapDeclarationSchema>;
+export const criterionSchema = z.object({ id: z.string().regex(/^AC-\d+$/), text: z.string().min(1).max(2000), proofs: z.array(proofSchema).min(1).max(20), bootstrap: bootstrapDeclarationSchema.optional() }).strict()
+  .refine(criterion => !criterion.proofs.includes(deploySmokeProof), `${deploySmokeProof} runs after delivery; require it with policy.deploySmoke instead of an acceptance criterion`);
+/** Stored declaration. The audit fields are stamped by the control plane, never by the client. */
+export interface BootstrapMode extends BootstrapDeclaration { declaredBy: string; declaredAt: string; policyRevision: number }
+export interface Criterion { id: string; text: string; proofs: string[]; bootstrap?: BootstrapMode }
 export const reviewProviders = ['github', 'codex', 'agent'] as const;
 export type ReviewProvider = typeof reviewProviders[number];
 const identifier = z.string().trim().regex(/^[a-z0-9][a-z0-9._-]{0,63}$/);
@@ -37,6 +86,9 @@ export const policySchema = z.object({
   review: z.boolean().default(true),
   reviewProvider: z.enum(reviewProviders).optional(),
   reviewerProfiles: z.array(reviewerProfileSchema).min(1).max(10).optional(),
+  // Optional second confidence layer after trunk: a trusted producer smoke-tests the live
+  // deployment once it serves this item's merge commit. It never gates the merge itself.
+  deploySmoke: z.boolean().optional(),
 }).strict().superRefine((policy, context) => {
   if (policy.reviewProvider !== 'agent') {
     if (policy.reviewerProfiles) context.addIssue({ code: 'custom', message: 'Reviewer profiles require reviewProvider "agent"', path: ['reviewerProfiles'] });
@@ -50,6 +102,10 @@ export const policySchema = z.object({
   if (!distinct(profiles.map(profile => profile.reviewerApp))) context.addIssue({ code: 'custom', message: 'Each reviewer profile must name a distinct registered reviewer App', path: ['reviewerProfiles'] });
 });
 export const resourcesSchema = z.array(z.string().regex(/^[a-z0-9][a-z0-9._:/-]*$/).max(200)).max(30).refine(v => new Set(v).size === v.length, 'Resource names must be unique');
+export const sliceIds = ['product', 'infrastructure', 'docs-experience'] as const;
+export type SliceId = typeof sliceIds[number];
+export const escalationTriggers = ['lease-loss', 'evidence-policy-conflict', 'security-concern', 'requirement-weakening'] as const;
+export type EscalationTrigger = typeof escalationTriggers[number];
 export const createSchema = z.object({
   title: z.string().min(1).max(200), description: z.string().max(20000).default(''),
   type: z.enum(['feature', 'bug', 'chore']).default('feature'),
@@ -59,14 +115,16 @@ export const createSchema = z.object({
   policy: policySchema.default({ checks: ['test', 'typecheck'], review: true }),
   plannedFiles: z.array(z.string().min(1).max(500)).max(100).default([]),
   exclusiveResources: resourcesSchema.optional(),
+  slice: z.enum(sliceIds).optional(),
 }).strict();
 export type Create = z.infer<typeof createSchema>;
-export const operatorCapabilities = ['intent:create', 'intent:ready', 'intent:unblock', 'policy:requirements', 'policy:review-provider'] as const;
+export const operatorCapabilities = ['intent:create', 'intent:ready', 'intent:unblock', 'policy:requirements', 'policy:review-provider', 'policy:bootstrap'] as const;
 export type OperatorCapability = typeof operatorCapabilities[number];
 export const operatorCredentialHash = Symbol('operatorCredentialHash');
 export interface Principal {
-  id: string; role: 'admin' | 'operator-agent' | 'coordinator' | 'worker' | 'producer' | 'reader';
+  id: string; role: 'admin' | 'operator-agent' | 'coordinator' | 'slice-lead' | 'worker' | 'producer' | 'reader';
   proofs?: string[]; displayName?: string; runtime?: string;
+  slice?: SliceId; sessionKind?: 'human' | 'ai';
   capabilities?: OperatorCapability[];
   scope?: { repositories: string[]; workItems: string[] };
   [operatorCredentialHash]?: string;
@@ -76,7 +134,7 @@ export interface Lease { owner: string; epoch: number; expiresAt: string }
 export interface Workspace { host: string; path: string; branch: string; epoch: number; owner: string }
 export interface Candidate { sha: string; baseSha: string; pr: number; branch: string; author: string }
 export type ArtifactKind = 'log' | 'report' | 'screenshot' | 'trace' | 'other';
-export type ArtifactAvailability = 'available' | 'expired' | 'redacted' | 'missing' | 'external';
+export type ArtifactAvailability = 'available' | 'expired' | 'redacted' | 'missing' | 'upload-failed' | 'external';
 export interface EvidenceArtifact {
   kind: ArtifactKind; label: string; mediaType?: string; size?: number; digest?: string;
   expiresAt?: string; availability: ArtifactAvailability;
@@ -91,6 +149,11 @@ export interface Evidence {
   executed: number; skipped: number; url?: string; at: string; expiresAt?: string;
   artifacts?: EvidenceArtifact[];
   scenarioRevision?: number; environment?: string;
+  provenance?: {
+    provider: 'github-actions'; repository: string; workflowCommit: string;
+    runId: string; runAttempt: number;
+    artifact: { id: number; name: string; digest: string; url: string; createdAt: string };
+  };
   validation?: { candidateId: string; requestId: string; attemptId: string };
 }
 export interface ReviewRequest {
@@ -109,6 +172,18 @@ export interface ReviewFailover {
   profile: string; reviewerApp: string; runtime: string; exhaustion: 'usage-limit' | 'timeout'; reason: string;
   at: string; sha: string; baseSha: string; policyRevision: number; requestCommentId: number; nextProfile: string | null;
 }
+/**
+ * One file the candidate changes, as the provider reports it against the merge base, together
+ * with the blob the candidate's bound base (the base branch tip, or a speculative tip's predicted
+ * base) holds at the same path. `baseSha` is null when that base has no such file and undefined
+ * when the observation never compared it (a file inside the planned scope, or an observation
+ * recorded before the regression guard existed).
+ */
+export interface ScopeFile {
+  path: string; status: 'added' | 'modified' | 'removed' | 'renamed' | 'copied' | 'changed' | 'unchanged';
+  previousPath?: string; sha: string | null; additions: number; deletions: number; binary: boolean;
+  baseSha?: string | null; previousBaseSha?: string | null;
+}
 export interface Observation {
   clockOffset?: { min: number; max: number };
   reviewIds?: number[];
@@ -121,17 +196,39 @@ export interface Observation {
   // base so a speculative binding never hides where the managed branch actually points.
   baseTip?: string; baseTree?: string;
   protected: boolean; files: string[]; at: string;
+  /** The candidate diff compared against its bound base; see regression-guard.ts. */
+  scopeFiles?: ScopeFile[];
 }
 export interface Gate { name: string; passed: boolean; reasons: string[] }
+export interface Escalation { trigger: EscalationTrigger; reason: string; at: string; actor: string }
+export interface ReleaseDelivery { environment: string; policyRevision: number; releaseId: string; releaseRevision: number; generation: number; verifiedAt: string; interval: { from: string; to: string } }
+/** What the running release served when Graphyard's coordinator observed it covering this merge. */
+export interface DeploymentObservation {
+  sha: string; mergeSha: string; source: 'endpoint' | 'github-deployment'; observedAt: string;
+  /** Exact when the release serves the merge commit itself; otherwise a descendant that contains it. */
+  covers: 'exact' | 'descendant';
+  at: string; observer: string;
+}
+/** The latest trusted post-deployment smoke result bound to the observed deployed commit. */
+export interface SmokeOutcome { evidenceId: string; result: 'pass' | 'fail'; sha: string; mergeSha: string; producer: string; at: string; executed: number; skipped: number; url?: string }
+/**
+ * The delivery snapshot. Merge facts are frozen at observation; the post-deployment facts are
+ * appended once each is independently observed and never rewrite the merge.
+ */
+export interface Delivery { mergedAt: string; mergeSha: string; authorizationRevision: number; deployment?: DeploymentObservation; smoke?: SmokeOutcome }
 export interface Work extends Create {
   validation?: Record<string, { candidateId: string; requestId?: string; attemptId?: string }>;
+  criteria: Criterion[];
   retiredCriterionIds?: string[];
   formalReviewResetRequired?: boolean;
   formalReviewBaseline?: { pr: number; policyRevision: number; reviewIds: number[] };
+  // Append-only identities that have held an assignment. Trusted proof producers
+  // must stay independent of every one of them, not only the latest assignment.
+  implementers?: string[];
   id: string; key: string; stage: Stage; revision: number; policyRevision: number;
   createdAt: string; updatedAt: string; stageEnteredAt: string; ready: boolean;
   epoch: number; lease: Lease | null; lastAssignment?: AssignmentIdentity; workspaces: Workspace[]; candidate: Candidate | null;
-  containmentQuarantine?: { owner: string; epoch: number; at: string; settlementHash: string; launchAcknowledgedAt?: string; launchExpiresAt?: string } | null;
+  containmentQuarantine?: { owner: string; epoch: number; at: string; settlementHash: string; launchAcknowledgedAt?: string; launchExpiresAt?: string; leaseExpiresAt?: string } | null;
   submission: { epoch: number; pr: number } | null;
   queue?: QueueEntry | null; queueSequence?: number; queueEjection?: QueueEjection | null; queueHistory?: QueueHistoryEntry[];
   reworkRequested: boolean;
@@ -139,9 +236,26 @@ export interface Work extends Create {
   reviewRequest?: ReviewRequest | null;
   reviewFailovers?: ReviewFailover[];
   mergeAuthorization?: { sha: string; baseSha: string; policyRevision: number; at: string } | null;
-  mergeExecution?: { id: string; owner: string; sha: string; baseSha: string; policyRevision: number; authorizationRevision: number; issuedAt: string; expiresAt: string; verifiedAt?: string; clockOffset?: { min: number; max: number } } | null;
-  delivery?: { mergedAt: string; mergeSha: string; authorizationRevision: number };
+  mergeExecution?: { id: string; owner: string; sha: string; baseSha: string; policyRevision: number; authorizationRevision: number; issuedAt: string; expiresAt: string; verifiedAt?: string; clockOffset?: { min: number; max: number }; fenced?: { reason: string; at: string } | null } | null;
+  delivery?: Delivery;
+  /**
+   * Independently observed production delivery, one record per environment: the first
+   * release whose verified common interval covered the whole expected manifest while this
+   * item was an included member. Merge completion above is a different fact and keeps its
+   * meaning; a later release containing the same change records nothing here again.
+   */
+  releaseDeliveries?: ReleaseDelivery[];
+  /** Required proof names that had no authorized producer when intent was last recorded. */
+  proofGaps?: string[];
   evidence: Evidence[]; observation: Observation | null; blocker: string | null;
+  // `escalations` is the source of truth: every distinct unresolved trigger
+  // stands until it is individually resolved. `escalation` mirrors the oldest
+  // one so legacy documents and readers keep working.
+  escalation?: Escalation | null;
+  escalations?: Escalation[];
+  // Durable state for a blocking lead ruling. History records the ruling; this
+  // field is what the gate evaluator and the merge broker read independently.
+  leadHold?: { action: BlockingRulingAction; rulingId: string; leadId: string; slice: SliceId; ruleId: string; reason: string; at: string } | null;
   gates: Gate[]; violations: string[];
 }
 export class Refusal extends Error {
@@ -157,14 +271,146 @@ export function demand(value: unknown, message: string, status = 409): asserts v
   if (!value) throw new Refusal(message, status);
 }
 export function admin(actor: Principal) { demand(actor.role === 'admin', 'Operator permission required', 403); }
+// One scope rule for every scoped read and mutation, so a route cannot answer
+// with data its own authorization would have refused.
+export function operatorScopeIncludes(actor: Principal, work: { id: string; key: string }) {
+  if (actor.role !== 'operator-agent') return true;
+  return !!actor.scope?.workItems.some(entry => entry === '*' || entry === work.id || entry === work.key);
+}
 export function operatorCapability(actor: Principal, capability: OperatorCapability, work?: Work, repository?: string) {
   if (actor.role === 'admin') return;
   demand(actor.role === 'operator-agent' && actor.capabilities?.includes(capability), `Capability ${capability} is required`, 403);
   demand(!!repository && actor.scope?.repositories.includes(repository), 'Repository is outside this operator-agent scope', 403);
-  if (work) demand(actor.scope?.workItems.includes('*') || actor.scope?.workItems.includes(work.id) || actor.scope?.workItems.includes(work.key), 'Work item is outside this operator-agent scope', 403);
+  if (work) demand(operatorScopeIncludes(actor, work), 'Work item is outside this operator-agent scope', 403);
 }
 export function activeLease(work: Work, actor: Principal, epoch: number, now: Date) {
   demand(work.lease && work.lease.owner === actor.id && work.lease.epoch === epoch && Date.parse(work.lease.expiresAt) > now.getTime(), 'Lease missing, expired, or superseded; claim the task again');
+}
+
+// Every unresolved trigger stands on its own. A document written before
+// `escalations` existed carries only the singular field, so it is read as a
+// one-entry list rather than migrated in place.
+export function standingEscalations(work: Work): Escalation[] {
+  if (work.escalations) return work.escalations;
+  return work.escalation ? [work.escalation] : [];
+}
+function setEscalations(work: Work, escalations: Escalation[]) {
+  work.escalations = escalations;
+  work.escalation = escalations[0] ?? null;
+}
+// An unresolved escalation refuses delivery. Only a human operator can resolve
+// one, so no lead or automated path can deliver past it.
+export function escalationRefusals(work: Work): string[] {
+  return standingEscalations(work).map(entry => `Unresolved ${entry.trigger} escalation requires operator resolution: ${entry.reason}`);
+}
+export function escalationRefusal(work: Work): string | null { return escalationRefusals(work)[0] ?? null; }
+// A standing escalation is never overwritten, and a later distinct trigger never
+// disappears behind it: each trigger is kept until it is resolved on its own, so
+// resolving one concern cannot silently drop another. Raising one refuses the
+// merge gate, invalidates merge authorization, and fences any in-flight merge
+// execution in the same transaction, so a candidate that was already merge-ready
+// cannot be delivered while it stands.
+export function raiseEscalation(work: Work, escalation: Escalation) {
+  const standing = standingEscalations(work);
+  // One entry per trigger: a repeat of a trigger that already stands is history,
+  // not a second incident, and resolution names a trigger.
+  if (standing.some(entry => entry.trigger === escalation.trigger)) return false;
+  setEscalations(work, [...standing, escalation]);
+  work.mergeAuthorization = null;
+  fenceMergeExecution(work, `Unresolved ${escalation.trigger} escalation: ${escalation.reason}`, escalation.at);
+  const merge = work.gates.find(gate => gate.name === 'merge');
+  if (merge) for (const reason of escalationRefusals(work)) if (!merge.reasons.includes(reason)) { merge.reasons.push(reason); merge.passed = false; }
+  return true;
+}
+// Resolving names one standing trigger and leaves every other one standing.
+export function resolveEscalation(work: Work, trigger: EscalationTrigger) {
+  const standing = standingEscalations(work);
+  const remaining = standing.filter(entry => entry.trigger !== trigger);
+  setEscalations(work, remaining);
+  return standing.length - remaining.length;
+}
+// Fencing, not cancelling: the execution row stays so its owner can still cancel
+// or observe it idempotently, but no verification and no provider call may
+// proceed under it. The broker re-reads this between verification and the merge
+// call, so a concern raised mid-flight still stops delivery.
+export function fenceMergeExecution(work: Work, reason: string, at: string) {
+  if (!work.mergeExecution || work.mergeExecution.fenced) return false;
+  work.mergeExecution.fenced = { reason, at };
+  return true;
+}
+
+// Rulings that stop delivery until an authorized recovery clears them. A plan
+// rejection is superseded by a later approve-plan from the same slice lead; a
+// send-back is cleared only by the operator rework lifecycle, which reopens
+// implementation. Ranked so a later ruling can raise, but never weaken, a hold.
+export const blockingRulingActions = ['reject-plan', 'send-back'] as const;
+export type BlockingRulingAction = typeof blockingRulingActions[number];
+export const blockingRulingRank: Record<BlockingRulingAction, number> = { 'reject-plan': 1, 'send-back': 2 };
+export function leadHoldRefusal(work: Work): string | null {
+  return work.leadHold
+    ? `Slice lead ${work.leadHold.leadId} ruled ${work.leadHold.action} under rule ${work.leadHold.ruleId}; delivery is blocked until the authorized recovery: ${work.leadHold.reason}`
+    : null;
+}
+// Applied inside the ruling transaction: the hold is recorded, merge
+// authorization is invalidated, and the merge gate refuses in the same write.
+export function holdDelivery(work: Work, hold: NonNullable<Work['leadHold']>) {
+  const standing = work.leadHold;
+  // A ruling may strengthen a standing hold, but it cannot replace an
+  // equal-ranked hold and thereby transfer that hold's recovery authority to a
+  // different lead. The later ruling remains in append-only history.
+  if (standing && blockingRulingRank[standing.action] >= blockingRulingRank[hold.action]) return false;
+  const superseded = leadHoldRefusal(work);
+  work.leadHold = hold;
+  work.mergeAuthorization = null;
+  fenceMergeExecution(work, `Slice lead ${hold.leadId} ruled ${hold.action} under rule ${hold.ruleId}`, hold.at);
+  const merge = work.gates.find(gate => gate.name === 'merge');
+  const reason = leadHoldRefusal(work)!;
+  if (merge) {
+    merge.reasons = merge.reasons.filter(entry => entry !== superseded && entry !== reason);
+    merge.reasons.push(reason);
+    merge.passed = false;
+  }
+  return true;
+}
+// Clearing a hold removes its refusal from the merge gate. Merge authorization is
+// not reissued here: only a full gate evaluation may mint it, so the recovery is
+// fail-closed until the next evaluation confirms every other gate still passes.
+export function releaseLeadHold(work: Work) {
+  const reason = leadHoldRefusal(work);
+  work.leadHold = null;
+  const merge = work.gates.find(gate => gate.name === 'merge');
+  if (!reason || !merge) return;
+  merge.reasons = merge.reasons.filter(entry => entry !== reason);
+  merge.passed = merge.reasons.length === 0;
+}
+
+// Every identity that has held an assignment on this item, including superseded
+// epochs and legacy documents that predate the append-only list.
+export function implementerIdentities(work: Work): string[] {
+  return [...new Set([
+    ...(work.implementers ?? []),
+    ...work.workspaces.map(workspace => workspace.owner),
+    ...(work.lastAssignment ? [work.lastAssignment.owner] : []),
+    ...(work.lease ? [work.lease.owner] : []),
+  ])];
+}
+
+// AC-4 independence is a standing property, not a submission-time check. The
+// implementer set is append-only, so trusted evidence whose producer later takes
+// an assignment stops being applicable, without any history being rewritten. The
+// loss is reported only for proofs no still-independent producer has re-proved,
+// so re-proving the same candidate remains possible.
+export function evidenceIndependenceRefusals(work: Work, now = new Date()): string[] {
+  const implementers = implementerIdentities(work);
+  const refusals: string[] = [];
+  for (const proof of new Set(work.criteria.flatMap(criterion => criterion.proofs))) {
+    if (currentEvidence(work, proof, now)) continue;
+    const superseded = work.evidence.filter(evidence => evidence.proof === proof && evidence.trusted && implementers.includes(evidence.producer)
+      && !!work.candidate && evidence.sha === work.candidate.sha && evidence.baseSha === work.candidate.baseSha && evidence.policyRevision === work.policyRevision);
+    for (const producer of new Set(superseded.map(evidence => evidence.producer)))
+      refusals.push(`Trusted ${proof} evidence from ${producer} is no longer independent: ${producer} has since held an assignment on ${work.key}`);
+  }
+  return refusals;
 }
 
 // A task created before pluggable providers keeps requiring a formal GitHub approval.
@@ -198,10 +444,122 @@ export function assertReviewerProfiles(profiles: ReviewerProfile[] | undefined, 
 export function currentEvidence(work: Work, proof: string, now = new Date()): Evidence | undefined {
   const scenario = work.scenarioRequirements?.find(s => s.proof === proof);
   const validation = work.validation?.[proof];
-  const latest = work.evidence.filter(e => e.proof === proof && e.trusted && e.sha === work.candidate?.sha && e.baseSha === work.candidate?.baseSha && e.policyRevision === work.policyRevision
+  const implementers = implementerIdentities(work);
+  const latest = work.evidence.filter(e => e.proof === proof && e.trusted && !implementers.includes(e.producer) && e.sha === work.candidate?.sha && e.baseSha === work.candidate?.baseSha && e.policyRevision === work.policyRevision
     && (!validation || !!validation.attemptId && e.validation?.candidateId === validation.candidateId && e.validation?.requestId === validation.requestId && e.validation?.attemptId === validation.attemptId)
     && (!scenario || e.scenarioRevision === scenario.revision && e.environment === scenario.environment)).at(-1);
   return latest && (!latest.expiresAt || Date.parse(latest.expiresAt) > now.getTime()) ? latest : undefined;
+}
+
+/** True when the policy asks for the post-deployment smoke proof. Older documents carry no flag. */
+export const deploySmokeRequired = (policy: Work['policy']) => !!policy.deploySmoke;
+
+/**
+ * Post-delivery state, derived from the delivery snapshot alone. `delivered` is the terminal state
+ * for work whose policy asks for no smoke proof; the others describe the second confidence layer.
+ */
+export type DeliveryState = 'delivered' | 'awaiting-deployment' | 'awaiting-smoke' | 'smoke-passed' | 'delivered-with-failure';
+export function deliveryState(work: Work): DeliveryState | null {
+  if (work.stage !== 'done' || !work.delivery) return null;
+  if (!deploySmokeRequired(work.policy)) return 'delivered';
+  const { deployment, smoke } = work.delivery;
+  if (!deployment) return 'awaiting-deployment';
+  // A smoke result only counts for the deployed commit Graphyard recorded for this delivery.
+  if (!smoke || smoke.sha !== deployment.sha || smoke.mergeSha !== work.delivery.mergeSha) return 'awaiting-smoke';
+  return smoke.result === 'pass' ? 'smoke-passed' : 'delivered-with-failure';
+}
+
+/**
+ * What an operator does about a failed smoke proof. Graphyard v0.1 does not roll anything back
+ * itself: the guidance names the exact commits involved so the person or agent acting on it
+ * cannot confuse the failing release with the one to restore.
+ */
+export function rollbackGuidance(work: Work, baseBranch = 'main'): string | null {
+  if (deliveryState(work) !== 'delivered-with-failure') return null;
+  const { mergeSha, deployment, smoke } = work.delivery!;
+  const serving = deployment!.covers === 'exact' ? `merge commit ${mergeSha}` : `${deployment!.sha}, which contains merge commit ${mergeSha}`;
+  return `${work.key} is delivered with a failed post-deployment smoke proof: the live deployment served ${serving} when ${smoke!.producer} reported ${smoke!.executed} executed, ${smoke!.skipped} skipped at ${smoke!.at}. `
+    + `Roll the deployment back to the last release whose smoke proof passed, or revert ${mergeSha} on ${baseBranch} through a new work item so the revert is reviewed and merged under the same gates. `
+    + `Do not backfill passing evidence for this delivery; the failure stays on record, and the fix or revert is a follow-up item with its own proof.`;
+}
+
+/** Time from merge to the smoke verdict, or to `now` while the verdict is still outstanding. */
+export function postDeployMs(work: Work, now: number): number | null {
+  const state = deliveryState(work);
+  if (!state || state === 'delivered') return null;
+  const end = state === 'smoke-passed' || state === 'delivered-with-failure' ? Date.parse(work.delivery!.smoke!.at) : now;
+  const value = end - Date.parse(work.delivery!.mergedAt);
+  return Number.isFinite(value) && value >= 0 ? value : null;
+}
+
+/** Time from the item's creation to the observed deployment covering its merge: PR-to-production latency. */
+export function productionLatencyMs(work: Work): number | null {
+  const observedAt = work.delivery?.deployment?.observedAt;
+  if (work.stage !== 'done' || !observedAt) return null;
+  const value = Date.parse(observedAt) - Date.parse(work.createdAt);
+  return Number.isFinite(value) && value >= 0 ? value : null;
+}
+
+// Deliberately bounded scope syntax: exact paths or directory prefixes ending /, /*, /**.
+// Unsupported glob expressions are not interpreted as semantic dependency knowledge.
+export function pathScope(value: string) {
+  const path = value.replace(/^\.\//, '');
+  const prefix = path.endsWith('/') || /\/\*{1,2}$/.test(path);
+  return { path: prefix ? path.replace(/\*+$/, '') : path, prefix };
+}
+export function pathScopesOverlap(a: string, b: string) {
+  const left = pathScope(a), right = pathScope(b);
+  return left.path === right.path || left.prefix && right.path.startsWith(left.path) || right.prefix && left.path.startsWith(right.path);
+}
+/** True when `outer` covers every file `inner` can name. A file scope contains only itself. */
+export function pathScopeContains(outer: string, inner: string) {
+  const wide = pathScope(outer), narrow = pathScope(inner);
+  return wide.path === narrow.path ? wide.prefix || !narrow.prefix : wide.prefix && narrow.path.startsWith(wide.path);
+}
+
+export interface BootstrapObligation extends BootstrapMode { key: string; workId: string; criterionId: string; proof: string }
+
+/**
+ * A deferred proof is discharged only by a delivered change that actually ran it: trusted
+ * passing evidence bound to that change's merged candidate and policy. Nothing an operator
+ * or worker asserts can retire an obligation.
+ */
+export function deliveredProof(work: Work, proof: string) {
+  const candidate = work.candidate;
+  return work.stage === 'done' && !!candidate && work.evidence.some(evidence => evidence.proof === proof && evidence.trusted
+    && evidence.result === 'pass' && evidence.executed > 0 && evidence.skipped === 0
+    && evidence.sha === candidate.sha && evidence.baseSha === candidate.baseSha && evidence.policyRevision === work.policyRevision);
+}
+
+/** Every bootstrap deferral no delivered change has proven yet. Derived, never asserted. */
+export function bootstrapObligations(all: Work[]): BootstrapObligation[] {
+  const declared = all.flatMap(item => item.criteria.flatMap(ac => ac.bootstrap
+    ? ac.proofs.map(proof => ({ key: item.key, workId: item.id, criterionId: ac.id, proof, ...ac.bootstrap! }))
+    : []));
+  return declared.filter(obligation => !all.some(item => deliveredProof(item, obligation.proof)));
+}
+
+/**
+ * Obligations another change deferred that this item's planned files now touch. A criterion
+ * of this item cannot defer an inherited proof a second time: its own bootstrap declaration is
+ * deliberately not consulted here, so the deferral can never be renewed by the change that
+ * inherits it.
+ */
+export function inheritedObligations(work: Work, all: Work[]): BootstrapObligation[] {
+  if (work.stage === 'done') return [];
+  const alreadyRequired = new Set(work.criteria.flatMap(ac => ac.bootstrap ? [] : ac.proofs));
+  const inherited: BootstrapObligation[] = [];
+  for (const obligation of bootstrapObligations(all)) {
+    if (obligation.workId === work.id || alreadyRequired.has(obligation.proof)) continue;
+    if (inherited.some(seen => seen.proof === obligation.proof)) continue;
+    if (work.plannedFiles.some(path => obligation.contractPaths.some(contract => pathScopesOverlap(path, contract)))) inherited.push(obligation);
+  }
+  return inherited;
+}
+
+/** Exactly the proofs the acceptance gate demands for the current candidate. */
+export function requiredProofs(work: Work, all: Work[]): string[] {
+  return [...new Set([...work.criteria.flatMap(ac => ac.bootstrap ? [] : ac.proofs), ...inheritedObligations(work, all).map(obligation => obligation.proof)])];
 }
 
 // Pure evaluation: neither worker assertions nor UI state can authorize progression.
@@ -214,7 +572,10 @@ export function evaluate(work: Work, all: Work[], now: Date, ciAppIds: number[])
   const obs = work.observation;
   const current = !!candidate && !!obs && obs.candidate.sha === candidate.sha && obs.candidate.baseSha === candidate.baseSha;
   const fresh = current && now.getTime() - Date.parse(obs!.at) < 120_000;
-  add('build', [...(!work.submission || work.reworkRequested ? ['Worker has not submitted implementation for this attempt'] : []), ...(!candidate ? ['Pull request has not been independently observed'] : []), ...(!work.workspaces.length ? ['No workspace registered'] : [])]);
+  // A candidate that reverts, deletes or rewrites shipped files outside its planned scope never
+  // reaches review: the refusal names every file and is re-derived from each new observation.
+  add('build', [...(!work.submission || work.reworkRequested ? ['Worker has not submitted implementation for this attempt'] : []), ...(!candidate ? ['Pull request has not been independently observed'] : []), ...(!work.workspaces.length ? ['No workspace registered'] : []),
+    ...(current ? regressionRefusals(work, obs!, all) : [])]);
   const reviews = current ? obs!.reviews : [];
   const changesRequested = reviews.some(r => r.state === 'CHANGES_REQUESTED');
   const agentReview = current ? obs!.agentReview : undefined;
@@ -249,16 +610,33 @@ export function evaluate(work: Work, all: Work[], now: Date, ciAppIds: number[])
     return !checks.length || checks.some(c => c.result !== 'success');
   }).map(name => `Required CI check ${name} has not passed on the current candidate`));
   const reasons: string[] = [];
-  for (const ac of work.criteria) for (const proof of ac.proofs) {
-    const scenario = work.scenarioRequirements?.find(s => s.proof === proof);
+  const unproven = (proof: string) => {
     const evidence = currentEvidence(work, proof, now);
-    if (!evidence || evidence.result !== 'pass' || evidence.executed < 1 || evidence.skipped !== 0) reasons.push(`${ac.id}: ${proof} needs trusted passing evidence, with executed > 0 and skipped = 0, for this candidate and policy${scenario ? `; scenario v${scenario.revision} in ${scenario.environment}` : ''}`);
+    return !evidence || evidence.result !== 'pass' || evidence.executed < 1 || evidence.skipped !== 0;
+  };
+  const demanded = (proof: string) => {
+    const scenario = work.scenarioRequirements?.find(s => s.proof === proof);
+    return `${proof} needs trusted passing evidence, with executed > 0 and skipped = 0, for this candidate and policy${scenario ? `; scenario v${scenario.revision} in ${scenario.environment}` : ''}`;
+  };
+  // A bootstrap criterion's proofs are deferred here and required of the next change that
+  // touches the same contract; review, CI and every other criterion still gate this one.
+  for (const ac of work.criteria.filter(criterion => !criterion.bootstrap)) for (const proof of ac.proofs) {
+    if (unproven(proof)) reasons.push(`${ac.id}: ${demanded(proof)}`);
   }
+  for (const obligation of inheritedObligations(work, all)) {
+    if (unproven(obligation.proof)) reasons.push(`Bootstrap obligation inherited from ${obligation.key} ${obligation.criterionId}: ${demanded(obligation.proof)}`);
+  }
+  // Independence is re-decided on every evaluation, so evidence minted before its
+  // producer joined the implementer set refuses acceptance with a named reason.
+  reasons.push(...evidenceIndependenceRefusals(work, now));
   add('acceptance', reasons);
   // The merge queue owns the last hop. A candidate that has proven itself enters the queue,
   // is validated against the speculative tip it will actually land, and merges in order.
-  const queueState = placeInQueue(work, all, now, ciAppIds, gates.every(g => g.passed) && !work.violations.length && !!candidate && !obs?.merged);
-  add('merge', [...(!fresh ? ['GitHub observation missing or older than two minutes'] : []), ...(!obs?.protected ? ['Required Graphyard check and merge-queue branch protection have not been verified'] : []), ...(!obs?.mergeable && !obs?.merged ? ['Pull request is not mergeable against the current base'] : []), ...queueState.reasons]);
+  // A standing escalation or lead hold is a refusal to deliver, so such an item never
+  // becomes queue-eligible and its own reason is reported alongside the queue's.
+  const delivery = [...escalationRefusals(work), ...(leadHoldRefusal(work) ? [leadHoldRefusal(work)!] : [])];
+  const queueState = placeInQueue(work, all, now, ciAppIds, gates.every(g => g.passed) && !work.violations.length && !delivery.length && !!candidate && !obs?.merged);
+  add('merge', [...(!fresh ? ['GitHub observation missing or older than two minutes'] : []), ...(!obs?.protected ? ['Required Graphyard check and merge-queue branch protection have not been verified'] : []), ...(!obs?.mergeable && !obs?.merged ? ['Pull request is not mergeable against the current base'] : []), ...delivery, ...queueState.reasons]);
   const first = gates.find(g => !g.passed);
   const violations = [...work.violations];
   let stage: Stage = !work.ready ? 'backlog' : !work.submission ? (work.lease && Date.parse(work.lease.expiresAt) > now.getTime() ? 'build' : 'ready') : (first?.name === 'ready' ? 'build' : first?.name as Stage ?? 'merge');

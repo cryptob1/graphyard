@@ -1,0 +1,74 @@
+name: Trusted post-deployment smoke
+on:
+  workflow_dispatch:
+    inputs:
+      work_id:
+        description: Graphyard work UUID (not display key)
+        required: true
+      deployed_sha:
+        description: Full commit Graphyard recorded the deployment serving
+        required: true
+      merge_sha:
+        description: Full merge commit of the delivered item
+        required: true
+      policy_revision:
+        description: Policy revision of the delivered item
+        required: true
+        default: '1'
+permissions:
+  contents: read
+jobs:
+  smoke:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with: { ref: '${{ github.sha }}', persist-credentials: false }
+      - uses: actions/setup-node@v4
+        with: { node-version: '24' }
+      - name: Probe the live deployment at the recorded commit
+        # SMOKE_DEPLOYMENT_URL reports the serving commit; SMOKE_CHECK_URLS are HTTPS endpoints that
+        # must answer 2xx; SMOKE_COMMAND is an optional command from this trusted checkout.
+        run: node scripts/deploy-smoke.mjs run smoke.json
+        env:
+          GRAPHYARD_WORK_ID: ${{ inputs.work_id }}
+          GRAPHYARD_DEPLOYED_SHA: ${{ inputs.deployed_sha }}
+          GRAPHYARD_MERGE_SHA: ${{ inputs.merge_sha }}
+          GRAPHYARD_POLICY_REVISION: ${{ inputs.policy_revision }}
+          SMOKE_DEPLOYMENT_URL: ${{ vars.SMOKE_DEPLOYMENT_URL }}
+          SMOKE_SHA_FIELD: ${{ vars.SMOKE_SHA_FIELD }}
+          SMOKE_CHECK_URLS: ${{ vars.SMOKE_CHECK_URLS }}
+          SMOKE_COMMAND: ${{ vars.SMOKE_COMMAND }}
+      - uses: actions/upload-artifact@v4
+        if: always() && hashFiles('smoke.json') != ''
+        with:
+          name: graphyard-deploy-smoke
+          path: smoke.json
+          if-no-files-found: error
+          retention-days: 14
+  publish:
+    needs: smoke
+    if: always() && github.ref == 'refs/heads/main' && needs.smoke.result != 'cancelled'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    # Configure this environment to permit only main BEFORE storing its producer secret. The
+    # producer principal must be granted e2e:deploy-smoke; grant it nothing an implementation
+    # worker could use.
+    environment: graphyard-reporting
+    steps:
+      - uses: actions/checkout@v4
+        with: { ref: '${{ github.sha }}', persist-credentials: false }
+      - uses: actions/setup-node@v4
+        with: { node-version: '24' }
+      - uses: actions/download-artifact@v4
+        with: { name: graphyard-deploy-smoke, path: reports }
+      - name: Publish the smoke verdict bound to the recorded deployment
+        run: node scripts/deploy-smoke.mjs publish reports/smoke.json
+        env:
+          GRAPHYARD_URL: ${{ vars.GRAPHYARD_URL }}
+          GRAPHYARD_PRODUCER_TOKEN: ${{ secrets.GRAPHYARD_PRODUCER_TOKEN }}
+          GRAPHYARD_WORK_ID: ${{ inputs.work_id }}
+          GRAPHYARD_DEPLOYED_SHA: ${{ inputs.deployed_sha }}
+          GRAPHYARD_MERGE_SHA: ${{ inputs.merge_sha }}
+          GRAPHYARD_POLICY_REVISION: ${{ inputs.policy_revision }}

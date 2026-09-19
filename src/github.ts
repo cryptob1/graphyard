@@ -4,10 +4,13 @@ import { observeCodex } from './codex-review.js';
 import { observeAgentReview } from './agent-review.js';
 import { readFile } from 'node:fs/promises';
 import type { Engine } from './engine.js';
-import { demand, nativeReviewRequired, parseReviewerApps, reviewerProfileFor, reviewProviderOf, type Observation, type ReviewerApp, type ReviewerProfile, type Work, type ReviewRequest } from './model.js';
+import { CHECK_NAME, demand, nativeReviewRequired, parseReviewerApps, reviewerProfileFor, reviewProviderOf, type Observation, type ReviewerApp, type ReviewerProfile, type ScopeFile, type Work, type ReviewRequest } from './model.js';
+import { inPlannedScope } from './regression-guard.js';
+export { CHECK_NAME };
 import { queuePlacement, queueRef, type QueuePlacement, type QueueSpeculation } from './merge-queue.js';
 
-export const CHECK_NAME = 'Graphyard / merge';
+/** Out-of-scope paths compared against the base tip per observation; the rest are refused as uncompared. */
+export const scopeLookupBudget = 200;
 export interface GitHubConfig { repository: string; base: string; appId: number; installationId: number; privateKey: string; reviewerApps?: ReviewerApp[] }
 export class GitHub {
   private token = '';
@@ -133,6 +136,9 @@ export class GitHub {
     // A published speculative tip carries its own validated base. The candidate stays bound to
     // that exact commit while the managed branch advances underneath it through queue merges.
     const bound = this.boundBase(work, pr);
+    // Out-of-scope files are compared with the bound base: the predicted base already contains
+    // every queued predecessor, so their changes on a speculative tip are not this candidate's.
+    const scopeFiles = await this.compareScope(work.plannedFiles ?? [], files, bound);
     const candidateBase = pr.merged && work.candidate && work.candidate.sha === pr.head.sha ? work.candidate.baseSha : bound;
     const baseTree = bound !== pr.base.sha ? await this.commitTree(pr.base.sha) : undefined;
     const provider = reviewProviderOf(work.policy);
@@ -154,13 +160,45 @@ export class GitHub {
       reviews: [...latest.values()].map(r => ({ id: r.id, reviewer: r.user.login, sha: r.commit_id, state: r.state, submittedAt: r.submitted_at })),
       prState: pr.state, draft: pr.draft, merged: pr.merged, mergeSha: pr.merge_commit_sha, mergedAt: pr.merged_at, mergeable: pr.mergeable === true && !pr.draft && pr.state === 'open',
       protected: protectedBranch, files: files.map(f => f.filename), at: startedAt,
-      baseTip: pr.base.sha, ...(baseTree ? { baseTree } : {}),
+      baseTip: pr.base.sha, ...(baseTree ? { baseTree } : {}), scopeFiles,
     };
+  }
+  /**
+   * The provider's PR diff is taken against the merge base. The regression guard needs every
+   * file outside the planned scope compared with the commit the candidate is bound to (the base
+   * branch tip, or the predicted base of a published speculative tip), so those paths are looked
+   * up there by blob identity. Paths beyond the lookup budget stay uncompared, which the guard
+   * refuses rather than passes.
+   */
+  private async compareScope(plannedFiles: string[], files: any[], base: string): Promise<ScopeFile[]> {
+    const budget = { remaining: scopeLookupBudget };
+    const lookup = async (path: string) => budget.remaining-- > 0 ? this.blobAt(path, base) : undefined;
+    const compared: ScopeFile[] = [];
+    for (const file of files) {
+      const status: ScopeFile['status'] = ['added', 'modified', 'removed', 'renamed', 'copied', 'changed', 'unchanged'].includes(file.status) ? file.status : 'modified';
+      const previousPath = typeof file.previous_filename === 'string' && file.previous_filename !== file.filename ? file.previous_filename : undefined;
+      const entry: ScopeFile = { path: file.filename, status, ...(previousPath ? { previousPath } : {}),
+        sha: status !== 'removed' && typeof file.sha === 'string' && /^[a-f0-9]{40}$/.test(file.sha) ? file.sha : null,
+        additions: Number.isSafeInteger(file.additions) ? file.additions : 0, deletions: Number.isSafeInteger(file.deletions) ? file.deletions : 0, binary: typeof file.patch !== 'string' };
+      if (!inPlannedScope(plannedFiles, entry.path)) { const baseSha = await lookup(entry.path); if (baseSha !== undefined) entry.baseSha = baseSha; }
+      if (previousPath && status === 'renamed' && !inPlannedScope(plannedFiles, previousPath)) { const previousBaseSha = await lookup(previousPath); if (previousBaseSha !== undefined) entry.previousBaseSha = previousBaseSha; }
+      compared.push(entry);
+    }
+    return compared;
+  }
+  /** Blob identity of a path at a ref, or null when the ref holds no file there. */
+  async blobAt(path: string, ref: string): Promise<string | null> {
+    let entry: any;
+    try { entry = await this.request(`/contents/${path.split('/').map(encodeURIComponent).join('/')}?ref=${encodeURIComponent(ref)}`); }
+    catch (error) { if (error instanceof Refusal && /\(404\)/.test(error.message)) return null; throw error; }
+    if (Array.isArray(entry) || entry?.type === 'dir') return null;
+    demand(typeof entry?.sha === 'string' && /^[a-f0-9]{40}$/.test(entry.sha), `GitHub did not return a readable blob for ${path} at ${ref}`, 502);
+    return entry.sha;
   }
   async verify(work: Work): Promise<Observation> {
     const first = await this.observe(work);
     const second = await this.observe(work);
-    const gates = (o: Observation) => JSON.stringify({ candidate: o.candidate, checks: o.checks, reviews: o.reviews, agentReview: o.agentReview, protected: o.protected, merged: o.merged, mergeable: o.mergeable, prState: o.prState, draft: o.draft });
+    const gates = (o: Observation) => JSON.stringify({ candidate: o.candidate, checks: o.checks, reviews: o.reviews, agentReview: o.agentReview, protected: o.protected, merged: o.merged, mergeable: o.mergeable, prState: o.prState, draft: o.draft, scopeFiles: o.scopeFiles });
     demand(gates(first) === gates(second), 'GitHub gates changed during final verification; retry');
     return second;
   }

@@ -32,9 +32,9 @@ Graphyard makes those facts explicit and durable.
 | GitHub enforcement | PR, review, CI, protection, and merge observations with an App-owned required check |
 | Herdr integration | Repository setup, a work ledger pane, supervised workers, and a dedicated master mode |
 | Delivery view | Kanban and a graph showing every item at its first refusal |
-| Test definitions | Versioned E2E scenarios and a durable runner protocol |
+| Test definitions | Versioned E2E scenarios and a packaged Playwright runner/collector path |
 
-Graphyard currently governs work through a verified GitHub merge. Turnkey E2E execution, environment observations, and production verification are still in development.
+Graphyard currently governs work through a verified GitHub merge. The packaged Playwright path is available; environment observations and production verification are still in development.
 
 ## Boundaries
 
