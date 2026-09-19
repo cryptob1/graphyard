@@ -9,12 +9,16 @@ import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import { server } from '../src/server.js';
 import { OperatorAgents } from '../src/operator-agent.js';
-import { ReconciliationRetry, type Principal, type Work, type Observation } from '../src/model.js';
+import { ReconciliationRetry, SpeculativeConflict, deliveryState, rollbackGuidance, type Principal, type Work, type Observation, type ScopeFile } from '../src/model.js';
+import { diagnose } from '../src/coordination.js';
+import { stageMetrics } from '../src/master-daemon.js';
+import { predictQueue, queueRef, type QueuePlacement, type QueueSpeculation } from '../src/merge-queue.js';
 import { defineScenario, scenarios } from '../src/scenarios.js';
 import { setTimeout as delay } from 'node:timers/promises';
 import { processJob, type GitHub } from '../src/github.js';
-import { acknowledgeContainment, isConfirmedCoordinationRefusal } from '../src/quarantine.js';
-import { supervise } from '../src/supervisor.js';
+import { acknowledgeContainment, containmentGraceMs, isConfirmedCoordinationRefusal } from '../src/quarantine.js';
+import { probeSupervisorAbsence, supervise } from '../src/supervisor.js';
+import { assertDispatchable, assessContainment, buildMasterStatus, snapshotWithClock } from '../src/master.js';
 // @ts-expect-error The trusted runner intentionally uses dependency-free JavaScript outside the candidate source.
 import { exercise } from '../scripts/acceptance-contract.mjs';
 
@@ -34,6 +38,7 @@ before(async () => {
   database = new EmbeddedPostgres({ databaseDir: await mkdtemp(join(tmpdir(), 'graphyard-test-')), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('graphyard_test');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/graphyard_test`); await store.init(); engine = new Engine(store, [15368], 120, 'owner/project');
+  engine.reviewerApps = reviewerApps; engine.controlPlaneAppId = GRAPHYARD_APP;
   http = server(engine, [{ ...operator, token: 'o'.repeat(32) }, { ...worker, token: 'w'.repeat(32) }, { ...coordinator, token: 'm'.repeat(32) }, ...probeWorkers]);
   await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));
   url = `http://127.0.0.1:${(http.address() as any).port}`;
@@ -45,15 +50,64 @@ async function claimed() { const w = await ready(); return engine.execute(worker
 async function submitted() {
   let w = await claimed();
   w = await engine.execute(worker, 'workspace', w.id, { epoch: 1, host: 'machine-a', path: `/tmp/${w.id}`, branch: `graphyard/${w.id}` }, randomUUID());
-  return engine.execute(worker, 'submit', w.id, { epoch: 1, pr: Number(w.key.slice(3)) }, randomUUID());
+  w = await engine.execute(worker, 'submit', w.id, { epoch: 1, pr: Number(w.key.slice(3)) }, randomUUID());
+  // Every candidate lands on the same managed branch, so the merge queue is global. Tests that
+  // assert single-candidate behaviour start from an empty queue; queue behaviour has its own tests.
+  await clearQueue(w.id);
+  return w;
+}
+async function clearQueue(keep?: string) {
+  await store.pool.query("UPDATE work_items SET document=document-'queue' WHERE ($1::uuid IS NULL OR id<>$1) AND document->>'stage'<>'done'", [keep ?? null]);
 }
 function observation(w: Work): Observation {
   return { clockOffset: { min: 0, max: 0 }, candidate: { sha: head, baseSha: base, pr: w.submission!.pr, branch: w.workspaces[0].branch, author: 'implementer' },
     checks: [{ name: 'test', result: 'success', appId: 15368 }, { name: 'typecheck', result: 'success', appId: 15368 }],
     reviews: [{ reviewer: 'reviewer', sha: head, state: 'APPROVED' }], protected: true, mergeable: true,
-    merged: false, mergeSha: null, files: ['src/claims.ts'], at: new Date().toISOString() };
+    merged: false, mergeSha: null, files: ['src/claims.ts'], scopeFiles: [], at: new Date().toISOString() };
 }
 function proof() { return { proof: 'integration:claim-safety', sha: head, baseSha: base, policyRevision: 1, result: 'pass', executed: 12, skipped: 0 }; }
+/**
+ * A proven candidate with Graphyard's queue tip published for it: the state a merge authorization
+ * now requires, since only a published tip proves the validated commit contains its base. Its
+ * branch already sits on that base, so the tip is its own head. Publication itself is exercised by
+ * the merge-queue scenarios below; these tests are about the authority that follows it.
+ */
+async function proven(w: Work, observed?: Observation) {
+  const evidenced = await engine.execute(producer, 'evidence', w.id, proof(), randomUUID());
+  const speculation: QueueSpeculation = { ref: queueRef(evidenced.key), tip: evidenced.candidate!.sha, base: evidenced.candidate!.baseSha,
+    baseTree: sha40('7e'), predecessors: [], policyRevision: evidenced.policyRevision, publishedAt: new Date().toISOString() };
+  await store.pool.query("UPDATE work_items SET document=jsonb_set(document,'{queue,speculation}',$2::jsonb) WHERE id=$1", [evidenced.id, JSON.stringify(speculation)]);
+  return engine.observe(evidenced.id, (await reload(evidenced)).revision, observed ?? observation(evidenced));
+}
+
+const GRAPHYARD_APP = 1234;
+const reviewerApps = [
+  { id: 'claude-reviewer', runtime: 'claude', appId: 55_001, botUserId: 55_002 },
+  { id: 'cursor-reviewer', runtime: 'cursor', appId: 66_001, botUserId: 66_002 },
+];
+const agentProfiles = [
+  { name: 'claude-reviewer', runtime: 'claude', reviewerApp: 'claude-reviewer' },
+  { name: 'cursor-reviewer', runtime: 'cursor', reviewerApp: 'cursor-reviewer', timeoutSeconds: 900 },
+];
+async function leasedJob(id: string) {
+  const token = randomUUID();
+  await store.pool.query("INSERT INTO jobs(work_id) VALUES($1) ON CONFLICT(work_id) DO NOTHING", [id]);
+  await store.pool.query("UPDATE jobs SET token=$2,locked_until=now()+interval '90 seconds' WHERE work_id=$1", [id, token]);
+  return token;
+}
+function agentRequest(w: Work, profile = 'claude-reviewer', commentId = 700) {
+  return { commentId, sha: head, baseSha: base, policyRevision: w.policyRevision, body: `review ${profile}`, createdAt: new Date().toISOString(),
+    provider: 'agent' as const, profile, reviewerApp: profile, marker: '44444444-4444-4444-8444-444444444444' };
+}
+function agentVerdict(w: Work, request: ReturnType<typeof agentRequest>, overrides: Record<string, unknown> = {}): Observation {
+  return { ...observation(w), reviews: [], prState: 'open', draft: false,
+    agentReview: { provider: 'agent', sha: head, approved: true, reason: 'Registered reviewer approved this commit',
+      requestId: request.commentId, profile: request.profile, reviewerApp: request.reviewerApp, ...overrides } };
+}
+async function agentReviewed() {
+  let w = await submitted(); w = await engine.observe(w.id, w.revision, observation(w));
+  return engine.execute(operator, 'reviewpolicy', w.id, { provider: 'agent', reviewerProfiles: agentProfiles, expectedPolicyRevision: 1, reason: 'Adopt identity-bound agent review' }, randomUUID());
+}
 
 test('32 racing agents across independent connection pools acquire exactly one lease', async () => {
   const work = await ready(); const second = new Store(store.pool.options.connectionString!); const replica = new Engine(second);
@@ -174,6 +228,114 @@ test('expired quarantines reserve shared resources until settlement or operator 
   await engine.execute(operator, 'rework', recoveryOwner.id, { reason: 'Expired supervisor was stopped', previousWorkerStopped: true }, randomUUID());
   assert.equal((await engine.execute(other, 'claim', recoveryPeer.id, {}, randomUUID())).epoch, 1);
 });
+async function quarantinedByDeadSupervisor(hostId = 'coordinator-host') {
+  const settlementToken = randomUUID().replaceAll('-', '').padEnd(64, '9').slice(0, 64);
+  const settlementHash = createHash('sha256').update(settlementToken).digest('hex');
+  let w = await claimed();
+  const path = `/srv/graphyard/worktrees/${w.key}-1`;
+  w = await engine.execute(worker, 'workspace', w.id, { epoch: 1, host: hostId, path, branch: `graphyard/${w.id}` }, randomUUID());
+  w = await engine.execute(worker, 'quarantine', w.id, { epoch: 1, settlementHash }, randomUUID());
+  w = await engine.execute(worker, 'launch', w.id, { epoch: 1, settlementHash }, randomUUID());
+  // The supervisor dies without settling: every authority lapses beyond the grace window.
+  // The lease deadline lapses on the quarantine too, exactly as an unrenewed lease does:
+  // reconciliation then clears the lease record without shortening the window.
+  const lapsed = new Date(Date.now() - containmentGraceMs - 600_000).toISOString();
+  await store.pool.query(`UPDATE work_items SET document=jsonb_set(jsonb_set(jsonb_set(document,'{lease,expiresAt}',to_jsonb($2::text)),
+    '{containmentQuarantine,launchExpiresAt}',to_jsonb($2::text)),'{containmentQuarantine,leaseExpiresAt}',to_jsonb($2::text)) WHERE id=$1`, [w.id, lapsed]);
+  await engine.reconcile();
+  assert.equal((await store.list()).find(item => item.id === w.id)!.lease, null, 'reconciliation clears the expired lease record');
+  return { work: (await store.list()).find(item => item.id === w.id)!, settlementHash, settlementToken, path, hostId };
+}
+const deadProbe = (workspacePath: string, overrides: Partial<ReturnType<typeof probeSupervisorAbsence>> = {}) => () =>
+  ({ method: 'linux-proc-systemd' as const, platform: 'linux', uid: 1000, workspacePath, processes: [], scopes: [], inaccessible: 0, unverifiable: [], ...overrides });
+
+test('master status verifies supervisor death on the registered host and the coordinator settles it with recorded evidence', async () => {
+  const { work, settlementHash, path, hostId } = await quarantinedByDeadSupervisor();
+  const headers = { Authorization: `Bearer ${'m'.repeat(32)}`, 'Content-Type': 'application/json' };
+  const { snapshot, clockOffset } = await snapshotWithClock(async () => (await (await fetch(`${url}/api/work-snapshot`, { headers })).json()) as { work: Work[]; now: string });
+  // A live containment scope on the host belongs to another assignment only because every
+  // member it holds was attributed to one; it does not fence this quarantine.
+  const containment = assessContainment(snapshot.work, { hostId, observedAt: snapshot.now, clockOffset,
+    probe: deadProbe(path, { scopes: [{ unit: 'graphyard-watch-9-x.scope', activeState: 'active', processes: [], attributed: [4242] }] }) });
+  const status = buildMasterStatus(snapshot, [], [], {}, containment);
+  const row = status.work.find(entry => entry.key === work.key)!;
+  assert.deepEqual({ settleable: row.containment?.settleable, refusals: row.containment?.refusals, host: row.containment?.host, epoch: row.containment?.epoch },
+    { settleable: true, refusals: [], host: hostId, epoch: 1 });
+  assert.equal(status.counts.settleableQuarantines >= 1, true);
+  assert.match(row.attention!, new RegExp(`verified settleable; run master settle-containment ${work.key}`));
+
+  const verification = containment[work.id].verification!;
+  const settled: any = await (await fetch(`${url}/api/work/${work.id}/autosettle`, { method: 'POST', headers: { ...headers, 'Idempotency-Key': randomUUID() },
+    body: JSON.stringify({ epoch: 1, settlementHash, reason: 'Supervisor verified dead on the registered host', verification }) })).json();
+  assert.equal(settled.containmentQuarantine, null);
+  const event = (await store.events(work.id)).find(entry => entry.kind === 'autosettle')!;
+  assert.equal(event.actor, coordinator.id);
+  assert.deepEqual(event.payload.details.verification, verification, 'the verification that authorized settlement is appended to history');
+  assert.equal(event.payload.details.reason, 'Supervisor verified dead on the registered host');
+  // The fence is gone, so the item is dispatchable again without an operator attestation.
+  const fresh = (await store.list()).find(item => item.id === work.id)!;
+  assert.doesNotThrow(() => assertDispatchable(fresh, [fresh], new Date().toISOString()));
+  assert.equal((await engine.execute(other, 'claim', work.id, {}, randomUUID())).epoch, 2);
+});
+
+test('every unverifiable containment signal refuses automatic settlement and keeps the attestation path', async () => {
+  const { work, settlementHash, settlementToken, path, hostId } = await quarantinedByDeadSupervisor();
+  const now = () => new Date().toISOString();
+  const evidence = (overrides: Record<string, unknown> = {}) => ({ method: 'linux-proc-systemd', host: hostId, uid: 1000, platform: 'linux', workspacePath: path,
+    observedAt: now(), clockOffset: { min: -20, max: 20 }, processes: [], scopes: [], inaccessible: 0, unverifiable: [], ...overrides });
+  const settle = (verification: unknown, actor = coordinator, body: Record<string, unknown> = {}) =>
+    engine.execute(actor, 'autosettle', work.id, { epoch: 1, settlementHash, reason: 'Automatic settlement attempt', verification, ...body }, randomUUID());
+
+  await assert.rejects(settle(evidence(), worker), /Coordinator permission required/);
+  await assert.rejects(settle(evidence(), coordinator, { settlementHash: 'f'.repeat(64) }), /does not match this verification/);
+  await assert.rejects(settle(evidence(), coordinator, { epoch: 2 }), /missing, superseded, or does not match/);
+  await assert.rejects(settle(evidence({ processes: [{ pid: 4242, evidence: 'command' }] })), /Process 4242 of the contained worker is still present/);
+  await assert.rejects(settle(evidence({ unverifiable: ['systemd user manager is unavailable'] })), /Host verification was incomplete/);
+  await assert.rejects(settle(evidence({ scopes: [{ unit: 'graphyard-watch-3-x.scope', activeState: 'active', processes: [9], attributed: [] }] })),
+    /still holds 1 process\(es\) that are not attributed to another assignment/);
+  await assert.rejects(settle(evidence({ scopes: [{ unit: 'graphyard-watch-3-x.scope', activeState: 'active', processes: [9], attributed: [10] }] })), /still holds 1 process/);
+  await assert.rejects(settle(evidence({ host: 'another-host' })), /registered on coordinator-host/);
+  await assert.rejects(settle(evidence({ workspacePath: '/srv/elsewhere' })), /is registered at/);
+  await assert.rejects(settle(evidence({ platform: 'darwin' })), /Linux process and scope inspection/);
+  await assert.rejects(settle(evidence({ observedAt: new Date(Date.now() - 600_000).toISOString() })), /older than 120s/);
+  await assert.rejects(settle(evidence({ clockOffset: { min: 30_000, max: 30_100 } })), /clocks disagree/);
+  for (const refusal of [settle(evidence({ processes: [{ pid: 1, evidence: 'workspace' }] }))])
+    await assert.rejects(refusal, /rework .* --previous-worker-stopped REASON/, 'every refusal names the operator attestation path');
+
+  // Reconciliation has already cleared the lease record, so the grace window is only as
+  // long as the deadline the quarantine retained: a fresh one fences with no lease at all.
+  const retainLease = (expiresAt: string | null) => store.pool.query(
+    expiresAt === null ? `UPDATE work_items SET document=document #- '{containmentQuarantine,leaseExpiresAt}' WHERE id=$1`
+      : `UPDATE work_items SET document=jsonb_set(document,'{containmentQuarantine,leaseExpiresAt}',to_jsonb($2::text)) WHERE id=$1`,
+    expiresAt === null ? [work.id] : [work.id, expiresAt]);
+  assert.equal((await store.list()).find(item => item.id === work.id)!.lease, null);
+  await retainLease(new Date(Date.now() - 1_000).toISOString());
+  await assert.rejects(settle(evidence()), /Worker lease for epoch 1 has not been expired for the required 120s grace window/);
+  await retainLease(null);
+  await assert.rejects(settle(evidence()), /records no worker-lease deadline/);
+  await retainLease(new Date(Date.now() - containmentGraceMs - 600_000).toISOString());
+
+  // A live supervisor is fenced even when the host reports nothing: the deadlines rule.
+  await store.pool.query(`UPDATE work_items SET document=jsonb_set(document,'{lease}',$2::jsonb) WHERE id=$1`,
+    [work.id, JSON.stringify({ owner: worker.id, epoch: 1, expiresAt: new Date(Date.now() + 60_000).toISOString() })]);
+  await assert.rejects(settle(evidence()), /Worker lease for epoch 1 has not been expired/);
+  await store.pool.query(`UPDATE work_items SET document=jsonb_set(document,'{containmentQuarantine,launchExpiresAt}',to_jsonb($2::text)) WHERE id=$1`,
+    [work.id, new Date(Date.now() - 1_000).toISOString()]);
+  await store.pool.query(`UPDATE work_items SET document=jsonb_set(document,'{lease,expiresAt}',to_jsonb($2::text)) WHERE id=$1`,
+    [work.id, new Date(Date.now() - 1_000).toISOString()]);
+  await assert.rejects(settle(evidence()), /Launch authority for epoch 1 has not been expired/);
+
+  // Nothing above lowered the fence, and both existing settlement paths still work.
+  const fenced = (await store.list()).find(item => item.id === work.id)!;
+  assert.equal(fenced.containmentQuarantine?.epoch, 1);
+  await assert.rejects(engine.execute(other, 'claim', work.id, {}, randomUUID()), /quarantined.*epoch 1/);
+  assert.equal((await engine.execute(worker, 'settle', work.id, { epoch: 1, settlementToken }, randomUUID())).containmentQuarantine, null);
+
+  const stranded = await quarantinedByDeadSupervisor('another-machine');
+  const localHost = assessContainment([stranded.work], { hostId, observedAt: new Date().toISOString(), clockOffset: { min: 0, max: 5 }, probe: deadProbe(stranded.path) });
+  assert.deepEqual(localHost, {}, 'a quarantine registered on another host is not this coordinator to verify');
+  assert.equal((await engine.execute(operator, 'rework', stranded.work.id, { reason: 'Operator attested the stopped worker', previousWorkerStopped: true }, randomUUID())).containmentQuarantine, null);
+});
 test('dependencies and explicit blockers refuse claims', async () => {
   const parent = await create(); let child = await create([parent.id]); child = await engine.execute(operator, 'ready', child.id, {}, randomUUID());
   await assert.rejects(engine.execute(worker, 'claim', child.id, {}, randomUUID()), /dependencies/);
@@ -200,7 +362,7 @@ test('operator can unblock abandoned work with an auditable reason', async () =>
 });
 test('operator-mediated rework fences old ownership, closes build gate, and preserves PR attribution', async () => {
   let w = await submitted(); w = await engine.observe(w.id, w.revision, observation(w));
-  w = await engine.execute(producer, 'evidence', w.id, proof(), randomUUID()); assert.ok(w.gates.every(g => g.passed));
+  w = await proven(w); assert.ok(w.gates.every(g => g.passed));
   await assert.rejects(engine.execute(worker, 'rework', w.id, { reason: 'Retry', previousWorkerStopped: true }, randomUUID()), /permission/);
   w = await engine.execute(operator, 'rework', w.id, { reason: 'Old process stopped; reproduce new failure', previousWorkerStopped: true }, randomUUID());
   assert.equal(w.stage, 'build'); assert.equal(w.lease, null);
@@ -224,7 +386,7 @@ test('coordinator can observe but cannot mutate work, claim leases, or submit ev
 });
 test('final merge verification re-evaluates mutable GitHub gates under the active execution', async () => {
   let w = await submitted(); w = await engine.observe(w.id, w.revision, observation(w));
-  w = await engine.execute(producer, 'evidence', w.id, proof(), randomUUID());
+  w = await proven(w);
   const granted = await engine.acquireMerge(coordinator, w.id, { expectedRevision: w.revision, sha: head, baseSha: base, policyRevision: w.policyRevision }, randomUUID());
   const current = { ...observation(w), prState: 'open' as const, draft: false };
   const verifyKey = randomUUID(); const verifyInput = { executionId: granted.execution.id };
@@ -240,7 +402,7 @@ test('final merge verification re-evaluates mutable GitHub gates under the activ
 
 test('single-use merge execution freezes relevant mutations through observed merge', async () => {
   let w = await submitted(); w = await engine.observe(w.id, w.revision, observation(w));
-  w = await engine.execute(producer, 'evidence', w.id, proof(), randomUUID()); assert.ok(w.gates.every(gate => gate.passed));
+  w = await proven(w); assert.ok(w.gates.every(gate => gate.passed));
   const acquireKey = randomUUID();
   const first = await engine.acquireMerge(coordinator, w.id, { expectedRevision: w.revision, sha: head, baseSha: base, policyRevision: w.policyRevision }, acquireKey);
   assert.equal(first.execution.authorizationRevision, w.revision); assert.equal(first.execution.owner, coordinator.id);
@@ -251,7 +413,7 @@ test('single-use merge execution freezes relevant mutations through observed mer
   await assert.rejects(engine.observe(w.id, first.revision, observation(w)), /reconciliation is deferred/);
   await assert.rejects(engine.cancelMerge(otherCoordinator, w.id, { executionId: first.execution.id, reason: 'Interfere with another coordinator' }, randomUUID()), /another coordinator/);
   await engine.cancelMerge(coordinator, w.id, { executionId: first.execution.id, reason: 'GitHub refused the merge' }, randomUUID());
-  await assert.rejects(engine.acquireMerge(coordinator, w.id, { expectedRevision: w.revision, sha: head, baseSha: base, policyRevision: w.policyRevision }, acquireKey), /expired, cancelled, or superseded/);
+  await assert.rejects(engine.acquireMerge(coordinator, w.id, { expectedRevision: w.revision, sha: head, baseSha: base, policyRevision: w.policyRevision }, acquireKey), /expired, cancelled, fenced, or superseded/);
   w = (await store.list()).find(item => item.id === w.id)!;
   const secondKey = randomUUID(); const secondInput = { expectedRevision: w.revision, sha: head, baseSha: base, policyRevision: w.policyRevision };
   const second = await engine.acquireMerge(coordinator, w.id, secondInput, secondKey);
@@ -291,7 +453,7 @@ test('a delivery carries the merge instant onto the repository clock with the me
 });
 test('a matching merge from before the execution grant remains an unauthorized violation', async () => {
   let w = await submitted(); w = await engine.observe(w.id, w.revision, observation(w));
-  w = await engine.execute(producer, 'evidence', w.id, proof(), randomUUID());
+  w = await proven(w);
   const granted = await engine.acquireMerge(coordinator, w.id, { expectedRevision: w.revision, sha: head, baseSha: base, policyRevision: w.policyRevision }, randomUUID());
   const merged = { ...observation(w), merged: true, mergeSha: 'c'.repeat(40), mergedAt: new Date(Date.parse(granted.execution.issuedAt) - 1000).toISOString() } as Observation;
   const refused = await engine.observe(w.id, granted.revision, merged);
@@ -299,7 +461,7 @@ test('a matching merge from before the execution grant remains an unauthorized v
 });
 test('a matching merge after the bounded execution deadline remains an unauthorized violation', async () => {
   let w = await submitted(); w = await engine.observe(w.id, w.revision, observation(w));
-  w = await engine.execute(producer, 'evidence', w.id, proof(), randomUUID());
+  w = await proven(w);
   const granted = await engine.acquireMerge(coordinator, w.id, { expectedRevision: w.revision, sha: head, baseSha: base, policyRevision: w.policyRevision }, randomUUID());
   const merged = { ...observation(w), merged: true, mergeSha: 'c'.repeat(40), mergedAt: new Date(Date.parse(granted.execution.expiresAt) + 1).toISOString() } as Observation;
   const refused = await engine.observe(w.id, granted.revision, merged);
@@ -307,7 +469,7 @@ test('a matching merge after the bounded execution deadline remains an unauthori
 });
 test('database clock ahead of GitHub cannot authorize a merge after the database deadline', async () => {
   let w = await submitted(); w = await engine.observe(w.id, w.revision, observation(w));
-  w = await engine.execute(producer, 'evidence', w.id, proof(), randomUUID());
+  w = await proven(w);
   const granted = await engine.acquireMerge(coordinator, w.id, { expectedRevision: w.revision, sha: head, baseSha: base, policyRevision: w.policyRevision }, randomUUID());
   const verified = await engine.verifyMerge(coordinator, w.id, { executionId: granted.execution.id }, { ...observation(w), prState: 'open', draft: false, clockOffset: { min: 5000, max: 6000 } }, randomUUID());
   const merged = { ...observation(w), merged: true, mergeSha: 'c'.repeat(40), mergedAt: new Date(Date.parse(granted.execution.expiresAt) - 4000).toISOString() };
@@ -316,7 +478,7 @@ test('database clock ahead of GitHub cannot authorize a merge after the database
 });
 test('whole-second merge timestamps require authority through the entire reported interval', async () => {
   let w = await submitted(); w = await engine.observe(w.id, w.revision, observation(w));
-  w = await engine.execute(producer, 'evidence', w.id, proof(), randomUUID());
+  w = await proven(w);
   const granted = await engine.acquireMerge(coordinator, w.id, { expectedRevision: w.revision, sha: head, baseSha: base, policyRevision: w.policyRevision }, randomUUID());
   const lowerBound = Math.floor(Date.now() / 1000) * 1000 + 60_000; const expiresAt = new Date(lowerBound + 500).toISOString();
   await store.pool.query("UPDATE work_items SET document=jsonb_set(document,'{mergeExecution,expiresAt}',to_jsonb($2::text)) WHERE id=$1", [w.id, expiresAt]);
@@ -326,7 +488,7 @@ test('whole-second merge timestamps require authority through the entire reporte
 });
 test('a cancelled merge execution cannot authorize a later matching merge', async () => {
   let w = await submitted(); w = await engine.observe(w.id, w.revision, observation(w));
-  w = await engine.execute(producer, 'evidence', w.id, proof(), randomUUID());
+  w = await proven(w);
   const granted = await engine.acquireMerge(coordinator, w.id, { expectedRevision: w.revision, sha: head, baseSha: base, policyRevision: w.policyRevision }, randomUUID());
   await engine.cancelMerge(coordinator, w.id, { executionId: granted.execution.id, reason: 'GitHub refused this attempt' }, randomUUID());
   w = (await store.list()).find(item => item.id === w.id)!;
@@ -336,7 +498,7 @@ test('a cancelled merge execution cannot authorize a later matching merge', asyn
 });
 test('periodic reconciliation defers without publishing failure during active merge execution', async () => {
   let w = await submitted(); w = await engine.observe(w.id, w.revision, observation(w));
-  w = await engine.execute(producer, 'evidence', w.id, proof(), randomUUID());
+  w = await proven(w);
   const granted = await engine.acquireMerge(coordinator, w.id, { expectedRevision: w.revision, sha: head, baseSha: base, policyRevision: w.policyRevision }, randomUUID());
   await store.pool.query("UPDATE jobs SET available_at=now()+interval '1 hour'");
   await store.pool.query('UPDATE jobs SET available_at=now(),locked_until=NULL,token=NULL WHERE work_id=$1', [w.id]);
@@ -349,7 +511,7 @@ test('periodic reconciliation defers without publishing failure during active me
 });
 test('reconciliation that became stale during merge acquisition defers without replacing the passing check', async () => {
   let w = await submitted(); w = await engine.observe(w.id, w.revision, observation(w));
-  w = await engine.execute(producer, 'evidence', w.id, proof(), randomUUID());
+  w = await proven(w);
   await store.pool.query('UPDATE jobs SET available_at=now(),locked_until=NULL,token=NULL WHERE work_id=$1', [w.id]);
   let observed!: () => void, resume!: () => void; const started = new Promise<void>(resolve => { observed = resolve; }); const paused = new Promise<void>(resolve => { resume = resolve; });
   let publications = 0;
@@ -363,7 +525,7 @@ test('reconciliation that became stale during merge acquisition defers without r
 });
 test('merge execution cannot outlive a required proof or the fresh observation', async () => {
   let w = await submitted(); w = await engine.observe(w.id, w.revision, observation(w));
-  w = await engine.execute(producer, 'evidence', w.id, proof(), randomUUID());
+  w = await proven(w);
   const expiresAt = new Date(Date.now() + 94_000).toISOString();
   await store.pool.query("UPDATE work_items SET document=jsonb_set(document,'{evidence,0,expiresAt}',to_jsonb($2::text)) WHERE id=$1", [w.id, expiresAt]);
   w = (await store.list()).find(item => item.id === w.id)!;
@@ -376,25 +538,46 @@ test('assertions, skipped suites, zero executed, stale base, stale head, and sta
   for (const override of [{ skipped: 1 }, { executed: 0 }, { sha: 'c'.repeat(40) }, { baseSha: 'd'.repeat(40) }, { policyRevision: 2 }, { result: 'fail' }]) {
     w = await engine.execute(producer, 'evidence', w.id, { ...proof(), ...override }, randomUUID()); assert.equal(w.stage, 'acceptance');
   }
-  w = await engine.execute(producer, 'evidence', w.id, proof(), randomUUID()); assert.equal(w.stage, 'merge');
+  w = await proven(w); assert.equal(w.stage, 'merge');
   const obs = observation(w); obs.candidate.sha = 'f'.repeat(40); obs.reviews[0].sha = obs.candidate.sha;
   w = await engine.observe(w.id, w.revision, obs); assert.equal(w.stage, 'acceptance');
 });
 test('latest failed evidence supersedes previous passing evidence', async () => {
   let w = await submitted(); w = await engine.observe(w.id, w.revision, observation(w));
-  w = await engine.execute(producer, 'evidence', w.id, proof(), randomUUID()); assert.equal(w.stage, 'merge');
+  w = await proven(w); assert.equal(w.stage, 'merge');
   w = await engine.execute(producer, 'evidence', w.id, { ...proof(), result: 'fail' }, randomUUID()); assert.equal(w.stage, 'acceptance');
+});
+test('legacy evidence URL remains valid and typed external artifacts do not change trust', async () => {
+  let w = await submitted(); w = await engine.observe(w.id, w.revision, observation(w));
+  w = await engine.execute(producer, 'evidence', w.id, { ...proof(), url: 'https://reports.example.test/legacy' }, randomUUID());
+  assert.equal(w.evidence.at(-1)?.url, 'https://reports.example.test/legacy'); assert.equal(w.evidence.at(-1)?.trusted, true);
+  w = await engine.execute(producer, 'evidence', w.id, { ...proof(), artifacts: [{ kind: 'trace', label: 'browser trace', mediaType: 'application/zip', size: 42, digest: `sha256:${'a'.repeat(64)}`, availability: 'external', url: 'https://reports.example.test/trace' }] }, randomUUID());
+  assert.equal(w.evidence.at(-1)?.artifacts?.[0].kind, 'trace'); assert.equal(w.evidence.at(-1)?.trusted, true);
+  await assert.rejects(engine.execute(producer, 'evidence', w.id, { ...proof(), artifacts: [{ kind: 'report', label: 'unsafe', availability: 'external', url: 'https://user:secret@reports.example.test/report' }] }, randomUUID()), /no credentials/);
+});
+test('redacted evidence artifact descriptors remain explicit and expose no read target', async () => {
+  let w = await submitted();
+  w = await engine.execute(producer, 'evidence', w.id, { ...proof(), artifacts: [{
+    kind: 'screenshot', label: 'Sensitive screenshot withheld', mediaType: 'image/png',
+    digest: `sha256:${'b'.repeat(64)}`, availability: 'redacted',
+  }] }, randomUUID());
+  assert.deepEqual(w.evidence.at(-1)?.artifacts, [{
+    kind: 'screenshot', label: 'Sensitive screenshot withheld', mediaType: 'image/png',
+    digest: `sha256:${'b'.repeat(64)}`, availability: 'redacted',
+  }]);
+  assert.equal(w.evidence.at(-1)?.artifacts?.[0].url, undefined);
+  assert.equal(w.evidence.at(-1)?.artifacts?.[0].reference, undefined);
 });
 test('wrong CI producer, self review, and missing protection fail closed', async () => {
   let w = await submitted(); let obs = observation(w); obs.reviews[0].reviewer = obs.candidate.author;
   w = await engine.observe(w.id, w.revision, obs); assert.equal(w.stage, 'review');
   obs = observation(w); obs.checks[0].appId = 999; w = await engine.observe(w.id, w.revision, obs); assert.equal(w.stage, 'test');
   obs = observation(w); obs.protected = false; w = await engine.observe(w.id, w.revision, obs);
-  w = await engine.execute(producer, 'evidence', w.id, proof(), randomUUID()); assert.equal(w.stage, 'merge'); assert.equal(w.gates.find(g => g.name === 'merge')!.passed, false);
+  w = await proven(w, { ...observation(w), protected: false }); assert.equal(w.stage, 'merge'); assert.equal(w.gates.find(g => g.name === 'merge')!.passed, false);
 });
 test('only an independently observed merge with a verified execution completes work', async () => {
   let w = await submitted(); w = await engine.observe(w.id, w.revision, observation(w));
-  w = await engine.execute(producer, 'evidence', w.id, proof(), randomUUID()); assert.equal(w.stage, 'merge');
+  w = await proven(w); assert.equal(w.stage, 'merge');
   const granted = await engine.acquireMerge(coordinator, w.id, { expectedRevision: w.revision, sha: head, baseSha: base, policyRevision: w.policyRevision }, randomUUID());
   const verified = await engine.verifyMerge(coordinator, w.id, { executionId: granted.execution.id }, { ...observation(w), prState: 'open', draft: false }, randomUUID());
   await delay(5); const mergedAt = ((await store.pool.query('SELECT clock_timestamp() AS now')).rows[0].now as Date).toISOString(); await delay(5);
@@ -412,8 +595,9 @@ test('capability settlement preserves active and expired merge executions while 
     item = await engine.execute(worker, 'quarantine', item.id, { epoch: 1, settlementHash }, randomUUID());
     item = await engine.execute(worker, 'workspace', item.id, { epoch: 1, host: `merge-settlement-${suffix}`, path: `/tmp/${item.id}-${suffix}`, branch: `graphyard/${item.id}-${suffix}` }, randomUUID());
     item = await engine.execute(worker, 'submit', item.id, { epoch: 1, pr: Number(item.key.slice(3)) }, randomUUID());
+    await clearQueue(item.id);
     item = await engine.observe(item.id, item.revision, observation(item));
-    item = await engine.execute(producer, 'evidence', item.id, proof(), randomUUID());
+    item = await proven(item);
     await engine.acquireMerge(coordinator, item.id, { expectedRevision: item.revision, sha: head, baseSha: base, policyRevision: item.policyRevision }, randomUUID());
     return { item, settlementToken };
   };
@@ -437,8 +621,9 @@ test('non-delivered capability settlement still re-evaluates stale gates', async
   w = await engine.execute(worker, 'quarantine', w.id, { epoch: 1, settlementHash }, randomUUID());
   w = await engine.execute(worker, 'workspace', w.id, { epoch: 1, host: `stale-settlement-${w.id}`, path: `/tmp/${w.id}-stale-settlement`, branch: `graphyard/${w.id}-stale-settlement` }, randomUUID());
   w = await engine.execute(worker, 'submit', w.id, { epoch: 1, pr: Number(w.key.slice(3)) }, randomUUID());
+  await clearQueue(w.id);
   w = await engine.observe(w.id, w.revision, observation(w));
-  w = await engine.execute(producer, 'evidence', w.id, proof(), randomUUID());
+  w = await proven(w);
   assert.equal(w.stage, 'merge'); assert.ok(w.mergeAuthorization);
   w = { ...w, observation: { ...w.observation!, at: '2000-01-01T00:00:00Z' },
     evidence: w.evidence.map(item => ({ ...item, expiresAt: '2000-01-01T00:00:00Z' })) };
@@ -459,8 +644,9 @@ test('capability settlement survives the merge-to-done race without weakening de
   w = await engine.execute(worker, 'quarantine', w.id, { epoch: 1, settlementHash }, randomUUID());
   w = await engine.execute(worker, 'workspace', w.id, { epoch: 1, host: 'race-host', path: `/tmp/${w.id}-race`, branch: `graphyard/${w.id}-race` }, randomUUID());
   w = await engine.execute(worker, 'submit', w.id, { epoch: 1, pr: Number(w.key.slice(3)) }, randomUUID());
+  await clearQueue(w.id);
   w = await engine.observe(w.id, w.revision, observation(w));
-  w = await engine.execute(producer, 'evidence', w.id, proof(), randomUUID());
+  w = await proven(w);
   const granted = await engine.acquireMerge(coordinator, w.id, { expectedRevision: w.revision, sha: head, baseSha: base, policyRevision: w.policyRevision }, randomUUID());
   const verified = await engine.verifyMerge(coordinator, w.id, { executionId: granted.execution.id }, { ...observation(w), prState: 'open', draft: false }, randomUUID());
   await delay(5); const mergedAt = ((await store.pool.query('SELECT clock_timestamp() AS now')).rows[0].now as Date).toISOString(); await delay(5);
@@ -494,8 +680,9 @@ test('operator stopped-worker recovery clears only a delivered containment quara
   w = await engine.execute(worker, 'quarantine', w.id, { epoch: 1, settlementHash }, randomUUID());
   w = await engine.execute(worker, 'workspace', w.id, { epoch: 1, host: 'recovery-host', path: `/tmp/${w.id}-recovery`, branch: `graphyard/${w.id}-recovery` }, randomUUID());
   w = await engine.execute(worker, 'submit', w.id, { epoch: 1, pr: Number(w.key.slice(3)) }, randomUUID());
+  await clearQueue(w.id);
   w = await engine.observe(w.id, w.revision, observation(w));
-  w = await engine.execute(producer, 'evidence', w.id, proof(), randomUUID());
+  w = await proven(w);
   const granted = await engine.acquireMerge(coordinator, w.id, { expectedRevision: w.revision, sha: head, baseSha: base, policyRevision: w.policyRevision }, randomUUID());
   const verified = await engine.verifyMerge(coordinator, w.id, { executionId: granted.execution.id }, { ...observation(w), prState: 'open', draft: false }, randomUUID());
   await delay(5); const mergedAt = ((await store.pool.query('SELECT clock_timestamp() AS now')).rows[0].now as Date).toISOString(); await delay(5);
@@ -531,12 +718,12 @@ test('operator stopped-worker recovery clears only a delivered containment quara
 test('bypassed merge is a permanent visible violation, not done', async () => {
   let w = await submitted(); w = await engine.observe(w.id, w.revision, { ...observation(w), merged: true });
   assert.notEqual(w.stage, 'done'); assert.ok(w.violations.length);
-  w = await engine.execute(producer, 'evidence', w.id, proof(), randomUUID()); assert.notEqual(w.stage, 'done');
+  w = await proven(w); assert.notEqual(w.stage, 'done');
 });
 test('evidence arriving after the actual merge cannot retroactively authorize it', async () => {
   let w = await submitted(); w = await engine.observe(w.id, w.revision, observation(w));
   const actualMerge = '2000-01-01T00:00:00Z';
-  w = await engine.execute(producer, 'evidence', w.id, proof(), randomUUID()); assert.ok(w.mergeAuthorization);
+  w = await proven(w); assert.ok(w.mergeAuthorization);
   w = await engine.observe(w.id, w.revision, { ...observation(w), merged: true, mergedAt: actualMerge });
   assert.notEqual(w.stage, 'done'); assert.ok(w.violations.includes('Merge observed without a prior authorization for this candidate'));
 });
@@ -660,6 +847,7 @@ test('E2E definitions are versioned, immutable, operator-owned, and pinned by wo
   w = await engine.execute(worker, 'claim', w.id, {}, randomUUID());
   w = await engine.execute(worker, 'workspace', w.id, { epoch: 1, host: 'e2e-host', path: `/tmp/${w.id}`, branch: `graphyard/${w.id}` }, randomUUID());
   w = await engine.execute(worker, 'submit', w.id, { epoch: 1, pr: Number(w.key.slice(3)) }, randomUUID());
+  await clearQueue(w.id);
   w = await engine.observe(w.id, w.revision, observation(w));
   const reporter: Principal = { id: 'e2e-reporter', role: 'producer', proofs: ['e2e:booking-sms'] };
   for (const binding of [{}, { scenarioRevision: 2, environment: 'staging' }, { scenarioRevision: 1, environment: 'production' }]) {
@@ -706,7 +894,7 @@ test('new evidence wakes an in-flight integration job and its acknowledgment pre
 
 test('a delayed merge uses historical authorization despite an outage and later failing evidence', async () => {
   let w = await submitted(); w = await engine.observe(w.id, w.revision, observation(w));
-  w = await engine.execute(producer, 'evidence', w.id, proof(), randomUUID());
+  w = await proven(w);
   const granted = await engine.acquireMerge(coordinator, w.id, { expectedRevision: w.revision, sha: head, baseSha: base, policyRevision: w.policyRevision }, randomUUID());
   const verified = await engine.verifyMerge(coordinator, w.id, { executionId: granted.execution.id }, { ...observation(w), prState: 'open', draft: false }, randomUUID());
   const authorizedRevision = granted.execution.authorizationRevision;
@@ -724,7 +912,7 @@ test('a delayed merge uses historical authorization despite an outage and later 
 
 test('whole-second merge timestamps do not accept same-second backfilled authorization', async () => {
   let w = await submitted(); w = await engine.observe(w.id, w.revision, observation(w));
-  w = await engine.execute(producer, 'evidence', w.id, proof(), randomUUID());
+  w = await proven(w);
   const mergedAt = w.mergeAuthorization!.at.replace(/\.\d+Z$/, 'Z');
   w = await engine.observe(w.id, w.revision, { ...observation(w), merged: true, mergedAt, mergeSha: 'e'.repeat(40) });
   assert.notEqual(w.stage, 'done');
@@ -732,7 +920,7 @@ test('whole-second merge timestamps do not accept same-second backfilled authori
 
 test('integration publication discards a passing snapshot superseded by failed evidence', async () => {
   let w = await submitted(); w = await engine.observe(w.id, w.revision, observation(w));
-  w = await engine.execute(producer, 'evidence', w.id, proof(), randomUUID());
+  w = await proven(w);
   await store.pool.query("UPDATE jobs SET available_at=now()+interval '1 hour'");
   await store.pool.query('UPDATE jobs SET available_at=now(),locked_until=NULL,token=NULL WHERE work_id=$1', [w.id]);
   const published: { forced?: string; passing: boolean }[] = []; let calls = 0;
@@ -802,7 +990,7 @@ test('assignment identity comes from the authenticated principal and survives re
   } finally { globalThis.Date = originalDate; }
  });
 test('review-provider revisions require operator identity, compare revisions, and invalidate acceptance', async () => {
-  let w = await submitted(); w = await engine.observe(w.id, w.revision, observation(w)); w = await engine.execute(producer, 'evidence', w.id, proof(), randomUUID());
+  let w = await submitted(); w = await engine.observe(w.id, w.revision, observation(w)); w = await proven(w);
   const input = { provider: 'codex', expectedPolicyRevision: 1, reason: 'Operator chooses independent cloud review' };
   await assert.rejects(engine.execute(worker, 'reviewpolicy', w.id, input, randomUUID()), /Operator/);
   w = await engine.execute(operator, 'reviewpolicy', w.id, input, randomUUID());
@@ -861,7 +1049,7 @@ test('concurrent task changes schedule a prompt retry without an operator error'
 
  test('a policy change after the actual merge cannot invalidate historical delivery authorization', async () => {
   let w = await submitted(); w = await engine.observe(w.id, w.revision, observation(w));
-  w = await engine.execute(producer, 'evidence', w.id, proof(), randomUUID());
+  w = await proven(w);
   const granted = await engine.acquireMerge(coordinator, w.id, { expectedRevision: w.revision, sha: head, baseSha: base, policyRevision: w.policyRevision }, randomUUID());
   const verified = await engine.verifyMerge(coordinator, w.id, { executionId: granted.execution.id }, { ...observation(w), prState: 'open', draft: false }, randomUUID());
   const authorizedRevision = granted.execution.authorizationRevision;
@@ -888,7 +1076,7 @@ test('concurrent task changes schedule a prompt retry without an operator error'
 
  test('whole-second delivery never searches past a same-second policy revocation', async () => {
   let w = await submitted(); w = await engine.observe(w.id, w.revision, observation(w));
-  w = await engine.execute(producer, 'evidence', w.id, proof(), randomUUID());
+  w = await proven(w);
   await delay(1100 - Date.now() % 1000);
   w = await engine.execute(operator, 'reviewpolicy', w.id, { provider: 'codex', expectedPolicyRevision: 1, reason: 'Revoke the prior review policy' }, randomUUID());
   const mergedAt = w.updatedAt.replace(/\.\d+Z$/, 'Z');
@@ -927,7 +1115,7 @@ test('draft and closed submissions wait normally and dispatch after becoming rea
 
 test('requirement revisions require stopped ownership, preserve history, and invalidate prior proof', async () => {
   let w = await submitted(); w = await engine.observe(w.id, w.revision, observation(w));
-  w = await engine.execute(producer, 'evidence', w.id, proof(), randomUUID());
+  w = await proven(w);
   const revision = { expectedPolicyRevision: 1, reason: 'Clarify the independent acceptance obligation', criteria: [{ id: 'AC-1', text: 'Revised outcome', proofs: ['integration:claim-safety'] }], dependencies: [], plannedFiles: ['src/'], exclusiveResources: ['staging:account'] };
   await assert.rejects(engine.execute(worker, 'requirements', w.id, revision, randomUUID()), /Operator/);
   await assert.rejects(engine.execute(operator, 'requirements', w.id, revision, randomUUID()), /release/);
@@ -1012,4 +1200,532 @@ test('formal review identities stay excluded after revisions regardless of clock
   assert.equal(w.formalReviewBaseline, undefined);
   w = await engine.observe(w.id, w.revision, { ...observation(w), reviewIds: [100, 101, 102], reviews: [{ ...existing, id: 102 }] });
   assert.equal(w.gates.find(g => g.name === 'review')!.passed, false);
+});
+
+// Post-deployment smoke proof: trunk stays the only pre-merge gate, and the second confidence
+// layer binds to the exact commit Graphyard observed serving the merge.
+const smokeProducer: Principal = { id: 'smoke-runner', role: 'producer', proofs: ['e2e:deploy-smoke', 'integration:claim-safety'] };
+const mergeSha = 'e'.repeat(40), servingSha = 'f'.repeat(40);
+async function deliveredWithSmokePolicy() {
+  let w = await engine.execute(operator, 'create', null, { ...workInput, policy: { checks: ['test', 'typecheck'], review: true, deploySmoke: true } }, randomUUID());
+  w = await engine.execute(operator, 'ready', w.id, {}, randomUUID());
+  w = await engine.execute(worker, 'claim', w.id, {}, randomUUID());
+  w = await engine.execute(worker, 'workspace', w.id, { epoch: 1, host: 'machine-a', path: `/tmp/${w.id}`, branch: `graphyard/${w.id}` }, randomUUID());
+  w = await engine.execute(worker, 'submit', w.id, { epoch: 1, pr: Number(w.key.slice(3)) }, randomUUID());
+  await clearQueue(w.id);
+  w = await engine.observe(w.id, w.revision, observation(w));
+  // The smoke policy changes nothing before the merge: the ordinary proof still takes it to merge.
+  w = await proven(w); assert.equal(w.stage, 'merge', 'deploySmoke never adds a pre-merge gate');
+  assert.ok(w.gates.every(gate => gate.passed));
+  const granted = await engine.acquireMerge(coordinator, w.id, { expectedRevision: w.revision, sha: head, baseSha: base, policyRevision: w.policyRevision }, randomUUID());
+  const verified = await engine.verifyMerge(coordinator, w.id, { executionId: granted.execution.id }, { ...observation(w), prState: 'open', draft: false }, randomUUID());
+  await delay(5); const mergedAt = ((await store.pool.query('SELECT clock_timestamp() AS now')).rows[0].now as Date).toISOString(); await delay(5);
+  w = await engine.observe(w.id, verified.revision, { ...observation(w), merged: true, mergedAt, mergeSha }); assert.equal(w.stage, 'done');
+  return w;
+}
+const smoke = (sha: string, baseSha: string, result: 'pass' | 'fail' = 'pass', extra: Record<string, unknown> = {}) => ({ proof: 'e2e:deploy-smoke', sha, baseSha, policyRevision: 1, result, executed: 3, skipped: 0, ...extra });
+
+test('deploy-smoke evidence binds to the observed deployed commit, is accepted only from an authorized producer, and lands in the delivery snapshot', async () => {
+  await assert.rejects(engine.execute(operator, 'create', null, { ...workInput, criteria: [{ id: 'AC-1', text: 'Smoke', proofs: ['e2e:deploy-smoke'] }] }, randomUUID()), /policy\.deploySmoke/, 'the post-deploy proof is a policy, never a merge criterion');
+  let w = await deliveredWithSmokePolicy();
+  assert.equal(deliveryState(w), 'awaiting-deployment');
+  const observed = new Date().toISOString();
+  // Nobody may report smoke before Graphyard has observed the deployment, whoever they are.
+  await assert.rejects(engine.execute(smokeProducer, 'evidence', w.id, smoke(mergeSha, mergeSha), randomUUID()), /has not observed a deployment/);
+  // Only the coordinator (or an operator) records a deployment observation, only for delivered work, only for this merge.
+  await assert.rejects(engine.execute(worker, 'deployment', w.id, { sha: mergeSha, mergeSha, source: 'endpoint', observedAt: observed }, randomUUID()), /Coordinator permission/);
+  await assert.rejects(engine.execute(producer, 'deployment', w.id, { sha: mergeSha, mergeSha, source: 'endpoint', observedAt: observed }, randomUUID()), /Coordinator permission/);
+  await assert.rejects(engine.execute(coordinator, 'deployment', w.id, { sha: mergeSha, mergeSha: head, source: 'endpoint', observedAt: observed }, randomUUID()), /another merge commit/);
+  const open = await submitted();
+  await assert.rejects(engine.execute(coordinator, 'deployment', open.id, { sha: mergeSha, mergeSha, source: 'endpoint', observedAt: observed }, randomUUID()), /only for delivered work/);
+  w = await engine.execute(coordinator, 'deployment', w.id, { sha: mergeSha, mergeSha, source: 'endpoint', observedAt: observed }, randomUUID());
+  assert.equal(w.stage, 'done'); assert.equal(w.delivery!.deployment!.covers, 'exact'); assert.equal(w.delivery!.deployment!.observer, coordinator.id);
+  assert.equal(deliveryState(w), 'awaiting-smoke');
+  await assert.rejects(engine.execute(coordinator, 'deployment', w.id, { sha: servingSha, mergeSha, source: 'endpoint', observedAt: observed }, randomUUID()), /already has a recorded deployment/);
+  // Authorization: a worker, an operator, and a producer without the grant are all refused outright; nothing untrusted is stored.
+  await assert.rejects(engine.execute(worker, 'evidence', w.id, smoke(mergeSha, mergeSha), randomUUID()), /only from a producer authorized/);
+  await assert.rejects(engine.execute(operator, 'evidence', w.id, smoke(mergeSha, mergeSha), randomUUID()), /only from a producer authorized/);
+  await assert.rejects(engine.execute(producer, 'evidence', w.id, smoke(mergeSha, mergeSha), randomUUID()), /only from a producer authorized/);
+  // Binding: the evidence must name the observed deployed commit and this item's merge commit.
+  await assert.rejects(engine.execute(smokeProducer, 'evidence', w.id, smoke(head, mergeSha), randomUUID()), /must name the observed deployed commit/);
+  await assert.rejects(engine.execute(smokeProducer, 'evidence', w.id, smoke(mergeSha, head), randomUUID()), /must name the observed deployed commit/);
+  await assert.rejects(engine.execute(smokeProducer, 'evidence', w.id, smoke(mergeSha, mergeSha, 'pass', { policyRevision: 2 }), randomUUID()), /Policy revision/);
+  assert.equal((await reload(w)).evidence.filter(e => e.proof === 'e2e:deploy-smoke').length, 0, 'refused smoke evidence is never stored');
+  const before = structuredClone(w.delivery);
+  w = await engine.execute(smokeProducer, 'evidence', w.id, smoke(mergeSha, mergeSha, 'pass', { url: 'https://github.com/owner/project/actions/runs/7' }), randomUUID());
+  assert.equal(w.stage, 'done'); assert.equal(deliveryState(w), 'smoke-passed');
+  assert.deepEqual({ mergedAt: w.delivery!.mergedAt, mergeSha: w.delivery!.mergeSha, authorizationRevision: w.delivery!.authorizationRevision, deployment: w.delivery!.deployment }, { ...before, deployment: before!.deployment }, 'merge facts in the delivery snapshot are untouched');
+  assert.equal(w.delivery!.smoke!.sha, mergeSha); assert.equal(w.delivery!.smoke!.mergeSha, mergeSha); assert.equal(w.delivery!.smoke!.producer, smokeProducer.id);
+  assert.equal(w.delivery!.smoke!.evidenceId, w.evidence.find(e => e.proof === 'e2e:deploy-smoke')!.id);
+  assert.ok(w.gates.every(gate => gate.passed), 'post-deployment facts never re-evaluate the delivered gates');
+  assert.equal((await store.pool.query('SELECT 1 FROM jobs WHERE work_id=$1', [w.id])).rowCount, 0, 'delivered work does not re-enter integration reconciliation');
+  const history = (await store.events(w.id)).map(e => e.kind);
+  assert.ok(history.includes('deployment') && history.includes('evidence'));
+  // A delivery without the policy keeps the ordinary immutability and refuses the smoke proof.
+  const plain = await (async () => { let item = await submitted(); item = await engine.observe(item.id, item.revision, observation(item)); item = await proven(item);
+    const g = await engine.acquireMerge(coordinator, item.id, { expectedRevision: item.revision, sha: head, baseSha: base, policyRevision: item.policyRevision }, randomUUID());
+    const v = await engine.verifyMerge(coordinator, item.id, { executionId: g.execution.id }, { ...observation(item), prState: 'open', draft: false }, randomUUID());
+    await delay(5); const at = ((await store.pool.query('SELECT clock_timestamp() AS now')).rows[0].now as Date).toISOString(); await delay(5);
+    return engine.observe(item.id, v.revision, { ...observation(item), merged: true, mergedAt: at, mergeSha }); })();
+  assert.equal(deliveryState(plain), 'delivered');
+  const recorded = await engine.execute(coordinator, 'deployment', plain.id, { sha: mergeSha, mergeSha, source: 'github-deployment', observedAt: new Date().toISOString() }, randomUUID());
+  assert.equal(recorded.delivery!.deployment!.source, 'github-deployment', 'deployment observations are recorded for every delivery; the smoke policy decides what they gate');
+  await assert.rejects(engine.execute(smokeProducer, 'evidence', plain.id, smoke(mergeSha, mergeSha), randomUUID()), /does not require e2e:deploy-smoke/);
+  await assert.rejects(engine.execute(worker, 'claim', plain.id, {}, randomUUID()), /immutable/);
+});
+
+test('a failed deploy-smoke proof is delivered-with-failure with rollback guidance in master status, and counts as post-deploy time in flow analytics', async () => {
+  let w = await deliveredWithSmokePolicy();
+  const observedAt = new Date().toISOString();
+  // A descendant rollout still covers the merge; the smoke result binds to that serving commit.
+  w = await engine.execute(coordinator, 'deployment', w.id, { sha: servingSha, mergeSha, source: 'endpoint', observedAt }, randomUUID());
+  assert.equal(w.delivery!.deployment!.covers, 'descendant');
+  await assert.rejects(engine.execute(smokeProducer, 'evidence', w.id, smoke(mergeSha, mergeSha, 'fail'), randomUUID()), /must name the observed deployed commit/);
+  await delay(5);
+  w = await engine.execute(smokeProducer, 'evidence', w.id, smoke(servingSha, mergeSha, 'fail', { url: 'https://github.com/owner/project/actions/runs/8' }), randomUUID());
+  assert.equal(w.stage, 'done', 'delivery history is never rewritten by a later failure');
+  assert.equal(deliveryState(w), 'delivered-with-failure');
+  assert.deepEqual(w.violations, [], 'a failed smoke proof is a recorded outcome, not a merge-bypass violation');
+  const guidance = rollbackGuidance(w, 'main')!;
+  assert.match(guidance, new RegExp(`${w.key} is delivered with a failed post-deployment smoke proof`));
+  assert.ok(guidance.includes(servingSha) && guidance.includes(mergeSha) && /revert .* on main/.test(guidance) && /Do not backfill/.test(guidance));
+  const snapshot = await store.workSnapshot();
+  const status = buildMasterStatus(snapshot, [], [], {}, {}, { pending: [], completed: [] }, 'main');
+  const row = status.delivered.find(entry => entry.key === w.key)!;
+  assert.equal(row.state, 'delivered-with-failure'); assert.equal(row.rollback, guidance); assert.equal(row.smoke!.result, 'fail'); assert.equal(row.deployment!.sha, servingSha);
+  assert.ok(status.counts.postDeployFailures >= 1);
+  assert.ok(row.postDeployMs! > 0 && row.productionLatencyMs! > 0);
+  assert.equal(status.work.some(entry => entry.key === w.key), false, 'delivered work stays out of the open ledger');
+  const metrics = stageMetrics(snapshot.work, Date.parse(snapshot.now));
+  assert.ok(metrics.postDeployFailures >= 1); assert.ok(metrics.postDeploy.count >= 1 && metrics.postDeploy.p90Ms > 0); assert.ok(metrics.production.count >= 1);
+  // A later pass at the same deployed commit supersedes the verdict; the failure stays in the ledger.
+  w = await engine.execute(smokeProducer, 'evidence', w.id, smoke(servingSha, mergeSha, 'pass'), randomUUID());
+  assert.equal(deliveryState(w), 'smoke-passed'); assert.equal(w.evidence.filter(e => e.proof === 'e2e:deploy-smoke').length, 2);
+});
+
+const sha40 = (label: string) => label.padEnd(40, '0');
+function tip(w: Work, candidate: { sha: string; baseSha: string }, extra: Partial<Observation> = {}): Observation {
+  return { clockOffset: { min: 0, max: 0 },
+    candidate: { ...candidate, pr: w.submission!.pr, branch: w.workspaces.at(-1)!.branch, author: 'implementer' },
+    checks: [{ name: 'test', result: 'success', appId: 15368 }, { name: 'typecheck', result: 'success', appId: 15368 }],
+    reviews: [{ reviewer: 'reviewer', sha: candidate.sha, state: 'APPROVED' }], protected: true, mergeable: true,
+    merged: false, mergeSha: null, prState: 'open', draft: false, baseTip: candidate.baseSha,
+    files: ['src/engine.ts'], scopeFiles: [], at: new Date().toISOString(), ...extra };
+}
+async function validated(w: Work, candidate: { sha: string; baseSha: string }, extra: Partial<Observation> = {}) {
+  const observed = await engine.observe(w.id, w.revision, tip(w, candidate, extra));
+  return engine.execute(producer, 'evidence', observed.id, { ...proof(), sha: candidate.sha, baseSha: candidate.baseSha }, randomUUID());
+}
+async function reload(w: Work) { return (await store.list()).find(item => item.id === w.id)!; }
+async function placementOf(w: Work) { return predictQueue(await store.list(), Date.now()).find(entry => entry.id === w.id)!; }
+async function onlyJob(w: Work) {
+  await store.pool.query("UPDATE jobs SET available_at=now()+interval '1 hour'");
+  await store.pool.query('UPDATE jobs SET available_at=now(),locked_until=NULL,token=NULL WHERE work_id=$1', [w.id]);
+}
+function queueAdapter(observation: (w: Work) => Observation, speculation: (w: Work, placement: QueuePlacement) => QueueSpeculation, seen: { key: string; base: string | null; predecessors: string[] }[] = []) {
+  return { seen, adapter: {
+    observe: async (w: Work) => observation(w),
+    publishSpeculativeTip: async (w: Work, placement: QueuePlacement) => {
+      seen.push({ key: w.key, base: placement.predictedBase, predecessors: placement.predecessors });
+      return speculation(w, placement);
+    },
+    publish: async () => { throw new Error('the replaced head must not receive a check publication'); },
+  } as unknown as GitHub };
+}
+const predicted = (w: Work, placement: QueuePlacement, tipSha: string, baseTree: string): QueueSpeculation =>
+  ({ ref: queueRef(w.key), tip: tipSha, base: placement.predictedBase!, baseTree, predecessors: placement.predecessors, policyRevision: w.policyRevision, publishedAt: new Date().toISOString() });
+/**
+ * Graphyard publishes a tip for every entry, the head included: publication is what proves the
+ * validated commit already contains its base. A branch that already sits on its predicted base
+ * publishes its own head, so nothing is rebuilt and nothing is revalidated.
+ */
+async function publishTip(w: Work, observed: { sha: string; baseSha: string }, tipSha: string, baseTree: string, extra: Partial<Observation> = {}) {
+  await onlyJob(w);
+  const run = queueAdapter(item => tip(item, observed, extra), (item, placement) => predicted(item, placement, tipSha, baseTree));
+  await processJob(engine, run.adapter);
+  return run.seen;
+}
+
+test('a queued candidate is validated on the speculative tip it will land, and an earlier merge does not invalidate it', async () => {
+  const main = sha40('a1'), firstHead = sha40('a2'), secondHead = sha40('a3'), secondTip = sha40('a4'), mainTree = sha40('a5'), mergeSha = sha40('a6');
+  let first = await submitted(), second = await submitted();
+  first = await validated(first, { sha: firstHead, baseSha: main });
+  second = await validated(second, { sha: secondHead, baseSha: main });
+  assert.equal((await placementOf(first)).current, false, 'nothing lands until Graphyard has published the tip for it');
+  assert.deepEqual(await publishTip(first, { sha: firstHead, baseSha: main }, firstHead, mainTree), [{ key: first.key, base: main, predecessors: [] }]);
+  first = await reload(first);
+  assert.equal(first.queue!.speculation!.tip, firstHead, 'a branch already on its predicted base publishes its own head as the tip');
+  const head = await placementOf(first), behind = await placementOf(second);
+  assert.equal(head.position, 0); assert.equal(head.predictedBase, main); assert.equal(head.current, true);
+  assert.equal(behind.position, 1); assert.equal(behind.predictedBase, firstHead, 'the entry behind predicts against the tip the head will land');
+  assert.equal(behind.current, false);
+  second = await reload(second);
+  assert.equal(second.mergeAuthorization, null);
+  assert.match(second.gates.find(gate => gate.name === 'merge')!.reasons.join(' '), /position 2 of 2/);
+
+  await onlyJob(second);
+  const { seen, adapter } = queueAdapter(w => tip(w, { sha: secondHead, baseSha: main }), (w, placement) => predicted(w, placement, secondTip, mainTree));
+  await processJob(engine, adapter);
+  assert.deepEqual(seen, [{ key: second.key, base: firstHead, predecessors: [first.key] }]);
+  second = await reload(second);
+  assert.equal(second.queue!.speculation!.tip, secondTip);
+  assert.equal(second.queue!.speculation!.ref, `refs/graphyard/queue/${second.key.toLowerCase()}`);
+  assert.equal((await store.events(second.id)).filter(event => event.kind === 'queue.predicted').length, 1);
+
+  second = await engine.observe(second.id, second.revision, tip(second, { sha: secondTip, baseSha: firstHead }, { baseTip: main, reviews: [{ reviewer: 'reviewer', sha: secondHead, state: 'APPROVED' }] }));
+  assert.equal(second.candidate!.baseSha, firstHead, 'the candidate binds to the predicted base rather than the base branch');
+  assert.equal(second.gates.find(gate => gate.name === 'review')!.passed, false, 'approval of the replaced head does not approve the speculative tip');
+  assert.equal(second.gates.find(gate => gate.name === 'acceptance')!.passed, false, 'proof of the replaced head does not prove the speculative tip');
+  second = await validated(second, { sha: secondTip, baseSha: firstHead }, { baseTip: main });
+  assert.equal(second.gates.find(gate => gate.name === 'acceptance')!.passed, true);
+  assert.match(second.gates.find(gate => gate.name === 'merge')!.reasons.join(' '), /position 2 of 2/, 'a fully validated entry still waits its turn');
+
+  first = await reload(first);
+  const granted = await engine.acquireMerge(coordinator, first.id, { expectedRevision: first.revision, sha: firstHead, baseSha: main, policyRevision: first.policyRevision }, randomUUID());
+  const verified = await engine.verifyMerge(coordinator, first.id, { executionId: granted.execution.id }, tip(first, { sha: firstHead, baseSha: main }), randomUUID());
+  await delay(5); const mergedAt = ((await store.pool.query('SELECT clock_timestamp() AS now')).rows[0].now as Date).toISOString(); await delay(5);
+  first = await engine.observe(first.id, verified.revision, tip(first, { sha: firstHead, baseSha: main }, { merged: true, mergeSha, mergedAt }));
+  assert.equal(first.stage, 'done');
+
+  second = await reload(second);
+  const evidenceBefore = second.evidence.length;
+  second = await engine.observe(second.id, second.revision, tip(second, { sha: secondTip, baseSha: firstHead }, { baseTip: mergeSha, baseTree: mainTree }));
+  assert.equal((await placementOf(second)).position, 0);
+  assert.equal(second.evidence.length, evidenceBefore, 'no new proof was required after the merge ahead of it');
+  assert.ok(second.gates.every(gate => gate.passed), second.gates.flatMap(gate => gate.reasons).join('; '));
+  assert.equal(second.mergeAuthorization!.sha, secondTip);
+  assert.equal(second.mergeAuthorization!.baseSha, firstHead);
+});
+
+test('main advancing outside the queue re-validates the head and re-bases the entries behind it without rework', async () => {
+  const main = sha40('b1'), firstHead = sha40('b2'), secondHead = sha40('b3'), secondTip = sha40('b4'), mainTree = sha40('b5');
+  const outside = sha40('b6'), outsideTree = sha40('b7'), firstTip = sha40('b8'), secondRebase = sha40('b9');
+  let first = await submitted(), second = await submitted();
+  first = await validated(first, { sha: firstHead, baseSha: main });
+  second = await validated(second, { sha: secondHead, baseSha: main });
+  await publishTip(first, { sha: firstHead, baseSha: main }, firstHead, mainTree);
+  first = await reload(first);
+  await onlyJob(second);
+  const initial = queueAdapter(w => tip(w, { sha: secondHead, baseSha: main }), (w, placement) => predicted(w, placement, secondTip, mainTree));
+  await processJob(engine, initial.adapter);
+  second = await validated(await reload(second), { sha: secondTip, baseSha: firstHead }, { baseTip: main });
+  assert.ok(second.queue!.speculation);
+
+  // Someone lands a commit on the managed branch outside the queue.
+  first = await engine.observe(first.id, (await reload(first)).revision, tip(first, { sha: firstHead, baseSha: main }, { baseTip: outside, baseTree: outsideTree }));
+  assert.equal(first.mergeAuthorization, null, 'the stale binding is refused, not reused');
+  assert.match(first.gates.find(gate => gate.name === 'merge')!.reasons.join(' '), /Speculative tip on predicted base/);
+  const waiting = await placementOf(second);
+  assert.equal(waiting.predictedBase, null); assert.equal(waiting.publishable, false);
+  assert.match(waiting.reasons.at(-1)!, /Waiting for .* to publish its speculative tip/, 'only the queue head is re-validated against the new base');
+  assert.equal((await placementOf(first)).publishable, true);
+
+  await onlyJob(first);
+  const headRun = queueAdapter(w => tip(w, { sha: firstHead, baseSha: main }, { baseTip: outside, baseTree: outsideTree }), (w, placement) => predicted(w, placement, firstTip, outsideTree));
+  await processJob(engine, headRun.adapter);
+  assert.deepEqual(headRun.seen, [{ key: first.key, base: outside, predecessors: [] }]);
+  first = await validated(await reload(first), { sha: firstTip, baseSha: outside }, { baseTip: outside });
+  assert.ok(first.gates.every(gate => gate.passed));
+
+  const rebased = await placementOf(second);
+  assert.equal(rebased.predictedBase, firstTip, 'the entry behind is re-predicted onto the new head tip');
+  assert.equal(rebased.publishable, true);
+  await onlyJob(second);
+  const behindRun = queueAdapter(w => tip(w, { sha: secondTip, baseSha: firstHead }, { baseTip: outside }), (w, placement) => predicted(w, placement, secondRebase, outsideTree));
+  await processJob(engine, behindRun.adapter);
+  assert.deepEqual(behindRun.seen, [{ key: second.key, base: firstTip, predecessors: [first.key] }]);
+  second = await reload(second);
+  assert.equal(second.queue!.speculation!.tip, secondRebase);
+  assert.equal(second.reworkRequested, false, 'Graphyard re-based the entry; the worker was not asked to redo anything');
+  assert.equal(second.submission!.epoch, 1); assert.equal(second.workspaces.length, 1);
+  second = await engine.observe(second.id, second.revision, tip(second, { sha: secondRebase, baseSha: firstTip }, { baseTip: outside, reviews: [{ reviewer: 'reviewer', sha: secondTip, state: 'APPROVED' }] }));
+  assert.equal(second.gates.find(gate => gate.name === 'acceptance')!.passed, false, 'the binding made against the superseded tip is refused');
+  assert.equal(second.gates.find(gate => gate.name === 'review')!.passed, false);
+});
+
+test('a failed speculative validation ejects the entry with a reason and re-predicts the queue without it', async () => {
+  const main = sha40('c1'), firstHead = sha40('c2'), secondHead = sha40('c3'), thirdHead = sha40('c4'), thirdTip = sha40('c5'), mainTree = sha40('c6');
+  let first = await submitted(), second = await submitted(), third = await submitted();
+  first = await validated(first, { sha: firstHead, baseSha: main });
+  second = await validated(second, { sha: secondHead, baseSha: main });
+  third = await validated(third, { sha: thirdHead, baseSha: main });
+  await publishTip(first, { sha: firstHead, baseSha: main }, firstHead, mainTree);
+  first = await reload(first);
+  assert.deepEqual((await placementOf(third)).predecessors, [first.key, second.key]);
+
+  second = await engine.observe(second.id, (await reload(second)).revision, tip(second, { sha: secondHead, baseSha: main }, { checks: [{ name: 'test', result: 'failure', appId: 15368 }, { name: 'typecheck', result: 'success', appId: 15368 }] }));
+  assert.equal(second.queue, null);
+  assert.match(second.queueEjection!.reason, /Required CI check test did not pass on speculative tip/);
+  assert.equal(second.queueHistory!.at(-1)!.event, 'ejected');
+  assert.ok((await store.events(second.id)).some(event => event.payload.work.queueEjection?.reason === second.queueEjection!.reason), 'the ejection and its reason are in the append-only history');
+  assert.deepEqual((await placementOf(third)).predecessors, [first.key], 'the entries behind are re-predicted without the ejected entry');
+  assert.equal((await placementOf(third)).predictedBase, firstHead);
+
+  // A repaired candidate returns to the back of the queue; the failed commit cannot re-enter.
+  second = await engine.observe(second.id, second.revision, tip(second, { sha: secondHead, baseSha: main }));
+  assert.equal(second.queue, null);
+  assert.match(second.gates.find(gate => gate.name === 'merge')!.reasons.join(' '), /Ejected from the merge queue/);
+  second = await validated(second, { sha: sha40('c7'), baseSha: main });
+  assert.ok(second.queue); assert.ok(second.queue!.sequence > third.queue!.sequence);
+
+  // No identity can buy a position, reorder the queue, or merge past the head.
+  await assert.rejects(engine.execute(operator, 'queue' as any, third.id, {}, randomUUID()), /Unknown command/);
+  third = await reload(third);
+  await assert.rejects(engine.acquireMerge(operator, third.id, { expectedRevision: third.revision, sha: thirdHead, baseSha: main, policyRevision: third.policyRevision }, randomUUID()), /Merge authorization is no longer current/);
+  await assert.rejects(engine.acquireMerge(coordinator, third.id, { expectedRevision: third.revision, sha: thirdHead, baseSha: main, policyRevision: third.policyRevision }, randomUUID()), /Merge authorization is no longer current/);
+
+  await onlyJob(third);
+  const conflicted = {
+    observe: async (w: Work) => tip(w, { sha: thirdHead, baseSha: main }),
+    publishSpeculativeTip: async () => { throw new SpeculativeConflict(`Speculative merge of ${firstHead.slice(0, 12)} into graphyard/third conflicts and cannot be resolved by Graphyard`); },
+    publish: async () => {},
+  } as unknown as GitHub;
+  await processJob(engine, conflicted);
+  third = await reload(third);
+  assert.equal(third.queue, null);
+  assert.match(third.queueEjection!.reason, /conflicts and cannot be resolved by Graphyard/);
+  assert.equal((await store.events(third.id)).filter(event => event.kind === 'queue.ejected').length, 1);
+  assert.equal(thirdTip.length, 40);
+});
+
+test('agent review policy requires registered reviewer profiles and an operator identity', async () => {
+  let w = await submitted(); w = await engine.observe(w.id, w.revision, observation(w));
+  w = await engine.execute(producer, 'evidence', w.id, proof(), randomUUID());
+  const intent = { provider: 'agent', expectedPolicyRevision: 1, reason: 'Adopt identity-bound agent review' };
+  await assert.rejects(engine.execute(operator, 'reviewpolicy', w.id, intent, randomUUID()), /Reviewer profiles are required/);
+  await assert.rejects(engine.execute(operator, 'reviewpolicy', w.id, { ...intent, reviewerProfiles: [{ name: 'ghost', runtime: 'claude', reviewerApp: 'ghost' }] }, randomUUID()), /not registered/);
+  await assert.rejects(engine.execute(operator, 'reviewpolicy', w.id, { ...intent, reviewerProfiles: [{ name: 'claude-reviewer', runtime: 'cursor', reviewerApp: 'claude-reviewer' }] }, randomUUID()), /registered runtime/);
+  await assert.rejects(engine.execute(worker, 'reviewpolicy', w.id, { ...intent, reviewerProfiles: agentProfiles }, randomUUID()), /Operator/);
+  await assert.rejects(engine.execute(operator, 'reviewpolicy', w.id, { provider: 'codex', reviewerProfiles: agentProfiles, expectedPolicyRevision: 1, reason: 'Mixed intent' }, randomUUID()), /rejected for every other provider/);
+  w = await engine.execute(operator, 'reviewpolicy', w.id, { ...intent, reviewerProfiles: agentProfiles }, randomUUID());
+  assert.equal(w.policyRevision, 2); assert.equal(w.policy.reviewProvider, 'agent');
+  assert.deepEqual(w.policy.reviewerProfiles?.map(profile => profile.name), ['claude-reviewer', 'cursor-reviewer']);
+  assert.equal(w.policy.reviewerProfiles![0].timeoutSeconds, 1800);
+  assert.equal(w.observation, null); assert.equal(w.reviewRequest, null);
+  // Acceptance evidence for the previous policy revision no longer counts.
+  assert.equal(w.evidence.length, 1); assert.equal(w.gates.find(gate => gate.name === 'acceptance')?.passed, false);
+  assert.equal((await store.events(w.id)).find(event => event.kind === 'reviewpolicy').payload.details.reason, intent.reason);
+  await assert.rejects(engine.execute(operator, 'reviewpolicy', w.id, { ...intent, expectedPolicyRevision: 2, reviewerProfiles: agentProfiles }, randomUUID()), /already selected/);
+  // Reordering the same identities is a real policy change and is accepted.
+  w = await engine.execute(operator, 'reviewpolicy', w.id, { ...intent, expectedPolicyRevision: 2, reviewerProfiles: [agentProfiles[1], agentProfiles[0]] }, randomUUID());
+  assert.deepEqual(w.policy.reviewerProfiles?.map(profile => profile.name), ['cursor-reviewer', 'claude-reviewer']);
+  // Returning to formal GitHub review drops the reviewer profiles entirely.
+  w = await engine.execute(operator, 'reviewpolicy', w.id, { provider: 'github', expectedPolicyRevision: 3, reason: 'Return to formal approval' }, randomUUID());
+  assert.equal(w.policy.reviewerProfiles, undefined); assert.equal(w.policy.reviewProvider, 'github');
+});
+
+test('agent approval satisfies review only for the dispatched profile and registered App', async () => {
+  let w = await agentReviewed();
+  w = await engine.observe(w.id, w.revision, observation(w));
+  const token = await leasedJob(w.id);
+  const request = agentRequest(w);
+  await assert.rejects(engine.bindReviewRequest(w.id, w.revision, { ...request, profile: 'cursor-reviewer', reviewerApp: 'cursor-reviewer' }, token), /currently selected reviewer profile/);
+  await assert.rejects(engine.bindReviewRequest(w.id, w.revision, { ...request, marker: undefined }, token), /currently selected reviewer profile/);
+  await assert.rejects(engine.bindReviewRequest(w.id, w.revision, { ...request, provider: 'codex' }, token), /candidate or policy changed/);
+  w = await engine.bindReviewRequest(w.id, w.revision, request, token);
+  assert.equal(w.reviewRequest?.profile, 'claude-reviewer');
+  assert.equal(w.observation?.agentReview?.approved, false);
+  assert.match(w.gates.find(gate => gate.name === 'review')!.reasons[0], /Waiting for reviewer profile claude-reviewer/);
+  w = await engine.observe(w.id, w.revision, agentVerdict(w, request));
+  assert.equal(w.gates.find(gate => gate.name === 'review')?.passed, true);
+  for (const forged of [{ requestId: 999 }, { profile: 'cursor-reviewer' }, { reviewerApp: 'cursor-reviewer' }, { sha: 'c'.repeat(40) }, { provider: 'codex' }]) {
+    w = await engine.observe(w.id, w.revision, agentVerdict(w, request, forged));
+    assert.equal(w.gates.find(gate => gate.name === 'review')?.passed, false, JSON.stringify(forged));
+    w = await engine.observe(w.id, w.revision, agentVerdict(w, request));
+    assert.equal(w.gates.find(gate => gate.name === 'review')?.passed, true, JSON.stringify(forged));
+  }
+  // A native change request still blocks an approved agent verdict.
+  w = await engine.observe(w.id, w.revision, { ...agentVerdict(w, request), reviews: [{ reviewer: 'human', sha: head, state: 'CHANGES_REQUESTED' }] });
+  assert.equal(w.gates.find(gate => gate.name === 'review')?.passed, false);
+});
+
+test('provider exhaustion fails over to the next profile and records it in history', async () => {
+  let w = await agentReviewed();
+  w = await engine.observe(w.id, w.revision, observation(w));
+  const token = await leasedJob(w.id);
+  await assert.rejects(engine.failoverReviewRequest(w.id, w.revision, { exhaustion: 'usage-limit', reason: 'quota' }, token), /current agent review request/);
+  const first = agentRequest(w);
+  w = await engine.bindReviewRequest(w.id, w.revision, first, token);
+  await assert.rejects(engine.failoverReviewRequest(w.id, w.revision, { exhaustion: 'timeout', reason: 'silent' }, randomUUID()), ReconciliationRetry);
+  w = await engine.failoverReviewRequest(w.id, w.revision, { exhaustion: 'usage-limit', reason: 'claude-reviewer reported exhausted usage limits' }, token);
+  assert.equal(w.reviewRequest, null); assert.equal(w.reviewFailovers?.length, 1);
+  assert.equal(w.reviewFailovers![0].profile, 'claude-reviewer'); assert.equal(w.reviewFailovers![0].nextProfile, 'cursor-reviewer');
+  assert.equal(w.reviewFailovers![0].exhaustion, 'usage-limit'); assert.equal(w.reviewFailovers![0].requestCommentId, first.commentId);
+  assert.match(w.gates.find(gate => gate.name === 'review')!.reasons[0], /failed over to cursor-reviewer/);
+  const failoverEvent = (await store.events(w.id)).find(event => event.kind === 'review.failover');
+  assert.equal(failoverEvent.payload.details.profile, 'claude-reviewer'); assert.equal(failoverEvent.payload.details.sha, head);
+  // The superseded profile can no longer be rebound, and its old verdict cannot approve.
+  await assert.rejects(engine.bindReviewRequest(w.id, w.revision, agentRequest(w), token), /currently selected reviewer profile/);
+  w = await engine.observe(w.id, w.revision, agentVerdict(w, first));
+  assert.equal(w.gates.find(gate => gate.name === 'review')?.passed, false);
+  w = await engine.observe(w.id, w.revision, observation(w));
+  const second = agentRequest(w, 'cursor-reviewer', 701);
+  w = await engine.bindReviewRequest(w.id, w.revision, second, token);
+  w = await engine.failoverReviewRequest(w.id, w.revision, { exhaustion: 'timeout', reason: 'no verdict within 900 seconds' }, token);
+  assert.equal(w.reviewFailovers?.length, 2); assert.equal(w.reviewFailovers![1].nextProfile, null);
+  assert.match(w.gates.find(gate => gate.name === 'review')!.reasons[0], /Every configured reviewer profile is exhausted/);
+  assert.equal(w.stage, 'review');
+  // Re-review restarts failover at the first configured profile without approving anything.
+  w = await engine.execute(operator, 'rereview', w.id, {}, randomUUID());
+  assert.deepEqual(w.reviewFailovers, []);
+  w = await engine.observe(w.id, w.revision, observation(w));
+  w = await engine.bindReviewRequest(w.id, w.revision, agentRequest(w, 'claude-reviewer', 702), token);
+  assert.equal(w.reviewRequest?.profile, 'claude-reviewer');
+  assert.ok((await store.events(w.id)).some(event => event.kind === 'review.failover'));
+});
+
+test('reconciliation dispatches, fails over, and stops without approving when reviewers are exhausted', async () => {
+  let w = await agentReviewed();
+  const dispatched: string[] = []; let exhaust: string | null = null; let publications = 0;
+  const adapter = {
+    reviewerAppFor: (profile: any) => profile && reviewerApps.find(app => app.id === profile.reviewerApp),
+    observe: async (work: Work) => {
+      const request = work.reviewRequest;
+      if (!request?.profile) return { ...observation(work), reviews: [], prState: 'open' as const, draft: false };
+      return { ...observation(work), reviews: [], prState: 'open' as const, draft: false,
+        agentReview: { provider: 'agent' as const, sha: head, approved: false, profile: request.profile, reviewerApp: request.reviewerApp,
+          reason: `${request.profile} is exhausted`, ...(exhaust === request.profile ? { exhausted: true, exhaustion: 'usage-limit' as const } : {}) } };
+    },
+    requestAgentReview: async (work: Work, profile: any, app: any, guard: () => Promise<void>) => {
+      await guard(); dispatched.push(profile.name);
+      assert.equal(app.id, profile.reviewerApp);
+      return agentRequest(work, profile.name, 800 + dispatched.length);
+    },
+    publish: async (_work: Work, forced: unknown, guard: () => Promise<void>) => { assert.equal(forced, undefined); await guard(); publications++; },
+  } as unknown as GitHub;
+  const run = async () => {
+    await store.pool.query("UPDATE jobs SET available_at=now()+interval '1 hour'");
+    await store.pool.query('UPDATE jobs SET available_at=now() WHERE work_id=$1', [w.id]);
+    await processJob(engine, adapter);
+    w = (await store.list()).find(item => item.id === w.id)!;
+  };
+  await run();
+  assert.deepEqual(dispatched, ['claude-reviewer']); assert.equal(w.reviewRequest?.profile, 'claude-reviewer');
+  exhaust = 'claude-reviewer'; await run();
+  assert.deepEqual(dispatched, ['claude-reviewer', 'cursor-reviewer']);
+  assert.equal(w.reviewFailovers?.length, 1); assert.equal(w.reviewRequest?.profile, 'cursor-reviewer');
+  exhaust = 'cursor-reviewer'; await run();
+  assert.equal(w.reviewFailovers?.length, 2); assert.equal(w.reviewRequest, null);
+  assert.deepEqual(dispatched, ['claude-reviewer', 'cursor-reviewer']);
+  assert.equal(w.gates.find(gate => gate.name === 'review')?.passed, false);
+  // A stalled reviewer never becomes an approval, and the job stays healthy for retries.
+  await run();
+  assert.equal(w.gates.find(gate => gate.name === 'review')?.passed, false);
+  assert.equal((await store.pool.query('SELECT error FROM jobs WHERE work_id=$1', [w.id])).rows[0].error, null);
+  assert.ok(publications >= 4);
+});
+
+test('existing GitHub and Codex review policies keep their original behavior', async () => {
+  // A default policy still requires an independent formal approval, registry or not.
+  let native = await submitted();
+  native = await engine.observe(native.id, native.revision, { ...observation(native), reviews: [] });
+  assert.equal(native.policy.reviewProvider, undefined);
+  assert.match(native.gates.find(gate => gate.name === 'review')!.reasons[0], /Independent approval of the current commit/);
+  native = await engine.observe(native.id, native.revision, { ...observation(native), reviews: [{ reviewer: 'implementer', sha: head, state: 'APPROVED' }] });
+  assert.equal(native.gates.find(gate => gate.name === 'review')?.passed, false);
+  native = await engine.observe(native.id, native.revision, observation(native));
+  assert.equal(native.gates.find(gate => gate.name === 'review')?.passed, true);
+  // A Codex policy still binds to its own provider record and rejects an agent verdict.
+  let codex = await submitted();
+  codex = await engine.observe(codex.id, codex.revision, observation(codex));
+  codex = await engine.execute(operator, 'reviewpolicy', codex.id, { provider: 'codex', expectedPolicyRevision: 1, reason: 'Keep hosted Codex review' }, randomUUID());
+  assert.equal(codex.policy.reviewerProfiles, undefined);
+  codex = await engine.observe(codex.id, codex.revision, observation(codex));
+  const token = await leasedJob(codex.id);
+  const request = { commentId: 8124, sha: head, baseSha: base, policyRevision: codex.policyRevision, body: '@codex review', createdAt: new Date().toISOString() };
+  codex = await engine.bindReviewRequest(codex.id, codex.revision, request, token);
+  assert.equal(codex.reviewRequest?.provider, undefined);
+  codex = await engine.observe(codex.id, codex.revision, { ...observation(codex), reviews: [], agentReview: { provider: 'agent', sha: head, approved: true, reason: 'agent', requestId: 8124, profile: 'claude-reviewer', reviewerApp: 'claude-reviewer' } });
+  assert.equal(codex.gates.find(gate => gate.name === 'review')?.passed, false);
+  codex = await engine.observe(codex.id, codex.revision, { ...observation(codex), reviews: [], agentReview: { provider: 'codex', sha: head, approved: true, reason: 'Clean review', requestId: 8124 } });
+  assert.equal(codex.gates.find(gate => gate.name === 'review')?.passed, true);
+});
+
+// --- Submit-time integration regression guard ---------------------------------------------------
+const scoped = (path: string, extra: Partial<ScopeFile> = {}): ScopeFile => ({ path, status: 'modified', sha: sha40('5'), additions: 1, deletions: 1, binary: false, baseSha: sha40('6'), ...extra });
+async function claimedScoped(plannedFiles: string[]) {
+  let w = await engine.execute(operator, 'create', null, { ...workInput, title: 'Scoped change', plannedFiles }, randomUUID());
+  w = await engine.execute(operator, 'ready', w.id, {}, randomUUID());
+  w = await engine.execute(worker, 'claim', w.id, {}, randomUUID());
+  return engine.execute(worker, 'workspace', w.id, { epoch: 1, host: 'machine-a', path: `/tmp/${w.id}`, branch: `graphyard/${w.id}` }, randomUUID());
+}
+test('complete refuses a candidate that reverts shipped code outside its planned files and accepts it once every such file matches the base', async () => {
+  const shipped = await store.list();
+  const delivered = shipped.find(item => item.stage === 'done' && item.observation?.files.includes('src/claims.ts'));
+  const w = await claimedScoped(['src/scoped/', 'tests/']);
+  const pr = Number(w.key.slice(3));
+  const observed = (scopeFiles: ScopeFile[]): Observation => ({ ...observation({ ...w, submission: { epoch: 1, pr } } as Work), files: scopeFiles.map(file => file.path), scopeFiles });
+  const reverting = observed([scoped('src/scoped/feature.ts', { baseSha: undefined }), scoped('src/claims.ts', { additions: 0, deletions: 14 }), scoped('src/quarantine.ts', { status: 'removed', sha: null }), scoped('tests/new.test.ts', { status: 'added', baseSha: undefined })]);
+  await assert.rejects(engine.execute(worker, 'submit', w.id, { epoch: 1, pr }, randomUUID(), { observation: reverting }), (error: any) => {
+    assert.match(error.message, new RegExp(`Submission refused for ${w.key}: Candidate changes 2 files outside its planned files`));
+    assert.match(error.message, /src\/claims\.ts: removes 14 lines that the base branch holds and adds nothing \(shipped by/);
+    if (delivered) assert.ok(error.message.includes(delivered.key), 'the shipped work item is named');
+    assert.match(error.message, /src\/quarantine\.ts: deleted; the base branch still holds it/);
+    assert.doesNotMatch(error.message, /feature\.ts|new\.test\.ts/, 'in-scope changes are never listed');
+    return true;
+  });
+  assert.equal((await reload(w)).submission, null, 'a refused submission is not recorded');
+  assert.equal((await store.events(w.id)).some(event => event.kind === 'submit'), false);
+  const otherBranch = observed([]); otherBranch.candidate.branch = 'graphyard/someone-else';
+  await assert.rejects(engine.execute(worker, 'submit', w.id, { epoch: 1, pr }, randomUUID(), { observation: otherBranch }), /PR branch does not match the assigned workspace/);
+  await assert.rejects(engine.execute(worker, 'submit', w.id, { epoch: 1, pr }, randomUUID(), { observation: { ...observed([]), candidate: { ...observed([]).candidate, pr: pr + 1000 } } }), /Observed pull request does not match/);
+  await assert.rejects(engine.execute(worker, 'submit', w.id, { epoch: 1, pr }, randomUUID(), { observation: { ...observed([]), scopeFiles: undefined } }), /has not been compared against the base branch tip/);
+  const fixed = observed([scoped('src/scoped/feature.ts', { baseSha: undefined }), scoped('src/claims.ts', { sha: sha40('6') }), scoped('src/quarantine.ts', { status: 'removed', sha: null, baseSha: null }), scoped('src/brand-new.ts', { status: 'added', baseSha: null }), scoped('tests/new.test.ts', { status: 'added', baseSha: undefined })]);
+  const accepted = await engine.execute(worker, 'submit', w.id, { epoch: 1, pr }, randomUUID(), { observation: fixed });
+  assert.deepEqual(accepted.submission, { epoch: 1, pr });
+  await clearQueue(w.id);
+});
+test('a submission observed by the deployment GitHub client is refused before it is recorded, and a replay never re-observes', async () => {
+  const w = await claimedScoped(['src/scoped/']);
+  const pr = Number(w.key.slice(3));
+  let observations = 0; let scopeFiles: ScopeFile[] = [scoped('src/claims.ts', { additions: 0, deletions: 3 })];
+  engine.submissionObserver = async probe => { observations++; assert.deepEqual(probe.submission, { epoch: 1, pr }); return { ...observation(probe), files: scopeFiles.map(file => file.path), scopeFiles }; };
+  try {
+    const headers = { Authorization: `Bearer ${'w'.repeat(32)}`, 'Content-Type': 'application/json' };
+    const submit = (key: string) => fetch(`${url}/api/work/${w.id}/submit`, { method: 'POST', headers: { ...headers, 'Idempotency-Key': key }, body: JSON.stringify({ epoch: 1, pr }) });
+    const refused = await submit(randomUUID());
+    assert.equal(refused.status, 409); assert.match((await refused.json() as any).error, /Out-of-scope regression: src\/claims\.ts: removes 3 lines/);
+    assert.equal((await reload(w)).submission, null);
+    scopeFiles = [scoped('src/scoped/feature.ts', { baseSha: undefined })];
+    const key = randomUUID();
+    assert.equal((await submit(key)).status, 200); const count = observations;
+    assert.equal((await submit(key)).status, 200); assert.equal(observations, count, 'the idempotent replay is answered from the receipt');
+    // Without a pre-observation the transaction records the submission; the reconciliation job then decides.
+    engine.submissionObserver = null;
+    await assert.rejects(engine.execute(worker, 'submit', w.id, { epoch: 1, pr: pr + 500 }, randomUUID()), /cannot switch pull requests/);
+  } finally { engine.submissionObserver = undefined; await clearQueue(w.id); }
+});
+test('every later head is re-evaluated: a revert pushed after submission closes the build gate, names the files in diagnose and the published check, and clears when fixed', async () => {
+  const w = await claimedScoped(['src/scoped/']);
+  const pr = Number(w.key.slice(3));
+  const clean = () => ({ ...observation({ ...w, submission: { epoch: 1, pr } } as Work), files: ['src/scoped/feature.ts'], scopeFiles: [scoped('src/scoped/feature.ts', { baseSha: undefined })] });
+  let current = clean();
+  let published: any[] = [];
+  const adapter = { observe: async () => current, publish: async (item: Work) => { published.push(item.gates.flatMap(gate => gate.reasons)); } } as unknown as GitHub;
+  engine.submissionObserver = async () => current;
+  try {
+    let submitted = await engine.execute(worker, 'submit', w.id, { epoch: 1, pr }, randomUUID());
+    await clearQueue(w.id);
+    await store.pool.query("UPDATE jobs SET available_at=now()+interval '1 hour'");
+    await store.pool.query('UPDATE jobs SET available_at=now(),locked_until=NULL,token=NULL WHERE work_id=$1', [w.id]);
+    await processJob(engine, adapter);
+    submitted = await reload(w);
+    assert.equal(submitted.gates.find(gate => gate.name === 'build')?.passed, true);
+    // The worker merges main badly and pushes: the head changes and the observation names the damage.
+    const regressed = sha40('9');
+    current = { ...clean(), candidate: { ...clean().candidate, sha: regressed }, files: ['src/scoped/feature.ts', 'src/quarantine.ts'], scopeFiles: [scoped('src/scoped/feature.ts', { baseSha: undefined }), scoped('src/quarantine.ts', { status: 'removed', sha: null })] };
+    await store.pool.query('UPDATE jobs SET available_at=now(),locked_until=NULL,token=NULL WHERE work_id=$1', [w.id]);
+    await processJob(engine, adapter);
+    const refused = await reload(w);
+    assert.equal(refused.stage, 'build'); assert.equal(refused.candidate?.sha, regressed);
+    const build = refused.gates.find(gate => gate.name === 'build')!;
+    assert.equal(build.passed, false); assert.match(build.reasons.join('\n'), /Out-of-scope regression: src\/quarantine\.ts: deleted; the base branch still holds it/);
+    const diagnostics = diagnose(refused, await store.list(), Date.now());
+    assert.ok(diagnostics.some(item => item.kind === 'gate-build' && /src\/quarantine\.ts: deleted/.test(item.message)), 'diagnose surfaces the refusal with the file');
+    assert.ok(published.at(-1)!.some((reason: string) => /src\/quarantine\.ts/.test(reason)), 'the published check names the file');
+    current = { ...clean(), candidate: { ...clean().candidate, sha: sha40('10') } };
+    await store.pool.query('UPDATE jobs SET available_at=now(),locked_until=NULL,token=NULL WHERE work_id=$1', [w.id]);
+    await processJob(engine, adapter);
+    assert.equal((await reload(w)).gates.find(gate => gate.name === 'build')?.passed, true);
+  } finally { engine.submissionObserver = undefined; await clearQueue(w.id); }
 });

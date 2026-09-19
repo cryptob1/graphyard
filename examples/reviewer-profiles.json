@@ -1,0 +1,5 @@
+[
+  { "name": "claude-reviewer", "runtime": "claude", "reviewerApp": "claude-reviewer", "mention": "@claude", "timeoutSeconds": 1800 },
+  { "name": "cursor-reviewer", "runtime": "cursor", "reviewerApp": "cursor-reviewer", "mention": "@cursor", "timeoutSeconds": 1800 },
+  { "name": "opencode-reviewer", "runtime": "opencode", "reviewerApp": "opencode-reviewer", "timeoutSeconds": 3600 }
+]

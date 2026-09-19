@@ -14,12 +14,16 @@ function safeName(path: string) {
   if (!path || path.length > 500 || /[\x00-\x1f\x7f\\]/.test(path) || path.startsWith('/') || path.split('/').some(p => !p || p === '.' || p === '..' || excluded.has(p)) || sensitive.test(path)) throw new Error('Select ordinary relative source files; secrets, generated output and local credentials are excluded');
   return path;
 }
-/** Read-only discovery. In particular, never import Playwright configuration or run package scripts. */
-export async function inspectRunnerRepository(directory: string) {
-  const root = await realpath(directory), files: string[] = [], omitted: string[] = [];
+/**
+ * Enumerate regular files below `root`. Discovery skips generated output and common
+ * credential names and merely records symlinks; bundle identity skips nothing and
+ * refuses symlinks, so a shadowed or substituted file fails instead of disappearing.
+ */
+async function listFiles(root: string, mode: 'discovery' | 'bundle') {
+  const files: string[] = [], omitted: string[] = [];
   let entriesSeen = 0;
   async function walk(path: string, depth: number) {
-    if (depth > 20) throw new Error('Repository exceeds discovery depth; inspect a narrower package directory');
+    if (depth > 20) throw new Error('Directory exceeds discovery depth; inspect a narrower package directory');
     const location = resolve(root, path);
     const dir = await open(location, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
     let entries;
@@ -28,15 +32,26 @@ export async function inspectRunnerRepository(directory: string) {
       entries = await readdir(`/proc/self/fd/${dir.fd}`, { withFileTypes: true });
     } finally { await dir.close(); }
     for (const entry of entries.sort((a, b) => a.name.localeCompare(b.name))) {
-      if (++entriesSeen > maxFiles) throw new Error('Repository exceeds discovery file limit; inspect a narrower package directory');
+      if (++entriesSeen > maxFiles) throw new Error('Directory exceeds the supported file limit; inspect a narrower package directory');
       const name = path ? `${path}/${entry.name}` : entry.name;
-      if (excluded.has(entry.name) || sensitive.test(name)) continue;
-      if (entry.isSymbolicLink()) { omitted.push(name); continue; }
+      if (mode === 'discovery' && (excluded.has(entry.name) || sensitive.test(name))) continue;
+      if (entry.isSymbolicLink()) {
+        if (mode === 'bundle') throw new Error(`Executable oracle bundles cannot contain symlinks: ${name}`);
+        omitted.push(name); continue;
+      }
       if (entry.isDirectory()) await walk(name, depth + 1);
       else if (entry.isFile()) files.push(name);
+      else if (mode === 'bundle') throw new Error(`Executable oracle bundles accept only regular files: ${name}`);
     }
   }
   await walk('', 0);
+  return { files, omitted };
+}
+
+/** Read-only discovery. In particular, never import Playwright configuration or run package scripts. */
+export async function inspectRunnerRepository(directory: string) {
+  const root = await realpath(directory);
+  const { files, omitted } = await listFiles(root, 'discovery');
   const packages = files.filter(p => /(?:^|\/)package\.json$/.test(p));
   const manifests: { path: string; playwright: boolean; npmLock: boolean }[] = [];
   for (const path of packages) {
@@ -100,4 +115,23 @@ export async function snapshotRunnerSources(directory: string, selected: string[
   }
   const manifest = { format: 'graphyard-oracle-source-v1', files };
   return { ...manifest, digest: hash(JSON.stringify(manifest)), totalBytes: total, executable: false, approved: false };
+}
+
+export const bundleFormat = 'graphyard-oracle-bundle-v1';
+/**
+ * Content identity of an executable oracle bundle directory: every regular file, no
+ * exclusions and no symlinks. Generated trees, credential filenames and non-regular
+ * files refuse rather than being skipped, so a bundle cannot carry its own module
+ * search path or hide bytes from approval. Runtime dependencies come from the pinned
+ * runner image, never from the bundle.
+ */
+export async function oracleBundleDigest(directory: string) {
+  const root = await realpath(directory);
+  const { files } = await listFiles(root, 'bundle');
+  if (!files.length) throw new Error('Executable oracle bundle is empty');
+  const entries: { path: string; digest: string }[] = [];
+  let total = 0;
+  for (const path of files.sort()) { const bytes = await readSource(root, path, maxBytes - total); total += bytes.length; entries.push({ path, digest: hash(bytes) }); }
+  const manifest = { format: bundleFormat, files: entries };
+  return { ...manifest, digest: hash(JSON.stringify(manifest)), totalBytes: total };
 }

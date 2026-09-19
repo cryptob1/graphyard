@@ -10,7 +10,7 @@ In your personal GitHub developer settings, create a GitHub App with:
 
 - Homepage: your Graphyard URL.
 - Webhook: `https://YOUR-HOST/api/github/webhook`, with a random webhook secret.
-- Repository permissions: Metadata read, Contents read, Pull requests read/write, Issues read (for comment webhooks), Checks read/write, and Administration read (to inspect branch protection).
+- Repository permissions: Metadata read, Contents read/write (to publish speculative merge-queue tips), Pull requests read/write, Issues read (for comment webhooks), Checks read/write, and Administration read (to inspect branch protection).
 - Events: Pull request, Pull request review, Check run, Check suite, Issue comment, and Push.
 - Install only on the repository managed by this Graphyard instance.
 
@@ -18,13 +18,30 @@ Generate a private key. Configure `GITHUB_APP_ID`, `GITHUB_INSTALLATION_ID`, `GI
 
 The installation ID appears in the installation settings URL. The App ID is in the App's settings. A personal access token is deliberately not a substitute for the dedicated App, because the required check should be bound to a specific producer.
 
+After registration, keeping the App's permissions current is the master's job. `graphyard master browser app-permissions` raises any permission below the set above through the operator's browser profile and verifies it with `gh api apps/SLUG`; `graphyard master browser installation-accept` accepts the permission request that raises for this repository's installation and verifies it with `gh api user/installations`. Both are recorded with screenshots and written to the master's audit ledger; see [GitHub administration through the browser](master-agent.md#github-administration-through-the-browser). Neither flow touches the reviewer App, whose permissions must stay read-only.
+
+## The reviewer App
+
+Independent review uses a **second, separate App**. The control-plane App observes the repository and publishes the gate check; the reviewer App reads the repository and posts pull-request reviews. Graphyard refuses to bind the control-plane App as the reviewer: an identity cannot independently review the work it gates, and a reviewer that could write code or publish the check would review its own output.
+
+Register it with `graphyard master reviewer setup` (`--name NAME` when the default `reviewer`
+would push the generated App name past GitHub's 34-character limit), which uses the same
+reviewer manifest as [identity-bound agent review providers](#identity-bound-agent-review-providers) below, or create it manually with:
+
+- Repository permissions: Metadata read, Contents read, Pull requests write, Issues read. Never Checks, Administration, Workflows, or Contents write — those are what make an identity a gate rather than a reviewer.
+- Installed only on the managed repository.
+
+Then bind it: `graphyard master reviewer bind FILE --key-stdin`, with the App ID, installation ID, and slug in `FILE` and the PEM on standard input. Binding verifies the installation covers the managed repository and refuses an installation that can write code, checks, or administration. The private key and IDs are stored outside every worktree with mode 0600; master configuration records only the App ID, installation ID, slug, and that file's path.
+
+Each `graphyard master review GY-N` mints a fresh installation token scoped to this repository with `contents: read` and `pull_requests: write`, valid for at most one hour. Graphyard refuses a token that reports a longer life or broader permissions, hands it to the session through a private `GH_CONFIG_DIR` rather than a command line or environment secret, and removes it when the verdict closes the session. A review posted by `SLUG[bot]` on the exact head commit is an ordinary GitHub approval: it satisfies the native protection requirement and Graphyard's review gate, both of which still require the approval to be on the current head and from someone other than the pull-request author.
+
 ## Require the check
 
 Configure protection on the managed base branch:
 
 1. Require status checks before merging.
 2. Require **`Graphyard / merge`**, explicitly bound to this App.
-3. Require the branch to be up to date before merging (`strict`).
+3. Do **not** require the branch to be up to date before merging (`strict` must be off). A queued candidate is deliberately behind the base branch while the entries ahead of it land, so that setting would block every queue landing. The [merge queue](#merge-queue) supersedes it with a stronger binding, and Graphyard refuses its merge gate while it is enabled.
 4. Enforce the rule for administrators.
 5. Disable force pushes and branch deletion.
 6. Remove bypass privileges from implementation agents. Review any rulesets that add alternate paths around protection.
@@ -35,6 +52,8 @@ Graphyard reads classic branch protection and refuses its merge gate unless thes
 
 The service does not automatically overwrite repository protection. For this project's first bootstrap commit, push the initial code before requiring the check, then enable it before agent-driven PRs begin. Record that bootstrap boundary in the work ledger.
 
+Once a classic rule with the App-bound check exists, the master keeps it consistent with the open review policies: `graphyard master protection --apply` patches the review subresource through the API, and `graphyard master browser protection` toggles `strict`, administrator enforcement, and the review settings on the settings page when the API path is unavailable, verifying the result through the API either way.
+
 ## What is checked
 
 - The PR is in the configured repository and targets the configured base branch.
@@ -44,8 +63,61 @@ The service does not automatically overwrite repository protection. For this pro
 - Each acceptance proof has trusted evidence for the current head/base/policy tuple, with a pass result, nonzero executed count, and zero skipped count.
 - GitHub says the PR is mergeable and is not a draft.
 - Required branch protection is independently observed.
+- The candidate is at the head of the merge queue, on the speculative tip it will actually land.
 
 By default the configured CI App ID is `15368`; verify the actual app IDs returned by your check runs and adjust `GITHUB_CI_APP_IDS`. A check with the right name from an unknown App cannot satisfy policy.
+
+## Merge queue
+
+Every candidate lands on the same managed branch, so Graphyard serializes the final hop through one merge queue. The queue exists so that a merge does not invalidate the candidates behind it.
+
+A candidate enters the queue when it passes its own gates: independent review, required checks, and trusted acceptance evidence for the commit it currently offers. Membership is derived from those gates, never requested. No command, operator, or administrator can insert an entry, hold or buy a position, reorder the queue, or merge past the head; there is no bypass path.
+
+Graphyard predicts what each entry will actually land:
+
+- the entry at the head predicts against the current base-branch head;
+- every entry behind it predicts against the validated tip of the entry directly ahead — the base branch plus every earlier queue entry.
+
+Graphyard then merges the predicted base into the candidate branch, publishes the resulting commit under its own `refs/graphyard/queue/KEY` ref, and rebinds the candidate to it. That commit is the **speculative tip**. Required checks, the review, and every acceptance proof must then reference that exact commit; bindings made against the replaced head are refused, not reused. The base recorded for the candidate is the predicted base, not wherever the base branch happens to point.
+
+Every entry is published this way, the head included. A branch that already contains its predicted base needs no new commit — GitHub reports nothing to merge and its own head becomes the tip — but the publication still happens, because it is what proves the validated commit contains the base it was validated on. Nothing lands that Graphyard has not published: a candidate with no published tip for its exact commit is refused at the gate and again immediately before the merge call.
+
+That proof is what replaces GitHub's "require branches to be up to date" setting, which a merge queue cannot use. Strict mode asks only that the branch contain the base-branch head; the queue asks for more — that the commit under test contain the base it was validated on, and that the base branch still carry that base's tree when the merge runs. Graphyard verifies both itself, so the managed branch must have `strict` off and keeps the App-bound required check, administrator enforcement, and the force-push/deletion bans. As before, an out-of-band merge by another identity is detected rather than prevented; restricting those identities remains repository administration.
+
+Because every entry is already validated against the entries ahead of it, merging the head does not invalidate the ones behind. Graphyard keeps an entry bound across an advancing base branch only when the advance leaves the validated base tree unchanged, which is exactly what an earlier queue merge does; the merge then lands the tested tree on the base branch. Any other advance — a direct push or an out-of-band merge — changes that tree, and the merge is refused rather than landing an untested combination.
+
+When the base branch advances outside the queue, only the head re-validates against it. Entries behind it have no predicted base until the head settles; Graphyard then re-bases each of them in turn onto the new chain. The worker is not asked to rebase and no rework is requested: the entry keeps its assignment, workspace, and position, and its stale bindings are refused until the new tip is validated.
+
+An entry leaves the queue by merging, or by an explicit ejection:
+
+| Ejection reason | Trigger |
+| --- | --- |
+| Required CI check did not pass | A required check reported an adverse conclusion on the speculative tip |
+| Review requested changes | A reviewer requested changes on the speculative tip |
+| Proof failed | Trusted evidence for the tip reported a failure |
+| Speculative merge conflicts | The predicted base cannot be merged into the candidate branch |
+| Policy revision changed | Requirements were revised after the entry was queued |
+| Returned for a new attempt | An operator requested rework, or the pull request was closed |
+
+Pending, missing, or still-running validation is not failure and never ejects. Every ejection is recorded in the append-only history with its reason and the tip it applied to, the entries behind it are re-predicted without it, and the ejected commit cannot re-enter. A repaired candidate re-enters at the back of the queue with a new sequence.
+
+Queue position, predicted base, predicted tip, and per-entry wait time appear in `graphyard master status` and on the dashboard. See [master-agent operating mode](master-agent.md#merge-queue).
+
+## Inspect enforcement
+
+Configured is not enforced. `scripts/verify-enforcement.mjs` joins the live GitHub and Graphyard observations for one submitted work item into a single read-only report:
+
+```sh
+node scripts/verify-enforcement.mjs GY-N [PR_NUMBER]
+```
+
+It reads the managed repository, base branch and dedicated App ID from the live server, then reports which App published `Graphyard / merge` on the exact PR head, the branch-protection settings the merge verifier requires, every Graphyard gate with its refusal reasons, and GitHub's own mergeability. It paginates check runs and refuses a mismatched candidate, a stale Graphyard observation, or a blocking GitHub merge state. Every context branch protection requires — not only `Graphyard / merge` — must have a completed successful run from the App that context is bound to. Immediately before reporting, it re-reads the work item, pull request, required check runs, and branch protection and refuses if their merge-controlling state changed during collection, including the work revision, exact commits, base ref, PR state (`state`, `draft`, `merged`, `mergeable`, or `mergeable_state`), and the run set of every protected required context. It then reads server time once more, after those re-reads, and judges observation freshness against it, so collection time counts against the Graphyard observation exactly as it does for the merge verifier. The verdict is `refused` while any gate, protection requirement or GitHub state would block the merge, and `permitted` only when all of them currently allow it. Notes call out what the verifier does not read, including repository rulesets, and a successful check inherited from another pull request on the same commit.
+
+The report is an inspection artifact, not evidence. It submits nothing, merges nothing and changes no protection. It needs `gh` authenticated with repository administration read and an individual Graphyard credential. Only an operator may attest a `manual:` proof such as `manual:github-enforcement`, and Graphyard re-verifies the exact candidate immediately before any merge, so a `permitted` verdict describes one observation rather than a standing authorization.
+
+## Dashboard candidate links
+
+Work cards and the work-detail Ownership section show `PR #N`, and Ownership shows the whole 40-character candidate SHA rather than an abbreviation, so the exact commit the gates decided on can be read, selected, and copied. When GitHub is configured, both are links into that repository: `https://github.com/<owner>/<repo>/pull/<N>` and `https://github.com/<owner>/<repo>/commit/<sha>`. Destinations derive only from the configured repository identity plus the observed candidate's numeric PR number and full hexadecimal SHA; candidate-authored values can never select a URL. Links open in a new tab with accessible names that begin with the visible reference (`PR #12, open pull request for GY-7 in GitHub`) and a visible keyboard focus ring, and activating one does not change dashboard selection. A card is a plain container, not a button: its title is the selection control that opens the work detail, and the PR link sits beside that control rather than inside it, so assistive technology announces both. Clicking anywhere else on the card still opens the detail. The SHA stays ordinary text: double-click it, or drag from the text beside it, to select and copy the value. Without a configured GitHub repository, or when a reference fails validation (for example a legacy abbreviated SHA), the reference renders as selectable plain text instead of a link.
 
 ## Trusted test producers
 
@@ -53,11 +125,34 @@ A green GitHub job does not prove every behavioral criterion. A dedicated produc
 
 Do not expose that credential to arbitrary PR code. Running untrusted code in a job that can read the producer secret lets that code forge evidence. Use a separately controlled reporter or trusted workflow and artifact verification appropriate to your threat model. This MVP authenticates producers; it does not implement GitHub OIDC attestations or cryptographically inspect uploaded artifacts.
 
+## Post-deployment smoke proof
+
+Trunk is the only pre-merge gate. Once a candidate merges, Graphyard marks it Done on the observed merge and the master loop verifies that the running release reaches the merge commit. A work policy can add one more layer after that, without a staging queue in front of the merge: a trusted producer smoke-tests the live deployment once it serves the merge, and the verdict is bound to that exact commit and this work item.
+
+```json
+{ "policy": { "checks": ["test", "typecheck"], "review": true, "deploySmoke": true } }
+```
+
+`deploySmoke` is a policy, never an acceptance criterion: a criterion gates the merge, and nothing is deployed before the merge. Creating work with `e2e:deploy-smoke` in a criterion's proofs is refused. Staging or a release-candidate branch remain optional for soak or coordinated cutovers; they are not required for this proof.
+
+The sequence, and what each step may do:
+
+1. The [master loop](master-agent.md#durable-loop) observes the deployed commit as before. When the running release serves a delivered item's merge commit — exactly, or through a descendant that contains it — the loop records that observation on the item with `POST /api/work/UUID/deployment` using its coordinator credential. Only a coordinator or an operator may record it, only for delivered work, only naming the item's own merge commit, and only once per delivery: the smoke proof binds to that serving commit, so a later rollout cannot quietly move the target the proof was made against.
+2. The loop asks GitHub to run the trusted smoke workflow (`master init --smoke-workflow deploy-smoke.yml`, see [`.github/workflows/deploy-smoke.yml`](../.github/workflows/deploy-smoke.yml)) with the work UUID, the recorded deployed commit, the merge commit, and the policy revision. One request per deployed commit; the loop holds no producer credential and never produces the verdict.
+3. `scripts/deploy-smoke.mjs run` reads the commit the deployment reports serving (`SMOKE_DEPLOYMENT_URL`, field `SMOKE_SHA_FIELD`), refuses to run unless it is the recorded deployed commit, executes the configured checks (`SMOKE_CHECK_URLS` must answer 2xx; `SMOKE_COMMAND` is an optional command from the trusted checkout), and reads the serving commit again. A target that moved before or during the run is a refusal to attribute, not a failure of the delivered change: no report is produced.
+4. `scripts/deploy-smoke.mjs publish`, in a separate job holding the producer secret, submits `e2e:deploy-smoke` evidence with `sha` = the deployed commit the checks ran against and `baseSha` = the item's merge commit.
+
+Graphyard accepts that evidence only from a producer whose credential is granted `e2e:deploy-smoke` — a worker, an operator, and an ungranted producer are refused outright and nothing untrusted is stored — only after the deployment observation is recorded, only when the policy asked for the proof, and only when `sha` and `baseSha` match the recorded deployed commit and the merge commit. The accepted verdict lands in the delivery snapshot as `delivery.smoke` beside `delivery.deployment`; the merge facts in that snapshot are never rewritten, the gates are not re-evaluated, and the item never leaves Done.
+
+A failed verdict marks the item **delivered with failure**. `master status` lists it under `delivered` with rollback guidance, the loop records the same guidance as an escalation, and the dashboard shows it on the card, in the work detail, and in the post-deploy flow node. See [operations](operations.md#delivered-with-a-failed-smoke-proof) for what to do. A later passing run at the same deployed commit supersedes the verdict for the item's state; every run stays in the evidence ledger.
+
+Grant the smoke producer only `e2e:deploy-smoke` (`graphyard grants grant smoke e2e:deploy-smoke "Post-deployment smoke reporter"`, see [proof authority grants](operations.md#proof-authority-grants)); the reporter checks its live authority before it runs. Do not give an implementation worker that credential, and keep `SMOKE_COMMAND` in the trusted checkout on the managed base branch rather than in candidate code.
+
 ## Enforcement boundary
 
 Graphyard controls its ledger immediately; GitHub check publication happens through a separate API. No transaction spans both systems. There can be a delay between a refusal and revocation of a previously successful check, especially during a GitHub or network outage. GitHub does not automatically expire a successful check when Graphyard goes offline.
 
-Strict base protection and commit-specific checks prevent common stale-head/base merges, but they do not make GitHub and Postgres one atomic system. The recommended master command narrows that boundary with a short-lived execution authority, a final transactional GitHub re-observation, and an exact-head merge call. Graphyard accepts delivery only when the observed merge follows that verified authority. Restricting every alternative GitHub merge identity still requires repository or organization administration outside Graphyard.
+Commit-specific checks and the queue's published-tip binding prevent common stale-head/base merges, but they do not make GitHub and Postgres one atomic system. The recommended master command narrows that boundary with a short-lived execution authority, a final transactional GitHub re-observation, and an exact-head merge call. Graphyard accepts delivery only when the observed merge follows that verified authority. Restricting every alternative GitHub merge identity still requires repository or organization administration outside Graphyard.
 
 Likewise, a worker with Git credentials can still push its own branch after losing a Graphyard lease. Separate worktrees, individual identities, branch protection, and the `watch` process supervisor reduce interference. They are not a remote filesystem security boundary.
 
@@ -70,8 +165,8 @@ A bypassed merge of linked work is recorded as a permanent violation; Graphyard 
 | Symptom | Check |
 | --- | --- |
 | UI says GitHub is disconnected | App ID, installation ID, PEM secret, and server restart |
-| Job shows 401/403 | App key, installation access, permission approval, repository selection |
-| Protection gate refuses | Exact check name, App binding, strict mode, admin enforcement, force/delete settings |
+| Job shows 401/403 | App key, installation access, permission approval (`master browser installation-accept`), repository selection |
+| Protection gate refuses | Exact check name, App binding, `strict` left enabled, admin enforcement, force/delete settings (`master browser protection`) |
 | Acceptance refuses despite green CI | Proof names, producer allowlist, candidate SHA, base SHA, policy revision, skipped count |
 | PR changed while observed | Normal optimistic concurrency retry; investigate only if persistent |
 | No update after webhook | Signature secret and job errors; periodic polling still runs |
@@ -103,7 +198,9 @@ The first command preserves the criteria and CI requirements, increments the pol
 
 ### Branch protection migration
 
-GitHub's native required approval count is separate from Graphyard's gate. For repositories adopting agent review, retain strict checks, enforced administrator protection and the App-bound `Graphyard / merge` check, but remove the native approval-count/last-push requirement once reviewed code supporting the adapter is deployed. Otherwise GitHub will continue demanding a formal approval even after Graphyard passes.
+`graphyard master protection` reconciles the native requirement with the review policy of every open item, and `--apply` performs it after a printed plan. It patches only the review subresource, preserves the App-bound check, the merge queue's `strict`-off setting and administrator enforcement, re-reads protection afterwards, and refuses a repository whose open items disagree about whether a native approval is required (`github` against `codex` or `agent`), or whose protection is missing those invariants or requires CODEOWNERS approval. The manual helper below remains for one-off migrations.
+
+GitHub's native required approval count is separate from Graphyard's gate. For repositories adopting agent review, retain enforced administrator protection and the App-bound `Graphyard / merge` check (with `strict` off, as the merge queue requires), but remove the native approval-count/last-push requirement once reviewed code supporting the adapter is deployed. Otherwise GitHub will continue demanding a formal approval even after Graphyard passes.
 
 ```sh
 node scripts/protect-github.mjs --plan --agent-reviews
@@ -146,3 +243,57 @@ Known clean-result courtesy variants observed while dogfooding (including “Kee
 The “Can’t wait for the next one!” compatibility fixture comes from the [authenticated PR #12 result](https://github.com/cryptob1/graphyard/pull/12#issuecomment-5673722335). It adds one exact benign suffix; contradictory continuation, edited results and unknown wording still refuse.
 
 The same contract recognizes the exact `:rocket:` suffix from the [subsequent authenticated PR #12 clean result](https://github.com/cryptob1/graphyard/pull/12#issuecomment-5673779337); emoji followed by findings or other prose is still refused.
+
+## Identity-bound agent review providers
+
+Hard-wiring the review gate to one hosted vendor makes every open item wait on that vendor's quota. Graphyard's review invariant is *an approving identity distinct from the author reviewed this exact head*, not *vendor X reviewed it*. The `agent` provider makes that invariant explicit: a policy lists ordered **reviewer profiles**, each naming an agent runtime and a **registered reviewer GitHub App**. Graphyard dispatches a request bound to head, base and policy revision; the runtime posts its verdict as that App; Graphyard verifies the identity, the binding and the freshness. Codex and formal GitHub policies are untouched by this and keep working exactly as before.
+
+### Register the reviewer App
+
+Each reviewer profile needs its own GitHub App identity — never the Graphyard control-plane App, and never the pull request author. Create one through the same local App-manifest flow, once per reviewer:
+
+```sh
+graphyard github-setup https://your-graphyard-deployment.example --reviewer claude
+```
+
+The manifest requests **Metadata: read**, **Contents: read**, **Pull requests: write** and **Issues: read**. It deliberately requests no `checks` and no `administration` permission, so a reviewer can never publish Graphyard's own `Graphyard / merge` check or change branch protection. Install it on the managed repository, signed in as an account that is not the pull request author. Credentials land in `.graphyard/github-reviewer-<name>.json` with mode 0600 and are never sent to Graphyard: the reviewer runtime — not the control plane — authenticates as that App.
+
+The final setup page prints the registry entry. Add every reviewer to the server's `GRAPHYARD_REVIEWER_APPS` environment variable, whose shape matches [examples/reviewer-apps.json](../examples/reviewer-apps.json):
+
+```json
+[{ "id": "claude-reviewer", "runtime": "claude", "appId": 1550001, "botUserId": 1550002 }]
+```
+
+Registration is the identity boundary. `appId` and `botUserId` are numeric GitHub identities, not display names or logins; `id` and `runtime` are how policies refer to them. IDs, App IDs and bot user IDs must be unique, and the server refuses to start if a registered reviewer shares the control-plane App ID. A policy can only name a registered reviewer, and `GET /api/status` lists the registered identities and advertises `agent` in `reviewProviders` once at least one is registered and the App holds its dispatch permissions.
+
+### Select reviewer profiles
+
+Profiles are ordered: the first is dispatched, later ones are failover capacity. Each profile names a `runtime` matching its registered App, an optional `mention` for runtimes that are triggered by a pull request mention, and a `timeoutSeconds` (60–86400, default 1800) after which silence counts as exhaustion. See [examples/reviewer-profiles.json](../examples/reviewer-profiles.json) for Cursor, Claude and opencode profiles.
+
+```sh
+graphyard reviewpolicy GY-N agent CURRENT_POLICY_REVISION "Adopt identity-bound agent review" --profiles examples/reviewer-profiles.json
+```
+
+Like every review-policy revision this preserves criteria and CI requirements, increments the policy revision, appends audit history, invalidates prior acceptance evidence, and queues reconciliation. Profile names and reviewer Apps must be unique within one policy, so an accepted verdict is attributable to exactly one profile. Reordering or replacing the profile list is itself a policy revision. Switching back to `github` or `codex` drops the profiles. Workers cannot change policy; operator agents need the existing `policy:review-provider` capability. The dashboard displays the selected provider, the profile order and any failover, and keeps the Codex/GitHub toggle; profiles are set through the CLI or API because they name registered identities.
+
+### The verdict contract
+
+Graphyard posts one request comment through its own App, recording the returned comment ID against the exact head SHA, base SHA, policy revision, dispatched profile and a unique correlation marker. For a queued candidate the recorded base is the [speculative tip](#merge-queue)'s validated base, not wherever the base branch currently points, so dispatch binds the reviewer to the commit that will actually land; publishing a new tip changes that binding and requires a fresh request. The reviewer runtime replies with exactly one pull request comment, posted as its registered App, containing one line:
+
+```
+<!-- graphyard-verdict:MARKER head:FULL_40_CHAR_SHA verdict:approved -->
+```
+
+`verdict:changes-requested` reports findings and `verdict:usage-limit` reports exhausted quota. Prose around the line is ignored; the line itself is the protocol. Approval additionally requires that the comment was created strictly after the recorded request, is unedited, carries the marker of the *current* request, names the current head, and that the reviewer identity has filed no pull request review and no newer comment since. The recorded request comment must still be present and unedited. Verdict, request, comments and reviews are all reread before approval, and any change refuses. Unknown verdict words, two verdict lines in one comment, malformed markers and conflicting verdicts refuse with an explicit reason instead of being guessed at.
+
+Refusals are deliberately narrow and loud: a verdict posted before the request, for another commit, for another base or policy revision, for a superseded profile, by the control-plane App, by the pull request author's identity, or by any unregistered App is refused. Outstanding native `CHANGES_REQUESTED` reviews still block, exactly as with the other providers. This proves that a registered independent identity approved this exact head — not that every possible defect has been disproved.
+
+### Quota failover
+
+Provider exhaustion is a capacity fact, not an approval. Two signals trigger it: a `verdict:usage-limit` reply from the dispatched profile, or no verdict within that profile's `timeoutSeconds`. Graphyard then records a failover entry — profile, runtime, exhaustion reason, candidate, policy revision, request comment ID and the next profile — as a `review.failover` event, releases the request, and dispatches to the next untried profile on the same candidate. The superseded profile's own verdict can no longer approve that candidate.
+
+Selection is derived from that history, never stored as mutable state, so it is scoped to the exact head, base and policy revision: a rebase, a new base, or a policy revision starts again at the first profile. When every profile is exhausted the review gate stays closed with `Every configured reviewer profile is exhausted for this candidate`; Graphyard never approves work because reviewers ran out. Add reviewer capacity, wait for quota, or select another provider. `graphyard master status` reports the active profile, the failover entries for the current candidate, a `reviewFailover` count, and raises attention when a task has no reviewer capacity left. `graphyard rereview GY-N` clears the current candidate's failover entries and restarts at the first profile; the event ledger keeps every superseded entry, while the work document retains the most recent hundred.
+
+### Limits
+
+The verdict contract is Graphyard's own, so each reviewer runtime needs an integration that authenticates as its App and posts the line — installing the App alone does not make a runtime review anything. A dispatched request is an invitation: a runtime that ignores mentions leaves the gate closed until its timeout converts the silence into failover. Graphyard verifies identity and binding, not review quality, and a runtime with repository write access outside its reviewer App is still outside this boundary. GitHub remains a trusted administration boundary, and the [enforcement boundary](#enforcement-boundary) and merge-broker limits above apply unchanged. Agent review, like Codex review, does not need GitHub's native approval count, so tasks using it rely on the App-bound required check, the merge queue's published-tip binding (with `strict` off) and enforced administrator protection; tasks still using formal GitHub review keep requiring a nonzero approval count, stale-review dismissal and last-push approval.
