@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { CODEX_APP_ID, CODEX_USER_ID } from '../src/codex-review.js';
-import { GitHub, CHECK_NAME } from '../src/github.js';
+import { GitHub, CHECK_NAME, scopeLookupBudget } from '../src/github.js';
 import { Refusal, SpeculativeConflict, type Work } from '../src/model.js';
 import type { QueuePlacement, QueueSpeculation } from '../src/merge-queue.js';
 // @ts-expect-error Dependency-free inspection script.
@@ -13,6 +13,8 @@ function fixture() {
   let reviews: any[] = [];
   let protectedBranch = true;
   let upToDateRequired = false;
+  let prFiles: any[] = [{ filename: 'src/claims.ts', status: 'modified', sha: 'c'.repeat(40), additions: 3, deletions: 1, patch: '@@' }];
+  let baseBlobs: Record<string, string> = {};
   const github = new GitHub({ repository: 'owner/repo', base: 'main', appId: 1234, installationId: 1, privateKey: 'not-used-in-adapter-test' });
   const mutations: Record<string, () => any> = {};
   github.request = async (path, method = 'GET', body) => {
@@ -22,14 +24,20 @@ function fixture() {
     if (path === '/pulls/10') return structuredClone(pr);
     if (path.includes('/protection')) return { required_pull_request_reviews: { required_approving_review_count: 1, dismiss_stale_reviews: true, require_last_push_approval: true }, required_status_checks: { strict: upToDateRequired, checks: [{ context: CHECK_NAME, app_id: protectedBranch ? 1234 : 999 }] }, enforce_admins: { enabled: true }, allow_force_pushes: { enabled: false }, allow_deletions: { enabled: false } };
     if (path.includes('/reviews')) return reviews;
-    if (path.includes('/files')) return [{ filename: 'src/claims.ts' }];
+    if (path.includes('/files')) { const page = Number(path.match(/[?&]page=(\d+)/)?.[1] ?? 1); return prFiles.slice((page - 1) * 100, page * 100); }
+    if (path.startsWith('/contents/')) {
+      const target = decodeURIComponent(path.slice(10, path.indexOf('?'))), ref = path.slice(path.indexOf('ref=') + 4);
+      const blob = baseBlobs[`${ref}:${target}`];
+      if (!blob) throw new Refusal(`GitHub GET ${path} failed (404)`, 502);
+      return { type: 'file', sha: blob, path: target };
+    }
     if (path.includes('check_name=')) return { check_runs: [{ id: 12, name: CHECK_NAME, app: { id: 1234 } }] };
     if (path.includes('/check-runs')) return { check_runs: [{ id: 9, name: 'test', status: 'completed', conclusion: 'success', app: { id: 15368 } }, { id: 12, name: CHECK_NAME, status: 'completed', conclusion: 'failure', app: { id: 1234 } }] };
     throw new Error(`Unexpected request ${path}`);
   };
-  const work = { id: 'task-id', key: 'GY-41', policy: { review: true, checks: ['test'] }, submission: { pr: 10, epoch: 1 }, candidate: { sha: head, baseSha: base, pr: 10 }, policyRevision: 1, revision: 3, gates: [{ name: 'acceptance', passed: false, reasons: ['AC-1 requires proof'] }], violations: [] } as unknown as Work;
+  const work = { id: 'task-id', key: 'GY-41', policy: { review: true, checks: ['test'] }, plannedFiles: ['src/claims.ts'], submission: { pr: 10, epoch: 1 }, candidate: { sha: head, baseSha: base, pr: 10 }, policyRevision: 1, revision: 3, gates: [{ name: 'acceptance', passed: false, reasons: ['AC-1 requires proof'] }], violations: [] } as unknown as Work;
   return { github, calls, pr, work, mutations, reviews: (r: any[]) => { reviews = r; }, protection: (p: boolean) => { protectedBranch = p; },
-    requireUpToDate: (required: boolean) => { upToDateRequired = required; } };
+    requireUpToDate: (required: boolean) => { upToDateRequired = required; }, files: (f: any[]) => { prFiles = f; }, baseBlobs: (b: Record<string, string>) => { baseBlobs = b; } };
 }
 test('GitHub adapter binds observations to repository, base, current reviews, and producer', async () => {
   const f = fixture(); f.reviews([{ id: 10, user: { login: 'reviewer' }, commit_id: head, state: 'APPROVED' }, { id: 11, user: { login: 'reviewer' }, commit_id: head, state: 'CHANGES_REQUESTED', submitted_at: '2026-01-01T00:01:00Z' }]);
@@ -542,4 +550,66 @@ test('the enforcement CLI judges observation freshness by server time read after
     assert.deepEqual(report.refusals, ['observation: Graphyard observation is missing, future-dated, or older than two minutes']);
     assert.equal(report.verdict, 'refused');
   } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
+test('observation compares every out-of-scope file with the bound base by blob identity and leaves planned files uncompared', async () => {
+  const f = fixture();
+  const kept = '4'.repeat(40), changed = 'c'.repeat(40), moved = '3'.repeat(40);
+  f.files([
+    { filename: 'src/claims.ts', status: 'modified', sha: 'a1'.repeat(20), additions: 3, deletions: 1, patch: '@@' },
+    { filename: 'src/quarantine.ts', status: 'modified', sha: changed, additions: 0, deletions: 20, patch: '@@' },
+    { filename: 'src/reviewer.ts', status: 'removed', sha: 'dead'.repeat(10), additions: 0, deletions: 40, patch: '@@' },
+    { filename: 'src/landed.ts', status: 'modified', sha: kept, additions: 2, deletions: 2, patch: '@@' },
+    { filename: 'src/brand-new.ts', status: 'added', sha: 'e'.repeat(40), additions: 9, deletions: 0, patch: '@@' },
+    { filename: 'web/moved.png', status: 'renamed', previous_filename: 'web/logo.png', sha: moved, additions: 0, deletions: 0 },
+  ]);
+  f.baseBlobs({ [`${base}:src/quarantine.ts`]: 'b'.repeat(40), [`${base}:src/reviewer.ts`]: 'b'.repeat(40), [`${base}:src/landed.ts`]: kept, [`${base}:web/logo.png`]: moved, [`${base}:src/claims.ts`]: 'never-read' });
+  const observation = await f.github.observe(f.work);
+  assert.deepEqual(observation.files, ['src/claims.ts', 'src/quarantine.ts', 'src/reviewer.ts', 'src/landed.ts', 'src/brand-new.ts', 'web/moved.png']);
+  assert.deepEqual(observation.scopeFiles, [
+    { path: 'src/claims.ts', status: 'modified', sha: 'a1'.repeat(20), additions: 3, deletions: 1, binary: false },
+    { path: 'src/quarantine.ts', status: 'modified', sha: changed, additions: 0, deletions: 20, binary: false, baseSha: 'b'.repeat(40) },
+    { path: 'src/reviewer.ts', status: 'removed', sha: null, additions: 0, deletions: 40, binary: false, baseSha: 'b'.repeat(40) },
+    { path: 'src/landed.ts', status: 'modified', sha: kept, additions: 2, deletions: 2, binary: false, baseSha: kept },
+    { path: 'src/brand-new.ts', status: 'added', sha: 'e'.repeat(40), additions: 9, deletions: 0, binary: false, baseSha: null },
+    { path: 'web/moved.png', status: 'renamed', previousPath: 'web/logo.png', sha: moved, additions: 0, deletions: 0, binary: true, baseSha: null, previousBaseSha: moved },
+  ]);
+  const lookups = f.calls.filter(call => call.path.startsWith('/contents/')).map(call => call.path);
+  assert.ok(lookups.every(path => path.endsWith(`?ref=${base}`)), 'comparisons are made against the bound base commit');
+  assert.ok(!lookups.some(path => path.includes('src%2Fclaims') || path.includes('src/claims')), 'a planned file is never looked up');
+  assert.equal(await f.github.verify(f.work).then(() => true), true);
+});
+
+test('a speculative tip compares its out-of-scope files with the predicted base, not with the moved base branch', async () => {
+  const f = fixture();
+  queued(f.work, { ref: 'refs/graphyard/queue/gy-41', tip: head, base: predictedBase, baseTree: 'basetree'.padEnd(40, '0'), predecessors: ['GY-40'], policyRevision: 1, publishedAt: '2026-09-17T00:00:00.000Z' });
+  const predecessor = 'd'.repeat(40);
+  f.files([{ filename: 'src/predecessor.ts', status: 'modified', sha: predecessor, additions: 4, deletions: 0, patch: '@@' }]);
+  f.baseBlobs({ [`${predictedBase}:src/predecessor.ts`]: predecessor, [`${base}:src/predecessor.ts`]: 'stale'.padEnd(40, '0') });
+  const observation = await f.github.observe(f.work);
+  assert.equal(observation.candidate.baseSha, predictedBase);
+  assert.deepEqual(observation.scopeFiles?.map(file => [file.path, file.baseSha]), [['src/predecessor.ts', predecessor]], 'a queued predecessor change already lives in the predicted base');
+});
+
+test('a missing blob at the bound base is a new file, and a provider failure other than absence is not', async () => {
+  const f = fixture(), request = f.github.request.bind(f.github);
+  assert.equal(await f.github.blobAt('src/none.ts', base), null);
+  f.baseBlobs({ [`${base}:src/dir/with space.ts`]: 'b'.repeat(40) });
+  assert.equal(await f.github.blobAt('src/dir/with space.ts', base), 'b'.repeat(40));
+  assert.ok(f.calls.some(call => call.path === `/contents/src/dir/with%20space.ts?ref=${base}`), 'path segments are encoded individually');
+  f.github.request = async (path, method, body) => { if (path.startsWith('/contents/')) throw new Refusal(`GitHub GET ${path} failed (503)`, 502); return request(path, method, body); };
+  await assert.rejects(f.github.blobAt('src/none.ts', base), /503/);
+  f.github.request = async () => ({ type: 'file', sha: 'not-a-sha' });
+  await assert.rejects(f.github.blobAt('src/none.ts', base), /readable blob/);
+  f.github.request = async () => [{ type: 'file', sha: 'b'.repeat(40) }];
+  assert.equal(await f.github.blobAt('src', base), null, 'a directory is not a file the guard compares');
+});
+
+test('out-of-scope lookups beyond the budget stay uncompared so the guard refuses rather than passes them', async () => {
+  const f = fixture();
+  const many = Array.from({ length: scopeLookupBudget + 3 }, (_, i) => ({ filename: `src/generated/${i}.ts`, status: 'modified', sha: 'a'.repeat(40), additions: 1, deletions: 1, patch: '@@' }));
+  f.files(many);
+  const observation = await f.github.observe(f.work);
+  assert.equal(observation.scopeFiles!.filter(file => file.baseSha === undefined).length, 3);
+  assert.equal(f.calls.filter(call => call.path.startsWith('/contents/')).length, scopeLookupBudget);
 });

@@ -9,7 +9,8 @@ import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import { server } from '../src/server.js';
 import { OperatorAgents } from '../src/operator-agent.js';
-import { ReconciliationRetry, SpeculativeConflict, deliveryState, rollbackGuidance, type Principal, type Work, type Observation } from '../src/model.js';
+import { ReconciliationRetry, SpeculativeConflict, deliveryState, rollbackGuidance, type Principal, type Work, type Observation, type ScopeFile } from '../src/model.js';
+import { diagnose } from '../src/coordination.js';
 import { stageMetrics } from '../src/master-daemon.js';
 import { predictQueue, queueRef, type QueuePlacement, type QueueSpeculation } from '../src/merge-queue.js';
 import { defineScenario, scenarios } from '../src/scenarios.js';
@@ -18,7 +19,6 @@ import { GitHubPermissionRefusal, installationFingerprint, permissionHoldMs, per
 import { acknowledgeContainment, containmentGraceMs, isConfirmedCoordinationRefusal } from '../src/quarantine.js';
 import { probeSupervisorAbsence, supervise } from '../src/supervisor.js';
 import { assertDispatchable, assessContainment, buildMasterStatus, snapshotWithClock } from '../src/master.js';
-import { diagnose } from '../src/coordination.js';
 // @ts-expect-error The trusted runner intentionally uses dependency-free JavaScript outside the candidate source.
 import { exercise } from '../scripts/acceptance-contract.mjs';
 
@@ -63,7 +63,7 @@ function observation(w: Work): Observation {
   return { clockOffset: { min: 0, max: 0 }, candidate: { sha: head, baseSha: base, pr: w.submission!.pr, branch: w.workspaces[0].branch, author: 'implementer' },
     checks: [{ name: 'test', result: 'success', appId: 15368 }, { name: 'typecheck', result: 'success', appId: 15368 }],
     reviews: [{ reviewer: 'reviewer', sha: head, state: 'APPROVED' }], protected: true, mergeable: true,
-    merged: false, mergeSha: null, files: ['src/claims.ts'], at: new Date().toISOString() };
+    merged: false, mergeSha: null, files: ['src/claims.ts'], scopeFiles: [], at: new Date().toISOString() };
 }
 function proof() { return { proof: 'integration:claim-safety', sha: head, baseSha: base, policyRevision: 1, result: 'pass', executed: 12, skipped: 0 }; }
 /**
@@ -1286,7 +1286,7 @@ function tip(w: Work, candidate: { sha: string; baseSha: string }, extra: Partia
     checks: [{ name: 'test', result: 'success', appId: 15368 }, { name: 'typecheck', result: 'success', appId: 15368 }],
     reviews: [{ reviewer: 'reviewer', sha: candidate.sha, state: 'APPROVED' }], protected: true, mergeable: true,
     merged: false, mergeSha: null, prState: 'open', draft: false, baseTip: candidate.baseSha,
-    files: ['src/engine.ts'], at: new Date().toISOString(), ...extra };
+    files: ['src/engine.ts'], scopeFiles: [], at: new Date().toISOString(), ...extra };
 }
 async function validated(w: Work, candidate: { sha: string; baseSha: string }, extra: Partial<Observation> = {}) {
   const observed = await engine.observe(w.id, w.revision, tip(w, candidate, extra));
@@ -1784,4 +1784,93 @@ test('the status API reports the App permission preflight and held jobs, and mas
     assert.deepEqual(quiet.controlPlane.attention, []);
     await store.releaseHeldJobs();
   } finally { await new Promise<void>(resolve => http.close(() => resolve())); }
+});
+
+// --- Submit-time integration regression guard ---------------------------------------------------
+const scoped = (path: string, extra: Partial<ScopeFile> = {}): ScopeFile => ({ path, status: 'modified', sha: sha40('5'), additions: 1, deletions: 1, binary: false, baseSha: sha40('6'), ...extra });
+async function claimedScoped(plannedFiles: string[]) {
+  let w = await engine.execute(operator, 'create', null, { ...workInput, title: 'Scoped change', plannedFiles }, randomUUID());
+  w = await engine.execute(operator, 'ready', w.id, {}, randomUUID());
+  w = await engine.execute(worker, 'claim', w.id, {}, randomUUID());
+  return engine.execute(worker, 'workspace', w.id, { epoch: 1, host: 'machine-a', path: `/tmp/${w.id}`, branch: `graphyard/${w.id}` }, randomUUID());
+}
+test('complete refuses a candidate that reverts shipped code outside its planned files and accepts it once every such file matches the base', async () => {
+  const shipped = await store.list();
+  const delivered = shipped.find(item => item.stage === 'done' && item.observation?.files.includes('src/claims.ts'));
+  const w = await claimedScoped(['src/scoped/', 'tests/']);
+  const pr = Number(w.key.slice(3));
+  const observed = (scopeFiles: ScopeFile[]): Observation => ({ ...observation({ ...w, submission: { epoch: 1, pr } } as Work), files: scopeFiles.map(file => file.path), scopeFiles });
+  const reverting = observed([scoped('src/scoped/feature.ts', { baseSha: undefined }), scoped('src/claims.ts', { additions: 0, deletions: 14 }), scoped('src/quarantine.ts', { status: 'removed', sha: null }), scoped('tests/new.test.ts', { status: 'added', baseSha: undefined })]);
+  await assert.rejects(engine.execute(worker, 'submit', w.id, { epoch: 1, pr }, randomUUID(), { observation: reverting }), (error: any) => {
+    assert.match(error.message, new RegExp(`Submission refused for ${w.key}: Candidate changes 2 files outside its planned files`));
+    assert.match(error.message, /src\/claims\.ts: removes 14 lines that the base branch holds and adds nothing \(shipped by/);
+    if (delivered) assert.ok(error.message.includes(delivered.key), 'the shipped work item is named');
+    assert.match(error.message, /src\/quarantine\.ts: deleted; the base branch still holds it/);
+    assert.doesNotMatch(error.message, /feature\.ts|new\.test\.ts/, 'in-scope changes are never listed');
+    return true;
+  });
+  assert.equal((await reload(w)).submission, null, 'a refused submission is not recorded');
+  assert.equal((await store.events(w.id)).some(event => event.kind === 'submit'), false);
+  const otherBranch = observed([]); otherBranch.candidate.branch = 'graphyard/someone-else';
+  await assert.rejects(engine.execute(worker, 'submit', w.id, { epoch: 1, pr }, randomUUID(), { observation: otherBranch }), /PR branch does not match the assigned workspace/);
+  await assert.rejects(engine.execute(worker, 'submit', w.id, { epoch: 1, pr }, randomUUID(), { observation: { ...observed([]), candidate: { ...observed([]).candidate, pr: pr + 1000 } } }), /Observed pull request does not match/);
+  await assert.rejects(engine.execute(worker, 'submit', w.id, { epoch: 1, pr }, randomUUID(), { observation: { ...observed([]), scopeFiles: undefined } }), /has not been compared against the base branch tip/);
+  const fixed = observed([scoped('src/scoped/feature.ts', { baseSha: undefined }), scoped('src/claims.ts', { sha: sha40('6') }), scoped('src/quarantine.ts', { status: 'removed', sha: null, baseSha: null }), scoped('src/brand-new.ts', { status: 'added', baseSha: null }), scoped('tests/new.test.ts', { status: 'added', baseSha: undefined })]);
+  const accepted = await engine.execute(worker, 'submit', w.id, { epoch: 1, pr }, randomUUID(), { observation: fixed });
+  assert.deepEqual(accepted.submission, { epoch: 1, pr });
+  await clearQueue(w.id);
+});
+test('a submission observed by the deployment GitHub client is refused before it is recorded, and a replay never re-observes', async () => {
+  const w = await claimedScoped(['src/scoped/']);
+  const pr = Number(w.key.slice(3));
+  let observations = 0; let scopeFiles: ScopeFile[] = [scoped('src/claims.ts', { additions: 0, deletions: 3 })];
+  engine.submissionObserver = async probe => { observations++; assert.deepEqual(probe.submission, { epoch: 1, pr }); return { ...observation(probe), files: scopeFiles.map(file => file.path), scopeFiles }; };
+  try {
+    const headers = { Authorization: `Bearer ${'w'.repeat(32)}`, 'Content-Type': 'application/json' };
+    const submit = (key: string) => fetch(`${url}/api/work/${w.id}/submit`, { method: 'POST', headers: { ...headers, 'Idempotency-Key': key }, body: JSON.stringify({ epoch: 1, pr }) });
+    const refused = await submit(randomUUID());
+    assert.equal(refused.status, 409); assert.match((await refused.json() as any).error, /Out-of-scope regression: src\/claims\.ts: removes 3 lines/);
+    assert.equal((await reload(w)).submission, null);
+    scopeFiles = [scoped('src/scoped/feature.ts', { baseSha: undefined })];
+    const key = randomUUID();
+    assert.equal((await submit(key)).status, 200); const count = observations;
+    assert.equal((await submit(key)).status, 200); assert.equal(observations, count, 'the idempotent replay is answered from the receipt');
+    // Without a pre-observation the transaction records the submission; the reconciliation job then decides.
+    engine.submissionObserver = null;
+    await assert.rejects(engine.execute(worker, 'submit', w.id, { epoch: 1, pr: pr + 500 }, randomUUID()), /cannot switch pull requests/);
+  } finally { engine.submissionObserver = undefined; await clearQueue(w.id); }
+});
+test('every later head is re-evaluated: a revert pushed after submission closes the build gate, names the files in diagnose and the published check, and clears when fixed', async () => {
+  const w = await claimedScoped(['src/scoped/']);
+  const pr = Number(w.key.slice(3));
+  const clean = () => ({ ...observation({ ...w, submission: { epoch: 1, pr } } as Work), files: ['src/scoped/feature.ts'], scopeFiles: [scoped('src/scoped/feature.ts', { baseSha: undefined })] });
+  let current = clean();
+  let published: any[] = [];
+  const adapter = { observe: async () => current, publish: async (item: Work) => { published.push(item.gates.flatMap(gate => gate.reasons)); } } as unknown as GitHub;
+  engine.submissionObserver = async () => current;
+  try {
+    let submitted = await engine.execute(worker, 'submit', w.id, { epoch: 1, pr }, randomUUID());
+    await clearQueue(w.id);
+    await store.pool.query("UPDATE jobs SET available_at=now()+interval '1 hour'");
+    await store.pool.query('UPDATE jobs SET available_at=now(),locked_until=NULL,token=NULL WHERE work_id=$1', [w.id]);
+    await processJob(engine, adapter);
+    submitted = await reload(w);
+    assert.equal(submitted.gates.find(gate => gate.name === 'build')?.passed, true);
+    // The worker merges main badly and pushes: the head changes and the observation names the damage.
+    const regressed = sha40('9');
+    current = { ...clean(), candidate: { ...clean().candidate, sha: regressed }, files: ['src/scoped/feature.ts', 'src/quarantine.ts'], scopeFiles: [scoped('src/scoped/feature.ts', { baseSha: undefined }), scoped('src/quarantine.ts', { status: 'removed', sha: null })] };
+    await store.pool.query('UPDATE jobs SET available_at=now(),locked_until=NULL,token=NULL WHERE work_id=$1', [w.id]);
+    await processJob(engine, adapter);
+    const refused = await reload(w);
+    assert.equal(refused.stage, 'build'); assert.equal(refused.candidate?.sha, regressed);
+    const build = refused.gates.find(gate => gate.name === 'build')!;
+    assert.equal(build.passed, false); assert.match(build.reasons.join('\n'), /Out-of-scope regression: src\/quarantine\.ts: deleted; the base branch still holds it/);
+    const diagnostics = diagnose(refused, await store.list(), Date.now());
+    assert.ok(diagnostics.some(item => item.kind === 'gate-build' && /src\/quarantine\.ts: deleted/.test(item.message)), 'diagnose surfaces the refusal with the file');
+    assert.ok(published.at(-1)!.some((reason: string) => /src\/quarantine\.ts/.test(reason)), 'the published check names the file');
+    current = { ...clean(), candidate: { ...clean().candidate, sha: sha40('10') } };
+    await store.pool.query('UPDATE jobs SET available_at=now(),locked_until=NULL,token=NULL WHERE work_id=$1', [w.id]);
+    await processJob(engine, adapter);
+    assert.equal((await reload(w)).gates.find(gate => gate.name === 'build')?.passed, true);
+  } finally { engine.submissionObserver = undefined; await clearQueue(w.id); }
 });
