@@ -4,16 +4,17 @@ import { mkdtemp, readFile, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { randomBytes } from 'node:crypto';
-import { createInventory, exercise } from './acceptance-contract.mjs';
+import { contract } from './contracts.mjs';
 
-const [metadataFile, image, output] = process.argv.slice(2);
-if (!metadataFile || !image || !output) throw new Error('Usage: run-acceptance metadata.json image output.json');
+const [metadataFile, image, output, proof = 'integration:claim-safety'] = process.argv.slice(2);
+if (!metadataFile || !image || !output) throw new Error('Usage: run-acceptance metadata.json image output.json [proof]');
+const { exercise, createInventory } = contract(proof);
 const metadata = JSON.parse(await readFile(metadataFile, 'utf8'));
 const scratch = await mkdtemp(join(tmpdir(), 'graphyard-acceptance-'));
 const suffix = randomBytes(6).toString('hex'), network = `gy-${suffix}`, db = `${network}-db`, app = `${network}-app`;
 const docker = (...args) => execFileSync('docker', args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
-// The inventory is filled in as cases run, so an interruption still reports the
-// completed, failing and genuinely unexecuted parts instead of an all-skipped report.
+// The inventory is bound to the selected proof and filled in as cases run, so an interruption
+// still reports the completed, failing and genuinely unexecuted parts instead of an all-skipped report.
 const inventory = createInventory();
 let passed = false;
 try {
@@ -46,7 +47,7 @@ finally {
   spawnSync('docker', ['rm', '-f', app, db], { stdio: 'ignore' });
   spawnSync('docker', ['network', 'rm', network], { stdio: 'ignore' });
   await rm(scratch, { recursive: true, force: true });
-  const result = { ...metadata, schema: 1, proof: 'integration:claim-safety', result: passed && inventory.complete ? 'pass' : 'fail',
+  const result = { ...metadata, schema: 1, proof, result: passed && inventory.complete ? 'pass' : 'fail',
     cases: inventory.cases, executed: inventory.executed, skipped: inventory.skipped };
   await writeFile(resolve(output), JSON.stringify(result, null, 2));
 }
