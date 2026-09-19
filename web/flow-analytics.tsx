@@ -39,6 +39,12 @@ export function submitToMerge(rows: { workKey: string; bucket: string; valueMs: 
   return { n: totals.length, p50Ms: totals.length ? rank(0.5) : null, p90Ms: totals.length ? rank(0.9) : null };
 }
 
+/** The wait categories in the words the home page uses; the full definitions stay in Show details. */
+export const plainWait: Record<string, string> = {
+  backlog: 'Not released for work', blocked: 'Stuck on a blocker', dependency: 'Waiting for another item', implementation: 'Being built or waiting for a worker',
+  review: 'Waiting for review', evidence: 'Waiting for proof that it works', 'merge-blocked': 'Cannot merge yet', 'merge-ready': 'Ready to merge',
+};
+
 /**
  * The default screen: where undelivered work is waiting, by plain reason, and how long a pull
  * request takes to merge. Categories with no items and unmeasured figures are left out.
@@ -48,7 +54,7 @@ export function FlowSummary({ report, merge, onDrill }: { report: Report; merge:
   return <div className="flow-summary">
     <section aria-labelledby="flow-bottleneck">
       <h2 id="flow-bottleneck">Where work is waiting</h2>
-      {waiting.length ? <div className="flow-cards">{waiting.map((category: any) => <button key={category.id} className="flow-card" title={category.definition} onClick={() => onDrill(category)}><span>{category.label}</span><strong>{category.count}</strong></button>)}</div>
+      {waiting.length ? <div className="flow-cards">{waiting.map((category: any) => <button key={category.id} className="flow-card" title={category.definition} onClick={() => onDrill(category)}><span>{plainWait[category.id] ?? category.label}</span><strong>{category.count}</strong></button>)}</div>
         : <p>Nothing is waiting: every item in this window has shipped.</p>}
     </section>
     {merge && merge.n > 0 && <section aria-labelledby="flow-merge"><h2 id="flow-merge">Pull request opened → merged</h2>
@@ -142,7 +148,7 @@ export default function FlowAnalytics({ request, token, canAudit, initial }: { r
     {loading && <p role="status">Loading flow analytics…</p>}
     {error && <div role="alert" className="notice danger">{error} <button onClick={() => void load()}>Retry flow analytics</button>{report && <p>Values below are from the earlier observation at {new Date(report.generatedAt).toLocaleString()} and may be stale.</p>}</div>}
     {report && state !== 'complete' && <p className={`flow-state flow-state-${state}`} data-state={state}>{stateText[state]}</p>}
-    {report && <FlowSummary report={report} merge={merge} onDrill={category => setDrill({ metric: 'bottleneck', key: category.id, title: category.label })}/>}
+    {report && <FlowSummary report={report} merge={merge} onDrill={category => setDrill({ metric: 'bottleneck', key: category.id, title: plainWait[category.id] ?? category.label })}/>}
 
     <details className="flow-details"><summary>Show details</summary>
     <form className="flow-filters" aria-label="More flow analytics filters" onSubmit={event => event.preventDefault()}>

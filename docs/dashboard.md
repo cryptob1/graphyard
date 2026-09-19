@@ -39,7 +39,7 @@ The item view opens with the status sentence, the owner, the pull request and th
 
 ## Flow analytics
 
-Flow analytics opens on two things: where undelivered work is waiting, counted per wait category, and the time from pull request opened to merged (p50 and p90). The merge figure is computed from the phase drill-down (`GET /api/analytics/flow/drilldown?metric=phase`). It counts only merged commits whose every phase was measured. A category with no items is left out, and so is a figure with no data. **Show details** holds the other filters, cumulative flow, lead time, stage dwell, phase durations, operations, attribution, coverage and definitions. Attribution cards are drawn only for measured or blocked metrics; an unmeasured one is named under *Unknown, not zero* and in the attribution table.
+Flow analytics opens on two things: where undelivered work is waiting, counted per wait category under the plain names the home page uses (for example "Waiting for proof that it works"; the server's category names and definitions are under **Show details**), and the time from pull request opened to merged (p50 and p90). The merge figure is computed from the phase drill-down (`GET /api/analytics/flow/drilldown?metric=phase`). It counts only merged commits whose every phase was measured. A category with no items is left out, and so is a figure with no data. **Show details** holds the other filters, cumulative flow, lead time, stage dwell, phase durations, operations, attribution, coverage and definitions. Attribution cards are drawn only for measured or blocked metrics; an unmeasured one is named under *Unknown, not zero* and in the attribution table.
 
 ## Hover definitions
 

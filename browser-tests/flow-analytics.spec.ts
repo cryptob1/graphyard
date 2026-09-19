@@ -124,7 +124,7 @@ test('integration:flow-analytics-browser', async ({ page }) => {
   await expect(page.locator('.flow-state')).toHaveAttribute('data-state', /complete|sparse/);
 
   // The default view: each wait category with items is a card with its count; nothing else.
-  const reviewCard = page.getByRole('button', { name: /Waiting on review/ });
+  const reviewCard = page.getByRole('button', { name: /Waiting for review/ });
   await expect(reviewCard).toContainText('1');
   await expect(page.getByRole('img', { name: /Cumulative flow by stage/ })).toBeHidden();
   await showDetails(page);
@@ -155,7 +155,7 @@ test('integration:flow-analytics-browser', async ({ page }) => {
 
   // Drill-down opens the exact underlying records and exports them.
   await reviewCard.click();
-  const dialog = page.getByRole('dialog', { name: 'Waiting on review drill-down' });
+  const dialog = page.getByRole('dialog', { name: 'Waiting for review drill-down' });
   await expect(dialog.getByRole('region', { name: /records/ }).locator('tbody tr')).toHaveCount(1);
   await expect(dialog.getByText('GY-1')).toBeVisible();
   const download = page.waitForEvent('download');
@@ -217,10 +217,10 @@ for (const viewport of [{ name: 'desktop', width: 1280, height: 900 }, { name: '
     const scroller = page.getByRole('region', { name: 'Cumulative flow data table' });
     await scroller.focus();
     expect(await scroller.evaluate(element => element === document.activeElement)).toBe(true);
-    const card = page.getByRole('button', { name: /Waiting on review/ });
+    const card = page.getByRole('button', { name: /Waiting for review/ });
     await card.focus();
     await page.keyboard.press('Enter');
-    const dialog = page.getByRole('dialog', { name: 'Waiting on review drill-down' });
+    const dialog = page.getByRole('dialog', { name: 'Waiting for review drill-down' });
     await expect(dialog.getByRole('button', { name: 'Close drill-down' })).toBeFocused();
     await expect(dialog).toContainText('Evidence and artifact identifiers require an operator');
     await page.keyboard.press('Escape');

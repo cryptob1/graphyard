@@ -22,7 +22,7 @@ import GuidePage from '../web/pages/guide.js';
 import CreateWork from '../web/pages/create-work.js';
 import TopBar from '../web/components/top-bar.js';
 import Sidebar from '../web/components/sidebar.js';
-import FlowAnalytics, { FlowSummary, submitToMerge } from '../web/flow-analytics.js';
+import FlowAnalytics, { FlowSummary, plainWait, submitToMerge } from '../web/flow-analytics.js';
 
 // GY-67: the dashboard is rendered from the checked-in fixture (scripts/dashboard-fixture.mjs)
 // and read the way a newcomer reads it: visible words only, closed <details> bodies and item
@@ -234,7 +234,8 @@ test('integration:analytics-default-view — flow analytics opens to where work 
   assert.match(page, /Pull request opened → merged/);
   assert.match(visible, /typical p50 .*slowest one in ten p90 .*3 merged/);
   const waiting = (report as any).bottleneck.categories.filter((c: any) => c.id !== 'delivered');
-  for (const category of waiting) assert.equal(visible.includes(`${category.label} ${category.count}`), category.count > 0, `${category.label}: shown only when it has items`);
+  for (const category of waiting) assert.equal(visible.includes(`${plainWait[category.id]} ${category.count}`), category.count > 0, `${category.label}: shown only when it has items, in plain words`);
+  assert.doesNotMatch(visible, /acceptance evidence|In implementation/, 'the server category labels stay in Show details');
   for (const hidden of ['Cumulative flow', 'Lead time', 'Stage dwell', 'Phase durations', 'Operations', 'Attribution', 'Coverage, exclusions and definitions', 'Work type', 'Delivery slice'])
     assert.ok(!visible.includes(hidden), `${hidden} is behind Show details`);
   assert.match(page, /<details class="flow-details"><summary>Show details<\/summary>[\s\S]*Cumulative flow[\s\S]*Attribution[\s\S]*Coverage, exclusions and definitions/);
