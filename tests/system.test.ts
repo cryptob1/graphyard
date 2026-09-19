@@ -541,6 +541,75 @@ test('revocation withdraws every accepted run for the candidate and republishes 
   assert.match(w.gates.find(gate => gate.name === 'merge')!.reasons.join(' '), /Ejected from the merge queue: Proof integration:claim-safety was revoked/);
   assert.equal(w.mergeAuthorization ?? null, null);
 });
+test('a committed merge execution outlives its expiry until GitHub reconciles the provider outcome', async () => {
+  let w = await submitted(); w = await engine.observe(w.id, w.revision, observation(w));
+  w = await proven(w);
+  const granted = await engine.acquireMerge(coordinator, w.id, { expectedRevision: w.revision, sha: head, baseSha: base, policyRevision: w.policyRevision }, randomUUID());
+  await engine.verifyMerge(coordinator, w.id, { executionId: granted.execution.id }, { ...observation(w), prState: 'open', draft: false }, randomUUID());
+  const committed = await engine.commitMerge(coordinator, w.id, { executionId: granted.execution.id }, randomUUID());
+  const expiresAt = new Date(Date.now() - 1000).toISOString();
+  await store.pool.query("UPDATE work_items SET document=jsonb_set(document,'{mergeExecution,expiresAt}',to_jsonb($2::text)) WHERE id=$1", [w.id, expiresAt]);
+  const withdrawal = { proof: 'integration:claim-safety', sha: head, baseSha: base, policyRevision: w.policyRevision, reason: 'Withdrawal after the authority lapsed' };
+  // The provider call may still be in flight: withdrawal, competing mutations, a new execution and
+  // periodic reconciliation all keep refusing until GitHub has been observed after the expiry.
+  await assert.rejects(engine.execute(producer, 'revoke', w.id, withdrawal, randomUUID()), /already committed this candidate/);
+  await assert.rejects(engine.execute(producer, 'evidence', w.id, proof(), randomUUID()), /committed this candidate to the provider; retry after GitHub reconciliation/);
+  await assert.rejects(engine.acquireMerge(coordinator, w.id, { expectedRevision: committed.revision, sha: head, baseSha: base, policyRevision: w.policyRevision }, randomUUID()), /awaits GitHub reconciliation/);
+  await engine.reconcile();
+  const retained = (await store.list()).find(item => item.id === w.id)!;
+  assert.equal(retained.mergeExecution?.id, granted.execution.id, 'reconciliation never retires a committed execution');
+  assert.equal(retained.mergeExecution?.expiresAt, expiresAt);
+  const early = { ...observation(w), at: new Date(Date.parse(expiresAt) - 500).toISOString() };
+  await assert.rejects(engine.observe(w.id, retained.revision, early), /awaits an observation taken after its authority expired/);
+  assert.equal((await store.list()).find(item => item.id === w.id)!.mergeExecution?.id, granted.execution.id, 'an unmerged reading from inside the authority does not rule the provider merge out');
+  const settled = await engine.observe(w.id, retained.revision, observation(w));
+  assert.equal(settled.mergeExecution, null, 'an unmerged observation after expiry reconciles the execution');
+  assert.notEqual(settled.stage, 'done');
+  // The record reopens only now: the withdrawal succeeds and a merge landing afterwards is a violation.
+  const revoked = await engine.execute(producer, 'revoke', w.id, withdrawal, randomUUID());
+  assert.ok(revoked.evidence.some(item => item.revocation)); assert.equal(revoked.stage, 'acceptance');
+  const late = { ...observation(w), merged: true, mergeSha: 'c'.repeat(40), mergedAt: new Date().toISOString() } as Observation;
+  const refused = await engine.observe(w.id, revoked.revision, late);
+  assert.notEqual(refused.stage, 'done'); assert.match(refused.violations.join(' '), /without a prior authorization/);
+});
+test('a retained committed execution still attributes the merge that landed inside its authority', async () => {
+  let w = await submitted(); w = await engine.observe(w.id, w.revision, observation(w));
+  w = await proven(w);
+  const granted = await engine.acquireMerge(coordinator, w.id, { expectedRevision: w.revision, sha: head, baseSha: base, policyRevision: w.policyRevision }, randomUUID());
+  await engine.verifyMerge(coordinator, w.id, { executionId: granted.execution.id }, { ...observation(w), prState: 'open', draft: false }, randomUUID());
+  const committed = await engine.commitMerge(coordinator, w.id, { executionId: granted.execution.id }, randomUUID());
+  await delay(5); const mergedAt = ((await store.pool.query('SELECT clock_timestamp() AS now')).rows[0].now as Date).toISOString(); await delay(5);
+  // The authority lapses on the record after the provider merged but before GitHub was observed.
+  await store.pool.query("UPDATE work_items SET document=jsonb_set(document,'{mergeExecution,expiresAt}',to_jsonb($2::text)) WHERE id=$1", [w.id, new Date(Date.now() + 5).toISOString()]);
+  await delay(10);
+  await assert.rejects(engine.execute(producer, 'revoke', w.id, { proof: 'integration:claim-safety', sha: head, baseSha: base, policyRevision: w.policyRevision, reason: 'Raced the observation' }, randomUUID()), /already committed this candidate/);
+  const delivered = await engine.observe(w.id, committed.revision, { ...observation(w), merged: true, mergedAt, mergeSha: 'a'.repeat(40) });
+  assert.equal(delivered.stage, 'done'); assert.equal(delivered.mergeExecution, null);
+  assert.equal(delivered.delivery?.authorizationRevision, granted.execution.authorizationRevision);
+});
+test('reconciliation defers a lapsed committed execution until an observation from after its expiry', async () => {
+  let w = await submitted(); w = await engine.observe(w.id, w.revision, observation(w));
+  w = await proven(w);
+  const granted = await engine.acquireMerge(coordinator, w.id, { expectedRevision: w.revision, sha: head, baseSha: base, policyRevision: w.policyRevision }, randomUUID());
+  await engine.verifyMerge(coordinator, w.id, { executionId: granted.execution.id }, { ...observation(w), prState: 'open', draft: false }, randomUUID());
+  await engine.commitMerge(coordinator, w.id, { executionId: granted.execution.id }, randomUUID());
+  const expiresAt = new Date(Date.now() - 1000).toISOString();
+  await store.pool.query("UPDATE work_items SET document=jsonb_set(document,'{mergeExecution,expiresAt}',to_jsonb($2::text)) WHERE id=$1", [w.id, expiresAt]);
+  await store.pool.query("UPDATE jobs SET available_at=now()+interval '1 hour'");
+  await store.pool.query('UPDATE jobs SET available_at=now(),locked_until=NULL,token=NULL WHERE work_id=$1', [w.id]);
+  let publications = 0; let at = new Date(Date.parse(expiresAt) - 500).toISOString();
+  const adapter = { observe: async (current: Work) => ({ ...observation(current), at }), publish: async () => { publications++; } } as unknown as GitHub;
+  await processJob(engine, adapter);
+  const deferred = (await store.pool.query('SELECT error,token,available_at FROM jobs WHERE work_id=$1', [w.id])).rows[0];
+  assert.equal(publications, 0); assert.equal(deferred.error, null); assert.equal(deferred.token, null);
+  assert.ok(deferred.available_at.getTime() <= Date.now(), 'the lapsed authority makes the next observation due immediately');
+  assert.equal((await store.list()).find(item => item.id === w.id)!.mergeExecution?.id, granted.execution.id);
+  at = new Date().toISOString();
+  await processJob(engine, adapter);
+  const reconciled = (await store.list()).find(item => item.id === w.id)!;
+  assert.equal(reconciled.mergeExecution, null); assert.equal(publications, 1);
+  assert.equal((await store.pool.query('SELECT error FROM jobs WHERE work_id=$1', [w.id])).rows[0].error, null);
+});
 test('delivered work refuses revocation and keeps its authorized delivery record', async () => {
   let w = await submitted(); w = await engine.observe(w.id, w.revision, observation(w));
   w = await proven(w);
@@ -984,6 +1053,11 @@ test('a delayed merge uses historical authorization despite an outage and later 
   await store.pool.query("UPDATE work_items SET document=jsonb_set(document,'{observation,at}',to_jsonb('2000-01-01T00:00:00Z'::text)) WHERE id=$1", [w.id]);
   await engine.reconcile();
   w = (await store.list()).find(item => item.id === w.id)!;
+  // The lapsed authority was committed to the provider, so the record stays frozen until GitHub
+  // answers for it; a reading from after the expiry that has not yet caught up with the merge
+  // reconciles the execution, and only then can the failing run be recorded.
+  await assert.rejects(engine.execute(producer, 'evidence', w.id, { ...proof(), result: 'fail' }, randomUUID()), /retry after GitHub reconciliation/);
+  w = await engine.observe(w.id, w.revision, observation(w)); assert.equal(w.mergeExecution, null);
   w = await engine.execute(producer, 'evidence', w.id, { ...proof(), result: 'fail' }, randomUUID());
   assert.equal(w.mergeAuthorization, null);
   w = await engine.observe(w.id, w.revision, { ...observation(w), merged: true, mergedAt, mergeSha: 'e'.repeat(40) });
@@ -1139,6 +1213,9 @@ test('concurrent task changes schedule a prompt retry without an operator error'
   await store.pool.query("UPDATE work_items SET document=jsonb_set(document,'{mergeExecution,expiresAt}',to_jsonb('2000-01-01T00:00:00Z'::text)) WHERE id=$1", [w.id]);
   await engine.reconcile();
   w = (await store.list()).find(item => item.id === w.id)!;
+  // The committed execution holds the record past its expiry until a post-expiry reading reconciles it.
+  await assert.rejects(engine.execute(operator, 'reviewpolicy', w.id, { provider: 'codex', expectedPolicyRevision: 1, reason: 'Merge not observed yet' }, randomUUID()), /retry after GitHub reconciliation/);
+  w = await engine.observe(w.id, w.revision, observation(w)); assert.equal(w.mergeExecution, null);
   w = await engine.execute(operator, 'reviewpolicy', w.id, { provider: 'codex', expectedPolicyRevision: 1, reason: 'Merge not observed yet' }, randomUUID());
   assert.equal(w.policyRevision, 2); assert.equal(w.mergeAuthorization, null);
   w = await engine.observe(w.id, w.revision, { ...observation(w), merged: true, mergedAt, mergeSha: 'e'.repeat(40) });

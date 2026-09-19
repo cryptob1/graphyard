@@ -340,9 +340,28 @@ test('routine merge is exact-candidate, double-checked, and never uses an admin 
   }, execution.owner, resumedStore.commit);
   assert.equal(reacquired, false, 'the owning coordinator resumes its active authority'); assert.match(resumedResult.result, /merge requested/);
   assert.throws(() => assertMergeCandidate(resumed, new Date().toISOString(), 'different-master'), /does not have/);
-  const uncertain = work({ observation: candidate.observation, mergeExecution: { ...execution, verifiedAt: new Date().toISOString() } });
-  const recovered = await mergeWork(config, uncertain, async () => ({ work: [uncertain], now: new Date().toISOString() }), async () => { throw new Error('must not reacquire'); }, cancel, verify, () => { throw new Error('must not repeat a possibly attempted provider call'); }, execution.owner);
-  assert.match(recovered.result, /already committed/);
+  // Verified but never committed: the provider was not attempted, so the owning broker resumes
+  // from the record's verification through the transactional commit and the provider call. The
+  // engine refuses a second merge-verify for that execution, so it must not be asked for one.
+  const verifiedExecution = { ...execution, verifiedAt: new Date(Date.now() - 2000).toISOString(), clockOffset: { min: -500, max: 500 } };
+  const uncommitted = work({ observation: candidate.observation, mergeExecution: verifiedExecution });
+  const uncommittedStore = broker(uncommitted, verifiedExecution); const resumedCalls: string[][] = []; let recommitted = '';
+  const uncommittedResult = await mergeWork(config, uncommitted, uncommittedStore.snapshot, async () => { throw new Error('must not reacquire'); }, cancel, async () => { throw new Error('must not verify an already verified execution'); }, (_command, args) => {
+    resumedCalls.push(args);
+    if (args[1] === 'view') return JSON.stringify({ headRefOid: uncommitted.candidate!.sha, baseRefOid: uncommitted.candidate!.baseSha, baseRefName: 'main', state: 'OPEN', isDraft: false });
+    if (args.includes('--include')) return `Date: ${new Date().toUTCString()}\n\n{}`;
+    return args[1] === '--method' ? JSON.stringify({ merged: true, sha: 'c'.repeat(40) }) : JSON.stringify(validProtection);
+  }, execution.owner, async (_work, held) => { recommitted = held.id; return uncommittedStore.commit(); });
+  assert.match(uncommittedResult.result, /merge requested/); assert.equal(recommitted, execution.id, 'the resumed execution is committed before the provider call');
+  assert.equal(resumedCalls.filter(args => args[1] === '--method').length, 1);
+  // Only a recorded provider commit marks an unknown provider outcome; that execution is retained
+  // for observation and never retried, whether or not its authority has since lapsed.
+  const committedExecution = { ...verifiedExecution, committingAt: new Date().toISOString() };
+  for (const expiresAt of [committedExecution.expiresAt, new Date(Date.now() - 1000).toISOString()]) {
+    const uncertain = work({ observation: candidate.observation, mergeExecution: { ...committedExecution, expiresAt } });
+    const recovered = await mergeWork(config, uncertain, async () => ({ work: [uncertain], now: new Date().toISOString() }), async () => { throw new Error('must not reacquire'); }, cancel, verify, () => { throw new Error('must not repeat a possibly attempted provider call'); }, execution.owner);
+    assert.match(recovered.result, /provider commit was already recorded/);
+  }
   const lateExecution = { ...execution, issuedAt: new Date(Date.now() - 110_000).toISOString(), expiresAt: new Date(Date.now() + 10_000).toISOString() };
   const late = work({ observation: candidate.observation, mergeExecution: lateExecution }); cancelled = '';
   await assert.rejects(mergeWork(config, late, async () => ({ work: [late], now: new Date().toISOString() }), async () => { throw new Error('must not reacquire'); }, async (_work, authority) => { cancelled = authority.id; }, verify, (_command, args) => {

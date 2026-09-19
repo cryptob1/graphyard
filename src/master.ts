@@ -9,7 +9,7 @@ import { loadConnection, managedInstructions, serverOrigin } from './repository-
 import { resourceConflicts } from './coordination.js';
 import { mergeOrder } from './delegation.js';
 import { launchPlan, masterHarnessPlan, writeHarnessPermissions } from './harness.js';
-import { CHECK_NAME, deliveryState, deploySmokeRequired, evidenceIndependenceRefusals, exhaustedReviewerProfiles, nativeReviewRequired, postDeployMs, productionLatencyMs, reviewerProfileFor, reviewProviderOf, rollbackGuidance, standingEscalations, type Work } from './model.js';
+import { CHECK_NAME, deliveryState, deploySmokeRequired, evidenceIndependenceRefusals, exhaustedReviewerProfiles, nativeReviewRequired, postDeployMs, productionLatencyMs, providerDelayAfterVerification, reviewerProfileFor, reviewProviderOf, rollbackGuidance, standingEscalations, type Work } from './model.js';
 import { containmentAttestation, containmentSettlementRefusals, containmentVerificationSchema, type ContainmentVerification } from './quarantine.js';
 import { probeSupervisorAbsence } from './supervisor.js';
 import { predictQueue, type QueuePlacement } from './merge-queue.js';
@@ -665,7 +665,7 @@ export async function continueMergeBatch<T extends { key: string }, R>(items: T[
   }
   return results;
 }
-type MergeExecution = { id: string; owner: string; sha: string; baseSha: string; policyRevision: number; authorizationRevision: number; issuedAt: string; expiresAt: string; verifiedAt?: string; committingAt?: string; fenced?: { reason: string; at: string } | null };
+type MergeExecution = { id: string; owner: string; sha: string; baseSha: string; policyRevision: number; authorizationRevision: number; issuedAt: string; expiresAt: string; verifiedAt?: string; committingAt?: string; clockOffset?: { min: number; max: number }; fenced?: { reason: string; at: string } | null };
 export function assertMergeProtection(protection: any, config: MasterConfig, work: Work) {
   const nativeReview = nativeReviewRequired(work.policy);
   const reviews = protection?.required_pull_request_reviews;
@@ -707,11 +707,19 @@ export function githubProviderDelay(verifiedTime: number, serverDelayMs: number,
   const verifiedBoundary = Math.ceil((verifiedTime - providerToDatabaseOffsetMin + 1) / 1000) * 1000;
   return Math.max(serverDelayMs, verifiedBoundary - githubTime, 0);
 }
+function recordedVerification(execution: MergeExecution) {
+  const verifiedAt = Date.parse(execution.verifiedAt ?? '');
+  if (!Number.isFinite(verifiedAt) || !execution.clockOffset) throw Object.assign(new Error('Resumed merge execution carries an incomplete verification record'), { confirmedRefusal: true });
+  return { executionId: execution.id, sha: execution.sha, verifiedAt: execution.verifiedAt!, providerDelayMs: providerDelayAfterVerification(verifiedAt, execution.clockOffset), clockOffset: execution.clockOffset };
+}
 export async function mergeWork(config: MasterConfig, work: Work, freshSnapshot: () => Promise<{ work: Work[]; now: string }>, acquire: (work: Work, authorization: ReturnType<typeof assertMergeCandidate>) => Promise<{ execution: MergeExecution }>, cancel: (work: Work, execution: MergeExecution, reason: string) => Promise<unknown>, verify: (work: Work, execution: MergeExecution) => Promise<{ executionId: string; sha: string; verifiedAt: string; providerDelayMs: number; clockOffset?: { min: number; max: number } }>, run: (command: string, args: string[]) => string = (command, args) => execFileSync(command, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 90_000 }), executionOwner?: string, commit?: (work: Work, execution: MergeExecution) => Promise<{ executionId: string; sha: string; committingAt: string }>) {
   const before = await freshSnapshot(); const current = before.work.find(item => item.id === work.id);
   if (!current || current.revision !== work.revision) throw new Error(`${work.key} changed before GitHub verification; retry`);
   const authorization = assertMergeCandidate(current, before.now, executionOwner);
-  if (current.mergeExecution?.verifiedAt) return { key: authorization.key, pr: authorization.pr, sha: authorization.sha, method: config.mergeMethod, result: 'final verification was already committed; Graphyard retained the execution and will reconcile a provider result or let it expire before a new attempt' };
+  // Only a recorded provider commit marks an unknown provider outcome: the broker may already
+  // have called GitHub, so nothing is retried until observation reconciles the execution. A
+  // verified execution that never reached the commit resumes below; the provider was not attempted.
+  if (current.mergeExecution?.committingAt) return { key: authorization.key, pr: authorization.pr, sha: authorization.sha, method: config.mergeMethod, result: 'the provider commit was already recorded; Graphyard retained the execution until GitHub reconciles the provider outcome and refuses a new attempt until then' };
   const pr = JSON.parse(run('gh', ['pr', 'view', String(authorization.pr), '--repo', config.repository, '--json', 'headRefOid,baseRefOid,baseRefName,state,isDraft']));
   if (pr.headRefOid !== authorization.sha || pr.baseRefName !== config.baseBranch || pr.state !== 'OPEN' || pr.isDraft) throw new Error(`${work.key} changed on GitHub before merge`);
   assertQueuedLanding(current, authorization, pr.baseRefOid, config.repository, run);
@@ -733,7 +741,12 @@ export async function mergeWork(config: MasterConfig, work: Work, freshSnapshot:
     if (!Number.isFinite(remaining) || remaining <= 90_000) throw new Error(`${work.key} merge execution does not remain valid for the provider timeout; refresh gate inputs and retry`);
     const protection = JSON.parse(run('gh', ['api', `repos/${config.repository}/branches/${encodeURIComponent(config.baseBranch)}/protection`]));
     assertMergeProtection(protection, config, latest);
-    verificationStarted = true; const verified = await verify(latest, granted.execution); verificationCompleted = true;
+    // A broker that stopped between merge-verify and merge-commit resumes here holding a verified
+    // execution. The verification is a durable fact of that execution — the record carries its
+    // verifiedAt and bounded clock offset — so the resumed attempt rebuilds it rather than asking
+    // the engine to verify again, which it refuses, and then runs the same clock wait, pre-commit
+    // revalidation, transactional commit and pre-provider checks as a first attempt.
+    verificationStarted = true; const verified = granted.execution.verifiedAt ? recordedVerification(granted.execution) : await verify(latest, granted.execution); verificationCompleted = true;
     const verifiedTime = Date.parse(verified.verifiedAt);
     if (verified.executionId !== granted.execution.id || verified.sha !== authorization.sha || !Number.isFinite(verifiedTime) || !Number.isInteger(verified.providerDelayMs) || verified.providerDelayMs < 0 || verified.providerDelayMs > 21_000
       || !verified.clockOffset || !Number.isFinite(verified.clockOffset.min) || !Number.isFinite(verified.clockOffset.max) || verified.clockOffset.min > verified.clockOffset.max || verified.clockOffset.max - verified.clockOffset.min > 20_000) throw new Error(`${work.key} received an invalid final GitHub gate verification`);
