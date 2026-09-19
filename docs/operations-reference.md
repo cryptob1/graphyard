@@ -1,4 +1,4 @@
-<!-- page: Operate Graphyard | 8 | every procedure in full, credentials, proof authority, drift, and scale limits. -->
+<!-- page: Operate Graphyard | 7 | every procedure in full, credentials, proof authority, drift, and scale limits. -->
 # Operations reference
 
 The full detail behind the [operations page](operations.md): the master loop, every recovery procedure, credentials, proof authority, setup drift, scale limits, and dashboard behaviour. Terms follow the [glossary](glossary.md).

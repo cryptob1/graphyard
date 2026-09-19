@@ -47,8 +47,8 @@ The sections below are generated from each page's `<!-- page: Section | order | 
 
 - [Graphyard repository bootstrap](first-pr.md) — repository-specific bootstrap procedure for Graphyard maintainers.
 - [Implementation audit — September 13, 2026](history/implementation-audit-2026-09-13.md) — what the September 2026 audit found and what it changed.
-- [Role-glossary audit — September 18, 2026](history/role-glossary-audit-2026-09-18.md) — the ambiguity audit, concision samples, and safety-parity check behind the glossary.
 - [Huck Engineer investigation: lessons for Graphyard](history/huck-engineer-comparison.md) — what Huck Engineer taught Graphyard about worker pipelines.
+- [Role-glossary audit — September 18, 2026](history/role-glossary-audit-2026-09-18.md) — the ambiguity audit, concision samples, and safety-parity check behind the glossary.
 <!-- /index -->
 
 Historical records explain past decisions. They are not current setup instructions.

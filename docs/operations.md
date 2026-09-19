@@ -41,7 +41,7 @@ Stop the previous worker yourself, then:
 graphyard rework GY-N --previous-worker-stopped "Reproduce review failure"
 ```
 
-This fences old commands, closes the build gate, and records a `lease-loss` escalation if a lease was held; resolve it once the replacement is verified. The new worker registers the PR branch in a fresh workspace and resubmits. Merged work needs a follow-up item. [Detail](operations-reference.md#submitted-implementation-needs-rework)
+This fences old commands, closes the build gate, and records a `lease-loss` escalation if a lease was held; resolve it once the replacement is verified. Merged work needs a follow-up item. [Detail](operations-reference.md#submitted-implementation-needs-rework)
 
 ### Settle a containment quarantine
 
@@ -53,7 +53,7 @@ Restart `graphyard master run` freely: its cursor reconciles on start; nothing i
 
 ### GitHub jobs and outages
 
-Jobs retry after 45 seconds and recover expired leases after 90. Check App access, protection, and the registered branch. A missing App permission (`appPermissions`) holds its jobs until accepted; fix with `github-setup --update-permissions`. The merge gate refuses observations older than two minutes; a direct GitHub merge has no verified execution and cannot complete its item. [Detail](operations-reference.md#github-job-fails)
+Check App access, protection, and the registered branch. A missing App permission (`appPermissions`) holds its jobs until accepted; fix with `github-setup --update-permissions`. The merge gate refuses observations older than two minutes; a direct GitHub merge has no verified execution and cannot complete its item. [Detail](operations-reference.md#github-job-fails)
 
 ### Merge bypass
 
@@ -66,6 +66,10 @@ The item stays Done, delivered with failure. Roll back or revert through a new w
 ## Bootstrap mode
 
 The human operator may defer one criterion whose proof harness ships in the same change: a `bootstrap` declaration naming `contractPaths` inside the planned files. It needs `policy:bootstrap`, leaves every other gate in force, and becomes an obligation for the next item touching those paths. [Detail](operations-reference.md#bootstrap-mode-for-a-self-proving-change)
+
+## Proof authority grants
+
+`graphyard grants grant ID "integration:*" "reason"` gives a `producer` principal live, append-only authority for named proofs; only an `admin` grants or revokes. [Detail](operations-reference.md#proof-authority-grants)
 
 ## Safety facts that never change
 
