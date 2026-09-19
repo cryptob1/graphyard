@@ -45,7 +45,8 @@ export interface Principal {
 export interface AssignmentIdentity { owner: string; epoch: number; displayName?: string; runtime?: string; claimedAt?: string }
 export interface Lease { owner: string; epoch: number; expiresAt: string }
 export interface Workspace { host: string; path: string; branch: string; epoch: number; owner: string }
-export interface Candidate { sha: string; baseSha: string; pr: number; branch: string; author: string }
+// createdAt is the provider's pull-request creation time; older observations predate it.
+export interface Candidate { sha: string; baseSha: string; pr: number; branch: string; author: string; createdAt?: string }
 /**
  * One file the candidate changes, as the provider reports it against the merge base, together
  * with the blob the candidate's bound base (the base branch tip, or a speculative tip's predicted
@@ -63,7 +64,7 @@ export interface Observation {
   reviewIds?: number[];
   agentReview?: AgentReview;
   prState?: 'open' | 'closed'; draft?: boolean; prCreatedAt?: string;
-  candidate: Candidate; checks: { name: string; result: string; appId: number }[];
+  candidate: Candidate; checks: { name: string; result: string; appId: number; id?: number; attempt?: number }[];
   reviews: { reviewer: string; sha: string; state: string; id?: number; submittedAt?: string }[];
   merged: boolean; mergeSha: string | null; mergedAt?: string | null; mergeable: boolean;
   // The real base-branch head and its tree, recorded separately from the candidate's bound
@@ -95,7 +96,7 @@ export interface Work extends Create {
   reviewRequest?: ReviewRequest | null;
   reviewFailovers?: ReviewFailover[];
   mergeAuthorization?: { sha: string; baseSha: string; policyRevision: number; at: string } | null;
-  mergeExecution?: { id: string; owner: string; sha: string; baseSha: string; policyRevision: number; authorizationRevision: number; issuedAt: string; expiresAt: string; verifiedAt?: string; clockOffset?: { min: number; max: number }; fenced?: { reason: string; at: string } | null } | null;
+  mergeExecution?: { id: string; owner: string; sha: string; baseSha: string; policyRevision: number; authorizationRevision: number; issuedAt: string; expiresAt: string; verifiedAt?: string; committingAt?: string; clockOffset?: { min: number; max: number }; fenced?: { reason: string; at: string } | null } | null;
   delivery?: Delivery;
   /**
    * Independently observed production delivery, one record per environment: the first

@@ -16,6 +16,7 @@ export interface Evidence {
   executed: number; skipped: number; url?: string; at: string; expiresAt?: string;
   artifacts?: EvidenceArtifact[];
   scenarioRevision?: number; environment?: string;
+  revocation?: { at: string; actor: string; reason: string };
   provenance?: {
     provider: 'github-actions'; repository: string; workflowCommit: string;
     runId: string; runAttempt: number;
@@ -58,7 +59,7 @@ export function currentEvidence(work: Work, proof: string, now = new Date()): Ev
   const scenario = work.scenarioRequirements?.find(s => s.proof === proof);
   const validation = work.validation?.[proof];
   const implementers = implementerIdentities(work);
-  const latest = work.evidence.filter(e => e.proof === proof && e.trusted && !implementers.includes(e.producer) && e.sha === work.candidate?.sha && e.baseSha === work.candidate?.baseSha && e.policyRevision === work.policyRevision
+  const latest = work.evidence.filter(e => e.proof === proof && e.trusted && !e.revocation && !implementers.includes(e.producer) && e.sha === work.candidate?.sha && e.baseSha === work.candidate?.baseSha && e.policyRevision === work.policyRevision
     && (!validation || !!validation.attemptId && e.validation?.candidateId === validation.candidateId && e.validation?.requestId === validation.requestId && e.validation?.attemptId === validation.attemptId)
     && (!scenario || e.scenarioRevision === scenario.revision && e.environment === scenario.environment)).at(-1);
   return latest && (!latest.expiresAt || Date.parse(latest.expiresAt) > now.getTime()) ? latest : undefined;

@@ -6,6 +6,7 @@ import { Validation } from '../validation.js';
 import { Delivery } from '../delivery.js';
 import { ProofGrants } from '../proof-grants.js';
 import { artifactBackendFromEnv, artifactCapacityFromEnv } from '../artifacts.js';
+import { projectFlow } from '../flow-analytics.js';
 import { principalSchema, server } from './index.js';
 
 /** Process entry: configuration, migration, the HTTP server and the reconciliation tick. */
@@ -47,6 +48,7 @@ export async function main() {
     // backlog of observations drains across ticks without ever skipping one.
     try {
       await validation.expireArtifacts(); await validation.reconcile(); await engine.reconcile(); await delivery.sweep();
+      await projectFlow(engine.store, { batches: 4 });
       if (github) {
         const preflight = await github.preflightIfDue();
         if (preflight) await announcePreflight(preflight);

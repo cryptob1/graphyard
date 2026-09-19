@@ -42,10 +42,21 @@ function fixture() {
 test('GitHub adapter binds observations to repository, base, current reviews, and producer', async () => {
   const f = fixture(); f.reviews([{ id: 10, user: { login: 'reviewer' }, commit_id: head, state: 'APPROVED' }, { id: 11, user: { login: 'reviewer' }, commit_id: head, state: 'CHANGES_REQUESTED', submitted_at: '2026-01-01T00:01:00Z' }]);
   const obs = await f.github.observe(f.work);
-  assert.deepEqual(obs.checks, [{ name: 'test', result: 'success', appId: 15368 }]);
+  assert.ok(f.calls.some(call => call.path.includes('/check-runs?filter=all')), 'all check-run identities are observed so retries are retained');
+  assert.deepEqual(obs.checks, [{ name: 'test', result: 'success', appId: 15368, id: 9 }]);
   assert.deepEqual(obs.reviewIds, [10, 11]); assert.equal(obs.reviews[0].id, 11); assert.equal(obs.reviews[0].submittedAt, '2026-01-01T00:01:00Z'); assert.equal(obs.reviews[0].state, 'CHANGES_REQUESTED'); assert.equal(obs.candidate.baseSha, base); assert.equal(obs.protected, true);
   f.pr.base.ref = 'other'; await assert.rejects(f.github.observe(f.work), /unmanaged/);
   f.pr.base.ref = 'main'; f.pr.head.repo.full_name = 'attacker/fork'; await assert.rejects(f.github.observe(f.work), /same-repository/);
+});
+test('GitHub adapter retains retry history in deterministic check-run identity order', async () => {
+  const f = fixture(), request = f.github.request.bind(f.github);
+  f.github.request = async (path, method, body) => path.includes('/check-runs')
+    ? { check_runs: [
+      { id: 103, run_attempt: 2, name: 'test', status: 'completed', conclusion: 'success', app: { id: 15368 } },
+      { id: 101, run_attempt: 1, name: 'test', status: 'completed', conclusion: 'failure', app: { id: 15368 } },
+    ] }
+    : request(path, method, body);
+  assert.deepEqual((await f.github.observe(f.work)).checks.map(check => [check.id, check.result]), [[101, 'failure'], [103, 'success']]);
 });
 test('final verification refuses gate changes after the initial collection', async () => {
   const f = fixture(), request = f.github.request.bind(f.github); let reads = 0;

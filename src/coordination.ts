@@ -58,7 +58,9 @@ export function proofPreview(work: Work, all: Work[] = []) {
   const measure = (criterion: string, proof: string, deferred?: BootstrapObligation, inherited?: BootstrapObligation) => {
     const pin = work.scenarioRequirements.find(s => s.proof === proof);
     const evidence = currentEvidence(work, proof);
-    const status = deferred ? 'deferred'
+    const revoked = !evidence && work.evidence.some(e => e.proof === proof && e.trusted && !!e.revocation
+      && e.sha === work.candidate?.sha && e.baseSha === work.candidate?.baseSha && e.policyRevision === work.policyRevision);
+    const status = deferred ? 'deferred' : revoked ? 'revoked'
       : !evidence ? 'unmeasured' : evidence.executed < 1 || evidence.skipped > 0 ? 'incomplete' : evidence.result === 'fail' ? 'failed' : 'passed';
     return { criterion, proof, status, scenario: pin, producer: evidence?.producer, evidenceId: evidence?.id, bootstrap: deferred ?? inherited };
   };
