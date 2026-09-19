@@ -1,9 +1,31 @@
-import type { Escalation, EscalationTrigger, Work } from './work.js';
+import type { Escalation, EscalationTrigger, Lease, Work } from './work.js';
+
+// The one sentence every path that discards an assignment writes, so the epoch a
+// standing lease-loss belongs to can be read back from the record itself.
+export function leaseLossReason(lease: Pick<Lease, 'owner' | 'epoch'>) { return `Worker ${lease.owner} lost lease epoch ${lease.epoch}`; }
+export function leaseLossEpoch(escalation: Escalation): number | null {
+  const match = escalation.trigger === 'lease-loss' ? /^Worker .+ lost lease epoch (\d+)$/.exec(escalation.reason) : null;
+  return match ? Number(match[1]) : null;
+}
+// An implementation lease ends at `submit`: the candidate is bound and the worker's job is
+// done. A lease that still lapses under that epoch — one a worker kept renewing past its
+// submission — is expected lifecycle, not an abandoned assignment. Only an epoch with no
+// bound submission was lost while its work was unfinished, and only that raises the concern.
+export type LeaseLapse = 'expired' | 'lost';
+export function submittedEpoch(work: Pick<Work, 'submission'>, epoch: number) { return !!work.submission && work.submission.epoch === epoch; }
+export function classifyLeaseLapse(work: Pick<Work, 'submission'>, lease: Pick<Lease, 'epoch'>): LeaseLapse { return submittedEpoch(work, lease.epoch) ? 'expired' : 'lost'; }
+// A standing lease-loss raised for an epoch that already had its candidate bound was
+// recorded before post-submission expiry stopped being treated as an incident. It is
+// settled by reconciliation with this audited note rather than by a human.
+export const leaseLossAutoSettlement = 'auto-settled: submitted before expiry';
+export function settleableLeaseLoss(work: Pick<Work, 'submission' | 'escalation' | 'escalations'>): Escalation[] {
+  return standingEscalations(work).filter(entry => { const epoch = leaseLossEpoch(entry); return epoch !== null && submittedEpoch(work, epoch); });
+}
 
 // Every unresolved trigger stands on its own. A document written before
 // `escalations` existed carries only the singular field, so it is read as a
 // one-entry list rather than migrated in place.
-export function standingEscalations(work: Work): Escalation[] {
+export function standingEscalations(work: Pick<Work, 'escalation' | 'escalations'>): Escalation[] {
   if (work.escalations) return work.escalations;
   return work.escalation ? [work.escalation] : [];
 }

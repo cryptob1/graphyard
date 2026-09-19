@@ -3,7 +3,7 @@ import { z } from 'zod';
 import { Store, save, wakeJob } from './store.js';
 import { authorizedForProof, unauthorizedProofs } from './proof-grants.js';
 import { workspacePath, pathsOverlap, validBranch } from './workspace.js';
-import { activeLease, admin, assertReviewerProfiles, operatorCapability, escalationTriggers, holdsMergeExecution, MergeExecutionInProgress, providerDelayAfterVerification, raiseEscalation, releaseLeadHold, resolveEscalation, standingEscalations, requireCurrent, createSchema, criterionSchema, currentEvidence, deploySmokeProof, deploySmokeRequired, inheritedObligations, pathScopeContains, requiredProofs, resourcesSchema, demand, evaluate, exhaustedReviewerProfiles, proofSchema, reviewerProfileFor, reviewerProfileSchema, reviewProviders, reviewProviderOf, type Criterion, type Principal, type ReviewerApp, type ReviewFailover, type Work, type Observation, type ReviewRequest, type OperatorCapability } from './model.js';
+import { activeLease, admin, assertReviewerProfiles, operatorCapability, escalationTriggers, holdsMergeExecution, MergeExecutionInProgress, providerDelayAfterVerification, raiseEscalation, releaseLeadHold, resolveEscalation, standingEscalations, classifyLeaseLapse, leaseLossAutoSettlement, leaseLossEpoch, leaseLossReason, settleableLeaseLoss, submittedEpoch, requireCurrent, createSchema, criterionSchema, currentEvidence, deploySmokeProof, deploySmokeRequired, inheritedObligations, pathScopeContains, requiredProofs, resourcesSchema, demand, evaluate, exhaustedReviewerProfiles, proofSchema, reviewerProfileFor, reviewerProfileSchema, reviewProviders, reviewProviderOf, type Criterion, type Principal, type ReviewerApp, type ReviewFailover, type Work, type Observation, type ReviewRequest, type OperatorCapability } from './model.js';
 import { resourceConflicts } from './coordination.js';
 import { containmentAttestation, containmentSettlementRefusals, containmentVerificationSchema } from './quarantine.js';
 import { activeEngineers, delegationLimits, implementerIdentities, leadMay, producerIndependenceRefusal, sessionKind } from './delegation.js';
@@ -326,7 +326,7 @@ export class Engine {
         // The operator's stopped-worker attestation authorizes the reassignment;
         // it does not decide whether the incident reaches the record.
         preserveAssignment(work);
-        if (work.lease) raiseEscalation(work, { trigger: 'lease-loss', reason: `Worker ${work.lease.owner} lost lease epoch ${work.lease.epoch}`, at: now.toISOString(), actor: 'graphyard' });
+        if (work.lease) raiseEscalation(work, { trigger: 'lease-loss', reason: leaseLossReason(work.lease), at: now.toISOString(), actor: 'graphyard' });
         work.lease = null;
         // Reopening implementation is the authorized recovery for send-back.
         // A plan rejection remains owned by its originating lead and can only
@@ -358,12 +358,16 @@ export class Engine {
         }
         // A replacement claim is itself the proof that the previous assignment was
         // lost. Record it here so the escalation cannot be erased by the overwrite.
-        if (work.lease) raiseEscalation(work, { trigger: 'lease-loss', reason: `Worker ${work.lease.owner} lost lease epoch ${work.lease.epoch}`, at: now.toISOString(), actor: 'graphyard' });
+        if (work.lease) raiseEscalation(work, { trigger: 'lease-loss', reason: leaseLossReason(work.lease), at: now.toISOString(), actor: 'graphyard' });
         work.epoch++;
         work.implementers = [...new Set([...implementerIdentities(work), actor.id])];
         work.lastAssignment = { owner: actor.id, epoch: work.epoch, claimedAt: now.toISOString(), ...(actor.displayName ? { displayName: actor.displayName } : {}), ...(actor.runtime ? { runtime: actor.runtime } : {}) };
         work.lease = { owner: actor.id, epoch: work.epoch, expiresAt: new Date(now.getTime() + this.leaseSeconds * 1000).toISOString() };
       }
+      // The lease a worker submitted under ended at that submission. A supervisor that keeps
+      // renewing it is told so, rather than left to read the loss as a superseded epoch.
+      if ((command === 'heartbeat' || command === 'release') && !work.lease && submittedEpoch(work, data.epoch))
+        demand(false, `Implementation lease for epoch ${data.epoch} ended when ${work.key} was submitted; stop heartbeating after complete`);
       if (['heartbeat', 'release', 'workspace', 'submit', 'blocked', 'quarantine', 'launch'].includes(command)) activeLease(work, actor, data.epoch, now);
       if (command === 'heartbeat') work.lease!.expiresAt = new Date(now.getTime() + this.leaseSeconds * 1000).toISOString();
       if (command === 'quarantine') {
@@ -415,6 +419,11 @@ export class Engine {
         }
         work.submission = { epoch: data.epoch, pr: data.pr };
         work.reworkRequested = false;
+        // Binding the candidate ends the implementation lease in the same transaction: submitted
+        // work continues through the gates without one, and a lease left to lapse afterwards
+        // would otherwise read as an abandoned assignment. The workspace and `lastAssignment`
+        // keep the attempt attributable, and rework still needs the stopped-worker attestation.
+        work.lease = null;
       }
       if (command === 'deployment') {
         demand(actor.role === 'coordinator' || actor.role === 'admin', 'Coordinator permission required', 403);
@@ -757,13 +766,26 @@ export class Engine {
         // settles its provider outcome, never by reconciliation.
         if (executing && !leaseLost) continue;
         if (!executing && work.mergeExecution) work.mergeExecution = null;
+        const ledger: { kind: string; details: Record<string, unknown> }[] = [];
         if (leaseLost) {
           const lost = work.lease!; work.lease = null;
-          raiseEscalation(work, { trigger: 'lease-loss', reason: `Worker ${lost.owner} lost lease epoch ${lost.epoch}`, at: now.toISOString(), actor: 'graphyard' });
+          // A lease that lapses under the epoch it submitted is the expected end of an attempt
+          // whose candidate is already bound — recorded as history, never as an incident. Only an
+          // epoch with no bound submission was abandoned unfinished, and that still escalates.
+          if (classifyLeaseLapse(work, lost) === 'expired') ledger.push({ kind: 'lease.expired', details: { owner: lost.owner, epoch: lost.epoch, expiresAt: lost.expiresAt, submission: work.submission } });
+          else raiseEscalation(work, { trigger: 'lease-loss', reason: leaseLossReason(lost), at: now.toISOString(), actor: 'graphyard' });
+        }
+        // A standing lease-loss for an epoch whose candidate was already bound predates that
+        // rule. It never needed a human: settle it here, on deploy and on every later tick, with
+        // the note that says why, so the backlog does not wait on one click per item.
+        for (const settled of settleableLeaseLoss(work)) {
+          resolveEscalation(work, settled.trigger);
+          ledger.push({ kind: 'escalation.auto-settled', details: { trigger: settled.trigger, epoch: leaseLossEpoch(settled), escalation: settled, note: leaseLossAutoSettlement, submission: work.submission } });
         }
         this.evaluate(work, all, now);
         if (JSON.stringify(work) !== before) {
-          await save(db, work, 'graphyard', 'reconciled', now);
+          for (const entry of ledger) await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, 'graphyard', entry.kind, JSON.stringify({ details: { ...entry.details, at: now.toISOString() } })]);
+          await save(db, work, 'graphyard', 'reconciled', now, ledger.length ? { ledger: ledger.map(entry => entry.kind) } : undefined);
           if (work.submission) await wakeJob(db, work.id);
         }
       }
