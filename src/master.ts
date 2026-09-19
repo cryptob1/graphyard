@@ -533,12 +533,13 @@ export function workAttentionOwner(work: Work, cause: 'containment-settleable' |
   if (cause === 'launch-producer') return agentOwner('master', 'Fix the refusal reason (graphyard master producer add FILE for a missing profile); the loop relaunches the producer on its own');
   const escalation = standingEscalations(work)[0];
   if (escalation) return agentOwner('master', `graphyard master decide ${key} resolve '{"trigger":"${escalation.trigger}"}' REASON, then graphyard master approver ${key} DECISION`, 'approver');
-  if (work.blocker) return agentOwner('master', `Clear the cause, then graphyard master unblock ${key} REASON; a cause that needs money, a third-party account or a person's credential goes to the human`);
+  // The owner follows the refusal the row shows: the first failing gate, then a bare blocker.
   const first = work.gates.find(gate => !gate.passed);
   const manual = first?.name === 'acceptance' ? /(manual:[\w./-]+)/.exec(first.reasons.join(' '))?.[1] : undefined;
   if (manual) return agentOwner('master', `graphyard master decide ${key} attest '{"proof":"${manual}"}' REASON, then graphyard master approver ${key} DECISION`, 'approver');
   if (first?.name === 'review') return agentOwner('reviewer', `The reviewer session judges it; graphyard master review ${key} relaunches a refused review`);
   if (first?.name === 'merge' && work.stage === 'merge') return agentOwner('master', `graphyard master merge ${key}`);
+  if (work.blocker) return agentOwner('master', `Clear the cause, then graphyard master unblock ${key} REASON; a cause that needs money, a third-party account or a person's credential goes to the human`);
   return agentOwner('master', `graphyard diagnose ${key}`);
 }
 /**
@@ -1323,7 +1324,9 @@ export async function setupAutonomy(root: string, input: { adminToken?: string; 
     const current = existing.find(document => document.id === identity.id);
     if (current?.revokedAt) throw new Error(`${identity.id} was revoked; choose another identity in .graphyard/master.json or restore it through the operator-agent API`);
     const body = { capabilities: identity.capabilities, scope: identity.scope, reason: autonomyReason };
-    if (current && (JSON.stringify([...current.capabilities].sort()) !== JSON.stringify([...identity.capabilities].sort()) || JSON.stringify(current.scope) !== JSON.stringify(identity.scope))) {
+    // Compared as sets: the server stores these in jsonb, which keeps neither key nor entry order.
+    const same = (left: string[] = [], right: string[] = []) => JSON.stringify([...left].sort()) === JSON.stringify([...right].sort());
+    if (current && (!same(current.capabilities, identity.capabilities) || !same(current.scope?.repositories, identity.scope.repositories) || !same(current.scope?.workItems, identity.scope.workItems))) {
       await adminCall(config, input.adminToken, fetcher, `operator-agents/${encodeURIComponent(identity.id)}/configure`, { expectedRevision: current.revision, ...body });
       changes.push(`${identity.id}: capabilities set to ${identity.capabilities.join(', ')}`);
     }
@@ -1395,7 +1398,7 @@ export async function restartMasterLoop(root: string, config: MasterConfig, lock
     const deadline = Date.now() + (options.timeoutMs ?? 30_000);
     while (alive(lock.pid)) {
       if (Date.now() > deadline) throw new Error(`Master loop pid ${lock.pid} did not stop within ${Math.round((options.timeoutMs ?? 30_000) / 1000)} seconds; it was not restarted`);
-      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 200);
+      await new Promise(done => setTimeout(done, 200));
     }
   }
   const log = resolve(await localDirectory(root), 'master-run.log');
