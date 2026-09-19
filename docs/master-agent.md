@@ -81,7 +81,9 @@ or a Herdr tab. `master init` accepts the loop's settings:
 Each cycle:
 
 1. **closes finished worker sessions** — a launched agent whose principal holds no active lease has
-   no authority left, so its pane is closed rather than left holding a provider seat;
+   no authority left, so its pane is closed rather than left holding a provider seat. `complete`
+   ends the worker's lease, so a submitted item's session is closed here on the next cycle; a
+   lease that lapses after submission is history (`lease.expired`), never an incident;
 2. **dispatches claimable work** to a healthy worker profile, through the same launcher
    `master dispatch` uses: the worker claims under its own identity and the loop holds no lease;
 3. **shepherds reviews and proofs** — one recorded request per exact candidate, a request to the
@@ -327,10 +329,18 @@ For the full correctness model, see [GitHub enforcement](github.md) and [archite
 For a dead worker or provider change:
 
 1. stop the old worker and supervisor;
-2. release or let the lease expire, and settle any containment quarantine it left;
+2. release or let the lease expire, and settle any containment quarantine it left; a submitted
+   attempt has no lease left to release, because `complete` ended it;
 3. request operator rework if a candidate was already submitted;
 4. claim with the replacement worker at a higher epoch;
 5. create a fresh workspace and preserve the old attempt.
+
+A `lease-loss` escalation stands only for an attempt abandoned before it submitted, or for an
+assignment a replacement claim or rework discarded, and only a declared human session resolves it.
+A lease that expired after `complete` raises nothing, and a standing `lease-loss` whose epoch
+already has a bound submission is settled by reconciliation itself (`escalation.auto-settled`,
+`auto-settled: submitted before expiry`) — do not ask the human operator to resolve one, and do not
+treat a submitted item whose worker session has ended as an incident needing rework.
 
 The master does not clear blockers, revise requirements, or satisfy human gates on its own. See [operations](operations.md) for recovery commands, including [restarting the durable loop](operations-reference.md#master-coordination-loop).
 

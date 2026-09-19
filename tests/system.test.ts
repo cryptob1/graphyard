@@ -372,7 +372,7 @@ test('operator-mediated rework fences old ownership, closes build gate, and pres
   await assert.rejects(engine.execute(worker, 'rework', w.id, { reason: 'Retry', previousWorkerStopped: true }, randomUUID()), /permission/);
   w = await engine.execute(operator, 'rework', w.id, { reason: 'Old process stopped; reproduce new failure', previousWorkerStopped: true }, randomUUID());
   assert.equal(w.stage, 'build'); assert.equal(w.lease, null);
-  await assert.rejects(engine.execute(worker, 'heartbeat', w.id, { epoch: 1 }, randomUUID()), /superseded/);
+  await assert.rejects(engine.execute(worker, 'heartbeat', w.id, { epoch: 1 }, randomUUID()), /ended when .* was submitted/);
   w = await engine.execute(other, 'claim', w.id, {}, randomUUID()); assert.equal(w.epoch, 2);
   w = await engine.execute(other, 'workspace', w.id, { epoch: 2, host: 'replacement-host', path: `/tmp/${w.id}-rework`, branch: w.workspaces[0].branch }, randomUUID());
   w = await engine.execute(other, 'submit', w.id, { epoch: 2, pr: w.submission!.pr }, randomUUID());
@@ -425,6 +425,9 @@ test('single-use merge execution freezes relevant mutations through observed mer
   const second = await engine.acquireMerge(coordinator, w.id, secondInput, secondKey);
   const verified = await engine.verifyMerge(coordinator, w.id, { executionId: second.execution.id }, { ...observation(w), prState: 'open', draft: false }, randomUUID());
   const committed = await engine.commitMerge(coordinator, w.id, { executionId: second.execution.id }, randomUUID());
+  // `submit` ends the lease, so only a lease an older deployment left outliving its submission
+  // can still be renewed here; the renewal must not disturb the committed execution.
+  await store.pool.query("UPDATE work_items SET document=jsonb_set(document,'{lease}',$2::jsonb) WHERE id=$1", [w.id, JSON.stringify({ owner: worker.id, epoch: w.epoch, expiresAt: new Date(Date.now() + 60_000).toISOString() })]);
   const renewed = await engine.execute(worker, 'heartbeat', w.id, { epoch: w.epoch }, randomUUID());
   assert.equal(renewed.mergeExecution?.id, second.execution.id, 'lease renewal cannot replace or cancel merge authority');
   assert.deepEqual(await engine.acquireMerge(coordinator, w.id, secondInput, secondKey), second, 'the coordinator can recover a lost acquire response after a heartbeat');
@@ -1234,7 +1237,8 @@ test('concurrent task changes schedule a prompt retry without an operator error'
   let publications = 0;
   const adapter = {
     async observe() {
-      await engine.execute(worker, 'heartbeat', w.id, { epoch: 1 }, randomUUID());
+      // Any revision change while GitHub is being read; the worker's own untrusted assertion is one that needs no lease.
+      await engine.execute(worker, 'evidence', w.id, { proof: 'integration:claim-safety', sha: head, baseSha: base, policyRevision: 1, result: 'pass', executed: 1, skipped: 0 }, randomUUID());
       return observation(w);
     },
     async publish(_work: Work, reason: string, guard: () => Promise<void>) { assert.match(reason, /fresh verification/); await guard(); publications++; },
@@ -1325,8 +1329,12 @@ test('requirement revisions require stopped ownership, preserve history, and inv
   w = await proven(w);
   const revision = { expectedPolicyRevision: 1, reason: 'Clarify the independent acceptance obligation', criteria: [{ id: 'AC-1', text: 'Revised outcome', proofs: ['integration:claim-safety'] }], dependencies: [], plannedFiles: ['src/'], exclusiveResources: ['staging:account'] };
   await assert.rejects(engine.execute(worker, 'requirements', w.id, revision, randomUUID()), /Operator/);
-  await assert.rejects(engine.execute(operator, 'requirements', w.id, revision, randomUUID()), /release/);
-  await engine.execute(worker, 'release', w.id, { epoch: 1 }, randomUUID());
+  // A live implementation lease refuses the revision; a submitted item has none left, because
+  // `submit` ended it, so its requirements can be revised without stopping anyone.
+  const live = await claimed();
+  await assert.rejects(engine.execute(operator, 'requirements', live.id, revision, randomUUID()), /release/);
+  await engine.execute(worker, 'release', live.id, { epoch: 1 }, randomUUID());
+  assert.equal(w.lease, null);
   const key = randomUUID(); w = await engine.execute(operator, 'requirements', w.id, revision, key);
   assert.equal(w.policyRevision, 2); assert.equal(w.reworkRequested, true); assert.equal(w.observation, null); assert.equal(w.mergeAuthorization, null); assert.equal(w.reviewRequest, null);
   assert.equal(w.evidence.length, 1); assert.equal(w.evidence[0].policyRevision, 1); assert.equal(w.gates.find(g => g.name === 'acceptance')!.passed, false);
@@ -1385,7 +1393,6 @@ test('formal review identities stay excluded after revisions regardless of clock
   let w = await submitted();
   const existing = { id: 100, reviewer: 'reviewer', sha: head, state: 'APPROVED', submittedAt: new Date(Date.now() + 60000).toISOString() };
   w = await engine.observe(w.id, w.revision, { ...observation(w), reviewIds: [100], reviews: [existing] });
-  await engine.execute(worker, 'release', w.id, { epoch: 1 }, randomUUID());
   w = await engine.execute(operator, 'requirements', w.id, { expectedPolicyRevision: 1, reason: 'Change intent without changing code', criteria: [{ ...w.criteria[0], text: 'Revised intent' }], dependencies: [], plannedFiles: [], exclusiveResources: [] }, randomUUID());
   assert.equal(w.formalReviewResetRequired, true); assert.equal(w.formalReviewBaseline, undefined);
   w = await engine.observe(w.id, w.revision, { ...observation(w), reviews: [existing] });
@@ -2072,7 +2079,11 @@ test('a submission observed by the deployment GitHub client is refused before it
     assert.equal((await submit(key)).status, 200); assert.equal(observations, count, 'the idempotent replay is answered from the receipt');
     // Without a pre-observation the transaction records the submission; the reconciliation job then decides.
     engine.submissionObserver = null;
-    await assert.rejects(engine.execute(worker, 'submit', w.id, { epoch: 1, pr: pr + 500 }, randomUUID()), /cannot switch pull requests/);
+    // The submitted epoch's lease has ended; a reworked attempt resubmits, and never another PR.
+    await engine.execute(operator, 'rework', w.id, { reason: 'Reopen for a second pass', previousWorkerStopped: true }, randomUUID());
+    await engine.execute(worker, 'claim', w.id, {}, randomUUID());
+    await engine.execute(worker, 'workspace', w.id, { epoch: 2, host: 'machine-a', path: `/tmp/${w.id}-rework`, branch: w.workspaces[0].branch }, randomUUID());
+    await assert.rejects(engine.execute(worker, 'submit', w.id, { epoch: 2, pr: pr + 500 }, randomUUID()), /cannot switch pull requests/);
   } finally { engine.submissionObserver = undefined; await clearQueue(w.id); }
 });
 test('every later head is re-evaluated: a revert pushed after submission closes the build gate, names the files in diagnose and the published check, and clears when fixed', async () => {
