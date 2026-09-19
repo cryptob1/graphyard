@@ -13,6 +13,8 @@ import { CHECK_NAME, carriedApproval, deliveryState, deploySmokeRequired, descri
 import { containmentAttestation, containmentSettlementRefusals, containmentVerificationSchema, type ContainmentVerification } from './quarantine.js';
 import { probeSupervisorAbsence } from './containment-probe.js';
 import { predictQueue, type QueuePlacement } from './merge-queue.js';
+import { MERGE_PROTOCOL } from './protocol-version.js';
+import { attentionLines, type ProductionReport } from './production-watch.js';
 
 const safeEnvironment = z.record(
   z.string().regex(/^[A-Z_][A-Z0-9_]*$/)
@@ -297,10 +299,15 @@ export async function setupMaster(root: string, input: { url: string; token: str
   await saveDiscovery(root);
   // A permission the installed App lacks is announced here with its exact migration steps, not
   // discovered later as a 403 loop. It never blocks setup: master status keeps reporting it.
-  const { attention } = controlPlaneAttention(status);
+  const { attention, appPermissions, delegationLimits, production } = controlPlaneAttention(status);
+  // Each installation fact keeps its own remedy: a permission shortfall is a GitHub migration, a
+  // capacity variable is a deployment setting, and production lag is a deploy to confirm.
+  const remedy = appPermissions?.missing?.length || status.appPermissions?.attention?.length ? 'Accept the GitHub App permission request (run graphyard github-setup --update-permissions on the machine holding .graphyard/github-app.json, or graphyard master browser app-permissions and installation-accept, for the exact steps)'
+    : delegationLimits?.drift.length ? `Set ${delegationLimits.drift.map(entry => `${entry.variable}=${entry.required}`).join(' ')} on the deployment`
+    : production?.incidents.length ? `Deploy main: ${production.attention[0] ?? production.incidents[0].reason}` : null;
   const start = config.reviewer ? `run graphyard master start codex (or another supported agent kind) and add worker and reviewer profiles` : `run graphyard master reviewer setup to register the independent reviewer identity, then graphyard master start codex (or another supported agent kind) and add worker and reviewer profiles`;
   return { repository: config.repository, server: config.url, role: status.actor.role, autoMerge: config.autoMerge, workers: config.workers.length, run: config.run, browser: config.browser ?? null, config: '.graphyard/master.json', reviewer: config.reviewer ? `${config.reviewer.slug}[bot]` : null, attention,
-    next: attention.length ? `Accept the GitHub App permission request (run graphyard github-setup --update-permissions on the machine holding .graphyard/github-app.json, or graphyard master browser app-permissions and installation-accept, for the exact steps), then ${start}` : start[0].toUpperCase() + start.slice(1) };
+    next: remedy ? `${remedy}, then ${start}` : start[0].toUpperCase() + start.slice(1) };
 }
 
 export async function saveWorkerProfile(root: string, profileInput: unknown, verify: (token: string) => Promise<any>) {
@@ -400,16 +407,55 @@ export function assessContainment(work: Work[], options: { hostId: string; obser
 export interface ControlPlaneStatus {
   appPermissions?: { app?: string; installationUrl?: string; verifiedAt?: string | null; error?: string | null; suspended?: boolean; missing?: { permission: string; required: string; features: string[] }[]; attention?: string[] } | null;
   heldJobs?: number;
+  /** Capacity variables against the configured roster; a server before GY-59 reports none. */
+  delegationLimits?: { limits?: Record<string, number>; deployed?: Record<string, string | null>; drift?: { variable: string; deployed: string | null; required: string; reason: string }[]; attention?: string[] } | null;
+  /** The build the server runs and the merge protocol it speaks. */
+  build?: { commit?: string | null; protocol?: number | null } | null;
+  /** Production deployment observation for the base branch. */
+  production?: Partial<ProductionReport> | null;
 }
 /**
  * Attention that belongs to the installation rather than to a work item: a declared App
- * permission the installation lacks, an unverifiable preflight, and the jobs held on it.
+ * permission the installation lacks, an unverifiable preflight, the jobs held on it, a
+ * capacity variable that no longer covers the roster, and a base branch that production has
+ * not deployed.
  */
 export function controlPlaneAttention(status: ControlPlaneStatus | undefined) {
   const report = status?.appPermissions;
   const attention = [...(report?.attention ?? [])];
   if (status?.heldJobs) attention.push(`${status.heldJobs} integration job${status.heldJobs === 1 ? ' is' : 's are'} held on that permission shortfall rather than retried; they resume on their own once the installation reports the permission`);
-  return { attention, appPermissions: report ? { app: report.app ?? null, installationUrl: report.installationUrl ?? null, verifiedAt: report.verifiedAt ?? null, error: report.error ?? null, suspended: report.suspended ?? false, missing: (report.missing ?? []).map(shortfall => ({ permission: shortfall.permission, required: shortfall.required, features: shortfall.features })) } : null, heldJobs: status?.heldJobs ?? 0 };
+  attention.push(...(status?.delegationLimits?.attention ?? []));
+  const production = status?.production ? productionSummary(status.production) : null;
+  attention.push(...(production?.attention ?? []));
+  return { attention, appPermissions: report ? { app: report.app ?? null, installationUrl: report.installationUrl ?? null, verifiedAt: report.verifiedAt ?? null, error: report.error ?? null, suspended: report.suspended ?? false, missing: (report.missing ?? []).map(shortfall => ({ permission: shortfall.permission, required: shortfall.required, features: shortfall.features })) } : null, heldJobs: status?.heldJobs ?? 0,
+    delegationLimits: status?.delegationLimits ? { limits: status.delegationLimits.limits ?? null, deployed: status.delegationLimits.deployed ?? null, drift: (status.delegationLimits.drift ?? []).map(entry => ({ variable: entry.variable, deployed: entry.deployed, required: entry.required, reason: entry.reason })) } : null,
+    build: status?.build ? { commit: status.build.commit ?? null, protocol: status.build.protocol ?? null } : null, production };
+}
+/**
+ * The production lag an operator reads first: what production serves, how far the base
+ * branch is ahead of it, and the failing deployment reason when the provider reported one.
+ */
+export function productionSummary(report: Partial<ProductionReport>) {
+  const incidents = (report.incidents ?? []).map(incident => ({ key: incident.key, mergeSha: incident.mergeSha, status: incident.status, reason: incident.reason, deploymentId: incident.deploymentId ?? null, since: incident.since }));
+  const ahead = report.ahead ?? null;
+  const summary = ahead ? ahead.by === 0 ? 'production serves the base branch tip' : `main is ${ahead.by} commit${ahead.by === 1 ? '' : 's'} ahead of production` : report.aheadError ?? 'production lag is unknown';
+  return { provider: report.provider ?? null, observedAt: report.observedAt ?? null, serving: report.serving ?? null, running: report.running ?? null, aheadBy: ahead?.by ?? null, aheadCommits: ahead?.commits ?? [], summary,
+    latestDeployment: report.latest ? { id: report.latest.id, status: report.latest.providerStatus, commit: report.latest.commit, createdAt: report.latest.createdAt, url: report.latest.url ?? null } : null,
+    deployed: report.deployed ?? [], pending: report.pending ?? [], incidents, error: report.error ?? null,
+    attention: attentionLines({ ahead, aheadError: report.aheadError ?? null, serving: report.serving ?? null, incidents: (report.incidents ?? []), error: report.error ?? null, latest: report.latest ?? null, provider: report.provider ?? null }) };
+}
+/**
+ * The version-skew guard the broker runs before touching a merge. The CLI and the server
+ * each declare the merge protocol they speak; a server behind the CLI — main merged, the
+ * deployment never served it — is reported as exactly that, with both commits, instead of
+ * the broker failing later on a reply shape it does not recognize. A server that reports no
+ * protocol predates the exchange and is version 1.
+ */
+export function mergeProtocolSkew(status: { build?: { commit?: string | null; protocol?: number | null } | null } | undefined, cli: { commit: string | null; protocol?: number }): string | null {
+  const serverProtocol = status?.build?.protocol ?? 1, cliProtocol = cli.protocol ?? MERGE_PROTOCOL;
+  if (serverProtocol === cliProtocol) return null;
+  const serverCommit = status?.build?.commit ?? 'an unknown commit', cliCommit = cli.commit ?? 'an unknown commit';
+  return `server runs ${serverCommit}, CLI expects ${cliCommit}: deploy main first (server merge protocol ${serverProtocol}, CLI merge protocol ${cliProtocol}${serverProtocol < cliProtocol ? '; the deployment has not served the commit the CLI runs' : '; update the CLI checkout to the deployed commit'})`;
 }
 export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profiles: WorkerProfile[], agents: HerdrAgent[], credentialHealth: Record<string, { available: boolean; reason: string | null }> = {}, containment: Record<string, ContainmentAssessment> = {}, reviews: { pending: any[]; completed: any[] } = { pending: [], completed: [] }, baseBranch = 'main', controlPlane?: ControlPlaneStatus) {
   const now = Date.parse(snapshot.now);
@@ -460,11 +506,14 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
     return { key: work.key, title: work.title, stage: work.stage, owner: active ? work.lease!.owner : null, profile: profile?.name ?? null, session: session?.state ?? null, refusal: first ? { gate: first.name, reason: first.reasons[0] } : null, mergeable, review, proofGaps: gaps, containment: quarantine, attention, queue: placement ? queueRows.find(row => row.key === work.key) ?? null : null };
   });
   const delivered = snapshot.work.filter(work => work.stage === 'done' && work.delivery && deploySmokeRequired(work.policy)).map(work => deliveredRow(work, now, baseBranch));
+  // Merge-to-production over every delivery with an observed deployment, whether or not its
+  // policy asked for a smoke proof, so the periodic measurement reads one number for the repository.
+  const mergeToProduction = latencyPercentiles(snapshot.work.map(work => mergeToProductionMs(work)).filter((value): value is number => value !== null));
   return { observedAt: snapshot.now,
     counts: { open: rows.length, ready: rows.filter(row => row.stage === 'ready').length, active: rows.filter(row => row.owner).length, attention: rows.filter(row => row.attention).length + installation.attention.length, proofAuthorityGaps: rows.filter(row => row.proofGaps.length).length, mergeable: rows.filter(row => row.mergeable).length, reviewsPending: reviews.pending.length, reviewFailover: rows.filter(row => row.review?.failedOver.length).length, queued: placements.length,
       quarantined: rows.filter(row => row.containment).length, settleableQuarantines: rows.filter(row => row.containment?.settleable).length,
       awaitingSmoke: delivered.filter(row => row.state === 'awaiting-deployment' || row.state === 'awaiting-smoke').length, postDeployFailures: delivered.filter(row => row.state === 'delivered-with-failure').length },
-    workers: sessions, reviews, work: rows, queue: queueRows, delivered, controlPlane: installation };
+    workers: sessions, reviews, work: rows, queue: queueRows, delivered, latency: { mergeToProduction }, controlPlane: installation };
 }
 
 /**
@@ -477,7 +526,20 @@ function deliveredRow(work: Work, now: number, baseBranch: string) {
   return { key: work.key, title: work.title, mergedAt, mergeSha, state: deliveryState(work)!,
     deployment: deployment ? { sha: deployment.sha, covers: deployment.covers, source: deployment.source, observedAt: deployment.observedAt } : null,
     smoke: smoke ? { result: smoke.result, sha: smoke.sha, producer: smoke.producer, at: smoke.at, executed: smoke.executed, skipped: smoke.skipped, url: smoke.url ?? null } : null,
-    postDeployMs: postDeployMs(work, now), productionLatencyMs: productionLatencyMs(work), rollback: rollbackGuidance(work, baseBranch) };
+    postDeployMs: postDeployMs(work, now), productionLatencyMs: productionLatencyMs(work), mergeToProductionMs: mergeToProductionMs(work), rollback: rollbackGuidance(work, baseBranch) };
+}
+/** Time from the accepted merge to the observed deployment covering it: merge-to-production latency. */
+export function mergeToProductionMs(work: Work): number | null {
+  const observedAt = work.delivery?.deployment?.observedAt;
+  if (work.stage !== 'done' || !observedAt) return null;
+  const value = Date.parse(observedAt) - Date.parse(work.delivery!.mergedAtRepository ?? work.delivery!.mergedAt);
+  return Number.isFinite(value) && value >= 0 ? value : null;
+}
+/** Nearest-rank percentiles over the measured deliveries, for the periodic measurement. */
+export function latencyPercentiles(values: number[]) {
+  const sorted = values.filter(Number.isFinite).sort((a, b) => a - b);
+  const at = (percentile: number) => sorted.length ? sorted[Math.min(sorted.length - 1, Math.max(0, Math.ceil(sorted.length * percentile / 100) - 1))] : 0;
+  return { count: sorted.length, p50Ms: at(50), p90Ms: at(90) };
 }
 
 /**
