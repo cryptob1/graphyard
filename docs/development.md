@@ -12,7 +12,7 @@
 | `src/server.ts` → `src/server/` | HTTP authentication and app assembly; `src/server/routes/` holds one route module per resource |
 | `src/cli.ts` → `src/cli/` | The launcher; one command module per command group, the help text generated from them |
 | `src/onboarding.ts`, `src/github-setup.ts` | Repository discovery and local GitHub App registration |
-| `scripts/*acceptance*.mjs` | Protected HTTP contract harness and separate evidence publisher |
+| `scripts/contracts.mjs`, `scripts/*contract*.mjs`, `scripts/*acceptance*.mjs` | Trusted contract registry, protected HTTP harnesses, and separate evidence publisher |
 | `scripts/protect-github.mjs`, `scripts/verify-enforcement.mjs` | Bind the App-owned check; inspect live merge enforcement read-only |
 | `scripts/check-docs.mjs` | Link, anchor and generated-index check for the guides (`npm run docs:check`) |
 | `web/main.tsx` → `web/pages/` | The dashboard shell; one page component per view, the sidebar generated from `web/pages/index.tsx` |
@@ -43,7 +43,9 @@ npm run build
 npm test
 ```
 
-The tests run isolated Postgres on port 15438, with a temporary database directory. Override `GRAPHYARD_TEST_PORT` if needed. Do not point tests at production. Tests start local processes and sockets, so a restricted execution sandbox may require explicit local-network permission. Run as a non-root user; the test runtime does not create system users.
+The tests run isolated Postgres on ports 15438 to 15447 (and 15448 for delegation), with temporary database directories. Override `GRAPHYARD_TEST_PORT` to move the whole range, or a suite's own variable (`GRAPHYARD_VALIDATION_TEST_PORT`, `GRAPHYARD_HERDR_RECOVERY_TEST_PORT`, and so on) individually. Do not point tests at production. Tests start local processes and sockets, so a restricted execution sandbox may require explicit local-network permission. Run as a non-root user; the test runtime does not create system users.
+
+The cross-machine recovery suite shortens the lease and launch fences of its own engine instance, and states those fences when it calls the protected recovery contract, so the contract runs unchanged in seconds. A trusted run passes no such override and refuses any candidate whose fences are shorter than the shipped defaults in `src/engine.ts`; the suite asserts that the certified minimums still match those defaults.
 
 Test behavioral invariants, not implementation details: conflicting claims, stale epochs, replayed requests, missing/skipped/stale evidence, authenticated producer scope, external observation races, and side-effect retries. Keep GitHub calls outside domain transactions. A UI change must not introduce an arbitrary state-write endpoint.
 

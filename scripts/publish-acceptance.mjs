@@ -1,11 +1,14 @@
 import { readFile } from 'node:fs/promises';
 import { pathToFileURL } from 'node:url';
-import { requiredCases } from './acceptance-contract.mjs';
+import { contract } from './contracts.mjs';
 
 // GitHub's maximum page size, and a bound on how many pages one run's inventory may take.
 const PAGE_SIZE = 100, PAGE_LIMIT = 100;
 export function validateReport(report, expected) {
-  if (report.schema !== 1 || !['pass', 'fail'].includes(report.result) || report.proof !== 'integration:claim-safety' || !Number.isSafeInteger(report.executed) || report.executed < 0 || report.executed > requiredCases.length || !Number.isSafeInteger(report.skipped) || report.skipped < 0 || report.skipped > requiredCases.length) throw new Error('Incomplete acceptance report');
+  // The inventory is selected by the reported proof and fixed in protected source; a report can
+  // never widen, shrink, or rename the cases its own proof requires.
+  const { requiredCases } = contract(report.proof);
+  if (report.schema !== 1 || !['pass', 'fail'].includes(report.result) || !Number.isSafeInteger(report.executed) || report.executed < 0 || report.executed > requiredCases.length || !Number.isSafeInteger(report.skipped) || report.skipped < 0 || report.skipped > requiredCases.length) throw new Error('Incomplete acceptance report');
   if (!Array.isArray(report.cases) || report.cases.length !== requiredCases.length || requiredCases.some(id => report.cases.filter(c => c.id === id && ['pass', 'fail', 'skipped'].includes(c.result)).length !== 1)) throw new Error('Required acceptance case inventory is incomplete');
   const executed = report.cases.filter(c => c.result !== 'skipped').length, skipped = report.cases.filter(c => c.result === 'skipped').length;
   if (report.executed !== executed || report.skipped !== skipped) throw new Error('Acceptance counts do not match the case inventory');
@@ -96,7 +99,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
     const report = JSON.parse(await readFile(process.argv[2], 'utf8'));
     const expected = {
       repository: process.env.GITHUB_REPOSITORY, harnessCommit: process.env.GITHUB_SHA, runId: process.env.GITHUB_RUN_ID, runAttempt: process.env.GITHUB_RUN_ATTEMPT,
-      workId: process.env.GRAPHYARD_WORK_ID, pr: process.env.GRAPHYARD_PR, policyRevision: process.env.GRAPHYARD_POLICY_REVISION,
+      workId: process.env.GRAPHYARD_WORK_ID, pr: process.env.GRAPHYARD_PR, policyRevision: process.env.GRAPHYARD_POLICY_REVISION, proof: process.env.GRAPHYARD_PROOF,
       artifactName: process.env.GRAPHYARD_ARTIFACT_NAME ?? `graphyard-acceptance-${process.env.GITHUB_RUN_ATTEMPT}`,
     };
     const provenance = await observeArtifactProvenance(expected, process.env.GITHUB_TOKEN);
