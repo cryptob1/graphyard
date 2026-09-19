@@ -33,7 +33,7 @@ When the queue entry ahead merges, the base branch becomes a merge commit whose 
 
 ## Carry across a Graphyard-authored tip
 
-Publishing a tip for an entry not already on its predicted base merges that base into the pull request branch. The speculation records `merge`: the replaced head (`from`), GitHub's account of the tip's `parents` and `author`, `authoredByApp`, `conflicts` (always `false` for the provider merge, which refuses a conflict with `409` and ejects the entry) and `baseChanges`, the paths changed between the replaced head's bound base and the predicted base (`null` when GitHub could not list them within the budget). When Graphyard binds the tip it decides once and records `queue.speculation.carry`:
+Publishing a tip for an entry not already on its predicted base merges that base into the pull request branch. The speculation records `merge`: the replaced head (`from`), GitHub's account of the tip's `parents` and `author`, `authoredByApp`, `conflicts` (always `false` for the provider merge, which refuses a conflict with `409` and ejects the entry) and `baseChanges`, the paths changed between the replaced head's bound base and the predicted base (`null` when GitHub could not list them completely: the compare API reports files on its first page only and stops at 300, so a list that reaches that cap is treated as truncated). When Graphyard binds the tip it decides once and records `queue.speculation.carry`:
 
 | Field | Meaning |
 | --- | --- |

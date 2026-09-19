@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { CODEX_APP_ID, CODEX_USER_ID } from '../src/codex-review.js';
-import { GitHub, CHECK_NAME, scopeLookupBudget } from '../src/github.js';
+import { GitHub, CHECK_NAME, scopeLookupBudget, compareFileCap } from '../src/github.js';
 import { Refusal, SpeculativeConflict, type Work } from '../src/model.js';
 import type { QueuePlacement, QueueSpeculation } from '../src/merge-queue.js';
 // @ts-expect-error Dependency-free inspection script.
@@ -29,7 +29,8 @@ function fixture() {
     if (method !== 'GET') return path in mutations ? mutations[path]() : { id: 12 };
     if (/^\/commits\/[a-f0-9]{40}$/.test(path)) return { sha: path.slice(9), commit: { tree: { sha: `f${path.slice(10)}` } }, ...(commits[path.slice(9)] ?? {}) };
     if (path === '/git/ref/heads/main') return { ref: 'refs/heads/main', object: { type: 'commit', sha: branchTip } };
-    if (path.startsWith('/compare/')) { const page = Number(path.match(/[?&]page=(\d+)/)?.[1] ?? 1); return { status: comparison, files: baseChanges.slice((page - 1) * 100, page * 100) }; }
+    // GitHub paginates a comparison's commits only: the files come on the first page alone, at most compareFileCap of them.
+    if (path.startsWith('/compare/')) { const page = Number(path.match(/[?&]page=(\d+)/)?.[1] ?? 1); return { status: comparison, files: page === 1 ? baseChanges.slice(0, compareFileCap) : [] }; }
     if (path === '/pulls/10') return structuredClone(pr);
     if (path.includes('/protection')) return { required_pull_request_reviews: { required_approving_review_count: 1, dismiss_stale_reviews: true, require_last_push_approval: true }, required_status_checks: { strict: upToDateRequired, checks: [{ context: CHECK_NAME, app_id: protectedBranch ? 1234 : 999 }] }, enforce_admins: { enabled: true }, allow_force_pushes: { enabled: false }, allow_deletions: { enabled: false } };
     if (path.includes('/reviews')) return reviews;
@@ -689,4 +690,23 @@ test('unit:queue-real-base-tip — publication records the tip\'s parents, autho
   assert.equal((await f.github.publishSpeculativeTip(f.work, placement())).merge!.authoredByApp, true, 'an unresolved author is recognised by the App bot\'s noreply address');
   f.mutations['/merges'] = () => null;
   assert.equal((await f.github.publishSpeculativeTip(f.work, placement())).merge, null, 'a head that already contains its base produced no merge and carries nothing');
+});
+
+test('unit:queue-real-base-tip — a change list at GitHub\'s compare cap is recorded as incomplete, so nothing can be carried over a diff the API may have truncated', async () => {
+  const f = fixture(); queued(f.work);
+  f.mutations['/merges'] = () => ({ sha: speculativeTip });
+  f.commit(speculativeTip, { parents: [{ sha: head }, { sha: predictedBase }], author: { login: 'graphyard-owner-repo[bot]', type: 'Bot' } });
+  const changed = (count: number) => Array.from({ length: count }, (_, i) => ({ filename: `src/generated/file-${i}.ts` }));
+  f.compare('ahead', changed(compareFileCap - 1));
+  assert.equal((await f.github.publishSpeculativeTip(f.work, placement())).merge!.baseChanges!.length, compareFileCap - 1, 'a list short of the cap is complete');
+  f.compare('ahead', changed(compareFileCap));
+  assert.equal((await f.github.publishSpeculativeTip(f.work, placement())).merge!.baseChanges, null, 'a list that reaches the cap cannot be told from a truncated one');
+  f.compare('ahead', changed(compareFileCap + 50));
+  assert.equal((await f.github.publishSpeculativeTip(f.work, placement())).merge!.baseChanges, null, 'GitHub returns only the first page of files, so a longer diff looks exactly like one at the cap');
+  assert.ok(f.calls.filter(call => call.path.startsWith(`/compare/${base}...${predictedBase}`)).every(call => !/[?&]page=/.test(call.path)), 'no later page is requested: it would never extend the file list');
+  f.compare('ahead', changed(3));
+  f.calls.length = 0;
+  const sync = (await f.github.publishSpeculativeTip(f.work, placement())).merge!;
+  assert.equal(sync.baseChanges!.length, 3);
+  assert.equal(f.calls.filter(call => call.path.startsWith(`/compare/${base}...${predictedBase}`)).length, 1, 'the comparison is read once');
 });

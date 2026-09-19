@@ -12,8 +12,11 @@ import { blockedFeatures, controlPlanePermissions, describeShortfall, permission
 
 /** Out-of-scope paths compared against the base tip per observation; the rest are refused as uncompared. */
 export const scopeLookupBudget = 200;
-/** Paths a predicted base may change before the list is treated as incomplete and nothing is carried. */
-export const baseChangeBudget = 1000;
+/**
+ * GitHub's compare endpoint reports changed files on its first page only and stops at this many,
+ * so a list this long may be truncated: it is treated as incomplete and nothing is carried.
+ */
+export const compareFileCap = 300;
 export interface GitHubConfig { repository: string; base: string; appId: number; installationId: number; privateKey: string; reviewerApps?: ReviewerApp[] }
 /**
  * A 401 or a non-rate-limit 403. Retrying it does not help: the credentials or the installed
@@ -439,13 +442,17 @@ Use \`verdict:changes-requested\` with the findings, or \`verdict:usage-limit\` 
   }
   /**
    * Every path that differs between two commits, including both ends of a rename, or null when
-   * the list is beyond the budget: a carry decided on an incomplete list would be a guess.
+   * the list may be truncated: a carry decided on an incomplete list would be a guess. GitHub
+   * paginates the comparison's commits only; the files come on the first page alone and stop at
+   * compareFileCap, so a list that reaches the cap cannot be told from a longer one and is refused.
    */
   async changedFiles(from: string, to: string): Promise<string[] | null> {
     if (from === to) return [];
-    const files = await this.pages(`/compare/${from}...${to}`, 'files');
-    if (files.length > baseChangeBudget) return null;
-    return [...new Set(files.flatMap(file => [file.filename, ...(typeof file.previous_filename === 'string' ? [file.previous_filename] : [])]).filter(path => typeof path === 'string'))];
+    const comparison = await this.request(`/compare/${from}...${to}`);
+    const files = comparison?.files;
+    demand(Array.isArray(files), `GitHub did not list the files changed between ${from.slice(0, 12)} and ${to.slice(0, 12)}`, 502);
+    if (files.length >= compareFileCap) return null;
+    return [...new Set(files.flatMap((file: any) => [file.filename, ...(typeof file.previous_filename === 'string' ? [file.previous_filename] : [])]).filter((path: unknown): path is string => typeof path === 'string'))];
   }
   /** How GitHub describes the tip Graphyard's merge produced: parents, author, and whether the author is this App. */
   private async describeMerge(from: string, tip: string, boundBase: string, predictedBase: string): Promise<TipMerge> {
