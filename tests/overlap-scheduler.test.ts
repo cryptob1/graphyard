@@ -146,14 +146,14 @@ test('integration:overlap-scheduler — master status shows the overlap holding 
   assert.deepEqual(report, { 'GY-left': { conflicts: [{ key: 'GY-right', files: ['src/sync.ts'] }], unprobed: [] }, 'GY-right': { conflicts: [{ key: 'GY-left', files: ['src/sync.ts'] }], unprobed: [] }, 'GY-apart': { conflicts: [], unprobed: [] } });
   const unprobed = candidateConflicts([left, right], () => null);
   assert.deepEqual(unprobed['GY-left'], { conflicts: [], unprobed: ['GY-right'] }, 'an unfetched head is reported as unprobed, never as conflict-free');
-  const status = buildMasterStatus({ work: [held, live, left, right, apart], now: iso(0) }, [], [], {}, {}, { pending: [], completed: [] }, 'main', undefined, { report, available: true, reason: null });
+  const status = buildMasterStatus({ work: [held, live, left, right, apart], now: iso(0) }, [], [], {}, {}, { pending: [], completed: [] }, 'main', undefined, undefined, { report, available: true, reason: null });
   const row = (key: string) => status.work.find(entry => entry.key === key)!;
   assert.equal(row('GY-held').overlap.held, true); assert.deepEqual(row('GY-held').overlap.ahead.map(entry => [entry.key, entry.paths]), [['GY-live', ['src/cli/master.ts']]]); assert.match(row('GY-held').overlap.reason!, /--allow-overlap/);
   assert.deepEqual(row('GY-held').scope, { files: 1, directories: 1, broad: ['docs/'], highConflict: true });
   assert.equal(row('GY-live').overlap.held, false);
   assert.deepEqual(row('GY-left').conflicts, { candidates: ['GY-right'], files: [{ key: 'GY-right', files: ['src/sync.ts'] }], unprobed: [], probed: true });
   assert.deepEqual(row('GY-apart').conflicts?.candidates, []); assert.equal(row('GY-held').conflicts, null, 'only open candidates have a conflict set');
-  assert.deepEqual(status.dispatch.order.map(entry => entry.key), ['GY-held']); assert.deepEqual(status.dispatch.highConflict, [{ key: 'GY-held', broad: ['docs/'] }]);
+  assert.deepEqual(status.schedule.order.map(entry => entry.key), ['GY-held']); assert.deepEqual(status.schedule.highConflict, [{ key: 'GY-held', broad: ['docs/'] }]);
   assert.deepEqual(status.conflicts.sequence, ['GY-apart', 'GY-left', 'GY-right'], 'the fewest-conflict candidate lands first');
   assert.deepEqual(status.conflicts.conflicting, [{ key: 'GY-left', conflicts: ['GY-right'] }, { key: 'GY-right', conflicts: ['GY-left'] }]);
   assert.deepEqual(sequenceAdvice([]), { sequence: [], conflicting: [] });

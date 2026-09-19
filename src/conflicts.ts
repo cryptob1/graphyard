@@ -61,3 +61,9 @@ export function gitConflictProbe(root: string, run: Run = gitRun): ConflictProbe
     }
   };
 }
+
+/** What `master status` reports: the conflict sets probed in memory over the fetched PR heads; an unfetchable head is unprobed, never conflict-free. */
+export function probeCandidateConflicts(root: string, work: Work[], run: Run = gitRun) {
+  const fetched = fetchCandidateHeads(root, work, run);
+  return { report: candidateConflicts(work, gitConflictProbe(root, run)), available: fetched.fetched, reason: fetched.reason };
+}

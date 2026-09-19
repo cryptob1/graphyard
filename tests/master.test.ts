@@ -95,6 +95,18 @@ test('worker profiles support existing sessions and launch profiles without embe
   assert.equal(workerProfileSchema.safeParse({ name: 'launch', principal: 'worker-b', agentName: 'eng-b', mode: 'launch', kind: 'codex', credentialFile: '/private/worker.token', environment: { CODEX_HOME: '/profiles/two' } }).success, true);
 });
 
+test('Muse launch profiles validate like every other runtime and carry no embedded secrets', () => {
+  const muse = { name: 'muse-primary', principal: 'muse-1', agentName: 'engineering-muse-1', mode: 'launch', kind: 'muse', credentialFile: '/private/muse-1.token' };
+  const parsed = workerProfileSchema.parse({ ...muse, agentArgs: ['--approval-mode', 'never', '--trust-workspace'] });
+  assert.equal(parsed.kind, 'muse'); assert.equal(parsed.approvals, 'auto'); assert.deepEqual(parsed.agentArgs, ['--approval-mode', 'never', '--trust-workspace']);
+  assert.equal(workerProfileSchema.safeParse({ ...muse, credentialFile: undefined }).success, false, 'a launched Muse worker needs its own credential file');
+  assert.equal(workerProfileSchema.safeParse({ ...muse, credentialFile: 'relative/muse.token' }).success, false);
+  assert.equal(workerProfileSchema.safeParse({ ...muse, environment: { MUSE_API_KEY: 'secret' } }).success, false, 'provider secrets belong to the runtime login, not the profile');
+  assert.equal(workerProfileSchema.safeParse({ ...muse, environment: { GRAPHYARD_TOKEN: 'coordinator' } }).success, false, 'GRAPHYARD_ variables are owned by the launcher');
+  assert.equal(workerProfileSchema.safeParse({ ...muse, mode: 'existing', kind: undefined, credentialFile: undefined }).success, true);
+  assert.equal(workerProfileSchema.safeParse({ ...muse, kind: 'muse-code' }).success, false);
+});
+
 test('master status derives ownership from Graphyard and only joins Herdr health', () => {
   const active = work({ stage: 'build', lease: { owner: 'worker-a', epoch: 3, expiresAt: '2030-01-01T00:10:00Z' }, gates: [{ name: 'build', passed: false, reasons: ['Worker has not submitted'] }] });
   const result = buildMasterStatus({ work: [active], now: '2030-01-01T00:00:00Z' }, [{ name: 'profile-a', principal: 'worker-a', agentName: 'eng-a', mode: 'existing', agentArgs: [], approvals: 'auto', environment: {} }], [{ name: 'eng-a', agent_status: 'working', pane_id: 'p1' }]);
@@ -105,8 +117,31 @@ test('master status derives ownership from Graphyard and only joins Herdr health
   assert.equal(unavailable.available, false); assert.deepEqual(unavailable.agents, []); assert.match(unavailable.reason!, /Graphyard work state remains authoritative/);
 });
 
+test('Muse lifecycle telemetry is health-only: working, idle, blocked, done, exit, offline, and lease loss', () => {
+  const active = work({ stage: 'build', lease: { owner: 'muse-1', epoch: 3, expiresAt: '2030-01-01T00:10:00Z' } });
+  const profile = { name: 'muse-primary', principal: 'muse-1', agentName: 'engineering-muse-1', mode: 'launch' as const, kind: 'muse' as const, credentialFile: '/private/muse-1.token', agentArgs: [], approvals: 'auto' as const, environment: {} };
+  const agent = (state: string) => [{ name: profile.agentName, agent: 'muse', agent_status: state, pane_id: 'muse-pane', cwd: '/worktrees/GY-42-3' }];
+  for (const state of ['working', 'idle']) {
+    const status = buildMasterStatus({ work: [active], now: '2030-01-01T00:00:00Z' }, [profile], agent(state));
+    assert.equal(status.work[0].owner, 'muse-1'); assert.equal(status.work[0].session, state); assert.equal(status.work[0].attention, null);
+    assert.equal(status.workers[0].state, state); assert.equal(status.workers[0].pane, 'muse-pane'); assert.equal(status.counts.active, 1);
+  }
+  for (const state of ['blocked', 'done']) {
+    const status = buildMasterStatus({ work: [active], now: '2030-01-01T00:00:00Z' }, [profile], agent(state));
+    assert.equal(status.work[0].owner, 'muse-1', `a ${state} Muse session neither releases nor advances Graphyard work`); assert.equal(status.work[0].session, state);
+    assert.match(status.work[0].attention!, new RegExp(`session is ${state}`));
+  }
+  const exited = buildMasterStatus({ work: [active], now: '2030-01-01T00:00:00Z' }, [profile], []);
+  assert.equal(exited.work[0].owner, 'muse-1', 'a Muse exit cannot release or change Graphyard ownership');
+  assert.equal(exited.work[0].session, 'offline'); assert.match(exited.work[0].attention!, /offline/); assert.equal(exited.workers[0].state, 'offline');
+  const expired = buildMasterStatus({ work: [active], now: '2030-01-01T00:20:00Z' }, [profile], agent('working'));
+  assert.equal(expired.work[0].owner, null, 'Muse telemetry cannot extend a lost lease'); assert.equal(expired.counts.active, 0);
+  const spoofed = buildMasterStatus({ work: [active], now: '2030-01-01T00:00:00Z' }, [profile], [{ name: 'muse-1', agent: 'muse', agent_status: 'working' }]);
+  assert.equal(spoofed.work[0].session, 'offline', 'a Muse session named after the principal is not the profile session');
+});
+
 test('master commands refuse a changed repository or managed base binding', () => {
-  const config = { version: 1 as const, url: 'https://graphyard.example', credentialFile: '/outside/master.token', cliPath: launcher, repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'machine-a', masterAgentName: 'graphyard-master-project', autoMerge: true, mergeMethod: 'merge' as const, workers: [], reviewers: [], run: { intervalSeconds: 20, deploymentShaField: 'commit' } };
+  const config = { version: 1 as const, url: 'https://graphyard.example', credentialFile: '/outside/master.token', cliPath: launcher, repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'machine-a', masterAgentName: 'graphyard-master-project', autoMerge: true, mergeMethod: 'merge' as const, workers: [], reviewers: [], producers: [], run: { intervalSeconds: 20, deploymentShaField: 'commit', dispatchIntervalSeconds: 10, producerTimeoutMinutes: 120 } };
   assert.doesNotThrow(() => assertMasterBinding(config, { actor: { role: 'coordinator' }, repository: 'OWNER/project', baseBranch: 'main', githubAppId: 1234 }));
   assert.throws(() => assertMasterBinding(config, { actor: { role: 'coordinator' }, repository: 'owner/other', baseBranch: 'main', githubAppId: 1234 }), /rerun master init/);
   assert.throws(() => assertMasterBinding(config, { actor: { role: 'coordinator' }, repository: 'owner/project', baseBranch: 'release', githubAppId: 1234 }), /rerun master init/);
@@ -158,6 +193,69 @@ test('dispatch launches through watch and requires lifecycle-reported readiness 
     const dependency = work({ id: 'dependency', key: 'GY-41', stage: 'build' });
     await assert.rejects(dispatchWork(root, work({ stage: 'ready', lease: null, submission: null, candidate: null, mergeAuthorization: null, dependencies: [dependency.id] }), profile, [], undefined, [dependency]), /unfinished dependencies/);
   } finally { await rm(root, { recursive: true, force: true }); await rm(credentialDirectory, { recursive: true, force: true }); }
+});
+
+test('Muse dispatch runs the installed binary through claim, assigned worktree, Herdr, and watch with its own credential only', async () => {
+  const root = await repository(); const credentialDirectory = await mkdtemp(join(tmpdir(), 'graphyard-master-credentials-')); const calls: string[][] = [];
+  const previousToken = process.env.GRAPHYARD_TOKEN; process.env.GRAPHYARD_TOKEN = coordinatorToken;
+  try {
+    const credential = join(credentialDirectory, 'muse-1.token'); await writeFile(credential, workerToken, { mode: 0o600 });
+    await setupMaster(root, { url: 'https://graphyard.example', token: coordinatorToken, cliPath: launcher, credentialDirectory, herdrWorkspace: 'workspace-graphyard' }, coordinatorStatus as typeof fetch);
+    await assert.rejects(saveWorkerProfile(root, { name: 'muse-primary', principal: 'muse-1', agentName: 'engineering-muse-1', mode: 'launch', kind: 'muse', credentialFile: credential }, async () => ({ actor: { id: 'muse-1', role: 'coordinator' } })), /worker role/);
+    await assert.rejects(saveWorkerProfile(root, { name: 'muse-primary', principal: 'muse-1', agentName: 'engineering-muse-1', mode: 'launch', kind: 'muse', credentialFile: credential }, async () => ({ actor: { id: 'muse-2', role: 'worker' } })), /profile principal/);
+    const saved = await saveWorkerProfile(root, { name: 'muse-primary', principal: 'muse-1', agentName: 'engineering-muse-1', mode: 'launch', kind: 'muse', credentialFile: credential, agentArgs: ['--approval-mode', 'never', '--trust-workspace'] }, async token => ({ actor: { id: token === workerToken ? 'muse-1' : 'wrong', role: 'worker' } }));
+    assert.equal(saved.launch!.applied, false); assert.match(saved.launch!.reason!, /no non-interactive launch contract for muse/); assert.deepEqual(saved.launch!.args, ['--approval-mode', 'never', '--trust-workspace']);
+    const profile = (await loadMasterConfig(root)).workers[0];
+    assert.equal(profile.kind, 'muse');
+    // The claim runs under the profile's own credential file: the coordinator token in the
+    // master's environment never reaches the worker process.
+    const prepareCalls: { args: string[]; options: any }[] = []; const base = 'c'.repeat(40);
+    const prepared = await prepareWorkerLaunch(root, 'GY-42', 'muse-primary', (command, args, options) => {
+      prepareCalls.push({ args, options });
+      if (command === 'git') return args[0] === 'rev-parse' ? `${base}\n` : '';
+      return args[1] === 'claim' ? JSON.stringify({ epoch: 4, lease: { owner: 'muse-1' } }) : JSON.stringify({ path: join(root, 'assigned') });
+    });
+    assert.equal(prepared.epoch, 4); const claim = prepareCalls.find(call => call.args[1] === 'claim')!;
+    assert.equal(claim.options.env.GRAPHYARD_TOKEN_FILE, credential); assert.equal(claim.options.env.GRAPHYARD_TOKEN, undefined); assert.equal(claim.options.env.GRAPHYARD_MASTER_TOKEN, undefined);
+    let probes = 0;
+    const result = await dispatchWork(root, work({ stage: 'ready', lease: null, submission: null, candidate: null, mergeAuthorization: null }), profile, [], (_command, args) => { calls.push(args); return JSON.stringify({ result: args[0] === 'tab' ? { type: 'tab_created', root_pane: { pane_id: 'muse-pane', tab_id: 'muse-tab' }, tab: { tab_id: 'muse-tab' } } : args[1] === 'get' ? { type: 'agent_info', agent: { pane_id: 'muse-pane', agent_status: ++probes === 1 ? 'working' : 'idle' } } : {} }); }, undefined, async () => ({ epoch: 4, path: join(root, 'assigned'), base }));
+    assert.match(result.ownership, /supervising/); assert.equal(result.principal, 'muse-1'); assert.equal(result.launch.applied, false);
+    const tab = calls[0]; assert.deepEqual(tab.slice(0, 4), ['tab', 'create', '--workspace', 'workspace-graphyard']);
+    assert.equal(tab[tab.indexOf('--cwd') + 1], join(root, 'assigned'));
+    const tabEnvironment = tab.flatMap((argument, index) => argument === '--env' ? [tab[index + 1]] : []);
+    assert.ok(tabEnvironment.includes(`GRAPHYARD_TOKEN_FILE=${credential}`)); assert.ok(tabEnvironment.includes('GRAPHYARD_HERDR_AGENT_KIND=muse'));
+    assert.ok(tabEnvironment.every(entry => !entry.startsWith('GRAPHYARD_TOKEN=') && !entry.startsWith('GRAPHYARD_MASTER_TOKEN=') && !entry.includes(coordinatorToken)), 'the Muse tab receives only its own credential file');
+    assert.deepEqual(calls[1].slice(0, 3), ['pane', 'run', 'muse-pane']);
+    assert.match(calls[1][3], /'watch' 'GY-42' '4' '--' 'muse' '--approval-mode' 'never' '--trust-workspace'$/, 'Muse starts only under graphyard watch with the profile arguments');
+    assert.doesNotMatch(calls[1][3], /herdr agent start|GRAPHYARD_TOKEN/);
+    assert.equal(probes, 2, 'prompting waits for Herdr to report the Muse session ready');
+    assert.deepEqual(calls.at(-2)!.slice(0, 3), ['agent', 'rename', 'muse-pane']); assert.deepEqual(calls.at(-1)!.slice(0, 3), ['agent', 'prompt', 'engineering-muse-1']);
+    assert.match(calls.at(-1)![3], /principal muse-1/); assert.equal(JSON.stringify(calls).includes(coordinatorToken), false); assert.equal(JSON.stringify(calls).includes(workerToken), false);
+    // A Muse session that never becomes visible is closed and its epoch released; one Herdr
+    // cannot confirm closed keeps the epoch fenced.
+    const failedCalls: string[][] = []; let releasedEpoch = 0;
+    await assert.rejects(dispatchWork(root, work({ stage: 'ready', lease: null, submission: null, candidate: null, mergeAuthorization: null }), profile, [], (_command, args) => { failedCalls.push(args); return JSON.stringify({ result: args[0] === 'tab' ? { pane_id: 'late-muse' } : args[0] === 'pane' && args[1] === 'list' ? { panes: [] } : {} }); }, undefined, async () => ({ epoch: 5, path: join(root, 'late'), base }), async (_root, _key, epoch) => { releasedEpoch = epoch; }, 1), /did not become visible/);
+    assert.equal(releasedEpoch, 5); assert.deepEqual(failedCalls.at(-2), ['pane', 'close', 'late-muse']); assert.deepEqual(failedCalls.at(-1), ['pane', 'list']);
+    let blockedRelease = 0;
+    await assert.rejects(dispatchWork(root, work({ stage: 'ready', lease: null, submission: null, candidate: null, mergeAuthorization: null }), profile, [], (_command, args) => {
+      if (args[0] === 'agent' && args[1] === 'get') return JSON.stringify({ result: { agent: { pane_id: 'blocked-muse', agent_status: 'blocked' } } });
+      return JSON.stringify({ result: args[0] === 'tab' ? { pane_id: 'blocked-muse' } : args[0] === 'pane' && args[1] === 'list' ? { panes: [] } : {} });
+    }, undefined, async () => ({ epoch: 6, path: join(root, 'blocked'), base }), async (_root, _key, epoch) => { blockedRelease = epoch; }, 5_000), /blocked before it is ready/);
+    assert.equal(blockedRelease, 6);
+    let unsafeRelease = false;
+    await assert.rejects(dispatchWork(root, work({ stage: 'ready', lease: null, submission: null, candidate: null, mergeAuthorization: null }), profile, [], (_command, args) => {
+      if (args[0] === 'pane' && args[1] === 'close') throw new Error('daemon unavailable');
+      return JSON.stringify({ result: args[0] === 'tab' ? { pane_id: 'unsafe-muse' } : {} });
+    }, undefined, async () => ({ epoch: 7, path: join(root, 'unsafe'), base }), async () => { unsafeRelease = true; }, 1), /retained epoch 7/);
+    assert.equal(unsafeRelease, false, 'ownership remains fenced until Muse pane shutdown is confirmed');
+    // An already-running Muse session is observable but never adopted for new work.
+    await assert.rejects(dispatchWork(root, work({ stage: 'ready', lease: null, submission: null, candidate: null, mergeAuthorization: null }), profile, [{ name: 'engineering-muse-1', agent: 'muse', agent_status: 'idle', cwd: root }]), /already visible in Herdr/);
+    const existing = { ...profile, name: 'muse-existing', principal: 'muse-2', agentName: 'engineering-muse-2', mode: 'existing' as const, kind: undefined, credentialFile: undefined };
+    await assert.rejects(dispatchWork(root, work({ stage: 'ready', lease: null, submission: null, candidate: null, mergeAuthorization: null }), existing, [{ name: 'engineering-muse-2', agent: 'muse', agent_status: 'idle', cwd: root }]), /cannot be safely adopted/);
+  } finally {
+    if (previousToken === undefined) delete process.env.GRAPHYARD_TOKEN; else process.env.GRAPHYARD_TOKEN = previousToken;
+    await rm(root, { recursive: true, force: true }); await rm(credentialDirectory, { recursive: true, force: true });
+  }
 });
 
 test('dispatch claimability permits operator-authorized rework independent of display stage', () => {
@@ -295,7 +393,7 @@ function broker(item: Work, active: NonNullable<Work['mergeExecution']>, overrid
 }
 
 test('routine merge is exact-candidate, double-checked, and never uses an admin bypass', async () => {
-  const candidate = work({ observation: { at: new Date().toISOString(), candidate: { sha: 'a'.repeat(40), baseSha: 'b'.repeat(40), pr: 42, branch: 'graphyard/gy-42-1', author: 'worker' } } as any }); const config = { version: 1 as const, url: 'https://graphyard.example', credentialFile: '/outside/master.token', cliPath: launcher, repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'machine-a', masterAgentName: 'graphyard-master-project', autoMerge: true, mergeMethod: 'merge' as const, workers: [], reviewers: [], run: { intervalSeconds: 20, deploymentShaField: 'commit' } };
+  const candidate = work({ observation: { at: new Date().toISOString(), candidate: { sha: 'a'.repeat(40), baseSha: 'b'.repeat(40), pr: 42, branch: 'graphyard/gy-42-1', author: 'worker' } } as any }); const config = { version: 1 as const, url: 'https://graphyard.example', credentialFile: '/outside/master.token', cliPath: launcher, repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'machine-a', masterAgentName: 'graphyard-master-project', autoMerge: true, mergeMethod: 'merge' as const, workers: [], reviewers: [], producers: [], run: { intervalSeconds: 20, deploymentShaField: 'commit', dispatchIntervalSeconds: 10, producerTimeoutMinutes: 120 } };
   const calls: string[][] = [];
   const execution = { id: '11111111-1111-4111-8111-111111111111', owner: 'master', sha: candidate.candidate!.sha, baseSha: candidate.candidate!.baseSha, policyRevision: 2, authorizationRevision: candidate.revision, issuedAt: new Date().toISOString(), expiresAt: new Date(Date.now() + 120_000).toISOString() };
   const acquire = async () => ({ execution }); const cancel = async () => ({}); const verify = async () => ({ executionId: execution.id, sha: execution.sha, verifiedAt: new Date(Date.now() - 2000).toISOString(), providerDelayMs: 0, clockOffset: { min: 0, max: 0 } });
@@ -471,7 +569,7 @@ test('routine merge is exact-candidate, double-checked, and never uses an admin 
 
 test('merge broker refuses the provider call when committed authority died during the clock wait', async () => {
   const candidate = work({ observation: { at: new Date().toISOString(), candidate: { sha: 'a'.repeat(40), baseSha: 'b'.repeat(40), pr: 42, branch: 'graphyard/gy-42-1', author: 'worker' } } as any });
-  const config = { version: 1 as const, url: 'https://graphyard.example', credentialFile: '/outside/master.token', cliPath: launcher, repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'machine-a', masterAgentName: 'graphyard-master-project', autoMerge: true, mergeMethod: 'merge' as const, workers: [], reviewers: [], run: { intervalSeconds: 20, deploymentShaField: 'commit' } };
+  const config = { version: 1 as const, url: 'https://graphyard.example', credentialFile: '/outside/master.token', cliPath: launcher, repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'machine-a', masterAgentName: 'graphyard-master-project', autoMerge: true, mergeMethod: 'merge' as const, workers: [], reviewers: [], producers: [], run: { intervalSeconds: 20, deploymentShaField: 'commit', dispatchIntervalSeconds: 10, producerTimeoutMinutes: 120 } };
   const execution = { id: '22222222-2222-4222-8222-222222222222', owner: 'master', sha: candidate.candidate!.sha, baseSha: candidate.candidate!.baseSha, policyRevision: 2, authorizationRevision: candidate.revision, issuedAt: new Date().toISOString(), expiresAt: new Date(Date.now() + 120_000).toISOString() };
   const acquire = async () => ({ execution });
   const verify = async () => ({ executionId: execution.id, sha: execution.sha, verifiedAt: new Date(Date.now() - 2000).toISOString(), providerDelayMs: 0, clockOffset: { min: 0, max: 0 } });
@@ -513,7 +611,7 @@ test('manual merge remains guarded when automatic merge is disabled and GitHub c
     'a provider clock behind the database must cross the translated commit boundary');
   assert.throws(() => githubProviderDelay(Date.now(), 0, '{}'), /server time/);
   const candidate = work({ observation: { at: new Date().toISOString(), candidate: { sha: 'a'.repeat(40), baseSha: 'b'.repeat(40), pr: 42, branch: 'graphyard/gy-42-1', author: 'worker' } } as any });
-  const config = { version: 1 as const, url: 'https://graphyard.example', credentialFile: '/outside/master.token', cliPath: launcher, repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'machine-a', masterAgentName: 'graphyard-master-project', autoMerge: false, mergeMethod: 'merge' as const, workers: [], reviewers: [], run: { intervalSeconds: 20, deploymentShaField: 'commit' } };
+  const config = { version: 1 as const, url: 'https://graphyard.example', credentialFile: '/outside/master.token', cliPath: launcher, repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'machine-a', masterAgentName: 'graphyard-master-project', autoMerge: false, mergeMethod: 'merge' as const, workers: [], reviewers: [], producers: [], run: { intervalSeconds: 20, deploymentShaField: 'commit', dispatchIntervalSeconds: 10, producerTimeoutMinutes: 120 } };
   const execution = { id: '11111111-1111-4111-8111-111111111111', owner: 'master', sha: candidate.candidate!.sha, baseSha: candidate.candidate!.baseSha, policyRevision: 2, authorizationRevision: candidate.revision, issuedAt: new Date().toISOString(), expiresAt: new Date(Date.now() + 120_000).toISOString() };
   const store = broker(candidate, execution);
   const result = await mergeWork(config, candidate, store.snapshot, store.acquire, async () => ({}), async () => ({ executionId: execution.id, sha: execution.sha, verifiedAt: new Date(Date.now() - 2000).toISOString(), providerDelayMs: 0, clockOffset: { min: 0, max: 0 } }), (_command, args) => {
@@ -543,7 +641,7 @@ test('unit:queue-authored-tip-carry — the broker re-posts a carried approval t
     approval: { carried: true, provider: 'github', reviewer: 'graphyard-reviewer[bot]', sha: 'f'.repeat(40), reviewId: 900, originalSha: 'f'.repeat(40), reason: 'carried' }, evidence: [] };
   const base = work({ observation: { at: new Date().toISOString(), candidate: { sha: 'a'.repeat(40), baseSha: 'b'.repeat(40), pr: 42, branch: 'graphyard/gy-42-1', author: 'worker' } } as any });
   const candidate = { ...base, queue: { ...base.queue!, speculation: { ...base.queue!.speculation!, carry } } } as Work;
-  const config = { version: 1 as const, url: 'https://graphyard.example', credentialFile: '/outside/master.token', cliPath: launcher, repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'machine-a', masterAgentName: 'graphyard-master-project', autoMerge: true, mergeMethod: 'merge' as const, workers: [], reviewers: [], run: { intervalSeconds: 20, deploymentShaField: 'commit' } };
+  const config = { version: 1 as const, url: 'https://graphyard.example', credentialFile: '/outside/master.token', cliPath: launcher, repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'machine-a', masterAgentName: 'graphyard-master-project', autoMerge: true, mergeMethod: 'merge' as const, workers: [], reviewers: [], producers: [], run: { intervalSeconds: 20, deploymentShaField: 'commit', dispatchIntervalSeconds: 10, producerTimeoutMinutes: 120 } };
   const execution = { id: '11111111-1111-4111-8111-111111111111', owner: 'master', sha: candidate.candidate!.sha, baseSha: candidate.candidate!.baseSha, policyRevision: 2, authorizationRevision: candidate.revision, issuedAt: new Date().toISOString(), expiresAt: new Date(Date.now() + 120_000).toISOString() };
   const verify = async () => ({ executionId: execution.id, sha: execution.sha, verifiedAt: new Date(Date.now() - 2000).toISOString(), providerDelayMs: 0, clockOffset: { min: 0, max: 0 } });
   const gh = (_command: string, args: string[]) => {
@@ -641,7 +739,7 @@ test('integration:landing-follower-merges — the broker lands a queued follower
   // request still reports the pre-predecessor base (staleCached) with another tree entirely.
   const predictedBase = 'b'.repeat(40), mergedBase = '2'.repeat(40), staleCached = '3'.repeat(40), validatedTree = 'e'.repeat(40);
   const candidate = work({ observation: { at: new Date().toISOString(), candidate: { sha: 'a'.repeat(40), baseSha: predictedBase, pr: 42, branch: 'graphyard/gy-42-1', author: 'worker' } } as any });
-  const config = { version: 1 as const, url: 'https://graphyard.example', credentialFile: '/outside/master.token', cliPath: launcher, repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'machine-a', masterAgentName: 'graphyard-master-project', autoMerge: true, mergeMethod: 'merge' as const, workers: [], reviewers: [], run: { intervalSeconds: 20, deploymentShaField: 'commit' } };
+  const config = { version: 1 as const, url: 'https://graphyard.example', credentialFile: '/outside/master.token', cliPath: launcher, repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'machine-a', masterAgentName: 'graphyard-master-project', autoMerge: true, mergeMethod: 'merge' as const, workers: [], reviewers: [], producers: [], run: { intervalSeconds: 20, deploymentShaField: 'commit', dispatchIntervalSeconds: 10, producerTimeoutMinutes: 120 } };
   const execution = { id: '44444444-4444-4444-8444-444444444444', owner: 'master', sha: candidate.candidate!.sha, baseSha: predictedBase, policyRevision: 2, authorizationRevision: candidate.revision, issuedAt: new Date().toISOString(), expiresAt: new Date(Date.now() + 120_000).toISOString() };
   const verify = async () => ({ executionId: execution.id, sha: execution.sha, verifiedAt: new Date(Date.now() - 2000).toISOString(), providerDelayMs: 0, clockOffset: { min: 0, max: 0 } });
   const github = (head: string, trees: Record<string, string>) => {
@@ -734,7 +832,7 @@ test('master status surfaces reviewer failover and exhausted reviewer capacity',
 });
 
 test('agent review policies keep Graphyard branch protection without a native approval count', () => {
-  const config = { version: 1 as const, url: 'https://graphyard.example', credentialFile: '/outside/master.token', cliPath: launcher, repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'machine-a', masterAgentName: 'graphyard-master-project', autoMerge: true, mergeMethod: 'merge' as const, workers: [], reviewers: [], run: { intervalSeconds: 20, deploymentShaField: 'commit' } };
+  const config = { version: 1 as const, url: 'https://graphyard.example', credentialFile: '/outside/master.token', cliPath: launcher, repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'machine-a', masterAgentName: 'graphyard-master-project', autoMerge: true, mergeMethod: 'merge' as const, workers: [], reviewers: [], producers: [], run: { intervalSeconds: 20, deploymentShaField: 'commit', dispatchIntervalSeconds: 10, producerTimeoutMinutes: 120 } };
   const protection = (overrides: Record<string, unknown> = {}) => ({ required_pull_request_reviews: { required_approving_review_count: 0 },
     required_status_checks: { strict: false, checks: [{ context: 'Graphyard / merge', app_id: 1234 }] }, enforce_admins: { enabled: true }, ...overrides });
   const agent = work({ policy: { checks: ['test'], review: true, reviewProvider: 'agent', reviewerProfiles: [{ name: 'claude-reviewer', runtime: 'claude', reviewerApp: 'claude-reviewer', timeoutSeconds: 1800 }] } });
