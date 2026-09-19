@@ -179,8 +179,11 @@ test('integration:deploy-limit-startup — an existing install with more produce
   const installation = controlPlaneAttention(status);
   assert.ok(installation.attention.some(line => /Set GRAPHYARD_MAX_REVIEWERS=4/.test(line)));
   assert.deepEqual(installation.delegationLimits?.drift.map(entry => [entry.variable, entry.required]), [['GRAPHYARD_MAX_REVIEWERS', '4']]);
-  // The build identity is public for deployment probes and the version-skew guard.
-  assert.deepEqual(health, { ok: true, commit: 'f'.repeat(40), protocol: status.build.protocol });
+  // The build identity is public for deployment probes and the version-skew guard, beside the
+  // release and schema generation health already names for upgrades.
+  assert.equal(health.ok, true);
+  assert.equal(health.commit, 'f'.repeat(40)); assert.equal(health.protocol, status.build.protocol);
+  assert.equal(typeof health.version, 'string'); assert.equal(typeof health.schema, 'number');
   assert.equal(status.build.commit, 'f'.repeat(40));
 
   // The roster this installation already ran with is the seeded proof-grant set, exactly as main() reads it.
