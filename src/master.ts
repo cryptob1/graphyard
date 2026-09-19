@@ -447,6 +447,72 @@ export async function saveProducerProfile(root: string, profileInput: unknown, v
     launch: agentLaunchPlan(profile.kind, profile.approvals, profile.agentArgs, profile.environment) };
 }
 
+/**
+ * The settings the master may tune on its own: the loop and dispatch cadence, the workflows the
+ * provider runs with its own secret, the deployment the loop verifies, which reviewer profile
+ * answers first, the producer session budget, the quota ceiling, and a profile's account order.
+ * Everything else — autoMerge, the merge method, server and repository binding, credential and
+ * identity paths, the environment inventory — is onboarding's or the operator's: no CLI path
+ * writes it, and the master's harness grants no direct edit of master.json, so flipping autoMerge
+ * or re-pointing a credential can never be a routine master action.
+ */
+export const masterOwnedRunFields = ['intervalSeconds', 'dispatchIntervalSeconds', 'proofWorkflow', 'smokeWorkflow', 'deploymentUrl', 'deploymentShaField', 'reviewerProfile', 'producerTimeoutMinutes', 'quotaCeilingPercent'] as const;
+const masterClearableRunFields = ['proofWorkflow', 'smokeWorkflow', 'deploymentUrl', 'reviewerProfile', 'quotaCeilingPercent'] as const;
+export interface MasterOwnedSettings {
+  intervalSeconds?: number | null; dispatchIntervalSeconds?: number | null; proofWorkflow?: string | null; smokeWorkflow?: string | null;
+  deploymentUrl?: string | null; deploymentShaField?: string | null; reviewerProfile?: string | null; producerTimeoutMinutes?: number | null; quotaCeilingPercent?: number | null;
+  accounts?: { profile: string; accounts: string[] }[];
+}
+
+/** The CLI's `master config FIELD=VALUE…` form: owned run fields, plus `accounts:PROFILE=a,b` (an empty value clears the pinned order). */
+export function masterSettingsFromArgs(args: string[]): MasterOwnedSettings {
+  const settings: MasterOwnedSettings = {}, accounts: NonNullable<MasterOwnedSettings['accounts']> = [];
+  for (const arg of args) {
+    const assignment = /^(accounts:[a-zA-Z0-9][a-zA-Z0-9._-]*|[a-zA-Z][a-zA-Z0-9]*)=(.*)$/.exec(arg);
+    if (!assignment) throw new Error(`master config takes FIELD=VALUE assignments; "${arg}" is not one`);
+    const [, field, raw] = assignment, value = raw.trim();
+    if (field.startsWith('accounts:')) { accounts.push({ profile: field.slice('accounts:'.length), accounts: value ? value.split(',').map(name => name.trim()).filter(Boolean) : [] }); continue; }
+    if (!(masterOwnedRunFields as readonly string[]).includes(field)) throw new Error(`master config changes only what the master owns (${masterOwnedRunFields.join(', ')} and accounts:PROFILE), never ${field}`);
+    (settings as Record<string, unknown>)[field] = value === '' || value === 'null' ? null : /^[0-9]+$/.test(value) ? Number(value) : value;
+  }
+  return accounts.length ? { ...settings, accounts } : settings;
+}
+
+/**
+ * The only configuration write a master session can reach: it applies the owned fields above to
+ * the loaded configuration and revalidates the whole file through the master config schema before
+ * writing it, exactly as the operator's own commands do. Unknown fields are refused by
+ * `masterSettingsFromArgs` and again here, so an autoMerge flip or a credential re-point is
+ * refused wherever it enters.
+ */
+export async function saveMasterSettings(root: string, changes: MasterOwnedSettings) {
+  const config = await loadMasterConfig(root);
+  const unknown = Object.keys(changes).filter(field => field !== 'accounts' && !(masterOwnedRunFields as readonly string[]).includes(field));
+  if (unknown.length) throw new Error(`saveMasterSettings changes only what the master owns (${masterOwnedRunFields.join(', ')} and accounts), never ${unknown.join(', ')}`);
+  const run: Record<string, unknown> = { ...config.run }, changed: string[] = [];
+  for (const field of masterOwnedRunFields) {
+    const value = changes[field];
+    if (value === undefined) continue;
+    if (value === null) {
+      if (!(masterClearableRunFields as readonly string[]).includes(field)) throw new Error(`${field} is required; it can only be set, never cleared`);
+      delete run[field];
+    } else run[field] = value;
+    changed.push(field);
+  }
+  if (changes.reviewerProfile && !config.reviewers.some(profile => profile.name === changes.reviewerProfile)) throw new Error(`No reviewer profile named ${changes.reviewerProfile}; the reviewer profile is the name of a configured reviewer`);
+  for (const change of changes.accounts ?? []) {
+    const missing = change.accounts.filter(name => !(config.environments ?? []).some(environment => environment.name === name));
+    if (missing.length) throw new Error(`${change.profile}: ${missing.join(', ')} is not a configured agent environment; run master environments --apply`);
+    const profile = [...config.workers, ...config.reviewers, ...config.producers].find(candidate => candidate.name === change.profile);
+    if (!profile) throw new Error(`No worker, reviewer, or producer profile named ${change.profile}`);
+    if (change.accounts.length) profile.accounts = change.accounts; else delete profile.accounts;
+    changed.push(`accounts:${change.profile}`);
+  }
+  const parsed = masterConfigSchema.parse({ ...config, run });
+  await atomicPrivateWrite(resolve(root, '.graphyard/master.json'), parsed);
+  return { changed, run: parsed.run, config: '.graphyard/master.json' };
+}
+
 /** Where agent environments live: one directory per account, named <agent>-<letter>. */
 export function agentEnvironmentRoot(input?: string) {
   return resolve(input ?? process.env.GRAPHYARD_AGENT_ENVIRONMENTS ?? resolve(homedir(), '.coding_agents'));
@@ -1260,7 +1326,9 @@ export function stopCreatedHerdrTab(pane: string | undefined, tab: string | unde
 
 /**
  * The master's harness rules cover everything the master owns, not only the coordination loop:
- * editing its own configuration, restarting and reading the durable loop, administering the
+ * tuning its own configuration through the CLI's owned fields (`master config` — a direct edit of
+ * master.json would reach autoMerge and the credential and identity paths onboarding owns, so it
+ * is not granted), restarting and reading the durable loop's exact unit, administering the
  * deployment it verifies, and re-running CI for a candidate. None of these reaches a merge, a
  * verdict, evidence, or a credential; the enforced boundaries are unchanged.
  */
@@ -1269,15 +1337,13 @@ function withMasterOwnedRules(plan: HarnessPlan, config: MasterConfig): HarnessP
   if (plan.harness !== 'claude') return plan;
   const workflows = [config.run.proofWorkflow, config.run.smokeWorkflow].filter((name): name is string => !!name);
   const owned: HarnessRule[] = [
-    { rule: 'Read(./.graphyard/master.json)', why: 'Read the master configuration the loop runs from: profiles, agent environments, run settings. It holds paths to credentials, never their values.' },
-    { rule: 'Edit(./.graphyard/master.json)', why: 'Tune the master\'s own configuration (run settings, the automatic reviewer profile, profile accounts) without an operator; every profile is revalidated when the master next loads it.' },
-    { rule: 'Write(./.graphyard/master.json)', why: 'Rewrite the master configuration when master environments or a profile change regenerates it.' },
-    { rule: 'Bash(systemctl --user restart graphyard-master*)', why: 'Restart the durable loop after a configuration or CLI change; it resumes from its persisted cursors.' },
-    { rule: 'Bash(systemctl --user start graphyard-master*)', why: 'Start the durable loop when master status reports it is not running.' },
-    { rule: 'Bash(systemctl --user stop graphyard-master*)', why: 'Stop the durable loop before an upgrade; nothing is lost, its cursors are persisted before every action.' },
-    { rule: 'Bash(systemctl --user status graphyard-master*)', why: 'Read whether the durable loop is running.' },
+    { rule: 'Read(./.graphyard/master.json)', why: 'Read the master configuration the loop runs from: profiles, agent environments, run settings. It holds paths to credentials, never their values. Changing it goes through master config, which writes only the fields the master owns.' },
+    { rule: 'Bash(systemctl --user restart graphyard-master.service)', why: 'Restart the durable loop after a configuration or CLI change; it resumes from its persisted cursors. The unit is exact, so no other unit can be named.' },
+    { rule: 'Bash(systemctl --user start graphyard-master.service)', why: 'Start the durable loop when master status reports it is not running.' },
+    { rule: 'Bash(systemctl --user stop graphyard-master.service)', why: 'Stop the durable loop before an upgrade; nothing is lost, its cursors are persisted before every action.' },
+    { rule: 'Bash(systemctl --user status graphyard-master.service)', why: 'Read whether the durable loop is running.' },
     { rule: 'Bash(systemctl --user daemon-reload)', why: 'Reload the loop\'s user unit after it is edited.' },
-    { rule: 'Bash(journalctl --user -u graphyard-master*)', why: 'Read the loop\'s launch, failover and refusal log.' },
+    { rule: 'Bash(journalctl --user -u graphyard-master.service:*)', why: 'Read the loop\'s launch, failover and refusal log; the unit is pinned to the loop\'s own.' },
     { rule: 'Bash(railway status:*)', why: 'Read which release the deployment serves while verifying a delivery.' },
     { rule: 'Bash(railway logs:*)', why: 'Read deployment logs when a release does not serve a delivery.' },
     { rule: 'Bash(railway deployment:*)', why: 'List deployments and their commits to find the exact release to verify or redeploy.' },
@@ -1287,7 +1353,6 @@ function withMasterOwnedRules(plan: HarnessPlan, config: MasterConfig): HarnessP
     { rule: 'Bash(gh run watch:*)', why: 'Follow a run the loop is waiting on.' },
     { rule: 'Bash(gh run rerun:*)', why: 'Re-run a flaky or infrastructure-failed run on the same commit; the check still has to pass on that exact head.' },
     ...workflows.map(name => ({ rule: `Bash(gh workflow run ${name}:*)`, why: `Request the configured ${name} workflow by hand, as master run does; the provider runs it with its own trusted secret.` })),
-    ...(config.run.deploymentUrl ? [{ rule: `Bash(curl -fsS ${config.run.deploymentUrl}*)`, why: 'Read the deployed release\'s identity endpoint while verifying a delivery.' }] : []),
   ];
   return { ...plan, allow: [...plan.allow, ...owned.filter(entry => !plan.allow.some(existing => existing.rule === entry.rule))] };
 }

@@ -6,7 +6,7 @@ import { mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { accountLaunch, agentLaunchPlan, buildMasterStatus, checkAgentEnvironment, deliverPrompt, discoverAgentEnvironments, dispatchWork, herdrErrorCode, inspectProducerCredentials, inspectWorkerCredentials, loadMasterConfig, masterHarness, NoHealthyAccountError, prepareAgentEnvironment, PromptNotAcceptedError, readEnvironmentLog, selectAccount, setupAgentEnvironments, setupMaster, startMaster, type EnvironmentProbe } from '../src/master.js';
+import { accountLaunch, agentLaunchPlan, buildMasterStatus, checkAgentEnvironment, deliverPrompt, discoverAgentEnvironments, dispatchWork, herdrErrorCode, inspectProducerCredentials, inspectWorkerCredentials, loadMasterConfig, masterHarness, masterSettingsFromArgs, NoHealthyAccountError, prepareAgentEnvironment, PromptNotAcceptedError, readEnvironmentLog, saveMasterSettings, selectAccount, setupAgentEnvironments, setupMaster, startMaster, type EnvironmentProbe } from '../src/master.js';
 import { bindReviewer, launchReview, readReviewLedger, saveReviewerProfile } from '../src/reviewer.js';
 import { launchProducer } from '../src/producer.js';
 import { dispatchSummary, readDispatchCursor, runDispatchTick, type DispatchEffects } from '../src/auto-dispatch.js';
@@ -373,15 +373,44 @@ test('integration:max-autonomy-permissions — every launched agent gets its run
     assert.ok(start.includes('sandbox_workspace_write.network_access=true') && start.includes(join(credentialDirectory, 'masters')));
     assert.deepEqual(masterCalls.slice(-2).map(args => args[1]), ['prompt', 'wait']);
 
-    // The master harness covers everything the master owns, and still no merge path or credential read.
+    // The master harness covers everything the master owns, and still no merge path or credential
+    // read: master.json is read, never edited — its owned settings change through `master config` —
+    // the loop's systemd unit is exact, and no rule lets curl take arbitrary arguments.
     const plan = masterHarness(root, config, 'claude');
     const allow = plan.allow.map(entry => entry.rule), deny = plan.deny.map(entry => entry.rule);
-    for (const rule of ['Edit(./.graphyard/master.json)', 'Write(./.graphyard/master.json)', 'Bash(systemctl --user restart graphyard-master*)', 'Bash(journalctl --user -u graphyard-master*)', 'Bash(railway redeploy:*)', 'Bash(railway deployment:*)', 'Bash(gh run rerun:*)', 'Bash(gh workflow run deploy-smoke.yml:*)', 'Bash(curl -fsS https://graphyard.example/api/health*)', `Bash(node ${config.cliPath} master:*)`]) assert.ok(allow.includes(rule), `${rule} is the master's own`);
+    for (const rule of ['Read(./.graphyard/master.json)', 'Bash(systemctl --user restart graphyard-master.service)', 'Bash(systemctl --user stop graphyard-master.service)', 'Bash(journalctl --user -u graphyard-master.service:*)', 'Bash(railway redeploy:*)', 'Bash(railway deployment:*)', 'Bash(gh run rerun:*)', 'Bash(gh workflow run deploy-smoke.yml:*)', `Bash(node ${config.cliPath} master:*)`]) assert.ok(allow.includes(rule), `${rule} is the master's own`);
     for (const entry of plan.allow) assert.ok(entry.why.length > 30, `${entry.rule} explains itself`);
     for (const rule of allow) assert.doesNotMatch(rule, /merge|access_tokens|reviews|graphql|\.pem|\.token|credential|cookies/i);
+    for (const rule of allow.filter(rule => rule.includes('master.json'))) assert.match(rule, /^Read\(/, `${rule} must not write the master's configuration file; the owned fields go through master config`);
+    for (const rule of allow.filter(rule => /(^|[( ])curl /.test(rule))) assert.ok(!/\*/.test(rule), `${rule} would let curl take arbitrary arguments`);
+    for (const rule of allow.filter(rule => /systemctl --user (restart|start|stop)/.test(rule))) assert.match(rule, /graphyard-master\.service\)$/, `${rule} must name the loop's unit exactly`);
     for (const rule of ['Bash(gh pr merge:*)', 'Bash(gh pr review:*)', 'Bash(gh api *merge*)', 'Bash(git push:*)', 'Read(**/*.token)', 'Read(./.graphyard/connection.json)']) assert.ok(deny.includes(rule), `${rule} stays denied`);
     assert.equal(new Set(allow).size, allow.length, 'no rule is listed twice');
     assert.match(masterHarness(root, config, 'codex').manual!, /--ask-for-approval never .*network_access=true/);
+
+    // The owned-fields path is the only configuration write a master session can reach: the owned
+    // run settings and a profile's account order round-trip; autoMerge and credential paths are
+    // unreachable from it and stay exactly as the operator set them.
+    await configure(root, next => { next.autoMerge = false; });
+    const before = await loadMasterConfig(root);
+    assert.throws(() => masterSettingsFromArgs(['autoMerge=false']), /changes only what the master owns/, 'autoMerge is not an owned field');
+    assert.throws(() => masterSettingsFromArgs([`credentialFile=${join(credentialDirectory, 'elsewhere.token')}`]), /changes only what the master owns/, 'credential paths are not owned fields');
+    await assert.rejects(saveMasterSettings(root, { autoMerge: false } as any), /changes only what the master owns/, 'the writer refuses unknown fields too');
+    const tuned = await saveMasterSettings(root, masterSettingsFromArgs(['intervalSeconds=25', 'quotaCeilingPercent=90', 'deploymentUrl=https://graphyard.example/api/health', 'accounts:review-oc=opencode-a']));
+    const after = await loadMasterConfig(root);
+    assert.deepEqual(tuned.changed, ['intervalSeconds', 'deploymentUrl', 'quotaCeilingPercent', 'accounts:review-oc']);
+    assert.equal(after.run.intervalSeconds, 25); assert.equal(after.run.quotaCeilingPercent, 90);
+    assert.equal(after.run.deploymentUrl, 'https://graphyard.example/api/health');
+    assert.equal(after.autoMerge, false, 'an autoMerge flip never rides the owned fields');
+    assert.equal(after.credentialFile, before.credentialFile, 'credential paths never move through the owned fields');
+    assert.deepEqual(after.reviewers.find(profile => profile.name === 'review-oc')!.accounts, ['opencode-a']);
+    await assert.rejects(saveMasterSettings(root, { intervalSeconds: null }), /can only be set, never cleared/);
+    await assert.rejects(saveMasterSettings(root, { reviewerProfile: 'no-such' }), /No reviewer profile named no-such/);
+    await assert.rejects(saveMasterSettings(root, { accounts: [{ profile: 'no-such', accounts: ['opencode-a'] }] }), /No worker, reviewer, or producer profile named no-such/);
+    await assert.rejects(saveMasterSettings(root, masterSettingsFromArgs(['accounts:review-oc=claude-a'])), /claude-a is not a configured agent environment/);
+    const cleared = await saveMasterSettings(root, masterSettingsFromArgs(['deploymentUrl=', 'accounts:review-oc=']));
+    assert.equal(cleared.run.deploymentUrl, undefined, 'an optional owned field can be cleared');
+    assert.equal((await loadMasterConfig(root)).reviewers.find(profile => profile.name === 'review-oc')!.accounts, undefined, 'an empty account list clears the pinned order');
   } finally { await cleanup(); await rm(directory, { recursive: true, force: true }); }
 });
 
