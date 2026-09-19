@@ -7,8 +7,9 @@ import { z } from 'zod';
 import { assertRepository, discover, localDirectory, saveDiscovery } from './onboarding.js';
 import { loadConnection, managedInstructions, serverOrigin } from './repository-setup.js';
 import { resourceConflicts } from './coordination.js';
+import { mergeOrder } from './delegation.js';
 import { launchPlan, masterHarnessPlan, writeHarnessPermissions } from './harness.js';
-import { CHECK_NAME, deliveryState, deploySmokeRequired, exhaustedReviewerProfiles, nativeReviewRequired, postDeployMs, productionLatencyMs, reviewerProfileFor, reviewProviderOf, rollbackGuidance, type Work } from './model.js';
+import { CHECK_NAME, deliveryState, deploySmokeRequired, evidenceIndependenceRefusals, exhaustedReviewerProfiles, nativeReviewRequired, postDeployMs, productionLatencyMs, reviewerProfileFor, reviewProviderOf, rollbackGuidance, standingEscalations, type Work } from './model.js';
 import { containmentAttestation, containmentSettlementRefusals, containmentVerificationSchema, type ContainmentVerification } from './quarantine.js';
 import { probeSupervisorAbsence } from './supervisor.js';
 import { predictQueue, type QueuePlacement } from './merge-queue.js';
@@ -75,6 +76,14 @@ export const masterRunSchema = z.object({
 }).strict();
 export type MasterRun = z.infer<typeof masterRunSchema>;
 
+// The operator's own authenticated browser profile: a Chrome profile name (such as Default) or the
+// path of a persistent profile directory. Used only by the enumerated master browser flows.
+export const masterBrowserSchema = z.object({
+  profile: z.string().trim().min(1).max(500),
+  executable: z.string().trim().min(1).max(500).optional(),
+}).strict();
+export type MasterBrowser = z.infer<typeof masterBrowserSchema>;
+
 export const masterConfigSchema = z.object({
   version: z.literal(1),
   url: z.string(),
@@ -92,6 +101,8 @@ export const masterConfigSchema = z.object({
   reviewer: reviewerIdentitySchema.optional(),
   reviewers: z.array(reviewerProfileSchema).max(20).default([]),
   run: masterRunSchema.prefault({}),
+  // The operator's own authenticated browser profile, used only by master browser flows.
+  browser: masterBrowserSchema.optional(),
 }).strict();
 export type MasterConfig = z.infer<typeof masterConfigSchema>;
 
@@ -123,12 +134,28 @@ bound reviewer identity read-only, and \`master status\` closes that session whe
 verdict lands. Never approve a candidate yourself. Reconcile branch protection with
 \`graphyard master protection\` after any review-policy change.
 
+GitHub administration of the managed repository is yours, not the operator's:
+control-plane App permission updates, acceptance of the installation permission
+request they raise, and branch-protection reconciliation. Use the API first
+(\`graphyard master protection --apply\`, \`gh api\` on protection and installations).
+When GitHub only offers a page — App manifest confirmation, permission-request
+acceptance, a sudo prompt — run \`graphyard master browser app-permissions\`,
+\`graphyard master browser installation-accept\`, or \`graphyard master browser protection\`.
+Each drives the operator's own authenticated browser profile headless, records every
+step and screenshot under \`.graphyard/master-actions/\`, verifies the result through
+the API, and appends an attributable audit entry. On a Confirm-access page the flow
+triggers GitHub Mobile and reports the two-digit code in \`master status\`; approving
+that prompt on their device, and decisions the docs mark human-only, are the only
+operator interactions left. Never store, export, or reuse the profile's cookies
+outside those flows.
+
 Check the automatic-merge preference in master status. When disabled, wait for
 explicit operator approval for each merge. Otherwise routine merges may use
 \`graphyard master merge --all\`. The command rechecks the
 exact current candidate, every configured gate, and GitHub state immediately before
 merging. Human gates, stale observations, failures, and changed commits remain
-blocking. Never use an administrative merge bypass. Read \`docs/master-agent.md\`
+blocking. Never use an administrative merge bypass, edit a candidate, or read a
+worker credential. Read \`docs/master-agent.md\`
 in Graphyard or run \`graphyard master guide\` for the complete operating loop.
 ${masterEnd}`;
   return starts ? existing.slice(0, existing.indexOf(masterStart)) + section + existing.slice(existing.indexOf(masterEnd) + masterEnd.length) : `${existing}${existing.endsWith('\n') || !existing ? '' : '\n'}\n${section}\n`;
@@ -212,7 +239,7 @@ async function atomicPrivateText(file: string, value: string) {
   await writeFile(temporary, value, { mode: 0o600, flag: 'wx' }); await rename(temporary, file); await chmod(file, 0o600);
 }
 
-export async function setupMaster(root: string, input: { url: string; token: string; cliPath: string; hostId?: string; herdrWorkspace?: string; credentialDirectory?: string; autoMerge?: boolean; mergeMethod?: 'merge' | 'squash' | 'rebase'; run?: Partial<MasterRun> }, fetcher: typeof fetch = fetch) {
+export async function setupMaster(root: string, input: { url: string; token: string; cliPath: string; hostId?: string; herdrWorkspace?: string; credentialDirectory?: string; autoMerge?: boolean; mergeMethod?: 'merge' | 'squash' | 'rebase'; run?: Partial<MasterRun>; browser?: MasterBrowser }, fetcher: typeof fetch = fetch) {
   const url = serverOrigin(input.url); const token = input.token.trim();
   const workerConnection = await loadConnection(root);
   if (workerConnection && workerConnection.url !== url) throw new Error('Worker connection uses another Graphyard server; migrate the repository connection before master setup');
@@ -241,7 +268,7 @@ export async function setupMaster(root: string, input: { url: string; token: str
   await assertOutsideWorktrees(root, credentialDirectory, 'Coordinator credential directory');
   const identity = createHash('sha256').update(`${url}\0${detected.repository}`).digest('hex').slice(0, 20);
   const credentialFile = resolve(credentialDirectory, `${identity}.token`);
-  const config = masterConfigSchema.parse({ version: 1, url, credentialFile, cliPath: resolve(input.cliPath), repository: detected.repository, baseBranch: status.baseBranch, githubAppId: status.githubAppId, hostId: input.hostId ?? previous?.hostId ?? hostname(), herdrWorkspace: input.herdrWorkspace ?? previous?.herdrWorkspace, masterAgentName: previous?.masterAgentName ?? `graphyard-master-${repositoryName}`, autoMerge: input.autoMerge ?? previous?.autoMerge ?? true, mergeMethod: input.mergeMethod ?? previous?.mergeMethod ?? 'merge', workers: previous?.workers ?? [], ...(previous?.reviewer ? { reviewer: previous.reviewer } : {}), reviewers: previous?.reviewers ?? [], run: { ...previous?.run, ...input.run } });
+  const config = masterConfigSchema.parse({ version: 1, url, credentialFile, cliPath: resolve(input.cliPath), repository: detected.repository, baseBranch: status.baseBranch, githubAppId: status.githubAppId, hostId: input.hostId ?? previous?.hostId ?? hostname(), herdrWorkspace: input.herdrWorkspace ?? previous?.herdrWorkspace, masterAgentName: previous?.masterAgentName ?? `graphyard-master-${repositoryName}`, autoMerge: input.autoMerge ?? previous?.autoMerge ?? true, mergeMethod: input.mergeMethod ?? previous?.mergeMethod ?? 'merge', workers: previous?.workers ?? [], ...(previous?.reviewer ? { reviewer: previous.reviewer } : {}), reviewers: previous?.reviewers ?? [], run: { ...previous?.run, ...input.run }, ...(input.browser ?? previous?.browser ? { browser: input.browser ?? previous?.browser } : {}) });
   const instructionsFile = resolve(root, 'AGENTS.md');
   let existing = ''; let mode = 0o644;
   try { const info = await lstat(instructionsFile); if (!info.isFile()) throw new Error('Refusing to replace a non-regular AGENTS.md'); mode = info.mode & 0o777; existing = await readFile(instructionsFile, 'utf8'); }
@@ -258,8 +285,8 @@ export async function setupMaster(root: string, input: { url: string; token: str
   // discovered later as a 403 loop. It never blocks setup: master status keeps reporting it.
   const { attention } = controlPlaneAttention(status);
   const start = config.reviewer ? `run graphyard master start codex (or another supported agent kind) and add worker and reviewer profiles` : `run graphyard master reviewer setup to register the independent reviewer identity, then graphyard master start codex (or another supported agent kind) and add worker and reviewer profiles`;
-  return { repository: config.repository, server: config.url, role: status.actor.role, autoMerge: config.autoMerge, workers: config.workers.length, run: config.run, config: '.graphyard/master.json', reviewer: config.reviewer ? `${config.reviewer.slug}[bot]` : null, attention,
-    next: attention.length ? `Accept the GitHub App permission request (run graphyard github-setup --update-permissions on the machine holding .graphyard/github-app.json for the exact steps), then ${start}` : start[0].toUpperCase() + start.slice(1) };
+  return { repository: config.repository, server: config.url, role: status.actor.role, autoMerge: config.autoMerge, workers: config.workers.length, run: config.run, browser: config.browser ?? null, config: '.graphyard/master.json', reviewer: config.reviewer ? `${config.reviewer.slug}[bot]` : null, attention,
+    next: attention.length ? `Accept the GitHub App permission request (run graphyard github-setup --update-permissions on the machine holding .graphyard/github-app.json, or graphyard master browser app-permissions and installation-accept, for the exact steps), then ${start}` : start[0].toUpperCase() + start.slice(1) };
 }
 
 export async function saveWorkerProfile(root: string, profileInput: unknown, verify: (token: string) => Promise<any>) {
@@ -497,7 +524,7 @@ export function stopCreatedHerdrTab(pane: string | undefined, tab: string | unde
 }
 
 export function masterHarness(root: string, config: MasterConfig, harness: string) {
-  return masterHarnessPlan({ harness, root, cliPath: config.cliPath, repository: config.repository, credentialHome: dirname(dirname(config.credentialFile)) });
+  return masterHarnessPlan({ harness, root, cliPath: config.cliPath, repository: config.repository, baseBranch: config.baseBranch, credentialHome: dirname(dirname(config.credentialFile)) });
 }
 export async function startMaster(root: string, kind: WorkerProfile['kind'], agentArgs: string[], agents: HerdrAgent[], run?: (command: string, args: string[]) => string) {
   if (!kind) throw new Error('Choose a supported master agent kind');
@@ -518,7 +545,10 @@ export async function startMaster(root: string, kind: WorkerProfile['kind'], age
     const mergeInstruction = config.autoMerge
       ? 'Automatic routine merging is enabled. Use the guarded merge command when all gates pass.'
       : 'Automatic merging is disabled. Wait for explicit operator approval for each merge. Do not invoke master merge or master merge --all without that approval; the operator can invoke the guarded command directly.';
-    herdrJson(['agent', 'prompt', config.masterAgentName, `${prompt} ${reviewInstruction} ${mergeInstruction}`], run);
+    const administrationInstruction = config.browser
+      ? `GitHub administration of ${config.repository} is yours: reconcile protection with node ${config.cliPath} master protection --apply, and when only a GitHub page can do it run node ${config.cliPath} master browser app-permissions, installation-accept, or protection, which drive the operator's browser profile ${config.browser.profile} headless, record every step, verify through the API, and append an audit entry. Report a pending sudo code from master status; the operator only approves it on their device. Never ask the operator to click through what those flows cover.`
+      : `No browser profile is configured, so App permission updates, installation acceptance, and page-only protection changes still need the operator; ask them to rerun node ${config.cliPath} master init --browser-profile PROFILE so those become yours.`;
+    herdrJson(['agent', 'prompt', config.masterAgentName, `${prompt} ${reviewInstruction} ${administrationInstruction} ${mergeInstruction}`], run);
   } catch (error) {
     const malformedTab = (error as any)?.herdrTab as string | undefined;
     if (pane || tabId || malformedTab) try { stopCreatedHerdrTab(pane, tabId ?? malformedTab, run); }
@@ -626,17 +656,26 @@ export function assertMergeCandidate(work: Work, observedAt?: string, executionO
   const age = observedAt && work.observation ? Date.parse(observedAt) - Date.parse(work.observation.at) : 0;
   const fresh = !observedAt || !!work.observation && Number.isFinite(age) && age >= 0 && age < 120_000;
   const activeMerge = !!observedAt && !!work.mergeExecution && Date.parse(work.mergeExecution.expiresAt) > Date.parse(observedAt);
-  const resumable = activeMerge && !!executionOwner && work.mergeExecution!.owner === executionOwner
+  const resumable = activeMerge && !!executionOwner && work.mergeExecution!.owner === executionOwner && !work.mergeExecution!.fenced
     && work.mergeExecution!.sha === work.candidate?.sha && work.mergeExecution!.baseSha === work.candidate?.baseSha
     && work.mergeExecution!.policyRevision === work.policyRevision;
-  if ((activeMerge && !resumable) || !fresh || work.stage !== 'merge' || !work.candidate || !work.mergeAuthorization || work.mergeAuthorization.sha !== work.candidate.sha || work.mergeAuthorization.baseSha !== work.candidate.baseSha || work.mergeAuthorization.policyRevision !== work.policyRevision || work.gates.some(gate => !gate.passed) || work.violations.length) throw new Error(`${work.key} does not have a current all-gates-passing merge authorization`);
+  // An unresolved escalation, a standing blocking lead ruling, and trusted
+  // evidence whose producer has since implemented the item each refuse delivery
+  // in the broker as well as in the gate, so a stale snapshot can never present
+  // such an item as selectable.
+  if ((activeMerge && !resumable) || !fresh || standingEscalations(work).length || work.leadHold || evidenceIndependenceRefusals(work).length || work.stage !== 'merge' || !work.candidate || !work.mergeAuthorization || work.mergeAuthorization.sha !== work.candidate.sha || work.mergeAuthorization.baseSha !== work.candidate.baseSha || work.mergeAuthorization.policyRevision !== work.policyRevision || work.gates.some(gate => !gate.passed) || work.violations.length) throw new Error(`${work.key} does not have a current all-gates-passing merge authorization`);
   return { key: work.key, revision: work.revision, pr: work.candidate.pr, sha: work.candidate.sha, baseSha: work.candidate.baseSha, policyRevision: work.policyRevision };
 }
+// Merge order is recomputed from current dependencies and conflicts on every
+// batch; registration order carries no authority.
 export function currentMergeCandidates(work: Work[], observedAt: string, executionOwner?: string) {
+  const observed = Date.parse(observedAt);
+  const order = mergeOrder(work, Number.isFinite(observed) ? observed : Date.now());
+  const rank = (item: Work) => order.indexOf(item.key) + 1 || Number.MAX_SAFE_INTEGER;
   return work.filter(item => {
     try { assertMergeCandidate(item, observedAt, executionOwner); return true; }
     catch { return false; }
-  });
+  }).sort((a, b) => rank(a) - rank(b) || a.key.localeCompare(b.key));
 }
 export async function continueMergeBatch<T extends { key: string }, R>(items: T[], action: (item: T) => Promise<R>) {
   const results: (R | { key: string; result: 'refused'; reason: string })[] = [];
@@ -646,7 +685,7 @@ export async function continueMergeBatch<T extends { key: string }, R>(items: T[
   }
   return results;
 }
-type MergeExecution = { id: string; owner: string; sha: string; baseSha: string; policyRevision: number; authorizationRevision: number; issuedAt: string; expiresAt: string; verifiedAt?: string };
+type MergeExecution = { id: string; owner: string; sha: string; baseSha: string; policyRevision: number; authorizationRevision: number; issuedAt: string; expiresAt: string; verifiedAt?: string; fenced?: { reason: string; at: string } | null };
 export function assertMergeProtection(protection: any, config: MasterConfig, work: Work) {
   const nativeReview = nativeReviewRequired(work.policy);
   const reviews = protection?.required_pull_request_reviews;
@@ -720,6 +759,23 @@ export async function mergeWork(config: MasterConfig, work: Work, freshSnapshot:
     if (delay) await new Promise(resolve => setTimeout(resolve, delay));
     const remainingAfterProtection = remainingAtSnapshot - (performance.now() - authorityBudgetStartedAt);
     if (!Number.isFinite(remainingAfterProtection) || remainingAfterProtection <= 90_000) throw new Error(`${work.key} merge execution no longer has enough time for the provider call after verifying branch protection; retry`);
+    // Verification and the provider call are separated by the clock-ordering
+    // delay, and a lead escalation or blocking ruling can land inside it. The
+    // last thing Graphyard reads before handing the merge to GitHub is the
+    // record itself: the execution must still stand unfenced, and every gate
+    // must still pass. Pinned inputs are not re-aged here, so this adds a
+    // refusal for concerns raised mid-flight without adding a freshness race.
+    const settled = await freshSnapshot(); const final = settled.work.find(item => item.id === work.id);
+    const execution = final?.mergeExecution;
+    if (!final || !execution || execution.id !== granted.execution.id || execution.fenced || Date.parse(execution.expiresAt) <= Date.parse(settled.now))
+      throw new Error(`${work.key} merge execution was fenced, cancelled, or expired after final verification: ${execution?.fenced?.reason ?? 'execution is no longer current'}`);
+    const refusals = [...standingEscalations(final).map(entry => `Unresolved ${entry.trigger} escalation: ${entry.reason}`),
+      ...(final.leadHold ? [`Slice lead ${final.leadHold.leadId} ruled ${final.leadHold.action} under rule ${final.leadHold.ruleId}`] : []),
+      ...final.gates.filter(gate => !gate.passed).flatMap(gate => gate.reasons), ...final.violations];
+    if (refusals.length || !final.mergeAuthorization || final.mergeAuthorization.sha !== authorization.sha
+      || final.mergeAuthorization.baseSha !== authorization.baseSha || final.mergeAuthorization.policyRevision !== authorization.policyRevision
+      || final.candidate?.sha !== authorization.sha || final.candidate.baseSha !== authorization.baseSha)
+      throw new Error(`${work.key} no longer passes every gate after final verification: ${refusals.join('; ') || 'merge authorization was invalidated'}`);
     providerStarted = true;
     const provider = JSON.parse(run('gh', ['api', '--method', 'PUT', `repos/${config.repository}/pulls/${authorization.pr}/merge`, '-f', `sha=${authorization.sha}`, '-f', `merge_method=${config.mergeMethod}`]));
     if (provider.merged !== true || typeof provider.sha !== 'string') {

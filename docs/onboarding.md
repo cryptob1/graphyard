@@ -61,6 +61,8 @@ This guided flow supports personal-account Apps. For organization-owned reposito
 
 The manifest requests exactly the [declared control-plane permission set](github.md#app-permissions); an App registered before the merge queue must be [migrated](github.md#migrating-an-existing-app) to Contents: read and write. Install the App only on the managed repository and copy its private values into the Graphyard service. Configure normal CI and review protection now. The new `Graphyard / merge` check may appear only after the first linked PR; require it as soon as Graphyard publishes it, before merging.
 
+Later permission changes to this App, and the installation's acceptance of them, are the master's job, not yours: once the master is started with a browser profile it performs them with `master browser app-permissions` and `master browser installation-accept`.
+
 Confirm the exact CI check names and their GitHub App IDs. GitHub Actions uses App ID `15368`; other CI providers do not.
 
 ## 3. Connect a worker and Herdr
@@ -96,15 +98,18 @@ herdr workspace list
 node "$GRAPHYARD_CLI" master init \
   --url https://YOUR-GRAPHYARD-HOST \
   --herdr-workspace HERDR_WORKSPACE_ID \
+  --browser-profile Default \
   --token-stdin
 node "$GRAPHYARD_CLI" master start codex
 ```
 
 Supply the coordinator token. Use `master start claude` if preferred. Commit the managed `AGENTS.md` update.
 
-The master reads Graphyard truth, watches runtime health, routes work, and requests guarded merges. It does not implement work or submit evidence.
+`--browser-profile` names the Chrome profile on this machine that is signed in to GitHub as the repository administrator (`agent-browser profiles` lists them). With it, the master administers the control-plane App, its installation, and branch protection itself — through the API where one exists and otherwise through that profile, headless, with every step recorded, verified, and audited (see [GitHub administration through the browser](master-agent.md#github-administration-through-the-browser)). The profile is your identity: the master never stores or exports its cookies and uses it only for those flows. The one thing it still needs from you is approving GitHub's *Confirm access* prompt on your device when a page asks for it; `master status` shows the two-digit GitHub Mobile code to choose.
 
-`master start claude` also writes the master's own harness permissions to `.claude/settings.local.json` before the session starts, so routine master commands do not stop for an approval keypress. Review them with `master harness claude`; every rule is printed with the reason it exists. The generated rules grant no merge path and no credential read. For Codex, `master harness codex` prints the `trust_level = "trusted"` block to add to `$CODEX_HOME/config.toml`; Graphyard does not edit that shared user file for you.
+The master reads Graphyard truth, watches runtime health, routes work, requests guarded merges, and administers GitHub for the managed repository. It does not implement work or submit evidence.
+
+`master start claude` also writes the master's own harness permissions to `.claude/settings.local.json` before the session starts, so routine master commands do not stop for an approval keypress and the auto-mode classifier does not refuse the GitHub administration flows as permission grants or CI bypasses. Review them with `master harness claude`; every rule is printed with the reason it exists. The generated rules grant no merge path and no credential read. For Codex, `master harness codex` prints the `trust_level = "trusted"` block to add to `$CODEX_HOME/config.toml`; Graphyard does not edit that shared user file for you.
 
 ## 5. Register the reviewer identity
 
@@ -139,6 +144,8 @@ A reviewer profile holds no Graphyard credential: a reviewer reads a candidate a
 node "$GRAPHYARD_CLI" master protection
 node "$GRAPHYARD_CLI" master protection --apply
 ```
+
+From here on the master reconciles protection itself after every review-policy change, through the API or, when only the settings page can make the change, with `master browser protection`.
 
 ## 6. Add workers
 
@@ -206,6 +213,6 @@ Before adding more workers, stop one worker, let its lease expire, reclaim with 
 
 ## Current manual steps
 
-Version 0.1 still requires an operator to deploy the server, provision identities, authenticate agent providers, click GitHub's App confirmation for each App, and connect project-specific trusted evidence. Branch protection is reconciled by `master protection --apply` once the App-bound check exists; Graphyard still refuses to create protection that is missing strict checks, administrator enforcement, or the `Graphyard / merge` binding. A hosted signup flow and general turnkey E2E execution are not shipped.
+Version 0.1 still requires an operator to deploy the server, provision identities, authenticate agent providers, sign the browser profile in to GitHub once, approve GitHub's *Confirm access* prompt on their device when a page asks for it, and connect project-specific trusted evidence. Registering each App is still a first-time click in the manifest flow; App permission updates, installation acceptance, and branch-protection reconciliation are the master's (`master browser …` and `master protection --apply`), and Graphyard still refuses to create protection that is missing the `Graphyard / merge` binding or a classic rule for the base branch. Decisions the guides mark human-only — releasing work, revising requirements, choosing review providers, clearing blockers, manual proofs, rework, and merge approval without automatic merging — stay with you. A hosted signup flow and general turnkey E2E execution are not shipped.
 
 Use the [documentation index](README.md) for deeper setup, operations, and protocol details.

@@ -12,7 +12,7 @@ async function fixture(page: Page, role = 'admin') {
     if (route.request().headers().authorization !== 'Bearer browser-fixture' || state.unauthorized) return route.fulfill({ status: 401, json: { error: 'Rejected' } });
     if (route.request().method() !== 'GET') state.writes++;
     const path = new URL(route.request().url()).pathname;
-    return route.fulfill({ json: path.endsWith('/status') ? { actor: { id: 'fixture', role }, github: true, reviewProviders: ['github','codex'], repository: 'fixture/repository', jobs: [] } : path.endsWith('/work-snapshot') ? {work:[work],now:'2026-01-01T00:00:00Z'} : path.endsWith('/work') ? [work] : path === '/api/proof-grants' ? proofGrants : [] });
+    return route.fulfill({ json: path.endsWith('/status') ? { actor: { id: 'fixture', role, sessionKind: role === 'admin' ? 'human' : 'ai' }, github: true, reviewProviders: ['github','codex'], repository: 'fixture/repository', jobs: [], delegation: { limits: { maxLeads: 3, maxEngineersPerLead: 2, minReviewers: 1, maxReviewers: 2 }, slices: [{ id: 'product', name: 'Product', lead: { id: 'product-lead', displayName: 'Pine', role: 'slice-lead', sessionKind: 'ai' }, engineers: [{ id: 'engineer-a', displayName: 'Atlas', role: 'worker', sessionKind: 'ai' }, { id: 'human-pair', displayName: 'Rivera', role: 'worker', sessionKind: 'human' }], workers: [{ key: 'GY-1', id: 'engineer-a', displayName: 'Atlas', role: 'worker', sessionKind: 'ai' }, { key: 'GY-2', id: 'human-pair', displayName: 'Rivera', role: 'worker', sessionKind: 'human' }, { key: 'GY-3', id: 'engineer-a', displayName: 'Atlas', role: 'worker', sessionKind: 'ai' }], bottlenecks: [{ key: 'GY-1', reason: 'Independent review required' }] }, { id: 'infrastructure', name: 'Infrastructure', lead: null, workers: [], bottlenecks: [] }, { id: 'docs-experience', name: 'Docs/experience', lead: null, workers: [], bottlenecks: [] }], reviewers: [{ id: 'reviewer-a', displayName: 'Rowan', role: 'producer', sessionKind: 'ai' }, { id: 'legacy-proof', displayName: null, role: 'producer', sessionKind: 'undeclared' }] } } : path.endsWith('/work-snapshot') ? {work:[work],now:'2026-01-01T00:00:00Z'} : path.endsWith('/work') ? [work] : path === '/api/proof-grants' ? proofGrants : [] });
   });
   await page.goto('/'); return state;
 }
@@ -174,6 +174,45 @@ test('reader has no creation controls; graph filters and search still work', asy
   await page.getByRole('button', { name: '✓ Test cases' }).click();
   await expect(page.getByRole('heading', { name: 'Test-case library' })).toBeVisible();
   await expect(page.getByRole('button', { name: '＋ New test case' })).toHaveCount(0);
+});
+
+test('slice view names leads, workers, reviewers and bottlenecks and labels each session kind from data', async ({ page }) => {
+  await fixture(page); await login(page);
+  const slices = page.getByRole('region', { name: 'Delivery slices' });
+  await expect(slices.getByText('Product', { exact: true })).toBeVisible();
+  await expect(slices.getByText('Pine')).toBeVisible();
+  // Only the slice that actually has a lead is labelled with a lead's session kind.
+  await expect(slices.getByText('AI lead', { exact: true })).toHaveCount(1);
+  await expect(slices.getByText('No lead assigned', { exact: true })).toHaveCount(2);
+  await expect(slices.getByText('Unassigned', { exact: true })).toHaveCount(2);
+  const product = slices.locator('.slice-card').first();
+  // Capacity is engineers, not leases: Atlas holds GY-1 and GY-3 but occupies one seat.
+  await expect(product).toContainText('2/2 active engineers · 3 claimed items · 1 bottleneck');
+  // Workers, reviewers and bottlenecks are named, and each identity carries its declared kind.
+  await expect(product).toContainText('GY-1 · Atlas');
+  await expect(product).toContainText('GY-2 · Rivera');
+  await expect(product).toContainText('GY-3 · Atlas');
+  await expect(product.locator('.session .identity.ai')).toHaveCount(2);
+  await expect(product.locator('.session .identity.human')).toHaveCount(1);
+  await expect(product).toContainText('GY-1 — Independent review required');
+  await expect(slices.locator('.slice-card').nth(1)).toContainText('Bottlenecks: none');
+  await expect(slices).toContainText('Independent review/proof sessions (2):');
+  await expect(slices).toContainText('Rowan');
+  await expect(slices).toContainText('legacy-proof');
+  await expect(slices.getByText('Session kind undeclared', { exact: true })).toHaveCount(1);
+  // The signed-in session states its own kind.
+  const session = page.locator('.sidebar-bottom');
+  await expect(session).toContainText('fixture · admin');
+  await expect(session.locator('.identity.human')).toHaveCount(1);
+  await expect(session.locator('.identity.ai')).toHaveCount(0);
+});
+
+test('an AI session is labelled AI in the signed-in session summary', async ({ page }) => {
+  await fixture(page, 'worker'); await login(page);
+  const session = page.locator('.sidebar-bottom');
+  await expect(session).toContainText('fixture · worker');
+  await expect(session.locator('.identity.ai')).toHaveCount(1);
+  await expect(session.locator('.identity.human')).toHaveCount(0);
 });
 
 test('a delayed post-create refresh cannot restore the signed-out session or leak into a new login', async ({ page }) => {

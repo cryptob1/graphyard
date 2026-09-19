@@ -4,6 +4,7 @@ import remarkGfm from 'remark-gfm';
 const pages = [
   ['README', 'Documentation home'], ['onboarding', 'Onboard a repository'], ['quickstart', 'Local quickstart'], ['how-graphyard-works', 'How Graphyard works'],
   ['deployment', 'Deploy Graphyard'], ['install', 'Install & upgrade'], ['github', 'GitHub enforcement'], ['herdr', 'Herdr integration'], ['master-agent', 'Master-agent setup'],
+  ['delegation', 'Slice-lead delegation'],
   ['architecture', 'Architecture reference'], ['protocol', 'Agent protocol & API'],
   ['operations', 'Operations & recovery'], ['development', 'Development & dogfooding'],
   ['operator-automation', 'Operator automation'],

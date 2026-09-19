@@ -15,6 +15,7 @@ Choose one path. The reference guides are there when a gate or integration needs
 - [GitHub enforcement](github.md) — App permissions, branch protection, CI producers, and Codex review.
 - [Herdr integration](herdr.md) — worker installation and multi-machine use.
 - [Master-agent mode](master-agent.md) — routing, recovery, and guarded merges.
+- [Slice-lead delegation](delegation.md) — bounded product, infrastructure, and docs/experience coordination.
 - [Operations](operations.md) — stalled work, expired leases, rework, and outages.
 - [Coordination](coordination.md) — dependencies, requirement revisions, overlap, and shared resources.
 

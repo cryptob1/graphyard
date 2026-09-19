@@ -289,9 +289,13 @@ test('master harness rules cover the master loop and grant no merge path or cred
     assert.ok(allow.some(rule => rule.includes('resolve-thread.mjs')), 'audited review threads can be resolved');
     assert.ok(allow.some(rule => rule.startsWith('Write(./.graphyard/profiles/')), 'the master can edit its own profiles');
     assert.ok(allow.some(rule => rule === `Bash(node ${config.cliPath} status:*)`), 'status is readable without an operator');
-    for (const rule of allow) assert.doesNotMatch(rule, /merge|gh api|\.pem|\.token|credential/i, `allow rule ${rule} must not reach a merge or a credential`);
+    // gh api is allowed only for the protection and installation reads and subresource writes the
+    // master's administration needs; merges, verdicts, and token minting stay denied by pattern.
+    for (const rule of allow) assert.doesNotMatch(rule, /merge|access_tokens|reviews|graphql|\.pem|\.token|credential/i, `allow rule ${rule} must not reach a merge, a verdict, or a credential`);
+    for (const rule of allow.filter(entry => entry.includes('gh api'))) assert.match(rule, /^Bash\(gh api (user|user\/installations\*|apps\/\*|repos\/owner\/project\/branches\/main\/protection\*|--method PATCH repos\/owner\/project\/branches\/main\/protection\/\*)\)$/, `gh api rule ${rule} must name one administration endpoint`);
+    assert.ok(!allow.some(rule => rule.includes('agent-browser')), 'the operator browser profile is driven only through master browser');
     const deny = plan.deny.map(entry => entry.rule);
-    for (const rule of ['Bash(gh pr merge:*)', 'Bash(gh api:*)', 'Bash(git push:*)', 'Read(**/*.pem)', 'Read(**/*.token)']) assert.ok(deny.includes(rule), `${rule} must be denied`);
+    for (const rule of ['Bash(gh pr merge:*)', 'Bash(gh pr review:*)', 'Bash(gh api *merge*)', 'Bash(gh api *access_tokens*)', 'Bash(gh api graphql*)', 'Bash(gh api *PUT*)', 'Bash(gh api *DELETE*)', 'Bash(agent-browser *)', 'Bash(git push:*)', 'Read(**/*.pem)', 'Read(**/*.token)']) assert.ok(deny.includes(rule), `${rule} must be denied`);
     assert.ok(deny.some(rule => rule.startsWith(`Read(//${join(config.credentialFile, '../..')}`)), 'the credential home is denied');
 
     const preview = await writeHarnessPermissions(root, plan, false);
@@ -409,6 +413,7 @@ console.log(JSON.stringify({ required_pull_request_reviews: JSON.parse(readFileS
     const harness = JSON.parse(await cli(['master', 'harness', 'claude', '--apply']));
     assert.equal(harness.applied, true);
     assert.ok(JSON.parse(await readFile(join(root, '.claude/settings.local.json'), 'utf8')).permissions.allow.some((rule: string) => rule.includes('master:*')));
+    assert.ok(JSON.parse(await readFile(join(root, '.claude/settings.local.json'), 'utf8')).permissions.allow.includes('Bash(gh api repos/owner/project/branches/main/protection*)'), 'the harness names the managed branch from master configuration');
     const plan = JSON.parse(await cli(['master', 'protection']));
     assert.equal(plan.mode, 'agent'); assert.equal(plan.consistent, false); assert.deepEqual(plan.items.agent, ['GY-42']); assert.equal(plan.apply, false);
     assert.equal(JSON.parse(await readFile(state, 'utf8')).required_approving_review_count, 1, 'a plan changes nothing');
