@@ -349,9 +349,10 @@ async function select(f: Env, r: Release, expectedGeneration: number) {
   return delivery.select(operator, { environment: f.env, release: { id: r.id, revision: r.revision }, expectedGeneration, approvalId: approval.id }, id());
 }
 function snapshot(f: Env, generation: number, manifest: Record<'api' | 'web', string>, overrides: Record<string, unknown> = {}, healthy = true) {
-  return { registration: f.registrations.observer, epoch: f.epoch, environment: f.env, expectedGeneration: generation, snapshotId: `snapshot-${++serial}`, observedAt: at(0), validFrom: at(-60), validTo: at(0),
-    services: [{ service: 'api', complete: true, instances: [{ instance: 'api-1', digest: manifest.api, measurement: 'provider', healthy }], deployment: { id: 'dep-api', status: 'success', deployedAt: at(-120) } },
-      { service: 'web', complete: true, instances: [{ instance: 'web-1', digest: manifest.web, measurement: 'provider', healthy }], deployment: { id: 'dep-web', status: 'success', deployedAt: at(-120) } }], ...overrides };
+  const now = Date.now(); // one clock reading per snapshot: a millisecond tick between fields would push observedAt past validTo
+  return { registration: f.registrations.observer, epoch: f.epoch, environment: f.env, expectedGeneration: generation, snapshotId: `snapshot-${++serial}`, observedAt: at(0, now), validFrom: at(-60, now), validTo: at(0, now),
+    services: [{ service: 'api', complete: true, instances: [{ instance: 'api-1', digest: manifest.api, measurement: 'provider', healthy }], deployment: { id: 'dep-api', status: 'success', deployedAt: at(-120, now) } },
+      { service: 'web', complete: true, instances: [{ instance: 'web-1', digest: manifest.web, measurement: 'provider', healthy }], deployment: { id: 'dep-web', status: 'success', deployedAt: at(-120, now) } }], ...overrides };
 }
 async function state(f: Env): Promise<EnvironmentDelivery> { return (await delivery.status()).environments.find(e => e.environmentId === f.env.id)!; }
 async function rollbackOf(rollbackId: string): Promise<RollbackRequest> { return (await delivery.status()).rollbacks.find(r => r.id === rollbackId)!; }

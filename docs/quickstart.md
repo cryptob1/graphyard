@@ -1,3 +1,4 @@
+<!-- page: Start here | 3 | run Graphyard locally for evaluation. -->
 # Local quickstart
 
 Use this path to evaluate Graphyard on one machine. For a real repository and Herdr fleet, use [repository onboarding](onboarding.md).

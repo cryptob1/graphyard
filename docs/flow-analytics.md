@@ -1,3 +1,4 @@
+<!-- page: Operate Graphyard | 11 | delivery bottlenecks, phase durations, and their data lineage. -->
 # Flow analytics
 
 Flow analytics answers one question: **where is delivery waiting, and for how long?**

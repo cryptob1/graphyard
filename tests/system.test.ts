@@ -426,6 +426,30 @@ test('single-use merge execution freezes relevant mutations through observed mer
   const delivered = await engine.observe(w.id, renewed.revision, merged);
   assert.equal(delivered.stage, 'done', 'a whole-second provider timestamp proves ordering once its lower bound postdates the grant'); assert.equal(delivered.mergeExecution, null);
   assert.equal(delivered.delivery?.authorizationRevision, second.execution.authorizationRevision, 'delivery cites the authorized snapshot rather than the later heartbeat');
+  // The instant the authorization judged evidence applicability, on the repository clock.
+  // A reader re-checking expiry at the raw provider timestamp would use a different clock.
+  const asOf = Date.parse(delivered.delivery!.evidenceAsOf!);
+  assert.ok(Number.isFinite(asOf), 'delivery records the authorization-time clock bound');
+  assert.ok(asOf < Date.parse(second.execution.expiresAt), 'the recorded bound precedes the execution expiry that capped required-evidence validity');
+});
+test('a delivery carries the merge instant onto the repository clock with the measured offset', async () => {
+  let w = await submitted(); w = await engine.observe(w.id, w.revision, observation(w));
+  w = await proven(w);
+  const granted = await engine.acquireMerge(coordinator, w.id, { expectedRevision: w.revision, sha: head, baseSha: base, policyRevision: w.policyRevision }, randomUUID());
+  // The repository clock trails GitHub's by a measured five seconds. Nothing recorded after
+  // this observation can recover that, so the delivery has to carry the instant itself:
+  // every later repository-clock comparison - which reporting window a delivery falls in,
+  // and how long it took from its append-only intent event - is otherwise off by the offset.
+  const clockOffset = { min: -5000, max: -4000 };
+  const verified = await engine.verifyMerge(coordinator, w.id, { executionId: granted.execution.id }, { ...observation(w), prState: 'open', draft: false, clockOffset }, randomUUID());
+  const mergedAt = new Date(Math.ceil((Date.parse(verified.verifiedAt) + 5001) / 1000) * 1000).toISOString().replace(/\.\d+Z$/, 'Z');
+  const delivered = await engine.observe(w.id, verified.revision, { ...observation(w), merged: true, mergeSha: 'c'.repeat(40), mergedAt } as Observation);
+  assert.equal(delivered.stage, 'done');
+  assert.equal(delivered.delivery?.mergedAt, mergedAt, 'the provider timestamp is kept exactly as GitHub reported it');
+  assert.equal(delivered.delivery?.repositoryClockOffsetMs, clockOffset.min);
+  // The lower bound of the measured offset: the earliest repository instant the merge can
+  // have happened at, so a duration derived from it is never inflated by clock skew.
+  assert.equal(delivered.delivery?.mergedAtRepository, new Date(Date.parse(mergedAt) + clockOffset.min).toISOString());
 });
 test('a matching merge from before the execution grant remains an unauthorized violation', async () => {
   let w = await submitted(); w = await engine.observe(w.id, w.revision, observation(w));
@@ -1251,7 +1275,8 @@ test('deploy-smoke evidence binds to the observed deployed commit, is accepted o
   const before = structuredClone(w.delivery);
   w = await engine.execute(smokeProducer, 'evidence', w.id, smoke(mergeSha, mergeSha, 'pass', { url: 'https://github.com/owner/project/actions/runs/7' }), randomUUID());
   assert.equal(w.stage, 'done'); assert.equal(deliveryState(w), 'smoke-passed');
-  assert.deepEqual({ mergedAt: w.delivery!.mergedAt, mergeSha: w.delivery!.mergeSha, authorizationRevision: w.delivery!.authorizationRevision, deployment: w.delivery!.deployment }, { ...before, deployment: before!.deployment }, 'merge facts in the delivery snapshot are untouched');
+  const { smoke: _smoke, ...mergeFacts } = w.delivery!;
+  assert.deepEqual(mergeFacts, before, 'merge facts in the delivery snapshot are untouched');
   assert.equal(w.delivery!.smoke!.sha, mergeSha); assert.equal(w.delivery!.smoke!.mergeSha, mergeSha); assert.equal(w.delivery!.smoke!.producer, smokeProducer.id);
   assert.equal(w.delivery!.smoke!.evidenceId, w.evidence.find(e => e.proof === 'e2e:deploy-smoke')!.id);
   assert.ok(w.gates.every(gate => gate.passed), 'post-deployment facts never re-evaluate the delivered gates');

@@ -1,3 +1,4 @@
+<!-- page: Build integrations | 2 | versioned E2E scenarios pinned to environments. -->
 # E2E test-case registry
 
 Graphyard stores versioned test-case definitions separately from execution evidence. A test-case definition describes what should be tested. An evidence record describes what a trusted runner actually observed.
@@ -65,7 +66,7 @@ A trusted producer with permission for that exact proof name submits ordinary ev
 }
 ```
 
-Include the exact tested head SHA, base SHA, policy revision, result, counts, and artifact URL described in the [agent protocol](protocol.md#evidence). The evidence must match the pinned scenario revision and environment, in addition to the candidate and policy. A passed staging run cannot satisfy a production requirement. An older or newer scenario run cannot satisfy the pinned version accidentally.
+Include the exact tested head SHA, base SHA, policy revision, result, counts, and artifact URL described in the [agent protocol](protocol/evidence.md). The evidence must match the pinned scenario revision and environment, in addition to the candidate and policy. A passed staging run cannot satisfy a production requirement. An older or newer scenario run cannot satisfy the pinned version accidentally.
 
 Defining a case does not count as running it. Running it does not count as passing it. A worker reporting pass does not make the result independently trusted.
 

@@ -10,52 +10,7 @@ import { queueSequencingReason } from './merge-queue.js';
 // Nothing is read from a client claim, and no current lifecycle snapshot is treated as
 // evidence: the current state itself is read back from the last durable gate fact.
 // Upstream retention (GitHub deleting a PR, a provider pruning a deployment) cannot
-// erase an already normalized fact.
-
-export const flowMigration = `
-CREATE TABLE IF NOT EXISTS flow_facts (
-  id bigserial PRIMARY KEY,
-  work_id uuid NOT NULL REFERENCES work_items(id),
-  work_key text NOT NULL,
-  kind text NOT NULL,
-  observed_at timestamptz NOT NULL,
-  recorded_at timestamptz NOT NULL,
-  source text NOT NULL,
-  source_event bigint NOT NULL,
-  stage text,
-  work_type text NOT NULL,
-  slices text[] NOT NULL DEFAULT '{}',
-  details jsonb NOT NULL,
-  dedupe text NOT NULL UNIQUE
-);
-CREATE INDEX IF NOT EXISTS flow_facts_time ON flow_facts(observed_at, id);
-CREATE INDEX IF NOT EXISTS flow_facts_work ON flow_facts(work_id, observed_at, id);
-CREATE INDEX IF NOT EXISTS flow_facts_work_kind_latest ON flow_facts(work_id, kind, observed_at DESC, id DESC);
-CREATE INDEX IF NOT EXISTS flow_facts_kind ON flow_facts(kind, observed_at, id);
-CREATE INDEX IF NOT EXISTS flow_facts_merge_sha ON flow_facts((details->>'mergeSha'), observed_at, id) WHERE kind='merged';
-DROP TRIGGER IF EXISTS immutable_flow_facts ON flow_facts;
-CREATE TRIGGER immutable_flow_facts BEFORE UPDATE OR DELETE ON flow_facts FOR EACH ROW EXECUTE FUNCTION graphyard_immutable();
-CREATE TABLE IF NOT EXISTS flow_projection (id int PRIMARY KEY, last_event bigint NOT NULL DEFAULT 0, updated_at timestamptz NOT NULL DEFAULT clock_timestamp());
-INSERT INTO flow_projection(id,last_event) VALUES(1,0) ON CONFLICT DO NOTHING;
-CREATE TABLE IF NOT EXISTS flow_projection_state (work_id uuid PRIMARY KEY REFERENCES work_items(id), state jsonb NOT NULL);
-CREATE TABLE IF NOT EXISTS deployment_observations (
-  id uuid PRIMARY KEY, provider text NOT NULL, external_id text NOT NULL, environment text NOT NULL,
-  sha text NOT NULL, state text NOT NULL, started_at timestamptz NOT NULL, finished_at timestamptz,
-  recorded_at timestamptz NOT NULL DEFAULT clock_timestamp(), producer text NOT NULL, details jsonb NOT NULL DEFAULT '{}'::jsonb,
-  UNIQUE(provider, external_id, state)
-);
-CREATE INDEX IF NOT EXISTS deployment_time ON deployment_observations(started_at, id);
-CREATE INDEX IF NOT EXISTS deployment_sha ON deployment_observations(sha);
-DROP TRIGGER IF EXISTS immutable_deployments ON deployment_observations;
-CREATE TRIGGER immutable_deployments BEFORE UPDATE OR DELETE ON deployment_observations FOR EACH ROW EXECUTE FUNCTION graphyard_immutable();
-CREATE TABLE IF NOT EXISTS deployment_merge_observations (
-  deployment_id uuid NOT NULL REFERENCES deployment_observations(id), merge_sha text NOT NULL,
-  PRIMARY KEY(deployment_id, merge_sha)
-);
-CREATE INDEX IF NOT EXISTS deployment_merge_sha ON deployment_merge_observations(merge_sha, deployment_id);
-DROP TRIGGER IF EXISTS immutable_deployment_merges ON deployment_merge_observations;
-CREATE TRIGGER immutable_deployment_merges BEFORE UPDATE OR DELETE ON deployment_merge_observations FOR EACH ROW EXECUTE FUNCTION graphyard_immutable();
-`;
+// erase an already normalized fact. The tables live in src/store/tables/flow.ts.
 
 export const flowWindows = [7, 30, 90] as const;
 export type FlowWindow = typeof flowWindows[number];

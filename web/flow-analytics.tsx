@@ -21,7 +21,14 @@ function duration(ms: number | null | undefined) {
 function count(value: number | null | undefined) { return value === null || value === undefined ? '—' : String(value); }
 function label(bucket: string) { return new Date(bucket).toISOString().slice(5, 10); }
 
-export default function FlowAnalytics({ request, download, canAudit }: { request: (path: string) => Promise<any>; download: (path: string) => Promise<{ blob: Blob; name: string }>; canAudit: boolean }) {
+/** Fetch an export as a file: the server names it through Content-Disposition. */
+async function download(token: string, path: string) {
+  const response = await fetch(`/api/${path}`, { headers: { Authorization: `Bearer ${token}` } });
+  if (!response.ok) throw new Error((await response.json().catch(() => ({}))).error ?? `Export failed (${response.status})`);
+  return { blob: await response.blob(), name: /filename="([^"]+)"/.exec(response.headers.get('content-disposition') ?? '')?.[1] ?? 'graphyard-flow-export' };
+}
+
+export default function FlowAnalytics({ request, token, canAudit }: { request: (path: string) => Promise<any>; token: string; canAudit: boolean }) {
   const [days, setDays] = useState<number>(30);
   const [type, setType] = useState('');
   const [stage, setStage] = useState('');
@@ -56,7 +63,7 @@ export default function FlowAnalytics({ request, download, canAudit }: { request
     if (!drill) return;
     setExported('');
     try {
-      const file = await download(`analytics/flow/export?${query}&metric=${drill.metric}${drill.key ? `&key=${encodeURIComponent(drill.key)}` : ''}&format=${format}`);
+      const file = await download(token, `analytics/flow/export?${query}&metric=${drill.metric}${drill.key ? `&key=${encodeURIComponent(drill.key)}` : ''}&format=${format}`);
       const href = URL.createObjectURL(file.blob);
       const anchor = document.createElement('a'); anchor.href = href; anchor.download = file.name; document.body.appendChild(anchor); anchor.click(); anchor.remove();
       setTimeout(() => URL.revokeObjectURL(href), 10000);
