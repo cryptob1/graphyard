@@ -39,7 +39,7 @@ export interface ShippingPulse {
  * delivery record itself cites. Only the newest deliveries carry it, so the response
  * stays bounded.
  */
-type AuthorizedSnapshot = Pick<Work, 'evidence' | 'criteria' | 'candidate' | 'policyRevision' | 'scenarioRequirements' | 'validation'>;
+type AuthorizedSnapshot = Pick<Work, 'evidence' | 'criteria' | 'candidate' | 'policyRevision' | 'scenarioRequirements' | 'validation' | 'implementers' | 'workspaces' | 'lastAssignment' | 'lease'>;
 
 type DeliveryRow = {
   work_id: string; key: string; title: string; pull_request: number; merge_sha: string;
@@ -84,7 +84,7 @@ function deliveredQuality(snapshot: AuthorizedSnapshot | null, recorded: unknown
   // An unresolvable authorization is unknown, never zero proofs passed out of zero required.
   if (!snapshot) return { passingProofs: null, requiredProofs: null, violations, unavailableReason: QUALITY_UNRESOLVED };
   const required = [...new Set((snapshot.criteria ?? []).flatMap(criterion => criterion.proofs ?? []))];
-  const work = { ...snapshot, evidence: snapshot.evidence ?? [] } as Work;
+  const work = { ...snapshot, evidence: snapshot.evidence ?? [], workspaces: snapshot.workspaces ?? [] } as Work;
   const passed = required.filter(proof => {
     const evidence = currentEvidence(work, proof, asOf);
     return !!evidence && evidence.result === 'pass' && evidence.executed > 0 && evidence.skipped === 0;
@@ -174,7 +174,13 @@ export async function shippingPulse(pool: pg.Pool): Promise<ShippingPulse> {
           'candidate', a.work->'candidate',
           'policyRevision', a.work->'policyRevision',
           'scenarioRequirements', COALESCE(a.work->'scenarioRequirements','[]'::jsonb),
-          'validation', COALESCE(a.work->'validation','{}'::jsonb))
+          'validation', COALESCE(a.work->'validation','{}'::jsonb),
+          -- Producer independence is judged against the implementers as they stood in
+          -- the cited snapshot, the same identities the authorization itself weighed.
+          'implementers', COALESCE(a.work->'implementers','[]'::jsonb),
+          'workspaces', COALESCE(a.work->'workspaces','[]'::jsonb),
+          'lastAssignment', a.work->'lastAssignment',
+          'lease', a.work->'lease')
         FROM (
           SELECT e.payload->'work' AS work FROM events e
           WHERE e.work_id=d.work_id AND e.payload ? 'work'

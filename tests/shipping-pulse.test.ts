@@ -13,7 +13,7 @@ import { ProductionDelivery, PRODUCTION_CLOCK_PRECISION_MS } from '../src/produc
 
 let database: EmbeddedPostgres; let store: Store;
 before(async () => {
-  const port = Number(process.env.GRAPHYARD_PULSE_TEST_PORT ?? 15448);
+  const port = Number(process.env.GRAPHYARD_PULSE_TEST_PORT ?? Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 9);
   database = new EmbeddedPostgres({ databaseDir: await mkdtemp(join(tmpdir(), 'graphyard-pulse-test-')), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('graphyard_pulse_test');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/graphyard_pulse_test`); await store.init();

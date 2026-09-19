@@ -434,7 +434,7 @@ test('single-use merge execution freezes relevant mutations through observed mer
 });
 test('a delivery carries the merge instant onto the repository clock with the measured offset', async () => {
   let w = await submitted(); w = await engine.observe(w.id, w.revision, observation(w));
-  w = await engine.execute(producer, 'evidence', w.id, proof(), randomUUID());
+  w = await proven(w);
   const granted = await engine.acquireMerge(coordinator, w.id, { expectedRevision: w.revision, sha: head, baseSha: base, policyRevision: w.policyRevision }, randomUUID());
   // The repository clock trails GitHub's by a measured five seconds. Nothing recorded after
   // this observation can recover that, so the delivery has to carry the instant itself:
@@ -1254,7 +1254,8 @@ test('deploy-smoke evidence binds to the observed deployed commit, is accepted o
   const before = structuredClone(w.delivery);
   w = await engine.execute(smokeProducer, 'evidence', w.id, smoke(mergeSha, mergeSha, 'pass', { url: 'https://github.com/owner/project/actions/runs/7' }), randomUUID());
   assert.equal(w.stage, 'done'); assert.equal(deliveryState(w), 'smoke-passed');
-  assert.deepEqual({ mergedAt: w.delivery!.mergedAt, mergeSha: w.delivery!.mergeSha, authorizationRevision: w.delivery!.authorizationRevision, deployment: w.delivery!.deployment }, { ...before, deployment: before!.deployment }, 'merge facts in the delivery snapshot are untouched');
+  const { smoke: _smoke, ...mergeFacts } = w.delivery!;
+  assert.deepEqual(mergeFacts, before, 'merge facts in the delivery snapshot are untouched');
   assert.equal(w.delivery!.smoke!.sha, mergeSha); assert.equal(w.delivery!.smoke!.mergeSha, mergeSha); assert.equal(w.delivery!.smoke!.producer, smokeProducer.id);
   assert.equal(w.delivery!.smoke!.evidenceId, w.evidence.find(e => e.proof === 'e2e:deploy-smoke')!.id);
   assert.ok(w.gates.every(gate => gate.passed), 'post-deployment facts never re-evaluate the delivered gates');
