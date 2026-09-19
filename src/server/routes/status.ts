@@ -5,6 +5,7 @@ import { installationSettingsUrl } from '../../github.js';
 import { controlPlanePermissions, requiredPermissions } from '../../github-permissions.js';
 import { releaseInfo, schemaVersion } from '../../release.js';
 import { defineRoutes } from '../routes.js';
+import { coordinationSnapshot, coordinationViewHeader } from '../work-view.js';
 
 /** Control-plane status and the work reads every client polls. */
 export const statusRoutes = defineRoutes('status', [
@@ -31,9 +32,14 @@ export const statusRoutes = defineRoutes('status', [
   },
   {
     method: 'GET', path: '/api/work-snapshot',
-    async handle({ actor, services, operatorVisible }) {
+    async handle({ actor, req, url, services, operatorVisible }) {
+      // The coordination view is the bounded read the master loop and dispatcher poll
+      // (work-view.ts); without it the snapshot carries every document whole.
+      const requested = url.searchParams.get('view') ?? req.headers[coordinationViewHeader.toLowerCase()];
+      const view = z.enum(['full', 'coordination']).parse(Array.isArray(requested) ? requested[0] : requested ?? 'full');
       const snapshot = await services.engine.store.workSnapshot(); const visibleWork = operatorVisible(snapshot.work);
-      return { ...snapshot, work: visibleWork, jobs: actor.role === 'operator-agent' ? snapshot.jobs.filter(job => visibleWork.some(work => work.id === job.work_id)) : snapshot.jobs };
+      const scoped = { ...snapshot, work: visibleWork, jobs: actor.role === 'operator-agent' ? snapshot.jobs.filter(job => visibleWork.some(work => work.id === job.work_id)) : snapshot.jobs };
+      return view === 'coordination' ? coordinationSnapshot(scoped) : scoped;
     },
   },
   { method: 'GET', path: '/api/work', handle: async ({ services, operatorVisible }) => operatorVisible(await services.engine.store.list()) },
