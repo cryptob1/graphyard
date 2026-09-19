@@ -29,7 +29,11 @@ KillSignal=SIGTERM
 StandardOutput=journal
 StandardError=journal
 NoNewPrivileges=yes
-PrivateTmp=yes
+# No PrivateTmp: producer sessions run in Herdr, outside this unit, and create their detached proof
+# worktrees under the shared /tmp. A private /tmp would hide every one of them from the loop, which
+# reads the repository's worktree inventory on each cycle. (The loop also survives a worktree whose
+# path is missing or hidden, but it must see the ones it reports on.)
+PrivateTmp=no
 
 [Install]
 WantedBy=default.target
