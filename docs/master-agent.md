@@ -130,6 +130,17 @@ or a Herdr tab. `master init` accepts the loop's settings:
 | `--reviewer-profile NAME` | The reviewer profile automatic dispatch launches when more than one is configured |
 | `--producer-timeout MINUTES` | How long a launched producer session may run before it is recorded as expired, 5–1440; default 120 |
 
+A running loop re-reads `.graphyard/master.json` before every cycle and every dispatch tick, so
+worker, reviewer and producer profiles, `herdrWorkspace`, every `run` setting (including both
+intervals when `--interval` was not passed) and `autoMerge` apply without a restart: the change
+is adopted on the next pass and recorded as a `config` action naming the settings that changed.
+What the loop is bound to — `url`, `repository`, `baseBranch`, `githubAppId`, `hostId`,
+`credentialFile`, `cliPath` and `masterAgentName` — cannot change under it. Such a change is
+refused by name (`master.json changes url, which a running master loop is bound to; restart
+master run to adopt it`), recorded once as an escalation, and shown under `daemon.config` in
+`master status`; the loop keeps every setting it last loaded, the other changes in that write
+included, until it is restarted. A file that no longer parses is refused the same way.
+
 Each cycle:
 
 1. **closes finished worker sessions** — a launched agent whose principal holds no active lease has
@@ -175,6 +186,13 @@ rework waiting for a dispatch that never comes.
 
 One loop owns a repository at a time. A second refuses while the first is alive; a lock left by a
 killed daemon on the same host is reclaimed as soon as that process is gone.
+
+Each cycle reads the repository's Git worktree inventory. A registered worktree whose path is
+missing or hidden — a proof worktree a producer removed without `git worktree remove`, or one
+under a `/tmp` this process cannot see — is compared by its registered path and never stops the
+loop. The example systemd unit does not set `PrivateTmp`: producer sessions run in Herdr, outside
+the unit, and create their detached proof worktrees under the shared `/tmp`, which a private one
+would hide from the loop.
 
 ### What the loop will not do
 
@@ -244,16 +262,36 @@ request that has no session yet:
   fewer free producer profiles than groups the remaining groups wait and `master status` says
   so; add profiles for parallelism.
 
-A launch happens **once per request id**: the reviewer ledger (`.graphyard/reviews.json`) and
-the producer ledger (`.graphyard/producers.json`) record which request each session answers,
+A request has **one live session at a time**: the reviewer ledger (`.graphyard/reviews.json`)
+and the producer ledger (`.graphyard/producers.json`) record which request each session answers,
 so a restart, a second tick or a re-read snapshot never doubles a session, and a request the
 control plane satisfied or cancelled is never launched. The ledgers record launch, completion
 and outcome per session: a reviewer session completes on its verdict and expires with its
 token; a producer session completes when every proof of its group has a trusted outcome (or
-one failed), expires after `producerTimeoutMinutes`, and is recorded as `failed` when Herdr
-reports it finished five minutes without submitting. A session whose head the control plane
-cancelled is closed on the next tick with its token withdrawn and the reason on the record — a
-head change cancels the in-flight sessions for the old head.
+one failed) and expires after `producerTimeoutMinutes`. Either is recorded as `failed` when
+Herdr reports it finished, gone, or blocked on a prompt for five minutes without its verdict or
+evidence — the resolution says which, and a blocked one says it ended waiting on input. A
+session whose head the control plane cancelled is closed on the next tick with its token
+withdrawn and the reason on the record — a head change cancels the in-flight sessions for the
+old head.
+
+**A failed or expired session is relaunched for the same request.** It does not strand the
+request until the head changes: the loop launches the request again as its next `attempt`
+after a widening wait — 1, 4, then 16 minutes after the last session closed, never more than 30
+— up to four sessions in all. `master status` shows each such request's `retry` (attempts, the
+limit, `nextAt`, whether it is exhausted, and the last session's state and resolution) beside its
+`session`, and raises it as the row's `attention` (`Producer session for integration proofs of
+GY-N failed after attempt 1 of 4: …; next attempt at …`). An exhausted reviewer request is
+recovered with `master review GY-N` once its cause is fixed.
+
+**Every launched session decides and acts on its own.** The reviewer, producer and worker
+prompts require it: post the verdict, submit pass or fail evidence, or record a blocker naming
+the exact command that was blocked and its error — a reviewer as a `COMMENT` review on the
+exact commit, a producer as `fail` evidence, a worker with `graphyard blocked GY-N EPOCH
+REASON` — and never stop to ask a human for confirmation or offer a menu of options. A session
+that ends waiting on input anyway is recorded as failed with that reason (a worker blocked on a
+prompt while it holds its assignment becomes a `session` action in `master status`), and a
+reviewer or producer request is relaunched as above.
 
 A launch the loop could not perform — a stale observation, a busy profile, Herdr refusing — is
 recorded in the dispatch cursor beside the coordinator credential with a widening retry
@@ -269,6 +307,29 @@ for each (profile, agent, state, verdict or per-proof outcome, and how long it h
 `producers` lists the pending and recent producer sessions, `dispatch` reports the dispatcher's
 cadence, last tick and failures, and `counts.dispatchRequested` and `counts.dispatchRunning`
 total the requests and the sessions running for them.
+
+A tick whose snapshot read fails or times out is retried promptly with a widening wait, and
+each consecutive failure doubles the bound on the next read (8 s, 16 s, 32 s…), up to the
+dispatch interval or the 8 s base, whichever is longer. A server that has merely become slower than the bound is therefore read on a
+later attempt instead of timing out on every retry and leaving the dispatcher blind for good.
+
+### Managing profiles
+
+Profiles change while the loop runs; it adopts each change on its next tick.
+
+| Command | Effect |
+| --- | --- |
+| `master producer add FILE` | Add a producer profile; its credential must authenticate exactly its principal as a producer |
+| `master producer replace FILE` | Replace the producer profile of the same name — a new principal, credential, kind or agent name — verified like `add` |
+| `master producer remove NAME` | Remove a producer profile; sessions it launched stay in the ledger and settle as usual |
+| `master reviewer remove NAME` | Remove a reviewer profile; a `run.reviewerProfile` naming it is cleared with it |
+
+`master status` reports setup that would silently stop every launch under `setup.attention`: a
+reviewer App that `master reviewer setup` registered but that was never bound (the flow stopped
+before the installation was verified, or the bind failed), a bound reviewer App whose credential
+file is gone, and a configured `herdrWorkspace` that Herdr no longer lists. `setup.reviewer` and
+`setup.herdrWorkspace` carry the details; only the App's public facts are read from its
+registration.
 
 What this leaves the master — the loop's judgment half, or the visible session — is the
 findings: read a `CHANGES_REQUESTED` verdict or a failed proof, decide whether it needs rework,
@@ -509,6 +570,16 @@ Existing entries are never removed and regeneration is idempotent. `master harne
 
 A harness allowlist is a prompt policy, not an authority boundary. The enforced boundary stays branch protection plus the App-bound Graphyard check: Graphyard's guarded merge is the only path that rechecks the exact candidate before delivery.
 
+### Session harness rules
+
+Claude Code loads `.claude/settings.local.json` for every session started anywhere under the repository, assigned worktrees included, so the master's rules would otherwise bind the sessions it launches: its `git push` deny would refuse a worker's push to its own branch, and its review-call deny would refuse the reviewer's verdict. Worker, reviewer and producer sessions therefore never inherit them. When the repository carries Claude project or local settings, each Claude session is launched with `--setting-sources user --settings .graphyard/harness/ROLE-PROFILE.json`: the operator's user settings plus its own role file, and never the repository's project or local settings where the master's rules live.
+
+- **worker** — the same rules dispatch writes into the assigned worktree's own `.claude/settings.local.json`: it may `git push` its assigned branch (`origin BRANCH`, `-u`, `HEAD:BRANCH`), run its item's Graphyard commands and open its pull request; it may not force-push, push the base branch, rebase, merge, post a review or submit evidence. The worktree file alone is not enough — Claude Code still loads the repository's settings above it, master denies included — which is why the session is launched with its role file instead.
+- **reviewer** — may read the diff and post the one verdict it was launched for (`gh api --method POST repos/OWNER/REPO/pulls/N/reviews`); may not push, commit, claim, submit evidence, or edit files.
+- **producer** — may fetch, add and remove its detached worktree and submit evidence; may not push, commit, claim or post a review.
+
+Every role is denied reads of credential directories, `.graphyard/connection.json`, `credentials.json`, `github-app.json`, `*.pem` and `*.token`, and every raw merge. The master's own rules are unchanged: it still cannot push. Runtimes that do not read Claude settings (Codex, Cursor, opencode) inherit no master rule and are launched with their profile arguments unchanged.
+
 ## Containment quarantines
 
 A foreground worker runs inside a containment quarantine that its supervisor settles on verified shutdown. When the supervisor itself dies — a crash, a provider usage limit, a killed terminal — the capability dies with it and the fence stays up: the item is undispatchable, its exclusive resources stay reserved, and its requirements stay immutable until someone proves the worker stopped.
@@ -665,6 +736,9 @@ The master clears blockers and adds requirements as its operator-agent identity;
 | `master status` | Work truth, session health, reviews, queue, `schedule` (dispatch order, overlap holds, high-conflict scopes), per-candidate `conflicts`, per-row `dispatch` (requested reviews and producers), and `administration` (recent browser actions, pending sudo code) |
 | `master dispatch GY-N PROFILE [--allow-overlap]` | Invite a worker to claim ready work; `--allow-overlap` dispatches over a planned-file overlap hold |
 | `master producer add FILE` | Add a proof-producer launch profile with its own producer credential |
+| `master producer replace FILE` | Replace the producer profile of the same name, verified like `add` |
+| `master producer remove NAME` | Remove a proof-producer launch profile |
+| `master reviewer remove NAME` | Remove a reviewer launch profile |
 | `master review GY-N [PROFILE]` | Launch the independent reviewer on the exact candidate (the loop does this on its own; recovery path) |
 | `master protection [--apply]` | Reconcile branch protection through the API |
 | `master browser app-permissions` | Raise the control-plane App's permissions through the browser |

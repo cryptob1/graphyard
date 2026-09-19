@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { z } from 'zod';
-import { accountLaunch, atomicPrivateWrite, closeHerdrPane, createdHerdrTab, deliverPrompt, herdrJson, loadMasterConfig, privateFile, readProducerCredential, selectAccount, sharedGitDirectory, stopCreatedHerdrTab, type EnvironmentProbe, type PromptDelivery, type HerdrAgent, type MasterConfig, type ProducerProfile } from './master.js';
+import { accountLaunch, atomicPrivateWrite, autonomousSession, closeHerdrPane, createdHerdrTab, deliverPrompt, herdrJson, loadMasterConfig, prepareSessionHarness, privateFile, readProducerCredential, selectAccount, sharedGitDirectory, stopCreatedHerdrTab, type EnvironmentProbe, type PromptDelivery, type HerdrAgent, type MasterConfig, type ProducerProfile, type SessionRetryReport } from './master.js';
 import { implementerIdentities, type Work } from './model.js';
 import type { DispatchRequest } from './model/dispatch.js';
 
@@ -24,8 +24,10 @@ export const producerOutcomes = ['pass', 'fail', 'untrusted', 'missing'] as cons
 export type ProducerOutcome = typeof producerOutcomes[number];
 export const producerRecordSchema = z.object({
   id: z.string().uuid(),
-  /** The control-plane producer request this session answers; one session per request id. */
+  /** The control-plane producer request this session answers; one live session per request id. */
   requestId: z.string().min(1).max(64),
+  /** Which launch for the request this is: a failed or expired session is relaunched as the next attempt. */
+  attempt: z.number().int().min(1).max(50).default(1),
   key: z.string().min(1).max(40), pr: z.number().int().positive(),
   sha: sha40, baseSha: sha40, policyRevision: z.number().int().nonnegative(),
   group: z.string().min(1).max(40), proofs: z.array(z.string().min(1).max(200)).min(1).max(50),
@@ -56,6 +58,32 @@ export const saveProducerLedger = (root: string, ledger: ProducerLedger) => atom
 /** A finished session that submitted nothing for a proof is given this long to finish submitting before it is recorded as failed. */
 export const producerIdleGraceMs = 5 * 60_000;
 
+/**
+ * A session recorded failed or expired does not end its request: the loop relaunches it for the
+ * same request, up to `sessionRetryLimit` sessions in all, each after a wider wait than the last
+ * (1, 4 and 16 minutes, never more than 30). Any other recorded state — pending, completed,
+ * cancelled — means the request has its session, and nothing is launched for it again.
+ */
+export const sessionRetryLimit = 4, sessionRetryBaseMs = 60_000, sessionRetryMaxMs = 30 * 60_000;
+export const sessionRetryDelay = (attempts: number) => Math.min(sessionRetryBaseMs * 4 ** Math.max(0, attempts - 1), sessionRetryMaxMs);
+const retriedStates = ['failed', 'expired'];
+export function sessionRetry(records: { requestId?: string; state: string; requestedAt: string; closedAt?: string | null; resolution?: string | null }[], requestId: string, now: number) {
+  const launched = records.filter(record => record.requestId === requestId);
+  const last = launched.at(-1);
+  const report = { requestId, attempts: launched.length, limit: sessionRetryLimit, last: last ? { state: last.state, resolution: last.resolution ?? null } : null };
+  if (!last) return { ...report, launch: true, settled: false, nextAt: null, exhausted: false };
+  if (!retriedStates.includes(last.state)) return { ...report, launch: false, settled: true, nextAt: null, exhausted: false };
+  if (launched.length >= sessionRetryLimit) return { ...report, launch: false, settled: false, nextAt: null, exhausted: true };
+  const nextAt = Date.parse(last.closedAt ?? last.requestedAt) + sessionRetryDelay(launched.length);
+  return { ...report, launch: now >= nextAt, settled: false, nextAt: new Date(nextAt).toISOString(), exhausted: false };
+}
+/** The retry schedule of every request whose latest session failed or expired, as master status reports it. */
+export function sessionRetries(records: { requestId?: string; state: string; requestedAt: string; closedAt?: string | null; resolution?: string | null }[], now: number): SessionRetryReport[] {
+  const requests = [...new Set(records.map(record => record.requestId).filter((id): id is string => !!id))];
+  return requests.map(id => sessionRetry(records, id, now)).filter(retry => retry.last && retriedStates.includes(retry.last.state))
+    .map(({ requestId, attempts, limit, nextAt, exhausted, last }) => ({ requestId, attempts, limit, nextAt, exhausted, last }));
+}
+
 // The request must still be the one the record holds for the exact current candidate; a session
 // launched for anything else would submit evidence the gates cannot bind.
 export function assertProducerCandidate(work: Work, request: DispatchRequest, observedAt: string) {
@@ -79,7 +107,7 @@ export function independentProducerProfiles(work: Work, profiles: ProducerProfil
   return profiles.filter(profile => !implementers.has(profile.principal));
 }
 
-export function producerPrompt(config: MasterConfig, binding: ProducerBinding, profile: Pick<ProducerProfile, 'principal'>) {
+export function producerPrompt(config: Pick<MasterConfig, 'repository' | 'cliPath'>, binding: ProducerBinding, profile: Pick<ProducerProfile, 'principal'>) {
   const worktree = `/tmp/graphyard-proof-${binding.key.toLowerCase()}-${binding.sha.slice(0, 7)}`;
   const evidenceFile = (proof: string) => `${worktree}-${proof.replace(/[^a-zA-Z0-9]+/g, '-')}.evidence.json`;
   return `You are an independent Graphyard proof producer for ${config.repository}, principal ${profile.principal}. Produce trusted evidence for work item ${binding.key} (pull request #${binding.pr}) at exact head ${binding.sha} against base ${binding.baseSha} under policy revision ${binding.policyRevision}, for the ${binding.group} proof group: ${binding.proofs.join(', ')}. `
@@ -87,7 +115,8 @@ export function producerPrompt(config: MasterConfig, binding: ProducerBinding, p
     + `Work in a detached worktree of the exact head, never in this checkout and never under .graphyard/worktrees: git fetch origin ${binding.sha} && git worktree add --detach ${worktree} ${binding.sha}. Install and build there, then run what establishes each proof — start from the tests and scripts named for the proof (grep the proof name under tests/ and scripts/) and the acceptance criteria in node ${config.cliPath} status ${binding.key} — with every GRAPHYARD_* and HERDR_* variable unset for the project's own test runs and a free GRAPHYARD_TEST_PORT. `
     + 'Do not edit, commit, push, rebase or merge the candidate, do not claim Graphyard work, do not post a review, and never weaken, skip or narrow a test to make a proof pass. '
     + `For each proof write a JSON file such as ${evidenceFile(binding.proofs[0])} of the form {"proof":"${binding.proofs[0]}","sha":"${binding.sha}","baseSha":"${binding.baseSha}","policyRevision":${binding.policyRevision},"result":"pass"|"fail","executed":N,"skipped":0,"environment":"<runtime and how it was produced>","scopeFiles":["<paths the proof depends on>"]} — exactly this sha, baseSha and policyRevision, executed as the number of cases actually run, and a failing or incomplete run submitted as result fail rather than omitted — and submit it with node ${config.cliPath} evidence ${binding.key} FILE. `
-    + `When every proof of the group is submitted, remove the worktree with git worktree remove --force ${worktree}, print a one-paragraph summary naming each proof and its result, and stop; Graphyard closes this session once it observes the evidence.`;
+    + `When every proof of the group is submitted, remove the worktree with git worktree remove --force ${worktree}, print a one-paragraph summary naming each proof and its result, and stop; Graphyard closes this session once it observes the evidence. `
+    + autonomousSession('submit pass or fail evidence for every proof of the group', `submit that proof as result fail with executed as the cases that ran, putting the blocked command and its error in environment`);
 }
 
 export async function launchProducer(root: string, work: Work, request: DispatchRequest, profile: ProducerProfile, agents: { name?: string }[], observedAt: string, dependencies: {
@@ -105,19 +134,25 @@ export async function launchProducer(root: string, work: Work, request: Dispatch
   const ledger = await readProducerLedger(root);
   const pending = ledger.producers.find(record => record.state === 'pending' && record.key === work.key && record.group === binding.group);
   if (pending) throw new Error(`A producer session for ${work.key} ${binding.group} proofs is already pending on ${pending.sha.slice(0, 7)}; reconcile it with master status before launching another`);
-  if (ledger.producers.some(record => record.requestId === request.id)) throw new Error(`Request ${request.id} was already launched for ${work.key}; one session per request`);
+  // One live session per request: a request whose sessions all failed or expired may be launched
+  // again, as its next attempt, until the retry limit.
+  const prior = ledger.producers.filter(record => record.requestId === request.id);
+  if (prior.some(record => !retriedStates.includes(record.state))) throw new Error(`Request ${request.id} was already launched for ${work.key}; one session per request`);
+  if (prior.length >= sessionRetryLimit) throw new Error(`Request ${request.id} for ${work.key} already had ${prior.length} sessions fail or expire; no further automatic attempt`);
   if (agents.some(agent => agent.name === profile.agentName)) throw new Error(`Producer agent ${profile.agentName} is already visible in Herdr`);
   await readProducerCredential(root, profile.credentialFile);
   const selected = await selectAccount(config, 'producer', profile, { ...dependencies.probe, work: work.key });
   // A producer builds in a detached worktree under /tmp that commits into the repository's Git directory.
   const launch = accountLaunch(profile, selected.account, { writable: ['/tmp', sharedGitDirectory(root)].filter((path): path is string => !!path) });
+  // The producer loads its own role rules, never the master's.
+  const harness = await prepareSessionHarness(root, config, { role: 'producer', kind: profile.kind, profile: profile.name, credentialFiles: [profile.credentialFile] });
   let pane: string | undefined, tabId: string | undefined;
   try {
     const environment = { ...launch.environment, GRAPHYARD_URL: config.url, GRAPHYARD_TOKEN_FILE: profile.credentialFile, GRAPHYARD_HOST_ID: config.hostId, GRAPHYARD_PRODUCER: `${binding.key}@${binding.sha}` };
     const created = createdHerdrTab(herdrJson(['tab', 'create', ...(config.herdrWorkspace ? ['--workspace', config.herdrWorkspace] : []), '--cwd', root,
       '--label', `${binding.key} ${binding.group} proofs · ${profile.agentName}`, ...Object.entries(environment).flatMap(([name, value]) => ['--env', `${name}=${value}`]), '--no-focus'], dependencies.run));
     pane = created.pane; tabId = created.tab;
-    herdrJson(['agent', 'start', profile.agentName, '--kind', launch.kind!, '--pane', created.pane, '--', ...launch.args], dependencies.run);
+    herdrJson(['agent', 'start', profile.agentName, '--kind', launch.kind!, '--pane', created.pane, '--', ...launch.args, ...harness.args], dependencies.run);
     deliverPrompt(profile.agentName, producerPrompt(config, binding, profile), dependencies.run, dependencies.prompt);
   } catch (error) {
     const malformedTab = (error as any)?.herdrTab as string | undefined;
@@ -126,11 +161,11 @@ export async function launchProducer(root: string, work: Work, request: Dispatch
     throw error;
   }
   const requestedAt = now();
-  const record: ProducerRecord = producerRecordSchema.parse({ id: randomUUID(), requestId: request.id, key: binding.key, pr: binding.pr, sha: binding.sha, baseSha: binding.baseSha, policyRevision: binding.policyRevision,
+  const record: ProducerRecord = producerRecordSchema.parse({ id: randomUUID(), requestId: request.id, attempt: prior.length + 1, key: binding.key, pr: binding.pr, sha: binding.sha, baseSha: binding.baseSha, policyRevision: binding.policyRevision,
     group: binding.group, proofs: binding.proofs, profile: profile.name, principal: profile.principal, agentName: profile.agentName, pane: pane ?? null,
     requestedAt: requestedAt.toISOString(), expiresAt: new Date(requestedAt.getTime() + config.run.producerTimeoutMinutes * 60_000).toISOString(), state: 'pending', outcome: Object.fromEntries(binding.proofs.map(proof => [proof, 'missing'])) });
   await saveProducerLedger(root, { ...ledger, producers: [...ledger.producers, record] });
-  return { producer: record.id, requestId: request.id, work: binding.key, pr: binding.pr, sha: binding.sha, baseSha: binding.baseSha, policyRevision: binding.policyRevision, group: binding.group, proofs: binding.proofs,
+  return { producer: record.id, requestId: request.id, attempt: record.attempt, work: binding.key, pr: binding.pr, sha: binding.sha, baseSha: binding.baseSha, policyRevision: binding.policyRevision, group: binding.group, proofs: binding.proofs,
     profile: profile.name, principal: profile.principal, agentName: profile.agentName, pane: record.pane, expiresAt: record.expiresAt, approvals: launch.plan.approvals,
     account: selected.account ? { environment: selected.account.name, kind: selected.account.kind, quota: selected.health?.quota ?? null, skipped: selected.skipped } : null,
     recorded: 'the launch is recorded; master status reconciles the evidence and closes the session' };
@@ -177,7 +212,12 @@ export async function reconcileProducers(root: string, config: MasterConfig, wor
     else if (Date.parse(record.expiresAt) <= now.getTime()) next = { state: 'expired', resolution: `no trusted evidence for ${record.proofs.filter(proof => outcome[proof] !== 'pass').join(', ')} within ${config.run.producerTimeoutMinutes} minutes` };
     else if (finished) {
       if (!record.idleSince) { record.idleSince = now.toISOString(); changed++; }
-      else if (now.getTime() - Date.parse(record.idleSince) >= producerIdleGraceMs) next = { state: 'failed', resolution: `the session finished (${agent?.agent_status ?? 'gone from Herdr'}) without trusted evidence for ${record.proofs.filter(proof => outcome[proof] !== 'pass').map(proof => `${proof} (${outcome[proof]})`).join(', ')}` };
+      else if (now.getTime() - Date.parse(record.idleSince) >= producerIdleGraceMs) {
+        const missing = record.proofs.filter(proof => outcome[proof] !== 'pass').map(proof => `${proof} (${outcome[proof]})`).join(', ');
+        next = { state: 'failed', resolution: agent?.agent_status === 'blocked'
+          ? `the session ended waiting on input (Herdr reports it blocked) instead of deciding on its own, without trusted evidence for ${missing}`
+          : `the session finished (${agent?.agent_status ?? 'gone from Herdr'}) without trusted evidence for ${missing}` };
+      }
     } else if (record.idleSince) { delete record.idleSince; changed++; }
     if (!next) continue;
     let closeFailure: string | undefined;
@@ -192,7 +232,7 @@ export async function reconcileProducers(root: string, config: MasterConfig, wor
 }
 
 export function summarizeProducers(records: ProducerRecord[]) {
-  const describe = (record: ProducerRecord) => ({ producer: record.id, requestId: record.requestId, work: record.key, pr: record.pr, sha: record.sha, policyRevision: record.policyRevision, group: record.group, proofs: record.proofs,
+  const describe = (record: ProducerRecord) => ({ producer: record.id, requestId: record.requestId, attempt: record.attempt, work: record.key, pr: record.pr, sha: record.sha, policyRevision: record.policyRevision, group: record.group, proofs: record.proofs,
     profile: record.profile, principal: record.principal, agentName: record.agentName, state: record.state, outcome: record.outcome, requestedAt: record.requestedAt, expiresAt: record.expiresAt, closedAt: record.closedAt ?? null, resolution: record.resolution ?? null, attention: record.closeFailure ?? null });
   return { pending: records.filter(record => record.state === 'pending').map(describe), completed: records.filter(record => record.state !== 'pending').slice(-20).map(describe) };
 }
