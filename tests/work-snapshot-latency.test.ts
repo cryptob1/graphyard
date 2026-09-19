@@ -1,0 +1,222 @@
+import { after, before, test } from 'node:test';
+import assert from 'node:assert/strict';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { randomUUID } from 'node:crypto';
+import { fileURLToPath } from 'node:url';
+import type { AddressInfo } from 'node:net';
+import EmbeddedPostgres from 'embedded-postgres';
+import { Store } from '../src/store.js';
+import { Engine } from '../src/engine.js';
+import { server } from '../src/server.js';
+import { evidenceIndependenceRefusals, type Evidence, type Work } from '../src/model.js';
+import { reconcileAutoDispatch, type DispatchRequest } from '../src/model/dispatch.js';
+import { masterConfigSchema, type MasterConfig } from '../src/master.js';
+import { emptyDaemonState, missingProofs, runDaemon, type DaemonEffects, type DaemonState } from '../src/master-daemon.js';
+import { dispatchSummary, emptyDispatchCursor, runAutoDispatch, tickRetryDelay, type DispatchCursor, type DispatchEffects } from '../src/auto-dispatch.js';
+import { proofOutcome } from '../src/producer.js';
+import { coordinationHistoryLimit, coordinationViewHeader } from '../src/server/work-view.js';
+import { cycleBudget } from '../src/cli/master.js';
+
+// A ledger the size production reached and beyond: 100 items, each carrying the history a long-lived
+// item accumulates (evidence for every head it ever had, the per-file scope comparison of its last
+// observation, dozens of resolved dispatch requests) and thousands of github.observed events whose
+// payloads are whole documents.
+const ITEMS = 100, OBSERVATIONS_PER_ITEM = 40, HEADS_PER_ITEM = 12;
+const launcher = fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url));
+const coordinatorToken = 'c'.repeat(40);
+
+let database: EmbeddedPostgres; let store: Store; let http: ReturnType<typeof server>; let origin: string; let directory: string;
+let config: MasterConfig;
+
+const sha = (item: number, head: number) => `${item.toString(16).padStart(4, '0')}${head.toString(16).padStart(4, '0')}`.padEnd(40, 'a');
+const base = 'b'.repeat(40);
+
+function ledgerItem(index: number, now: Date): Work {
+  const id = randomUUID(), key = `GY-${index + 1}`;
+  const proofs = ['integration:alpha', 'integration:beta', 'e2e:gamma'];
+  const head = sha(index, HEADS_PER_ITEM);
+  const stage = (['build', 'review', 'test', 'acceptance', 'merge', 'done'] as const)[index % 6];
+  const evidence: Evidence[] = [];
+  for (let h = 1; h <= HEADS_PER_ITEM; h++) for (const proof of proofs) evidence.push({
+    id: randomUUID(), proof, sha: sha(index, h), baseSha: base, policyRevision: 1, producer: 'proof-runner', trusted: true, result: h === HEADS_PER_ITEM && proof === 'e2e:gamma' && index % 2 ? 'fail' : 'pass',
+    executed: 12, skipped: 0, at: new Date(now.getTime() - (HEADS_PER_ITEM - h) * 60_000).toISOString(), environment: 'node 24 on the proof runner',
+    url: `https://ci.example/runs/${index}-${h}`, scopeFiles: Array.from({ length: 30 }, (_, file) => `src/module-${file}/component-${index}.ts`),
+    artifacts: Array.from({ length: 4 }, (_, n) => ({ kind: 'report', label: `report ${n}`, mediaType: 'application/json', size: 20_000, digest: `sha256:${'d'.repeat(64)}`, availability: 'available', reference: { requestId: randomUUID(), artifactId: randomUUID() } })) as Evidence['artifacts'],
+  });
+  const work = {
+    id, key, title: `Ledger item ${key}`, description: 'An item with the history a long-lived ledger accumulates. '.repeat(20), type: 'feature', priority: index % 3,
+    dependencies: [], criteria: proofs.map((proof, n) => ({ id: `AC-${n + 1}`, text: `Criterion ${n + 1} of ${key}`, proofs: [proof] })),
+    policy: { checks: ['test', 'typecheck'], review: true }, plannedFiles: ['src/server/', 'tests/'], stage, revision: 400, policyRevision: 1,
+    createdAt: new Date(now.getTime() - 86_400_000).toISOString(), updatedAt: now.toISOString(), stageEnteredAt: now.toISOString(), ready: true, epoch: 2,
+    lease: null, workspaces: [], implementers: ['worker-a'], submission: { epoch: 2, pr: index + 1 },
+    candidate: { sha: head, baseSha: base, pr: index + 1, branch: `graphyard/gy-${index + 1}-2`, author: 'worker-a' },
+    reworkRequested: false, scenarioRequirements: [], evidence, blocker: null,
+    observation: { at: now.toISOString(), candidate: { sha: head, baseSha: base, pr: index + 1 }, files: ['src/server/index.ts', 'tests/example.test.ts'], checks: [{ name: 'test', conclusion: 'success' }], reviews: [], draft: false, prState: 'open', mergeable: true, baseTip: base, baseTipContained: true,
+      scopeFiles: Array.from({ length: 200 }, (_, file) => ({ path: `src/generated/file-${file}.ts`, sha: 'e'.repeat(40), base: 'f'.repeat(40), status: 'unchanged' })) },
+    gates: [{ name: 'build', passed: true, reasons: [] }, { name: 'review', passed: stage !== 'review', reasons: stage === 'review' ? ['Independent approval of the current commit is required'] : [] }],
+    violations: [],
+    queueHistory: Array.from({ length: 40 }, (_, n) => ({ at: now.toISOString(), event: 'placed', sequence: n })),
+  } as unknown as Work;
+  if (stage !== 'done') reconcileAutoDispatch(work, [work], now);
+  // Every head before the current one left its resolved requests behind.
+  const resolved: DispatchRequest[] = [];
+  for (let h = 1; h < HEADS_PER_ITEM; h++) for (const kind of ['review', 'producer'] as const) resolved.push({
+    id: randomUUID(), kind, sha: sha(index, h), baseSha: base, policyRevision: 1, pr: index + 1, requestedAt: now.toISOString(), reason: 'submitted head',
+    state: 'cancelled', resolvedAt: now.toISOString(), resolution: 'head changed', ...(kind === 'producer' ? { group: 'integration', proofs: ['integration:alpha'] } : { provider: 'github' }),
+  } as DispatchRequest);
+  work.autoDispatch = { review: work.autoDispatch?.review ?? null, producers: work.autoDispatch?.producers ?? [], history: [...resolved, ...resolved, ...(work.autoDispatch?.history ?? [])] };
+  return work;
+}
+
+before(async () => {
+  const port = Number(process.env.GRAPHYARD_SNAPSHOT_TEST_PORT ?? Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 23);
+  database = new EmbeddedPostgres({ databaseDir: await mkdtemp(join(tmpdir(), 'graphyard-snapshot-test-')), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
+  await database.initialise(); await database.start(); await database.createDatabase('graphyard_snapshot_test');
+  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/graphyard_snapshot_test`); await store.init();
+  const now = new Date();
+  for (let index = 0; index < ITEMS; index++) {
+    const item = ledgerItem(index, now);
+    await store.pool.query('INSERT INTO work_items(id,document) VALUES($1,$2)', [item.id, JSON.stringify(item)]);
+    await store.pool.query('INSERT INTO jobs(work_id) VALUES($1)', [item.id]);
+  }
+  // Thousands of observations, each appending the whole document as save() does and rewriting
+  // the row, so the tables carry the churn a live ledger does.
+  await store.pool.query(`INSERT INTO events(work_id,actor,kind,payload) SELECT id,'github','github.observed',jsonb_build_object('work',document,'details',jsonb_build_object('observation',n)) FROM work_items, generate_series(1,$1::int) AS n`, [OBSERVATIONS_PER_ITEM]);
+  for (let round = 0; round < 5; round++) await store.pool.query("UPDATE work_items SET document=jsonb_set(document,'{revision}',to_jsonb((document->>'revision')::int+1))");
+  http = server(new Engine(store, [15368], 120, 'owner/project'), [{ id: 'coordinator', role: 'coordinator', token: coordinatorToken }]);
+  await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));
+  origin = `http://127.0.0.1:${(http.address() as AddressInfo).port}`;
+  directory = await mkdtemp(join(tmpdir(), 'graphyard-snapshot-master-'));
+  const credentialFile = join(directory, 'coordinator.token'); await writeFile(credentialFile, coordinatorToken, { mode: 0o600 });
+  config = masterConfigSchema.parse({ version: 1, url: origin, credentialFile, cliPath: launcher, repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'machine-a', masterAgentName: 'graphyard-master-project', autoMerge: true, mergeMethod: 'merge', workers: [] });
+});
+after(async () => {
+  if (http) await new Promise<void>(resolve => http.close(() => resolve()));
+  if (store) await store.close(); if (database) await database.stop();
+  if (directory) await rm(directory, { recursive: true, force: true });
+});
+
+async function read(path: string, headers: Record<string, string> = {}) {
+  const response = await fetch(`${origin}/api/${path}`, { headers: { ...headers, Authorization: `Bearer ${coordinatorToken}` }, signal: AbortSignal.timeout(30_000) });
+  const text = await response.text(); assert.equal(response.status, 200, text.slice(0, 500));
+  return { body: JSON.parse(text), bytes: text.length };
+}
+// As the master loop asks for it: by header, so a server without the view still answers.
+const snapshot = () => read('work-snapshot', { [coordinationViewHeader]: 'coordination' }).then(result => result.body as { work: Work[]; now: string });
+const p95 = (samples: number[]) => [...samples].sort((a, b) => a - b)[Math.ceil(samples.length * 0.95) - 1];
+
+test('integration:work-snapshot-latency — the coordination snapshot of a 100-item ledger with thousands of github.observed events answers under 2 s p95, bounded, with every decision input intact', async () => {
+  const events = Number((await store.pool.query("SELECT count(*) FROM events WHERE kind='github.observed'")).rows[0].count);
+  assert.ok(events >= 4000, `the ledger carries ${events} github.observed events`);
+  const samples: number[] = [];
+  let compact: { body: any; bytes: number } | undefined;
+  for (let run = 0; run < 20; run++) {
+    const started = performance.now();
+    compact = await read('work-snapshot?view=coordination');
+    samples.push(performance.now() - started);
+  }
+  const latency = p95(samples);
+  assert.ok(latency < 2_000, `p95 ${Math.round(latency)}ms over ${samples.length} reads`);
+  const full = await read('work-snapshot');
+  const view = compact!.body;
+  assert.equal(view.view, 'coordination'); assert.equal(view.work.length, ITEMS); assert.equal(view.jobs.length, ITEMS);
+  // Bounded: history no longer grows with the ledger's age, and no event payload or per-file scope rides along.
+  assert.ok(compact!.bytes * 3 < full.bytes, `coordination view ${compact!.bytes} bytes against the full ${full.bytes}`);
+  assert.ok(view.omitted.evidence > 0 && view.omitted.dispatchHistory > 0 && view.omitted.queueHistory > 0);
+  for (const item of view.work as Work[]) {
+    assert.ok(item.autoDispatch!.history.length <= coordinationHistoryLimit);
+    assert.ok((item.queueHistory ?? []).length <= coordinationHistoryLimit);
+    assert.equal((item.observation as any).scopeFiles, undefined); assert.deepEqual(item.observation!.files, ['src/server/index.ts', 'tests/example.test.ts']);
+    for (const entry of item.evidence) { assert.equal(entry.artifacts, undefined); assert.equal(entry.scopeFiles, undefined); }
+    assert.ok(item.evidence.length < HEADS_PER_ITEM * 3);
+    assert.equal(JSON.stringify(item).includes('"payload"'), false);
+  }
+  // Nothing the master loop or the dispatcher decides on differs from the full documents.
+  const now = new Date(view.now);
+  for (const [index, item] of (view.work as Work[]).entries()) {
+    const whole = full.body.work[index] as Work;
+    assert.equal(item.id, whole.id);
+    for (const field of ['stage', 'gates', 'violations', 'lease', 'candidate', 'submission', 'criteria', 'policyRevision', 'epoch', 'mergeAuthorization', 'queue', 'delivery'] as const) assert.deepEqual(item[field], whole[field], `${item.key} ${field}`);
+    assert.deepEqual({ review: item.autoDispatch!.review, producers: item.autoDispatch!.producers }, { review: whole.autoDispatch!.review, producers: whole.autoDispatch!.producers });
+    assert.deepEqual(missingProofs(item, now), missingProofs(whole, now));
+    assert.deepEqual(evidenceIndependenceRefusals(item, now), evidenceIndependenceRefusals(whole, now));
+    for (const request of item.autoDispatch!.producers) for (const proof of request.proofs ?? [])
+      assert.equal(proofOutcome(item, request, proof), proofOutcome(whole, request, proof));
+  }
+  // The header the CLI sends selects the same view.
+  const byHeader = await read('work-snapshot', { [coordinationViewHeader]: 'coordination' });
+  assert.equal(byHeader.body.view, 'coordination'); assert.equal(byHeader.bytes, compact!.bytes);
+  // The full view stays available and unchanged for readers that want whole documents.
+  assert.equal(full.body.view, undefined); assert.ok((full.body.work[0] as Work).evidence.length === HEADS_PER_ITEM * 3);
+  const refused = await fetch(`${origin}/api/work-snapshot?view=everything`, { headers: { Authorization: `Bearer ${coordinatorToken}` } });
+  assert.equal(refused.status, 400);
+});
+
+test('integration:dispatch-read-resilience — a dispatcher tick whose read times out or fails retries promptly with backoff, and master status reports the last successful tick and consecutive failures', async () => {
+  const intervalMs = 60_000, stopping = new AbortController();
+  const cursor: DispatchCursor = emptyDispatchCursor(config);
+  const persisted: DispatchCursor[] = []; const log: string[] = [];
+  let reads = 0;
+  const effects: DispatchEffects = {
+    snapshot: async () => {
+      reads++;
+      if (reads === 1) return new Promise<never>(() => {}); // a read that never answers
+      if (reads === 2) throw new Error('fetch failed: connection reset');
+      return snapshot();
+    },
+    agents: () => [],
+    credentials: async () => ({}),
+    reconcileReviews: async () => ({ reviews: [] }),
+    reconcileProducers: async () => ({ producers: [] }),
+    launchReview: async () => {}, launchProducer: async () => {},
+    persist: async state => { persisted.push(structuredClone(state)); if (state.lastSuccessAt) stopping.abort(); },
+  };
+  const started = performance.now();
+  const run = await runAutoDispatch(config, cursor, effects, { intervalMs, signal: stopping.signal, log: line => log.push(line), readTimeoutMs: 300, retryMinMs: 100 });
+  const elapsed = performance.now() - started;
+  // Two failures and a success, well inside one interval: nothing waited a whole interval to retry.
+  assert.equal(reads, 3); assert.equal(run.ticks.length, 1);
+  assert.ok(elapsed < 10_000 && elapsed < intervalMs, `recovered in ${Math.round(elapsed)}ms`);
+  assert.match(log[0], /tick failed \(1 in a row, retrying in 100ms\): work snapshot read timed out after 300ms/);
+  assert.match(log[1], /tick failed \(2 in a row, retrying in 200ms\): fetch failed/);
+  const failing = persisted.find(state => state.consecutiveFailures === 2)!;
+  assert.ok(failing, 'the failure streak is persisted before the retry');
+  const blind = dispatchSummary(failing, Date.now(), intervalMs);
+  assert.equal(blind.lastSuccessAt, null); assert.equal(blind.consecutiveFailures, 2); assert.match(blind.lastFailure!.reason, /connection reset/); assert.equal(blind.running, false);
+  const recovered = dispatchSummary(cursor, Date.now(), intervalMs);
+  assert.equal(recovered.consecutiveFailures, 0); assert.ok(recovered.lastSuccessAt); assert.equal(recovered.running, true);
+  assert.equal(recovered.lastFailure!.reason, failing.lastFailure!.reason, 'the last failure stays visible after recovery');
+  // Backoff widens but never waits longer than the interval it replaces.
+  assert.deepEqual([1, 2, 3, 4].map(failures => tickRetryDelay(failures, 10_000)), [1_000, 2_000, 4_000, 8_000]);
+  assert.equal(tickRetryDelay(9, 10_000), 10_000);
+});
+
+test('integration:cycle-within-interval — a coordination cycle over the 100-item ledger completes within its configured interval, and master status records the measurement', async () => {
+  const intervalMs = config.run.intervalSeconds * 1000;
+  const state: DaemonState = emptyDaemonState(config);
+  const effects: DaemonEffects = {
+    agents: () => [],
+    credentials: async profiles => Object.fromEntries(profiles.map(item => [item.name, { available: true, reason: null }])),
+    snapshot,
+    closeSession: () => {}, dispatch: async () => {}, requestProof: () => {}, merge: async () => ({ result: 'merge requested' }),
+    observeDeployment: async () => ({ source: 'unavailable', sha: null, at: new Date().toISOString(), reason: 'not configured', deployed: [], pending: [] }),
+    recordDeployment: async () => {}, requestSmoke: () => {},
+    persist: async () => {},
+  };
+  const result = await runDaemon(config, state, effects, { once: true, intervalMs, identity: { pid: process.pid, host: 'machine-a' }, signals: [], log: () => {} });
+  assert.equal(result.cycles.length, 1);
+  const [cycle] = state.metrics;
+  assert.equal(cycle.open, (await snapshot()).work.filter(item => item.stage !== 'done').length, 'the cycle measured the whole ledger');
+  assert.ok(cycle.durationMs <= intervalMs, `cycle took ${cycle.durationMs}ms against a ${intervalMs}ms interval`);
+  const budget = cycleBudget(state, intervalMs);
+  assert.deepEqual(budget.lastCycle, { cycle: cycle.cycle, at: cycle.at, durationMs: cycle.durationMs });
+  assert.equal(budget.withinInterval, true); assert.equal(budget.overruns, 0); assert.equal(budget.measured, 1); assert.equal(budget.intervalMs, intervalMs);
+  // A regression is visible: an overrunning cycle is counted and named.
+  const slow = { ...cycle, cycle: cycle.cycle + 1, durationMs: intervalMs * 3 };
+  const regressed = cycleBudget({ metrics: [...state.metrics, slow] }, intervalMs);
+  assert.equal(regressed.withinInterval, false); assert.equal(regressed.overruns, 1); assert.deepEqual(regressed.lastOverrun, { cycle: slow.cycle, at: slow.at, durationMs: slow.durationMs });
+  assert.equal(regressed.p95Ms, slow.durationMs);
+  assert.deepEqual(cycleBudget({ metrics: [] }, intervalMs), { intervalMs, measured: 0, lastCycle: null, withinInterval: null, p95Ms: null, overruns: 0, lastOverrun: null });
+});

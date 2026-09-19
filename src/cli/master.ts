@@ -5,17 +5,18 @@ import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 import { startGithubSetup } from '../github-setup.js';
 import { resourceConflicts } from '../coordination.js';
-import { assertMasterBinding, continueMergeBatch, currentMergeCandidates, dispatchWork, listHerdrAgents, liveMasterConfig, loadMasterConfig, masterHarness, mergeExecutor, mergeProtocolSkew, readCredentialFile, readWorkerCredential, removeProducerProfile, replaceProducerProfile, saveProducerProfile, saveWorkerProfile, setupMaster, snapshotWithClock, startMaster, verifyContainmentDeath, workerProfileSchema } from '../master.js';
+import { approvedMerges, assertMasterBinding, autonomySubcommands, continueMergeBatch, runAutonomyCommand, currentMergeCandidates, dispatchWork, listHerdrAgents, liveMasterConfig, loadMasterConfig, masterHarness, mergeExecutor, mergeProtocolSkew, producerCommand, readCredentialFile, readWorkerCredential, saveWorkerProfile, setupMaster, snapshotWithClock, startMaster, verifyContainmentDeath, workerProfileSchema } from '../master.js';
 import { cliCommit } from '../protocol-version.js';
-import { daemonEffects, readDaemonState, runDaemon } from '../master-daemon.js';
+import { daemonEffects, readDaemonState, runDaemon, type DaemonState } from '../master-daemon.js';
 import { verificationEffects, verifyDeployment } from '../master-verification.js';
 import { bindReviewer, launchReview, removeReviewerProfile, reviewerCredentialDirectory, saveReviewerProfile, verifyReviewerInstallation } from '../reviewer.js';
-import { dispatchEffects, readDispatchCursor, runAutoDispatch } from '../auto-dispatch.js';
+import { dispatchEffects, dispatchReadTimeoutMs, readDispatchCursor, runAutoDispatch } from '../auto-dispatch.js';
 import { applyProtection, protectionPlan, readProtection } from '../protection.js';
 import { writeHarnessPermissions } from '../harness.js';
 import { browserFlows, runBrowserFlow, type BrowserFlow } from '../master-browser.js';
 import { defineCommands } from './registry.js';
 import { masterStatusReport } from './master-status.js';
+import { coordinationViewHeader } from '../server/work-view.js';
 import { readSecretFromStdin } from './context.js';
 
 /**
@@ -39,11 +40,8 @@ export const masterCommands = defineCommands([
       '                                browser flow; NAME defaults to reviewer and must keep the',
       "                                generated App name within GitHub's 34-character limit",
       '  master reviewer bind FILE --key-stdin   Bind an existing reviewer App (IDs in FILE, PEM on stdin)',
-      '  master reviewer add FILE      Add a reviewer launch profile',
-      '  master reviewer remove NAME   Remove a reviewer launch profile',
-      '  master producer add FILE      Add a proof-producer launch profile (own producer credential)',
-      '  master producer replace FILE  Replace the producer profile of the same name, verified like add',
-      '  master producer remove NAME   Remove a proof-producer launch profile',
+      '  master reviewer add FILE | remove NAME   Add or remove a reviewer launch profile',
+      '  master producer add FILE | replace FILE | remove NAME  Manage proof-producer profiles',
       '  master review GY-N [PROFILE]  Launch the bound reviewer on the exact current candidate;',
       '                                master run does this on its own for every submitted head',
       '  master protection [--apply]   Reconcile branch protection with every open review policy',
@@ -69,9 +67,13 @@ export const masterCommands = defineCommands([
       '  master run [--once] [--interval SECONDS]',
       '                                Run the durable coordination loop as a supervised process;',
       '                                it launches the reviewer and the proof producers for every',
-      '                                submitted head within 30 seconds of the request, relaunches a',
-      '                                failed or expired session on a widening interval, and adopts',
-      '                                .graphyard/master.json changes without a restart',
+      '                                submitted head within 30 seconds of the request',
+      '  master autonomy [--admin-token-stdin --apply]  Provision the master and approver identities',
+      '  master create FILE|release GY-N|unblock GY-N|requirements GY-N FILE REASON  Own intent',
+      '  master decide GY-N ACTION [JSON|@FILE] REASON  Request a two-party decision',
+      '  master decisions GY-N | approver GY-N DECISION [KIND] | approve GY-N DECISION REASON',
+      '  master principals [--apply]   Preview or apply a roster rotation keeping live principals',
+      '  master restart                Restart this host\'s master loop detached',
       '  master guide                  Print the complete master-agent operating guide',
     ],
     async run(context) {
@@ -92,8 +94,8 @@ export const masterCommands = defineCommands([
       }
       const master = await loadMasterConfig(root);
       const masterToken = await readCredentialFile(master.credentialFile);
-      const masterApi = async (path: string, credential = masterToken) => {
-        const response = await fetch(`${master.url}/api/${path}`, { headers: { Authorization: `Bearer ${credential}` }, signal: AbortSignal.timeout(30_000) });
+      const masterApi = async (path: string, credential = masterToken, timeoutMs = 30_000, headers: Record<string, string> = {}) => {
+        const response = await fetch(`${master.url}/api/${path}`, { headers: { ...headers, Authorization: `Bearer ${credential}` }, signal: AbortSignal.timeout(timeoutMs) });
         const body = await response.json(); if (!response.ok) throw new Error(JSON.stringify(body)); return body;
       };
       const masterMutation = async (path: string, data: unknown, requestId: string = randomUUID()) => {
@@ -104,6 +106,8 @@ export const masterCommands = defineCommands([
       // The CLI's own commit, for the version-skew guard: the checkout this file runs from.
       const cli = { commit: cliCommit(fileURLToPath(new URL('../..', import.meta.url))) };
       const assertProtocol = (status: any) => { const skew = mergeProtocolSkew(status, cli); if (skew) throw new Error(skew); };
+      if ((autonomySubcommands as readonly string[]).includes(id ?? '')) return print(await runAutonomyCommand(root, master, id!, args,
+        { coordinator: masterApi, readSecret: () => readSecretFromStdin(10_000), agents: listHerdrAgents, daemonLock: async () => (await readDaemonState(root, master)).lock }));
       if (id === 'start') {
         const kind = workerProfileSchema.shape.kind.safeParse(args[0]); if (!kind.success) throw new Error('Use master start with a supported agent kind such as codex or claude');
         const separator = args.indexOf('--'); const agentArgs = separator < 0 ? [] : args.slice(separator + 1);
@@ -111,12 +115,7 @@ export const masterCommands = defineCommands([
         return print(await startMaster(root, kind.data, agentArgs, listHerdrAgents()));
       }
       if (id === 'worker' && args[0] === 'add' && args[1]) return print(await saveWorkerProfile(root, JSON.parse(await readFile(args[1], 'utf8')), credential => masterApi('status', credential)));
-      if (id === 'producer') {
-        if (args[0] === 'add' && args[1]) return print(await saveProducerProfile(root, JSON.parse(await readFile(args[1], 'utf8')), credential => masterApi('status', credential)));
-        if (args[0] === 'replace' && args[1]) return print(await replaceProducerProfile(root, JSON.parse(await readFile(args[1], 'utf8')), credential => masterApi('status', credential)));
-        if (args[0] === 'remove' && args[1]) return print(await removeProducerProfile(root, args[1]));
-        throw new Error('Use master producer add FILE, master producer replace FILE, or master producer remove NAME');
-      }
+      if (id === 'producer') return print(await producerCommand(root, args, credential => masterApi('status', credential)));
       if (id === 'reviewer') {
         if (args[0] === 'add' && args[1]) return print(await saveReviewerProfile(root, JSON.parse(await readFile(args[1], 'utf8'))));
         if (args[0] === 'remove' && args[1]) return print(await removeReviewerProfile(root, args[1]));
@@ -140,7 +139,7 @@ export const masterCommands = defineCommands([
           console.log(`Open ${setup.url} in your browser and register the reviewer App. It is a second App, separate from the Graphyard control-plane App, and it cannot write code. Credentials stay outside this repository with mode 0600. Press Ctrl+C when the page reports the installation is verified.`);
           const stop = () => setup.http.close(); process.once('SIGINT', stop); process.once('SIGTERM', stop); return;
         }
-        throw new Error('Use master reviewer setup, master reviewer bind FILE --key-stdin, master reviewer add FILE, or master reviewer remove NAME');
+        throw new Error('Use master reviewer setup, master reviewer bind FILE --key-stdin, or master reviewer add FILE');
       }
       if (id === 'review') {
         if (!args[0]) throw new Error('Use master review GY-N [PROFILE]');
@@ -170,7 +169,11 @@ export const masterCommands = defineCommands([
         if (!kind.success) throw new Error('Use master harness with a supported agent kind such as claude or codex');
         return print(await writeHarnessPermissions(root, masterHarness(root, master, kind.data!), !!values.apply));
       }
-      if (id === 'status') return print(await masterStatusReport(root, master, masterApi, coordinator, cli));
+      if (id === 'status') {
+        const report = await masterStatusReport(root, master, masterApi, coordinator, cli);
+        const state = await readDaemonState(root, master).catch(() => null);
+        return print({ ...report, daemon: { ...report.daemon, cycleBudget: state ? cycleBudget(state, master.run.intervalSeconds * 1000) : null } });
+      }
       if (id === 'settle-containment') {
         if (!args[0] || !args.slice(1).join(' ').trim()) throw new Error('Use master settle-containment GY-N REASON');
         const { snapshot, clockOffset } = await snapshotWithClock(() => masterApi('work-snapshot'));
@@ -212,6 +215,7 @@ export const masterCommands = defineCommands([
         const snapshot = await masterApi('work-snapshot');
         const selected = args[0] === '--all' ? currentMergeCandidates(snapshot.work, snapshot.now, coordinator.actor.id) : snapshot.work.filter((item: any) => item.id === args[0] || item.key === args[0]);
         if (!selected.length) throw new Error(args[0] === '--all' ? 'No work has a current all-gates-passing merge authorization' : `Unknown work item ${args[0]}`);
+        if (!master.autoMerge) selected.splice(0, selected.length, ...await approvedMerges(selected, item => masterApi(`work/${item.id}/decisions`), args[0] !== '--all'));
         const outerRequest = process.env.GRAPHYARD_REQUEST_ID ?? randomUUID();
         const mergeOne = mergeExecutor(master, () => masterApi('work-snapshot'), masterMutation, coordinator.actor.id, outerRequest);
         const results = args[0] === '--all' ? await continueMergeBatch(selected, mergeOne) : [await mergeOne(selected[0])];
@@ -236,26 +240,43 @@ export const masterCommands = defineCommands([
         if (coordinator.actor.proofs?.length) throw new Error('The durable master loop refuses a credential that is also allowed to produce evidence');
         assertProtocol(coordinator);
         const state = await readDaemonState(root, master);
-        // Both loops re-read .graphyard/master.json before every cycle and tick: a replaced profile,
-        // a new workspace or a changed run setting applies without a restart, and a change to what
-        // the loop is bound to is refused by name while the loop keeps its loaded settings.
-        const live = liveMasterConfig(root, master);
-        const effects = daemonEffects(root, () => live.current, { snapshot: () => masterApi('work-snapshot'), mutate: masterMutation, executionOwner: coordinator.actor.id });
+        // The cycle and the dispatcher poll the bounded coordination view; the guarded merge
+        // re-reads the full documents, since it is the last check before GitHub is asked to merge.
+        // The view is asked for by header, so a server that predates it answers with whole documents.
+        const live = liveMasterConfig(root, master), current = () => live.current, reload = () => live.reload();
+        const coordinationSnapshot = (timeoutMs?: number) => masterApi('work-snapshot', masterToken, timeoutMs, { [coordinationViewHeader]: 'coordination' });
+        const effects = daemonEffects(root, current, { snapshot: () => coordinationSnapshot(), mutate: masterMutation, executionOwner: coordinator.actor.id });
+        const guardedMerge: typeof effects.merge = work => mergeExecutor(current(), () => masterApi('work-snapshot'), masterMutation, coordinator.actor.id, randomUUID())(work);
         // The loop outlives deployments: every guarded merge re-reads the server's protocol first.
-        const guardedMerge = effects.merge;
         effects.merge = async work => { assertProtocol(await masterApi('status')); return guardedMerge(work); };
-        // Automatic dispatch runs beside the coordination cycle on its own, shorter cadence: the
-        // control plane's review and producer requests are launched within 30 seconds of being
-        // recorded, whatever the coordination interval. It stops when the daemon stops.
+        // Automatic dispatch runs beside the cycle, launching each request within 30 seconds.
         const dispatchCursor = await readDispatchCursor(root, master);
         const stopping = new AbortController();
-        const daemonRun = runDaemon(master, state, effects, { once: values.once, intervalMs: values.interval ? intervalSeconds * 1000 : () => live.current.run.intervalSeconds * 1000, identity: { pid: process.pid, host: master.hostId }, reload: () => live.reload() }).finally(() => stopping.abort());
-        const dispatchRun = runAutoDispatch(master, dispatchCursor, dispatchEffects(root, () => live.current, { snapshot: () => masterApi('work-snapshot') }), { once: values.once, intervalMs: () => live.current.run.dispatchIntervalSeconds * 1000, signal: stopping.signal, reload: () => live.reload() });
+        const daemonRun = runDaemon(master, state, effects, { once: values.once, intervalMs: values.interval ? intervalSeconds * 1000 : () => current().run.intervalSeconds * 1000, identity: { pid: process.pid, host: master.hostId }, reload }).finally(() => stopping.abort());
+        const dispatchRun = runAutoDispatch(master, dispatchCursor, dispatchEffects(root, current, { snapshot: () => coordinationSnapshot(dispatchReadTimeoutMs) }), { once: values.once, intervalMs: () => current().run.dispatchIntervalSeconds * 1000, signal: stopping.signal, reload });
         const [result, dispatched] = await Promise.all([daemonRun, dispatchRun]);
         return print({ repository: master.repository, coordinator: coordinator.actor.id, intervalSeconds, dispatchIntervalSeconds: master.run.dispatchIntervalSeconds, cycles: result.cycles.length, stopped: result.stopped ? 'signal' : 'completed', last: result.cycles.at(-1) ?? null,
           dispatch: { ticks: dispatched.ticks.length, launched: dispatched.ticks.reduce((total, tick) => total + tick.launched.length, 0), refused: dispatched.ticks.reduce((total, tick) => total + tick.refused.length, 0), last: dispatched.ticks.at(-1) ?? null } });
       }
-      throw new Error('Use master init, start, worker add, producer add|replace|remove, reviewer, review, protection, browser, harness, status, dispatch, settle-containment, run, merge, verify-deployment, or guide');
+      throw new Error(`Use master init, start, worker add, producer, reviewer, review, protection, browser, harness, status, dispatch, settle-containment, run, merge, verify-deployment, ${autonomySubcommands.join(', ')}, or guide`);
     },
   },
 ]);
+
+/**
+ * How the coordination cycle keeps to its configured interval, from the durations the daemon
+ * records for its retained cycles: the last one, the p95, and every cycle that overran. A cycle
+ * longer than its interval means the loop is falling behind the work it shepherds.
+ */
+export function cycleBudget(state: Pick<DaemonState, 'metrics'>, intervalMs: number) {
+  const metrics = state.metrics;
+  const last = metrics.at(-1) ?? null;
+  const durations = metrics.map(metric => metric.durationMs).sort((a, b) => a - b);
+  const p95Ms = durations.length ? durations[Math.min(durations.length - 1, Math.ceil(durations.length * 0.95) - 1)] : null;
+  const overruns = metrics.filter(metric => metric.durationMs > intervalMs);
+  return {
+    intervalMs, measured: metrics.length, lastCycle: last ? { cycle: last.cycle, at: last.at, durationMs: last.durationMs } : null,
+    withinInterval: last ? last.durationMs <= intervalMs : null, p95Ms, overruns: overruns.length,
+    lastOverrun: overruns.length ? { cycle: overruns.at(-1)!.cycle, at: overruns.at(-1)!.at, durationMs: overruns.at(-1)!.durationMs } : null,
+  };
+}

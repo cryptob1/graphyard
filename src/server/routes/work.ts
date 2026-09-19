@@ -3,6 +3,7 @@ import type { Command } from '../../engine.js';
 import { producerIndependenceRefusal, recordEvidenceRefusal, recordLeadViolation } from '../../delegation.js';
 import { ciRunBindingSchema, isCiProducer, observeCiCheckRun, type CiRunObservation } from '../../model/ci-proofs.js';
 import { defineRoutes, parseJson, type RouteContext } from '../routes.js';
+import { approveDecision, listDecisions, requestDecision } from '../decisions.js';
 
 // Every mutating work route refuses a slice lead the same way and leaves the same
 // ledger entry. Routing order decides which handler matches first; it must never
@@ -13,8 +14,19 @@ const refuseLead = async ({ actor, services }: RouteContext, id: string | null, 
   demand(false, 'Slice leads cannot perform lifecycle mutations', 403);
 };
 
-/** Work mutations: the guarded merge broker and every engine command. */
+/** Work mutations: two-party decisions, the guarded merge broker and every engine command. */
 export const workRoutes = defineRoutes('work', [
+  // Two-party decisions: an agent requests, a second independent agent approves, and the
+  // control plane applies. They precede the generic route, which would read them as commands.
+  { method: 'GET', path: /^\/api\/work\/([^/]+)\/decisions$/, handle: ({ actor, services }, [id]) => listDecisions(services, actor, decodeURIComponent(id)) },
+  {
+    method: 'POST', path: /^\/api\/work\/([^/]+)\/(decide|approve)$/,
+    async handle(context, [id, action]) {
+      await refuseLead(context, id, action);
+      const data = await parseJson(context), key = context.idempotencyKey(), target = decodeURIComponent(id);
+      return action === 'decide' ? requestDecision(context.services, context.actor, target, data, key) : approveDecision(context.services, context.actor, target, data, key);
+    },
+  },
   {
     method: 'POST', path: /^\/api\/work\/([^/]+)\/merge-(acquire|cancel|verify|commit)$/,
     async handle(context, [id, action]) {

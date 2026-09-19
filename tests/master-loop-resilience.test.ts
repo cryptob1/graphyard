@@ -8,7 +8,7 @@ import { randomUUID, generateKeyPairSync } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import type { Observation, Work } from '../src/model.js';
 import { reconcileAutoDispatch } from '../src/model/dispatch.js';
-import { assertOutsideWorktrees, autonomousSession, buildMasterStatus, dispatchWork, herdrWorkspaceHealth, liveMasterConfig, loadMasterConfig, masterConfigChanges, masterConfigSchema, masterHarness, prepareSessionHarness, removeProducerProfile, replaceProducerProfile, saveProducerProfile, sessionHarnessFile, sessionHarnessPlan, setupMaster, workerPrompt, type MasterConfig, type MasterRun, type WorkerProfile } from '../src/master.js';
+import { assertOutsideWorktrees, autonomousSession, buildMasterStatus, dispatchWork, herdrWorkspaceHealth, liveMasterConfig, loadMasterConfig, masterConfigChanges, masterConfigSchema, masterHarness, prepareSessionHarness, removeProducerProfile, replaceProducerProfile, saveProducerProfile, sessionHarnessFile, sessionHarnessPlan, setupMaster, workerHarnessPlan, workerPrompt, type MasterConfig, type MasterRun, type WorkerProfile } from '../src/master.js';
 import { writeHarnessPermissions } from '../src/harness.js';
 import { bindReviewer, launchReview, readReviewLedger, reconcileReviews, removeReviewerProfile, reviewerBindingHealth, reviewerRegistrationFile, reviewIdleGraceMs, reviewPrompt, saveReviewerProfile, summarizeReviews, type ReviewRecord } from '../src/reviewer.js';
 import { launchProducer, producerIdleGraceMs, producerPrompt, readProducerLedger, reconcileProducers, sessionRetries, sessionRetry, sessionRetryBaseMs, sessionRetryLimit, summarizeProducers, type ProducerRecord } from '../src/producer.js';
@@ -292,7 +292,7 @@ test('integration:master-profile-management — producer profiles can be replace
     assert.equal(herdrWorkspaceHealth({ herdrWorkspace: undefined }).exists, null);
     // The commands are part of the CLI and the guide.
     const help = await readFile(new URL('../src/cli/master.ts', import.meta.url), 'utf8');
-    for (const command of ['master producer replace FILE', 'master producer remove NAME', 'master reviewer remove NAME']) assert.ok(help.includes(command), `${command} is in CLI help`);
+    for (const command of ['master producer add FILE | replace FILE | remove NAME', 'master reviewer add FILE | remove NAME']) assert.ok(help.includes(command), `${command} is in CLI help`);
     const guide = await readFile(new URL('../docs/master-agent.md', import.meta.url), 'utf8');
     for (const fragment of ['master producer replace', 'master producer remove', 'master reviewer remove', 'setup.attention']) assert.ok(guide.includes(fragment), `docs/master-agent.md documents ${fragment}`);
   } finally { await cleanup(); }
@@ -327,7 +327,7 @@ test('integration:loop-missing-worktree — the loop survives a registered workt
 
 test('integration:role-scoped-harness-rules — worker, reviewer and producer sessions launch with their own role rules and never load the master\'s: a worker may push its branch, the master may not', async () => {
   // The plans: the master denies every push; a worker may push exactly its assigned branch.
-  const input = { cliPath: launcher, repository: 'owner/project', baseBranch: 'main', credentialDirectories: ['/home/x/.config/graphyard/masters'] };
+  const input = { cliPath: launcher, repository: 'owner/project', baseBranch: 'main', credentialHome: '/home/x/.config/graphyard', credentialDirectories: ['/home/x/.config/graphyard/masters'] };
   const worker = sessionHarnessPlan({ ...input, role: 'worker', kind: 'claude', branch: 'graphyard/gy-69-4' });
   const reviewer = sessionHarnessPlan({ ...input, role: 'reviewer', kind: 'claude', pr: 69 });
   const producer = sessionHarnessPlan({ ...input, role: 'producer', kind: 'claude' });
@@ -376,7 +376,8 @@ test('integration:role-scoped-harness-rules — worker, reviewer and producer se
     const blocking = masterDeny.filter(rule => matches(rule, 'git push origin graphyard/gy-69-4'));
     assert.deepEqual(blocking, ['Bash(git push:*)']);
     for (const rule of blocking) assert.equal(workerSettings.permissions.deny.includes(rule), false, `the master's ${rule} never reaches the worker`);
-    assert.ok(workerSettings.permissions.deny.includes(`Read(/${credentials}/**)`), 'credentials stay unreadable');
+    assert.ok(workerSettings.permissions.deny.some((rule: string) => rule.startsWith('Read(') && rule.includes(credentials)), 'credentials stay unreadable');
+    assert.deepEqual(workerSettings.permissions.allow, workerHarnessPlan({ cliPath: launcher, branch: 'graphyard/gy-69-4', baseBranch: 'main', credentialHome: credentials }).allow.map(entry => entry.rule), 'the worker role file carries the worker rules the worktree gets');
 
     // Reviewer: its own file allows exactly the verdict the master's rules deny.
     await saveReviewerProfile(root, { name: 'claude-reviewer', agentName: 'review-claude-1', kind: 'claude' });

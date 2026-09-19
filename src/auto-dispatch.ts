@@ -35,6 +35,10 @@ export const dispatchCursorSchema = z.object({
   version: z.literal(1), url: z.string(), repository: z.string(),
   ticks: z.number().int().min(0).default(0),
   lastTickAt: z.string().nullable().default(null),
+  /** The last tick that read the snapshot and ran to the end, and how many ticks have failed since. */
+  lastSuccessAt: z.string().nullable().default(null),
+  consecutiveFailures: z.number().int().min(0).default(0),
+  lastFailure: z.object({ at: z.string(), reason: z.string().max(500) }).strict().nullable().default(null),
   /** Launches that refused, by request id, with the widening retry time; cleared by the launch that succeeds. */
   failures: z.record(z.string(), dispatchFailureSchema).default({}),
 }).strict();
@@ -42,6 +46,13 @@ export type DispatchCursor = z.infer<typeof dispatchCursorSchema>;
 
 /** A refused launch retries on a widening interval, never more often than this and never later than this. */
 export const dispatchRetryMinMs = 30_000, dispatchRetryMaxMs = 600_000, dispatchFailureLimit = 12;
+/**
+ * A tick whose snapshot read fails is retried on its own short backoff rather than a whole
+ * interval later, never faster than the first step and never slower than the interval. The read
+ * itself is bounded so a hung request cannot hold the loop past the dispatch bound.
+ */
+export const dispatchReadTimeoutMs = 8_000, tickRetryMinMs = 1_000;
+export const tickRetryDelay = (failures: number, intervalMs: number, minMs = tickRetryMinMs) => Math.min(minMs * 2 ** Math.max(0, failures - 1), Math.max(minMs, intervalMs));
 
 export function emptyDispatchCursor(config: MasterConfig): DispatchCursor {
   return dispatchCursorSchema.parse({ version: 1, url: config.url, repository: config.repository });
@@ -102,8 +113,8 @@ const retryDelay = (attempts: number) => Math.min(dispatchRetryMinMs * 2 ** Math
  * every open request that has none. Each launch is recorded by the launcher's own ledger before
  * the tick moves on, so a kill between two launches leaves nothing to repeat.
  */
-export async function runDispatchTick(config: MasterConfig, cursor: DispatchCursor, effects: DispatchEffects, now: () => number = Date.now): Promise<DispatchTick> {
-  const snapshot = await effects.snapshot();
+export async function runDispatchTick(config: MasterConfig, cursor: DispatchCursor, effects: DispatchEffects, now: () => number = Date.now, readTimeoutMs = dispatchReadTimeoutMs): Promise<DispatchTick> {
+  const snapshot = await boundedRead(effects.snapshot, readTimeoutMs);
   const observedAt = snapshot.now;
   const clock = Number.isFinite(Date.parse(observedAt)) ? Date.parse(observedAt) : now();
   const tick: DispatchTick = { at: new Date(clock).toISOString(), launched: [], refused: [], waiting: [], skipped: 0 };
@@ -176,13 +187,20 @@ export async function runDispatchTick(config: MasterConfig, cursor: DispatchCurs
   // A failure for a request the control plane resolved is history the cursor need not keep.
   const live = new Set(snapshot.work.flatMap(work => [...(work.autoDispatch?.review ? [work.autoDispatch.review.id] : []), ...(work.autoDispatch?.producers ?? []).map(request => request.id)]));
   for (const id of Object.keys(cursor.failures)) if (!live.has(id)) delete cursor.failures[id];
-  cursor.ticks += 1; cursor.lastTickAt = new Date(now()).toISOString();
+  cursor.ticks += 1; cursor.lastTickAt = cursor.lastSuccessAt = new Date(now()).toISOString(); cursor.consecutiveFailures = 0;
   await effects.persist(cursor);
   return tick;
 }
 
+async function boundedRead<T>(read: () => Promise<T>, timeoutMs: number): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    return await Promise.race([read(), new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error(`work snapshot read timed out after ${timeoutMs}ms`)), timeoutMs); })]);
+  } finally { clearTimeout(timer); }
+}
+
 /** Tick until stopped. Runs beside the daemon in `master run`; the signal is the daemon's stop. */
-export async function runAutoDispatch(config: MasterConfig, cursor: DispatchCursor, effects: DispatchEffects, options: { intervalMs: number | (() => number); once?: boolean; signal?: AbortSignal; now?: () => number; log?: (line: string) => void;
+export async function runAutoDispatch(config: MasterConfig, cursor: DispatchCursor, effects: DispatchEffects, options: { intervalMs: number | (() => number); once?: boolean; signal?: AbortSignal; now?: () => number; log?: (line: string) => void; readTimeoutMs?: number; retryMinMs?: number;
   /** Re-reads .graphyard/master.json before each tick, so a changed profile or run setting applies without a restart. */
   reload?: () => Promise<ConfigReload> }) {
   const now = options.now ?? Date.now, log = options.log ?? (line => console.error(line));
@@ -190,6 +208,8 @@ export async function runAutoDispatch(config: MasterConfig, cursor: DispatchCurs
   let refused: string | null = null;
   do {
     if (options.signal?.aborted) break;
+    const interval = typeof options.intervalMs === 'function' ? options.intervalMs() : options.intervalMs;
+    let wait = interval;
     try {
       if (options.reload) {
         const reload = await options.reload();
@@ -198,13 +218,20 @@ export async function runAutoDispatch(config: MasterConfig, cursor: DispatchCurs
         if (reload.refused && reload.refused !== refused) log(`[graphyard-dispatch] ${reload.refused}`);
         refused = reload.refused;
       }
-      const tick = await runDispatchTick(config, cursor, effects, now);
+      const tick = await runDispatchTick(config, cursor, effects, now, options.readTimeoutMs);
       ticks.push(tick);
       for (const launch of tick.launched) log(`[graphyard-dispatch] launched ${launch.kind} for ${launch.work} ${launch.sha.slice(0, 12)} on ${launch.profile}${launch.group ? ` (${launch.group}: ${launch.proofs?.join(', ')})` : ''}`);
       for (const refusal of tick.refused) log(`[graphyard-dispatch] ${refusal.kind} launch for ${refusal.work} refused (attempt ${refusal.attempts}): ${refusal.reason}`);
-    } catch (error) { log(`[graphyard-dispatch] tick failed: ${message(error)}`); }
+    } catch (error) {
+      // A failed tick launched nothing it has not already recorded, so it is retried promptly;
+      // the cursor keeps the streak so master status can say how long dispatch has been blind.
+      cursor.consecutiveFailures += 1; cursor.lastFailure = { at: new Date(now()).toISOString(), reason: message(error).slice(0, 500) };
+      wait = tickRetryDelay(cursor.consecutiveFailures, interval, options.retryMinMs);
+      await effects.persist(cursor).catch(() => {});
+      log(`[graphyard-dispatch] tick failed (${cursor.consecutiveFailures} in a row, retrying in ${wait}ms): ${message(error)}`);
+    }
     if (options.once || options.signal?.aborted) break;
-    try { await delay(typeof options.intervalMs === 'function' ? options.intervalMs() : options.intervalMs, undefined, { signal: options.signal }); } catch { /* woken to stop */ }
+    try { await delay(wait, undefined, { signal: options.signal }); } catch { /* woken to stop */ }
   } while (!options.signal?.aborted);
   return { ticks };
 }
@@ -230,5 +257,6 @@ export function dispatchSummary(cursor: DispatchCursor, now: number, intervalMs:
   const lastTickAt = cursor.lastTickAt ? Date.parse(cursor.lastTickAt) : Number.NaN;
   const lagMs = Number.isFinite(lastTickAt) ? now - lastTickAt : null;
   return { running: lagMs !== null && lagMs < Math.max(3 * intervalMs, 60_000), ticks: cursor.ticks, lastTickAt: cursor.lastTickAt, lagMs, intervalMs,
+    lastSuccessAt: cursor.lastSuccessAt, consecutiveFailures: cursor.consecutiveFailures, lastFailure: cursor.lastFailure,
     failures: Object.entries(cursor.failures).map(([requestId, failure]) => ({ requestId, ...failure })) };
 }

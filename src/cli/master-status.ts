@@ -1,5 +1,5 @@
 import { probeCandidateConflicts } from '../conflicts.js';
-import { assessContainment, buildMasterStatus, herdrWorkspaceHealth, inspectWorkerCredentials, mergeProtocolSkew, observeHerdrAgents, snapshotWithClock, type MasterConfig } from '../master.js';
+import { agentOwner, assessContainment, buildMasterStatus, herdrWorkspaceHealth, humanOwner, inspectWorkerCredentials, mergeProtocolSkew, observeHerdrAgents, snapshotWithClock, type MasterConfig } from '../master.js';
 import { daemonSummary, readDaemonState } from '../master-daemon.js';
 import { readReviewLedger, reconcileReviews, reviewerBindingHealth, summarizeReviews } from '../reviewer.js';
 import { readProducerLedger, reconcileProducers, sessionRetries, summarizeProducers } from '../producer.js';
@@ -38,7 +38,16 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
   // Browser administration is reported beside the work it unblocks: a pending sudo code is
   // the one thing the operator must act on, and the recent ledger entries say who changed what.
   const administration = { browser: master.browser ? { profile: master.browser.profile } : null, ...summarizeAdministration((await readAdministrationLedger(root)).entries, await readSudoState(root)) };
-  return { ...buildMasterStatus(snapshot, master.workers, runtime.agents, credentials, containment, reviews, master.baseBranch, coordinator, { producers, failures: dispatch.failures, retries }, probeCandidateConflicts(root, snapshot.work)), autoMerge: master.autoMerge, mergeApproval: master.autoMerge ? 'routine merges permitted after gates pass' : 'explicit operator approval required for each merge',
+  const status = buildMasterStatus(snapshot, master.workers, runtime.agents, credentials, containment, reviews, master.baseBranch, coordinator, { producers, failures: dispatch.failures, retries }, probeCandidateConflicts(root, snapshot.work));
+  // A waiting sudo prompt is the operator confirming their own GitHub credential on their device,
+  // the one step no agent may take for them; a timed-out one is the master's to rerun.
+  const sudo = administration.sudo;
+  const attentionItems = sudo ? [...status.attentionItems, { subject: 'installation', text: sudo.instruction,
+    ...(Date.parse(sudo.deadline) <= Date.now() ? agentOwner('master', `graphyard master browser ${sudo.flow}`) : humanOwner('issuing credentials to people', sudo.instruction)) }] : [...status.attentionItems];
+  // Setup that stops every launch is the master's to repair.
+  for (const text of reviewerBinding.attention) attentionItems.push({ subject: 'setup', text, ...agentOwner('master', 'graphyard master reviewer setup (or graphyard master reviewer bind FILE --key-stdin) to bind the reviewer App') });
+  if (workspace.exists === false) attentionItems.push({ subject: 'setup', text: workspace.reason!, ...agentOwner('master', 'Set herdrWorkspace in .graphyard/master.json to a workspace herdr workspace list shows; master run adopts it on its next tick') });
+  return { ...status, attentionItems, autoMerge: master.autoMerge, mergeApproval: master.autoMerge ? 'routine merges permitted after gates pass' : 'each merge needs an approved merge decision: graphyard master decide GY-N merge REASON, approved by the approver agent',
     versionSkew: mergeProtocolSkew(coordinator, cli), cli,
     reviewer: master.reviewer ? { identity: `${master.reviewer.slug}[bot]`, appId: master.reviewer.appId, profiles: master.reviewers.map(profile => profile.name), automatic: master.run.reviewerProfile ?? (master.reviewers.length === 1 ? master.reviewers[0].name : null) } : null,
     producerProfiles: master.producers.map(profile => ({ name: profile.name, principal: profile.principal, kind: profile.kind, agentName: profile.agentName })),

@@ -5,6 +5,16 @@ The master is the coordinator: a `coordinator` principal run as the durable `mas
 
 Graphyard remains the source of truth. Herdr only reports live session health. Terms follow the [glossary](glossary.md).
 
+## Autonomy: agents approve agents
+
+Autonomy is the default. The master acts without asking; the human operator sets goals and priorities, and keeps only two other decisions: spending money or opening third-party accounts, and issuing credentials to people (approving a GitHub sudo prompt on their own device is one). Every other decision names the agent that makes it and the independent agent that approves it ([who decides](glossary.md#who-decides)):
+
+- **Intent the master applies alone**, as its own operator-agent identity: `master create FILE REASON`, `master release GY-N REASON`, `master unblock GY-N REASON`, and `master requirements GY-N FILE REASON` for additions. None of it weakens anything, and the reviewer and proof producers judge every candidate that follows.
+- **Two-party decisions**, requested by the master and approved by the separate approver agent: requirement rewrites and removals, escalation resolution, `manual:` attestation, rework and containment recovery (attesting the previous worker stopped), proof grants to a producer, and merge approval when automatic merging is off. Request with `master decide GY-N ACTION [JSON|@FILE] REASON`, launch the approver session with `master approver GY-N DECISION`, and read the outcome with `master decisions GY-N`. The approver runs `master approve GY-N DECISION REASON` from its own session; the server refuses self-approval and any approver that held an assignment on the item, produced the evidence the decision rests on, or would receive the grant, naming the conflict. See [two-party decisions](operator-automation.md#two-party-decisions).
+- **Routine operations**: principal-roster rotation for agent principals (`master principals` previews it and refuses to drop a live principal or change its role; `--apply` deploys it), restarting the durable loop (`master restart`), GitHub administration through the API and the browser flows, dispatch, review and proof shepherding, and the guarded merge.
+
+Onboarding provides the identities once: `master autonomy --admin-token-stdin --apply` provisions the master's operator-agent identity and the approver identity and installs the master's harness rules; dispatch installs each worker's own rules in its worktree, so a worker pushes its assigned branch and opens its pull request without a keypress. Every attention item in `master status` carries `attentionOwner` — the resolving `role` (`master`, `reviewer`, `control plane`, or `human` only for the three human-only decisions), whether the approver agent must approve, and the `next` command — and `attentionItems` lists them all. Never ask a human to run a command an agent identity is permitted to run.
+
 ## Install
 
 Requires Node 24, Herdr 0.7.1 or newer, a Graphyard checkout, and GitHub CLI authenticated as an identity allowed to merge the protected base branch. Muse profiles require Herdr 0.9.1 or newer, which recognizes kind `muse` natively, and an installed, provider-authenticated `muse` executable on the coordinator host.
@@ -123,9 +133,10 @@ Each cycle:
 3. **shepherds reviews and proofs** — the reviewer and producer sessions the control plane
    requested for each exact head are launched on the dispatcher's own cadence (see
    [automatic dispatch at submit](#automatic-dispatch-at-submit)), a request goes to the trusted
-   producer workflow when automatable proof is missing and one is configured, and anything only a
-   human may resolve is escalated;
-4. **invokes only the guarded merge**, when automatic merging is enabled;
+   producer workflow when automatable proof is missing and one is configured, and anything that needs
+   a two-party decision is surfaced in `master status` with its owner and next command;
+4. **invokes only the guarded merge**, when automatic merging is enabled (with it disabled, the
+   visible session merges each candidate the approver agent approved);
 5. **verifies the deployed SHA** against what Graphyard recorded as delivered, and for a delivery
    whose policy sets `deploySmoke` records that observation on the item, requests the trusted smoke
    workflow once per deployed commit, and escalates a failed verdict with rollback guidance (see the
@@ -173,9 +184,9 @@ refused merge is the gate working: the loop records the refusal and keeps cyclin
 An unhealthy profile — an unreadable credential, a name already busy in Herdr, or a recent failed
 launch — is routed around for a ten-minute cool-off while other profiles keep receiving work.
 
-Judgment calls stay with the visible master session or the human operator: reading a worker's
-report, deciding whether a review finding needs rework, choosing how to route a novel failure. The
-loop keeps the mechanical steps running underneath them.
+Judgment calls stay with the visible master session, and a two-party decision with the approver
+agent: reading a worker's report, deciding whether a review finding needs rework, choosing how to
+route a novel failure. The loop keeps the mechanical steps running underneath them.
 
 ## Automatic dispatch at submit
 
@@ -328,8 +339,8 @@ step 5. Stop only when every in-scope work item is Done or genuinely externally
 blocked, and either the exact deployed release has passed live verification or a
 genuinely external deployment blocker is recorded in Graphyard.
 
-In-scope work is every item Graphyard has released: unreleased backlog is the human
-operator's (or a scoped operator agent's, with `intent:ready`) to release with `ready`,
+In-scope work is every item Graphyard has released: unreleased backlog is released by the
+master (`master release GY-N REASON`, in the priority order the human operator set),
 so it neither blocks nor satisfies the terminal condition. A per-item blocker is the `blocked` record the lease holder writes on the
 item; a session that went quiet without one is not a blocker, it is work to dispatch
 again.
@@ -399,9 +410,9 @@ Run `status` at startup, after dispatch, when a worker reports completion, and w
 
 `delivered` lists every delivery whose policy sets `deploySmoke`, with the recorded deployment, the smoke verdict, `postDeployMs`, `productionLatencyMs`, and — for a failed verdict — `rollback` guidance. Act on that guidance through a follow-up item; never backfill evidence or clear the failure. See [operations](operations.md#delivered-with-a-failed-smoke-proof).
 
-For work using the [identity-bound agent review provider](github.md#identity-bound-agent-review-providers), each row carries a `review` object with the currently dispatched reviewer profile and runtime, plus the failover entries recorded for the current candidate; `counts.reviewFailover` totals the items that failed over. A reviewer runs out of quota or goes silent past its timeout, Graphyard records that and moves to the next configured profile on its own — no master action is required. When every profile is exhausted the row is flagged for attention and the review gate stays closed. That is a capacity decision for the operator: add reviewer capacity, wait for quota, or revise the review policy. Never treat exhaustion as an approval, and never merge around a closed review gate.
+For work using the [identity-bound agent review provider](github.md#identity-bound-agent-review-providers), each row carries a `review` object with the currently dispatched reviewer profile and runtime, plus the failover entries recorded for the current candidate; `counts.reviewFailover` totals the items that failed over. A reviewer runs out of quota or goes silent past its timeout, Graphyard records that and moves to the next configured profile on its own — no master action is required. When every profile is exhausted the row is flagged for attention and the review gate stays closed. That is a capacity decision for the master: add a reviewer profile on another provider (`master reviewer add`), wait for quota, or select another review provider; buying more quota is spending money, the human's call. Never treat exhaustion as an approval, and never merge around a closed review gate.
 
-`master status` also reports facts about the installation itself under `controlPlane`: `attention` lists a GitHub App permission the installation lacks (with the installation page where the pending request is accepted), a preflight that could not verify the permissions, the number of integration jobs held on that shortfall, every capacity variable that no longer covers the configured principals (`Set GRAPHYARD_MAX_REVIEWERS=N on the deployment`, under `delegationLimits`), and how far the base branch is ahead of what production serves; `appPermissions` carries the missing entries and when they were last verified; `counts.attention` includes these items. `controlPlane.production` is the control plane's own [deployment observation](deployment.md#production-deployment-observation): the serving commit, `aheadBy`, the newest provider deployment with its status, the pending and deployed items, and the open incidents; when main is ahead the attention line reads `main is N commits ahead of production (serving …): <failing deployment reason>`. `controlPlane.build` is the commit and merge protocol the server runs, `versionSkew` is the refusal `master merge` would raise (`null` when the CLI and server agree), and `latency.mergeToProduction` is the merge-to-production p50/p90 over every delivery with an observed deployment, which the periodic measurement records beside `delivered[].mergeToProductionMs`. A permission shortfall is an administration action — the human operator, or the master through the operator's browser profile — not a merge decision: the affected jobs are held rather than retried, the gates they feed stay closed, and `graphyard github-setup --update-permissions` on the machine holding the App credentials prints the exact steps. `master init` reports the same attention in its result. See [App permissions](github.md#app-permissions).
+`master status` also reports facts about the installation itself under `controlPlane`: `attention` lists a GitHub App permission the installation lacks (with the installation page where the pending request is accepted), a preflight that could not verify the permissions, the number of integration jobs held on that shortfall, every capacity variable that no longer covers the configured principals (`Set GRAPHYARD_MAX_REVIEWERS=N on the deployment`, under `delegationLimits`), and how far the base branch is ahead of what production serves; `appPermissions` carries the missing entries and when they were last verified; `counts.attention` includes these items. `controlPlane.production` is the control plane's own [deployment observation](deployment.md#production-deployment-observation): the serving commit, `aheadBy`, the newest provider deployment with its status, the pending and deployed items, and the open incidents; when main is ahead the attention line reads `main is N commits ahead of production (serving …): <failing deployment reason>`. `controlPlane.build` is the commit and merge protocol the server runs, `versionSkew` is the refusal `master merge` would raise (`null` when the CLI and server agree), and `latency.mergeToProduction` is the merge-to-production p50/p90 over every delivery with an observed deployment, which the periodic measurement records beside `delivered[].mergeToProductionMs`. A permission shortfall is an administration action — the master's, through the API or the operator's browser profile — not a merge decision: the affected jobs are held rather than retried, the gates they feed stay closed, and `graphyard github-setup --update-permissions` on the machine holding the App credentials prints the exact steps. `master init` reports the same attention in its result. See [App permissions](github.md#app-permissions).
 
 Dispatch:
 
@@ -507,7 +518,7 @@ A browser-driven change is therefore as attributable as a CLI one, and a refusal
 ### The only operator interactions left
 
 - **Device approval.** When GitHub answers with its *Confirm access* page, the flow clicks *Use GitHub Mobile*, reads the two-digit pairing code, writes it to `.graphyard/master-actions/sudo.json`, and reports it in the session output and in `master status` under `administration.sudo` with the instruction to approve the prompt on your device and choose that code. It then waits with a bounded, retrying poll — three seconds between reads, three minutes in total, and an expired code re-issued at most three times — and continues where it was once the approval lands. A prompt nobody approves fails with the code and the rerun command rather than hanging; a prompt without a GitHub Mobile option is refused rather than guessed at with a password or authenticator.
-- **Human-only decisions.** The guides mark these human-only: choosing which review provider an item uses, releasing backlog work, revising requirements, clearing blockers, satisfying a manual proof, authorizing rework, and approving a merge when automatic merging is disabled stay with the human operator. The flows change nothing outside the three targets above.
+- **Human-only decisions.** Only three decisions are human-only: goals and priorities, spending money or opening third-party accounts, and issuing credentials to people. Review-provider selection, releasing backlog work, revising requirements, clearing blockers, satisfying a manual proof, authorizing rework, and approving a merge when automatic merging is disabled are [agent decisions](#autonomy-agents-approve-agents). The flows change nothing outside the three targets above.
 
 ### What the master must never do
 
@@ -529,7 +540,7 @@ A harness allowlist is a prompt policy, not an authority boundary. The enforced 
 
 Claude Code loads `.claude/settings.local.json` for every session started anywhere under the repository, assigned worktrees included, so the master's rules would otherwise bind the sessions it launches: its `git push` deny would refuse a worker's push to its own branch, and its review-call deny would refuse the reviewer's verdict. Worker, reviewer and producer sessions therefore never inherit them. When the repository carries Claude project or local settings, each Claude session is launched with `--setting-sources user --settings .graphyard/harness/ROLE-PROFILE.json`: the operator's user settings plus its own role file, and never the repository's project or local settings where the master's rules live.
 
-- **worker** — may `git push` its assigned branch (`origin BRANCH`, `-u`, `HEAD:BRANCH`), run the Graphyard CLI and open its pull request; may not force-push, push the base branch, post a review or submit evidence.
+- **worker** — the same rules dispatch writes into the assigned worktree's own `.claude/settings.local.json`: it may `git push` its assigned branch (`origin BRANCH`, `-u`, `HEAD:BRANCH`), run its item's Graphyard commands and open its pull request; it may not force-push, push the base branch, rebase, merge, post a review or submit evidence. The worktree file alone is not enough — Claude Code still loads the repository's settings above it, master denies included — which is why the session is launched with its role file instead.
 - **reviewer** — may read the diff and post the one verdict it was launched for (`gh api --method POST repos/OWNER/REPO/pulls/N/reviews`); may not push, commit, claim, submit evidence, or edit files.
 - **producer** — may fetch, add and remove its detached worktree and submit evidence; may not push, commit, claim or post a review.
 
@@ -544,9 +555,9 @@ A foreground worker runs inside a containment quarantine that its supervisor set
 The quarantine records the exact scope unit the session was launched in and the supervisor's pid (`containment.scope`), and status reports what systemd says of that unit. Everything the recorded scope still holds fences this item, whatever a member's working directory or ancestry says. Any other live `graphyard-watch-*` scope is dismissed only when its members are positively attributed to another assignment: by the live supervisor whose pid the scope name carries, when that supervisor runs `watch` for a different work key or epoch from another workspace, or by following a member's own ancestry to such a supervisor. Another worker's scope on the same machine is therefore ordinary, even when its session has reparented away from its supervisor; an orphaned scope left by a dead supervisor is not, and it fences until an operator attests. Every process still holding the fence is listed in `containment.held`, and printed by `master settle-containment`, with its pid, cmdline and cwd — read them before stopping anything.
 
 - `settleable: true` with no `refusals` means the supervisor is verifiably gone. Run `master settle-containment GY-N "reason"`. The control plane re-checks the deadlines and the verification before clearing the fence, and records the verification in the event ledger.
-- Any `refusals` entry means something could not be proven — the host is unreachable or not the registered one, a scope or process query failed, a process is still present, or the clocks disagree. Automatic settlement refuses, and so does the control plane. Stop the supervisor yourself and use the operator attestation path (`rework GY-N --previous-worker-stopped`, or `recover-containment GY-N --previous-worker-stopped` once the work is delivered).
+- Any `refusals` entry means something could not be proven — the host is unreachable or not the registered one, a scope or process query failed, a process is still present, or the clocks disagree. Automatic settlement refuses, and so does the control plane. Stop the supervisor yourself and use the stopped-worker attestation path: a two-party `rework` decision (`master decide GY-N rework REASON`), or `recover` once the work is delivered, approved by the approver agent.
 
-The record it sends names every process and containment scope it found, and counts the privileged host processes that withheld inspection. Settlement lowers the fence and nothing else. It does not authorize rework, reopen delivered work, or satisfy any gate; a submitted item still needs an operator's rework decision before reassignment. Verification is bounded by what this host can see: a supervisor launched on another machine, by another user, or outside this coordinator's systemd user manager is never reported as absent — those remain the operator's attestation. See [the protocol](protocol/containment-settlement.md) for the exact checks.
+The record it sends names every process and containment scope it found, and counts the privileged host processes that withheld inspection. Settlement lowers the fence and nothing else. It does not authorize rework, reopen delivered work, or satisfy any gate; a submitted item still needs a rework decision before reassignment. Verification is bounded by what this host can see: a supervisor launched on another machine, by another user, or outside this coordinator's systemd user manager is never reported as absent — those need the stopped-worker attestation of a two-party `rework` or `recover` decision, made after someone on that host confirms the stop. See [the protocol](protocol/containment-settlement.md) for the exact checks.
 
 ## Secure multi-machine topology
 
@@ -572,7 +583,7 @@ The command never uses an admin bypass. Graphyard marks Done only after independ
 
 Before any candidate is read, the broker compares the merge protocol it speaks with the one the server reports in `GET /api/status` (`build.protocol`; a server that reports none is protocol 1). A mismatch refuses with `server runs <sha>, CLI expects <sha>: deploy main first` — the deployment has not served the commit the CLI runs, typically because the container failed to start — instead of failing later with an invalid gate verification. The durable loop makes the same check at start-up and before every guarded merge. Deploy main (see [merged but not deployed](operations.md#merged-but-not-deployed)) and retry; never downgrade the CLI to match a stale server.
 
-Use `master init --no-auto-merge` when an operator must approve each merge request. This preference does not weaken the checks.
+Use `master init --no-auto-merge` when each merge needs an explicit approval. The approval is an agent's: request `master decide GY-N merge REASON`, the approver agent approves it for the exact candidate, and `master merge` refuses any candidate without an applied merge decision matching its head, base and policy revision (`master merge --all` skips them). This preference does not weaken the checks.
 
 ## Merge queue
 
@@ -615,8 +626,8 @@ the smallest planned scope first: fewest root-level directory scopes (`src/`, `d
 then fewest directory scopes, then fewest files, then the older item. A small item that lands early
 is one fewer re-integration for everything that would otherwise have waited behind it. Each row's
 `scope` carries that breadth, and a root-level directory scope marks the item `highConflict`
-(also listed under `schedule.highConflict`): ask the operator to narrow such a scope before
-dispatching it beside anything else.
+(also listed under `schedule.highConflict`): narrow such a scope with a two-party `requirements`
+decision before dispatching it beside anything else.
 
 **Per-candidate conflict sets.** For every open candidate, `master status` runs
 `git merge-tree --write-tree` between its head and each other open candidate's head — a real
@@ -641,7 +652,7 @@ For a dead worker or provider change:
 1. stop the old worker and supervisor;
 2. release or let the lease expire, and settle any containment quarantine it left; a submitted
    attempt has no lease left to release, because `complete` ended it;
-3. request operator rework if a candidate was already submitted;
+3. request a two-party `rework` decision if a candidate was already submitted;
 4. claim with the replacement worker at a higher epoch;
 5. create a fresh workspace and preserve the old attempt.
 
@@ -651,23 +662,25 @@ Every other lapse is `lease.expired` history with its cause — `submitted` (the
 `complete`), `blocked-awaiting-operator` (the worker reported `blocked` and stopped to wait on
 you), or `stopped-by-attestation` (you stopped the worker and said so with
 `rework --previous-worker-stopped` or `recover-containment --previous-worker-stopped`, before or
-after the lapse) — and raises nothing. Do not treat any of those as an incident needing the human
-operator.
+after the lapse) — and raises nothing. Do not treat any of those as an incident needing anyone.
 
 Who settles what:
 
 - reconciliation settles, on deploy and every later tick, a standing `lease-loss` whose epoch has
   a bound submission, a carried blocked report, or a stopped-worker attestation in the ledger
   (`escalation.auto-settled`, with the note and the attestation it rests on). Attest first, then
-  wait a tick: your `rework --previous-worker-stopped` for the lapsed epoch is the attestation;
-- you, with your `admin` credential — this path does not require a declared human session —
-  settle a control-plane-raised `lease-loss` yourself by citing the attestation:
+  wait a tick: an applied two-party `rework` decision for the lapsed epoch (or an `admin`'s
+  `rework --previous-worker-stopped`) is the attestation;
+- an `admin` session — this path does not require a declared human session — settles a
+  control-plane-raised `lease-loss` by citing the attestation:
   `resolve GY-N lease-loss --attestation blocked|stopped-worker "reason"`. The server verifies the
   citation against the ledger and refuses one that is not there; the `escalation.resolved` entry
   records who, why and which attestation;
-- a lapse nothing explains — no report, no attestation — is a vanished worker and stays for a
-  declared human session, as do `security-concern`, `requirement-weakening`,
-  `evidence-policy-conflict` and any lease-loss a lead raised. Never work around those.
+- a lapse nothing explains — no report, no attestation — is a vanished worker; it, and
+  `security-concern`, `requirement-weakening`, `evidence-policy-conflict` and any lease-loss a
+  lead raised, are resolved by a two-party `resolve` decision (`master decide GY-N resolve
+  '{"trigger":"TRIGGER"}' REASON`) that the approver agent approves after checking the cause, or
+  by a declared human session. Never work around those.
 
 Before `master settle-containment` stops anything, read its report: the quarantine records the
 exact scope unit and supervisor pid the session was launched in (`containment.scope`), and a
@@ -677,7 +690,7 @@ its own live supervisor by the pid in its name, so another item's running worker
 item's fence; a scope you cannot attribute from that report belongs to someone — verify whose
 before stopping it.
 
-The master does not clear blockers, revise requirements, or satisfy human gates on its own. See [operations](operations.md) for recovery commands, including [restarting the durable loop](operations-reference.md#master-coordination-loop).
+The master clears blockers and adds requirements as its operator-agent identity; everything else it cannot do alone goes through a two-party decision, never around a gate. See [operations](operations.md) for recovery commands, including [restarting the durable loop](operations-reference.md#master-coordination-loop).
 
 ## Master commands
 
@@ -697,5 +710,13 @@ The master does not clear blockers, revise requirements, or satisfy human gates 
 | `master browser installation-accept` | Accept the installation's pending permission request through the browser |
 | `master browser protection [--dry-run]` | Reconcile branch protection through the browser |
 | `master harness [KIND] [--apply]` | Generate the master's own harness permissions |
-| `master merge GY-N\|--all` | Guarded merge of authorized candidates |
+| `master merge GY-N\|--all` | Guarded merge of authorized candidates; with automatic merging off, only candidates with an approved merge decision |
+| `master autonomy [--admin-token-stdin --apply]` | Provision the master's operator-agent and approver identities and harness rules (once, at onboarding) |
+| `master create FILE REASON`, `master release GY-N REASON`, `master unblock GY-N REASON`, `master requirements GY-N FILE REASON` | The master's own non-weakening intent, as its operator-agent identity |
+| `master decide GY-N ACTION [JSON\|@FILE] REASON` | Request a two-party decision: `release`, `unblock`, `requirements`, `resolve`, `attest`, `merge`, `rework`, `recover`, `grant` |
+| `master decisions GY-N` | An item's decisions with requester, approver, reasons, outcome, and refusals |
+| `master approver GY-N DECISION [KIND]` | Launch the independent approver session for one decision |
+| `master approve GY-N DECISION REASON` | Approve, from the approver session only |
+| `master principals [--apply]` | Preview or apply an agent-principal roster rotation that keeps every live principal |
+| `master restart` | Stop this host's durable loop and start it again detached |
 | `master run [--once]` | The durable coordination loop, with the dispatcher that launches requested reviews and producers |
