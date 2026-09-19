@@ -1,5 +1,6 @@
 import { probeCandidateConflicts } from '../conflicts.js';
-import { agentOwner, assessContainment, buildMasterStatus, herdrWorkspaceHealth, humanOwner, inspectWorkerCredentials, mergeProtocolSkew, observeHerdrAgents, snapshotWithClock, type MasterConfig } from '../master.js';
+import { agentOwner, assessContainment, buildMasterStatus, herdrWorkspaceHealth, humanOwner, inspectWorkerCredentials, installationOwner, mergeProtocolSkew, observeHerdrAgents, snapshotWithClock, type MasterConfig } from '../master.js';
+import { generatedFilesAssignment, generatedFilesDrift, generatedFilesVariable, generatedManifestScript } from '../install/generated-files.js';
 import { daemonSummary, readDaemonState } from '../master-daemon.js';
 import { readReviewLedger, reconcileReviews, reviewerBindingHealth, summarizeReviews } from '../reviewer.js';
 import { readProducerLedger, reconcileProducers, sessionRetries, summarizeProducers } from '../producer.js';
@@ -47,6 +48,18 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
   // Setup that stops every launch is the master's to repair.
   for (const text of reviewerBinding.attention) attentionItems.push({ subject: 'setup', text, ...agentOwner('master', 'graphyard master reviewer setup (or graphyard master reviewer bind FILE --key-stdin) to bind the reviewer App') });
   if (workspace.exists === false) attentionItems.push({ subject: 'setup', text: workspace.reason!, ...agentOwner('master', 'Set herdrWorkspace in .graphyard/master.json to a workspace herdr workspace list shows; master run adopts it on its next tick') });
+  // The generated-files variable the installers set beside GRAPHYARD_PRINCIPALS, compared with
+  // the managed repository's manifest: a deployment that does not exempt the manifest's paths
+  // sends every docs-touching item into the out-of-scope refusal, so the drift is raised here
+  // with the exact command that fixes the deployment.
+  try {
+    const manifest = generatedFilesAssignment(root);
+    const deployed = coordinator?.delegationLimits?.deployed?.[generatedFilesVariable];
+    for (const text of generatedFilesDrift(deployed, manifest)) attentionItems.push({ subject: 'installation', text, ...installationOwner('delegation-limits', text) });
+  } catch (error) {
+    attentionItems.push({ subject: 'installation', text: `The repository generated-file manifest is unreadable: ${error instanceof Error ? error.message : 'unknown reason'}`,
+      ...agentOwner('master', `Fix ${generatedManifestScript} so --list prints the generated paths; master status reports the deployment drift again once it does`) });
+  }
   return { ...status, attentionItems, autoMerge: master.autoMerge, mergeApproval: master.autoMerge ? 'routine merges permitted after gates pass' : 'each merge needs an approved merge decision: graphyard master decide GY-N merge REASON, approved by the approver agent',
     versionSkew: mergeProtocolSkew(coordinator, cli), cli,
     reviewer: master.reviewer ? { identity: `${master.reviewer.slug}[bot]`, appId: master.reviewer.appId, profiles: master.reviewers.map(profile => profile.name), automatic: master.run.reviewerProfile ?? (master.reviewers.length === 1 ? master.reviewers[0].name : null) } : null,
