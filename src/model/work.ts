@@ -68,9 +68,13 @@ export interface Observation {
   candidate: Candidate; checks: { name: string; result: string; appId: number; id?: number; attempt?: number }[];
   reviews: { reviewer: string; sha: string; state: string; id?: number; submittedAt?: string }[];
   merged: boolean; mergeSha: string | null; mergedAt?: string | null; mergeable: boolean;
-  // The real base-branch head and its tree, recorded separately from the candidate's bound
-  // base so a speculative binding never hides where the managed branch actually points.
+  // The real base-branch head and its tree, read from refs/heads/<base> (never from the pull
+  // request's cached base) and recorded separately from the candidate's bound base so a
+  // speculative binding never hides where the managed branch actually points.
   baseTip?: string; baseTree?: string;
+  // The head contains that base tip: by ancestry, or as a published queue tip whose bound base
+  // is tree-identical to it. A review is only requested for a head that does.
+  baseTipContained?: boolean;
   protected: boolean; files: string[]; at: string;
   /** The candidate diff compared against its bound base; see regression-guard.ts. */
   scopeFiles?: ScopeFile[];

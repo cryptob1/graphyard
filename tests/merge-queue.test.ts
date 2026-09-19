@@ -207,3 +207,31 @@ test('a queued entry behind the head has no merge authorization, and the queue r
   assert.equal(queueRef('GY-41'), 'refs/graphyard/queue/gy-41');
   assert.equal(queueRef('GY-41').startsWith('refs/heads/') || queueRef('GY-41').startsWith('refs/tags/'), false);
 });
+
+test('unit:queue-tree-equivalent-base — a predicted base that changes to a tree-identical commit keeps the published tip and binding; a different tree republishes', () => {
+  const head = enqueue(work('GY-1'), 1);
+  const tip = commit('GY-1tip'), validatedBase = commit('predecessor');
+  head.candidate = { ...head.candidate!, sha: tip, baseSha: validatedBase };
+  head.queue!.speculation = { ref: queueRef('GY-1'), tip, base: validatedBase, baseTree: commit('tree'), predecessors: ['GY-0'], policyRevision: 1, publishedAt: now.toISOString() };
+  head.observation = observation(head, { baseTip: validatedBase, baseTree: commit('tree') });
+  head.evidence = [evidence(head)];
+  const exact = predictQueue([head], now.getTime())[0];
+  assert.deepEqual([exact.current, exact.binding, exact.publishable], [true, 'exact', false]);
+  assert.deepEqual(exact.base, { sha: validatedBase, tree: commit('tree') });
+  // GY-0 merged with merge_method=merge: main is a new commit whose tree is exactly GY-0's validated tip tree.
+  head.observation = observation(head, { baseTip: commit('merged'), baseTree: commit('tree') });
+  const kept = predictQueue([head], now.getTime())[0];
+  assert.deepEqual([kept.current, kept.binding, kept.publishable, kept.tip, kept.predictedBase], [true, 'tree-equivalent', false, tip, commit('merged')]);
+  assert.deepEqual(kept.base, { sha: commit('merged'), tree: commit('tree') }, 'the chain now rests on the advanced commit');
+  const gates = evaluate(head, [head], now, ciAppIds);
+  assert.deepEqual(gates.gates.find(gate => gate.name === 'merge')!.reasons, [], 'nothing is republished and no binding is refused');
+  assert.equal(head.candidate!.baseSha, validatedBase, 'the candidate stays bound to the sha it was validated on');
+  // Any other advance changes the tree: the tip is stale and Graphyard publishes a new one.
+  head.observation = observation(head, { baseTip: commit('outside'), baseTree: commit('othertree') });
+  const stale = predictQueue([head], now.getTime())[0];
+  assert.deepEqual([stale.current, stale.binding, stale.publishable], [false, null, true]);
+  assert.match(stale.reasons[0], /has not been published and validated/);
+  // Tree equivalence never substitutes for publication: an unpublished head on a tree-identical base still publishes.
+  head.queue!.speculation = null; head.observation = observation(head, { baseTip: commit('merged'), baseTree: commit('tree') });
+  assert.equal(predictQueue([head], now.getTime())[0].publishable, true);
+});

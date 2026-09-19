@@ -1,4 +1,5 @@
 import type { Work } from './work.js';
+import { evidenceBindsCandidate } from './carry.js';
 
 export type ArtifactKind = 'log' | 'report' | 'screenshot' | 'trace' | 'other';
 export type ArtifactAvailability = 'available' | 'expired' | 'redacted' | 'missing' | 'upload-failed' | 'external';
@@ -16,6 +17,12 @@ export interface Evidence {
   executed: number; skipped: number; url?: string; at: string; expiresAt?: string;
   artifacts?: EvidenceArtifact[];
   scenarioRevision?: number; environment?: string;
+  /**
+   * The paths this proof depends on, in the bounded scope syntax of `plannedFiles`, declared by
+   * the producer. The merge queue carries the record onto a Graphyard-authored tip only when this
+   * scope is disjoint from what the predecessor changed; an undeclared scope is never carried.
+   */
+  scopeFiles?: string[];
   revocation?: { at: string; actor: string; reason: string };
   provenance?: {
     provider: 'github-actions'; repository: string; workflowCommit: string;
@@ -53,19 +60,20 @@ export function evidenceIndependenceRefusals(work: Work, now = new Date()): stri
   for (const proof of new Set(work.criteria.flatMap(criterion => criterion.proofs))) {
     if (currentEvidence(work, proof, now)) continue;
     const superseded = work.evidence.filter(evidence => evidence.proof === proof && evidence.trusted && implementers.includes(evidence.producer)
-      && !!work.candidate && evidence.sha === work.candidate.sha && evidence.baseSha === work.candidate.baseSha && evidence.policyRevision === work.policyRevision);
+      && evidenceBindsCandidate(work, evidence) && evidence.policyRevision === work.policyRevision);
     for (const producer of new Set(superseded.map(evidence => evidence.producer)))
       refusals.push(`Trusted ${proof} evidence from ${producer} is no longer independent: ${producer} has since held an assignment on ${work.key}`);
   }
   return refusals;
 }
 
-// Shared by gates and human-facing proof previews.
+// Shared by gates and human-facing proof previews. A record binds the candidate exactly, or
+// carried across a Graphyard-authored tip (see carry.ts); nothing else applies.
 export function currentEvidence(work: Work, proof: string, now = new Date()): Evidence | undefined {
   const scenario = work.scenarioRequirements?.find(s => s.proof === proof);
   const validation = work.validation?.[proof];
   const implementers = implementerIdentities(work);
-  const latest = work.evidence.filter(e => e.proof === proof && e.trusted && !e.revocation && !implementers.includes(e.producer) && e.sha === work.candidate?.sha && e.baseSha === work.candidate?.baseSha && e.policyRevision === work.policyRevision
+  const latest = work.evidence.filter(e => e.proof === proof && e.trusted && !e.revocation && !implementers.includes(e.producer) && evidenceBindsCandidate(work, e) && e.policyRevision === work.policyRevision
     && (!validation || !!validation.attemptId && e.validation?.candidateId === validation.candidateId && e.validation?.requestId === validation.requestId && e.validation?.attemptId === validation.attemptId)
     && (!scenario || e.scenarioRevision === scenario.revision && e.environment === scenario.environment)).at(-1);
   return latest && (!latest.expiresAt || Date.parse(latest.expiresAt) > now.getTime()) ? latest : undefined;
