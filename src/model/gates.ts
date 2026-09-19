@@ -1,3 +1,4 @@
+import { latestCheck } from '../merge-queue.js';
 import type { QueueEjection, QueueEntry, QueueHistoryEntry } from '../merge-queue.js';
 import type { Gate, Stage, Work } from './work.js';
 import { escalationRefusals } from './escalation.js';
@@ -53,7 +54,7 @@ export function evaluate(work: Work, all: Work[], now: Date, ciAppIds: number[])
   ] : []);
   add('test', work.policy.checks.filter(name => {
     const checks = current ? obs!.checks.filter(c => c.name === name && ciAppIds.includes(c.appId)) : [];
-    return !checks.length || checks.some(c => c.result !== 'success');
+    return latestCheck(checks)?.result !== 'success';
   }).map(name => `Required CI check ${name} has not passed on the current candidate`));
   const reasons: string[] = [];
   const unproven = (proof: string) => {
