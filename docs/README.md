@@ -36,6 +36,7 @@ The sections below are generated from each page's `<!-- page: Section | order | 
 - [Releases and observed production delivery](delivery.md) — release builds, approvals, and observed production delivery.
 - [Candidate-to-deployment attribution](attribution.md) — release manifests, exact-target validation, safe re-anchoring, and attribution analytics.
 - [Runner capacity, artifact operations and delivery recovery](recovery.md) — runner capacity, artifact retention and migration, and fenced rollback as an observed workflow.
+- [Evidence replay, scoped reuse and execution analytics](evidence-reuse.md) — replay of retained artifacts with explicit coverage, scoped reuse of the newest compatible attempt, and execution cost analytics.
 
 ## Understand or contribute
 

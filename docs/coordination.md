@@ -48,7 +48,7 @@ All previous acceptance evidence remains in history but becomes inapplicable to 
 
 To withdraw specific accepted runs without changing what the work item requires, revoke that evidence instead of revising requirements; see the [operations runbook](operations.md#accepted-evidence-turns-out-to-be-wrong) and the [protocol](protocol/evidence.md#revocation).
 
-Existing E2E proof names retain their pinned scenario version. Newly added E2E proofs pin the latest definition at revision time. This command does not silently upgrade existing pins. Selecting a newer revision of the same scenario and selective reuse of unaffected evidence remain future work.
+Existing E2E proof names retain their pinned scenario version. Newly added E2E proofs pin the latest definition at revision time. This command does not silently upgrade existing pins. Selecting a newer revision of the same scenario remains future work. Reuse of an executed pass for a later head of the same item is a separate, policy-bound decision described in [evidence replay, scoped reuse and execution analytics](evidence-reuse.md); a requirement revision always refuses it.
 
 ## Detect overlap without pretending to understand every API
 

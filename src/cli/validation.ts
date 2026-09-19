@@ -12,11 +12,21 @@ export const validationCommands = defineCommands([
       '  validation artifact-migrate TARGET [LIMIT]',
       '                                Move retained artifacts between postgres and the configured',
       '                                external backend, verifying each digest (operator)',
+      '  validation reuse file.json   Decide whether the newest attempt\'s pass may stand for the',
+      '                                current head under a reuse policy (operator); decisions lists them',
+      '  validation replay REQUEST ATTEMPT',
+      '                                Re-run the pinned verifier over retained artifacts and record',
+      '                                coverage and cost; replays lists the records (operator or reader)',
+      '  validation analytics         Attempt durations, runner-reported cost and reuse/replay counts',
     ],
     async run(context) {
       const { id, args, api, base, print } = context;
       if (!id || id === 'requests') return print(await api('validation' + (args[0] ? `?cursor=${encodeURIComponent(args[0])}` : '')));
       if (id === 'capacity') return print(await api('validation/capacity'));
+      if (id === 'analytics') return print(await api('validation/analytics'));
+      if (id === 'decisions') return print(await api('validation/reuse' + (args[0] ? `?cursor=${encodeURIComponent(args[0])}` : '')));
+      if (id === 'replays') return print(await api('validation/replays' + (args[0] ? `?cursor=${encodeURIComponent(args[0])}` : '')));
+      if (id === 'replay' && args.length === 2) return print(await api('validation/replay', { requestId: args[0], attemptId: args[1] }));
       if (id === 'artifact-migrate' && args[0]) return print(await api('validation/artifacts/migrate', { target: args[0], ...(args[1] ? { limit: Number(args[1]) } : {}) }));
       if (id === 'artifact-upload' && args.length === 1) return print(await api('validation/artifacts', JSON.parse(await readFile(args[0], 'utf8'))));
       if (id === 'artifact-download' && args.length === 3) {
@@ -30,7 +40,7 @@ export const validationCommands = defineCommands([
       }
       if (id === 'definitions') return print(await api('validation/definitions' + (args[0] ? `?cursor=${encodeURIComponent(args[0])}` : '')));
       if (id === 'show-candidate' && args[0]) return print(await api(`validation/candidate/${encodeURIComponent(args[0])}`));
-      if (!['define','build','candidate','request','dispatch','ack','heartbeat','result','cancel','settle','retry'].includes(id) || !args[0]) throw new Error('Use validation ACTION file.json');
+      if (!['define','build','candidate','request','dispatch','ack','heartbeat','result','cancel','settle','retry','reuse'].includes(id) || !args[0]) throw new Error('Use validation ACTION file.json');
       return print(await api(`validation/${id}`, JSON.parse(await readFile(args[0], 'utf8'))));
     },
   },
