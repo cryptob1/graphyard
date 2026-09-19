@@ -8,6 +8,8 @@ import { ProofGrants } from '../proof-grants.js';
 import { artifactBackendFromEnv, artifactCapacityFromEnv } from '../artifacts.js';
 import { projectFlow } from '../flow-analytics.js';
 import { principalSchema, server } from './index.js';
+import { buildIdentity } from '../protocol-version.js';
+import { ProductionWatch, railwayProvider } from '../production-watch.js';
 
 /** Process entry: configuration, migration, the HTTP server and the reconciliation tick. */
 export async function main() {
@@ -30,7 +32,16 @@ export async function main() {
   };
   if (github) await announcePreflight(await github.preflight());
   const artifacts = { backend: artifactBackendFromEnv(), capacityBytes: artifactCapacityFromEnv() };
-  const http = server(engine, credentials, github, artifacts);
+  // The producers this installation already ran with. An over-limit roster of these starts
+  // with a warning; only a principal added beyond the limit refuses, naming the variable.
+  const knownPrincipals = (await store.pool.query('SELECT principal_id FROM proof_grants')).rows.map(row => String(row.principal_id));
+  const build = buildIdentity();
+  const provider = railwayProvider();
+  const production = new ProductionWatch(store, { provider, github, build, baseBranch: github?.config.base ?? process.env.GITHUB_BASE_BRANCH ?? 'main' });
+  const http = server(engine, credentials, github, artifacts, { knownPrincipals, production });
+  for (const line of http.services.delegationLimits.attention) console.error(`Delegation limits: ${line}`);
+  console.log(`Build ${build.commit ?? 'commit unknown'} (merge protocol ${build.protocol}); production observation ${provider ? `via ${provider.description}` : build.commit ? 'from the build identity only; set RAILWAY_API_TOKEN or RAILWAY_TOKEN to read the deployment list' : 'unavailable: set GRAPHYARD_BUILD_SHA or RAILWAY_GIT_COMMIT_SHA'}`);
+  await production.load().catch(error => console.error('production incidents could not be loaded', error instanceof Error ? error.message : 'unknown'));
   // One-time materialization of the deployment allowlist. Operators manage proof authority
   // inside Graphyard from here on; a later environment edit no longer changes authority.
   const seeded = await new ProofGrants(store, credentials.map(({ token, ...actor }) => actor)).seed();
@@ -49,6 +60,10 @@ export async function main() {
     try {
       await validation.expireArtifacts(); await validation.reconcile(); await engine.reconcile(); await delivery.sweep();
       await projectFlow(engine.store, { batches: 4 });
+      // Provider polling is bounded inside the watch to once a minute; incidents it raises
+      // land in the ledger and in /api/status, and are announced here once each.
+      const before = production.status().incidents.map(incident => incident.id);
+      for (const incident of (await production.tick()).incidents) if (!before.includes(incident.id)) console.error(`Deployment incident ${incident.key} (${incident.status}): ${incident.reason}`);
       if (github) {
         const preflight = await github.preflightIfDue();
         if (preflight) await announcePreflight(preflight);

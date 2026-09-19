@@ -11,7 +11,7 @@ export GRAPHYARD_CLI=/absolute/path/to/graphyard/bin/graphyard.mjs
 
 ## Fresh installation
 
-1. **Deploy the server** with Postgres and an HTTPS origin, following [deployment](deployment.md). Set `GRAPHYARD_PRINCIPALS` with one cryptographically random token per role, plus `GITHUB_REPOSITORY`, `GITHUB_BASE_BRANCH`, and `GITHUB_CI_APP_IDS`.
+1. **Deploy the server** with Postgres and an HTTPS origin, following [deployment](deployment.md). Set `GRAPHYARD_PRINCIPALS` with one cryptographically random token per role, the four [capacity variables](deployment.md#delegation-capacity-variables) derived from that principal set (`GRAPHYARD_MAX_REVIEWERS` at least the number of `producer` principals), plus `GITHUB_REPOSITORY`, `GITHUB_BASE_BRANCH`, and `GITHUB_CI_APP_IDS`. The Railway adapters write the capacity variables for you and `init --scan --apply` prints them as `capacity.lines` beside the principals it registers; set them by hand only when configuring the deployment directly.
 2. **Register the control-plane App** from the managed repository checkout:
 
    ```sh
@@ -44,5 +44,13 @@ Upgrade in this order:
 
    It prints the exact browser steps GitHub requires — set the permission on the App, then accept the pending request on the installation — and polls until the installation reports the declared set. It exits nonzero while anything remains.
 4. Nothing else is needed. The next preflight sees the accepted permission and releases the held jobs; no restart is required. Confirm with `doctor` that `appPermissions.missing` is empty and `heldJobs` is `0`.
+
+### Capacity limits and drift
+
+An upgrade never changes the roster, but a release can change a default. The server therefore derives any unset `GRAPHYARD_MAX_*`/`GRAPHYARD_MIN_*` limit from the principals it is configured with and starts; it refuses start-up only for a principal newly added beyond an explicit limit, naming the variable and the value to set. Both `doctor` and `master status` report `delegationLimits` drift — a deployed value, or an unset default, that no longer covers the principals — as `Set GRAPHYARD_MAX_REVIEWERS=N on the deployment`. Re-running the installer after adding principals reports the same drift and sets the corrected values; set them by hand on a manual deployment and redeploy. See [delegation capacity variables](deployment.md#delegation-capacity-variables).
+
+### Confirm the deployment served the upgrade
+
+A container that exits at start-up leaves the previous release serving and `/healthz` green. After deploying, confirm `/healthz` reports the `commit` you deployed, and read `production` in `doctor` or `controlPlane.production` in `master status`: `main is N commits ahead of production` with the provider's failure reason means the upgrade never started. `master merge` refuses with `server runs <sha>, CLI expects <sha>: deploy main first` while the deployed server speaks an older merge protocol than the CLI checkout. See [production deployment observation](deployment.md#production-deployment-observation).
 
 Only the control-plane App gains a permission in this migration. Reviewer Apps keep their own declaration — `github-setup --update-permissions --reviewer NAME` reports any excess grant as a step to reduce it — and worker identities are never Apps. The reasons are in [App permissions](github.md#app-permissions).
