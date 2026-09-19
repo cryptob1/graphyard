@@ -55,7 +55,7 @@ You are prompted for exactly four things:
 
 | Prompt | What to do |
 | --- | --- |
-| Which provider | Already answered by `--provider` |
+| Which provider | Already answered by `--provider`; on Railway, add `--workspace NAME-OR-ID` when the account belongs to several workspaces |
 | Provider login | Run the login command the installer prints, once |
 | The GitHub App confirmation | Open the printed page, confirm the App, install it on this repository |
 | Plan approval | Read the plan, then rerun with `--apply` |

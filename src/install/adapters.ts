@@ -15,6 +15,8 @@ export interface AdapterContext {
   sourceRoot: string;
   sshHost: string | null;
   sshUser: string;
+  /** Railway workspace chosen with --workspace; null lets the installer resolve a single-workspace account. */
+  workspace: string | null;
   serverType: string;
   location: string;
   databasePassword: string;
@@ -30,6 +32,8 @@ export interface AdapterContext {
 
 export interface AdapterObservation {
   installed: boolean;
+  /** The provider-side container of the deployment exists: the Railway project, the Hetzner server. */
+  compute: boolean;
   database: boolean;
   app: boolean;
   url: string | null;
@@ -52,7 +56,7 @@ export interface ProviderAdapter {
   logs(ctx: AdapterContext, lines?: number): Promise<string>;
 }
 
-export const emptyObservation = (): AdapterObservation => ({ installed: false, database: false, app: false, url: null, variables: {}, detail: [] });
+export const emptyObservation = (): AdapterObservation => ({ installed: false, compute: false, database: false, app: false, url: null, variables: {}, detail: [] });
 
 export async function httpHealth(ctx: AdapterContext, url: string) {
   try {
@@ -297,6 +301,7 @@ export const hetznerAdapter: ProviderAdapter = {
     if (described.code !== 0) return observation;
     let address: string | null = null;
     try { address = JSON.parse(described.stdout)?.public_net?.ipv4?.ip ?? null; } catch { address = null; }
+    observation.compute = true;
     observation.detail.push(address ? `Server ${ctx.service} exists at ${address}` : `Server ${ctx.service} exists`);
     if (!address) return observation;
     const remote = ctx.ssh(address, ctx.sshUser);
@@ -311,14 +316,14 @@ export const hetznerAdapter: ProviderAdapter = {
   },
   plan(ctx, observation) {
     return [
-      { id: 'provider.provision.server', target: 'provider', title: `Create Hetzner server ${ctx.service} (${ctx.serverType}, ${ctx.location}) with a Docker cloud-init and an attached data volume`, state: observation.detail.length ? 'satisfied' : 'create', command: `hcloud server create --name ${ctx.service} --type ${ctx.serverType} --location ${ctx.location} --image ubuntu-24.04` },
+      { id: 'provider.provision.server', target: 'provider', title: `Create Hetzner server ${ctx.service} (${ctx.serverType}, ${ctx.location}) with a Docker cloud-init and an attached data volume`, state: observation.compute ? 'satisfied' : 'create', command: `hcloud server create --name ${ctx.service} --type ${ctx.serverType} --location ${ctx.location} --image ubuntu-24.04` },
       ...composeActions(ctx, observation, `Hetzner server ${ctx.service}`),
       { id: 'provider.tls', target: 'provider', title: ctx.domain ? `Terminate TLS for ${ctx.domain} with Caddy and automatic certificates` : 'Terminate TLS with a Caddy internal certificate (no public domain selected)', state: observation.app ? 'satisfied' : 'create' },
       { id: 'provider.backup', target: 'provider', title: `Schedule backups of the ${ctx.service}-data volume mounted at ${ctx.dataPath}; the work ledger lives only in Postgres`, state: 'update', command: `hcloud volume describe ${ctx.service}-data -o json` },
     ];
   },
   async provision(ctx, observation) {
-    if (!observation.detail.length) {
+    if (!observation.compute) {
       await ctx.transport.exec('hcloud', ['volume', 'create', '--name', `${ctx.service}-data`, '--size', '20', '--location', ctx.location, '--format', 'ext4'], { allowFailure: true, timeout: 600_000 });
       await ctx.transport.exec('hcloud', ['server', 'create', '--name', ctx.service, '--type', ctx.serverType, '--location', ctx.location, '--image', 'ubuntu-24.04', '--user-data-from-file', '-'], { input: cloudInit(ctx), timeout: 900_000 });
       await ctx.transport.exec('hcloud', ['volume', 'attach', `${ctx.service}-data`, '--server', ctx.service, '--automount'], { allowFailure: true, timeout: 600_000 });
@@ -352,13 +357,70 @@ async function hetznerAddress(ctx: AdapterContext) {
 // railway
 // ---------------------------------------------------------------------------
 
+export interface RailwayWorkspace { id: string; name: string }
+export interface RailwayWorkspaceChoice {
+  /** The workspace the project is created in; null when the CLI could not enumerate any. */
+  selected: RailwayWorkspace | null;
+  choices: RailwayWorkspace[];
+  problem: string | null;
+}
+
+/**
+ * `railway init` runs without a terminal here, and outside one the CLI refuses to guess between
+ * workspaces: an account that belongs to more than one gets "--workspace required in
+ * non-interactive mode". The installer therefore settles the workspace before the plan is
+ * printed — from `--workspace`, or on its own when the account has exactly one — and reports
+ * a choice it cannot make as a failed preflight item instead of a failed apply.
+ */
+export function chooseRailwayWorkspace(requested: string | null, choices: RailwayWorkspace[]): RailwayWorkspaceChoice {
+  const names = choices.map(workspace => `${workspace.name} (${workspace.id})`).join(', ');
+  if (requested) {
+    const wanted = requested.trim();
+    const selected = choices.find(workspace => workspace.id === wanted) ?? choices.find(workspace => workspace.name === wanted) ?? choices.find(workspace => workspace.name.toLowerCase() === wanted.toLowerCase());
+    if (selected) return { selected, choices, problem: null };
+    // An empty listing means the CLI did not enumerate workspaces; the value is passed through as given.
+    if (!choices.length) return { selected: { id: wanted, name: wanted }, choices, problem: null };
+    return { selected: null, choices, problem: `no workspace is named "${wanted}"; this account belongs to: ${names}` };
+  }
+  if (choices.length === 1) return { selected: choices[0], choices, problem: null };
+  if (choices.length === 0) return { selected: null, choices, problem: null };
+  return { selected: null, choices, problem: `this account belongs to ${choices.length} workspaces, and creating the project outside a terminal needs an explicit choice: ${names}` };
+}
+
+const railwayWorkspaces = new WeakMap<AdapterContext, RailwayWorkspaceChoice>();
+
+async function resolveRailwayWorkspace(ctx: AdapterContext): Promise<RailwayWorkspaceChoice> {
+  const cached = railwayWorkspaces.get(ctx);
+  if (cached) return cached;
+  const account = await ctx.transport.exec('railway', ['whoami', '--json'], { allowFailure: true, timeout: 60_000 });
+  let choices: RailwayWorkspace[] = [];
+  try {
+    const parsed = account.code === 0 ? JSON.parse(account.stdout) : null;
+    choices = (Array.isArray(parsed?.workspaces) ? parsed.workspaces : [])
+      .map((workspace: any) => ({ id: String(workspace?.id ?? ''), name: String(workspace?.name ?? '') }))
+      .filter((workspace: RailwayWorkspace) => workspace.id);
+  } catch { choices = []; }
+  const choice = chooseRailwayWorkspace(ctx.workspace, choices);
+  railwayWorkspaces.set(ctx, choice);
+  return choice;
+}
+
+const railwayInitArgs = (ctx: AdapterContext, workspace: RailwayWorkspace | null) => ['init', '--name', `graphyard-${ctx.installId}`, ...(workspace ? ['--workspace', workspace.id] : [])];
+
 export const railwayAdapter: ProviderAdapter = {
   provider: 'railway',
   async preflight(ctx) {
-    return [
+    const items = [
       await tool(ctx, ctx.transport, 'railway', ['--version'], 'Railway CLI', 'Install the Railway CLI (npm i -g @railway/cli)'),
       await tool(ctx, ctx.transport, 'railway', ['whoami'], 'Railway login', 'Run: railway login'),
     ];
+    if (!items.every(item => item.ok)) return items;
+    const workspace = await resolveRailwayWorkspace(ctx);
+    const options = workspace.choices.map(choice => `"${choice.name}"`).join(' | ');
+    items.push(workspace.problem
+      ? { name: 'Railway workspace', ok: false, detail: workspace.problem, fix: `Rerun with --workspace ${options || 'NAME-OR-ID'} (railway whoami --json lists them)` }
+      : { name: 'Railway workspace', ok: true, detail: workspace.selected ? `${workspace.selected.name} (${workspace.selected.id})${ctx.workspace ? '' : ', the only workspace of this account'}` : 'not enumerated by this Railway CLI; the account default is used' });
+    return items;
   },
   async observe(ctx) {
     const observation = emptyObservation();
@@ -368,6 +430,7 @@ export const railwayAdapter: ProviderAdapter = {
     try {
       const parsed = JSON.parse(status.stdout);
       services = (parsed?.services?.edges ?? []).map((edge: any) => String(edge?.node?.name ?? '')).filter(Boolean);
+      observation.compute = true;
       observation.detail.push(`Linked to Railway project ${parsed?.name ?? 'unknown'}`);
     } catch { return observation; }
     observation.database = services.some(name => /postgres/i.test(name));
@@ -389,14 +452,20 @@ export const railwayAdapter: ProviderAdapter = {
     return observation;
   },
   plan(ctx, observation) {
+    // Preflight ran first and settled the workspace; a plan built without it shows the bare command.
+    const workspace = railwayWorkspaces.get(ctx) ?? chooseRailwayWorkspace(ctx.workspace, []);
     return [
-      { id: 'provider.provision.project', target: 'provider', title: `Link or create the Railway project for ${ctx.repository}`, state: observation.detail.length ? 'satisfied' : 'create', command: `railway init --name graphyard-${ctx.installId}` },
+      { id: 'provider.provision.project', target: 'provider', title: `Link or create the Railway project for ${ctx.repository}${workspace.selected ? ` in workspace ${workspace.selected.name}` : ''}`, state: observation.compute ? 'satisfied' : 'create', command: `railway ${railwayInitArgs(ctx, workspace.selected).join(' ')}`, ...(workspace.selected ? { values: [{ name: 'workspace', value: `${workspace.selected.name} (${workspace.selected.id})`, secret: false }] } : {}) },
       { id: 'provider.provision.database', target: 'provider', title: 'Add the managed Postgres database', state: observation.database ? 'satisfied' : 'create', command: 'railway add --database postgres' },
       { id: 'provider.provision.app', target: 'provider', title: `Add the ${ctx.service} application service built from the repository Dockerfile`, state: observation.app ? 'satisfied' : 'create', command: `railway add --service ${ctx.service}` },
     ];
   },
   async provision(ctx, observation) {
-    if (!observation.detail.length) await ctx.transport.exec('railway', ['init', '--name', `graphyard-${ctx.installId}`], { timeout: 600_000 });
+    if (!observation.compute) {
+      const workspace = await resolveRailwayWorkspace(ctx);
+      if (workspace.problem) throw new Error(`Railway workspace: ${workspace.problem}`);
+      await ctx.transport.exec('railway', railwayInitArgs(ctx, workspace.selected), { timeout: 600_000 });
+    }
     if (!observation.database) await ctx.transport.exec('railway', ['add', '--database', 'postgres'], { timeout: 600_000 });
     if (!observation.app) await ctx.transport.exec('railway', ['add', '--service', ctx.service], { timeout: 600_000 });
   },

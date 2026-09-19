@@ -2,9 +2,9 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { stat } from 'node:fs/promises';
 import { buildPlan, coreEnv, materializeInstall, prepareInstall } from '../src/install/index.js';
-import { variableMarker } from '../src/install/adapters.js';
+import { chooseRailwayWorkspace, variableMarker } from '../src/install/adapters.js';
 import type { Provider } from '../src/install/types.js';
-import { harness, satisfiedProtection, type Harness } from './install-harness.js';
+import { harness, satisfiedProtection, RAILWAY_WORKSPACES, type Harness } from './install-harness.js';
 
 const supported: Provider[] = ['railway', 'hetzner', 'docker-host', 'compose'];
 const inputsFor = (provider: Provider) => ({ repository: 'owner/project', provider, ...(provider === 'railway' || provider === 'compose' ? {} : { sshHost: '203.0.113.10', sshUser: 'root', domain: 'graphyard.example.test' }) });
@@ -144,4 +144,53 @@ test('a database password a provider resolves for itself never reaches the plan'
     assert.match(entry.observed, /^sha:[0-9a-f]{12}$/);
     assert.ok(!JSON.stringify(plan).includes('railway-managed-password-9xz'), 'the resolved database password reached the plan');
   } finally { await first.cleanup(); await second?.cleanup(); }
+});
+
+/**
+ * Railway creates the project without a terminal here, and outside one its CLI refuses to pick
+ * between workspaces. The live proof of AC-3 failed exactly there ("--workspace required in
+ * non-interactive mode"), after the plan had said every preflight item was fine. The plan must
+ * settle the workspace before it is approved: on its own for a single-workspace account, from
+ * --workspace otherwise, and as a failed preflight item — with the choices — when it cannot.
+ */
+test('the Railway plan settles the workspace before apply, and reports an ambiguous account as a preflight gap', async () => {
+  const workspaceItem = (plan: Awaited<ReturnType<typeof buildPlan>>) => plan.preflight.find(item => item.name === 'Railway workspace');
+  const project = (plan: Awaited<ReturnType<typeof buildPlan>>) => plan.actions.find(action => action.id === 'provider.provision.project')!;
+
+  const single = await harness({ provider: 'railway' });
+  try {
+    const plan = await buildPlan(await prepareInstall(single.root, inputsFor('railway'), single.deps, 'plan'));
+    assert.deepEqual(workspaceItem(plan), { name: 'Railway workspace', ok: true, detail: 'Graphyard (ws-graphyard-0001), the only workspace of this account' });
+    assert.equal(project(plan).command, 'railway init --name graphyard-owner-project --workspace ws-graphyard-0001');
+    assert.deepEqual(project(plan).values, [{ name: 'workspace', value: 'Graphyard (ws-graphyard-0001)', secret: false }]);
+  } finally { await single.cleanup(); }
+
+  const several = await harness({ provider: 'railway', workspaces: RAILWAY_WORKSPACES });
+  try {
+    const ambiguous = await buildPlan(await prepareInstall(several.root, inputsFor('railway'), several.deps, 'plan'));
+    const item = workspaceItem(ambiguous)!;
+    assert.equal(item.ok, false);
+    assert.match(item.detail, /belongs to 2 workspaces/);
+    assert.match(item.detail, /Graphyard \(ws-graphyard-0001\), Installer's Projects \(ws-personal-0002\)/);
+    assert.equal(item.fix, `Rerun with --workspace "Graphyard" | "Installer's Projects" (railway whoami --json lists them)`);
+    assert.ok(!several.commandLines().some(line => line.includes('railway init')), 'an ambiguous plan must not touch the provider');
+
+    // By name, case-insensitively, or by ID; the command always carries the exact ID.
+    for (const requested of ['Graphyard', 'graphyard', 'ws-graphyard-0001']) {
+      const chosen = await buildPlan(await prepareInstall(several.root, { ...inputsFor('railway'), workspace: requested }, several.deps, 'plan'));
+      assert.deepEqual(workspaceItem(chosen), { name: 'Railway workspace', ok: true, detail: 'Graphyard (ws-graphyard-0001)' }, requested);
+      assert.equal(project(chosen).command, 'railway init --name graphyard-owner-project --workspace ws-graphyard-0001', requested);
+      assert.ok(chosen.preflight.every(item => item.ok), requested);
+    }
+
+    const unknown = await buildPlan(await prepareInstall(several.root, { ...inputsFor('railway'), workspace: 'Nowhere' }, several.deps, 'plan'));
+    assert.equal(workspaceItem(unknown)!.ok, false);
+    assert.match(workspaceItem(unknown)!.detail, /no workspace is named "Nowhere"/);
+  } finally { await several.cleanup(); }
+});
+
+test('a Railway CLI that does not enumerate workspaces still plans, passing --workspace through as given', () => {
+  assert.deepEqual(chooseRailwayWorkspace(null, []), { selected: null, choices: [], problem: null });
+  assert.deepEqual(chooseRailwayWorkspace('team-id', []), { selected: { id: 'team-id', name: 'team-id' }, choices: [], problem: null });
+  assert.equal(chooseRailwayWorkspace(' Graphyard ', RAILWAY_WORKSPACES).selected?.id, 'ws-graphyard-0001');
 });

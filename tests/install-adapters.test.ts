@@ -3,10 +3,10 @@ import assert from 'node:assert/strict';
 import { readFile, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import { applyInstall, buildPlan, coreEnv, prepareInstall } from '../src/install/index.js';
-import { fakeTransport, type Transport } from '../src/install/transport.js';
+import { fakeTransport, localTransport, type Transport } from '../src/install/transport.js';
 import { CHECK_NAME } from '../src/install/github.js';
 import type { Provider } from '../src/install/types.js';
-import { harness, satisfiedProtection, GRAPHYARD_APP_ID, CI_APP_ID, type Harness } from './install-harness.js';
+import { harness, satisfiedProtection, GRAPHYARD_APP_ID, CI_APP_ID, RAILWAY_WORKSPACES, type Harness } from './install-harness.js';
 
 const inputsFor = (provider: Provider) => ({ repository: 'owner/project', provider,
   ...(provider === 'railway' || provider === 'compose' ? {} : { sshHost: '203.0.113.10', sshUser: 'root', domain: 'graphyard.example.test' }) });
@@ -233,4 +233,55 @@ test('a server whose Docker never appears fails the install with the server name
     const session = await prepareInstall(fixture.root, inputsFor('hetzner'), { ...fixture.deps, ssh: () => unreachable as Transport });
     await assert.rejects(applyInstall(session, await buildPlan(session)), /Docker did not become available on graphyard-owner-project/);
   } finally { await fixture.cleanup(); }
+});
+
+test('Railway project creation names the resolved workspace, and a provider failure carries the CLI diagnostic', async () => {
+  const fixture = await harness({ provider: 'railway', workspaces: RAILWAY_WORKSPACES });
+  try {
+    const session = await prepareInstall(fixture.root, { ...inputsFor('railway'), workspace: "Installer's Projects" }, fixture.deps);
+    await applyInstall(session, await buildPlan(session));
+    const init = fixture.transport.commands.find(command => command.program === 'railway' && command.args[0] === 'init')!;
+    assert.deepEqual(init.args, ['init', '--name', 'graphyard-owner-project', '--workspace', 'ws-personal-0002']);
+  } finally { await fixture.cleanup(); }
+
+  // The bare exit code sent the live proof to the provider's documentation; the diagnostic
+  // behind it is what the runbook's failure table acts on.
+  const refused = await harness({ provider: 'railway' });
+  try {
+    const transport = { ...refused.transport, exec: async (program: string, args: string[], options: any = {}) =>
+      program === 'railway' && args[0] === 'init'
+        ? fakeTransport({ responses: [{ match: 'railway init', result: { stdout: '', stderr: '--workspace required in non-interactive mode (multiple workspaces available)\n', code: 1 } }] }).exec(program, args, options)
+        : refused.transport.exec(program, args, options) };
+    const session = await prepareInstall(refused.root, inputsFor('railway'), { ...refused.deps, transport: transport as Transport });
+    await assert.rejects(applyInstall(session, await buildPlan(session)), { message: 'railway exited with 1: --workspace required in non-interactive mode (multiple workspaces available)' });
+  } finally { await refused.cleanup(); }
+});
+
+test('a failed provider command surfaces its stderr, scrubbed of every generated secret', async () => {
+  const fixture = await harness({ provider: 'railway' });
+  try {
+    // Apply has minted the credentials by the time a variable is set; the provider quotes one
+    // back in its diagnostic. The fake transport builds the failure exactly as execFile does.
+    let session: Awaited<ReturnType<typeof prepareInstall>>;
+    const wired = { ...fixture.transport, exec: async (program: string, args: string[], options: any = {}) => {
+      if (program === 'railway' && args[0] === 'variable') {
+        const token = session.tokens.get(`${session.installId}-operator`)!;
+        return fakeTransport({ responses: [{ match: 'railway variable set', result: { stdout: '', stderr: `error: invalid value for ${args.at(-1)}: ${token} ${session.context.databasePassword}\n`, code: 2 } }] }).exec(program, args, options);
+      }
+      return fixture.transport.exec(program, args, options);
+    } };
+    session = await prepareInstall(fixture.root, inputsFor('railway'), { ...fixture.deps, transport: wired as Transport });
+    await assert.rejects(applyInstall(session, await buildPlan(session)), (error: Error) => {
+      assert.match(error.message, /^railway exited with 2: error: invalid value for GRAPHYARD_PRINCIPALS: \[redacted\] \[redacted\]$/);
+      assert.ok(!session.vault.exposes(error.message), 'a provider diagnostic leaked a generated credential');
+      return true;
+    });
+  } finally { await fixture.cleanup(); }
+});
+
+test('a failing local command reports its exit code and the tail of its stderr', async () => {
+  const transport = localTransport();
+  await assert.rejects(transport.exec('sh', ['-c', 'echo noise; echo "--workspace required in non-interactive mode" >&2; exit 3']), { message: 'sh exited with 3: --workspace required in non-interactive mode' });
+  const tolerated = await transport.exec('sh', ['-c', 'echo failed >&2; exit 4'], { allowFailure: true });
+  assert.deepEqual({ code: tolerated.code, stderr: tolerated.stderr.trim() }, { code: 4, stderr: 'failed' });
 });

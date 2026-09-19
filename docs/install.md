@@ -16,7 +16,8 @@ verification pass — is performed by the installer.
 
 Exactly four things, and nothing else:
 
-1. **Which provider**, supplied in the instruction.
+1. **Which provider**, supplied in the instruction — and, on a Railway account that belongs
+   to several workspaces, which workspace (`--workspace`); the plan lists them.
 2. **Provider login**, once, in a terminal (`railway login`, `hcloud context create`, an SSH key, or a local Docker daemon).
 3. **The GitHub App confirmation click**, once, in a browser page the installer opens.
 4. **Approval of the printed plan**, before anything is applied.
@@ -67,10 +68,16 @@ export GRAPHYARD_CLI=/absolute/path/to/graphyard/bin/graphyard.mjs
 
 | Provider | Check | Login | Notes |
 | --- | --- | --- | --- |
-| `railway` | `railway whoami` | `railway login` | Managed Postgres, managed TLS domain |
+| `railway` | `railway whoami` | `railway login` | Managed Postgres, managed TLS domain. An account in more than one workspace passes `--workspace NAME-OR-ID` |
 | `hetzner` | `hcloud context active` | `hcloud context create graphyard` | Creates the server, volume, Docker, and Caddy TLS |
 | `docker-host` | `ssh USER@HOST docker version` | your SSH key | Any existing Docker host; pass `--ssh-host` |
 | `compose` | `docker compose version` | none | One machine, loopback only, for evaluation |
+
+On `railway`, the installer creates the project outside a terminal, and there the Railway CLI
+refuses to choose between workspaces. The plan settles the workspace before you approve it: an
+account with exactly one workspace needs nothing; an account with several needs
+`--workspace NAME-OR-ID`, and the plan's `Railway workspace` preflight item lists the choices
+(`railway whoami --json` prints them too) until one is passed.
 
 `hetzner` and `docker-host` need `--domain` for publicly trusted TLS. Point the domain's A
 record at the host first. Without a domain, Caddy issues an internal certificate and the
@@ -96,6 +103,7 @@ Add the options the instruction called for:
 | `--producer-proof NAME` | Allow a CI producer to submit exactly this proof; repeatable |
 | `--reviewer NAME` | Also register a separate reviewer GitHub App |
 | `--review-policy github\|agent` | Native approvals (default) or Graphyard-bound agent review. It raises a weaker branch to the policy's count and never lowers a stricter one |
+| `--workspace NAME-OR-ID` | Railway workspace that owns the project; required when the account belongs to several |
 | `--ssh-host HOST` / `--ssh-user USER` | Target for `docker-host` |
 | `--base-branch NAME` | Protected base branch (default `main`) |
 | `--port N` | Host port for a local `compose` install (default 4310) |
@@ -127,6 +135,8 @@ Add the options the instruction called for:
 - Every `preflight[].ok` is `true`.
 - `actions` ends with `local.herdr`, and contains `provider.env.core`, `github.app`,
   `github.protection`, `verify.status`, and `verify.webhook`.
+- On `railway`, `provider.provision.project` names the workspace the project will be created
+  in, both in its `command` (`--workspace <id>`) and in `values`.
 
 **If a preflight item is `false`**, its `fix` field holds the exact command to run. Run it,
 then rerun `--plan`. Do not continue with a failing preflight: `--apply` rechecks preflight
@@ -313,6 +323,8 @@ a step to reduce it — and worker identities are never Apps. The reasons are in
 | Symptom | Cause | Action |
 | --- | --- | --- |
 | `Preflight is incomplete` | a CLI is missing or not authenticated | nothing was created; run the `fix` command printed for that item, then rerun |
+| `Railway workspace` preflight is `false` | the Railway account belongs to several workspaces, or `--workspace` names none of them | nothing was created; rerun with `--workspace` set to one of the names the item lists |
+| `<cli> exited with N: <diagnostic>` | a provider command failed; the provider CLI's own message follows the colon | act on the diagnostic (it is scrubbed of every generated secret), then rerun `--apply`; completed steps are reported as satisfied and repeated for nothing |
 | `Run graphyard install from the checkout of the repository being managed` | wrong working directory | `cd` into the `OWNER/REPO` checkout |
 | `This checkout is X; rerun from Y` | `--repo` and the Git origin disagree | correct `--repo` or change directory |
 | `did not become healthy` | the container cannot start or reach Postgres | `node "$GRAPHYARD_CLI" install --provider PROVIDER --repo OWNER/REPO --logs` |

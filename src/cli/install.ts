@@ -33,6 +33,7 @@ export const installCommands = defineCommands([
       '  install --provider railway|hetzner|docker-host|compose --repo OWNER/NAME',
       '          [--plan|--apply] [--domain HOST] [--workers N] [--reviewer NAME]',
       '          [--producer-proof PROOF] [--ssh-host HOST] [--ssh-user USER] [--port N]',
+      '          [--workspace NAME-OR-ID]',
       '                                Install or reconcile a complete control plane.',
       '                                --plan prints every action with secrets redacted and',
       '                                changes nothing; --apply executes the same plan.',
@@ -46,7 +47,7 @@ export const installCommands = defineCommands([
         domain: { type: 'string' }, workers: { type: 'string' }, reviewer: { type: 'string' }, image: { type: 'string' },
         'producer-proof': { type: 'string', multiple: true }, 'base-branch': { type: 'string' }, 'review-policy': { type: 'string' },
         'required-check': { type: 'string', multiple: true }, 'review-count': { type: 'string' },
-        'ssh-host': { type: 'string' }, 'ssh-user': { type: 'string' }, 'server-name': { type: 'string' },
+        'ssh-host': { type: 'string' }, 'ssh-user': { type: 'string' }, 'server-name': { type: 'string' }, workspace: { type: 'string' },
         'server-type': { type: 'string' }, location: { type: 'string' }, port: { type: 'string' }, logs: { type: 'boolean' },
       }, allowPositionals: false });
       if (!values.repo) throw new Error('Use --repo OWNER/NAME');
@@ -67,7 +68,7 @@ export const installCommands = defineCommands([
         ...(values['required-check']?.length ? { requiredChecks: values['required-check'] } : {}),
         ...(values['review-count'] ? { reviewCount: count('review-count', values['review-count']) } : {}),
         ...(values['ssh-host'] ? { sshHost: values['ssh-host'] } : {}), ...(values['ssh-user'] ? { sshUser: values['ssh-user'] } : {}),
-        ...(values['server-name'] ? { serverName: values['server-name'] } : {}),
+        ...(values['server-name'] ? { serverName: values['server-name'] } : {}), ...(values.workspace ? { workspace: values.workspace } : {}),
         ...(values['server-type'] ? { serverType: values['server-type'] } : {}), ...(values.location ? { location: values.location } : {}) };
       const session = await prepareInstall(process.cwd(), inputs, {
         cliPath: await context.activeCliPath(), hostId: context.individualHostId(), log: line => console.error(line),

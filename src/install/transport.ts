@@ -6,6 +6,17 @@ export interface CommandResult { stdout: string; stderr: string; code: number }
 export interface RunOptions { input?: string; cwd?: string; timeout?: number; allowFailure?: boolean }
 
 /**
+ * A failed provider command names its cause. `railway exited with 1` alone sent a live install
+ * to the provider's documentation; with the CLI's own diagnostic behind it (`--workspace
+ * required in non-interactive mode`) the runbook's failure table can act on it. Only the tail
+ * is kept, and the installer scrubs the message before it is shown, like every other line.
+ */
+export function commandFailure(program: string, result: CommandResult) {
+  const diagnostic = (result.stderr.trim() || result.stdout.trim()).split('\n').filter(Boolean).slice(-8).join('\n').slice(-2000);
+  return new Error(`${program} exited with ${result.code}${diagnostic ? `: ${diagnostic}` : ''}`);
+}
+
+/**
  * One command surface for every adapter. Provider CLIs, SSH hosts, and the CI fakes all
  * implement it, which is what makes `--apply` executable in tests without a real account.
  */
@@ -20,7 +31,7 @@ function local(program: string, args: string[], options: RunOptions = {}): Promi
     const child = execFile(program, args, { encoding: 'utf8', cwd: options.cwd, timeout: options.timeout ?? 600_000, maxBuffer: 8_000_000, windowsHide: true }, (error: any, stdout, stderr) => {
       if (!error) return accept({ stdout: String(stdout), stderr: String(stderr), code: 0 });
       const result = { stdout: String(stdout ?? ''), stderr: String(stderr ?? error.message ?? ''), code: Number.isInteger(error.code) ? error.code : 1 };
-      if (options.allowFailure) accept(result); else reject(new Error(`${program} exited with ${result.code}`));
+      if (options.allowFailure) accept(result); else reject(commandFailure(program, result));
     });
     if (options.input !== undefined) child.stdin?.end(options.input); else child.stdin?.end();
   });
@@ -77,7 +88,7 @@ export function fakeTransport(options: FakeTransportOptions = {}) {
       if (!response) return { stdout: '', stderr: '', code: 0 };
       const produced = typeof response.result === 'function' ? response.result() : response.result;
       const result = typeof produced === 'string' ? { stdout: produced, stderr: '', code: 0 } : produced;
-      if (result.code !== 0 && !runOptions.allowFailure) throw new Error(`${program} exited with ${result.code}`);
+      if (result.code !== 0 && !runOptions.allowFailure) throw commandFailure(program, result);
       return result;
     },
     async putFile(path, content, mode) { files.set(path, { content, mode }); },

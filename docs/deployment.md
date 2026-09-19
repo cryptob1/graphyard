@@ -27,6 +27,11 @@ does, what every variable means, and how to operate the deployment afterwards.
 | `docker-host` | Any existing Docker host reached over SSH | `postgres:17-alpine` in the same Compose project | Caddy, automatic certificates for `--domain` | your SSH key |
 | `compose` | This machine | `postgres:17-alpine` | none; loopback only | none |
 
+On `railway`, the project is created without a terminal, so an account that belongs to more
+than one workspace passes `--workspace NAME-OR-ID`; the plan's `Railway workspace` preflight
+item lists the choices until one is given, and an account with a single workspace needs
+nothing.
+
 Every self-hosted provider runs the same Compose bundle: `db`, `server`, and — when the
 deployment is reachable from outside — a `proxy` service terminating TLS. `hetzner` and
 `docker-host` need `--domain` for a publicly trusted certificate; without one, Caddy issues

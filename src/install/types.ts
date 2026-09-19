@@ -60,6 +60,8 @@ export interface InstallInputs {
   /** docker-host and hetzner reach the machine over SSH as user@host. */
   sshHost?: string;
   sshUser?: string;
+  /** Railway workspace (ID or exact name) that owns the project; required only when the account belongs to several. */
+  workspace?: string;
   image?: string;
   /** Host port published by a local Compose install; the container always listens on 4310. */
   port?: number;

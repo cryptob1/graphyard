@@ -105,6 +105,7 @@ export async function prepareInstall(cwd: string, rawInputs: InstallInputs, depe
     workdir: provider === 'compose' ? `${directory}/compose` : `/opt/graphyard/${installId}`,
     sourceRoot: dependencies.sourceRoot ?? fileURLToPath(new URL('../..', import.meta.url)),
     sshHost: inputs.sshHost ?? null, sshUser: inputs.sshUser ?? 'root',
+    workspace: inputs.workspace ?? null,
     serverType: inputs.serverType ?? 'cx22', location: inputs.location ?? 'nbg1',
     databasePassword, port: inputs.port ?? SERVER_PORT, dataPath: provider === 'hetzner' ? '/mnt/graphyard' : null,
     wait: dependencies.wait ?? ((ms: number) => new Promise(accept => setTimeout(accept, ms))),
@@ -207,7 +208,7 @@ export async function buildPlan(session: InstallSession): Promise<InstallPlan> {
   preflight.push(ghStatus.code === 0
     ? { name: 'GitHub CLI', ok: true, detail: 'authenticated for branch protection and CI discovery' }
     : { name: 'GitHub CLI', ok: false, detail: 'gh is missing or not authenticated', fix: `Install GitHub CLI and run: gh auth login --scopes repo,admin:repo_hook (the account must administer ${session.inputs.repository})` });
-  const observation = preflight.every(item => item.ok) ? await adapter.observe(context) : { installed: false, database: false, app: false, url: null, variables: {}, detail: ['provider preflight is incomplete; the installation was not inspected'] } as AdapterObservation;
+  const observation = preflight.every(item => item.ok) ? await adapter.observe(context) : { installed: false, compute: false, database: false, app: false, url: null, variables: {}, detail: ['provider preflight is incomplete; the installation was not inspected'] } as AdapterObservation;
 
   const core = coreEnv(session);
   const drift: PlanDrift[] = [];
@@ -294,7 +295,20 @@ export interface InstallSummary {
   webhook: DeliveryProof; profiles: ProfileRegistration; drift: PlanDrift[]; nextSteps: string[];
 }
 
+/**
+ * A provider command that fails now carries the provider's own diagnostic, which may quote a
+ * value the installer piped into it, so the failure is scrubbed on the way out like every log
+ * line and the summary.
+ */
 export async function applyInstall(session: InstallSession, plan: InstallPlan): Promise<InstallSummary> {
+  try { return await performInstall(session, plan); }
+  catch (error: any) {
+    const message = session.vault.scrub(String(error?.message ?? error));
+    throw message === error?.message ? error : new Error(message);
+  }
+}
+
+async function performInstall(session: InstallSession, plan: InstallPlan): Promise<InstallSummary> {
   const { adapter, context, deps, vault } = session;
   if (session.mode !== 'apply') throw new Error('Apply requires a session prepared in apply mode; --plan sessions create nothing');
   const log = (line: string) => deps.log(vault.scrub(line));

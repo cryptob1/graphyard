@@ -25,8 +25,10 @@ export const WEBHOOK_SECRET = 'webhook-secret-for-tests-0123456789';
 
 export interface FakeState { installed: boolean; protection: any | null; deliveries: any[]; hookConfig: { url: string; secret?: string } | null }
 
+export const RAILWAY_WORKSPACES = [{ id: 'ws-graphyard-0001', name: 'Graphyard' }, { id: 'ws-personal-0002', name: "Installer's Projects" }];
+
 /** Provider CLI transcripts. `installed` switches every probe to the "already there" answer. */
-export function providerResponses(provider: Provider, state: { installed: boolean; workdir: string; service: string; envFile?: string }) {
+export function providerResponses(provider: Provider, state: { installed: boolean; workdir: string; service: string; envFile?: string; workspaces?: { id: string; name: string }[] }) {
   const ps = JSON.stringify([{ Service: 'db', State: 'running' }, { Service: 'server', State: 'running' }]);
   const compose = [
     { match: 'docker version', result: '27.1.1' },
@@ -49,6 +51,9 @@ export function providerResponses(provider: Provider, state: { installed: boolea
   }
   return [
     { match: 'railway --version', result: 'railway 3.11.0' },
+    // The account's workspaces, as `railway whoami --json` reports them; one by default so a
+    // plain install resolves the workspace on its own.
+    { match: 'railway whoami --json', result: JSON.stringify({ name: 'installer', email: 'installer@example.test', workspaces: state.workspaces ?? RAILWAY_WORKSPACES.slice(0, 1) }) },
     { match: 'railway whoami', result: 'installer@example.test' },
     { match: 'railway status --json', result: state.installed ? JSON.stringify({ name: 'graphyard-owner-project', services: { edges: [{ node: { name: 'Postgres' } }, { node: { name: state.service } }] } }) : { stdout: '', stderr: 'no linked project', code: 1 } },
     { match: 'railway variables', result: state.installed ? (state.envFile ?? '{}') : '{}' },
@@ -104,6 +109,8 @@ export interface HarnessOptions {
   /** Reuse a previous harness's checkout and credential home to exercise a re-run. */
   root?: string;
   configHome?: string;
+  /** Railway only: the workspaces the fake account belongs to (default: exactly one). */
+  workspaces?: { id: string; name: string }[];
 }
 
 export async function harness(options: HarnessOptions): Promise<Harness> {
@@ -115,7 +122,7 @@ export async function harness(options: HarnessOptions): Promise<Harness> {
   const service = options.service ?? `graphyard-${installId}`;
   const workdir = options.workdir ?? (options.provider === 'compose' ? `${configHome}/${installId}/compose` : `/opt/graphyard/${installId}`);
   const state: FakeState = { installed: !!options.installed, protection: options.protection ?? null, deliveries: options.deliveries ?? [], hookConfig: null };
-  const responses = [...providerResponses(options.provider, { installed: state.installed, workdir, service, envFile: options.envFile }), ...githubResponses(state, repository)];
+  const responses = [...providerResponses(options.provider, { installed: state.installed, workdir, service, envFile: options.envFile, workspaces: options.workspaces }), ...githubResponses(state, repository)];
   const transport = fakeTransport({ responses });
   const remotes = new Map<string, ReturnType<typeof fakeTransport>>();
   const ssh = (host: string) => {
