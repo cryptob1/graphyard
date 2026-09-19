@@ -1,3 +1,4 @@
+<!-- page: Maintainer and historical records | 2 | what the September 2026 audit found and what it changed. -->
 # Implementation audit — September 13, 2026
 
 > **Historical snapshot.** This audit describes the repository at the listed date. Use the [current documentation index](../README.md) for setup and operations.

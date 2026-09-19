@@ -102,12 +102,14 @@ async function select(f: Env, r: Release, expectedGeneration = 0) {
   const approval = await delivery.approve(operator, { release: { id: r.id, revision: r.revision }, environment: f.env }, id());
   return delivery.select(operator, { environment: f.env, release: { id: r.id, revision: r.revision }, expectedGeneration, approvalId: approval.id }, id());
 }
-/** A whole-environment provider snapshot that matches the expected manifest unless overridden. */
-function snapshot(f: Env, generation: number, overrides: Record<string, unknown> = {}, services: Record<string, unknown>[] = [
-  { service: 'api', complete: true, instances: [{ instance: 'api-1', digest: expected.api, measurement: 'provider', healthy: true }], deployment: { id: 'dep-api', status: 'success', deployedAt: at(-120) } },
-  { service: 'web', complete: true, instances: [{ instance: 'web-1', digest: expected.web, measurement: 'provider', healthy: true }], deployment: { id: 'dep-web', status: 'success', deployedAt: at(-120) } },
+/** A snapshot's validity window from one clock reading: reading Date.now() per field let a millisecond tick push observedAt past validTo, which the schema refuses. */
+const validity = (validFrom: number, validTo: number, observedAt = validTo, now = Date.now()) => ({ now, validFrom: at(validFrom, now), validTo: at(validTo, now), observedAt: at(observedAt, now) });
+/** A whole-environment provider snapshot that matches the expected manifest unless overridden; every timestamp derives from the single `now` reading. */
+function snapshot(f: Env, generation: number, { now = Date.now(), ...overrides }: Record<string, unknown> & { now?: number } = {}, services: Record<string, unknown>[] = [
+  { service: 'api', complete: true, instances: [{ instance: 'api-1', digest: expected.api, measurement: 'provider', healthy: true }], deployment: { id: 'dep-api', status: 'success', deployedAt: at(-120, now) } },
+  { service: 'web', complete: true, instances: [{ instance: 'web-1', digest: expected.web, measurement: 'provider', healthy: true }], deployment: { id: 'dep-web', status: 'success', deployedAt: at(-120, now) } },
 ]) {
-  return { registration: f.registrations.observer, epoch: f.epoch, environment: f.env, expectedGeneration: generation, snapshotId: `snapshot-${++serial}`, observedAt: at(0), validFrom: at(-60), validTo: at(0), services, ...overrides };
+  return { registration: f.registrations.observer, epoch: f.epoch, environment: f.env, expectedGeneration: generation, snapshotId: `snapshot-${++serial}`, observedAt: at(0, now), validFrom: at(-60, now), validTo: at(0, now), services, ...overrides };
 }
 const service = (name: 'api' | 'web', instances: Record<string, unknown>[], extra: Record<string, unknown> = {}) => ({ service: name, complete: true, instances, ...extra });
 const instance = (name: string, digest: string | null, measurement = 'provider', healthy = true) => ({ instance: name, digest, measurement, healthy });
@@ -138,24 +140,24 @@ test('D3-1 a mixed-version deployment does not pass expected-service verificatio
 });
 
 test('D3-2 staggered, missing, gapped and stale observations refuse; a common interval over the whole manifest verifies', async () => {
-  const f = await environment({ freshnessSeconds: 120, approvalRequired: true }); const r = await release(f); await select(f, r);
+  const f = await environment({ freshnessSeconds: 120, approvalRequired: true }); const r = await release(f); await select(f, r); const now = Date.now();
   // Only api observed: web has no observation at all.
-  await observe(snapshot(f, 1, { validFrom: at(-300), validTo: at(-200), observedAt: at(-200) }, [service('api', [instance('api-1', expected.api)])])); await delivery.sweep();
+  await observe(snapshot(f, 1, validity(-300, -200, -200, now), [service('api', [instance('api-1', expected.api)])])); await delivery.sweep();
   assert.equal((await state(f.env.id)).verification.status, 'unobserved');
   // A matched only before B matched: api [-300,-200], web [-190,-100]. Never simultaneous.
-  await observe(snapshot(f, 1, { validFrom: at(-190), validTo: at(-100), observedAt: at(-100) }, [service('web', [instance('web-1', expected.web)])])); await delivery.sweep();
+  await observe(snapshot(f, 1, validity(-190, -100, -100, now), [service('web', [instance('web-1', expected.web)])])); await delivery.sweep();
   let s = await state(f.env.id); assert.equal(s.verification.status, 'no-common-interval'); assert.equal(s.verification.interval, null);
   // A missing instance listing (provider page truncated) is incomplete, not a pass.
-  await observe(snapshot(f, 1, { validFrom: at(-100), validTo: at(-90), observedAt: at(-90) }, [service('api', [instance('api-1', expected.api)], { complete: false }), service('web', [instance('web-1', expected.web)])])); await delivery.sweep();
+  await observe(snapshot(f, 1, validity(-100, -90, -90, now), [service('api', [instance('api-1', expected.api)], { complete: false }), service('web', [instance('web-1', expected.web)])])); await delivery.sweep();
   s = await state(f.env.id); assert.equal(s.verification.status, 'incomplete'); assert.match(s.verification.reasons.join(), /listing for api is incomplete/);
   // A common interval that exists but ended beyond the freshness bound is stale.
   const g = await environment({ freshnessSeconds: 120, approvalRequired: true }); await select(g, await release(g));
-  await observe(snapshot(g, 1, { validFrom: at(-400), validTo: at(-300), observedAt: at(-300) })); await delivery.sweep();
+  await observe(snapshot(g, 1, validity(-400, -300, -300, now))); await delivery.sweep();
   const stale = await state(g.env.id); assert.equal(stale.verification.status, 'stale'); assert.equal(stale.verification.verifiedAt, null);
-  assert.deepEqual(stale.verification.interval && [stale.verification.interval.from.slice(0, 16), stale.verification.interval.to.slice(0, 16)], [at(-400).slice(0, 16), at(-300).slice(0, 16)]);
+  assert.deepEqual(stale.verification.interval && [stale.verification.interval.from.slice(0, 16), stale.verification.interval.to.slice(0, 16)], [at(-400, now).slice(0, 16), at(-300, now).slice(0, 16)]);
   // Overlapping, fresh coverage of both services verifies and records the common interval.
-  await observe(snapshot(f, 1, { validFrom: at(-30), validTo: at(0), observedAt: at(0) }, [service('api', [instance('api-1', expected.api)])]));
-  await observe(snapshot(f, 1, { validFrom: at(-20), validTo: at(-5), observedAt: at(-5) }, [service('web', [instance('web-1', expected.web)])])); await delivery.sweep();
+  await observe(snapshot(f, 1, validity(-30, 0, 0, now), [service('api', [instance('api-1', expected.api)])]));
+  await observe(snapshot(f, 1, validity(-20, -5, -5, now), [service('web', [instance('web-1', expected.web)])])); await delivery.sweep();
   s = await state(f.env.id); assert.equal(s.verification.status, 'verified'); assert.ok(s.verification.verifiedAt);
   assert.ok(s.verification.interval && Date.parse(s.verification.interval.from) >= Date.now() - 21_000 && Date.parse(s.verification.interval.to) <= Date.now() - 4_000, 'the interval is the intersection, not either observation');
   assert.equal(s.history.at(-1)?.outcome, 'verified');
@@ -183,7 +185,7 @@ test('D3-3 wrong-scope, superseded-lease, stale-generation and webhook inputs ne
   assert.equal((await events('delivery.observation-rejected')).length >= 3, true);
   // Duplicate snapshot: the original receipt, not a refreshed observation time.
   const input = snapshot(f, 1); const first: any = await observe(input); await delay(5);
-  const again: any = await observe({ ...input, observedAt: at(0), validTo: at(0) });
+  const later = Date.now(); const again: any = await observe({ ...input, observedAt: at(0, later), validTo: at(0, later) });
   assert.equal(again.duplicate, true); assert.equal(again.id, first.id); assert.equal(again.receivedAt, first.receivedAt);
   const key = id(); const replayed = await delivery.observe(observer, snapshot(f, 1), key); assert.deepEqual(await delivery.observe(observer, snapshot(f, 1, { snapshotId: 'different' }), key).catch(e => e.message), 'Idempotency key reused with different input');
   assert.deepEqual(await delivery.observe(observer, JSON.parse(JSON.stringify(input)), key).catch(e => e.message), 'Idempotency key reused with different input');
@@ -232,13 +234,13 @@ test('D3-4 workers and observers cannot define or select releases; generation fe
 });
 
 test('D3-5 a green deployment job with unknown runtime identity remains unverified', async () => {
-  const f = await environment(); const r = await release(f); await select(f, r);
-  await observe(snapshot(f, 1, {}, [service('api', [instance('api-1', null, 'unknown')], { deployment: { id: 'dep-api', status: 'success', deployedAt: at(-120) } }), service('web', [instance('web-1', expected.web)], { deployment: { id: 'dep-web', status: 'success', deployedAt: at(-120) } })]));
+  const f = await environment(); const r = await release(f); await select(f, r); const now = Date.now();
+  await observe(snapshot(f, 1, { now }, [service('api', [instance('api-1', null, 'unknown')], { deployment: { id: 'dep-api', status: 'success', deployedAt: at(-120, now) } }), service('web', [instance('web-1', expected.web)], { deployment: { id: 'dep-web', status: 'success', deployedAt: at(-120, now) } })]));
   await delivery.sweep();
   const s = await state(f.env.id); assert.equal(s.verification.status, 'unknown'); assert.equal(s.verification.verifiedAt, null);
   assert.match(s.verification.reasons.join(), /Runtime identity of instance api-1 of api is unknown/);
   // Provider-reported deployment failure is unhealthy, and a build in progress is incomplete.
-  await observe(snapshot(f, 1, {}, [service('api', [instance('api-1', expected.api)], { deployment: { id: 'dep-api', status: 'failed', deployedAt: at(-60) } }), service('web', [instance('web-1', expected.web)])])); await delivery.sweep();
+  await observe(snapshot(f, 1, { now }, [service('api', [instance('api-1', expected.api)], { deployment: { id: 'dep-api', status: 'failed', deployedAt: at(-60, now) } }), service('web', [instance('web-1', expected.web)])])); await delivery.sweep();
   assert.equal((await state(f.env.id)).verification.status, 'unhealthy');
   await observe(snapshot(f, 1, {}, [service('api', [instance('api-1', expected.api)], { deployment: { id: 'dep-api', status: 'building', deployedAt: null } }), service('web', [instance('web-1', expected.web)])])); await delivery.sweep();
   assert.equal((await state(f.env.id)).verification.status, 'incomplete');
@@ -288,10 +290,10 @@ test('D3-8 a release containing multiple PRs attributes all applicable work once
 });
 
 test('D3-9 a sweep interrupted at its bound resumes without silently omitting history', async () => {
-  const f = await environment(); const r = await release(f); await select(f, r);
+  const f = await environment(); const r = await release(f); await select(f, r); const now = Date.now();
   // 24 api-only observations, then the single web observation that makes the manifest complete.
-  for (let i = 0; i < 24; i++) await observe(snapshot(f, 1, { validFrom: at(-30 - i), validTo: at(-i), observedAt: at(-i) }, [service('api', [instance('api-1', expected.api)])]));
-  await observe(snapshot(f, 1, { validFrom: at(-30), validTo: at(0) }, [service('web', [instance('web-1', expected.web)])]));
+  for (let i = 0; i < 24; i++) await observe(snapshot(f, 1, validity(-30 - i, -i, -i, now), [service('api', [instance('api-1', expected.api)])]));
+  await observe(snapshot(f, 1, validity(-30, 0, 0, now), [service('web', [instance('web-1', expected.web)])]));
   const first = await delivery.sweep(10); assert.deepEqual([first.applied, first.complete], [10, false]);
   let s = await state(f.env.id); assert.equal(s.verification.status, 'unobserved'); const cursor = s.cursor;
   // "Interrupted": a different process, with its own pool, continues from the persisted cursor.
@@ -313,7 +315,7 @@ test('D3-10 later failures create a visible incident without erasing evidence or
   const r = await release(f, [{ workId: w.id, mergeSha: '5'.repeat(40) }]); await select(f, r);
   await observe(snapshot(f, 1)); await delivery.sweep();
   const verified = await state(f.env.id); assert.equal(verified.verification.status, 'verified');
-  await observe(snapshot(f, 1, { validFrom: at(0), validTo: at(5), observedAt: at(5) }, [service('api', [instance('api-1', wrong)]), service('web', [instance('web-1', expected.web)])])); await delivery.sweep();
+  await observe(snapshot(f, 1, validity(0, 5), [service('api', [instance('api-1', wrong)]), service('web', [instance('web-1', expected.web)])])); await delivery.sweep();
   const degraded = await state(f.env.id);
   assert.equal(degraded.verification.status, 'degraded'); assert.equal(degraded.verification.verifiedAt, verified.verification.verifiedAt);
   assert.deepEqual(degraded.verification.interval, verified.verification.interval, 'the historical interval is kept');
@@ -335,10 +337,10 @@ test('D3-10 a later failure inside an earlier, longer matched interval still inv
   const f = await environment(); const base = Date.now(); const w = await delivered('6'.repeat(40));
   const r = await release(f, [{ workId: w.id, mergeSha: '6'.repeat(40) }]); await select(f, r);
   // The provider vouches for a long validity window; a later, shorter snapshot within it finds api unhealthy.
-  await observe(snapshot(f, 1, { validFrom: at(-60, base), validTo: at(60, base), observedAt: at(0, base) })); await delivery.sweep();
+  await observe(snapshot(f, 1, validity(-60, 60, 0, base))); await delivery.sweep();
   const verified = await state(f.env.id); assert.equal(verified.verification.status, 'verified');
   assert.deepEqual(verified.coverage.api.segments, [{ from: at(-60, base), to: at(60, base) }]);
-  await observe(snapshot(f, 1, { validFrom: at(10, base), validTo: at(10, base), observedAt: at(10, base) }, [service('api', [instance('api-1', expected.api, 'provider', false)]), service('web', [instance('web-1', expected.web)])])); await delivery.sweep();
+  await observe(snapshot(f, 1, validity(10, 10, 10, base), [service('api', [instance('api-1', expected.api, 'provider', false)]), service('web', [instance('web-1', expected.web)])])); await delivery.sweep();
   const degraded = await state(f.env.id);
   assert.equal(degraded.coverage.api.latest?.observedAt, at(10, base), 'current health follows the most recent observation, not the longest validity');
   assert.equal(degraded.coverage.api.latest?.state, 'unhealthy');
@@ -347,7 +349,7 @@ test('D3-10 a later failure inside an earlier, longer matched interval still inv
   assert.deepEqual(degraded.coverage.api.segments, verified.coverage.api.segments, 'the matched history is not rewritten');
   assert.deepEqual(degraded.verification.interval, verified.verification.interval); assert.equal((await reload(w)).releaseDeliveries?.length, 1);
   // An out-of-order arrival of an older matched snapshot extends history but cannot restore current health.
-  await observe(snapshot(f, 1, { validFrom: at(-90, base), validTo: at(-30, base), observedAt: at(-30, base) })); await delivery.sweep();
+  await observe(snapshot(f, 1, validity(-90, -30, -30, base))); await delivery.sweep();
   const still = await state(f.env.id);
   assert.equal(still.coverage.api.latest?.observedAt, at(10, base)); assert.equal(still.verification.status, 'degraded'); assert.equal(still.incidents.length, 1);
   assert.deepEqual(still.coverage.api.segments, [{ from: at(-90, base), to: at(60, base) }]);

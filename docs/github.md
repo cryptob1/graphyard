@@ -1,3 +1,4 @@
+<!-- page: Operate Graphyard | 3 | App permissions, branch protection, CI producers, and Codex review. -->
 # GitHub enforcement
 
 Graphyard uses a dedicated GitHub App. Its installation token is minted from the App private key and refreshed automatically. The App observes the repository and publishes **`Graphyard / merge`** on the exact PR head commit.
@@ -10,7 +11,7 @@ In your personal GitHub developer settings, create a GitHub App with:
 
 - Homepage: your Graphyard URL.
 - Webhook: `https://YOUR-HOST/api/github/webhook`, with a random webhook secret.
-- Repository permissions: Metadata read, Contents read/write (to publish speculative merge-queue tips), Pull requests read/write, Issues read (for comment webhooks), Checks read/write, and Administration read (to inspect branch protection).
+- Repository permissions: exactly the [declared control-plane set](#app-permissions) below.
 - Events: Pull request, Pull request review, Check run, Check suite, Issue comment, and Push.
 - Install only on the repository managed by this Graphyard instance.
 
@@ -18,7 +19,64 @@ Generate a private key. Configure `GITHUB_APP_ID`, `GITHUB_INSTALLATION_ID`, `GI
 
 The installation ID appears in the installation settings URL. The App ID is in the App's settings. A personal access token is deliberately not a substitute for the dedicated App, because the required check should be bound to a specific producer.
 
-After registration, keeping the App's permissions current is the master's job. `graphyard master browser app-permissions` raises any permission below the set above through the operator's browser profile and verifies it with `gh api apps/SLUG`; `graphyard master browser installation-accept` accepts the permission request that raises for this repository's installation and verifies it with `gh api user/installations`. Both are recorded with screenshots and written to the master's audit ledger; see [GitHub administration through the browser](master-agent.md#github-administration-through-the-browser). Neither flow touches the reviewer App, whose permissions must stay read-only.
+## App permissions
+
+Every permission a Graphyard App identity holds is declared once, in `src/github-permissions.ts`, with the feature that needs it. The App manifest that `github-setup` submits, the tables below, the server's startup preflight, the integration-job holds, and the `--update-permissions` migration all read that one declaration; a test keeps these tables identical to it. A feature that needs a new permission declares it there and nowhere else.
+
+The control-plane App holds:
+
+| Permission | Access | Needed to |
+| --- | --- | --- |
+| Administration | Read | inspect branch protection (pull request observation) |
+| Checks | Read and write | read CI check runs (pull request observation); publish `Graphyard / merge` on the exact candidate commit (the required check) |
+| Contents | Read and write | read commits, trees and pull request files (pull request observation); publish speculative merge-queue tips: the merge commit on the candidate branch and the `refs/graphyard/queue/*` ref that binds it (the merge queue) |
+| Issues | Read | receive `issue_comment` webhooks carrying review results (comment webhooks) |
+| Metadata | Read | read the managed repository (repository access) |
+| Pull requests | Read and write | read pull requests and reviews (pull request observation); post review request comments (review dispatch) |
+
+**Why Contents is read and write, and why only here.** The [merge queue](#merge-queue) lands every candidate on the commit it was validated against. Producing that commit means asking GitHub to merge the predicted base into the candidate branch and publishing the result under `refs/graphyard/queue/KEY`, and both writes need Contents: write. That is the only code-writing the App ever does: it creates merge commits of already-validated candidates onto the base they were validated on, never an agent's changes. The write is deliberately confined to the control-plane identity. A [reviewer App](#register-the-reviewer-app) holds the declaration below and is never granted Contents: write, Checks, or Administration, so a reviewer can neither publish the gate check, change protection, nor write code; worker identities are not Apps at all and push only their own branches with their own credentials, which branch protection keeps off the base branch.
+
+A reviewer App holds:
+
+| Permission | Access | Needed to |
+| --- | --- | --- |
+| Contents | Read | read the code under review (pull request observation) |
+| Issues | Read | follow `issue_comment` events on the reviewed pull request (comment webhooks) |
+| Metadata | Read | read the managed repository (repository access) |
+| Pull requests | Read and write | post the verdict comment (review dispatch) |
+
+### Preflight and holds
+
+The server reads the installation's granted permissions with the App key at startup and every five minutes, and immediately after any GitHub 403, then compares them with the declaration. A shortfall becomes a first-class attention item rather than a symptom to diagnose: `GET /api/status` reports it under `appPermissions` with the missing permission, the feature it blocks, and the installation page where the pending request is accepted; the dashboard shows the same sentence with a link; and `graphyard master status` carries it under `controlPlane.attention`, for example:
+
+```
+App graphyard-owner-repo lacks Contents: write, which the merge queue needs to publish speculative merge-queue tips …; accept the pending permission request at https://github.com/settings/installations/ID
+```
+
+Integration jobs that need the missing permission are **held, not retried**. A job that would publish a speculative tip without Contents: write, post a review request without Pull requests: write, or publish the required check without Checks: write parks with that sentence as its error and is not attempted again until a preflight sees the permission granted, which releases every job held on that shortfall at once; as a bound, a held job re-checks once every thirty minutes on its own. Observation itself continues for jobs whose features are unaffected. A preflight that cannot read the installation reports that too, keeps the last verified reading, and never lifts a hold on its own.
+
+A 401 or 403 the declaration does not predict — a credential GitHub rejects, a repository the installation no longer covers, a resource-level restriction — is classified as a refusal, never as a rate limit: it does not pause the client, the other jobs keep talking to GitHub, and it brings the next preflight forward. The refused job retries at the ordinary cadence at most three times and is then held for thirty minutes with the refusal as its visible reason. Every hold records the installation reading it was decided against, and a passing preflight releases a hold only when its reading differs from that one: acceptance of a pending request, a lifted suspension, or a different installation. Re-reading the same installation that already looked complete is not a reason to attempt the job again, so a refusal the preflight cannot explain costs one attempt per thirty-minute hold rather than three per preflight, and no job accumulates unbounded attempts on a permission error.
+
+Held jobs surface as `heldJobs` in `GET /api/status`, on the dashboard notice, and in `graphyard diagnose GY-N` as `integration-held`. Nothing in a hold weakens a gate: the merge gate keeps refusing an unpublished tip, and it opens only after the permission is accepted and the tip actually publishes.
+
+### Migrating an existing App
+
+An App registered before the merge queue was introduced holds Contents: read. Upgrading the server does not change the App, so the first preflight after the upgrade raises the attention item above, and every queued candidate's tip publication is held until the permission is accepted. To migrate, run on the machine that holds `.graphyard/github-app.json`:
+
+```sh
+node "$GRAPHYARD_CLI" github-setup --update-permissions
+# or poll until the request is accepted:
+node "$GRAPHYARD_CLI" github-setup --update-permissions --wait 600
+```
+
+GitHub offers no API for changing a registered App's permissions and every installation must accept a change explicitly, so the command cannot click for you. It reads the App and its installation back with the App key, compares both with the declaration, and prints exactly the steps that remain:
+
+1. Open `https://github.com/settings/apps/APP-SLUG/permissions` (or the organization equivalent), set **Contents** to *Read and write*, and save.
+2. Open `https://github.com/settings/installations/ID` and accept the pending permission request.
+
+It then verifies acceptance by re-reading the installation — `--wait` polls until it reports the permission or the time is up — and exits nonzero while anything remains. `master init` reports the same attention and steps in its result, `doctor` reports `appPermissions` from the live server, and the server preflight releases the held jobs on its own once the installation reports Contents: write; no restart is needed. A newly registered App requests the declared set from the start. `--reviewer NAME` inspects a reviewer App against its own declaration and reports any excess, such as a reviewer that was somehow granted Contents: write, as a step to reduce it. See [install and upgrade](install.md#upgrading-an-existing-installation) for the upgrade order.
+
+After registration, keeping the App's permissions current is the master's job, and the same declaration drives it. `graphyard master browser app-permissions` raises any permission below the set above through the operator's browser profile and verifies it with `gh api apps/SLUG`; `graphyard master browser installation-accept` accepts the permission request that raises for this repository's installation and verifies it with `gh api user/installations`. Both are recorded with screenshots and written to the master's audit ledger; see [GitHub administration through the browser](master-agent.md#github-administration-through-the-browser). Neither flow touches the reviewer App, whose permissions must stay read-only.
 
 ## The reviewer App
 
@@ -154,7 +212,7 @@ Graphyard controls its ledger immediately; GitHub check publication happens thro
 
 Commit-specific checks and the queue's published-tip binding prevent common stale-head/base merges, but they do not make GitHub and Postgres one atomic system. The recommended master command narrows that boundary with a short-lived execution authority, a final transactional GitHub re-observation, and an exact-head merge call. Graphyard accepts delivery only when the observed merge follows that verified authority. Restricting every alternative GitHub merge identity still requires repository or organization administration outside Graphyard.
 
-An execution authority freezes competing mutations for up to two minutes, which would otherwise make the window *wider* for the one event that most needs to interrupt a merge: an operator or trusted producer withdrawing the evidence that authorized it. [Revocation](protocol.md#revocation) may therefore interrupt an active execution until its final provider-commit boundary. It cancels the execution in the same transaction that withdraws the evidence, using the same cancellation ledger the broker and delivery attribution already read. Afterwards `merge-acquire`, `merge-verify`, `merge-commit` and replay all refuse the cancelled execution, and concurrent or retried acquisitions refuse because no current authorization exists.
+An execution authority freezes competing mutations for up to two minutes, which would otherwise make the window *wider* for the one event that most needs to interrupt a merge: an operator or trusted producer withdrawing the evidence that authorized it. [Revocation](protocol/evidence.md#revocation) may therefore interrupt an active execution until its final provider-commit boundary. It cancels the execution in the same transaction that withdraws the evidence, using the same cancellation ledger the broker and delivery attribution already read. Afterwards `merge-acquire`, `merge-verify`, `merge-commit` and replay all refuse the cancelled execution, and concurrent or retried acquisitions refuse because no current authorization exists.
 
 After final verification and clock-skew waiting, `merge-commit` transactionally rechecks the authorization immediately before the GitHub mutation. It is the serialization point: a withdrawal that wins the work-item row lock cancels provider authority, while a commit that wins marks the provider mutation irrevocably in flight and later withdrawal refuses. The broker then uses the verified lower clock-offset bound and waits until GitHub's observable clock has crossed a whole-second boundary after that commit before calling the provider, because GitHub's `merged_at` timestamp has only whole-second precision. Immediately before that provider call the broker revalidates the committed execution against a fresh server snapshot — same execution id, commit recorded, not fenced by an escalation or lead ruling, exact head, and remaining lifetime for the provider call — and refuses on anything missing, fenced or expired, so a suspended broker that resumes after expiry cannot merge with stale authority. The lifetime it demands is the provider timeout plus GitHub's whole-second timestamp interval and the verified clock-offset width, because delivery attribution accepts a merge only when that translated interval ends before the execution expires; a merge that GitHub completes slowly but successfully just inside the deadline is therefore never classified as unauthorized. Delivery requires that committed execution and its exact candidate. No database transaction spans the network call; an unknown provider outcome retains the committed execution for observation instead of retrying or pretending that a later withdrawal recalled it. That retention outlives the execution's expiry: a committed execution is never cleared by a later command, a new acquisition or periodic reconciliation, because the provider call it serialized may still be in flight, so withdrawal keeps refusing and the record stays frozen until GitHub answers for it. Only an observation settles it — the matching merge is attributed as delivery, or the pull request is seen still unmerged by a reading taken after the authority lapsed, after which the record reopens and any merge landing later is recorded as an unauthorized violation rather than delivery.
 
@@ -171,7 +229,8 @@ A bypassed merge of linked work is recorded as a permanent violation; Graphyard 
 | Symptom | Check |
 | --- | --- |
 | UI says GitHub is disconnected | App ID, installation ID, PEM secret, and server restart |
-| Job shows 401/403 | App key, installation access, permission approval (`master browser installation-accept`), repository selection |
+| Job shows 401 | App ID, installation ID, and private key; a rejected key is a credential refusal, not a pause |
+| Job shows 403 or is held | `appPermissions` in `GET /api/status` or the dashboard notice; accept the pending request at the installation page (`master browser installation-accept`), or run `github-setup --update-permissions` for the exact steps |
 | Protection gate refuses | Exact check name, App binding, `strict` left enabled, admin enforcement, force/delete settings (`master browser protection`) |
 | Acceptance refuses despite green CI | Proof names, producer allowlist, candidate SHA, base SHA, policy revision, skipped count |
 | PR changed while observed | Normal optimistic concurrency retry; investigate only if persistent |
@@ -183,7 +242,7 @@ References: [GitHub Checks API](https://docs.github.com/en/rest/checks/runs), [b
 
 A work policy can select `reviewProvider: "codex"` while retaining `review: true`. The alternative `github` (also the default for existing tasks) requires a formal independent GitHub approval. Human product/visual acceptance remains a separate criterion; selecting agent code review does not bypass it, CI, dependencies, or deployment checks.
 
-Graphyard dispatches a fresh `@codex review` comment through its own GitHub App and records the returned comment ID against the exact head SHA, base SHA, and policy revision. The comment includes a unique request marker. Arbitrary comments and previously posted manual requests cannot be imported as approvals. The App needs **Pull requests: write** to post PR comments and **Issues: read** to subscribe to the `issue_comment` event; Contents remains read-only. GitHub documents the comment-event permission in its [webhook reference](https://docs.github.com/en/webhooks/webhook-events-and-payloads#issue_comment). Existing installations must update and approve the permission before enabling this policy. Codex cloud must be connected. This installation has produced both automatic summary/reaction results and standalone clean-result comments following App requests. Enable automatic reviews for PRs and new commits; do not assume a successful comment POST launched a review. The recorded request establishes a candidate/policy boundary, but only independently observed completion can satisfy it.
+Graphyard dispatches a fresh `@codex review` comment through its own GitHub App and records the returned comment ID against the exact head SHA, base SHA, and policy revision. The comment includes a unique request marker. Arbitrary comments and previously posted manual requests cannot be imported as approvals. The App needs **Pull requests: write** to post PR comments and **Issues: read** to subscribe to the `issue_comment` event, both part of the [declared control-plane set](#app-permissions). GitHub documents the comment-event permission in its [webhook reference](https://docs.github.com/en/webhooks/webhook-events-and-payloads#issue_comment). Existing installations must update and approve the permission before enabling this policy; the preflight reports the shortfall and holds review dispatch until then. Codex cloud must be connected. This installation has produced both automatic summary/reaction results and standalone clean-result comments following App requests. Enable automatic reviews for PRs and new commits; do not assume a successful comment POST launched a review. The recorded request establishes a candidate/policy boundary, but only independently observed completion can satisfy it.
 
 The adapter also accepts the hosted connector’s explicit “Didn’t find any major issues” result comment (bare verdict, thumbs-up/celebration suffixes, or a small closed allowlist of benign courtesy phrases, including the observed “Hooray!”, “Breezy!” and “Chef’s kiss.” variations) with a reviewed commit. It requires both numeric bot/App identities, an unedited result created strictly after the recorded request, resolution to the full current head, no findings since the request, no newer provider activity, and no running reactions. Only one of the exact observed legacy or current informational footers, or trailing whitespace alone, may follow the reviewed-commit line; appended findings or unknown content refuse. The connector may update its authenticated summary immediately after the result; Graphyard accepts one such update only when it reports a manual review completed for the same exact head within ten seconds. A running summary, another commit or trigger, a later update, multiple matching summaries, or any other newer provider activity refuses. The result, request, and matching summary are reread alongside current comments/reviews before acceptance, and their bodies and timestamps must remain unchanged. An older summary left “Running” does not override a newer explicit result. The verdict and those courtesies are recognized with either the ASCII or the typographic apostrophe, as the authenticated connector has posted both; the spelling alone changes nothing else, so every identity, request-correlation, exact-head, freshness, and no-findings check here still applies unchanged. This means the provider reported no major issues, not that every possible defect has been disproved.
 
@@ -226,9 +285,9 @@ GitHub's whole-second merge timestamps leave an ambiguous interval. The master w
 
 Graphyard conditionally revalidates cached GitHub GET responses with ETags. Cached data counts only after GitHub returns `304 Not Modified`; a failed request never falls back to cached evidence. The cache is bounded to 256 URL entries per process. Identical completed check output is not rewritten, but candidate and job guards still run. Successful check output records head/base/policy without the ever-changing polling revision.
 
-Rate/access refusals (403/429) pause that process's GitHub client for at least one minute, honor `Retry-After` and exhausted-quota reset headers, and increase the fallback delay for repeated refusals. These errors remain visible; stale observations cannot satisfy gates. Restarted replicas have independent cooldown/cache state and must observe fresh rate-limit headers. This follows [GitHub's API best practices](https://docs.github.com/en/rest/using-the-rest-api/best-practices-for-using-the-rest-api); large installations will still need shared request budgeting.
+Rate limits are classified apart from permission errors. A 429, or a 403 that carries `x-ratelimit-remaining: 0`, a `Retry-After` header, or a rate-limit message, pauses that process's GitHub client for at least one minute, honors `Retry-After` and exhausted-quota reset headers, and increases the fallback delay for repeated refusals. A 401, or a 403 without those signals, is a permission or credential refusal: it never pauses the client, its error names the missing permission from the last [preflight](#preflight-and-holds) (or the installation page to compare against), it brings the next preflight forward, and the job that hit it retries at the ordinary cadence at most three times before it is held for thirty minutes with that reason. No job accumulates unbounded attempts on a permission error. All of these errors remain visible; stale observations cannot satisfy gates. Restarted replicas have independent cooldown/cache state and must observe fresh rate-limit headers. This follows [GitHub's API best practices](https://docs.github.com/en/rest/using-the-rest-api/best-practices-for-using-the-rest-api); large installations will still need shared request budgeting.
 
-Concurrent jobs share one installation-token refresh. Token creation uses the same rate-limit cooldown as repository reads and writes, so an authentication refusal cannot trigger a fresh token request for every queued job.
+Concurrent jobs share one installation-token refresh. Token creation uses the same rate-limit cooldown as repository reads and writes, so a rate-limited refusal cannot trigger a fresh token request for every queued job, and a rejected App key is reported as a credential refusal rather than a pause.
 
 The agent-review migration refuses repositories that require CODEOWNERS approval before making any protection changes. The current adapter proves an independent Codex review, not approval by a configured owner. Define an explicit ownership-review policy first; the helper does not silently remove that additional requirement. This applies to both preview and apply.
 
@@ -262,7 +321,7 @@ Each reviewer profile needs its own GitHub App identity — never the Graphyard 
 graphyard github-setup https://your-graphyard-deployment.example --reviewer claude
 ```
 
-The manifest requests **Metadata: read**, **Contents: read**, **Pull requests: write** and **Issues: read**. It deliberately requests no `checks` and no `administration` permission, so a reviewer can never publish Graphyard's own `Graphyard / merge` check or change branch protection. Install it on the managed repository, signed in as an account that is not the pull request author. Credentials land in `.graphyard/github-reviewer-<name>.json` with mode 0600 and are never sent to Graphyard: the reviewer runtime — not the control plane — authenticates as that App.
+The manifest requests exactly the [reviewer declaration](#app-permissions): **Metadata: read**, **Contents: read**, **Pull requests: write** and **Issues: read**. It deliberately requests no `checks`, no `administration`, and never Contents: write, so a reviewer can never publish Graphyard's own `Graphyard / merge` check, change branch protection, or write code; `github-setup --update-permissions --reviewer NAME` reports any excess grant as a step to reduce it. Install it on the managed repository, signed in as an account that is not the pull request author. Credentials land in `.graphyard/github-reviewer-<name>.json` with mode 0600 and are never sent to Graphyard: the reviewer runtime — not the control plane — authenticates as that App.
 
 The final setup page prints the registry entry. Add every reviewer to the server's `GRAPHYARD_REVIEWER_APPS` environment variable, whose shape matches [examples/reviewer-apps.json](../examples/reviewer-apps.json):
 

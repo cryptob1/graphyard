@@ -1,3 +1,4 @@
+<!-- page: Build integrations | 4 | the packaged Playwright runner, host attestor, and collector. -->
 # The packaged Playwright runner and collector
 
 This is the supported end-to-end path: guided discovery, an approved content-addressed oracle bundle, an isolated executor, and a separately trusted collector that verifies inventory, whole-run target attribution and required artifacts before publishing a result. Connecting an existing Playwright suite needs no custom dispatcher and no custom evidence publisher.

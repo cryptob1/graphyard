@@ -281,8 +281,12 @@ export async function setupMaster(root: string, input: { url: string; token: str
   const { writeFile, rename } = await import('node:fs/promises');
   await writeFile(temporary, instructions, { mode, flag: 'wx' }); await rename(temporary, instructionsFile); await chmod(instructionsFile, mode);
   await saveDiscovery(root);
-  return { repository: config.repository, server: config.url, role: status.actor.role, autoMerge: config.autoMerge, workers: config.workers.length, run: config.run, browser: config.browser ?? null, config: '.graphyard/master.json', reviewer: config.reviewer ? `${config.reviewer.slug}[bot]` : null,
-    next: config.reviewer ? `Run graphyard master start codex (or another supported agent kind), then add worker and reviewer profiles` : `Run graphyard master reviewer setup to register the independent reviewer identity, then graphyard master start codex (or another supported agent kind) and add worker and reviewer profiles` };
+  // A permission the installed App lacks is announced here with its exact migration steps, not
+  // discovered later as a 403 loop. It never blocks setup: master status keeps reporting it.
+  const { attention } = controlPlaneAttention(status);
+  const start = config.reviewer ? `run graphyard master start codex (or another supported agent kind) and add worker and reviewer profiles` : `run graphyard master reviewer setup to register the independent reviewer identity, then graphyard master start codex (or another supported agent kind) and add worker and reviewer profiles`;
+  return { repository: config.repository, server: config.url, role: status.actor.role, autoMerge: config.autoMerge, workers: config.workers.length, run: config.run, browser: config.browser ?? null, config: '.graphyard/master.json', reviewer: config.reviewer ? `${config.reviewer.slug}[bot]` : null, attention,
+    next: attention.length ? `Accept the GitHub App permission request (run graphyard github-setup --update-permissions on the machine holding .graphyard/github-app.json, or graphyard master browser app-permissions and installation-accept, for the exact steps), then ${start}` : start[0].toUpperCase() + start.slice(1) };
 }
 
 export async function saveWorkerProfile(root: string, profileInput: unknown, verify: (token: string) => Promise<any>) {
@@ -374,8 +378,24 @@ export function assessContainment(work: Work[], options: { hostId: string; obser
   }
   return assessments;
 }
-export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profiles: WorkerProfile[], agents: HerdrAgent[], credentialHealth: Record<string, { available: boolean; reason: string | null }> = {}, containment: Record<string, ContainmentAssessment> = {}, reviews: { pending: any[]; completed: any[] } = { pending: [], completed: [] }, baseBranch = 'main') {
+/** The control-plane facts `GET /api/status` reports that are not about any one work item. */
+export interface ControlPlaneStatus {
+  appPermissions?: { app?: string; installationUrl?: string; verifiedAt?: string | null; error?: string | null; suspended?: boolean; missing?: { permission: string; required: string; features: string[] }[]; attention?: string[] } | null;
+  heldJobs?: number;
+}
+/**
+ * Attention that belongs to the installation rather than to a work item: a declared App
+ * permission the installation lacks, an unverifiable preflight, and the jobs held on it.
+ */
+export function controlPlaneAttention(status: ControlPlaneStatus | undefined) {
+  const report = status?.appPermissions;
+  const attention = [...(report?.attention ?? [])];
+  if (status?.heldJobs) attention.push(`${status.heldJobs} integration job${status.heldJobs === 1 ? ' is' : 's are'} held on that permission shortfall rather than retried; they resume on their own once the installation reports the permission`);
+  return { attention, appPermissions: report ? { app: report.app ?? null, installationUrl: report.installationUrl ?? null, verifiedAt: report.verifiedAt ?? null, error: report.error ?? null, suspended: report.suspended ?? false, missing: (report.missing ?? []).map(shortfall => ({ permission: shortfall.permission, required: shortfall.required, features: shortfall.features })) } : null, heldJobs: status?.heldJobs ?? 0 };
+}
+export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profiles: WorkerProfile[], agents: HerdrAgent[], credentialHealth: Record<string, { available: boolean; reason: string | null }> = {}, containment: Record<string, ContainmentAssessment> = {}, reviews: { pending: any[]; completed: any[] } = { pending: [], completed: [] }, baseBranch = 'main', controlPlane?: ControlPlaneStatus) {
   const now = Date.parse(snapshot.now);
+  const installation = controlPlaneAttention(controlPlane);
   const sessions = profiles.map(profile => {
     const agent = agents.find(candidate => candidate.name === profile.agentName);
     const credential = credentialHealth[profile.name] ?? { available: true, reason: null };
@@ -418,10 +438,10 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
   });
   const delivered = snapshot.work.filter(work => work.stage === 'done' && work.delivery && deploySmokeRequired(work.policy)).map(work => deliveredRow(work, now, baseBranch));
   return { observedAt: snapshot.now,
-    counts: { open: rows.length, ready: rows.filter(row => row.stage === 'ready').length, active: rows.filter(row => row.owner).length, attention: rows.filter(row => row.attention).length, proofAuthorityGaps: rows.filter(row => row.proofGaps.length).length, mergeable: rows.filter(row => row.mergeable).length, reviewsPending: reviews.pending.length, reviewFailover: rows.filter(row => row.review?.failedOver.length).length, queued: placements.length,
+    counts: { open: rows.length, ready: rows.filter(row => row.stage === 'ready').length, active: rows.filter(row => row.owner).length, attention: rows.filter(row => row.attention).length + installation.attention.length, proofAuthorityGaps: rows.filter(row => row.proofGaps.length).length, mergeable: rows.filter(row => row.mergeable).length, reviewsPending: reviews.pending.length, reviewFailover: rows.filter(row => row.review?.failedOver.length).length, queued: placements.length,
       quarantined: rows.filter(row => row.containment).length, settleableQuarantines: rows.filter(row => row.containment?.settleable).length,
       awaitingSmoke: delivered.filter(row => row.state === 'awaiting-deployment' || row.state === 'awaiting-smoke').length, postDeployFailures: delivered.filter(row => row.state === 'delivered-with-failure').length },
-    workers: sessions, reviews, work: rows, queue: placements.map(queueRow), delivered };
+    workers: sessions, reviews, work: rows, queue: placements.map(queueRow), delivered, controlPlane: installation };
 }
 
 /**
