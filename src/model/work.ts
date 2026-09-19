@@ -95,7 +95,7 @@ export interface Work extends Create {
   reviewRequest?: ReviewRequest | null;
   reviewFailovers?: ReviewFailover[];
   mergeAuthorization?: { sha: string; baseSha: string; policyRevision: number; at: string } | null;
-  mergeExecution?: { id: string; owner: string; sha: string; baseSha: string; policyRevision: number; authorizationRevision: number; issuedAt: string; expiresAt: string; verifiedAt?: string; clockOffset?: { min: number; max: number }; fenced?: { reason: string; at: string } | null } | null;
+  mergeExecution?: { id: string; owner: string; sha: string; baseSha: string; policyRevision: number; authorizationRevision: number; issuedAt: string; expiresAt: string; verifiedAt?: string; committingAt?: string; clockOffset?: { min: number; max: number }; fenced?: { reason: string; at: string } | null } | null;
   delivery?: Delivery;
   /**
    * Independently observed production delivery, one record per environment: the first

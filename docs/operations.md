@@ -23,6 +23,7 @@ Three minutes for the human operator. Detail: [operations reference](operations-
   - Blocker with no owner → `graphyard unblock GY-N "reason"`.
 - **A merge is refused.** A stale observation, closed gate, or queue position behind the head is normal. Wait or repair; never bypass, never have a worker rebase a queued candidate.
 - **A merge bypassed Graphyard** → [merge bypass](#merge-bypass).
+- **Accepted evidence was wrong** → `graphyard revoke GY-N revoke.json` (proof, head SHA, base SHA, policy revision, reason); it also cancels an uncommitted merge execution. `admin` or the granted `producer` only. [Detail](operations-reference.md#accepted-evidence-turns-out-to-be-wrong)
 - **Integration jobs fail** → [GitHub jobs and outages](#github-jobs-and-outages).
 - **A smoke proof failed after deploy** → [delivered with failure](#delivered-with-a-failed-smoke-proof).
 - **The master loop is down** → [restart it](#restart-the-master-loop).
@@ -31,7 +32,7 @@ Three minutes for the human operator. Detail: [operations reference](operations-
 
 ### Lost worker before submission
 
-The lease expires 120 seconds after the last heartbeat; a new worker claims at a higher epoch and old-epoch commands refuse. Keep the old worktree; the new attempt gets a fresh branch. Expiry does not prove the old process stopped. [Detail](operations-reference.md#lost-worker-before-submission)
+The lease expires 120 seconds after the last heartbeat; a new worker claims at a higher epoch and old-epoch commands refuse. Keep the old worktree. Expiry does not prove the old process stopped. [Detail](operations-reference.md#lost-worker-before-submission)
 
 ### Rework a submitted implementation
 
@@ -45,7 +46,7 @@ This fences old commands, closes the build gate, and records a `lease-loss` esca
 
 ### Settle a containment quarantine
 
-A dead supervisor leaves the fence up deliberately. When `master status` shows `settleable: true` with no refusals, run `graphyard master settle-containment GY-N "reason"`; the control plane re-verifies. Otherwise confirm the worker stopped yourself, then attest: `rework … --previous-worker-stopped` (undelivered) or `graphyard recover-containment GY-N --previous-worker-stopped "reason"` (delivered). Never attest a stop you have not confirmed. [Detail](operations-reference.md#supervisor-died-leaving-a-containment-quarantine)
+When `master status` shows `settleable: true` with no refusals, run `graphyard master settle-containment GY-N "reason"`; the control plane re-verifies. Otherwise confirm the worker stopped yourself, then attest: `rework … --previous-worker-stopped` (undelivered) or `graphyard recover-containment GY-N --previous-worker-stopped "reason"` (delivered). Never attest a stop you have not confirmed. [Detail](operations-reference.md#supervisor-died-leaving-a-containment-quarantine)
 
 ### Restart the master loop
 
@@ -53,11 +54,11 @@ Restart `graphyard master run` freely: its cursor reconciles on start; nothing i
 
 ### GitHub jobs and outages
 
-Check App access, protection, and the registered branch. A missing App permission (`appPermissions`) holds its jobs until accepted; fix with `github-setup --update-permissions`. The merge gate refuses observations older than two minutes; a direct GitHub merge has no verified execution and cannot complete its item. [Detail](operations-reference.md#github-job-fails)
+Check App access, protection, and the registered branch. A missing App permission (`appPermissions`) holds its jobs until accepted; fix with `github-setup --update-permissions`. A direct GitHub merge has no verified execution and cannot complete its item. [Detail](operations-reference.md#github-job-fails)
 
 ### Merge bypass
 
-An observed merge with unsatisfied gates is a permanent violation. Never backfill evidence. Repair the access rules and open a follow-up item. [Detail](operations-reference.md#merge-bypass)
+An observed merge with unsatisfied gates is a permanent violation. Never backfill evidence. Repair the access rules; open a follow-up item. [Detail](operations-reference.md#merge-bypass)
 
 ### Delivered with a failed smoke proof
 
@@ -65,7 +66,7 @@ The item stays Done, delivered with failure. Roll back or revert through a new w
 
 ## Bootstrap mode
 
-The human operator may defer one criterion whose proof harness ships in the same change: a `bootstrap` declaration naming `contractPaths` inside the planned files. It needs `policy:bootstrap`, leaves every other gate in force, and becomes an obligation for the next item touching those paths. [Detail](operations-reference.md#bootstrap-mode-for-a-self-proving-change)
+The human operator may defer one criterion whose proof harness ships in the same change, via a `bootstrap` declaration naming `contractPaths` inside the planned files. It needs `policy:bootstrap`, leaves every other gate in force, and obligates the next item touching those paths. [Detail](operations-reference.md#bootstrap-mode-for-a-self-proving-change)
 
 ## Proof authority grants
 

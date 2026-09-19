@@ -44,7 +44,7 @@ jobs:
           GRAPHYARD_PROOF: ${{ inputs.proof }}
       - name: Build isolated candidate
         run: docker build --tag graphyard-acceptance candidate
-      - name: Execute protected HTTP contract against candidate
+      - name: Execute protected contract against candidate
         run: node scripts/run-acceptance.mjs candidate.json graphyard-acceptance acceptance.json "$GRAPHYARD_PROOF"
         env:
           GRAPHYARD_PROOF: ${{ inputs.proof }}

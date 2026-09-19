@@ -9,7 +9,7 @@ import { loadConnection, managedInstructions, serverOrigin } from './repository-
 import { resourceConflicts } from './coordination.js';
 import { mergeOrder } from './delegation.js';
 import { launchPlan, masterHarnessPlan, writeHarnessPermissions } from './harness.js';
-import { CHECK_NAME, deliveryState, deploySmokeRequired, evidenceIndependenceRefusals, exhaustedReviewerProfiles, nativeReviewRequired, postDeployMs, productionLatencyMs, reviewerProfileFor, reviewProviderOf, rollbackGuidance, standingEscalations, type Work } from './model.js';
+import { CHECK_NAME, deliveryState, deploySmokeRequired, evidenceIndependenceRefusals, exhaustedReviewerProfiles, nativeReviewRequired, postDeployMs, productionLatencyMs, providerDelayAfterVerification, reviewerProfileFor, reviewProviderOf, rollbackGuidance, standingEscalations, type Work } from './model.js';
 import { containmentAttestation, containmentSettlementRefusals, containmentVerificationSchema, type ContainmentVerification } from './quarantine.js';
 import { probeSupervisorAbsence } from './supervisor.js';
 import { predictQueue, type QueuePlacement } from './merge-queue.js';
@@ -685,7 +685,7 @@ export async function continueMergeBatch<T extends { key: string }, R>(items: T[
   }
   return results;
 }
-type MergeExecution = { id: string; owner: string; sha: string; baseSha: string; policyRevision: number; authorizationRevision: number; issuedAt: string; expiresAt: string; verifiedAt?: string; fenced?: { reason: string; at: string } | null };
+type MergeExecution = { id: string; owner: string; sha: string; baseSha: string; policyRevision: number; authorizationRevision: number; issuedAt: string; expiresAt: string; verifiedAt?: string; committingAt?: string; clockOffset?: { min: number; max: number }; fenced?: { reason: string; at: string } | null };
 export function assertMergeProtection(protection: any, config: MasterConfig, work: Work) {
   const nativeReview = nativeReviewRequired(work.policy);
   const reviews = protection?.required_pull_request_reviews;
@@ -714,21 +714,32 @@ export function assertQueuedLanding(work: Work, authorization: { sha: string; ba
   const commit = JSON.parse(run('gh', ['api', `repos/${repository}/commits/${baseRefOid}`]));
   if (commit?.commit?.tree?.sha !== speculation.baseTree) throw new Error(`${work.key} base branch advanced outside the merge queue; the validated tip would no longer land its tested tree`);
 }
-export function githubProviderDelay(verifiedTime: number, serverDelayMs: number, response: string) {
+export function githubProviderDelay(verifiedTime: number, serverDelayMs: number, response: string, providerToDatabaseOffsetMin = 0) {
   const header = /^Date:\s*(.+?)\r?$/gmi.exec(response);
   const githubTime = header ? Date.parse(header[1]) : Number.NaN;
-  if (!Number.isFinite(verifiedTime) || !Number.isInteger(serverDelayMs) || serverDelayMs < 0 || !Number.isFinite(githubTime)) throw new Error('GitHub did not provide a valid server time for merge ordering');
+  if (!Number.isFinite(verifiedTime) || !Number.isInteger(serverDelayMs) || serverDelayMs < 0 || !Number.isFinite(githubTime) || !Number.isFinite(providerToDatabaseOffsetMin)) throw new Error('GitHub did not provide a valid server time for merge ordering');
   // GitHub's Date and merged_at values have whole-second precision. Waiting from
   // the lower bound of GitHub's reported second remains conservative when the
   // database clock is ahead of GitHub's clock.
-  const verifiedBoundary = Math.ceil((verifiedTime + 1) / 1000) * 1000;
+  // Delivery compares the lower bound of GitHub's whole-second merged_at interval,
+  // translated into the database clock domain by offset.min.  Therefore the provider
+  // clock must cross (database time - offset.min), not merely database time.
+  const verifiedBoundary = Math.ceil((verifiedTime - providerToDatabaseOffsetMin + 1) / 1000) * 1000;
   return Math.max(serverDelayMs, verifiedBoundary - githubTime, 0);
 }
-export async function mergeWork(config: MasterConfig, work: Work, freshSnapshot: () => Promise<{ work: Work[]; now: string }>, acquire: (work: Work, authorization: ReturnType<typeof assertMergeCandidate>) => Promise<{ execution: MergeExecution }>, cancel: (work: Work, execution: MergeExecution, reason: string) => Promise<unknown>, verify: (work: Work, execution: MergeExecution) => Promise<{ executionId: string; sha: string; verifiedAt: string; providerDelayMs: number }>, run: (command: string, args: string[]) => string = (command, args) => execFileSync(command, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 90_000 }), executionOwner?: string) {
+function recordedVerification(execution: MergeExecution) {
+  const verifiedAt = Date.parse(execution.verifiedAt ?? '');
+  if (!Number.isFinite(verifiedAt) || !execution.clockOffset) throw Object.assign(new Error('Resumed merge execution carries an incomplete verification record'), { confirmedRefusal: true });
+  return { executionId: execution.id, sha: execution.sha, verifiedAt: execution.verifiedAt!, providerDelayMs: providerDelayAfterVerification(verifiedAt, execution.clockOffset), clockOffset: execution.clockOffset };
+}
+export async function mergeWork(config: MasterConfig, work: Work, freshSnapshot: () => Promise<{ work: Work[]; now: string }>, acquire: (work: Work, authorization: ReturnType<typeof assertMergeCandidate>) => Promise<{ execution: MergeExecution }>, cancel: (work: Work, execution: MergeExecution, reason: string) => Promise<unknown>, verify: (work: Work, execution: MergeExecution) => Promise<{ executionId: string; sha: string; verifiedAt: string; providerDelayMs: number; clockOffset?: { min: number; max: number } }>, run: (command: string, args: string[]) => string = (command, args) => execFileSync(command, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 90_000 }), executionOwner?: string, commit?: (work: Work, execution: MergeExecution) => Promise<{ executionId: string; sha: string; committingAt: string }>) {
   const before = await freshSnapshot(); const current = before.work.find(item => item.id === work.id);
   if (!current || current.revision !== work.revision) throw new Error(`${work.key} changed before GitHub verification; retry`);
   const authorization = assertMergeCandidate(current, before.now, executionOwner);
-  if (current.mergeExecution?.verifiedAt) return { key: authorization.key, pr: authorization.pr, sha: authorization.sha, method: config.mergeMethod, result: 'final verification was already committed; Graphyard retained the execution and will reconcile a provider result or let it expire before a new attempt' };
+  // Only a recorded provider commit marks an unknown provider outcome: the broker may already
+  // have called GitHub, so nothing is retried until observation reconciles the execution. A
+  // verified execution that never reached the commit resumes below; the provider was not attempted.
+  if (current.mergeExecution?.committingAt) return { key: authorization.key, pr: authorization.pr, sha: authorization.sha, method: config.mergeMethod, result: 'the provider commit was already recorded; Graphyard retained the execution until GitHub reconciles the provider outcome and refuses a new attempt until then' };
   const pr = JSON.parse(run('gh', ['pr', 'view', String(authorization.pr), '--repo', config.repository, '--json', 'headRefOid,baseRefOid,baseRefName,state,isDraft']));
   if (pr.headRefOid !== authorization.sha || pr.baseRefName !== config.baseBranch || pr.state !== 'OPEN' || pr.isDraft) throw new Error(`${work.key} changed on GitHub before merge`);
   assertQueuedLanding(current, authorization, pr.baseRefOid, config.repository, run);
@@ -750,15 +761,27 @@ export async function mergeWork(config: MasterConfig, work: Work, freshSnapshot:
     if (!Number.isFinite(remaining) || remaining <= 90_000) throw new Error(`${work.key} merge execution does not remain valid for the provider timeout; refresh gate inputs and retry`);
     const protection = JSON.parse(run('gh', ['api', `repos/${config.repository}/branches/${encodeURIComponent(config.baseBranch)}/protection`]));
     assertMergeProtection(protection, config, latest);
-    verificationStarted = true; const verified = await verify(latest, granted.execution); verificationCompleted = true;
+    // A broker that stopped between merge-verify and merge-commit resumes here holding a verified
+    // execution. The verification is a durable fact of that execution — the record carries its
+    // verifiedAt and bounded clock offset — so the resumed attempt rebuilds it rather than asking
+    // the engine to verify again, which it refuses, and then runs the same clock wait, pre-commit
+    // revalidation, transactional commit and pre-provider checks as a first attempt.
+    verificationStarted = true; const verified = granted.execution.verifiedAt ? recordedVerification(granted.execution) : await verify(latest, granted.execution); verificationCompleted = true;
     const verifiedTime = Date.parse(verified.verifiedAt);
-    if (verified.executionId !== granted.execution.id || verified.sha !== authorization.sha || !Number.isFinite(verifiedTime) || !Number.isInteger(verified.providerDelayMs) || verified.providerDelayMs < 0 || verified.providerDelayMs > 21_000) throw new Error(`${work.key} received an invalid final GitHub gate verification`);
+    if (verified.executionId !== granted.execution.id || verified.sha !== authorization.sha || !Number.isFinite(verifiedTime) || !Number.isInteger(verified.providerDelayMs) || verified.providerDelayMs < 0 || verified.providerDelayMs > 21_000
+      || !verified.clockOffset || !Number.isFinite(verified.clockOffset.min) || !Number.isFinite(verified.clockOffset.max) || verified.clockOffset.min > verified.clockOffset.max || verified.clockOffset.max - verified.clockOffset.min > 20_000) throw new Error(`${work.key} received an invalid final GitHub gate verification`);
+    // Delivery attribution accepts a merge only when GitHub's whole-second merged_at interval,
+    // translated into the database clock by the verified offset bound, ends before the execution
+    // expires. The remaining authority must therefore cover the provider timeout plus that
+    // timestamp interval and the accepted offset width, or a slow but successful provider merge
+    // just inside the deadline would be permanently classified as unauthorized.
+    const providerReserve = 90_000 + 1000 + (verified.clockOffset.max - verified.clockOffset.min);
     const githubClock = run('gh', ['api', '--include', 'rate_limit']);
     const delay = githubProviderDelay(verifiedTime, verified.providerDelayMs, githubClock);
-    if (delay > 21_000 || remainingAtSnapshot - (performance.now() - authorityBudgetStartedAt) - delay <= 90_000) throw new Error('Clock uncertainty leaves insufficient merge authority; refresh and retry');
+    if (delay > 21_000 || remainingAtSnapshot - (performance.now() - authorityBudgetStartedAt) - delay <= providerReserve) throw new Error('Clock uncertainty leaves insufficient merge authority; refresh and retry');
     if (delay) await new Promise(resolve => setTimeout(resolve, delay));
     const remainingAfterProtection = remainingAtSnapshot - (performance.now() - authorityBudgetStartedAt);
-    if (!Number.isFinite(remainingAfterProtection) || remainingAfterProtection <= 90_000) throw new Error(`${work.key} merge execution no longer has enough time for the provider call after verifying branch protection; retry`);
+    if (!Number.isFinite(remainingAfterProtection) || remainingAfterProtection <= providerReserve) throw new Error(`${work.key} merge execution no longer has enough time for the provider call after verifying branch protection; retry`);
     // Verification and the provider call are separated by the clock-ordering
     // delay, and a lead escalation or blocking ruling can land inside it. The
     // last thing Graphyard reads before handing the merge to GitHub is the
@@ -776,7 +799,32 @@ export async function mergeWork(config: MasterConfig, work: Work, freshSnapshot:
       || final.mergeAuthorization.baseSha !== authorization.baseSha || final.mergeAuthorization.policyRevision !== authorization.policyRevision
       || final.candidate?.sha !== authorization.sha || final.candidate.baseSha !== authorization.baseSha)
       throw new Error(`${work.key} no longer passes every gate after final verification: ${refusals.join('; ') || 'merge authorization was invalidated'}`);
+    if (!commit) throw new Error(`${work.key} merge broker commit callback is unavailable`);
+    const committed = await commit(latest, granted.execution);
+    const committingTime = Date.parse(committed.committingAt);
+    if (committed.executionId !== granted.execution.id || committed.sha !== authorization.sha || !Number.isFinite(committingTime)) throw new Error(`${work.key} received an invalid provider commit authority`);
+    // From this transactional boundary onward revocation refuses: the broker has won
+    // serialization and must treat any provider error as an unknown merge outcome.
     providerStarted = true;
+    // GitHub reports merged_at only to whole-second precision. Cross a provider-clock
+    // boundary after the transactional commit so a fast successful merge cannot appear
+    // to predate the authority that serialized it against revocation.
+    const commitClock = run('gh', ['api', '--include', 'rate_limit']);
+    const commitDelay = githubProviderDelay(committingTime, 0, commitClock, verified.clockOffset.min);
+    if (commitDelay > 21_000 || remainingAtSnapshot - (performance.now() - authorityBudgetStartedAt) - commitDelay <= providerReserve) throw new Error('Clock uncertainty leaves insufficient committed merge authority; wait for observation or expiry');
+    if (commitDelay) await new Promise(resolve => setTimeout(resolve, commitDelay));
+    // A suspended broker can resume after its execution expired: reconciliation then
+    // clears the execution, the revocation window reopens, and this stale SHA could
+    // merge before the asynchronously published GitHub check changes. Revalidate the
+    // committed authority and its remaining lifetime immediately before the provider
+    // mutation; the mutation is refused on any missing, fenced or expired authority.
+    const preProvider = await freshSnapshot();
+    const finalExecution = preProvider.work.find(item => item.id === work.id)?.mergeExecution;
+    const remainingBeforeProvider = remainingAtSnapshot - (performance.now() - authorityBudgetStartedAt);
+    if (!finalExecution || finalExecution.id !== granted.execution.id || !finalExecution.committingAt || finalExecution.fenced
+      || finalExecution.sha !== authorization.sha || Date.parse(finalExecution.expiresAt) <= Date.parse(preProvider.now)
+      || !Number.isFinite(remainingBeforeProvider) || remainingBeforeProvider <= providerReserve)
+      throw new Error(`${work.key} merge execution expired, was fenced or was superseded during the provider clock wait; the provider merge is refused${finalExecution?.fenced ? `: ${finalExecution.fenced.reason}` : ''}`);
     const provider = JSON.parse(run('gh', ['api', '--method', 'PUT', `repos/${config.repository}/pulls/${authorization.pr}/merge`, '-f', `sha=${authorization.sha}`, '-f', `merge_method=${config.mergeMethod}`]));
     if (provider.merged !== true || typeof provider.sha !== 'string') {
       await cancel(latest, granted.execution, provider.message || 'GitHub confirmed that it did not merge the candidate'); cancelled = true;
@@ -803,5 +851,6 @@ export function mergeExecutor(config: MasterConfig, snapshot: () => Promise<{ wo
   return (item: Work) => mergeWork(config, item, snapshot,
     (latest, authorization) => mutation(`work/${latest.id}/merge-acquire`, { expectedRevision: authorization.revision, sha: authorization.sha, baseSha: authorization.baseSha, policyRevision: authorization.policyRevision }, stepKey(latest, 'acquire')),
     (latest, execution, reason) => mutation(`work/${latest.id}/merge-cancel`, { executionId: execution.id, reason }, stepKey(latest, 'cancel', execution.id)),
-    (latest, execution) => mutation(`work/${latest.id}/merge-verify`, { executionId: execution.id }, stepKey(latest, 'verify', execution.id)), run, executionOwner);
+    (latest, execution) => mutation(`work/${latest.id}/merge-verify`, { executionId: execution.id }, stepKey(latest, 'verify', execution.id)), run, executionOwner,
+    (latest, execution) => mutation(`work/${latest.id}/merge-commit`, { executionId: execution.id }, stepKey(latest, 'commit', execution.id)));
 }

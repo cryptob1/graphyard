@@ -46,6 +46,8 @@ Stop the worker and release its lease first. Only the human operator's `admin` c
 
 All previous acceptance evidence remains in history but becomes inapplicable to the new policy. Review requests, observations and merge authorization are invalidated. Previously submitted work requires a new claimed attempt and resubmission on its existing PR branch. GitHub check revocation is asynchronous: suspend merging until the refusing check is visible, as with rework. Delivered or observed-merged work requires a follow-up task.
 
+To withdraw specific accepted runs without changing what the work item requires, revoke that evidence instead of revising requirements; see the [operations reference](operations-reference.md#accepted-evidence-turns-out-to-be-wrong) and the [protocol](protocol/evidence.md#revocation).
+
 Existing E2E proof names retain their pinned scenario version. Newly added E2E proofs pin the latest definition at revision time. This command does not silently upgrade existing pins. Selecting a newer revision of the same scenario and selective reuse of unaffected evidence remain future work.
 
 ## Detect overlap without pretending to understand every API

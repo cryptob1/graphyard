@@ -90,5 +90,10 @@ export function ejectionReason(work: Work, ciAppIds: number[]): string | null {
   const proof = work.evidence.find(item => item.trusted && item.result === 'fail' && item.sha === candidate.sha
     && item.baseSha === candidate.baseSha && item.policyRevision === work.policyRevision);
   if (proof) return `Proof ${proof.proof} failed on speculative tip ${tip}`;
+  // A withdrawn proof is an explicit adverse conclusion, not a missing one: the entry leaves the
+  // queue instead of holding its position while everything behind it waits.
+  const revoked = work.evidence.find(item => item.trusted && !!item.revocation && item.sha === candidate.sha
+    && item.baseSha === candidate.baseSha && item.policyRevision === work.policyRevision);
+  if (revoked) return `Proof ${revoked.proof} was revoked on speculative tip ${tip}: ${revoked.revocation!.reason}`;
   return null;
 }

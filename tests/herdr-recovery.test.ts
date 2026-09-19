@@ -124,7 +124,7 @@ test('the trusted registry selects fixed inventories and rejects unknown proofs'
   assert.equal(contract('integration:herdr-recovery').requiredCases.length, 5);
   assert.deepEqual(contract('integration:claim-safety').requiredCases, contracts['integration:claim-safety'].requiredCases);
   // The refusal states the bootstrap ordering rule: a contract reaches protected main first.
-  assert.throws(() => contract('integration:invented'), /Unknown trusted acceptance proof integration:invented\. This protected checkout registers integration:claim-safety, integration:herdr-recovery; merge a contract to main before requiring its proof\./);
+  assert.throws(() => contract('integration:invented'), /Unknown trusted acceptance proof integration:invented\. This protected checkout registers integration:claim-safety, integration:herdr-recovery, integration:merge-authorization; merge a contract to main before requiring its proof\./);
   assert.throws(() => contract('toString'), /Unknown trusted acceptance proof/);
   assert.equal(launchFenceMs, 120_000);
   // Every registered contract names the protected file a trusted run actually executes.
