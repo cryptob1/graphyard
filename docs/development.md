@@ -12,6 +12,7 @@
 | `src/cli.ts` | Worker protocol, local worktrees, process supervision |
 | `src/onboarding.ts`, `src/github-setup.ts` | Repository discovery and local GitHub App registration |
 | `scripts/contracts.mjs`, `scripts/*contract*.mjs`, `scripts/*acceptance*.mjs` | Trusted contract registry, protected HTTP harnesses, and separate evidence publisher |
+| `scripts/protect-github.mjs`, `scripts/verify-enforcement.mjs` | Bind the App-owned check; inspect live merge enforcement read-only |
 | `web/` | React graph, board, work form, details and history |
 | `integrations/herdr/` | Native Herdr ledger pane and open action |
 | `tests/` | Real Postgres integration and HTTP tests |
@@ -25,7 +26,7 @@ npm run build
 npm test
 ```
 
-The tests run isolated Postgres on ports 15438 to 15440, with temporary database directories. Override `GRAPHYARD_TEST_PORT` to move the whole range, or `GRAPHYARD_VALIDATION_TEST_PORT` and `GRAPHYARD_RECOVERY_TEST_PORT` individually. Do not point tests at production. Tests start local processes and sockets, so a restricted execution sandbox may require explicit local-network permission. Run as a non-root user; the test runtime does not create system users.
+The tests run isolated Postgres on ports 15438 to 15445 (and 15448 for delegation), with temporary database directories. Override `GRAPHYARD_TEST_PORT` to move the whole range, or a suite's own variable (`GRAPHYARD_VALIDATION_TEST_PORT`, `GRAPHYARD_HERDR_RECOVERY_TEST_PORT`, and so on) individually. Do not point tests at production. Tests start local processes and sockets, so a restricted execution sandbox may require explicit local-network permission. Run as a non-root user; the test runtime does not create system users.
 
 The cross-machine recovery suite shortens the lease and launch fences of its own engine instance, and states those fences when it calls the protected recovery contract, so the contract runs unchanged in seconds. A trusted run passes no such override and refuses any candidate whose fences are shorter than the shipped defaults in `src/engine.ts`; the suite asserts that the certified minimums still match those defaults.
 

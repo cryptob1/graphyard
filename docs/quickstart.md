@@ -24,6 +24,35 @@ Keep this Graphyard checkout running. Clone the configured writable repository s
 
 ## Prepare the repository
 
+### Propose the delivery workflow first
+
+Instead of hand-authoring check names, proof names, and profiles, let Graphyard inspect the repository and propose them:
+
+```sh
+cd /path/to/your-writable-repository
+node "$GRAPHYARD_CLI" init --scan --url "$GRAPHYARD_URL"
+```
+
+The scan is read-only. It inspects package manifests, CI workflows, deploy configuration (Railway, Vercel, Fly, GitHub Pages, Dockerfile/compose), and the test layout, then writes one ignored file, `.graphyard/setup-proposal.json`, proposing:
+
+- the CI system and the required check names;
+- build/test commands with their proof names;
+- the deploy target and how to verify a deployed SHA;
+- the candidate environment topology (ephemeral, pooled, or partial — see [operations](operations.md#setup-proposals-and-drift));
+- the default policy: required checks, GitHub as review provider, and evidence expectations;
+- worker/reviewer profiles for the agent runtimes present on this machine;
+- the GitHub App registration.
+
+Review the proposal with the operator, then apply it. A sample proposal for a Node/Railway repository is in [examples/setup-proposal.json](../examples/setup-proposal.json):
+
+```sh
+node "$GRAPHYARD_CLI" init --scan --apply --url "$GRAPHYARD_URL"
+```
+
+Applying writes the managed `AGENTS.md` section, generates principal credentials with proof grants in `.graphyard/principals.json`, writes the worker/reviewer profiles, and performs the GitHub App registration flow. Nothing is applied without `--apply`. If the repository changes between review and apply, the command refuses and the stored proposal is left untouched; rerun `init --scan`, review the refreshed proposal, and apply again. Re-running a matching apply changes nothing and reports drift.
+
+### Connect a worker
+
 From the writable repository, connect a worker and install the `.graphyard/` ignore rule:
 
 ```sh
