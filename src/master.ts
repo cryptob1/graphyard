@@ -11,7 +11,7 @@ import type { ConflictReport } from './conflicts.js';
 import { mergeOrder } from './delegation.js';
 import { launchPlan, masterHarnessPlan, writeHarnessPermissions, type HarnessPlan, type HarnessRule } from './harness.js';
 import { CHECK_NAME, carriedApproval, deliveryState, deploySmokeRequired, describeQueueBinding, evidenceIndependenceRefusals, exhaustedReviewerProfiles, nativeReviewRequired, postDeployMs, productionLatencyMs, providerDelayAfterVerification, reviewerProfileFor, reviewProviderOf, rollbackGuidance, standingEscalations, type CarriedApproval, type QueueBindingReport, type Work } from './model.js';
-import { containmentAttestation, containmentSettlementRefusals, containmentVerificationSchema, type ContainmentVerification } from './quarantine.js';
+import { containmentAttestation, containmentGraceMs, containmentSettlementRefusals, containmentVerificationSchema, type ContainmentVerification } from './quarantine.js';
 import { probeSupervisorAbsence } from './containment-probe.js';
 import { predictQueue, type QueuePlacement } from './merge-queue.js';
 import { MERGE_PROTOCOL } from './protocol-version.js';
@@ -258,7 +258,10 @@ async function repositoryWorktrees(root: string) {
     worktrees = records.filter(record => record.startsWith('worktree ')).map(record => resolve(record.slice('worktree '.length)));
   } catch { throw new Error('Cannot verify credential location because the complete Git worktree inventory is unavailable'); }
   if (!worktrees.length) throw new Error('Cannot verify credential location because Git returned an empty worktree inventory');
-  return Promise.all(worktrees.map(worktree => realpath(worktree)));
+  // A registered worktree whose path is missing or hidden (a removed proof worktree, or one under
+  // a /tmp this process cannot see) is compared by its registered path: it cannot be resolved,
+  // but a target lexically inside it is still refused, and it never stops the loop.
+  return Promise.all(worktrees.map(worktree => realpath(worktree).catch(() => worktree)));
 }
 export async function assertOutsideWorktrees(root: string, target: string, label: string) {
   const canonicalTarget = await realpath(target);
@@ -410,6 +413,96 @@ export async function saveProducerProfile(root: string, profileInput: unknown, v
     launch: launchPlan(profile.kind, profile.approvals, profile.agentArgs, profile.environment) };
 }
 
+/**
+ * Replace a producer profile in place, under the same name, with the checks `add` makes: the new
+ * credential authenticates exactly the new principal as a producer, and no other profile shares
+ * its agent name or principal. A running `master run` adopts it on its next tick.
+ */
+export async function replaceProducerProfile(root: string, profileInput: unknown, verify: (token: string) => Promise<any>) {
+  const profile = producerProfileSchema.parse(profileInput);
+  const config = await loadMasterConfig(root);
+  const index = config.producers.findIndex(item => item.name === profile.name);
+  if (index < 0) throw new Error(`Unknown producer profile ${profile.name}; add it with master producer add`);
+  await externalCredential(root, profile.credentialFile, 'Producer');
+  const status = await verify(await readCredentialFile(profile.credentialFile));
+  if (status.actor?.role !== 'producer' || status.actor.id !== profile.principal) throw new Error('Producer credential does not match the profile principal and producer role');
+  const others = config.producers.filter((_, position) => position !== index);
+  if (others.some(item => item.agentName === profile.agentName || item.principal === profile.principal)) throw new Error('Producer profile agent name and principal must be unique');
+  if (config.workers.some(item => item.agentName === profile.agentName) || config.reviewers.some(item => item.agentName === profile.agentName)) throw new Error('A worker or reviewer profile already uses that Herdr agent name');
+  if (config.workers.some(item => item.principal === profile.principal)) throw new Error('A producer principal cannot also be a worker principal; the control plane refuses evidence from an implementer');
+  const previous = config.producers[index];
+  config.producers[index] = profile; await atomicPrivateWrite(resolve(root, '.graphyard/master.json'), config);
+  return { replaced: profile.name, principal: { from: previous.principal, to: profile.principal }, agentName: { from: previous.agentName, to: profile.agentName }, kind: profile.kind,
+    proofs: Array.isArray(status.actor?.proofs) ? status.actor.proofs : [], producers: config.producers.length, launch: launchPlan(profile.kind, profile.approvals, profile.agentArgs, profile.environment) };
+}
+
+/** Remove a producer profile. Sessions it already launched stay in the ledger and settle as usual. */
+export async function removeProducerProfile(root: string, name: string) {
+  const config = await loadMasterConfig(root);
+  const removed = config.producers.find(item => item.name === name);
+  if (!removed) throw new Error(`Unknown producer profile ${name}`);
+  config.producers = config.producers.filter(item => item.name !== name);
+  await atomicPrivateWrite(resolve(root, '.graphyard/master.json'), config);
+  return { removed: name, principal: removed.principal, agentName: removed.agentName, producers: config.producers.length,
+    next: config.producers.length ? 'master run adopts the change on its next tick' : 'No producer profile remains; producer requests wait until one is added with master producer add' };
+}
+
+/** `master producer add|replace FILE` and `master producer remove NAME`. */
+export async function producerCommand(root: string, args: string[], verify: (token: string) => Promise<any>) {
+  if ((args[0] === 'add' || args[0] === 'replace') && args[1]) return (args[0] === 'add' ? saveProducerProfile : replaceProducerProfile)(root, JSON.parse(await readFile(args[1], 'utf8')), verify);
+  if (args[0] === 'remove' && args[1]) return removeProducerProfile(root, args[1]);
+  throw new Error('Use master producer add FILE, master producer replace FILE, or master producer remove NAME');
+}
+
+/**
+ * The master's own configuration, re-read by a running loop so a profile, workspace, run setting
+ * or merge preference changed in .graphyard/master.json applies without a restart. What the loop
+ * is bound to — server, repository, base branch, App, host, coordinator credential, CLI and
+ * master agent — cannot change under it: such a change is refused by name and the loop keeps the
+ * settings it loaded until it is restarted.
+ */
+export const masterBoundSettings = ['version', 'url', 'credentialFile', 'cliPath', 'repository', 'baseBranch', 'githubAppId', 'hostId', 'masterAgentName'] as const;
+export function masterConfigChanges(current: MasterConfig, next: MasterConfig) {
+  const flatten = (config: MasterConfig) => {
+    const { run, ...rest } = config;
+    return { ...rest, ...Object.fromEntries(Object.entries(run).map(([key, value]) => [`run.${key}`, value])) } as Record<string, unknown>;
+  };
+  const before = flatten(current), after = flatten(next);
+  const changed = [...new Set([...Object.keys(before), ...Object.keys(after)])].filter(key => JSON.stringify(before[key]) !== JSON.stringify(after[key])).sort();
+  return { changed, bound: changed.filter(key => (masterBoundSettings as readonly string[]).includes(key)) };
+}
+export interface ConfigReload { config: MasterConfig; changed: string[]; refused: string | null; at: string }
+export function liveMasterConfig(root: string, initial: MasterConfig, load: (root: string) => Promise<MasterConfig> = loadMasterConfig, clock: () => number = Date.now) {
+  const live = {
+    current: initial,
+    async reload(): Promise<ConfigReload> {
+      const at = new Date(clock()).toISOString();
+      let next: MasterConfig;
+      try { next = await load(root); }
+      catch (error) { return { config: live.current, changed: [], at, refused: `.graphyard/master.json could not be reloaded (${error instanceof Error ? error.message : String(error)}); the loop keeps the settings it last loaded` }; }
+      const { changed, bound } = masterConfigChanges(live.current, next);
+      if (bound.length) return { config: live.current, changed: [], at, refused: `.graphyard/master.json changes ${bound.join(', ')}, which a running master loop is bound to; restart master run to adopt ${bound.length === 1 ? 'it' : 'them'}. Until then the loop keeps its loaded settings, including every other change` };
+      live.current = next;
+      return { config: next, changed, refused: null, at };
+    },
+  };
+  return live;
+}
+export type LiveMasterConfig = ReturnType<typeof liveMasterConfig>;
+
+/**
+ * The configured Herdr workspace, checked against Herdr's own inventory: a workspace closed since
+ * `master init` makes every launch refuse, so status names it before a launch does.
+ */
+export function herdrWorkspaceHealth(config: Pick<MasterConfig, 'herdrWorkspace'>, run?: (command: string, args: string[]) => string) {
+  if (!config.herdrWorkspace) return { workspace: null, exists: null as boolean | null, reason: null as string | null };
+  let workspaces: any[];
+  try { const listed = herdrJson(['workspace', 'list'], run); workspaces = Array.isArray(listed?.workspaces) ? listed.workspaces : []; }
+  catch { return { workspace: config.herdrWorkspace, exists: null, reason: 'Herdr could not list workspaces, so the configured workspace is unverified' }; }
+  const exists = workspaces.some(entry => entry?.workspace_id === config.herdrWorkspace);
+  return { workspace: config.herdrWorkspace, exists, reason: exists ? null : `Herdr workspace ${config.herdrWorkspace} configured in .graphyard/master.json no longer exists (Herdr lists ${workspaces.map(entry => entry?.workspace_id).filter(Boolean).join(', ') || 'none'}); every launch into it will refuse. Set herdrWorkspace to a live workspace, or rerun master init --herdr-workspace ID` };
+}
+
 export type HerdrAgent = { name?: string; pane_id?: string; agent?: string; agent_status?: string; cwd?: string; foreground_cwd?: string; tokens?: Record<string, string> };
 // Reviewer failover is a capacity decision the operator must see, not a silent retry.
 function reviewState(work: Work) {
@@ -428,6 +521,36 @@ export interface ContainmentAssessment {
   scope: { unit: string; pid: number } | null;
   settleable: boolean; refusals: string[]; attestation: string;
   verification: ContainmentVerification | null;
+}
+
+export type ContainmentPhase =
+  | { state: 'live'; owner: string; epoch: number; expiresAt: string }
+  | { state: 'grace'; lapsedAt: string; remainingMs: number }
+  | { state: 'lapsed'; lapsedAt: string | null };
+/**
+ * Where a containment quarantine stands against its worker's lease. Every supervised launch
+ * records one, so while its owner still holds the quarantined epoch's lease it is a session at
+ * work, not something to act on. Once the lease lapses, the grace window runs from the later of
+ * the lease and launch deadlines, and only then can supervisor absence be verified.
+ */
+export function containmentPhase(work: Work, now: number, graceMs = containmentGraceMs): ContainmentPhase | null {
+  const quarantine = work.containmentQuarantine;
+  if (!quarantine) return null;
+  const lease = work.lease;
+  if (lease && lease.owner === quarantine.owner && lease.epoch === quarantine.epoch && Date.parse(lease.expiresAt) > now)
+    return { state: 'live', owner: lease.owner, epoch: lease.epoch, expiresAt: lease.expiresAt };
+  const deadlines = [lease?.epoch === quarantine.epoch ? lease.expiresAt : undefined, quarantine.leaseExpiresAt, quarantine.launchExpiresAt]
+    .map(value => value ? Date.parse(value) : NaN).filter(Number.isFinite);
+  if (!deadlines.length) return { state: 'lapsed', lapsedAt: null };
+  const lapsed = Math.max(...deadlines), lapsedAt = new Date(lapsed).toISOString();
+  return lapsed + graceMs > now ? { state: 'grace', lapsedAt, remainingMs: lapsed + graceMs - now } : { state: 'lapsed', lapsedAt };
+}
+/** Why a quarantined item cannot be dispatched: in progress by its live owner, or unverified containment. */
+export function containmentHold(work: Work, now: number): string | null {
+  const phase = containmentPhase(work, now);
+  if (!phase) return null;
+  if (phase.state === 'live') return `${work.key} is in progress by ${phase.owner} under lease epoch ${phase.epoch} (active until ${phase.expiresAt})`;
+  return `Dispatch blocked by unverified worker containment from epoch ${work.containmentQuarantine!.epoch}`;
 }
 
 /** Quarantines this coordinator could verify: the registered host is the one it runs on. */
@@ -475,10 +598,11 @@ export function verifyContainmentDeath(
   const refusals = containmentSettlementRefusals(work, verification, { now: Date.parse(options.observedAt) });
   return { ...assessment, settleable: !refusals.length, refusals, verification };
 }
-/** Verify every quarantine this host is responsible for, keyed by work id. */
+/** Verify every lapsed quarantine this host is responsible for, keyed by work id; a live worker's is not probed. */
 export function assessContainment(work: Work[], options: { hostId: string; observedAt: string; clockOffset: { min: number; max: number }; probe?: typeof probeSupervisorAbsence }) {
   const assessments: Record<string, ContainmentAssessment> = {};
   for (const item of containmentQuarantines(work, options.hostId)) {
+    if (containmentPhase(item, Date.parse(options.observedAt))?.state === 'live') continue;
     try { assessments[item.id] = verifyContainmentDeath(item, options); }
     catch (error) {
       assessments[item.id] = { key: item.key, id: item.id, epoch: item.containmentQuarantine!.epoch, owner: item.containmentQuarantine!.owner, at: item.containmentQuarantine!.at,
@@ -523,9 +647,10 @@ export function installationOwner(source: 'app-permissions' | 'held-jobs' | 'del
  * identity may run is routed to an agent: decisions a human used to make go to the master and
  * its independent approver through graphyard master decide.
  */
-export function workAttentionOwner(work: Work, cause: 'containment-settleable' | 'containment' | 'session' | 'proof-gap' | 'reviewer-exhausted' | 'launch-review' | 'launch-producer' | 'gate'): AttentionOwner {
+export function workAttentionOwner(work: Work, cause: 'containment-settleable' | 'containment-grace' | 'containment' | 'session' | 'proof-gap' | 'reviewer-exhausted' | 'launch-review' | 'launch-producer' | 'gate'): AttentionOwner {
   const key = work.key;
   if (cause === 'containment-settleable') return agentOwner('master', `graphyard master settle-containment ${key} REASON`);
+  if (cause === 'containment-grace') return agentOwner('master', `Wait out the grace window, then graphyard master status verifies the host and graphyard master settle-containment ${key} REASON once settleable`);
   if (cause === 'containment') return agentOwner('master', `Stop the recorded supervisor on its host, then graphyard master decide ${key} ${work.stage === 'done' ? 'recover' : 'rework'} REASON and graphyard master approver ${key} DECISION`, 'approver');
   if (cause === 'session') return agentOwner('master', `herdr agent list to inspect the session; once the lease lapses, graphyard master dispatch ${key} PROFILE`);
   if (cause === 'proof-gap') return agentOwner('master', `graphyard master decide ${key} grant '{"principal":"PRODUCER","patterns":["${(work.proofGaps ?? [])[0] ?? 'PROOF'}"]}' REASON, then graphyard master approver ${key} DECISION`, 'approver');
@@ -590,7 +715,8 @@ export function mergeProtocolSkew(status: { build?: { commit?: string | null; pr
   return `server runs ${serverCommit}, CLI expects ${cliCommit}: deploy main first (server merge protocol ${serverProtocol}, CLI merge protocol ${cliProtocol}${serverProtocol < cliProtocol ? '; the deployment has not served the commit the CLI runs' : '; update the CLI checkout to the deployed commit'})`;
 }
 /** Sessions the local ledgers hold and the launches the dispatcher refused, as `master status` joins them onto each candidate's requests. */
-export interface DispatchSessions { producers: { pending: any[]; completed: any[] }; failures: { requestId: string; kind: string; attempts: number; reason: string; at: string; nextAt: string }[] }
+export interface SessionRetryReport { requestId: string; attempts: number; limit: number; nextAt: string | null; exhausted: boolean; last: { state: string; resolution: string | null } | null }
+export interface DispatchSessions { producers: { pending: any[]; completed: any[] }; failures: { requestId: string; kind: string; attempts: number; reason: string; at: string; nextAt: string }[]; retries?: SessionRetryReport[] }
 const noSessions: DispatchSessions = { producers: { pending: [], completed: [] }, failures: [] };
 /**
  * What is running for one candidate and since when: every open request the control plane
@@ -603,11 +729,14 @@ export function describeDispatch(work: Work, reviews: { pending: any[]; complete
   const since = (at: string) => Math.max(0, now - Date.parse(at));
   const session = (records: any[], requestId: string) => {
     const record = [...records].reverse().find(entry => entry.requestId === requestId);
-    return record ? { id: record.review ?? record.producer, profile: record.profile, agentName: record.agentName, state: record.state, requestedAt: record.requestedAt, sinceMs: since(record.requestedAt), ...(record.verdict !== undefined ? { verdict: record.verdict } : {}), ...(record.outcome ? { outcome: record.outcome } : {}), resolution: record.resolution ?? null, attention: record.attention ?? null } : null;
+    return record ? { id: record.review ?? record.producer, profile: record.profile, agentName: record.agentName, state: record.state, attempt: record.attempt ?? 1, requestedAt: record.requestedAt, sinceMs: since(record.requestedAt), ...(record.verdict !== undefined ? { verdict: record.verdict } : {}), ...(record.outcome ? { outcome: record.outcome } : {}), resolution: record.resolution ?? null, attention: record.attention ?? null } : null;
   };
   const failure = (requestId: string) => sessions.failures.find(entry => entry.requestId === requestId) ?? null;
+  // A session that failed or expired is relaunched for the same request on a widening interval;
+  // the attempts so far and when the next one is due are reported beside the request.
+  const retry = (requestId: string) => sessions.retries?.find(entry => entry.requestId === requestId) ?? null;
   const describe = (request: NonNullable<typeof state.review>, records: any[]) => ({ requestId: request.id, sha: request.sha, baseSha: request.baseSha, policyRevision: request.policyRevision, requestedAt: request.requestedAt, sinceMs: since(request.requestedAt), reason: request.reason,
-    ...(request.group ? { group: request.group, proofs: request.proofs } : {}), session: session(records, request.id), failure: failure(request.id) });
+    ...(request.group ? { group: request.group, proofs: request.proofs } : {}), session: session(records, request.id), failure: failure(request.id), retry: retry(request.id) });
   const reviewRecords = [...reviews.completed, ...reviews.pending], producerRecords = [...sessions.producers.completed, ...sessions.producers.pending];
   return { review: state.review ? describe(state.review, reviewRecords) : null, producers: state.producers.map(request => describe(request, producerRecords)),
     recent: state.history.slice(-5).map(request => ({ kind: request.kind, ...(request.group ? { group: request.group } : {}), sha: request.sha, state: request.state, resolution: request.resolution ?? null, resolvedAt: request.resolvedAt ?? null })) };
@@ -638,10 +767,14 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
     const dwellMs = now - Date.parse(work.stageEnteredAt);
     const review = reviewState(work);
     const assessed = containment[work.id];
-    const quarantine = work.containmentQuarantine
+    const phase = containmentPhase(work, now);
+    const quarantine = work.containmentQuarantine && phase
       ? { epoch: work.containmentQuarantine.epoch, owner: work.containmentQuarantine.owner, at: work.containmentQuarantine.at,
-        settleable: assessed?.settleable ?? false,
-        refusals: assessed?.refusals ?? ['Supervisor absence has not been verified on the registered host'],
+        // A live owner's containment is its running session; the grace window and settlement apply only once the lease lapses.
+        phase: phase.state, lapsedAt: phase.state === 'live' ? null : phase.lapsedAt, graceRemainingMs: phase.state === 'grace' ? phase.remainingMs : null,
+        hold: containmentHold(work, now)!,
+        settleable: phase.state !== 'live' && (assessed?.settleable ?? false),
+        refusals: phase.state === 'live' ? [containmentHold(work, now)!] : assessed?.refusals ?? ['Supervisor absence has not been verified on the registered host'],
         host: assessed?.host ?? work.workspaces.find(item => item.epoch === work.containmentQuarantine!.epoch)?.host ?? null,
         scope: work.containmentQuarantine.scope ?? null,
         // Each process the verification found holding the fence, with cmdline and cwd, so the
@@ -649,21 +782,26 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
         held: assessed?.verification?.held ?? [],
         verifiedAt: assessed?.verification?.observedAt ?? null,
         // A refusal is only useful with the path that still works.
-        attestation: assessed?.settleable ? null : containmentAttestation(work.key) }
+        attestation: phase.state === 'live' || assessed?.settleable ? null : containmentAttestation(work.key) }
       : null;
+    const seconds = (ms: number) => `${Math.ceil(ms / 1000)}s`;
+    const containmentAttention: [string, Parameters<typeof workAttentionOwner>[1]] | null = !quarantine || quarantine.phase === 'live' ? null
+      : quarantine.settleable ? [`Containment quarantine from epoch ${quarantine.epoch} is verified settleable; run master settle-containment ${work.key}`, 'containment-settleable']
+      : quarantine.phase === 'grace' ? [`Worker lease for epoch ${quarantine.epoch} lapsed at ${quarantine.lapsedAt}; containment grace window has ${seconds(quarantine.graceRemainingMs!)} remaining before supervisor absence can be verified`, 'containment-grace']
+      : [`Containment quarantine from epoch ${quarantine.epoch} blocks dispatch: ${quarantine.lapsedAt ? `worker lease lapsed at ${quarantine.lapsedAt}, past the ${seconds(containmentGraceMs)} grace window; ` : ''}${quarantine.refusals[0]}`, 'containment'];
     const gaps = work.proofGaps ?? [];
     const held = scheduling.held.find(entry => entry.key === work.key) ?? null;
     const conflictReport = candidateConflicts.report[work.key];
     const conflicts = work.submission && work.candidate ? { candidates: (conflictReport?.conflicts ?? []).map(conflict => conflict.key), files: conflictReport?.conflicts ?? [], unprobed: conflictReport?.unprobed ?? [], probed: !!conflictReport && candidateConflicts.available } : null;
     const dispatch = describeDispatch(work, reviews, sessions, now);
     const stalledLaunch = [dispatch?.review, ...(dispatch?.producers ?? [])].find(request => request?.failure);
-    const [attention, cause]: [string | null, Parameters<typeof workAttentionOwner>[1] | null] = quarantine ? quarantine.settleable
-      ? [`Containment quarantine from epoch ${quarantine.epoch} is verified settleable; run master settle-containment ${work.key}`, 'containment-settleable']
-      : [`Containment quarantine from epoch ${quarantine.epoch} blocks dispatch: ${quarantine.refusals[0]}`, 'containment']
+    const retrying = [dispatch?.review, ...(dispatch?.producers ?? [])].find(request => request?.retry && request.session && ['failed', 'expired'].includes(request.session.state));
+    const [attention, cause]: [string | null, Parameters<typeof workAttentionOwner>[1] | null] = containmentAttention ? containmentAttention
       : active && (!session || !['working', 'idle'].includes(session.state)) ? [`Assigned worker session is ${session?.state ?? 'offline'}`, 'session']
       : gaps.length ? [`No principal is authorized to produce ${gaps.join(', ')}; grant the proof name before dispatch`, 'proof-gap']
       : review?.exhausted ? [`Every configured reviewer profile is exhausted for the current candidate (${review.failedOver.map(entry => `${entry.profile}: ${entry.exhaustion}`).join(', ')})`, 'reviewer-exhausted']
       : stalledLaunch ? [`Automatic ${stalledLaunch.failure!.kind} launch for ${work.key} refused ${stalledLaunch.failure!.attempts} time(s): ${stalledLaunch.failure!.reason}`, stalledLaunch.failure!.kind === 'review' ? 'launch-review' : 'launch-producer']
+      : retrying ? [`${retrying.group ? `Producer session for ${retrying.group} proofs` : 'Reviewer session'} of ${work.key} ${retrying.session!.state} after attempt ${retrying.retry!.attempts} of ${retrying.retry!.limit}: ${retrying.session!.resolution ?? 'no reason recorded'}; ${retrying.retry!.exhausted ? 'no further automatic attempt' : `next attempt at ${retrying.retry!.nextAt}`}`, retrying.group ? 'launch-producer' : 'launch-review']
       : work.blocker || dwellMs > 3_600_000 ? [first?.reasons[0] ?? `Work has remained at ${work.stage} for more than one hour`, 'gate'] : [null, null];
     const attentionOwner = cause ? workAttentionOwner(work, cause) : null;
     return { key: work.key, title: work.title, stage: work.stage, owner: active ? work.lease!.owner : null, profile: profile?.name ?? null, session: session?.state ?? null, refusal: first ? { gate: first.name, reason: first.reasons[0] } : null, mergeable, review, dispatch, proofGaps: gaps, containment: quarantine, attention, attentionOwner, queue: placement ? queueRows.find(row => row.key === work.key) ?? null : null,
@@ -681,7 +819,7 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
   return { observedAt: snapshot.now,
     counts: { open: rows.length, ready: rows.filter(row => row.stage === 'ready').length, active: rows.filter(row => row.owner).length, attention: rows.filter(row => row.attention).length + installation.attention.length, proofAuthorityGaps: rows.filter(row => row.proofGaps.length).length, mergeable: rows.filter(row => row.mergeable).length, reviewsPending: reviews.pending.length, producersPending: sessions.producers.pending.length,
       dispatchRequested: rows.reduce((total, row) => total + (row.dispatch ? (row.dispatch.review ? 1 : 0) + row.dispatch.producers.length : 0), 0), dispatchRunning: rows.reduce((total, row) => total + (row.dispatch ? [row.dispatch.review, ...row.dispatch.producers].filter(request => request?.session?.state === 'pending').length : 0), 0), reviewFailover: rows.filter(row => row.review?.failedOver.length).length, queued: placements.length,
-      quarantined: rows.filter(row => row.containment).length, settleableQuarantines: rows.filter(row => row.containment?.settleable).length,
+      quarantined: rows.filter(row => row.containment && row.containment.phase !== 'live').length, settleableQuarantines: rows.filter(row => row.containment?.settleable).length,
       awaitingSmoke: delivered.filter(row => row.state === 'awaiting-deployment' || row.state === 'awaiting-smoke').length, postDeployFailures: delivered.filter(row => row.state === 'delivered-with-failure').length },
     // Every attention item with the role that resolves it and the next command, work items first.
     attentionItems: [...rows.flatMap(row => row.attention && row.attentionOwner ? [{ subject: row.key, text: row.attention, ...row.attentionOwner }] : []), ...installation.attentionItems] as AttentionItem[],
@@ -806,6 +944,101 @@ export function stopCreatedHerdrTab(pane: string | undefined, tab: string | unde
   throw new Error(`Herdr still reports tab ${tab} after close`);
 }
 
+/**
+ * Role-scoped harness rules for the sessions the master launches. The master's own rules live in
+ * the repository's .claude/settings.local.json, and Claude Code loads that file for every session
+ * started anywhere under the repository — assigned worktrees included — so a master deny such as
+ * `git push` would otherwise refuse a worker's push to its own branch. Each Claude session the
+ * master launches under a repository that carries project settings therefore starts with only the
+ * operator's user settings plus its own role file (`--setting-sources user --settings FILE`), and
+ * never the master's. Like the master's rules these are a prompt policy, not authority: the
+ * lease, the session's own credential and branch protection remain the enforcement.
+ */
+export type SessionRole = 'worker' | 'reviewer' | 'producer';
+export interface SessionHarnessInput { role: SessionRole; kind: string | undefined; cliPath: string; repository: string; baseBranch: string; credentialHome: string; credentialDirectories: string[]; branch?: string; pr?: number }
+export function sessionHarnessPlan(input: SessionHarnessInput): HarnessPlan {
+  if (input.kind !== 'claude') return { harness: input.kind ?? 'unknown', file: null, allow: [], deny: [], manual: null, note: `${input.kind ?? 'This runtime'} does not load the repository's Claude Code settings, so it inherits no master rule; its own approval configuration applies.` };
+  const cli = `node ${input.cliPath}`;
+  const secrets: HarnessRule[] = [
+    ...[...new Set(input.credentialDirectories)].sort().map(directory => ({ rule: `Read(/${directory}/**)`, why: 'Graphyard credentials live here; the session uses its own through the CLI and never reads their bytes.' })),
+    { rule: 'Read(./.graphyard/connection.json)', why: 'Holds an individual Graphyard credential.' },
+    { rule: 'Read(./.graphyard/credentials.json)', why: 'Holds local principal credentials.' },
+    { rule: 'Read(./.graphyard/github-app.json)', why: 'Holds the control-plane App private key.' },
+    { rule: 'Read(**/*.pem)', why: 'App private keys are never read into a session transcript.' },
+    { rule: 'Read(**/*.token)', why: 'Token files are never read into a session transcript.' },
+    { rule: 'Bash(gh pr merge:*)', why: 'Delivery happens only through the guarded merge.' },
+    // Scoped to the merge endpoints, not the word: a reviewer's verdict body often says "merge", and
+    // in Claude Code a deny beats the allow for its one review call.
+    { rule: 'Bash(gh api *pulls/*/merge*)', why: 'A raw pull-request merge call is an administrative merge bypass.' },
+    { rule: 'Bash(gh api *repos/*/merges*)', why: 'A raw branch-merge call is an administrative merge bypass.' },
+    { rule: 'Bash(gh api graphql*)', why: 'GraphQL reaches merge and merge-queue mutations; no session needs it.' },
+    { rule: 'Bash(agent-browser *)', why: "The operator's browser profile is driven only by the master's recorded flows." },
+  ];
+  const noVerdict: HarnessRule[] = [
+    { rule: 'Bash(gh pr review:*)', why: 'Only the independent reviewer posts a verdict.' },
+    { rule: 'Bash(gh api *pulls/*/reviews*)', why: 'Only the independent reviewer posts a verdict.' },
+  ];
+  const noPush: HarnessRule[] = [
+    { rule: 'Bash(git push:*)', why: 'This session implements nothing and pushes nothing.' },
+    { rule: 'Bash(git commit:*)', why: 'This session changes nothing in the candidate.' },
+    { rule: `Bash(${cli} claim:*)`, why: 'Claiming work would make this principal an implementer.' },
+  ];
+  let allow: HarnessRule[], deny: HarnessRule[];
+  if (input.role === 'worker') {
+    if (!input.branch) throw new Error('A worker harness names the assigned branch it may push');
+    // The same worker rules installWorkerHarness writes into the worktree, plus the shared secret
+    // and verdict denies: loaded through --settings they apply even though the worktree's own
+    // settings file is not loaded.
+    const worker = workerHarnessPlan({ cliPath: input.cliPath, branch: input.branch, baseBranch: input.baseBranch, credentialHome: input.credentialHome });
+    const extra = [...secrets, ...noVerdict, { rule: `Bash(${cli} evidence:*)`, why: 'Implementation workers never submit trusted evidence.' }];
+    allow = worker.allow;
+    deny = [...worker.deny, ...extra.filter(entry => !worker.deny.some(existing => existing.rule === entry.rule))];
+  } else if (input.role === 'reviewer') {
+    allow = [
+      { rule: 'Bash(gh pr diff:*)', why: 'Read the candidate diff.' },
+      { rule: 'Bash(gh pr view:*)', why: 'Read the pull request and poll its mergeability before posting.' },
+      ...(input.pr ? [{ rule: `Bash(gh api --method POST repos/${input.repository}/pulls/${input.pr}/reviews*)`, why: 'Post the one verdict this session was launched for; the master itself is denied every review call.' }] : []),
+    ];
+    deny = [...secrets, ...noPush,
+      { rule: `Bash(${cli} evidence:*)`, why: 'A reviewer never submits evidence.' },
+      { rule: 'Edit(./**)', why: 'The review session is read-only.' },
+      { rule: 'Write(./**)', why: 'The review session is read-only.' },
+    ];
+  } else {
+    allow = [
+      { rule: `Bash(${cli} evidence:*)`, why: 'Submit the evidence of the proof group this session was launched for, under its own producer credential.' },
+      { rule: `Bash(${cli} status:*)`, why: 'Read the acceptance criteria the proofs establish.' },
+      { rule: 'Bash(git fetch:*)', why: 'Fetch the exact head.' },
+      { rule: 'Bash(git worktree add:*)', why: 'Check the exact head out in a detached worktree of its own.' },
+      { rule: 'Bash(git worktree remove:*)', why: 'Remove that worktree once every proof is submitted.' },
+    ];
+    deny = [...secrets, ...noPush, ...noVerdict];
+  }
+  return { harness: 'claude', file: null, allow, deny, manual: null, note: `Role-scoped ${input.role} rules; the session loads these and the operator's user settings, never the repository's project or local settings where the master's rules live.` };
+}
+
+/** Where a session's role file lives: beside the ledgers, ignored by Git, never inside a worktree it is launched for. */
+export const sessionHarnessFile = (root: string, role: SessionRole, profile: string) => resolve(root, '.graphyard/harness', `${role}-${profile}.json`);
+async function repositoryCarriesClaudeSettings(root: string) {
+  for (const name of ['settings.json', 'settings.local.json']) {
+    try { await lstat(resolve(root, '.claude', name)); return true; } catch (error: any) { if (error.code !== 'ENOENT') throw error; }
+  }
+  return false;
+}
+/**
+ * Writes the role file and returns the runtime arguments that load it instead of the repository's
+ * settings. A Claude session under a repository that carries no project settings inherits nothing
+ * and is launched with its profile arguments unchanged.
+ */
+export async function prepareSessionHarness(root: string, config: MasterConfig, input: Omit<SessionHarnessInput, 'cliPath' | 'repository' | 'baseBranch' | 'credentialHome' | 'credentialDirectories'> & { profile: string; credentialFiles?: string[] }) {
+  const plan = sessionHarnessPlan({ ...input, cliPath: config.cliPath, repository: config.repository, baseBranch: config.baseBranch, credentialHome: dirname(dirname(config.credentialFile)),
+    credentialDirectories: [dirname(config.credentialFile), ...(config.reviewer ? [dirname(config.reviewer.credentialFile)] : []), ...(input.credentialFiles ?? []).map(file => dirname(file))] });
+  if (input.kind !== 'claude' || !await repositoryCarriesClaudeSettings(root)) return { plan, file: null, args: [] as string[] };
+  const file = sessionHarnessFile(root, input.role, input.profile);
+  await mkdir(dirname(file), { recursive: true, mode: 0o700 });
+  await atomicPrivateText(file, `${JSON.stringify({ permissions: { allow: plan.allow.map(entry => entry.rule), deny: plan.deny.map(entry => entry.rule) } }, null, 2)}\n`);
+  return { plan, file, args: ['--setting-sources', 'user', '--settings', file] };
+}
 export async function startMaster(root: string, kind: WorkerProfile['kind'], agentArgs: string[], agents: HerdrAgent[], run?: (command: string, args: string[]) => string) {
   if (!kind) throw new Error('Choose a supported master agent kind');
   const config = await loadMasterConfig(root);
@@ -839,7 +1072,7 @@ export async function startMaster(root: string, kind: WorkerProfile['kind'], age
 }
 
 type WorkerCommand = (command: string, args: string[], options?: any) => string | Buffer;
-type PreparedWorker = { epoch: number; path: string; base: string };
+type PreparedWorker = { epoch: number; path: string; base: string; branch?: string };
 
 export interface DispatchOptions { allowOverlap?: boolean }
 export const describeOverlap = (overlap: ReturnType<typeof dispatchOverlap>) => overlap.map(ahead => `${ahead.key} (${ahead.state}, ${ahead.stage}) on ${ahead.paths.join(', ')}`).join('; ');
@@ -847,7 +1080,8 @@ export function assertDispatchable(work: Work, allWork: Work[], observedAt: stri
   const now = Date.parse(observedAt);
   if (!Number.isFinite(now)) throw new Error('Dispatch requires a valid Graphyard snapshot clock');
   if (!work.ready || work.blocker) throw new Error('Dispatch requires released work without a blocker');
-  if (work.containmentQuarantine) throw new Error(`Dispatch blocked by unverified worker containment from epoch ${work.containmentQuarantine.epoch}`);
+  const hold = containmentHold(work, now);
+  if (hold) throw new Error(hold);
   const unfinished = work.dependencies.map(id => allWork.find(item => item.id === id)).filter(dependency => !dependency || dependency.stage !== 'done');
   if (unfinished.length) throw new Error(`Dispatch blocked by unfinished dependencies: ${unfinished.map(dependency => dependency?.key ?? 'unknown').join(', ')}`);
   if (work.lease && Date.parse(work.lease.expiresAt) > now) throw new Error(`Dispatch blocked by active owner ${work.lease.owner}`);
@@ -874,13 +1108,15 @@ export async function dispatchWork(root: string, work: Work, profile: WorkerProf
     // The worker's own rules go into its worktree before the session starts, so pushing its
     // branch and opening its pull request never wait on a keypress. A failure is reported, not fatal.
     harness = await installWorkerHarness(config, profile, work.key, prepared).catch(error => ({ applied: false, reason: error instanceof Error ? error.message : 'Worker rules could not be written' }));
-    const prompt = `Implement ${work.key}: ${work.title}. The Graphyard worker launcher has claimed this item under principal ${profile.principal}, created its assigned worktree, and placed this agent under lease supervision. Run node ${config.cliPath} status ${work.key} before editing. Work only in the current assigned worktree, satisfy the stated criteria without weakening them, open a PR, and submit it with complete as your last action: complete ends your lease and the supervisor then stops this session, which is the attempt ending, not lease loss. Stop immediately if the supervisor reports lease loss before you have submitted. Do not submit trusted evidence or merge the PR; the control plane requests the independent review and the proof producers for your exact head as soon as it passes the build gate, so ask nobody to launch them.`;
+    const prompt = workerPrompt(config, work, profile, prepared.epoch);
     let pane: string | undefined, tabId: string | undefined;
     try {
       const launch = launchPlan(profile.kind, profile.approvals, profile.agentArgs, profile.environment);
+      // The worker loads its own role rules, never the master's: it may push its assigned branch.
+      const sessionHarness = await prepareSessionHarness(root, config, { role: 'worker', kind: profile.kind, profile: profile.name, branch: prepared.branch ?? `graphyard/${work.key.toLowerCase()}-${prepared.epoch}`, credentialFiles: [profile.credentialFile!] });
       const tabArgs = ['tab', 'create', ...(config.herdrWorkspace ? ['--workspace', config.herdrWorkspace] : []), '--cwd', prepared.path, '--label', `${work.key} · ${profile.agentName}`, '--env', `GRAPHYARD_URL=${config.url}`, '--env', `GRAPHYARD_TOKEN_FILE=${profile.credentialFile}`, '--env', `GRAPHYARD_HOST_ID=${config.hostId}`, '--env', `GRAPHYARD_HERDR_AGENT_KIND=${profile.kind}`, ...Object.entries({ ...launch.environment, ...profile.environment }).flatMap(([key, value]) => ['--env', `${key}=${value}`]), '--no-focus'];
       const created = createdHerdrTab(herdrJson(tabArgs, run)); pane = created.pane; tabId = created.tab;
-      const supervised = [process.execPath, config.cliPath, 'watch', work.key, String(prepared.epoch), '--', profile.kind!, ...launch.args].map(shellQuote).join(' ');
+      const supervised = [process.execPath, config.cliPath, 'watch', work.key, String(prepared.epoch), '--', profile.kind!, ...launch.args, ...sessionHarness.args].map(shellQuote).join(' ');
       herdrRun(['pane', 'run', pane, supervised], run);
       waitForHerdrAgent(pane, run, agentTimeoutMs);
       herdrJson(['agent', 'rename', pane, profile.agentName], run);
@@ -901,6 +1137,20 @@ export async function dispatchWork(root: string, work: Work, profile: WorkerProf
   return { work: work.key, profile: profile.name, principal: profile.principal, agentName: profile.agentName, pane: target.pane_id ?? null, approvals: profile.approvals,
     launch: launchPlan(profile.kind, profile.approvals, profile.agentArgs, profile.environment), ownership: 'worker launcher claimed and is supervising the agent process', harness,
     overlap: overlap.length ? { allowed: true, ahead: overlap, note: `Dispatched over a planned-file overlap with ${describeOverlap(overlap)}; expect a sync → review → proof round for whichever lands second` } : null };
+}
+
+/**
+ * Every launched session decides and acts on its own. The only way out without its result is a
+ * recorded blocker that names the exact command that was blocked; a session that stops to ask for
+ * confirmation or offers a menu of options is waiting on input, and the loop records it as failed.
+ */
+export function autonomousSession(outcome: string, blocker: string) {
+  return `Decide and act on your own: ${outcome}. Never stop to ask a human for confirmation, never end your turn with a question, and never offer a menu of options to choose from; choose what the criteria and these instructions support and carry it out. `
+    + `If a command you need is refused or cannot succeed, ${blocker}, naming the exact command that was blocked and its error, then stop. A session that ends waiting on input is recorded as failed with that reason.`;
+}
+export function workerPrompt(config: Pick<MasterConfig, 'cliPath'>, work: Pick<Work, 'key' | 'title'>, profile: Pick<WorkerProfile, 'principal'>, epoch: number) {
+  return `Implement ${work.key}: ${work.title}. The Graphyard worker launcher has claimed this item under principal ${profile.principal}, created its assigned worktree, and placed this agent under lease supervision. Run node ${config.cliPath} status ${work.key} before editing. Work only in the current assigned worktree, satisfy the stated criteria without weakening them, open a PR, and submit it with complete as your last action: complete ends your lease and the supervisor then stops this session, which is the attempt ending, not lease loss. Stop immediately if the supervisor reports lease loss before you have submitted. Do not submit trusted evidence or merge the PR; the control plane requests the independent review and the proof producers for your exact head as soon as it passes the build gate, so ask nobody to launch them. `
+    + autonomousSession('implement the item, open the pull request and submit it with complete', `record a blocker with node ${config.cliPath} blocked ${work.key} ${epoch} REASON`);
 }
 
 const shellQuote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
@@ -935,7 +1185,7 @@ export async function prepareWorkerLaunch(root: string, key: string, profileName
     if (claim.lease?.owner !== profile.principal || claimedEpoch === null) throw new Error('Worker launcher acquired an unexpected assignment identity');
     const workspace = JSON.parse(String(run(process.execPath, [config.cliPath, 'worktree', key, String(claimedEpoch), base], { cwd: root, env, stdio: ['ignore', 'pipe', 'inherit'] })));
     if (!workspace.path || !isAbsolute(workspace.path)) throw new Error('Worker launcher did not receive an assigned workspace');
-    return { epoch: claimedEpoch, path: workspace.path, base };
+    return { epoch: claimedEpoch, path: workspace.path, base, ...(typeof workspace.branch === 'string' && workspace.branch ? { branch: workspace.branch } : {}) };
   } catch (error) {
     if (claimedEpoch !== null) try { run(process.execPath, [config.cliPath, 'release', key, String(claimedEpoch)], { cwd: root, env }); }
     catch { throw new Error(`${error instanceof Error ? error.message : 'Workspace preparation failed'}; Graphyard could not release epoch ${claimedEpoch}`); }

@@ -6,7 +6,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { z } from 'zod';
 import { currentEvidence, deliveryState, deploySmokeRequired, exhaustedReviewerProfiles, postDeployMs, productionLatencyMs, reviewProviderOf, reviewerProfileFor, rollbackGuidance, type Work } from './model.js';
 import { dispatchOrder } from './coordination.js';
-import { assertDispatchable, assertOutsideWorktrees, closeHerdrPane, dispatchWork, inspectWorkerCredentials, listHerdrAgents, mergeExecutor, type HerdrAgent, type MasterConfig, type WorkerProfile } from './master.js';
+import { assertDispatchable, assertOutsideWorktrees, closeHerdrPane, dispatchWork, inspectWorkerCredentials, listHerdrAgents, mergeExecutor, type ConfigReload, type HerdrAgent, type MasterConfig, type WorkerProfile } from './master.js';
 
 /**
  * The durable coordination loop. Every step is a pure decision over one Graphyard snapshot plus
@@ -15,7 +15,7 @@ import { assertDispatchable, assertOutsideWorktrees, closeHerdrPane, dispatchWor
  * evidence, never calls an operator route, and reaches GitHub only through the guarded merge.
  */
 
-export const daemonActionKinds = ['close', 'dispatch', 'review', 'proof', 'merge', 'deployment', 'smoke', 'escalation'] as const;
+export const daemonActionKinds = ['close', 'dispatch', 'review', 'proof', 'merge', 'deployment', 'smoke', 'escalation', 'config', 'session'] as const;
 export type DaemonActionKind = typeof daemonActionKinds[number];
 export const daemonActionSchema = z.object({
   kind: z.enum(daemonActionKinds),
@@ -63,6 +63,8 @@ export const daemonStateSchema = z.object({
   profiles: z.record(z.string(), z.object({ failures: z.number().int().min(0), reason: z.string().max(500).nullable(), cooldownUntil: z.string().nullable() }).strict()).default({}),
   metrics: z.array(cycleMetricsSchema).default([]),
   deployment: deploymentObservationSchema.nullable().default(null),
+  /** The last reload of .graphyard/master.json: what the running loop adopted, or why it refused. */
+  config: z.object({ at: z.string(), changed: z.array(z.string().max(100)).max(100), refused: z.string().max(1000).nullable() }).strict().nullable().default(null),
 }).strict();
 export type DaemonState = z.infer<typeof daemonStateSchema>;
 
@@ -297,6 +299,17 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
     } catch (error) {
       performed.push(await record(state, key, { kind: 'close', work: null, principal: profile.principal, state: 'failed', detail: `Could not close ${profile.agentName}: ${message(error)}`, attempts: state.actions[key].attempts, cycle: state.cycle }, now(), effects.persist));
     }
+  }
+
+  // 1b. A worker session that stops on a prompt while it holds its assignment is waiting on input
+  //     no one will give; it is recorded as failed with that reason, once per pane, for the master.
+  for (const profile of config.workers.filter(worker => worker.mode === 'launch')) {
+    const agent = agents.find(candidate => candidate.name === profile.agentName);
+    const item = open.find(candidate => !!candidate.lease && candidate.lease.owner === profile.principal && Date.parse(candidate.lease.expiresAt) > clock);
+    if (!agent?.pane_id || !item || agent.agent_status !== 'blocked') continue;
+    const key = `session:blocked:${profile.name}:${agent.pane_id}:${item.epoch}`;
+    if (state.actions[key]) continue;
+    performed.push(await record(state, key, { kind: 'session', work: item.key, principal: profile.principal, state: 'failed', detail: `Worker session ${profile.agentName} on ${item.key} (epoch ${item.epoch}) is waiting on input (Herdr reports it blocked) instead of deciding on its own; answer or stop it, and have it record a blocker naming the blocked command rather than asking`, attempts: 1, epoch: item.epoch, cycle: state.cycle }, now(), effects.persist));
   }
 
   // A pane this cycle just closed frees its profile, so health is read after the closures.
@@ -546,17 +559,42 @@ export function daemonSummary(state: DaemonState, now: number, intervalMs: numbe
     metrics: state.metrics.at(-1) ?? null,
     deployment: state.deployment,
     profiles: state.profiles,
+    config: state.config,
   };
+}
+
+/**
+ * Adopt a reloaded master.json into the running loop, or record why it was refused. A refusal is
+ * an escalation naming the stale setting, written once per distinct reason; an adoption names what
+ * changed. Either way the loop keeps cycling on the settings it holds.
+ */
+export async function noteConfigReload(state: DaemonState, reload: ConfigReload, persist: DaemonEffects['persist']) {
+  const previous = state.config;
+  state.config = { at: reload.at, changed: reload.changed.slice(0, 100), refused: reload.refused?.slice(0, 1000) ?? null };
+  const noted: DaemonAction[] = [];
+  if (reload.refused && previous?.refused !== state.config.refused) {
+    const entry = daemonActionSchema.parse({ kind: 'escalation', work: null, principal: null, state: 'failed', detail: state.config.refused, attempts: 1, cycle: state.cycle, at: reload.at });
+    state.actions[`escalation:config:${reload.at}`] = entry; noted.push(entry);
+  }
+  if (reload.changed.length) {
+    const entry = daemonActionSchema.parse({ kind: 'config', work: null, principal: null, state: 'done', detail: `Adopted .graphyard/master.json changes without a restart: ${reload.changed.join(', ')}`.slice(0, 2000), attempts: 1, cycle: state.cycle, at: reload.at });
+    state.actions[`config:${reload.at}`] = entry; noted.push(entry);
+  }
+  if (noted.length || previous?.refused !== state.config.refused) await persist(state);
+  return noted;
 }
 
 /**
  * Supervised entry point. The process owns no lease and no credential beyond the coordinator token,
  * so a restart is always safe: it reconciles the cursor against Graphyard and keeps cycling.
  */
-export async function runDaemon(config: MasterConfig, state: DaemonState, effects: DaemonEffects, options: { once?: boolean; intervalMs: number; identity: { pid: number; host: string }; signals?: NodeJS.Signals[]; now?: () => number; log?: (line: string) => void } ) {
+export async function runDaemon(config: MasterConfig, state: DaemonState, effects: DaemonEffects, options: { once?: boolean; intervalMs: number | (() => number); identity: { pid: number; host: string }; signals?: NodeJS.Signals[]; now?: () => number; log?: (line: string) => void;
+  /** Re-reads .graphyard/master.json before each cycle, so profiles, workspace, run settings and autoMerge apply without a restart. */
+  reload?: () => Promise<ConfigReload> } ) {
   // Progress goes to stderr so stdout stays the machine-readable result the CLI prints.
   const now = options.now ?? Date.now, log = options.log ?? (line => console.error(line));
-  acquireDaemonLock(state, options.identity, now(), options.intervalMs);
+  const interval = () => typeof options.intervalMs === 'function' ? options.intervalMs() : options.intervalMs;
+  acquireDaemonLock(state, options.identity, now(), interval());
   await effects.persist(state);
   let stopping = false;
   // A supervisor's SIGTERM must land during the wait, not one whole interval later.
@@ -567,12 +605,15 @@ export async function runDaemon(config: MasterConfig, state: DaemonState, effect
   const cycles: { cycle: number; actions: number; durationMs: number }[] = [];
   try {
     do {
+      if (options.reload) {
+        for (const action of await noteConfigReload(state, await options.reload().then(reload => { config = reload.config; return reload; }), effects.persist)) log(`[graphyard-master] ${action.kind} ${action.state}: ${action.detail}`);
+      }
       const result = await runCycle(config, state, effects, now);
       cycles.push({ cycle: result.metrics.cycle, actions: result.actions.length, durationMs: result.metrics.durationMs });
       for (const action of result.actions) log(`[graphyard-master] cycle ${result.metrics.cycle} ${action.kind} ${action.state}: ${action.detail}`);
       log(`[graphyard-master] cycle ${result.metrics.cycle} complete in ${result.metrics.durationMs}ms; ${result.metrics.open} open, ${result.actions.length} action(s)`);
       if (options.once || stopping) break;
-      try { await delay(options.intervalMs, undefined, { signal: waking.signal }); } catch { /* woken to stop */ }
+      try { await delay(interval(), undefined, { signal: waking.signal }); } catch { /* woken to stop */ }
     } while (!stopping);
   } finally {
     for (const signal of signals) process.off(signal, stop);
@@ -582,14 +623,15 @@ export async function runDaemon(config: MasterConfig, state: DaemonState, effect
   return { cycles, stopped: stopping };
 }
 
-/** Effects bound to the real coordinator process. */
-export function daemonEffects(root: string, config: MasterConfig, deps: {
+/** Effects bound to the real coordinator process; `config` may be a live source the loop reloads. */
+export function daemonEffects(root: string, source: MasterConfig | (() => MasterConfig), deps: {
   snapshot: () => Promise<{ work: Work[]; now: string }>;
   mutate: (path: string, data: unknown, requestId?: string) => Promise<any>;
   executionOwner: string;
   run?: (command: string, args: string[]) => string;
 }): DaemonEffects {
   const run = deps.run ?? ((command, args) => execFileSync(command, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 90_000 }));
+  const current = typeof source === 'function' ? source : () => source;
   return {
     agents: () => { try { return listHerdrAgents(run); } catch { return []; } },
     credentials: profiles => inspectWorkerCredentials(root, profiles),
@@ -597,16 +639,18 @@ export function daemonEffects(root: string, config: MasterConfig, deps: {
     closeSession: pane => closeHerdrPane(pane, run),
     dispatch: (work, profile, agents, snapshot) => dispatchWork(root, work, profile, agents, run, snapshot.work, undefined, undefined, undefined, snapshot.now),
     requestProof: work => {
+      const config = current();
       run('gh', ['workflow', 'run', config.run.proofWorkflow!, '--repo', config.repository, '--ref', config.baseBranch,
         '-f', `pr=${work.submission!.pr}`, '-f', `work_id=${work.id}`, '-f', `policy_revision=${work.policyRevision}`]);
     },
-    merge: work => mergeExecutor(config, deps.snapshot, deps.mutate, deps.executionOwner, randomUUID(), run)(work),
-    observeDeployment: delivered => observeDeployment(config, delivered, run),
+    merge: work => mergeExecutor(current(), deps.snapshot, deps.mutate, deps.executionOwner, randomUUID(), run)(work),
+    observeDeployment: delivered => observeDeployment(current(), delivered, run),
     recordDeployment: (work, observation) => deps.mutate(`work/${work.id}/deployment`, { sha: observation.sha, mergeSha: work.delivery!.mergeSha, source: observation.source, observedAt: observation.observedAt }),
     requestSmoke: work => {
+      const config = current();
       run('gh', ['workflow', 'run', config.run.smokeWorkflow!, '--repo', config.repository, '--ref', config.baseBranch,
         '-f', `work_id=${work.id}`, '-f', `deployed_sha=${work.delivery!.deployment!.sha}`, '-f', `merge_sha=${work.delivery!.mergeSha}`, '-f', `policy_revision=${work.policyRevision}`]);
     },
-    persist: state => writeDaemonState(config, state),
+    persist: state => writeDaemonState(current(), state),
   };
 }

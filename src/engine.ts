@@ -11,6 +11,7 @@ import { queueHistoryLimit, queueSequencingReason, type QueueSpeculation } from 
 import { githubFromEnv } from './github.js';
 import { regressionRefusals } from './regression-guard.js';
 import { ciFamilyAllows, ciProofFamilies, ciRunBindingSchema, ciRunRefusal, isCiProducer, refuseCiProducer, staleCiAttemptRefusal, type CiRunObservation } from './model/ci-proofs.js';
+import { liveScopeWidening } from './model/scope.js';
 import { reconcileAutoDispatch, type DispatchTransition } from './model/dispatch.js';
 import { beginAttempt, endAttempt, endLapsedAttempt, recordIntervention, recordRework, recordSubmission } from './pipeline-speed.js';
 
@@ -58,6 +59,9 @@ const commands = {
   workspace: z.object({ epoch, host: z.string().trim().min(1).max(200), path: z.string().startsWith('/').max(1000).refine(p => !/[\u0000-\u001f]/.test(p), 'Invalid path').transform(workspacePath), branch: z.string().max(200).refine(validBranch, 'Invalid Graphyard branch name') }).strict(),
   submit: z.object({ epoch, pr: z.number().int().positive() }).strict(),
   blocked: z.object({ epoch, reason: z.string().max(2000).nullable() }).strict(),
+  // An empty `paths` list clears this attempt's open request; otherwise every path must
+  // reach outside the current planned scope, so the request is always a widening ask.
+  scope: z.object({ epoch, paths: z.array(z.string().min(1).max(500)).max(50), reason: z.string().trim().min(1).max(2000) }).strict(),
   // `scopeFiles` is the producer's declaration of what the proof depends on, in the planned-files
   // scope syntax; the merge queue carries a proof across its own authored tip only inside it.
   evidence: z.object({ proof: proofSchema, sha, baseSha: sha, policyRevision: z.number().int().positive(), result: z.enum(['pass', 'fail']), executed: z.number().int().min(0), skipped: z.number().int().min(0), url: publicArtifactUrl.optional(), artifacts: z.array(evidenceArtifact).max(30).optional(), scenarioRevision: z.number().int().positive().optional(), environment: z.string().min(1).max(100).optional(),
@@ -199,6 +203,9 @@ export class Engine {
       const all: Work[] = (await db.query('SELECT document FROM work_items ORDER BY number')).rows.map(r => r.document);
       let work = all.find(w => w.id === id || w.key === id);
       const before = work ? structuredClone(work) : null;
+      // Set by the requirements command: the revision was a purely additive planned-files
+      // widening applied to a live attempt, recorded in history beside the intent.
+      let widening = false;
       if (command === 'create') {
         if (actor.role === 'operator-agent') {
           authorizeOperatorCommand(actor, command, data, undefined, this.repository);
@@ -277,8 +284,16 @@ export class Engine {
       if (command === 'requirements') {
         if (actor.role !== 'operator-agent') admin(actor);
         demand(!work.observation?.merged, 'Merged work requires a follow-up task');
-        demand(!work.containmentQuarantine, `Task is quarantined by unverified containment from epoch ${work.containmentQuarantine?.epoch}; requirements remain immutable until settlement or stopped-worker recovery`);
-        demand(!work.lease || Date.parse(work.lease.expiresAt) <= now.getTime(), 'Stop and release the active worker before revising requirements');
+        // A purely additive planned-files widening is non-weakening intent: applied to a live
+        // attempt it keeps the lease (and any containment fence) so the worker never hands the
+        // item back. Every other revision under a live lease or quarantine is refused exactly
+        // as before.
+        const leaseLive = !!work.lease && Date.parse(work.lease.expiresAt) > now.getTime();
+        widening = liveScopeWidening({ criteria: work.criteria, dependencies: work.dependencies, plannedFiles: work.plannedFiles ?? [], exclusiveResources: work.exclusiveResources, producerProofs: work.producerProofs }, data);
+        if (!widening) {
+          demand(!work.containmentQuarantine, `Task is quarantined by unverified containment from epoch ${work.containmentQuarantine?.epoch}; requirements remain immutable until settlement or stopped-worker recovery`);
+          demand(!leaseLive, 'Stop and release the active worker before revising requirements');
+        }
         demand(data.expectedPolicyRevision === work.policyRevision, 'Policy revision changed; reload before revising');
         demand(new Set(data.criteria.map((ac: { id: string }) => ac.id)).size === data.criteria.length, 'Criterion IDs must be unique');
         if (actor.role === 'operator-agent') {
@@ -316,11 +331,17 @@ export class Engine {
         this.refuseRenewedDeferral(work, all);
         work.proofGaps = await unauthorizedProofs(db, this.principals, [...proofs, ...(deploySmokeRequired(work.policy) ? [deploySmokeProof] : [])]);
         work.formalReviewResetRequired = true; work.formalReviewBaseline = undefined;
-        // The revision is a hand-off for an item already under way: its timeline counts it, and the
-        // lapsed lease it discards (a live one was refused above) ends that attempt at its deadline.
-        if (work.lease) endLapsedAttempt(work, work.lease, now);
-        recordIntervention(work, 'requirements');
-        work.lease = null; work.observation = null; work.mergeAuthorization = null; work.reviewRequest = null;
+        // A request the widened scope fully covers is answered; a partial one stays open for the master.
+        if (work.scopeRequest && work.scopeRequest.paths.every(path => data.plannedFiles.some((scope: string) => pathScopeContains(scope, path)))) work.scopeRequest = null;
+        // A revision other than a live-scope widening is a hand-off for an item already under way:
+        // its timeline counts it, and the lapsed lease it discards (a live one was refused above)
+        // ends that attempt at its deadline. A widening keeps the attempt, so it counts neither.
+        if (!widening) {
+          if (work.lease) endLapsedAttempt(work, work.lease, now);
+          recordIntervention(work, 'requirements');
+          work.lease = null;
+        }
+        work.observation = null; work.mergeAuthorization = null; work.reviewRequest = null;
         // A submitted implementation must be explicitly reconsidered for changed intent.
         if (work.submission) work.reworkRequested = true;
       }
@@ -416,6 +437,8 @@ export class Engine {
           endLapsedAttempt(work, work.lease, now);
         }
         work.epoch++;
+        // A fresh attempt asks afresh: the previous attempt's scope request belongs to a lease that no longer exists.
+        work.scopeRequest = null;
         work.implementers = [...new Set([...implementerIdentities(work), actor.id])];
         work.lastAssignment = { owner: actor.id, epoch: work.epoch, claimedAt: now.toISOString(), ...(actor.displayName ? { displayName: actor.displayName } : {}), ...(actor.runtime ? { runtime: actor.runtime } : {}) };
         work.lease = { owner: actor.id, epoch: work.epoch, expiresAt: new Date(now.getTime() + this.leaseSeconds * 1000).toISOString() };
@@ -425,7 +448,7 @@ export class Engine {
       // renewing it is told so, rather than left to read the loss as a superseded epoch.
       if ((command === 'heartbeat' || command === 'release') && !work.lease && submittedEpoch(work, data.epoch))
         demand(false, `Implementation lease for epoch ${data.epoch} ended when ${work.key} was submitted; stop heartbeating after complete`);
-      if (['heartbeat', 'release', 'workspace', 'submit', 'blocked', 'quarantine', 'launch'].includes(command)) activeLease(work, actor, data.epoch, now);
+      if (['heartbeat', 'release', 'workspace', 'submit', 'blocked', 'scope', 'quarantine', 'launch'].includes(command)) activeLease(work, actor, data.epoch, now);
       if (command === 'heartbeat') work.lease!.expiresAt = new Date(now.getTime() + this.leaseSeconds * 1000).toISOString();
       if (command === 'quarantine') {
         demand(!work.containmentQuarantine || work.containmentQuarantine.owner === actor.id && work.containmentQuarantine.epoch === data.epoch
@@ -459,6 +482,16 @@ export class Engine {
       if (command === 'release') { endAttempt(work, data.epoch, 'released', now); work.lease = null; }
       // A blocked report is a hand-off to the master or operator; the item's timeline counts it.
       if (command === 'blocked') { work.blocker = data.reason; if (data.reason) recordIntervention(work, 'blocked'); }
+      if (command === 'scope') {
+        if (!data.paths.length) {
+          demand(work.scopeRequest, 'No scope request is open for this attempt');
+          work.scopeRequest = null;
+        } else {
+          const outside = data.paths.filter((path: string) => !(work.plannedFiles ?? []).some(planned => pathScopeContains(planned, path)));
+          demand(outside.length, 'Every named path is already inside plannedFiles; no scope request is needed');
+          work.scopeRequest = { epoch: data.epoch, paths: data.paths, reason: data.reason, requestedBy: actor.id, at: now.toISOString() };
+        }
+      }
       if (command === 'workspace') {
         demand(!work.workspaces.some(w => w.epoch === data.epoch), 'This assignment already has a workspace');
         demand(!all.some(w => w.workspaces.some(s => (s.branch === data.branch && (w.id !== work!.id || !work!.reworkRequested)) || s.host === data.host && pathsOverlap(s.path, data.path))), 'Branch or host/path is already reserved or overlaps a reservation; use a fresh workspace');
@@ -580,7 +613,7 @@ export class Engine {
       // append its audit/revision metadata, but stale inputs must not re-evaluate it.
       if (!deliveredContainmentCleanup && !postDeployment) this.evaluate(work, all, now);
       await this.recordDispatch(db, work, now);
-      await save(db, work, actor.id, command, now, command === 'settle' ? { epoch: data.epoch } : actor.role === 'operator-agent' ? { before, intent: data, reason: data.reason ?? null } : data);
+      await save(db, work, actor.id, command, now, command === 'settle' ? { epoch: data.epoch } : actor.role === 'operator-agent' ? { before, intent: data, reason: data.reason ?? null, ...(command === 'requirements' ? { liveScopeWidening: widening } : {}) } : data);
       if (work.submission && !postDeployment && !['heartbeat', 'release', 'claim', 'workspace'].includes(command)) await wakeJob(db, work.id);
       await db.query('INSERT INTO receipts(actor,key,fingerprint,result) VALUES($1,$2,$3,$4)', [actor.id, key, fingerprint, JSON.stringify(work)]);
       return work;
