@@ -36,7 +36,7 @@ A running deployment names its release at `/healthz` without a credential and un
 | Provider | Compute | Postgres | TLS | Provider login |
 | --- | --- | --- | --- | --- |
 | `railway` | Railway service built from the root `Dockerfile` | Railway managed Postgres, referenced as `${{Postgres.DATABASE_URL}}` | Railway domain | `railway login` |
-| `hetzner` | Hetzner Cloud server created with a Docker cloud-init and an attached data volume | `postgres:17-alpine` on the volume | Caddy, automatic certificates for `--domain` | `hcloud context create graphyard` |
+| `hetzner` | Hetzner Cloud server created with a Docker cloud-init and an attached data volume | `postgres:17-alpine` on the volume | Caddy, automatic certificates for `--domain` | `hcloud context create graphyard`, an SSH key for `--ssh-key` |
 | `docker-host` | Any existing Docker host reached over SSH | `postgres:17-alpine` in the same Compose project | Caddy, automatic certificates for `--domain` | your SSH key |
 | `compose` | This machine | `postgres:17-alpine` | none; loopback only | none |
 
@@ -47,8 +47,11 @@ nothing.
 
 Every self-hosted provider runs the same Compose bundle: `db`, `server`, and — when the
 deployment is reachable from outside — a `proxy` service terminating TLS. `hetzner` and
-`docker-host` need `--domain` for a publicly trusted certificate; without one, Caddy issues
-an internal certificate and the installer reports that the endpoint is not publicly trusted.
+`docker-host` require `--domain`, with its A record pointed at the host: the installer
+verifies its own health endpoint and receives GitHub webhooks over HTTPS, both of which reject
+the internal certificate Caddy could otherwise issue for a bare address, so the plan refuses
+to start without a domain. `hetzner` also requires `--ssh-key`: the installer authenticates
+with a key only, and without one the created server would carry an unusable root password.
 
 The installer never touches `.railway/railway.ts`. That file describes this project's own
 personal Railway deployment, including preserved values, and is not a template for a fresh
@@ -70,7 +73,7 @@ deployment, and for the manual fallback below.
 | `GITHUB_BASE_BRANCH` | Usually `main` |
 | `GITHUB_APP_ID` | Dedicated Graphyard GitHub App ID |
 | `GITHUB_INSTALLATION_ID` | Installation ID for the managed repository |
-| `GITHUB_PRIVATE_KEY` | Full PEM key in a secret variable; alternatively mount `GITHUB_PRIVATE_KEY_FILE` |
+| `GITHUB_PRIVATE_KEY` | Full PEM key in a secret variable; alternatively mount `GITHUB_PRIVATE_KEY_FILE`. The installer writes the key to a mode-`0600` file mounted into the container and sets `GITHUB_PRIVATE_KEY_FILE` on self-hosted providers, because a multi-line PEM cannot live in a Compose env file |
 | `GITHUB_WEBHOOK_SECRET` | Shared secret for GitHub signature verification |
 | `GITHUB_CI_APP_IDS` | Comma-separated IDs of trusted CI Apps; the installer discovers these from the checks published on the base branch |
 | `GRAPHYARD_ARTIFACT_BACKEND` | Optional `postgres` (default) or `s3`; with `s3`, the `GRAPHYARD_ARTIFACT_S3_*` variables and optional `GRAPHYARD_ARTIFACT_CAPACITY_BYTES` described in [recovery](recovery.md#artifact-backends-capacity-and-migration) |

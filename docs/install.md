@@ -69,8 +69,8 @@ export GRAPHYARD_CLI=/absolute/path/to/graphyard/bin/graphyard.mjs
 | Provider | Check | Login | Notes |
 | --- | --- | --- | --- |
 | `railway` | `railway whoami` | `railway login` | Managed Postgres, managed TLS domain. An account in more than one workspace passes `--workspace NAME-OR-ID` |
-| `hetzner` | `hcloud context active` | `hcloud context create graphyard` | Creates the server, volume, Docker, and Caddy TLS |
-| `docker-host` | `ssh USER@HOST docker version` | your SSH key | Any existing Docker host; pass `--ssh-host` |
+| `hetzner` | `hcloud context active` | `hcloud context create graphyard` | Creates the server, volume, Docker, and Caddy TLS; pass `--domain` and `--ssh-key` |
+| `docker-host` | `ssh USER@HOST docker version` | your SSH key | Any existing Docker host; pass `--ssh-host` and `--domain` |
 | `compose` | `docker compose version` | none | One machine, loopback only, for evaluation |
 
 On `railway`, the installer creates the project outside a terminal, and there the Railway CLI
@@ -79,9 +79,15 @@ account with exactly one workspace needs nothing; an account with several needs
 `--workspace NAME-OR-ID`, and the plan's `Railway workspace` preflight item lists the choices
 (`railway whoami --json` prints them too) until one is passed.
 
-`hetzner` and `docker-host` need `--domain` for publicly trusted TLS. Point the domain's A
-record at the host first. Without a domain, Caddy issues an internal certificate and the
-endpoint is encrypted but not publicly trusted; the installer says so rather than hiding it.
+`hetzner` and `docker-host` need `--domain`, with its A record already pointed at the host.
+The installer verifies its own health endpoint and receives GitHub webhooks over HTTPS, and
+both reject the internal certificate Caddy could otherwise issue for a bare host address — so
+the plan's `Public hostname` preflight item fails without a domain, and `--apply` changes
+nothing rather than starting an install it could never verify.
+
+`hetzner` also needs `--ssh-key NAME` (`hcloud ssh-key list` prints the names): the installer
+reaches the server over key-authenticated SSH only, and without a key Hetzner creates the
+server with a root password that cannot be used.
 
 ## Step 1 — print the plan
 
@@ -105,6 +111,7 @@ Add the options the instruction called for:
 | `--review-policy github\|agent` | Native approvals (default) or Graphyard-bound agent review. It raises a weaker branch to the policy's count and never lowers a stricter one |
 | `--workspace NAME-OR-ID` | Railway workspace that owns the project; required when the account belongs to several |
 | `--ssh-host HOST` / `--ssh-user USER` | Target for `docker-host` |
+| `--ssh-key NAME` | Hetzner Cloud SSH key for the created server; required on `hetzner` (`hcloud ssh-key list`) |
 | `--base-branch NAME` | Protected base branch (default `main`) |
 | `--port N` | Host port for a local `compose` install (default 4310) |
 | `--image REF` | Control-plane image for `hetzner` and `docker-host` (default: the [versioned release image](deployment.md#versioned-images) for this checkout's version, `ghcr.io/cryptob1/graphyard:X.Y.Z`; pin a digest here). `railway` builds the root `Dockerfile` and `compose` builds the image from the checkout |
@@ -166,7 +173,7 @@ The installer performs the plan in order:
 4. Deploys and obtains a public HTTPS URL.
 5. Verifies `GET /healthz`.
 6. Opens the GitHub App manifest flow — **this is the human click**, see Step 4.
-7. Writes `GITHUB_APP_ID`, `GITHUB_INSTALLATION_ID`, `GITHUB_PRIVATE_KEY`, and `GITHUB_WEBHOOK_SECRET` to the server and redeploys.
+7. Writes `GITHUB_APP_ID`, `GITHUB_INSTALLATION_ID`, the App private key, and `GITHUB_WEBHOOK_SECRET` to the server and redeploys. On self-hosted providers the private key is a separate mode-`0600` file mounted into the container and referenced through `GITHUB_PRIVATE_KEY_FILE`, because a multi-line PEM cannot survive an environment file.
 8. Points the App webhook at `https://YOUR-HOST/api/github/webhook` with the secret the server holds.
 9. Detects the GitHub App IDs publishing checks on the base branch and sets `GITHUB_CI_APP_IDS`.
 10. Applies branch protection: the required status checks, conversation resolution, administrator
@@ -363,6 +370,8 @@ a step to reduce it — and worker identities are never Apps. The reasons are in
 | --- | --- | --- |
 | `Preflight is incomplete` | a CLI is missing or not authenticated | nothing was created; run the `fix` command printed for that item, then rerun |
 | `Railway workspace` preflight is `false` | the Railway account belongs to several workspaces, or `--workspace` names none of them | nothing was created; rerun with `--workspace` set to one of the names the item lists |
+| `Public hostname` preflight is `false` | `hetzner` or `docker-host` ran without `--domain`, or the A record is not pointed yet | nothing was created; pass `--domain HOST` with its record pointed at the host, then rerun |
+| `SSH key` preflight is `false` | `hetzner` ran without `--ssh-key` | nothing was created; rerun with a key name from `hcloud ssh-key list` |
 | `<cli> exited with N: <diagnostic>` | a provider command failed; the provider CLI's own message follows the colon | act on the diagnostic (it is scrubbed of every generated secret), then rerun `--apply`; completed steps are reported as satisfied and repeated for nothing |
 | `Run graphyard install from the checkout of the repository being managed` | wrong working directory | `cd` into the `OWNER/REPO` checkout |
 | `This checkout is X; rerun from Y` | `--repo` and the Git origin disagree | correct `--repo` or change directory |

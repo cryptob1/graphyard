@@ -3,7 +3,7 @@ import { randomBytes } from 'node:crypto';
 import { hostname } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { discover } from '../onboarding.js';
-import { adapterFor, carriesCredential, variableMarker, type AdapterContext, type AdapterObservation, type ProviderAdapter, DEFAULT_IMAGE } from './adapters.js';
+import { adapterFor, carriesCredential, isProviderReference, variableMarker, type AdapterContext, type AdapterObservation, type ProviderAdapter, DEFAULT_IMAGE } from './adapters.js';
 import { applyProtection, appClient, configureWebhook, detectCiAppIds, effectiveReviewCount, headSha, githubCli, installationClient, protectionSatisfied, readProtection, readWebhookConfig, triggerDelivery, verifyDelivery, webhookUrlFor, CHECK_NAME, type AppFacts, type DeliveryProof } from './github.js';
 import { detectHerdr, detectRuntimes, masterRuntime, reviewerProfiles, workerProfiles, type DetectedRuntime, type HerdrState, type ReviewerProfileDraft, type WorkerProfileDraft } from './runtimes.js';
 import { delegationLimitAssignments, delegationLimitVariables } from './limits.js';
@@ -106,6 +106,7 @@ export async function prepareInstall(cwd: string, rawInputs: InstallInputs, depe
     workdir: provider === 'compose' ? `${directory}/compose` : `/opt/graphyard/${installId}`,
     sourceRoot: dependencies.sourceRoot ?? fileURLToPath(new URL('../..', import.meta.url)),
     sshHost: inputs.sshHost ?? null, sshUser: inputs.sshUser ?? 'root',
+    sshKey: inputs.sshKey ?? null,
     workspace: inputs.workspace ?? null,
     serverType: inputs.serverType ?? 'cx22', location: inputs.location ?? 'nbg1',
     databasePassword, port: inputs.port ?? SERVER_PORT, dataPath: provider === 'hetzner' ? '/mnt/graphyard' : null,
@@ -198,6 +199,11 @@ function variableDrift(session: InstallSession, action: string, values: EnvValue
     // Both sides are markers for anything carrying a credential, so drift is reportable
     // verbatim: an observed value only ever reaches the plan as `sha:<fingerprint>`.
     if (current === undefined) return [{ action, field: value.name, expected, observed: 'absent' }];
+    // A shared reference such as `${{Postgres.DATABASE_URL}}` is resolved by the provider
+    // before it is reported back, and the resolved value is a credential the installer must
+    // not read. It is therefore compared by presence: a fingerprinted observed value is the
+    // reference doing its job, not drift, so a real Railway re-plan reports satisfied.
+    if (expected !== current && isProviderReference(value.value) && current.startsWith('sha:')) return [];
     return current === expected ? [] : [{ action, field: value.name, expected, observed: current }];
   });
 }

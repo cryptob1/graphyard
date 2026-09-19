@@ -60,6 +60,8 @@ export interface InstallInputs {
   /** docker-host and hetzner reach the machine over SSH as user@host. */
   sshHost?: string;
   sshUser?: string;
+  /** Hetzner Cloud SSH key registered on the created server; required so key-only SSH can reach it. */
+  sshKey?: string;
   /** Railway workspace (ID or exact name) that owns the project; required only when the account belongs to several. */
   workspace?: string;
   image?: string;

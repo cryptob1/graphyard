@@ -9,7 +9,8 @@ import type { Provider } from '../src/install/types.js';
 import { allText, githubResponses, harness, providerResponses } from './install-harness.js';
 
 const inputsFor = (provider: Provider) => ({ repository: 'owner/project', provider,
-  ...(provider === 'railway' || provider === 'compose' ? {} : { sshHost: '203.0.113.10', sshUser: 'root', domain: 'graphyard.example.test' }) });
+  ...(provider === 'railway' || provider === 'compose' ? {} : { sshHost: '203.0.113.10', sshUser: 'root', domain: 'graphyard.example.test' }),
+  ...(provider === 'hetzner' ? { sshKey: 'graphyard-key' } : {}) });
 
 /** Tracked files plus anything Git would add: exactly what a commit could carry. */
 function committableFiles(root: string) {

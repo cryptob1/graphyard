@@ -195,7 +195,7 @@ test('the CLI accepts every option the runbook documents and refuses a count tha
     return result.stderr;
   };
   // Every documented flag must parse. Reaching the checkout check proves the option was accepted.
-  for (const args of [['--port', '4400'], ['--workers', '3'], ['--review-count', '2'], ['--required-check', 'lint'], ['--domain', 'graphyard.example'], ['--base-branch', 'trunk'], ['--producer-proof', 'unit:example'], ['--reviewer', 'claude'], ['--review-policy', 'agent']]) {
+  for (const args of [['--port', '4400'], ['--workers', '3'], ['--review-count', '2'], ['--required-check', 'lint'], ['--domain', 'graphyard.example'], ['--base-branch', 'trunk'], ['--producer-proof', 'unit:example'], ['--reviewer', 'claude'], ['--review-policy', 'agent'], ['--ssh-host', '203.0.113.10'], ['--ssh-user', 'deploy'], ['--ssh-key', 'graphyard-key']]) {
     assert.match(await run([...args, '--plan']), /Run graphyard install from the checkout/, `${args[0]} was not accepted by the CLI`);
   }
   // A silently NaN count would install no worker principal at all, or an unusable port.

@@ -1,13 +1,13 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { stat } from 'node:fs/promises';
-import { buildPlan, coreEnv, materializeInstall, prepareInstall } from '../src/install/index.js';
+import { buildPlan, coreEnv, materializeInstall, prepareInstall, applyInstall } from '../src/install/index.js';
 import { chooseRailwayWorkspace, variableMarker } from '../src/install/adapters.js';
 import type { Provider } from '../src/install/types.js';
 import { harness, satisfiedProtection, RAILWAY_WORKSPACES, type Harness } from './install-harness.js';
 
 const supported: Provider[] = ['railway', 'hetzner', 'docker-host', 'compose'];
-const inputsFor = (provider: Provider) => ({ repository: 'owner/project', provider, ...(provider === 'railway' || provider === 'compose' ? {} : { sshHost: '203.0.113.10', sshUser: 'root', domain: 'graphyard.example.test' }) });
+const inputsFor = (provider: Provider) => ({ repository: 'owner/project', provider, ...(provider === 'railway' || provider === 'compose' ? {} : { sshHost: '203.0.113.10', sshUser: 'root', domain: 'graphyard.example.test' }), ...(provider === 'hetzner' ? { sshKey: 'graphyard-key' } : {}) });
 
 function renderEnv(provider: Provider, values: { name: string; value: string }[]) {
   return provider === 'railway'
@@ -126,10 +126,12 @@ test('an observed value is compared by fingerprint only when it is a credential'
 
 /**
  * Railway is given the shared reference `${{Postgres.DATABASE_URL}}` but reports the value it
- * resolves to. That resolved value is a password, it differs from what was set, so it lands in
- * drift — and drift is printed. It has to arrive there as a fingerprint.
+ * resolves to. That resolved value is a password, so it can never be read to compare it: the
+ * installer compares the reference by presence and treats a fingerprinted observed value as
+ * satisfied. A re-plan of a real Railway installation therefore reports no phantom drift, and
+ * the password still never reaches the plan.
  */
-test('a database password a provider resolves for itself never reaches the plan', async () => {
+test('a database password a provider resolves for itself is compared by presence and never reaches the plan', async () => {
   const first = await harness({ provider: 'railway' });
   let second: Harness | undefined;
   try {
@@ -139,11 +141,41 @@ test('a database password a provider resolves for itself never reaches the plan'
     second = await harness({ provider: 'railway', installed: true, envFile, protection: satisfiedProtection(null), root: first.root, configHome: first.configHome });
     const plan = await buildPlan(await prepareInstall(second.root, inputsFor('railway'), second.deps, 'plan'));
 
-    const entry = plan.drift.find(item => item.field === 'DATABASE_URL');
-    assert.ok(entry, 'a resolved DATABASE_URL must be reported as drift');
-    assert.match(entry.observed, /^sha:[0-9a-f]{12}$/);
+    assert.ok(!plan.drift.some(item => item.field === 'DATABASE_URL'), 'a resolved DATABASE_URL was reported as drift');
+    const core = plan.actions.find(item => item.id === 'provider.env.core')!;
+    assert.equal(core.state, 'satisfied', `re-plan reported drift: ${JSON.stringify(core.drift)}`);
     assert.ok(!JSON.stringify(plan).includes('railway-managed-password-9xz'), 'the resolved database password reached the plan');
   } finally { await first.cleanup(); await second?.cleanup(); }
+});
+
+test('docker-host without a public hostname refuses to apply instead of failing its own health check', async () => {
+  const fixture = await harness({ provider: 'docker-host' });
+  try {
+    const inputs = { repository: 'owner/project', provider: 'docker-host' as Provider, sshHost: '203.0.113.10', sshUser: 'root' };
+    const session = await prepareInstall(fixture.root, inputs, fixture.deps);
+    const plan = await buildPlan(session);
+    const item = plan.preflight.find(entry => entry.name === 'Public hostname')!;
+    assert.equal(item.ok, false);
+    assert.match(item.fix!, /--domain/);
+    await assert.rejects(applyInstall(session, plan), /Preflight is incomplete[\s\S]*Public hostname/);
+    assert.ok(!fixture.commandLines().some(line => line.includes('up -d')), 'a refused apply started the stack');
+  } finally { await fixture.cleanup(); }
+});
+
+test('hetzner requires an SSH key so the created server is reachable, and plans the exact create command', async () => {
+  const fixture = await harness({ provider: 'hetzner' });
+  try {
+    const inputs = { repository: 'owner/project', provider: 'hetzner' as Provider, sshHost: '203.0.113.10', sshUser: 'root', domain: 'graphyard.example.test' };
+    const withoutKey = await buildPlan(await prepareInstall(fixture.root, inputs, fixture.deps, 'plan'));
+    const item = withoutKey.preflight.find(entry => entry.name === 'SSH key')!;
+    assert.equal(item.ok, false);
+    assert.match(item.fix!, /--ssh-key/);
+    assert.match(item.fix!, /hcloud ssh-key list/);
+
+    const planned = await buildPlan(await prepareInstall(fixture.root, inputsFor('hetzner'), fixture.deps, 'plan'));
+    const create = planned.actions.find(action => action.id === 'provider.provision.server')!;
+    assert.equal(create.command, 'hcloud server create --name graphyard-owner-project --type cx22 --location nbg1 --image ubuntu-24.04 --ssh-key graphyard-key');
+  } finally { await fixture.cleanup(); }
 });
 
 /**

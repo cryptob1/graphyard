@@ -2,14 +2,17 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile, stat } from 'node:fs/promises';
 import { join } from 'node:path';
+import { parseEnv } from 'node:util';
 import { applyInstall, buildPlan, coreEnv, prepareInstall } from '../src/install/index.js';
+import { PRIVATE_KEY_CONTAINER_PATH } from '../src/install/adapters.js';
 import { fakeTransport, localTransport, type Transport } from '../src/install/transport.js';
 import { CHECK_NAME } from '../src/install/github.js';
 import type { Provider } from '../src/install/types.js';
-import { harness, satisfiedProtection, GRAPHYARD_APP_ID, CI_APP_ID, RAILWAY_WORKSPACES, type Harness } from './install-harness.js';
+import { harness, satisfiedProtection, GRAPHYARD_APP_ID, CI_APP_ID, RAILWAY_WORKSPACES, appKey, type Harness } from './install-harness.js';
 
 const inputsFor = (provider: Provider) => ({ repository: 'owner/project', provider,
-  ...(provider === 'railway' || provider === 'compose' ? {} : { sshHost: '203.0.113.10', sshUser: 'root', domain: 'graphyard.example.test' }) });
+  ...(provider === 'railway' || provider === 'compose' ? {} : { sshHost: '203.0.113.10', sshUser: 'root', domain: 'graphyard.example.test' }),
+  ...(provider === 'hetzner' ? { sshKey: 'graphyard-key' } : {}) });
 
 const bundle = (fixture: Harness, name: string) => {
   const stores = [fixture.transport.files, ...[...fixture.remotes.values()].map(remote => remote.files)];
@@ -57,7 +60,7 @@ test('--apply provisions Postgres and the application, sets every variable, and 
         const environment = bundle(fixture, 'server.env')!;
         assert.equal(environment.mode, 0o600);
         assert.equal(bundle(fixture, 'db.env')!.mode, 0o600);
-        for (const name of ['HOST', 'PORT', 'DATABASE_URL', 'GRAPHYARD_PRINCIPALS', 'GITHUB_REPOSITORY', 'GITHUB_BASE_BRANCH', 'GITHUB_APP_ID', 'GITHUB_INSTALLATION_ID', 'GITHUB_PRIVATE_KEY', 'GITHUB_WEBHOOK_SECRET', 'GITHUB_CI_APP_IDS']) {
+        for (const name of ['HOST', 'PORT', 'DATABASE_URL', 'GRAPHYARD_PRINCIPALS', 'GITHUB_REPOSITORY', 'GITHUB_BASE_BRANCH', 'GITHUB_APP_ID', 'GITHUB_INSTALLATION_ID', 'GITHUB_PRIVATE_KEY_FILE', 'GITHUB_WEBHOOK_SECRET', 'GITHUB_CI_APP_IDS']) {
           assert.ok(environment.content.includes(`${name}=`), `${provider} did not set ${name}`);
         }
         if (provider !== 'compose') assert.match(bundle(fixture, 'Caddyfile')!.content, /graphyard\.example\.test \{/);
@@ -167,6 +170,31 @@ test('the App-bound merge check is required only once Graphyard has published it
   } finally { await published.cleanup(); }
 });
 
+test('the multi-line App private key is written beside the bundle and mounted, never into the env file', async () => {
+  const fixture = await harness({ provider: 'compose' });
+  try {
+    await apply(fixture, 'compose');
+    const environment = bundle(fixture, 'server.env')!;
+    // docker compose reads an env file as one NAME=value per line and refuses anything else;
+    // feeding the rendered file through a real parser is what a deploy would do with it.
+    for (const line of environment.content.split('\n').filter(Boolean)) {
+      assert.match(line, /^[A-Za-z_][A-Za-z0-9_]*=/, `env-file line is not a variable assignment: ${line.slice(0, 30)}`);
+    }
+    const parsed = parseEnv(environment.content);
+    assert.ok(!environment.content.includes('PRIVATE KEY'), 'the raw PEM reached the env file');
+    assert.equal(parsed.GITHUB_PRIVATE_KEY, undefined);
+    assert.equal(parsed.GITHUB_PRIVATE_KEY_FILE, PRIVATE_KEY_CONTAINER_PATH);
+    assert.equal(parsed.HOST, '0.0.0.0');
+    assert.ok(parsed.DATABASE_URL?.startsWith('postgres://'), 'the parsed env file lost the core variables');
+
+    const key = bundle(fixture, 'github-private-key.pem')!;
+    assert.ok(key, 'the private key sidecar file was not written');
+    assert.equal(key.mode, 0o600);
+    assert.equal(key.content, appKey);
+    assert.match(bundle(fixture, 'compose.yaml')!.content, new RegExp(`volumes: \\["\\./github-private-key\\.pem:${PRIVATE_KEY_CONTAINER_PATH}:ro"\\]`));
+  } finally { await fixture.cleanup(); }
+});
+
 test('the agent review policy sets zero native approvals without relaxing any other protection', async () => {
   const fixture = await harness({ provider: 'compose' });
   try {
@@ -213,6 +241,7 @@ test('the Hetzner server keeps Postgres on its attached volume and waits for clo
 
     const create = fixture.transport.commands.find(command => command.program === 'hcloud' && command.args[0] === 'server' && command.args[1] === 'create')!;
     assert.ok(create.input, 'cloud-init was not supplied over stdin');
+    assert.ok(create.args.includes('--ssh-key') && create.args.includes('graphyard-key'), 'the server was created without an SSH key');
     assert.match(create.input!, /docker-compose-plugin/);
     assert.match(create.input!, /scsi-0HC_Volume_/);
     assert.match(create.input!, /\/mnt\/graphyard ext4/);

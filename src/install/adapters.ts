@@ -17,6 +17,8 @@ export interface AdapterContext {
   sourceRoot: string;
   sshHost: string | null;
   sshUser: string;
+  /** Hetzner Cloud SSH key the created server is registered with; without one it is unreachable for key-only SSH. */
+  sshKey: string | null;
   /** Railway workspace chosen with --workspace; null lets the installer resolve a single-workspace account. */
   workspace: string | null;
   serverType: string;
@@ -81,12 +83,29 @@ async function tool(ctx: AdapterContext, transport: Transport, program: string, 
 
 export interface BundleFile { path: string; content: string; mode: number }
 
+/** The GitHub private key is multi-line, and an env file cannot carry it: these move it into a mounted file. */
+export const PRIVATE_KEY_FILE_VARIABLE = 'GITHUB_PRIVATE_KEY_FILE';
+export const PRIVATE_KEY_CONTAINER_PATH = '/run/graphyard/github-private-key.pem';
+const PRIVATE_KEY_BUNDLE_NAME = 'github-private-key.pem';
+
 export function composeBundle(ctx: AdapterContext, values: EnvValue[], publish: 'loopback' | 'proxy'): BundleFile[] {
-  const environment = values.map(value => `${value.name}=${value.value}`).join('\n');
+  // `GITHUB_PRIVATE_KEY` is a PEM that spans many lines, and docker compose reads an env file
+  // as one `NAME=value` per line: every continuation line of a raw key would be refused as a
+  // malformed variable name and the deploy would fail. The key is therefore written to its own
+  // mode-0600 file, mounted into the server container read-only, and referenced through
+  // `GITHUB_PRIVATE_KEY_FILE`, which the server reads natively.
+  const key = values.find(value => value.name === 'GITHUB_PRIVATE_KEY' && value.value);
+  const environment = values
+    .filter(value => value.name !== 'GITHUB_PRIVATE_KEY')
+    .map(value => {
+      if (/[\r\n]/.test(value.value)) throw new Error(`${value.name} cannot be written to a Compose env file: its value spans multiple lines`);
+      return `${value.name}=${value.value}`;
+    });
+  if (key) environment.push(`${PRIVATE_KEY_FILE_VARIABLE}=${PRIVATE_KEY_CONTAINER_PATH}`);
   const proxied = publish === 'proxy';
   const files: BundleFile[] = [
     { path: `${ctx.workdir}/db.env`, mode: 0o600, content: `POSTGRES_USER=graphyard\nPOSTGRES_DB=graphyard\nPOSTGRES_PASSWORD=${ctx.databasePassword}\n` },
-    { path: `${ctx.workdir}/server.env`, mode: 0o600, content: `${environment}\n` },
+    { path: `${ctx.workdir}/server.env`, mode: 0o600, content: `${environment.join('\n')}\n` },
     { path: `${ctx.workdir}/compose.yaml`, mode: 0o644, content: `name: graphyard-${ctx.installId}
 services:
   db:
@@ -103,7 +122,7 @@ services:
     image: ${ctx.image}
     restart: unless-stopped
     env_file: [server.env]
-    depends_on:
+${key ? `    volumes: ["./${PRIVATE_KEY_BUNDLE_NAME}:${PRIVATE_KEY_CONTAINER_PATH}:ro"]\n` : ''}    depends_on:
       db: { condition: service_healthy }
 ${proxied ? '    expose: ["' + SERVER_PORT + '"]' : `    ports: ["127.0.0.1:${ctx.port}:${SERVER_PORT}"]`}
 ${proxied ? `  proxy:
@@ -115,6 +134,7 @@ ${proxied ? `  proxy:
 ` : ''}volumes:
 ${ctx.dataPath ? '' : '  graphyard-data: {}\n'}${proxied ? '  caddy-data: {}\n  caddy-config: {}\n' : ''}` },
   ];
+  if (key) files.push({ path: `${ctx.workdir}/${PRIVATE_KEY_BUNDLE_NAME}`, mode: 0o600, content: key.value });
   // Without a registered domain Caddy issues an internal certificate: the endpoint is
   // encrypted but not publicly trusted, which the installer reports rather than hides.
   if (proxied) files.push({ path: `${ctx.workdir}/Caddyfile`, mode: 0o644, content: ctx.domain ? `${ctx.domain} {\n\treverse_proxy server:${SERVER_PORT}\n}\n` : `:443 {\n\ttls internal\n\treverse_proxy server:${SERVER_PORT}\n}\n` });
@@ -207,14 +227,21 @@ export const composeAdapter: ProviderAdapter = {
 // ---------------------------------------------------------------------------
 
 function requireHost(ctx: AdapterContext) {
-  if (!ctx.sshHost) throw new Error('This provider needs --ssh-host USER@HOST (or a provisioned server) before it can be reached');
+  // The transport always connects as `${--ssh-user}@${--ssh-host}`, so the hint must not suggest a USER@HOST value: following it would produce `root@user@host`.
+  if (!ctx.sshHost) throw new Error('This provider needs --ssh-host HOST (and --ssh-user USER when the target is not root) before it can be reached');
   return ctx.ssh(ctx.sshHost, ctx.sshUser);
 }
 
 export const dockerHostAdapter: ProviderAdapter = {
   provider: 'docker-host',
   async preflight(ctx) {
-    const items: PreflightItem[] = [{ name: 'SSH target', ok: !!ctx.sshHost, detail: ctx.sshHost ? `${ctx.sshUser}@${ctx.sshHost}` : 'no target selected', fix: 'Pass --ssh-host HOST and, when it is not root, --ssh-user USER' }];
+    const items: PreflightItem[] = [
+      { name: 'SSH target', ok: !!ctx.sshHost, detail: ctx.sshHost ? `${ctx.sshUser}@${ctx.sshHost}` : 'no target selected', fix: 'Pass --ssh-host HOST and, when it is not root, --ssh-user USER' },
+      // A bare host address can only get an internal certificate from Caddy, and the
+      // installer's own health check and GitHub's webhook delivery both reject that; a
+      // missing domain is refused here instead of after a doomed health loop.
+      { name: 'Public hostname', ok: !!ctx.domain, detail: ctx.domain ?? 'no domain selected; the health check and GitHub webhook delivery reject the internal certificate Caddy would issue for a bare host address', fix: `Pass --domain graphyard.example.com and point its A record at ${ctx.sshHost ?? 'this host'} for publicly trusted TLS` },
+    ];
     if (!ctx.sshHost) return items;
     const remote = requireHost(ctx);
     items.push(await tool(ctx, remote, 'docker', ['version', '--format', '{{.Server.Version}}'], 'Remote Docker Engine', `Install Docker Engine on ${ctx.sshHost}: ssh ${ctx.sshUser}@${ctx.sshHost} 'curl -fsSL https://get.docker.com | sh'`));
@@ -295,6 +322,10 @@ export const hetznerAdapter: ProviderAdapter = {
     const items = [await tool(ctx, ctx.transport, 'hcloud', ['version'], 'hcloud CLI', 'Install hcloud and run: hcloud context create graphyard')];
     items.push(await tool(ctx, ctx.transport, 'hcloud', ['context', 'active'], 'Hetzner Cloud project', 'Run: hcloud context create graphyard, then paste a project API token'));
     items.push({ name: 'Public hostname', ok: !!ctx.domain, detail: ctx.domain ?? 'no domain selected; Caddy will issue an internal certificate', fix: 'Pass --domain graphyard.example.com and point its A record at the created server for publicly trusted TLS' });
+    // The installer reaches the server over key-authenticated SSH only (BatchMode, no
+    // passwords). Without a key Hetzner sets a root password, and provisioning would wait
+    // out the SSH attempts before blaming cloud-init for a server it cannot log into.
+    items.push({ name: 'SSH key', ok: !!ctx.sshKey, detail: ctx.sshKey ?? 'no SSH key selected; without one the server is created with a root password that key-only SSH cannot use', fix: 'Pass --ssh-key NAME (hcloud ssh-key list prints the names)' });
     return items;
   },
   async observe(ctx) {
@@ -318,7 +349,7 @@ export const hetznerAdapter: ProviderAdapter = {
   },
   plan(ctx, observation) {
     return [
-      { id: 'provider.provision.server', target: 'provider', title: `Create Hetzner server ${ctx.service} (${ctx.serverType}, ${ctx.location}) with a Docker cloud-init and an attached data volume`, state: observation.compute ? 'satisfied' : 'create', command: `hcloud server create --name ${ctx.service} --type ${ctx.serverType} --location ${ctx.location} --image ubuntu-24.04` },
+      { id: 'provider.provision.server', target: 'provider', title: `Create Hetzner server ${ctx.service} (${ctx.serverType}, ${ctx.location}) with a Docker cloud-init and an attached data volume`, state: observation.compute ? 'satisfied' : 'create', command: `hcloud server create --name ${ctx.service} --type ${ctx.serverType} --location ${ctx.location} --image ubuntu-24.04${ctx.sshKey ? ` --ssh-key ${ctx.sshKey}` : ''}` },
       ...composeActions(ctx, observation, `Hetzner server ${ctx.service}`),
       { id: 'provider.tls', target: 'provider', title: ctx.domain ? `Terminate TLS for ${ctx.domain} with Caddy and automatic certificates` : 'Terminate TLS with a Caddy internal certificate (no public domain selected)', state: observation.app ? 'satisfied' : 'create' },
       { id: 'provider.backup', target: 'provider', title: `Schedule backups of the ${ctx.service}-data volume mounted at ${ctx.dataPath}; the work ledger lives only in Postgres`, state: 'update', command: `hcloud volume describe ${ctx.service}-data -o json` },
@@ -327,7 +358,7 @@ export const hetznerAdapter: ProviderAdapter = {
   async provision(ctx, observation) {
     if (!observation.compute) {
       await ctx.transport.exec('hcloud', ['volume', 'create', '--name', `${ctx.service}-data`, '--size', '20', '--location', ctx.location, '--format', 'ext4'], { allowFailure: true, timeout: 600_000 });
-      await ctx.transport.exec('hcloud', ['server', 'create', '--name', ctx.service, '--type', ctx.serverType, '--location', ctx.location, '--image', 'ubuntu-24.04', '--user-data-from-file', '-'], { input: cloudInit(ctx), timeout: 900_000 });
+      await ctx.transport.exec('hcloud', ['server', 'create', '--name', ctx.service, '--type', ctx.serverType, '--location', ctx.location, '--image', 'ubuntu-24.04', ...(ctx.sshKey ? ['--ssh-key', ctx.sshKey] : []), '--user-data-from-file', '-'], { input: cloudInit(ctx), timeout: 900_000 });
       await ctx.transport.exec('hcloud', ['volume', 'attach', `${ctx.service}-data`, '--server', ctx.service, '--automount'], { allowFailure: true, timeout: 600_000 });
     }
     const remote = ctx.ssh(await hetznerAddress(ctx), ctx.sshUser);
@@ -504,6 +535,8 @@ export const railwayAdapter: ProviderAdapter = {
  */
 export const secretVariableNames = new Set(['GRAPHYARD_PRINCIPALS', 'GITHUB_PRIVATE_KEY', 'GITHUB_WEBHOOK_SECRET']);
 const providerReference = /^\$\{\{[^{}]+\}\}$/;
+/** True for a shared reference such as `${{Postgres.DATABASE_URL}}`, which the provider resolves before reporting it back. */
+export const isProviderReference = (value: string) => providerReference.test(value.trim());
 export const carriesCredential = (name: string, value: string) => secretVariableNames.has(name) || (name === 'DATABASE_URL' && !providerReference.test(value.trim()));
 export const variableMarker = (name: string, value: string) => carriesCredential(name, value) ? `sha:${fingerprint(value)}` : value;
 
