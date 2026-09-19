@@ -69,6 +69,8 @@ Acceptance checks:
 
 ## D2 — One turnkey Playwright path
 
+*Shipped. See [runner setup](runner-setup.md) for the packaged runner and collector, and [validation](validation.md) for the protocol they speak. The requirements below remain the standard this path is held to; the acceptance checks at the end of this section are the ones it must keep passing.*
+
 Ship a supported runner integration and setup flow, not merely a protocol document. Start by discovering repository configuration and enumerating proposed tests. Let the operator review required scenarios, test inventory, target URL and proof mapping. An independently approved, digest-pinned test/oracle bundle is the executable authority; discovered package names and candidate-controlled commands are only suggestions. The runner verifies the bytes of the approved bundle, including transitive test helpers, fixtures, configuration, lockfiles and runner image/version, before execution. Execute that content-addressed bundle from a read-only boundary inaccessible to candidate-controlled build/setup/test-target processes for the entire attempt, with separately isolated scratch/output paths. Candidate code cannot replace imports, configuration, interpreters or approved runtime dependencies after verification; no shared writable filesystem or candidate-selected module/search path may supply executable oracle bytes. Validate these isolation properties in the supported adapter. It must not silently substitute tests from the implementation checkout. New or changed executable assertions require separately authorized bundle approval and an explicit scenario/requirement revision that pins that bundle; implementation-worker credentials cannot authorize this revision. The approved harness exercises the candidate artifact, so test authority remains separate from the product code under test.
 
 The runner should support an isolated self-hosted execution path and an existing CI execution path. Candidate code must not receive operator credentials or a generic trusted producer token. Separate test execution from the trusted collector that verifies request identity, test inventory, target attribution and artifacts. Scope any execution capability to one request/attempt. The collector must not treat arbitrary candidate-authored JSON as proof that a command ran or that the complete inventory executed.
@@ -108,6 +110,8 @@ Acceptance checks:
 
 ## D3 — Releases and observed production delivery
 
+*Shipped as the release model, observation protocol and bounded reconciliation. See [releases and observed production delivery](delivery.md) for the records, the observer and promoter identities, and the derived verification statuses. No provider adapter ships with it: an observer is an operator-run process with its own credential, and Railway's API does not expose measured runtime artifact identity, so a Railway observer would report `unknown` — which the protocol refuses to verify, by design. Behavioral checks bound to a release rather than a work item's candidate are not part of this increment. The requirements below remain the standard this path is held to; the acceptance checks at the end of this section are the ones `tests/delivery.test.ts` runs, one named test per check.*
+
 Add `Release`, explicit release membership, expected service manifests and append-only deployment observations. Keep desired state separate from provider-reported deployment success and independently observed runtime state. Record deployment time, observation time and receipt time separately.
 
 Release creation, immutable membership/manifest revisions and selection of the expected release require an authenticated promotion principal explicitly authorized for the repository, environment and services. Implementation workers and observation-only adapters cannot change desired state. Each selection transaction compares the expected current generation and, for delegated jobs, the current principal-bound lease epoch, checks the configured promotion/approval policy, then appends history and advances the generation atomically. Approval binds the exact manifest, source/artifact provenance and policy revision; changing any of them requires fresh authorization. A deployment notification cannot choose its own expected release.
@@ -136,6 +140,8 @@ Acceptance checks:
 - Later failures create a visible incident/follow-up without erasing prior evidence or rewriting historical authorization.
 
 ## D4 — Operate runners and recover delivery failures
+
+*Shipped as capacity reporting, request diagnostics and backpressure on the runner path, an artifact backend interface with an S3-compatible option, capacity bound, verified retention and digest-checked migration, and the authorized, fenced, observed rollback workflow. See [runner capacity, artifact operations and delivery recovery](recovery.md). The requirements below remain the standard this path is held to; the acceptance checks at the end of this section are the ones `tests/recovery.test.ts` runs, one named test per check.*
 
 Extend the execution-resource safety shipped in D2 with capacity reporting, backpressure, queue dwell and richer dispatch/heartbeat diagnostics. Execution-scoped leases, external fencing and verified settlement before reassignment are D2 prerequisites; D4 adds operational scale without relaxing those guarantees.
 

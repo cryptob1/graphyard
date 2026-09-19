@@ -27,7 +27,7 @@ Graphyard's own repository uses a protected acceptance workflow to prove its HTT
    ```
 
 4. Protect `main` with `node scripts/protect-github.mjs --plan`, review the output, then apply it.
-5. Open a Graphyard-linked PR. Confirm `Graphyard / merge` refuses before acceptance evidence exists.
+5. Open a Graphyard-linked PR. Confirm `Graphyard / merge` refuses before acceptance evidence exists. Capture the refusal with `node scripts/verify-enforcement.mjs GY-N PR_NUMBER`; its report names the publishing App, the observed protection, and every refusing gate.
 6. Dispatch the protected workflow from `main`:
 
    ```sh
@@ -37,7 +37,7 @@ Graphyard's own repository uses a protected acceptance workflow to prove its HTT
 
    Each dispatch produces exactly one proof. Pass `-f proof=integration:merge-authorization` to run the merge-broker contract instead; the workflow refuses a proof this harness cannot produce, and the reporter refuses a report whose case inventory does not match the proof it claims.
 
-7. Confirm current-head review, CI, trusted acceptance evidence, branch protection, and guarded merge all pass. Push a new commit once to verify old proof becomes stale.
+7. Confirm current-head review, CI, trusted acceptance evidence, branch protection, and guarded merge all pass. Rerun the inspection; the same command should now report `permitted` with no refusals. Push a new commit once to verify old proof becomes stale.
 
 ## Trust boundary
 
@@ -47,4 +47,6 @@ The exercise job runs candidate code with disposable principals. A separate `gra
 
 Neither proof establishes arbitrary product behavior, cross-machine recovery, or production delivery.
 
-After this loop succeeds, route further Graphyard work through Graphyard-assigned worktrees. See [development](development.md) for repository rules and [GitHub enforcement](github.md) for the general integration model.
+The refused and permitted reports are the operator's inspection record for the `manual:github-enforcement` criterion. They are not evidence: an operator inspects them and attests the proof from a separate admin session, and Graphyard re-verifies the exact candidate before merging.
+
+After this loop succeeds, route further Graphyard work through Graphyard-assigned worktrees. See [development](development.md) for repository rules and [GitHub enforcement](github.md#inspect-enforcement) for the general integration model.

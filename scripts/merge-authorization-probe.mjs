@@ -38,10 +38,14 @@ export async function probeMergeAuthorization({ url, controlUrl, controlToken, p
       return { status: response.status, body: await response.json() };
     };
     const refusal = result => ({ status: result.status, message: String(result.body?.error ?? '') });
-    const observeWork = observeCandidate ?? (async (item, observation) => {
-      const response = await fetch(`${controlUrl}/observe`, { method: 'POST', headers: { Authorization: `Bearer ${controlToken}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ id: item.id, revision: item.revision, observation }), signal: AbortSignal.timeout(20_000) });
+    const observeWork = observeCandidate ?? (async (item, observation, speculation) => {
+      const response = await fetch(`${controlUrl}/observe`, { method: 'POST', headers: { Authorization: `Bearer ${controlToken}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ id: item.id, revision: item.revision, observation, ...(speculation ? { speculation } : {}) }), signal: AbortSignal.timeout(20_000) });
       const body = await response.json(); if (!response.ok) throw new Error(body.error || 'Probe observation failed'); return body;
     });
+    // The merge queue is the only path onto the base branch, and only Graphyard publishes a
+    // speculative tip. Like the observation itself, the harness supplies that binding; no
+    // client-controlled route can invent one.
+    const speculation = (item, sha, baseSha) => ({ ref: `refs/graphyard/queue/${item.key.toLowerCase()}`, tip: sha, base: baseSha, baseTree: '7e'.repeat(20), predecessors: [], policyRevision: item.policyRevision, publishedAt: new Date().toISOString() });
 
     let work = (await call('work', 'probe-operator', { title: 'Merge authorization probe', criteria: [{ id: 'AC-1', text: 'A revoked candidate cannot merge', proofs: [proof] }] })).body;
     await call(`work/${work.id}/ready`, 'probe-operator', {});
@@ -55,12 +59,13 @@ export async function probeMergeAuthorization({ url, controlUrl, controlToken, p
       candidate: { sha: head, baseSha: base, pr: 4001, branch, author: 'probe-implementer' },
       checks: [{ name: 'test', result: 'success', appId: 15368 }, { name: 'typecheck', result: 'success', appId: 15368 }],
       reviews: [{ reviewer: 'probe-reviewer', sha: head, state: 'APPROVED' }],
-      protected: true, mergeable: true, merged: false, mergeSha: null, files: ['src/engine.ts'],
+      protected: true, mergeable: true, merged: false, mergeSha: null, files: ['src/engine.ts'], scopeFiles: [],
       at: new Date().toISOString(), ...extra,
     });
     snapshot = observe({ prState: 'open', draft: false });
     work = await observeWork(work, observe());
     work = (await call(`work/${work.id}/evidence`, 'probe-producer', { proof, sha: head, baseSha: base, policyRevision: work.policyRevision, result: 'pass', executed: 9, skipped: 0 })).body;
+    work = await observeWork(work, observe(), speculation(work, head, base));
     record('authorized-candidate', { stage: work.stage, gatesPassed: work.gates.every(gate => gate.passed), authorized: !!work.mergeAuthorization });
 
     const acquireInput = { expectedRevision: work.revision, sha: head, baseSha: base, policyRevision: work.policyRevision };
@@ -81,6 +86,7 @@ export async function probeMergeAuthorization({ url, controlUrl, controlToken, p
     const revoked = (await call(`work/${work.id}/revoke`, 'probe-producer', withdrawal)).body;
     record('revoked', {
       stage: revoked.stage, execution: revoked.mergeExecution, authorization: revoked.mergeAuthorization,
+      queue: revoked.queue ?? null, ejection: revoked.queueEjection ? { sha: revoked.queueEjection.sha, reason: revoked.queueEjection.reason } : null,
       acceptanceReasons: revoked.gates?.find(gate => gate.name === 'acceptance')?.reasons ?? [],
       revocations: (revoked.evidence ?? []).filter(item => item.revocation).map(item => ({ proof: item.proof, actor: item.revocation.actor, reason: item.revocation.reason })),
       retainedEvidence: (revoked.evidence ?? []).length,
@@ -113,6 +119,7 @@ export async function probeMergeAuthorization({ url, controlUrl, controlToken, p
     snapshot = observe({ candidate: { sha: head, baseSha: base, pr: 4002, branch: racedBranch, author: 'probe-implementer' }, prState: 'open', draft: false });
     raced = await observeWork(raced, snapshot);
     raced = (await call(`work/${raced.id}/evidence`, 'probe-producer', { proof, sha: head, baseSha: base, policyRevision: raced.policyRevision, result: 'pass', executed: 9, skipped: 0 })).body;
+    raced = await observeWork(raced, snapshot, speculation(raced, head, base));
     const racedAcquire = (await call(`work/${raced.id}/merge-acquire`, 'probe-coordinator', { expectedRevision: raced.revision, sha: head, baseSha: base, policyRevision: raced.policyRevision })).body;
     await call(`work/${raced.id}/merge-verify`, 'probe-coordinator', { executionId: racedAcquire.execution.id });
     const racedWithdrawal = { proof, sha: head, baseSha: base, policyRevision: raced.policyRevision, reason: 'Probe raced final provider commit' };

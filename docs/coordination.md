@@ -51,7 +51,7 @@ Existing E2E proof names retain their pinned scenario version. Newly added E2E p
 
 ## Detect overlap without pretending to understand every API
 
-`plannedFiles` can contain exact repository-relative paths or directory prefixes ending in `/`, `/*`, or `/**`. For this advisory feature all three directory forms include descendants. Arbitrary glob expressions, renames across historical paths, generated-file relationships and semantic dependencies are not inferred.
+`plannedFiles` can contain exact repository-relative paths or directory prefixes ending in `/`, `/*`, or `/**`. All three directory forms include descendants, for overlap warnings and for the [regression guard](#refuse-candidates-that-revert-shipped-code-outside-their-scope) alike. Arbitrary glob expressions, renames across historical paths, generated-file relationships and semantic dependencies are not inferred.
 
 Graphyard compares planned paths and provider-observed PR files against other unfinished ready, assigned or submitted work. Cards show the other work keys; details show the overlapping scopes. Backlog-only peers are omitted until scheduled. Warnings may use the last observed diff; they are not proof of current filesystem contents. Overlap does not block a claim: two compatible edits may legitimately touch the same file. Coordinate or add an explicit dependency when ordering is required.
 
@@ -59,9 +59,27 @@ Graphyard compares planned paths and provider-observed PR files against other un
 
 Optional `exclusiveResources` names declare resources that cannot be assigned concurrently, such as `staging:sms-test-account`. Names are case-sensitive lowercase identifiers using letters, digits, `.`, `_`, `:`, `/`, and `-`. Give the same real resource the same name throughout this single-repository installation.
 
-Claiming work atomically reserves all declared names for that assignment. A conflicting active assignment refuses the whole claim. `next` and master dispatch exclude work with busy resources. Reservations normally follow the worker lease: release or expiry makes them claimable again, and an old heartbeat cannot recover expired authority. If an assignment has a containment quarantine, however, all of its declared resources remain reserved after lease expiry. They become available only after verified capability settlement or operator-confirmed stopped-worker recovery clears the quarantine. Rework performs that recovery for undelivered work and authorizes reassignment. On delivered work, capability settlement or `recover-containment --previous-worker-stopped` removes only the quarantine and releases its resource fence. It appends required audit/revision metadata without re-evaluating stale observation or evidence, preserving Done, recorded gates, candidate, evidence, observation, merge authorization, and the delivery snapshot. Non-delivered settlement retains normal gate evaluation. Submission alone does not release an active lease.
+Claiming work atomically reserves all declared names for that assignment. A conflicting active assignment refuses the whole claim. `next` and master dispatch exclude work with busy resources. Reservations normally follow the worker lease: release or expiry makes them claimable again, and an old heartbeat cannot recover expired authority. If an assignment has a containment quarantine, however, all of its declared resources remain reserved after lease expiry. They become available only after the quarantine is cleared: by verified capability settlement, by a coordinator that verified the supervisor dead on the registered host ([automatic containment settlement](protocol.md#automatic-containment-settlement)), or by operator-confirmed stopped-worker recovery. Rework performs that recovery for undelivered work and authorizes reassignment. On delivered work, capability settlement or `recover-containment --previous-worker-stopped` removes only the quarantine and releases its resource fence. It appends required audit/revision metadata without re-evaluating stale observation or evidence, preserving Done, recorded gates, candidate, evidence, observation, merge authorization, and the delivery snapshot. Non-delivered settlement retains normal gate evaluation. Submission alone does not release an active lease.
 
 These are coordination reservations, not physical locks on an external account or environment. A disconnected process may still access external systems using its credentials. Use supervised workers and verify that the old process has stopped before touching shared resources. Runner-specific resource fencing and leases spanning independent E2E execution are part of future runner orchestration. Never treat a resource name as a substitute for an access-control boundary.
+
+## Refuse candidates that revert shipped code outside their scope
+
+`plannedFiles` is also the boundary of what a candidate may change. A worker that merges the base branch and re-resolves a file it does not own in favour of its branch silently deletes code and tests that already merged, and a reviewer is a slow and unreliable way to notice. Graphyard catches it at `complete`, before review, and again on every new head:
+
+- Every file the pull request changes is classified against the work item's `plannedFiles`. Changes strictly inside scope pass, and so do new files nobody has shipped.
+- Every other file is compared with the commit the candidate is bound to — the base branch tip, or the predicted base of a published speculative tip — by blob identity. A file that matches byte-for-byte passes. A file that is deleted, reverted (lines removed and nothing added), rewritten, renamed away from a shipped path, or a binary that differs is refused. A file the observation could not compare is refused too; absence of evidence is never a pass.
+- `complete` observes the pull request first and refuses the submission with the exact file list and the delivered work items whose planned files or observed diff shipped each path. Nothing is recorded for a refused submission. Once the submission is accepted, every reconciliation re-derives the same refusal for the current head into the `build` gate, the `Graphyard / merge` check, `diagnose` (`gate-build` entries) and the work detail drawer, so a bad merge pushed during rework is caught the same way.
+
+Workers keep the base branch current with `sync`:
+
+```sh
+graphyard sync GY-N
+```
+
+It runs `git fetch origin && git merge origin/BASE` — a merge, never a rebase, so the history and every resolution stay visible — and then classifies the local diff against the fetched base tip with the same rules. It prints every offending file and exits non-zero before anything is pushed; a conflicting merge stops with the conflicted paths and no resolution is made for the worker. The generated `AGENTS.md` block requires `sync` before every push and states that files outside `plannedFiles` must match `origin/BASE` byte-for-byte. Restoring a file is `git checkout BASE_TIP -- PATH`; for a rename, restore the original path.
+
+The scope is the operator's. A worker cannot widen `plannedFiles`: the `workspace`, `submit` and `evidence` commands never accept it, and only the audited [`requirements` revision](#revise-requirements-explicitly) changes it. A master that returns a refused candidate for rework should quote the refusal's file list in the rework reason and ask the worker to run `sync GY-N` and restore each file rather than re-resolve the merge.
 
 ## Explain stalls
 
@@ -69,7 +87,7 @@ These are coordination reservations, not physical locks on an external account o
 graphyard diagnose GY-N
 ```
 
-The CLI and work detail drawer explain dependencies, explicit blockers, missing ownership or workspace, busy resources, unobserved/stale PRs, integration failures, overdue unowned integration jobs, violations and the first refusing gate. Output includes required proof and file overlap. Work, job metadata and database time come from one snapshot. This is diagnostic evidence, not another lifecycle state setter.
+The CLI and work detail drawer explain dependencies, explicit blockers, missing ownership or workspace, busy resources, unobserved/stale PRs, integration failures, overdue unowned integration jobs, violations and the first refusing gate, including an [out-of-scope regression](#refuse-candidates-that-revert-shipped-code-outside-their-scope) refusal with its file list. Output includes required proof and file overlap. Work, job metadata and database time come from one snapshot. This is diagnostic evidence, not another lifecycle state setter.
 
 Released and expired assignments are described as no longer authoritative; the UI does not invent a cause or claim the process has terminated. Integration errors retain automatic retry information. Missing observation and unavailable connectivity must not be interpreted as successful delivery.
 

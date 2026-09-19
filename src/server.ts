@@ -6,20 +6,26 @@ import { pathToFileURL } from 'node:url';
 import { z } from 'zod';
 import { Store } from './store.js';
 import { Engine, type Command } from './engine.js';
-import { Refusal, demand, type Principal } from './model.js';
+import { Refusal, demand, operatorScopeIncludes, parseReviewerApps, type Principal } from './model.js';
 import { githubFromEnv, processJob, type GitHub } from './github.js';
 import { Validation } from './validation.js';
+import { Delivery } from './delivery.js';
 import { defineScenario, scenarios } from './scenarios.js';
 import { OperatorAgents } from './operator-agent.js';
+import { delegationLimits, delegationSnapshot, producerIndependenceRefusal, recordEvidenceRefusal, recordIntake, recordLeadRuling, recordLeadViolation, validateDelegationPrincipals } from './delegation.js';
+import { ProofGrants } from './proof-grants.js';
+import { artifactBackendFromEnv, artifactCapacityFromEnv, type ArtifactBackend } from './artifacts.js';
 
-export const principalSchema = z.array(z.object({ id: z.string().min(1), role: z.enum(['admin', 'coordinator', 'worker', 'producer', 'reader']), token: z.string().min(32), proofs: z.array(z.string()).optional(), displayName: z.string().trim().min(1).max(100).regex(/^[^\u0000-\u001f\u007f]+$/).optional(), runtime: z.string().trim().min(1).max(80).regex(/^[^\u0000-\u001f\u007f]+$/).optional() }).strict()).min(1);
+export const principalSchema = z.array(z.object({ id: z.string().min(1), role: z.enum(['admin', 'coordinator', 'slice-lead', 'worker', 'producer', 'reader']), token: z.string().min(32), proofs: z.array(z.string()).optional(), displayName: z.string().trim().min(1).max(100).regex(/^[^\u0000-\u001f\u007f]+$/).optional(), runtime: z.string().trim().min(1).max(80).regex(/^[^\u0000-\u001f\u007f]+$/).optional(), slice: z.enum(['product', 'infrastructure', 'docs-experience']).optional(), sessionKind: z.enum(['human', 'ai']).optional() }).strict()).min(1);
 export type Credential = Principal & { token: string };
 async function body(req: IncomingMessage, limit = 1_000_000) {
   const chunks: Buffer[] = []; let size = 0;
   for await (const chunk of req) { size += chunk.length; demand(size <= limit, 'Request exceeds size limit', 413); chunks.push(chunk); }
   return Buffer.concat(chunks);
 }
-export function server(engine: Engine, credentials: Credential[], github: GitHub | null = null) {
+export function server(engine: Engine, credentials: Credential[], github: GitHub | null = null, artifacts: { backend: ArtifactBackend | null; capacityBytes: number } = { backend: null, capacityBytes: artifactCapacityFromEnv() }) {
+  const limits = delegationLimits();
+  validateDelegationPrincipals(credentials, limits);
   const principals = credentials.map(({ token, ...actor }) => ({ actor, hash: createHash('sha256').update(token).digest() }));
   // The engine is constructed with the repository that this control plane is
   // authorized to coordinate.  GITHUB_REPOSITORY is merely a process default
@@ -32,9 +38,21 @@ export function server(engine: Engine, credentials: Credential[], github: GitHub
   // by authentication and operator-agent administration. Some embedders pass
   // the repository only through their GitHub adapter.
   engine.repository = repository;
+  // Reviewer identities come from deployment configuration alongside the control-plane App,
+  // so a single parsed registry authorizes both policy validation and provider observation.
+  if (github) { engine.reviewerApps = github.config.reviewerApps ?? []; engine.controlPlaneAppId = github.config.appId; }
+  demand(!engine.reviewerApps.some(app => app.appId === engine.controlPlaneAppId),
+    'A registered reviewer App must be distinct from the Graphyard control-plane App');
   const validation = new Validation(engine, principals.map(p => p.actor), repository);
+  validation.artifactBackend = artifacts.backend; validation.artifactCapacityBytes = artifacts.capacityBytes;
+  const delivery = new Delivery(validation);
   const operatorAgents = new OperatorAgents(engine.store, repository, credentials.map(credential => ({ id: credential.id, tokenHash: createHash('sha256').update(credential.token).digest('hex') })));
   engine.operatorAuthorizer = operatorAgents.revalidate.bind(operatorAgents);
+  // Proof authority is Graphyard state. The configured registry only identifies which
+  // principals exist and what role each holds; the grant store decides what they may prove.
+  const configured = credentials.map(({ token, ...actor }) => actor);
+  engine.principals = configured;
+  const proofGrants = new ProofGrants(engine.store, configured);
   return createServer(async (req, res) => {
     res.setHeader('X-Content-Type-Options', 'nosniff');
     res.setHeader('Referrer-Policy', 'no-referrer');
@@ -71,28 +89,55 @@ export function server(engine: Engine, credentials: Credential[], github: GitHub
         if (actor.role === 'operator-agent') demand(actor.scope?.repositories.includes(repository), 'Repository is outside operator-agent scope', 403);
         if (url.pathname === '/api/operator-agents' && req.method === 'GET') return send(200, await operatorAgents.list(actor));
         if (url.pathname === '/api/operator-agents' && req.method === 'POST') return send(200, await operatorAgents.setup(actor, JSON.parse((await body(req)).toString()), String(req.headers['idempotency-key'] ?? '')));
+        if (url.pathname === '/api/proof-grants' && req.method === 'GET') return send(200, await proofGrants.list(actor));
+        const grantHistory = url.pathname.match(/^\/api\/proof-grants\/([^/]+)\/history$/);
+        if (grantHistory && req.method === 'GET') return send(200, await proofGrants.history(actor, decodeURIComponent(grantHistory[1])));
+        const grantRoute = url.pathname.match(/^\/api\/proof-grants\/([^/]+)\/(grant|revoke)$/);
+        if (grantRoute && req.method === 'POST') {
+          const data = JSON.parse((await body(req)).toString()), key = String(req.headers['idempotency-key'] ?? ''), target = decodeURIComponent(grantRoute[1]);
+          return send(200, grantRoute[2] === 'grant' ? await proofGrants.grant(actor, target, data, key) : await proofGrants.revoke(actor, target, data, key));
+        }
         const operatorRoute = url.pathname.match(/^\/api\/operator-agents\/([^/]+)\/(configure|rotate|revoke)$/);
         if (operatorRoute && req.method === 'POST') {
           const data = JSON.parse((await body(req)).toString()), key = String(req.headers['idempotency-key'] ?? '');
           return send(200, operatorRoute[2] === 'configure' ? await operatorAgents.configure(actor, operatorRoute[1], data, key)
             : operatorRoute[2] === 'rotate' ? await operatorAgents.rotate(actor, operatorRoute[1], data, key) : await operatorAgents.revoke(actor, operatorRoute[1], data, key));
         }
-        const operatorVisible = (items: any[]) => actor.role !== 'operator-agent' ? items : items.filter(item => actor.scope?.workItems.includes('*') || actor.scope?.workItems.includes(item.id) || actor.scope?.workItems.includes(item.key));
+        const operatorVisible = (items: any[]) => items.filter(item => operatorScopeIncludes(actor, item));
         if (actor.role === 'operator-agent') demand(
-          url.pathname === '/api/status' || url.pathname === '/api/work-snapshot' || url.pathname === '/api/work' || url.pathname === '/api/events' || /^\/api\/work(?:\/[^/]+\/[a-z]+)?$/.test(url.pathname),
+          url.pathname === '/api/status' || url.pathname === '/api/work-snapshot' || url.pathname === '/api/work' || url.pathname === '/api/events'
+          || url.pathname === '/api/delegation' || url.pathname === '/api/intake' || /^\/api\/work(?:\/[^/]+\/[a-z]+)?$/.test(url.pathname),
           'Route is not available to operator agents', 403);
+        // Delegation is a read over work items, so it is filtered by the same scope
+        // rule as every other read; a scoped agent never sees out-of-scope owners,
+        // workers, or bottlenecks here or inside /api/status.
+        if (url.pathname === '/api/delegation' && req.method === 'GET') return send(200, delegationSnapshot(principals.map(p => p.actor), operatorVisible(await engine.store.list()), Date.now(), limits));
+        if (url.pathname === '/api/intake' && req.method === 'POST') return send(200, await recordIntake(engine.store, actor, JSON.parse((await body(req)).toString()), String(req.headers['idempotency-key'] ?? '')));
+        const leadRoute = url.pathname.match(/^\/api\/work\/([^/]+)\/lead-ruling$/);
+        if (leadRoute && req.method === 'POST') return send(200, await recordLeadRuling(engine.store, actor, leadRoute[1], JSON.parse((await body(req)).toString()), String(req.headers['idempotency-key'] ?? '')));
         if (url.pathname === '/api/validation/artifacts' && req.method === 'POST') return send(200, await validation.uploadArtifact(actor, JSON.parse((await body(req, 11_200_000)).toString()), String(req.headers['idempotency-key'] ?? '')));
         const artifactRead = url.pathname.match(/^\/api\/validation\/artifacts\/([^/]+)\/([^/]+)$/);
         if (artifactRead && req.method === 'GET') {
           const artifact = await validation.readArtifact(actor, artifactRead[1], artifactRead[2]);
-          res.writeHead(200, { 'Content-Type': 'application/octet-stream', 'Content-Disposition': 'attachment; filename="graphyard-artifact"', 'Content-Length': artifact.bytes.length });
+          const safePreview = artifact.bytes.length <= 1_000_000 && (artifact.mediaType === 'image/png' || artifact.mediaType === 'application/json' || artifact.mediaType === 'text/plain');
+          const preview = url.searchParams.get('preview') === '1' && safePreview;
+          const filename = artifact.name.replace(/[^a-zA-Z0-9._-]/g, '_') || 'graphyard-artifact';
+          res.writeHead(200, { 'Content-Type': preview ? artifact.mediaType : 'application/octet-stream', 'Content-Disposition': `${preview ? 'inline' : 'attachment'}; filename="${filename}"`, 'Content-Length': artifact.bytes.length,
+            'X-Content-Type-Options': 'nosniff', 'Content-Security-Policy': "default-src 'none'; sandbox", 'Cache-Control': 'no-store' });
           return res.end(artifact.bytes);
         }
         if (url.pathname === '/api/validation' && req.method === 'GET') return send(200, await validation.list(url.searchParams.get('cursor') ?? undefined));
+        // D4: runner capacity, queue dwell, reserved resources and a diagnosed next step per live request.
+        if (url.pathname === '/api/validation/capacity' && req.method === 'GET') return send(200, await validation.capacity());
+        if (url.pathname === '/api/validation/artifacts/migrate' && req.method === 'POST') return send(200, await validation.migrateArtifacts(actor, JSON.parse((await body(req)).toString() || '{}')));
         if (url.pathname === '/api/validation/definitions' && req.method === 'GET') return send(200, await validation.definitions(url.searchParams.get('cursor') ?? undefined));
         const candidateRead = url.pathname.match(/^\/api\/validation\/candidate\/([^/]+)$/);
         if (candidateRead && req.method === 'GET') return send(200, await validation.readCandidate(candidateRead[1]));
-        const validationRoute = url.pathname.match(/^\/api\/validation\/(define|build|candidate|request|dispatch|ack|heartbeat|result|cancel|settle|retry)$/);
+        // The host attestor's independent read of what it is about to execute. Read-only,
+        // and refused to the worker and producer credentials that run and collect.
+        const attemptRead = url.pathname.match(/^\/api\/validation\/attempt\/([^/]+)$/);
+        if (attemptRead && req.method === 'GET') return send(200, await validation.attemptAuthority(actor, attemptRead[1]));
+        const validationRoute = url.pathname.match(/^\/api\/validation\/(define|build|candidate|request|dispatch|ack|heartbeat|collection-authority|collection-heartbeat|result|cancel|settle|retry)$/);
         if (validationRoute && req.method === 'POST') {
           const command = validationRoute[1], data = JSON.parse((await body(req)).toString()), key = String(req.headers['idempotency-key'] ?? '');
           const result = command === 'define' ? await validation.define(actor, data, key)
@@ -102,7 +147,31 @@ export function server(engine: Engine, credentials: Credential[], github: GitHub
             : command === 'dispatch' ? await validation.dispatch(actor, data, key)
             : command === 'result' ? await validation.result(actor, data, key)
             : command === 'ack' || command === 'heartbeat' ? await validation.runnerCommand(actor, command, data, key)
+            : command === 'collection-heartbeat' ? await validation.collectionHeartbeat(actor, data, key)
+            : command === 'collection-authority' ? await validation.collectionAuthority(actor, data)
             : await validation.operatorCommand(actor, command as 'cancel' | 'settle' | 'retry', data, key);
+          return send(200, result);
+        }
+        // D3: releases, expected-release selection and deployment observations. Reads are
+        // open to every authenticated non-operator-agent credential; each mutation derives its
+        // authority from the credential and the registration it names.
+        if (url.pathname === '/api/delivery' && req.method === 'GET') return send(200, await delivery.status());
+        if (url.pathname === '/api/delivery/observations' && req.method === 'GET') return send(200, await delivery.observations(url.searchParams.get('environment') ?? '', url.searchParams.get('cursor') ?? undefined));
+        const deliveryRoute = url.pathname.match(/^\/api\/delivery\/(build|release|approve|select|lease|observe|notify|sweep|rollback|rollback-claim|rollback-settle|rollback-resolve)$/);
+        if (deliveryRoute && req.method === 'POST') {
+          const command = deliveryRoute[1], data = JSON.parse((await body(req)).toString() || '{}'), key = String(req.headers['idempotency-key'] ?? '');
+          if (command === 'sweep') { demand(actor.role === 'admin', 'Operator permission required', 403); return send(200, await delivery.sweep()); }
+          const result = command === 'build' ? await delivery.attestBuild(actor, data, key)
+            : command === 'release' ? await delivery.createRelease(actor, data, key)
+            : command === 'approve' ? await delivery.approve(actor, data, key)
+            : command === 'select' ? await delivery.select(actor, data, key)
+            : command === 'lease' ? await delivery.lease(actor, data)
+            : command === 'observe' ? await delivery.observe(actor, data, key)
+            : command === 'rollback' ? await delivery.requestRollback(actor, data, key)
+            : command === 'rollback-claim' ? await delivery.claimRollback(actor, data, key)
+            : command === 'rollback-settle' ? await delivery.settleRollback(actor, data, key)
+            : command === 'rollback-resolve' ? await delivery.resolveRollback(actor, data, key)
+            : await delivery.notify(actor, data);
           return send(200, result);
         }
         if (url.pathname === '/api/scenarios') {
@@ -113,9 +182,9 @@ export function server(engine: Engine, credentials: Credential[], github: GitHub
           const jobs = actor.role === 'operator-agent' ? [] : (await engine.store.pool.query('SELECT work_id,available_at,locked_until,attempts,error FROM jobs WHERE error IS NOT NULL ORDER BY available_at LIMIT 50')).rows;
           const githubRepository = github ? await github.reviewRepository() : null;
           const githubPermissions = github ? await github.reviewPermissions() : {};
-          const codexAvailable = !!githubRepository && githubPermissions.pull_requests === 'write' && ['read', 'write'].includes(githubPermissions.issues) && githubPermissions.checks === 'write';
+          const dispatchAvailable = !!githubRepository && githubPermissions.pull_requests === 'write' && ['read', 'write'].includes(githubPermissions.issues) && githubPermissions.checks === 'write';
           const observedAt = (await engine.store.pool.query('SELECT clock_timestamp() AS now')).rows[0].now as Date;
-          return send(200, { actor, repository: repository || null, baseBranch: github?.config.base ?? process.env.GITHUB_BASE_BRANCH ?? 'main', github: !!github, check: 'Graphyard / merge', reviewProviders: codexAvailable ? ['github', 'codex'] : ['github'], githubPermissions, githubRepository, githubAppId: github?.config.appId ?? null, githubInstallationId: github?.config.installationId ?? null, jobs, now: observedAt.toISOString() });
+          return send(200, { actor, delegation: delegationSnapshot(principals.map(p => p.actor), operatorVisible(await engine.store.list()), observedAt.getTime(), limits), repository: repository || null, baseBranch: github?.config.base ?? process.env.GITHUB_BASE_BRANCH ?? 'main', github: !!github, check: 'Graphyard / merge', reviewProviders: ['github', ...(dispatchAvailable ? ['codex'] : []), ...(dispatchAvailable && engine.reviewerApps.length ? ['agent'] : [])], reviewerApps: engine.reviewerApps, githubPermissions, githubRepository, githubAppId: github?.config.appId ?? null, githubInstallationId: github?.config.installationId ?? null, jobs, now: observedAt.toISOString() });
         }
         if (req.method === 'GET' && url.pathname === '/api/work-snapshot') { const snapshot = await engine.store.workSnapshot(); const visibleWork = operatorVisible(snapshot.work); return send(200, { ...snapshot, work: visibleWork, jobs: actor.role === 'operator-agent' ? snapshot.jobs.filter(job => visibleWork.some(work => work.id === job.work_id)) : snapshot.jobs }); }
         if (req.method === 'GET' && url.pathname === '/api/work') return send(200, operatorVisible(await engine.store.list()));
@@ -125,8 +194,19 @@ export function server(engine: Engine, credentials: Credential[], github: GitHub
           if (actor.role === 'operator-agent') { demand(id, 'Operator-agent history reads require a scoped work item', 403); const item = (await engine.store.list()).find(w => w.id === id); demand(item && operatorVisible([item]).length, 'Work item is outside this operator-agent scope', 403); }
           return send(200, await engine.store.events(id));
         }
+        // Every mutating work route refuses a slice lead the same way and leaves
+        // the same ledger entry. Routing order decides which handler matches
+        // first; it must never decide whether the attempt is recorded.
+        const refuseLead = async (id: string | null, attemptedAction: string) => {
+          if (actor.role !== 'slice-lead') return;
+          await recordLeadViolation(engine.store, actor, id, attemptedAction);
+          demand(false, 'Slice leads cannot perform lifecycle mutations', 403);
+        };
         const mergeRoute = url.pathname.match(/^\/api\/work\/([^/]+)\/merge-(acquire|cancel|verify|commit)$/);
         if (req.method === 'POST' && mergeRoute) {
+          // These routes sit above the generic work route, so their own refusal
+          // is recorded here rather than inherited from a handler never reached.
+          await refuseLead(mergeRoute[1], `merge-${mergeRoute[2]}`);
           const data = JSON.parse((await body(req)).toString() || '{}'), key = String(req.headers['idempotency-key'] ?? '');
           if (mergeRoute[2] === 'acquire') return send(200, await engine.acquireMerge(actor, mergeRoute[1], data, key));
           if (mergeRoute[2] === 'cancel') return send(200, await engine.cancelMerge(actor, mergeRoute[1], data, key));
@@ -146,8 +226,23 @@ export function server(engine: Engine, credentials: Credential[], github: GitHub
         }
         const match = url.pathname.match(/^\/api\/work(?:\/([^/]+)\/([a-z]+))?$/);
         if (req.method === 'POST' && match) {
+          const attempted = match[2] ?? 'create';
+          // Creating work names no existing item, so the refusal is recorded
+          // unscoped rather than dropped for want of a ledger to append to.
+          await refuseLead(match[1] ?? null, attempted);
           const raw = await body(req);
-          const result = await engine.execute(actor, (match[2] ?? 'create') as Command, match[1] ?? null, JSON.parse(raw.toString() || '{}'), String(req.headers['idempotency-key'] ?? ''));
+          if (attempted === 'evidence' && match[1] && actor.role !== 'worker') {
+            const item = (await engine.store.list()).find(w => w.id === match[1] || w.key === match[1]);
+            const dependent = item ? producerIndependenceRefusal(actor, item, engine.principals) : null;
+            if (item && dependent) {
+              // An unparsable body is still a recorded refusal; the engine repeats this decision.
+              let proof: unknown = null;
+              try { proof = JSON.parse(raw.toString() || '{}')?.proof; } catch { proof = null; }
+              await recordEvidenceRefusal(engine.store, actor, item.id, proof, dependent);
+              demand(false, dependent, 403);
+            }
+          }
+          const result = await engine.execute(actor, attempted as Command, match[1] ?? null, JSON.parse(raw.toString() || '{}'), String(req.headers['idempotency-key'] ?? ''));
           return send(200, result);
         }
         return send(404, { error: 'Route not found' });
@@ -176,15 +271,26 @@ async function main() {
   const store = new Store(process.env.DATABASE_URL ?? 'postgres://graphyard:graphyard@localhost:5438/graphyard');
   await store.init();
   const engine = new Engine(store, (process.env.GITHUB_CI_APP_IDS ?? '15368').split(',').map(Number));
+  engine.reviewerApps = parseReviewerApps(process.env.GRAPHYARD_REVIEWER_APPS);
   const github = await githubFromEnv();
-  const http = server(engine, credentials, github);
+  const artifacts = { backend: artifactBackendFromEnv(), capacityBytes: artifactCapacityFromEnv() };
+  const http = server(engine, credentials, github, artifacts);
+  // One-time materialization of the deployment allowlist. Operators manage proof authority
+  // inside Graphyard from here on; a later environment edit no longer changes authority.
+  const seeded = await new ProofGrants(store, credentials.map(({ token, ...actor }) => actor)).seed();
+  if (seeded.length) console.log(`Seeded proof grants for ${seeded.map(grant => grant.principalId).join(', ')}`);
   const validation = new Validation(engine, credentials.map(({ token, ...actor }) => actor), github?.config.repository ?? process.env.GITHUB_REPOSITORY ?? '');
+  validation.artifactBackend = artifacts.backend; validation.artifactCapacityBytes = artifacts.capacityBytes;
+  const delivery = new Delivery(validation);
+  console.log(`Artifact storage: ${artifacts.backend?.label ?? 'postgres'}; capacity ${artifacts.capacityBytes} bytes`);
   await validation.expireArtifacts();
   await validation.reconcile(true);
   let running = false;
   const timer = setInterval(async () => {
     if (running) return; running = true;
-    try { await validation.expireArtifacts(); await validation.reconcile(); await engine.reconcile(); if (github) await Promise.all(Array.from({ length: 4 }, () => processJob(engine, github))); }
+    // The delivery sweep is bounded per tick and resumes from its persisted cursor, so a
+    // backlog of observations drains across ticks without ever skipping one.
+    try { await validation.expireArtifacts(); await validation.reconcile(); await engine.reconcile(); await delivery.sweep(); if (github) await Promise.all(Array.from({ length: 4 }, () => processJob(engine, github))); }
     catch (error) { console.error('reconciliation failed', error instanceof Error ? error.message : 'unknown'); }
     finally { running = false; }
   }, 2000);

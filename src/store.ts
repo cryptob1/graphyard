@@ -17,6 +17,20 @@ CREATE OR REPLACE FUNCTION graphyard_immutable() RETURNS trigger LANGUAGE plpgsq
 BEGIN RAISE EXCEPTION 'The event ledger is append-only'; END $$;
 DROP TRIGGER IF EXISTS immutable_events ON events;
 CREATE TRIGGER immutable_events BEFORE UPDATE OR DELETE ON events FOR EACH ROW EXECUTE FUNCTION graphyard_immutable();
+CREATE TABLE IF NOT EXISTS lead_rulings (
+  id uuid PRIMARY KEY, work_id uuid NOT NULL REFERENCES work_items(id), lead_id text NOT NULL,
+  slice_id text NOT NULL, action text NOT NULL, rule_id text NOT NULL, reason text NOT NULL,
+  created_at timestamptz NOT NULL DEFAULT clock_timestamp()
+);
+DROP TRIGGER IF EXISTS immutable_lead_rulings ON lead_rulings;
+CREATE TRIGGER immutable_lead_rulings BEFORE UPDATE OR DELETE ON lead_rulings FOR EACH ROW EXECUTE FUNCTION graphyard_immutable();
+CREATE TABLE IF NOT EXISTS intake_items (
+  id uuid PRIMARY KEY, origin text NOT NULL, title text NOT NULL, description text NOT NULL,
+  source_work_id uuid REFERENCES work_items(id), submitted_by text NOT NULL,
+  created_at timestamptz NOT NULL DEFAULT clock_timestamp()
+);
+DROP TRIGGER IF EXISTS immutable_intake_items ON intake_items;
+CREATE TRIGGER immutable_intake_items BEFORE UPDATE OR DELETE ON intake_items FOR EACH ROW EXECUTE FUNCTION graphyard_immutable();
 CREATE TABLE IF NOT EXISTS receipts (
   actor text NOT NULL, key text NOT NULL, fingerprint text NOT NULL, result jsonb NOT NULL,
   PRIMARY KEY(actor,key)
@@ -29,6 +43,15 @@ CREATE TABLE IF NOT EXISTS operator_credentials (
   token_hash text NOT NULL UNIQUE, valid_from timestamptz NOT NULL, valid_until timestamptz,
   revoked_at timestamptz, PRIMARY KEY(agent_id,fingerprint)
 );
+CREATE TABLE IF NOT EXISTS proof_grants (
+  principal_id text PRIMARY KEY, document jsonb NOT NULL
+);
+CREATE TABLE IF NOT EXISTS proof_grant_history (
+  seq bigserial PRIMARY KEY, principal_id text NOT NULL, document jsonb NOT NULL,
+  created_at timestamptz NOT NULL DEFAULT clock_timestamp()
+);
+DROP TRIGGER IF EXISTS immutable_proof_grant_history ON proof_grant_history;
+CREATE TRIGGER immutable_proof_grant_history BEFORE UPDATE OR DELETE ON proof_grant_history FOR EACH ROW EXECUTE FUNCTION graphyard_immutable();
 CREATE TABLE IF NOT EXISTS jobs (
   work_id uuid PRIMARY KEY REFERENCES work_items(id), available_at timestamptz NOT NULL DEFAULT now(),
   locked_until timestamptz, token uuid, attempts int NOT NULL DEFAULT 0, error text
@@ -60,10 +83,44 @@ CREATE TABLE IF NOT EXISTS validation_artifacts (
   UNIQUE(request_id,attempt_id,name)
 );
 CREATE INDEX IF NOT EXISTS validation_artifact_expiry ON validation_artifacts(expires_at) WHERE bytes IS NOT NULL;
+ALTER TABLE validation_artifacts ADD COLUMN IF NOT EXISTS backend text NOT NULL DEFAULT 'postgres';
+ALTER TABLE validation_artifacts ADD COLUMN IF NOT EXISTS location text;
+ALTER TABLE validation_artifacts ADD COLUMN IF NOT EXISTS state text NOT NULL DEFAULT 'stored';
+ALTER TABLE validation_artifacts ADD COLUMN IF NOT EXISTS size bigint;
+UPDATE validation_artifacts SET size=octet_length(bytes) WHERE size IS NULL AND bytes IS NOT NULL;
+UPDATE validation_artifacts SET state='expired' WHERE state='stored' AND backend='postgres' AND bytes IS NULL;
+CREATE INDEX IF NOT EXISTS validation_artifact_retained ON validation_artifacts(expires_at) WHERE state='stored';
+CREATE TABLE IF NOT EXISTS validation_runner_polls (
+  registration_id text PRIMARY KEY, principal text NOT NULL, polled_at timestamptz NOT NULL, granted_request_id uuid
+);
 CREATE TABLE IF NOT EXISTS validation_resources (resource text PRIMARY KEY, request_id uuid NOT NULL REFERENCES validation_requests(id));
 CREATE TABLE IF NOT EXISTS scenarios (id text NOT NULL, revision int NOT NULL, document jsonb NOT NULL, PRIMARY KEY(id,revision));
 DROP TRIGGER IF EXISTS immutable_scenarios ON scenarios;
 CREATE TRIGGER immutable_scenarios BEFORE UPDATE OR DELETE ON scenarios FOR EACH ROW EXECUTE FUNCTION graphyard_immutable();
+CREATE TABLE IF NOT EXISTS release_builds (id uuid PRIMARY KEY, document jsonb NOT NULL);
+DROP TRIGGER IF EXISTS immutable_release_builds ON release_builds;
+CREATE TRIGGER immutable_release_builds BEFORE UPDATE OR DELETE ON release_builds FOR EACH ROW EXECUTE FUNCTION graphyard_immutable();
+CREATE TABLE IF NOT EXISTS releases (id text NOT NULL, revision int NOT NULL, document jsonb NOT NULL, PRIMARY KEY(id,revision));
+DROP TRIGGER IF EXISTS immutable_releases ON releases;
+CREATE TRIGGER immutable_releases BEFORE UPDATE OR DELETE ON releases FOR EACH ROW EXECUTE FUNCTION graphyard_immutable();
+CREATE TABLE IF NOT EXISTS release_approvals (id uuid PRIMARY KEY, document jsonb NOT NULL);
+DROP TRIGGER IF EXISTS immutable_release_approvals ON release_approvals;
+CREATE TRIGGER immutable_release_approvals BEFORE UPDATE OR DELETE ON release_approvals FOR EACH ROW EXECUTE FUNCTION graphyard_immutable();
+CREATE TABLE IF NOT EXISTS delivery_environments (environment_id text PRIMARY KEY, document jsonb NOT NULL);
+CREATE TABLE IF NOT EXISTS delivery_observations (
+  seq bigserial PRIMARY KEY, id uuid NOT NULL UNIQUE, environment_id text NOT NULL, registration_id text NOT NULL,
+  snapshot_id text NOT NULL, document jsonb NOT NULL, received_at timestamptz NOT NULL,
+  UNIQUE(registration_id,snapshot_id)
+);
+CREATE INDEX IF NOT EXISTS delivery_observation_environment ON delivery_observations(environment_id,seq);
+DROP TRIGGER IF EXISTS immutable_delivery_observations ON delivery_observations;
+CREATE TRIGGER immutable_delivery_observations BEFORE UPDATE OR DELETE ON delivery_observations FOR EACH ROW EXECUTE FUNCTION graphyard_immutable();
+CREATE TABLE IF NOT EXISTS delivery_leases (registration_id text PRIMARY KEY, principal text NOT NULL, epoch int NOT NULL, expires_at timestamptz NOT NULL);
+CREATE TABLE IF NOT EXISTS delivery_rollbacks (
+  id uuid PRIMARY KEY, environment_id text NOT NULL, generation int NOT NULL, document jsonb NOT NULL,
+  created_at timestamptz NOT NULL DEFAULT clock_timestamp()
+);
+CREATE INDEX IF NOT EXISTS delivery_rollback_environment ON delivery_rollbacks(environment_id,created_at);
 `;
 
 export class Store {

@@ -20,6 +20,9 @@ createServer(async (request, response) => {
     if (request.headers.authorization !== `Bearer ${controlToken}` || request.method !== 'POST' || request.url !== '/observe') { response.statusCode = 404; response.end(JSON.stringify({ error: 'Not found' })); return; }
     const chunks = []; for await (const chunk of request) chunks.push(chunk);
     const input = JSON.parse(Buffer.concat(chunks).toString('utf8')); snapshot = input.observation;
+    // A Graphyard-published speculative tip is harness-supplied for the same reason the
+    // observation is: the candidate exposes no route that could invent either.
+    if (input.speculation) await store.pool.query("UPDATE work_items SET document=jsonb_set(document,'{queue,speculation}',$2::jsonb) WHERE id=$1", [input.id, JSON.stringify(input.speculation)]);
     response.end(JSON.stringify(await engine.observe(input.id, input.revision, input.observation)));
   } catch (error) { response.statusCode = error?.status ?? 500; response.end(JSON.stringify({ error: error instanceof Error ? error.message : 'Probe control failed' })); }
 }).listen(4311, '0.0.0.0');

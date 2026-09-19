@@ -46,12 +46,14 @@ export function judgeMergeAuthorization(transcript) {
   assert.equal(revoked.execution, null, 'revocation must cancel the in-flight execution, not wait for it');
   assert.equal(revoked.authorization, null);
   assert.match(revoked.acceptanceReasons.join(' '), /previously accepted evidence was revoked/);
+  assert.equal(revoked.queue, null, 'a revoked candidate must leave the merge queue rather than hold its position');
+  assert.equal(revoked.ejection?.sha, 'a'.repeat(40)); assert.match(String(revoked.ejection?.reason), /was revoked on speculative tip/);
   assert.deepEqual(revoked.revocations.map(item => item.actor), ['probe-producer']);
   assert.ok(revoked.retainedEvidence >= 1, 'the revoked record must be retained for audit, not deleted');
   cases.push('revocation-closes-authorization');
 
   refused(only('verify-after-revocation'), 409, /missing, expired, superseded/);
-  refused(only('acquire-replay-after-revocation'), 409, /expired, cancelled, or superseded/);
+  refused(only('acquire-replay-after-revocation'), 409, /expired, cancelled, fenced, or superseded/);
   refused(only('cancel-after-revocation'), 409, /missing, expired, superseded/);
   cases.push('broker-refuses-revoked-candidate');
 
