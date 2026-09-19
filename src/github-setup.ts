@@ -2,10 +2,12 @@ import { createServer } from 'node:http';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { readFile, writeFile, rename } from 'node:fs/promises';
 import { resolve } from 'node:path';
-import { GitHub } from './github.js';
+import { GitHub, appJwt, installationSettingsUrl } from './github.js';
 import { localDirectory } from './onboarding.js';
+import { controlPlaneEvents, controlPlanePermissions, describePermission, permissionShortfalls, requiredPermissions, reviewerEvents, reviewerPermissions, type PermissionLevel, type PermissionShortfall } from './github-permissions.js';
 
 export interface AppCredentials { appId: number; slug: string; privateKey: string; webhookSecret: string; repository: string; installationId?: number; reviewer?: string; botUserId?: number }
+const credentialFile = (root: string, reviewer?: string) => resolve(root, '.graphyard', reviewer ? `github-reviewer-${reviewer}.json` : 'github-app.json');
 const escape = (value: string) => value.replaceAll('&', '&amp;').replaceAll('"', '&quot;').replaceAll('<', '&lt;').replaceAll('>', '&gt;');
 function manifestOrigin(repository: string, deployment: string) {
   if (!/^[\w.-]+\/[\w.-]+$/.test(repository)) throw new Error('Expected owner/repository');
@@ -24,9 +26,10 @@ export function reviewerAppManifest(reviewer: string, repository: string, deploy
   if (name.length > 34) throw new Error(`GitHub App names are limited to 34 characters; "${name}" is too long, so choose a shorter reviewer name`);
   return { name, url: origin, public: false,
     redirect_url: `${callback}/created`, setup_url: `${callback}/installed`,
-    // No checks or administration: a reviewer can never publish Graphyard's merge check.
-    default_permissions: { metadata: 'read', contents: 'read', pull_requests: 'write', issues: 'read' },
-    default_events: ['pull_request', 'issue_comment'] };
+    // The reviewer declaration carries no checks, administration, or contents: write: a
+    // reviewer can never publish Graphyard's merge check or write code.
+    default_permissions: requiredPermissions(reviewerPermissions),
+    default_events: [...reviewerEvents] };
 }
 export function appManifest(repository: string, deployment: string, callback: string) {
   const origin = manifestOrigin(repository, deployment);
@@ -34,8 +37,89 @@ export function appManifest(repository: string, deployment: string, callback: st
   return { name: `Graphyard ${repository.replace('/', '-')}`, url: url.origin, public: false,
     hook_attributes: { url: `${url.origin}/api/github/webhook`, active: true },
     redirect_url: `${callback}/created`, setup_url: `${callback}/installed`,
-    default_permissions: { metadata: 'read', contents: 'read', pull_requests: 'write', issues: 'read', checks: 'write', administration: 'read' },
-    default_events: ['pull_request', 'pull_request_review', 'issue_comment', 'check_run', 'check_suite', 'push'] };
+    // Exactly the declared control-plane set; the merge queue's Contents: write lives there.
+    default_permissions: requiredPermissions(controlPlanePermissions),
+    default_events: [...controlPlaneEvents] };
+}
+export interface AppPermissionInspection {
+  role: 'control-plane' | 'reviewer'; reviewer: string | null; appId: number; slug: string; installationId: number | null;
+  required: Record<string, PermissionLevel>; registered: Record<string, string>; granted: Record<string, string> | null;
+  /** The App's own configuration lacks these; GitHub only changes that in the browser. */
+  appShortfalls: PermissionShortfall[];
+  /** The App requests these, but the installation has not accepted the pending request. */
+  installationShortfalls: PermissionShortfall[];
+  /** Permissions beyond the declaration. For a reviewer this is a boundary violation. */
+  excess: { permission: string; granted: string; declared: PermissionLevel | null }[];
+  settingsUrl: string; installationUrl: string; steps: string[]; verified: boolean;
+}
+const levelRank = (level: unknown) => ['read', 'write', 'admin'].indexOf(String(level));
+/**
+ * Compares a registered App with the declaration for its role. GitHub exposes no API for
+ * changing a registered App's permissions, so the App-level change is a browser step and the
+ * installation-level acceptance another; both are named exactly, and acceptance is verified
+ * by reading the installation back rather than assumed from the click.
+ */
+export async function inspectAppPermissions(root: string, options: { reviewer?: string; fetcher?: typeof fetch } = {}): Promise<AppPermissionInspection> {
+  const reviewer = options.reviewer;
+  if (reviewer !== undefined && !/^[a-z0-9][a-z0-9._-]{0,63}$/.test(reviewer)) throw new Error('Reviewer name must be a lowercase identifier');
+  let app: AppCredentials;
+  try { app = JSON.parse(await readFile(credentialFile(root, reviewer), 'utf8')); }
+  catch (error: any) { if (error.code === 'ENOENT') throw new Error(`No saved ${reviewer ? `reviewer App "${reviewer}"` : 'Graphyard App'}; register it first with graphyard github-setup HTTPS_URL${reviewer ? ` --reviewer ${reviewer}` : ''}`); throw error; }
+  if (!Number.isSafeInteger(app.appId) || typeof app.privateKey !== 'string' || !app.privateKey) throw new Error('Saved App credentials are incomplete; rerun github-setup');
+  if ((app.reviewer ?? undefined) !== reviewer) throw new Error('Saved App belongs to a different Graphyard role');
+  const set = reviewer ? reviewerPermissions : controlPlanePermissions;
+  const required = requiredPermissions(set);
+  const fetcher = options.fetcher ?? fetch;
+  const read = async (path: string) => {
+    const response = await fetcher(`https://api.github.com${path}`, { headers: { Authorization: `Bearer ${appJwt(app.appId, app.privateKey)}`, Accept: 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28' }, signal: AbortSignal.timeout(20_000) });
+    if (!response.ok) throw new Error(`GitHub GET ${path} failed (${response.status}); ${response.status === 401 ? 'the saved App key was rejected' : response.status === 404 ? 'the App or installation no longer exists' : 'retry later'}`);
+    return response.json();
+  };
+  const registration: any = await read('/app');
+  if (!Number.isSafeInteger(registration?.id) || registration.id !== app.appId) throw new Error('GitHub returned a different App for the saved key');
+  const registered: Record<string, string> = registration.permissions && typeof registration.permissions === 'object' ? Object.fromEntries(Object.entries(registration.permissions).filter(([, level]) => typeof level === 'string')) as Record<string, string> : {};
+  const slug = typeof registration.slug === 'string' && registration.slug ? registration.slug : app.slug;
+  const owner = registration.owner;
+  const settingsUrl = owner?.type === 'Organization' && typeof owner.login === 'string' ? `https://github.com/organizations/${encodeURIComponent(owner.login)}/settings/apps/${encodeURIComponent(slug)}/permissions` : `https://github.com/settings/apps/${encodeURIComponent(slug)}/permissions`;
+  const installationId = Number.isSafeInteger(app.installationId) && app.installationId! > 0 ? app.installationId! : null;
+  let granted: Record<string, string> | null = null;
+  let installationUrl = installationId ? installationSettingsUrl(installationId) : `https://github.com/apps/${encodeURIComponent(slug)}/installations/new`;
+  if (installationId) {
+    const installation: any = await read(`/app/installations/${installationId}`);
+    granted = installation?.permissions && typeof installation.permissions === 'object' ? Object.fromEntries(Object.entries(installation.permissions).filter(([, level]) => typeof level === 'string')) as Record<string, string> : {};
+    if (typeof installation?.html_url === 'string' && /^https:\/\/github\.com\//.test(installation.html_url)) installationUrl = installation.html_url;
+  }
+  const appShortfalls = permissionShortfalls(registered, set);
+  const installationShortfalls = installationId ? permissionShortfalls(granted, set) : [];
+  const excess = Object.entries(granted ?? registered).filter(([permission, level]) => levelRank(level) > levelRank(required[permission] ?? null))
+    .map(([permission, level]) => ({ permission, granted: level, declared: required[permission] ?? null })).sort((a, b) => a.permission < b.permission ? -1 : 1);
+  const list = (shortfalls: PermissionShortfall[]) => shortfalls.map(shortfall => describePermission(shortfall.permission, shortfall.required)).join(', ');
+  const steps: string[] = [];
+  if (appShortfalls.length) steps.push(`Open ${settingsUrl}, set ${list(appShortfalls)} under Repository permissions, and save. GitHub has no API for changing a registered App's permissions, so this is a browser step.`);
+  if (!installationId) steps.push(`Install the App on ${app.repository} at ${installationUrl}, then rerun github-setup so the installation is recorded.`);
+  else if (appShortfalls.length || installationShortfalls.length) steps.push(`Open ${installationUrl} and accept the pending permission request for ${list(installationShortfalls.length ? installationShortfalls : appShortfalls)}. GitHub only applies an App permission change to an installation after its owner accepts it there.`);
+  if (excess.length && reviewer) steps.push(`Reduce ${excess.map(entry => `${describePermission(entry.permission, entry.granted as PermissionLevel)}`).join(', ')} at ${settingsUrl}: a reviewer App must never hold more than its declaration, and never Contents: write.`);
+  if (steps.length) steps.push('Rerun graphyard github-setup --update-permissions (add --wait SECONDS to poll) to verify acceptance; the server preflight releases held jobs on its own once the installation reports the permission.');
+  const verified = !!installationId && !appShortfalls.length && !installationShortfalls.length && !(reviewer && excess.length);
+  return { role: reviewer ? 'reviewer' : 'control-plane', reviewer: reviewer ?? null, appId: app.appId, slug, installationId, required, registered, granted, appShortfalls, installationShortfalls, excess, settingsUrl, installationUrl, steps, verified };
+}
+/**
+ * The migration command behind `github-setup --update-permissions`: inspect, print the exact
+ * steps, and optionally wait for the installation to report the accepted permissions.
+ */
+export async function updateAppPermissions(root: string, options: { reviewer?: string; fetcher?: typeof fetch; waitMs?: number; pollMs?: number; announce?: (message: string) => void; wait?: (ms: number) => Promise<void> } = {}) {
+  const announce = options.announce ?? (message => console.error(message));
+  const wait = options.wait ?? ((ms: number) => new Promise<void>(accept => setTimeout(accept, ms)));
+  const deadline = Date.now() + (options.waitMs ?? 0);
+  let announced = '';
+  for (;;) {
+    const inspection = await inspectAppPermissions(root, options);
+    if (inspection.verified) return { ...inspection, waited: false };
+    const message = inspection.steps.map((step, index) => `${index + 1}. ${step}`).join('\n');
+    if (message !== announced) { announce(message); announced = message; }
+    if (Date.now() >= deadline) return { ...inspection, waited: (options.waitMs ?? 0) > 0 };
+    await wait(options.pollMs ?? 5_000);
+  }
 }
 export async function startGithubSetup(root: string, repository: string, deployment: string, port = 4311, dependencies: {
   convert?: (code: string) => Promise<any>;
@@ -47,8 +131,8 @@ export async function startGithubSetup(root: string, repository: string, deploym
   record?: (app: AppCredentials & { installationId: number }) => Promise<void>;
 } = {}, reviewer?: string) {
   if (reviewer !== undefined && !/^[a-z0-9][a-z0-9._-]{0,63}$/.test(reviewer)) throw new Error('Reviewer name must be a lowercase identifier');
-  const directory = await localDirectory(root);
-  const file = dependencies.file ?? resolve(directory, reviewer ? `github-reviewer-${reviewer}.json` : 'github-app.json');
+  await localDirectory(root);
+  const file = dependencies.file ?? credentialFile(root, reviewer);
   let app: AppCredentials | undefined;
   try { app = JSON.parse(await readFile(file, 'utf8')); } catch (error: any) { if (error.code !== 'ENOENT') throw error; }
   if (app && app.repository !== repository) throw new Error('Saved App belongs to a different repository');
@@ -100,7 +184,7 @@ export async function startGithubSetup(root: string, repository: string, deploym
         const manifest = reviewer ? reviewerAppManifest(reviewer, repository, deployment, `http://${address}`) : appManifest(repository, deployment, `http://${address}`);
         return html(200, reviewer
           ? `<p>Register a private reviewer App named <strong>${escape(reviewer)}</strong> for <strong>${escape(repository)}</strong>. Its runtime signs in as this App to post review verdicts.</p><p>The reviewer App reads code and writes pull request comments. It cannot publish Graphyard's gate check, change branch protection, or write source code. Use a GitHub account that is not the pull request author.</p><form method="post" action="https://github.com/settings/apps/new?state=${state}"><input type="hidden" name="manifest" value="${escape(JSON.stringify(manifest))}"><button>Register reviewer App →</button></form>`
-          : `<p>Register a private App for <strong>${escape(repository)}</strong>. GitHub will ask you to sign in, name the App, and choose the repository.</p><p>The App reads code and branch protection, publishes its gate check, and writes PR review requests. It cannot write source code. Credentials return directly to this machine; no key copying is needed.</p><form method="post" action="https://github.com/settings/apps/new?state=${state}"><input type="hidden" name="manifest" value="${escape(JSON.stringify(manifest))}"><button>Register Graphyard App →</button></form>`);
+          : `<p>Register a private App for <strong>${escape(repository)}</strong>. GitHub will ask you to sign in, name the App, and choose the repository.</p><p>The App reads code and branch protection, publishes its gate check, writes PR review requests, and publishes merge-queue tips, which is why it holds Contents: read and write. It never writes an agent's code: the only commits it creates are merges of already-validated candidates onto the base they were validated against. Credentials return directly to this machine; no key copying is needed.</p><form method="post" action="https://github.com/settings/apps/new?state=${state}"><input type="hidden" name="manifest" value="${escape(JSON.stringify(manifest))}"><button>Register Graphyard App →</button></form>`);
       }
       if (url.pathname === '/created') {
         const received = Buffer.from(url.searchParams.get('state') ?? ''), expected = Buffer.from(state);
