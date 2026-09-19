@@ -56,6 +56,8 @@ A candidate is `(PR, head SHA, base SHA)`, independently read from GitHub and ch
 
 Evidence carries producer identity derived from authentication. A worker cannot self-assign trust. A producer credential has an allowlist of exact proof names. Operators may attest `manual:` proofs, but cannot use an operator token to mint trusted automated test evidence. Latest submitted trusted evidence for each matching proof/candidate/policy wins, including a later failure. Historical and stale evidence remains visible.
 
+An executed E2E pass may stand for a later head of the same item only through a recorded reuse decision under an operator-defined applicability policy over Graphyard's own file observations, bound to the exact revisions and superseded by any newer live attempt; a replay of retained artifacts is an audit record that authorizes nothing. See [evidence replay, scoped reuse and execution analytics](evidence-reuse.md).
+
 CI check success proves that named check reported success. It does not prove test inventory. Acceptance evidence separately requires counts and named behavioral proofs. A trusted producer is responsible for deriving these counts from actual reports and binding them to the actual tested code. Graphyard cannot determine whether an assertion adequately expresses product intent.
 
 ## Reconciliation

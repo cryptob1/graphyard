@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import type { ValidationRequest, ValidationCandidate, RequestDiagnosis, RunnerCapacity, ArtifactCapacity } from '../src/validation';
+import type { AnalyticsGroup, DurationSummary } from '../src/evidence-replay';
 import type { Work } from '../src/model';
 
 /** The operator-facing name of each diagnosed condition; the next step itself comes from the server with the request. */
@@ -8,6 +9,10 @@ const conditionLabel: Record<RequestDiagnosis['condition'], string> = {
   unacknowledged: 'Dispatched, not acknowledged', running: 'Running', 'heartbeat-missing': 'Runner heartbeat missing', collecting: 'Collecting', 'collection-stalled': 'Collector stalled',
   'awaiting-settlement': 'Awaiting verified settlement', retryable: 'Settled — retry available', settled: 'Settled',
 };
+
+type Analytics = { groups: AnalyticsGroup[]; reuse: { decisions: number; granted: number; refused: number; supersededByLiveRun: number; contradictedByLaterFailure: number; avoidedExecutions: number }; replays: { total: number; outcomes: Record<string, number>; durationMs: DurationSummary; bytesRead: number }; caveat: string };
+const seconds = (d: DurationSummary) => d.samples ? `${(d.p50Ms! / 1000).toFixed(1)}s median, ${(d.maxMs! / 1000).toFixed(1)}s max over ${d.samples}` : 'no samples';
+const money = (amounts: Record<string, number>) => Object.entries(amounts).map(([currency, amount]) => `${amount} ${currency}`).join(', ') || 'none';
 
 export default function ValidationView({ api, work }: { api: (path: string) => Promise<any>; work: Work[] }) {
   const [requests, setRequests] = useState<ValidationRequest[]>([]);
@@ -19,7 +24,18 @@ export default function ValidationView({ api, work }: { api: (path: string) => P
   const [following, setFollowing] = useState(true);
   const [loadingOlder, setLoadingOlder] = useState(false);
   const [capacity, setCapacity] = useState<{ runners: RunnerCapacity[]; requests: RequestDiagnosis[]; artifacts: ArtifactCapacity; resources: { resource: string; requestId: string; live: boolean }[] } | null>(null);
+  const [analytics, setAnalytics] = useState<Analytics | null>(null);
   const alive = useRef(true), viewEpoch = useRef(0);
+  // Analytics are a slow read over the whole attempt ledger: refreshed every 30 seconds, never blocking the request list.
+  useEffect(() => {
+    let stopped = false; let timer: ReturnType<typeof setTimeout>;
+    const load = async () => {
+      try { const data = await api('validation/analytics'); if (!stopped && Array.isArray(data?.groups) && data.reuse && data.replays) setAnalytics(data); }
+      catch { /* the request list reports its own failures */ }
+      finally { if (!stopped) timer = setTimeout(() => void load(), 30_000); }
+    };
+    void load(); return () => { stopped = true; clearTimeout(timer); };
+  }, []);
   // Capacity and diagnoses are a separate read: a failed one leaves the request list intact and simply shows no diagnosis.
   useEffect(() => {
     let stopped = false; let timer: ReturnType<typeof setTimeout>;
@@ -72,6 +88,13 @@ export default function ValidationView({ api, work }: { api: (path: string) => P
         <p>{runner.lastPollAt ? `Last poll ${new Date(runner.lastPollAt).toLocaleString()}` : 'Never polled'} · queued {runner.queued} of {runner.queueLimit}{runner.oldestQueuedSeconds !== null ? ` · oldest waiting ${runner.oldestQueuedSeconds}s` : ''}{runner.executing ? ` · executing ${runner.executing}` : ''}</p></div>)}
       <p className="muted">Artifacts: {capacity.artifacts.backend} · {Math.round(capacity.artifacts.usedBytes / 1_048_576)} of {Math.round(capacity.artifacts.capacityBytes / 1_048_576)} MiB retained across {capacity.artifacts.retained} artifacts · {capacity.artifacts.expiringWithin24h} expiring within 24h{capacity.artifacts.uploadFailed ? ` · ${capacity.artifacts.uploadFailed} upload failures` : ''}{capacity.artifacts.awaitingDeletion ? ` · ${capacity.artifacts.awaitingDeletion} awaiting verified deletion` : ''}</p>
       {capacity.resources.filter(r => !r.live).length > 0 && <p className="amber">{capacity.resources.filter(r => !r.live).length} protected resource reservation(s) are held by attempts whose settlement is not verified.</p>}</section>}
+    {analytics && (analytics.groups.length > 0 || analytics.reuse.decisions > 0 || analytics.replays.total > 0) && <section><div className="section-title"><h2>Execution analytics <span className="count">{analytics.groups.length}</span></h2><span>OBSERVED DURATIONS, REPORTED COST, REUSE AND REPLAY</span></div>
+      {analytics.groups.map(group => <div className="criterion" key={`${group.proof}:${group.environment}:${group.runner}`}><strong>{group.proof} · {group.environment} · runner {group.runner} · {group.attempts} attempt{group.attempts === 1 ? '' : 's'}</strong>
+        <p>Outcomes: {group.outcomes.passed} passed · {group.outcomes.failed} failed · {group.outcomes.expired} expired · {group.outcomes.cancelled} cancelled · {group.outcomes.superseded} superseded · {group.outcomes.inFlight} in flight</p>
+        <p>Observed: queue {seconds(group.observed.queueMs)} · acknowledge {seconds(group.observed.acknowledgeMs)} · execution {seconds(group.observed.executionMs)} · collection {seconds(group.observed.collectionMs)} · total {seconds(group.observed.totalMs)}</p>
+        <p>Runner-reported: duration {seconds(group.reported.durationMs)} · cost observed {money(group.cost.observed.amounts)} over {group.cost.observed.attempts} · estimated {money(group.cost.estimated.amounts)} over {group.cost.estimated.attempts} · unavailable for {group.cost.unavailable}</p></div>)}
+      <p className="muted">Reuse: {analytics.reuse.decisions} decisions · {analytics.reuse.granted} granted · {analytics.reuse.refused} refused · {analytics.reuse.avoidedExecutions} executions avoided · {analytics.reuse.supersededByLiveRun} superseded by a live run · {analytics.reuse.contradictedByLaterFailure} contradicted by a later failure. Replays: {analytics.replays.total} · {analytics.replays.outcomes.consistent ?? 0} consistent · {analytics.replays.outcomes.inconsistent ?? 0} inconsistent · {analytics.replays.outcomes.unmeasured ?? 0} unmeasured · {seconds(analytics.replays.durationMs)}.</p>
+      <p className="muted">{analytics.caveat}</p></section>}
     <div className="scenario-list">{recent.map(r => {
       const c = candidates.find(c => c.id === r.candidateId), attempt = r.attempts.at(-1), item = work.find(w => w.id === r.workId);
       const diagnosis = capacity?.requests.find(d => d.requestId === r.id && d.condition in conditionLabel);

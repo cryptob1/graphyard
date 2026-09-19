@@ -35,6 +35,7 @@ The sections below are generated from each page's `<!-- page: Section | order | 
 - [Report adapters](report-adapters.md) — what each supported report format proves, observes and refuses.
 - [Releases and observed production delivery](delivery.md) — release builds, approvals, and observed production delivery.
 - [Runner capacity, artifact operations and delivery recovery](recovery.md) — runner capacity, artifact retention and migration, and fenced rollback as an observed workflow.
+- [Evidence replay, scoped reuse and execution analytics](evidence-reuse.md) — replay of retained artifacts with explicit coverage, scoped reuse of the newest compatible attempt, and execution cost analytics.
 
 ## Understand or contribute
 
