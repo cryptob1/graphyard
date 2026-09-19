@@ -171,6 +171,45 @@ test('integration:decision-pinning-scope — resolve is pinned to the standing t
   assert.equal(attestApproved.body.state, 'applied');
   const attested = (await reload(item.id)).evidence.find(entry => entry.proof === 'manual:audit')!;
   assert.equal(attested.trusted, true);
+  // The resolve pin names the incident, not the trigger slot: once the incident it was
+  // requested against is cleared by another path and the same trigger is raised again, the
+  // approval refuses and settles stale instead of clearing the second, unreviewed incident,
+  // and a fresh resolve of the same action is accepted immediately.
+  let swapped = await created('swapped-resolve');
+  swapped = await engine.execute(operator, 'requirements', swapped.id, { expectedPolicyRevision: swapped.policyRevision, criteria: [swapped.criteria[0]], dependencies: [], plannedFiles: swapped.plannedFiles, exclusiveResources: [], producerProofs: [], reason: 'AC-2 moves to a follow-up item' }, randomUUID());
+  const firstIncident = standingEscalations(swapped).find(entry => entry.trigger === 'requirement-weakening')!;
+  const swapRequest = await decide(master.token, swapped, 'resolve', { trigger: 'requirement-weakening', expectedRevision: swapped.revision }, 'Resolve the narrowing this item records');
+  assert.equal(swapRequest.status, 200, JSON.stringify(swapRequest.body));
+  // Another path clears that incident: a declared human session resolves the trigger directly.
+  swapped = await engine.execute(operator, 'resolve', swapped.id, { trigger: 'requirement-weakening', expectedRevision: swapped.revision, reason: 'A human session resolves the incident the request named' }, randomUUID());
+  assert.deepEqual(standingEscalations(swapped), []);
+  // The scope widens with a fresh criterion, then narrows again: the same trigger is raised
+  // for a new incident (AC-2 stays retired, so the widening adds AC-3).
+  swapped = await engine.execute(operator, 'requirements', swapped.id, { expectedPolicyRevision: swapped.policyRevision, criteria: [...swapped.criteria, { id: 'AC-3', text: 'Changelog', proofs: ['manual:changelog'] }], dependencies: [], plannedFiles: swapped.plannedFiles, exclusiveResources: [], producerProofs: [], reason: 'Changelog criterion arrives' }, randomUUID());
+  swapped = await engine.execute(operator, 'requirements', swapped.id, { expectedPolicyRevision: swapped.policyRevision, criteria: [swapped.criteria[0]], dependencies: [], plannedFiles: swapped.plannedFiles, exclusiveResources: [], producerProofs: [], reason: 'AC-3 moves to a follow-up item' }, randomUUID());
+  const secondIncident = standingEscalations(swapped).find(entry => entry.trigger === 'requirement-weakening')!;
+  assert.ok(secondIncident, 'the trigger stands again');
+  assert.ok(secondIncident.reason.includes('AC-3') && !firstIncident.reason.includes('AC-3'), 'the standing incident is the later one, not the incident the request named');
+  const swapRefused = await approve(approver.token, swapped, swapRequest.body.id, 'Approved against the incident I read');
+  assert.equal(swapRefused.status, 409);
+  assert.match(swapRefused.body.error, new RegExp(`The requirement-weakening escalation this decision was requested against is no longer the standing one; request it again; the decision was not applied`));
+  swapped = await reload(swapped.id);
+  const stillStanding = standingEscalations(swapped).find(entry => entry.trigger === 'requirement-weakening')!;
+  assert.equal(stillStanding.reason, secondIncident.reason, 'the second incident is untouched by the approval');
+  const swapListed = await ok(master.token, 'GET', `work/${swapped.key}/decisions`);
+  const settled = swapListed.decisions.find((entry: any) => entry.id === swapRequest.body.id);
+  assert.equal(settled.state, 'stale');
+  assert.deepEqual(settled.race, { expected: { trigger: 'requirement-weakening', standingAt: swapRequest.body.requestedAt }, current: { trigger: 'requirement-weakening', standingAt: stillStanding.at } });
+  const settledEvent = (await events(swapped)).find(row => row.kind === 'decision.stale' && row.payload.id === swapRequest.body.id);
+  assert.equal(settledEvent.actor, approver.id);
+  // The stale settlement unblocks the action: a resolve of the new incident is accepted at once.
+  const fresh = await decide(master.token, swapped, 'resolve', { trigger: 'requirement-weakening', expectedRevision: swapped.revision }, 'Requested against the incident that stands now');
+  assert.equal(fresh.status, 200, JSON.stringify(fresh.body));
+  const freshApplied = await approve(approver.token, swapped, fresh.body.id, 'The new incident is the one reviewed');
+  assert.equal(freshApplied.status, 200, JSON.stringify(freshApplied.body));
+  assert.equal(freshApplied.body.state, 'applied');
+  swapped = await reload(swapped.id);
+  assert.deepEqual(standingEscalations(swapped), []);
 });
 
 test('integration:decision-withdraw — the master withdraws its own requested decision with a reason, and master-visible state shows it as withdrawn without blocking a re-request', async () => {

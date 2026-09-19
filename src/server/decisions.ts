@@ -127,10 +127,11 @@ interface StaleRace { expected: unknown; current: unknown }
 /**
  * Whether approval failed on a pin that can never match again: the item revision, the policy
  * revision or the candidate moved past the one the decision was requested against, and
- * revisions never move back. Resolve is absent on purpose — it is pinned to the escalation
- * trigger still standing, not to the whole revision.
+ * revisions never move back; or the resolve's escalation incident is gone or has been replaced
+ * by a later one of the same trigger — a slot a repeat never takes while one stands and a
+ * re-raise can only ever fill after the request was made.
  */
-function decisionRace(decision: Pick<Decision, 'action' | 'input'>, work: Work): StaleRace | null {
+function decisionRace(decision: Pick<Decision, 'action' | 'input' | 'requestedAt'>, work: Work): StaleRace | null {
   if (decision.action === 'requirements' && decision.input.expectedPolicyRevision !== work.policyRevision)
     return { expected: { policyRevision: decision.input.expectedPolicyRevision }, current: { policyRevision: work.policyRevision } };
   if ((decision.action === 'attest' || decision.action === 'merge') && (!work.candidate || work.candidate.sha !== decision.input.sha
@@ -139,6 +140,11 @@ function decisionRace(decision: Pick<Decision, 'action' | 'input'>, work: Work):
       current: { sha: work.candidate?.sha ?? null, baseSha: work.candidate?.baseSha ?? null, policyRevision: work.policyRevision } };
   if ((decision.action === 'release' || decision.action === 'unblock') && decision.input.expectedRevision !== work.revision)
     return { expected: { revision: decision.input.expectedRevision }, current: { revision: work.revision } };
+  if (decision.action === 'resolve') {
+    const standing = standingEscalations(work).find(entry => entry.trigger === decision.input.trigger);
+    return standing && Date.parse(standing.at) <= Date.parse(decision.requestedAt) ? null
+      : { expected: { trigger: decision.input.trigger, standingAt: decision.requestedAt }, current: { trigger: standing?.trigger ?? null, standingAt: standing?.at ?? null } };
+  }
   return null;
 }
 
@@ -178,12 +184,20 @@ export async function approveDecision(services: Services, caller: Principal, id:
       demand(decision!.state === 'requested' || resuming, `Decision ${decision!.id} is already ${decision!.state}${decision!.approvedBy ? ` (approved by ${decision!.approvedBy})` : ''}`, 409);
       await requesterAuthority(services, db, decision!, work!);
       let precondition = resuming ? null : decisionPrecondition(decision!.action, decision!.input, work!);
-      // A resolve decision is pinned to the escalation trigger still standing, not to the item's
-      // whole revision: a heartbeat, workspace registration or dispatch between the request and
-      // the approval moves the revision without invalidating the request.
-      if (decision!.action === 'resolve' && precondition?.startsWith('Task revision changed')) {
-        const standing = standingEscalations(work!).some(entry => entry.trigger === decision!.input.trigger);
-        precondition = standing ? null : `No standing ${decision!.input.trigger} escalation; standing: ${standingEscalations(work!).map(entry => entry.trigger).join(', ') || 'none'}`;
+      // A resolve decision is pinned to the escalation incident it was requested against, not
+      // to the item's whole revision: a heartbeat, workspace registration or dispatch between
+      // the request and the approval moves the revision without invalidating the request. The
+      // pin holds only while the standing escalation of that trigger is the incident the
+      // requester saw — one raised no later than the request itself, since a repeat of a
+      // standing trigger is never recorded and a re-raise after a resolution is always later.
+      // A cleared or swapped incident is a pin that can never hold again, so decisionRace
+      // settles it stale below and a fresh resolve of the same action is accepted at once.
+      if (decision!.action === 'resolve' && !resuming) {
+        const standing = standingEscalations(work!).find(entry => entry.trigger === decision!.input.trigger);
+        const pinned = !!standing && Date.parse(standing.at) <= Date.parse(decision!.requestedAt);
+        precondition = pinned && precondition?.startsWith('Task revision changed') ? null
+          : pinned ? precondition
+          : `The ${decision!.input.trigger} escalation this decision was requested against is no longer the standing one; request it again`;
       }
       if (precondition) {
         // A pin the item has moved past can never hold again, so the decision would stay
