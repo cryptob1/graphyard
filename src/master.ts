@@ -58,6 +58,24 @@ export const reviewerProfileSchema = z.object({
 }).strict();
 export type ReviewerProfile = z.infer<typeof reviewerProfileSchema>;
 
+// A producer session runs one proof group on one exact head and submits evidence under its own
+// producer principal. It is launched like a worker — its own credential file, runtime and
+// environment — but never claims work: trust follows the principal's proof grants, and the
+// control plane refuses its evidence as soon as that principal ever holds an assignment.
+export const producerProfileSchema = z.object({
+  name: profileName,
+  principal: z.string().trim().min(1).max(200),
+  agentName: z.string().trim().min(1).max(100),
+  kind: agentKindSchema,
+  credentialFile: z.string(),
+  agentArgs: z.array(z.string().max(1000)).max(30).default([]),
+  approvals: approvalMode,
+  environment: safeEnvironment,
+}).strict().superRefine((profile, context) => {
+  if (!isAbsolute(profile.credentialFile)) context.addIssue({ code: 'custom', message: 'credentialFile must be absolute', path: ['credentialFile'] });
+});
+export type ProducerProfile = z.infer<typeof producerProfileSchema>;
+
 export const reviewerIdentitySchema = z.object({
   appId: z.number().int().positive(),
   installationId: z.number().int().positive(),
@@ -75,6 +93,12 @@ export const masterRunSchema = z.object({
   deploymentUrl: z.string().url().max(500).optional(),
   deploymentShaField: z.string().trim().min(1).max(100).regex(/^[A-Za-z0-9_]+(?:\.[A-Za-z0-9_]+)*$/).default('commit'),
   smokeWorkflow: z.string().trim().min(1).max(200).regex(/^[A-Za-z0-9][A-Za-z0-9._-]*$/, 'Name the trusted post-deployment smoke workflow file, such as deploy-smoke.yml').optional(),
+  // Automatic dispatch at submit: how often the loop reads the control plane's review and
+  // producer requests (the launch bound is 30 seconds from the request), which reviewer profile
+  // answers a request when more than one is configured, and how long a producer session may run.
+  dispatchIntervalSeconds: z.number().int().min(5).max(30).default(10),
+  reviewerProfile: profileName.optional(),
+  producerTimeoutMinutes: z.number().int().min(5).max(1440).default(120),
 }).strict();
 export type MasterRun = z.infer<typeof masterRunSchema>;
 
@@ -102,6 +126,7 @@ export const masterConfigSchema = z.object({
   workers: z.array(workerProfileSchema).max(100).default([]),
   reviewer: reviewerIdentitySchema.optional(),
   reviewers: z.array(reviewerProfileSchema).max(20).default([]),
+  producers: z.array(producerProfileSchema).max(20).default([]),
   run: masterRunSchema.prefault({}),
   // The operator's own authenticated browser profile, used only by master browser flows.
   browser: masterBrowserSchema.optional(),
@@ -130,10 +155,17 @@ worker must claim the item under its own identity and use the assigned worktree.
 Treat prompt delivery as an invitation, never as ownership. Use durable handoffs
 when an agent, provider account, machine, or context window changes.
 
-Independent review is launched, never performed by the master:
-\`graphyard master review GY-N [PROFILE]\` verifies the exact candidate, launches the
-bound reviewer identity read-only, and \`master status\` closes that session when the
-verdict lands. Never approve a candidate yourself. Reconcile branch protection with
+Review and proof collection start on their own. When a candidate passes the build gate
+the control plane records a review request and one producer request per proof group,
+each bound to the exact head, base and policy revision, and \`graphyard master run\`
+launches the configured reviewer profile and a producer session for each of them within
+30 seconds, without a keystroke. A head change cancels those sessions and requests the
+new head afresh unless the merge queue carried the approval or the proof. You handle
+findings, rework and merges; you never launch reviews or producers by hand. \`master
+status\` shows, per candidate, what is requested, what is running and since when, and
+any launch the loop refused; \`graphyard master review GY-N [PROFILE]\` is the recovery
+path for a refused reviewer launch once its cause is fixed. Never approve a candidate
+yourself, and never submit evidence. Reconcile branch protection with
 \`graphyard master protection\` after any review-policy change.
 
 GitHub administration of the managed repository is yours, not the operator's:
@@ -242,6 +274,18 @@ export async function inspectWorkerCredentials(root: string, profiles: WorkerPro
   }
   return health;
 }
+export async function readProducerCredential(root: string, file: string) {
+  await externalCredential(root, file, 'Producer');
+  return readCredentialFile(file);
+}
+export async function inspectProducerCredentials(root: string, profiles: ProducerProfile[]) {
+  const health: Record<string, { available: boolean; reason: string | null }> = {};
+  for (const profile of profiles) {
+    try { await readProducerCredential(root, profile.credentialFile); health[profile.name] = { available: true, reason: null }; }
+    catch (error) { health[profile.name] = { available: false, reason: error instanceof Error ? error.message : 'Producer credential is unavailable' }; }
+  }
+  return health;
+}
 
 export async function atomicPrivateWrite(file: string, value: unknown) {
   const temporary = `${file}.${randomUUID()}.tmp`;
@@ -284,7 +328,7 @@ export async function setupMaster(root: string, input: { url: string; token: str
   await assertOutsideWorktrees(root, credentialDirectory, 'Coordinator credential directory');
   const identity = createHash('sha256').update(`${url}\0${detected.repository}`).digest('hex').slice(0, 20);
   const credentialFile = resolve(credentialDirectory, `${identity}.token`);
-  const config = masterConfigSchema.parse({ version: 1, url, credentialFile, cliPath: resolve(input.cliPath), repository: detected.repository, baseBranch: status.baseBranch, githubAppId: status.githubAppId, hostId: input.hostId ?? previous?.hostId ?? hostname(), herdrWorkspace: input.herdrWorkspace ?? previous?.herdrWorkspace, masterAgentName: previous?.masterAgentName ?? `graphyard-master-${repositoryName}`, autoMerge: input.autoMerge ?? previous?.autoMerge ?? true, mergeMethod: input.mergeMethod ?? previous?.mergeMethod ?? 'merge', workers: previous?.workers ?? [], ...(previous?.reviewer ? { reviewer: previous.reviewer } : {}), reviewers: previous?.reviewers ?? [], run: { ...previous?.run, ...input.run }, ...(input.browser ?? previous?.browser ? { browser: input.browser ?? previous?.browser } : {}) });
+  const config = masterConfigSchema.parse({ version: 1, url, credentialFile, cliPath: resolve(input.cliPath), repository: detected.repository, baseBranch: status.baseBranch, githubAppId: status.githubAppId, hostId: input.hostId ?? previous?.hostId ?? hostname(), herdrWorkspace: input.herdrWorkspace ?? previous?.herdrWorkspace, masterAgentName: previous?.masterAgentName ?? `graphyard-master-${repositoryName}`, autoMerge: input.autoMerge ?? previous?.autoMerge ?? true, mergeMethod: input.mergeMethod ?? previous?.mergeMethod ?? 'merge', workers: previous?.workers ?? [], ...(previous?.reviewer ? { reviewer: previous.reviewer } : {}), reviewers: previous?.reviewers ?? [], producers: previous?.producers ?? [], run: { ...previous?.run, ...input.run }, ...(input.browser ?? previous?.browser ? { browser: input.browser ?? previous?.browser } : {}) });
   const instructionsFile = resolve(root, 'AGENTS.md');
   let existing = ''; let mode = 0o644;
   try { const info = await lstat(instructionsFile); if (!info.isFile()) throw new Error('Refusing to replace a non-regular AGENTS.md'); mode = info.mode & 0o777; existing = await readFile(instructionsFile, 'utf8'); }
@@ -322,6 +366,26 @@ export async function saveWorkerProfile(root: string, profileInput: unknown, ver
   config.workers.push(profile); await atomicPrivateWrite(resolve(root, '.graphyard/master.json'), config);
   return { added: profile.name, principal: profile.principal, mode: profile.mode, workers: config.workers.length,
     launch: profile.mode === 'launch' ? launchPlan(profile.kind, profile.approvals, profile.agentArgs, profile.environment) : null };
+}
+
+/**
+ * A producer profile is verified the way a worker profile is — its credential authenticates
+ * exactly the named principal in the producer role — and additionally kept apart from every
+ * worker principal: evidence from an identity that implements is never trusted, so a shared
+ * principal would only ever launch sessions whose evidence the control plane refuses.
+ */
+export async function saveProducerProfile(root: string, profileInput: unknown, verify: (token: string) => Promise<any>) {
+  const profile = producerProfileSchema.parse(profileInput);
+  const config = await loadMasterConfig(root);
+  await externalCredential(root, profile.credentialFile, 'Producer');
+  const status = await verify(await readCredentialFile(profile.credentialFile));
+  if (status.actor?.role !== 'producer' || status.actor.id !== profile.principal) throw new Error('Producer credential does not match the profile principal and producer role');
+  if (config.producers.some(item => item.name === profile.name || item.agentName === profile.agentName || item.principal === profile.principal)) throw new Error('Producer profile name, agent name, and principal must be unique');
+  if (config.workers.some(item => item.agentName === profile.agentName) || config.reviewers.some(item => item.agentName === profile.agentName)) throw new Error('A worker or reviewer profile already uses that Herdr agent name');
+  if (config.workers.some(item => item.principal === profile.principal)) throw new Error('A producer principal cannot also be a worker principal; the control plane refuses evidence from an implementer');
+  config.producers.push(profile); await atomicPrivateWrite(resolve(root, '.graphyard/master.json'), config);
+  return { added: profile.name, principal: profile.principal, kind: profile.kind, proofs: Array.isArray(status.actor?.proofs) ? status.actor.proofs : [], producers: config.producers.length,
+    launch: launchPlan(profile.kind, profile.approvals, profile.agentArgs, profile.environment) };
 }
 
 export type HerdrAgent = { name?: string; pane_id?: string; agent?: string; agent_status?: string; cwd?: string; foreground_cwd?: string; tokens?: Record<string, string> };
@@ -457,10 +521,33 @@ export function mergeProtocolSkew(status: { build?: { commit?: string | null; pr
   const serverCommit = status?.build?.commit ?? 'an unknown commit', cliCommit = cli.commit ?? 'an unknown commit';
   return `server runs ${serverCommit}, CLI expects ${cliCommit}: deploy main first (server merge protocol ${serverProtocol}, CLI merge protocol ${cliProtocol}${serverProtocol < cliProtocol ? '; the deployment has not served the commit the CLI runs' : '; update the CLI checkout to the deployed commit'})`;
 }
-export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profiles: WorkerProfile[], agents: HerdrAgent[], credentialHealth: Record<string, { available: boolean; reason: string | null }> = {}, containment: Record<string, ContainmentAssessment> = {}, reviews: { pending: any[]; completed: any[] } = { pending: [], completed: [] }, baseBranch = 'main', controlPlane?: ControlPlaneStatus) {
+/** Sessions the local ledgers hold and the launches the dispatcher refused, as `master status` joins them onto each candidate's requests. */
+export interface DispatchSessions { producers: { pending: any[]; completed: any[] }; failures: { requestId: string; kind: string; attempts: number; reason: string; at: string; nextAt: string }[] }
+const noSessions: DispatchSessions = { producers: { pending: [], completed: [] }, failures: [] };
+/**
+ * What is running for one candidate and since when: every open request the control plane
+ * holds for the current head, the session (if any) launched for it, and the launch failure
+ * standing against it, plus the last resolved requests so a re-request reads with its history.
+ */
+export function describeDispatch(work: Work, reviews: { pending: any[]; completed: any[] }, sessions: DispatchSessions, now: number) {
+  const state = work.autoDispatch;
+  if (!state) return null;
+  const since = (at: string) => Math.max(0, now - Date.parse(at));
+  const session = (records: any[], requestId: string) => {
+    const record = [...records].reverse().find(entry => entry.requestId === requestId);
+    return record ? { id: record.review ?? record.producer, profile: record.profile, agentName: record.agentName, state: record.state, requestedAt: record.requestedAt, sinceMs: since(record.requestedAt), ...(record.verdict !== undefined ? { verdict: record.verdict } : {}), ...(record.outcome ? { outcome: record.outcome } : {}), resolution: record.resolution ?? null, attention: record.attention ?? null } : null;
+  };
+  const failure = (requestId: string) => sessions.failures.find(entry => entry.requestId === requestId) ?? null;
+  const describe = (request: NonNullable<typeof state.review>, records: any[]) => ({ requestId: request.id, sha: request.sha, baseSha: request.baseSha, policyRevision: request.policyRevision, requestedAt: request.requestedAt, sinceMs: since(request.requestedAt), reason: request.reason,
+    ...(request.group ? { group: request.group, proofs: request.proofs } : {}), session: session(records, request.id), failure: failure(request.id) });
+  const reviewRecords = [...reviews.completed, ...reviews.pending], producerRecords = [...sessions.producers.completed, ...sessions.producers.pending];
+  return { review: state.review ? describe(state.review, reviewRecords) : null, producers: state.producers.map(request => describe(request, producerRecords)),
+    recent: state.history.slice(-5).map(request => ({ kind: request.kind, ...(request.group ? { group: request.group } : {}), sha: request.sha, state: request.state, resolution: request.resolution ?? null, resolvedAt: request.resolvedAt ?? null })) };
+}
+export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profiles: WorkerProfile[], agents: HerdrAgent[], credentialHealth: Record<string, { available: boolean; reason: string | null }> = {}, containment: Record<string, ContainmentAssessment> = {}, reviews: { pending: any[]; completed: any[] } = { pending: [], completed: [] }, baseBranch = 'main', controlPlane?: ControlPlaneStatus, sessions: DispatchSessions = noSessions) {
   const now = Date.parse(snapshot.now);
   const installation = controlPlaneAttention(controlPlane);
-  const sessions = profiles.map(profile => {
+  const workerSessions = profiles.map(profile => {
     const agent = agents.find(candidate => candidate.name === profile.agentName);
     const credential = credentialHealth[profile.name] ?? { available: true, reason: null };
     return { profile: profile.name, principal: profile.principal, agentName: profile.agentName, mode: profile.mode, state: agent?.agent_status ?? 'offline', pane: agent?.pane_id ?? null, cwd: agent?.foreground_cwd ?? agent?.cwd ?? null, contextPercent: agent?.tokens?.agent_watcher_context_pct ? Number(agent.tokens.agent_watcher_context_pct) : null, credential };
@@ -471,7 +558,7 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
     const placement = placements.find(entry => entry.id === work.id) ?? null;
     const active = !!work.lease && Date.parse(work.lease.expiresAt) > now;
     const profile = active ? profiles.find(item => item.principal === work.lease!.owner) : undefined;
-    const session = profile ? sessions.find(item => item.profile === profile.name) : undefined;
+    const session = profile ? workerSessions.find(item => item.profile === profile.name) : undefined;
     const first = work.gates.find(gate => !gate.passed);
     const freshObservation = !!work.observation && now - Date.parse(work.observation.at) >= 0 && now - Date.parse(work.observation.at) < 120_000;
     const activeMerge = !!work.mergeExecution && Date.parse(work.mergeExecution.expiresAt) > now;
@@ -496,24 +583,28 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
         attestation: assessed?.settleable ? null : containmentAttestation(work.key) }
       : null;
     const gaps = work.proofGaps ?? [];
+    const dispatch = describeDispatch(work, reviews, sessions, now);
+    const stalledLaunch = [dispatch?.review, ...(dispatch?.producers ?? [])].find(request => request?.failure);
     const attention = quarantine ? quarantine.settleable
       ? `Containment quarantine from epoch ${quarantine.epoch} is verified settleable; run master settle-containment ${work.key}`
       : `Containment quarantine from epoch ${quarantine.epoch} blocks dispatch: ${quarantine.refusals[0]}`
       : active && (!session || !['working', 'idle'].includes(session.state)) ? `Assigned worker session is ${session?.state ?? 'offline'}`
       : gaps.length ? `No principal is authorized to produce ${gaps.join(', ')}; grant the proof name before dispatch`
       : review?.exhausted ? `Every configured reviewer profile is exhausted for the current candidate (${review.failedOver.map(entry => `${entry.profile}: ${entry.exhaustion}`).join(', ')})`
+      : stalledLaunch ? `Automatic ${stalledLaunch.failure!.kind} launch for ${work.key} refused ${stalledLaunch.failure!.attempts} time(s): ${stalledLaunch.failure!.reason}`
       : work.blocker || dwellMs > 3_600_000 ? first?.reasons[0] ?? `Work has remained at ${work.stage} for more than one hour` : null;
-    return { key: work.key, title: work.title, stage: work.stage, owner: active ? work.lease!.owner : null, profile: profile?.name ?? null, session: session?.state ?? null, refusal: first ? { gate: first.name, reason: first.reasons[0] } : null, mergeable, review, proofGaps: gaps, containment: quarantine, attention, queue: placement ? queueRows.find(row => row.key === work.key) ?? null : null };
+    return { key: work.key, title: work.title, stage: work.stage, owner: active ? work.lease!.owner : null, profile: profile?.name ?? null, session: session?.state ?? null, refusal: first ? { gate: first.name, reason: first.reasons[0] } : null, mergeable, review, dispatch, proofGaps: gaps, containment: quarantine, attention, queue: placement ? queueRows.find(row => row.key === work.key) ?? null : null };
   });
   const delivered = snapshot.work.filter(work => work.stage === 'done' && work.delivery && deploySmokeRequired(work.policy)).map(work => deliveredRow(work, now, baseBranch));
   // Merge-to-production over every delivery with an observed deployment, whether or not its
   // policy asked for a smoke proof, so the periodic measurement reads one number for the repository.
   const mergeToProduction = latencyPercentiles(snapshot.work.map(work => mergeToProductionMs(work)).filter((value): value is number => value !== null));
   return { observedAt: snapshot.now,
-    counts: { open: rows.length, ready: rows.filter(row => row.stage === 'ready').length, active: rows.filter(row => row.owner).length, attention: rows.filter(row => row.attention).length + installation.attention.length, proofAuthorityGaps: rows.filter(row => row.proofGaps.length).length, mergeable: rows.filter(row => row.mergeable).length, reviewsPending: reviews.pending.length, reviewFailover: rows.filter(row => row.review?.failedOver.length).length, queued: placements.length,
+    counts: { open: rows.length, ready: rows.filter(row => row.stage === 'ready').length, active: rows.filter(row => row.owner).length, attention: rows.filter(row => row.attention).length + installation.attention.length, proofAuthorityGaps: rows.filter(row => row.proofGaps.length).length, mergeable: rows.filter(row => row.mergeable).length, reviewsPending: reviews.pending.length, producersPending: sessions.producers.pending.length,
+      dispatchRequested: rows.reduce((total, row) => total + (row.dispatch ? (row.dispatch.review ? 1 : 0) + row.dispatch.producers.length : 0), 0), dispatchRunning: rows.reduce((total, row) => total + (row.dispatch ? [row.dispatch.review, ...row.dispatch.producers].filter(request => request?.session?.state === 'pending').length : 0), 0), reviewFailover: rows.filter(row => row.review?.failedOver.length).length, queued: placements.length,
       quarantined: rows.filter(row => row.containment).length, settleableQuarantines: rows.filter(row => row.containment?.settleable).length,
       awaitingSmoke: delivered.filter(row => row.state === 'awaiting-deployment' || row.state === 'awaiting-smoke').length, postDeployFailures: delivered.filter(row => row.state === 'delivered-with-failure').length },
-    workers: sessions, reviews, work: rows, queue: queueRows, delivered, latency: { mergeToProduction }, controlPlane: installation };
+    workers: workerSessions, reviews, producers: sessions.producers, work: rows, queue: queueRows, delivered, latency: { mergeToProduction }, controlPlane: installation };
 }
 
 /**
@@ -630,8 +721,8 @@ export async function startMaster(root: string, kind: WorkerProfile['kind'], age
     herdrJson(['agent', 'start', config.masterAgentName, '--kind', kind, '--pane', created.pane, '--', ...agentArgs], run);
     const prompt = `You are the dedicated Graphyard master agent for ${config.repository}. Do not implement product work, claim worker leases, submit evidence, weaken requirements, or bypass gates. Read AGENTS.md, run node ${config.cliPath} master guide, then run node ${config.cliPath} master status. Use Graphyard as assignment and progression truth and Herdr only for session health and control. Route ready work to configured worker profiles, require workers to claim for themselves, preserve handoffs, surface decisions that need the operator, and invoke routine merge only through graphyard master merge after every exact-candidate gate passes.`;
     const reviewInstruction = config.reviewer
-      ? `Independent review runs under your own control: launch it with node ${config.cliPath} master review GY-N and let master status reconcile the verdict and close the session. The reviewer identity is ${config.reviewer.slug}[bot]; never review a candidate yourself.`
-      : `No reviewer identity is registered yet. Run node ${config.cliPath} master reviewer setup before routing work that needs independent review, and never approve a candidate yourself.`;
+      ? `Independent review and proof collection start on their own: when a candidate passes the build gate the control plane records a review request and producer requests bound to its exact head, and node ${config.cliPath} master run launches the reviewer identity ${config.reviewer.slug}[bot] and one producer session per proof group for them within 30 seconds. Read the findings, route rework, and merge; never launch reviews or producers by hand, never review a candidate yourself, and never submit evidence. master status shows what is running per candidate and since when, and node ${config.cliPath} master review GY-N is only the recovery path for a refused reviewer launch.`
+      : `No reviewer identity is registered yet. Run node ${config.cliPath} master reviewer setup before routing work that needs independent review; once it is registered, master run launches reviews and producers for every submitted head on its own. Never approve a candidate yourself.`;
     const mergeInstruction = config.autoMerge
       ? 'Automatic routine merging is enabled. Use the guarded merge command when all gates pass.'
       : 'Automatic merging is disabled. Wait for explicit operator approval for each merge. Do not invoke master merge or master merge --all without that approval; the operator can invoke the guarded command directly.';
@@ -675,7 +766,7 @@ export async function dispatchWork(root: string, work: Work, profile: WorkerProf
     await readCredentialFile(profile.credentialFile!);
     if (target) throw new Error('Launch profile agent name is already visible in Herdr');
     const prepared = await prepare(root, work.key, profile.name);
-    const prompt = `Implement ${work.key}: ${work.title}. The Graphyard worker launcher has claimed this item under principal ${profile.principal}, created its assigned worktree, and placed this agent under lease supervision. Run node ${config.cliPath} status ${work.key} before editing. Work only in the current assigned worktree, satisfy the stated criteria without weakening them, open a PR, and submit it with complete as your last action: complete ends your lease and the supervisor then stops this session, which is the attempt ending, not lease loss. Stop immediately if the supervisor reports lease loss before you have submitted. Do not submit trusted evidence or merge the PR.`;
+    const prompt = `Implement ${work.key}: ${work.title}. The Graphyard worker launcher has claimed this item under principal ${profile.principal}, created its assigned worktree, and placed this agent under lease supervision. Run node ${config.cliPath} status ${work.key} before editing. Work only in the current assigned worktree, satisfy the stated criteria without weakening them, open a PR, and submit it with complete as your last action: complete ends your lease and the supervisor then stops this session, which is the attempt ending, not lease loss. Stop immediately if the supervisor reports lease loss before you have submitted. Do not submit trusted evidence or merge the PR; the control plane requests the independent review and the proof producers for your exact head as soon as it passes the build gate, so ask nobody to launch them.`;
     let pane: string | undefined, tabId: string | undefined;
     try {
       const launch = launchPlan(profile.kind, profile.approvals, profile.agentArgs, profile.environment);

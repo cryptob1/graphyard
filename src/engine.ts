@@ -11,6 +11,7 @@ import { queueHistoryLimit, queueSequencingReason, type QueueSpeculation } from 
 import { githubFromEnv } from './github.js';
 import { regressionRefusals } from './regression-guard.js';
 import { ciFamilyAllows, ciProofFamilies, ciRunBindingSchema, ciRunRefusal, isCiProducer, refuseCiProducer, staleCiAttemptRefusal, type CiRunObservation } from './model/ci-proofs.js';
+import { reconcileAutoDispatch, type DispatchTransition } from './model/dispatch.js';
 
 const epoch = z.number().int().positive();
 const sha = z.string().regex(/^[a-f0-9]{40}$/);
@@ -30,7 +31,7 @@ export const containmentScopeSchema = z.object({ unit: z.string().trim().min(1).
 const commands = {
   create: createSchema.extend({ reason: z.string().trim().min(1).max(2000).optional() }),
   ready: z.object({ expectedRevision: z.number().int().positive().optional(), reason: z.string().trim().min(1).max(2000).optional() }).strict(),
-  requirements: z.object({ expectedPolicyRevision: z.number().int().positive(), reason: z.string().trim().min(1).max(2000), criteria: z.array(criterionSchema).min(1).max(50), dependencies: z.array(z.string().uuid()).max(50), plannedFiles: createSchema.shape.plannedFiles, exclusiveResources: resourcesSchema }).strict(),
+  requirements: z.object({ expectedPolicyRevision: z.number().int().positive(), reason: z.string().trim().min(1).max(2000), criteria: z.array(criterionSchema).min(1).max(50), dependencies: z.array(z.string().uuid()).max(50), plannedFiles: createSchema.shape.plannedFiles, exclusiveResources: resourcesSchema, producerProofs: createSchema.shape.producerProofs }).strict(),
   reviewpolicy: z.object({ provider: z.enum(reviewProviders), reviewerProfiles: z.array(reviewerProfileSchema).min(1).max(10).optional(), expectedPolicyRevision: z.number().int().positive(), reason: z.string().trim().min(1).max(2000) }).strict(),
   unblock: z.object({ reason: z.string().trim().min(1).max(2000), expectedRevision: z.number().int().positive().optional() }).strict(),
   rework: z.object({ reason: z.string().min(1).max(2000), previousWorkerStopped: z.literal(true) }).strict(),
@@ -131,6 +132,9 @@ export class Engine {
    * disables the pre-check, and every later observation still re-derives the refusal.
    */
   submissionObserver: ((work: Work) => Promise<Observation>) | null | undefined = undefined;
+  // Auto-dispatch transitions the last evaluation of a document produced, written to the ledger
+  // by the transaction that persists it. Keyed by the object, so a probe clone records nothing.
+  private dispatchTransitions = new WeakMap<Work, DispatchTransition[]>();
   // The launch fence is a deployment-independent safety default; only tests shorten it.
   constructor(public store: Store, public ciAppIds: number[] = [15368], public leaseSeconds = 120, public repository = process.env.GITHUB_REPOSITORY ?? '', public launchFence = launchFenceMs) {}
   private async observeSubmission(actor: Principal, id: string | null, data: { epoch: number; pr: number }, key: string): Promise<Observation | null> {
@@ -306,7 +310,7 @@ export class Engine {
         if (retired.length || narrowed.length) raiseEscalation(work, { trigger: 'requirement-weakening', reason: `Requirement revision retires ${retired.map(ac => ac.id).join(', ') || 'no criterion'} and narrows proofs for ${narrowed.map(ac => ac.id).join(', ') || 'no criterion'}`, at: now.toISOString(), actor: actor.id });
         work.retiredCriterionIds = [...(work.retiredCriterionIds ?? []), ...work.criteria.filter(ac => !data.criteria.some((next: { id: string }) => next.id === ac.id)).map(ac => ac.id)];
         work.criteria = revised;
-        work.dependencies = data.dependencies; work.plannedFiles = data.plannedFiles; work.exclusiveResources = data.exclusiveResources;
+        work.dependencies = data.dependencies; work.plannedFiles = data.plannedFiles; work.exclusiveResources = data.exclusiveResources; work.producerProofs = data.producerProofs;
         work.scenarioRequirements = pins; work.policyRevision++;
         this.refuseRenewedDeferral(work, all);
         work.proofGaps = await unauthorizedProofs(db, this.principals, [...proofs, ...(deploySmokeRequired(work.policy) ? [deploySmokeProof] : [])]);
@@ -565,6 +569,7 @@ export class Engine {
       // Delivery is an immutable snapshot. A late containment cleanup or a post-deployment fact may
       // append its audit/revision metadata, but stale inputs must not re-evaluate it.
       if (!deliveredContainmentCleanup && !postDeployment) this.evaluate(work, all, now);
+      await this.recordDispatch(db, work, now);
       await save(db, work, actor.id, command, now, command === 'settle' ? { epoch: data.epoch } : actor.role === 'operator-agent' ? { before, intent: data, reason: data.reason ?? null } : data);
       if (work.submission && !postDeployment && !['heartbeat', 'release', 'claim', 'workspace'].includes(command)) await wakeJob(db, work.id);
       await db.query('INSERT INTO receipts(actor,key,fingerprint,result) VALUES($1,$2,$3,$4)', [actor.id, key, fingerprint, JSON.stringify(work)]);
@@ -608,6 +613,7 @@ export class Engine {
       demand(Number.isFinite(expiresAt) && expiresAt - now.getTime() > 95_000, 'Required gate inputs expire too soon for a bounded merge execution; refresh them and retry');
       const execution = { id: randomUUID(), owner: actor.id, sha: data.sha, baseSha: data.baseSha, policyRevision: data.policyRevision, authorizationRevision: work.revision, issuedAt: now.toISOString(), expiresAt: new Date(expiresAt).toISOString() };
       work.mergeExecution = execution;
+      await this.recordDispatch(db, work, now);
       await save(db, work, actor.id, 'merge.execution.acquired', now, { executionId: execution.id, owner: execution.owner, sha: execution.sha, baseSha: execution.baseSha, policyRevision: execution.policyRevision });
       const result = { key: work.key, revision: work.revision, execution };
       await db.query('INSERT INTO receipts(actor,key,fingerprint,result) VALUES($1,$2,$3,$4)', [actor.id, key, fingerprint, JSON.stringify(result)]);
@@ -627,6 +633,7 @@ export class Engine {
       demand(work, 'Work item not found', 404);
       demand(work.mergeExecution?.id === data.executionId && work.mergeExecution.owner === actor.id, 'Merge execution is missing, expired, superseded, or owned by another coordinator');
       work.mergeExecution = null; this.evaluate(work, all, now);
+      await this.recordDispatch(db, work, now);
       await save(db, work, actor.id, 'merge.execution.cancelled', now, { executionId: data.executionId, reason: data.reason });
       await wakeJob(db, work.id);
       const result = { key: work.key, revision: work.revision, cancelled: data.executionId };
@@ -710,6 +717,7 @@ export class Engine {
         && work.mergeAuthorization.policyRevision === execution.policyRevision,
       'Merge authorization changed after final verification; provider merge refused');
       execution.committingAt = now.toISOString();
+      await this.recordDispatch(db, work, now);
       await save(db, work, actor.id, 'merge.execution.committed', now, { executionId: execution.id, sha: execution.sha, committingAt: execution.committingAt });
       const result = { key: work.key, executionId: execution.id, sha: execution.sha, committingAt: execution.committingAt, revision: work.revision };
       await db.query('INSERT INTO receipts(actor,key,fingerprint,result) VALUES($1,$2,$3,$4)', [actor.id, key, fingerprint, JSON.stringify(result)]);
@@ -736,7 +744,7 @@ export class Engine {
       if (work.observation) work.observation.agentReview = provider === 'agent'
         ? { provider: 'agent', sha: request.sha, approved: false, profile: request.profile, reviewerApp: request.reviewerApp, reason: `Waiting for reviewer profile ${request.profile} to post a verdict through its registered App` }
         : { provider: 'codex', sha: request.sha, approved: false, reason: 'Waiting for dispatched Codex review' };
-      this.evaluate(work, all, now); await save(db, work, 'github', 'review.requested', now); return work;
+      this.evaluate(work, all, now); await this.recordDispatch(db, work, now); await save(db, work, 'github', 'review.requested', now); return work;
     });
   }
   /**
@@ -759,6 +767,7 @@ export class Engine {
       work.queueHistory = [...(work.queueHistory ?? []), { at: now.toISOString(), event: 'predicted' as const, sequence: work.queue!.sequence, tip: speculation.tip }].slice(-queueHistoryLimit);
       this.evaluate(work, all, now);
       if (carry) await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, 'graphyard', 'queue.carry', JSON.stringify({ details: { ...carry, merge: speculation.merge ?? null } })]);
+      await this.recordDispatch(db, work, now);
       await save(db, work, 'graphyard', 'queue.predicted', now, { tip: speculation.tip, base: speculation.base, ref: speculation.ref, predecessors: speculation.predecessors,
         ...(carry ? { carry: { approval: carry.approval.carried ? 'carried' : 'required', evidence: Object.fromEntries(carry.evidence.map(entry => [entry.proof, entry.carried ? 'carried' : 'required'])) } } : {}) });
       await wakeJob(db, work.id);
@@ -796,6 +805,7 @@ export class Engine {
       work.queueHistory = [...(work.queueHistory ?? []), { at: now.toISOString(), event: 'ejected' as const, sequence, reason, ...(work.queue!.speculation ? { tip: work.queue!.speculation.tip } : {}) }].slice(-queueHistoryLimit);
       work.queue = null;
       this.evaluate(work, all, now);
+      await this.recordDispatch(db, work, now);
       await save(db, work, 'graphyard', 'queue.ejected', now, { sequence, reason });
       for (const behind of all) if (behind.queue && behind.id !== work.id) await wakeJob(db, behind.id);
       return work;
@@ -833,6 +843,7 @@ export class Engine {
         reason: next ? `Reviewer profile ${failover.profile} is exhausted (${failover.exhaustion}); Graphyard failed over to ${next.name}`
           : `Every configured reviewer profile is exhausted for this candidate; the last was ${failover.profile} (${failover.exhaustion})` };
       this.evaluate(work, all, now);
+      await this.recordDispatch(db, work, now);
       await save(db, work, 'github', 'review.failover', now, failover);
       return work;
     });
@@ -845,6 +856,15 @@ export class Engine {
     else if (work.candidate && !work.observation?.merged && (!work.mergeAuthorization || work.mergeAuthorization.sha !== work.candidate.sha || work.mergeAuthorization.baseSha !== work.candidate.baseSha)) {
       work.mergeAuthorization = { sha: work.candidate.sha, baseSha: work.candidate.baseSha, policyRevision: work.policyRevision, at: now.toISOString() };
     }
+    // What the exact head still needs from a launched reviewer or producer, decided from the
+    // gates just evaluated; the transitions reach the ledger with the document (recordDispatch).
+    this.dispatchTransitions.set(work, reconcileAutoDispatch(work, all, now));
+  }
+  /** Append the auto-dispatch transitions of the last evaluation to the ledger, once, beside the document save. */
+  private async recordDispatch(db: { query: (text: string, values: unknown[]) => Promise<unknown> }, work: Work, now: Date) {
+    const transitions = this.dispatchTransitions.get(work) ?? [];
+    this.dispatchTransitions.delete(work);
+    for (const transition of transitions) await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, 'graphyard', transition.event, JSON.stringify({ details: { ...transition.request, at: now.toISOString() } })]);
   }
   async reconcile() {
     await this.store.transaction(async (db, now) => {
@@ -890,6 +910,7 @@ export class Engine {
         this.evaluate(work, all, now);
         if (JSON.stringify(work) !== before) {
           for (const entry of ledger) await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, 'graphyard', entry.kind, JSON.stringify({ details: { ...entry.details, at: now.toISOString() } })]);
+          await this.recordDispatch(db, work, now);
           await save(db, work, 'graphyard', 'reconciled', now, ledger.length ? { ledger: ledger.map(entry => entry.kind) } : undefined);
           if (work.submission) await wakeJob(db, work.id);
         }
@@ -1017,6 +1038,7 @@ export class Engine {
         // expired, so the execution — committed or not — is reconciled and the record reopens.
         work.mergeExecution = null;
       }
+      await this.recordDispatch(db, work, now);
       await save(db, work, 'github', 'github.observed', now);
       return work;
     });

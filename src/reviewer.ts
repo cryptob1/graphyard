@@ -26,10 +26,15 @@ export const reviewRecordSchema = z.object({
   profile: z.string().min(1).max(80), agentName: z.string().min(1).max(100),
   pane: z.string().min(1).max(200).nullable(), sessionDirectory: z.string().min(1),
   requestedAt: z.string().min(1).max(40), tokenExpiresAt: z.string().min(1).max(40),
-  state: z.enum(['pending', 'completed', 'expired']),
+  // The control plane's review request this session answers (autoDispatch.review.id); a launch
+  // by hand records none. One session per request id is what makes automatic dispatch idempotent.
+  requestId: z.string().min(1).max(64).optional(),
+  state: z.enum(['pending', 'completed', 'expired', 'cancelled']),
   verdict: z.object({ state: z.string().min(1).max(40), reviewer: z.string().min(1).max(100), reviewId: z.number().int().positive(), submittedAt: z.string().min(1).max(40) }).optional(),
   closedAt: z.string().min(1).max(40).optional(),
   closeFailure: z.string().min(1).max(500).optional(),
+  /** Why a session ended without a verdict: the head it was reviewing is no longer the candidate. */
+  resolution: z.string().min(1).max(500).optional(),
 }).strict();
 export type ReviewRecord = z.infer<typeof reviewRecordSchema>;
 export const reviewLedgerSchema = z.object({ version: z.literal(1), reviews: z.array(reviewRecordSchema).max(200).default([]) }).strict();
@@ -151,6 +156,7 @@ export function reviewPrompt(config: MasterConfig, binding: ReviewBinding) {
     + `Post exactly one verdict, bound to that exact commit: gh api --method POST repos/${config.repository}/pulls/${binding.pr}/reviews -f commit_id=${binding.sha} -f event=APPROVE -f body=YOUR_JUSTIFICATION (use event=REQUEST_CHANGES instead when the change is not acceptable). `
     + `Judge only whether this diff is correct, safe, and matches what ${binding.key} requires; never weaken a requirement to let it pass. `
     + `GH_CONFIG_DIR points at a reviewer credential that expires within the hour and can only read this repository and write reviews. `
+    + `Immediately before posting, run gh pr view ${binding.pr} --repo ${config.repository} --json mergeable,mergeStateStatus,headRefOid and repeat it every 5 seconds until mergeable is no longer UNKNOWN: GitHub recomputes the merge base lazily and dismisses a verdict posted before that recompute. `
     + `If gh reports a head commit other than ${binding.sha}, stop and report that instead of reviewing a different commit. Then stop; Graphyard closes this session once it observes your verdict.`;
 }
 
@@ -167,6 +173,8 @@ export async function launchReview(root: string, work: Work, profileName: string
   run?: (command: string, args: string[]) => string;
   mint?: (credential: ReviewerCredential, repository: string) => Promise<{ token: string; expiresAt: string }>;
   now?: () => Date;
+  /** The control-plane review request this launch answers; recorded so the request is never launched twice. */
+  requestId?: string;
 } = {}) {
   const now = dependencies.now ?? (() => new Date());
   const config = await loadMasterConfig(root);
@@ -204,9 +212,10 @@ export async function launchReview(root: string, work: Work, profileName: string
     throw error;
   }
   const record: ReviewRecord = reviewRecordSchema.parse({ id, key: binding.key, pr: binding.pr, sha: binding.sha, baseSha: binding.baseSha, policyRevision: binding.policyRevision,
-    profile: profile.name, agentName: profile.agentName, pane: pane ?? null, sessionDirectory, requestedAt: now().toISOString(), tokenExpiresAt: minted.expiresAt, state: 'pending' });
+    profile: profile.name, agentName: profile.agentName, pane: pane ?? null, sessionDirectory, requestedAt: now().toISOString(), tokenExpiresAt: minted.expiresAt, state: 'pending',
+    ...(dependencies.requestId ? { requestId: dependencies.requestId } : {}) });
   await saveReviewLedger(root, { ...ledger, reviews: [...ledger.reviews, record] });
-  return { review: record.id, work: binding.key, pr: binding.pr, sha: binding.sha, baseSha: binding.baseSha, policyRevision: binding.policyRevision, profile: profile.name, agentName: profile.agentName,
+  return { review: record.id, requestId: record.requestId ?? null, work: binding.key, pr: binding.pr, sha: binding.sha, baseSha: binding.baseSha, policyRevision: binding.policyRevision, profile: profile.name, agentName: profile.agentName,
     pane: record.pane, reviewer: `${config.reviewer.slug}[bot]`, tokenExpiresAt: minted.expiresAt, approvals: launch.approvals,
     recorded: 'the request is recorded; master status reconciles the verdict and closes the session' };
 }
@@ -219,12 +228,32 @@ export function observeReviewVerdict(repository: string, record: ReviewRecord, r
   return match ? { state: String(match.state), reviewer, reviewId: Number(match.id), submittedAt: String(match.submitted_at ?? new Date().toISOString()) } : null;
 }
 
+/**
+ * Why a pending session no longer reviews the candidate: the head it was launched for was
+ * replaced, or the item left review altogether. The session is closed and its token withdrawn;
+ * a verdict it managed to post for the old head settles nothing the record does not already say.
+ */
+export function staleReviewReason(record: Pick<ReviewRecord, 'key' | 'sha' | 'baseSha' | 'policyRevision'>, work: Work[] | undefined): string | null {
+  const item = work?.find(candidate => candidate.key === record.key);
+  if (!item) return null;
+  if (item.stage === 'done' || item.observation?.merged) return 'the work is delivered';
+  if (item.reworkRequested) return 'rework was requested for the item';
+  if (!item.submission || !item.candidate) return 'the item no longer has a submitted candidate';
+  if (item.candidate.sha !== record.sha) return `head changed from ${record.sha.slice(0, 12)} to ${item.candidate.sha.slice(0, 12)}`;
+  if (item.candidate.baseSha !== record.baseSha) return `base changed from ${record.baseSha.slice(0, 12)} to ${item.candidate.baseSha.slice(0, 12)}`;
+  if (item.policyRevision !== record.policyRevision) return `policy revision changed from ${record.policyRevision} to ${item.policyRevision}`;
+  return null;
+}
+
 // A session is reported closed only once Herdr confirms the pane is gone and the reviewer
 // credential directory is removed; a verdict alone never claims the credential was withdrawn.
+// Given the current work snapshot, a session whose head is no longer the candidate is cancelled
+// the same way, with the reason on the record.
 export async function reconcileReviews(root: string, config: MasterConfig, dependencies: {
   run?: (command: string, args: string[]) => string;
   observe?: (record: ReviewRecord, reviewer: string) => { state: string; reviewer: string; reviewId: number; submittedAt: string } | null;
   now?: () => Date;
+  work?: Work[];
 } = {}) {
   const ledger = await readReviewLedger(root);
   if (!config.reviewer) return { reviews: ledger.reviews, changed: 0 };
@@ -236,14 +265,15 @@ export async function reconcileReviews(root: string, config: MasterConfig, depen
     if (record.state !== 'pending') continue;
     const verdict = record.verdict ?? observe(record, reviewer) ?? undefined;
     const expired = !verdict && Date.parse(record.tokenExpiresAt) <= now.getTime();
-    if (!verdict && !expired) continue;
+    const stale = verdict ? null : staleReviewReason(record, dependencies.work);
+    if (!verdict && !expired && !stale) continue;
     if (verdict) record.verdict = verdict;
     let closeFailure: string | undefined;
     try { if (record.pane) closeHerdrPane(record.pane, dependencies.run); }
     catch (error) { closeFailure = `Herdr could not close pane ${record.pane}: ${error instanceof Error ? error.message : 'unknown reason'}`; }
     if (!closeFailure) await rm(record.sessionDirectory, { recursive: true, force: true });
     record.closeFailure = closeFailure;
-    if (!closeFailure) { record.state = verdict ? 'completed' : 'expired'; record.closedAt = now.toISOString(); }
+    if (!closeFailure) { record.state = verdict ? 'completed' : stale ? 'cancelled' : 'expired'; record.closedAt = now.toISOString(); if (stale) record.resolution = stale; }
     changed++;
   }
   if (changed) await saveReviewLedger(root, ledger);
@@ -251,8 +281,8 @@ export async function reconcileReviews(root: string, config: MasterConfig, depen
 }
 
 export function summarizeReviews(records: ReviewRecord[]) {
-  const describe = (record: ReviewRecord) => ({ review: record.id, work: record.key, pr: record.pr, sha: record.sha, policyRevision: record.policyRevision, profile: record.profile, agentName: record.agentName,
-    state: record.state, verdict: record.verdict?.state ?? null, requestedAt: record.requestedAt, tokenExpiresAt: record.tokenExpiresAt, closedAt: record.closedAt ?? null, attention: record.closeFailure ?? null });
+  const describe = (record: ReviewRecord) => ({ review: record.id, requestId: record.requestId ?? null, work: record.key, pr: record.pr, sha: record.sha, policyRevision: record.policyRevision, profile: record.profile, agentName: record.agentName,
+    state: record.state, verdict: record.verdict?.state ?? null, requestedAt: record.requestedAt, tokenExpiresAt: record.tokenExpiresAt, closedAt: record.closedAt ?? null, resolution: record.resolution ?? null, attention: record.closeFailure ?? null });
   return { pending: records.filter(record => record.state === 'pending').map(describe), completed: records.filter(record => record.state !== 'pending').slice(-20).map(describe) };
 }
 

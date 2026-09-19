@@ -5,11 +5,13 @@ import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 import { startGithubSetup } from '../github-setup.js';
 import { resourceConflicts } from '../coordination.js';
-import { assertMasterBinding, assessContainment, buildMasterStatus, continueMergeBatch, currentMergeCandidates, dispatchWork, inspectWorkerCredentials, listHerdrAgents, loadMasterConfig, masterHarness, mergeExecutor, mergeProtocolSkew, observeHerdrAgents, readCredentialFile, readWorkerCredential, saveWorkerProfile, setupMaster, snapshotWithClock, startMaster, verifyContainmentDeath, workerProfileSchema } from '../master.js';
+import { assertMasterBinding, assessContainment, buildMasterStatus, continueMergeBatch, currentMergeCandidates, dispatchWork, inspectWorkerCredentials, listHerdrAgents, loadMasterConfig, masterHarness, mergeExecutor, mergeProtocolSkew, observeHerdrAgents, readCredentialFile, readWorkerCredential, saveProducerProfile, saveWorkerProfile, setupMaster, snapshotWithClock, startMaster, verifyContainmentDeath, workerProfileSchema } from '../master.js';
 import { cliCommit } from '../protocol-version.js';
 import { daemonEffects, daemonSummary, readDaemonState, runDaemon } from '../master-daemon.js';
 import { verificationEffects, verifyDeployment } from '../master-verification.js';
 import { bindReviewer, launchReview, readReviewLedger, reconcileReviews, reviewerCredentialDirectory, saveReviewerProfile, summarizeReviews, verifyReviewerInstallation } from '../reviewer.js';
+import { readProducerLedger, reconcileProducers, summarizeProducers } from '../producer.js';
+import { dispatchEffects, dispatchSummary, readDispatchCursor, runAutoDispatch } from '../auto-dispatch.js';
 import { applyProtection, protectionPlan, readProtection } from '../protection.js';
 import { writeHarnessPermissions } from '../harness.js';
 import { browserFlows, readAdministrationLedger, readSudoState, runBrowserFlow, summarizeAdministration, type BrowserFlow } from '../master-browser.js';
@@ -26,9 +28,11 @@ export const masterCommands = defineCommands([
     readsConnection: () => false,
     help: [
       '  master init --token-stdin [--herdr-workspace ID] [--browser-profile PROFILE]',
+      '              [--dispatch-interval SECONDS] [--reviewer-profile NAME] [--producer-timeout MINUTES]',
       '                                Install the recommended master-agent operating mode;',
       "                                PROFILE is the operator's Chrome profile the master",
-      '                                administers GitHub through',
+      '                                administers GitHub through; the dispatch settings bound the',
+      '                                automatic reviewer and producer launches',
       '  master start AGENT_KIND       Launch the dedicated visible Herdr master session',
       '  master worker add FILE        Add an existing or launchable Herdr worker profile',
       '  master reviewer setup [--name NAME]     Register the separate reviewer GitHub App in a',
@@ -36,7 +40,9 @@ export const masterCommands = defineCommands([
       "                                generated App name within GitHub's 34-character limit",
       '  master reviewer bind FILE --key-stdin   Bind an existing reviewer App (IDs in FILE, PEM on stdin)',
       '  master reviewer add FILE      Add a reviewer launch profile',
-      '  master review GY-N [PROFILE]  Launch the bound reviewer on the exact current candidate',
+      '  master producer add FILE      Add a proof-producer launch profile (own producer credential)',
+      '  master review GY-N [PROFILE]  Launch the bound reviewer on the exact current candidate;',
+      '                                master run does this on its own for every submitted head',
       '  master protection [--apply]   Reconcile branch protection with every open review policy',
       '  master browser FLOW [--dry-run]',
       "                                Perform GitHub administration through the operator's browser",
@@ -53,7 +59,9 @@ export const masterCommands = defineCommands([
       '                                emits the current instructions; refuse stale or local-only',
       '                                observations, record the exact release observed',
       '  master run [--once] [--interval SECONDS]',
-      '                                Run the durable coordination loop as a supervised process',
+      '                                Run the durable coordination loop as a supervised process;',
+      '                                it launches the reviewer and the proof producers for every',
+      '                                submitted head within 30 seconds of the request',
       '  master guide                  Print the complete master-agent operating guide',
     ],
     async run(context) {
@@ -62,11 +70,12 @@ export const masterCommands = defineCommands([
       // The guide's first line is its docs-index entry, not part of the guide.
       if (id === 'guide') return console.log((await readFile(fileURLToPath(new URL('../../docs/master-agent.md', import.meta.url)), 'utf8')).replace(/^<!-- page:[^\n]*\n/, ''));
       if (id === 'init') {
-        const { values } = parseArgs({ args, options: { url: { type: 'string' }, 'token-stdin': { type: 'boolean' }, 'no-auto-merge': { type: 'boolean' }, 'merge-method': { type: 'string' }, 'cli-path': { type: 'string' }, 'host-id': { type: 'string' }, 'herdr-workspace': { type: 'string' }, interval: { type: 'string' }, 'proof-workflow': { type: 'string' }, 'deployment-url': { type: 'string' }, 'deployment-sha-field': { type: 'string' }, 'smoke-workflow': { type: 'string' }, 'browser-profile': { type: 'string' }, 'browser-executable': { type: 'string' } }, allowPositionals: false });
+        const { values } = parseArgs({ args, options: { url: { type: 'string' }, 'token-stdin': { type: 'boolean' }, 'no-auto-merge': { type: 'boolean' }, 'merge-method': { type: 'string' }, 'cli-path': { type: 'string' }, 'host-id': { type: 'string' }, 'herdr-workspace': { type: 'string' }, interval: { type: 'string' }, 'proof-workflow': { type: 'string' }, 'deployment-url': { type: 'string' }, 'deployment-sha-field': { type: 'string' }, 'smoke-workflow': { type: 'string' }, 'dispatch-interval': { type: 'string' }, 'reviewer-profile': { type: 'string' }, 'producer-timeout': { type: 'string' }, 'browser-profile': { type: 'string' }, 'browser-executable': { type: 'string' } }, allowPositionals: false });
         if (!values['token-stdin']) throw new Error('Use master init --token-stdin so the coordinator credential is not stored in shell history');
         const masterToken = await readSecretFromStdin(10_000); if (!masterToken) throw new Error('Master coordinator credential is required; setup made no changes');
         const method = values['merge-method']; if (method && !['merge', 'squash', 'rebase'].includes(method)) throw new Error('Merge method must be merge, squash, or rebase');
-        const run = { ...(values.interval ? { intervalSeconds: Number(values.interval) } : {}), ...(values['proof-workflow'] ? { proofWorkflow: values['proof-workflow'] } : {}), ...(values['deployment-url'] ? { deploymentUrl: values['deployment-url'] } : {}), ...(values['deployment-sha-field'] ? { deploymentShaField: values['deployment-sha-field'] } : {}), ...(values['smoke-workflow'] ? { smokeWorkflow: values['smoke-workflow'] } : {}) };
+        const run = { ...(values.interval ? { intervalSeconds: Number(values.interval) } : {}), ...(values['proof-workflow'] ? { proofWorkflow: values['proof-workflow'] } : {}), ...(values['deployment-url'] ? { deploymentUrl: values['deployment-url'] } : {}), ...(values['deployment-sha-field'] ? { deploymentShaField: values['deployment-sha-field'] } : {}), ...(values['smoke-workflow'] ? { smokeWorkflow: values['smoke-workflow'] } : {}),
+          ...(values['dispatch-interval'] ? { dispatchIntervalSeconds: Number(values['dispatch-interval']) } : {}), ...(values['reviewer-profile'] ? { reviewerProfile: values['reviewer-profile'] } : {}), ...(values['producer-timeout'] ? { producerTimeoutMinutes: Number(values['producer-timeout']) } : {}) };
         if (values['browser-executable'] && !values['browser-profile']) throw new Error('--browser-executable requires --browser-profile');
         const browser = values['browser-profile'] ? { profile: values['browser-profile'], ...(values['browser-executable'] ? { executable: values['browser-executable'] } : {}) } : undefined;
         return print(await setupMaster(root, { url: values.url ?? base, token: masterToken, cliPath: resolve(values['cli-path'] ?? await context.activeCliPath()), hostId: values['host-id'] ?? context.individualHostId(), herdrWorkspace: values['herdr-workspace'], ...(values['no-auto-merge'] ? { autoMerge: false } : {}), ...(method ? { mergeMethod: method as 'merge' | 'squash' | 'rebase' } : {}), ...(Object.keys(run).length ? { run } : {}), ...(browser ? { browser } : {}) }));
@@ -92,6 +101,10 @@ export const masterCommands = defineCommands([
         return print(await startMaster(root, kind.data, agentArgs, listHerdrAgents()));
       }
       if (id === 'worker' && args[0] === 'add' && args[1]) return print(await saveWorkerProfile(root, JSON.parse(await readFile(args[1], 'utf8')), credential => masterApi('status', credential)));
+      if (id === 'producer') {
+        if (args[0] === 'add' && args[1]) return print(await saveProducerProfile(root, JSON.parse(await readFile(args[1], 'utf8')), credential => masterApi('status', credential)));
+        throw new Error('Use master producer add FILE');
+      }
       if (id === 'reviewer') {
         if (args[0] === 'add' && args[1]) return print(await saveReviewerProfile(root, JSON.parse(await readFile(args[1], 'utf8'))));
         if (args[0] === 'bind' && args[1]) {
@@ -148,19 +161,26 @@ export const masterCommands = defineCommands([
         const runtime = observeHerdrAgents();
         const credentials = await inspectWorkerCredentials(root, master.workers);
         let reviews = summarizeReviews((await readReviewLedger(root)).reviews), reviewRuntime = { available: true, reason: null as string | null };
-        try { reviews = summarizeReviews((await reconcileReviews(root, master)).reviews); }
-        catch (error) { reviewRuntime = { available: false, reason: `Reviewer verdicts could not be reconciled with GitHub: ${error instanceof Error ? error.message : 'unknown reason'}` }; }
         const { snapshot, clockOffset } = await snapshotWithClock(() => masterApi('work-snapshot'));
+        // Sessions the automatic dispatcher launched are settled against this same snapshot: a
+        // head change cancels them here as well as in the loop, so status never shows a stale one.
+        try { reviews = summarizeReviews((await reconcileReviews(root, master, { work: snapshot.work })).reviews); }
+        catch (error) { reviewRuntime = { available: false, reason: `Reviewer verdicts could not be reconciled with GitHub: ${error instanceof Error ? error.message : 'unknown reason'}` }; }
+        let producers = summarizeProducers((await readProducerLedger(root)).producers);
+        try { producers = summarizeProducers((await reconcileProducers(root, master, snapshot.work, runtime.available ? runtime.agents : null)).producers); } catch { /* the ledger as last written stands */ }
+        const dispatchCursor = await readDispatchCursor(root, master).catch(error => ({ error: error instanceof Error ? error.message : 'Master dispatch cursor is unreadable' }));
+        const dispatch = 'error' in dispatchCursor ? { running: false, failures: [] as { requestId: string; kind: string; attempts: number; reason: string; at: string; nextAt: string }[], error: dispatchCursor.error } : dispatchSummary(dispatchCursor, Date.now(), master.run.dispatchIntervalSeconds * 1000);
         const containment = assessContainment(snapshot.work, { hostId: master.hostId, observedAt: snapshot.now, clockOffset });
         const daemonState = await readDaemonState(root, master).catch(error => ({ error: error instanceof Error ? error.message : 'Master daemon state is unreadable' }));
         const daemon = 'error' in daemonState ? { running: false, error: daemonState.error } : daemonSummary(daemonState, Date.now(), master.run.intervalSeconds * 1000);
         // Browser administration is reported beside the work it unblocks: a pending sudo code is
         // the one thing the operator must act on, and the recent ledger entries say who changed what.
         const administration = { browser: master.browser ? { profile: master.browser.profile } : null, ...summarizeAdministration((await readAdministrationLedger(root)).entries, await readSudoState(root)) };
-        return print({ ...buildMasterStatus(snapshot, master.workers, runtime.agents, credentials, containment, reviews, master.baseBranch, coordinator), autoMerge: master.autoMerge, mergeApproval: master.autoMerge ? 'routine merges permitted after gates pass' : 'explicit operator approval required for each merge',
+        return print({ ...buildMasterStatus(snapshot, master.workers, runtime.agents, credentials, containment, reviews, master.baseBranch, coordinator, { producers, failures: dispatch.failures }), autoMerge: master.autoMerge, mergeApproval: master.autoMerge ? 'routine merges permitted after gates pass' : 'explicit operator approval required for each merge',
           versionSkew: mergeProtocolSkew(coordinator, cli), cli,
-          reviewer: master.reviewer ? { identity: `${master.reviewer.slug}[bot]`, appId: master.reviewer.appId, profiles: master.reviewers.map(profile => profile.name) } : null,
-          administration, daemon, runtime: { herdr: { available: runtime.available, reason: runtime.reason }, reviews: reviewRuntime } });
+          reviewer: master.reviewer ? { identity: `${master.reviewer.slug}[bot]`, appId: master.reviewer.appId, profiles: master.reviewers.map(profile => profile.name), automatic: master.run.reviewerProfile ?? (master.reviewers.length === 1 ? master.reviewers[0].name : null) } : null,
+          producerProfiles: master.producers.map(profile => ({ name: profile.name, principal: profile.principal, kind: profile.kind, agentName: profile.agentName })),
+          administration, daemon, dispatch, runtime: { herdr: { available: runtime.available, reason: runtime.reason }, reviews: reviewRuntime } });
       }
       if (id === 'settle-containment') {
         if (!args[0] || !args.slice(1).join(' ').trim()) throw new Error('Use master settle-containment GY-N REASON');
@@ -230,10 +250,18 @@ export const masterCommands = defineCommands([
         // The loop outlives deployments: every guarded merge re-reads the server's protocol first.
         const guardedMerge = effects.merge;
         effects.merge = async work => { assertProtocol(await masterApi('status')); return guardedMerge(work); };
-        const result = await runDaemon(master, state, effects, { once: values.once, intervalMs: intervalSeconds * 1000, identity: { pid: process.pid, host: master.hostId } });
-        return print({ repository: master.repository, coordinator: coordinator.actor.id, intervalSeconds, cycles: result.cycles.length, stopped: result.stopped ? 'signal' : 'completed', last: result.cycles.at(-1) ?? null });
+        // Automatic dispatch runs beside the coordination cycle on its own, shorter cadence: the
+        // control plane's review and producer requests are launched within 30 seconds of being
+        // recorded, whatever the coordination interval. It stops when the daemon stops.
+        const dispatchCursor = await readDispatchCursor(root, master);
+        const stopping = new AbortController();
+        const daemonRun = runDaemon(master, state, effects, { once: values.once, intervalMs: intervalSeconds * 1000, identity: { pid: process.pid, host: master.hostId } }).finally(() => stopping.abort());
+        const dispatchRun = runAutoDispatch(master, dispatchCursor, dispatchEffects(root, master, { snapshot: () => masterApi('work-snapshot') }), { once: values.once, intervalMs: master.run.dispatchIntervalSeconds * 1000, signal: stopping.signal });
+        const [result, dispatched] = await Promise.all([daemonRun, dispatchRun]);
+        return print({ repository: master.repository, coordinator: coordinator.actor.id, intervalSeconds, dispatchIntervalSeconds: master.run.dispatchIntervalSeconds, cycles: result.cycles.length, stopped: result.stopped ? 'signal' : 'completed', last: result.cycles.at(-1) ?? null,
+          dispatch: { ticks: dispatched.ticks.length, launched: dispatched.ticks.reduce((total, tick) => total + tick.launched.length, 0), refused: dispatched.ticks.reduce((total, tick) => total + tick.refused.length, 0), last: dispatched.ticks.at(-1) ?? null } });
       }
-      throw new Error('Use master init, start, worker add, reviewer, review, protection, browser, harness, status, dispatch, settle-containment, run, merge, verify-deployment, or guide');
+      throw new Error('Use master init, start, worker add, producer add, reviewer, review, protection, browser, harness, status, dispatch, settle-containment, run, merge, verify-deployment, or guide');
     },
   },
 ]);

@@ -1,7 +1,7 @@
 <!-- page: Operate Graphyard | 5 | routing, recovery, and guarded merges. -->
 # Master-agent operating mode
 
-The master is the coordinator: a `coordinator` principal run as the durable `master run` loop plus an optional visible master session. It reads Graphyard, watches Herdr session health, routes ready work, handles handoffs, requests guarded merges, and administers the managed repository's GitHub App, installation, and branch protection — through the API when it can and through the human operator's own browser profile when only a GitHub page can do it. It does not implement work, hold worker leases, or produce evidence.
+The master is the coordinator: a `coordinator` principal run as the durable `master run` loop plus an optional visible master session. It reads Graphyard, watches Herdr session health, routes ready work, launches the independent reviewer and the proof producers the control plane requests for every submitted head, handles findings and handoffs, requests guarded merges, and administers the managed repository's GitHub App, installation, and branch protection — through the API when it can and through the human operator's own browser profile when only a GitHub page can do it. It does not implement work, hold worker leases, review candidates, or produce evidence.
 
 Graphyard remains the source of truth. Herdr only reports live session health. Terms follow the [glossary](glossary.md).
 
@@ -77,6 +77,9 @@ or a Herdr tab. `master init` accepts the loop's settings:
 | `--deployment-url URL` | JSON endpoint that reports the commit the running release serves |
 | `--deployment-sha-field PATH` | Dotted field holding that commit; default `commit` |
 | `--smoke-workflow FILE` | Workflow file, such as `deploy-smoke.yml`, that the loop asks GitHub to run against the live deployment once it serves a delivery whose policy sets `deploySmoke` |
+| `--dispatch-interval SECONDS` | Seconds between reads of the control plane's review and producer requests, 5–30; default 10 (see [automatic dispatch at submit](#automatic-dispatch-at-submit)) |
+| `--reviewer-profile NAME` | The reviewer profile automatic dispatch launches when more than one is configured |
+| `--producer-timeout MINUTES` | How long a launched producer session may run before it is recorded as expired, 5–1440; default 120 |
 
 Each cycle:
 
@@ -87,9 +90,11 @@ Each cycle:
    attestation is history (`lease.expired` with its cause), never an incident;
 2. **dispatches claimable work** to a healthy worker profile, through the same launcher
    `master dispatch` uses: the worker claims under its own identity and the loop holds no lease;
-3. **shepherds reviews and proofs** — one recorded request per exact candidate, a request to the
-   trusted producer workflow when automatable proof is missing, and an escalation for anything only
-   a human or a producer may resolve;
+3. **shepherds reviews and proofs** — the reviewer and producer sessions the control plane
+   requested for each exact head are launched on the dispatcher's own cadence (see
+   [automatic dispatch at submit](#automatic-dispatch-at-submit)), a request goes to the trusted
+   producer workflow when automatable proof is missing and one is configured, and anything only a
+   human may resolve is escalated;
 4. **invokes only the guarded merge**, when automatic merging is enabled;
 5. **verifies the deployed SHA** against what Graphyard recorded as delivered, and for a delivery
    whose policy sets `deploySmoke` records that observation on the item, requests the trusted smoke
@@ -135,6 +140,89 @@ Judgment calls stay with the visible master session or the human operator: readi
 report, deciding whether a review finding needs rework, choosing how to route a novel failure. The
 loop keeps the mechanical steps running underneath them.
 
+## Automatic dispatch at submit
+
+Review and proof collection start the moment a candidate is ready for them, not when someone
+notices it. The control plane and the loop each own half of that:
+
+**The control plane records what the exact head needs.** Whenever a work item is evaluated —
+a submission, a GitHub observation, evidence, a queue publication, a policy change — and its
+candidate passes the build gate (submitted, observed, open, not a draft, not awaiting rework),
+it records on the item, under `autoDispatch`:
+
+- one **review request** when the policy expects a GitHub verdict and no approval binds the
+  head: neither an exact approval of it nor one the merge queue [carried](#merge-queue) onto a
+  Graphyard-authored tip. A head that does not contain the base tip is not requested until it
+  does, because a review of it would be dismissed when GitHub recomputes the merge base. `codex`
+  and `agent` policies are dispatched by the control plane through GitHub itself and record no
+  request here;
+- one **producer request per proof group** — `unit`, `integration`, and `manual` for the
+  proofs the item lists in `producerProofs` — naming every proof of that group that no trusted
+  passing evidence binds, exactly or carried. A proof whose trusted evidence already failed on
+  this head is not requested again: that is a finding to route, not a run to repeat.
+
+Every request is bound to head, base and policy revision. A head change, a base change, or a
+policy revision cancels each request with the reason (`head changed from … to …`) and requests
+the new head afresh unless a carried binding covers it; an observed approval, a `CHANGES_REQUESTED`
+verdict, or trusted evidence satisfies it; rework, closure and merge cancel it. Each transition
+is a `dispatch.requested`, `dispatch.satisfied` or `dispatch.cancelled` entry in the item's
+history, and the last fifty resolved requests stay on the record under `autoDispatch.history`.
+
+**The loop launches them within 30 seconds.** `master run` reads those requests every
+`dispatchIntervalSeconds` (5–30, default 10) beside its coordination cycle and, for every open
+request that has no session yet:
+
+- launches the reviewer profile — `run.reviewerProfile`, or the only configured one — through
+  the same launcher as `master review GY-N`: exact head verified, an hour-long read-only App
+  token in a private `GH_CONFIG_DIR`, the runtime's approval contract pre-seeded so no keystroke
+  is needed, and a prompt that polls `gh pr view --json mergeable` until GitHub has recomputed the
+  merge base before the verdict is posted;
+- launches one producer session per proof group on a free, independent producer profile. A
+  producer profile is a `kind`, a producer credential file and an environment declared in
+  `.graphyard/master.json` next to the worker profiles (`master producer add FILE`, template
+  [examples/master/claude-producer.json](../examples/master/claude-producer.json)); its credential
+  is verified to authenticate exactly the named principal in the producer role, and it can never
+  share a principal with a worker profile, because the control plane refuses evidence from an
+  identity that has implemented the item — a profile whose principal has held an assignment on
+  the item is skipped for that item for the same reason. The session receives the credential as a
+  path in `GRAPHYARD_TOKEN_FILE`, never as a value, works in a detached worktree of the exact
+  head outside every Graphyard worktree, and submits each proof with `graphyard evidence` bound
+  to that exact head, base and policy revision — a failing run as `fail`, never omitted. With
+  fewer free producer profiles than groups the remaining groups wait and `master status` says
+  so; add profiles for parallelism.
+
+A launch happens **once per request id**: the reviewer ledger (`.graphyard/reviews.json`) and
+the producer ledger (`.graphyard/producers.json`) record which request each session answers,
+so a restart, a second tick or a re-read snapshot never doubles a session, and a request the
+control plane satisfied or cancelled is never launched. The ledgers record launch, completion
+and outcome per session: a reviewer session completes on its verdict and expires with its
+token; a producer session completes when every proof of its group has a trusted outcome (or
+one failed), expires after `producerTimeoutMinutes`, and is recorded as `failed` when Herdr
+reports it finished five minutes without submitting. A session whose head the control plane
+cancelled is closed on the next tick with its token withdrawn and the reason on the record — a
+head change cancels the in-flight sessions for the old head.
+
+A launch the loop could not perform — a stale observation, a busy profile, Herdr refusing — is
+recorded in the dispatch cursor beside the coordinator credential with a widening retry
+(30 seconds, doubling to 10 minutes, at most twelve attempts), and `master status` raises it as
+that row's `attention`. Once its cause is fixed, `master review GY-N [PROFILE]` is the recovery
+path for a reviewer request past its attempts; producers retry on their own once a profile is
+free.
+
+`master status` shows it all per candidate under each row's `dispatch`: the open review and
+producer requests with `requestedAt`, `sinceMs` and the recorded reason; the `session` launched
+for each (profile, agent, state, verdict or per-proof outcome, and how long it has run); any
+`failure` standing against it; and `recent`, the last resolved requests with their resolution.
+`producers` lists the pending and recent producer sessions, `dispatch` reports the dispatcher's
+cadence, last tick and failures, and `counts.dispatchRequested` and `counts.dispatchRunning`
+total the requests and the sessions running for them.
+
+What this leaves the master — the loop's judgment half, or the visible session — is the
+findings: read a `CHANGES_REQUESTED` verdict or a failed proof, decide whether it needs rework,
+route it, and merge when every gate passes. The master handles findings, reworks and merges; it
+never launches reviews or producers by hand, never approves a candidate, and never submits
+evidence.
+
 ## Operate
 
 The master is a perpetual coordinator, not a one-shot dispatcher. Whether the
@@ -147,7 +235,8 @@ blocker is recorded in Graphyard:
 
 1. Run `master status` and treat Graphyard as progression truth.
 2. Dispatch ready work to an appropriate worker profile.
-3. Shepherd review findings, rework, and trusted proof collection to completion.
+3. Route review findings and failed proofs to rework; the reviewer and the producers for every
+   submitted head are launched by the loop, never by hand.
 4. Request a guarded merge only when the exact candidate passes every gate.
 5. Run [deployment verification](#deployment-verification) for each delivery with
    `master verify-deployment GY-N`: the required live behavior is established against
@@ -271,7 +360,7 @@ The trade-off is real: an `auto` session runs whatever it decides to run inside 
 
 ## Independent review
 
-The reviewer is a separate GitHub identity: not the pull-request author, and not the Graphyard control-plane App that publishes the gate check.
+The reviewer is a separate GitHub identity: not the pull-request author, and not the Graphyard control-plane App that publishes the gate check. Once it is registered and a reviewer profile exists, `master run` launches it for every submitted head on its own (see [automatic dispatch at submit](#automatic-dispatch-at-submit)); `master review` remains the launcher the loop uses and the recovery path when a launch was refused.
 
 ```sh
 node "$GRAPHYARD_CLI" master reviewer setup
@@ -468,11 +557,12 @@ The master does not clear blockers, revise requirements, or satisfy human gates 
 | `master start KIND` | Launch the visible master session with its harness rules |
 | `master status` | Work truth, session health, reviews, queue, and `administration` (recent browser actions, pending sudo code) |
 | `master dispatch GY-N PROFILE` | Invite a worker to claim ready work |
-| `master review GY-N [PROFILE]` | Launch the independent reviewer on the exact candidate |
+| `master producer add FILE` | Add a proof-producer launch profile with its own producer credential |
+| `master review GY-N [PROFILE]` | Launch the independent reviewer on the exact candidate (the loop does this on its own; recovery path) |
 | `master protection [--apply]` | Reconcile branch protection through the API |
 | `master browser app-permissions` | Raise the control-plane App's permissions through the browser |
 | `master browser installation-accept` | Accept the installation's pending permission request through the browser |
 | `master browser protection [--dry-run]` | Reconcile branch protection through the browser |
 | `master harness [KIND] [--apply]` | Generate the master's own harness permissions |
 | `master merge GY-N\|--all` | Guarded merge of authorized candidates |
-| `master run [--once]` | The durable coordination loop |
+| `master run [--once]` | The durable coordination loop, with the dispatcher that launches requested reviews and producers |

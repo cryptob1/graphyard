@@ -5,6 +5,8 @@ import type { Evidence } from './evidence.js';
 import type { AgentReview, ReviewFailover, ReviewRequest } from './review.js';
 import type { Delivery, ReleaseDelivery } from './delivery.js';
 import type { BlockingRulingAction } from './delegation.js';
+import type { AutoDispatch } from './dispatch.js';
+import { proofSchema } from './proof.js';
 import { demand } from './refusal.js';
 
 export const CHECK_NAME = 'Graphyard / merge';
@@ -24,6 +26,11 @@ export const createSchema = z.object({
   plannedFiles: z.array(z.string().min(1).max(500)).max(100).default([]),
   exclusiveResources: resourcesSchema.optional(),
   slice: z.enum(sliceIds).optional(),
+  // Manual proofs a launched producer session may run on the item's behalf. Unit and
+  // integration proofs are always producer-runnable; every other manual proof stays with
+  // the human operator. See model/dispatch.ts.
+  producerProofs: z.array(proofSchema).max(50).optional().refine(proofs => !proofs || proofs.every(proof => proof.startsWith('manual:')), 'producerProofs names only manual: proofs; unit and integration proofs are producer-runnable already')
+    .refine(proofs => !proofs || new Set(proofs).size === proofs.length, 'producerProofs must be unique'),
 }).strict();
 export type Create = z.infer<typeof createSchema>;
 export const operatorCapabilities = ['intent:create', 'intent:ready', 'intent:unblock', 'policy:requirements', 'policy:review-provider', 'policy:bootstrap'] as const;
@@ -108,6 +115,8 @@ export interface Work extends Create {
   reviewRequest?: ReviewRequest | null;
   reviewFailovers?: ReviewFailover[];
   mergeAuthorization?: { sha: string; baseSha: string; policyRevision: number; at: string } | null;
+  /** What the exact head still needs from a launched reviewer or producer; see model/dispatch.ts. */
+  autoDispatch?: AutoDispatch | null;
   mergeExecution?: { id: string; owner: string; sha: string; baseSha: string; policyRevision: number; authorizationRevision: number; issuedAt: string; expiresAt: string; verifiedAt?: string; committingAt?: string; clockOffset?: { min: number; max: number }; fenced?: { reason: string; at: string } | null } | null;
   delivery?: Delivery;
   /**
