@@ -14,7 +14,7 @@ Every observation reads the managed branch from `refs/heads/<base>` and records:
 | `observation.baseTipContained` | The head contains `baseTip`: by ancestry, or as a published queue tip whose bound base is tree-identical to it or which sits behind other queue entries. |
 | `candidate.baseSha` | The bound base: the predicted base of a published speculative tip for this head under this policy revision, otherwise `baseTip`. |
 
-A review is requested only while `baseTipContained` is not `false`: `master review` refuses with `does not contain the base branch tip`, the Codex and agent dispatchers defer, and `diagnose` reports `base-behind`. The worker runs `graphyard sync GY-N` and pushes, or the queue publishes a tip that contains the base once the candidate is proven.
+A review is requested only while `baseTipContained` is not `false`: `master review` refuses with `does not contain the base branch tip`, the `codex` and `agent` review-provider dispatchers defer, and `diagnose` reports `base-behind`. The worker runs `graphyard sync GY-N` and pushes, or the queue publishes a tip that contains the base once the candidate is proven.
 
 ## Evidence `scopeFiles`
 
@@ -48,7 +48,7 @@ Nothing carries unless the tip is a two-parent merge of exactly `from.sha` and `
 
 A carried binding is a standing judgement over the original record: it applies only while the candidate is exactly `to` under the same policy revision (and, for agent review, while the policy still dispatches to the same reviewer App). Revoking the original evidence withdraws the carried binding and ejects the tip. The ledger holds one `queue.carry` event per decision and a `carried`/`required` summary on `queue.predicted`.
 
-GitHub dismisses stale reviews on Graphyard's own tip push. Before acquiring merge authority, `master merge` re-posts a carried GitHub approval bound to the tip through the reviewer App that gave it — never through the control-plane App, never for a human approval, and never over a reviewer that has since requested changes — and reports the outcome as `carriedApproval` in its result.
+GitHub dismisses stale reviews on Graphyard's own tip push. Before acquiring merge authority, `master merge` re-posts a carried GitHub approval bound to the tip through the reviewer App that gave it — never through the control-plane App, never for a human reviewer's approval, and never over a reviewer that has since requested changes — and reports the outcome as `carriedApproval` in its result.
 
 ## Where it is reported
 
