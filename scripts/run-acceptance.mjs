@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
-import { contracts, exercise, judgeMergeAuthorization } from './acceptance-contract.mjs';
+import { contracts, createInventory, exercise, judgeMergeAuthorization } from './acceptance-contract.mjs';
 import { mergeAuthorizationPrincipals, probeMergeAuthorization } from './merge-authorization-probe.mjs';
 
 const [metadataFile, image, output, proofInput] = process.argv.slice(2);
@@ -19,7 +19,10 @@ const scratch = await mkdtemp(join(tmpdir(), 'graphyard-acceptance-'));
 const suffix = randomBytes(6).toString('hex'), network = `gy-${suffix}`, db = `${network}-db`, app = `${network}-app`;
 const docker = (...args) => execFileSync('docker', args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
 const database = 'postgres://postgres:acceptance-only@database:5432/graphyard';
-let result = { ...metadata, schema: 1, proof, result: 'fail', cases: contract.cases.map(id => ({ id, result: 'fail' })), executed: 0, skipped: 0 };
+// The inventory is filled in as cases run, so an interruption still reports the
+// completed, failing and genuinely unexecuted parts instead of an all-skipped report.
+const inventory = createInventory(contract.cases);
+let passed = false;
 try {
   docker('network', 'create', network);
   docker('run', '-d', '--name', db, '--network', network, '--network-alias', 'database', '-e', 'POSTGRES_PASSWORD=acceptance-only', '-e', 'POSTGRES_DB=graphyard', 'postgres:17-alpine');
@@ -29,14 +32,16 @@ try {
     await new Promise(r => setTimeout(r, 1000));
   }
   if (!databaseReady) throw new Error('Isolated database did not become ready');
-  const cases = proof === 'integration:merge-authorization' ? judgeMergeAuthorization(await exerciseMergeAuthorization()) : await exerciseOverHttp();
-  result = { ...result, result: 'pass', cases, executed: cases.length }; console.log(`Trusted acceptance completed: ${cases.length} ${proof} cases passed.`);
+  if (proof === 'integration:merge-authorization') judgeMergeAuthorization(await exerciseMergeAuthorization(), inventory); else await exerciseOverHttp();
+  passed = inventory.complete; console.log(`Trusted acceptance completed: ${inventory.executed} ${proof} cases passed.`);
 } catch { console.error('Trusted acceptance failed. No passing evidence was produced.'); process.exitCode = 1; }
 finally {
   // Do not print candidate logs: candidate-controlled output may contain test credentials.
   spawnSync('docker', ['rm', '-f', app, db], { stdio: 'ignore' });
   spawnSync('docker', ['network', 'rm', network], { stdio: 'ignore' });
   await rm(scratch, { recursive: true, force: true });
+  const result = { ...metadata, schema: 1, proof, result: passed && inventory.complete ? 'pass' : 'fail',
+    cases: inventory.cases, executed: inventory.executed, skipped: inventory.skipped };
   await writeFile(resolve(output), JSON.stringify(result, null, 2));
 }
 
@@ -71,5 +76,5 @@ async function exerciseOverHttp() {
     await new Promise(r => setTimeout(r, 1000));
   }
   if (!ready) throw new Error('Candidate did not become healthy');
-  return exercise(url, principals);
+  await exercise(url, principals, inventory);
 }

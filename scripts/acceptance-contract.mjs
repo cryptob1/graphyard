@@ -12,7 +12,7 @@ export const contracts = {
 
 // Judges a merge-authorization transcript produced by scripts/merge-authorization-probe.mjs.
 // The probe records what the candidate did; the expectations live here, outside the candidate.
-export function judgeMergeAuthorization(transcript) {
+export function judgeMergeAuthorization(transcript, inventory = createInventory(mergeAuthorizationCases)) {
   assert.ok(Array.isArray(transcript) && transcript.length, 'Merge-authorization probe produced no transcript');
   const steps = name => transcript.filter(entry => entry.step === name);
   const only = name => { const found = steps(name); assert.equal(found.length, 1, `Expected exactly one ${name} step`); return found[0]; };
@@ -20,23 +20,30 @@ export function judgeMergeAuthorization(transcript) {
     assert.equal(entry.status, status, `${entry.step} returned ${entry.status}: ${entry.message}`);
     assert.match(entry.message, pattern, `${entry.step} refused for the wrong reason`);
   };
-  const cases = [];
+  // Each case is judged in order and recorded as it completes, so a failing transcript still
+  // names the case that failed and the ones that were never reached.
+  const cases = { push(id) { inventory.pass(id); } };
+  const judging = id => inventory.begin(id);
 
+  judging('authorized-candidate');
   const authorized = only('authorized-candidate');
   assert.equal(authorized.stage, 'merge'); assert.equal(authorized.gatesPassed, true); assert.equal(authorized.authorized, true);
   cases.push('authorized-candidate');
 
+  judging('broker-identity-restricted');
   const brokerIdentities = steps('broker-identity');
   assert.deepEqual(brokerIdentities.map(entry => entry.actor), [null, 'probe-worker', 'probe-producer', 'probe-other-producer']);
   for (const entry of brokerIdentities) refused(entry, entry.actor ? 403 : 401, entry.actor ? /Coordinator permission/ : /valid Graphyard bearer token/);
   cases.push('broker-identity-restricted');
 
+  judging('revocation-identity-restricted');
   const revocationIdentities = steps('revocation-identity');
   assert.deepEqual(revocationIdentities.map(entry => entry.actor), [null, 'probe-worker', 'probe-other-producer', 'probe-coordinator']);
   for (const entry of revocationIdentities) refused(entry, entry.actor ? 403 : 401, entry.actor ? /operator or the trusted producer/ : /valid Graphyard bearer token/);
   refused(only('revocation-scope'), 404, /No trusted evidence matches/);
   cases.push('revocation-identity-restricted');
 
+  judging('revocation-closes-authorization');
   const granted = only('execution-granted');
   assert.equal(granted.owner, 'probe-coordinator'); assert.equal(granted.sha, 'a'.repeat(40));
   assert.ok(Number.isSafeInteger(granted.authorizationRevision) && granted.authorizationRevision > 0);
@@ -52,11 +59,13 @@ export function judgeMergeAuthorization(transcript) {
   assert.ok(revoked.retainedEvidence >= 1, 'the revoked record must be retained for audit, not deleted');
   cases.push('revocation-closes-authorization');
 
+  judging('broker-refuses-revoked-candidate');
   refused(only('verify-after-revocation'), 409, /missing, expired, superseded/);
   refused(only('acquire-replay-after-revocation'), 409, /expired, cancelled, fenced, or superseded/);
   refused(only('cancel-after-revocation'), 409, /missing, expired, superseded/);
   cases.push('broker-refuses-revoked-candidate');
 
+  judging('concurrent-attempts-refused');
   const concurrent = only('concurrent-attempts');
   assert.equal(concurrent.attempts.length, 8);
   for (const attempt of concurrent.attempts) refused({ ...attempt, step: 'concurrent-attempts' }, 409, /Merge authorization is no longer current/);
@@ -64,12 +73,14 @@ export function judgeMergeAuthorization(transcript) {
   assert.equal(survivors.execution, null); assert.equal(survivors.authorization, null);
   cases.push('concurrent-attempts-refused');
 
+  judging('merge-after-revocation-refused');
   const merged = only('merge-after-revocation');
   assert.notEqual(merged.stage, 'done');
   assert.match(merged.violations.join(' '), /without a prior authorization/);
   assert.equal(merged.delivery, null);
   cases.push('merge-after-revocation-refused');
 
+  judging('provider-commit-serialized');
   const race = only('provider-commit-race');
   assert.deepEqual([race.commit.status, race.revoke.status].sort(), [200, 409], 'exactly one side of the commit/revocation race must win');
   if (race.commit.status === 200) {
@@ -83,15 +94,35 @@ export function judgeMergeAuthorization(transcript) {
   }
   cases.push('provider-commit-serialized');
 
-  assert.deepEqual(cases, mergeAuthorizationCases);
-  return cases.map(id => ({ id, result: 'pass' }));
+  assert.ok(inventory.complete, 'every merge-authorization case must be judged exactly once');
+  return inventory.cases;
 }
 
-export async function exercise(url, principals) {
+// Records each case as it runs so an interrupted exercise still reports which cases
+// completed, which one failed, and which never executed. A started case counts as
+// failing until it finishes, so a throw anywhere keeps the failure attributed.
+export function createInventory(required = requiredCases) {
+  const cases = required.map(id => ({ id, result: 'skipped' }));
+  const find = id => { const entry = cases.find(c => c.id === id); if (!entry) throw new Error(`Unknown acceptance case ${id}`); return entry; };
+  let running = null;
+  return {
+    get cases() { return cases.map(entry => ({ ...entry })); },
+    get executed() { return cases.filter(entry => entry.result !== 'skipped').length; },
+    get skipped() { return cases.filter(entry => entry.result === 'skipped').length; },
+    get complete() { return running === null && cases.every(entry => entry.result === 'pass'); },
+    begin(id) {
+      if (running !== null) throw new Error(`Acceptance case ${running} did not finish`);
+      if (find(id).result !== 'skipped') throw new Error(`Acceptance case ${id} ran twice`);
+      find(id).result = 'fail'; running = id;
+    },
+    pass(id) { if (running !== id) throw new Error(`Acceptance case ${id} was not started`); find(id).result = 'pass'; running = null; },
+  };
+}
+
+export async function exercise(url, principals, inventory = createInventory()) {
   const operator = principals.find(p => p.role === 'admin');
   const workers = principals.filter(p => p.role === 'worker');
   assert.ok(operator && workers.length >= 32);
-  const cases = [];
   async function request(path, actor, data, status = 200) {
     const response = await fetch(`${url}/api/${path}`, { method: data === undefined ? 'GET' : 'POST',
       headers: { ...(actor ? { Authorization: `Bearer ${actor.token}` } : {}), 'Content-Type': 'application/json', 'Idempotency-Key': randomUUID() },
@@ -99,7 +130,9 @@ export async function exercise(url, principals) {
     assert.equal(response.status, status, `Unexpected status for ${path}`); return response.json();
   }
   const input = { title: 'Trusted acceptance probe', criteria: [{ id: 'AC-1', text: 'Claims are exclusive', proofs: ['integration:claim-safety'] }] };
-  await request('work', undefined, undefined, 401); cases.push('anonymous-denied');
+  inventory.begin('anonymous-denied');
+  await request('work', undefined, undefined, 401); inventory.pass('anonymous-denied');
+  inventory.begin('exclusive-claim');
   let work = await request('work', operator, input);
   await request(`work/${work.id}/ready`, operator, {});
   const claims = await Promise.all(workers.slice(0, 32).map(async actor => {
@@ -110,19 +143,22 @@ export async function exercise(url, principals) {
   const winner = winners[0]; work = winner.work;
   assert.equal(work.lease.owner, winner.actor.id); assert.equal(work.epoch, 1);
   const history = await request(`events?work=${work.id}`, operator); assert.equal(history.filter(e => e.kind === 'claim').length, 1);
-  cases.push('exclusive-claim');
+  inventory.pass('exclusive-claim');
+  inventory.begin('stale-epoch');
   await request(`work/${work.id}/release`, winner.actor, { epoch: 1 });
   const replacement = workers.find(w => w.id !== winner.actor.id);
   work = await request(`work/${work.id}/claim`, replacement, {}); assert.equal(work.epoch, 2);
   for (const command of ['heartbeat', 'release']) await request(`work/${work.id}/${command}`, winner.actor, { epoch: 1 }, 409);
-  await request(`work/${work.id}/submit`, winner.actor, { epoch: 1, pr: 1 }, 409); cases.push('stale-epoch');
+  await request(`work/${work.id}/submit`, winner.actor, { epoch: 1, pr: 1 }, 409); inventory.pass('stale-epoch');
+  inventory.begin('worker-proof-denied');
   const proof = { proof: 'integration:claim-safety', sha: 'a'.repeat(40), baseSha: 'b'.repeat(40), policyRevision: 1, result: 'pass', executed: 5, skipped: 0 };
   await request(`work/${work.id}/evidence`, replacement, { ...proof, trusted: true }, 400);
   work = await request(`work/${work.id}/evidence`, replacement, proof);
-  assert.equal(work.evidence.at(-1).trusted, false); assert.notEqual(work.stage, 'done'); cases.push('worker-proof-denied');
+  assert.equal(work.evidence.at(-1).trusted, false); assert.notEqual(work.stage, 'done'); inventory.pass('worker-proof-denied');
+  inventory.begin('dependency-blocked');
   const dependent = await request('work', operator, { ...input, dependencies: [work.id] });
   await request(`work/${dependent.id}/ready`, operator, {});
-  await request(`work/${dependent.id}/claim`, replacement, {}, 409); cases.push('dependency-blocked');
-  assert.deepEqual(cases, requiredCases);
-  return cases.map(id => ({ id, result: 'pass' }));
+  await request(`work/${dependent.id}/claim`, replacement, {}, 409); inventory.pass('dependency-blocked');
+  assert.deepEqual(inventory.cases, requiredCases.map(id => ({ id, result: 'pass' })));
+  return inventory.cases;
 }
