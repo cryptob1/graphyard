@@ -173,7 +173,7 @@ The installer performs the plan in order:
 4. Deploys and obtains a public HTTPS URL.
 5. Verifies `GET /healthz`.
 6. Opens the GitHub App manifest flow — **this is the human click**, see Step 4.
-7. Writes `GITHUB_APP_ID`, `GITHUB_INSTALLATION_ID`, the App private key, and `GITHUB_WEBHOOK_SECRET` to the server and redeploys. On self-hosted providers the private key is a separate mode-`0600` file mounted into the container and referenced through `GITHUB_PRIVATE_KEY_FILE`, because a multi-line PEM cannot survive an environment file.
+7. Writes `GITHUB_APP_ID`, `GITHUB_INSTALLATION_ID`, the App private key, and `GITHUB_WEBHOOK_SECRET` to the server and redeploys. On self-hosted providers the private key is a separate mode-`0600` file mounted into the container and referenced through `GITHUB_PRIVATE_KEY_FILE`, because a multi-line PEM cannot survive an environment file. The file is given to the container user (`chown 1000:1000`) as it is written — a bind mount keeps host ownership, and the server runs as uid 1000, so a root-owned key would leave the server restart-looping on a permission error. The install refuses with the exact recovery when the connecting user cannot chown.
 8. Points the App webhook at `https://YOUR-HOST/api/github/webhook` with the secret the server holds.
 9. Detects the GitHub App IDs publishing checks on the base branch and sets `GITHUB_CI_APP_IDS`.
 10. Applies branch protection: the required status checks, conversation resolution, administrator
@@ -373,6 +373,7 @@ a step to reduce it — and worker identities are never Apps. The reasons are in
 | `Public hostname` preflight is `false` | `hetzner` or `docker-host` ran without `--domain`, or the A record is not pointed yet | nothing was created; pass `--domain HOST` with its record pointed at the host, then rerun |
 | `SSH key` preflight is `false` | `hetzner` ran without `--ssh-key` | nothing was created; rerun with a key name from `hcloud ssh-key list` |
 | `<cli> exited with N: <diagnostic>` | a provider command failed; the provider CLI's own message follows the colon | act on the diagnostic (it is scrubbed of every generated secret), then rerun `--apply`; completed steps are reported as satisfied and repeated for nothing |
+| `The server container runs as uid 1000 and must be able to read …github-private-key.pem` | the connecting user could not give the App private key to the container user: a non-root `--ssh-user`, or a local uid outside the container's | reconnect as `root` (the default `--ssh-user`), or run the `chown 1000:1000` command the error prints, then rerun `--apply` |
 | `Run graphyard install from the checkout of the repository being managed` | wrong working directory | `cd` into the `OWNER/REPO` checkout |
 | `This checkout is X; rerun from Y` | `--repo` and the Git origin disagree | correct `--repo` or change directory |
 | `did not become healthy` | the container cannot start or reach Postgres | `node "$GRAPHYARD_CLI" install --provider PROVIDER --repo OWNER/REPO --logs` |

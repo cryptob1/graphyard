@@ -3,12 +3,20 @@ import assert from 'node:assert/strict';
 import { readFile, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import { parseEnv } from 'node:util';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import { applyInstall, buildPlan, coreEnv, prepareInstall } from '../src/install/index.js';
-import { PRIVATE_KEY_CONTAINER_PATH } from '../src/install/adapters.js';
-import { fakeTransport, localTransport, type Transport } from '../src/install/transport.js';
+import { PRIVATE_KEY_CONTAINER_PATH, composeAdapter, type AdapterContext } from '../src/install/adapters.js';
+import { fakeTransport, localTransport, sshTransport, type Transport } from '../src/install/transport.js';
+import { Vault } from '../src/install/secrets.js';
 import { CHECK_NAME } from '../src/install/github.js';
 import type { Provider } from '../src/install/types.js';
 import { harness, satisfiedProtection, GRAPHYARD_APP_ID, CI_APP_ID, RAILWAY_WORKSPACES, appKey, type Harness } from './install-harness.js';
+
+const skipWithoutDocker = await (async () => {
+  try { return (await localTransport().exec('docker', ['version', '--format', '{{.Server.Version}}'], { allowFailure: true, timeout: 30_000 })).code === 0 ? false : 'docker is not usable on this machine'; }
+  catch { return 'docker is not usable on this machine'; }
+})();
 
 const inputsFor = (provider: Provider) => ({ repository: 'owner/project', provider,
   ...(provider === 'railway' || provider === 'compose' ? {} : { sshHost: '203.0.113.10', sshUser: 'root', domain: 'graphyard.example.test' }),
@@ -190,9 +198,60 @@ test('the multi-line App private key is written beside the bundle and mounted, n
     const key = bundle(fixture, 'github-private-key.pem')!;
     assert.ok(key, 'the private key sidecar file was not written');
     assert.equal(key.mode, 0o600);
+    // The image runs USER node (uid 1000) and a bind mount keeps host ownership, so the key
+    // must be given to the container user at write time: anything else crash-loops the server.
+    assert.equal(key.owner, '1000:1000');
     assert.equal(key.content, appKey);
     assert.match(bundle(fixture, 'compose.yaml')!.content, new RegExp(`volumes: \\["\\./github-private-key\\.pem:${PRIVATE_KEY_CONTAINER_PATH}:ro"\\]`));
   } finally { await fixture.cleanup(); }
+});
+
+test('the SSH transport ends the key write with chown and refuses a remote user that cannot give it to the container', async () => {
+  const recorded: { args: string[] }[] = [];
+  const base: Transport = {
+    description: 'base',
+    exec: async (_program: string, args: string[]) => { recorded.push({ args }); return { stdout: '', stderr: '', code: 0 }; },
+    putFile: async () => {},
+  };
+  await sshTransport('203.0.113.10', 'root', base).putFile('/opt/graphyard/owner-project/github-private-key.pem', 'PEM', 0o600, '1000:1000');
+  // ssh joins the arguments into one remote command, so the script arrives double-quoted;
+  // the escaped quotes are collapsed before the content is matched.
+  const script = recorded[0].args.at(-1)!.replaceAll(`'\\''`, "'");
+  assert.match(script, /chmod 0600/);
+  assert.match(script, /chown '1000:1000' '\/opt\/graphyard\/owner-project\/github-private-key\.pem'/, 'the key was not given to the container user');
+
+  // A non-root remote user cannot chown to uid 1000; the deploy must stop here, with the fix,
+  // instead of restarting the server forever on EACCES.
+  const refusing: Transport = {
+    description: 'base',
+    exec: async () => ({ stdout: '', stderr: "chown: changing ownership of '/opt/graphyard/owner-project/github-private-key.pem': Operation not permitted", code: 1 }),
+    putFile: async () => {},
+  };
+  await assert.rejects(
+    sshTransport('203.0.113.10', 'deploy', refusing).putFile('/opt/graphyard/owner-project/github-private-key.pem', 'PEM', 0o600, '1000:1000'),
+    (error: Error) => { assert.match(error.message, /must be able to read .*--ssh-user root|chown '1000:1000'/); return true; },
+  );
+});
+
+test('a uid-1000 container reads the key a real transport wrote, through a real bind mount', { skip: skipWithoutDocker }, async () => {
+  const docker = localTransport();
+  const workdir = await mkdtemp(join(tmpdir(), 'graphyard-key-mount-'));
+  try {
+    const context: AdapterContext = {
+      provider: 'compose', repository: 'owner/project', installId: 'key-mount', service: 'graphyard-key-mount',
+      domain: null, image: 'alpine:3', workdir, sourceRoot: workdir, sshHost: null, sshUser: 'root',
+      sshKey: null, workspace: null, serverType: '', location: '', databasePassword: 'database-password-for-the-key-mount-test',
+      port: 4310, dataPath: null, wait: async () => {}, transport: docker, ssh: () => docker, fetch, vault: new Vault(),
+    };
+    await composeAdapter.setEnv(context, [{ name: 'GITHUB_PRIVATE_KEY', value: appKey, secret: true }]);
+    // `--user 1000:1000` mirrors the image's USER node. Whatever the local writer's uid is,
+    // the transports hand the key to 1000:1000; a root-owned 0600 file fails exactly here.
+    const read = await docker.exec('docker', ['compose', '--project-directory', workdir, '-f', join(workdir, 'compose.yaml'), 'run', '--rm', '--no-deps', '--user', '1000:1000', 'server', 'sh', '-c', 'ls -ln /run/graphyard/github-private-key.pem && cat /run/graphyard/github-private-key.pem'], { timeout: 600_000 });
+    assert.equal(read.code, 0, `the container user could not read the key: ${read.stderr.trim().slice(-400)}`);
+    const listing = read.stdout.trim().split('\n')[0];
+    assert.match(listing, /^-\S+\s+1\s+1000\s+1000\s/, `the mounted key was not owned by the container user: ${listing}`);
+    assert.ok(read.stdout.includes(appKey), 'the container read something other than the key');
+  } finally { await rm(workdir, { recursive: true, force: true }); }
 });
 
 test('the agent review policy sets zero native approvals without relaxing any other protection', async () => {

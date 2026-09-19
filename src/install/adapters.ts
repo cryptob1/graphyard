@@ -1,5 +1,5 @@
 import { fingerprint, Vault } from './secrets.js';
-import type { Transport } from './transport.js';
+import { SERVER_CONTAINER_UID, type Transport } from './transport.js';
 import { SERVER_PORT, type EnvValue, type PlanAction, type PreflightItem, type Provider } from './types.js';
 import { packageVersion } from '../release.js';
 
@@ -81,7 +81,7 @@ async function tool(ctx: AdapterContext, transport: Transport, program: string, 
 // Shared Compose bundle: identical application topology on every self-hosted target.
 // ---------------------------------------------------------------------------
 
-export interface BundleFile { path: string; content: string; mode: number }
+export interface BundleFile { path: string; content: string; mode: number; /** The `UID:GID` the transport gives the file, so the container user can read it. */ owner?: string }
 
 /** The GitHub private key is multi-line, and an env file cannot carry it: these move it into a mounted file. */
 export const PRIVATE_KEY_FILE_VARIABLE = 'GITHUB_PRIVATE_KEY_FILE';
@@ -92,7 +92,7 @@ export function composeBundle(ctx: AdapterContext, values: EnvValue[], publish: 
   // `GITHUB_PRIVATE_KEY` is a PEM that spans many lines, and docker compose reads an env file
   // as one `NAME=value` per line: every continuation line of a raw key would be refused as a
   // malformed variable name and the deploy would fail. The key is therefore written to its own
-  // mode-0600 file, mounted into the server container read-only, and referenced through
+  // file, mounted into the server container read-only, and referenced through
   // `GITHUB_PRIVATE_KEY_FILE`, which the server reads natively.
   const key = values.find(value => value.name === 'GITHUB_PRIVATE_KEY' && value.value);
   const environment = values
@@ -134,7 +134,14 @@ ${proxied ? `  proxy:
 ` : ''}volumes:
 ${ctx.dataPath ? '' : '  graphyard-data: {}\n'}${proxied ? '  caddy-data: {}\n  caddy-config: {}\n' : ''}` },
   ];
-  if (key) files.push({ path: `${ctx.workdir}/${PRIVATE_KEY_BUNDLE_NAME}`, mode: 0o600, content: key.value });
+  if (key) {
+    // A bind mount keeps the host file's owner and mode, so the key must land as 0600 owned
+    // by the container user itself: root:root 0600 (the SSH transports write as root) or a
+    // local installer with a different uid would leave it unreadable inside the container,
+    // and the server would restart forever on EACCES. A transport that cannot chown refuses
+    // the install instead of deploying a server that cannot start.
+    files.push({ path: `${ctx.workdir}/${PRIVATE_KEY_BUNDLE_NAME}`, mode: 0o600, owner: `${SERVER_CONTAINER_UID}:${SERVER_CONTAINER_UID}`, content: key.value });
+  }
   // Without a registered domain Caddy issues an internal certificate: the endpoint is
   // encrypted but not publicly trusted, which the installer reports rather than hides.
   if (proxied) files.push({ path: `${ctx.workdir}/Caddyfile`, mode: 0o644, content: ctx.domain ? `${ctx.domain} {\n\treverse_proxy server:${SERVER_PORT}\n}\n` : `:443 {\n\ttls internal\n\treverse_proxy server:${SERVER_PORT}\n}\n` });
@@ -211,7 +218,7 @@ export const composeAdapter: ProviderAdapter = {
     await ctx.transport.exec('docker', ['build', '--tag', ctx.image, ctx.sourceRoot], { timeout: 1_800_000 });
   },
   async setEnv(ctx, values) {
-    for (const file of composeBundle(ctx, values, 'loopback')) await ctx.transport.putFile(file.path, file.content, file.mode);
+    for (const file of composeBundle(ctx, values, 'loopback')) await ctx.transport.putFile(file.path, file.content, file.mode, file.owner);
   },
   async deploy(ctx) { await composeUp(ctx, ctx.transport, false); },
   async url(ctx) { return `http://127.0.0.1:${ctx.port}`; },
@@ -265,7 +272,7 @@ export const dockerHostAdapter: ProviderAdapter = {
   async provision(ctx) { await requireHost(ctx).exec('mkdir', ['-p', ctx.workdir, ...(ctx.dataPath ? [`${ctx.dataPath}/postgres`] : [])], { timeout: 60_000 }); },
   async setEnv(ctx, values) {
     const remote = requireHost(ctx);
-    for (const file of composeBundle(ctx, values, 'proxy')) await remote.putFile(file.path, file.content, file.mode);
+    for (const file of composeBundle(ctx, values, 'proxy')) await remote.putFile(file.path, file.content, file.mode, file.owner);
   },
   async deploy(ctx) { await composeUp(ctx, requireHost(ctx), true); },
   async url(ctx) { return publicUrl(ctx); },
@@ -367,7 +374,7 @@ export const hetznerAdapter: ProviderAdapter = {
   },
   async setEnv(ctx, values) {
     const remote = ctx.ssh(await hetznerAddress(ctx), ctx.sshUser);
-    for (const file of composeBundle(ctx, values, 'proxy')) await remote.putFile(file.path, file.content, file.mode);
+    for (const file of composeBundle(ctx, values, 'proxy')) await remote.putFile(file.path, file.content, file.mode, file.owner);
   },
   async deploy(ctx) { await composeUp(ctx, ctx.ssh(await hetznerAddress(ctx), ctx.sshUser), true); },
   async url(ctx) { return ctx.domain ? `https://${ctx.domain}` : `https://${await hetznerAddress(ctx)}`; },

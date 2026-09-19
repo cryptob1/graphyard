@@ -73,7 +73,7 @@ deployment, and for the manual fallback below.
 | `GITHUB_BASE_BRANCH` | Usually `main` |
 | `GITHUB_APP_ID` | Dedicated Graphyard GitHub App ID |
 | `GITHUB_INSTALLATION_ID` | Installation ID for the managed repository |
-| `GITHUB_PRIVATE_KEY` | Full PEM key in a secret variable; alternatively mount `GITHUB_PRIVATE_KEY_FILE`. The installer writes the key to a mode-`0600` file mounted into the container and sets `GITHUB_PRIVATE_KEY_FILE` on self-hosted providers, because a multi-line PEM cannot live in a Compose env file |
+| `GITHUB_PRIVATE_KEY` | Full PEM key in a secret variable; alternatively mount `GITHUB_PRIVATE_KEY_FILE`. The installer writes the key to a mode-`0600` file mounted into the container and sets `GITHUB_PRIVATE_KEY_FILE` on self-hosted providers, because a multi-line PEM cannot live in a Compose env file. A bind mount keeps host ownership, so the installer gives the file to the container user (`chown 1000:1000`) as it writes it; a key the container user cannot read leaves the server restart-looping |
 | `GITHUB_WEBHOOK_SECRET` | Shared secret for GitHub signature verification |
 | `GITHUB_CI_APP_IDS` | Comma-separated IDs of trusted CI Apps; the installer discovers these from the checks published on the base branch |
 | `GRAPHYARD_ARTIFACT_BACKEND` | Optional `postgres` (default) or `s3`; with `s3`, the `GRAPHYARD_ARTIFACT_S3_*` variables and optional `GRAPHYARD_ARTIFACT_CAPACITY_BYTES` described in [recovery](recovery.md#artifact-backends-capacity-and-migration) |

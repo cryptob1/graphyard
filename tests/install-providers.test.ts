@@ -130,6 +130,13 @@ test('an observed value is compared by fingerprint only when it is a credential'
  * installer compares the reference by presence and treats a fingerprinted observed value as
  * satisfied. A re-plan of a real Railway installation therefore reports no phantom drift, and
  * the password still never reaches the plan.
+ *
+ * Comparing against the raw template instead would be better, but no Railway CLI surface
+ * returns it: `variables --json` and `--kv` both resolve the reference (checked against a
+ * live project, where the help text's "raw values" still means the resolved string). The
+ * accepted residual is that a literal connection string set in the reference's place is
+ * indistinguishable from a resolved one; DATABASE_URL is the only variable the installer
+ * ever sets as a reference.
  */
 test('a database password a provider resolves for itself is compared by presence and never reaches the plan', async () => {
   const first = await harness({ provider: 'railway' });

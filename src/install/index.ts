@@ -199,10 +199,15 @@ function variableDrift(session: InstallSession, action: string, values: EnvValue
     // Both sides are markers for anything carrying a credential, so drift is reportable
     // verbatim: an observed value only ever reaches the plan as `sha:<fingerprint>`.
     if (current === undefined) return [{ action, field: value.name, expected, observed: 'absent' }];
-    // A shared reference such as `${{Postgres.DATABASE_URL}}` is resolved by the provider
-    // before it is reported back, and the resolved value is a credential the installer must
-    // not read. It is therefore compared by presence: a fingerprinted observed value is the
-    // reference doing its job, not drift, so a real Railway re-plan reports satisfied.
+    // A shared reference such as `${{Postgres.DATABASE_URL}}` is resolved by Railway before
+    // its CLI reports it — `variables --json` and `--kv` both return the resolved connection
+    // string (checked against a live project), and no CLI surface returns the raw template.
+    // The only comparison that never reads that credential is presence: a fingerprinted
+    // observed value is the reference doing its job, not drift. The residual blind spot is
+    // accepted and bounded: a literal connection string in the reference's place is
+    // indistinguishable from a resolved one, so --plan cannot flag it; DATABASE_URL is the
+    // only variable the installer ever sets as a reference, and the verification steps after
+    // apply are what prove the deployed server is actually serving this installation.
     if (expected !== current && isProviderReference(value.value) && current.startsWith('sha:')) return [];
     return current === expected ? [] : [{ action, field: value.name, expected, observed: current }];
   });

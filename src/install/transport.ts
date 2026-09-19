@@ -1,9 +1,24 @@
 import { execFile } from 'node:child_process';
-import { mkdir, writeFile } from 'node:fs/promises';
+import { chown, mkdir, stat, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
 
 export interface CommandResult { stdout: string; stderr: string; code: number }
 export interface RunOptions { input?: string; cwd?: string; timeout?: number; allowFailure?: boolean }
+
+/**
+ * The server image runs `USER node` (uid 1000), and a bind mount keeps the host file's owner
+ * and mode: a private key written `root:root 0600` over SSH, or by a local installer with
+ * another uid, would be unreadable inside the container and the server would restart forever
+ * on EACCES. Bundle files that must be readable by the container therefore carry the
+ * `UID:GID` owner the transport applies after writing.
+ */
+export const SERVER_CONTAINER_UID = 1000;
+
+const parseOwner = (owner: string): { uid: number; gid: number } => {
+  const [uid, gid] = owner.split(':').map(Number);
+  if (!Number.isInteger(uid) || !Number.isInteger(gid) || uid < 0 || gid < 0) throw new Error(`a file owner must be UID:GID, not "${owner}"`);
+  return { uid, gid };
+};
 
 /**
  * A failed provider command names its cause. `railway exited with 1` alone sent a live install
@@ -23,7 +38,7 @@ export function commandFailure(program: string, result: CommandResult) {
 export interface Transport {
   readonly description: string;
   exec(program: string, args: string[], options?: RunOptions): Promise<CommandResult>;
-  putFile(path: string, content: string, mode: number): Promise<void>;
+  putFile(path: string, content: string, mode: number, owner?: string): Promise<void>;
 }
 
 function local(program: string, args: string[], options: RunOptions = {}): Promise<CommandResult> {
@@ -41,7 +56,24 @@ export function localTransport(): Transport {
   return {
     description: 'this machine',
     exec: local,
-    async putFile(path, content, mode) { await mkdir(dirname(path), { recursive: true, mode: 0o700 }); await writeFile(path, content, { mode }); },
+    async putFile(path, content, mode, owner) {
+      await mkdir(dirname(path), { recursive: true, mode: 0o700 });
+      await writeFile(path, content, { mode });
+      if (!owner) return;
+      const { uid, gid } = parseOwner(owner);
+      try { await chown(path, uid, gid); return; }
+      catch { /* not the file's owner and not root: try the Docker daemon below */ }
+      // The installing user is often the container user itself (a uid-1000 operator), in
+      // which case the read that matters already succeeds.
+      const status = await stat(path).catch(() => null);
+      if (status && (status.uid === uid || (status.gid === gid && !!(status.mode & 0o040)) || !!(status.mode & 0o004))) return;
+      // A Compose install needs the Docker daemon anyway, and the daemon runs as root: give
+      // it the chown when the shell user cannot. Failing closed here beats deploying a
+      // server that restarts forever on EACCES.
+      const fixed = await local('docker', ['run', '--rm', '-v', `${dirname(path)}:/fix`, 'alpine:3', 'chown', `${uid}:${gid}`, `/fix/${path.split('/').pop()}`], { allowFailure: true, timeout: 300_000 }).catch(() => ({ stdout: '', stderr: 'docker is unavailable', code: 1 }));
+      if (fixed.code === 0) return;
+      throw new Error(`The server container runs as uid ${uid} and must be able to read ${path}, but it could not be given to ${owner} and the Docker daemon could not either: ${fixed.stderr.trim().slice(-300)}. Run the installer as root or as uid ${uid}, or chown ${owner} ${path} yourself, then rerun graphyard install --apply.`);
+    },
   };
 }
 
@@ -56,17 +88,29 @@ export function sshTransport(host: string, user = 'root', base: Transport = loca
   return {
     description: target,
     exec: (program, args, options = {}) => base.exec('ssh', [...sshArgs, ...[program, ...args].map(shellQuote)], options),
-    async putFile(path, content, mode) {
-      await base.exec('ssh', [...sshArgs, 'sh', '-c', shellQuote(`mkdir -p ${shellQuote(dirname(path))} && umask 077 && cat > ${shellQuote(path)} && chmod ${mode.toString(8).padStart(4, '0')} ${shellQuote(path)}`)], { input: content });
+    async putFile(path, content, mode, owner) {
+      const steps = [`mkdir -p ${shellQuote(dirname(path))}`, 'umask 077', `cat > ${shellQuote(path)}`, `chmod ${mode.toString(8).padStart(4, '0')} ${shellQuote(path)}`];
+      if (owner) steps.push(`chown ${shellQuote(owner)} ${shellQuote(path)}`);
+      const run = () => base.exec('ssh', [...sshArgs, 'sh', '-c', shellQuote(steps.join(' && '))], { input: content });
+      if (!owner) { await run(); return; }
+      const failure = await run().then(
+        result => result.code === 0 ? null : commandFailure('ssh', result).message,
+        (error: Error) => error.message,
+      );
+      if (failure === null) return;
+      // The remote shell is whatever --ssh-user names; a non-root user cannot chown to
+      // uid 1000, and the failure must be loud here rather than a crash-looping server later.
+      throw new Error(`${failure}. The server container runs as uid ${owner.split(':')[0]} and must be able to read ${path}: connect as a remote user that can chown (the default --ssh-user root), or chown ${owner} ${path} on ${host} yourself, then rerun graphyard install --apply.`);
     },
   };
 }
 
 export interface RecordedCommand { program: string; args: string[]; input?: string }
+export interface BundleFileRecord { content: string; mode: number; owner?: string }
 export interface FakeTransportOptions {
   /** First match wins; a response is stdout, a full result, or a thunk for stateful fakes. */
   responses?: { match: string; result: string | CommandResult | (() => string | CommandResult) }[];
-  files?: Map<string, { content: string; mode: number }>;
+  files?: Map<string, BundleFileRecord>;
 }
 
 /**
@@ -75,9 +119,9 @@ export interface FakeTransportOptions {
  */
 export function fakeTransport(options: FakeTransportOptions = {}) {
   const commands: RecordedCommand[] = [];
-  const files = options.files ?? new Map<string, { content: string; mode: number }>();
+  const files = options.files ?? new Map<string, BundleFileRecord>();
   const responses = options.responses ?? [];
-  const transport: Transport & { commands: RecordedCommand[]; files: Map<string, { content: string; mode: number }>; line(index: number): string } = {
+  const transport: Transport & { commands: RecordedCommand[]; files: Map<string, BundleFileRecord>; line(index: number): string } = {
     description: 'recorded transport',
     commands, files,
     line: (index: number) => [commands[index].program, ...commands[index].args].join(' '),
@@ -91,7 +135,7 @@ export function fakeTransport(options: FakeTransportOptions = {}) {
       if (result.code !== 0 && !runOptions.allowFailure) throw commandFailure(program, result);
       return result;
     },
-    async putFile(path, content, mode) { files.set(path, { content, mode }); },
+    async putFile(path, content, mode, owner) { files.set(path, { content, mode, ...(owner ? { owner } : {}) }); },
   };
   return transport;
 }
