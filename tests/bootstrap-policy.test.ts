@@ -436,13 +436,13 @@ test('integration:bootstrap-policy-authority refuses a declaration outside the a
 // ---------------------------------------------------------------------------
 
 test('manual:bootstrap-policy-docs-ui documents the mode and its audit trail for operators', async () => {
-  for (const page of ['docs/protocol.md', 'docs/operations.md']) {
+  for (const page of ['docs/protocol/bootstrap-mode.md', 'docs/operations.md']) {
     const text = await readFile(new URL(`../${page}`, import.meta.url), 'utf8');
     assert.match(text, /## Bootstrap/i, `${page} must document bootstrap mode`);
     assert.match(text, /contractPaths/, `${page} must name the contract the obligation binds to`);
     assert.match(text, /policy:bootstrap/, `${page} must state the capability the mode requires`);
   }
-  const dashboard = await readFile(new URL('../web/main.tsx', import.meta.url), 'utf8');
+  const dashboard = await readFile(new URL('../web/pages/work-details.tsx', import.meta.url), 'utf8');
   assert.match(dashboard, /Bootstrap obligations/, 'the dashboard lists the outstanding obligations');
   assert.match(dashboard, /ac\.bootstrap\.declaredBy/, 'the dashboard names who declared a deferral and when');
   const editor = await readFile(new URL('../web/requirements.tsx', import.meta.url), 'utf8');

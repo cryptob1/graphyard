@@ -1,3 +1,4 @@
+<!-- page: Operate Graphyard | 2 | App permissions, branch protection, CI producers, and Codex review. -->
 # GitHub enforcement
 
 Graphyard uses a dedicated GitHub App. Its installation token is minted from the App private key and refreshed automatically. The App observes the repository and publishes **`Graphyard / merge`** on the exact PR head commit.

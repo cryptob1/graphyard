@@ -431,7 +431,7 @@ console.log(JSON.stringify({ required_pull_request_reviews: JSON.parse(readFileS
 
 test('the reviewer path is documented end to end in the install runbook and guides', async () => {
   const read = async (name: string) => readFile(new URL(`../${name}`, import.meta.url), 'utf8');
-  const [masterAgent, github, onboarding, help] = await Promise.all([read('docs/master-agent.md'), read('docs/github.md'), read('docs/onboarding.md'), read('src/cli.ts')]);
+  const [masterAgent, github, onboarding, help] = await Promise.all([read('docs/master-agent.md'), read('docs/github.md'), read('docs/onboarding.md'), read('src/cli/master.ts')]);
   for (const command of ['master reviewer setup', 'master reviewer add', 'master review GY-N', 'master protection', 'master harness']) {
     assert.ok(help.includes(command), `${command} must appear in CLI help`);
     assert.ok(masterAgent.includes(command), `docs/master-agent.md must document ${command}`);

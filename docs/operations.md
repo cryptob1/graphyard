@@ -1,3 +1,4 @@
+<!-- page: Operate Graphyard | 6 | stalled work, expired leases, rework, and outages. -->
 # Operations and recovery
 
 ## Daily checks
