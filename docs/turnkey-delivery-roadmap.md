@@ -196,6 +196,8 @@ Consider evidence reuse only with a defensible applicability definition covering
 
 Add cost and duration analytics from optional runner-supplied measurements. Distinguish observed cost, estimated cost and unavailable cost; do not rank agents as if workloads were comparable without context.
 
+*Shipped ahead of reuse: [candidate-to-deployment attribution](attribution.md) binds every validation request to its exact manifest, compatibility signature and independently observed target, re-anchors safely when the target moves, and measures avoided runs, wasted runs and unsupported claims — the accounting any later reuse policy must be judged against. No reuse is enabled by it.*
+
 Acceptance checks:
 
 - Relevant dependency/configuration changes invalidate reuse.

@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import Dialog from './dialog';
+import AttributionSection from './attribution';
 import { stages } from '../src/model';
 import { flowWindows } from '../src/flow-analytics';
 
@@ -217,7 +218,11 @@ export default function FlowAnalytics({ request, token, canAudit }: { request: (
           ? <p>No deployment-provider observation has been recorded, so deployment frequency, latency, failure and rollback are unavailable rather than zero.</p>
           : <p>{report.operations.deployments.observations} observation(s) across {report.operations.deployments.environments.join(', ') || 'no environment'}: {report.operations.deployments.succeeded} succeeded, {report.operations.deployments.failed} failed, {report.operations.deployments.rollbacks} rolled back, {count(report.operations.deployments.perDay)} per day, latency median {duration(report.operations.deployments.latency.medianMs)} over n {report.operations.deployments.latency.n}, up to {count(report.operations.deployments.pullRequestsPerDeployment.max)} merged pull request(s) per deployment. <button className="text-button" onClick={() => setDrill({ metric: 'deployments', key: null, title: 'Deployments' })}>Deployment records ↗</button></p>}
       </section>
+    </>}
 
+    <AttributionSection request={request} days={days} canAudit={canAudit}/>
+
+    {report && <>
       <section aria-labelledby="flow-provenance">
         <div className="section-title"><h2 id="flow-provenance">Coverage, exclusions and definitions</h2></div>
         <p>{report.coverage.withObservedCandidate} of {report.coverage.workItems} selected item(s) have an independently observed candidate. {report.coverage.providerTimestamps} record(s) carry a provider timestamp and {report.coverage.controlPlaneTimestamps} carry a control-plane timestamp. Slice provenance: {report.coverage.slices.observed} observed, {report.coverage.slices.declared} declared, {report.coverage.slices.unclassified} unclassified. Projection is {report.coverage.projection.stale ? `behind by ${report.coverage.projection.pendingEvents} ledger event(s)` : 'current with the ledger'}.</p>
