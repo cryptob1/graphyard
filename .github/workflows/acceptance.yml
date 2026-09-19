@@ -12,6 +12,12 @@ on:
         description: Required policy revision
         required: true
         default: '1'
+      proof:
+        # Validated against the protected registry in scripts/contracts.mjs rather than a
+        # duplicated option list, so requiring a proof cannot depend on editing this file.
+        description: Trusted contract to execute, as registered in scripts/contracts.mjs
+        required: true
+        default: integration:claim-safety
 permissions:
   contents: read
   actions: read
@@ -19,12 +25,15 @@ jobs:
   exercise:
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    # Recovery contracts wait out the candidate's real lease and launch fences.
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
         with: { ref: '${{ github.sha }}', persist-credentials: false }
       - uses: actions/setup-node@v4
         with: { node-version: '24' }
+      # Refuses before any candidate code is fetched when this protected checkout does not
+      # register the requested proof, which is the bootstrap ordering rule made explicit.
       - name: Prepare candidate from provider facts
         run: node scripts/prepare-acceptance.mjs
         env:
@@ -32,10 +41,13 @@ jobs:
           GRAPHYARD_PR: ${{ inputs.pr }}
           GRAPHYARD_WORK_ID: ${{ inputs.work_id }}
           GRAPHYARD_POLICY_REVISION: ${{ inputs.policy_revision }}
+          GRAPHYARD_PROOF: ${{ inputs.proof }}
       - name: Build isolated candidate
         run: docker build --tag graphyard-acceptance candidate
-      - name: Execute protected HTTP contract against candidate
-        run: node scripts/run-acceptance.mjs candidate.json graphyard-acceptance acceptance.json
+      - name: Execute protected contract against candidate
+        run: node scripts/run-acceptance.mjs candidate.json graphyard-acceptance acceptance.json "$GRAPHYARD_PROOF"
+        env:
+          GRAPHYARD_PROOF: ${{ inputs.proof }}
       - uses: actions/upload-artifact@v4
         if: always() && hashFiles('acceptance.json') != ''
         with:
@@ -66,5 +78,6 @@ jobs:
           GRAPHYARD_PR: ${{ inputs.pr }}
           GRAPHYARD_WORK_ID: ${{ inputs.work_id }}
           GRAPHYARD_POLICY_REVISION: ${{ inputs.policy_revision }}
+          GRAPHYARD_PROOF: ${{ inputs.proof }}
           GRAPHYARD_ARTIFACT_NAME: graphyard-acceptance-${{ github.run_attempt }}
           GITHUB_TOKEN: ${{ github.token }}

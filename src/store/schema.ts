@@ -7,6 +7,7 @@ import { validationTables } from './tables/validation.js';
 import { scenarioTables } from './tables/scenarios.js';
 import { deliveryTables } from './tables/delivery.js';
 import { productionTables } from './tables/production.js';
+import { flowTables } from './tables/flow.js';
 
 /**
  * Every table, in an order a restore can insert without violating references: a table
@@ -14,7 +15,7 @@ import { productionTables } from './tables/production.js';
  */
 export const tables: readonly TableDefinition[] = [
   ...workTables, ...delegationTables, ...operatorAgentTables, ...proofGrantTables,
-  ...validationTables, ...scenarioTables, ...deliveryTables, ...productionTables,
+  ...validationTables, ...scenarioTables, ...deliveryTables, ...productionTables, ...flowTables,
 ];
 
 /** The additive startup migration: the append-only trigger function, then each table's DDL. */

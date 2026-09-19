@@ -1,3 +1,4 @@
+import { latestCheck } from '../merge-queue.js';
 import type { QueueEjection, QueueEntry, QueueHistoryEntry } from '../merge-queue.js';
 import type { Gate, Stage, Work } from './work.js';
 import { escalationRefusals } from './escalation.js';
@@ -53,7 +54,7 @@ export function evaluate(work: Work, all: Work[], now: Date, ciAppIds: number[])
   ] : []);
   add('test', work.policy.checks.filter(name => {
     const checks = current ? obs!.checks.filter(c => c.name === name && ciAppIds.includes(c.appId)) : [];
-    return !checks.length || checks.some(c => c.result !== 'success');
+    return latestCheck(checks)?.result !== 'success';
   }).map(name => `Required CI check ${name} has not passed on the current candidate`));
   const reasons: string[] = [];
   const unproven = (proof: string) => {
@@ -62,7 +63,11 @@ export function evaluate(work: Work, all: Work[], now: Date, ciAppIds: number[])
   };
   const demanded = (proof: string) => {
     const scenario = work.scenarioRequirements?.find(s => s.proof === proof);
-    return `${proof} needs trusted passing evidence, with executed > 0 and skipped = 0, for this candidate and policy${scenario ? `; scenario v${scenario.revision} in ${scenario.environment}` : ''}`;
+    // Name an explicit revocation: an operator otherwise cannot tell a revoked
+    // candidate apart from one that was never proven.
+    const revoked = work.evidence.some(e => e.proof === proof && e.trusted && !!e.revocation
+      && e.sha === work.candidate?.sha && e.baseSha === work.candidate?.baseSha && e.policyRevision === work.policyRevision);
+    return `${proof} needs trusted passing evidence, with executed > 0 and skipped = 0, for this candidate and policy${scenario ? `; scenario v${scenario.revision} in ${scenario.environment}` : ''}${revoked && !currentEvidence(work, proof, now) ? '; previously accepted evidence was revoked' : ''}`;
   };
   // A bootstrap criterion's proofs are deferred here and required of the next change that
   // touches the same contract; review, CI and every other criterion still gate this one.

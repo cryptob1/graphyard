@@ -9,6 +9,7 @@ const pages = [
   ['operations', 'Operations & recovery'], ['development', 'Development & dogfooding'],
   ['operator-automation', 'Operator automation'],
   ['coordination', 'Coordination & recovery drills'],
+  ['flow-analytics', 'Flow analytics'],
   ['visual-identity', 'Visual identity'],
   ['test-cases', 'E2E test cases'], ['validation', 'Validation runner protocol'], ['runner-setup', 'Runner preparation & artifacts'], ['delivery', 'Releases & observed delivery'],
   ['first-pr', 'Graphyard repository bootstrap'],

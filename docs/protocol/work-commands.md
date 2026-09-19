@@ -23,6 +23,7 @@ Other commands use `POST /api/work/UUID/COMMAND` (display keys also work):
 | `workspace` | `{"epoch":1,"host":"build-machine-a","path":"/work/GY-1","branch":"graphyard/gy-1-1"}` |
 | `submit` | `{"epoch":1,"pr":123}`; the server observes the pull request first and refuses, naming the files, when it reverts, deletes or rewrites files outside `plannedFiles` relative to the base it is bound to, see [regression guard](regression-guard.md#submit-time-regression-guard) |
 | `evidence` | See below |
+| `revoke` | See [revocation](evidence.md#revocation) |
 | `deployment` | `{"sha":"<serving commit>","mergeSha":"<the item's merge commit>","source":"endpoint","observedAt":"2026-09-18T10:00:00Z"}`; coordinator or admin, delivered work only, once per delivery. Whether the serving commit is the merge itself or a descendant is derived, never asserted. See [post-deployment smoke proof](../github.md#post-deployment-smoke-proof) |
 
 No endpoint sets arbitrary lifecycle state. `complete` in the CLI maps to `submit`, not `done`. Delivered work accepts only `deployment` and `e2e:deploy-smoke` evidence, which extend the delivery snapshot without re-evaluating it.

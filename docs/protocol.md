@@ -18,8 +18,9 @@ The protocol is documented one topic per page. The index below is generated from
 7. [Workspaces](protocol/workspaces.md) — worktree registration, branch and path uniqueness, and the launch fence.
 8. [Submit-time regression guard](protocol/regression-guard.md) — how submit classifies every changed file against `plannedFiles` and refuses out-of-scope regressions.
 9. [Evidence and proof authority](protocol/evidence.md) — evidence submission, proof authority grants, and the post-deployment smoke proof.
-10. [Bootstrap mode for a change that introduces its own proof harness](protocol/bootstrap-mode.md) — deferring a proof onto the contract the change introduces, and the obligation it leaves.
-11. [GitHub webhook and review providers](protocol/github-webhook.md) — webhook verification, review-provider changes, re-review, and the work snapshot.
-12. [Validation runner and delivery APIs](protocol/validation-and-delivery.md) — where the validation runner and release delivery APIs are documented.
-13. [Supervised shutdown invariants](protocol/shutdown-invariants.md) — what the supervisor guarantees before, during, and after a contained launch.
+10. [Deployment observations](protocol/deployment-observations.md) — recording deployment-provider observations that feed flow analytics without moving a gate.
+11. [Bootstrap mode for a change that introduces its own proof harness](protocol/bootstrap-mode.md) — deferring a proof onto the contract the change introduces, and the obligation it leaves.
+12. [GitHub webhook and review providers](protocol/github-webhook.md) — webhook verification, review-provider changes, re-review, and the work snapshot.
+13. [Validation runner and delivery APIs](protocol/validation-and-delivery.md) — where the validation runner and release delivery APIs are documented.
+14. [Supervised shutdown invariants](protocol/shutdown-invariants.md) — what the supervisor guarantees before, during, and after a contained launch.
 <!-- /index -->

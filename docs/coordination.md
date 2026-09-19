@@ -46,6 +46,8 @@ Stop the worker and release its lease first. Only an operator may revise require
 
 All previous acceptance evidence remains in history but becomes inapplicable to the new policy. Review requests, observations and merge authorization are invalidated. Previously submitted work requires a new claimed attempt and resubmission on its existing PR branch. GitHub check revocation is asynchronous: suspend merging until the refusing check is visible, as with rework. Delivered or observed-merged work requires a follow-up task.
 
+To withdraw specific accepted runs without changing what the work item requires, revoke that evidence instead of revising requirements; see the [operations runbook](operations.md#accepted-evidence-turns-out-to-be-wrong) and the [protocol](protocol/evidence.md#revocation).
+
 Existing E2E proof names retain their pinned scenario version. Newly added E2E proofs pin the latest definition at revision time. This command does not silently upgrade existing pins. Selecting a newer revision of the same scenario and selective reuse of unaffected evidence remain future work.
 
 ## Detect overlap without pretending to understand every API
@@ -92,7 +94,7 @@ Released and expired assignments are described as no longer authoritative; the U
 
 ## Two-machine operational drill
 
-Run this with two real hosts, two distinct worker principals, and an operator. Isolated tests using independent connection pools are useful but are **not** evidence that this drill ran.
+Run this with two real hosts, two distinct worker principals, and an operator. Isolated tests using independent connection pools are useful but are **not** evidence that this drill ran. The trusted [`integration:herdr-recovery` contract](herdr.md#automated-recovery-contract) proves the same refusals automatically, but it is evidence about the coordination API, not about two real hosts.
 
 1. Connect both hosts with `graphyard init --herdr --token-stdin`; check distinct host IDs and principal IDs. Keep operator and producer credentials off both worker environments.
 2. Create a small real work item with a repository test as its acceptance proof. Concurrently claim it from both hosts. Record one winner and one refusal, then register the winner's worktree.

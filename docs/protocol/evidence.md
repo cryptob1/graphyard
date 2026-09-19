@@ -26,4 +26,24 @@ Work creation and every requirement revision record `proofGaps`: the required pr
 
 All required proof names must pass. Evidence is selected for the exact head/base/policy tuple. A later matching failure supersedes an earlier pass. Stale evidence is retained for audit without satisfying the current candidate.
 
+### Revocation
+
+`POST /api/work/:id/revoke` withdraws accepted evidence that should no longer authorize a candidate:
+
+```json
+{
+  "proof": "integration:claim-safety",
+  "sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "baseSha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "policyRevision": 1,
+  "reason": "Reported run was attributed to the wrong artifact"
+}
+```
+
+Only an operator, or the trusted producer whose live [proof grant](#proof-authority) covers that exact proof name, may revoke; workers, coordinators, other producers and operator agents are refused. The tuple is pinned deliberately: a request that matches no trusted record refuses with 404 rather than silently withdrawing nothing.
+
+Revocation withdraws *every* trusted record for that tuple, so an older accepted run cannot quietly re-authorize the same candidate. Records are annotated, never deleted; each keeps a `revocation` object naming the actor, reason and time. The acceptance gate then names the withdrawal explicitly instead of reporting the proof as merely unmeasured, and reconciliation republishes a refusing GitHub check. A later trusted run for the same candidate satisfies acceptance again; the merge queue, however, ejects a revoked entry as it would a failed proof, so the ejected commit does not re-enter and a new candidate lands at the back of the queue.
+
+Revocation may interrupt an active merge execution until the broker's transactional provider-commit boundary; it then serializes before the commit and cancels it, or serializes after it and refuses because the provider mutation is already irrevocably in flight. That refusal does not lapse with the execution's expiry: a committed execution stays on the record until a GitHub observation settles the provider outcome — the merge is attributed, or the pull request is observed still unmerged after the authority ran out — and only then does the tuple become revocable again. See [the merge broker](../github.md#enforcement-boundary). Delivered work is immutable and refuses revocation: use a follow-up task.
+
 `e2e:deploy-smoke` is the one proof submitted after delivery. For it, `sha` is the deployed commit the checks ran against — the one recorded by the `deployment` command — and `baseSha` is the item's merge commit. It is accepted only from a producer granted that proof, only when the work policy sets `deploySmoke`, only after the deployment observation exists, and only with exactly those two commits and the current policy revision; any other submission is refused rather than stored untrusted. The result is recorded as `delivery.smoke`.

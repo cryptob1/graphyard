@@ -49,4 +49,10 @@ export const leaseCommands = defineCommands([
     help: ['  evidence GY-N file.json       Submit evidence (trust follows credential)'],
     run: async (context, work) => context.print(await workMutation(context, work)('evidence', JSON.parse(await readFile(context.args[0], 'utf8')))),
   },
+  {
+    name: 'revoke',
+    scope: 'work',
+    help: ['  revoke GY-N file.json         Withdraw trusted evidence for a candidate (producer/operator)'],
+    run: async (context, work) => context.print(await workMutation(context, work)('revoke', JSON.parse(await readFile(context.args[0], 'utf8')))),
+  },
 ]);
