@@ -18,7 +18,7 @@ const evidenceArtifact = z.object({
   kind: z.enum(['log', 'report', 'screenshot', 'trace', 'other']), label: z.string().trim().min(1).max(200),
   mediaType: z.string().trim().min(1).max(200).optional(), size: z.number().int().min(0).optional(),
   digest: z.string().regex(/^sha256:[a-f0-9]{64}$/).optional(), expiresAt: z.iso.datetime().optional(),
-  availability: z.enum(['available', 'expired', 'redacted', 'missing', 'external']), url: publicArtifactUrl.optional(),
+  availability: z.enum(['available', 'expired', 'redacted', 'missing', 'upload-failed', 'external']), url: publicArtifactUrl.optional(),
 }).strict().refine(value => value.availability === 'external' ? !!value.url : !value.url, 'Only external artifacts may carry a public URL');
 // Longer than acknowledgeContainment's three 30-second HTTP attempts plus retry delays.
 export const launchFenceMs = 120_000;
