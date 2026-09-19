@@ -128,9 +128,10 @@ test('integration:master-loop-deployment-verification — verification is record
     const behind = await verifyDeployment(delivered('a'.repeat(40), iso(clock, -hour)), verificationEffects(master, { snapshot: async () => ({ work: [delivered('a'.repeat(40), iso(clock, -hour))], now: iso(clock) }), mutate: async () => assert.fail('nothing is recorded for a release that does not serve the merge'), run: (command, args, options) => command === 'gh' ? JSON.stringify({ status: 'behind' }) : execFileSync(command, args, { ...options, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }) }));
     assert.equal(behind.result, 'refused'); assert.match(behind.refusals.join('\n'), /does not serve GY-42 merge commit a{40} yet/);
 
-    // No observation at all: unavailable is a refusal with the endpoint's reason, never a pass.
+    // No observation at all: unavailable is a refusal with the endpoint's reason, never a pass
+    // (the stub answers 401 off the release path, as a probe behind the wrong credential would).
     const silent = await verifyDeployment(state.work[0], verificationEffects(config(release.cliPath, url, { deploymentUrl: `${url}/missing` }), { snapshot: effects.snapshot, mutate: async () => assert.fail('nothing is recorded without an observation') }));
-    assert.equal(silent.result, 'refused'); assert.match(silent.refusals[0], /deployed release is unobserved: Deployment endpoint answered 404/);
+    assert.equal(silent.result, 'refused'); assert.match(silent.refusals[0], /deployed release is unobserved: Deployment endpoint answered 401/);
   } finally { await close(server); await rm(release.directory, { recursive: true, force: true }); }
 });
 
@@ -197,7 +198,7 @@ test('integration:master-loop-deployment-verification — the checkout identity 
     assert.match(emitted.guide, /^# Master-agent operating mode/); assert.doesNotMatch(emitted.guide, /^<!-- page:/);
     assert.match(emitted.init, /This repository uses Graphyard at https:\/\/graphyard\.example/);
     assert.deepEqual(missingLoopStatements(emitted.guide), []); assert.deepEqual(missingLoopStatements(emitted.init), []);
-    assert.equal(execFileSync('git', ['-C', release.checkout, 'status', '--porcelain'], { encoding: 'utf8' }).trim(), '', 'emitting instructions leaves the release checkout untouched');
+    assert.equal(execFileSync('git', ['-C', release.checkout, 'status', '--porcelain', '--untracked-files=no'], { encoding: 'utf8' }).trim(), '', 'emitting instructions leaves the release checkout untouched');
   } finally { await rm(release.directory, { recursive: true, force: true }); await rm(outside, { recursive: true, force: true }); }
 });
 

@@ -76,8 +76,9 @@ export function assessDeploymentVerification(work: Work, input: VerificationInpu
   }
   const initial: InstructionCheck = emits ? 'unobserved' : 'not-applicable';
   const checks: { guide: InstructionCheck; init: InstructionCheck } = { guide: initial, init: initial };
-  if (!emits) { /* the launcher is not a checkout of the managed repository; the release's coverage of the merge is the whole check */ }
-  else if (input.emitted) {
+  // A launcher that is not a checkout of the managed repository emits nothing about it; the
+  // release's coverage of the merge is then the whole check.
+  if (emits && input.emitted) {
     const guide = missingLoopStatements(input.emitted.guide), init = missingLoopStatements(input.emitted.init);
     checks.guide = guide.length ? 'fail' : 'pass'; checks.init = init.length ? 'fail' : 'pass';
     if (guide.length) refusals.push(`master guide from the deployed release lacks ${guide.join(', ')}`);
