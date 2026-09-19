@@ -4,7 +4,7 @@ import { mkdir, readFile, rm, realpath } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { dirname, resolve } from 'node:path';
 import { z } from 'zod';
-import { assertOutsideWorktrees, atomicPrivateWrite, autonomousSession, createdHerdrTab, herdrJson, loadMasterConfig, prepareSessionHarness, privateFile, reviewerIdentitySchema, reviewerProfileSchema, closeHerdrPane, stopCreatedHerdrTab, type HerdrAgent, type MasterConfig, type ReviewerIdentity, type ReviewerProfile } from './master.js';
+import { assertOutsideWorktrees, atomicPrivateWrite, autonomousSession, createdHerdrTab, closeHerdrPane, herdrJson, loadMasterConfig, prepareSessionHarness, privateFile, reviewerIdentitySchema, reviewerProfileSchema, stopCreatedHerdrTab, type HerdrAgent, type MasterConfig, type ReviewerIdentity, type ReviewerProfile } from './master.js';
 import { launchPlan } from './harness.js';
 import type { Work } from './model.js';
 
@@ -196,10 +196,17 @@ export function reviewPrompt(config: MasterConfig, binding: ReviewBinding) {
     + 'This session is read-only: do not edit, stage, commit, push, rebase, or merge anything, do not run the project\'s build, tests, or servers, do not claim Graphyard work, and do not submit evidence. '
     + `Post exactly one verdict, bound to that exact commit: gh api --method POST repos/${config.repository}/pulls/${binding.pr}/reviews -f commit_id=${binding.sha} -f event=APPROVE -f body=YOUR_JUSTIFICATION (use event=REQUEST_CHANGES instead when the change is not acceptable). `
     + `Judge only whether this diff is correct, safe, and matches what ${binding.key} requires; never weaken a requirement to let it pass. `
+    + `Posting that review is granted to this session's role, not a permission to request: the launch allows exactly this one call, so post it as soon as you have judged the diff, without asking for confirmation. `
     + `GH_CONFIG_DIR points at a reviewer credential that expires within the hour and can only read this repository and write reviews. `
     + `Immediately before posting, run gh pr view ${binding.pr} --repo ${config.repository} --json mergeable,mergeStateStatus,headRefOid and repeat it every 5 seconds until mergeable is no longer UNKNOWN: GitHub recomputes the merge base lazily and dismisses a verdict posted before that recompute. `
     + `If gh reports a head commit other than ${binding.sha}, stop and report that instead of reviewing a different commit. Then stop; Graphyard closes this session once it observes your verdict. `
     + autonomousSession('post the verdict yourself, APPROVE or REQUEST_CHANGES, as soon as you have judged the diff', `record a blocker as one review with event=COMMENT on commit ${binding.sha} (or, when posting is itself refused, as a final line starting BLOCKED:)`);
+}
+
+/** The loop's retry for a session that stopped before posting the verdict it already judged. */
+export function reviewRetryPrompt(repository: string, record: Pick<ReviewRecord, 'key' | 'pr' | 'sha'>) {
+  return `You stopped before posting the verdict for ${record.key}. Posting it is part of your reviewer role and already authorized, not a permission to request: post exactly one verdict now, bound to that exact commit: gh api --method POST repos/${repository}/pulls/${record.pr}/reviews -f commit_id=${record.sha} -f event=APPROVE -f body=YOUR_JUSTIFICATION (use event=REQUEST_CHANGES instead when the change is not acceptable). `
+    + `Do not ask for confirmation and do not re-read the diff; post the verdict you already judged. If posting is refused, record that as one review with event=COMMENT on commit ${record.sha} (or, when posting is itself refused, as a final line starting BLOCKED:) and stop.`;
 }
 
 async function writeReviewerSession(directory: string, token: string) {
@@ -226,8 +233,18 @@ export async function launchReview(root: string, work: Work, profileName: string
   const binding = assertReviewCandidate(work, observedAt);
   if (binding.author.toLowerCase() === `${config.reviewer.slug}[bot]`.toLowerCase()) throw new Error('The reviewer App authored this pull request; an identity cannot independently review its own work');
   const ledger = await readReviewLedger(root);
-  const pending = ledger.reviews.find(record => record.state === 'pending' && record.key === work.key);
-  if (pending) throw new Error(`A reviewer session for ${work.key} is already pending on ${pending.sha.slice(0, 7)}; reconcile it with master status before launching another`);
+  // A record for a superseded head never blocks a review request for the current head: every
+  // such record is closed as cancelled with the reason on the record, and this launch proceeds.
+  // Only a record for the exact current candidate holds the key: one session per candidate.
+  const pendings = ledger.reviews.filter(record => record.state === 'pending' && record.key === work.key);
+  const superseded = new Map<ReviewRecord, string>();
+  for (const pending of pendings) {
+    const reason = staleReviewReason(pending, [work]);
+    if (!reason) throw new Error(`A reviewer session for ${work.key} is already pending on ${pending.sha.slice(0, 7)}; reconcile it with master status before launching another`);
+    superseded.set(pending, reason);
+  }
+  for (const [pending, reason] of superseded) await closeReviewSession(pending, { run: dependencies.run, now }, { state: 'cancelled', resolution: reason, force: true });
+  if (superseded.size) await saveReviewLedger(root, ledger);
   if (agents.some(agent => agent.name === profile.agentName)) throw new Error(`Reviewer agent ${profile.agentName} is already visible in Herdr`);
   const credential = await readReviewerCredential(root, config.reviewer.credentialFile);
   if (credential.appId !== config.reviewer.appId || credential.installationId !== config.reviewer.installationId || credential.slug !== config.reviewer.slug) throw new Error('The stored reviewer credential does not match the recorded reviewer identity; rerun master reviewer bind');
@@ -292,10 +309,32 @@ export function staleReviewReason(record: Pick<ReviewRecord, 'key' | 'sha' | 'ba
   return null;
 }
 
+/**
+ * Settle one record: close its pane, withdraw the session credential, and record the outcome.
+ * Herdr confirming the pane gone is what lets the session directory be removed, and a record
+ * with a close failure stays pending unless `force` applies: a posted verdict, or a head the
+ * candidate has replaced, settles the record even when that confirmation fails — such a session
+ * decides nothing further for the candidate — with the close failure kept on the record as
+ * attention and the token expiring within the hour regardless.
+ */
+async function closeReviewSession(record: ReviewRecord, dependencies: { run?: (command: string, args: string[]) => string; now: () => Date }, options: { state: ReviewRecord['state']; resolution?: string; force?: boolean }) {
+  let closeFailure: string | undefined;
+  try { if (record.pane) closeHerdrPane(record.pane, dependencies.run); }
+  catch (error) { closeFailure = `Herdr could not close pane ${record.pane}: ${error instanceof Error ? error.message : 'unknown reason'}`; }
+  if (!closeFailure) await rm(record.sessionDirectory, { recursive: true, force: true });
+  record.closeFailure = closeFailure;
+  if (!closeFailure || options.force) {
+    record.state = options.state; record.closedAt = dependencies.now().toISOString();
+    if (options.resolution) record.resolution = options.resolution;
+  }
+  return closeFailure;
+}
+
 // A session is reported closed only once Herdr confirms the pane is gone and the reviewer
-// credential directory is removed; a verdict alone never claims the credential was withdrawn.
-// Given the current work snapshot, a session whose head is no longer the candidate is cancelled
-// the same way, with the reason on the record.
+// credential directory is removed — except that a posted verdict, and a superseded head, settle
+// the record even when that confirmation fails (see closeReviewSession). Given the current work
+// snapshot, a session whose head is no longer the candidate is cancelled the same way, with the
+// reason on the record.
 export async function reconcileReviews(root: string, config: MasterConfig, dependencies: {
   run?: (command: string, args: string[]) => string;
   observe?: (record: ReviewRecord, reviewer: string) => { state: string; reviewer: string; reviewId: number; submittedAt: string } | null;
@@ -303,25 +342,34 @@ export async function reconcileReviews(root: string, config: MasterConfig, depen
   work?: Work[];
   /** Herdr's agent list; null when Herdr could not be read, when a session is never judged finished. */
   agents?: HerdrAgent[] | null;
+  /** Retries a session that stopped without a verdict; the default prompts it in Herdr. */
+  retry?: (record: ReviewRecord, message: string) => void;
 } = {}) {
   const ledger = await readReviewLedger(root);
   if (!config.reviewer) return { reviews: ledger.reviews, changed: 0 };
   const reviewer = `${config.reviewer.slug}[bot]`;
   const observe = dependencies.observe ?? ((record: ReviewRecord, identity: string) => observeReviewVerdict(config.repository, record, identity, dependencies.run ?? ((command: string, args: string[]) => execFileSync(command, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }))));
   const now = (dependencies.now ?? (() => new Date()))();
+  const retry = dependencies.retry ?? ((record: ReviewRecord, message: string) => herdrJson(['agent', 'prompt', record.agentName, message], dependencies.run));
   let changed = 0;
   for (const record of ledger.reviews) {
     if (record.state !== 'pending') continue;
     const verdict = record.verdict ?? observe(record, reviewer) ?? undefined;
     const expired = !verdict && Date.parse(record.tokenExpiresAt) <= now.getTime();
     const stale = verdict ? null : staleReviewReason(record, dependencies.work);
-    // A session that finished, vanished or sits blocked without a verdict is waiting on input it
-    // will never get: after a grace period it is recorded as failed, and the request relaunched.
+    // A session that finished, vanished or sits blocked without a verdict is retried where it
+    // stopped: the loop itself prompts it once to post the verdict it already judged, so the
+    // master never has to. One still without a verdict after a grace period is recorded as
+    // failed, and the request relaunched as its next attempt.
     let failed: string | null = null;
     if (!verdict && !expired && !stale && dependencies.agents) {
       const agent = dependencies.agents.find(candidate => candidate.name === record.agentName);
       if (!agent || ['done', 'idle', 'blocked'].includes(agent.agent_status ?? '')) {
-        if (!record.idleSince) { record.idleSince = now.toISOString(); changed++; }
+        if (!record.idleSince) {
+          record.idleSince = now.toISOString(); changed++;
+          try { retry(record, reviewRetryPrompt(config.repository, record)); }
+          catch { /* the grace period records the session as failed when the prompt cannot reach it */ }
+        }
         else if (now.getTime() - Date.parse(record.idleSince) >= reviewIdleGraceMs) failed = agent?.agent_status === 'blocked'
           ? `the reviewer session ended waiting on input (Herdr reports it blocked) instead of deciding on its own, without a verdict on ${record.sha.slice(0, 12)}`
           : `the reviewer session finished (${agent?.agent_status ?? 'gone from Herdr'}) without posting a verdict on ${record.sha.slice(0, 12)}`;
@@ -329,16 +377,9 @@ export async function reconcileReviews(root: string, config: MasterConfig, depen
     }
     if (!verdict && !expired && !stale && !failed) continue;
     if (verdict) record.verdict = verdict;
-    let closeFailure: string | undefined;
-    try { if (record.pane) closeHerdrPane(record.pane, dependencies.run); }
-    catch (error) { closeFailure = `Herdr could not close pane ${record.pane}: ${error instanceof Error ? error.message : 'unknown reason'}`; }
-    if (!closeFailure) await rm(record.sessionDirectory, { recursive: true, force: true });
-    record.closeFailure = closeFailure;
-    if (!closeFailure) {
-      record.state = verdict ? 'completed' : stale ? 'cancelled' : failed ? 'failed' : 'expired'; record.closedAt = now.toISOString();
-      if (stale ?? failed) record.resolution = (stale ?? failed)!;
-      else if (!verdict) record.resolution = `the reviewer token expired at ${record.tokenExpiresAt} without a verdict on ${record.sha.slice(0, 12)}`;
-    }
+    if (verdict) await closeReviewSession(record, { run: dependencies.run, now: () => now }, { state: 'completed', force: true });
+    else if (stale) await closeReviewSession(record, { run: dependencies.run, now: () => now }, { state: 'cancelled', resolution: stale, force: true });
+    else await closeReviewSession(record, { run: dependencies.run, now: () => now }, { state: failed ? 'failed' : 'expired', resolution: failed ?? `the reviewer token expired at ${record.tokenExpiresAt} without a verdict on ${record.sha.slice(0, 12)}` });
     changed++;
   }
   if (changed) await saveReviewLedger(root, ledger);
