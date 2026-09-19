@@ -21,4 +21,4 @@ export const releaseInfo = () => ({
  * it, and the migration records the generation it reached. Backups carry the generation
  * they were taken at, so a restore into older code refuses instead of dropping columns.
  */
-export const schemaVersion = 2;
+export const schemaVersion = 3;

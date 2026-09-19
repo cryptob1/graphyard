@@ -32,6 +32,13 @@ export interface Evidence {
   validation?: { candidateId: string; requestId: string; attemptId: string };
   /** What a validation result was attributed to: the exact manifest, compatibility signature and independently observed target; see docs/attribution.md. */
   attribution?: EvidenceAttribution;
+  /**
+   * D6: this entry was derived from an executed attempt's pass by a recorded reuse decision
+   * rather than measured for this head. `observedAt` is when the original evidence was
+   * collected; `sourceSha` is the head it measured. A later live attempt for the same proof
+   * supersedes the selection this entry is bound to, so a later failure always wins.
+   */
+  reuse?: { decisionId: string; evidenceId: string; candidateId: string; requestId: string; attemptId: string; sequence: number; sourceSha: string; observedAt: string; policy: { id: string; revision: number } };
 }
 export interface EvidenceAttribution {
   manifestHash: string; digestHash: string; signature: string; environmentId: string; environmentRevision: number;

@@ -10,6 +10,8 @@ import { producerIndependenceRefusal } from './delegation.js';
 import type { Scenario } from './scenarios.js';
 import { defaultReportFormat, reportFormats } from './report-adapters.js';
 import { defaultArtifactCapacityBytes, type ArtifactBackend } from './artifacts.js';
+import { EvidenceReuse, reuseScopeSchema } from './evidence-reuse.js';
+import { ArtifactReplay } from './evidence-replay.js';
 import { appendAttribution, candidateManifest, compatibilitySignature, signatureDifferences, type TargetIdentity, type SignatureComponent } from './attribution.js';
 import { Reanchoring, TargetMismatchRefusal, type RequestAttribution } from './reanchor.js';
 
@@ -39,29 +41,54 @@ export const definitionSchema = z.discriminatedUnion('kind', [
   // `queueLimit` is a runner's backpressure bound: queued requests beyond it refuse creation.
   z.object({ ...base, kind: z.literal('registration'), principalId: name, role: z.enum(['runner', 'collector', 'builder', 'observer', 'promoter', 'rollback']), environment: ref, adapterVersion: name, proofs: z.array(proofSchema).max(50), enabled: z.boolean(), executionHost: z.string().min(1).max(500).optional(), attestationPublicKey: z.string().min(32).max(4096).optional(), executionNetwork: z.string().min(1).max(60).optional(), testAccountDigest: digest.optional(), services: resourceNames.optional(), queueLimit: z.number().int().min(1).max(100).optional(), rollback: z.object({ fencing: z.enum(['provider', 'serialized', 'none']), automatic: z.boolean() }).strict().optional() }).strict(),
   z.object({ ...base, kind: z.literal('bundle'), scenario: name, scenarioRevision: revision, scenarioHash: z.string().regex(/^[a-f0-9]{64}$/), digest, runnerImageDigest: digest, reportFormat: z.enum(reportFormats).default(defaultReportFormat) }).strict(),
+  // D6: an environment's evidence-reuse policy. `relevant` names the paths whose change
+  // forbids reuse, by category; `ignorable` names the paths known not to affect the proof;
+  // everything else is unknown and refuses. `artifacts: identical` additionally requires
+  // the built artifact manifest to be unchanged; `scoped` accepts a differing manifest when
+  // the declared build inputs are unchanged and every changed path is ignorable.
+  z.object({ ...base, kind: z.literal('reuse'), environment: ref, enabled: z.boolean(), freshnessSeconds: z.number().int().min(60).max(30 * 86_400), artifacts: z.enum(['identical', 'scoped']).default('identical'), relevant: reuseScopeSchema, ignorable: z.array(z.string().min(1).max(300)).max(100) }).strict(),
 ]);
 type DefinitionInput = z.infer<typeof definitionSchema>;
 export type Definition = DefinitionInput & { revision: number; createdAt: string; createdBy: string };
 export type Environment = Definition & { kind: 'environment' };
 export type Registration = Definition & { kind: 'registration' };
+export type ReusePolicy = Definition & { kind: 'reuse' };
 export const deliveryPolicy = (environment: Environment) => ({ freshnessSeconds: 300, approvalRequired: true, automaticRollback: false, ...environment.delivery });
 export const defaultQueueLimit = 20;
 export type RollbackFencing = 'provider' | 'serialized' | 'none';
-type Bundle = Definition & { kind: 'bundle' };
+export type Bundle = Definition & { kind: 'bundle' };
 const attestationSchema = z.object({ registration: ref, workId: z.uuid(), expectedWorkRevision: revision, sourceSha: sha, baseSha: sha, buildInputsDigest: digest, artifacts, provenanceUrl: z.url().max(2000) }).strict();
 export type BuildAttestation = z.infer<typeof attestationSchema> & { id: string; producer: string; at: string; repository: string };
 const candidateSchema = z.object({ workId: z.uuid(), expectedWorkRevision: revision, proof: proofSchema, environment: ref, bundle: ref, buildAttestationId: z.uuid(), requiredArtifacts: resourceNames, artifactStorage: z.enum(['external', 'postgres']).default('external') }).strict();
-/** `manifestHash` and `signature` are content addresses derived from the trusted build, bundle, environment and policy the candidate binds; see src/attribution.ts. */
+/**
+ * `manifestHash` and `signature` are content addresses derived from the trusted build, bundle, environment and policy the candidate binds; see src/attribution.ts.
+ * `files` is the independently observed diff of the head against its base — each changed
+ * path with the blob the head holds — snapshotted when the candidate is selected, so a later
+ * reuse decision compares two observations Graphyard made rather than anything a client says
+ * changed. Null when the observation carried no comparison. `reuse` marks a derived candidate:
+ * one selected by a reuse decision and bound to the executed attempt it names.
+ */
 export type ValidationCandidate = z.infer<typeof candidateSchema> & { id: string; sourceSha: string; baseSha: string; policyRevision: number; scenario: { revision: number; hash: string; environment: string }; createdAt: string; createdBy: string;
-  manifestHash?: string; digestHash?: string; signature?: string; signatureComponents?: Record<SignatureComponent, string>; reanchoredFrom?: { candidateId: string; requestId: string } };
+  manifestHash?: string; digestHash?: string; signature?: string; signatureComponents?: Record<SignatureComponent, string>; reanchoredFrom?: { candidateId: string; requestId: string };
+  files?: { path: string; sha: string | null }[] | null; reuse?: { decisionId: string; of: { candidateId: string; requestId: string; attemptId: string; sequence: number } } };
 const requestSchema = z.object({ candidateId: z.uuid(), expectedWorkRevision: revision, runner: ref, collector: ref, deadline: z.iso.datetime(), maxAttempts: z.number().int().min(1).max(5) }).strict();
-export type Attempt = { id: string; epoch: number; dispatchedAt: string; expiresAt: string; acknowledgedAt?: string; lastHeartbeatAt?: string; finishedAt?: string; state: 'dispatched' | 'running' | 'completed' | 'expired' | 'cancelled' | 'superseded'; settled: boolean;
+/** Optional runner-supplied measurements the collector forwards with a result; Graphyard records them beside its own observed timings and never substitutes one for the other. */
+export type AttemptMeasurements = z.infer<typeof measurementsSchema>;
+/** What the collector reported for a finished attempt, kept for replay comparison and analytics. */
+export type AttemptReport = { execution: string; behavior: string; executed: number; skipped: number; inventoryComplete: boolean; artifactState: string; attribution: string; measurement: string; passed: boolean };
+export type Attempt = { id: string; epoch: number; dispatchedAt: string; expiresAt: string; acknowledgedAt?: string; collectingAt?: string; lastHeartbeatAt?: string; finishedAt?: string; state: 'dispatched' | 'running' | 'completed' | 'expired' | 'cancelled' | 'superseded'; settled: boolean;
   /** The independently observed target identity when the grant was issued; the result must hold it across the whole window. */
-  target?: { state: TargetIdentity['state']; observationIds: string[]; observedAt: string | null; digestHash: string | null } };
+  target?: { state: TargetIdentity['state']; observationIds: string[]; observedAt: string | null; digestHash: string | null };
+  /** The durable dispatch order (validation_attempts.seq); absent on attempts that predate it. */
+  sequence?: number; report?: AttemptReport; measurements?: AttemptMeasurements };
 export type ValidationRequest = z.infer<typeof requestSchema> & { id: string; workId: string; proof: string; state: 'queued' | 'dispatched' | 'running' | 'collecting' | 'completed' | 'cancelled' | 'expired' | 'superseded'; attempts: Attempt[]; createdAt: string; createdBy: string; result?: { accepted: boolean; passed: boolean; reasons: string[] };
   /** What the request is bound to for attribution: manifest, signature, target kind and the target observed at creation. Never rewritten; a moved target supersedes the request and a fresh one is created. */
   attribution?: RequestAttribution };
 const commandSchema = z.object({ requestId: z.uuid(), attemptId: z.uuid(), epoch: revision }).strict();
+// Cost is `observed` when the runner or its provider metered this attempt, `estimated` when
+// it was derived from a rate; absent cost is reported as unavailable, never as zero.
+const measurementsSchema = z.object({ durationMs: z.number().int().min(0).max(86_400_000).optional(), cpuSeconds: z.number().min(0).max(1_000_000).optional(),
+  cost: z.object({ amount: z.number().min(0).max(1_000_000), currency: z.string().regex(/^[A-Z]{3}$/), basis: z.enum(['observed', 'estimated']), source: z.string().min(1).max(200) }).strict().optional() }).strict();
 const reportSchema = commandSchema.extend({
   execution: z.enum(['completed', 'cancelled', 'timed_out']), behavior: z.enum(['passed', 'failed', 'blocked', 'unmeasured']),
   executed: z.number().int().min(0).max(1_000_000), skipped: z.number().int().min(0).max(1_000_000), inventoryComplete: z.boolean(),
@@ -69,6 +96,7 @@ const reportSchema = commandSchema.extend({
   bundleDigest: digest, runnerImageDigest: digest,
   artifacts: z.array(z.object({ name, digest, url: z.union([externalUrl, z.string().regex(/^graphyard-artifact:\/\/[^?#]+\/[0-9a-f-]{36}\/[0-9a-f-]{36}$/)]) }).strict()).max(30),
   artifactState: z.enum(['verified', 'missing', 'upload-failed', 'expired']), executionSettled: z.boolean(),
+  measurements: measurementsSchema.optional(),
 }).strict();
 type Report = z.infer<typeof reportSchema>;
 /** Stored artifact metadata. `state` is the retention state; bytes live in the row for the postgres backend and at `location` otherwise. */
@@ -87,6 +115,9 @@ export class Validation {
   /** External artifact bytes, when configured. Null keeps bytes in the Postgres row. */
   artifactBackend: ArtifactBackend | null = null;
   artifactCapacityBytes = defaultArtifactCapacityBytes;
+  /** D6: scoped evidence reuse and artifact replay, built on this protocol's authority checks. */
+  readonly reuse = new EvidenceReuse(this);
+  readonly replay = new ArtifactReplay(this);
   /** Target checks and automatic re-anchoring; see src/reanchor.ts. */
   readonly reanchoring = new Reanchoring(this);
   constructor(readonly engine: Engine, readonly principals: Principal[], readonly repository: string) {}
@@ -106,7 +137,7 @@ export class Validation {
     return { requests, candidates, nextCursor: rows.length > 20 ? requests.at(-1)!.id : null };
   }
   async definitions(cursor?: string) {
-    const position = cursor ? z.object({ at: z.iso.datetime(), kind: z.enum(['environment','registration','bundle']), id: name, revision }).strict().parse(JSON.parse(Buffer.from(z.string().max(1000).parse(cursor), 'base64url').toString('utf8'))) : null;
+    const position = cursor ? z.object({ at: z.iso.datetime(), kind: z.enum(['environment','registration','bundle','reuse']), id: name, revision }).strict().parse(JSON.parse(Buffer.from(z.string().max(1000).parse(cursor), 'base64url').toString('utf8'))) : null;
     const rows: Definition[] = (await this.store.pool.query(`SELECT document FROM validation_definitions
       WHERE $1::text IS NULL OR (document->>'createdAt',kind,id,revision)<($1::text,$2::text,$3::text,$4::int)
       ORDER BY document->>'createdAt' DESC,kind DESC,id DESC,revision DESC LIMIT 51`, [position?.at ?? null, position?.kind ?? null, position?.id ?? null, position?.revision ?? null])).rows.map(r => r.document);
@@ -120,6 +151,7 @@ export class Validation {
     const build = (await this.store.pool.query('SELECT document FROM validation_builds WHERE id=$1', [candidate.buildAttestationId])).rows[0]?.document as BuildAttestation;
     return { ...candidate, build };
   }
+  /** The helpers below are shared with the D6 reuse and replay modules; they are not part of the HTTP surface. */
   async event(db: pg.PoolClient, actor: string, kind: string, payload: unknown, workId?: string) { await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [workId ?? null, actor, `validation.${kind}`, JSON.stringify(payload)]); }
   async definition(db: pg.PoolClient, kind: Definition['kind'], selected: { id: string; revision: number }, current = true): Promise<Definition> {
     const rows = (await db.query('SELECT document FROM validation_definitions WHERE kind=$1 AND id=$2 ORDER BY revision DESC', [kind, selected.id])).rows;
@@ -168,7 +200,7 @@ export class Validation {
     const build = (await db.query('SELECT document AS attestation FROM validation_builds WHERE id=$1', [c.buildAttestationId])).rows[0]?.attestation as BuildAttestation | undefined;
     demand(build, 'Missing trusted build provenance'); await this.registration(db, build.registration, 'builder');
   }
-  private async withReceipt(actor: Principal, command: string, data: unknown, key: string, fn: (db: pg.PoolClient, now: Date) => Promise<unknown>) {
+  async withReceipt(actor: Principal, command: string, data: unknown, key: string, fn: (db: pg.PoolClient, now: Date) => Promise<unknown>) {
     demand(key && key.length <= 200, 'An Idempotency-Key is required', 400);
     const fingerprint = hash({ command: `validation.${command}`, data });
     return this.store.transaction(async (db, now) => {
@@ -230,6 +262,7 @@ export class Validation {
           demand(!data.rollback!.automatic || data.rollback!.fencing !== 'none', 'An unfenced rollback adapter cannot offer automatic rollback');
         } else demand(!data.rollback, 'Only rollback registrations declare rollback fencing');
       }
+      if (data.kind === 'reuse') await this.reuse.checkPolicy(db, data as ReusePolicy & { enabled: boolean });
       if (data.kind === 'bundle') {
         const s = (await db.query('SELECT document FROM scenarios WHERE id=$1 AND revision=$2', [data.scenario, data.scenarioRevision])).rows[0]?.document as Scenario | undefined;
         demand(s?.hash === data.scenarioHash, 'Bundle approval must pin an existing scenario revision and hash');
@@ -285,7 +318,8 @@ export class Validation {
     const { signature, components } = compatibilitySignature({ manifestHash: manifest.hash, sourceSha: w.candidate.sha, baseSha: w.candidate.baseSha, policyRevision: w.policyRevision, buildInputsDigest: build.buildInputsDigest,
       bundle: { digest: b.digest, runnerImageDigest: b.runnerImageDigest, scenarioHash: b.scenarioHash, scenarioRevision: b.scenarioRevision }, environment: data.environment, requiredArtifacts: data.requiredArtifacts, proof: data.proof });
     const c: ValidationCandidate = { ...data, id: randomUUID(), sourceSha: w.candidate.sha, baseSha: w.candidate.baseSha, policyRevision: w.policyRevision, scenario: s, createdAt: now.toISOString(), createdBy: actor,
-      manifestHash: manifest.hash, digestHash: manifest.digestHash, signature, signatureComponents: components, ...(reanchoredFrom ? { reanchoredFrom } : {}) };
+      manifestHash: manifest.hash, digestHash: manifest.digestHash, signature, signatureComponents: components, ...(reanchoredFrom ? { reanchoredFrom } : {}),
+      files: w.observation.scopeFiles?.map(f => ({ path: f.path, sha: f.sha })) ?? null };
     const previous = w.validation?.[data.proof]?.candidateId ? await this.candidate(db, w.validation[data.proof].candidateId) : undefined;
     await db.query('INSERT INTO validation_candidates VALUES($1,$2)', [c.id, JSON.stringify(c)]);
     if (previous && previous.signature !== signature) {
@@ -368,6 +402,10 @@ export class Validation {
         const target = await this.reanchoring.gate(db, r, c, w, environment, actor.id, now);
         if (!target) { withheld = `Request ${r.id} was not granted: ${environment.immutable === false ? 'shared staging has no measured observation of the candidate manifest yet' : 'observers report the target running another manifest, so it was superseded and re-anchored'}`; continue; }
         const attempt: Attempt = { id: randomUUID(), epoch: r.attempts.length + 1, dispatchedAt: now.toISOString(), expiresAt: new Date(Math.min(now.getTime() + 30_000, Date.parse(r.deadline))).toISOString(), state: 'dispatched', settled: false, target };
+        // The durable attempt order is taken here, under the coordination lock: a later
+        // result cannot claim an earlier place, and a delayed older result cannot outrank
+        // an attempt dispatched after it.
+        attempt.sequence = Number((await db.query('INSERT INTO validation_attempts(request_id,attempt_id,epoch,work_id,proof,candidate_id,dispatched_at) VALUES($1,$2,$3,$4,$5,$6,$7) RETURNING seq', [r.id, attempt.id, attempt.epoch, w.id, c.proof, c.id, now])).rows[0].seq);
         r.attempts.push(attempt); r.state = 'dispatched'; await this.persist(db, r);
         for (const resource of resources) await db.query('INSERT INTO validation_resources VALUES($1,$2)', [resource, r.id]);
         w.validation![c.proof] = { candidateId: c.id, requestId: r.id, attemptId: attempt.id };
@@ -425,7 +463,7 @@ export class Validation {
       demand(['running', 'collecting'].includes(r.state) && Date.parse(a.expiresAt) > now.getTime() && Date.parse(r.deadline) > now.getTime(), 'Attempt lease expired, cancelled or superseded');
       if (r.state !== 'collecting') {
         // Revoke execution authority first, then extend the lease for the collector.
-        r.state = 'collecting'; a.expiresAt = new Date(Math.min(now.getTime() + 60_000, Date.parse(r.deadline))).toISOString();
+        r.state = 'collecting'; a.expiresAt = new Date(Math.min(now.getTime() + 60_000, Date.parse(r.deadline))).toISOString(); a.collectingAt = now.toISOString();
         await this.persist(db, r); await this.event(db, actor.id, 'collecting', { requestId: r.id, attempt: a }, r.workId);
       }
       const runner = await this.definition(db, 'registration', r.runner, false) as Registration;
@@ -528,6 +566,8 @@ export class Validation {
         : { kind: this.artifactKind(artifact.name), label: artifact.name, digest: artifact.digest, availability: 'missing' as const }));
       const result = { accepted: true, passed: reasons.length === 0, reasons };
       current.state = 'completed'; current.result = result; a!.state = 'completed'; a!.finishedAt = now.toISOString(); a!.settled = data.executionSettled;
+      a!.report = { execution: data.execution, behavior: data.behavior, executed: data.executed, skipped: data.skipped, inventoryComplete: data.inventoryComplete, artifactState: data.artifactState, attribution: data.target.attribution, measurement: data.target.measurement, passed: result.passed };
+      if (data.measurements) a!.measurements = data.measurements;
       if (a!.settled) await db.query('DELETE FROM validation_resources WHERE request_id=$1', [r.id]);
       await this.persist(db, current);
       const evidence: Evidence = { id: randomUUID(), proof: c.proof, sha: c.sourceSha, baseSha: c.baseSha, policyRevision: c.policyRevision, producer: actor.id, trusted: true, result: result.passed ? 'pass' : 'fail', executed: data.executed, skipped: data.skipped, at: now.toISOString(), ...(expiresAt ? { expiresAt } : {}), artifacts: evidenceArtifacts, scenarioRevision: c.scenario.revision, environment: c.scenario.environment, validation: { candidateId: c.id, requestId: r.id, attemptId: a!.id }, attribution };
@@ -893,27 +933,33 @@ export class Validation {
     // Historical completed attempts never enter the authority verification loop.
     const requests: ValidationRequest[] = (await db.query(`
       WITH selected AS MATERIALIZED (
-        SELECT w.document AS work, (v.value->>'requestId')::uuid AS request_id
+        SELECT w.document AS work, (v.value->>'requestId')::uuid AS request_id, (v.value->>'candidateId')::uuid AS candidate_id
         FROM work_items w CROSS JOIN LATERAL jsonb_each(COALESCE(w.document->'validation','{}'::jsonb)) v
         WHERE w.document->>'stage'<>'done' AND v.value ? 'requestId'
       )
       SELECT document FROM validation_requests WHERE document->>'state' IN ('queued','dispatched','running','collecting')
       UNION ALL
       SELECT r.document FROM selected s JOIN validation_requests r ON r.id=s.request_id
-      JOIN validation_candidates c ON c.id=(r.document->>'candidateId')::uuid
-      WHERE r.document->>'state'='completed' AND ($1::boolean
+      JOIN validation_candidates c ON c.id=s.candidate_id
+      WHERE r.document->>'state' IN ('completed','superseded') AND ($1::boolean
         OR c.document->>'policyRevision' IS DISTINCT FROM s.work->>'policyRevision'
         OR c.document->>'sourceSha' IS DISTINCT FROM s.work->'candidate'->>'sha'
         OR c.document->>'baseSha' IS DISTINCT FROM s.work->'candidate'->>'baseSha')
     `, [includeCompleted])).rows.map(r => r.document);
     for (const r of requests) {
       const c = await this.candidate(db, r.candidateId), w = (await db.query('SELECT document FROM work_items WHERE id=$1', [r.workId])).rows[0]?.document as Work;
-      let invalid = !w || w.validation?.[r.proof]?.requestId !== r.id || w.validation[r.proof].candidateId !== c.id;
-      try { await this.valid(db, c, w); await this.registration(db, r.runner, 'runner'); await this.registration(db, r.collector, 'collector'); } catch { invalid = true; }
+      // The selection may be a derived (reused) candidate bound to this request's executed
+      // attempt; its own build, bundle and environment pins are then what must stay current.
+      const selection = w?.validation?.[r.proof];
+      const selected = selection?.candidateId && selection.candidateId !== c.id ? await this.candidate(db, selection.candidateId) : c;
+      let invalid = !w || selection?.requestId !== r.id || selected.id !== c.id && !(selected.reuse?.of.requestId === r.id && selected.reuse.of.candidateId === c.id);
+      try { await this.valid(db, selected, w); await this.registration(db, r.runner, 'runner'); await this.registration(db, r.collector, 'collector'); } catch { invalid = true; }
       const a = r.attempts.at(-1);
       if (invalid) {
+        // Already superseded with no attempt bound: nothing changes, so nothing is recorded again.
+        if (r.state === 'superseded' && !selection?.attemptId) continue;
         await this.endActiveAttempt(db, r, 'superseded', now); r.state = 'superseded';
-      } else if (r.state !== 'completed' && (Date.parse(r.deadline) <= now.getTime() || a && ['dispatched', 'running', 'collecting'].includes(r.state) && Date.parse(a.expiresAt) <= now.getTime())) {
+      } else if (['queued', 'dispatched', 'running', 'collecting'].includes(r.state) && (Date.parse(r.deadline) <= now.getTime() || a && r.state !== 'queued' && Date.parse(a.expiresAt) <= now.getTime())) {
         // Unacknowledged runners are prohibited from starting. Their expired ACK
         // cannot succeed; no execution was authorized, so those slots are reusable.
         await this.endActiveAttempt(db, r, 'expired', now); r.state = 'expired';

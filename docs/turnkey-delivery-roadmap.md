@@ -30,7 +30,7 @@ Use precise labels in the UI. A green merge must never silently stand in for ver
 | D3 | Deployment observations, release membership and production verification | D1; D2 for behavioral checks |
 | D4 | Capacity, recovery, artifact operations and safe rollback integrations | D2–D3 |
 | D5 | Additional runner/report adapters and off-the-shelf packaging | Proven D2 path |
-| D6 | Optional evidence replay, safe reuse and cost analytics | Stable artifacts and operational measurements |
+| D6 | Optional evidence replay, safe reuse and cost analytics — [shipped](evidence-reuse.md) | Stable artifacts and operational measurements |
 
 Implement one vertical path before building an extensible framework around imagined adapters. The initial target is one repository, GitHub, an existing Playwright suite, a pinned preview or staging candidate, and Railway deployment observations. Other supported stacks follow the same protocol. No new workflow framework is required by this plan; reassess if measured operational requirements exceed the existing durable job model.
 
@@ -178,6 +178,8 @@ Acceptance checks, with where each is exercised:
 - Self-hosted Graphyard remains fully useful without a cloud subscription. — versioned images, Compose, the Helm chart, `db backup`/`db restore` and the readiness checklist need no hosted account; `tests/deployment-packaging.test.ts` holds the packaging to one version everywhere it is stamped. Railway stays a supported guided deployment, not a requirement.
 
 ## D6 — Evidence replay, compatible reuse and analytics
+
+*Shipped as artifact replay with per-dimension coverage and measured cost, operator-defined reuse policies over independently observed file snapshots with exact revision binding and a durable attempt sequence, and execution analytics that keep observed, estimated and unavailable cost apart. See [evidence replay, scoped reuse and execution analytics](evidence-reuse.md). The requirements below remain the standard this path is held to; the acceptance checks at the end of this section are the ones `tests/evidence-reuse.test.ts` runs, one named test per check.*
 
 These optimizations follow a correct pinned-candidate path. They are not prerequisites for initial turnkey E2E execution.
 
