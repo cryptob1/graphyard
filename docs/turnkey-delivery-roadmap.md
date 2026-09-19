@@ -1,3 +1,4 @@
+<!-- page: Understand or contribute | 3 | planned work, clearly separated from shipped behavior. -->
 # Turnkey E2E execution and verified delivery
 
 **Status: implementation roadmap, not shipped functionality.** Graphyard should eventually cover the full journey from work assignment to independently verified delivery after a guided setup. Users should not have to assemble their own control plane, dispatch queue, evidence broker and deployment reconciler.

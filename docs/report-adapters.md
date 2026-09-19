@@ -1,3 +1,4 @@
+<!-- page: Build integrations | 5 | what each supported report format proves, observes and refuses. -->
 # Report adapters
 
 A report adapter is how the trusted collector turns the two files an attempt writes — an offline inventory and an execution report — into a verdict. Each adapter is a published contract: it says what an accepted verification proves, which of those facts were independently observed rather than reported, which producers and versions its fixtures cover, and how every failure condition is classified. Nothing in a contract yields a pass.

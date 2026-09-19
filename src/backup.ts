@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { z } from 'zod';
 import type pg from 'pg';
-import { ledgerTables } from './store.js';
+import { ledgerOrder, ledgerSequences, ledgerTables } from './store.js';
 import { releaseInfo, schemaVersion } from './release.js';
 
 /**
@@ -11,19 +11,18 @@ import { releaseInfo, schemaVersion } from './release.js';
  * `pg_dump` remains the right tool for a physical copy of the database, but it needs a
  * client that matches the server major version and it says nothing about what Graphyard
  * expects to find inside. This format is what the documented upgrade, backup and restore
- * exercises are held to: every ledger table — including the releases, approvals,
- * deployment observations and rollbacks behind observed delivery and recovery, the runner
- * polls behind validation capacity, and the slice-lead rulings and intake items behind
- * delegation — the serial sequences that order work,
- * events, proof-grant history and observations, and the schema generation the rows were written at, so a
- * restore into a release that does not know the schema refuses instead of quietly
- * dropping columns.
+ * exercises are held to: every ledger table, the serial sequences that order work, events,
+ * proof-grant history and observations, and the schema generation the rows were written
+ * at, so a restore into a release that does not know the schema refuses instead of quietly
+ * dropping columns. The table list, its export order and its sequences are derived from
+ * the store's table registry, so a table a later feature defines is in the next backup
+ * without anyone remembering to add it here.
  *
  * A backup is sensitive. It holds private validation artifacts, evidence and hashed
  * credentials; keep it where the database itself is allowed to be.
  */
 export const backupFormat = 'graphyard-backup-v1';
-const tableName = z.enum(ledgerTables);
+const tableName = z.enum(ledgerTables as [string, ...string[]]);
 export const backupSchema = z.object({
   format: z.literal(backupFormat),
   takenAt: z.iso.datetime(),
@@ -45,14 +44,6 @@ export const backupDigest = (backup: Omit<Backup, 'digest'>) => {
   return `sha256:${createHash('sha256').update(canonical(rest)).digest('hex')}`;
 };
 
-const orderColumns: Record<(typeof ledgerTables)[number], string> = {
-  work_items: 'number', events: 'seq', lead_rulings: 'created_at,id', intake_items: 'created_at,id', receipts: 'actor,key', operator_agents: 'id', operator_credentials: 'agent_id,fingerprint', proof_grants: 'principal_id', proof_grant_history: 'seq', jobs: 'work_id',
-  webhook_receipts: 'id', validation_definitions: 'kind,id,revision', validation_builds: 'id', validation_candidates: 'id', validation_requests: 'id',
-  validation_artifacts: 'id', validation_resources: 'resource', validation_runner_polls: 'registration_id', scenarios: 'id,revision', release_builds: 'id', releases: 'id,revision', release_approvals: 'id',
-  delivery_environments: 'environment_id', delivery_observations: 'seq', delivery_leases: 'registration_id', delivery_rollbacks: 'created_at,id', graphyard_schema: 'version',
-};
-const sequences = [{ table: 'work_items', column: 'number' }, { table: 'events', column: 'seq' }, { table: 'proof_grant_history', column: 'seq' }, { table: 'delivery_observations', column: 'seq' }] as const;
-
 /**
  * Read every ledger table from one repeatable-read snapshot. Rows are exported through
  * `row_to_json`, which is what `json_populate_recordset` reads back on restore, so
@@ -68,11 +59,11 @@ export async function createBackup(pool: pg.Pool): Promise<Backup> {
     const takenAt = (await db.query('SELECT clock_timestamp() AS now')).rows[0].now.toISOString();
     const tables: Backup['tables'] = [];
     for (const name of ledgerTables) {
-      const rows = (await db.query(`SELECT row_to_json(t) AS row FROM ${name} t ORDER BY ${orderColumns[name]}`)).rows.map(r => r.row);
+      const rows = (await db.query(`SELECT row_to_json(t) AS row FROM ${name} t ORDER BY ${ledgerOrder[name]}`)).rows.map(r => r.row);
       tables.push({ name, rows });
     }
     const exported: Backup['sequences'] = [];
-    for (const { table, column } of sequences) {
+    for (const { table, column } of ledgerSequences) {
       const sequence = (await db.query('SELECT pg_get_serial_sequence($1,$2) AS name', [table, column])).rows[0].name as string;
       const state = (await db.query(`SELECT last_value, is_called FROM ${sequence}`)).rows[0];
       exported.push({ name: sequence, value: Number(state.last_value), called: state.is_called });

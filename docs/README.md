@@ -2,11 +2,15 @@
 
 Choose one path. The reference guides are there when a gate or integration needs deeper investigation.
 
+The sections below are generated from each page's `<!-- page: Section | order | summary -->` line by `npm run docs:check -- --write`; add the line to a new page and regenerate.
+
+<!-- index: docs, docs/history | Start here; Operate Graphyard; Build integrations; Understand or contribute; Maintainer and historical records -->
+
 ## Start here
 
 1. [How Graphyard works](how-graphyard-works.md) — the lifecycle and authority model in five minutes.
 2. [Onboard a repository](onboarding.md) — Railway, GitHub, Herdr, master, workers, and the first PR.
-3. [Quickstart](quickstart.md) — run Graphyard locally for evaluation.
+3. [Local quickstart](quickstart.md) — run Graphyard locally for evaluation.
 
 ## Operate Graphyard
 
@@ -14,31 +18,33 @@ Choose one path. The reference guides are there when a gate or integration needs
 - [Install and upgrade](install.md) — the shortest install path and the App-permission migration an upgrade can require.
 - [GitHub enforcement](github.md) — App permissions, branch protection, CI producers, and Codex review.
 - [Herdr integration](herdr.md) — worker installation and multi-machine use.
-- [Master-agent mode](master-agent.md) — routing, recovery, and guarded merges.
+- [Master-agent operating mode](master-agent.md) — routing, recovery, and guarded merges.
 - [Slice-lead delegation](delegation.md) — bounded product, infrastructure, and docs/experience coordination.
-- [Operations](operations.md) — stalled work, expired leases, rework, and outages.
-- [Coordination](coordination.md) — dependencies, requirement revisions, overlap, and shared resources.
+- [Operations and recovery](operations.md) — stalled work, expired leases, rework, and outages.
+- [Coordinating independent agents](coordination.md) — dependencies, requirement revisions, overlap, and shared resources.
+- [Scoped operator-agent automation](operator-automation.md) — least-privilege operator agents with server-enforced scope.
+- [Shipping pulse](shipping-pulse.md) — repository delivery flow: throughput, intent-to-merge, and deployment lag without rankings.
 
 ## Build integrations
 
-- [Agent protocol and API](protocol.md)
-- [E2E test-case registry](test-cases.md)
-- [Validation runner protocol](validation.md)
-- [Packaged Playwright runner](runner-setup.md)
-- [Report adapters](report-adapters.md) — what each supported report format proves, observes and refuses
-- [Releases and observed production delivery](delivery.md)
-- [Runner capacity, artifact operations and delivery recovery](recovery.md)
+- [Agent protocol and HTTP API](protocol.md) — roles, requests, work commands, leases, workspaces, evidence, and the webhook, one topic per page.
+- [E2E test-case registry](test-cases.md) — versioned E2E scenarios pinned to environments.
+- [Validation candidates and runner protocol](validation.md) — candidates, dispatch, attempts, and trusted result collection.
+- [The packaged Playwright runner and collector](runner-setup.md) — the packaged Playwright runner, host attestor, and collector.
+- [Report adapters](report-adapters.md) — what each supported report format proves, observes and refuses.
+- [Releases and observed production delivery](delivery.md) — release builds, approvals, and observed production delivery.
+- [Runner capacity, artifact operations and delivery recovery](recovery.md) — runner capacity, artifact retention and migration, and fenced rollback as an observed workflow.
 
 ## Understand or contribute
 
-- [Architecture](architecture.md)
-- [Development and dogfooding](development.md)
-- [Delivery roadmap](turnkey-delivery-roadmap.md) — planned work, clearly separated from shipped behavior.
+- [Architecture and correctness model](architecture.md) — the correctness model behind ownership, evidence, and gates.
+- [Development and dogfooding](development.md) — repository layout, where new features go, and dogfooding.
+- [Turnkey E2E execution and verified delivery](turnkey-delivery-roadmap.md) — planned work, clearly separated from shipped behavior.
+- [Graphyard visual identity](visual-identity.md) — the marks, palette, and voice the dashboard and docs share.
 
 ## Maintainer and historical records
 
-- [Graphyard's first enforced PR](first-pr.md) — repository-specific bootstrap procedure for Graphyard maintainers.
-- [September 2026 implementation audit](history/implementation-audit-2026-09-13.md)
-- [Huck Engineer comparison](history/huck-engineer-comparison.md)
-
-Historical records explain past decisions. They are not current setup instructions.
+- [Graphyard repository bootstrap](first-pr.md) — repository-specific bootstrap procedure for Graphyard maintainers.
+- [Implementation audit — September 13, 2026](history/implementation-audit-2026-09-13.md) — what the September 2026 audit found and what it changed.
+- [Huck Engineer investigation: lessons for Graphyard](history/huck-engineer-comparison.md) — what Huck Engineer taught Graphyard about worker pipelines.
+<!-- /index -->

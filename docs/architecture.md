@@ -1,3 +1,4 @@
+<!-- page: Understand or contribute | 1 | the correctness model behind ownership, evidence, and gates. -->
 # Architecture and correctness model
 
 This page is the technical reference for Graphyard's invariants and storage model. For a visual, plain-language tour from setup to Done, start with [How Graphyard works](how-graphyard-works.md).
