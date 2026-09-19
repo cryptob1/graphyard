@@ -4,7 +4,7 @@ import { observeCodex } from './codex-review.js';
 import { observeAgentReview } from './agent-review.js';
 import { readFile } from 'node:fs/promises';
 import type { Engine } from './engine.js';
-import { CHECK_NAME, demand, nativeReviewRequired, parseReviewerApps, reviewerProfileFor, reviewProviderOf, type Observation, type ReviewerApp, type ReviewerProfile, type ScopeFile, type Work, type ReviewRequest } from './model.js';
+import { CHECK_NAME, carriedApproval, demand, nativeReviewRequired, parseReviewerApps, reviewerProfileFor, reviewProviderOf, type Observation, type ReviewerApp, type ReviewerProfile, type ScopeFile, type TipMerge, type Work, type ReviewRequest } from './model.js';
 import { inPlannedScope } from './regression-guard.js';
 export { CHECK_NAME };
 import { queuePlacement, queueRef, type QueuePlacement, type QueueSpeculation } from './merge-queue.js';
@@ -12,6 +12,8 @@ import { blockedFeatures, controlPlanePermissions, describeShortfall, permission
 
 /** Out-of-scope paths compared against the base tip per observation; the rest are refused as uncompared. */
 export const scopeLookupBudget = 200;
+/** Paths a predicted base may change before the list is treated as incomplete and nothing is carried. */
+export const baseChangeBudget = 1000;
 export interface GitHubConfig { repository: string; base: string; appId: number; installationId: number; privateKey: string; reviewerApps?: ReviewerApp[] }
 /**
  * A 401 or a non-rate-limit 403. Retrying it does not help: the credentials or the installed
@@ -56,6 +58,7 @@ export class GitHub {
   private cache = new Map<string, { etag: string; value: any }>();
   private preflightState: AppPermissionReport | null = null;
   private preflightDueAt = 0;
+  private appSlug: string | null = null;
   // A rejected App credential is retried once a minute, not once per queued job: every request
   // needs the token, so this is the whole bound on credential-refusal traffic.
   private authenticationRefusal: { until: number; error: GitHubPermissionRefusal } | null = null;
@@ -231,32 +234,57 @@ export class GitHub {
     } catch { return false; }
   }
   /**
+   * The managed branch's head and its tree, read from `refs/heads/<base>`. A pull request's
+   * `base.sha` is GitHub's cached view of the same ref, refreshed only when it recomputes the
+   * pull request, and it is never used for the base tip: a binding decided against it was the
+   * root cause of approvals dismissed for a merge base that had not actually changed.
+   */
+  async baseBranch(): Promise<{ tip: string; tree: string }> {
+    const ref = await this.request(`/git/ref/heads/${this.config.base.split('/').map(encodeURIComponent).join('/')}`);
+    const tip = ref?.object?.sha;
+    demand(ref?.object?.type === 'commit' && typeof tip === 'string' && /^[a-f0-9]{40}$/.test(tip), `GitHub did not return a readable head for refs/heads/${this.config.base}`, 502);
+    return { tip, tree: await this.commitTree(tip) };
+  }
+  /** Whether `head` contains `base` by ancestry, as GitHub's compare reports it. */
+  async contains(base: string, head: string): Promise<boolean> {
+    if (base === head) return true;
+    const comparison = await this.request(`/compare/${base}...${head}?per_page=1`);
+    demand(typeof comparison?.status === 'string', `GitHub did not compare ${base.slice(0, 12)} with ${head.slice(0, 12)}`, 502);
+    return comparison.status === 'ahead' || comparison.status === 'identical';
+  }
+  /**
    * The base a candidate is legitimately bound to. A published speculative tip carries the base it
    * was built on, and the managed branch advances underneath it while the entries ahead of it land,
-   * so the live `pr.base.sha` is not that binding. Every other candidate binds to the live base.
+   * so the live branch head is not that binding. Every other candidate binds to the live head.
    */
-  private boundBase(work: Work, pr: any): string {
+  private boundBase(work: Work, pr: any, branch: { tip: string }): string {
     const speculation = work.queue?.speculation;
-    return speculation && speculation.tip === pr.head.sha && speculation.policyRevision === work.policyRevision ? speculation.base : pr.base.sha;
+    return speculation && speculation.tip === pr.head.sha && speculation.policyRevision === work.policyRevision ? speculation.base : branch.tip;
   }
   async observe(work: Work): Promise<Observation> {
     const startedAt = new Date().toISOString();
     const pr = await this.request(`/pulls/${work.submission!.pr}`);
     demand(pr.base.repo.full_name.toLowerCase() === this.config.repository.toLowerCase() && pr.head.repo?.full_name.toLowerCase() === this.config.repository.toLowerCase(), 'MVP requires same-repository pull requests');
     demand(pr.base.ref === this.config.base, 'Pull request targets an unmanaged branch');
-    const [checks, reviews, protectedBranch, files] = await Promise.all([
-      this.pages(`/commits/${pr.head.sha}/check-runs?filter=all`, 'check_runs'), this.pages(`/pulls/${pr.number}/reviews`), this.protection(nativeReviewRequired(work.policy)), this.pages(`/pulls/${pr.number}/files`),
+    const [checks, reviews, protectedBranch, files, branch] = await Promise.all([
+      this.pages(`/commits/${pr.head.sha}/check-runs?filter=all`, 'check_runs'), this.pages(`/pulls/${pr.number}/reviews`), this.protection(nativeReviewRequired(work.policy)), this.pages(`/pulls/${pr.number}/files`), this.baseBranch(),
     ]);
     const latest = new Map<string, any>();
     for (const r of reviews) if (['APPROVED', 'CHANGES_REQUESTED', 'DISMISSED'].includes(r.state)) latest.set(r.user.login, r);
     // A published speculative tip carries its own validated base. The candidate stays bound to
     // that exact commit while the managed branch advances underneath it through queue merges.
-    const bound = this.boundBase(work, pr);
+    const bound = this.boundBase(work, pr, branch);
     // Out-of-scope files are compared with the bound base: the predicted base already contains
     // every queued predecessor, so their changes on a speculative tip are not this candidate's.
     const scopeFiles = await this.compareScope(work.plannedFiles ?? [], files, bound);
     const candidateBase = pr.merged && work.candidate && work.candidate.sha === pr.head.sha ? work.candidate.baseSha : bound;
-    const baseTree = bound !== pr.base.sha ? await this.commitTree(pr.base.sha) : undefined;
+    // A head contains the base tip by ancestry, or as a published tip whose bound base is the
+    // tip's tree-identical predecessor, or as a published tip behind other queue entries, whose
+    // chain rests on the base branch by publication; the placement reports whether it still does.
+    const speculation = work.queue?.speculation;
+    const publishedTip = !!speculation && speculation.tip === pr.head.sha && speculation.policyRevision === work.policyRevision;
+    const baseTipContained = pr.merged || await this.contains(branch.tip, pr.head.sha)
+      || publishedTip && (speculation!.baseTree === branch.tree || speculation!.predecessors.length > 0);
     const provider = reviewProviderOf(work.policy);
     const unready = !pr.merged && (pr.state !== 'open' || pr.draft !== false)
       ? pr.draft ? 'Pull request is draft; mark it ready to request code review' : 'Pull request is not open; reopen it to request code review' : null;
@@ -279,7 +307,7 @@ export class GitHub {
       reviews: [...latest.values()].map(r => ({ id: r.id, reviewer: r.user.login, sha: r.commit_id, state: r.state, submittedAt: r.submitted_at })),
       prState: pr.state, draft: pr.draft, prCreatedAt: pr.created_at, merged: pr.merged, mergeSha: pr.merge_commit_sha, mergedAt: pr.merged_at, mergeable: pr.mergeable === true && !pr.draft && pr.state === 'open',
       protected: protectedBranch, files: files.map(f => f.filename), at: startedAt,
-      baseTip: pr.base.sha, ...(baseTree ? { baseTree } : {}), scopeFiles,
+      baseTip: branch.tip, baseTree: branch.tree, baseTipContained, scopeFiles,
     };
   }
   /**
@@ -347,13 +375,18 @@ export class GitHub {
     if (unready) return { provider: 'agent' as const, sha: pr.head.sha, approved: false, profile: profile.name, reviewerApp: app.id, reason: unready };
     return observeAgentReview(this, pr.number, pr.head.sha, reviews, pr.user.id, work.reviewRequest, candidateBase, work.policyRevision, this.config.appId, profile, app);
   }
+  /** A review is requested only for a head that contains the base tip; anything else is refused before any write. */
+  private reviewable(work: Work) {
+    demand(work.observation?.baseTipContained !== false, `Candidate ${work.candidate?.sha.slice(0, 12)} does not contain the base branch tip ${work.observation?.baseTip?.slice(0, 12)}; a review of it would be dismissed when the merge base changes, so none is requested until the head contains the tip`);
+  }
   async requestAgentReview(work: Work, profile: ReviewerProfile, app: ReviewerApp, beforeWrite: () => Promise<void>): Promise<ReviewRequest> {
     demand(work.candidate && work.policy.review && reviewProviderOf(work.policy) === 'agent', 'Candidate with agent review policy required');
     demand(app.id === profile.reviewerApp && app.runtime === profile.runtime, 'Reviewer profile does not match its registered App identity');
     demand(app.appId !== this.config.appId, 'The Graphyard control-plane App cannot be dispatched as a reviewer');
     demand((work.policy.reviewerProfiles ?? []).some(configured => configured.name === profile.name && configured.reviewerApp === profile.reviewerApp), 'Reviewer profile is not configured on this policy');
+    this.reviewable(work);
     const pr = await this.request(`/pulls/${work.candidate.pr}`);
-    requireCurrent(pr.head.sha === work.candidate.sha && this.boundBase(work, pr) === work.candidate.baseSha && pr.state === 'open' && pr.draft === false, 'PR changed before review dispatch; retry');
+    requireCurrent(pr.head.sha === work.candidate.sha && this.boundBase(work, pr, await this.baseBranch()) === work.candidate.baseSha && pr.state === 'open' && pr.draft === false, 'PR changed before review dispatch; retry');
     demand(pr.user?.id !== app.botUserId, 'Reviewer identity must be independent of the pull request author');
     const marker = randomUUID();
     const body = `${profile.mention ? `${profile.mention} review\n\n` : ''}Graphyard requests an independent code review from reviewer profile \`${profile.name}\` (runtime \`${profile.runtime}\`).
@@ -373,8 +406,9 @@ Use \`verdict:changes-requested\` with the findings, or \`verdict:usage-limit\` 
   }
   async requestCodex(work: Work, beforeWrite: () => Promise<void>): Promise<ReviewRequest> {
     demand(work.candidate && work.policy.review && work.policy.reviewProvider === 'codex', 'Candidate with Codex review policy required');
+    this.reviewable(work);
     const pr = await this.request(`/pulls/${work.candidate.pr}`);
-    requireCurrent(pr.head.sha === work.candidate.sha && this.boundBase(work, pr) === work.candidate.baseSha && pr.state === 'open' && pr.draft === false, 'PR changed before review dispatch; retry');
+    requireCurrent(pr.head.sha === work.candidate.sha && this.boundBase(work, pr, await this.baseBranch()) === work.candidate.baseSha && pr.state === 'open' && pr.draft === false, 'PR changed before review dispatch; retry');
     const body = `@codex review\n\n<!-- graphyard-review:${randomUUID()} head:${work.candidate.sha} base:${work.candidate.baseSha} policy:${work.policyRevision} -->`;
     await beforeWrite();
     const comment = await this.request(`/issues/${work.candidate.pr}/comments`, 'POST', { body });
@@ -386,6 +420,45 @@ Use \`verdict:changes-requested\` with the findings, or \`verdict:usage-limit\` 
     const tree = commit?.commit?.tree?.sha;
     demand(typeof tree === 'string' && /^[a-f0-9]{40}$/.test(tree), `GitHub did not return a readable tree for ${sha}`, 502);
     return tree;
+  }
+  /** The control-plane App's own bot login, the only author a carried tip may have. */
+  async controlPlaneLogin(): Promise<string> {
+    if (!this.appSlug) {
+      const verified = this.preflightState?.verifiedAt ? this.preflightState.app : null;
+      this.appSlug = verified && verified !== String(this.config.appId) ? verified : await this.appSlugFromApi();
+    }
+    return `${this.appSlug}[bot]`;
+  }
+  private async appSlugFromApi(): Promise<string> {
+    const response = await fetch('https://api.github.com/app', { headers: this.appHeaders(), signal: AbortSignal.timeout(15_000) });
+    const refused = await this.refusal(response, 'GET /app');
+    if (refused) throw refused;
+    const app: any = await response.json();
+    demand(typeof app?.slug === 'string' && /^[a-z0-9-]+$/i.test(app.slug), 'GitHub did not return the control-plane App slug', 502);
+    return app.slug;
+  }
+  /**
+   * Every path that differs between two commits, including both ends of a rename, or null when
+   * the list is beyond the budget: a carry decided on an incomplete list would be a guess.
+   */
+  async changedFiles(from: string, to: string): Promise<string[] | null> {
+    if (from === to) return [];
+    const files = await this.pages(`/compare/${from}...${to}`, 'files');
+    if (files.length > baseChangeBudget) return null;
+    return [...new Set(files.flatMap(file => [file.filename, ...(typeof file.previous_filename === 'string' ? [file.previous_filename] : [])]).filter(path => typeof path === 'string'))];
+  }
+  /** How GitHub describes the tip Graphyard's merge produced: parents, author, and whether the author is this App. */
+  private async describeMerge(from: string, tip: string, boundBase: string, predictedBase: string): Promise<TipMerge> {
+    const commit = await this.request(`/commits/${tip}`);
+    const parents = Array.isArray(commit?.parents) ? commit.parents.map((parent: any) => parent?.sha).filter((sha: unknown) => typeof sha === 'string') : [];
+    const login = await this.controlPlaneLogin();
+    const author = typeof commit?.author?.login === 'string' ? commit.author.login : null;
+    const email = typeof commit?.commit?.author?.email === 'string' ? commit.commit.author.email : '';
+    const authoredByApp = author !== null ? author.toLowerCase() === login.toLowerCase() && commit.author?.type === 'Bot'
+      : new RegExp(`^\\d+\\+${login.replace(/[[\]]/g, '\\$&')}@users\\.noreply\\.github\\.com$`, 'i').test(email);
+    // The provider merge never resolves a conflict: a conflicting merge is refused with 409 and
+    // ejects the entry (see mergeBranch), so a tip that exists was produced without one.
+    return { from, parents, author: author ?? (email || null), authoredByApp, conflicts: false, baseChanges: await this.changedFiles(boundBase, predictedBase) };
   }
   /** Returns the new head, or null when the branch already contains the merged commit. */
   async mergeBranch(branch: string, head: string, message: string): Promise<string | null> {
@@ -417,13 +490,21 @@ Use \`verdict:changes-requested\` with the findings, or \`verdict:usage-limit\` 
     const pr = await this.request(`/pulls/${work.candidate!.pr}`);
     requireCurrent(pr.head.sha === work.candidate!.sha && pr.base.ref === this.config.base && pr.state === 'open' && pr.draft === false,
       'Pull request changed before speculative prediction; retry');
+    // A speculative tip always contains the real base tip: the chain of predictions rests on the
+    // base-branch commit the observation saw, and the branch must still be that commit or a
+    // tree-identical advance of it (an earlier queue merge) when the tip is built.
+    const branch = await this.baseBranch();
+    requireCurrent(!!placement.base && (branch.tip === placement.base.sha || branch.tree === placement.base.tree), `Base branch ${this.config.base} moved before speculative prediction; retry`);
     const baseTree = await this.commitTree(placement.predictedBase!);
     await beforeWrite();
     const merged = await this.mergeBranch(pr.head.ref, placement.predictedBase!, `Graphyard speculative tip for ${work.key} behind ${placement.predecessors.join(', ') || this.config.base}`);
     const tip = merged ?? pr.head.sha;
     const ref = queueRef(work.key);
     await this.publishRef(ref, tip);
-    return { ref, tip, base: placement.predictedBase!, baseTree, predecessors: placement.predecessors, policyRevision: work.policyRevision, publishedAt: new Date().toISOString() };
+    // What the merge produced is recorded with the tip, so the binding carry (see model/carry.ts)
+    // is decided on GitHub's own account of the commit, never on the fact that a merge was asked for.
+    const merge = merged ? await this.describeMerge(pr.head.sha, merged, work.candidate!.baseSha, placement.predictedBase!) : null;
+    return { ref, tip, base: placement.predictedBase!, baseTree, predecessors: placement.predecessors, policyRevision: work.policyRevision, publishedAt: new Date().toISOString(), merge };
   }
   async publish(work: Work, forcedReason?: string, beforeWrite: () => Promise<void> = async () => {}) {
     if (!work.candidate) return;
@@ -432,7 +513,7 @@ Use \`verdict:changes-requested\` with the findings, or \`verdict:usage-limit\` 
     const body = { name: CHECK_NAME, head_sha: work.candidate.sha, status: 'completed', conclusion: reasons.length ? 'failure' : 'success', external_id: work.id,
       output: { title: reasons.length ? 'REFUSED' : 'All required gates passed', summary: (reasons.length ? reasons.map(r => `- ${r}`).join('\n') : `Candidate ${work.candidate.sha}; base ${work.candidate.baseSha}; policy ${work.policyRevision}`).slice(0, 60000) } };
     const pr = await this.request(`/pulls/${work.candidate.pr}`);
-    if (!reasons.length || !forcedReason) requireCurrent(pr.head.sha === work.candidate.sha && this.boundBase(work, pr) === work.candidate.baseSha, 'PR changed before check publication; retry');
+    if (!reasons.length || !forcedReason) requireCurrent(pr.head.sha === work.candidate.sha && this.boundBase(work, pr, await this.baseBranch()) === work.candidate.baseSha, 'PR changed before check publication; retry');
     if (!reasons.length) requireCurrent(pr.state === 'open' && !pr.draft && pr.base.ref === this.config.base, 'PR is closed, draft, or retargeted; refusing success');
     await beforeWrite();
     if (existing?.status === body.status && existing.conclusion === body.conclusion && existing.external_id === body.external_id
@@ -497,10 +578,14 @@ export async function processJob(engine: Engine, github: GitHub) {
       const observation = await github.observe(work);
       work = await engine.observe(work.id, work.revision, observation, job.token);
       const provider = reviewProviderOf(work.policy);
-      const dispatchable = !observation.merged && observation.prState === 'open' && observation.draft === false && work.policy.review;
-      const unbound = (item: Work, profile?: string) => !item.reviewRequest || item.reviewRequest.sha !== item.candidate?.sha
+      // A head that does not contain the base tip is not reviewed: the request is deferred, and
+      // diagnose reports why, until the worker syncs or the queue publishes a tip that contains it.
+      const dispatchable = !observation.merged && observation.prState === 'open' && observation.draft === false && work.policy.review && observation.baseTipContained !== false;
+      // A request binds the exact candidate; an approval Graphyard carried onto its own authored
+      // tip already stands for that candidate, so no new request is dispatched for it.
+      const unbound = (item: Work, profile?: string) => !carriedApproval(item) && (!item.reviewRequest || item.reviewRequest.sha !== item.candidate?.sha
         || item.reviewRequest.baseSha !== item.candidate?.baseSha || item.reviewRequest.policyRevision !== item.policyRevision
-        || profile !== undefined && item.reviewRequest.profile !== profile;
+        || profile !== undefined && item.reviewRequest.profile !== profile);
       if (dispatchable && provider === 'codex' && unbound(work)) {
         held ??= hold('review-dispatch');
         if (!held) {

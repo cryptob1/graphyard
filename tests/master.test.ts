@@ -511,6 +511,32 @@ test('merge-all selection and execution do not let refusing work starve eligible
   assert.deepEqual(batch, [{ key: 'GY-50', result: 'refused', reason: 'candidate changed' }, { key: 'GY-51', result: 'merged' }]);
 });
 
+test('unit:queue-authored-tip-carry — the broker re-posts a carried approval through the reviewer identity before acquiring merge authority, and refuses when the re-post fails', async () => {
+  const carry = { from: { sha: 'f'.repeat(40), baseSha: 'b'.repeat(40) }, to: { sha: 'a'.repeat(40), baseSha: 'b'.repeat(40) }, policyRevision: 2, at: new Date().toISOString(), predecessor: 'base branch', changedFiles: ['src/other.ts'], reviewedFiles: ['src/queue.ts'],
+    approval: { carried: true, provider: 'github', reviewer: 'graphyard-reviewer[bot]', sha: 'f'.repeat(40), reviewId: 900, originalSha: 'f'.repeat(40), reason: 'carried' }, evidence: [] };
+  const base = work({ observation: { at: new Date().toISOString(), candidate: { sha: 'a'.repeat(40), baseSha: 'b'.repeat(40), pr: 42, branch: 'graphyard/gy-42-1', author: 'worker' } } as any });
+  const candidate = { ...base, queue: { ...base.queue!, speculation: { ...base.queue!.speculation!, carry } } } as Work;
+  const config = { version: 1 as const, url: 'https://graphyard.example', credentialFile: '/outside/master.token', cliPath: launcher, repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'machine-a', masterAgentName: 'graphyard-master-project', autoMerge: true, mergeMethod: 'merge' as const, workers: [], reviewers: [], run: { intervalSeconds: 20, deploymentShaField: 'commit' } };
+  const execution = { id: '11111111-1111-4111-8111-111111111111', owner: 'master', sha: candidate.candidate!.sha, baseSha: candidate.candidate!.baseSha, policyRevision: 2, authorizationRevision: candidate.revision, issuedAt: new Date().toISOString(), expiresAt: new Date(Date.now() + 120_000).toISOString() };
+  const verify = async () => ({ executionId: execution.id, sha: execution.sha, verifiedAt: new Date(Date.now() - 2000).toISOString(), providerDelayMs: 0, clockOffset: { min: 0, max: 0 } });
+  const gh = (_command: string, args: string[]) => {
+    if (args[1] === 'view') return JSON.stringify({ headRefOid: candidate.candidate!.sha, baseRefOid: candidate.candidate!.baseSha, baseRefName: 'main', state: 'OPEN', isDraft: false });
+    if (args.includes('--include')) return `Date: ${new Date().toUTCString()}\n\n{}`;
+    return args[1] === '--method' ? JSON.stringify({ merged: true, sha: 'c'.repeat(40) }) : JSON.stringify(validProtection);
+  };
+  const order: string[] = [];
+  const store = broker(candidate, execution);
+  const result = await mergeWork(config, candidate, store.snapshot, async () => { order.push('acquire'); return store.acquire(); }, async () => ({}), verify, gh, execution.owner, store.commit,
+    async (item, carried) => { order.push('repost'); assert.equal(item.key, 'GY-42'); assert.equal(carried.reviewer, 'graphyard-reviewer[bot]'); return { posted: true, reviewId: 901, reason: 're-posted' }; });
+  assert.deepEqual(order, ['repost', 'acquire'], 'the carried approval is re-posted before any authority is acquired');
+  assert.deepEqual(result.carriedApproval, { posted: true, reviewId: 901, reason: 're-posted' });
+  await assert.rejects(mergeWork(config, candidate, broker(candidate, execution).snapshot, async () => { throw new Error('must not acquire'); }, async () => ({}), verify, gh, execution.owner, store.commit,
+    async () => { throw new Error('reviewer requested changes after approving'); }), /reviewer requested changes/);
+  const plain = broker(base, execution); let reposts = 0;
+  await mergeWork(config, base, plain.snapshot, plain.acquire, async () => ({}), verify, gh, execution.owner, plain.commit, async () => { reposts++; return { posted: false, reviewId: null, reason: '' }; });
+  assert.equal(reposts, 0, 'an exact approval needs no re-post');
+});
+
 const queueEntry = (sequence: number, enqueuedAt: string, speculation: any = null) => ({ sequence, enqueuedAt, policyRevision: 2, speculation });
 
 test('master status reports queue position, predicted tip, and per-entry wait time', () => {

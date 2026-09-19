@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { demand } from './refusal.js';
 import type { Work } from './work.js';
+import type { ApprovalIdentity } from './carry.js';
 
 export const reviewProviders = ['github', 'codex', 'agent'] as const;
 export type ReviewProvider = typeof reviewProviders[number];
@@ -71,4 +72,32 @@ export function assertReviewerProfiles(profiles: ReviewerProfile[] | undefined, 
     demand(app!.runtime === profile.runtime, `Reviewer profile ${profile.name} must name its registered runtime ${app!.runtime}`);
     demand(!controlPlaneAppId || app!.appId !== controlPlaneAppId, 'The Graphyard control-plane App cannot act as a reviewer identity');
   }
+}
+
+/**
+ * The approval the review gate accepts for the exact current candidate, with the identity behind
+ * it, or null. One rule for every provider: a formal GitHub approval of the head by someone other
+ * than the author (after the requirement-review baseline when one is set), or the dispatched
+ * provider's verdict for the exact recorded request and, for agent review, the profile Graphyard
+ * currently dispatches to under the same registered App.
+ */
+export function exactApproval(work: Work): ApprovalIdentity | null {
+  const candidate = work.candidate, obs = work.observation;
+  if (!candidate || !obs || obs.candidate.sha !== candidate.sha || obs.candidate.baseSha !== candidate.baseSha) return null;
+  const provider = reviewProviderOf(work.policy);
+  if (provider === 'github') {
+    const baseline = work.formalReviewBaseline;
+    const review = (obs.reviews ?? []).find(r => r.sha === candidate.sha && r.state === 'APPROVED' && r.reviewer !== candidate.author
+      && (!work.formalReviewResetRequired || baseline?.pr === candidate.pr && baseline.policyRevision === work.policyRevision && Number.isSafeInteger(r.id) && r.id! > 0 && !baseline.reviewIds.includes(r.id!)));
+    return review ? { provider, reviewer: review.reviewer, sha: candidate.sha, ...(review.id !== undefined ? { reviewId: review.id } : {}) } : null;
+  }
+  const verdict = obs.agentReview, request = work.reviewRequest;
+  const dispatched = !!verdict?.approved && verdict.provider === provider && verdict.sha === candidate.sha && !!request && request.commentId === verdict.requestId
+    && request.sha === candidate.sha && request.baseSha === candidate.baseSha && request.policyRevision === work.policyRevision;
+  if (!dispatched) return null;
+  if (provider === 'codex') return { provider, reviewer: 'codex', sha: candidate.sha, reviewId: verdict!.requestId };
+  const selected = reviewerProfileFor(work);
+  const identity = !!verdict!.profile && !!verdict!.reviewerApp && request!.provider === 'agent' && request!.profile === verdict!.profile
+    && request!.reviewerApp === verdict!.reviewerApp && selected?.name === verdict!.profile && selected?.reviewerApp === verdict!.reviewerApp;
+  return identity ? { provider, reviewer: verdict!.profile!, reviewerApp: verdict!.reviewerApp!, sha: candidate.sha, reviewId: verdict!.requestId } : null;
 }
