@@ -1,3 +1,4 @@
+<!-- page: Operate Graphyard | 10 | repository delivery flow: throughput, intent-to-merge, and deployment lag without rankings. -->
 # Shipping pulse
 
 Shipping pulse summarizes repository delivery flow. It is deliberately a repository view, not a worker scorecard: it contains no rankings, lines of code, effort estimates, individual productivity measures, or causal claims.

@@ -1,3 +1,4 @@
+<!-- page: Operate Graphyard | 2 | the shortest install path and the App-permission migration an upgrade can require. -->
 # Install and upgrade
 
 The shortest supported path from a GitHub repository to an enforcing Graphyard control plane, and the checks that keep an existing installation enforcing after an upgrade. [Onboard a repository](onboarding.md) walks the same steps with Herdr, a master, and a worker; [deployment](deployment.md) covers the hosting choices.

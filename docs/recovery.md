@@ -1,3 +1,4 @@
+<!-- page: Build integrations | 6 | runner capacity, artifact retention and migration, and fenced rollback as an observed workflow. -->
 # Runner capacity, artifact operations and delivery recovery
 
 Graphyard now reports what each runner is doing and why each request is waiting, bounds how much work a runner queue accepts, stores private artifacts in Postgres or an S3-compatible backend with verified retention and migration, and runs rollback as an authorized, fenced, observed workflow rather than a shell command.
