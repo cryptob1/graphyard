@@ -788,7 +788,8 @@ test('card and ownership candidate references link to the exact PR and commit in
     await expect(link).toHaveAttribute('rel', 'noopener noreferrer');
   }
   await expect(shaLink.locator('code')).toHaveText(work.candidate!.sha);
-  await expect(dialog.getByText('PR #1', { exact: true })).toBeVisible();
+  // The status sentence explains "PR #1" in place, so this asserts on the candidate reference itself.
+  await expect(dialog.locator('.candidate-details').getByText('PR #1', { exact: true })).toBeVisible();
   const [commitPopup] = await Promise.all([page.waitForEvent('popup'), shaLink.click()]);
   expect(commitPopup.url()).toBe(commitHref); await commitPopup.close();
   expect(state.writes).toBe(0);
@@ -865,10 +866,10 @@ test('an unconfigured GitHub repository renders candidate references as non-link
   await page.route('**/api/status', route => route.fulfill({ json: { actor: { id: 'fixture', role: 'admin' }, github: false, reviewProviders: ['github'], repository: null, jobs: [] } }));
   await login(page);
   await expect(cardPrLink(page)).toHaveCount(0);
-  await expect(page.locator('.card').getByText('PR #1', { exact: true })).toBeVisible();
+  await expect(page.locator('.card-pr').getByText('PR #1', { exact: true })).toBeVisible();
   await cardSelect(page).click();
   const dialog = page.getByRole('dialog');
-  await expect(dialog.getByText('PR #1', { exact: true })).toBeVisible();
+  await expect(dialog.locator('.candidate-details').getByText('PR #1', { exact: true })).toBeVisible();
   await expect(dialog.getByText(work.candidate!.sha, { exact: true })).toBeVisible();
   await expect(dialog.getByRole('link')).toHaveCount(0);
 });

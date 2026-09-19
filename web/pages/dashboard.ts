@@ -18,6 +18,8 @@ export interface Dashboard {
   observedAt: number; jobs: IntegrationJob[];
   query: string; setQuery(query: string): void;
   operatorAgents: any[]; events: any[];
+  /** Why the operator-automation read failed, when it did; null when it answered. */
+  operatorAgentsError: string | null;
   /** Which optional features have anything configured; see web/features.ts. */
   features: Features;
   editingRequirements: boolean; setEditingRequirements(value: boolean | ((value: boolean) => boolean)): void;

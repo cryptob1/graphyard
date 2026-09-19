@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import type { Work } from '../../src/model';
 import SessionBadge from '../components/session-badge';
-import Term from '../components/term';
+import Term, { Explained } from '../components/term';
 import WorkCard from '../components/work-card';
 import { CandidatePr } from '../candidate';
 import { age } from '../format';
@@ -71,7 +71,7 @@ export default function OverviewPage({ work, status, filter, setFilter, query, s
     </div><aside>
     {queue.length > 0 && <section className="graph-section" aria-label="Merge queue"><h2><Term term="merge queue">Merge queue</Term> <span className="count">{queue.length}</span></h2>{queue.map(entry => <button className="card" key={entry.id} onClick={() => setSelected(entry.id)}><div className="card-top"><span>{entry.position + 1}. {entry.key}</span><span>Waiting {age(entry.enqueuedAt)}</span></div><p className="reason">{entry.predecessors.length ? `Behind ${entry.predecessors.join(', ')}` : 'Next to merge'} · {entry.current ? 'tested with the changes ahead of it' : 'being re-tested'}</p></button>)}</section>}
     <section className="work-list shipped-recently" aria-label="Shipped this week"><h2>Shipped this week <span className="count">{numbers.shippedThisWeek}</span></h2>
-      {recent.length ? <ul className="shipped-list">{recent.slice(0, 5).map(w => <li key={w.id}><button className="text-button" onClick={() => setSelected(w.id)}>{w.key} <span data-title>{w.title}</span></button>{w.candidate && <CandidatePr repository={status?.repository} candidate={w.candidate} workKey={w.key}/>}{plainStatus(w, now).tone === 'stuck' && <span className="danger-text">{plainStatus(w, now).blocking}</span>}</li>)}</ul> : <p className="muted">Nothing shipped in the last seven days.</p>}
+      {recent.length ? <ul className="shipped-list">{recent.slice(0, 5).map(w => <li key={w.id}><button className="text-button" onClick={() => setSelected(w.id)}>{w.key} <span data-title>{w.title}</span></button>{w.candidate && <CandidatePr repository={status?.repository} candidate={w.candidate} workKey={w.key}/>}{plainStatus(w, now).tone === 'stuck' && <span className="danger-text"><Explained sentence={plainStatus(w, now).blocking!}/></span>}</li>)}</ul> : <p className="muted">Nothing shipped in the last seven days.</p>}
       {work.some(w => w.stage === 'done') && <button className="text-button" onClick={() => setView('shipped')}>See everything shipped →</button>}
     </section>
     </aside></div>

@@ -72,8 +72,8 @@ function App() {
   const item = work.find(w => w.id === selected);
   const queue = predictQueue(work, observedAt);
   async function action(id: string, command: string, data: unknown = {}) { const epoch = sessionEpoch.current; setBusy(true); try { await api(`work/${id}/${command}`, data); if (epoch !== sessionEpoch.current) return; await refresh(epoch); } catch (e) { if (epoch === sessionEpoch.current) setError((e as Error).message); } finally { if (epoch === sessionEpoch.current) setBusy(false); } }
-  const { features, operatorAgents } = useFeatures(token, !!status, api, status?.actor?.role === 'admin', work.some(w => w.scenarioRequirements?.length > 0));
-  const dashboard: Dashboard = { token, work, status, error, connected, lastUpdated, view, setView, filter, setFilter, selected, setSelected, creating, setCreating, busy, setBusy, observedAt, jobs, query, setQuery, operatorAgents, features, events, editingRequirements, setEditingRequirements, codexAvailable, queue, sessionEpoch, api, refresh, action, setError, signOut };
+  const { features, operatorAgents, operatorAgentsError } = useFeatures(token, !!status, api, status?.actor?.role === 'admin', work.some(w => w.scenarioRequirements?.length > 0));
+  const dashboard: Dashboard = { token, work, status, error, connected, lastUpdated, view, setView, filter, setFilter, selected, setSelected, creating, setCreating, busy, setBusy, observedAt, jobs, query, setQuery, operatorAgents, operatorAgentsError, features, events, editingRequirements, setEditingRequirements, codexAvailable, queue, sessionEpoch, api, refresh, action, setError, signOut };
   if (!token || !status) return <LoginPage token={token} error={error} signOut={signOut} setError={setError} sessionEpoch={sessionEpoch} setToken={setToken} draftToken={draftToken} setDraftToken={setDraftToken}/>;
   return <div className="shell"><Sidebar entries={views.map(entry => primaryEntry(dashboard, entry))} dashboard={dashboard}/>
     <main className="main"><TopBar {...dashboard}/>{error && <div role="alert" className="notice danger">{error}</div>}{viewFor(view).render(dashboard)}</main>

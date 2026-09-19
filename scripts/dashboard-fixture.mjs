@@ -84,6 +84,15 @@ export function fixtureWork() {
   ];
 }
 
+/**
+ * A repository whose window holds `count` delivered items, each with one measured episode. The
+ * phase drill-down returns one row per phase per episode, so this is how the bound at
+ * `flowLimits.drilldown` is reached: the combined request is cut off past roughly a sixth of it.
+ */
+export function busyFixtureWork(count) {
+  return Array.from({ length: count }, (_, index) => shipped(100 + index, `Delivered item ${index + 1}`, 500 + index, -(index + 1) * hour));
+}
+
 export const fixtureStatus = (role = 'admin') => ({ actor: { id: role === 'admin' ? 'operator' : `fixture-${role}`, role, sessionKind: role === 'admin' ? 'human' : 'ai' }, github: true, reviewProviders: ['github'],
   repository: 'fixture/shop', baseBranch: 'main', jobs: [], delegation: { limits: { maxLeads: 3, maxEngineersPerLead: 2, minReviewers: 1, maxReviewers: 2 },
     slices: [{ id: 'product', name: 'Product', lead: null, workers: [], bottlenecks: [] }, { id: 'infrastructure', name: 'Infrastructure', lead: null, workers: [], bottlenecks: [] }, { id: 'docs-experience', name: 'Docs/experience', lead: null, workers: [], bottlenecks: [] }], reviewers: [] } });
@@ -119,6 +128,21 @@ function flowDataset(work) {
     projection: { lastEvent: facts.length, updatedAt: at(0), pendingEvents: 0, pendingCapped: false } };
 }
 
+/**
+ * The flow-analytics API over an arbitrary work list, answered by the real aggregation and the
+ * real bounded drill-down, so a test sees exactly the payload — cut-off rows included — that the
+ * control plane would return for the same repository.
+ */
+export function flowApi(work, role = 'admin') {
+  const dataset = flowDataset(work);
+  const report = computeFlow(dataset, { days: 30 });
+  return path => {
+    const url = new URL(path.replace(/^\/?(api\/)?/, 'http://fixture/api/'));
+    if (!url.pathname.endsWith('/drilldown')) return report;
+    return flowDrilldown(dataset, report, { metric: url.searchParams.get('metric'), key: url.searchParams.get('key'), authorized: role !== 'reader' });
+  };
+}
+
 /** The fixture API: the JSON body the control plane would return for `path` (with its query). */
 export function fixtureApi(path, role = 'admin') {
   const url = new URL(path.replace(/^\/?(api\/)?/, 'http://fixture/api/'));
@@ -128,12 +152,7 @@ export function fixtureApi(path, role = 'admin') {
   if (route === 'work-snapshot') return { work, jobs: [], now: at(0) };
   if (route === 'work') return work;
   if (route === 'events') return [{ seq: 3, kind: 'work.claimed', actor: 'worker-3', created_at: at(-4 * hour) }, { seq: 2, kind: 'work.ready', actor: 'operator', created_at: at(-day) }, { seq: 1, kind: 'work.created', actor: 'operator', created_at: at(-10 * day) }];
-  if (route.startsWith('analytics/flow')) {
-    const dataset = flowDataset(work);
-    const report = computeFlow(dataset, { days: 30 });
-    if (route.endsWith('/drilldown')) return flowDrilldown(dataset, report, { metric: url.searchParams.get('metric'), key: url.searchParams.get('key'), authorized: role !== 'reader' });
-    return report;
-  }
+  if (route.startsWith('analytics/flow')) return flowApi(work, role)(path);
   if (route.startsWith('analytics/attribution')) {
     const empty = { observedAt: at(0), from: at(-30 * day), to: at(0), days: 30, records: [], recordsTruncated: false, requests: [], requestsTruncated: false, environments: {}, blockedNow: [] };
     return route.endsWith('/drilldown') ? { rows: [], columns: [], total: 0, truncated: false } : computeAttribution(empty);
@@ -155,18 +174,25 @@ export function fixtureApi(path, role = 'admin') {
 }
 
 /**
- * The words a person sees in rendered markup: text outside `hidden` elements and outside the
- * body of a closed <details> (its <summary> counts), not counting elements marked `data-title`
- * (item titles, which are the operator's own words). Attributes, tooltips included, never count.
+ * The words a person sees in rendered markup, each with whether it carries a hover definition:
+ * text outside `hidden` elements and outside the body of a closed <details> (its <summary>
+ * counts), not counting elements marked `data-title` (item titles, which are the operator's own
+ * words). Attributes, tooltips included, never count as words. A word is `explained` when it sits
+ * inside a <Term>, the shared glossary's `<abbr class="term" title="…">`; another element's title
+ * (a card's "In this step for 3h", say) is not a definition and never counts as one.
  */
-export function visibleWords(html) {
+export function readableWords(html) {
   const voids = new Set(['area', 'base', 'br', 'col', 'embed', 'hr', 'img', 'input', 'link', 'meta', 'source', 'track', 'wbr']);
   const stack = []; const words = [];
   const skipping = () => stack.some(entry => entry.skip);
+  const explained = () => stack.some(entry => entry.term);
   for (const token of html.replace(/<!--[\s\S]*?-->/g, '').split(/(<[^>]+>)/)) {
     if (!token) continue;
     const tag = /^<\/?([a-zA-Z0-9-]+)([^>]*)>$/.exec(token);
-    if (!tag) { if (!skipping()) words.push(...token.replace(/&[a-z#0-9]+;/gi, ' ').split(/\s+/).filter(word => /[\p{L}\p{N}]/u.test(word))); continue; }
+    if (!tag) {
+      if (!skipping()) for (const word of token.replace(/&[a-z#0-9]+;/gi, ' ').split(/\s+/)) if (/[\p{L}\p{N}]/u.test(word)) words.push({ word, explained: explained() });
+      continue;
+    }
     const name = tag[1].toLowerCase(), attributes = tag[2];
     if (token.startsWith('</')) {
       const index = stack.map(entry => entry.name).lastIndexOf(name);
@@ -177,10 +203,15 @@ export function visibleWords(html) {
     if (voids.has(name) || token.endsWith('/>')) continue;
     const hidden = /\shidden(\s|=|$)/.test(attributes) || /\sdata-title(\s|=|$)/.test(attributes) || /aria-hidden="true"/.test(attributes);
     // A closed <details> shows only its <summary>: the rest is skipped once the summary closes.
-    stack.push({ name, skip: hidden, open: name === 'details' && /\sopen(\s|=|$)/.test(attributes) });
+    stack.push({ name, skip: hidden, open: name === 'details' && /\sopen(\s|=|$)/.test(attributes), term: name === 'abbr' && /class="term"/.test(attributes) && /\stitle="/.test(attributes) });
   }
   return words;
 }
+
+/** The words a person sees, in order. */
+export const visibleWords = html => readableWords(html).map(entry => entry.word);
+/** The visible words that carry no glossary definition: what a newcomer cannot look up in place. */
+export const unexplainedWords = html => readableWords(html).filter(entry => !entry.explained).map(entry => entry.word);
 
 async function main() {
   const [{ createServer }, { readFile }, { extname, join, resolve }, { mkdir }, { chromium }] = await Promise.all([import('node:http'), import('node:fs/promises'), import('node:path'), import('node:fs/promises'), import('@playwright/test')]);

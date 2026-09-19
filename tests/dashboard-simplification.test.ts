@@ -5,10 +5,11 @@ import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { evaluate, stages, type Gate, type Work } from '../src/model.js';
 import { predictQueue } from '../src/merge-queue.js';
+import { flowLimits } from '../src/flow-analytics.js';
 import { apiRoutes } from '../src/server/index.js';
 import { computeAttribution } from '../src/attribution.js';
 // @ts-expect-error Dependency-free fixture and screenshot script.
-import { fixtureApi, fixtureStatus, fixtureWork, NOW, visibleWords } from '../scripts/dashboard-fixture.mjs';
+import { busyFixtureWork, fixtureApi, fixtureStatus, fixtureWork, flowApi, NOW, unexplainedWords, visibleWords } from '../scripts/dashboard-fixture.mjs';
 import { jargon, phaseOf, phases, plainReason, plainStatus } from '../web/plain-status.js';
 import { homeNumbers } from '../web/home-numbers.js';
 import { glossary } from '../web/glossary.js';
@@ -19,10 +20,12 @@ import OverviewPage from '../web/pages/overview.js';
 import WorkDetails from '../web/pages/work-details.js';
 import ShippedPage from '../web/pages/shipped.js';
 import GuidePage from '../web/pages/guide.js';
+import AutomationPage from '../web/pages/automation.js';
 import CreateWork from '../web/pages/create-work.js';
 import TopBar from '../web/components/top-bar.js';
 import Sidebar from '../web/components/sidebar.js';
-import FlowAnalytics, { FlowSummary, plainWait, submitToMerge } from '../web/flow-analytics.js';
+import FlowAnalytics, { FlowSummary, mergeTime, plainWait, submitToMerge, toMerged } from '../web/flow-analytics.js';
+import ScenarioLibrary from '../web/scenarios.js';
 
 // GY-67: the dashboard is rendered from the checked-in fixture (scripts/dashboard-fixture.mjs)
 // and read the way a newcomer reads it: visible words only, closed <details> bodies and item
@@ -38,7 +41,7 @@ function dashboard(overrides: Partial<Dashboard> = {}, role = 'admin', features:
   return {
     token: 'fixture', work, status: fixtureStatus(role), error: '', connected: true, lastUpdated: '12:00:00', view: 'work', setView: noop, filter: null, setFilter: noop,
     selected: null, setSelected: noop, creating: false, setCreating: noop, busy: false, setBusy: noop, observedAt: NOW, jobs: [], query: '', setQuery: noop,
-    operatorAgents: [], features, events: fixtureApi('events') as any[], editingRequirements: false, setEditingRequirements: noop, codexAvailable: false,
+    operatorAgents: [], operatorAgentsError: null, features, events: fixtureApi('events') as any[], editingRequirements: false, setEditingRequirements: noop, codexAvailable: false,
     queue: predictQueue(work, NOW), sessionEpoch: { current: 0 }, api: async (path: string) => fixtureApi(path, role), refresh: async () => {}, action: async () => {},
     setError: noop, signOut: noop, ...overrides,
   };
@@ -149,7 +152,7 @@ test('integration:dashboard-navigation — four primary entries; everything else
   // The sidebar renders exactly the primary entries; the pages of a section are tabs above the content.
   const sidebar = markup(createElement(Sidebar, { entries: views.map(view => primaryEntry(dashboard(), view)), dashboard: dashboard() }));
   assert.equal(sidebar.match(/class="nav( active)?"/g)?.length, 4);
-  const tabs = (d: Dashboard, view: string) => [...markup(createElement(TopBar, { ...d, view })).matchAll(/class="tab(?: active)?"[^>]*>([^<]+)</g)].map(match => match[1]);
+  const tabs = (d: Dashboard, view: string) => [...markup(createElement(TopBar, { ...d, view })).matchAll(/class="tab(?: active)?"[^>]*>(?:<abbr[^>]*>)?([^<]+)</g)].map(match => match[1]);
   assert.deepEqual(tabs(dashboard(), 'flow'), ['Shipping pulse', 'Flow analytics', 'Validation', 'Releases']);
   assert.deepEqual(tabs(dashboard(), 'grants'), ['Test cases', 'Proof authority', 'Operator automation']);
   assert.match(markup(createElement(TopBar, dashboard())), />How Graphyard works</, 'the guide is linked from the header');
@@ -168,6 +171,14 @@ test('integration:dashboard-navigation — four primary entries; everything else
   assert.deepEqual(tabs(none, 'grants'), ['Test cases', 'Proof authority']);
   const failing = await probeFeatures(async () => { throw new Error('unavailable'); }, true, false);
   assert.deepEqual(failing.features, { releases: null, validation: null, automation: null }, 'an outage never hides a page');
+  // An outage and an empty registry mean opposite things, so the page never reports one as the other.
+  assert.equal(probed.operatorAgentsError, null);
+  assert.equal(failing.operatorAgentsError, 'unavailable');
+  const unread = markup(createElement(AutomationPage, { operatorAgents: [], operatorAgentsError: 'unavailable' }));
+  assert.match(text(unread), /Operator automation could not be read, so what is configured is unknown: unavailable/);
+  assert.doesNotMatch(text(unread), /safe bootstrap default/);
+  assert.match(unread, /Configured identities <span class="count">—<\/span>/, 'an unknown count is never drawn as zero');
+  assert.match(text(markup(createElement(AutomationPage, { operatorAgents: [], operatorAgentsError: null }))), /safe bootstrap default/);
   assert.equal((await probeFeatures(async () => ({ requests: [] }), false, true)).features.validation, true, 'a scenario requirement means validation is in use');
   // No slice lead: no Delivery slices panel. A lead: the panel appears.
   assert.doesNotMatch(home(), /Delivery slices/);
@@ -220,18 +231,19 @@ test('integration:item-view-structure — status, owner, pull request and the on
   for (const role of ['reader', 'worker']) { const other = itemView('GY-16', role); assert.doesNotMatch(other, /edit-menu|Use Codex cloud review|Revise requirements/, role); }
 });
 
-test('integration:analytics-default-view — flow analytics opens to where work waits and pull-request-to-merge time; the rest behind Show details; no UNKNOWN cards', () => {
+test('integration:analytics-default-view — flow analytics opens to where work waits and handed-in-to-merge time; the rest behind Show details; no UNKNOWN cards', async () => {
   const report = fixtureApi('analytics/flow?window=30');
   const phaseRows = (fixtureApi('analytics/flow/drilldown?window=30&metric=phase') as any).rows;
   const merge = submitToMerge(phaseRows);
-  assert.equal(merge.n, 3, 'every shipped fixture item has a measured pull-request-to-merge time');
+  assert.equal(merge.n, 3, 'every shipped fixture item has a measured handed-in-to-merge time');
   assert.ok(merge.p50Ms! > 0 && merge.p90Ms! >= merge.p50Ms!);
+  assert.equal(merge.truncated, false);
   const attribution = computeAttribution({ observedAt: new Date(NOW).toISOString(), from: new Date(NOW - 30 * 864e5).toISOString(), to: new Date(NOW).toISOString(), days: 30, records: [], recordsTruncated: false, requests: [], requestsTruncated: false, environments: {}, blockedNow: [] } as any);
   const page = markup(createElement(FlowAnalytics, { request: async () => ({}), token: 'fixture', canAudit: true, initial: { report, merge, attribution } }));
   const visible = text(page);
   assert.match(visible, /Where work is waiting/);
-  assert.match(visible, /Pull request opened merged/);
-  assert.match(page, /Pull request opened → merged/);
+  assert.match(visible, /Handed in merged/);
+  assert.match(page, /Handed in<\/abbr> → merged/);
   assert.match(visible, /typical p50 .*slowest one in ten p90 .*3 merged/);
   const waiting = (report as any).bottleneck.categories.filter((c: any) => c.id !== 'delivered');
   for (const category of waiting) assert.equal(visible.includes(`${plainWait[category.id]} ${category.count}`), category.count > 0, `${category.label}: shown only when it has items, in plain words`);
@@ -243,15 +255,60 @@ test('integration:analytics-default-view — flow analytics opens to where work 
   assert.doesNotMatch(page, /class="flow-card attribution-card"[^>]*data-state="unavailable"|attribution-badge-unavailable/, 'a metric with no data is never drawn as an UNKNOWN card');
   assert.doesNotMatch(visible, /UNKNOWN/i);
   // A report with nothing measured omits the merge figure rather than showing a placeholder.
-  assert.doesNotMatch(markup(createElement(FlowSummary, { report, merge: submitToMerge([]), onDrill: noop })), /Pull request opened/);
+  assert.doesNotMatch(markup(createElement(FlowSummary, { report, merge: submitToMerge([]), onDrill: noop })), /Handed in/);
+
+  // The drill-down is bounded at flowLimits.drilldown rows and is sorted by work key before it is
+  // cut, so a single request for every phase of every episode silently returns the lowest-keyed
+  // items. The page asks for one phase at a time instead, and says so rather than averaging a
+  // sample it knows is partial.
+  const busy = flowApi(busyFixtureWork(60));
+  const combined = busy('analytics/flow/drilldown?window=30&metric=phase');
+  assert.ok(combined.truncated && combined.total > flowLimits.drilldown && combined.rows.length === flowLimits.drilldown, `${combined.total} phase rows, cut to ${combined.rows.length}`);
+  assert.ok(submitToMerge(combined.rows).n < 60, 'the cut-off rows would undercount the merges');
+  const perPhase = (await mergeTime(async path => busy(path), 'window=30'))!;
+  assert.equal(perPhase.truncated, false);
+  assert.equal(perPhase.n, 60, 'asking for one phase at a time reads every episode in the window');
+  const everyPhase = submitToMerge(toMerged.flatMap(phase => busy(`analytics/flow/drilldown?window=30&metric=phase&key=${phase}`).rows));
+  assert.equal(perPhase.p50Ms, everyPhase.p50Ms); assert.equal(perPhase.p90Ms, everyPhase.p90Ms);
+  // Past the bound even per phase, the figure is reported as unreadable and never drawn.
+  const huge = flowApi(busyFixtureWork(flowLimits.drilldown + 10));
+  const unreadable = (await mergeTime(async path => huge(path), 'window=30'))!;
+  assert.equal(unreadable.truncated, true);
+  const partial = markup(createElement(FlowSummary, { report, merge: unreadable, onDrill: noop }));
+  assert.match(text(partial), /Handed in merged Not shown: this window holds more merged changes than one read can return/);
+  assert.doesNotMatch(text(partial), /typical|p50|p90|merged \d/, 'no percentile is drawn from a sample that was cut off');
+  assert.doesNotMatch(text(partial), /UNKNOWN/i);
 });
+
+// The words a newcomer cannot guess: abbreviations, proof names and a commit. Wherever one is
+// visible by default it must carry its glossary definition in place — the same screens the
+// manual plain-language review reads, which found PR, the commit, E2E and the form's terms bare.
+const cannotGuess = [/^PR$/, /^SHA(-\d+)?$/i, /^CI$/, /^E2E$/i, /^(unit|integration|e2e|manual):/, /^p(50|90|95)$/, /^[0-9a-f]{40}$/];
+const bare = (html: string) => unexplainedWords(html)
+  .map((word: string) => word.replace(/^[^\p{L}\p{N}]+|[^\p{L}\p{N}:]+$/gu, ''))
+  .filter((word: string) => cannotGuess.some(pattern => pattern.test(word)));
 
 test('plain-language support for manual:plain-language-review — every visible technical term has a hover definition from the shared glossary; the guide is under 300 words; the create form explains proofs', () => {
   const guide = markup(createElement(GuidePage));
   assert.ok(words(guide).length <= 300, `guide is ${words(guide).length} words`);
-  for (const html of [guide, itemView('GY-16'), home(dashboard({ status: (() => { const s = fixtureStatus('admin'); s.delegation.slices[0].lead = { id: 'l', displayName: 'Pine', sessionKind: 'ai' } as any; return s; })() }))])
-    for (const [, title] of html.matchAll(/<abbr class="term" title="([^"]*)"/g)) assert.ok(Object.values(glossary).includes(title.replace(/&#x27;/g, '\'').replace(/&quot;/g, '"').replace(/&amp;/g, '&') as any), `definition from the glossary: ${title}`);
   const form = markup(createElement(CreateWork, dashboard({ creating: true })));
+  const report = fixtureApi('analytics/flow?window=30');
+  const screens: [string, string][] = [
+    ['How Graphyard works', guide],
+    ['home', home(dashboard({ status: (() => { const s = fixtureStatus('admin'); s.delegation.slices[0].lead = { id: 'l', displayName: 'Pine', sessionKind: 'ai' } as any; return s; })() }))],
+    ['item view', itemView('GY-16')],
+    ['create form', form],
+    ['test cases', markup(createElement(ScenarioLibrary, { api: async () => [], canEdit: true }))],
+    ['flow analytics', markup(createElement(FlowSummary, { report, merge: submitToMerge((fixtureApi('analytics/flow/drilldown?window=30&metric=phase') as any).rows), onDrill: noop }))],
+  ];
+  for (const [name, html] of screens) {
+    // Every definition on screen is the shared glossary's own wording, and none is written twice.
+    for (const [, title] of html.matchAll(/<abbr class="term" title="([^"]*)"/g)) assert.ok(Object.values(glossary).includes(title.replace(/&#x27;/g, '\'').replace(/&quot;/g, '"').replace(/&amp;/g, '&') as any), `${name}: definition from the glossary: ${title}`);
+    assert.deepEqual(bare(html), [], `${name}: every technical word a newcomer cannot guess carries its definition in place`);
+  }
+  // The item view's commit and pull request are the glossary's, not a bare identifier.
+  assert.match(itemView('GY-16'), /<abbr class="term" title="[^"]*forty letters[^"]*"[^>]*><code>e{40}<\/code><\/abbr>/);
+  assert.match(home(), /<abbr class="term" title="The proposed code change on GitHub[^"]*"[^>]*>PR<\/abbr> #42/);
   assert.match(form, /A proof name starts with its kind/);
   for (const example of ['unit:login-rejects-bad-password', 'integration:claim-safety', 'e2e:checkout', 'manual:copy-review']) assert.ok(form.includes(example), example);
   assert.match(form, /Add another criterion/);

@@ -79,7 +79,7 @@ table.flow-data tbody th,.flow-table-scroll tbody th{font-weight:500;color:#dbe6
 .criterion-text{color:#c9d6c3}.proof-markers{list-style:none;padding:0;margin:6px 0 0;display:flex;flex-wrap:wrap;gap:6px 14px;font-size:11px}.marker-pass{color:#b7d397}.marker-fail{color:#e6afa0}.marker-pending{color:#d4b777}
 abbr.term{text-decoration:underline dotted #7f9a73;text-underline-offset:3px;cursor:help}
 .guide{max-width:640px}.guide ol{padding-left:20px;line-height:1.8;color:#aebdad}.guide h2{margin-top:26px}
-.flow-summary section{margin:0 0 26px}.flow-summary .flow-card strong{margin:6px 0 0}.flow-headline{font-size:14px;color:#c9d6c3}.flow-headline strong{font-size:22px;font-weight:500;color:#dce4dc}
+.flow-summary section{margin:0 0 26px}.flow-summary .flow-card strong{margin:6px 0 0}.flow-headline{font-size:14px;color:#c9d6c3}.flow-headline strong{font-size:22px;font-weight:500;color:#dce4dc}.flow-unreadable{max-width:62ch;color:#a9b6a4}
 .criteria-fields{border:1px solid #3c4b3b;border-radius:7px;padding:12px 14px;display:grid;gap:12px}.criteria-fields legend{font-size:12px;color:#c4d7b5;padding:0 6px}.criteria-fields code{display:inline;padding:1px 4px;margin:0}.criterion-row{display:grid;gap:10px;padding-bottom:10px;border-bottom:1px solid #2c3b2d}
 .main .page-heading .eyebrow{display:none}
 .top-bar{height:56px}.main>.page-heading,.main .page-heading{margin:18px 0 14px}.main .page-heading h1{font-size:28px}

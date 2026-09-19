@@ -23,20 +23,40 @@ function duration(ms: number | null | undefined) {
 function count(value: number | null | undefined) { return value === null || value === undefined ? '—' : String(value); }
 function label(bucket: string) { return new Date(bucket).toISOString().slice(5, 10); }
 
-const toMerged = ['pr-created-to-review-start', 'review-start-to-review-complete', 'review-complete-to-evidence-complete', 'evidence-complete-to-merge-authorized', 'merge-authorized-to-merged'];
+export const toMerged = ['pr-created-to-review-start', 'review-start-to-review-complete', 'review-complete-to-evidence-complete', 'evidence-complete-to-merge-authorized', 'merge-authorized-to-merged'];
 /**
- * Pull request opened to merged, per merged commit, from the phase drill-down rows: the sum of
- * the five consecutive phases, counted only when every one of them was measured. Percentiles
- * are nearest-rank. Nothing measured gives n 0, which the summary omits rather than shows.
+ * Handed in to merged, per merged commit, from the phase drill-down rows: the sum of the five
+ * consecutive phases, counted only when every one of them was measured. The clock starts when
+ * that version of the code was handed in, so a pull request pushed again is measured from its
+ * last push. Percentiles are nearest-rank. Nothing measured gives n 0, which the summary omits
+ * rather than shows; `truncated` says the rows were cut off, which the summary never averages.
  */
-export function submitToMerge(rows: { workKey: string; bucket: string; valueMs: number | null; commit: string | null }[]) {
+export function submitToMerge(rows: { workKey: string; bucket: string; valueMs: number | null; commit: string | null }[], truncated = false) {
   const episodes = new Map<string, Map<string, number>>();
   for (const row of rows) if (toMerged.includes(row.bucket) && typeof row.valueMs === 'number') {
     const key = `${row.workKey}:${row.commit}`; (episodes.get(key) ?? episodes.set(key, new Map()).get(key)!).set(row.bucket, row.valueMs);
   }
   const totals = [...episodes.values()].filter(phases => toMerged.every(phase => phases.has(phase))).map(phases => toMerged.reduce((sum, phase) => sum + phases.get(phase)!, 0)).sort((a, b) => a - b);
   const rank = (p: number) => totals[Math.max(0, Math.ceil(p * totals.length) - 1)];
-  return { n: totals.length, p50Ms: totals.length ? rank(0.5) : null, p90Ms: totals.length ? rank(0.9) : null };
+  return { n: totals.length, p50Ms: totals.length ? rank(0.5) : null, p90Ms: totals.length ? rank(0.9) : null, truncated };
+}
+
+/**
+ * The handed-in-to-merged figure, read honestly within the drill-down's row bound. One request
+ * carries every phase of every episode, so it is cut off past roughly `flowLimits.drilldown / 6`
+ * episodes — and because the server sorts by work key before cutting, the surviving rows are the
+ * lowest-keyed items, whose percentiles would be biased without saying so. When the combined
+ * request is cut off, each phase is asked for on its own, which multiplies the episodes this page
+ * can read by the number of phases; if even that is cut off, the figure is reported as unreadable
+ * and never drawn.
+ */
+export async function mergeTime(request: (path: string) => Promise<any>, query: string) {
+  const combined = await request(`analytics/flow/drilldown?${query}&metric=phase`).catch(() => null);
+  if (!combined?.rows) return null;
+  if (!combined.truncated) return submitToMerge(combined.rows);
+  const perPhase = await Promise.all(toMerged.map(phase => request(`analytics/flow/drilldown?${query}&metric=phase&key=${phase}`).catch(() => null)));
+  if (perPhase.some(page => !page?.rows)) return null;
+  return submitToMerge(perPhase.flatMap(page => page.rows), perPhase.some(page => page.truncated));
 }
 
 /** The wait categories in the words the home page uses; the full definitions stay in Show details. */
@@ -57,8 +77,10 @@ export function FlowSummary({ report, merge, onDrill }: { report: Report; merge:
       {waiting.length ? <div className="flow-cards">{waiting.map((category: any) => <button key={category.id} className="flow-card" title={category.definition} onClick={() => onDrill(category)}><span>{plainWait[category.id] ?? category.label}</span><strong>{category.count}</strong></button>)}</div>
         : <p>Nothing is waiting: every item in this window has shipped.</p>}
     </section>
-    {merge && merge.n > 0 && <section aria-labelledby="flow-merge"><h2 id="flow-merge">Pull request opened → merged</h2>
-      <p className="flow-headline"><strong>{duration(merge.p50Ms)}</strong> typical (<Term term="p50 / p90">p50</Term>) · <strong>{duration(merge.p90Ms)}</strong> slowest one in ten (<Term term="p50 / p90">p90</Term>) · {merge.n} merged</p></section>}
+    {merge && (merge.truncated || merge.n > 0) && <section aria-labelledby="flow-merge"><h2 id="flow-merge"><Term term="handed in">Handed in</Term> → merged</h2>
+      {merge.truncated
+        ? <p className="flow-headline flow-unreadable">Not shown: this window holds more merged changes than one read can return, and the part that came back is not a fair sample. Choose a shorter window, or read the phase table under Show details.</p>
+        : <p className="flow-headline"><strong>{duration(merge.p50Ms)}</strong> typical (<Term term="p50 / p90">p50</Term>) · <strong>{duration(merge.p90Ms)}</strong> slowest one in ten (<Term term="p50 / p90">p90</Term>) · {merge.n} merged</p>}</section>}
   </div>;
 }
 
@@ -89,8 +111,8 @@ export default function FlowAnalytics({ request, token, canAudit, initial }: { r
   const load = async () => {
     const current = ++version.current; setLoading(true);
     try {
-      const [value, phases] = await Promise.all([request(`analytics/flow?${query}`), request(`analytics/flow/drilldown?${query}&metric=phase`).catch(() => null)]);
-      if (current === version.current) { setReport(value); setMerge(phases?.rows ? submitToMerge(phases.rows) : null); setError(''); }
+      const [value, merged] = await Promise.all([request(`analytics/flow?${query}`), mergeTime(request, query)]);
+      if (current === version.current) { setReport(value); setMerge(merged); setError(''); }
     }
     catch (e) { if (current === version.current) setError((e as Error).message); }
     finally { if (current === version.current) setLoading(false); }

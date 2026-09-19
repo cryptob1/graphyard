@@ -1,6 +1,7 @@
 import type { Work } from '../../src/model';
 import { CandidatePr } from '../candidate';
 import { plainStatus } from '../plain-status';
+import { Explained } from '../components/term';
 import type { Dashboard } from './dashboard';
 
 /** Every delivered item, newest first, with its pull request and whether the release serves it. */
@@ -15,7 +16,7 @@ export default function ShippedPage({ work, status, observedAt, setSelected }: D
         <button className="text-button" onClick={() => setSelected(w.id)}>{w.key} <span data-title>{w.title}</span></button>
         {w.candidate && <CandidatePr repository={status?.repository} candidate={w.candidate} workKey={w.key}/>}
         <span className="muted">{new Date(shippedAt(w)).toLocaleDateString()}</span>
-        {plain.blocking && <span className={plain.tone === 'stuck' ? 'danger-text' : 'amber'}>{plain.blocking}</span>}
+        {plain.blocking && <span className={plain.tone === 'stuck' ? 'danger-text' : 'amber'}><Explained sentence={plain.blocking}/></span>}
       </li>; })}</ul>}
   </>;
 }

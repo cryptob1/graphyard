@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import Dialog from '../dialog';
+import Term from '../components/term';
 import type { Dashboard } from './dashboard';
 
 const proofPattern = '(unit|integration|e2e|manual):[a-zA-Z0-9._/-]+';
@@ -19,19 +20,19 @@ export default function CreateWork({ work, error, busy, codexAvailable, setCreat
     <label>Title<input name="title" required maxLength={200} placeholder="What needs to change?"/></label>
     <label>Description<textarea name="description" rows={3}/></label>
     <fieldset className="criteria-fields"><legend>What must be true when it is done</legend>
-      <p className="muted">Each criterion is one thing someone can check. Give it one or more <strong>proofs</strong>: the names of the tests that show it is true. A proof name starts with its kind — <code>unit:</code> a fast code test, <code>integration:</code> a test against a real database or service, <code>e2e:</code> a test through the browser, <code>manual:</code> a person checks it. Examples: <code>unit:login-rejects-bad-password</code>, <code>integration:claim-safety</code>, <code>e2e:checkout</code>, <code>manual:copy-review</code>. Someone who did not build the work must run it.</p>
+      <p className="muted">Each <Term term="acceptance criterion">criterion</Term> is one thing someone can check. Give it one or more <Term term="proof"><strong>proofs</strong></Term>: the names of the tests that show it is true. A proof name starts with its kind — <Term term="unit test"><code>unit:</code></Term> a fast code test, <Term term="integration test"><code>integration:</code></Term> a test against a real database or service, <Term term="end-to-end test"><code>e2e:</code></Term> a test through the browser, <Term term="manual check"><code>manual:</code></Term> a person checks it. Examples: <Term term="unit test"><code>unit:login-rejects-bad-password</code></Term>, <Term term="integration test"><code>integration:claim-safety</code></Term>, <Term term="end-to-end test"><code>e2e:checkout</code></Term>, <Term term="manual check"><code>manual:copy-review</code></Term>. Someone who did not build the work must run it.</p>
       {rows.map((row, i) => <div className="criterion-row" key={row}>
-        <label>Acceptance criterion {i + 1}<input name={`criterion-${row}`} required placeholder="What observable behavior proves success?"/></label>
-        <label>Required proof{rows.length > 1 ? ` for criterion ${i + 1}` : ''} (comma separated)<input name={`proof-${row}`} required pattern={`${proofPattern}(\\s*,\\s*${proofPattern})*`} placeholder="integration:claim-safety"/></label>
+        <label><span><Term term="acceptance criterion">Acceptance criterion</Term> {i + 1}</span><input name={`criterion-${row}`} required placeholder="What observable behavior proves success?"/></label>
+        <label><span>Required <Term term="proof">proof</Term>{rows.length > 1 ? ` for criterion ${i + 1}` : ''} (comma separated)</span><input name={`proof-${row}`} required pattern={`${proofPattern}(\\s*,\\s*${proofPattern})*`} placeholder="integration:claim-safety"/></label>
         {rows.length > 1 && <button type="button" className="text-button" onClick={() => setRows(rows.filter(other => other !== row))}>Remove criterion {i + 1}</button>}
       </div>)}
       <button type="button" className="text-button" onClick={() => setRows([...rows, Math.max(...rows) + 1])}>＋ Add another criterion</button>
     </fieldset>
-    <label>Planned files or directories (comma separated)<input name="plannedFiles" placeholder="src/booking/, src/sms/send.ts"/></label>
-    <label>Exclusive resources (comma separated)<input name="exclusiveResources" placeholder="staging:sms-test-account"/></label>
-    <label>Code review provider<select name="reviewProvider" defaultValue="github"><option value="codex" disabled={!codexAvailable}>Codex cloud review{codexAvailable ? '' : ' (unavailable)'}</option><option value="github">Formal GitHub approval</option></select></label>{!codexAvailable && <p className="muted">Codex review is unavailable. Verify the GitHub App connection and accept its required permission updates.</p>}
-    <label>Required CI checks<input name="checks" defaultValue="test, typecheck" required/></label>
-    <label>Depends on<select name="dependency"><option value="">No dependency</option>{work.map(w => <option key={w.id} value={w.id}>{w.key} · {w.title}</option>)}</select></label>
+    <label><span><Term term="planned files">Planned files</Term> or directories (comma separated)</span><input name="plannedFiles" placeholder="src/booking/, src/sms/send.ts"/></label>
+    <label><span><Term term="exclusive resource">Exclusive resources</Term> (comma separated)</span><input name="exclusiveResources" placeholder="staging:sms-test-account"/></label>
+    <label><span>Code <Term term="review provider">review provider</Term></span><select name="reviewProvider" defaultValue="github"><option value="codex" disabled={!codexAvailable}>Codex cloud review{codexAvailable ? '' : ' (unavailable)'}</option><option value="github">Formal GitHub approval</option></select></label>{!codexAvailable && <p className="muted">Codex review is unavailable. Verify the GitHub App connection and accept its required permission updates.</p>}
+    <label><span>Required <Term term="automated checks">CI checks</Term></span><input name="checks" defaultValue="test, typecheck" required/></label>
+    <label><span><Term term="dependency">Depends on</Term></span><select name="dependency"><option value="">No dependency</option>{work.map(w => <option key={w.id} value={w.id}>{w.key} · {w.title}</option>)}</select></label>
     <p className="muted">Created as not started. Someone else must approve the code before it merges. More dependencies can be added through the CLI.</p>
     {error && <p role="alert" className="amber">{error}</p>}
     <button disabled={busy}>{busy ? 'Creating…' : 'Create work item'}</button>

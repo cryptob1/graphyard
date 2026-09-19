@@ -7,7 +7,7 @@ import { assignment } from '../assignment';
 import { CandidatePr, CandidateSha } from '../candidate';
 import EvidenceArtifacts from '../components/evidence-artifacts';
 import PostDeployment from '../components/post-deployment';
-import Term from '../components/term';
+import Term, { Explained } from '../components/term';
 import { age } from '../format';
 import { plainReason, plainStatus } from '../plain-status';
 import type { Dashboard } from './dashboard';
@@ -40,12 +40,12 @@ export default function WorkDetails({ item, work, status, token, observedAt, job
   const postDeployment = <PostDeployment item={item} repository={status?.repository} baseBranch={status?.baseBranch ?? 'main'} observedAt={observedAt}/>;
   return <Dialog onClose={() => setSelected(null)}><section role="dialog" aria-modal="true" aria-label={item.title} className="drawer" onClick={e => e.stopPropagation()}><button className="close" aria-label="Close details" onClick={() => setSelected(null)}>×</button>
     <div className="drawer-key">{item.key}</div><h2>{item.title}</h2>
-    <p className={`status-sentence tone-${plain.tone}`}>{plain.sentence}</p>
+    <p className={`status-sentence tone-${plain.tone}`}><Explained sentence={plain.sentence}/></p>
     <dl className="facts">
       <div><dt>Owner</dt><dd className="assignment-details">{owner.active ? owner.label : owner.owner ? owner.text : 'Nobody yet'}</dd></div>
-      <div><dt>Pull request</dt><dd className="candidate-details">{item.candidate ? <><CandidatePr repository={status?.repository} candidate={item.candidate} workKey={item.key}/> <CandidateSha repository={status?.repository} sha={item.candidate.sha} workKey={item.key}/></> : 'None yet'}</dd></div>
+      <div><dt><Term term="pull request" focusable={false}>Pull request</Term> and <Term term="commit" focusable={false}>commit</Term></dt><dd className="candidate-details">{item.candidate ? <><CandidatePr repository={status?.repository} candidate={item.candidate} workKey={item.key}/> <CandidateSha repository={status?.repository} sha={item.candidate.sha} workKey={item.key}/></> : 'None yet'}</dd></div>
     </dl>
-    {plain.blocking && <p className="blocking-now"><strong>Blocking now:</strong> {plain.blocking}</p>}
+    {plain.blocking && <p className="blocking-now"><strong>Blocking now:</strong> <Explained sentence={plain.blocking}/></p>}
     {item.violations.map(v => <div className="notice danger" key={v}>{v}</div>)}
     {!item.ready && admin && <button disabled={busy} onClick={() => action(item.id, 'ready')}>Release to ready</button>}
     {failedDelivery && postDeployment}
@@ -67,7 +67,7 @@ export default function WorkDetails({ item, work, status, token, observedAt, job
     {editingRequirements && <RequirementsEditor key={`${item.id}:${item.policyRevision}`} item={item} all={work} api={api} onSaved={async () => { const epoch = sessionEpoch.current; setEditingRequirements(false); await refresh(epoch); }}/>}
     <details className="more-details"><summary>More details</summary>
       <p>{item.description}</p>
-      <div className="tags"><span>{item.type}</span><span>P{item.priority}</span><span>{item.stage}</span><span>In this step for {age(item.stageEnteredAt)}</span><span>Policy v{item.policyRevision}</span><span>Revision {item.revision}</span>{deploySmokeRequired(item.policy) && <span>e2e:deploy-smoke after deploy</span>}</div>
+      <div className="tags"><span>{item.type}</span><span>P{item.priority}</span><span>{item.stage}</span><span>In this step for {age(item.stageEnteredAt)}</span><span>Policy v{item.policyRevision}</span><span>Revision {item.revision}</span>{deploySmokeRequired(item.policy) && <span><Term term="post-deploy check">e2e:deploy-smoke</Term> after deploy</span>}</div>
       <h3>Ownership</h3><p>{owner.text}</p>{owner.owner && <p className="muted">Worker ID: {owner.owner} · assignment {owner.epoch}</p>}<p>{owner.active && item.lease ? `Active lease · expires ${new Date(item.lease.expiresAt).toLocaleTimeString()}` : 'No active assignment'}</p>{item.workspaces.map(w => <code key={w.epoch}>{w.host}:{w.path}<br/>{w.branch} · assignment {w.epoch}</code>)}
       {!failedDelivery && postDeployment}
       <h3>Coordination</h3>{diagnose(item, work, observedAt, jobs).map((d, i) => <div className="criterion" key={i}><strong>{d.message}</strong><p>{d.next}</p></div>)}

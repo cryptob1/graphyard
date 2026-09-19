@@ -53,7 +53,7 @@ export const views: readonly View[] = [
   { id: 'releases', icon: '⇈', label: 'Releases', section: 'insights', visible: dashboard => configured(dashboard.features.releases), render: dashboard => <ReleasesView api={dashboard.api} work={dashboard.work}/> },
   { id: 'scenarios', icon: '✓', label: 'Test cases', section: 'settings', render: dashboard => <ScenarioLibrary api={dashboard.api} canEdit={role(dashboard) === 'admin'}/> },
   { id: 'grants', icon: '⚷', label: 'Proof authority', section: 'settings', render: dashboard => <ProofGrantsView api={dashboard.api} work={dashboard.work} canEdit={role(dashboard) === 'admin'}/> },
-  { id: 'automation', icon: '◇', label: 'Operator automation', section: 'settings', adminOnly: true, visible: dashboard => configured(dashboard.features.automation), render: dashboard => <AutomationPage operatorAgents={dashboard.operatorAgents}/> },
+  { id: 'automation', icon: '◇', label: 'Operator automation', section: 'settings', adminOnly: true, visible: dashboard => configured(dashboard.features.automation), render: dashboard => <AutomationPage operatorAgents={dashboard.operatorAgents} operatorAgentsError={dashboard.operatorAgentsError}/> },
   { id: 'guide', icon: '?', label: 'How Graphyard works', render: () => <GuidePage/> },
 ];
 
