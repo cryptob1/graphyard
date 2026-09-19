@@ -151,6 +151,18 @@ test('pending validation keeps an entry queued; an observed failure names the re
   assert.match(ejectionReason(reworked, ciAppIds)!, /returned to the worker/);
 });
 
+test('a successful CI retry keeps an entry queued although the observation retains the failed run', () => {
+  const retried = enqueue(work('GY-1'), 1);
+  retried.observation = observation(retried, { checks: [{ name: 'test', result: 'failure', appId: 15368, id: 101 }, { name: 'test', result: 'success', appId: 15368, id: 102 }] });
+  assert.equal(ejectionReason(retried, ciAppIds), null, 'the newest run decides, exactly as the test gate does');
+  const regressed = enqueue(work('GY-2'), 2);
+  regressed.observation = observation(regressed, { checks: [{ name: 'test', result: 'success', appId: 15368, id: 201 }, { name: 'test', result: 'failure', appId: 15368, id: 202 }] });
+  assert.match(ejectionReason(regressed, ciAppIds)!, /Required CI check test did not pass on speculative tip/);
+  const unordered = enqueue(work('GY-3'), 3);
+  unordered.observation = observation(unordered, { checks: [{ name: 'test', result: 'success', appId: 15368, id: 302 }, { name: 'test', result: 'failure', appId: 15368, id: 301 }] });
+  assert.equal(ejectionReason(unordered, ciAppIds), null, 'immutable run identity, not response order, selects the newest run');
+});
+
 test('an unrelated CI app cannot eject an entry and a stale observation is not a failure', () => {
   const foreign = enqueue(work('GY-1'), 1);
   foreign.observation = observation(foreign, { checks: [{ name: 'test', result: 'failure', appId: 4242 }] });
