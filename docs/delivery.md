@@ -58,7 +58,7 @@ Register the deployment identities as `kind: registration` definitions with `rol
 }
 ```
 
-A promoter registration is the same shape with `role: promoter`; it must cover every service of the environment to select a release for it. Define a `role: builder` registration for the release build producer exactly as for validation.
+A promoter registration is the same shape with `role: promoter`; it must cover every service of the environment to select a release for it. Define a `role: builder` registration for the release build producer exactly as for validation. Each deployment identity is a `producer` credential in `GRAPHYARD_PRINCIPALS` and counts toward the shared review/proof agent limit described in [slice-lead delegation](delegation.md#capacity-and-identity); set `GRAPHYARD_MAX_REVIEWERS` to cover them.
 
 ## Define and select a release
 

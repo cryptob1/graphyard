@@ -537,7 +537,13 @@ test('D4-6 an unresolved serialized operation blocks successors; an unfenced ada
 
 test('rollback HTTP routes derive authority from the credential and appear in delivery status', async () => {
   const f = await environment(); const { one } = await degraded(f);
-  const http = server(engine, principals.map(p => ({ ...p, token: `${p.id}-token-${'x'.repeat(32)}` })));
+  // Collector, builder, observer, promoter and both executors hold producer
+  // credentials and count toward the review/proof agent limit the server
+  // enforces at boot; raise the configurable limit for this roster.
+  const configuredReviewers = process.env.GRAPHYARD_MAX_REVIEWERS; process.env.GRAPHYARD_MAX_REVIEWERS = '6';
+  let http: ReturnType<typeof server>;
+  try { http = server(engine, principals.map(p => ({ ...p, token: `${p.id}-token-${'x'.repeat(32)}` }))); }
+  finally { if (configuredReviewers === undefined) delete process.env.GRAPHYARD_MAX_REVIEWERS; else process.env.GRAPHYARD_MAX_REVIEWERS = configuredReviewers; }
   await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));
   const url = `http://127.0.0.1:${(http.address() as any).port}`;
   const call = async (actor: Principal, path: string, body?: unknown) => { const response = await fetch(`${url}/api/${path}`, { method: body ? 'POST' : 'GET', headers: { Authorization: `Bearer ${actor.id}-token-${'x'.repeat(32)}`, 'Content-Type': 'application/json', 'Idempotency-Key': id() }, body: body ? JSON.stringify(body) : undefined }); return { status: response.status, body: await response.json() as any }; };

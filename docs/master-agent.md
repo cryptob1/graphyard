@@ -1,6 +1,6 @@
 # Master-agent operating mode
 
-The master is a dedicated coordinator session. It reads Graphyard, watches Herdr health, routes ready work, handles handoffs, and requests guarded merges. It does not implement work, hold worker leases, or produce evidence.
+The master is a dedicated coordinator session. It reads Graphyard, watches Herdr health, routes ready work, handles handoffs, requests guarded merges, and administers the managed repository's GitHub App, installation, and branch protection — through the API when it can and through the operator's own browser profile when only a GitHub page can do it. It does not implement work, hold worker leases, or produce evidence.
 
 Graphyard remains the source of truth. Herdr only reports live session health.
 
@@ -16,11 +16,14 @@ herdr workspace list
 node "$GRAPHYARD_CLI" master init \
   --url https://YOUR-GRAPHYARD-HOST \
   --herdr-workspace HERDR_WORKSPACE_ID \
+  --browser-profile Default \
   --token-stdin
 node "$GRAPHYARD_CLI" master start codex
 ```
 
 At the token prompt, paste the token, press Enter, then press Ctrl-D to send EOF. Use `master start claude` if preferred. Setup preserves existing repository instructions and stores the coordinator token outside the repository.
+
+`master init --browser-profile PROFILE` names the Chrome profile (`agent-browser profiles` lists them) or profile directory that is signed in to GitHub as the repository administrator. It is what lets the master perform [GitHub administration through the browser](#github-administration-through-the-browser) instead of handing those clicks back to you; `--browser-executable PATH` selects a non-default Chrome. Without it the master must still ask you for App permission updates, installation acceptance, and page-only protection changes.
 
 `master start` also installs the master's own harness permissions for harnesses that have a command classifier. See [harness permissions](#harness-permissions).
 
@@ -212,20 +215,55 @@ node "$GRAPHYARD_CLI" master protection
 node "$GRAPHYARD_CLI" master protection --apply
 ```
 
-The plan prints the open items on each provider, the current review settings, and the exact changes. `--apply` patches only the review subresource, leaving the App-bound `Graphyard / merge` check, the merge queue's `strict`-off setting, and administrator enforcement as observed, then re-reads protection and refuses unless GitHub reports the reconciled state.
+The plan prints the open items on each provider, the current review settings, and the exact changes. `--apply` patches only the review subresource, leaving the App-bound `Graphyard / merge` check, the merge queue's `strict`-off setting, and administrator enforcement as observed, then re-reads protection and refuses unless GitHub reports the reconciled state. When the operator's token cannot patch protection, or `strict` and administrator enforcement themselves need toggling, `master browser protection` makes the same reconciliation through the [browser](#github-administration-through-the-browser) and verifies it the same way.
 
 - Open items on `github` review: at least one required approval, last-push approval, and stale-review dismissal.
 - Open items on `codex` or `agent` review: native approval count zero and no last-push approval, so Graphyard's own gate decides. Both providers share this side: the split is the model's `nativeReviewRequired`, which only the `github` provider satisfies, so a policy Graphyard accepts is never one the branch cannot enforce.
 - A mix of native and non-native items: refused, naming the conflicting items and their providers. Move the open items onto one provider first; leaving protection inconsistent with an open item's policy is not an option Graphyard offers.
 - `strict` ("require branches to be up to date") left enabled, missing administrator enforcement or App-bound check, or a required CODEOWNERS approval: refused before any change. The [merge queue](github.md#merge-queue) needs `strict` off.
 
+## GitHub administration through the browser
+
+The master owns three pieces of GitHub administration for the managed repository: control-plane App permission updates, acceptance of the installation permission request those updates raise, and branch-protection reconciliation. Routine cases go through the API — `master protection --apply`, and the `gh api` reads and subresource writes its harness allows. GitHub offers no API for App manifest confirmation, permission-request acceptance, or a sudo prompt, so for those the master runs `master browser FLOW`, which drives the operator's own authenticated browser profile headless through `agent-browser --profile PROFILE` on the master's behalf, and never stops to ask the operator to click. The session never runs `agent-browser` itself; the harness denies it.
+
+```sh
+node "$GRAPHYARD_CLI" master browser app-permissions
+node "$GRAPHYARD_CLI" master browser installation-accept
+node "$GRAPHYARD_CLI" master browser protection
+node "$GRAPHYARD_CLI" master browser protection --dry-run
+```
+
+| Flow | Page | What it does | Verified afterwards by |
+| --- | --- | --- | --- |
+| `app-permissions` | `github.com/settings/apps/SLUG/permissions` | Raises every control-plane permission below what Graphyard needs (Metadata read, Contents write, Pull requests write, Issues read, Checks write, Administration read) and saves | `gh api apps/SLUG` reports each permission at or above the requirement |
+| `installation-accept` | `github.com/settings/installations/ID/permissions/update` (or the organization's equivalent) | Accepts the pending permission request the update raised for this repository's installation | `gh api user/installations` shows the installation granting them |
+| `protection` | `github.com/OWNER/REPO/settings/branches` → the classic rule for the base branch | Sets `strict` off, administrator enforcement on, and the required approval count, stale-review dismissal, and last-push approval the open review policies need, then saves | the protection plan re-read through `gh api …/protection` is consistent |
+
+Every flow:
+
+1. reads the current state through the API and refuses before opening a page when the change is impossible from a form (no classic rule, no App-bound check, a CODEOWNERS requirement, an App that does not yet request what the installation should accept);
+2. records each page action under `.graphyard/master-actions/<time>-<flow>-<id>/` — `record.json` lists every step with its arguments and result, and a numbered PNG screenshot follows every navigation and mutation;
+3. verifies the outcome through the API, never by trusting the page;
+4. appends an entry to the audit ledger `.graphyard/master-actions/ledger.json` (mode 0600, append-only): who (the signed-in browser login, the profile, the `gh` identity, the OS user, the host, and the coordinator principal), what (flow and target), when, before and after, the outcome (`applied`, `unchanged`, or `refused`) and whether verification passed, and the record directory. `master status` shows the last five entries under `administration`.
+
+A browser-driven change is therefore as attributable as a CLI one, and a refusal is diagnosable from the record rather than from memory.
+
+### The only operator interactions left
+
+- **Device approval.** When GitHub answers with its *Confirm access* page, the flow clicks *Use GitHub Mobile*, reads the two-digit pairing code, writes it to `.graphyard/master-actions/sudo.json`, and reports it in the session output and in `master status` under `administration.sudo` with the instruction to approve the prompt on your device and choose that code. It then waits with a bounded, retrying poll — three seconds between reads, three minutes in total, and an expired code re-issued at most three times — and continues where it was once the approval lands. A prompt nobody approves fails with the code and the rerun command rather than hanging; a prompt without a GitHub Mobile option is refused rather than guessed at with a password or authenticator.
+- **Human-only decisions.** The guides mark these human-only: choosing which review provider an item uses, releasing backlog work, revising requirements, clearing blockers, satisfying a manual proof, authorizing rework, and approving a merge when automatic merging is disabled stay with a person. The flows change nothing outside the three targets above.
+
+### What the master must never do
+
+The browser profile is the operator's identity. The master never stores, exports, or copies its cookies or saved state, never uses `agent-browser`'s auth vault, restore, or state files, and never drives the profile outside the three flows: the harness denies every direct `agent-browser` command, so the only way the session reaches the profile is `master browser`, and the only way to inspect what a flow saw is its record directory. It also never adds a repository to an installation or replaces protection through the API; installation writes happen only through `master browser installation-accept`, and protection writes only through `master protection --apply`, `master browser protection`, or a subresource `PATCH`. It never uses an administrative merge bypass, never edits a candidate or pushes code, never posts a review verdict, never mints an installation token, and never reads a worker, reviewer, or coordinator credential — those rules are denied in the harness and stated in the generated instructions.
+
 ## Harness permissions
 
-A master running inside a harness with its own command classifier stops on its own routine commands until someone approves them. `master start claude` writes project-scoped rules to `.claude/settings.local.json` (git-ignored, machine-specific) before the session starts; `master harness claude` previews them and `master harness claude --apply` writes them. Every rule prints the reason it exists.
+A master running inside a harness with its own command classifier stops on its own routine commands until someone approves them. In Claude Code's auto mode the classifier goes further: it refuses branch-protection reads and writes as CI-bypass reconnaissance, installation and App permission changes as permission grants, launching a second agent as a permission grant, and browser control as self-modification — so a master without generated rules cannot perform the administration it owns. `master start claude` writes project-scoped rules to `.claude/settings.local.json` (git-ignored, machine-specific) before the session starts; `master harness claude` previews them and `master harness claude --apply` writes them. Every rule prints the reason it exists.
 
-Allowed: the master's own CLI subcommands at their absolute path, `herdr`, read-only `gh pr` commands, `jq`, the audited-thread wrapper `scripts/resolve-thread.mjs`, and writes to `.graphyard/profiles/`.
+Allowed: the master's own CLI subcommands at their absolute path, with the reviewer launcher (`master review`) and the browser flows (`master browser`, which invoke `agent-browser` themselves) listed on their own; `herdr`; read-only `gh pr` commands; `gh api user`; `gh api` reads of the managed base branch's protection and `--method PATCH` writes to its subresources; `gh api user/installations` reads; `gh api apps/*` reads; `jq`; the audited-thread wrapper `scripts/resolve-thread.mjs`; reads of `.graphyard/master-actions/`; and writes to `.graphyard/profiles/`.
 
-Denied: `gh pr merge`, raw `gh api` calls, `git push`, and reads of the coordinator credential home, `.graphyard/connection.json`, `*.pem`, and `*.token`.
+Denied: `gh pr merge`, `gh pr review`, any `gh api` call that merges, posts a review, mints an access token, uses GraphQL, or uses `PUT`, `POST`, or `DELETE` wherever the method flag sits (replacing whole branch protection, adding a repository to an installation, deleting protection or an installation); every direct `agent-browser` command, so the operator's profile, cookies, state, and auth vault are reachable only through the recorded flows; `git push`; and reads of the coordinator credential home, `.graphyard/connection.json`, `*.pem`, and `*.token`.
 
 Existing entries are never removed and regeneration is idempotent. `master harness codex` prints the `trust_level = "trusted"` block for `$CODEX_HOME/config.toml` instead of editing that shared user file.
 
@@ -292,3 +330,20 @@ For a dead worker or provider change:
 5. create a fresh workspace and preserve the old attempt.
 
 The master does not clear blockers, revise requirements, or satisfy human gates on its own. See [operations](operations.md) for recovery commands, including [restarting the durable loop](operations.md#master-coordination-loop).
+
+## Master commands
+
+| Command | Purpose |
+| --- | --- |
+| `master init --token-stdin [--browser-profile PROFILE]` | Install the operating mode; name the operator's browser profile |
+| `master start KIND` | Launch the visible master session with its harness rules |
+| `master status` | Work truth, session health, reviews, queue, and `administration` (recent browser actions, pending sudo code) |
+| `master dispatch GY-N PROFILE` | Invite a worker to claim ready work |
+| `master review GY-N [PROFILE]` | Launch the independent reviewer on the exact candidate |
+| `master protection [--apply]` | Reconcile branch protection through the API |
+| `master browser app-permissions` | Raise the control-plane App's permissions through the browser |
+| `master browser installation-accept` | Accept the installation's pending permission request through the browser |
+| `master browser protection [--dry-run]` | Reconcile branch protection through the browser |
+| `master harness [KIND] [--apply]` | Generate the master's own harness permissions |
+| `master merge GY-N\|--all` | Guarded merge of authorized candidates |
+| `master run [--once]` | The durable coordination loop |

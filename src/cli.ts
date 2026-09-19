@@ -22,6 +22,7 @@ import { daemonEffects, daemonSummary, readDaemonState, runDaemon } from './mast
 import { bindReviewer, launchReview, readReviewLedger, reconcileReviews, reviewerCredentialDirectory, saveReviewerProfile, summarizeReviews, verifyReviewerInstallation } from './reviewer.js';
 import { applyProtection, protectionPlan, readProtection } from './protection.js';
 import { writeHarnessPermissions } from './harness.js';
+import { browserFlows, readAdministrationLedger, readSudoState, runBrowserFlow, summarizeAdministration, type BrowserFlow } from './master-browser.js';
 import { acknowledgeContainment, containmentCredentials, establishContainment, isConfirmedCoordinationRefusal, revalidateContainment, settleContainment } from './quarantine.js';
 
 try { process.loadEnvFile(); } catch (error: any) { if (error.code !== 'ENOENT') throw error; }
@@ -130,8 +131,10 @@ async function main() {
 Environment: GRAPHYARD_URL, GRAPHYARD_TOKEN (individual role-scoped credential)
   init [--scan] [--apply] [--url URL] [--herdr] [--token-stdin]
                                 Scan and propose the delivery workflow (--scan), or apply the reviewed proposal (--apply)
-  master init --token-stdin [--herdr-workspace ID]
-                                Install the recommended master-agent operating mode
+  master init --token-stdin [--herdr-workspace ID] [--browser-profile PROFILE]
+                                Install the recommended master-agent operating mode;
+                                PROFILE is the operator's Chrome profile the master
+                                administers GitHub through
   master start AGENT_KIND       Launch the dedicated visible Herdr master session
   master worker add FILE        Add an existing or launchable Herdr worker profile
   master reviewer setup [--name NAME]     Register the separate reviewer GitHub App in a
@@ -141,6 +144,10 @@ Environment: GRAPHYARD_URL, GRAPHYARD_TOKEN (individual role-scoped credential)
   master reviewer add FILE      Add a reviewer launch profile
   master review GY-N [PROFILE]  Launch the bound reviewer on the exact current candidate
   master protection [--apply]   Reconcile branch protection with every open review policy
+  master browser FLOW [--dry-run]
+                                Perform GitHub administration through the operator's browser
+                                profile: app-permissions, installation-accept, or protection.
+                                Recorded with screenshots, verified via the API, audited
   master harness [KIND] [--apply]  Generate the master's own harness permissions
   master status                 Join Graphyard work truth with Herdr session health
   master dispatch GY-N PROFILE  Invite a worker to claim ready work in a visible tab
@@ -187,6 +194,7 @@ Environment: GRAPHYARD_URL, GRAPHYARD_TOKEN (individual role-scoped credential)
   scenario file.json           Publish a scenario version (operator)
   ready GY-N REASON            Release backlog item with an audit reason (operator)
   unblock GY-N REASON           Clear a blocker with an audit reason (operator)
+  resolve GY-N TRIGGER REASON   Resolve a standing escalation with an audit reason (operator)
   rework GY-N --previous-worker-stopped REASON  Authorize reassignment (operator)
   recover-containment GY-N --previous-worker-stopped REASON
                                 Release delivered work's stopped-worker quarantine (operator)
@@ -223,13 +231,15 @@ Never share an operator or producer credential with an implementation agent.`); 
     const root = execFileSync('git', ['rev-parse', '--show-toplevel'], { encoding: 'utf8' }).trim();
     if (id === 'guide') return console.log(await readFile(fileURLToPath(new URL('../docs/master-agent.md', import.meta.url)), 'utf8'));
     if (id === 'init') {
-      const { values } = parseArgs({ args, options: { url: { type: 'string' }, 'token-stdin': { type: 'boolean' }, 'no-auto-merge': { type: 'boolean' }, 'merge-method': { type: 'string' }, 'cli-path': { type: 'string' }, 'host-id': { type: 'string' }, 'herdr-workspace': { type: 'string' }, interval: { type: 'string' }, 'proof-workflow': { type: 'string' }, 'deployment-url': { type: 'string' }, 'deployment-sha-field': { type: 'string' }, 'smoke-workflow': { type: 'string' } }, allowPositionals: false });
+      const { values } = parseArgs({ args, options: { url: { type: 'string' }, 'token-stdin': { type: 'boolean' }, 'no-auto-merge': { type: 'boolean' }, 'merge-method': { type: 'string' }, 'cli-path': { type: 'string' }, 'host-id': { type: 'string' }, 'herdr-workspace': { type: 'string' }, interval: { type: 'string' }, 'proof-workflow': { type: 'string' }, 'deployment-url': { type: 'string' }, 'deployment-sha-field': { type: 'string' }, 'smoke-workflow': { type: 'string' }, 'browser-profile': { type: 'string' }, 'browser-executable': { type: 'string' } }, allowPositionals: false });
       if (!values['token-stdin']) throw new Error('Use master init --token-stdin so the coordinator credential is not stored in shell history');
       let input = ''; for await (const chunk of process.stdin) { input += chunk; if (input.length > 10_000) throw new Error('Token input is too large'); }
       const masterToken = input.trim(); if (!masterToken) throw new Error('Master coordinator credential is required; setup made no changes');
       const method = values['merge-method']; if (method && !['merge', 'squash', 'rebase'].includes(method)) throw new Error('Merge method must be merge, squash, or rebase');
       const run = { ...(values.interval ? { intervalSeconds: Number(values.interval) } : {}), ...(values['proof-workflow'] ? { proofWorkflow: values['proof-workflow'] } : {}), ...(values['deployment-url'] ? { deploymentUrl: values['deployment-url'] } : {}), ...(values['deployment-sha-field'] ? { deploymentShaField: values['deployment-sha-field'] } : {}), ...(values['smoke-workflow'] ? { smokeWorkflow: values['smoke-workflow'] } : {}) };
-      return print(await setupMaster(root, { url: values.url ?? base, token: masterToken, cliPath: resolve(values['cli-path'] ?? await activeCliPath()), hostId: values['host-id'] ?? individualHostId(), herdrWorkspace: values['herdr-workspace'], ...(values['no-auto-merge'] ? { autoMerge: false } : {}), ...(method ? { mergeMethod: method as 'merge' | 'squash' | 'rebase' } : {}), ...(Object.keys(run).length ? { run } : {}) }));
+      if (values['browser-executable'] && !values['browser-profile']) throw new Error('--browser-executable requires --browser-profile');
+      const browser = values['browser-profile'] ? { profile: values['browser-profile'], ...(values['browser-executable'] ? { executable: values['browser-executable'] } : {}) } : undefined;
+      return print(await setupMaster(root, { url: values.url ?? base, token: masterToken, cliPath: resolve(values['cli-path'] ?? await activeCliPath()), hostId: values['host-id'] ?? individualHostId(), herdrWorkspace: values['herdr-workspace'], ...(values['no-auto-merge'] ? { autoMerge: false } : {}), ...(method ? { mergeMethod: method as 'merge' | 'squash' | 'rebase' } : {}), ...(Object.keys(run).length ? { run } : {}), ...(browser ? { browser } : {}) }));
     }
     const master = await loadMasterConfig(root);
     const masterToken = await readCredentialFile(master.credentialFile);
@@ -286,6 +296,15 @@ Never share an operator or producer credential with an implementation agent.`); 
       if (values.apply) return print(await applyProtection(master, snapshot.work));
       return print({ ...protectionPlan(readProtection(master), master, snapshot.work), apply: false, next: 'Rerun with --apply to reconcile branch protection with these policies' });
     }
+    if (id === 'browser') {
+      const { values, positionals } = parseArgs({ args, options: { 'dry-run': { type: 'boolean' } }, allowPositionals: true });
+      const flow = positionals[0] as BrowserFlow | undefined;
+      if (!flow || !browserFlows.includes(flow)) throw new Error(`Use master browser ${browserFlows.join('|')} [--dry-run]`);
+      const snapshot = await masterApi('work-snapshot');
+      const result = await runBrowserFlow(root, master, flow, { work: snapshot.work, coordinator: coordinator.actor.id, dryRun: !!values['dry-run'] });
+      if (result.outcome === 'refused') process.exitCode = 1;
+      return print(result);
+    }
     if (id === 'harness') {
       const { values, positionals } = parseArgs({ args, options: { apply: { type: 'boolean' } }, allowPositionals: true });
       const kind = workerProfileSchema.shape.kind.safeParse(positionals[0] ?? 'claude');
@@ -302,9 +321,12 @@ Never share an operator or producer credential with an implementation agent.`); 
       const containment = assessContainment(snapshot.work, { hostId: master.hostId, observedAt: snapshot.now, clockOffset });
       const daemonState = await readDaemonState(root, master).catch(error => ({ error: error instanceof Error ? error.message : 'Master daemon state is unreadable' }));
       const daemon = 'error' in daemonState ? { running: false, error: daemonState.error } : daemonSummary(daemonState, Date.now(), master.run.intervalSeconds * 1000);
+      // Browser administration is reported beside the work it unblocks: a pending sudo code is
+      // the one thing the operator must act on, and the recent ledger entries say who changed what.
+      const administration = { browser: master.browser ? { profile: master.browser.profile } : null, ...summarizeAdministration((await readAdministrationLedger(root)).entries, await readSudoState(root)) };
       return print({ ...buildMasterStatus(snapshot, master.workers, runtime.agents, credentials, containment, reviews, master.baseBranch), autoMerge: master.autoMerge, mergeApproval: master.autoMerge ? 'routine merges permitted after gates pass' : 'explicit operator approval required for each merge',
         reviewer: master.reviewer ? { identity: `${master.reviewer.slug}[bot]`, appId: master.reviewer.appId, profiles: master.reviewers.map(profile => profile.name) } : null,
-        daemon, runtime: { herdr: { available: runtime.available, reason: runtime.reason }, reviews: reviewRuntime } });
+        administration, daemon, runtime: { herdr: { available: runtime.available, reason: runtime.reason }, reviews: reviewRuntime } });
     }
     if (id === 'settle-containment') {
       if (!args[0] || !args.slice(1).join(' ').trim()) throw new Error('Use master settle-containment GY-N REASON');
@@ -356,7 +378,7 @@ Never share an operator or producer credential with an implementation agent.`); 
       const result = await runDaemon(master, state, effects, { once: values.once, intervalMs: intervalSeconds * 1000, identity: { pid: process.pid, host: master.hostId } });
       return print({ repository: master.repository, coordinator: coordinator.actor.id, intervalSeconds, cycles: result.cycles.length, stopped: result.stopped ? 'signal' : 'completed', last: result.cycles.at(-1) ?? null });
     }
-    throw new Error('Use master init, start, worker add, reviewer, review, protection, harness, status, dispatch, settle-containment, run, merge, or guide');
+    throw new Error('Use master init, start, worker add, reviewer, review, protection, browser, harness, status, dispatch, settle-containment, run, merge, or guide');
   }
   if (command === 'runner') {
     if (id === 'inspect' && args.length <= 1) return print(await inspectRunnerRepository(resolve(args[0] ?? '.')));
@@ -706,6 +728,10 @@ Never share an operator or producer credential with an implementation agent.`); 
   if (command === 'ready') return print(await mutate(command, args.length ? { expectedRevision: work.revision, reason: args.join(' ') } : {}));
   if (command === 'claim') return print(await mutate(command, {}));
   if (command === 'unblock') return print(await mutate('unblock', { expectedRevision: work.revision, reason: args.join(' ') }));
+  if (command === 'resolve') {
+    if (!args[0] || !args.slice(1).length) throw new Error('Name the standing escalation trigger and an audit reason');
+    return print(await mutate('resolve', { trigger: args[0], expectedRevision: work.revision, reason: args.slice(1).join(' ') }));
+  }
   if (command === 'rework') {
     if (args[0] !== '--previous-worker-stopped') throw new Error('Stop the previous worker first, then pass --previous-worker-stopped and an audit reason');
     return print(await mutate('rework', { reason: args.slice(1).join(' '), previousWorkerStopped: true }));
