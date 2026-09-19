@@ -80,7 +80,7 @@ The candidate was rebased on `main` after GY-55 (submit-time regression guard) a
 
 Read with no ambiguous instance: the `sync` command text in `coordination.md` and `protocol.md` (*worker* names the role), the `scopeFiles` paragraph, `validation.md`'s capacity sentence, and the `rollback` registration sentence in `validation.md`. The safety statements these passages add — a worker cannot widen `plannedFiles`; a refused submission writes nothing; an `unknown` rollback outcome blocks successors until resolved with evidence — are preserved word for word apart from the role terms above. `recovery.md` was added to the in-app docs navigation.
 
-A later merge of `main` brought GY-3 (trusted CI inventory provenance), which extends the *Trusted test producers* section of `github.md`. Read with no ambiguous instance: *producer*, *publisher*, *reporter*, and *harness* there name the proof-producer identity and the pieces of the bundled acceptance workflow, and *the exercise job receives no producer token* restates an evidence-trust boundary without weakening it. No rewrite was needed.
+A later merge of `main` brought GY-3 (trusted CI inventory provenance), which extends the *Trusted test producers* section of `github.md`. Read with no ambiguous instance: *producer*, *publisher*, *reporter*, and *harness* there name the proof-producer identity and the pieces of the bundled acceptance workflow, and *the exercise job receives no producer token* restates an evidence-trust boundary without weakening it. No rewrite was needed. GY-38 (dashboard durations) followed and added a formatter paragraph to `architecture.md`; it names no role, session, or authority, so it was read with no ambiguous instance.
 
 ## Concision samples (before / after)
 
