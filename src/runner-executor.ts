@@ -200,6 +200,80 @@ export function authorityWatch(options: { staleAfterMs?: number; now?: () => num
   };
 }
 
+/** What the runner identifies its attempt by on every command it sends. */
+export type AttemptCommand = { requestId: string; attemptId: string; epoch: number };
+/**
+ * The request document `validation/ack` returns, narrowed to what confirms *this* attempt
+ * as acknowledged: a 2xx alone does not, since a proxy can answer one for a request the
+ * control plane never saw.
+ */
+const acknowledgementSchema = z.object({ id: z.uuid(), state: z.string().min(1).max(50),
+  attempts: z.array(z.object({ id: z.uuid(), epoch: z.number().int().positive(), acknowledgedAt: z.iso.datetime().optional() }).loose()).min(1) }).loose();
+/** The retry bound for the acknowledgement, documented in docs/runner-setup.md. */
+export const acknowledgementRetry = {
+  /** Sends in total, the first included. */
+  attempts: 5,
+  /** The pause before the second send; each later pause doubles it. */
+  retryMs: 1_000,
+  /** No send starts later than this after the first one: the lease an acknowledgement
+   * grants is 60 seconds, so a replay after it can only be refused as expired. */
+  windowMs: 60_000,
+};
+/**
+ * Acknowledge one attempt, retrying an ambiguous answer without ever sending a second
+ * acknowledgement.
+ *
+ * The ACK is the transition that makes the attempt hold its runner, environment and
+ * external reservations. When the control plane commits it but the response is lost — a
+ * timeout, a connection dropped mid-reply, a gateway's 408/429/5xx — the runner cannot
+ * tell whether the attempt is `running` on the server or still `dispatched`. Giving up on
+ * that first ambiguous answer leaves a running attempt nobody executes or heartbeats, and
+ * it expires holding its reservations. So every send carries the same request key and an
+ * identical body, which the control plane's idempotency receipt turns into one
+ * acknowledgement however many times it arrives, and the replayed receipt is what confirms
+ * the earlier commit. A refusal the server confirmed is a decision and is never retried;
+ * an answer that does not show this attempt as acknowledged is not success, whatever its
+ * status was. Until this resolves, no heartbeat is sent and the attestor is not told to
+ * proceed.
+ */
+export async function acknowledgeAttempt(
+  api: (path: string, data: unknown, requestId: string) => Promise<unknown>,
+  command: AttemptCommand,
+  options: { attempts?: number; retryMs?: number; windowMs?: number; now?: () => number; sleep?: (ms: number) => Promise<void> } = {},
+) {
+  const attempts = options.attempts ?? acknowledgementRetry.attempts, retryMs = options.retryMs ?? acknowledgementRetry.retryMs, windowMs = options.windowMs ?? acknowledgementRetry.windowMs;
+  const now = options.now ?? Date.now, sleep = options.sleep ?? ((ms: number) => new Promise<void>(r => setTimeout(r, ms)));
+  // Fixed once: the key is the attempt's, and the body is never rebuilt between sends.
+  const key = `${command.attemptId}-ack`;
+  const body = Object.freeze({ requestId: command.requestId, attemptId: command.attemptId, epoch: command.epoch });
+  const started = now();
+  let sends = 0, ambiguous: unknown;
+  while (sends < attempts) {
+    let response: unknown;
+    sends++;
+    try { response = await api('validation/ack', body, key); }
+    catch (error) {
+      // A refusal the server confirmed — expired, superseded, the wrong principal — is a
+      // decision, not a lost packet, and a second send cannot change it.
+      if ((error as { confirmedRefusal?: boolean } | null)?.confirmedRefusal) throw error;
+      ambiguous = error;
+      const pause = retryMs * 2 ** (sends - 1);
+      if (sends === attempts || now() + pause - started > windowMs) break;
+      await sleep(pause);
+      continue;
+    }
+    // A replayed receipt answers with the request as it was at the commit, so the same
+    // check confirms a first acknowledgement and a retried one alike.
+    const parsed = acknowledgementSchema.safeParse(response);
+    const current = parsed.success ? parsed.data.attempts.at(-1) : undefined;
+    if (!parsed.success || parsed.data.id !== command.requestId || parsed.data.state !== 'running' || !current || current.id !== command.attemptId || current.epoch !== command.epoch || !current.acknowledgedAt)
+      throw new Error('Graphyard answered the acknowledgement without confirming this attempt as acknowledged and running; no heartbeat was sent and no container was started');
+    return { acknowledgedAt: current.acknowledgedAt, sends };
+  }
+  const reason = ambiguous instanceof Error ? ambiguous.message : String(ambiguous);
+  throw new Error(`The acknowledgement of attempt ${command.attemptId} stayed ambiguous after ${sends} send${sends === 1 ? '' : 's'} within its retry bound; no heartbeat was sent and no container was started: ${reason}`);
+}
+
 /** Both container names are derived from the attempt alone, so a collector that never
  * saw the plan can name exactly the containers this attempt was allowed to start. */
 export const containerNames = (attemptId: string) => (['enumerate', 'execute'] as Phase[]).map(phase => `graphyard-${phase}-${attemptId}`);

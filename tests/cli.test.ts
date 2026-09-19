@@ -779,7 +779,8 @@ test('the runner holds authority while the host attestor executes and signs the 
       return;
     }
     posts.push(String(req.url).replace('/api/validation/', ''));
-    if (req.url === '/api/validation/ack') { attempt = { state: 'running', acknowledged: true }; res.end('{}'); return; }
+    // The ACK answers with the request document; the runner confirms its own attempt in it.
+    if (req.url === '/api/validation/ack') { attempt = { state: 'running', acknowledged: true }; res.end(JSON.stringify({ id: requestId, state: 'running', attempts: [{ id: attemptId, epoch: 1, acknowledgedAt: new Date().toISOString() }] })); return; }
     if (req.url !== '/api/validation/dispatch') { res.end('{}'); return; }
     res.end(JSON.stringify({
       request: { id: requestId, deadline },
@@ -876,6 +877,94 @@ test('the runner holds authority while the host attestor executes and signs the 
     await chmod(attestorToken, 0o600);
     await chmod(key, 0o644);
     await assert.rejects(supervise(attestorEnv), /private key must be a private regular file/);
+  } finally { await new Promise<void>(r => http.close(() => r())); await rm(cwd, { recursive: true, force: true }); }
+});
+
+test('the runner retries a lost acknowledgement response idempotently and starts nothing before the replay confirms it', async () => {
+  const cwd = await mkdtemp(join(tmpdir(), 'graphyard-ack-retry-'));
+  const requestId = randomUUID(), attemptId = randomUUID();
+  const { publicKey, privateKey } = generateKeyPairSync('ed25519');
+  const attestationPublicKey = publicKey.export({ type: 'spki', format: 'pem' }).toString();
+  const deadline = new Date(Date.now() + 600_000).toISOString();
+  let bundleDigest = '';
+  // Everything the control plane and the attestor see, in the order it happened: the
+  // runner's commands, and the attestor's own authority reads with the state they saw.
+  const events: string[] = [];
+  const acks: { key: string | undefined; body: string }[] = [];
+  const held = { id: requestId, state: 'dispatched', attempts: [{ id: attemptId, epoch: 1 } as Record<string, unknown>] };
+  const http = createServer((req, res) => {
+    res.setHeader('Content-Type', 'application/json');
+    if (req.url === '/api/status') { res.end(JSON.stringify({ actor: { id: 'preview-runner', role: 'worker' } })); return; }
+    if (req.url === `/api/validation/attempt/${requestId}`) {
+      events.push(`authority:${held.state}`);
+      res.end(JSON.stringify({ grant: { requestId, attemptId, epoch: 1, runner: { id: 'preview-runner', revision: 1 },
+        executionHost: 'unix:///var/run/docker.sock', attestationPublicKey, executionNetwork: 'gy-isolated',
+        bundleDigest, runnerImageDigest: `sha256:${'b'.repeat(64)}`, targetUrl: 'https://preview.example.test/', deadline, testAccountDigest: null },
+        state: held.state, acknowledged: !!held.attempts[0].acknowledgedAt, expiresAt: new Date(Date.now() + 60_000).toISOString(), now: new Date().toISOString() }));
+      return;
+    }
+    let body = '';
+    req.setEncoding('utf8'); req.on('data', chunk => { body += chunk; });
+    req.on('end', () => {
+      const command = String(req.url).replace('/api/validation/', '');
+      if (command === 'ack') {
+        acks.push({ key: req.headers['idempotency-key'] as string | undefined, body });
+        // The acknowledgement transaction commits either way: the attempt is `running` on
+        // the server from the first send on.
+        held.state = 'running'; held.attempts[0].acknowledgedAt ??= new Date().toISOString();
+        if (acks.length === 1) {
+          // ...but the first response never arrives: the connection drops after the
+          // commit, so the runner cannot tell whether it was acknowledged.
+          events.push('ack:response-lost'); req.socket.destroy(); return;
+        }
+        // The idempotency receipt replays the committed request document.
+        events.push('ack:replayed'); res.end(JSON.stringify(held)); return;
+      }
+      events.push(command);
+      if (command !== 'dispatch') { res.end('{}'); return; }
+      res.end(JSON.stringify({
+        request: { id: requestId, deadline }, attempt: { id: attemptId, epoch: 1 },
+        bundle: { digest: bundleDigest, runnerImageDigest: `sha256:${'b'.repeat(64)}` },
+        environment: { instance: 'preview-7f3a', url: 'https://preview.example.test/' },
+        build: { artifacts: [{ service: 'api', digest: `sha256:${'c'.repeat(64)}` }] },
+        executionAuthority: { host: 'unix:///var/run/docker.sock', network: 'gy-isolated', attestationPublicKey, testAccountDigest: null },
+      }));
+    });
+  });
+  await new Promise<void>(r => http.listen(0, '127.0.0.1', r));
+  const fakeBin = join(cwd, 'fake-bin');
+  const env = { ...process.env, PATH: `${fakeBin}:${process.env.PATH}`, GRAPHYARD_TOKEN: 'test-only', GRAPHYARD_URL: `http://127.0.0.1:${(http.address() as any).port}` };
+  try {
+    await mkdir(fakeBin);
+    await writeFile(join(fakeBin, 'docker'), '#!/bin/sh\nexit 1\n'); await chmod(join(fakeBin, 'docker'), 0o755);
+    const oracle = join(cwd, 'oracle'), output = join(cwd, 'out'), key = join(cwd, 'attestor.key'), attestorToken = join(cwd, 'attestor.token');
+    await mkdir(oracle, { mode: 0o755 }); await mkdir(output, { mode: 0o700 });
+    await writeFile(join(oracle, 'suite.spec.ts'), 'approved assertion');
+    await writeFile(key, privateKey.export({ type: 'pkcs8', format: 'pem' }).toString(), { mode: 0o600 });
+    await writeFile(attestorToken, 'attestor-read-only\n', { mode: 0o600 });
+    bundleDigest = JSON.parse((await exec(process.execPath, [launcher, 'runner', 'bundle-digest', oracle], { cwd, env })).stdout).digest;
+    const attestorEnv = { ...env, GRAPHYARD_ATTESTOR_KEY: key, GRAPHYARD_ATTESTOR_URL: env.GRAPHYARD_URL, GRAPHYARD_ATTESTOR_TOKEN_FILE: attestorToken };
+    const containerUid = process.getuid!() === 10001 ? 10002 : 10001;
+    const plan = join(cwd, 'runner.json');
+    await writeFile(plan, JSON.stringify({ registration: { id: 'preview-runner', revision: 1 }, imageRepository: 'example/graphyard-runner',
+      oraclePath: oracle, outputPath: output, timeoutMs: 60_000, runAsUser: `${containerUid}:${process.getgid!()}`,
+      supervisor: { command: process.execPath, args: [launcher, 'runner', 'supervise'] } }));
+    const attempted = JSON.parse((await exec(process.execPath, [launcher, 'runner', 'attempt', plan], { cwd, env: attestorEnv, maxBuffer: 8 << 20 })).stdout);
+
+    // The lost response was retried as the same acknowledgement: one request key, one
+    // body, so the control plane's receipt made two sends into one commit.
+    assert.equal(acks.length, 2);
+    assert.equal(acks[0].key, `${attemptId}-ack`);
+    assert.equal(acks[1].key, acks[0].key, 'the retry carries a stable request key');
+    assert.equal(acks[1].body, acks[0].body, 'the retry carries an identical body');
+    assert.deepEqual(JSON.parse(acks[0].body), { requestId, attemptId, epoch: 1 });
+    // The replayed, already-acknowledged answer is success: the attempt went on to the
+    // attestor, which read `running` for itself and produced a signed record.
+    assert.deepEqual(events, ['dispatch', 'authority:dispatched', 'ack:response-lost', 'ack:replayed', 'authority:running'],
+      'no heartbeat and no execution precede the confirmed acknowledgement');
+    assert.equal(attempted.dispatched, true);
+    assert.equal(attempted.attestation.payload.attemptId, attemptId);
+    assert.ok(verify(null, Buffer.from(JSON.stringify(attempted.attestation.payload)), attestationPublicKey, Buffer.from(attempted.attestation.signature, 'base64')));
   } finally { await new Promise<void>(r => http.close(() => r())); await rm(cwd, { recursive: true, force: true }); }
 });
 
