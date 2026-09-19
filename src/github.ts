@@ -8,10 +8,44 @@ import { CHECK_NAME, demand, nativeReviewRequired, parseReviewerApps, reviewerPr
 import { inPlannedScope } from './regression-guard.js';
 export { CHECK_NAME };
 import { queuePlacement, queueRef, type QueuePlacement, type QueueSpeculation } from './merge-queue.js';
+import { blockedFeatures, controlPlanePermissions, describeShortfall, permissionShortfalls, requiredPermissions, type PermissionFeature, type PermissionLevel, type PermissionShortfall } from './github-permissions.js';
 
 /** Out-of-scope paths compared against the base tip per observation; the rest are refused as uncompared. */
 export const scopeLookupBudget = 200;
 export interface GitHubConfig { repository: string; base: string; appId: number; installationId: number; privateKey: string; reviewerApps?: ReviewerApp[] }
+/**
+ * A 401 or a non-rate-limit 403. Retrying it does not help: the credentials or the installed
+ * permissions have to change. It is classified apart from rate limiting so it never pauses the
+ * whole client, and the job that hit it is held after a bounded number of attempts.
+ */
+export class GitHubPermissionRefusal extends Refusal {
+  constructor(message: string, public kind: 'authentication' | 'permission', status = 502) { super(message, status); }
+}
+/** What the installed App can do, compared with what Graphyard declares it needs. */
+export interface AppPermissionReport {
+  appId: number; installationId: number; app: string; account: string | null; installationUrl: string;
+  observedAt: string; verifiedAt: string | null; error: string | null; suspended: boolean;
+  required: Record<string, PermissionLevel>; granted: Record<string, string> | null;
+  missing: PermissionShortfall[]; blockedFeatures: PermissionFeature[]; attention: string[];
+}
+/**
+ * The installation a hold was decided against: identity, suspension and the granted levels of
+ * the last verified reading. A hold is released when a passing preflight reports a different
+ * fingerprint, never because the same installation was read again. Null until a reading exists.
+ */
+export function installationFingerprint(report: AppPermissionReport | null): string | null {
+  if (!report?.granted) return null;
+  const granted = Object.fromEntries(Object.entries(report.granted).sort(([a], [b]) => a.localeCompare(b)));
+  return JSON.stringify({ appId: report.appId, installationId: report.installationId, suspended: report.suspended, granted });
+}
+/** App-level endpoints authenticate with a short JWT signed by the App private key. */
+export function appJwt(appId: number, privateKey: string, now = Date.now()) {
+  const issued = Math.floor(now / 1000);
+  const encode = (x: unknown) => Buffer.from(JSON.stringify(x)).toString('base64url');
+  const unsigned = `${encode({ alg: 'RS256', typ: 'JWT' })}.${encode({ iat: issued - 60, exp: issued + 540, iss: String(appId) })}`;
+  return `${unsigned}.${createSign('RSA-SHA256').update(unsigned).sign(privateKey, 'base64url')}`;
+}
+export const installationSettingsUrl = (installationId: number) => `https://github.com/settings/installations/${installationId}`;
 export class GitHub {
   private token = '';
   private expires = 0;
@@ -20,26 +54,107 @@ export class GitHub {
   private rateFailures = 0;
   private authentication?: Promise<void>;
   private cache = new Map<string, { etag: string; value: any }>();
+  private preflightState: AppPermissionReport | null = null;
+  private preflightDueAt = 0;
+  // A rejected App credential is retried once a minute, not once per queued job: every request
+  // needs the token, so this is the whole bound on credential-refusal traffic.
+  private authenticationRefusal: { until: number; error: GitHubPermissionRefusal } | null = null;
+  /** How often the installed permissions are re-read when nothing has gone wrong. */
+  preflightIntervalMs = 5 * 60_000;
   constructor(public config: GitHubConfig) {}
   private backoff(response: Response) {
-    if (response.status === 403 || response.status === 429) {
-      const retry = Number(response.headers.get('retry-after'));
-      const reset = Number(response.headers.get('x-ratelimit-reset')) * 1000;
-      this.blockedUntil = Math.max(this.blockedUntil, Date.now() + Math.min(3600_000, 60_000 * 2 ** Math.min(this.rateFailures++, 6)), Number.isFinite(retry) && retry > 0 ? Date.now() + retry * 1000 : 0,
-        response.headers.get('x-ratelimit-remaining') === '0' && Number.isFinite(reset) ? reset : 0);
+    const retry = Number(response.headers.get('retry-after'));
+    const reset = Number(response.headers.get('x-ratelimit-reset')) * 1000;
+    this.blockedUntil = Math.max(this.blockedUntil, Date.now() + Math.min(3600_000, 60_000 * 2 ** Math.min(this.rateFailures++, 6)), Number.isFinite(retry) && retry > 0 ? Date.now() + retry * 1000 : 0,
+      response.headers.get('x-ratelimit-remaining') === '0' && Number.isFinite(reset) ? reset : 0);
+  }
+  /**
+   * Turns a failed response into the right refusal. Only a rate limit pauses the client; an
+   * authentication or permission refusal is reported as such, and a permission refusal brings
+   * the next permission preflight forward so the operator sees what is actually missing.
+   */
+  private async refusal(response: Response, context: string): Promise<Refusal | null> {
+    if (response.ok) return null;
+    let text = '';
+    try { text = (await response.text()).slice(0, 2000); } catch { /* The status alone is classified. */ }
+    const rateLimited = response.status === 429 || response.status === 403 && (response.headers.get('x-ratelimit-remaining') === '0' || !!response.headers.get('retry-after') || /rate limit/i.test(text));
+    if (rateLimited) {
+      this.backoff(response);
+      return new Refusal(`GitHub ${context} failed (${response.status}): rate limited; requests paused until ${new Date(this.blockedUntil).toISOString()}`, 502);
     }
+    if (response.status === 401) return new GitHubPermissionRefusal(`GitHub ${context} failed (401): the App credentials were rejected; check GITHUB_APP_ID, GITHUB_INSTALLATION_ID and the private key`, 'authentication');
+    if (response.status === 403) {
+      this.preflightDueAt = 0;
+      return new GitHubPermissionRefusal(`GitHub ${context} failed (403): ${this.permissionHint()}`, 'permission');
+    }
+    return new Refusal(`GitHub ${context} failed (${response.status})`, 502);
+  }
+  private permissionHint() {
+    const report = this.preflightState;
+    if (report?.suspended) return `the App installation is suspended; restore it at ${report.installationUrl}`;
+    if (report?.missing.length) return describeShortfall(report.missing[0], report.app, report.installationUrl);
+    return `the installed App lacks a permission this request needs; compare its installation at ${report?.installationUrl ?? installationSettingsUrl(this.config.installationId)} with graphyard github-setup --update-permissions`;
+  }
+  private appHeaders() {
+    return { Authorization: `Bearer ${appJwt(this.config.appId, this.config.privateKey)}`, Accept: 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28' };
+  }
+  /**
+   * Reads the installation's granted permissions with the App JWT and compares them with the
+   * declared set. Never throws: an unreadable installation is itself reported, and the last
+   * verified reading is retained so a transient outage does not silently lift a hold.
+   */
+  async preflight(now = Date.now()): Promise<AppPermissionReport> {
+    const previous = this.preflightState;
+    const required = requiredPermissions(controlPlanePermissions);
+    const base = { appId: this.config.appId, installationId: this.config.installationId, app: previous?.app ?? String(this.config.appId), account: previous?.account ?? null,
+      installationUrl: previous?.installationUrl ?? installationSettingsUrl(this.config.installationId), observedAt: new Date(now).toISOString(), required };
+    try {
+      demand(now >= this.blockedUntil, `GitHub requests paused until ${new Date(this.blockedUntil).toISOString()} after a rate limit`, 502);
+      const response = await fetch(`https://api.github.com/app/installations/${this.config.installationId}`, { headers: this.appHeaders(), signal: AbortSignal.timeout(15_000) });
+      const refused = await this.refusal(response, 'GET /app/installations');
+      if (refused) throw refused;
+      const installation: any = await response.json();
+      demand(installation && typeof installation === 'object' && installation.permissions && typeof installation.permissions === 'object', 'GitHub returned an installation without permissions', 502);
+      const granted: Record<string, string> = Object.fromEntries(Object.entries(installation.permissions).filter(([, level]) => typeof level === 'string')) as Record<string, string>;
+      const missing = permissionShortfalls(granted, controlPlanePermissions);
+      const app = typeof installation.app_slug === 'string' && installation.app_slug ? installation.app_slug : String(this.config.appId);
+      const installationUrl = typeof installation.html_url === 'string' && /^https:\/\/github\.com\//.test(installation.html_url) ? installation.html_url : installationSettingsUrl(this.config.installationId);
+      const suspended = !!installation.suspended_at;
+      const attention = [...(suspended ? [`App ${app} installation is suspended; restore it at ${installationUrl}`] : []), ...missing.map(shortfall => describeShortfall(shortfall, app, installationUrl))];
+      this.preflightState = { ...base, app, account: typeof installation.account?.login === 'string' ? installation.account.login : null, installationUrl, verifiedAt: base.observedAt, error: null, suspended, granted, missing, blockedFeatures: blockedFeatures(missing), attention };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'GitHub App permissions could not be read';
+      const retained = previous ? { granted: previous.granted, missing: previous.missing, blockedFeatures: previous.blockedFeatures, suspended: previous.suspended, verifiedAt: previous.verifiedAt } : { granted: null, missing: [], blockedFeatures: [] as PermissionFeature[], suspended: false, verifiedAt: null };
+      const attention = [`GitHub App permissions could not be verified${retained.verifiedAt ? ` since ${retained.verifiedAt}` : ''}: ${message}`, ...(previous?.attention.filter(line => !line.startsWith('GitHub App permissions could not be verified')) ?? [])];
+      this.preflightState = { ...base, ...retained, error: message, attention };
+    }
+    this.preflightDueAt = now + this.preflightIntervalMs;
+    return this.preflightState;
+  }
+  /** Runs the periodic preflight when its interval elapsed or a permission refusal brought it forward. */
+  async preflightIfDue(now = Date.now()): Promise<AppPermissionReport | null> {
+    return now >= this.preflightDueAt ? this.preflight(now) : null;
+  }
+  permissionReport(): AppPermissionReport | null { return this.preflightState ? structuredClone(this.preflightState) : null; }
+  /**
+   * The reason a feature must wait, or null when the last preflight found the permissions it
+   * needs. Before any preflight nothing is held: a hold is only ever placed on a verified fact.
+   */
+  permissionShortfall(feature: PermissionFeature): string | null {
+    const report = this.preflightState;
+    if (!report) return null;
+    if (report.suspended) return `App ${report.app} installation is suspended; restore it at ${report.installationUrl}`;
+    const shortfall = report.missing.find(entry => entry.features.includes(feature));
+    return shortfall ? describeShortfall(shortfall, report.app, report.installationUrl) : null;
   }
   private async refreshToken() {
-      const now = Math.floor(Date.now() / 1000);
-      const encode = (x: unknown) => Buffer.from(JSON.stringify(x)).toString('base64url');
-      const unsigned = `${encode({ alg: 'RS256', typ: 'JWT' })}.${encode({ iat: now - 60, exp: now + 540, iss: String(this.config.appId) })}`;
-      const signer = createSign('RSA-SHA256').update(unsigned);
-      const jwt = `${unsigned}.${signer.sign(this.config.privateKey, 'base64url')}`;
       const response = await fetch(`https://api.github.com/app/installations/${this.config.installationId}/access_tokens`, {
-        method: 'POST', headers: { Authorization: `Bearer ${jwt}`, Accept: 'application/vnd.github+json' }, signal: AbortSignal.timeout(15_000),
+        method: 'POST', headers: this.appHeaders(), signal: AbortSignal.timeout(15_000),
       });
-      this.backoff(response);
-      demand(response.ok, `GitHub installation authentication failed (${response.status})`, 502);
+      const refused = await this.refusal(response, 'installation authentication');
+      if (refused instanceof GitHubPermissionRefusal) this.authenticationRefusal = { until: Date.now() + 60_000, error: refused };
+      if (refused) throw refused;
+      this.authenticationRefusal = null;
       const result: any = await response.json();
       demand(typeof result.token === 'string' && result.token.length > 0 && Number.isFinite(Date.parse(result.expires_at)) && Date.parse(result.expires_at) > Date.now(), 'Invalid GitHub installation token response', 502);
       this.token = result.token; this.expires = Date.parse(result.expires_at);
@@ -47,6 +162,7 @@ export class GitHub {
   }
   private async authenticate() {
     demand(Date.now() >= this.blockedUntil, `GitHub requests paused until ${new Date(this.blockedUntil).toISOString()} after a rate/access refusal`, 502);
+    if (this.authenticationRefusal && Date.now() < this.authenticationRefusal.until) throw this.authenticationRefusal.error;
     if (this.expires < Date.now() + 60_000) {
       this.authentication ??= this.refreshToken().finally(() => { this.authentication = undefined; });
       await this.authentication;
@@ -67,8 +183,8 @@ export class GitHub {
       body: body === undefined ? undefined : JSON.stringify(body), signal: AbortSignal.timeout(15_000),
     });
     if (response.status === 304 && cached) { this.rateFailures = 0; return structuredClone(cached.value); }
-    this.backoff(response);
-    demand(response.ok, `GitHub ${method} ${path} failed (${response.status})${this.blockedUntil > Date.now() ? `; requests paused until ${new Date(this.blockedUntil).toISOString()}` : ''}`, 502);
+    const refused = await this.refusal(response, `${method} ${path}`);
+    if (refused) throw refused;
     this.rateFailures = 0;
     const value = response.status === 204 ? null : await response.json();
     const etag = response.headers.get('etag');
@@ -208,9 +324,10 @@ export class GitHub {
   async serverTime(): Promise<number> {
     await this.authenticate();
     const response = await fetch('https://api.github.com/rate_limit', { headers: { Authorization: `Bearer ${this.token}`, Accept: 'application/vnd.github+json', 'Cache-Control': 'no-cache' }, signal: AbortSignal.timeout(15_000) });
-    this.backoff(response);
     const time = Date.parse(response.headers.get('date') ?? '');
-    demand(response.ok && Number.isFinite(time), 'GitHub server time is unavailable', 502);
+    const refused = await this.refusal(response, 'GET /rate_limit');
+    if (refused) throw refused;
+    demand(Number.isFinite(time), 'GitHub server time is unavailable', 502);
     await response.body?.cancel();
     return time;
   }
@@ -333,18 +450,26 @@ export async function githubFromEnv() {
  * Moves one queued candidate onto the tip it is predicted to land. Entries publish head-first:
  * an entry with no predicted base yet simply waits for the one ahead of it to settle.
  */
-async function advanceQueue(engine: Engine, github: GitHub, work: Work, job: { work_id: string; token: string }, guard: (snapshot: Work, success: boolean) => () => Promise<void>) {
+async function advanceQueue(engine: Engine, github: GitHub, work: Work, job: { work_id: string; token: string }, guard: (snapshot: Work, success: boolean) => () => Promise<void>, hold: (feature: PermissionFeature) => string | null) {
   const all = await engine.store.list();
   const placement = queuePlacement(work, all.map(item => item.id === work.id ? work : item), Date.now());
-  if (!placement || placement.current || !placement.publishable) return { work, published: false };
+  if (!placement || placement.current || !placement.publishable) return { work, published: false, held: null };
+  // Publishing a tip writes a merge commit and a ref; without Contents: write the call can
+  // only 403. The entry keeps its place and waits for the permission instead of retrying.
+  const held = hold('merge-queue');
+  if (held) return { work, published: false, held };
   try {
     const speculation = await github.publishSpeculativeTip(work, placement, guard(work, false));
-    return { work: await engine.bindSpeculativeTip(work.id, work.revision, speculation, job.token), published: true };
+    return { work: await engine.bindSpeculativeTip(work.id, work.revision, speculation, job.token), published: true, held: null };
   } catch (error) {
     if (!(error instanceof SpeculativeConflict)) throw error;
-    return { work: await engine.ejectFromQueue(work.id, work.revision, error.message, job.token), published: false };
+    return { work: await engine.ejectFromQueue(work.id, work.revision, error.message, job.token), published: false, held: null };
   }
 }
+/** A held job waits this long before one bounded re-check, unless a preflight sees the installation change first. */
+export const permissionHoldMs = 30 * 60_000;
+/** Consecutive permission refusals a job may retry at the normal cadence before it is held. */
+export const permissionRefusalLimit = 3;
 export async function processJob(engine: Engine, github: GitHub) {
   const job = await engine.store.takeJob();
   if (!job) return;
@@ -356,9 +481,19 @@ export async function processJob(engine: Engine, github: GitHub) {
     requireCurrent(row && row.document.revision === snapshot.revision, 'Work or job ownership changed before publication; retry');
     if (success) requireCurrent(snapshot.observation && row.now.getTime() - Date.parse(snapshot.observation.at) < 120_000, 'Observation expired before publication; retry');
   };
+  // A feature whose permission the last preflight found missing is not attempted: the job is
+  // held with the operator-facing reason instead of retrying into a 403. Adapters without a
+  // preflight (test doubles) hold nothing.
+  const hold = (feature: PermissionFeature) => github.permissionShortfall?.(feature) ?? null;
+  // Every hold records the installation it was decided against, so a later preflight releases
+  // it only when the installation actually changed (see Store.releaseHeldJobs).
+  const heldOn = () => installationFingerprint(github.permissionReport?.() ?? null);
+  let held: string | null = null;
   try {
     work = (await engine.store.list()).find(w => w.id === job.work_id);
     if (work?.submission && work.stage !== 'done') {
+      held = hold('observation');
+      if (held) { await engine.store.holdJob(job.work_id, job.token, held, permissionHoldMs, heldOn()); return; }
       const observation = await github.observe(work);
       work = await engine.observe(work.id, work.revision, observation, job.token);
       const provider = reviewProviderOf(work.policy);
@@ -367,8 +502,11 @@ export async function processJob(engine: Engine, github: GitHub) {
         || item.reviewRequest.baseSha !== item.candidate?.baseSha || item.reviewRequest.policyRevision !== item.policyRevision
         || profile !== undefined && item.reviewRequest.profile !== profile;
       if (dispatchable && provider === 'codex' && unbound(work)) {
-        const request = await github.requestCodex(work, guard(work, false));
-        work = await engine.bindReviewRequest(work.id, work.revision, request, job.token);
+        held ??= hold('review-dispatch');
+        if (!held) {
+          const request = await github.requestCodex(work, guard(work, false));
+          work = await engine.bindReviewRequest(work.id, work.revision, request, job.token);
+        }
       }
       if (dispatchable && provider === 'agent') {
         let current: Work = work;
@@ -380,21 +518,29 @@ export async function processJob(engine: Engine, github: GitHub) {
         const profile = reviewerProfileFor(current);
         const app = github.reviewerAppFor(profile);
         if (profile && app && unbound(current, profile.name)) {
-          const request = await github.requestAgentReview(current, profile, app, guard(current, false));
-          current = await engine.bindReviewRequest(current.id, current.revision, request, job.token);
+          held ??= hold('review-dispatch');
+          if (!held) {
+            const request = await github.requestAgentReview(current, profile, app, guard(current, false));
+            current = await engine.bindReviewRequest(current.id, current.revision, request, job.token);
+          }
         }
         work = current;
       }
       if (!observation.merged && observation.prState === 'open' && observation.draft === false) {
-        const advanced = await advanceQueue(engine, github, work, job, guard);
-        work = advanced.work;
+        const advanced = await advanceQueue(engine, github, work, job, guard, hold);
+        work = advanced.work; held ??= advanced.held;
         // A freshly published tip replaces the PR head; the next observation binds the gates to it.
         if (advanced.published) { await engine.store.finishJob(job.work_id, job.token, undefined, true); return; }
       }
-      if (!observation.merged) await github.publish(work, undefined, guard(work, work.gates.every(g => g.passed) && !work.violations.length));
+      if (!observation.merged) {
+        const unpublishable = hold('check');
+        if (unpublishable) held ??= unpublishable;
+        else await github.publish(work, undefined, guard(work, work.gates.every(g => g.passed) && !work.violations.length));
+      }
     }
     if (work?.stage === 'done') await engine.store.pool.query('DELETE FROM jobs WHERE work_id=$1 AND token=$2', [job.work_id, job.token]);
-    await engine.store.finishJob(job.work_id, job.token);
+    if (held) await engine.store.holdJob(job.work_id, job.token, held, permissionHoldMs, heldOn());
+    else await engine.store.finishJob(job.work_id, job.token);
   } catch (error) {
     const message = error instanceof Error ? error.message : 'GitHub reconciliation failed';
     const current = (await engine.store.pool.query('SELECT document,clock_timestamp() AS now FROM work_items WHERE id=$1', [job.work_id])).rows[0];
@@ -404,7 +550,13 @@ export async function processJob(engine: Engine, github: GitHub) {
     if (execution && (executionActive || error instanceof MergeExecutionInProgress)) {
       await engine.store.deferJob(job.work_id, job.token, execution.expiresAt); return;
     }
-    if (latest?.candidate && latest.stage !== 'done') try { await github.publish(latest, 'Reconciliation failed; fresh verification required', guard(latest, false)); } catch { /* Durable retry follows. */ }
+    if (latest?.candidate && latest.stage !== 'done' && !hold('check')) try { await github.publish(latest, 'Reconciliation failed; fresh verification required', guard(latest, false)); } catch { /* Durable retry follows. */ }
+    // A permission refusal is not transient: after a bounded number of ordinary retries the
+    // job is held with the reason, and the next preflight either confirms the shortfall or
+    // releases it once the installation changed. A refusal the declaration does not explain
+    // (the preflight already passes) therefore stays held for the bounded hold, one attempt
+    // per hold, instead of being released into the same 403 by every passing preflight.
+    if (error instanceof GitHubPermissionRefusal) { await engine.store.refuseJob(job.work_id, job.token, message, permissionRefusalLimit, permissionHoldMs, heldOn()); return; }
     await engine.store.finishJob(job.work_id, job.token, error instanceof ReconciliationRetry ? undefined : message, error instanceof ReconciliationRetry);
   }
 }
