@@ -1,6 +1,13 @@
 import { useEffect, useRef, useState } from 'react';
-import type { ValidationRequest, ValidationCandidate } from '../src/validation';
+import type { ValidationRequest, ValidationCandidate, RequestDiagnosis, RunnerCapacity, ArtifactCapacity } from '../src/validation';
 import type { Work } from '../src/model';
+
+/** The operator-facing name of each diagnosed condition; the next step itself comes from the server with the request. */
+const conditionLabel: Record<RequestDiagnosis['condition'], string> = {
+  'queued-starved': 'Queue starved — no runner is polling', 'queued-waiting-for-slot': 'Queued behind a running attempt', 'queued-resource-held': 'Blocked by an unsettled reservation',
+  unacknowledged: 'Dispatched, not acknowledged', running: 'Running', 'heartbeat-missing': 'Runner heartbeat missing', collecting: 'Collecting', 'collection-stalled': 'Collector stalled',
+  'awaiting-settlement': 'Awaiting verified settlement', retryable: 'Settled — retry available', settled: 'Settled',
+};
 
 export default function ValidationView({ api, work }: { api: (path: string) => Promise<any>; work: Work[] }) {
   const [requests, setRequests] = useState<ValidationRequest[]>([]);
@@ -11,7 +18,18 @@ export default function ValidationView({ api, work }: { api: (path: string) => P
   const [retry, setRetry] = useState(0);
   const [following, setFollowing] = useState(true);
   const [loadingOlder, setLoadingOlder] = useState(false);
+  const [capacity, setCapacity] = useState<{ runners: RunnerCapacity[]; requests: RequestDiagnosis[]; artifacts: ArtifactCapacity; resources: { resource: string; requestId: string; live: boolean }[] } | null>(null);
   const alive = useRef(true), viewEpoch = useRef(0);
+  // Capacity and diagnoses are a separate read: a failed one leaves the request list intact and simply shows no diagnosis.
+  useEffect(() => {
+    let stopped = false; let timer: ReturnType<typeof setTimeout>;
+    const load = async () => {
+      try { const data = await api('validation/capacity'); if (!stopped && Array.isArray(data?.runners) && Array.isArray(data?.requests) && data.artifacts) setCapacity(data); }
+      catch { /* the request list reports its own failures */ }
+      finally { if (!stopped) timer = setTimeout(() => void load(), 5000); }
+    };
+    void load(); return () => { stopped = true; clearTimeout(timer); };
+  }, []);
   useEffect(() => { alive.current = true; return () => { alive.current = false; }; }, []);
   useEffect(() => {
     if (!following) return;
@@ -49,13 +67,20 @@ export default function ValidationView({ api, work }: { api: (path: string) => P
     {error && <div role="alert" className="notice danger">{error} {loaded && 'Previously loaded data may be stale.'} <button disabled={loadingOlder} onClick={() => following ? setRetry(n => n + 1) : void older()}>Retry validation requests</button></div>}
     {!loaded && !error && <p role="status">Loading validation requests…</p>}
     {loaded && !error && !requests.length && <div className="empty"><h2>No validation requested yet.</h2><p>Configure an approved environment, test bundle and separate runner/collector identities, then create a pinned request.</p><a href="/docs/validation">Set up the validation protocol ↗</a></div>}
+    {capacity && (capacity.runners.length > 0 || capacity.artifacts.retained > 0) && <section><div className="section-title"><h2>Runner capacity <span className="count">{capacity.runners.length}</span></h2><span>POLLS, DWELL AND RESERVATIONS</span></div>
+      {capacity.runners.map(runner => <div className="criterion" key={runner.registration.id}><strong>{runner.registration.id} · {runner.principalId} · {runner.enabled ? (runner.executing ? 'executing' : 'idle') : 'disabled'}</strong>
+        <p>{runner.lastPollAt ? `Last poll ${new Date(runner.lastPollAt).toLocaleString()}` : 'Never polled'} · queued {runner.queued} of {runner.queueLimit}{runner.oldestQueuedSeconds !== null ? ` · oldest waiting ${runner.oldestQueuedSeconds}s` : ''}{runner.executing ? ` · executing ${runner.executing}` : ''}</p></div>)}
+      <p className="muted">Artifacts: {capacity.artifacts.backend} · {Math.round(capacity.artifacts.usedBytes / 1_048_576)} of {Math.round(capacity.artifacts.capacityBytes / 1_048_576)} MiB retained across {capacity.artifacts.retained} artifacts · {capacity.artifacts.expiringWithin24h} expiring within 24h{capacity.artifacts.uploadFailed ? ` · ${capacity.artifacts.uploadFailed} upload failures` : ''}{capacity.artifacts.awaitingDeletion ? ` · ${capacity.artifacts.awaitingDeletion} awaiting verified deletion` : ''}</p>
+      {capacity.resources.filter(r => !r.live).length > 0 && <p className="amber">{capacity.resources.filter(r => !r.live).length} protected resource reservation(s) are held by attempts whose settlement is not verified.</p>}</section>}
     <div className="scenario-list">{recent.map(r => {
       const c = candidates.find(c => c.id === r.candidateId), attempt = r.attempts.at(-1), item = work.find(w => w.id === r.workId);
+      const diagnosis = capacity?.requests.find(d => d.requestId === r.id && d.condition in conditionLabel);
       const waitingSettlement = attempt && !attempt.settled && !['queued', 'dispatched', 'running', 'collecting'].includes(r.state);
       return <article className="scenario-card" key={r.id}><div className="card-top"><span>{item?.key ?? r.workId} · {r.proof}</span><strong>{r.state}</strong></div><h2>{item?.title ?? 'Validation request'}</h2>
         <p>{c ? `${c.environment.id} · source ${c.sourceSha.slice(0,10)} · policy ${c.policyRevision}` : `Candidate ${r.candidateId}`}</p>
         <p>Runner: {r.runner.id} · collector: {r.collector.id}</p><p>{attempt ? `Attempt ${attempt.epoch} of ${r.maxAttempts}` : 'Not dispatched'} · deadline {new Date(r.deadline).toLocaleString()}</p>
         {waitingSettlement && <p className="amber">Resources remain reserved. Verify execution has stopped before recovery.</p>}
+        {diagnosis && <p className={['running', 'collecting', 'settled'].includes(diagnosis.condition) ? 'muted' : 'amber'}><strong>{conditionLabel[diagnosis.condition]}</strong>{r.state === 'queued' ? ` · waiting ${diagnosis.dwellSeconds}s` : ''} — {diagnosis.nextStep}</p>}
         {r.result && <p>{r.result.passed ? 'Required dimensions passed.' : r.result.reasons.join('; ')}</p>}
         <details><summary>Attempt history ({r.attempts.length})</summary>{r.attempts.map(a => <p key={a.id}>Attempt {a.epoch} · {a.state} · {a.settled ? 'settled' : 'settlement not verified'} · {new Date(a.dispatchedAt).toLocaleString()}</p>)}<code>{r.id}</code></details>
       </article>;

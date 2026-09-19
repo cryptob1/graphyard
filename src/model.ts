@@ -134,7 +134,7 @@ export interface Lease { owner: string; epoch: number; expiresAt: string }
 export interface Workspace { host: string; path: string; branch: string; epoch: number; owner: string }
 export interface Candidate { sha: string; baseSha: string; pr: number; branch: string; author: string }
 export type ArtifactKind = 'log' | 'report' | 'screenshot' | 'trace' | 'other';
-export type ArtifactAvailability = 'available' | 'expired' | 'redacted' | 'missing' | 'external';
+export type ArtifactAvailability = 'available' | 'expired' | 'redacted' | 'missing' | 'upload-failed' | 'external';
 export interface EvidenceArtifact {
   kind: ArtifactKind; label: string; mediaType?: string; size?: number; digest?: string;
   expiresAt?: string; availability: ArtifactAvailability;

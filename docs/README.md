@@ -25,6 +25,7 @@ Choose one path. The reference guides are there when a gate or integration needs
 - [Validation runner protocol](validation.md)
 - [Packaged Playwright runner](runner-setup.md)
 - [Releases and observed production delivery](delivery.md)
+- [Runner capacity, artifact operations and delivery recovery](recovery.md)
 
 ## Understand or contribute
 

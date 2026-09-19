@@ -359,7 +359,7 @@ test('deployment identity registrations are service-scoped and carry no executio
   await assert.rejects(validation.define(operator, definition, id()), /services of their environment/);
   await assert.rejects(validation.define(operator, { ...definition, services: ['api'], proofs: ['e2e:x'] }, id()), /no proof scope/);
   await assert.rejects(validation.define(operator, { ...definition, services: ['api'], executionNetwork: 'gy' }, id()), /Only runner registrations/);
-  await assert.rejects(validation.define(operator, { ...definition, role: 'builder', services: ['api'] }, id()), /Only observer and promoter/);
+  await assert.rejects(validation.define(operator, { ...definition, role: 'builder', services: ['api'] }, id()), /Only observer, promoter and rollback/);
   await assert.rejects(validation.define(operator, { ...definition, services: ['api'], principalId: worker.id }, id()), /appropriate separate role/);
   await assert.rejects(delivery.lease(observer, { registration: f.registrations.builder }), /not an enabled deployment identity/);
   await assert.rejects(delivery.lease(observer, { registration: f.registrations.apiObserver }), /not an enabled deployment identity/);
