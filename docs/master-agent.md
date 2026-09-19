@@ -86,7 +86,10 @@ Each cycle:
    lease that lapses after submission, under a `blocked` report, or after your stopped-worker
    attestation is history (`lease.expired` with its cause), never an incident;
 2. **dispatches claimable work** to a healthy worker profile, through the same launcher
-   `master dispatch` uses: the worker claims under its own identity and the loop holds no lease;
+   `master dispatch` uses: the worker claims under its own identity and the loop holds no lease.
+   Ready items are offered [smallest planned scope first](#conflict-avoidance) within a priority,
+   and an item whose `plannedFiles` overlap a claimed or unmerged item is held rather than
+   dispatched — the loop never overrides a hold; only `master dispatch --allow-overlap` does;
 3. **shepherds reviews and proofs** — one recorded request per exact candidate, a request to the
    trusted producer workflow when automatable proof is missing, and an escalation for anything only
    a human or a producer may resolve;
@@ -146,7 +149,9 @@ live-verified against the exact deployed release, or a genuinely external deploy
 blocker is recorded in Graphyard:
 
 1. Run `master status` and treat Graphyard as progression truth.
-2. Dispatch ready work to an appropriate worker profile.
+2. Dispatch ready work to an appropriate worker profile, in the order `dispatch.order` gives
+   and leaving `dispatch.held` items for the item ahead of them to merge (see
+   [conflict avoidance](#conflict-avoidance)).
 3. Shepherd review findings, rework, and trusted proof collection to completion.
 4. Request a guarded merge only when the exact candidate passes every gate.
 5. Run [deployment verification](#deployment-verification) for each delivery with
@@ -415,6 +420,48 @@ A follower whose predecessor merges keeps its tip and bindings: the base branch 
 
 For the full correctness model, see [GitHub enforcement](github.md) and [architecture](architecture.md).
 
+## Conflict avoidance
+
+The queue lands validated tips in order, but it cannot prevent a conflict git itself reports:
+whichever of two overlapping candidates lands second is sent through a sync → review → proof round.
+Most of those rounds have two causes — items with overlapping `plannedFiles` built concurrently,
+and shared generated files that nearly every pull request regenerated — and `master status`
+reports both so the master can schedule around them.
+
+**Overlap-aware dispatch.** An item's `plannedFiles` are a soft exclusive resource against every
+item that is *claimed* (a live lease, or a quarantine still holding its assignment) or *submitted
+but not merged*. Such an item is not dispatched, by the loop or by `master dispatch`; the row's
+`overlap` says `held: true`, lists each item `ahead` with the overlapping `paths` on both sides, and
+`dispatch.held` repeats the hold with its reason. Two ready items that overlap each other hold
+nothing: the first to be dispatched then holds the other. The hold is advisory with an operator
+override — `master dispatch GY-N PROFILE --allow-overlap` dispatches anyway and records the
+overlap in its result — and the loop never uses the override. Exclusive resources, dependencies,
+blockers and quarantines refuse exactly as before; `--allow-overlap` lifts nothing else.
+
+**Smallest scope first.** Among ready items of the same operator priority, `dispatch.order` offers
+the smallest planned scope first: fewest root-level directory scopes (`src/`, `docs/`, `tests/`),
+then fewest directory scopes, then fewest files, then the older item. A small item that lands early
+is one fewer re-integration for everything that would otherwise have waited behind it. Each row's
+`scope` carries that breadth, and a root-level directory scope marks the item `highConflict`
+(also listed under `dispatch.highConflict`): ask the operator to narrow such a scope before
+dispatching it beside anything else.
+
+**Per-candidate conflict sets.** For every open candidate, `master status` runs
+`git merge-tree --write-tree` between its head and each other open candidate's head — a real
+three-way merge from their merge base, done in memory over the fetched PR branches — and reports
+the result on the row under `conflicts`: the `candidates` it cannot merge with, the conflicting
+`files` per pair, and `unprobed` candidates whose head this checkout could not fetch (never
+reported as conflict-free). `conflicts.sequence` orders the open candidates fewest-conflicts
+first and `conflicts.conflicting` lists every pair, so the master can sequence merges to force the
+fewest re-integration rounds; `conflicts.available` and `reason` say when the fetch failed. The
+probe reports what git will report at merge time; it does not judge semantic conflicts.
+
+**Generated files never conflict.** The docs indexes are generated in full and `graphyard sync`
+regenerates them, and the managed `AGENTS.md` blocks, instead of asking the worker to resolve them;
+the control plane's regression guard treats the files named by `GRAPHYARD_GENERATED_FILES` as
+generated rather than owned. Every remaining conflict `sync` reports names the shipped items that
+landed it. See [coordination](coordination.md#generated-files-never-conflict).
+
 ## Recovery
 
 For a dead worker or provider change:
@@ -466,8 +513,8 @@ The master does not clear blockers, revise requirements, or satisfy human gates 
 | --- | --- |
 | `master init --token-stdin [--browser-profile PROFILE]` | Install the operating mode; name the operator's browser profile |
 | `master start KIND` | Launch the visible master session with its harness rules |
-| `master status` | Work truth, session health, reviews, queue, and `administration` (recent browser actions, pending sudo code) |
-| `master dispatch GY-N PROFILE` | Invite a worker to claim ready work |
+| `master status` | Work truth, session health, reviews, queue, `dispatch` (order, overlap holds, high-conflict scopes), per-candidate `conflicts`, and `administration` (recent browser actions, pending sudo code) |
+| `master dispatch GY-N PROFILE [--allow-overlap]` | Invite a worker to claim ready work; `--allow-overlap` dispatches over a planned-file overlap hold |
 | `master review GY-N [PROFILE]` | Launch the independent reviewer on the exact candidate |
 | `master protection [--apply]` | Reconcile branch protection through the API |
 | `master browser app-permissions` | Raise the control-plane App's permissions through the browser |

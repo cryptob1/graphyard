@@ -5,6 +5,7 @@ import { basename, dirname, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { z } from 'zod';
 import { currentEvidence, deliveryState, deploySmokeRequired, exhaustedReviewerProfiles, postDeployMs, productionLatencyMs, reviewProviderOf, reviewerProfileFor, rollbackGuidance, type Work } from './model.js';
+import { dispatchOrder } from './coordination.js';
 import { assertDispatchable, assertOutsideWorktrees, closeHerdrPane, dispatchWork, inspectWorkerCredentials, listHerdrAgents, mergeExecutor, type HerdrAgent, type MasterConfig, type WorkerProfile } from './master.js';
 
 /**
@@ -303,9 +304,12 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
 
   // 2. Dispatch claimable work to a healthy profile. The launcher claims under the worker's own
   //    identity; the daemon never holds a lease. An unhealthy profile is skipped, not waited on.
+  //    An item whose planned files overlap a claimed or unmerged item is not claimable (the
+  //    loop never overrides that; `master dispatch --allow-overlap` is the operator's call), and
+  //    the smallest planned scope within a priority is offered first.
   const claimable = open.filter(item => {
     try { assertDispatchable(item, snapshot.work, snapshot.now); return true; } catch { return false; }
-  }).sort((a, b) => a.priority - b.priority || Date.parse(a.createdAt) - Date.parse(b.createdAt));
+  }).sort(dispatchOrder);
   const taken = new Set<string>();
   for (const item of claimable) {
     const key = dispatchKey(item);

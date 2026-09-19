@@ -6,7 +6,8 @@ import { homedir, hostname } from 'node:os';
 import { z } from 'zod';
 import { assertRepository, discover, localDirectory, saveDiscovery } from './onboarding.js';
 import { loadConnection, managedInstructions, serverOrigin } from './repository-setup.js';
-import { resourceConflicts } from './coordination.js';
+import { dispatchOrder, dispatchOverlap, resourceConflicts, scopeBreadth } from './coordination.js';
+import type { ConflictReport } from './conflicts.js';
 import { mergeOrder } from './delegation.js';
 import { launchPlan, masterHarnessPlan, writeHarnessPermissions } from './harness.js';
 import { CHECK_NAME, carriedApproval, deliveryState, deploySmokeRequired, describeQueueBinding, evidenceIndependenceRefusals, exhaustedReviewerProfiles, nativeReviewRequired, postDeployMs, productionLatencyMs, providerDelayAfterVerification, reviewerProfileFor, reviewProviderOf, rollbackGuidance, standingEscalations, type CarriedApproval, type QueueBindingReport, type Work } from './model.js';
@@ -457,8 +458,9 @@ export function mergeProtocolSkew(status: { build?: { commit?: string | null; pr
   const serverCommit = status?.build?.commit ?? 'an unknown commit', cliCommit = cli.commit ?? 'an unknown commit';
   return `server runs ${serverCommit}, CLI expects ${cliCommit}: deploy main first (server merge protocol ${serverProtocol}, CLI merge protocol ${cliProtocol}${serverProtocol < cliProtocol ? '; the deployment has not served the commit the CLI runs' : '; update the CLI checkout to the deployed commit'})`;
 }
-export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profiles: WorkerProfile[], agents: HerdrAgent[], credentialHealth: Record<string, { available: boolean; reason: string | null }> = {}, containment: Record<string, ContainmentAssessment> = {}, reviews: { pending: any[]; completed: any[] } = { pending: [], completed: [] }, baseBranch = 'main', controlPlane?: ControlPlaneStatus) {
+export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profiles: WorkerProfile[], agents: HerdrAgent[], credentialHealth: Record<string, { available: boolean; reason: string | null }> = {}, containment: Record<string, ContainmentAssessment> = {}, reviews: { pending: any[]; completed: any[] } = { pending: [], completed: [] }, baseBranch = 'main', controlPlane?: ControlPlaneStatus, candidateConflicts: { report: Record<string, ConflictReport>; available: boolean; reason: string | null } = { report: {}, available: false, reason: 'Candidate conflicts were not probed' }) {
   const now = Date.parse(snapshot.now);
+  const scheduling = dispatchSchedule(snapshot.work, now);
   const installation = controlPlaneAttention(controlPlane);
   const sessions = profiles.map(profile => {
     const agent = agents.find(candidate => candidate.name === profile.agentName);
@@ -496,6 +498,9 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
         attestation: assessed?.settleable ? null : containmentAttestation(work.key) }
       : null;
     const gaps = work.proofGaps ?? [];
+    const held = scheduling.held.find(entry => entry.key === work.key) ?? null;
+    const conflictReport = candidateConflicts.report[work.key];
+    const conflicts = work.submission && work.candidate ? { candidates: (conflictReport?.conflicts ?? []).map(conflict => conflict.key), files: conflictReport?.conflicts ?? [], unprobed: conflictReport?.unprobed ?? [], probed: !!conflictReport && candidateConflicts.available } : null;
     const attention = quarantine ? quarantine.settleable
       ? `Containment quarantine from epoch ${quarantine.epoch} is verified settleable; run master settle-containment ${work.key}`
       : `Containment quarantine from epoch ${quarantine.epoch} blocks dispatch: ${quarantine.refusals[0]}`
@@ -503,7 +508,8 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
       : gaps.length ? `No principal is authorized to produce ${gaps.join(', ')}; grant the proof name before dispatch`
       : review?.exhausted ? `Every configured reviewer profile is exhausted for the current candidate (${review.failedOver.map(entry => `${entry.profile}: ${entry.exhaustion}`).join(', ')})`
       : work.blocker || dwellMs > 3_600_000 ? first?.reasons[0] ?? `Work has remained at ${work.stage} for more than one hour` : null;
-    return { key: work.key, title: work.title, stage: work.stage, owner: active ? work.lease!.owner : null, profile: profile?.name ?? null, session: session?.state ?? null, refusal: first ? { gate: first.name, reason: first.reasons[0] } : null, mergeable, review, proofGaps: gaps, containment: quarantine, attention, queue: placement ? queueRows.find(row => row.key === work.key) ?? null : null };
+    return { key: work.key, title: work.title, stage: work.stage, owner: active ? work.lease!.owner : null, profile: profile?.name ?? null, session: session?.state ?? null, refusal: first ? { gate: first.name, reason: first.reasons[0] } : null, mergeable, review, proofGaps: gaps, containment: quarantine, attention, queue: placement ? queueRows.find(row => row.key === work.key) ?? null : null,
+      scope: scopeBreadth(work.plannedFiles), overlap: held ? { held: true, ahead: held.ahead, reason: held.reason } : { held: false, ahead: [], reason: null }, conflicts };
   });
   const delivered = snapshot.work.filter(work => work.stage === 'done' && work.delivery && deploySmokeRequired(work.policy)).map(work => deliveredRow(work, now, baseBranch));
   // Merge-to-production over every delivery with an observed deployment, whether or not its
@@ -513,7 +519,28 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
     counts: { open: rows.length, ready: rows.filter(row => row.stage === 'ready').length, active: rows.filter(row => row.owner).length, attention: rows.filter(row => row.attention).length + installation.attention.length, proofAuthorityGaps: rows.filter(row => row.proofGaps.length).length, mergeable: rows.filter(row => row.mergeable).length, reviewsPending: reviews.pending.length, reviewFailover: rows.filter(row => row.review?.failedOver.length).length, queued: placements.length,
       quarantined: rows.filter(row => row.containment).length, settleableQuarantines: rows.filter(row => row.containment?.settleable).length,
       awaitingSmoke: delivered.filter(row => row.state === 'awaiting-deployment' || row.state === 'awaiting-smoke').length, postDeployFailures: delivered.filter(row => row.state === 'delivered-with-failure').length },
-    workers: sessions, reviews, work: rows, queue: queueRows, delivered, latency: { mergeToProduction }, controlPlane: installation };
+    workers: sessions, reviews, work: rows, queue: queueRows, delivered, latency: { mergeToProduction }, controlPlane: installation,
+    dispatch: scheduling, conflicts: { available: candidateConflicts.available, reason: candidateConflicts.reason, ...sequenceAdvice(rows.filter(row => row.conflicts).map(row => ({ key: row.key, conflicts: row.conflicts!.candidates }))) } };
+}
+
+/**
+ * The dispatch plan the durable loop and `master dispatch` follow: ready items in the order they
+ * would be offered (smallest planned scope first within a priority), the ones held behind a
+ * claimed or unmerged item whose planned files they overlap, and the broad scopes that will
+ * overlap nearly everything.
+ */
+export function dispatchSchedule(work: Work[], now: number) {
+  const ready = work.filter(item => item.stage !== 'done' && item.ready && !item.blocker && !item.containmentQuarantine && !(item.lease && Date.parse(item.lease.expiresAt) > now) && (!item.submission || item.reworkRequested)).sort(dispatchOrder);
+  const held = ready.flatMap(item => { const ahead = dispatchOverlap(item, work, now); return ahead.length ? [{ key: item.key, ahead, reason: `Held by planned-file overlap with ${describeOverlap(ahead)}; dispatch with --allow-overlap to override` }] : []; });
+  const heldKeys = new Set(held.map(entry => entry.key));
+  return { order: ready.map(item => ({ key: item.key, priority: item.priority, scope: scopeBreadth(item.plannedFiles), held: heldKeys.has(item.key) })), held,
+    highConflict: ready.filter(item => scopeBreadth(item.plannedFiles).highConflict).map(item => ({ key: item.key, broad: scopeBreadth(item.plannedFiles).broad })) };
+}
+/** Fewest conflicts first: the order that forces the fewest re-integration rounds on the rest. */
+export function sequenceAdvice(candidates: { key: string; conflicts: string[] }[]) {
+  const sequence = [...candidates].sort((a, b) => a.conflicts.length - b.conflicts.length || a.key.localeCompare(b.key)).map(entry => entry.key);
+  const conflicting = candidates.filter(entry => entry.conflicts.length);
+  return { sequence, conflicting: conflicting.map(entry => ({ key: entry.key, conflicts: entry.conflicts })) };
 }
 
 /**
@@ -651,7 +678,9 @@ export async function startMaster(root: string, kind: WorkerProfile['kind'], age
 type WorkerCommand = (command: string, args: string[], options?: any) => string | Buffer;
 type PreparedWorker = { epoch: number; path: string; base: string };
 
-export function assertDispatchable(work: Work, allWork: Work[], observedAt: string) {
+export interface DispatchOptions { allowOverlap?: boolean }
+export const describeOverlap = (overlap: ReturnType<typeof dispatchOverlap>) => overlap.map(ahead => `${ahead.key} (${ahead.state}, ${ahead.stage}) on ${ahead.paths.join(', ')}`).join('; ');
+export function assertDispatchable(work: Work, allWork: Work[], observedAt: string, options: DispatchOptions = {}) {
   const now = Date.parse(observedAt);
   if (!Number.isFinite(now)) throw new Error('Dispatch requires a valid Graphyard snapshot clock');
   if (!work.ready || work.blocker) throw new Error('Dispatch requires released work without a blocker');
@@ -662,10 +691,13 @@ export function assertDispatchable(work: Work, allWork: Work[], observedAt: stri
   if (work.submission && !work.reworkRequested) throw new Error('Dispatch requires operator-authorized rework for a submitted item');
   const conflicts = resourceConflicts(work, allWork, now);
   if (conflicts.length) throw new Error(`Dispatch blocked by exclusive resources: ${conflicts.map(conflict => `${conflict.resource} held by ${conflict.key}`).join(', ')}`);
+  // Planned-file overlap is a soft exclusive resource: advisory, with an operator override.
+  const overlap = dispatchOverlap(work, allWork, now);
+  if (overlap.length && !options.allowOverlap) throw new Error(`Dispatch held by planned-file overlap with ${describeOverlap(overlap)}; whichever lands second re-integrates the other. Wait for it to merge, or pass --allow-overlap to dispatch anyway`);
 }
 
-export async function dispatchWork(root: string, work: Work, profile: WorkerProfile, agents: HerdrAgent[], run?: (command: string, args: string[]) => string, allWork: Work[] = [work], prepare: (root: string, key: string, profileName: string) => Promise<PreparedWorker> = prepareWorkerLaunch, release: (root: string, key: string, epoch: number, profileName: string) => Promise<void> = releaseWorkerLaunch, agentTimeoutMs = 30_000, observedAt = new Date().toISOString()) {
-  assertDispatchable(work, allWork, observedAt);
+export async function dispatchWork(root: string, work: Work, profile: WorkerProfile, agents: HerdrAgent[], run?: (command: string, args: string[]) => string, allWork: Work[] = [work], prepare: (root: string, key: string, profileName: string) => Promise<PreparedWorker> = prepareWorkerLaunch, release: (root: string, key: string, epoch: number, profileName: string) => Promise<void> = releaseWorkerLaunch, agentTimeoutMs = 30_000, observedAt = new Date().toISOString(), options: DispatchOptions = {}) {
+  assertDispatchable(work, allWork, observedAt, options);
   const config = await loadMasterConfig(root);
   let target = agents.find(agent => agent.name === profile.agentName);
   if (profile.mode === 'existing') {
@@ -698,8 +730,10 @@ export async function dispatchWork(root: string, work: Work, profile: WorkerProf
       throw error;
     }
   }
+  const overlap = dispatchOverlap(work, allWork, Date.parse(observedAt));
   return { work: work.key, profile: profile.name, principal: profile.principal, agentName: profile.agentName, pane: target.pane_id ?? null, approvals: profile.approvals,
-    launch: launchPlan(profile.kind, profile.approvals, profile.agentArgs, profile.environment), ownership: 'worker launcher claimed and is supervising the agent process' };
+    launch: launchPlan(profile.kind, profile.approvals, profile.agentArgs, profile.environment), ownership: 'worker launcher claimed and is supervising the agent process',
+    overlap: overlap.length ? { allowed: true, ahead: overlap, note: `Dispatched over a planned-file overlap with ${describeOverlap(overlap)}; expect a sync → review → proof round for whichever lands second` } : null };
 }
 
 const shellQuote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
