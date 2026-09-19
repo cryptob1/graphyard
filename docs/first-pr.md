@@ -1,3 +1,4 @@
+<!-- page: Maintainer and historical records | 1 | repository-specific bootstrap procedure for Graphyard maintainers. -->
 # Graphyard repository bootstrap
 
 > **Maintainer guide.** This procedure is specific to `cryptob1/graphyard`. New users should follow [repository onboarding](onboarding.md).

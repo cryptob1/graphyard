@@ -109,6 +109,44 @@ for (const viewport of [{ name: 'desktop', width: 1280, height: 900 }, { name: '
   });
 }
 
+for (const viewport of [{ name: 'desktop', width: 1280, height: 900 }, { name: 'mobile', width: 390, height: 844 }]) {
+  test(`dashboard durations use adaptive units with accessible text and no clipping on ${viewport.name}`, async ({ page }) => {
+    const at = (minutesAgo: number) => new Date(Date.now() - minutesAgo * 60000).toISOString();
+    const item = (key: string, stage: string, minutesAgo: number) => ({ ...work, id: `fixture-${key.toLowerCase()}`, key, stage, stageEnteredAt: at(minutesAgo) });
+    const items = [item('GY-2', 'ready', 45), item('GY-3', 'review', 894), item('GY-4', 'review', 890), item('GY-5', 'build', 3060), item('GY-6', 'build', 3055)];
+    await page.setViewportSize(viewport);
+    await page.route('**/api/**', async route => {
+      if (route.request().headers().authorization !== 'Bearer browser-fixture') return route.fulfill({ status: 401, json: { error: 'Rejected' } });
+      const path = new URL(route.request().url()).pathname;
+      if (path.endsWith('/status')) return route.fulfill({ json: { actor: { id: 'fixture', role: 'admin' }, github: true, reviewProviders: ['github'], repository: 'fixture/repository', jobs: [] } });
+      if (path.endsWith('/work-snapshot')) return route.fulfill({ json: { work: items, now: new Date().toISOString() } });
+      return route.fulfill({ json: [] });
+    });
+    await page.goto('/'); await login(page);
+    const node = (stage: string) => page.locator('.node', { hasText: stage });
+    await expect(node('Ready')).toContainText('Oldest 45m');
+    await expect(node('Ready')).toContainText('p50 45m · p95 45m');
+    await expect(node('Review')).toContainText('Oldest 14h 54m');
+    await expect(node('Review')).toContainText('p50 14h 54m · p95 14h 54m');
+    await expect(node('Build')).toContainText('Oldest 2d 3h');
+    await expect(node('Build')).toContainText('p50 2d 3h · p95 2d 3h');
+    await expect(node('Backlog')).toContainText('Clear');
+    await expect(node('Backlog')).toContainText('—');
+    await expect(page.locator('.node small span[title]')).toHaveCount(9);
+    await expect(node('post-deploy')).toContainText('—');
+    await expect(node('post-deploy').locator('span[title]')).toHaveAttribute('title', 'No post-deploy data to summarize yet');
+    await expect(node('Build').locator('span[title]')).toHaveAttribute('title', /50th and 95th percentile/);
+    await expect(node('Merge').locator('span[title]')).toHaveAttribute('title', 'No dwell data to summarize for this stage yet');
+    await expect(node('Build').locator('span[title]')).toHaveCSS('text-transform', 'none');
+    await expect(page.locator('.card-top', { hasText: 'GY-2' })).toContainText('45m');
+    await expect(page.locator('.card-top', { hasText: 'GY-3' })).toContainText('14h 54m');
+    await expect(page.locator('.card-top', { hasText: 'GY-5' })).toContainText('2d 3h');
+    await expect(page.locator('.card-top', { hasText: 'GY-6' })).toContainText('2d 2h');
+    const clipped = await page.locator('.node').evaluateAll(nodes => nodes.flatMap(node => [node, ...node.querySelectorAll('small')].map(element => element.scrollWidth > element.clientWidth)));
+    expect(clipped).not.toContain(true);
+  });
+}
+
 test('invalid login remains on login; whitespace is trimmed and loading never claims empty work', async ({ page }) => {
   const state = await fixture(page);
   await login(page, 'invalid');
@@ -143,6 +181,90 @@ test('mobile sign out is reachable and removes the session', async ({ page }) =>
   await expect(signOut).toBeVisible(); await signOut.click();
   await expect(page.getByLabel('Access token')).toBeVisible();
   expect(await page.evaluate(() => sessionStorage.getItem('graphyard-token'))).toBeNull();
+});
+
+const pulseFixture = (overrides: Record<string, unknown> = {}) => ({ generatedAt: new Date().toISOString(), range: { start: '2026-06-29T00:00:00.000Z', end: new Date().toISOString(), weeks: 12, semantics: 'repository-utc-inclusive' }, completeness: 'complete', truncated: false, counts: { days7: 3, days30: 8 }, intentToMerge: { medianHours: 12.5, sampleSize: 7, excluded: 1 }, prToProduction: { averageHours: 30, medianHours: 24, p90Hours: 48, sampleSize: 6, eligible: 8, excluded: 2, coveragePercent: 75, sparse: false, exclusions: { 'no-verifiable-production-deployment': 2 }, split: { prToMergeAverageHours: 18, mergeToProductionAverageHours: 12 } }, weeks: Array.from({ length: 12 }, (_, index) => ({ start: new Date(Date.UTC(2026, 5, 29 + index * 7)).toISOString(), end: new Date(Date.UTC(2026, 6, 5 + index * 7)).toISOString(), count: index % 4 })), recent: [{ key: 'GY-9', title: 'Exact delivery', pullRequest: 42, mergeSha: 'abcdef1234567890abcdef1234567890abcdef12', mergedAt: '2026-09-15T12:00:00.000Z', quality: { passingProofs: 4, requiredProofs: 4, violations: [] } }], ...overrides });
+
+for (const viewport of [{ name: 'desktop', width: 1280, height: 900 }, { name: 'mobile', width: 390, height: 844 }]) test(`shipping pulse exposes exact metrics, links and chart text on ${viewport.name}`, async ({ page }) => {
+  await page.setViewportSize(viewport); await fixture(page);
+  await page.route('**/api/shipping-pulse', route => route.fulfill({ json: pulseFixture() }));
+  await login(page); await page.getByRole('button', { name: /Shipping pulse/ }).click();
+  await expect(page.getByRole('heading', { name: 'Shipping pulse' })).toBeVisible();
+  await expect(page.getByLabel('Delivery metrics')).toContainText('3');
+  await expect(page.getByText('12.5h')).toBeVisible(); await expect(page.getByText('7 included · 1 excluded')).toBeVisible();
+  await expect(page.getByLabel('Pull request to production metrics')).toContainText('30h');
+  await expect(page.getByText('6 included of 8')).toBeVisible();
+  await expect(page.getByRole('list', { name: 'Weekly delivery counts' }).getByRole('listitem')).toHaveCount(12);
+  await expect(page.getByRole('link', { name: /PR #42/ })).toHaveAttribute('href', 'https://github.com/fixture/repository/pull/42');
+  await expect(page.getByRole('link', { name: /Commit abcdef12/ })).toHaveAttribute('href', 'https://github.com/fixture/repository/commit/abcdef1234567890abcdef1234567890abcdef12');
+  // Deployment times are the provider's clock carried onto the repository clock with the
+  // bracket the collector measured. The method note must say that rather than describe the
+  // durations as exact, which would overstate values known only to that precision.
+  await expect(page.locator('.pulse-method')).toContainText('carried onto the repository clock at ingestion using the offset bracket the collector measured');
+  await expect(page.getByText('EXACT VERIFIED CONTAINMENT')).toHaveCount(0);
+  const shell = page.locator('.shell'); expect((await shell.evaluate(element => element.scrollWidth <= element.clientWidth))).toBe(true);
+});
+
+test('shipping pulse labels sparse and unavailable production samples without fabricating zero', async ({ page }) => {
+  await fixture(page);
+  // The second delivery's authorizing snapshot cannot be resolved, so its proof totals are
+  // unknown. An unknown total must never be drawn as 0/0, which would read as a clean record.
+  const unresolved = { key: 'GY-10', title: 'Unretained authorization', pullRequest: 43, mergeSha: 'bcdef01234567890abcdef1234567890abcdef12', mergedAt: '2026-09-14T12:00:00.000Z', quality: { passingProofs: null, requiredProofs: null, violations: [], unavailableReason: 'The immutable snapshot that authorized this delivery is no longer in the retained ledger, so recorded proof totals are unknown.' } };
+  await page.route('**/api/shipping-pulse', route => route.fulfill({ json: pulseFixture({ prToProduction: { averageHours: null, medianHours: null, p90Hours: null, sampleSize: 0, eligible: 1, excluded: 1, coveragePercent: 0, sparse: true, exclusions: { 'no-verifiable-production-deployment': 1 }, split: { prToMergeAverageHours: null, mergeToProductionAverageHours: null } }, recent: [...pulseFixture().recent, unresolved] }) }));
+  await login(page); await page.getByRole('button', { name: /Shipping pulse/ }).click();
+  await expect(page.getByText('Sparse sample.')).toBeVisible();
+  await expect(page.getByLabel('Pull request to production metrics')).toContainText('Unavailable');
+  await page.getByText('Why records were excluded').click();
+  await expect(page.getByText('no verifiable production deployment: 1')).toBeVisible();
+  const entry = page.locator('.delivery-list article').filter({ hasText: 'GY-10' });
+  await expect(entry).toContainText('Recorded proof totals unavailable');
+  await expect(entry).toContainText('no longer in the retained ledger');
+  await expect(entry).not.toContainText('0/0');
+  await expect(page.locator('.delivery-list article').filter({ hasText: 'GY-9' })).toContainText('4/4 recorded proofs passed');
+});
+
+test('shipping pulse distinguishes loading, unavailable, empty, partial, and stale data', async ({ page }) => {
+  await fixture(page); let mode = 'loading'; let release!: () => void; const pending = new Promise<void>(resolve => { release = resolve; });
+  await page.route('**/api/shipping-pulse', async route => {
+    if (mode === 'loading') { await pending; return route.abort(); }
+    if (mode === 'unavailable') return route.abort();
+    if (mode === 'empty') return route.fulfill({ json: pulseFixture({ recent: [], counts: { days7: 0, days30: 0 }, weeks: Array.from({ length: 12 }, (_, index) => ({ start: new Date(Date.UTC(2026, 5, 29 + index * 7)).toISOString(), end: new Date(Date.UTC(2026, 6, 5 + index * 7)).toISOString(), count: 0 })) }) });
+    return route.fulfill({ json: pulseFixture({ completeness: 'partial', partialReason: 'More production observations matched a merge than the query cap reads.' }) });
+  });
+  await login(page); await page.getByRole('button', { name: /Shipping pulse/ }).click();
+  await expect(page.getByRole('status')).toContainText('Loading shipping pulse');
+  mode = 'unavailable'; release(); await expect(page.getByRole('alert')).toContainText('unavailable');
+  mode = 'empty'; await page.getByRole('button', { name: /Delivery graph/ }).click(); await page.getByRole('button', { name: /Shipping pulse/ }).click();
+  await expect(page.getByText('No deliveries in this window')).toBeVisible(); await expect(page.getByLabel('Delivery metrics')).toHaveCount(0);
+  mode = 'partial'; await page.getByRole('button', { name: /Delivery graph/ }).click(); await page.getByRole('button', { name: /Shipping pulse/ }).click();
+  await expect(page.getByText('Partial history.')).toBeVisible(); await expect(page.getByText('More production observations matched a merge than the query cap reads.')).toBeVisible();
+  // Partial at the production cap does not truncate the delivery sample, so the durations
+  // are not labelled as sampled here; only the delivery cap does that.
+  await expect(page.getByText('Sampled durations:')).toHaveCount(0);
+  // Staleness is measured from this browser's own last successful read, so it appears
+  // when a refresh fails while data is on screen - never from a repository/browser clock gap.
+  mode = 'unavailable'; await page.getByRole('button', { name: 'Refresh' }).click();
+  await expect(page.getByText('Data is stale.')).toBeVisible();
+  await expect(page.getByText('Partial history.')).toBeVisible();
+});
+
+test('truncated history labels durations as newest-delivery samples, never as bounds', async ({ page }) => {
+  await fixture(page);
+  // The delivery cap makes counts lower bounds but leaves the durations a sample of the
+  // newest work, so every duration group must say so rather than read as a bound.
+  await page.route('**/api/shipping-pulse', route => route.fulfill({ json: pulseFixture({ completeness: 'partial', truncated: true, partialReason: 'More than 1000 exact deliveries occurred in the bounded window; only the newest 1000 were read. The counts are lower bounds. The durations are not bounds.' }) }));
+  await login(page); await page.getByRole('button', { name: /Shipping pulse/ }).click();
+  await expect(page.getByText('Partial history.')).toBeVisible();
+  await expect(page.getByText('The counts are lower bounds. The durations are not bounds.')).toBeVisible();
+  const sampled = page.getByText('Sampled durations:');
+  await expect(sampled).toHaveCount(2);
+  await expect(sampled.first()).toContainText('they are not lower bounds');
+});
+
+test('shipping pulse is not offered to operator agents whose scoped API cannot serve it', async ({ page }) => {
+  await fixture(page, 'operator-agent'); await login(page);
+  await expect(page.getByRole('button', { name: /Delivery graph/ })).toBeVisible();
+  await expect(page.getByRole('button', { name: /Shipping pulse/ })).toHaveCount(0);
 });
 
 async function checkDialog(page: Page, trigger: ReturnType<Page['getByRole']>) {

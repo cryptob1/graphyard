@@ -1,3 +1,4 @@
+<!-- page: Operate Graphyard | 5 | routing, recovery, and guarded merges. -->
 # Master-agent operating mode
 
 The master is a dedicated coordinator session. It reads Graphyard, watches Herdr health, routes ready work, handles handoffs, requests guarded merges, and administers the managed repository's GitHub App, installation, and branch protection — through the API when it can and through the operator's own browser profile when only a GitHub page can do it. It does not implement work, hold worker leases, or produce evidence.
@@ -189,6 +190,8 @@ Run `status` at startup, after dispatch, when a worker reports completion, and w
 
 For work using the [identity-bound agent review provider](github.md#identity-bound-agent-review-providers), each row carries a `review` object with the currently dispatched reviewer profile and runtime, plus the failover entries recorded for the current candidate; `counts.reviewFailover` totals the items that failed over. A reviewer runs out of quota or goes silent past its timeout, Graphyard records that and moves to the next configured profile on its own — no master action is required. When every profile is exhausted the row is flagged for attention and the review gate stays closed. That is a capacity decision for the operator: add reviewer capacity, wait for quota, or revise the review policy. Never treat exhaustion as an approval, and never merge around a closed review gate.
 
+`master status` also reports facts about the installation itself under `controlPlane`: `attention` lists a GitHub App permission the installation lacks (with the installation page where the pending request is accepted), a preflight that could not verify the permissions, and the number of integration jobs held on that shortfall; `appPermissions` carries the missing entries and when they were last verified; `counts.attention` includes these items. A permission shortfall is an operator action, not a merge decision: the affected jobs are held rather than retried, the gates they feed stay closed, and `graphyard github-setup --update-permissions` on the machine holding the App credentials prints the exact steps. `master init` reports the same attention in its result. See [App permissions](github.md#app-permissions).
+
 Dispatch:
 
 1. verifies the item is claimable;
@@ -321,7 +324,7 @@ A live scope is dismissed only when every member it still holds is positively at
 - `settleable: true` with no `refusals` means the supervisor is verifiably gone. Run `master settle-containment GY-N "reason"`. The control plane re-checks the deadlines and the verification before clearing the fence, and records the verification in the event ledger.
 - Any `refusals` entry means something could not be proven — the host is unreachable or not the registered one, a scope or process query failed, a process is still present, or the clocks disagree. Automatic settlement refuses, and so does the control plane. Stop the supervisor yourself and use the operator attestation path (`rework GY-N --previous-worker-stopped`, or `recover-containment GY-N --previous-worker-stopped` once the work is delivered).
 
-The record it sends names every process and containment scope it found, and counts the privileged host processes that withheld inspection. Settlement lowers the fence and nothing else. It does not authorize rework, reopen delivered work, or satisfy any gate; a submitted item still needs an operator's rework decision before reassignment. Verification is bounded by what this host can see: a supervisor launched on another machine, by another user, or outside this coordinator's systemd user manager is never reported as absent — those remain the operator's attestation. See [the protocol](protocol.md#automatic-containment-settlement) for the exact checks.
+The record it sends names every process and containment scope it found, and counts the privileged host processes that withheld inspection. Settlement lowers the fence and nothing else. It does not authorize rework, reopen delivered work, or satisfy any gate; a submitted item still needs an operator's rework decision before reassignment. Verification is bounded by what this host can see: a supervisor launched on another machine, by another user, or outside this coordinator's systemd user manager is never reported as absent — those remain the operator's attestation. See [the protocol](protocol/containment-settlement.md) for the exact checks.
 
 ## Secure multi-machine topology
 
