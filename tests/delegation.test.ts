@@ -48,7 +48,7 @@ function observation(work: Work, sha = head): Observation {
     reviews: [{ reviewer: 'independent-reviewer', sha, state: 'APPROVED' }], protected: true, mergeable: true,
     merged: false, mergeSha: null, files: ['src/delegation.ts'], scopeFiles: [], at: new Date().toISOString() };
 }
-// Drive an item to an observed candidate, then release the lease so later tests
+// Drive an item to an observed candidate. Submission ends the lease, so later tests
 // in the same slice are not blocked by a stale active engineer.
 async function candidate(actor: Principal, title: string, slice?: SliceId) {
   let work = await engine.execute(admin, 'create', null, input(title, slice), id());
@@ -56,8 +56,8 @@ async function candidate(actor: Principal, title: string, slice?: SliceId) {
   work = await engine.execute(actor, 'claim', work.id, {}, id());
   work = await engine.execute(actor, 'workspace', work.id, { epoch: work.epoch, host: 'delegation-host', path: `/tmp/delegation/${work.id}`, branch: `graphyard/${work.key.toLowerCase()}-${work.epoch}` }, id());
   work = await engine.execute(actor, 'submit', work.id, { epoch: work.epoch, pr: ++pr }, id());
-  work = await engine.observe(work.id, work.revision, observation(work));
-  return engine.execute(actor, 'release', work.id, { epoch: work.epoch }, id());
+  assert.equal(work.lease, null, 'complete ends the implementation lease');
+  return engine.observe(work.id, work.revision, observation(work));
 }
 const reload = async (work: Work) => (await store.list()).find(item => item.id === work.id)!;
 // The merge queue is global and strictly ordered, so a scenario that needs merge
@@ -302,7 +302,7 @@ test('integration:lead-enforcement — violating lead actions are refused server
   assert.equal(held.stage, 'merge');
   assert.ok(held.mergeAuthorization, 'authorization is reissued only after the authorized recovery');
   assert.deepEqual(currentMergeCandidates([held], held.observation!.at).map(w => w.key), [held.key]);
-  await engine.execute(workerA, 'release', ready.id, { epoch: held.epoch }, id());
+  assert.equal(held.lease, null, 'resubmission ended the rework lease');
 
   // A plan rejection blocks the same way and is superseded by the lead's own
   // approval of the revised plan, which is the one lead-side recovery.
@@ -336,7 +336,7 @@ test('integration:lead-enforcement — violating lead actions are refused server
   planned = await proven(planned, redone);
   assert.ok(planned.mergeAuthorization, 'authorization returns only through a full gate evaluation');
   assert.deepEqual(currentMergeCandidates([planned], planned.observation!.at).map(w => w.key), [planned.key]);
-  await engine.execute(workerB, 'release', planned.id, { epoch: planned.epoch }, id());
+  assert.equal(planned.lease, null, 'resubmission ended the rework lease');
 
   // Holds are ranked and never weakened: a send-back raised over a plan rejection
   // survives both a later rejection and a later approval.
@@ -392,7 +392,7 @@ test('integration:ownership-and-delivery-invariants — Graphyard owns leases, w
   // Control-plane truth never depends on the session runtime.
   for (const module of ['model.ts', 'engine.ts', 'store.ts', 'delegation.ts', 'server.ts'])
     assert.doesNotMatch(await readFile(new URL(`../src/${module}`, import.meta.url), 'utf8'), /herdr/i, module);
-  await engine.execute(workerA, 'release', item.id, { epoch: item.epoch }, id());
+  assert.equal(item.lease, null, 'submission ended the lease');
   await engine.execute(workerB, 'release', other.id, { epoch: other.epoch }, id());
 
   // The binding is per claimed item, not per worker: one engineer may hold more
@@ -488,7 +488,7 @@ test('integration:exact-candidate-validation — trusted evidence binds the exac
   assert.equal(accepted.policyRevision, item.policyRevision);
   assert.ok(accepted.executed > 0 && accepted.skipped === 0);
   assert.equal(acceptance(item), true);
-  await engine.execute(workerB, 'release', item.id, { epoch: item.epoch }, id());
+  assert.equal(item.lease, null, 'resubmission ended the rework lease');
   // Over HTTP, a producer credential co-located with an implementation session is
   // refused and the attempt is recorded rather than silently downgraded.
   let coLocated = await engine.execute(admin, 'create', null, input('co-located-producer', 'docs-experience'), id());
@@ -543,7 +543,7 @@ test('integration:exact-candidate-validation — trusted evidence binds the exac
   // this head from the merge queue, and an ejected head never re-enters.
   assert.match(revoked.gates.find(gate => gate.name === 'merge')!.reasons.join(' '), /Ejected from the merge queue/);
   assert.deepEqual(currentMergeCandidates([revoked], revoked.observation!.at), []);
-  await engine.execute(producerWorker, 'release', revoked.id, { epoch: revoked.epoch }, id());
+  assert.equal(revoked.lease, null, 'resubmission ended the rework lease');
 });
 
 test('unit:intake-classification — routine and human-only origins are explicitly separated', () => {
@@ -821,19 +821,18 @@ test('integration:automatic-escalation — every trigger escalates and no lead c
   assert.equal(replaced.escalation!.actor, 'graphyard');
   await engine.execute(workerB, 'release', replaced.id, { epoch: replaced.epoch }, id());
 
-  // Operator rework discards whatever assignment still stood, and that is the
-  // last moment the loss is visible: reconciliation only ever sees an expired
-  // lease, and the replacement claim guards on a lease this path has already
-  // cleared. A worker stopped after submitting never released its own lease, so
-  // the incident is recorded here rather than falling between the two.
+  // Operator rework discards whatever unfinished assignment still stood, and that
+  // is the last moment the loss is visible: reconciliation only ever sees an
+  // expired lease, and the replacement claim guards on a lease this path has
+  // already cleared. A worker stopped mid-implementation never released its own
+  // lease, so the incident is recorded here rather than falling between the two.
   let stranded = await engine.execute(admin, 'create', null, input('escalation-rework-lease', 'infrastructure'), id());
   stranded = await engine.execute(admin, 'ready', stranded.id, {}, id());
   stranded = await engine.execute(workerA, 'claim', stranded.id, {}, id());
   const strandedEpoch = stranded.epoch;
   stranded = await engine.execute(workerA, 'workspace', stranded.id, { epoch: strandedEpoch, host: 'delegation-host', path: `/tmp/delegation/${stranded.id}`, branch: `graphyard/${stranded.key.toLowerCase()}-${strandedEpoch}` }, id());
-  stranded = await engine.execute(workerA, 'submit', stranded.id, { epoch: strandedEpoch, pr: ++pr }, id());
-  assert.ok(stranded.lease, 'the stopped worker never released the lease it submitted under');
-  stranded = await engine.execute(admin, 'rework', stranded.id, { reason: 'Worker session was closed after submission', previousWorkerStopped: true }, id());
+  assert.ok(stranded.lease, 'the stopped worker never released the lease it was implementing under');
+  stranded = await engine.execute(admin, 'rework', stranded.id, { reason: 'Worker session was closed before it submitted', previousWorkerStopped: true }, id());
   assert.equal(stranded.lease, null);
   assert.equal(stranded.escalation!.trigger, 'lease-loss');
   assert.match(stranded.escalation!.reason, new RegExp(`${workerA.id} lost lease epoch ${strandedEpoch}`));
@@ -861,6 +860,13 @@ test('integration:automatic-escalation — every trigger escalates and no lead c
   reopened = await engine.execute(admin, 'rework', reopened.id, { reason: 'Reopened before anyone claimed it', previousWorkerStopped: true }, id());
   assert.equal(reopened.escalation ?? null, null);
   assert.deepEqual(reopened.escalations ?? [], []);
+  // A submitted attempt is one of those: `submit` ended its lease, so a worker
+  // session closed after completing leaves nothing for rework to discard.
+  let completed = await candidate(workerA, 'escalation-rework-submitted', 'infrastructure');
+  assert.equal(completed.lease, null);
+  completed = await engine.execute(admin, 'rework', completed.id, { reason: 'Worker session was closed after submission', previousWorkerStopped: true }, id());
+  assert.deepEqual(completed.escalations ?? [], [], 'post-submission rework is not an incident');
+  assert.equal(completed.lastAssignment!.owner, workerA.id, 'the completed attempt is still attributable');
 
   // An unresolved escalation refuses delivery, even for an otherwise merge-ready
   // candidate, and only a human operator can resolve it.
@@ -989,5 +995,5 @@ test('integration:bootstrap-compatibility — the single-agent bootstrap flow is
   assert.deepEqual(snapshot.slices.map(slice => slice.lead), [null, null, null]);
   assert.deepEqual(snapshot.reviewers, []);
   for (const [index, actor] of [workerB, workerC, admin].entries()) await bootstrap.execute(actor, 'release', peers[index].id, { epoch: peers[index].epoch }, id());
-  await bootstrap.execute(workerA, 'release', item.id, { epoch: item.epoch }, id());
+  assert.equal((await reload(item)).lease, null, 'the submitted attempt holds no lease to release');
 });
