@@ -47,9 +47,9 @@ after(async () => { if (pg) await pg.stop(); });
 
 /**
  * A ledger holding everything the roadmap says an upgrade and restore must preserve: an
- * assignment under a live lease with its registered workspace, the append-only history
- * behind it, two revisions of one scenario, and a validation request that is still
- * pending. Plus the tables an installation accumulates around them, and the proof-grant
+ * assignment under a live lease with its registered workspace, a submitted candidate whose
+ * lease the submission released, the append-only history behind them, two revisions of one
+ * scenario, and a validation request that is still pending. Plus the tables an installation accumulates around them, and the proof-grant
  * ledger after the operator has moved it away from the environment seed: one producer
  * holds a pattern that exists only in the database, another has had its seeded pattern
  * revoked. Both are what a restore that re-seeded the environment would get wrong. And the
@@ -76,7 +76,8 @@ async function populate(store: Store) {
   await validation.define(operator, { kind: 'registration', id: 'collector-1', expectedRevision: 0, principalId: collector.id, role: 'collector', environment, adapterVersion: 'test-v1', proofs: ['e2e:booking'], enabled: true }, id());
   await validation.define(operator, { kind: 'registration', id: 'builder-1', expectedRevision: 0, principalId: builder.id, role: 'builder', environment, adapterVersion: 'test-v1', proofs: [], enabled: true }, id());
   await validation.define(operator, { kind: 'bundle', id: 'bundle-1', expectedRevision: 0, scenario: 'booking', scenarioRevision: second.revision, scenarioHash: second.hash, digest, runnerImageDigest: inputs, reportFormat: 'junit-xml-v1' }, id());
-  // An assigned item under a live lease, with history, plus a second item still in backlog.
+  // A submitted item (submission releases its lease), a second item still in backlog, and a
+  // third item under a live lease with its registered workspace.
   let w = await engine.execute(operator, 'create', null, { title: 'Booking flow', criteria: [{ id: 'AC-1', text: 'Booking is proven', proofs: ['e2e:booking'] }] }, id());
   const later = await engine.execute(operator, 'create', null, { title: 'Later work', slice: 'product', criteria: [{ id: 'AC-1', text: 'Later', proofs: ['unit:later'] }] }, id());
   await recordLeadRuling(store, lead, later.id, { action: 'send-back', ruleId: 'rules/plan-v1#coverage', reason: 'Negative coverage is missing' }, id());
@@ -84,6 +85,9 @@ async function populate(store: Store) {
   w = await engine.execute(operator, 'ready', w.id, {}, id()); w = await engine.execute(worker, 'claim', w.id, {}, id());
   w = await engine.execute(worker, 'workspace', w.id, { epoch: 1, host: 'worker-host', path: '/srv/worktrees/booking', branch: 'graphyard/booking-1' }, id());
   w = await engine.execute(worker, 'submit', w.id, { epoch: 1, pr: 7 }, id());
+  let leased = await engine.execute(operator, 'create', null, { title: 'Cancellation flow', criteria: [{ id: 'AC-1', text: 'Cancellation is proven', proofs: ['unit:cancellation'] }] }, id());
+  leased = await engine.execute(operator, 'ready', leased.id, {}, id()); leased = await engine.execute(worker, 'claim', leased.id, {}, id());
+  await engine.execute(worker, 'workspace', leased.id, { epoch: 1, host: 'worker-host', path: '/srv/worktrees/cancellation', branch: 'graphyard/cancellation-1' }, id());
   w = await engine.observe(w.id, w.revision, { candidate: { sha, baseSha: base, pr: 7, branch: 'graphyard/booking-1', author: 'implementer' }, checks: [{ name: 'test', appId: 15368, result: 'success' }, { name: 'typecheck', appId: 15368, result: 'success' }], reviews: [{ reviewer: 'other', sha, state: 'APPROVED' }], merged: false, mergeSha: null, protected: true, mergeable: true, files: [], at: new Date().toISOString() });
   const build: any = await validation.attestBuild(builder, { registration: { id: 'builder-1', revision: 1 }, workId: w.id, expectedWorkRevision: w.revision, sourceSha: sha, baseSha: base, buildInputsDigest: inputs, artifacts: [{ service: 'api', digest }], provenanceUrl: 'https://ci.example.test/build/1' }, id());
   const candidate: any = await validation.createCandidate(operator, { workId: w.id, expectedWorkRevision: w.revision, proof: 'e2e:booking', environment, bundle: { id: 'bundle-1', revision: 1 }, buildAttestationId: build.id, requiredArtifacts: ['report'], artifactStorage: 'postgres' }, id());
@@ -119,7 +123,7 @@ async function populate(store: Store) {
   const secondApproval: any = await delivery.approve(operator, { release: { id: secondRelease.id, revision: secondRelease.revision }, environment }, id());
   await delivery.select(operator, { environment, release: { id: secondRelease.id, revision: secondRelease.revision }, expectedGeneration: 1, approvalId: secondApproval.id }, id());
   await delivery.requestRollback(operator, { environment, target: { id: release.id, revision: release.revision }, expectedGeneration: 2, reason: 'Release two degraded' }, id());
-  return { engine, validation, workId: w.id, requestId: request.id, scenario: { revision: second.revision, hash: second.hash } };
+  return { engine, validation, workId: w.id, leasedId: leased.id, requestId: request.id, scenario: { revision: second.revision, hash: second.hash } };
 }
 
 async function snapshot(store: Store) {
@@ -153,7 +157,8 @@ test('the documented backup and restore exercise preserves assignments, history,
   // row the migration seeds and the projection advances.
   await projectFlow(source);
   const before = await snapshot(source);
-  assert.ok(before.work.find(w => w.id === seeded.workId)!.lease, 'the fixture holds a live assignment');
+  assert.ok(before.work.find(w => w.id === seeded.leasedId)!.lease, 'the fixture holds a live assignment');
+  assert.equal(before.work.find(w => w.id === seeded.workId)!.lease, null, 'the submitted item released its lease at submission');
   assert.ok(before.flowFacts.length > 0 && Number(before.flowCheckpoint[0].last_event) > 0, 'the fixture holds projected flow facts behind an advanced checkpoint');
   assert.equal(before.requests.find(r => r.id === seeded.requestId)!.document.state, 'collecting');
   assert.equal(before.scenarios.length, 2);
@@ -196,7 +201,9 @@ test('the documented backup and restore exercise preserves assignments, history,
   const engine = new Engine(restored.pool ? restored : source, [15368], 120, 'test/repository');
   const validation = new Validation(engine, principals, 'test/repository');
   const item = (await restored.list()).find(w => w.id === seeded.workId)!;
-  assert.equal(item.lease?.owner, worker.id); assert.equal(item.workspaces[0].path, '/srv/worktrees/booking'); assert.equal(item.submission?.pr, 7);
+  assert.equal(item.lease, null); assert.equal(item.workspaces[0].path, '/srv/worktrees/booking'); assert.equal(item.submission?.pr, 7);
+  const live = (await restored.list()).find(w => w.id === seeded.leasedId)!;
+  assert.equal(live.lease?.owner, worker.id); assert.equal(live.lease?.epoch, 1); assert.equal(live.workspaces[0].path, '/srv/worktrees/cancellation');
   const request = (await validation.list()).requests.find(r => r.id === seeded.requestId)!;
   assert.equal(request.state, 'collecting'); assert.equal(request.attempts.at(-1)?.epoch, 1);
   // The heartbeat the collector was holding continues under the same epoch after restore.
@@ -204,7 +211,7 @@ test('the documented backup and restore exercise preserves assignments, history,
   // Sequences continue after the restored rows rather than colliding with them.
   const created = await engine.execute(operator, 'create', null, { title: 'After restore', criteria: [{ id: 'AC-1', text: 'Continues', proofs: ['unit:after'] }] }, id());
   const numbers = (await restored.pool.query('SELECT number FROM work_items ORDER BY number')).rows.map(r => Number(r.number));
-  assert.deepEqual(numbers, [1, 2, 3]); assert.equal(created.key, 'GY-3');
+  assert.deepEqual(numbers, [1, 2, 3, 4]); assert.equal(created.key, 'GY-4');
   const seqs = (await restored.pool.query('SELECT seq FROM events ORDER BY seq')).rows.map(r => Number(r.seq));
   assert.deepEqual(seqs.slice(0, before.events.length), before.events.map(e => Number(e.seq)));
   assert.ok(seqs.length > before.events.length && seqs.every((seq, i) => i === 0 || seq > seqs[i - 1]), 'new history appends after the restored history');
