@@ -1,3 +1,4 @@
+<!-- page: Understand or contribute | 3 | planned work, clearly separated from shipped behavior. -->
 # Turnkey E2E execution and verified delivery
 
 **Status: implementation roadmap, not shipped functionality.** Graphyard should eventually cover the full journey from work assignment to independently verified delivery after a guided setup. Users should not have to assemble their own control plane, dispatch queue, evidence broker and deployment reconciler.
@@ -29,7 +30,7 @@ Use precise labels in the UI. A green merge must never silently stand in for ver
 | D3 | Deployment observations, release membership and production verification | D1; D2 for behavioral checks |
 | D4 | Capacity, recovery, artifact operations and safe rollback integrations | D2–D3 |
 | D5 | Additional runner/report adapters and off-the-shelf packaging | Proven D2 path |
-| D6 | Optional evidence replay, safe reuse and cost analytics | Stable artifacts and operational measurements |
+| D6 | Optional evidence replay, safe reuse and cost analytics — [shipped](evidence-reuse.md) | Stable artifacts and operational measurements |
 
 Implement one vertical path before building an extensible framework around imagined adapters. The initial target is one repository, GitHub, an existing Playwright suite, a pinned preview or staging candidate, and Railway deployment observations. Other supported stacks follow the same protocol. No new workflow framework is required by this plan; reassess if measured operational requirements exceed the existing durable job model.
 
@@ -69,9 +70,11 @@ Acceptance checks:
 
 ## D2 — One turnkey Playwright path
 
+*Shipped. See [runner setup](runner-setup.md) for the packaged runner and collector, and [validation](validation.md) for the protocol they speak. The requirements below remain the standard this path is held to; the acceptance checks at the end of this section are the ones it must keep passing.*
+
 Ship a supported runner integration and setup flow, not merely a protocol document. Start by discovering repository configuration and enumerating proposed tests. Let the operator review required scenarios, test inventory, target URL and proof mapping. An independently approved, digest-pinned test/oracle bundle is the executable authority; discovered package names and candidate-controlled commands are only suggestions. The runner verifies the bytes of the approved bundle, including transitive test helpers, fixtures, configuration, lockfiles and runner image/version, before execution. Execute that content-addressed bundle from a read-only boundary inaccessible to candidate-controlled build/setup/test-target processes for the entire attempt, with separately isolated scratch/output paths. Candidate code cannot replace imports, configuration, interpreters or approved runtime dependencies after verification; no shared writable filesystem or candidate-selected module/search path may supply executable oracle bytes. Validate these isolation properties in the supported adapter. It must not silently substitute tests from the implementation checkout. New or changed executable assertions require separately authorized bundle approval and an explicit scenario/requirement revision that pins that bundle; implementation-worker credentials cannot authorize this revision. The approved harness exercises the candidate artifact, so test authority remains separate from the product code under test.
 
-The runner should support an isolated self-hosted execution path and an existing CI execution path. Candidate code must not receive operator credentials or a generic trusted producer token. Separate test execution from the trusted collector that verifies request identity, test inventory, target attribution and artifacts. Scope any execution capability to one request/attempt. The collector must not treat arbitrary candidate-authored JSON as proof that a command ran or that the complete inventory executed.
+The runner should support an isolated self-hosted execution path and an existing CI execution path. Candidate code must not receive the human operator's `admin` credential or a generic trusted producer token. Separate test execution from the trusted collector that verifies request identity, test inventory, target attribution and artifacts. Scope any execution capability to one request/attempt. The collector must not treat arbitrary candidate-authored JSON as proof that a command ran or that the complete inventory executed.
 
 Isolation must suit untrusted repository code: separate tenants/repositories, fresh workspaces, controlled network access, bounded time/resources and no ambient deployment credentials. A container alone is not a claim of sufficient hostile-code isolation. Specify and test the actual sandbox boundary for each executor. Test accounts and outbound side effects require explicit configuration; do not silently exercise production messaging or payment operations.
 
@@ -108,6 +111,8 @@ Acceptance checks:
 
 ## D3 — Releases and observed production delivery
 
+*Shipped as the release model, observation protocol and bounded reconciliation. See [releases and observed production delivery](delivery.md) for the records, the observer and promoter identities, and the derived verification statuses. No provider adapter ships with it: an observer is an operator-run process with its own credential, and Railway's API does not expose measured runtime artifact identity, so a Railway observer would report `unknown` — which the protocol refuses to verify, by design. Behavioral checks bound to a release rather than a work item's candidate are not part of this increment. The requirements below remain the standard this path is held to; the acceptance checks at the end of this section are the ones `tests/delivery.test.ts` runs, one named test per check.*
+
 Add `Release`, explicit release membership, expected service manifests and append-only deployment observations. Keep desired state separate from provider-reported deployment success and independently observed runtime state. Record deployment time, observation time and receipt time separately.
 
 Release creation, immutable membership/manifest revisions and selection of the expected release require an authenticated promotion principal explicitly authorized for the repository, environment and services. Implementation workers and observation-only adapters cannot change desired state. Each selection transaction compares the expected current generation and, for delegated jobs, the current principal-bound lease epoch, checks the configured promotion/approval policy, then appends history and advances the generation atomically. Approval binds the exact manifest, source/artifact provenance and policy revision; changing any of them requires fresh authorization. A deployment notification cannot choose its own expected release.
@@ -137,6 +142,8 @@ Acceptance checks:
 
 ## D4 — Operate runners and recover delivery failures
 
+*Shipped as capacity reporting, request diagnostics and backpressure on the runner path, an artifact backend interface with an S3-compatible option, capacity bound, verified retention and digest-checked migration, and the authorized, fenced, observed rollback workflow. See [runner capacity, artifact operations and delivery recovery](recovery.md). The requirements below remain the standard this path is held to; the acceptance checks at the end of this section are the ones `tests/recovery.test.ts` runs, one named test per check.*
+
 Extend the execution-resource safety shipped in D2 with capacity reporting, backpressure, queue dwell and richer dispatch/heartbeat diagnostics. Execution-scoped leases, external fencing and verified settlement before reassignment are D2 prerequisites; D4 adds operational scale without relaxing those guarantees.
 
 Extend D2's already-shipped private artifact storage, access controls, hashes, retention and redaction with a documented backend interface, capacity management, S3-compatible options and operational recovery. Backend migrations must preserve authorization and retention policies, and verify artifact integrity. Baseline security and durable storage are prerequisites from D2, not deferred to this increment.
@@ -154,21 +161,25 @@ Acceptance checks:
 
 ## D5 — Generalized reports, runners and installation
 
+*Shipped for the parts below; the remaining limits are stated. See [report adapters](report-adapters.md) for the adapter contracts, [deployment](deployment.md) for versioned images, the Helm chart, upgrades, backups and restores, and the [operations reference](operations-reference.md#readiness-checklist-per-completion-profile) for the readiness checklist. Deployment-provider adapters follow D3's release observations and are not part of this increment; production verification therefore remains a manual proof, and the checklist says so.*
+
 After D2 works, add adapters based on actual user demand: supported unit/integration report formats, additional E2E frameworks and deployment providers. Each adapter must declare what it can prove, what is independently observed, supported versions and failure semantics. Contract fixtures cover real payloads and unknown formats fail visibly; avoid another brittle prose approval dependency.
 
 Provide versioned Docker images and documented upgrade, backup and restore procedures. Railway should remain a supported guided deployment. Add a Helm chart when the actual deployment topology and Kubernetes operating requirements are established; a chart should ship with tested persistence, secrets, migrations and upgrade behavior rather than merely wrap the container.
 
 `graphyard init` should propose the repository graph, discover supported CI/tests, guide credential creation, configure Herdr and managed AGENTS instructions, and validate a first real PR. Detection must not silently authorize privileged integrations. Show an explicit readiness checklist for the selected completion profile.
 
-Acceptance checks:
+Acceptance checks, with where each is exercised:
 
-- A clean machine can deploy and connect a supported repository using the documented path.
-- The first real PR visibly progresses through the configured proof and delivery stages.
-- Missing credentials, permissions or unsupported test formats have direct recovery instructions.
-- Upgrade and restore exercises preserve assignments, event history, scenario revisions and pending requests.
-- Self-hosted Graphyard remains fully useful without a cloud subscription.
+- A clean machine can deploy and connect a supported repository using the documented path. — `scripts/verify-image-release.mjs` starts the versioned image against an empty database on every CI run and release; `deploy/helm/exercise.sh` installs the chart on a fresh kind cluster; `tests/init-scan.test.ts` connects a scanned repository through `init --scan --apply` and `doctor`. The Railway and Compose walkthroughs on a machine nobody has prepared remain an operator-witnessed manual proof.
+- The first real PR visibly progresses through the configured proof and delivery stages. — `graphyard doctor --profile` reports what is configured, and `tests/system.test.ts` drives a PR through every gate; the real PR on a fresh installation is the manual proof, as the checklist itself states.
+- Missing credentials, permissions or unsupported test formats have direct recovery instructions. — `tests/readiness.test.ts` and the `doctor` CLI test: every `missing` and `unknown` item carries the command or setting that resolves it; frameworks without a report adapter are named as unsupported with the recovery.
+- Upgrade and restore exercises preserve assignments, event history, scenario revisions and pending requests. — `tests/backup-restore.test.ts` (an assignment under lease with its workspace, append-only history, two scenario revisions, a validation request mid-collection with a private artifact, and the proof-grant ledger after a grant made only in Graphyard and a revoked environment seed, restored into a fresh database, migrated again, and continued under the same epoch with the bootstrap seed re-materializing nothing), the same round trip through the shipped image in `scripts/verify-image-release.mjs`, and the chart's upgrade-then-restore drill in `deploy/helm/exercise.sh`.
+- Self-hosted Graphyard remains fully useful without a cloud subscription. — versioned images, Compose, the Helm chart, `db backup`/`db restore` and the readiness checklist need no hosted account; `tests/deployment-packaging.test.ts` holds the packaging to one version everywhere it is stamped. Railway stays a supported guided deployment, not a requirement.
 
 ## D6 — Evidence replay, compatible reuse and analytics
+
+*Shipped as artifact replay with per-dimension coverage and measured cost, operator-defined reuse policies over independently observed file snapshots with exact revision binding and a durable attempt sequence, and execution analytics that keep observed, estimated and unavailable cost apart. See [evidence replay, scoped reuse and execution analytics](evidence-reuse.md). The requirements below remain the standard this path is held to; the acceptance checks at the end of this section are the ones `tests/evidence-reuse.test.ts` runs, one named test per check.*
 
 These optimizations follow a correct pinned-candidate path. They are not prerequisites for initial turnkey E2E execution.
 
@@ -177,6 +188,8 @@ Replay deterministic verifiers over sanitized retained artifacts with explicit c
 Consider evidence reuse only with a defensible applicability definition covering dependencies, lockfiles, build inputs, configuration, migrations and relevant services. Reuse also requires exact requirement revision, scenario revision/hash, proof policy revision and approved executable oracle bundle identity/digest, together with target/environment scope and required evidence freshness. A change to any of those forbids reuse even if the product code is unchanged. No cross-revision compatibility mapping is included in D6; any future relaxation needs its own separately reviewed non-weakening policy. Missing scope falls back to exact binding. Only the newest compatible attempt may authorize reuse, and it must satisfy every required execution, behavior, attribution, inventory and artifact condition. A newer queued, running, blocked, timed-out, unmeasured or incomplete attempt prevents fallback to an older pass. Order attempts by a durable sequence, not result arrival time; delayed older results cannot regain authority. Measure avoided work and false reuse before enabling broad reuse policies.
 
 Add cost and duration analytics from optional runner-supplied measurements. Distinguish observed cost, estimated cost and unavailable cost; do not rank agents as if workloads were comparable without context.
+
+*Shipped ahead of reuse: [candidate-to-deployment attribution](attribution.md) binds every validation request to its exact manifest, compatibility signature and independently observed target, re-anchors safely when the target moves, and measures avoided runs, wasted runs and unsupported claims — the accounting any later reuse policy must be judged against. No reuse is enabled by it.*
 
 Acceptance checks:
 
@@ -189,6 +202,6 @@ Acceptance checks:
 
 ## Definition of the eventual off-the-shelf experience
 
-For a supported stack, a user installs Graphyard, connects a repository and environments, reviews proposed requirements, and runs agents through their preferred runtime. Graphyard handles assignment, isolation registration, conflict visibility, review, runner dispatch, evidence, deployment attribution, recovery and progression. The UI explains what is waiting and what action resolves it.
+For a supported stack, a user installs Graphyard, connects a repository and environments, reviews proposed requirements, and runs agent sessions through their preferred runtime. Graphyard handles assignment, isolation registration, conflict visibility, review, runner dispatch, evidence, deployment attribution, recovery and progression. The UI explains what is waiting and what action resolves it.
 
 Application-specific test code, credentials, production risk decisions and unsupported provider capabilities remain explicit inputs. “Turn it on and cover the lifecycle” must mean useful integrations and honest verification, not automatic claims that an arbitrary application is correct.

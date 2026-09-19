@@ -1,0 +1,11 @@
+{
+  "name": "cursor-primary",
+  "principal": "cursor-1",
+  "agentName": "engineering-cursor-1",
+  "mode": "launch",
+  "kind": "cursor",
+  "credentialFile": "/home/operator/.config/graphyard/workers/cursor-1.token",
+  "agentArgs": [],
+  "approvals": "auto",
+  "environment": {}
+}

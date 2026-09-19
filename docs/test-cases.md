@@ -1,3 +1,4 @@
+<!-- page: Build integrations | 2 | versioned E2E scenarios pinned to environments. -->
 # E2E test-case registry
 
 Graphyard stores versioned test-case definitions separately from execution evidence. A test-case definition describes what should be tested. An evidence record describes what a trusted runner actually observed.
@@ -40,7 +41,7 @@ graphyard scenario scenario.json
 graphyard scenarios
 ```
 
-The API is `POST /api/scenarios` and `GET /api/scenarios`. All requests require authentication; publication also requires an operator and an idempotency key. Reads return all immutable revisions ordered by ID and newest revision first.
+The API is `POST /api/scenarios` and `GET /api/scenarios`. All requests require authentication; publication also requires the human operator's `admin` credential and an idempotency key. Reads return all immutable revisions ordered by ID and newest revision first.
 
 ## Versioning
 
@@ -65,10 +66,10 @@ A trusted producer with permission for that exact proof name submits ordinary ev
 }
 ```
 
-Include the exact tested head SHA, base SHA, policy revision, result, counts, and artifact URL described in the [agent protocol](protocol.md#evidence). The evidence must match the pinned scenario revision and environment, in addition to the candidate and policy. A passed staging run cannot satisfy a production requirement. An older or newer scenario run cannot satisfy the pinned version accidentally.
+Include the exact tested head SHA, base SHA, policy revision, result, counts, and artifact URL described in the [agent protocol](protocol/evidence.md). The evidence must match the pinned scenario revision and environment, in addition to the candidate and policy. A passed staging run cannot satisfy a production requirement. An older or newer scenario run cannot satisfy the pinned version accidentally.
 
 Defining a case does not count as running it. Running it does not count as passing it. A worker reporting pass does not make the result independently trusted.
 
 ## Loading and revised work
 
-The library distinguishes loading, failed reads and a confirmed empty result. Retry a failed read; previously loaded definitions are labeled potentially stale. Adding a definition does not run tests. Work requirements can be revised by an operator using the [coordination guide](coordination.md), while existing scenario pins remain unchanged.
+The library distinguishes loading, failed reads and a confirmed empty result. The empty-library prompt appears only after a successful read returns nothing. Retry a failed read; definitions already observed stay on screen and are labeled potentially stale. When a read fails and no definition has been observed, the library reports that its contents are unknown instead of implying the library is empty or that stale definitions are displayed. A rejected publish is reported on the form alone and never changes what the page says about the last read. Adding a definition does not run tests. Work requirements can be revised by an operator using the [coordination guide](coordination.md), while existing scenario pins remain unchanged.

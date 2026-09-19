@@ -6,6 +6,7 @@
   "kind": "claude",
   "credentialFile": "/home/operator/.config/graphyard/workers/claude-1.token",
   "agentArgs": [],
+  "approvals": "auto",
   "environment": {
     "CLAUDE_CONFIG_DIR": "/home/operator/.config/claude-primary"
   }

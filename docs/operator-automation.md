@@ -1,14 +1,15 @@
+<!-- page: Operate Graphyard | 10 | least-privilege operator agents with server-enforced scope. -->
 # Scoped operator-agent automation
 
 ## Bootstrap boundary
 
-Graphyard starts in the safer mode: one implementation agent works under direct human supervision. No operator-agent credential, multi-agent routine, or automated coordinator is required. Connect Graphyard's own repository, activate its delivery gates, and demonstrate the complete protected path before enabling operator automation.
+Graphyard starts in the safer mode: one worker session works under the human operator's direct supervision. No operator-agent credential, multi-agent routine, or automated coordinator is required. Terms follow the [glossary](glossary.md). Connect Graphyard's own repository, activate its delivery gates, and demonstrate the complete protected path before enabling operator automation.
 
-Only a human administrator may opt in. After opt-in, keep four distinct AI sessions and identities: the **Operator** expresses bounded intent, the **Master** observes and coordinates routine delivery, the **Worker** implements in an assigned worktree, and the **Reviewer/proof-producer** independently reviews or produces trusted proof. The human supplies goals, approval decisions, exceptions, and oversight. Do not collapse these sessions or share credentials between them.
+Only the human operator may opt in. After opt-in, keep four distinct AI agent sessions, each with its own principal: the **operator agent** expresses bounded intent, the **master** observes and coordinates routine delivery, the **worker** implements in an assigned worktree, and the **reviewer/proof producer** independently reviews or produces trusted proof. The human operator supplies goals, approval decisions, exceptions, and oversight. Do not collapse these sessions or share credentials between them.
 
 ## Authority model
 
-An `operator-agent` is not an administrator. Its server-loaded identity contains an explicit capability list and repository/work allowlist; missing entries deny access. Available capabilities are:
+An `operator-agent` is not the human operator and holds no `admin` authority. Its server-loaded identity contains an explicit capability list and repository/work allowlist; missing entries deny access. Available capabilities are:
 
 | Capability | Bounded operation |
 | --- | --- |
@@ -79,7 +80,7 @@ A revoked identity is retained for audit and cannot be silently reactivated. Cre
 - **Repository split binding:** startup fails closed when an explicitly repository-bound engine is paired with a GitHub adapter for another repository; status, webhooks, validation, and mutations must share one binding.
 - **Stale/replayed requests:** expected revisions reject stale policy edits; idempotency receipts return the identical result and reject changed reuse.
 - **Lease races:** the role has no lease commands. Existing principal identity and epoch checks continue to fence workers.
-- **Evidence forgery and session collapse:** operator automation has no evidence or validation authority. Keep reviewer/proof-producer, worker, master, and operator sessions distinct.
+- **Evidence forgery and session collapse:** operator automation has no evidence or validation authority. Keep reviewer/proof producer, worker, master, and operator-agent sessions distinct.
 - **Secret exposure:** stdin avoids process arguments; responses, UI, events, and stored agent documents contain fingerprints only. Database credential hashes still require normal database protection.
 - **Partial rotation and lockout:** bounded overlap permits verification; a human admin can rotate or revoke. Retain an offline recovery path for the admin credential.
-- **Rollback:** revoke the identity to return to human-operated coordination. Existing immutable history remains; do not delete it or relax delivery gates.
+- **Rollback:** revoke the identity to return to coordination by the human operator. Existing immutable history remains; do not delete it or relax delivery gates.

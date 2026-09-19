@@ -1,3 +1,4 @@
+<!-- page: Maintainer and historical records | 3 | what Huck Engineer taught Graphyard about worker pipelines. -->
 # Huck Engineer investigation: lessons for Graphyard
 
 > **Historical research.** Commit references and implementation status below are preserved for context. Use the [current documentation index](../README.md) for shipped behavior.

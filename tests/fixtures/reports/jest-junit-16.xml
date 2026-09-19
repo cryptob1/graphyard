@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuites name="jest tests" tests="3" failures="0" errors="0" time="1.234">
+  <testsuite name="orders" errors="0" failures="0" skipped="0" timestamp="2026-09-18T10:20:01" time="0.812" tests="2">
+    <testcase classname="orders creates an order" name="orders creates an order" time="0.4">
+    </testcase>
+    <testcase classname="orders cancels an order" name="orders cancels an order" time="0.3">
+    </testcase>
+  </testsuite>
+  <testsuite name="health" errors="0" failures="0" skipped="0" timestamp="2026-09-18T10:20:02" time="0.422" tests="1">
+    <testcase classname="health answers" name="health answers" time="0.2">
+    </testcase>
+  </testsuite>
+</testsuites>

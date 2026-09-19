@@ -1,0 +1,44 @@
+name: Release image
+on:
+  push:
+    tags: ['v*.*.*']
+permissions:
+  contents: read
+  packages: write
+jobs:
+  image:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with: { persist-credentials: false }
+      - name: Resolve the release version from the tag and package.json
+        id: version
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME#v}"
+          declared="$(node -p "require('./package.json').version")"
+          if [ "$tag" != "$declared" ]; then echo "Tag v$tag does not match package.json version $declared" >&2; exit 1; fi
+          echo "version=$tag" >> "$GITHUB_OUTPUT"
+          echo "repository=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build, verify and publish the versioned control-plane image
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          REPOSITORY: ${{ steps.version.outputs.repository }}
+        run: |
+          set -euo pipefail
+          docker build \
+            --build-arg "GRAPHYARD_VERSION=$VERSION" \
+            --build-arg "GRAPHYARD_BUILD_REVISION=$GITHUB_SHA" \
+            --tag "$REPOSITORY:$VERSION" .
+          # The image must report the release it claims before it is published anywhere.
+          node scripts/verify-image-release.mjs "$REPOSITORY:$VERSION" "$VERSION" "$GITHUB_SHA"
+          docker push "$REPOSITORY:$VERSION"
+          docker image inspect --format '{{index .RepoDigests 0}}' "$REPOSITORY:$VERSION" | tee image-digest.txt
+      - uses: actions/upload-artifact@v4
+        with: { name: image-digest, path: image-digest.txt, retention-days: 90 }

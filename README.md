@@ -2,7 +2,7 @@
 
 **Turn a fleet of coding agents into an engineering system.**
 
-Graphyard is an open-source control plane for coordinating coding agents across machines and worktrees. Agent runtimes write code. Graphyard records ownership, dependencies, evidence, gate decisions, and the exact change allowed to merge.
+Graphyard is an open-source control plane for coordinating coding agents across machines and worktrees. Agent sessions, hosted by runtimes such as Herdr, write the code. Graphyard records ownership, dependencies, evidence, gate decisions, and the exact change allowed to merge.
 
 ```text
 Backlog → Ready → Build → Review → Test → Acceptance → Merge → Done
@@ -10,7 +10,7 @@ Backlog → Ready → Build → Review → Test → Acceptance → Merge → Don
 
 A card stops at its first refusing gate and explains what is missing. `graphyard complete` submits an implementation; only an observed, authorized merge makes work Done.
 
-[How it works](docs/how-graphyard-works.md) · [Onboard a repository](docs/onboarding.md) · [Documentation](docs/README.md)
+[How it works](docs/how-graphyard-works.md) · [Glossary](docs/glossary.md) · [Onboard a repository](docs/onboarding.md) · [Documentation](docs/README.md)
 
 ## Why Graphyard
 
@@ -32,19 +32,19 @@ Graphyard makes those facts explicit and durable.
 | GitHub enforcement | PR, review, CI, protection, and merge observations with an App-owned required check |
 | Herdr integration | Repository setup, a work ledger pane, supervised workers, and a dedicated master mode |
 | Delivery view | Kanban and a graph showing every item at its first refusal |
-| Test definitions | Versioned E2E scenarios and a durable runner protocol |
+| Test definitions | Versioned E2E scenarios and a packaged Playwright runner/collector path |
 
-Graphyard currently governs work through a verified GitHub merge. Turnkey E2E execution, environment observations, and production verification are still in development.
+Graphyard currently governs work through a verified GitHub merge. The packaged Playwright path is available; environment observations and production verification are still in development.
 
 ## Boundaries
 
 - **Git** owns source history.
 - **GitHub** owns PR and merge facts.
-- **Agent runtimes** own live sessions.
-- **Trusted runners** produce allowed evidence.
+- **Agent runtimes** such as Herdr own live agent sessions.
+- **Proof producers** (CI workflows and trusted runners) produce trusted evidence.
 - **Graphyard** owns coordination and progression.
 
-Herdr is the first packaged runtime integration. Codex, Claude, OpenCode, custom agents, and humans can use the same CLI and HTTP protocol.
+Herdr is the first packaged runtime integration. Codex, Claude Code, opencode, custom agents, and human operators can use the same CLI and HTTP protocol.
 
 ## Try it locally
 
@@ -61,13 +61,13 @@ npm run build
 npm start
 ```
 
-Open `http://localhost:4310`. Use the operator token from `.env`.
+Open `http://localhost:4310`. Sign in with the `admin` token from `.env`.
 
 For a real repository with Railway, GitHub protection, Herdr, a master, and workers, follow [repository onboarding](docs/onboarding.md). The package is not published to npm yet; run the CLI from a Graphyard checkout.
 
 ## Deploy
 
-Graphyard is one application container plus Postgres. Use the included Dockerfile with [Railway or Docker Compose](docs/deployment.md). It does not require Temporal, LangGraph, Redis, or Kubernetes.
+Graphyard is one application container plus Postgres. Every release publishes a versioned image; run it with [Railway, Docker Compose, or the Helm chart](docs/deployment.md), and back up, upgrade and restore the ledger with the shipped `graphyard db` commands. It does not require Temporal, LangGraph, Redis, or a hosted account; Kubernetes is supported, not required.
 
 ## Documentation
 

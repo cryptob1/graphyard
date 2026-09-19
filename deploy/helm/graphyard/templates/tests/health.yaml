@@ -1,0 +1,37 @@
+# `helm test RELEASE`: the release serves /healthz and reports the version the chart deployed.
+# The pod stays after it succeeds so `helm test --logs` and `kubectl logs` can read what it saw;
+# the next `helm test` replaces it. Deleting it on success would remove the logs before Helm
+# collects them.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: {{ include "graphyard.fullname" . }}-test-health
+  labels:
+    {{- include "graphyard.labels" . | nindent 4 }}
+    app.kubernetes.io/component: test
+  annotations:
+    helm.sh/hook: test
+    helm.sh/hook-delete-policy: before-hook-creation
+spec:
+  restartPolicy: Never
+  securityContext:
+    {{- toYaml .Values.podSecurityContext | nindent 4 }}
+  containers:
+    - name: health
+      image: {{ include "graphyard.image" . | quote }}
+      securityContext:
+        {{- toYaml .Values.containerSecurityContext | nindent 8 }}
+      command: ["node", "--input-type=module", "-e"]
+      args:
+        - |
+          const expected = process.env.EXPECTED_VERSION;
+          const response = await fetch(process.env.HEALTH_URL, { signal: AbortSignal.timeout(10000) });
+          const health = await response.json();
+          if (!response.ok || health.ok !== true) throw new Error(`unhealthy: ${JSON.stringify(health)}`);
+          if (health.version !== expected) throw new Error(`release reports version ${health.version}, chart deployed ${expected}`);
+          console.log(`healthy: version ${health.version}, revision ${health.revision}, schema ${health.schema}`);
+      env:
+        - name: HEALTH_URL
+          value: "http://{{ include "graphyard.fullname" . }}:{{ .Values.service.port }}/healthz"
+        - name: EXPECTED_VERSION
+          value: {{ include "graphyard.version" . | quote }}

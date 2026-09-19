@@ -15,13 +15,23 @@ const fetcher = async () => new Response(JSON.stringify({ actor: { id: 'worker-a
 async function repo() { const root = await mkdtemp(join(tmpdir(), 'graphyard-init-')); execFileSync('git', ['init', '-q', root]); return root; }
 
 test('managed instructions refresh one section and preserve all surrounding operator content', () => {
-  const original = '# Operator rules\nNever delete customer data.\n';
+  const bootstrap = "The initial MVP is a single-agent bootstrap under the operator's supervision. Do not launch other agents for bootstrap work.";
+  const original = `# Operator rules\n${bootstrap}\nNever delete customer data.\n`;
   const first = managedInstructions(original, 'https://one.example');
+  assert.match(first, /dedicated master coordinator must keep cycling: status, dispatch ready work,\nshepherd review and proof collection, guarded merge, then deployment verification/);
+  assert.match(first, /both conditions hold: \(1\) every in-scope item is Done or has a genuinely\nexternal blocker recorded in Graphyard; and \(2\) every merged change is deployed and\nlive-verified against the exact deployed release, or a genuinely external deployment\nblocker is recorded in Graphyard/);
+  assert.match(first, /Delivered work is immutable, so a deployment\nblocker is recorded as a follow-up work item naming the delivered item, its merge\ncommit, and the external cause/);
+  assert.match(first, /An observed merge alone does not end the loop/);
+  for (const condition of ['Ordinary review findings', 'rework', 'idle workers', 'proof setup', 'Close finished agent\\s+sessions']) assert.match(first, new RegExp(condition));
   const surrounding = `${first}\n## Team review\nAsk the maintainer.\n`;
   const updated = managedInstructions(surrounding, 'https://two.example');
   assert.ok(updated.startsWith(original)); assert.ok(updated.endsWith('## Team review\nAsk the maintainer.\n'));
   assert.equal(updated.split('<!-- graphyard -->').length, 2); assert.doesNotMatch(updated, /one.example/);
+  assert.equal(updated.split(bootstrap).length - 1, 1, 'setup preserves the protected bootstrap rule byte-for-byte');
   assert.equal(managedInstructions(updated, 'https://two.example'), updated);
+  assert.match(updated, /Run `sync GY-N` before every push/); assert.match(updated, /never rebase/);
+  assert.match(updated, /Files outside plannedFiles must match\norigin\/BASE byte-for-byte/); assert.match(updated, /Only an operator can widen plannedFiles/);
+  assert.match(updated, /refused, naming the files and the shipped work/);
   for (const broken of ['<!-- graphyard -->', '<!-- /graphyard --><!-- graphyard -->', first + first]) assert.throws(() => managedInstructions(broken, 'https://example.com'), /markers/);
 });
 
@@ -91,7 +101,7 @@ test('init accepts a token over stdin, and a server override never forwards a sa
   const http = createServer((req, res) => { received = String(req.headers.authorization ?? ''); res.setHeader('Content-Type', 'application/json'); res.end(JSON.stringify({ actor: { role: 'worker', id: 'worker-a' } })); });
   await new Promise<void>(r => http.listen(0, '127.0.0.1', r));
   const url = `http://127.0.0.1:${(http.address() as any).port}`;
-  const env = { ...process.env }; delete env.GRAPHYARD_TOKEN; delete env.GRAPHYARD_URL;
+  const env = { ...process.env }; delete env.GRAPHYARD_TOKEN; delete env.GRAPHYARD_URL; delete env.GRAPHYARD_TOKEN_FILE;
   try {
     const child = execFile(process.execPath, [launcher, 'init', '--url', url, '--token-stdin'], { cwd: root, env });
     child.stdin!.end(secret);
@@ -160,7 +170,7 @@ test('CLI init from a linked worktree shares credentials with siblings and repla
   const http=createServer((req,res)=>{authorization=String(req.headers.authorization??'');res.setHeader('Content-Type','application/json');res.end(JSON.stringify({actor:{id:'worker-a',role:'worker'}}));});
   await new Promise<void>(r=>http.listen(0,'127.0.0.1',r));
   const url=`http://127.0.0.1:${(http.address() as any).port}`;
-  const env={...process.env};delete env.GRAPHYARD_TOKEN;delete env.GRAPHYARD_URL;delete env.GRAPHYARD_HOST_ID;
+  const env={...process.env};delete env.GRAPHYARD_TOKEN;delete env.GRAPHYARD_URL;delete env.GRAPHYARD_TOKEN_FILE;delete env.GRAPHYARD_HOST_ID;
   try {
     execFileSync('git',['-c','user.name=Test','-c','user.email=test@localhost','commit','--allow-empty','-m','Initial'],{cwd:root,stdio:'ignore'});
     const first=join(root,'first'),sibling=join(root,'sibling');
@@ -181,7 +191,7 @@ test('CLI init from a linked worktree shares credentials with siblings and repla
 });
 
 test('empty explicit stdin and environment credentials refuse without replacing saved configuration', async () => {
-  const root=await repo();const env={...process.env};delete env.GRAPHYARD_TOKEN;delete env.GRAPHYARD_URL;
+  const root=await repo();const env={...process.env};delete env.GRAPHYARD_TOKEN;delete env.GRAPHYARD_URL;delete env.GRAPHYARD_TOKEN_FILE;
   try {
     await setupRepository(root,connection,{fetcher});
     const saved=await readFile(join(root,'.graphyard/connection.json'),'utf8'),instructions=await readFile(join(root,'AGENTS.md'),'utf8');
