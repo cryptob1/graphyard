@@ -608,7 +608,7 @@ test('master status reports each containment quarantine and only claims verifica
   const quarantine = { owner: 'worker-a', epoch: 1, at: lapsed, settlementHash: 'a'.repeat(64), launchAcknowledgedAt: lapsed, launchExpiresAt: lapsed, leaseExpiresAt: lapsed };
   const workspace = { host: 'coordinator-host', path: '/srv/worktrees/GY-42-1', branch: 'graphyard/gy-42-1', epoch: 1, owner: 'worker-a' };
   const stranded = work({ stage: 'build', submission: null, candidate: null, queue: null, mergeAuthorization: null, lease: null, containmentQuarantine: quarantine, workspaces: [workspace] });
-  const clean = { method: 'linux-proc-systemd' as const, platform: 'linux', uid: 1000, workspacePath: workspace.path, processes: [], scopes: [], inaccessible: 0, unverifiable: [] };
+  const clean = { method: 'linux-proc-systemd' as const, platform: 'linux', uid: 1000, workspacePath: workspace.path, processes: [], scopes: [], held: [], recordedScope: null, inaccessible: 0, unverifiable: [] };
   const probe = () => clean;
 
   const unverified = buildMasterStatus({ work: [stranded], now: observedAt }, [], []).work[0];

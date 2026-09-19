@@ -9,17 +9,78 @@ export function leaseLossEpoch(escalation: Escalation): number | null {
 }
 // An implementation lease ends at `submit`: the candidate is bound and the worker's job is
 // done. A lease that still lapses under that epoch — one a worker kept renewing past its
-// submission — is expected lifecycle, not an abandoned assignment. Only an epoch with no
-// bound submission was lost while its work was unfinished, and only that raises the concern.
+// submission — is expected lifecycle, not an abandoned assignment. The same holds for a lapse
+// the control plane itself caused and already recorded: the worker reported `blocked` for that
+// epoch and stopped awaiting the operator, or an admin attested with `rework` or
+// `recover-containment --previous-worker-stopped` that it stopped the worker. Only an epoch
+// with no bound submission, no carried blocked report and no attestation was lost while its
+// work was unfinished — a worker that silently vanished — and only that raises the concern.
 export type LeaseLapse = 'expired' | 'lost';
+export type LeaseLapseCause = 'submitted' | 'blocked-awaiting-operator' | 'stopped-by-attestation';
+export const attestationKinds = ['blocked', 'stopped-worker'] as const;
+export type AttestationKind = typeof attestationKinds[number];
+/**
+ * One ledger entry that explains why a lease for `epoch` ended without its worker finishing: the
+ * worker's own `blocked` report (withdrawn by a later `blocked GY-N EPOCH -` for the same epoch),
+ * or the admin's stopped-worker attestation carried by `rework` or `recover-containment`. It is
+ * read back from the append-only events ledger, never asserted by a client.
+ */
+export interface Attestation { kind: AttestationKind; source: 'blocked' | 'rework' | 'recover-containment'; epoch: number; actor: string; at: string; reason: string; seq: number }
+export interface LedgerEntry { seq: number; actor: string; kind: string; at: string; details?: unknown; workEpoch?: number }
+export function attestationsFromLedger(entries: LedgerEntry[]): Attestation[] {
+  const result: Attestation[] = [];
+  for (const entry of [...entries].sort((a, b) => a.seq - b.seq)) {
+    const details = (entry.details ?? {}) as Record<string, unknown>;
+    if (entry.kind === 'blocked') {
+      const epoch = details.epoch;
+      if (!Number.isInteger(epoch)) continue;
+      // The worker's latest word for the epoch stands: a cleared blocker withdraws the report.
+      const carried = result.findIndex(item => item.kind === 'blocked' && item.epoch === epoch);
+      if (carried >= 0) result.splice(carried, 1);
+      if (typeof details.reason === 'string') result.push({ kind: 'blocked', source: 'blocked', epoch: epoch as number, actor: entry.actor, at: entry.at, reason: details.reason, seq: entry.seq });
+    } else if ((entry.kind === 'rework' || entry.kind === 'recover') && details.previousWorkerStopped === true && Number.isInteger(entry.workEpoch)) {
+      result.push({ kind: 'stopped-worker', source: entry.kind === 'rework' ? 'rework' : 'recover-containment', epoch: entry.workEpoch!, actor: entry.actor, at: entry.at, reason: typeof details.reason === 'string' ? details.reason : '', seq: entry.seq });
+    }
+  }
+  return result;
+}
+export function attestationFor(attestations: Attestation[], epoch: number, kind?: AttestationKind): Attestation | null {
+  return attestations.find(item => item.epoch === epoch && (!kind || item.kind === kind)) ?? null;
+}
 export function submittedEpoch(work: Pick<Work, 'submission'>, epoch: number) { return !!work.submission && work.submission.epoch === epoch; }
-export function classifyLeaseLapse(work: Pick<Work, 'submission'>, lease: Pick<Lease, 'epoch'>): LeaseLapse { return submittedEpoch(work, lease.epoch) ? 'expired' : 'lost'; }
+/** Why a lapse of `lease` is expected lifecycle, or null when the worker silently vanished. */
+export function leaseLapseCause(work: Pick<Work, 'submission'>, lease: Pick<Lease, 'epoch'>, attestations: Attestation[] = []): { cause: LeaseLapseCause; attestation: Attestation | null } | null {
+  if (submittedEpoch(work, lease.epoch)) return { cause: 'submitted', attestation: null };
+  const blocked = attestationFor(attestations, lease.epoch, 'blocked');
+  if (blocked) return { cause: 'blocked-awaiting-operator', attestation: blocked };
+  const stopped = attestationFor(attestations, lease.epoch, 'stopped-worker');
+  if (stopped) return { cause: 'stopped-by-attestation', attestation: stopped };
+  return null;
+}
+export function classifyLeaseLapse(work: Pick<Work, 'submission'>, lease: Pick<Lease, 'epoch'>, attestations: Attestation[] = []): LeaseLapse { return leaseLapseCause(work, lease, attestations) ? 'expired' : 'lost'; }
 // A standing lease-loss raised for an epoch that already had its candidate bound was
-// recorded before post-submission expiry stopped being treated as an incident. It is
-// settled by reconciliation with this audited note rather than by a human.
+// recorded before post-submission expiry stopped being treated as an incident, and one
+// raised by the control plane (actor `graphyard`) for an epoch whose lapse a blocked report
+// or a stopped-worker attestation explains never needed a human either. Both are settled by
+// reconciliation with an audited note naming the cause rather than by a human.
 export const leaseLossAutoSettlement = 'auto-settled: submitted before expiry';
-export function settleableLeaseLoss(work: Pick<Work, 'submission' | 'escalation' | 'escalations'>): Escalation[] {
-  return standingEscalations(work).filter(entry => { const epoch = leaseLossEpoch(entry); return epoch !== null && submittedEpoch(work, epoch); });
+export function leaseLossSettlementNote(cause: LeaseLapseCause, attestation: Attestation | null) {
+  if (cause === 'submitted') return leaseLossAutoSettlement;
+  const source = attestation ? ` (${attestation.source} by ${attestation.actor} at ${attestation.at})` : '';
+  return cause === 'blocked-awaiting-operator' ? `auto-settled: blocked report for epoch ${attestation?.epoch} explains the lapse${source}`
+    : `auto-settled: stopped-worker attestation for epoch ${attestation?.epoch} explains the lapse${source}`;
+}
+export interface LeaseLossSettlement { escalation: Escalation; epoch: number; cause: LeaseLapseCause; attestation: Attestation | null; note: string }
+export function settleableLeaseLoss(work: Pick<Work, 'submission' | 'escalation' | 'escalations'>, attestations: Attestation[] = []): LeaseLossSettlement[] {
+  const settlements: LeaseLossSettlement[] = [];
+  for (const escalation of standingEscalations(work)) {
+    const epoch = leaseLossEpoch(escalation);
+    if (epoch === null) continue;
+    // A lead-raised concern is never settled here; only a lapse the control plane recorded is.
+    const explained = leaseLapseCause(work, { epoch }, escalation.actor === 'graphyard' ? attestations : []);
+    if (explained) settlements.push({ escalation, epoch, ...explained, note: leaseLossSettlementNote(explained.cause, explained.attestation) });
+  }
+  return settlements;
 }
 
 // Every unresolved trigger stands on its own. A document written before
@@ -33,8 +94,9 @@ function setEscalations(work: Work, escalations: Escalation[]) {
   work.escalations = escalations;
   work.escalation = escalations[0] ?? null;
 }
-// An unresolved escalation refuses delivery. Only a human operator can resolve
-// one, so no lead or automated path can deliver past it.
+// An unresolved escalation refuses delivery. Only an operator resolves one — a
+// declared human, or for a control-plane-raised lease-loss an admin citing the
+// ledger attestation — so no lead or automated path can deliver past it.
 export function escalationRefusals(work: Work): string[] {
   return standingEscalations(work).map(entry => `Unresolved ${entry.trigger} escalation requires operator resolution: ${entry.reason}`);
 }

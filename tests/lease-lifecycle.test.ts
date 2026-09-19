@@ -63,7 +63,7 @@ test('unit:lease-loss-classification: a lapse is expected only under the epoch t
   assert.equal(leaseLossEpoch({ ...lost, trigger: 'security-concern' }), null, 'only lease-loss reasons name an epoch');
   assert.equal(leaseLossEpoch({ ...lost, reason: 'Worker x lost lease epoch 2 and more' }), null, 'a reason this code did not write is not parsed');
   // Settlement is decided from the record alone: the trigger, its epoch and the bound submission.
-  const settle = (work: Partial<Work>) => settleableLeaseLoss({ submission: null, escalations: undefined, escalation: undefined, ...work } as Work).map(entry => entry.reason);
+  const settle = (work: Partial<Work>) => settleableLeaseLoss({ submission: null, escalations: undefined, escalation: undefined, ...work } as Work).map(entry => entry.escalation.reason);
   assert.deepEqual(settle({ submission: { epoch: 2, pr: 41 }, escalations: [lost] }), [lost.reason]);
   assert.deepEqual(settle({ submission: { epoch: 2, pr: 41 }, escalation: lost }), [lost.reason], 'a legacy single-field document is read the same way');
   assert.deepEqual(settle({ submission: { epoch: 3, pr: 41 }, escalations: [lost] }), [], 'the epoch must be the submitted one');
@@ -153,13 +153,18 @@ test('integration:lease-release-on-submit: complete ends the lease with the cand
   assert.deepEqual(standingEscalations(replaced).map(entry => entry.reason), [`Worker ${worker.id} lost lease epoch ${replacedEpoch}`]);
   await engine.reconcile();
   assert.deepEqual(standingEscalations(await reload(replaced)).map(entry => entry.trigger), ['lease-loss']);
-  // Rework that discards a live, unsubmitted lease still records the loss.
+  // Rework that discards a live, unsubmitted lease records its end as history under the
+  // admin's own stopped-worker attestation, not as a silently vanished worker (GY-62).
   let discarded = await claimed('lease-rework-discards');
   const discardedEpoch = discarded.epoch;
   discarded = await engine.execute(operator, 'rework', discarded.id, { reason: 'Reassigning an unfinished attempt', previousWorkerStopped: true }, id());
-  assert.deepEqual(standingEscalations(discarded).map(entry => entry.reason), [`Worker ${worker.id} lost lease epoch ${discardedEpoch}`]);
+  assert.deepEqual(standingEscalations(discarded), []);
+  assert.equal(discarded.lease, null);
+  const stopped = await events(discarded, 'lease.expired');
+  assert.equal(stopped.length, 1);
+  assert.deepEqual({ owner: stopped[0].payload.details.owner, epoch: stopped[0].payload.details.epoch, cause: stopped[0].payload.details.cause, attestation: stopped[0].payload.details.attestation.source }, { owner: worker.id, epoch: discardedEpoch, cause: 'stopped-by-attestation', attestation: 'rework' });
   await engine.reconcile();
-  assert.deepEqual(standingEscalations(await reload(discarded)).map(entry => entry.trigger), ['lease-loss']);
+  assert.deepEqual(standingEscalations(await reload(discarded)), []);
   // The human path itself is unchanged.
   abandoned = await engine.execute(operator, 'resolve', abandoned.id, { trigger: 'lease-loss', reason: 'Replacement assigned and verified', expectedRevision: abandoned.revision }, id());
   assert.deepEqual(standingEscalations(abandoned), []);
