@@ -4,7 +4,7 @@ import { mkdtemp, readFile, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { randomBytes } from 'node:crypto';
-import { exercise, requiredCases } from './acceptance-contract.mjs';
+import { createInventory, exercise } from './acceptance-contract.mjs';
 
 const [metadataFile, image, output] = process.argv.slice(2);
 if (!metadataFile || !image || !output) throw new Error('Usage: run-acceptance metadata.json image output.json');
@@ -12,7 +12,10 @@ const metadata = JSON.parse(await readFile(metadataFile, 'utf8'));
 const scratch = await mkdtemp(join(tmpdir(), 'graphyard-acceptance-'));
 const suffix = randomBytes(6).toString('hex'), network = `gy-${suffix}`, db = `${network}-db`, app = `${network}-app`;
 const docker = (...args) => execFileSync('docker', args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
-let result = { ...metadata, schema: 1, proof: 'integration:claim-safety', result: 'fail', cases: requiredCases.map(id => ({ id, result: 'fail' })), executed: 0, skipped: 0 };
+// The inventory is filled in as cases run, so an interruption still reports the
+// completed, failing and genuinely unexecuted parts instead of an all-skipped report.
+const inventory = createInventory();
+let passed = false;
 try {
   docker('network', 'create', network);
   docker('run', '-d', '--name', db, '--network', network, '--network-alias', 'database', '-e', 'POSTGRES_PASSWORD=acceptance-only', '-e', 'POSTGRES_DB=graphyard', 'postgres:17-alpine');
@@ -35,13 +38,15 @@ try {
     await new Promise(r => setTimeout(r, 1000));
   }
   if (!ready) throw new Error('Candidate did not become healthy');
-  const cases = await exercise(url, principals);
-  result = { ...result, result: 'pass', cases, executed: cases.length }; console.log(`Trusted acceptance completed: ${cases.length} cases passed.`);
+  await exercise(url, principals, inventory);
+  passed = inventory.complete; console.log(`Trusted acceptance completed: ${inventory.executed} cases passed.`);
 } catch { console.error('Trusted acceptance failed. No passing evidence was produced.'); process.exitCode = 1; }
 finally {
   // Do not print candidate logs: candidate-controlled output may contain test credentials.
   spawnSync('docker', ['rm', '-f', app, db], { stdio: 'ignore' });
   spawnSync('docker', ['network', 'rm', network], { stdio: 'ignore' });
   await rm(scratch, { recursive: true, force: true });
+  const result = { ...metadata, schema: 1, proof: 'integration:claim-safety', result: passed && inventory.complete ? 'pass' : 'fail',
+    cases: inventory.cases, executed: inventory.executed, skipped: inventory.skipped };
   await writeFile(resolve(output), JSON.stringify(result, null, 2));
 }

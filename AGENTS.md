@@ -61,6 +61,27 @@ worker must claim the item under its own identity and use the assigned worktree.
 Treat prompt delivery as an invitation, never as ownership. Use durable handoffs
 when an agent, provider account, machine, or context window changes.
 
+Independent review is launched, never performed by the master:
+`graphyard master review GY-N [PROFILE]` verifies the exact candidate, launches the
+bound reviewer identity read-only, and `master status` closes that session when the
+verdict lands. Never approve a candidate yourself. Reconcile branch protection with
+`graphyard master protection` after any review-policy change.
+
+GitHub administration of the managed repository is yours, not the operator's:
+control-plane App permission updates, acceptance of the installation permission
+request they raise, and branch-protection reconciliation. Use the API first
+(`graphyard master protection --apply`, `gh api` on protection and installations).
+When GitHub only offers a page — App manifest confirmation, permission-request
+acceptance, a sudo prompt — run `graphyard master browser app-permissions`,
+`graphyard master browser installation-accept`, or `graphyard master browser protection`.
+Each drives the operator's own authenticated browser profile headless, records every
+step and screenshot under `.graphyard/master-actions/`, verifies the result through
+the API, and appends an attributable audit entry. On a Confirm-access page the flow
+triggers GitHub Mobile and reports the two-digit code in `master status`; approving
+that prompt on their device, and decisions the docs mark human-only, are the only
+operator interactions left. Never store, export, or reuse the profile's cookies
+outside those flows.
+
 Keep cycling: status, dispatch ready work, shepherd review and proof collection,
 guarded merge, then deployment verification. Repeat until both conditions hold:
 (1) every in-scope item is Done or has a genuinely external blocker recorded in
@@ -75,6 +96,7 @@ explicit operator approval for each merge. Otherwise routine merges may use
 `graphyard master merge --all`. The command rechecks the
 exact current candidate, every configured gate, and GitHub state immediately before
 merging. Human gates, stale observations, failures, and changed commits remain
-blocking. Never use an administrative merge bypass. Read `docs/master-agent.md`
+blocking. Never use an administrative merge bypass, edit a candidate, or read a
+worker credential. Read `docs/master-agent.md`
 in Graphyard or run `graphyard master guide` for the complete operating loop.
 <!-- /graphyard-master -->
