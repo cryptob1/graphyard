@@ -792,17 +792,36 @@ export function assertMergeProtection(protection: any, config: MasterConfig, wor
   if (!protectedBranch) throw new Error(`${work.key} managed-branch protection changed after merge authorization; Graphyard refused the merge`);
 }
 /**
+ * The real head of the managed base branch, read from `refs/heads/<base>`. A pull request's
+ * `baseRefOid` is GitHub's cached view of the same ref, refreshed only when the pull request is
+ * recomputed (a push to its head), so right after a predecessor merges it still names the
+ * pre-merge base and would refuse every follower in the queue. The landing check therefore
+ * never reads it: the server-side observation reads the ref (GY-57) and the broker does the same.
+ */
+export function readBaseTip(repository: string, baseBranch: string, run: (command: string, args: string[]) => string): string {
+  const ref = JSON.parse(run('gh', ['api', `repos/${repository}/git/ref/heads/${baseBranch.split('/').map(encodeURIComponent).join('/')}`]));
+  const tip = ref?.object?.sha;
+  if (ref?.object?.type !== 'commit' || typeof tip !== 'string' || !/^[a-f0-9]{40}$/.test(tip)) throw new Error(`GitHub did not return a readable head for refs/heads/${baseBranch} of ${repository}`);
+  return tip;
+}
+/**
  * The validated commit must still land its tested tree. Only a Graphyard-published speculative tip
  * may land, because publication is what proves the validated commit already contains its base. The
  * base branch must then still be exactly that base, or have advanced only through earlier queue
- * merges, which leave its tree untouched. Any other advance refuses the merge.
+ * merges, which leave its tree untouched. Any other advance refuses the merge, naming both the
+ * real base tip and the validated base with their trees. The base tip is `refs/heads/<base>` as
+ * GitHub serves it now, never the pull request's cached `baseRefOid`.
  */
-export function assertQueuedLanding(work: Work, authorization: { sha: string; baseSha: string }, baseRefOid: string, repository: string, run: (command: string, args: string[]) => string) {
+export function assertQueuedLanding(work: Work, authorization: { sha: string; baseSha: string }, baseBranch: string, repository: string, run: (command: string, args: string[]) => string): { baseTip: string; baseTree: string | null } {
   const speculation = work.queue?.speculation;
   if (!speculation || speculation.tip !== authorization.sha || speculation.base !== authorization.baseSha || !speculation.baseTree) throw new Error(`${work.key} has no published merge-queue tip for the authorized commit; the queue is the only path onto the base branch`);
-  if (baseRefOid === authorization.baseSha) return;
-  const commit = JSON.parse(run('gh', ['api', `repos/${repository}/commits/${baseRefOid}`]));
-  if (commit?.commit?.tree?.sha !== speculation.baseTree) throw new Error(`${work.key} base branch advanced outside the merge queue; the validated tip would no longer land its tested tree`);
+  const baseTip = readBaseTip(repository, baseBranch, run);
+  if (baseTip === authorization.baseSha) return { baseTip, baseTree: null };
+  const commit = JSON.parse(run('gh', ['api', `repos/${repository}/commits/${baseTip}`]));
+  const baseTree = commit?.commit?.tree?.sha;
+  if (typeof baseTree !== 'string' || !/^[a-f0-9]{40}$/.test(baseTree)) throw new Error(`GitHub did not return a tree for ${baseBranch} head ${baseTip} of ${repository}`);
+  if (baseTree !== speculation.baseTree) throw new Error(`${work.key} base branch ${baseBranch} advanced outside the merge queue: its head ${baseTip} (tree ${baseTree}) is not tree-identical to validated base ${authorization.baseSha} (tree ${speculation.baseTree}); the validated tip would no longer land its tested tree`);
+  return { baseTip, baseTree };
 }
 /** The GitHub review states a re-post decision reads; anything else is a comment, not a verdict. */
 const verdictStates = ['APPROVED', 'CHANGES_REQUESTED', 'DISMISSED'];
@@ -875,9 +894,11 @@ export async function mergeWork(config: MasterConfig, work: Work, freshSnapshot:
   // have called GitHub, so nothing is retried until observation reconciles the execution. A
   // verified execution that never reached the commit resumes below; the provider was not attempted.
   if (current.mergeExecution?.committingAt) return { key: authorization.key, pr: authorization.pr, sha: authorization.sha, method: config.mergeMethod, result: 'the provider commit was already recorded; Graphyard retained the execution until GitHub reconciles the provider outcome and refuses a new attempt until then' };
-  const pr = JSON.parse(run('gh', ['pr', 'view', String(authorization.pr), '--repo', config.repository, '--json', 'headRefOid,baseRefOid,baseRefName,state,isDraft']));
+  // The pull request answers for its own head, base branch name and state; the base tip is read
+  // from the ref itself inside assertQueuedLanding, because `baseRefOid` is a cached value.
+  const pr = JSON.parse(run('gh', ['pr', 'view', String(authorization.pr), '--repo', config.repository, '--json', 'headRefOid,baseRefName,state,isDraft']));
   if (pr.headRefOid !== authorization.sha || pr.baseRefName !== config.baseBranch || pr.state !== 'OPEN' || pr.isDraft) throw new Error(`${work.key} changed on GitHub before merge`);
-  assertQueuedLanding(current, authorization, pr.baseRefOid, config.repository, run);
+  assertQueuedLanding(current, authorization, config.baseBranch, config.repository, run);
   // An approval the control plane carried onto its authored tip is re-posted through the
   // reviewer App before any authority is acquired, so a native review requirement that GitHub
   // re-armed on the tip publication is met by the same identity that gave the approval.
@@ -894,9 +915,9 @@ export async function mergeWork(config: MasterConfig, work: Work, freshSnapshot:
   let providerStarted = false; let cancelled = false;
   let verificationStarted = false; let verificationCompleted = false;
   try {
-    const lockedPr = JSON.parse(run('gh', ['pr', 'view', String(authorization.pr), '--repo', config.repository, '--json', 'headRefOid,baseRefOid,baseRefName,state,isDraft']));
+    const lockedPr = JSON.parse(run('gh', ['pr', 'view', String(authorization.pr), '--repo', config.repository, '--json', 'headRefOid,baseRefName,state,isDraft']));
     if (lockedPr.headRefOid !== authorization.sha || lockedPr.baseRefName !== config.baseBranch || lockedPr.state !== 'OPEN' || lockedPr.isDraft) throw new Error(`${work.key} changed on GitHub after merge authority was acquired`);
-    assertQueuedLanding(latest, authorization, lockedPr.baseRefOid, config.repository, run);
+    assertQueuedLanding(latest, authorization, config.baseBranch, config.repository, run);
     const remaining = remainingAtSnapshot - (performance.now() - authorityBudgetStartedAt);
     if (!Number.isFinite(remaining) || remaining <= 90_000) throw new Error(`${work.key} merge execution does not remain valid for the provider timeout; refresh gate inputs and retry`);
     const protection = JSON.parse(run('gh', ['api', `repos/${config.repository}/branches/${encodeURIComponent(config.baseBranch)}/protection`]));
@@ -957,7 +978,10 @@ export async function mergeWork(config: MasterConfig, work: Work, freshSnapshot:
     // clears the execution, the revocation window reopens, and this stale SHA could
     // merge before the asynchronously published GitHub check changes. Revalidate the
     // committed authority and its remaining lifetime immediately before the provider
-    // mutation; the mutation is refused on any missing, fenced or expired authority.
+    // mutation; the mutation is refused on any missing, fenced or expired authority. The base
+    // branch is re-read from its ref for the same reason: a base that advanced outside the
+    // queue during the wait would land a different tree than the one the tip was tested on.
+    assertQueuedLanding(latest, authorization, config.baseBranch, config.repository, run);
     const preProvider = await freshSnapshot();
     const finalExecution = preProvider.work.find(item => item.id === work.id)?.mergeExecution;
     const remainingBeforeProvider = remainingAtSnapshot - (performance.now() - authorityBudgetStartedAt);
