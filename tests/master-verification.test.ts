@@ -181,8 +181,15 @@ test('integration:master-loop-deployment-verification — stale observations, un
   let now = clock; const emissions: number[] = [];
   const slow = await verifyDeployment(item, { snapshot: async () => ({ work: [item], now: iso(clock) }), observe: async () => observation, release: () => release, emit: async () => { emissions.push(now); now += deploymentFreshnessMs + 1; return emitted; }, record: async () => assert.fail('a stale observation is never recorded'), now: () => now });
   assert.equal(slow.result, 'refused'); assert.equal(emissions.length, 1); assert.match(slow.refusals[0], /stale/); assert.deepEqual(slow.checks, { guide: 'pass', init: 'pass' });
-  const notDelivered = await verifyDeployment({ ...item, stage: 'merge', delivery: undefined }, { snapshot: async () => ({ work: [{ ...item, stage: 'merge', delivery: undefined }], now: iso(clock) }), observe: async () => observation, release: () => release, emit: async () => assert.fail('undelivered work never emits'), record: async () => assert.fail('undelivered work is never recorded'), now: () => clock });
-  assert.equal(notDelivered.result, 'refused'); assert.match(notDelivered.refusals[0], /not delivered/);
+  // Undelivered work never reaches the probe, which reads each item's merge commit: the
+  // executor observes nothing for it, and the refusal names the missing delivery first.
+  const undeliveredItem = { ...item, stage: 'merge' as const, delivery: undefined };
+  const observed: Work[][] = [];
+  const notDelivered = await verifyDeployment(undeliveredItem, { snapshot: async () => ({ work: [undeliveredItem], now: iso(clock) }), observe: async delivered => { observed.push(delivered); assert.ok(delivered.every(candidate => candidate.delivery), 'only delivered work reaches the deployment probe'); return { source: 'unavailable', sha: null, at: iso(clock), reason: 'No delivered work is awaiting deployment verification', deployed: [], pending: [] }; }, release: () => release, emit: async () => assert.fail('undelivered work never emits'), record: async () => assert.fail('undelivered work is never recorded'), now: () => clock });
+  assert.equal(notDelivered.result, 'refused'); assert.equal(notDelivered.recorded, null); assert.deepEqual(observed, [[]]);
+  assert.equal(notDelivered.refusals[0], 'GY-42 is not delivered; deployment verification follows the observed merge');
+  assert.match(notDelivered.refusals[1], /^The deployed release is unobserved: No delivered work is awaiting deployment verification/);
+  assert.deepEqual(notDelivered.release, { sha: null, source: 'unavailable', observedAt: iso(clock), covers: null });
 });
 
 test('integration:master-loop-deployment-verification — the checkout identity and the emitted instructions are read from the real CLI', async () => {
@@ -227,6 +234,16 @@ test('integration:master-loop-deployment-verification — master verify-deployme
     const report = JSON.parse(refused.stdout);
     assert.equal(report.result, 'refused'); assert.equal(report.recorded, null); assert.deepEqual(report.checkout, { sha: release.sha, clean: false });
     assert.match(report.refusals.join('\n'), /local checkout .* with uncommitted changes, not by the deployed release/);
+    assert.equal(state.records.length, 1);
+    // Undelivered work through the real CLI and the real deployment probe: the documented
+    // refusal on stdout, exit status 1, no stack trace, and nothing recorded.
+    state.work.push(delivered(release.sha, iso(clock, -hour), { id: 'f5c3b4d9-2d1f-4e1b-8c5f-2a3b4c5d6e7f', key: 'GY-43', stage: 'merge', delivery: undefined }));
+    const undelivered = await promisify(execFile)(process.execPath, [launcher, 'master', 'verify-deployment', 'GY-43'], { cwd: repository, env }).then(() => assert.fail('undelivered work is refused with a nonzero exit'), (error: any) => error);
+    assert.equal(undelivered.code, 1); assert.equal(undelivered.stderr, '');
+    const undeliveredReport = JSON.parse(undelivered.stdout);
+    assert.equal(undeliveredReport.result, 'refused'); assert.equal(undeliveredReport.recorded, null); assert.equal(undeliveredReport.release.sha, null);
+    assert.equal(undeliveredReport.refusals[0], 'GY-43 is not delivered; deployment verification follows the observed merge');
+    assert.match(undeliveredReport.refusals.join('\n'), /The deployed release is unobserved: No delivered work is awaiting deployment verification/);
     assert.equal(state.records.length, 1);
     await assert.rejects(promisify(execFile)(process.execPath, [launcher, 'master', 'verify-deployment'], { cwd: repository, env }), /Use master verify-deployment GY-N/);
   } finally { await close(server); await rm(release.directory, { recursive: true, force: true }); await rm(repository, { recursive: true, force: true }); await rm(credentialDirectory, { recursive: true, force: true }); }

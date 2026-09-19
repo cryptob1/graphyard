@@ -147,7 +147,9 @@ export async function verifyDeployment(work: Work, effects: VerificationEffects,
   const snapshot = await effects.snapshot();
   const current = snapshot.work.find(item => item.id === work.id);
   if (!current) throw new Error(`Unknown work item ${work.key}`);
-  const observation = await effects.observe([current]);
+  // The probe reads each item's merge commit, so only a delivered item reaches it; undelivered
+  // work is refused by the assessment with nothing to observe, never by a crash in the probe.
+  const observation = await effects.observe(current.stage === 'done' && current.delivery ? [current] : []);
   const release = effects.release();
   const result = (assessment: ReturnType<typeof assessDeploymentVerification>, recorded: 'now' | 'existing' | null) => ({
     key: current.key, result: assessment.verifiable ? 'verified' as const : 'refused' as const,
