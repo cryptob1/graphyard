@@ -1,7 +1,11 @@
-<!-- page: Start here | 3 | Railway, GitHub, Herdr, master, workers, and the first PR. -->
+<!-- page: Start here | 3 | the human prompts, more machines, the master, and the first PR. -->
 # Onboard a repository
 
-This is the supported path from an existing GitHub repository to Graphyard, Herdr, one master, and one worker. Start with one worker; add capacity after the first PR reaches Done. Roles are defined in the [glossary](glossary.md).
+This is the supported path from an existing GitHub repository to a working fleet. One
+command installs the control plane — see [install](install.md) for the full runbook — and
+this guide covers what surrounds it: the human prompts, adding machines, starting the
+master, and proving the first pull request. Start with one worker; add capacity after the
+first PR reaches Done. Roles are defined in the [glossary](glossary.md).
 
 ![Who holds which authority in Graphyard: the human operator sends human-only decisions to the Graphyard control plane; the Herdr runtime hosts the master, slice lead, and worker sessions, each with one credential; the reviewer, proof producer, and optional operator agent sit beside them; sessions send authenticated commands to Graphyard, the worker pushes its branch and opens the pull request on GitHub, the reviewer approves the exact head, and Graphyard observes GitHub facts and merges only through the guarded path.](diagrams/roles-and-authority.svg)
 
@@ -11,11 +15,13 @@ You keep talking directly to the master. GitHub owns code review and CI facts; p
 
 The initial setup works with one worker. Add more workers or machines only after the first PR has completed the full loop.
 
-Do not create an operator-agent credential during this bootstrap. After the repository is connected and its gates have completed the protected loop, the human operator may optionally configure [scoped operator automation](operator-automation.md). That mode keeps operator agent, master, worker, and reviewer/proof producer as four distinct AI agent sessions; it does not replace human goals, approvals, exceptions, or oversight.
-
 ## Before you start
 
-You need Node 24, Git, Docker, Herdr 0.7.1+, a Graphyard checkout, a GitHub repository, and a Railway account or another Docker host. Agent providers such as Codex or Claude must already be authenticated on the machine that runs them. The coordinator also needs GitHub CLI authenticated as an identity allowed to merge the protected base branch.
+You need Node 24, Git, a Graphyard checkout, a GitHub repository you administer, and access
+to one supported provider. The GitHub CLI must be authenticated as an identity that
+administers the base branch. Agent providers such as Codex or Claude must already be signed
+in on the machine that runs them; Herdr 0.7.1+ is optional and is bound automatically when
+it is installed.
 
 Graphyard is not published to npm yet. In the commands below:
 
@@ -23,46 +29,74 @@ Graphyard is not published to npm yet. In the commands below:
 export GRAPHYARD_CLI=/absolute/path/to/graphyard/bin/graphyard.mjs
 ```
 
-For every `--token-stdin` prompt, paste the token, press Enter, then press Ctrl-D to send EOF.
+## 1. Install the control plane
 
-## 1. Deploy one control plane
-
-Use one Graphyard server and one Postgres database for all workers. Follow [deployment](deployment.md) for Railway or Docker Compose.
-
-Create one principal with a separate cryptographically random token of at least 32 characters for each role:
-
-| Role | Held by | Use |
-| --- | --- | --- |
-| `admin` | The human operator; declare `sessionKind: "human"` | Setup, work creation, requirements, and recovery |
-| `coordinator` | The master | Master status and guarded merge authority |
-| `worker` | One worker session each | One principal per concurrent worker session |
-| `reader` | Dashboards | Read-only dashboards |
-| `producer` | A proof producer (CI or trusted runner) | Only the proof names its grant allows |
-
-Set `GRAPHYARD_PRINCIPALS`, `GITHUB_REPOSITORY`, `GITHUB_BASE_BRANCH`, and `GITHUB_CI_APP_IDS` on the server. Never give a worker an `admin`, `coordinator`, or `producer` token.
-
-Open the Graphyard URL and sign in with the admin token.
-
-## 2. Connect GitHub
-
-From the repository being managed:
+One command replaces the former sequence of deploying a server, generating a token per role,
+setting eleven variables, creating a domain, running the GitHub App flow, configuring the
+webhook and branch protection, discovering CI App IDs, connecting a worker, and initializing
+the master.
 
 ```sh
 cd /path/to/your-repository
-node "$GRAPHYARD_CLI" github-setup https://YOUR-GRAPHYARD-HOST
+node "$GRAPHYARD_CLI" install --provider railway --repo OWNER/REPO --workers 1 --plan
+node "$GRAPHYARD_CLI" install --provider railway --repo OWNER/REPO --workers 1 --apply
 ```
 
-This guided flow supports personal-account Apps. For organization-owned repositories, create the App manually using [GitHub enforcement](github.md#create-and-install-the-app).
+Follow [install](install.md) for the full runbook: preconditions, per-step verification, and
+failure handling. Providers are `railway`, `hetzner`, `docker-host`, and `compose`.
 
-The manifest requests exactly the [declared control-plane permission set](github.md#app-permissions); an App registered before the merge queue must be [migrated](github.md#migrating-an-existing-app) to Contents: read and write. Install the App only on the managed repository and copy its private values into the Graphyard service. Configure normal CI and review protection now. The new `Graphyard / merge` check may appear only after the first linked PR; require it as soon as Graphyard publishes it, before merging.
+You are prompted for exactly four things:
 
-Later permission changes to this App, and the installation's acceptance of them, are the master's job, not yours: once the master is started with a browser profile it performs them with `master browser app-permissions` and `master browser installation-accept`.
+| Prompt | What to do |
+| --- | --- |
+| Which provider | Already answered by `--provider`; on Railway, add `--workspace NAME-OR-ID` when the account belongs to several workspaces |
+| Provider login | Run the login command the installer prints, once |
+| The GitHub App confirmation | Open the printed page, confirm the App, install it on this repository |
+| Plan approval | Read the plan, then rerun with `--apply` |
 
-Confirm the exact CI check names and their GitHub App IDs. GitHub Actions uses App ID `15368`; other CI providers do not.
+The App manifest the installer opens requests exactly the
+[declared control-plane permission set](github.md#app-permissions), and the App is installed
+only on the managed repository. An App registered before the merge queue must be
+[migrated](github.md#migrating-an-existing-app) to Contents: read and write; the
+[upgrade order](install.md#upgrading-an-existing-installation) covers that. Later permission
+changes to the control-plane App, and the installation's acceptance of them, are the master's
+job, not yours: once the master runs with a browser profile it
+performs them with `master browser app-permissions` and `master browser installation-accept`
+(see [step 4](#4-start-the-master)).
 
-## 3. Connect a worker and Herdr
+The installer reads the CI check names and their GitHub App IDs from the checks already
+published on the base branch and prints them in the plan; confirm them there. GitHub Actions
+uses App ID `15368`; other CI providers do not.
 
-On a worker machine, from a worker-only checkout:
+The installer generates one credential per role, stores each under
+`~/.config/graphyard/<install>/` with mode `0600`, and never prints one. Add
+`--producer-proof NAME` for each proof a CI runner may submit; without it no producer
+principal is created, which is the safe default. Add `--reviewer NAME` to also register a
+separate reviewer GitHub App for [agent review](github.md#identity-bound-agent-review-providers).
+
+Do not create an operator-agent credential during this bootstrap. After the repository is
+connected and its gates have completed the protected loop, the human operator may
+optionally configure [scoped operator automation](operator-automation.md). That mode keeps
+operator agent, master, worker, and reviewer/proof producer as four distinct AI agent
+sessions; it does not replace human goals, approvals, exceptions, or oversight.
+
+## 2. Read the summary
+
+`--apply` ends with a redacted summary. Confirm `health`, `status.role`, `status.repository`,
+`webhook.delivered`, `protection`, and the registered profiles, then work through its
+`nextSteps`. Those steps are generated from what actually happened, so they are the
+authoritative list of anything still missing — commonly a rerun once Graphyard has published
+`Graphyard / merge` on the first pull request.
+
+Open the Graphyard URL and sign in with the admin credential named in the summary.
+
+## 3. Add machines and capacity
+
+The installer configures this machine: the repository connection, the Herdr plugin when
+Herdr is present, the master profile, and one worker profile per `--workers`.
+
+For another worker machine, rerun the installer there with a higher `--workers` count, or
+connect that machine alone against the existing control plane:
 
 ```sh
 cd /path/to/your-repository
@@ -73,84 +107,17 @@ node "$GRAPHYARD_CLI" init \
   --token-stdin
 ```
 
-Supply that worker's token on standard input. Setup:
+Supply that machine's own worker token on standard input; paste it, press Enter, then
+Ctrl-D. Setup verifies the repository and worker identity, updates one managed section in
+`AGENTS.md`, adds the `.graphyard/` ignore rule, stores the private connection locally, and
+links and enables the Herdr plugin. Commit `AGENTS.md` and `.gitignore`. Never commit
+`.graphyard/`. Give every concurrent session a different worker identity and host ID.
 
-- verifies the repository and worker identity;
-- updates one managed section in `AGENTS.md`;
-- adds the `.graphyard/` ignore rule;
-- stores the private connection locally;
-- links and enables the Herdr plugin.
-
-Commit `AGENTS.md` and `.gitignore`. Never commit `.graphyard/`. Repeat on each worker machine with a different worker identity and host ID.
-
-## 4. Start the master
-
-Use a clean checkout under a dedicated coordinator OS identity or machine. It must not contain a worker connection or expose its merge-capable GitHub CLI credentials to worker sessions.
-
-```sh
-cd /path/to/coordinator-checkout
-herdr workspace list
-node "$GRAPHYARD_CLI" master init \
-  --url https://YOUR-GRAPHYARD-HOST \
-  --herdr-workspace HERDR_WORKSPACE_ID \
-  --browser-profile Default \
-  --token-stdin
-node "$GRAPHYARD_CLI" master start codex
-```
-
-Supply the coordinator token. Use `master start claude` if preferred. Commit the managed `AGENTS.md` update.
-
-`--browser-profile` names the Chrome profile on this machine that is signed in to GitHub as the repository administrator (`agent-browser profiles` lists them). With it, the master administers the control-plane App, its installation, and branch protection itself — through the API where one exists and otherwise through that profile, headless, with every step recorded, verified, and audited (see [GitHub administration through the browser](master-agent.md#github-administration-through-the-browser)). The profile is your identity: the master never stores or exports its cookies and uses it only for those flows. The one thing it still needs from you is approving GitHub's *Confirm access* prompt on your device when a page asks for it; `master status` shows the two-digit GitHub Mobile code to choose.
-
-The master reads Graphyard truth, watches runtime health, routes work, requests guarded merges, and administers GitHub for the managed repository. It does not implement work or submit evidence.
-
-`master start claude` also writes the master's own harness permissions to `.claude/settings.local.json` before the session starts, so routine master commands do not stop for an approval keypress and the auto-mode classifier does not refuse the GitHub administration flows as permission grants or CI bypasses. Review them with `master harness claude`; every rule is printed with the reason it exists. The generated rules grant no merge path and no credential read. For Codex, `master harness codex` prints the `trust_level = "trusted"` block to add to `$CODEX_HOME/config.toml`; Graphyard does not edit that shared user file for you.
-
-## 5. Register the reviewer identity
-
-Independent review needs a GitHub identity that is neither the pull-request author nor the Graphyard control-plane App. Register it once:
-
-```sh
-node "$GRAPHYARD_CLI" master reviewer setup
-```
-
-Open the printed local URL, click through GitHub's App confirmation, and install the App on the managed repository only. That click and your provider logins are the only hand-run steps in this section. The reviewer App requests Metadata read, Contents read, and Pull requests write; it cannot write code, publish the `Graphyard / merge` check, or read branch protection. Its private key and IDs are stored outside every worktree with mode 0600, and only the App ID, installation ID, and slug are recorded in `.graphyard/master.json`.
-
-To bind an App you already created, put its IDs in a file that contains no secret and send the PEM on standard input:
-
-```sh
-printf '{"appId":123456,"installationId":654321,"slug":"graphyard-reviewer-your-repo"}' > /tmp/reviewer.json
-node "$GRAPHYARD_CLI" master reviewer bind /tmp/reviewer.json --key-stdin < /path/to/reviewer.private-key.pem
-```
-
-Then add one reviewer launch profile:
-
-- [Claude](../examples/master/claude-reviewer.json)
-- [Cursor](../examples/master/cursor-reviewer.json)
-- [opencode](../examples/master/opencode-reviewer.json)
-
-```sh
-node "$GRAPHYARD_CLI" master reviewer add /path/to/reviewer-profile.json
-```
-
-A reviewer profile holds no Graphyard credential: a reviewer reads a candidate and posts one GitHub verdict. Finally, make branch protection match the review policy of every open item:
-
-```sh
-node "$GRAPHYARD_CLI" master protection
-node "$GRAPHYARD_CLI" master protection --apply
-```
-
-From here on the master reconciles protection itself after every review-policy change, through the API or, when only the settings page can make the change, with `master browser protection`.
-
-## 6. Add workers
-
-For a trusted worker on the coordinator host, start from a template:
+Worker profile templates, for a profile added by hand:
 
 - [Codex](../examples/master/codex-worker.json)
 - [Claude](../examples/master/claude-worker.json)
 - [existing Herdr session](../examples/master/existing-worker.json)
-
-Store each worker token in a mode-0600 file outside the repository, edit the template, then:
 
 ```sh
 node "$GRAPHYARD_CLI" master worker add /path/to/profile.json
@@ -159,11 +126,69 @@ node "$GRAPHYARD_CLI" master status
 
 Every launch profile starts non-interactively by default (`"approvals": "auto"`): Graphyard adds that runtime's own startup flags so a fresh session never blocks on an approval or workspace-trust prompt. `master worker add` prints exactly what it will start with and what that costs. Set `"approvals": "prompt"` to opt out per profile; the session then waits for a human in its tab. See [approval modes](master-agent.md#approval-modes).
 
-Local launch profiles share the coordinator host. They require Linux with a working systemd user manager for durable containment. Use them only for trusted dogfooding or inside a real OS/container boundary that hides coordinator GitHub credentials. On macOS or a Linux host without user systemd, use the remote-worker flow below.
+Local launch profiles share the coordinator host. They require Linux with a working systemd
+user manager for durable containment. Use them only for trusted dogfooding or inside a real
+OS or container boundary that hides coordinator GitHub credentials. On macOS, or a Linux host
+without user systemd, run workers on other machines with GitHub identities that can push
+branches and open pull requests but cannot merge the protected base branch. Version 0.1 does
+not remotely launch supervised Herdr tabs across hosts; the master selects work and the
+remote worker claims it.
 
-For the recommended separated setup, workers run on other machines with GitHub identities that can push branches and open PRs but cannot merge the protected base branch. Version 0.1 does not remotely launch supervised Herdr tabs across hosts; the master selects work and the remote worker claims it.
+## 4. Start the master
 
-## 7. Prove the first PR
+```sh
+node "$GRAPHYARD_CLI" master start codex
+```
+
+Use the agent kind reported as `profiles.master.kind` in the summary; `master start claude`
+if you prefer. The master reads Graphyard truth, watches runtime health, routes work,
+requests guarded merges, and administers GitHub for the managed repository. It does not
+implement work or submit evidence. Run it from a checkout under a dedicated coordinator OS
+identity that does not expose its merge-capable GitHub CLI credentials to worker sessions.
+
+To let the master administer the control-plane App, its installation, and branch protection
+itself, give it the Chrome profile on this machine that is signed in to GitHub as the
+repository administrator (`agent-browser profiles` lists them). The installer wrote
+`.graphyard/master.json` without one; add it by re-running master setup with the coordinator
+credential the installer stored, redirected from its file so it is never printed:
+
+```sh
+node "$GRAPHYARD_CLI" master init \
+  --url https://YOUR-GRAPHYARD-HOST \
+  --browser-profile Default \
+  --token-stdin < ~/.config/graphyard/INSTALL/tokens/INSTALL-master.token
+```
+
+`INSTALL` is the `installDirectory` name from the summary. Master setup is idempotent: the
+existing worker and reviewer profiles are kept. With a browser profile the master performs
+GitHub administration through the API where one exists and otherwise through that profile,
+headless, with every step recorded, verified, and audited (see [GitHub administration through
+the browser](master-agent.md#github-administration-through-the-browser)). The profile is your
+identity: the master never stores or exports its cookies and uses it only for those flows. The
+one thing it still needs from you is approving GitHub's *Confirm access* prompt on your device
+when a page asks for it; `master status` shows the two-digit GitHub Mobile code to choose.
+
+`master start claude` also writes the master's own harness permissions to
+`.claude/settings.local.json` before the session starts, so routine master commands do not
+stop for an approval keypress and the auto-mode classifier does not refuse the GitHub
+administration flows as permission grants or CI bypasses. Review them with `master harness
+claude`; every rule is printed with the reason it exists. The generated rules grant no merge
+path and no credential read. For Codex, `master harness codex` prints the
+`trust_level = "trusted"` block to add to `$CODEX_HOME/config.toml`; Graphyard does not edit
+that shared user file for you.
+
+The installer registers the reviewer App and its launch profile when you pass `--reviewer
+NAME`. To add or replace one later, use `master reviewer setup`, `master reviewer bind FILE
+--key-stdin` for an App you already created, and `master reviewer add PROFILE` with one of
+the shipped reviewer profiles — [Claude](../examples/master/claude-reviewer.json),
+[Cursor](../examples/master/cursor-reviewer.json), or
+[opencode](../examples/master/opencode-reviewer.json); see
+[master-agent mode](master-agent.md). A reviewer profile holds no Graphyard credential: a
+reviewer reads a candidate and posts one GitHub verdict. From here on the master reconciles
+branch protection itself after every review-policy change with `master protection --apply`,
+or, when only the settings page can make the change, with `master browser protection`.
+
+## 5. Prove the first PR
 
 Before the first PR, read the readiness checklist for the completion profile you intend to enforce:
 
@@ -214,8 +239,22 @@ Done means Graphyard observed that authorized merge. It does not yet mean deploy
 
 Before adding more workers, stop one worker, let its lease expire, reclaim with another identity, and confirm the old epoch can no longer heartbeat or submit.
 
-## Current manual steps
+## What is still manual
 
-Version 0.1 still requires the human operator to deploy the server, provision principals, authenticate agent providers, sign the browser profile in to GitHub once, approve GitHub's *Confirm access* prompt on their device when a page asks for it, and connect project-specific trusted evidence. Registering each App is still a first-time click in the manifest flow; App permission updates, installation acceptance, and branch-protection reconciliation are the master's (`master browser …` and `master protection --apply`), and Graphyard still refuses to create protection that is missing the `Graphyard / merge` binding or a classic rule for the base branch. Decisions the guides mark human-only — releasing work, revising requirements, choosing review providers, clearing blockers, manual proofs, rework, and merge approval without automatic merging — stay with you. Self-hosting is the complete product: versioned images, Compose, the Helm chart, backups and restores need no hosted account. A hosted signup flow is not shipped, and turnkey E2E execution covers the [packaged Playwright runner](runner-setup.md) and the [report adapters](report-adapters.md) it accepts.
+The installer covers deployment, identities, GitHub integration, protection, profiles, and
+verification. The human operator still authenticates the provider CLI, the GitHub CLI, and each agent
+runtime, confirms each GitHub App in the browser once in the manifest flow, approves the plan,
+signs the master's browser profile in to GitHub once and approves GitHub's *Confirm access*
+prompt on their device when a page asks for it, and connects project-specific trusted evidence
+by granting a producer its proof names. App permission updates, installation acceptance, and
+branch-protection reconciliation are the master's (`master browser …` and `master protection
+--apply`), and Graphyard still refuses to create protection that is missing the
+`Graphyard / merge` binding or a classic rule for the base branch. Decisions the guides mark
+human-only — releasing work, revising requirements, choosing review providers, clearing
+blockers, manual proofs, rework, and merge approval without automatic merging — stay with
+you. Self-hosting is the complete product: versioned images, Compose, the Helm chart, backups
+and restores need no hosted account. A hosted signup flow is not shipped, and turnkey E2E
+execution covers the [packaged Playwright runner](runner-setup.md) and the
+[report adapters](report-adapters.md) it accepts.
 
 Use the [documentation index](README.md) for deeper setup, operations, and protocol details.

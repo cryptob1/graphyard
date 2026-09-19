@@ -8,15 +8,15 @@ The sections below are generated from each page's `<!-- page: Section | order | 
 
 ## Start here
 
-1. [How Graphyard works](how-graphyard-works.md) — the lifecycle and authority model in five minutes, with diagrams.
-2. [Glossary](glossary.md) — human operator, agent session, principal, lease, reviewer, proof producer, control plane, runtime: one definition each, plus the diagram legend.
-3. [Onboard a repository](onboarding.md) — Railway, GitHub, Herdr, master, workers, and the first PR.
-4. [Local quickstart](quickstart.md) — run Graphyard locally for evaluation.
+1. [Install Graphyard](install.md) — the one command, the agent-executable runbook behind it, and the App-permission migration an upgrade can require.
+2. [How Graphyard works](how-graphyard-works.md) — the lifecycle and authority model in five minutes, with diagrams.
+3. [Glossary](glossary.md) — human operator, agent session, principal, lease, reviewer, proof producer, control plane, runtime: one definition each, plus the diagram legend.
+4. [Onboard a repository](onboarding.md) — the human prompts, more machines, the master, and the first PR.
+5. [Local quickstart](quickstart.md) — install locally with `--provider compose` for evaluation.
 
 ## Operate Graphyard
 
-- [Deployment](deployment.md) — versioned images, Railway, Docker Compose, the Helm chart, backups, upgrades, and restores.
-- [Install and upgrade](install.md) — the shortest install path and the App-permission migration an upgrade can require.
+- [Deployment](deployment.md) — provider reference behind the installer: versioned images, the variables table, a manual fallback for Railway, Docker Compose and the Helm chart, backups, upgrades, and restores.
 - [GitHub enforcement](github.md) — App permissions, branch protection, CI producers, and Codex review.
 - [Herdr integration](herdr.md) — worker installation and multi-machine use.
 - [Master-agent operating mode](master-agent.md) — routing, recovery, and guarded merges.
