@@ -284,4 +284,4 @@ If a task changes while GitHub is being read, or the integration lease expires b
 
 ## Coordination diagnosis and recovery drills
 
-Use `graphyard diagnose GY-N` or the work-detail Coordination section for concrete next steps. See [coordination](coordination.md) for requirement revisions, overlap warnings, declared-resource reservations and the two-machine drill. A drill procedure is not completed execution evidence.
+Use `graphyard diagnose GY-N` or the work-detail Coordination section for concrete next steps. See [coordination](coordination.md) for requirement revisions, overlap warnings, declared-resource reservations and the two-machine drill, and the [automated recovery contract](herdr.md#automated-recovery-contract) for the refusals a trusted run establishes on every candidate. A drill procedure is not completed execution evidence.

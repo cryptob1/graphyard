@@ -25,6 +25,22 @@ jobs:
           node scripts/run-acceptance.mjs "$RUNNER_TEMP/candidate.json" graphyard-ci "$RUNNER_TEMP/acceptance.json"
       - name: Verify the release contract, backup and restore with the shipped image
         run: node scripts/verify-image-release.mjs graphyard-ci "$(node -p "require('./package.json').version")" "$GITHUB_SHA"
+  container-recovery:
+    runs-on: ubuntu-latest
+    # The recovery contract waits out the shipped two-minute lease and launch fences.
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with: { persist-credentials: false }
+      - uses: actions/setup-node@v4
+        with: { node-version: '24' }
+      - name: Build candidate image
+        run: docker build --tag graphyard-ci .
+      - name: Recover an expired lease on a second machine identity
+        # Validation only: this PR-controlled job has no evidence-producer credential.
+        run: |
+          echo '{}' > "$RUNNER_TEMP/candidate.json"
+          node scripts/run-acceptance.mjs "$RUNNER_TEMP/candidate.json" graphyard-ci "$RUNNER_TEMP/recovery.json" integration:herdr-recovery
   secrets:
     runs-on: ubuntu-latest
     steps:

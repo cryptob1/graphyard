@@ -77,4 +77,24 @@ Before scaling:
 4. submit stale evidence and confirm acceptance stays closed;
 5. supply current review and proof, merge through the master, and observe Done.
 
+## Automated recovery contract
+
+`integration:herdr-recovery` is the trusted contract behind steps 1 to 3 of that check. It runs from protected source in `scripts/herdr-recovery-contract.mjs` against a candidate container that holds no producer credential, and it drives only the public HTTP API with the identities Graphyard authenticates: two worker principals, two host IDs, and two non-overlapping worktree reservations.
+
+Its fixed inventory is:
+
+| Case | What it establishes |
+| --- | --- |
+| `exclusive-claim` | Sixteen concurrent claims from two machine identities produce one lease and one claim event. |
+| `expiry-recovery` | The lease expires without a heartbeat, the stopped machine cannot renew it, and the second machine claims the next epoch. |
+| `stale-owner-refused` | Heartbeat, release, workspace, submit, blocked, quarantine, launch, rereview, and a fresh claim all refuse for the superseded owner. |
+| `isolated-worktrees` | The replacement cannot reserve the stopped machine's branch or an overlapping path, registers its own worktree, and the earlier reservation is retained. |
+| `supervised-fence-recovery` | A supervised worker that quarantined containment and stopped without settling keeps the item fenced: operator rework is refused while the fences are live, and surrendering the lease does not lift launch authority. After both expire, rework succeeds, the stopped machine's settlement capability no longer applies, and the second machine owns the work. |
+
+The contract waits on the lease and launch fences the candidate itself reports, measured by the candidate's clock, so it exercises the shipped defaults rather than a test-only timeout. It also refuses to certify a candidate that has shortened them: each fence must be reported as at least the two-minute default, and must then hold for that long on the harness's own clock, which the candidate does not control. Only this repository's test suite substitutes shorter fences, against its own short-fenced engine.
+
+A trusted run executes the contract from the protected checkout, so a new contract must be merged to `main` before any work item may require its proof, and preparation refuses a candidate whose own base does not already carry the contract. Until it lands, the pull request introducing it is covered by the unprivileged `container-recovery` CI job, which runs the identical inventory against the candidate and publishes no evidence. Dispatch a trusted run as described in [adding a trusted contract](first-pr.md#adding-a-trusted-contract).
+
+This proves the control-plane contract for cross-machine recovery. It does not start Herdr, does not run two physical hosts, and does not prove that a disconnected agent process stopped. The [two-machine operational drill](coordination.md#two-machine-operational-drill) remains the procedure for real hosts, and [operations](operations.md#lost-worker-before-submission) covers recovery in production.
+
 For exact API behavior, read the [agent protocol](protocol.md). For the complete installation path, read [onboarding](onboarding.md).
