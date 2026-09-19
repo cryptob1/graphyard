@@ -3,11 +3,25 @@ import { randomUUID } from 'node:crypto';
 import type { Work } from '../model.js';
 import type { IntegrationJob } from '../coordination.js';
 import { migration } from './schema.js';
+import { releaseInfo, schemaVersion } from '../release.js';
 
 export class Store {
   pool: pg.Pool;
   constructor(url: string) { this.pool = new pg.Pool({ connectionString: url, max: 12 }); }
-  async init() { await this.transaction(async db => { await db.query(migration); }); }
+  /**
+   * Apply the additive migration and record the schema generation it reached. Running
+   * against a database a newer release already migrated refuses: rolling the application
+   * back under a schema it does not know is how columns and rows go missing silently.
+   */
+  async init() {
+    await this.transaction(async db => {
+      await db.query(migration);
+      const current = Number((await db.query('SELECT COALESCE(MAX(version),0) AS version FROM graphyard_schema')).rows[0].version);
+      if (current > schemaVersion) throw new Error(`Database schema generation ${current} is newer than this release supports (${schemaVersion}); deploy the release that migrated it, or restore a backup taken at generation ${schemaVersion} or earlier`);
+      if (current < schemaVersion) await db.query('INSERT INTO graphyard_schema(version, graphyard_version) VALUES($1,$2)', [schemaVersion, releaseInfo().version]);
+    });
+  }
+  async schema() { return Number((await this.pool.query('SELECT COALESCE(MAX(version),0) AS version FROM graphyard_schema')).rows[0].version); }
   async close() { await this.pool.end(); }
   async transaction<T>(fn: (db: pg.PoolClient, now: Date) => Promise<T>): Promise<T> {
     const db = await this.pool.connect();

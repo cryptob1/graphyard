@@ -11,7 +11,7 @@ const pages = [
   ['coordination', 'Coordination & recovery drills'],
   ['flow-analytics', 'Flow analytics'],
   ['visual-identity', 'Visual identity'],
-  ['test-cases', 'E2E test cases'], ['validation', 'Validation runner protocol'], ['runner-setup', 'Runner preparation & artifacts'], ['delivery', 'Releases & observed delivery'], ['recovery', 'Runner capacity & delivery recovery'],
+  ['test-cases', 'E2E test cases'], ['validation', 'Validation runner protocol'], ['runner-setup', 'Runner preparation & artifacts'], ['report-adapters', 'Report adapters'], ['delivery', 'Releases & observed delivery'], ['recovery', 'Runner capacity & delivery recovery'],
   ['first-pr', 'Graphyard repository bootstrap'],
   ['turnkey-delivery-roadmap', 'Turnkey E2E & delivery roadmap'],
   ['shipping-pulse', 'Shipping pulse'],

@@ -67,7 +67,7 @@ For a real repository with Railway, GitHub protection, Herdr, a master, and work
 
 ## Deploy
 
-Graphyard is one application container plus Postgres. Use the included Dockerfile with [Railway or Docker Compose](docs/deployment.md). It does not require Temporal, LangGraph, Redis, or Kubernetes.
+Graphyard is one application container plus Postgres. Every release publishes a versioned image; run it with [Railway, Docker Compose, or the Helm chart](docs/deployment.md), and back up, upgrade and restore the ledger with the shipped `graphyard db` commands. It does not require Temporal, LangGraph, Redis, or a hosted account; Kubernetes is supported, not required.
 
 ## Documentation
 

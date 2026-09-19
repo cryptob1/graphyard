@@ -161,19 +161,21 @@ Acceptance checks:
 
 ## D5 — Generalized reports, runners and installation
 
+*Shipped for the parts below; the remaining limits are stated. See [report adapters](report-adapters.md) for the adapter contracts, [deployment](deployment.md) for versioned images, the Helm chart, upgrades, backups and restores, and the [operations reference](operations-reference.md#readiness-checklist-per-completion-profile) for the readiness checklist. Deployment-provider adapters follow D3's release observations and are not part of this increment; production verification therefore remains a manual proof, and the checklist says so.*
+
 After D2 works, add adapters based on actual user demand: supported unit/integration report formats, additional E2E frameworks and deployment providers. Each adapter must declare what it can prove, what is independently observed, supported versions and failure semantics. Contract fixtures cover real payloads and unknown formats fail visibly; avoid another brittle prose approval dependency.
 
 Provide versioned Docker images and documented upgrade, backup and restore procedures. Railway should remain a supported guided deployment. Add a Helm chart when the actual deployment topology and Kubernetes operating requirements are established; a chart should ship with tested persistence, secrets, migrations and upgrade behavior rather than merely wrap the container.
 
 `graphyard init` should propose the repository graph, discover supported CI/tests, guide credential creation, configure Herdr and managed AGENTS instructions, and validate a first real PR. Detection must not silently authorize privileged integrations. Show an explicit readiness checklist for the selected completion profile.
 
-Acceptance checks:
+Acceptance checks, with where each is exercised:
 
-- A clean machine can deploy and connect a supported repository using the documented path.
-- The first real PR visibly progresses through the configured proof and delivery stages.
-- Missing credentials, permissions or unsupported test formats have direct recovery instructions.
-- Upgrade and restore exercises preserve assignments, event history, scenario revisions and pending requests.
-- Self-hosted Graphyard remains fully useful without a cloud subscription.
+- A clean machine can deploy and connect a supported repository using the documented path. — `scripts/verify-image-release.mjs` starts the versioned image against an empty database on every CI run and release; `deploy/helm/exercise.sh` installs the chart on a fresh kind cluster; `tests/init-scan.test.ts` connects a scanned repository through `init --scan --apply` and `doctor`. The Railway and Compose walkthroughs on a machine nobody has prepared remain an operator-witnessed manual proof.
+- The first real PR visibly progresses through the configured proof and delivery stages. — `graphyard doctor --profile` reports what is configured, and `tests/system.test.ts` drives a PR through every gate; the real PR on a fresh installation is the manual proof, as the checklist itself states.
+- Missing credentials, permissions or unsupported test formats have direct recovery instructions. — `tests/readiness.test.ts` and the `doctor` CLI test: every `missing` and `unknown` item carries the command or setting that resolves it; frameworks without a report adapter are named as unsupported with the recovery.
+- Upgrade and restore exercises preserve assignments, event history, scenario revisions and pending requests. — `tests/backup-restore.test.ts` (an assignment under lease with its workspace, append-only history, two scenario revisions, a validation request mid-collection with a private artifact, and the proof-grant ledger after a grant made only in Graphyard and a revoked environment seed, restored into a fresh database, migrated again, and continued under the same epoch with the bootstrap seed re-materializing nothing), the same round trip through the shipped image in `scripts/verify-image-release.mjs`, and the chart's upgrade-then-restore drill in `deploy/helm/exercise.sh`.
+- Self-hosted Graphyard remains fully useful without a cloud subscription. — versioned images, Compose, the Helm chart, `db backup`/`db restore` and the readiness checklist need no hosted account; `tests/deployment-packaging.test.ts` holds the packaging to one version everywhere it is stamped. Railway stays a supported guided deployment, not a requirement.
 
 ## D6 — Evidence replay, compatible reuse and analytics
 

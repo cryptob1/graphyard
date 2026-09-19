@@ -4,7 +4,7 @@ import { createHash, verify as verifySignature } from 'node:crypto';
 import { resolve } from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
 import { z } from 'zod';
-import { runnerReport, verifyRunnerReport } from './runner-report.js';
+import { defaultReportFormat, reportAdapter, type ArtifactKindName, type ReportFormat, type ReportVerification } from './report-adapters.js';
 import { attemptGrantSchema, containerNames, executionRecordSchema, type AttemptGrant, type ContainerState, type ExecutionRecord } from './runner-executor.js';
 
 const name = z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9._/-]*$/).max(150);
@@ -185,15 +185,15 @@ export function attributeExecution(input: {
 }
 
 /**
- * Artifact kinds this collector can capture within the configured protection policy.
+ * Artifact kinds this collector can capture within the configured protection policy, for
+ * the default Playwright format. Every supported format holds the same two kinds — an
+ * offline inventory and an execution report — under the file names its adapter declares.
  * Rich Playwright captures (traces, screenshots, videos) can embed credentials and
  * customer data; until redaction for them is implemented and tested they are refused
  * rather than uploaded, and a candidate that requires one cannot be accepted.
  */
-export const artifactKinds: Record<string, { file: string; mediaType: 'application/json' }> = {
-  inventory: { file: 'inventory.json', mediaType: 'application/json' },
-  report: { file: 'report.json', mediaType: 'application/json' },
-};
+export const artifactKinds: Record<string, { file: string; mediaType: 'application/json' | 'application/xml' }> = reportAdapter(defaultReportFormat).artifacts;
+export const artifactKindsFor = (format: ReportFormat): Record<string, { file: string; mediaType: 'application/json' | 'application/xml' }> => reportAdapter(format).artifacts;
 /**
  * Which artifacts a collector must read, given the names it is configured to publish.
  * Verification always needs every approved kind the boundary holds: an execution report
@@ -219,17 +219,27 @@ async function readPrivateFile(root: string, file: string, limit: number) {
   } finally { await handle.close(); }
 }
 /**
- * Read the attempt's output boundary. Only the approved reporter's structure is accepted,
- * so arbitrary candidate-authored JSON is not proof that a command ran. Missing or
- * unprotectable required artifacts refuse collection instead of uploading unsafe evidence.
+ * One artifact read from the execution boundary. `digest` identifies the raw bytes the
+ * attestor measured there; `published` is what a collector may durably store — the same
+ * bytes for the data-minimised Playwright reporter, and a structure-only projection for a
+ * format whose raw output carries messages, stack traces or captured stdio.
  */
-export async function collectArtifacts(outputDirectory: string, required: string[]) {
+export type CollectedArtifact = { name: string; digest: string; document: unknown; published: { bytes: Buffer; mediaType: 'application/json'; digest: string } };
+/**
+ * Read the attempt's output boundary. Only the pinned format's approved structure is
+ * accepted, so arbitrary candidate-authored JSON is not proof that a command ran, and
+ * bytes in a format the bundle approval did not name are refused rather than sniffed.
+ * Missing or unprotectable required artifacts refuse collection instead of uploading
+ * unsafe evidence.
+ */
+export async function collectArtifacts(outputDirectory: string, required: string[], format: ReportFormat = defaultReportFormat) {
   const names = z.array(name).min(1).max(30).parse(required);
+  const adapter = reportAdapter(format);
   const root = await realpath(outputDirectory);
-  const artifacts: { name: string; mediaType: 'application/json'; digest: string; bytes: Buffer; document: unknown }[] = [];
+  const artifacts: CollectedArtifact[] = [];
   const reasons: string[] = [];
   for (const required of [...new Set(names)].sort()) {
-    const kind = artifactKinds[required];
+    const kind = (adapter.artifacts as Record<string, { file: string } | undefined>)[required];
     if (!kind) { reasons.push(`Artifact ${required} has no collector implementation meeting the capture policy; disable it rather than uploading unprotected evidence`); continue; }
     let bytes: Buffer;
     // The container writes as its own identity, so the trusted readers reach its output
@@ -242,12 +252,12 @@ export async function collectArtifacts(outputDirectory: string, required: string
         : `Required artifact ${required} is missing or unreadable at the execution boundary`);
       continue;
     }
-    let document: unknown;
-    try { document = runnerReport.parse(JSON.parse(bytes.toString('utf8'))); }
-    catch { reasons.push(`Required artifact ${required} is not an approved data-minimised report`); continue; }
-    artifacts.push({ name: required, mediaType: kind.mediaType, digest: hash(bytes), bytes, document });
+    let parsed: ReturnType<typeof adapter.parse>;
+    try { parsed = adapter.parse(required as ArtifactKindName, bytes); }
+    catch { reasons.push(`Required artifact ${required} is not an approved data-minimised report in the pinned ${adapter.format} format`); continue; }
+    artifacts.push({ name: required, digest: hash(bytes), document: parsed.document, published: { bytes: parsed.published.bytes, mediaType: parsed.published.mediaType, digest: hash(parsed.published.bytes) } });
   }
-  const expectedFiles = new Set([...new Set(names)].filter(n => artifactKinds[n]).map(n => artifactKinds[n].file));
+  const expectedFiles = new Set(Object.values(adapter.artifacts).map(kind => kind.file));
   const unexpected = (await readdir(root)).filter(entry => !expectedFiles.has(entry));
   if (unexpected.length) reasons.push('The collection boundary contains output the approved reporter did not write');
   return { artifacts, reasons, complete: reasons.length === 0 && artifacts.length === new Set(names).size };
@@ -318,7 +328,7 @@ export function assembleResult(input: {
   grant: unknown; execution: unknown; collectedFrom: string;
   expected: { instance: string; artifacts: { service: string; digest: string }[] };
   observations: unknown; maxGapMs: number;
-  collected: { artifacts: { name: string; digest: string; document: unknown }[]; reasons: string[] };
+  collected: { artifacts: { name: string; digest: string; document: unknown; published?: { digest: string } }[]; reasons: string[] };
   uploaded: { name: string; digest: string; url: string }[];
   settlementObservations: unknown;
   executionAttestation: unknown;
@@ -346,9 +356,10 @@ export function assembleResult(input: {
 
   const inventory = input.collected.artifacts.find(a => a.name === 'inventory')?.document;
   const report = input.collected.artifacts.find(a => a.name === 'report')?.document;
-  let verified: ReturnType<typeof verifyRunnerReport> | null = null;
+  let verified: ReportVerification | null = null;
   if (inventory !== undefined && report !== undefined) {
-    try { verified = verifyRunnerReport(inventory, report); } catch { refusals.push('The approved reporter output could not be verified against the enumerated inventory'); }
+    // The adapter is the one the grant pins, never one chosen from the bytes.
+    try { verified = reportAdapter(grant.reportFormat).verify(inventory, report); } catch { refusals.push('The approved reporter output could not be verified against the enumerated inventory'); }
   } else refusals.push('The enumerated inventory or its execution report was not collected');
   if (verified) refusals.push(...verified.reasons);
 
@@ -356,7 +367,7 @@ export function assembleResult(input: {
   const collectedNames = new Set(input.collected.artifacts.map(a => a.name));
   const uploadedByName = new Map(input.uploaded.map(a => [a.name, a]));
   const artifactState: ArtifactState = required.some(n => !collectedNames.has(n)) ? 'missing'
-    : required.some(n => uploadedByName.get(n)?.digest !== input.collected.artifacts.find(a => a.name === n)!.digest) ? 'upload-failed' : 'verified';
+    : required.some(n => { const a = input.collected.artifacts.find(a => a.name === n)!; return uploadedByName.get(n)?.digest !== (a.published?.digest ?? a.digest); }) ? 'upload-failed' : 'verified';
   if (artifactState !== 'verified') refusals.push(`Required execution artifacts are ${artifactState === 'missing' ? 'missing at the execution boundary' : 'not durably stored with the collected digest'}`);
 
   const executionState: 'completed' | 'cancelled' | 'timed_out' = input.cancelled ? 'cancelled' : execution.outcome === 'timed_out' ? 'timed_out' : 'completed';

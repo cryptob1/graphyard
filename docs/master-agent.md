@@ -137,6 +137,88 @@ loop keeps the mechanical steps running underneath them.
 
 ## Operate
 
+The master is a perpetual coordinator, not a one-shot dispatcher. Whether the
+mechanical steps run in the [durable loop](#durable-loop) or the visible master session
+drives them by hand, keep cycling through these steps until both parts of the terminal
+condition hold: (1) every in-scope work item is Done or has a genuinely external
+blocker recorded in Graphyard; and (2) every merged change is deployed and
+live-verified against the exact deployed release, or a genuinely external deployment
+blocker is recorded in Graphyard:
+
+1. Run `master status` and treat Graphyard as progression truth.
+2. Dispatch ready work to an appropriate worker profile.
+3. Shepherd review findings, rework, and trusted proof collection to completion.
+4. Request a guarded merge only when the exact candidate passes every gate.
+5. Run [deployment verification](#deployment-verification) for each delivery with
+   `master verify-deployment GY-N`: the required live behavior is established against
+   the exact deployed release, and local or stale observations are refused rather than
+   counted.
+6. Close finished agent sessions, then return to status and continue the cycle.
+
+Ordinary review findings, rework, idle workers, and proof setup are not stopping
+conditions. Resolve or route them and continue. Done marks an observed merge, not a
+deployed release, so the last merge never satisfies the terminal condition before
+step 5. Stop only when every in-scope work item is Done or genuinely externally
+blocked, and either the exact deployed release has passed live verification or a
+genuinely external deployment blocker is recorded in Graphyard.
+
+In-scope work is every item Graphyard has released: unreleased backlog is the human
+operator's (or a scoped operator agent's, with `intent:ready`) to release with `ready`,
+so it neither blocks nor satisfies the terminal condition. A per-item blocker is the `blocked` record the lease holder writes on the
+item; a session that went quiet without one is not a blocker, it is work to dispatch
+again.
+
+A deployment blocker has its own record because delivered work is immutable and
+accepts no `blocked` mutation. When a delivery cannot be verified live for a
+genuinely external reason — the provider will not roll out, the release endpoint is
+gone, or a rollback decision is pending — record it as a follow-up work item naming
+the delivered item, its merge commit, and the external cause; `daemon.deployment`
+keeps listing the delivery under `pending` (or `unavailable` when no probe can
+answer), and `delivered` keeps it `awaiting-deployment` or `awaiting-smoke`, until
+the release serves it. Only that recorded follow-up satisfies part (2) without live
+verification. An unverified deployment with no such record is never terminal, and
+neither is a delivery whose release moved on before the smoke ran; see
+[operations](operations.md#delivered-with-a-failed-smoke-proof) for the failure path.
+
+### Deployment verification
+
+Done marks an observed merge. What the running release serves is a separate fact, and
+the loop establishes it after delivery with one command per delivered item:
+
+```sh
+node "$GRAPHYARD_CLI" master verify-deployment GY-42
+```
+
+It is an operational step the master performs and records after delivery, never a
+pre-merge gate: nothing about it changes which candidates merge. The command
+
+1. observes the deployed release through the loop's deployment probe (`--deployment-url`,
+   or the provider's deployment record for the base branch) and refuses when nothing
+   answers, when the observation is older than five minutes, or when the release does not
+   yet contain the item's merge commit;
+2. identifies the checkout whose CLI emits the instructions — the commit the configured
+   launcher's checkout is at — and refuses a local-only reading: a checkout at any commit
+   other than the deployed release, or one with uncommitted changes;
+3. reads what that release emits the way the human operator would: `master guide`, and the
+   `AGENTS.md` a fresh `init --url` writes into a scratch git checkout outside every
+   repository, with no Graphyard credential in the environment. Both must carry the
+   perpetual cycle, deployment verification as a step of it, the terminal condition, the
+   exact-release requirement, the non-stopping conditions, and the finished-agent closure
+   duty. This check applies when the launcher is a checkout of the managed repository —
+   Graphyard verifying its own release; for another managed repository the release's
+   coverage of the merge is the whole check;
+4. records the observation on the delivered item as its deployment observation
+   (`delivery.deployment`, and a `deployment` event in the item's history), bound to the
+   exact commit observed, the merge commit it covers, the probe source, and the observation
+   time. The control plane accepts one observation per delivery and refuses a second, so a
+   later rollout is verified through a follow-up item, never by rewriting the record.
+
+A refusal prints every reason, exits nonzero, and records nothing; the loop keeps cycling.
+A verification that already stands for the same release reports `recorded: existing`
+and writes nothing twice. `master status` shows the recorded observation under
+`delivered` for deliveries whose policy sets `deploySmoke`; the item's `events` show it
+for every delivery.
+
 ```sh
 node "$GRAPHYARD_CLI" master status
 node "$GRAPHYARD_CLI" master dispatch GY-42 codex-primary
@@ -144,6 +226,7 @@ node "$GRAPHYARD_CLI" master review GY-42
 node "$GRAPHYARD_CLI" master settle-containment GY-42 "Supervisor died on provider usage limit"
 node "$GRAPHYARD_CLI" master merge GY-42
 node "$GRAPHYARD_CLI" master merge --all
+node "$GRAPHYARD_CLI" master verify-deployment GY-42
 ```
 
 Run `status` at startup, after dispatch, when a worker reports completion, and when an integration event arrives. Owners, stages, refusals, merge candidates, and pending and completed reviews come from Graphyard. Missing Herdr telemetry never erases an assignment.

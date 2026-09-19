@@ -7,6 +7,7 @@ import { startGithubSetup } from '../github-setup.js';
 import { resourceConflicts } from '../coordination.js';
 import { assertMasterBinding, assessContainment, buildMasterStatus, continueMergeBatch, currentMergeCandidates, dispatchWork, inspectWorkerCredentials, listHerdrAgents, loadMasterConfig, masterHarness, mergeExecutor, observeHerdrAgents, readCredentialFile, readWorkerCredential, saveWorkerProfile, setupMaster, snapshotWithClock, startMaster, verifyContainmentDeath, workerProfileSchema } from '../master.js';
 import { daemonEffects, daemonSummary, readDaemonState, runDaemon } from '../master-daemon.js';
+import { verificationEffects, verifyDeployment } from '../master-verification.js';
 import { bindReviewer, launchReview, readReviewLedger, reconcileReviews, reviewerCredentialDirectory, saveReviewerProfile, summarizeReviews, verifyReviewerInstallation } from '../reviewer.js';
 import { applyProtection, protectionPlan, readProtection } from '../protection.js';
 import { writeHarnessPermissions } from '../harness.js';
@@ -47,6 +48,9 @@ export const masterCommands = defineCommands([
       '                                Settle a containment quarantine whose supervisor this',
       '                                host verifies dead; unverifiable signals refuse',
       '  master merge GY-N|--all       Merge exact authorized candidates without bypasses',
+      '  master verify-deployment GY-N Verify that the deployed release serves a delivery and',
+      '                                emits the current instructions; refuse stale or local-only',
+      '                                observations, record the exact release observed',
       '  master run [--once] [--interval SECONDS]',
       '                                Run the durable coordination loop as a supervised process',
       '  master guide                  Print the complete master-agent operating guide',
@@ -195,6 +199,15 @@ export const masterCommands = defineCommands([
         const results = args[0] === '--all' ? await continueMergeBatch(selected, mergeOne) : [await mergeOne(selected[0])];
         return print({ requestId: outerRequest, results });
       }
+      if (id === 'verify-deployment') {
+        if (!args[0]) throw new Error('Use master verify-deployment GY-N');
+        const snapshot = await masterApi('work-snapshot');
+        const work = snapshot.work.find((item: any) => item.id === args[0] || item.key === args[0]);
+        if (!work) throw new Error(`Unknown work item ${args[0]}`);
+        const result = await verifyDeployment(work, verificationEffects(master, { snapshot: () => masterApi('work-snapshot'), mutate: masterMutation }));
+        if (result.result === 'refused') process.exitCode = 1;
+        return print(result);
+      }
       if (id === 'run') {
         const { values } = parseArgs({ args, options: { once: { type: 'boolean' }, interval: { type: 'string' } }, allowPositionals: false });
         const intervalSeconds = values.interval ? Number(values.interval) : master.run.intervalSeconds;
@@ -208,7 +221,7 @@ export const masterCommands = defineCommands([
         const result = await runDaemon(master, state, effects, { once: values.once, intervalMs: intervalSeconds * 1000, identity: { pid: process.pid, host: master.hostId } });
         return print({ repository: master.repository, coordinator: coordinator.actor.id, intervalSeconds, cycles: result.cycles.length, stopped: result.stopped ? 'signal' : 'completed', last: result.cycles.at(-1) ?? null });
       }
-      throw new Error('Use master init, start, worker add, reviewer, review, protection, browser, harness, status, dispatch, settle-containment, run, merge, or guide');
+      throw new Error('Use master init, start, worker add, reviewer, review, protection, browser, harness, status, dispatch, settle-containment, run, merge, verify-deployment, or guide');
     },
   },
 ]);

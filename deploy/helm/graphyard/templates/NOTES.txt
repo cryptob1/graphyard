@@ -1,0 +1,30 @@
+Graphyard {{ include "graphyard.version" . }} is being rolled out as release {{ .Release.Name }}.
+
+Confirm the release from outside the cluster once it is ready:
+
+  helm test {{ .Release.Name }} --namespace {{ .Release.Namespace }}
+  kubectl --namespace {{ .Release.Namespace }} port-forward svc/{{ include "graphyard.fullname" . }} 4310:{{ .Values.service.port }}
+  curl -s http://127.0.0.1:4310/healthz
+
+{{- if not .Values.config.githubAppId }}
+
+GitHub is not configured (config.githubAppId is empty): the API and dashboard work, merge gates stay closed.
+Register the dedicated GitHub App with `graphyard github-setup`, then set config.githubRepository,
+config.githubAppId, config.githubInstallationId and the GITHUB_PRIVATE_KEY / GITHUB_WEBHOOK_SECRET keys.
+{{- end }}
+{{- if .Values.secrets.create }}
+
+Credentials were rendered from chart values (secrets.create=true). That is for evaluation:
+manage the Secret outside Helm values and set secrets.existingSecret for anything shared.
+{{- end }}
+{{- if .Values.postgresql.enabled }}
+
+The bundled Postgres is an evaluation database on one PersistentVolumeClaim. Point DATABASE_URL at
+managed Postgres, with its own backups, before relying on this installation.
+{{- end }}
+{{- if not .Values.backup.enabled }}
+
+Scheduled logical backups are off (backup.enabled=false). Enable them, or run
+`kubectl exec deploy/{{ include "graphyard.fullname" . }} -- node bin/graphyard.mjs db backup /tmp/ledger.json`
+before every upgrade. See docs/deployment.md for the upgrade, backup and restore procedure.
+{{- end }}
