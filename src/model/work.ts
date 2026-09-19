@@ -112,6 +112,12 @@ export interface Work extends Create {
   // supervisor's pid, so settlement can attribute a live scope to this assignment or another.
   containmentQuarantine?: { owner: string; epoch: number; at: string; settlementHash: string; launchAcknowledgedAt?: string; launchExpiresAt?: string; leaseExpiresAt?: string; scope?: ContainmentScope } | null;
   submission: { epoch: number; pr: number } | null;
+  /**
+   * A worker's open ask to widen plannedFiles, bound to the lease epoch that raised it. It
+   * surfaces to the master as a scope attention item and is applied — or superseded — without
+   * ending the attempt; `master scope` is its one-command approval.
+   */
+  scopeRequest?: { epoch: number; paths: string[]; reason: string; requestedBy: string; at: string } | null;
   queue?: QueueEntry | null; queueSequence?: number; queueEjection?: QueueEjection | null; queueHistory?: QueueHistoryEntry[];
   reworkRequested: boolean;
   scenarioRequirements: { proof: string; revision: number; environment: string; hash: string }[];
