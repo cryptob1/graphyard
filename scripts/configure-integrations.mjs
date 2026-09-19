@@ -6,10 +6,12 @@
 // with --remove ID. The preview names ids, roles and token changes and never a token. A token is
 // rotated only when named with --rotate ID (or when none exists yet), and a rotated producer token
 // reaches its GitHub secret only after the deployed server authenticates it, so the secret and the
-// deployed roster never disagree.
-import { readFile } from 'node:fs/promises';
+// deployed roster never disagree. A token staged but not yet served (a deployment that outlived the
+// wait, or a failed `gh secret set`) is recorded by digest in the ignored
+// .graphyard/pending-secret-sync.json, and the next --deploy run completes its secret.
+import { readFile, writeFile } from 'node:fs/promises';
 import { execFileSync } from 'node:child_process';
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { pathToFileURL } from 'node:url';
 import { setTimeout as sleep } from 'node:timers/promises';
 
@@ -79,6 +81,40 @@ export function secretsToSync(live, next) {
   });
 }
 
+/** A token's SHA-256 digest: what the pending-sync record keeps instead of the token itself. */
+export function tokenDigest(token) {
+  return createHash('sha256').update(token).digest('hex');
+}
+
+/**
+ * The recorded secret syncs still owed: each recorded producer whose live (staged) token is the one
+ * the record names. A record whose token is no longer live is stale — its token never reached the
+ * roster or was replaced since — and owes nothing, because the secret still holds a token no newer
+ * than the one that record replaced.
+ */
+export function pendingSecretSyncs(record, live) {
+  return (record ?? []).flatMap(entry => {
+    const token = live.find(candidate => candidate.id === entry.id)?.token;
+    return typeof token === 'string' && tokenDigest(token) === entry.digest ? [{ id: entry.id, secret: entry.secret, token }] : [];
+  });
+}
+
+/**
+ * Every GitHub secret this run must set: the producer tokens this roster changes, and each recorded
+ * sync whose staged token the roster keeps. Rerunning after a deployment timed out therefore still
+ * sets the secret, although the live roster already holds the new token.
+ */
+export function secretsDue(live, next, record) {
+  const changed = secretsToSync(live, next);
+  const owed = pendingSecretSyncs(record, live).filter(entry => !changed.some(candidate => candidate.id === entry.id) && next.find(candidate => candidate.id === entry.id)?.token === entry.token);
+  return [...changed, ...owed];
+}
+
+/** The record to keep: the given syncs by id and digest, never a token. */
+export function secretSyncRecord(secrets) {
+  return secrets.map(entry => ({ id: entry.id, secret: entry.secret, digest: tokenDigest(entry.token) }));
+}
+
 /**
  * Waits until the deployed server authenticates each token as its principal. Only then may the
  * GitHub secret holding it change; a token the deployment does not serve yet stays unsynced.
@@ -136,7 +172,11 @@ async function main() {
     const roster = withCiProducer([...principals.filter(p => p.id !== producer.id), producer]);
     stage = 'check the merged roster';
     assertRosterSafe(live, roster, options);
-    const secrets = secretsToSync(live, roster);
+    const recordFile = new URL('.graphyard/pending-secret-sync.json', root);
+    let record = [];
+    try { record = JSON.parse(await readFile(recordFile, 'utf8')); } catch (error) { if (error.code !== 'ENOENT') throw error; }
+    const secrets = secretsDue(live, roster, record);
+    const saveRecord = async entries => { record = secretSyncRecord(entries); await writeFile(recordFile, `${JSON.stringify(record, null, 2)}\n`, { mode: 0o600 }); };
     console.log(JSON.stringify({ roster: rosterPreview(live, roster), secrets: secrets.map(entry => ({ id: entry.id, secret: entry.secret })) }, null, 2));
     if (secrets.length && !options.deploy) throw Object.assign(new Error(`The roster changes the token behind ${secrets.map(entry => entry.secret).join(', ')}; rerun with --deploy so the deployment and the secret change together`), { visible: true });
     stage = 'restrict reporter environment';
@@ -160,6 +200,10 @@ async function main() {
     for (const entry of limits.drift) console.error(`Drift: ${entry.reason}`);
     const variables = { GITHUB_APP_ID: String(app.appId), GITHUB_INSTALLATION_ID: String(app.installationId), GITHUB_PRIVATE_KEY: app.privateKey, GITHUB_WEBHOOK_SECRET: app.webhookSecret,
       GRAPHYARD_PRINCIPALS: JSON.stringify(roster), ...limits.variables };
+    // Recorded before staging, so a sync the deployment or GitHub leaves unfinished is completed by
+    // the next --deploy run rather than forgotten once the staged token reads as live.
+    stage = 'record the secret syncs this run owes';
+    await saveRecord(secrets);
     stage = 'stage Railway secret variables';
     for (const [key, value] of Object.entries(variables)) execFileSync('npx', [...railway, 'variable', 'set', '--service', 'graphyard', '--skip-deploys', '--stdin', key], { input: value, stdio: ['pipe', 'ignore', 'pipe'] });
     gh(['variable', 'set', 'GRAPHYARD_URL', '--repo', repository, '--env', 'graphyard-reporting', '--body', url]);
@@ -172,8 +216,11 @@ async function main() {
     stage = 'wait for the deployment to serve the rotated tokens';
     const served = await awaitServedTokens(url, secrets.map(entry => ({ id: entry.id, token: entry.token })));
     stage = 'store the served producer credentials';
-    for (const entry of secrets.filter(candidate => served.served.includes(candidate.id))) gh(['secret', 'set', entry.secret, '--repo', repository, '--env', 'graphyard-reporting'], entry.token);
-    if (served.pending.length) throw Object.assign(new Error(`The deployment does not authenticate ${served.pending.join(', ')} yet, so ${secrets.filter(entry => served.pending.includes(entry.id)).map(entry => entry.secret).join(', ')} was left unchanged; rerun with --deploy once the deployment is live`), { visible: true });
+    for (const entry of secrets.filter(candidate => served.served.includes(candidate.id))) {
+      gh(['secret', 'set', entry.secret, '--repo', repository, '--env', 'graphyard-reporting'], entry.token);
+      await saveRecord(secrets.filter(candidate => candidate.id !== entry.id && record.some(owed => owed.id === candidate.id)));
+    }
+    if (served.pending.length) throw Object.assign(new Error(`The deployment does not authenticate ${served.pending.join(', ')} yet, so ${secrets.filter(entry => served.pending.includes(entry.id)).map(entry => entry.secret).join(', ')} was left unchanged and recorded in .graphyard/pending-secret-sync.json; rerun with --deploy once the deployment is live and it is set then`), { visible: true });
     console.log(`Integrations configured without printing credentials; capacity set to ${limits.lines.join(' ')}. Deployed the merged roster and updated ${secrets.map(entry => entry.secret).join(', ')} only after the deployment authenticated ${served.served.join(', ')}.`);
   } catch (error) { console.error(error?.visible || stage === 'check the merged roster' ? error.message : `Configuration stopped at: ${stage}. No credential values are logged. Correct the setup and rerun; the live roster is merged again and no token rotates unless named with --rotate.`); process.exitCode = 1; }
 }

@@ -922,7 +922,11 @@ export function sessionHarnessPlan(input: SessionHarnessInput): HarnessPlan {
     { rule: 'Read(**/*.pem)', why: 'App private keys are never read into a session transcript.' },
     { rule: 'Read(**/*.token)', why: 'Token files are never read into a session transcript.' },
     { rule: 'Bash(gh pr merge:*)', why: 'Delivery happens only through the guarded merge.' },
-    { rule: 'Bash(gh api *merge*)', why: 'A raw merge call is an administrative merge bypass.' },
+    // Scoped to the merge endpoints, not the word: a reviewer's verdict body often says "merge", and
+    // in Claude Code a deny beats the allow for its one review call.
+    { rule: 'Bash(gh api *pulls/*/merge*)', why: 'A raw pull-request merge call is an administrative merge bypass.' },
+    { rule: 'Bash(gh api *repos/*/merges*)', why: 'A raw branch-merge call is an administrative merge bypass.' },
+    { rule: 'Bash(gh api graphql*)', why: 'GraphQL reaches merge and merge-queue mutations; no session needs it.' },
     { rule: 'Bash(agent-browser *)', why: "The operator's browser profile is driven only by the master's recorded flows." },
   ];
   const noVerdict: HarnessRule[] = [

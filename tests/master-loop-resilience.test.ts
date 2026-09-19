@@ -15,7 +15,7 @@ import { launchProducer, producerIdleGraceMs, producerPrompt, readProducerLedger
 import { emptyDispatchCursor, readDispatchCursor, runAutoDispatch, runDispatchTick, type DispatchEffects } from '../src/auto-dispatch.js';
 import { emptyDaemonState, noteConfigReload, readDaemonState, runCycle, runDaemon, type DaemonEffects } from '../src/master-daemon.js';
 // @ts-expect-error Dependency-free operator script.
-import { assertRosterSafe, awaitServedTokens, generatedProducer, mergeRoster, parseOptions, rosterPreview, secretsToSync } from '../scripts/configure-integrations.mjs';
+import { assertRosterSafe, awaitServedTokens, generatedProducer, mergeRoster, parseOptions, pendingSecretSyncs, rosterPreview, secretsDue, secretSyncRecord, secretsToSync } from '../scripts/configure-integrations.mjs';
 
 // Each test is named for the proof it produces (GY-69): integration:producer-session-retry,
 // integration:master-config-reload, integration:master-profile-management,
@@ -346,6 +346,11 @@ test('integration:role-scoped-harness-rules — worker, reviewer and producer se
   assert.equal(denied(rules(reviewer, 'deny'), 'git push origin graphyard/gy-69-4'), true);
   assert.equal(denied(rules(producer, 'deny'), 'git push origin graphyard/gy-69-4'), true);
   assert.ok(rules(reviewer, 'allow').includes('Bash(gh api --method POST repos/owner/project/pulls/69/reviews*)'));
+  // The merge deny names merge endpoints, so a verdict body that mentions merging is not refused.
+  assert.equal(denied(rules(reviewer, 'deny'), 'gh api --method POST repos/owner/project/pulls/69/reviews -f event=APPROVE -f body=safe to merge'), false);
+  for (const command of ['gh api --method PUT repos/owner/project/pulls/69/merge', 'gh api --method POST repos/owner/project/merges -f base=main', 'gh api graphql -f query=mutation{mergePullRequest}']) {
+    for (const plan of [worker, reviewer, producer]) assert.equal(denied(rules(plan, 'deny'), command), true, `${command} stays denied`);
+  }
   assert.equal(sessionHarnessPlan({ ...input, role: 'worker', kind: 'codex', branch: 'b' }).allow.length, 0, 'runtimes that do not read Claude settings get no generated rules');
   assert.throws(() => sessionHarnessPlan({ ...input, role: 'worker', kind: 'claude' }), /names the assigned branch/);
 
@@ -467,11 +472,30 @@ test('integration:principal-rotation-safety — rotation merges into the live ro
   let now = 0;
   const never = await awaitServedTokens('https://graphyard.example', [{ id: 'trusted-acceptance', token: rotated.token }], { fetcher: (async () => new Response('{}', { status: 401 })) as typeof fetch, timeoutMs: 30, intervalMs: 10, wait: async (ms: number) => { now += ms; }, clock: () => now });
   assert.deepEqual(never, { served: [], pending: ['trusted-acceptance'] }, 'an undeployed token is reported pending and its secret is left unchanged');
+  // Timeout, then rerun: the first run records the owed sync (by digest, never the token) before it
+  // stages. On the rerun the live roster already holds the staged token, so no token "changes" —
+  // yet the record keeps the secret due until it is set.
+  const rotation = secretsDue(live, next, []);
+  const record = secretSyncRecord(rotation);
+  assert.deepEqual(record.map((entry: any) => [entry.id, entry.secret]), [['trusted-acceptance', 'GRAPHYARD_PRODUCER_TOKEN']]);
+  assert.equal(JSON.stringify(record).includes(rotated.token), false, 'the record never holds a token');
+  const staged = next; // what `railway variable list` returns once the first run staged its roster
+  const rerunRoster = mergeRoster(staged, [...local, generatedProducer(staged, 'trusted-acceptance', { role: 'producer', proofs: ['integration:claim-safety'] }, [], () => secret('other'))]);
+  assert.deepEqual(secretsToSync(staged, rerunRoster), [], 'the staged token reads as live on the rerun');
+  assert.deepEqual(secretsDue(staged, rerunRoster, record).map((entry: any) => [entry.id, entry.secret, entry.token]), [['trusted-acceptance', 'GRAPHYARD_PRODUCER_TOKEN', rotated.token]], 'the rerun still owes the secret the staged token');
+  // Once set, the record is emptied and nothing is owed; a record whose token never reached the roster is stale.
+  assert.deepEqual(secretsDue(staged, rerunRoster, secretSyncRecord([])), []);
+  assert.deepEqual(pendingSecretSyncs(record, live), [], 'a token that was never staged owes nothing: the secret still matches the live roster');
+  // Rotating again on the rerun supersedes the owed token rather than setting both.
+  const again = mergeRoster(staged, [generatedProducer(staged, 'trusted-acceptance', { role: 'producer', proofs: ['integration:claim-safety'] }, ['trusted-acceptance'], () => secret('third'))]);
+  assert.deepEqual(secretsDue(staged, again, record).map((entry: any) => entry.token), [secret('third')]);
   // The script wires these together: it reads the live roster, refuses before any write, and deploys before any secret.
   const script = await readFile(new URL('../scripts/configure-integrations.mjs', import.meta.url), 'utf8');
   const order = ['variable\', \'list\'', 'assertRosterSafe(live, roster, options)', 'rerun with --deploy', 'variable\', \'set\'', '\'redeploy\'', 'await awaitServedTokens(url', '\'secret\', \'set\''].map(fragment => script.indexOf(fragment));
   assert.ok(order.every(index => index > 0), 'every step is present'); assert.deepEqual([...order].sort((x, y) => x - y), order, 'live read, safety check, staging, deploy, serve check, then secret');
   assert.doesNotMatch(script, /--skip-deploys[^\n]*\n[^\n]*gh\(\['secret'/, 'no secret is set straight after a skip-deploys stage');
+  const recorded = ['secretsDue(live, roster, record)', 'await saveRecord(secrets)', 'variable\', \'set\'', '\'secret\', \'set\'', 'await saveRecord(secrets.filter'].map(fragment => script.indexOf(fragment));
+  assert.ok(recorded.every(index => index > 0)); assert.deepEqual([...recorded].sort((x, y) => x - y), recorded, 'the owed sync is recorded before staging and cleared only after its secret is set');
   const docs = await readFile(new URL('../docs/deployment.md', import.meta.url), 'utf8');
   for (const fragment of ['--rotate', '--remove', '--deploy', 'live roster']) assert.ok(docs.includes(fragment), `docs/deployment.md documents ${fragment}`);
 });
