@@ -1,7 +1,7 @@
 import { execFileSync } from 'node:child_process';
-import { createHash, randomUUID } from 'node:crypto';
+import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { chmod, lstat, mkdir, readFile, realpath } from 'node:fs/promises';
-import { dirname, isAbsolute, relative, resolve, sep } from 'node:path';
+import { basename, dirname, isAbsolute, relative, resolve, sep } from 'node:path';
 import { homedir, hostname } from 'node:os';
 import { z } from 'zod';
 import { assertRepository, discover, localDirectory, saveDiscovery } from './onboarding.js';
@@ -9,7 +9,7 @@ import { loadConnection, managedInstructions, serverOrigin } from './repository-
 import { dispatchOrder, dispatchOverlap, resourceConflicts, scopeBreadth } from './coordination.js';
 import type { ConflictReport } from './conflicts.js';
 import { mergeOrder } from './delegation.js';
-import { launchPlan, masterHarnessPlan, writeHarnessPermissions } from './harness.js';
+import { launchPlan, masterHarnessPlan, writeHarnessPermissions, type HarnessPlan, type HarnessRule } from './harness.js';
 import { CHECK_NAME, carriedApproval, deliveryState, deploySmokeRequired, describeQueueBinding, evidenceIndependenceRefusals, exhaustedReviewerProfiles, nativeReviewRequired, postDeployMs, productionLatencyMs, providerDelayAfterVerification, reviewerProfileFor, reviewProviderOf, rollbackGuidance, standingEscalations, type CarriedApproval, type QueueBindingReport, type Work } from './model.js';
 import { containmentAttestation, containmentSettlementRefusals, containmentVerificationSchema, type ContainmentVerification } from './quarantine.js';
 import { probeSupervisorAbsence } from './containment-probe.js';
@@ -112,6 +112,7 @@ export const masterBrowserSchema = z.object({
 }).strict();
 export type MasterBrowser = z.infer<typeof masterBrowserSchema>;
 
+export const agentIdentitySchema = z.object({ id: z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,99}$/), credentialFile: z.string().min(1).max(1000) }).strict();
 export const masterConfigSchema = z.object({
   version: z.literal(1),
   url: z.string(),
@@ -132,6 +133,10 @@ export const masterConfigSchema = z.object({
   run: masterRunSchema.prefault({}),
   // The operator's own authenticated browser profile, used only by master browser flows.
   browser: masterBrowserSchema.optional(),
+  // The master's own operator-agent identity, and the separate approver identity whose session
+  // approves the master's two-party decisions (master autonomy). Paths only, never tokens.
+  operatorAgent: agentIdentitySchema.optional(),
+  approver: agentIdentitySchema.optional(),
 }).strict();
 export type MasterConfig = z.infer<typeof masterConfigSchema>;
 
@@ -151,6 +156,20 @@ The recommended coordinator is a dedicated, visible master-agent session. It doe
 not implement work, hold worker leases, submit evidence, or bypass gates. Run
 \`graphyard master status\` at startup and after every material event. Graphyard is
 the source of assignment and progression truth; Herdr supplies live session health.
+
+Autonomy is the default: act without asking. The operator sets goals; agents make
+every other call. Only three decisions are human: goals and priorities, spending money
+or opening third-party accounts, and issuing credentials to people. Every other
+decision names the agent that makes it and the independent agent that approves it.
+Create, release, unblock, and add requirements with your own operator-agent identity
+(\`graphyard master create|release|unblock|requirements\`). Request every other
+decision (requirement rewrites, escalation resolution, \`manual:\` attestation,
+rework, containment recovery, proof grants, and merge approval when automatic
+merging is off) with \`graphyard master decide GY-N ACTION REASON\`, then launch the
+independent approver with \`graphyard master approver GY-N DECISION\`. The server
+refuses self-approval and any approver that held an assignment on the item or produced
+its evidence. Never ask a human to run a command an agent identity may run: \`master
+status\` names who resolves each attention item and the next command.
 
 Dispatch only ready work with \`graphyard master dispatch GY-N PROFILE\`. The
 worker must claim the item under its own identity and use the assigned worktree.
@@ -181,7 +200,7 @@ Each drives the operator's own authenticated browser profile headless, records e
 step and screenshot under \`.graphyard/master-actions/\`, verifies the result through
 the API, and appends an attributable audit entry. On a Confirm-access page the flow
 triggers GitHub Mobile and reports the two-digit code in \`master status\`; approving
-that prompt on their device, and decisions the docs mark human-only, are the only
+that prompt on their device, and the three human-only decisions above, are the only
 operator interactions left. Never store, export, or reuse the profile's cookies
 outside those flows.
 
@@ -199,12 +218,13 @@ An observed merge alone does not end the loop. Ordinary review findings, rework,
 idle workers, and proof setup are not stopping conditions. Close finished agent
 sessions as part of the cycle.
 
-Check the automatic-merge preference in master status. When disabled, wait for
-explicit operator approval for each merge. Otherwise routine merges may use
-\`graphyard master merge --all\`. The command rechecks the
-exact current candidate, every configured gate, and GitHub state immediately before
-merging. Human gates, stale observations, failures, and changed commits remain
-blocking. Never use an administrative merge bypass, edit a candidate, or read a
+Check the automatic-merge preference in master status. When disabled, each merge
+needs an approved merge decision: request it with \`graphyard master decide GY-N
+merge\`, and \`graphyard master merge\` refuses a candidate the approver agent has not
+approved. Otherwise routine merges may use \`graphyard master merge --all\`. The command
+rechecks the exact current candidate, every configured gate, and GitHub state
+immediately before merging. Unapproved decisions, stale observations, failures, and
+changed commits remain blocking. Never use an administrative merge bypass, edit a candidate, or read a
 worker credential. Read \`docs/master-agent.md\`
 in Graphyard or run \`graphyard master guide\` for the complete operating loop.
 ${masterEnd}`;
@@ -353,7 +373,7 @@ export async function setupMaster(root: string, input: { url: string; token: str
     : production?.incidents.length ? `Deploy main: ${production.attention[0] ?? production.incidents[0].reason}` : null;
   const start = config.reviewer ? `run graphyard master start codex (or another supported agent kind) and add worker and reviewer profiles` : `run graphyard master reviewer setup to register the independent reviewer identity, then graphyard master start codex (or another supported agent kind) and add worker and reviewer profiles`;
   return { repository: config.repository, server: config.url, role: status.actor.role, autoMerge: config.autoMerge, workers: config.workers.length, run: config.run, browser: config.browser ?? null, config: '.graphyard/master.json', reviewer: config.reviewer ? `${config.reviewer.slug}[bot]` : null, attention,
-    next: remedy ? `${remedy}, then ${start}` : start[0].toUpperCase() + start.slice(1) };
+    next: `${remedy ? `${remedy}, then ${start}` : start[0].toUpperCase() + start.slice(1)}; give the master its agent identities once with graphyard master autonomy --admin-token-stdin --apply` };
 }
 
 export async function saveWorkerProfile(root: string, profileInput: unknown, verify: (token: string) => Promise<any>) {
@@ -481,6 +501,49 @@ export interface ControlPlaneStatus {
   production?: Partial<ProductionReport> | null;
 }
 /**
+ * Who resolves an attention item and the next command they run. `role` is an agent role
+ * (master, approver, reviewer, control plane); `human` is true only for the human-only list,
+ * and `humanOnly` then names which of those decisions it is.
+ */
+export interface AttentionOwner { role: 'master' | 'reviewer' | 'control plane' | 'human'; approvedBy: 'approver' | null; human: boolean; humanOnly: typeof humanOnlyDecisions[number] | null; next: string }
+export interface AttentionItem extends AttentionOwner { subject: string; text: string }
+export const agentOwner = (role: 'master' | 'reviewer' | 'control plane', next: string, approvedBy: 'approver' | null = null): AttentionOwner => ({ role, approvedBy, human: false, humanOnly: null, next });
+export const humanOwner = (humanOnly: typeof humanOnlyDecisions[number], next: string): AttentionOwner => ({ role: 'human', approvedBy: null, human: true, humanOnly, next });
+/** The owner of one installation attention line, by the source that raised it. */
+export function installationOwner(source: 'app-permissions' | 'held-jobs' | 'delegation-limits' | 'production', text: string): AttentionOwner {
+  // Reinstating a suspended App installation is an account decision on the operator's GitHub account.
+  if (source === 'app-permissions') return /suspended/i.test(text) ? humanOwner('spending money or opening third-party accounts', 'Reinstate the suspended GitHub App installation from the account that owns it')
+    : agentOwner('master', 'graphyard master browser app-permissions, then graphyard master browser installation-accept');
+  if (source === 'held-jobs') return agentOwner('control plane', 'Nothing to run: held jobs resume once graphyard master browser installation-accept grants the permission');
+  if (source === 'delegation-limits') { const assignment = /Set (\S+=\S+)/.exec(text)?.[1]; return agentOwner('master', assignment ? `Set ${assignment} on the deployment (Railway: railway variables --set ${assignment} --service graphyard), then redeploy` : 'Set the named capacity variable on the deployment, then redeploy'); }
+  return agentOwner('master', 'Fix or trigger the deployment of the base branch with the configured provider, then graphyard master verify-deployment GY-N for each pending delivery');
+}
+/**
+ * The owner of a work item's attention, from the same facts that raised it. Everything an agent
+ * identity may run is routed to an agent: decisions a human used to make go to the master and
+ * its independent approver through graphyard master decide.
+ */
+export function workAttentionOwner(work: Work, cause: 'containment-settleable' | 'containment' | 'session' | 'proof-gap' | 'reviewer-exhausted' | 'launch-review' | 'launch-producer' | 'gate'): AttentionOwner {
+  const key = work.key;
+  if (cause === 'containment-settleable') return agentOwner('master', `graphyard master settle-containment ${key} REASON`);
+  if (cause === 'containment') return agentOwner('master', `Stop the recorded supervisor on its host, then graphyard master decide ${key} ${work.stage === 'done' ? 'recover' : 'rework'} REASON and graphyard master approver ${key} DECISION`, 'approver');
+  if (cause === 'session') return agentOwner('master', `herdr agent list to inspect the session; once the lease lapses, graphyard master dispatch ${key} PROFILE`);
+  if (cause === 'proof-gap') return agentOwner('master', `graphyard master decide ${key} grant '{"principal":"PRODUCER","patterns":["${(work.proofGaps ?? [])[0] ?? 'PROOF'}"]}' REASON, then graphyard master approver ${key} DECISION`, 'approver');
+  if (cause === 'reviewer-exhausted') return agentOwner('master', `graphyard master reviewer add FILE with a profile on another provider, then graphyard master review ${key}`);
+  if (cause === 'launch-review') return agentOwner('master', `Fix the refusal reason, then graphyard master review ${key}`);
+  if (cause === 'launch-producer') return agentOwner('master', 'Fix the refusal reason (graphyard master producer add FILE for a missing profile); the loop relaunches the producer on its own');
+  const escalation = standingEscalations(work)[0];
+  if (escalation) return agentOwner('master', `graphyard master decide ${key} resolve '{"trigger":"${escalation.trigger}"}' REASON, then graphyard master approver ${key} DECISION`, 'approver');
+  // The owner follows the refusal the row shows: the first failing gate, then a bare blocker.
+  const first = work.gates.find(gate => !gate.passed);
+  const manual = first?.name === 'acceptance' ? /(manual:[\w./-]+)/.exec(first.reasons.join(' '))?.[1] : undefined;
+  if (manual) return agentOwner('master', `graphyard master decide ${key} attest '{"proof":"${manual}"}' REASON, then graphyard master approver ${key} DECISION`, 'approver');
+  if (first?.name === 'review') return agentOwner('reviewer', `The reviewer session judges it; graphyard master review ${key} relaunches a refused review`);
+  if (first?.name === 'merge' && work.stage === 'merge') return agentOwner('master', `graphyard master merge ${key}`);
+  if (work.blocker) return agentOwner('master', `Clear the cause, then graphyard master unblock ${key} REASON; a cause that needs money, a third-party account or a person's credential goes to the human`);
+  return agentOwner('master', `graphyard diagnose ${key}`);
+}
+/**
  * Attention that belongs to the installation rather than to a work item: a declared App
  * permission the installation lacks, an unverifiable preflight, the jobs held on it, a
  * capacity variable that no longer covers the roster, and a base branch that production has
@@ -488,12 +551,15 @@ export interface ControlPlaneStatus {
  */
 export function controlPlaneAttention(status: ControlPlaneStatus | undefined) {
   const report = status?.appPermissions;
-  const attention = [...(report?.attention ?? [])];
-  if (status?.heldJobs) attention.push(`${status.heldJobs} integration job${status.heldJobs === 1 ? ' is' : 's are'} held on that permission shortfall rather than retried; they resume on their own once the installation reports the permission`);
-  attention.push(...(status?.delegationLimits?.attention ?? []));
+  const items: AttentionItem[] = [];
+  const raise = (source: Parameters<typeof installationOwner>[0], text: string) => items.push({ subject: 'installation', text, ...installationOwner(source, text) });
+  for (const text of report?.attention ?? []) raise('app-permissions', text);
+  if (status?.heldJobs) raise('held-jobs', `${status.heldJobs} integration job${status.heldJobs === 1 ? ' is' : 's are'} held on that permission shortfall rather than retried; they resume on their own once the installation reports the permission`);
+  for (const text of status?.delegationLimits?.attention ?? []) raise('delegation-limits', text);
   const production = status?.production ? productionSummary(status.production) : null;
-  attention.push(...(production?.attention ?? []));
-  return { attention, appPermissions: report ? { app: report.app ?? null, installationUrl: report.installationUrl ?? null, verifiedAt: report.verifiedAt ?? null, error: report.error ?? null, suspended: report.suspended ?? false, missing: (report.missing ?? []).map(shortfall => ({ permission: shortfall.permission, required: shortfall.required, features: shortfall.features })) } : null, heldJobs: status?.heldJobs ?? 0,
+  for (const text of production?.attention ?? []) raise('production', text);
+  const attention = items.map(item => item.text);
+  return { attention, attentionItems: items, appPermissions: report ? { app: report.app ?? null, installationUrl: report.installationUrl ?? null, verifiedAt: report.verifiedAt ?? null, error: report.error ?? null, suspended: report.suspended ?? false, missing: (report.missing ?? []).map(shortfall => ({ permission: shortfall.permission, required: shortfall.required, features: shortfall.features })) } : null, heldJobs: status?.heldJobs ?? 0,
     delegationLimits: status?.delegationLimits ? { limits: status.delegationLimits.limits ?? null, deployed: status.delegationLimits.deployed ?? null, drift: (status.delegationLimits.drift ?? []).map(entry => ({ variable: entry.variable, deployed: entry.deployed, required: entry.required, reason: entry.reason })) } : null,
     build: status?.build ? { commit: status.build.commit ?? null, protocol: status.build.protocol ?? null } : null, production };
 }
@@ -591,15 +657,16 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
     const conflicts = work.submission && work.candidate ? { candidates: (conflictReport?.conflicts ?? []).map(conflict => conflict.key), files: conflictReport?.conflicts ?? [], unprobed: conflictReport?.unprobed ?? [], probed: !!conflictReport && candidateConflicts.available } : null;
     const dispatch = describeDispatch(work, reviews, sessions, now);
     const stalledLaunch = [dispatch?.review, ...(dispatch?.producers ?? [])].find(request => request?.failure);
-    const attention = quarantine ? quarantine.settleable
-      ? `Containment quarantine from epoch ${quarantine.epoch} is verified settleable; run master settle-containment ${work.key}`
-      : `Containment quarantine from epoch ${quarantine.epoch} blocks dispatch: ${quarantine.refusals[0]}`
-      : active && (!session || !['working', 'idle'].includes(session.state)) ? `Assigned worker session is ${session?.state ?? 'offline'}`
-      : gaps.length ? `No principal is authorized to produce ${gaps.join(', ')}; grant the proof name before dispatch`
-      : review?.exhausted ? `Every configured reviewer profile is exhausted for the current candidate (${review.failedOver.map(entry => `${entry.profile}: ${entry.exhaustion}`).join(', ')})`
-      : stalledLaunch ? `Automatic ${stalledLaunch.failure!.kind} launch for ${work.key} refused ${stalledLaunch.failure!.attempts} time(s): ${stalledLaunch.failure!.reason}`
-      : work.blocker || dwellMs > 3_600_000 ? first?.reasons[0] ?? `Work has remained at ${work.stage} for more than one hour` : null;
-    return { key: work.key, title: work.title, stage: work.stage, owner: active ? work.lease!.owner : null, profile: profile?.name ?? null, session: session?.state ?? null, refusal: first ? { gate: first.name, reason: first.reasons[0] } : null, mergeable, review, dispatch, proofGaps: gaps, containment: quarantine, attention, queue: placement ? queueRows.find(row => row.key === work.key) ?? null : null,
+    const [attention, cause]: [string | null, Parameters<typeof workAttentionOwner>[1] | null] = quarantine ? quarantine.settleable
+      ? [`Containment quarantine from epoch ${quarantine.epoch} is verified settleable; run master settle-containment ${work.key}`, 'containment-settleable']
+      : [`Containment quarantine from epoch ${quarantine.epoch} blocks dispatch: ${quarantine.refusals[0]}`, 'containment']
+      : active && (!session || !['working', 'idle'].includes(session.state)) ? [`Assigned worker session is ${session?.state ?? 'offline'}`, 'session']
+      : gaps.length ? [`No principal is authorized to produce ${gaps.join(', ')}; grant the proof name before dispatch`, 'proof-gap']
+      : review?.exhausted ? [`Every configured reviewer profile is exhausted for the current candidate (${review.failedOver.map(entry => `${entry.profile}: ${entry.exhaustion}`).join(', ')})`, 'reviewer-exhausted']
+      : stalledLaunch ? [`Automatic ${stalledLaunch.failure!.kind} launch for ${work.key} refused ${stalledLaunch.failure!.attempts} time(s): ${stalledLaunch.failure!.reason}`, stalledLaunch.failure!.kind === 'review' ? 'launch-review' : 'launch-producer']
+      : work.blocker || dwellMs > 3_600_000 ? [first?.reasons[0] ?? `Work has remained at ${work.stage} for more than one hour`, 'gate'] : [null, null];
+    const attentionOwner = cause ? workAttentionOwner(work, cause) : null;
+    return { key: work.key, title: work.title, stage: work.stage, owner: active ? work.lease!.owner : null, profile: profile?.name ?? null, session: session?.state ?? null, refusal: first ? { gate: first.name, reason: first.reasons[0] } : null, mergeable, review, dispatch, proofGaps: gaps, containment: quarantine, attention, attentionOwner, queue: placement ? queueRows.find(row => row.key === work.key) ?? null : null,
       scope: scopeBreadth(work.plannedFiles), overlap: held ? { held: true, ahead: held.ahead, reason: held.reason } : { held: false, ahead: [], reason: null }, conflicts,
       // Execution versus wait so far, rework rounds and hand-offs, from the item's own timeline.
       speed: pipelineSpeed(work, now) };
@@ -616,6 +683,8 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
       dispatchRequested: rows.reduce((total, row) => total + (row.dispatch ? (row.dispatch.review ? 1 : 0) + row.dispatch.producers.length : 0), 0), dispatchRunning: rows.reduce((total, row) => total + (row.dispatch ? [row.dispatch.review, ...row.dispatch.producers].filter(request => request?.session?.state === 'pending').length : 0), 0), reviewFailover: rows.filter(row => row.review?.failedOver.length).length, queued: placements.length,
       quarantined: rows.filter(row => row.containment).length, settleableQuarantines: rows.filter(row => row.containment?.settleable).length,
       awaitingSmoke: delivered.filter(row => row.state === 'awaiting-deployment' || row.state === 'awaiting-smoke').length, postDeployFailures: delivered.filter(row => row.state === 'delivered-with-failure').length },
+    // Every attention item with the role that resolves it and the next command, work items first.
+    attentionItems: [...rows.flatMap(row => row.attention && row.attentionOwner ? [{ subject: row.key, text: row.attention, ...row.attentionOwner }] : []), ...installation.attentionItems] as AttentionItem[],
     workers: workerSessions, reviews, producers: sessions.producers, work: rows, queue: queueRows, delivered, latency: { mergeToProduction }, speed, controlPlane: installation,
     schedule: scheduling, conflicts: { available: candidateConflicts.available, reason: candidateConflicts.reason, ...sequenceAdvice(rows.filter(row => row.conflicts).map(row => ({ key: row.key, conflicts: row.conflicts!.candidates }))) } };
 }
@@ -737,9 +806,6 @@ export function stopCreatedHerdrTab(pane: string | undefined, tab: string | unde
   throw new Error(`Herdr still reports tab ${tab} after close`);
 }
 
-export function masterHarness(root: string, config: MasterConfig, harness: string) {
-  return masterHarnessPlan({ harness, root, cliPath: config.cliPath, repository: config.repository, baseBranch: config.baseBranch, credentialHome: dirname(dirname(config.credentialFile)) });
-}
 export async function startMaster(root: string, kind: WorkerProfile['kind'], agentArgs: string[], agents: HerdrAgent[], run?: (command: string, args: string[]) => string) {
   if (!kind) throw new Error('Choose a supported master agent kind');
   const config = await loadMasterConfig(root);
@@ -752,13 +818,13 @@ export async function startMaster(root: string, kind: WorkerProfile['kind'], age
     const created = createdHerdrTab(herdrJson(['tab', 'create', ...(config.herdrWorkspace ? ['--workspace', config.herdrWorkspace] : []), '--cwd', root, '--label', `Graphyard master · ${config.repository}`, '--env', 'GRAPHYARD_MASTER=1', '--no-focus'], run));
     pane = created.pane; tabId = created.tab;
     herdrJson(['agent', 'start', config.masterAgentName, '--kind', kind, '--pane', created.pane, '--', ...agentArgs], run);
-    const prompt = `You are the dedicated Graphyard master agent for ${config.repository}. Do not implement product work, claim worker leases, submit evidence, weaken requirements, or bypass gates. Read AGENTS.md, run node ${config.cliPath} master guide, then run node ${config.cliPath} master status. Use Graphyard as assignment and progression truth and Herdr only for session health and control. Route ready work to configured worker profiles, require workers to claim for themselves, preserve handoffs, surface decisions that need the operator, and invoke routine merge only through graphyard master merge after every exact-candidate gate passes.`;
+    const prompt = `You are the dedicated Graphyard master agent for ${config.repository}. Do not implement product work, claim worker leases, submit evidence, weaken requirements, or bypass gates. Read AGENTS.md, run node ${config.cliPath} master guide, then run node ${config.cliPath} master status. Use Graphyard as assignment and progression truth and Herdr only for session health and control. Route ready work to configured worker profiles, require workers to claim for themselves, preserve handoffs, and invoke routine merge only through graphyard master merge after every exact-candidate gate passes. Act without asking: only goals and priorities, spending money or opening third-party accounts, and issuing credentials to people belong to the human. Create, release, unblock and add requirements with node ${config.cliPath} master create, release, unblock, or requirements; request every other decision with node ${config.cliPath} master decide GY-N ACTION REASON and launch its independent approver with node ${config.cliPath} master approver GY-N DECISION.${config.operatorAgent ? '' : ` Your operator-agent and approver identities are not provisioned yet; report that onboarding must run node ${config.cliPath} master autonomy --admin-token-stdin --apply once.`}`;
     const reviewInstruction = config.reviewer
       ? `Independent review and proof collection start on their own: when a candidate passes the build gate the control plane records a review request and producer requests bound to its exact head, and node ${config.cliPath} master run launches the reviewer identity ${config.reviewer.slug}[bot] and one producer session per proof group for them within 30 seconds. Read the findings, route rework, and merge; never launch reviews or producers by hand, never review a candidate yourself, and never submit evidence. master status shows what is running per candidate and since when, and node ${config.cliPath} master review GY-N is only the recovery path for a refused reviewer launch.`
       : `No reviewer identity is registered yet. Run node ${config.cliPath} master reviewer setup before routing work that needs independent review; once it is registered, master run launches reviews and producers for every submitted head on its own. Never approve a candidate yourself.`;
     const mergeInstruction = config.autoMerge
       ? 'Automatic routine merging is enabled. Use the guarded merge command when all gates pass.'
-      : 'Automatic merging is disabled. Wait for explicit operator approval for each merge. Do not invoke master merge or master merge --all without that approval; the operator can invoke the guarded command directly.';
+      : `Automatic merging is disabled, so every merge needs explicit operator approval given by an agent: request it with node ${config.cliPath} master decide GY-N merge REASON and launch the approver; master merge refuses a candidate without an approved merge decision. Never wait on a human for it.`;
     const administrationInstruction = config.browser
       ? `GitHub administration of ${config.repository} is yours: reconcile protection with node ${config.cliPath} master protection --apply, and when only a GitHub page can do it run node ${config.cliPath} master browser app-permissions, installation-accept, or protection, which drive the operator's browser profile ${config.browser.profile} headless, record every step, verify through the API, and append an audit entry. Report a pending sudo code from master status; the operator only approves it on their device. Never ask the operator to click through what those flows cover.`
       : `No browser profile is configured, so App permission updates, installation acceptance, and page-only protection changes still need the operator; ask them to rerun node ${config.cliPath} master init --browser-profile PROFILE so those become yours.`;
@@ -797,6 +863,7 @@ export async function dispatchWork(root: string, work: Work, profile: WorkerProf
   assertDispatchable(work, allWork, observedAt, options);
   const config = await loadMasterConfig(root);
   let target = agents.find(agent => agent.name === profile.agentName);
+  let harness: Awaited<ReturnType<typeof installWorkerHarness>> | null = null;
   if (profile.mode === 'existing') {
     if (!target) throw new Error('Existing worker is not visible in Herdr');
     throw new Error('Existing sessions are observable but cannot be safely adopted for new work; use a launch profile so Graphyard supervises the agent process');
@@ -804,6 +871,9 @@ export async function dispatchWork(root: string, work: Work, profile: WorkerProf
     await readCredentialFile(profile.credentialFile!);
     if (target) throw new Error('Launch profile agent name is already visible in Herdr');
     const prepared = await prepare(root, work.key, profile.name);
+    // The worker's own rules go into its worktree before the session starts, so pushing its
+    // branch and opening its pull request never wait on a keypress. A failure is reported, not fatal.
+    harness = await installWorkerHarness(config, profile, work.key, prepared).catch(error => ({ applied: false, reason: error instanceof Error ? error.message : 'Worker rules could not be written' }));
     const prompt = `Implement ${work.key}: ${work.title}. The Graphyard worker launcher has claimed this item under principal ${profile.principal}, created its assigned worktree, and placed this agent under lease supervision. Run node ${config.cliPath} status ${work.key} before editing. Work only in the current assigned worktree, satisfy the stated criteria without weakening them, open a PR, and submit it with complete as your last action: complete ends your lease and the supervisor then stops this session, which is the attempt ending, not lease loss. Stop immediately if the supervisor reports lease loss before you have submitted. Do not submit trusted evidence or merge the PR; the control plane requests the independent review and the proof producers for your exact head as soon as it passes the build gate, so ask nobody to launch them.`;
     let pane: string | undefined, tabId: string | undefined;
     try {
@@ -829,7 +899,7 @@ export async function dispatchWork(root: string, work: Work, profile: WorkerProf
   }
   const overlap = dispatchOverlap(work, allWork, Date.parse(observedAt));
   return { work: work.key, profile: profile.name, principal: profile.principal, agentName: profile.agentName, pane: target.pane_id ?? null, approvals: profile.approvals,
-    launch: launchPlan(profile.kind, profile.approvals, profile.agentArgs, profile.environment), ownership: 'worker launcher claimed and is supervising the agent process',
+    launch: launchPlan(profile.kind, profile.approvals, profile.agentArgs, profile.environment), ownership: 'worker launcher claimed and is supervising the agent process', harness,
     overlap: overlap.length ? { allowed: true, ahead: overlap, note: `Dispatched over a planned-file overlap with ${describeOverlap(overlap)}; expect a sync → review → proof round for whichever lands second` } : null };
 }
 
@@ -1149,4 +1219,318 @@ export function mergeExecutor(config: MasterConfig, snapshot: () => Promise<{ wo
     (latest, execution) => mutation(`work/${latest.id}/merge-verify`, { executionId: execution.id }, stepKey(latest, 'verify', execution.id)), run, executionOwner,
     (latest, execution) => mutation(`work/${latest.id}/merge-commit`, { executionId: execution.id }, stepKey(latest, 'commit', execution.id)),
     (latest, carried) => repostCarriedApproval(config, latest, carried, { run: run ?? ((command, args) => execFileSync(command, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 90_000 })) }));
+}
+
+// ---- Autonomy ----------------------------------------------------------------------------------
+// Humans set goals; agents run the loop. Everything a human used to approve is either the master's
+// own operator-agent capability (non-weakening intent) or a two-party decision that a separate
+// approver agent approves. What stays human is this list, and nothing else.
+export const humanOnlyDecisions = ['goals and priorities', 'spending money or opening third-party accounts', 'issuing credentials to people'] as const;
+export const masterOperatorCapabilities = ['intent:create', 'intent:ready', 'intent:unblock', 'policy:requirements', 'policy:review-provider',
+  'decision:resolve', 'decision:attest', 'decision:merge', 'decision:rework', 'decision:grant'] as const;
+export const approverAgentCapabilities = ['decision:approve'] as const;
+const autonomyReason = 'Master autonomy onboarding: agent identities for the master and its independent approver';
+
+/** The two agent identities onboarding provisions, and where their credentials live. */
+export function autonomyPlan(config: MasterConfig) {
+  const name = config.repository.split('/').at(-1)!.replace(/[^a-zA-Z0-9._-]/g, '-');
+  const directory = dirname(config.credentialFile), stem = basename(config.credentialFile, '.token');
+  const scope = { repositories: [config.repository], workItems: ['*'] };
+  return {
+    operatorAgent: { id: config.operatorAgent?.id ?? `graphyard-master-${name}-operator`.slice(0, 100), displayName: `Graphyard master for ${config.repository}`.slice(0, 100), capabilities: [...masterOperatorCapabilities], scope,
+      credentialFile: config.operatorAgent?.credentialFile ?? resolve(directory, `${stem}-operator.token`), role: 'Requests two-party decisions and applies non-weakening intent (create, release, unblock, add requirements) alone' },
+    approver: { id: config.approver?.id ?? `graphyard-approver-${name}`.slice(0, 100), displayName: `Graphyard approver for ${config.repository}`.slice(0, 100), capabilities: [...approverAgentCapabilities], scope,
+      credentialFile: config.approver?.credentialFile ?? resolve(directory, `${stem}-approver.token`), role: 'Approves the master\'s decisions from its own session; never requests, implements, or produces evidence' },
+  };
+}
+
+/** Rules every master session gets on top of its loop rules: it cannot borrow another identity. */
+const autonomyDeny = (credentialHome: string): HarnessRule[] => [
+  { rule: 'Bash(*GRAPHYARD_TOKEN_FILE=*)', why: 'The master acts only as its own identities; pointing a command at the approver\'s or a worker\'s credential file would let one agent approve its own decision.' },
+  { rule: 'Bash(*GRAPHYARD_APPROVER=*)', why: 'Only a launched approver session carries the approver marker; the master never claims it.' },
+  { rule: `Edit(//${credentialHome}/**)`, why: 'Agent credentials are issued by onboarding and rotated through the API, never edited in place.' },
+];
+export function masterHarness(root: string, config: MasterConfig, harness: string) {
+  const credentialHome = dirname(dirname(config.credentialFile));
+  const plan = masterHarnessPlan({ harness, root, cliPath: config.cliPath, repository: config.repository, baseBranch: config.baseBranch, credentialHome });
+  return plan.file ? { ...plan, deny: [...plan.deny, ...autonomyDeny(credentialHome)] } : plan;
+}
+
+/**
+ * A worker session's own rules, written into its assigned worktree: it runs its item's commands,
+ * pushes its assigned branch and opens the pull request without a keypress, and can never push
+ * the base branch, force-push, rebase, merge, review, or read a credential.
+ */
+export function workerHarnessPlan(input: { cliPath: string; branch: string; baseBranch: string; credentialHome: string }): HarnessPlan {
+  const cli = `node ${input.cliPath}`;
+  const allow: HarnessRule[] = [
+    ...['status', 'sync', 'complete', 'blocked', 'heartbeat', 'events', 'diagnose'].map(command => ({ rule: `Bash(${cli} ${command}:*)`, why: `The worker's own ${command} command on its claimed item; the server checks the lease epoch.` })),
+    { rule: `Bash(git push origin ${input.branch})`, why: 'Push the assigned branch; Graphyard observes it as the candidate head.' },
+    { rule: `Bash(git push -u origin ${input.branch})`, why: 'Publish the assigned branch the first time.' },
+    { rule: `Bash(git push origin HEAD:${input.branch})`, why: 'Push the current head to the assigned branch.' },
+    { rule: 'Bash(gh pr create:*)', why: 'Open the pull request the worker submits with complete.' },
+    { rule: 'Bash(gh pr view:*)', why: 'Read the pull request number and state before submitting.' },
+    { rule: 'Bash(gh pr checks:*)', why: 'Read CI results for the worker\'s own candidate.' },
+    { rule: `Bash(git merge origin/${input.baseBranch})`, why: 'sync merges the base branch; the worker never rebases.' },
+  ];
+  const deny: HarnessRule[] = [
+    { rule: 'Bash(git push *--force*)', why: 'History on a submitted branch is never rewritten; the review and proofs are bound to its heads.' },
+    { rule: 'Bash(git push * -f*)', why: 'Short form of a force push.' },
+    { rule: 'Bash(git push *+*)', why: 'A leading + refspec is a force push.' },
+    { rule: `Bash(git push *:${input.baseBranch}*)`, why: 'The base branch moves only through the guarded merge.' },
+    { rule: `Bash(git push origin ${input.baseBranch}*)`, why: 'The base branch moves only through the guarded merge.' },
+    { rule: 'Bash(git rebase:*)', why: 'sync merges the base branch; a rebase would re-resolve files outside the planned files.' },
+    { rule: 'Bash(gh pr merge:*)', why: 'Workers never merge; the control plane\'s merge gate decides.' },
+    { rule: 'Bash(gh pr review:*)', why: 'Workers never review their own work.' },
+    { rule: 'Bash(*GRAPHYARD_TOKEN_FILE=*)', why: 'A worker acts only as its own principal.' },
+    { rule: `Read(//${input.credentialHome}/**)`, why: 'Credentials are used through the CLI, never read into a transcript.' },
+    { rule: 'Read(**/*.token)', why: 'Token files are never read into a session transcript.' },
+  ];
+  return { harness: 'claude', file: '.claude/settings.local.json', allow, deny, manual: null, note: 'Worker rules for one assigned worktree: its own commands and its own branch. A harness rule is a prompt policy; branch protection, leases and the merge gate remain the enforcement.' };
+}
+/** Install the worker rules in a freshly prepared worktree, only where Git already ignores them. */
+export async function installWorkerHarness(config: MasterConfig, profile: WorkerProfile, key: string, prepared: PreparedWorker) {
+  if (profile.kind !== 'claude') return { applied: false, reason: `No generated worker rules for ${profile.kind}` };
+  try { execFileSync('git', ['check-ignore', '--quiet', '--', '.claude/settings.local.json'], { cwd: prepared.path, stdio: 'ignore' }); }
+  catch { return { applied: false, reason: 'The worktree does not ignore .claude/settings.local.json, so no rules were written into it' }; }
+  const plan = workerHarnessPlan({ cliPath: config.cliPath, branch: `graphyard/${key.toLowerCase()}-${prepared.epoch}`, baseBranch: config.baseBranch, credentialHome: dirname(dirname(config.credentialFile)) });
+  const written = await writeHarnessPermissions(prepared.path, plan, true);
+  return { applied: written.applied, reason: null, added: written.added.length };
+}
+
+type AutonomyFetch = typeof fetch;
+async function adminCall(config: MasterConfig, token: string, fetcher: AutonomyFetch, path: string, body?: unknown) {
+  const response = await fetcher(`${config.url}/api/${path}`, { method: body === undefined ? 'GET' : 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', 'Idempotency-Key': randomUUID() }, ...(body === undefined ? {} : { body: JSON.stringify(body) }), signal: AbortSignal.timeout(30_000) });
+  const result = await response.json();
+  if (!response.ok) throw new Error(`Graphyard refused ${path} (${response.status}): ${result?.error ?? 'unknown'}`);
+  return result;
+}
+async function identityHolds(config: MasterConfig, file: string, id: string, fetcher: AutonomyFetch) {
+  try { return (await adminCall(config, await readCredentialFile(file), fetcher, 'status')).actor?.id === id; } catch { return false; }
+}
+/**
+ * Onboarding for autonomy: provision (or repair) the master's operator-agent identity and the
+ * approver identity, store their credentials beside the coordinator's, record them in the
+ * master configuration, and install the master's harness rules. The admin credential is read
+ * once from stdin and never stored. Without `apply` it reports the plan and changes nothing.
+ */
+export async function setupAutonomy(root: string, input: { adminToken?: string; apply: boolean; harness?: string }, fetcher: AutonomyFetch = fetch) {
+  const config = await loadMasterConfig(root);
+  const plan = autonomyPlan(config);
+  const identities = [plan.operatorAgent, plan.approver];
+  const describe = identities.map(({ id, capabilities, credentialFile, role }) => ({ id, capabilities, credentialFile, role }));
+  if (!input.apply) return { applied: false, identities: describe, humanOnly: humanOnlyDecisions, harness: await writeHarnessPermissions(root, masterHarness(root, config, input.harness ?? 'claude'), false),
+    next: 'Rerun with --apply and the admin credential on stdin: graphyard master autonomy --admin-token-stdin --apply' };
+  if (!input.adminToken || input.adminToken.length < 32) throw new Error('Autonomy setup needs the admin credential once, on stdin; it is used to provision the agent identities and is never stored');
+  const status = await adminCall(config, input.adminToken, fetcher, 'status');
+  if (status.actor?.role !== 'admin') throw new Error('Autonomy setup needs the admin credential; it provisions operator-agent identities, which only an admin may create');
+  const existing: any[] = await adminCall(config, input.adminToken, fetcher, 'operator-agents');
+  const changes: string[] = [];
+  for (const identity of identities) {
+    const current = existing.find(document => document.id === identity.id);
+    if (current?.revokedAt) throw new Error(`${identity.id} was revoked; choose another identity in .graphyard/master.json or restore it through the operator-agent API`);
+    const body = { capabilities: identity.capabilities, scope: identity.scope, reason: autonomyReason };
+    // Compared as sets: the server stores these in jsonb, which keeps neither key nor entry order.
+    const same = (left: string[] = [], right: string[] = []) => JSON.stringify([...left].sort()) === JSON.stringify([...right].sort());
+    if (current && (!same(current.capabilities, identity.capabilities) || !same(current.scope?.repositories, identity.scope.repositories) || !same(current.scope?.workItems, identity.scope.workItems))) {
+      await adminCall(config, input.adminToken, fetcher, `operator-agents/${encodeURIComponent(identity.id)}/configure`, { expectedRevision: current.revision, ...body });
+      changes.push(`${identity.id}: capabilities set to ${identity.capabilities.join(', ')}`);
+    }
+    if (current && await identityHolds(config, identity.credentialFile, identity.id, fetcher)) continue;
+    const token = randomBytes(32).toString('hex');
+    if (current) await adminCall(config, input.adminToken, fetcher, `operator-agents/${encodeURIComponent(identity.id)}/rotate`, { token, transitionSeconds: 0, reason: autonomyReason });
+    else await adminCall(config, input.adminToken, fetcher, 'operator-agents', { id: identity.id, displayName: identity.displayName, token, ...body });
+    await atomicPrivateText(identity.credentialFile, token);
+    await assertOutsideWorktrees(root, identity.credentialFile, `${identity.id} credential file`);
+    changes.push(`${identity.id}: ${current ? 'credential rotated' : 'provisioned'}`);
+  }
+  const next = { ...config, operatorAgent: { id: plan.operatorAgent.id, credentialFile: plan.operatorAgent.credentialFile }, approver: { id: plan.approver.id, credentialFile: plan.approver.credentialFile } };
+  await atomicPrivateWrite(resolve(await localDirectory(root), 'master.json'), masterConfigSchema.parse(next));
+  const harness = await writeHarnessPermissions(root, masterHarness(root, next, input.harness ?? 'claude'), true);
+  return { applied: true, identities: describe, changes, humanOnly: humanOnlyDecisions, harness,
+    next: 'The master now creates, releases, unblocks and adds requirements with its operator-agent identity, and requests every other decision with graphyard master decide; graphyard master approver GY-N DECISION launches the independent approver session' };
+}
+
+export async function agentToken(root: string, config: MasterConfig, which: 'operatorAgent' | 'approver') {
+  const identity = config[which];
+  if (!identity) throw new Error(`No ${which === 'operatorAgent' ? 'master operator-agent' : 'approver'} identity is provisioned; run graphyard master autonomy --admin-token-stdin --apply`);
+  await externalCredential(root, identity.credentialFile, which === 'operatorAgent' ? 'Operator-agent' : 'Approver');
+  return readCredentialFile(identity.credentialFile);
+}
+
+/**
+ * Fill the binding a decision needs from the item's current state, so the master names the
+ * decision and its reason and Graphyard supplies the exact revision or candidate it binds to.
+ */
+export function decisionInput(action: string, work: Work, input: Record<string, unknown>) {
+  if (['release', 'unblock', 'resolve'].includes(action)) return { expectedRevision: work.revision, ...input };
+  if (action === 'requirements') return { expectedPolicyRevision: work.policyRevision, criteria: work.criteria, dependencies: work.dependencies, plannedFiles: work.plannedFiles, exclusiveResources: work.exclusiveResources ?? [], producerProofs: work.producerProofs ?? [], ...input };
+  if ((action === 'merge' || action === 'attest') && work.candidate) return { sha: work.candidate.sha, baseSha: work.candidate.baseSha, policyRevision: work.policyRevision, ...(action === 'attest' ? { result: 'pass', executed: 1, skipped: 0 } : {}), ...input };
+  if (action === 'rework' || action === 'recover') return { previousWorkerStopped: true, ...input };
+  return input;
+}
+/** With automatic merging off, the guarded merge runs only for a candidate an approver agent approved. */
+export function approvedMerge(work: Work, decisions: { action: string; state: string; input: any; approvedBy: string | null }[]) {
+  return decisions.find(decision => decision.action === 'merge' && decision.state === 'applied' && !!work.candidate
+    && decision.input.sha === work.candidate.sha && decision.input.baseSha === work.candidate.baseSha && decision.input.policyRevision === work.policyRevision) ?? null;
+}
+
+/**
+ * With automatic merging off, an approver agent's merge decision for the exact candidate stands in
+ * for the operator: a named item without one is refused, and `--all` keeps only approved ones.
+ */
+export async function approvedMerges(selected: Work[], decisions: (work: Work) => Promise<{ decisions: Parameters<typeof approvedMerge>[1] }>, single: boolean) {
+  const approved: Work[] = [];
+  for (const work of selected) {
+    if (approvedMerge(work, (await decisions(work)).decisions)) approved.push(work);
+    else if (single) throw new Error(`${work.key} has no approved merge decision for its current candidate; request one with graphyard master decide ${work.key} merge REASON`);
+  }
+  return approved;
+}
+/**
+ * A roster rotation, previewed against the principals the server authenticates now. It may add
+ * principals and rotate tokens; it may never drop a live principal or change its role. Tokens
+ * are never read into the report.
+ */
+export function previewPrincipalRotation(live: { id: string; role: string; leases?: string[] }[], proposed: { id: string; role: string }[]) {
+  const dropped = live.filter(principal => !proposed.some(next => next.id === principal.id));
+  const changed = live.filter(principal => proposed.some(next => next.id === principal.id && next.role !== principal.role));
+  const refusals = [...dropped.map(principal => `${principal.id} (${principal.role}${principal.leases?.length ? `, holding ${principal.leases.join(', ')}` : ''}) is live and would be dropped`),
+    ...changed.map(principal => `${principal.id} would change role from ${principal.role} to ${proposed.find(next => next.id === principal.id)!.role}`)];
+  return { kept: live.filter(principal => !dropped.includes(principal) && !changed.includes(principal)).map(principal => principal.id), added: proposed.filter(next => !live.some(principal => principal.id === next.id)).map(next => `${next.id} (${next.role})`), refusals, applicable: !refusals.length };
+}
+export async function readProposedRoster(root: string) {
+  const file = resolve(root, '.graphyard/credentials.json'); await privateFile(file);
+  const parsed = JSON.parse(await readFile(file, 'utf8'));
+  if (!Array.isArray(parsed) || !parsed.every(entry => typeof entry?.id === 'string' && typeof entry?.role === 'string')) throw new Error('.graphyard/credentials.json must be the principal array the deployment runs with');
+  return parsed.map(entry => ({ id: entry.id as string, role: entry.role as string }));
+}
+
+/** Stop this host's master loop, if one runs, and start it again detached, logging beside the config. */
+export async function restartMasterLoop(root: string, config: MasterConfig, lock: { pid: number; host: string; heartbeatAt: string } | null, options: { timeoutMs?: number } = {}) {
+  const alive = (pid: number) => { try { process.kill(pid, 0); return true; } catch (error: any) { return error?.code === 'EPERM'; } };
+  let stopped: number | null = null;
+  if (lock && lock.host !== config.hostId && Date.now() - Date.parse(lock.heartbeatAt) < 3 * config.run.intervalSeconds * 1000) throw new Error(`The master loop runs on ${lock.host} (pid ${lock.pid}); restart it on that host`);
+  if (lock && lock.host === config.hostId && alive(lock.pid)) {
+    process.kill(lock.pid, 'SIGTERM'); stopped = lock.pid;
+    const deadline = Date.now() + (options.timeoutMs ?? 30_000);
+    while (alive(lock.pid)) {
+      if (Date.now() > deadline) throw new Error(`Master loop pid ${lock.pid} did not stop within ${Math.round((options.timeoutMs ?? 30_000) / 1000)} seconds; it was not restarted`);
+      await new Promise(done => setTimeout(done, 200));
+    }
+  }
+  const log = resolve(await localDirectory(root), 'master-run.log');
+  const { openSync } = await import('node:fs'); const { spawn } = await import('node:child_process');
+  const output = openSync(log, 'a', 0o600);
+  const child = spawn(process.execPath, [config.cliPath, 'master', 'run'], { cwd: root, detached: true, stdio: ['ignore', output, output] });
+  child.unref();
+  return { stopped, started: child.pid ?? null, log };
+}
+
+/**
+ * Launch the independent approver session for one decision: its own Herdr tab, its own
+ * credential by path, the approver marker, and a prompt to judge — never to implement.
+ */
+export async function launchApprover(root: string, work: Work, decision: string, kind: NonNullable<WorkerProfile['kind']>, agents: HerdrAgent[], run?: (command: string, args: string[]) => string) {
+  const config = await loadMasterConfig(root);
+  await agentToken(root, config, 'approver');
+  const name = `graphyard-approver-${work.key.toLowerCase()}`;
+  if (agents.some(agent => agent.name === name)) throw new Error(`Approver session ${name} is already visible in Herdr; let it finish or close it first`);
+  const launch = launchPlan(kind, 'auto');
+  const cli = `node ${config.cliPath}`;
+  const prompt = `You are the independent Graphyard approver for ${config.repository}, acting as ${config.approver!.id}. Judge decision ${decision} on ${work.key}: run ${cli} master decisions ${work.key}, read the item with ${cli} status ${work.key}, its pull request and history, and weigh the requester's reason against the item's criteria and the operator's goals. If it is justified, run ${cli} master approve ${work.key} ${decision} "YOUR REASON". If not, do not approve; state the reason in this tab. Never approve a decision you requested, implemented, or produced evidence for; never edit, push, merge, review, or submit evidence. Stop when the decision is judged.`;
+  let pane: string | undefined, tabId: string | undefined;
+  try {
+    const created = createdHerdrTab(herdrJson(['tab', 'create', ...(config.herdrWorkspace ? ['--workspace', config.herdrWorkspace] : []), '--cwd', root, '--label', `Approver · ${work.key}`, '--env', `GRAPHYARD_URL=${config.url}`, '--env', `GRAPHYARD_TOKEN_FILE=${config.approver!.credentialFile}`, '--env', 'GRAPHYARD_APPROVER=1', '--env', `GRAPHYARD_HOST_ID=${config.hostId}`, ...Object.entries(launch.environment).flatMap(([key, value]) => ['--env', `${key}=${value}`]), '--no-focus'], run));
+    pane = created.pane; tabId = created.tab;
+    herdrJson(['agent', 'start', name, '--kind', kind, '--pane', created.pane, '--', ...launch.args], run);
+    herdrJson(['agent', 'prompt', name, prompt], run);
+  } catch (error) {
+    if (pane || tabId) try { stopCreatedHerdrTab(pane, tabId, run); } catch { /* the launch error below is the report */ }
+    throw error;
+  }
+  return { agentName: name, work: work.key, decision, identity: config.approver!.id, pane: pane!, focusChanged: false };
+}
+
+export const autonomySubcommands = ['autonomy', 'create', 'release', 'unblock', 'requirements', 'decide', 'decisions', 'approve', 'approver', 'principals', 'restart'] as const;
+export interface AutonomyDependencies {
+  coordinator: (path: string) => Promise<any>;
+  readSecret: () => Promise<string>;
+  agents: () => HerdrAgent[];
+  daemonLock: () => Promise<{ pid: number; host: string; heartbeatAt: string } | null>;
+  fetcher?: typeof fetch;
+  run?: (command: string, args: string[], options?: any) => string | Buffer;
+}
+const words = (args: string[]) => args.join(' ').trim();
+async function jsonArgument(value: string) { return JSON.parse(value.startsWith('@') ? await readFile(value.slice(1), 'utf8') : value); }
+/**
+ * The autonomy subcommands of `graphyard master`: onboarding the agent identities, the master's
+ * own intent commands, two-party decisions, the approver session, roster rotation and the loop
+ * restart. Each authenticates as the identity the command belongs to, never as another.
+ */
+export async function runAutonomyCommand(root: string, config: MasterConfig, id: string, args: string[], deps: AutonomyDependencies) {
+  if (!(autonomySubcommands as readonly string[]).includes(id)) throw new Error(`Unknown autonomy command ${id}`);
+  const fetcher = deps.fetcher ?? fetch;
+  const call = async (token: string, path: string, body?: unknown) => {
+    const response = await fetcher(`${config.url}/api/${path}`, { method: body === undefined ? 'GET' : 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', 'Idempotency-Key': process.env.GRAPHYARD_REQUEST_ID ?? randomUUID() }, ...(body === undefined ? {} : { body: JSON.stringify(body) }), signal: AbortSignal.timeout(30_000) });
+    const result = await response.json(); if (!response.ok) throw new Error(JSON.stringify(result)); return result;
+  };
+  const operator = () => agentToken(root, config, 'operatorAgent');
+  const item = async (key: string | undefined) => {
+    if (!key) throw new Error(`Use master ${id} GY-N …`);
+    const found = (await deps.coordinator('work-snapshot')).work.find((work: Work) => work.id === key || work.key === key);
+    if (!found) throw new Error(`Unknown work item ${key}`); return found as Work;
+  };
+  const reason = (rest: string[]) => { const text = words(rest); if (!text) throw new Error(`master ${id} needs a REASON; every agent decision is attributable`); return text; };
+  if (id === 'autonomy') {
+    const apply = args.includes('--apply'), harness = args[args.indexOf('--harness') + 1];
+    if (apply && !args.includes('--admin-token-stdin')) throw new Error('Use master autonomy --admin-token-stdin --apply so the admin credential is not stored in shell history');
+    return setupAutonomy(root, { apply, adminToken: apply ? await deps.readSecret() : undefined, ...(args.includes('--harness') ? { harness } : {}) }, fetcher);
+  }
+  if (id === 'create') {
+    if (!args[0]) throw new Error('Use master create FILE REASON');
+    return call(await operator(), 'work', { ...await jsonArgument(`@${args[0]}`), reason: reason(args.slice(1)) });
+  }
+  if (id === 'release' || id === 'unblock') {
+    const work = await item(args[0]);
+    return call(await operator(), `work/${work.id}/${id === 'release' ? 'ready' : 'unblock'}`, { expectedRevision: work.revision, reason: reason(args.slice(1)) });
+  }
+  if (id === 'requirements') {
+    const work = await item(args[0]); if (!args[1]) throw new Error('Use master requirements GY-N FILE REASON');
+    return call(await operator(), `work/${work.id}/requirements`, { ...decisionInput('requirements', work, await jsonArgument(`@${args[1]}`)), reason: reason(args.slice(2)) });
+  }
+  if (id === 'decide') {
+    const work = await item(args[0]); const action = args[1];
+    if (!action) throw new Error('Use master decide GY-N ACTION [JSON|@FILE] REASON');
+    const explicit = args[2] && /^[{@]/.test(args[2]);
+    const input = explicit ? await jsonArgument(args[2]) : {};
+    return call(await operator(), `work/${work.id}/decide`, { action, input: decisionInput(action, work, input), reason: reason(args.slice(explicit ? 3 : 2)) });
+  }
+  if (id === 'decisions') return deps.coordinator(`work/${encodeURIComponent((await item(args[0])).id)}/decisions`);
+  if (id === 'approve') {
+    // The server refuses self-approval; this refuses the master's session before it asks.
+    if (process.env.GRAPHYARD_MASTER === '1') throw new Error('The master never approves its own decisions; graphyard master approver GY-N DECISION launches the independent approver session');
+    const file = process.env.GRAPHYARD_TOKEN_FILE;
+    if (!file) throw new Error('master approve runs in an approver session, which carries its own credential file in GRAPHYARD_TOKEN_FILE');
+    const token = await readCredentialFile(file);
+    for (const own of [config.credentialFile, config.operatorAgent?.credentialFile]) if (own && token === await readCredentialFile(own).catch(() => null)) throw new Error('That is one of the master\'s own credentials; approvals come from the approver identity');
+    const work = await item(args[0]); if (!args[1]) throw new Error('Use master approve GY-N DECISION REASON');
+    return call(token, `work/${work.id}/approve`, { decision: args[1], reason: reason(args.slice(2)) });
+  }
+  if (id === 'approver') {
+    const work = await item(args[0]); if (!args[1]) throw new Error('Use master approver GY-N DECISION [AGENT_KIND]');
+    const kind = agentKindSchema.parse(args[2] ?? config.reviewers[0]?.kind ?? 'claude');
+    return launchApprover(root, work, args[1], kind, deps.agents());
+  }
+  if (id === 'principals') {
+    const live = (await deps.coordinator('principals')).principals;
+    const preview = previewPrincipalRotation(live, await readProposedRoster(root));
+    if (!args.includes('--apply')) return { ...preview, applied: false, next: preview.applicable ? 'Rerun with --apply to deploy the roster' : 'Restore every live principal in .graphyard/credentials.json; a rotation never drops one' };
+    if (!preview.applicable) throw new Error(`Roster rotation refused: ${preview.refusals.join('; ')}`);
+    const applier = resolve(root, 'scripts/provision-railway.mjs');
+    try { await lstat(applier); } catch { throw new Error('This repository has no roster applier (scripts/provision-railway.mjs); deploy GRAPHYARD_PRINCIPALS with the configured provider'); }
+    (deps.run ?? ((command, commandArgs, options) => execFileSync(command, commandArgs, options)))(process.execPath, [applier], { cwd: root, env: { ...process.env, GRAPHYARD_URL: config.url }, stdio: ['ignore', 'inherit', 'inherit'] });
+    return { ...preview, applied: true, next: 'Redeploy the service so the roster takes effect, then graphyard master status' };
+  }
+  return restartMasterLoop(root, config, await deps.daemonLock());
 }
