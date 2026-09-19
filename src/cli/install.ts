@@ -77,12 +77,21 @@ export const installCommands = defineCommands([
       let live: any = null, failure: string | undefined;
       try { live = await context.api('status'); } catch (error: any) { failure = error.message; }
       const appPermissions = live?.appPermissions ?? null;
+      // Capacity drift and production lag are the two installation facts a deploy can break
+      // silently; the server reports both and doctor repeats them beside the App preflight.
+      const delegationLimits = live?.delegationLimits ?? null, production = live?.production ?? null;
       return context.print({ discovered, server: context.base, cliPath: await context.activeCliPath(), hostId: context.individualHostId(), connected: !!live, githubConfigured: !!live?.github, role: live?.actor?.role, failure,
         setup: await readSetupStatus(root).catch((error: any) => ({ error: error.message })),
         appPermissions: appPermissions ? { verifiedAt: appPermissions.verifiedAt, missing: appPermissions.missing, attention: appPermissions.attention, installationUrl: appPermissions.installationUrl } : null,
         heldJobs: live?.heldJobs ?? 0,
+        build: live?.build ?? null,
+        delegationLimits: delegationLimits ? { limits: delegationLimits.limits, deployed: delegationLimits.deployed, drift: delegationLimits.drift, attention: delegationLimits.attention } : null,
+        production: production ? { provider: production.provider, serving: production.serving, running: production.running, aheadBy: production.ahead?.by ?? null, incidents: production.incidents, attention: production.attention, error: production.error } : null,
         next: !live ? 'Configure GRAPHYARD_URL and an individual token' : !live.github ? 'Complete github-setup and configure the server App credentials'
-          : appPermissions?.missing?.length ? `Run graphyard github-setup --update-permissions: ${appPermissions.attention[0]}` : 'Submit a real PR and inspect every gate; configured is not proof of enforcement',
+          : appPermissions?.missing?.length ? `Run graphyard github-setup --update-permissions: ${appPermissions.attention[0]}`
+          : delegationLimits?.drift?.length ? `Set ${delegationLimits.drift.map((entry: any) => `${entry.variable}=${entry.required}`).join(' ')} on the deployment: ${delegationLimits.drift[0].reason}`
+          : production?.incidents?.length ? `Production has not deployed ${production.incidents.map((incident: any) => incident.key).join(', ')}: ${production.incidents[0].reason}`
+          : 'Submit a real PR and inspect every gate; configured is not proof of enforcement',
         limits: ['CI discovery is a proposal, not executed-test inventory', 'Herdr two-host recovery and GitHub refusal-to-acceptance must be demonstrated'] });
     },
   },

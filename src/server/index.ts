@@ -7,10 +7,12 @@ import type { GitHub } from '../github.js';
 import { Validation } from '../validation.js';
 import { Delivery } from '../delivery.js';
 import { OperatorAgents } from '../operator-agent.js';
-import { delegationLimits, validateDelegationPrincipals } from '../delegation.js';
+import { assembleDelegationLimits } from './limits.js';
 import { ProofGrants } from '../proof-grants.js';
 import { ProductionDelivery } from '../production-delivery.js';
 import { artifactCapacityFromEnv, type ArtifactBackend } from '../artifacts.js';
+import { buildIdentity } from '../protocol-version.js';
+import type { ProductionWatch } from '../production-watch.js';
 import { Next, Sent, matchRoute, type RouteContext, type RouteModule, type Services } from './routes.js';
 import { authenticate, operatorAgentRouteGuard, operatorVisible } from './auth.js';
 import { healthRoutes } from './routes/health.js';
@@ -52,9 +54,16 @@ async function body(req: IncomingMessage, limit = 1_000_000) {
 /** Where retained validation artifacts live and how much the postgres backend may hold. */
 export interface ArtifactOptions { backend: ArtifactBackend | null; capacityBytes: number }
 
-export function assembleServices(engine: Engine, credentials: Credential[], github: GitHub | null, artifacts: ArtifactOptions = { backend: null, capacityBytes: artifactCapacityFromEnv() }): Services {
-  const limits = delegationLimits();
-  validateDelegationPrincipals(credentials, limits);
+/**
+ * What an embedder tells the control plane about the installation: the principals it already
+ * ran with (the seeded proof-grant roster, deciding whether an over-limit roster warns or
+ * refuses), the environment the limits are read from, and the deployment watch to report.
+ */
+export interface ServerOptions { knownPrincipals?: readonly string[]; env?: NodeJS.ProcessEnv; production?: ProductionWatch | null }
+
+export function assembleServices(engine: Engine, credentials: Credential[], github: GitHub | null, artifacts: ArtifactOptions = { backend: null, capacityBytes: artifactCapacityFromEnv() }, options: ServerOptions = {}): Services {
+  const env = options.env ?? process.env;
+  const delegationLimits = assembleDelegationLimits(credentials, env, options.knownPrincipals);
   const principals = credentials.map(({ token, ...actor }) => ({ actor, hash: createHash('sha256').update(token).digest() }));
   // The engine is constructed with the repository that this control plane is
   // authorized to coordinate.  GITHUB_REPOSITORY is merely a process default
@@ -83,13 +92,15 @@ export function assembleServices(engine: Engine, credentials: Credential[], gith
   const configured = credentials.map(({ token, ...actor }) => actor);
   engine.principals = configured;
   const proofGrants = new ProofGrants(engine.store, configured);
-  return { engine, github, repository, principals, limits, validation, delivery, operatorAgents, proofGrants, productionDelivery };
+  return { engine, github, repository, principals, limits: delegationLimits.limits, delegationLimits, build: buildIdentity(env), production: options.production ?? null, validation, delivery, operatorAgents, proofGrants, productionDelivery };
 }
 
-export function server(engine: Engine, credentials: Credential[], github: GitHub | null = null, artifacts: ArtifactOptions = { backend: null, capacityBytes: artifactCapacityFromEnv() }) {
-  const services = assembleServices(engine, credentials, github, artifacts);
+export function server(engine: Engine, credentials: Credential[], github: GitHub | null = null, artifacts: ArtifactOptions = { backend: null, capacityBytes: artifactCapacityFromEnv() }, options: ServerOptions = {}) {
+  const services = assembleServices(engine, credentials, github, artifacts, options);
   const unauthenticated: Principal = { id: '', role: 'reader' };
-  return createServer(async (req, res) => {
+  // The assembled services ride on the server so the process entry can announce what they
+  // decided (limit drift, build identity) without assembling them twice.
+  return Object.assign(createServer(async (req, res) => {
     res.setHeader('X-Content-Type-Options', 'nosniff');
     res.setHeader('Referrer-Policy', 'no-referrer');
     res.setHeader('Content-Security-Policy', "default-src 'self'; style-src 'self'; img-src 'self' data:; script-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'");
@@ -128,5 +139,5 @@ export function server(engine: Engine, credentials: Credential[], github: GitHub
       console.error('request failed', error instanceof Error ? error.message : 'unknown');
       send(500, { error: 'Internal error; consult server logs' });
     }
-  });
+  }), { services });
 }

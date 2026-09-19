@@ -11,6 +11,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { createHash, generateKeyPairSync, randomUUID, verify } from 'node:crypto';
 import { realpath } from 'node:fs/promises';
 import { executionAttestationPayload } from '../src/runner-collector.js';
+import { MERGE_PROTOCOL } from '../src/protocol-version.js';
 import { captureTrackedRoot, linuxProcessRecord, signalTrackedProcesses, supervise, systemdContainment } from '../src/supervisor.js';
 import { acknowledgeContainment, containmentCredentials, establishContainment, isConfirmedCoordinationRefusal, revalidateContainment, settleContainment } from '../src/quarantine.js';
 
@@ -882,7 +883,7 @@ test('master run executes the durable loop as a supervised process and master st
   const root = await mkdtemp(join(tmpdir(), 'graphyard-master-run-'));
   const credentialDirectory = await mkdtemp(join(tmpdir(), 'graphyard-master-run-credentials-'));
   const credentialFile = join(credentialDirectory, 'coordinator.token');
-  let proofScoped = false;
+  let proofScoped = false, skewed = false;
   const now = () => new Date().toISOString();
   const snapshot = {
     now: now(),
@@ -892,7 +893,8 @@ test('master run executes the durable loop as a supervised process and master st
   };
   const http = createServer((req, res) => {
     res.setHeader('Content-Type', 'application/json');
-    if (req.url === '/api/status') return res.end(JSON.stringify({ actor: { id: 'master', role: 'coordinator', ...(proofScoped ? { proofs: ['integration:loop'] } : {}) }, repository: 'owner/project', baseBranch: 'main', githubAppId: 1234 }));
+    // The durable loop refuses a server behind its merge protocol before reading any work; this stub speaks the current one.
+    if (req.url === '/api/status') return res.end(JSON.stringify({ actor: { id: 'master', role: 'coordinator', ...(proofScoped ? { proofs: ['integration:loop'] } : {}) }, repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, build: { commit: null, protocol: skewed ? MERGE_PROTOCOL - 1 : MERGE_PROTOCOL } }));
     if (req.url === '/api/work-snapshot') return res.end(JSON.stringify({ ...snapshot, now: now() }));
     res.statusCode = 404; res.end('{}');
   });
@@ -926,6 +928,14 @@ test('master run executes the durable loop as a supervised process and master st
     await assert.rejects(exec(process.execPath, [launcher, 'master', 'run', '--once', '--interval', '2'], { cwd: root, env }), /whole seconds between 5 and 900/);
     proofScoped = true;
     await assert.rejects(exec(process.execPath, [launcher, 'master', 'run', '--once'], { cwd: root, env }), /refuses a credential that is also allowed to produce evidence/);
+    // GY-59: a deployed server behind the CLI's merge protocol is refused as version skew by the loop and by
+    // master merge, naming both commits, and master status reports the same skew without refusing.
+    proofScoped = false; skewed = true;
+    await assert.rejects(exec(process.execPath, [launcher, 'master', 'run', '--once'], { cwd: root, env }), /server runs an unknown commit, CLI expects [0-9a-f]{40}: deploy main first \(server merge protocol 1, CLI merge protocol 2/);
+    await assert.rejects(exec(process.execPath, [launcher, 'master', 'merge', '--all'], { cwd: root, env }), /deploy main first/);
+    const skewedStatus = JSON.parse((await exec(process.execPath, [launcher, 'master', 'status'], { cwd: root, env })).stdout);
+    assert.match(skewedStatus.versionSkew, /deploy main first/); assert.match(skewedStatus.cli.commit, /^[0-9a-f]{40}$/);
+    assert.deepEqual(skewedStatus.controlPlane.build, { commit: null, protocol: 1 });
   } finally {
     await new Promise<void>(resolve => http.close(() => resolve()));
     await rm(root, { recursive: true, force: true }); await rm(credentialDirectory, { recursive: true, force: true });
