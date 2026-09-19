@@ -3,7 +3,7 @@ import type pg from 'pg';
 import { z } from 'zod';
 import { Refusal, demand, resolveEscalation, standingEscalations, type Principal, type Work } from '../model.js';
 import { save, wakeJob } from '../store.js';
-import { approvalConflict, approveCapability, assertDecisionAuthority, decisionApprovalSchema, decisionCapabilities, decisionInputs, decisionPrecondition, decisionRequestSchema, foldDecisions, type Decision } from '../model/approval.js';
+import { approvalConflict, approveCapability, assertDecisionAuthority, decisionApprovalSchema, decisionInputs, decisionPrecondition, decisionRequestSchema, foldDecisions, requiredDecisionCapabilities, type Decision } from '../model/approval.js';
 import type { Services } from './routes.js';
 
 type Db = pg.PoolClient;
@@ -33,11 +33,13 @@ async function receipt(db: Db, actor: Principal, key: string, fingerprint: strin
  * or one that lost the capability or the item's scope, no longer carries its request.
  */
 async function requesterAuthority(services: Services, db: Db, decision: Decision, work: Work) {
-  const configured = services.principals.find(entry => entry.actor.id === decision.requestedBy)?.actor;
-  if (configured) return assertDecisionAuthority(configured, decisionCapabilities[decision.action], work, services.repository);
-  const agent = (await db.query('SELECT document FROM operator_agents WHERE id=$1', [decision.requestedBy])).rows[0]?.document;
-  demand(agent && !agent.revokedAt, `Requester ${decision.requestedBy} is no longer a live agent identity; request the decision again`, 409);
-  assertDecisionAuthority({ id: agent.id, role: 'operator-agent', capabilities: agent.capabilities, scope: agent.scope }, decisionCapabilities[decision.action], work, services.repository);
+  let requester = services.principals.find(entry => entry.actor.id === decision.requestedBy)?.actor;
+  if (!requester) {
+    const agent = (await db.query('SELECT document FROM operator_agents WHERE id=$1', [decision.requestedBy])).rows[0]?.document;
+    demand(agent && !agent.revokedAt, `Requester ${decision.requestedBy} is no longer a live agent identity; request the decision again`, 409);
+    requester = { id: agent.id, role: 'operator-agent', capabilities: agent.capabilities, scope: agent.scope };
+  }
+  for (const capability of requiredDecisionCapabilities(decision.action, decision.input, work)) assertDecisionAuthority(requester!, capability, work, services.repository);
 }
 
 export async function listDecisions(services: Services, actor: Principal, id: string) {
@@ -57,12 +59,12 @@ export async function requestDecision(services: Services, caller: Principal, id:
     const actor = await authenticated(services, db, now, caller);
     const replay = await receipt(db, actor, key, fingerprint); if (replay) return replay;
     const work = await findWork(db, id); demand(work, 'Work item not found', 404);
-    assertDecisionAuthority(actor, decisionCapabilities[data.action], work!, services.repository);
+    for (const capability of requiredDecisionCapabilities(data.action, input, work!)) assertDecisionAuthority(actor, capability, work!, services.repository);
     const precondition = decisionPrecondition(data.action, input, work!); demand(!precondition, precondition!, 409);
     const pending = (await readDecisions(db, work!)).find(decision => decision.action === data.action && (decision.state === 'requested' || decision.state === 'approved'));
     demand(!pending, `Decision ${pending?.id} (${data.action}) is already ${pending?.state} on ${work!.key}; wait for it before requesting another`, 409);
     const decisionId = randomUUID();
-    await record(db, work!, actor.id, 'decision.requested', { id: decisionId, action: data.action, input, reason: data.reason, requester: { id: actor.id, role: actor.role }, capability: decisionCapabilities[data.action] });
+    await record(db, work!, actor.id, 'decision.requested', { id: decisionId, action: data.action, input, reason: data.reason, requester: { id: actor.id, role: actor.role }, capabilities: requiredDecisionCapabilities(data.action, input, work!) });
     const result = (await readDecisions(db, work!)).find(decision => decision.id === decisionId)!;
     await db.query('INSERT INTO receipts(actor,key,fingerprint,result) VALUES($1,$2,$3,$4)', [actor.id, key, fingerprint, JSON.stringify(result)]);
     return result;

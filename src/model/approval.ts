@@ -103,6 +103,17 @@ export function approvalConflict(decision: Pick<Decision, 'id' | 'action' | 'inp
   return null;
 }
 
+/**
+ * Every capability a request needs: the action's own, plus `policy:bootstrap` for a requirements
+ * revision that declares or changes a bootstrap deferral, exactly as the direct command demands.
+ */
+export function requiredDecisionCapabilities(action: DecisionAction, input: any, work: Work): OperatorCapability[] {
+  const capabilities = [decisionCapabilities[action]];
+  if (action === 'requirements' && input.criteria.some((criterion: any) => criterion.bootstrap
+    && JSON.stringify(work.criteria.find(existing => existing.id === criterion.id)?.bootstrap ?? null) !== JSON.stringify(criterion.bootstrap))) capabilities.push('policy:bootstrap');
+  return capabilities;
+}
+
 /** The item must still be in the state the decision was requested against. */
 export function decisionPrecondition(action: DecisionAction, input: any, work: Work): string | null {
   if (action === 'recover') return work.stage === 'done' && work.containmentQuarantine ? null : 'Containment recovery applies to delivered work that is still quarantined';

@@ -8,7 +8,7 @@ import EmbeddedPostgres from 'embedded-postgres';
 import { Engine } from '../src/engine.js';
 import { server } from '../src/server.js';
 import { standingEscalations, type Observation, type Principal, type Work } from '../src/model.js';
-import { approvalConflict, foldDecisions } from '../src/model/approval.js';
+import { approvalConflict, foldDecisions, requiredDecisionCapabilities } from '../src/model/approval.js';
 import { Store } from '../src/store.js';
 
 // GY-70: decisions the guides reserved for a human operator are completed by one agent identity
@@ -195,6 +195,12 @@ test('integration:agent-approval-separation — self-approval and conflicted app
   // A request whose precondition no longer holds is refused before any approval.
   const stale = await decide(master.token, item, 'release', { expectedRevision: 1 }, 'Stale');
   assert.equal(stale.status, 409); assert.match(stale.body.error, /revision changed|Only unreleased backlog work/);
+  // A requirements decision that declares a bootstrap deferral also needs policy:bootstrap, as the direct command does.
+  const deferral = { id: 'AC-1', text: 'Works', proofs: ['unit:works'], bootstrap: { reason: 'Self-proving change', contractPaths: [`src/${work.title}.ts`] } };
+  assert.deepEqual(requiredDecisionCapabilities('requirements', { criteria: [deferral] }, work), ['policy:requirements', 'policy:bootstrap']);
+  assert.deepEqual(requiredDecisionCapabilities('requirements', { criteria: work.criteria }, work), ['policy:requirements']);
+  const deferred = await decide(master.token, work, 'requirements', { expectedPolicyRevision: work.policyRevision, criteria: [deferral], dependencies: [], plannedFiles: work.plannedFiles, exclusiveResources: [], producerProofs: [] }, 'Defer the proof');
+  assert.equal(deferred.status, 403); assert.match(deferred.body.error, /Capability policy:bootstrap is required/);
   // Folding ignores entries for unknown decisions.
   assert.deepEqual(foldDecisions('w', [{ kind: 'decision.approved', actor: 'x', at: '', payload: { id: 'nope' } }]), []);
 });
