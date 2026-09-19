@@ -51,9 +51,9 @@
 <rect x="20" y="733.8000000000001" width="520" height="157.0" rx="14" fill="#3a3020" stroke="#e0c27a" stroke-width="2"/>
 <text x="32" y="763.8" font-size="16" font-weight="650" fill="#f6e7b8" text-anchor="start">Human operator</text>
 <text x="32" y="782.6" font-size="14" font-weight="400" fill="#f6e7b8" text-anchor="start">Supplies goals, required decisions, and oversight. Still the</text>
-<text x="32" y="801.1" font-size="14" font-weight="400" fill="#f6e7b8" text-anchor="start">only authority for releasing work, revising requirements,</text>
-<text x="32" y="819.6" font-size="14" font-weight="400" fill="#f6e7b8" text-anchor="start">resolving escalations, manual proofs, and merge approval when</text>
-<text x="32" y="838.1" font-size="14" font-weight="400" fill="#f6e7b8" text-anchor="start">automatic merging is off.</text>
+<text x="32" y="801.1" font-size="14" font-weight="400" fill="#f6e7b8" text-anchor="start">only authority for goals, requirement rewrites, escalation</text>
+<text x="32" y="819.6" font-size="14" font-weight="400" fill="#f6e7b8" text-anchor="start">resolution, manual proofs, and merge approval when automatic</text>
+<text x="32" y="838.1" font-size="14" font-weight="400" fill="#f6e7b8" text-anchor="start">merging is off.</text>
 <rect x="32" y="854.84" width="55.0" height="24" rx="12" fill="#111714" stroke="#c5e69b" stroke-width="1.5" stroke-dasharray="3 3"/>
 <text x="40" y="872.4" font-size="13" font-weight="400" fill="#c5e69b" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace">admin</text>
 <rect x="95" y="854.84" width="156.4" height="24" rx="12" fill="#111714" stroke="#c5e69b" stroke-width="1.5" stroke-dasharray="3 3"/>

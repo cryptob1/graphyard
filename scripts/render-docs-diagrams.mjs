@@ -120,7 +120,7 @@ ${this.parts.join('\n')}
 function rolesAndAuthority() {
   const c = new Canvas();
   let y = c.heading(16, 'Who holds which authority');
-  const human = c.box({ x: 20, y, w: 520, kind: 'human', title: 'Human operator', body: 'admin credential declaring sessionKind: "human". Sets goals, releases backlog work, revises requirements, resolves escalations, attests manual proofs, and approves merges when automatic merging is off. Nothing below can do these.', tags: ['admin', 'sessionKind: human'] });
+  const human = c.box({ x: 20, y, w: 520, kind: 'human', title: 'Human operator', body: 'admin credential declaring sessionKind: "human". Sets goals, releases backlog work, revises requirements, resolves escalations, attests manual proofs, and approves merges when automatic merging is off. No session below can resolve an escalation or attest a proof.', tags: ['admin', 'sessionKind: human'] });
   c.arrow(human.cx, human.bottom, human.cx, human.bottom + 44, { label: 'human-only decisions', labelSide: 'right' });
   y = human.bottom + 46;
   const gy = c.box({ x: 20, y, w: 520, kind: 'graphyard', title: 'Graphyard control plane', body: 'Server, Postgres, dashboard, and CLI. Records ownership (lease + epoch), requirements, the candidate (PR, head SHA, base SHA), evidence, gate decisions, and merge authorization. Gates are deterministic; there is no lifecycle-state endpoint and no merge bypass.' });
@@ -164,7 +164,7 @@ function bootstrapVersusNormal() {
   y = c.note(Math.max(gy1.bottom, gh1.bottom) + 12, 'No operator agent, no master loop, no slice leads, no reviewer session yet: the human operator performs those duties. Every gate is already enforced.');
 
   y = c.heading(y + 30, 'Phase 2 · Normal operation: many sessions, same gates');
-  const human2 = c.box({ x: 20, y, w: 520, kind: 'human', title: 'Human operator', body: 'Supplies goals, required decisions, and oversight. Still the only authority for releasing work, revising requirements, resolving escalations, manual proofs, and merge approval when automatic merging is off.', tags: ['admin', 'sessionKind: human'] });
+  const human2 = c.box({ x: 20, y, w: 520, kind: 'human', title: 'Human operator', body: 'Supplies goals, required decisions, and oversight. Still the only authority for goals, requirement rewrites, escalation resolution, manual proofs, and merge approval when automatic merging is off.', tags: ['admin', 'sessionKind: human'] });
   c.arrow(120, human2.bottom, 120, human2.bottom + 44, { label: 'goals', labelSide: 'right' });
   c.arrow(440, human2.bottom, 440, human2.bottom + 44, { label: 'human-only decisions', labelSide: 'left' });
   const op = c.box({ x: 20, y: human2.bottom + 46, w: 236, kind: 'agent', title: 'Operator agent (optional)', body: 'Scoped, opt-in credential provisioned by the administrator. Sends bounded intent: it adds work and requirements, never removes them.', tags: ['operator-agent'] });

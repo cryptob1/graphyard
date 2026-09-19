@@ -9,7 +9,7 @@ One short definition and one canonical usage per term. Every guide in `docs/` us
 
 The person who administers a Graphyard installation. They hold an `admin` credential that declares `sessionKind: "human"`, and usually the GitHub repository-administrator identity as well.
 
-Human-only authorities: setting goals, releasing backlog work, revising requirements, choosing review providers, clearing blockers, resolving escalations, attesting `manual:` proofs, authorizing rework, and approving a merge when automatic merging is off. Graphyard refuses these from any credential that declares `sessionKind: "ai"` or declares nothing.
+The guides mark these decisions human-only: setting goals, releasing backlog work, revising requirements, choosing review providers, clearing blockers, resolving escalations, attesting `manual:` proofs, authorizing rework, and approving a merge when automatic merging is off. Graphyard enforces the declaration for two of them: resolving an escalation and recording human-only intake (goals, policy and requirement changes, waivers) are refused from any credential that declares `sessionKind: "ai"` or declares nothing. The rest are gated on the credential's role, not its declared session: rework, `manual:` proof attestation, and proof-authority grants need `admin`; releasing, unblocking, adding requirements, and selecting a review provider are also open to a [scoped operator agent](operator-automation.md) holding the matching capability (see the roles table below). Merge approval when automatic merging is off is a master-loop preference (`master init --no-auto-merge`): the loop records that the item awaits explicit operator approval instead of invoking the guarded merge, and every gate stays in force.
 
 **Canonical usage:** *human operator*. Bare *operator* always means this person. *Administrator* is the same person in a GitHub or deployment context. Never write *operator* for the scoped operator agent.
 
@@ -62,7 +62,7 @@ The session supervisor that launches, shows, and stops agent sessions, and the f
 | Role (credential) | Normally held by | May | Never |
 | --- | --- | --- | --- |
 | `admin` | Human operator | Create and release work, revise requirements, attest `manual:` proofs, grant proof authority, rework, resolve escalations | Mint trusted automated evidence; be shared with any AI session |
-| `operator-agent` | Operator agent (optional, scoped) | Create intent, release or unblock in-scope work, add requirements | Remove or rewrite requirements, hold a lease, submit evidence, merge |
+| `operator-agent` | Operator agent (optional, scoped) | Create intent, release or unblock in-scope work, add requirements, select a review provider — each only with the matching capability | Remove or rewrite requirements, resolve escalations, hold a lease, submit evidence, merge |
 | `coordinator` | Master (durable loop and optional visible session) | Read work and runtime health, dispatch, request the guarded merge, record deployment observations, settle a verified-dead quarantine | Claim, implement, produce evidence, revise requirements, bypass a gate |
 | `slice-lead` | Slice lead | Rule on plans and failures in its slice, escalate | Implement, hold a lease, submit evidence, review its own slice, merge |
 | `worker` | Worker | Claim, heartbeat, register its worktree, submit its candidate, record untrusted assertions | Receive `admin`, `coordinator`, or `producer` tokens; satisfy an acceptance gate |
