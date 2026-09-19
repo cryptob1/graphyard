@@ -1,6 +1,7 @@
 import { deliveryState, deploySmokeRequired, postDeployMs, rollbackGuidance, type Work } from '../../src/model';
 import { deliveryLabel, safeExternalUrl } from '../format';
 import { CandidateSha } from '../candidate';
+import { formatDuration } from '../duration';
 
 /**
  * The second confidence layer for one delivery: what the release served, what the trusted
@@ -13,7 +14,7 @@ export default function PostDeployment({ item, repository, baseBranch, observedA
   const rollback = rollbackGuidance(item, baseBranch);
   const elapsed = postDeployMs(item, Number.isFinite(observedAt) ? observedAt : Date.now());
   return <><h3>Post-deployment</h3>
-    <p className="post-deploy-state"><strong className={state === 'delivered-with-failure' ? 'danger-text' : state === 'smoke-passed' || state === 'delivered' ? 'green-text' : 'amber'}>{deliveryLabel[state]}</strong>{state !== 'delivered' && <span className="muted"> · {deploySmokeRequired(item.policy) ? 'policy requires e2e:deploy-smoke' : ''}{elapsed !== null ? ` · post-deploy time ${Math.floor(elapsed / 60000)}m` : ''}</span>}</p>
+    <p className="post-deploy-state"><strong className={state === 'delivered-with-failure' ? 'danger-text' : state === 'smoke-passed' || state === 'delivered' ? 'green-text' : 'amber'}>{deliveryLabel[state]}</strong>{state !== 'delivered' && <span className="muted"> · {deploySmokeRequired(item.policy) ? 'policy requires e2e:deploy-smoke' : ''}{elapsed !== null ? ` · post-deploy time ${formatDuration(elapsed / 60000)}` : ''}</span>}</p>
     <p className="candidate-details">Merge commit <CandidateSha repository={repository} sha={mergeSha} workKey={item.key}/></p>
     {deployment ? <p className="candidate-details">Deployment observed serving <CandidateSha repository={repository} sha={deployment.sha} workKey={item.key}/> ({deployment.covers === 'exact' ? 'the merge commit itself' : 'a descendant containing the merge'}) · {deployment.source} · {new Date(deployment.observedAt).toLocaleString()} · recorded by {deployment.observer}</p>
       : state !== 'delivered' && <p className="muted">Graphyard has not observed a deployment covering this merge. Smoke evidence is refused until the coordinator records one.</p>}

@@ -1,6 +1,7 @@
 import type { EvidenceArtifact, deliveryState } from '../src/model';
+import { formatAge } from './duration';
 
-export function age(time: string) { const minutes = Math.max(0, Math.floor((Date.now() - Date.parse(time)) / 60000)); return minutes < 60 ? `${minutes}m` : `${Math.floor(minutes / 60)}h ${minutes % 60}m`; }
+export function age(time: string) { return formatAge(time, Date.now()); }
 export function artifactLabel(artifact: EvidenceArtifact) {
   const size = artifact.size === undefined ? '' : ` · ${artifact.size < 1024 ? `${artifact.size} B` : `${(artifact.size / 1024).toFixed(1)} KiB`}`;
   return `${artifact.kind} · ${artifact.mediaType ?? 'type unknown'}${size}`;
