@@ -3,7 +3,7 @@ import remarkGfm from 'remark-gfm';
 
 const pages = [
   ['README', 'Documentation home'], ['onboarding', 'Onboard a repository'], ['quickstart', 'Local quickstart'], ['how-graphyard-works', 'How Graphyard works'],
-  ['deployment', 'Deploy Graphyard'], ['github', 'GitHub enforcement'], ['herdr', 'Herdr integration'], ['master-agent', 'Master-agent setup'],
+  ['deployment', 'Deploy Graphyard'], ['install', 'Install & upgrade'], ['github', 'GitHub enforcement'], ['herdr', 'Herdr integration'], ['master-agent', 'Master-agent setup'],
   ['delegation', 'Slice-lead delegation'],
   ['architecture', 'Architecture reference'], ['protocol', 'Agent protocol & API'],
   ['operations', 'Operations & recovery'], ['development', 'Development & dogfooding'],
@@ -13,6 +13,7 @@ const pages = [
   ['test-cases', 'E2E test cases'], ['validation', 'Validation runner protocol'], ['runner-setup', 'Runner preparation & artifacts'], ['delivery', 'Releases & observed delivery'],
   ['first-pr', 'Graphyard repository bootstrap'],
   ['turnkey-delivery-roadmap', 'Turnkey E2E & delivery roadmap'],
+  ['shipping-pulse', 'Shipping pulse'],
   ['history/implementation-audit-2026-09-13', 'Historical implementation audit'],
   ['history/huck-engineer-comparison', 'Historical Huck investigation'],
 ];

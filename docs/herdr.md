@@ -1,3 +1,4 @@
+<!-- page: Operate Graphyard | 4 | worker installation and multi-machine use. -->
 # Herdr integration
 
 Herdr runs visible agent sessions. Graphyard remains authoritative for work ownership, leases, evidence, and progression.

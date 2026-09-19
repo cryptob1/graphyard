@@ -1,3 +1,4 @@
+<!-- page: Start here | 2 | the lifecycle and authority model in five minutes. -->
 # How Graphyard works
 
 Graphyard helps a team move one well-defined piece of work from an idea to a verified merge. It records who owns the work, what must be true, and whether every delivery gate is satisfied.

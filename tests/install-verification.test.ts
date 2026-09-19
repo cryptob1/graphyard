@@ -35,6 +35,8 @@ const github = {
   config: { repository: 'owner/project', base: 'main', appId: GRAPHYARD_APP_ID, installationId: 500, privateKey: appKey, reviewerApps: [] },
   reviewRepository: async () => ({ id: 1, fullName: 'owner/project' }),
   reviewPermissions: async () => ({ pull_requests: 'write', issues: 'read', checks: 'write' }),
+  // The permission preflight has not run in this process; status reports that rather than failing.
+  permissionReport: () => null,
 } as unknown as GitHub;
 
 before(async () => {

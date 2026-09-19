@@ -1,3 +1,4 @@
+<!-- page: Start here | 4 | install locally with `--provider compose` for evaluation. -->
 # Local quickstart
 
 Use this path to evaluate Graphyard on one machine. For a real deployment and a Herdr fleet,

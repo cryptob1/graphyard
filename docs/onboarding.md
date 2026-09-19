@@ -1,3 +1,4 @@
+<!-- page: Start here | 3 | the human prompts, more machines, the master, and the first PR. -->
 # Onboard a repository
 
 This is the supported path from an existing GitHub repository to a working fleet. One
@@ -59,8 +60,13 @@ You are prompted for exactly four things:
 | The GitHub App confirmation | Open the printed page, confirm the App, install it on this repository |
 | Plan approval | Read the plan, then rerun with `--apply` |
 
-Later permission changes to the control-plane App, and the installation's acceptance of
-them, are the master's job, not yours: once the master runs with a browser profile it
+The App manifest the installer opens requests exactly the
+[declared control-plane permission set](github.md#app-permissions), and the App is installed
+only on the managed repository. An App registered before the merge queue must be
+[migrated](github.md#migrating-an-existing-app) to Contents: read and write; the
+[upgrade order](install.md#upgrading-an-existing-installation) covers that. Later permission
+changes to the control-plane App, and the installation's acceptance of them, are the master's
+job, not yours: once the master runs with a browser profile it
 performs them with `master browser app-permissions` and `master browser installation-accept`
 (see [step 4](#4-start-the-master)).
 
@@ -220,7 +226,7 @@ node "$GRAPHYARD_CLI" master status
 
 `master status` lists pending and completed reviews. When the reviewer posts its verdict on that exact commit, Graphyard closes the session and removes its credential.
 
-Connect that evidence before merging. Version 0.1 has no general-purpose runner: put a narrowly scoped `producer` token in protected CI that pull-request code cannot read, then submit the current candidate's actual result. For a criterion explicitly defined with a `manual:` proof, use a separate admin-authenticated operator session to inspect and submit it; never expose that credential to the worker checkout. An admin cannot certify automated proof names. See [evidence submission](protocol.md#evidence).
+Connect that evidence before merging. Version 0.1 has no general-purpose runner: put a narrowly scoped `producer` token in protected CI that pull-request code cannot read, then submit the current candidate's actual result. For a criterion explicitly defined with a `manual:` proof, use a separate admin-authenticated operator session to inspect and submit it; never expose that credential to the worker checkout. An admin cannot certify automated proof names. See [evidence submission](protocol/evidence.md).
 
 When `Graphyard / merge` first appears, add it to branch protection — with "require branches to be up to date" off, which the [merge queue](github.md#merge-queue) requires. After every gate passes:
 

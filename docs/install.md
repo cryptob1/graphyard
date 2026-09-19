@@ -1,3 +1,4 @@
+<!-- page: Start here | 1 | the one command, the agent-executable runbook behind it, and the App-permission migration an upgrade can require. -->
 # Install Graphyard
 
 One command installs a complete Graphyard control plane for a GitHub repository on the
@@ -265,6 +266,47 @@ installer then binds `Graphyard / merge` to the Graphyard App in branch protecti
 
 Read `drift` before applying it. Drift is usually either a deliberate manual change someone
 made on the provider, or a sign that two installations are pointed at one repository.
+
+## Upgrading an existing installation
+
+Upgrading the server image never changes the GitHub App. A release that needs a new App
+permission — the merge queue's Contents: write is the first — therefore leaves an
+already-installed App short until its owner accepts the change, and the server says so
+instead of failing quietly:
+
+- the startup and five-minute [preflight](github.md#preflight-and-holds) raises an attention
+  item naming the missing permission and the installation page, in the server log,
+  `GET /api/status`, the dashboard, and `graphyard master status` under
+  `controlPlane.attention`;
+- integration jobs that need the permission are held rather than retried, so there is no 403
+  back-off loop and other observations stay fresh;
+- `graphyard master init` reports the same attention in its result and points at the
+  migration command.
+
+Upgrade in this order:
+
+1. Back up the database and deploy the tested image as
+   [deployment](deployment.md#backup-upgrade-rollback) describes.
+2. Read the attention items: `node "$GRAPHYARD_CLI" doctor`, the dashboard, or
+   `node "$GRAPHYARD_CLI" master status`.
+3. On the machine that holds `.graphyard/github-app.json`, run the
+   [migration](github.md#migrating-an-existing-app):
+
+   ```sh
+   node "$GRAPHYARD_CLI" github-setup --update-permissions --wait 600
+   ```
+
+   It prints the exact browser steps GitHub requires — set the permission on the App, then
+   accept the pending request on the installation — and polls until the installation reports
+   the declared set. It exits nonzero while anything remains.
+4. Nothing else is needed. The next preflight sees the accepted permission and releases the
+   held jobs; no restart is required. Confirm with `doctor` that `appPermissions.missing` is
+   empty and `heldJobs` is `0`.
+
+Only the control-plane App gains a permission in this migration. Reviewer Apps keep their own
+declaration — `github-setup --update-permissions --reviewer NAME` reports any excess grant as
+a step to reduce it — and worker identities are never Apps. The reasons are in
+[App permissions](github.md#app-permissions).
 
 ## Failure handling
 

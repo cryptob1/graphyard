@@ -1,3 +1,4 @@
+<!-- page: Operate Graphyard | 1 | provider reference behind the installer, the variables table, a manual fallback, backups, and upgrades. -->
 # Deployment
 
 Graphyard is one application container plus Postgres. The container serves the compiled UI,
@@ -45,7 +46,7 @@ deployment, and for the manual fallback below.
 | `DATABASE_URL` | Postgres connection string; on Railway, reference `${{Postgres.DATABASE_URL}}` to use private networking |
 | `HOST` | `0.0.0.0` for container ingress |
 | `PORT` | `4310`, or the port supplied by the platform |
-| `GRAPHYARD_PRINCIPALS` | JSON array of individual admin, coordinator, worker, reader, and proof-producer credentials |
+| `GRAPHYARD_PRINCIPALS` | JSON array of individual admin, coordinator, worker, reader, and proof-producer credentials. A producer's optional `proofs` allowlist scopes acceptance-evidence collection only; a separate optional `deploymentProviders` allowlist is what authorizes recording that provider's production deployments (see [shipping pulse](shipping-pulse.md)). Grant each lane to the credential that needs it rather than widening the other. |
 | `GITHUB_REPOSITORY` | `owner/repository`; one repository per control plane |
 | `GITHUB_BASE_BRANCH` | Usually `main` |
 | `GITHUB_APP_ID` | Dedicated Graphyard GitHub App ID |
@@ -97,9 +98,12 @@ railway domain --service graphyard --port 4310
 ```
 
 Then generate one token per role, assemble `GRAPHYARD_PRINCIPALS` yourself, run
-`node "$GRAPHYARD_CLI" github-setup https://YOUR-DOMAIN`, copy the App values into the
-service, set the webhook URL to `https://YOUR-DOMAIN/api/github/webhook`, and configure
-branch protection and CI App IDs as described in [GitHub enforcement](github.md).
+`node "$GRAPHYARD_CLI" github-setup https://YOUR-DOMAIN` (the manifest requests exactly the
+[declared control-plane permission set](github.md#app-permissions); install the App only on
+the managed repository), copy the App values into the service, set the webhook URL to
+`https://YOUR-DOMAIN/api/github/webhook`, and configure branch protection and CI App IDs as
+described in [GitHub enforcement](github.md). Verify with `node "$GRAPHYARD_CLI" doctor`:
+`appPermissions.missing` must be empty.
 
 ### Docker Compose, by hand
 
