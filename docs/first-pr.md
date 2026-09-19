@@ -53,6 +53,8 @@ The exercise job runs candidate code with disposable principals. A separate `gra
 
 Because a trusted run executes only protected source, a contract must reach protected `main` before any work item may require its proof. Land the harness, its registry entry, and its unprivileged CI job as their own change, gated by review, CI and the proofs that already exist; then require the new proof of later work.
 
+A contract exports its fixed `requiredCases`, a `createInventory` bound to exactly those cases through the shared ledger in `scripts/case-inventory.mjs`, and an `exercise` that records every case through that ledger as it runs. The runner selects all three by proof, so an interrupted run reports the completed, failing and unexecuted cases under the contract's own names and never under another proof's.
+
 Preparation enforces that order rather than trusting the dispatch. It first resolves the requested proof against the registry in this protected checkout, before any candidate code is fetched. It then fetches the candidate's base commit alone and refuses unless that base already carries the contract's source file, so the change that introduces a contract can never be the change its own trusted proof certifies. Assigning a new proof to the change that introduces it therefore fails closed instead of producing evidence a candidate effectively wrote for itself.
 
 The CI job for the new contract runs the identical fixed inventory against every candidate, so the change that introduces a contract is still executed end to end — it simply publishes no trusted evidence.
