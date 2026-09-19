@@ -568,6 +568,52 @@ the control plane's regression guard treats the files named by `GRAPHYARD_GENERA
 generated rather than owned. Every remaining conflict `sync` reports names the shipped items that
 landed it. See [coordination](coordination.md#generated-files-never-conflict).
 
+## Pipeline speed
+
+The target for a routine item — one with at most one rework round and no hand-off to a master or
+operator between submit and merge — is a submit→merge p50 of at most 30 minutes and p90 of at most
+60 minutes, judged over at least ten deliveries, with a median of at most one rework round. Every
+step between `complete` and the merge is the control plane's or the loop's: the regression guard
+refuses the revert that used to cost a rework round, the reviewer and the producers are requested
+and launched on the exact head, automatable proofs run as trusted CI on the published tip, overlap
+holds keep colliding items apart, and the master's only remaining part is routing a genuine finding
+or taking a human-only decision. The measurement says whether that holds, and where the time goes
+when it does not.
+
+`master status` reports it in two places. Each work row's `speed` — derived from the item's own
+[pipeline timeline](protocol/pipeline-speed.md) — carries `executionMs` (lease time summed over
+attempts), `waitMs` (everything else since the first claim), `reworkRounds`, `interventions`
+(`blocked` reports and `requirements` revisions, the hand-offs), `sinceSubmitMs` while in flight
+and `submitToMergeMs` once delivered, and `routine`. The top-level `speed` is the periodic
+measurement over every delivery with a recorded submission: `speed.submitToMerge` (nearest-rank
+p50/p90 and count), `speed.routine.submitToMerge` (the population the target is stated for),
+`speed.reworkRounds` (median, p90, distribution), `speed.interventions`, `speed.execution` (total
+execution versus wait, and the execution share), `speed.unmeasured` (deliveries that predate the
+timeline, reported and never estimated), and the verdict: `met` is `true` or `false` once ten
+routine deliveries are measured, with `reason` naming the figure that misses, and `null` with the
+count until then. `speed.items` lists the measured deliveries in merge order with their figures.
+
+The same figures are recorded outside a status read by the measurement script, which the
+3-hourly measurement runs and which `manual:speed-target-met` reads:
+
+```sh
+GRAPHYARD_URL=… GRAPHYARD_TOKEN_FILE=… node scripts/measure-pipeline-speed.mjs \
+  --split GY-55,GY-64,GY-65,GY-66 --record .graphyard/measurements/pipeline-speed
+```
+
+It reads the work snapshot with any read-capable credential (the coordinator's will do), prints the
+overall summary, and for each `--split` item prints the same summary for the deliveries merged
+before and after that item landed, so the effect of a change is measured rather than asserted;
+`--since` and `--until` bound the window, `--json` prints the whole report, and `--record DIR`
+writes it as one timestamped file. The arithmetic is the module master status uses, so the two
+never disagree. Deliveries before the timeline shipped are `unmeasured`; the baseline for those is
+the [flow analytics](flow-analytics.md) phase durations and the ledger figures recorded on GY-54.
+
+A missed target is routed like any other finding: `speed.items` names the slow deliveries, each
+row's `interventions` and `reworkRounds` say whether the time went to a hand-off or a rework round,
+and the flow analytics bottleneck summary says which wait category held the rest. Never trade a
+gate, a proof, an identity rule or a lease rule for the number.
+
 ## Recovery
 
 For a dead worker or provider change:
