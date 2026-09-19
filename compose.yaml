@@ -1,3 +1,8 @@
+# Local evaluation and small self-hosted installations. See docs/deployment.md.
+#
+# The server runs the versioned release image by default; `--build` builds the same image
+# from this checkout instead. Set GRAPHYARD_IMAGE to pin a release or a digest:
+#   GRAPHYARD_IMAGE=ghcr.io/cryptob1/graphyard:0.1.0 docker compose --profile full up -d
 services:
   db:
     image: postgres:17-alpine
@@ -13,14 +18,22 @@ services:
       timeout: 3s
       retries: 20
   server:
-    build: .
+    image: ${GRAPHYARD_IMAGE:-ghcr.io/cryptob1/graphyard:0.1.0}
+    build:
+      context: .
+      args:
+        GRAPHYARD_VERSION: ${GRAPHYARD_VERSION:-0.1.0}
+        GRAPHYARD_BUILD_REVISION: ${GRAPHYARD_BUILD_REVISION:-unknown}
     profiles: ["full"]
     env_file: .env
     environment:
       DATABASE_URL: postgres://graphyard:graphyard@db:5432/graphyard
       HOST: 0.0.0.0
     ports: ["127.0.0.1:4310:4310"]
+    # Logical backups written by `docker compose exec server node bin/graphyard.mjs db backup /backups/NAME.json`.
+    volumes: ["graphyard-backups:/backups"]
     depends_on:
       db: { condition: service_healthy }
 volumes:
   graphyard-data:
+  graphyard-backups:

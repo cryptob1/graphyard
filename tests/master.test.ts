@@ -29,8 +29,16 @@ function work(overrides: Partial<Work> = {}) {
 }
 
 test('master instructions are managed idempotently without replacing repository rules', () => {
-  const original = '# Local rules\nKeep this text.\n'; const first = managedMasterInstructions(original);
+  const bootstrap = "The initial MVP is a single-agent bootstrap under the operator's supervision. Do not launch other agents for bootstrap work.";
+  const original = `# Local rules\n${bootstrap}\nKeep this text.\n`; const first = managedMasterInstructions(original);
   assert.ok(first.startsWith(original)); assert.match(first, /dedicated, visible master-agent session/);
+  assert.match(first, /Keep cycling: status, dispatch ready work, shepherd review and proof collection,\nguarded merge, then deployment verification/);
+  assert.match(first, /both conditions hold:\n\(1\) every in-scope item is Done or has a genuinely external blocker recorded in\nGraphyard; and \(2\) every merged change is deployed and live-verified against the exact\ndeployed release, or a genuinely external deployment blocker is recorded in Graphyard/);
+  assert.match(first, /Delivered work is immutable, so a deployment blocker is recorded as a follow-up work\nitem naming the delivered item, its merge commit, and the external cause/);
+  assert.match(first, /An observed merge alone does not end the loop/);
+  assert.match(first, /Verify each delivery with `graphyard master verify-deployment GY-N`: it refuses a\nstale or local-only observation and records only the exact deployed release it observed/);
+  for (const condition of ['Ordinary review', 'rework', 'idle workers', 'proof setup', 'Close finished agent\\s+sessions']) assert.match(first, new RegExp(condition));
+  assert.equal(first.split(bootstrap).length - 1, 1, 'master setup preserves the protected bootstrap rule byte-for-byte');
   assert.equal(managedMasterInstructions(first), first);
   assert.throws(() => managedMasterInstructions(first + first), /markers/);
 });

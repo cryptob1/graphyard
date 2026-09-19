@@ -19,7 +19,7 @@ npm run build
 npm start
 ```
 
-Open `http://localhost:4310` and sign in with the operator token from `.env`.
+Open `http://localhost:4310` and sign in with the operator token from `.env`. `curl -s http://localhost:4310/healthz` names the version and schema generation you are running.
 
 Keep this Graphyard checkout running. Clone the configured writable repository separately; Graphyard does not accept a pull request whose head belongs to a different repository.
 

@@ -263,6 +263,10 @@ async function deliver(work: Work, slice: string, mergeSha: string, overrides: P
   latest = await current();
   const delivered = await engine.observe(latest.id, latest.revision, { ...observation(latest, slice, overrides), merged: true, mergeSha, mergedAt });
   assert.equal(delivered.stage, 'done');
+  // GY-60: a merge observed without a committed execution is recorded as a violation and never
+  // reaches `done`; pin the attribution so a dropped commitMerge fails here, not in the analytics.
+  assert.deepEqual(delivered.violations, [], 'the merged observation is attributed to the committed execution');
+  assert.equal(delivered.mergeExecution, null, 'delivery retires the committed execution');
   await settle(mergedAt);
   return { delivered, mergedAt, mergeSha };
 }

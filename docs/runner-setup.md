@@ -281,6 +281,10 @@ Set `maxGapMs` from how quickly the target could actually change. A short run wi
 
 The published result reports execution, behaviour, inventory, attribution and artifacts separately. Graphyard rechecks every one of them against the pinned candidate, so the collector's own computation is a second boundary, not the only one. An infrastructure problem — a refused bundle check, a timeout, an unreadable boundary — is reported as `blocked`, never as a product failure and never as a pass. A report with no usable measurement is `unmeasured`.
 
+## Other report formats
+
+The collector verifies the two files an attempt writes through the [report adapter](report-adapters.md) pinned in the bundle definition's `reportFormat`. This path's default, `graphyard-playwright-v1`, is the built-in reporter above. `junit-xml-v1` accepts unit and integration suites whose pinned image writes a `graphyard-inventory-v1` inventory in `enumerate` and a JUnit XML `report.xml` in `execute`; only its minimised structure is published. The format is authority: bytes in any other shape are refused, and changing it for a scenario revision needs a new revision like any other change of executable authority.
+
 ## Limits of this path
 
 - The target must be immutable and operator-configured; the adapter has no mutable-target support, so a URL taken from arbitrary PR output is not acceptable input.

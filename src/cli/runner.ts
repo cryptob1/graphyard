@@ -8,6 +8,7 @@ import { inspectRunnerRepository, oracleBundleDigest, snapshotRunnerSources } fr
 import { accountFileDigest, assertRunnerCredentialScope, attemptGrantSchema, authorityWatch, containerNames, executionRecordSchema, observeContainers, runnerPlanSchema } from '../runner-executor.js';
 import { assembleResult, collectArtifacts, collectionBinding, collectionInputs, collectorInputSchema, verifyExecutionAttestation } from '../runner-collector.js';
 import { superviseAttempt, supervisionRequestSchema } from '../runner-attestor.js';
+import { adapterContracts, reportAdapter } from '../report-adapters.js';
 import { defineCommands } from './registry.js';
 
 /**
@@ -67,6 +68,9 @@ export const runnerCommands = defineCommands([
       '  runner snapshot file.json    Snapshot an explicit source-file list for review (not approval)',
       '  runner bundle-digest DIR      Content identity of an executable oracle bundle for approval',
       '  runner account-digest FILE    Measure an approved test-account env file for registration',
+      '  runner adapters               Print each supported report adapter\'s declared contract',
+      '  runner verify-report FORMAT INVENTORY REPORT',
+      '                                Preview an adapter\'s verdict over two local files (not evidence)',
       '  runner attempt file.json      Hold one dispatched attempt while the host attestor runs it',
       '  runner supervise              Host attestor: run one attempt and attest what it observed',
       '  runner collect file.json      Verify one attempt and publish a trusted result (collector)',
@@ -80,6 +84,15 @@ export const runnerCommands = defineCommands([
       // read here only to be measured: the entries never leave this process, and approving
       // them is a separate operator action against Graphyard.
       if (id === 'account-digest' && args.length === 1) return print({ testAccountDigest: await accountFileDigest(resolve(args[0])) });
+      if (id === 'adapters' && !args.length) return print({ adapters: adapterContracts(), note: 'A format is pinned in the operator-approved bundle definition; the collector verifies only the pinned format and refuses every other structure.' });
+      if (id === 'verify-report' && args.length === 3) {
+        // A local preview of the pinned adapter's verdict over two files. It reads no attempt
+        // authority and publishes nothing: evidence comes only from the collector, over bytes
+        // the host attestor measured.
+        const adapter = reportAdapter(args[0]);
+        const inventory = adapter.parse('inventory', await readFile(resolve(args[1]))), report = adapter.parse('report', await readFile(resolve(args[2])));
+        return print({ format: adapter.format, verification: adapter.verify(inventory.document, report.document), publishedReport: JSON.parse(report.published.bytes.toString('utf8')), evidence: false });
+      }
       if (id === 'attempt' && args.length === 1) {
         // Runner path. This credential is a worker registration: it can acknowledge and
         // hold attempt authority, but it neither executes nor authors any execution fact.
@@ -88,7 +101,7 @@ export const runnerCommands = defineCommands([
         const dispatched = await api('validation/dispatch', { registration });
         if (!dispatched.request) return print({ dispatched: false, reason: dispatched.reason });
         const grant = attemptGrantSchema.parse({ requestId: dispatched.request.id, attemptId: dispatched.attempt.id, epoch: dispatched.attempt.epoch,
-          runner: registration, bundleDigest: dispatched.bundle.digest, runnerImageDigest: dispatched.bundle.runnerImageDigest,
+          runner: registration, bundleDigest: dispatched.bundle.digest, runnerImageDigest: dispatched.bundle.runnerImageDigest, reportFormat: dispatched.bundle.reportFormat,
           executionHost: dispatched.executionAuthority.host, attestationPublicKey: dispatched.executionAuthority.attestationPublicKey,
           executionNetwork: dispatched.executionAuthority.network,
           // Never the runner's own configuration: which approved account material this
@@ -224,7 +237,7 @@ export const runnerCommands = defineCommands([
         // behaviour cannot be verified from the execution report alone, and a kind left
         // unread would look like output the approved reporter never wrote. Only the upload
         // below is narrowed to the configured subset.
-        const collected = await collectArtifacts(collectedFrom, collectionInputs(input.requiredArtifacts));
+        const collected = await collectArtifacts(collectedFrom, collectionInputs(input.requiredArtifacts), grant.reportFormat);
         // Verify the host attestation, and the digests of the bytes just read, *before* the
         // first upload. An artifact name is published once per attempt and cannot be taken
         // back: a live grant plus schema-valid forged boundary files would otherwise consume
@@ -240,7 +253,7 @@ export const runnerCommands = defineCommands([
           if (collectionAuthority.lost) throw new Error('Collection authority could not be renewed; no artifact or result was published');
           try {
             const body = { requestId: grant.requestId, attemptId: grant.attemptId, epoch: grant.epoch,
-              name: artifact.name, mediaType: artifact.mediaType, bytes: artifact.bytes.toString('base64'), capturePolicy: 'approved-test-data-only' };
+              name: artifact.name, mediaType: artifact.published.mediaType, bytes: artifact.published.bytes.toString('base64'), capturePolicy: 'approved-test-data-only' };
             let stored: any, error: unknown;
             for (let retry = 0; retry < 3 && !stored; retry++) try { stored = await api('validation/artifacts', body, `${grant.attemptId}-artifact-${artifact.name}`); } catch (caught) { error = caught; }
             if (!stored) throw error;
@@ -255,7 +268,7 @@ export const runnerCommands = defineCommands([
         return print({ refusals: assembled.refusals, report: assembled.report, result: await api('validation/result', assembled.report, `${grant.attemptId}-result`) });
         } finally { if (renewCollection) clearInterval(renewCollection); }
       }
-      throw new Error('Use runner inspect|snapshot|bundle-digest|attempt|supervise|collect');
+      throw new Error('Use runner inspect|snapshot|bundle-digest|account-digest|adapters|verify-report|attempt|supervise|collect');
     },
   },
 ]);

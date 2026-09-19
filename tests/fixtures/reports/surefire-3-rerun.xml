@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite version="3.0" name="com.example.orders.OrderServiceTest" time="0.9" tests="2" errors="0" skipped="0" failures="0">
+  <testcase name="createsAnOrder" classname="com.example.orders.OrderServiceTest" time="0.211">
+    <flakyFailure message="expected 201 but was 500" type="java.lang.AssertionError">private-stack-marker</flakyFailure>
+  </testcase>
+  <testcase name="cancelsAnOrder" classname="com.example.orders.OrderServiceTest" time="0.107"/>
+</testsuite>

@@ -3,6 +3,7 @@ import { demand } from '../../model.js';
 import { delegationSnapshot } from '../../delegation.js';
 import { installationSettingsUrl } from '../../github.js';
 import { controlPlanePermissions, requiredPermissions } from '../../github-permissions.js';
+import { releaseInfo, schemaVersion } from '../../release.js';
 import { defineRoutes } from '../routes.js';
 
 /** Control-plane status and the work reads every client polls. */
@@ -20,7 +21,7 @@ export const statusRoutes = defineRoutes('status', [
       const appPermissions = github ? github.permissionReport() ?? { appId: github.config.appId, installationId: github.config.installationId, app: String(github.config.appId), account: null, installationUrl: installationSettingsUrl(github.config.installationId), observedAt: null, verifiedAt: null, error: 'Permission preflight has not run yet', suspended: false, required: requiredPermissions(controlPlanePermissions), granted: null, missing: [], blockedFeatures: [], attention: ['GitHub App permissions have not been verified yet; the preflight runs at startup and every five minutes'] } : null;
       const heldJobs = actor.role === 'operator-agent' ? 0 : (await engine.store.heldJobs()).length;
       const observedAt = (await engine.store.pool.query('SELECT clock_timestamp() AS now')).rows[0].now as Date;
-      return { actor, delegation: delegationSnapshot(principals.map(p => p.actor), operatorVisible(await engine.store.list()), observedAt.getTime(), limits), repository: repository || null, baseBranch: github?.config.base ?? process.env.GITHUB_BASE_BRANCH ?? 'main', github: !!github, check: 'Graphyard / merge', reviewProviders: ['github', ...(dispatchAvailable ? ['codex'] : []), ...(dispatchAvailable && engine.reviewerApps.length ? ['agent'] : [])], reviewerApps: engine.reviewerApps, githubPermissions, githubRepository, githubAppId: github?.config.appId ?? null, githubInstallationId: github?.config.installationId ?? null, appPermissions, heldJobs, jobs, now: observedAt.toISOString() };
+      return { actor, delegation: delegationSnapshot(principals.map(p => p.actor), operatorVisible(await engine.store.list()), observedAt.getTime(), limits), repository: repository || null, baseBranch: github?.config.base ?? process.env.GITHUB_BASE_BRANCH ?? 'main', github: !!github, check: 'Graphyard / merge', reviewProviders: ['github', ...(dispatchAvailable ? ['codex'] : []), ...(dispatchAvailable && engine.reviewerApps.length ? ['agent'] : [])], reviewerApps: engine.reviewerApps, githubPermissions, githubRepository, githubAppId: github?.config.appId ?? null, githubInstallationId: github?.config.installationId ?? null, appPermissions, heldJobs, jobs, now: observedAt.toISOString(), release: releaseInfo(), schema: schemaVersion };
     },
   },
   {
