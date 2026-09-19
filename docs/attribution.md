@@ -75,6 +75,7 @@ Blocked states, each with its own resolution:
 | Target history is ambiguous: overlapping authoritative observations disagree | Wait for the observers to converge, or correct the observer that is wrong |
 | Observed target identity is not fully measured (a service unobserved, incomplete or only self-reported) | Fix the observer so every service is measured |
 | The observed target matches no trusted build attestation or release manifest | Attest the build or define the release the target is running |
+| A release names the change but no build attestation for this work item covers its manifest | Attest the build of this candidate that produced the released manifest; membership alone cannot pin a fresh candidate |
 | The observed target does not contain the intended change | Deploy a target that does; the ledger names the trusted record that excludes it |
 | The superseded request's deadline has passed | Request validation again |
 
