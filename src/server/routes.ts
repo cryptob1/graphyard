@@ -7,6 +7,9 @@ import type { OperatorAgents } from '../operator-agent.js';
 import type { ProofGrants } from '../proof-grants.js';
 import type { ProductionDelivery } from '../production-delivery.js';
 import type { delegationLimits } from '../delegation.js';
+import type { DelegationLimitReport } from './limits.js';
+import type { BuildIdentity } from '../protocol-version.js';
+import type { ProductionWatch } from '../production-watch.js';
 import type { Principal } from '../model.js';
 
 /** Everything the assembled control plane owns, handed to every route. */
@@ -14,6 +17,12 @@ export interface Services {
   engine: Engine; github: GitHub | null; repository: string;
   principals: { actor: Principal; hash: Buffer }[];
   limits: ReturnType<typeof delegationLimits>;
+  /** The limits in force, the deployed variables, and every way they fail to cover the roster. */
+  delegationLimits: DelegationLimitReport;
+  /** The commit this build runs and the merge protocol it speaks. */
+  build: BuildIdentity;
+  /** Production deployment observation, when the process hosts one. */
+  production: ProductionWatch | null;
   validation: Validation; delivery: Delivery; operatorAgents: OperatorAgents; proofGrants: ProofGrants; productionDelivery: ProductionDelivery;
 }
 
