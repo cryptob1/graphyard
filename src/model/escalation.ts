@@ -42,6 +42,20 @@ export function resolveEscalation(work: Work, trigger: EscalationTrigger) {
   setEscalations(work, remaining);
   return standing.length - remaining.length;
 }
+// An execution holds the record until it expires. Once the broker has committed it to the
+// provider, only a GitHub observation may retire it: the provider outcome is unknown until
+// observed, and revocation must keep refusing across that gap rather than reopen the instant
+// the authority lapses while a provider call may still be in flight.
+export function holdsMergeExecution(work: Pick<Work, 'mergeExecution'>, now: number) {
+  const execution = work.mergeExecution;
+  return !!execution && (!!execution.committingAt || Date.parse(execution.expiresAt) > now);
+}
+// The provider-clock wait a verification demands before the commit: the rest of the database's
+// current second plus the verified offset width. The broker rebuilds it from the record when it
+// resumes an execution that was verified but not yet committed.
+export function providerDelayAfterVerification(verifiedAt: number, offset: { min: number; max: number }) {
+  return Math.ceil((verifiedAt + 1) / 1000) * 1000 - verifiedAt + Math.ceil(offset.max - offset.min);
+}
 // Fencing, not cancelling: the execution row stays so its owner can still cancel
 // or observe it idempotently, but no verification and no provider call may
 // proceed under it. The broker re-reads this between verification and the merge

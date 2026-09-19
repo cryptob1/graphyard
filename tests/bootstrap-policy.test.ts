@@ -334,14 +334,15 @@ async function deliverFromHistory(work: Work, between?: () => Promise<unknown>) 
   const ready = await queueHead(work);
   assert.deepEqual(ready.gates.filter(gate => !gate.passed).map(gate => gate.name), [], 'the candidate must be merge-ready before delivery');
   const granted = await engine.acquireMerge(coordinator, ready.id, { expectedRevision: ready.revision, sha: head, baseSha: base, policyRevision: ready.policyRevision }, id());
-  const verified = await engine.verifyMerge(coordinator, ready.id, { executionId: granted.execution.id }, { ...observation(ready), prState: 'open', draft: false }, id());
+  await engine.verifyMerge(coordinator, ready.id, { executionId: granted.execution.id }, { ...observation(ready), prState: 'open', draft: false }, id());
+  const committed = await engine.commitMerge(coordinator, ready.id, { executionId: granted.execution.id }, id());
   await delay(5);
   const mergedAt = ((await store.pool.query('SELECT clock_timestamp() AS now')).rows[0].now as Date).toISOString();
   await delay(5);
   if (between) await between();
   // The execution record is gone from the document; only the event history still carries it.
   await store.pool.query("UPDATE work_items SET document=document-'mergeExecution' WHERE id=$1", [work.id]);
-  return engine.observe(work.id, verified.revision, { ...observation(ready), merged: true, mergedAt, mergeSha: 'e'.repeat(40) });
+  return engine.observe(work.id, committed.revision, { ...observation(ready), merged: true, mergedAt, mergeSha: 'e'.repeat(40) });
 }
 
 test('integration:bootstrap-policy-gate reconciles a delivered bootstrap candidate from event history', async () => {

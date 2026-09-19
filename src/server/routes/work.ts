@@ -15,7 +15,7 @@ const refuseLead = async ({ actor, services }: RouteContext, id: string | null, 
 /** Work mutations: the guarded merge broker and every engine command. */
 export const workRoutes = defineRoutes('work', [
   {
-    method: 'POST', path: /^\/api\/work\/([^/]+)\/merge-(acquire|cancel|verify)$/,
+    method: 'POST', path: /^\/api\/work\/([^/]+)\/merge-(acquire|cancel|verify|commit)$/,
     async handle(context, [id, action]) {
       const { actor, services: { engine, github } } = context;
       // These routes sit above the generic work route, so their own refusal
@@ -24,6 +24,7 @@ export const workRoutes = defineRoutes('work', [
       const data = await parseJson(context, undefined, '{}'), key = context.idempotencyKey();
       if (action === 'acquire') return engine.acquireMerge(actor, id, data, key);
       if (action === 'cancel') return engine.cancelMerge(actor, id, data, key);
+      if (action === 'commit') return engine.commitMerge(actor, id, data, key);
       demand(actor.role === 'coordinator' || actor.role === 'admin', 'Coordinator permission required', 403);
       demand(github, 'GitHub integration is required for merge verification', 503);
       const work = (await engine.store.list()).find(item => item.id === id || item.key === id); demand(work?.submission, 'Submitted work item required', 404);

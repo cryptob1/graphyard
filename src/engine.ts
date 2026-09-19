@@ -3,7 +3,7 @@ import { z } from 'zod';
 import { Store, save, wakeJob } from './store.js';
 import { authorizedForProof, unauthorizedProofs } from './proof-grants.js';
 import { workspacePath, pathsOverlap, validBranch } from './workspace.js';
-import { activeLease, admin, assertReviewerProfiles, operatorCapability, escalationTriggers, MergeExecutionInProgress, raiseEscalation, releaseLeadHold, resolveEscalation, standingEscalations, requireCurrent, createSchema, criterionSchema, currentEvidence, deploySmokeProof, deploySmokeRequired, inheritedObligations, pathScopeContains, requiredProofs, resourcesSchema, demand, evaluate, exhaustedReviewerProfiles, proofSchema, reviewerProfileFor, reviewerProfileSchema, reviewProviders, reviewProviderOf, type Criterion, type Principal, type ReviewerApp, type ReviewFailover, type Work, type Observation, type ReviewRequest, type OperatorCapability } from './model.js';
+import { activeLease, admin, assertReviewerProfiles, operatorCapability, escalationTriggers, holdsMergeExecution, MergeExecutionInProgress, providerDelayAfterVerification, raiseEscalation, releaseLeadHold, resolveEscalation, standingEscalations, requireCurrent, createSchema, criterionSchema, currentEvidence, deploySmokeProof, deploySmokeRequired, inheritedObligations, pathScopeContains, requiredProofs, resourcesSchema, demand, evaluate, exhaustedReviewerProfiles, proofSchema, reviewerProfileFor, reviewerProfileSchema, reviewProviders, reviewProviderOf, type Criterion, type Principal, type ReviewerApp, type ReviewFailover, type Work, type Observation, type ReviewRequest, type OperatorCapability } from './model.js';
 import { resourceConflicts } from './coordination.js';
 import { containmentAttestation, containmentSettlementRefusals, containmentVerificationSchema } from './quarantine.js';
 import { activeEngineers, delegationLimits, implementerIdentities, leadMay, producerIndependenceRefusal, sessionKind } from './delegation.js';
@@ -57,6 +57,7 @@ const commands = {
   // The coordinator's observation of the running release covering a delivered merge. It names the
   // serving commit and where it was read; whether it is exact is derived, never asserted.
   deployment: z.object({ sha, mergeSha: sha, source: z.enum(['endpoint', 'github-deployment']), observedAt: z.iso.datetime() }).strict(),
+  revoke: z.object({ proof: proofSchema, sha, baseSha: sha, policyRevision: z.number().int().positive(), reason: z.string().trim().min(1).max(2000) }).strict(),
 } as const;
 const mergeAcquireSchema = z.object({ expectedRevision: z.number().int().positive(), sha, baseSha: sha, policyRevision: z.number().int().positive() }).strict();
 const mergeCancelSchema = z.object({ executionId: z.string().uuid(), reason: z.string().trim().min(1).max(2000) }).strict();
@@ -211,8 +212,13 @@ export class Engine {
       const containmentCleanup = ['settle', 'recover', 'autosettle'];
       const deliveredContainmentCleanup = work.stage === 'done' && containmentCleanup.includes(command);
       preserveAssignment(work); retainQuarantineFence(work);
-      if (!containmentCleanup.includes(command) && !postDeployment && work.mergeExecution && Date.parse(work.mergeExecution.expiresAt) <= now.getTime()) work.mergeExecution = null;
-      demand(!work.mergeExecution || command === 'heartbeat' || containmentCleanup.includes(command) || postDeployment, 'A merge execution is active; retry after it completes or expires');
+      if (!containmentCleanup.includes(command) && !postDeployment && work.mergeExecution && !holdsMergeExecution(work, now.getTime())) work.mergeExecution = null;
+      // Revocation is the one mutation an in-flight merge execution cannot outrun: freezing it
+      // for the execution's lifetime would leave a withdrawn proof merging against a published
+      // GitHub success check. Every other command still waits for the bounded execution — and a
+      // committed one outlives its expiry here until GitHub has answered for the provider call.
+      demand(!work.mergeExecution || command === 'heartbeat' || command === 'revoke' || containmentCleanup.includes(command) || postDeployment,
+        work.mergeExecution?.committingAt ? 'The merge broker committed this candidate to the provider; retry after GitHub reconciliation' : 'A merge execution is active; retry after it completes or expires');
       if (command !== 'create' && !containmentCleanup.includes(command) && !postDeployment) demand(work.stage !== 'done', 'Delivered work is immutable; create a follow-up task');
       if (command === 'rereview') {
         if (actor.role !== 'admin') { demand(actor.role === 'worker', 'Worker or operator required', 403); activeLease(work, actor, data.epoch, now); }
@@ -446,6 +452,35 @@ export class Engine {
         if (data.proof === deploySmokeProof) work.delivery!.smoke = { evidenceId: evidence.id, result: data.result, sha: data.sha, mergeSha: data.baseSha, producer: actor.id, at: evidence.at, executed: data.executed, skipped: data.skipped, ...(data.url ? { url: data.url } : {}) };
         if (trusted && data.policyRevision !== work.policyRevision) raiseEscalation(work, { trigger: 'evidence-policy-conflict', reason: `Evidence policy v${data.policyRevision} conflicts with current policy v${work.policyRevision}`, at: now.toISOString(), actor: actor.id });
       }
+      if (command === 'revoke') {
+        // Producer authority is the same live grant set that decides trust at submission.
+        demand(actor.role === 'admin' || actor.role === 'producer' && await authorizedForProof(db, actor, data.proof),
+          'Evidence revocation requires an operator or the trusted producer authorized for this proof', 403);
+        // Revoke every applicable record for the tuple, not merely the newest: leaving an older
+        // accepted run behind would silently re-authorize the same candidate.
+        const withdrawn = work.evidence.filter(item => item.trusted && !item.revocation && item.proof === data.proof
+          && item.sha === data.sha && item.baseSha === data.baseSha && item.policyRevision === data.policyRevision);
+        demand(withdrawn.length, 'No trusted evidence matches this proof and candidate; reload before revoking', 404);
+        const execution = work.mergeExecution
+          && work.mergeExecution.sha === data.sha
+          && work.mergeExecution.baseSha === data.baseSha
+          && work.mergeExecution.policyRevision === data.policyRevision
+          && work.criteria.some(criterion => criterion.proofs.includes(data.proof))
+          ? work.mergeExecution : null;
+        // mergeCommit is the serialization point immediately before the provider mutation.
+        // Once it wins the row lock, a withdrawal that contributed to that execution must
+        // refuse rather than falsely claim it recalled the candidate — and keeps refusing past
+        // the execution's expiry, because the committed record is retained until a GitHub
+        // observation settles the provider outcome. Historical/unrelated evidence can still be
+        // withdrawn without disturbing the current execution.
+        demand(!execution?.committingAt, 'The merge broker already committed this candidate to the provider; wait for reconciliation before revoking');
+        for (const item of withdrawn) item.revocation = { at: now.toISOString(), actor: actor.id, reason: data.reason };
+        if (execution) work.mergeExecution = null;
+        // Reuse the cancellation ledger the merge broker and delivery attribution already read,
+        // so an observed merge that lands after this instant refuses instead of completing.
+        if (execution) await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)',
+          [work.id, actor.id, 'merge.execution.cancelled', JSON.stringify({ details: { executionId: execution.id, reason: `Evidence ${data.proof} revoked: ${data.reason}` } })]);
+      }
       retainQuarantineFence(work);
       // Delivery is an immutable snapshot. A late containment cleanup or a post-deployment fact may
       // append its audit/revision metadata, but stale inputs must not re-evaluate it.
@@ -477,8 +512,8 @@ export class Engine {
         return receipt.result;
       }
       demand(work.revision === data.expectedRevision, 'Task changed before merge execution; retry');
-      if (work.mergeExecution && Date.parse(work.mergeExecution.expiresAt) <= now.getTime()) work.mergeExecution = null;
-      demand(!work.mergeExecution, 'A merge execution is already active');
+      if (work.mergeExecution && !holdsMergeExecution(work, now.getTime())) work.mergeExecution = null;
+      demand(!work.mergeExecution, work.mergeExecution?.committingAt ? 'A committed merge execution awaits GitHub reconciliation; no new execution can be granted until it is observed' : 'A merge execution is already active');
       this.evaluate(work, all, now);
       const authorization = work.mergeAuthorization;
       const age = work.observation ? now.getTime() - Date.parse(work.observation.at) : NaN;
@@ -563,8 +598,40 @@ export class Engine {
       demand(offset && Number.isFinite(offset.min) && Number.isFinite(offset.max) && offset.min <= offset.max && offset.max - offset.min <= 20_000, 'A bounded GitHub/database clock observation is required');
       execution.clockOffset = offset;
       await save(db, work, actor.id, 'merge.execution.verified', now, { executionId: execution.id, sha: execution.sha, verifiedAt: execution.verifiedAt });
-      const providerDelayMs = Math.ceil((now.getTime() + 1) / 1000) * 1000 - now.getTime() + Math.ceil(offset.max - offset.min);
-      const result = { key: work.key, executionId: execution.id, sha: execution.sha, verifiedAt: execution.verifiedAt, providerDelayMs, revision: work.revision };
+      const providerDelayMs = providerDelayAfterVerification(now.getTime(), offset);
+      const result = { key: work.key, executionId: execution.id, sha: execution.sha, verifiedAt: execution.verifiedAt, providerDelayMs, clockOffset: offset, revision: work.revision };
+      await db.query('INSERT INTO receipts(actor,key,fingerprint,result) VALUES($1,$2,$3,$4)', [actor.id, key, fingerprint, JSON.stringify(result)]);
+      return result;
+    });
+  }
+  async commitMerge(actor: Principal, id: string, input: unknown, key: string) {
+    demand(actor.role === 'coordinator' || actor.role === 'admin', 'Coordinator permission required', 403);
+    demand(key && key.length <= 200, 'An Idempotency-Key is required', 400);
+    const data = mergeVerifySchema.parse(input); const fingerprint = createHash('sha256').update(JSON.stringify({ command: 'merge.commit', id, data })).digest('hex');
+    return this.store.transaction(async (db, now) => {
+      const receipt = (await db.query('SELECT * FROM receipts WHERE actor=$1 AND key=$2', [actor.id, key])).rows[0];
+      if (receipt) {
+        demand(receipt.fingerprint === fingerprint, 'Idempotency key reused with different input');
+        const current = (await db.query('SELECT document FROM work_items WHERE id::text=$1 OR document->>\'key\'=$1', [id])).rows[0]?.document as Work | undefined;
+        demand(current?.mergeExecution?.id === data.executionId && current.mergeExecution.owner === actor.id
+          && current.mergeExecution.committingAt === receipt.result.committingAt && Date.parse(current.mergeExecution.expiresAt) > now.getTime(),
+        'Replayed merge commit is expired, cancelled, or superseded');
+        return receipt.result;
+      }
+      const all: Work[] = (await db.query('SELECT document FROM work_items ORDER BY number')).rows.map(row => row.document);
+      const work = all.find(item => item.id === id || item.key === id); demand(work, 'Work item not found', 404);
+      const execution = work.mergeExecution;
+      demand(execution?.id === data.executionId && execution.owner === actor.id && Date.parse(execution.expiresAt) > now.getTime(), 'Merge execution is missing, expired, superseded, or owned by another coordinator');
+      demand(execution.verifiedAt, 'Merge execution has not passed final verification');
+      demand(!execution.committingAt, 'Merge execution was already committed; retry with the original idempotency key');
+      this.evaluate(work, all, now);
+      demand(work.stage === 'merge' && work.gates.every(gate => gate.passed) && !work.violations.length && work.mergeAuthorization
+        && work.mergeAuthorization.sha === execution.sha && work.mergeAuthorization.baseSha === execution.baseSha
+        && work.mergeAuthorization.policyRevision === execution.policyRevision,
+      'Merge authorization changed after final verification; provider merge refused');
+      execution.committingAt = now.toISOString();
+      await save(db, work, actor.id, 'merge.execution.committed', now, { executionId: execution.id, sha: execution.sha, committingAt: execution.committingAt });
+      const result = { key: work.key, executionId: execution.id, sha: execution.sha, committingAt: execution.committingAt, revision: work.revision };
       await db.query('INSERT INTO receipts(actor,key,fingerprint,result) VALUES($1,$2,$3,$4)', [actor.id, key, fingerprint, JSON.stringify(result)]);
       return result;
     });
@@ -576,7 +643,7 @@ export class Engine {
       const all: Work[] = (await db.query('SELECT document FROM work_items ORDER BY number')).rows.map(r => r.document);
       const work = all.find(w => w.id === id);
       requireCurrent(work && work.revision === expectedRevision && work.stage !== 'done' && !work.observation?.merged, 'Task changed during review dispatch');
-      demand(!work.mergeExecution || Date.parse(work.mergeExecution.expiresAt) <= now.getTime(), 'Merge execution is active');
+      demand(!holdsMergeExecution(work, now.getTime()), 'Merge execution is active');
       const provider = reviewProviderOf(work.policy);
       demand(work.policy.review && (request.provider ?? 'codex') === provider && ['codex', 'agent'].includes(provider)
         && request.sha === work.candidate?.sha && request.baseSha === work.candidate?.baseSha && request.policyRevision === work.policyRevision, 'Review request candidate or policy changed');
@@ -600,7 +667,7 @@ export class Engine {
       const all: Work[] = (await db.query('SELECT document FROM work_items ORDER BY number')).rows.map(r => r.document);
       const work = all.find(w => w.id === id);
       requireCurrent(work && work.revision === expectedRevision && work.stage !== 'done' && !work.observation?.merged, 'Task changed while the speculative tip was built');
-      demand(!work.mergeExecution || Date.parse(work.mergeExecution.expiresAt) <= now.getTime(), 'Merge execution is active');
+      demand(!holdsMergeExecution(work, now.getTime()), 'Merge execution is active');
       requireCurrent(work.queue && speculation.policyRevision === work.policyRevision, 'Queue entry or policy changed while the speculative tip was built');
       work.queue!.speculation = speculation;
       work.queueHistory = [...(work.queueHistory ?? []), { at: now.toISOString(), event: 'predicted' as const, sequence: work.queue!.sequence, tip: speculation.tip }].slice(-queueHistoryLimit);
@@ -641,7 +708,7 @@ export class Engine {
       const all: Work[] = (await db.query('SELECT document FROM work_items ORDER BY number')).rows.map(r => r.document);
       const work = all.find(w => w.id === id);
       requireCurrent(work && work.revision === expectedRevision && work.stage !== 'done' && !work.observation?.merged, 'Task changed during review failover');
-      demand(!work.mergeExecution || Date.parse(work.mergeExecution.expiresAt) <= now.getTime(), 'Merge execution is active');
+      demand(!holdsMergeExecution(work, now.getTime()), 'Merge execution is active');
       const request = work.reviewRequest;
       demand(work.policy.review && reviewProviderOf(work.policy) === 'agent' && request?.provider === 'agent'
         && request.sha === work.candidate?.sha && request.baseSha === work.candidate?.baseSha && request.policyRevision === work.policyRevision,
@@ -681,11 +748,13 @@ export class Engine {
         if (work.stage === 'done') continue;
         const before = JSON.stringify(work);
         preserveAssignment(work); retainQuarantineFence(work);
-        const executing = !!work.mergeExecution && Date.parse(work.mergeExecution.expiresAt) > now.getTime();
+        const executing = holdsMergeExecution(work, now.getTime());
         const leaseLost = !!work.lease && Date.parse(work.lease.expiresAt) <= now.getTime();
         // An in-flight merge execution defers reconciliation, but never a lease
         // loss: that escalation must reach the record and fence the execution
-        // rather than wait for it, so delivery cannot outrun the concern.
+        // rather than wait for it, so delivery cannot outrun the concern. A
+        // committed execution is retired only by the GitHub observation that
+        // settles its provider outcome, never by reconciliation.
         if (executing && !leaseLost) continue;
         if (!executing && work.mergeExecution) work.mergeExecution = null;
         if (leaseLost) {
@@ -709,8 +778,14 @@ export class Engine {
       const all: Work[] = (await db.query('SELECT document FROM work_items ORDER BY number')).rows.map(r => r.document);
       const work = all.find(w => w.id === id);
       requireCurrent(work && work.revision === expectedRevision, 'Task changed while GitHub was being observed; retry');
-      const activeExecution = work.mergeExecution && Date.parse(work.mergeExecution.expiresAt) > now.getTime() ? work.mergeExecution : null;
+      const execution = work.mergeExecution ?? null;
+      const activeExecution = execution && Date.parse(execution.expiresAt) > now.getTime() ? execution : null;
       if (activeExecution && (!observation.merged || observation.candidate.sha !== activeExecution.sha || observation.candidate.baseSha !== activeExecution.baseSha)) throw new MergeExecutionInProgress('Merge execution is active; reconciliation is deferred unless GitHub observes its matching merge');
+      // A committed execution outlives its expiry on the record. Only an observation taken after
+      // the authority lapsed can rule the provider merge out: an earlier unmerged reading leaves
+      // the in-flight call unresolved, so the record stays frozen and revocation stays refused.
+      if (execution?.committingAt && !activeExecution && !observation.merged && !(Date.parse(observation.at) >= Date.parse(execution.expiresAt)))
+        throw new MergeExecutionInProgress('Committed merge execution awaits an observation taken after its authority expired; reconciliation is deferred');
       demand(work.submission?.pr === observation.candidate.pr, 'Unassigned pull request');
       demand(work.workspaces.some(w => w.epoch === work.submission!.epoch && w.branch === observation.candidate.branch), 'PR branch does not match the assigned workspace');
       if (work.stage === 'done') return work;
@@ -732,7 +807,7 @@ export class Engine {
         const providerMergedTime = Date.parse(observation.mergedAt);
         // Never allow evidence from after the earliest possible merge instant.
         // Whole-second timestamps can therefore conservatively refuse same-second authorization.
-        const acquired = (await db.query("SELECT payload->'work'->'mergeExecution' AS execution FROM events WHERE work_id=$1 AND kind IN ('merge.execution.acquired','merge.execution.verified') ORDER BY seq DESC LIMIT 1", [id])).rows[0]?.execution as Work['mergeExecution'] | undefined;
+        const acquired = (await db.query("SELECT payload->'work'->'mergeExecution' AS execution FROM events WHERE work_id=$1 AND kind IN ('merge.execution.acquired','merge.execution.verified','merge.execution.committed') ORDER BY seq DESC LIMIT 1", [id])).rows[0]?.execution as Work['mergeExecution'] | undefined;
         const boundedExecution = activeExecution ?? acquired ?? null;
         const offset = boundedExecution?.clockOffset;
         const mergedTime = providerMergedTime + (offset?.min ?? 0);
@@ -753,8 +828,10 @@ export class Engine {
           cancelledExecution = !!cancellation && cancellation.getTime() < cutoff;
         }
         const executionValid = !!boundedExecution && !!offset && !cancelledExecution && boundedExecution.sha === observation.candidate.sha && boundedExecution.baseSha === observation.candidate.baseSha
-          && !!boundedExecution.verifiedAt && Date.parse(boundedExecution.issuedAt) <= Date.parse(boundedExecution.verifiedAt)
-          && Date.parse(boundedExecution.verifiedAt) < mergedTime && cutoff <= Date.parse(boundedExecution.expiresAt);
+          && !!boundedExecution.verifiedAt && !!boundedExecution.committingAt
+          && Date.parse(boundedExecution.issuedAt) <= Date.parse(boundedExecution.verifiedAt)
+          && Date.parse(boundedExecution.verifiedAt) <= Date.parse(boundedExecution.committingAt)
+          && Date.parse(boundedExecution.committingAt) < mergedTime && cutoff <= Date.parse(boundedExecution.expiresAt);
         if (activeExecution && executionValid && work.mergeAuthorization
           && activeExecution.sha === observation.candidate.sha && activeExecution.baseSha === observation.candidate.baseSha
           && activeExecution.policyRevision === work.policyRevision && work.mergeAuthorization.sha === activeExecution.sha
@@ -798,6 +875,10 @@ export class Engine {
           work.mergeExecution = null;
           if (!work.violations.includes(violation)) work.violations.push(violation);
         }
+      } else if (execution && !activeExecution) {
+        // GitHub answered for the lapsed authority: the pull request is still unmerged after it
+        // expired, so the execution — committed or not — is reconciled and the record reopens.
+        work.mergeExecution = null;
       }
       await save(db, work, 'github', 'github.observed', now);
       return work;

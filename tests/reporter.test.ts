@@ -6,6 +6,8 @@ import { validateReport, validateArtifactProvenance, observeArtifactProvenance, 
 import { createInventory, requiredCases } from '../scripts/acceptance-contract.mjs';
 // @ts-expect-error Dependency-free protected workflow script.
 import { requiredCases as recoveryCases, createInventory as createRecoveryInventory } from '../scripts/herdr-recovery-contract.mjs';
+// @ts-expect-error Dependency-free protected workflow script.
+import { requiredCases as mergeAuthorizationCases } from '../scripts/merge-authorization-contract.mjs';
 const expected = { repository: 'owner/repo', workId: '00000000-0000-4000-8000-000000000001', pr: 1, policyRevision: 1, runId: '123', runAttempt: '2', harnessCommit: 'c'.repeat(40) };
 const report = () => ({ ...expected, schema: 1, proof: 'integration:claim-safety', result: 'pass', sha: 'a'.repeat(40), baseSha: 'b'.repeat(40), testedTree: 'd'.repeat(40), cases: requiredCases.map((id: string) => ({ id, result: 'pass' })), executed: 5, skipped: 0 });
 const provenance = { provider: 'github-actions', repository: expected.repository, workflowCommit: expected.harnessCommit, runId: expected.runId, runAttempt: 2, artifact: { id: 45, name: 'graphyard-acceptance', digest: `sha256:${'d'.repeat(64)}`, url: 'https://api.github.com/repos/owner/repo/actions/artifacts/45/zip', createdAt: '2026-09-16T12:00:00Z' } };
@@ -125,6 +127,17 @@ test('each proof is validated against its own protected inventory', () => {
   const partial = { ...recovery, result: 'fail', cases: ledger.cases, executed: ledger.executed, skipped: ledger.skipped };
   assert.doesNotThrow(() => validateReport(partial, expected));
   assert.throws(() => validateReport({ ...partial, proof: 'integration:claim-safety' }, expected), /inventory is incomplete/);
+});
+test('the merge-authorization proof is validated against its own registered inventory', () => {
+  const pinned = { ...expected, proof: 'integration:merge-authorization' };
+  const merge = () => ({ ...report(), ...pinned, cases: mergeAuthorizationCases.map((id: string) => ({ id, result: 'pass' })), executed: mergeAuthorizationCases.length });
+  assert.equal(mergeAuthorizationCases.length, 8);
+  assert.doesNotThrow(() => validateReport(merge(), pinned));
+  // A claim-safety inventory cannot be relabelled as the merge-authorization proof, and a proof
+  // the registry does not carry is never publishable whatever inventory it carries.
+  assert.throws(() => validateReport({ ...merge(), cases: requiredCases.map((id: string) => ({ id, result: 'pass' })), executed: requiredCases.length }, pinned), /inventory is incomplete/);
+  assert.throws(() => validateReport(report(), pinned), /does not match this trusted run/);
+  assert.throws(() => validateReport({ ...merge(), proof: 'integration:ci-inventory' }, { ...pinned, proof: 'integration:ci-inventory' }), /Unknown trusted acceptance proof/);
 });
 test('reporter binds evidence to the observed candidate and forwards failures instead of retaining a stale pass', async () => {
   const work = { id: expected.workId, stage: 'acceptance', policyRevision: 1, candidate: { pr: 1, sha: 'a'.repeat(40), baseSha: 'b'.repeat(40) } };
