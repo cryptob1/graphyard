@@ -1,5 +1,6 @@
 import { test, expect, type Page } from '@playwright/test';
 import { computeFlow, deriveFacts, flowDrilldown, flowExport, type FlowDataset, type FlowFact, type LedgerEvent, type ProjectionState } from '../src/flow-analytics';
+import { computeAttribution, type AttributionDataset } from '../src/attribution';
 import type { Work } from '../src/model';
 
 // Browser-only fixtures. The report is computed by the real aggregation from synthetic
@@ -88,6 +89,11 @@ async function fixture(page: Page, role = 'admin', mutate: (report: any) => any 
   await page.route('**/api/**', async route => {
     const url = new URL(route.request().url());
     if (route.request().headers().authorization !== 'Bearer browser-fixture') return route.fulfill({ status: 401, json: { error: 'Rejected' } });
+    // The Attribution section of the same page reads its own endpoint; browser-tests/attribution.spec.ts exercises it.
+    if (url.pathname.startsWith('/api/analytics/attribution')) {
+      const empty: AttributionDataset = { observedAt: new Date(observedAt).toISOString(), from: new Date(observedAt - 30 * day).toISOString(), to: new Date(observedAt).toISOString(), days: 30, records: [], recordsTruncated: false, requests: [], requestsTruncated: false, environments: {}, blockedNow: [] };
+      return route.fulfill({ json: url.pathname.endsWith('/drilldown') ? { rows: [], columns: [], total: 0, truncated: false } : computeAttribution(empty) });
+    }
     if (url.pathname.startsWith('/api/analytics/flow')) {
       state.queries.push(url.search);
       if (state.delay) await new Promise(resolve => setTimeout(resolve, 600));

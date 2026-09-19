@@ -5,7 +5,8 @@ import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 import { startGithubSetup } from '../github-setup.js';
 import { resourceConflicts } from '../coordination.js';
-import { assertMasterBinding, assessContainment, buildMasterStatus, continueMergeBatch, currentMergeCandidates, dispatchWork, inspectWorkerCredentials, listHerdrAgents, loadMasterConfig, masterHarness, mergeExecutor, observeHerdrAgents, readCredentialFile, readWorkerCredential, saveWorkerProfile, setupMaster, snapshotWithClock, startMaster, verifyContainmentDeath, workerProfileSchema } from '../master.js';
+import { assertMasterBinding, assessContainment, buildMasterStatus, continueMergeBatch, currentMergeCandidates, dispatchWork, inspectWorkerCredentials, listHerdrAgents, loadMasterConfig, masterHarness, mergeExecutor, mergeProtocolSkew, observeHerdrAgents, readCredentialFile, readWorkerCredential, saveWorkerProfile, setupMaster, snapshotWithClock, startMaster, verifyContainmentDeath, workerProfileSchema } from '../master.js';
+import { cliCommit } from '../protocol-version.js';
 import { daemonEffects, daemonSummary, readDaemonState, runDaemon } from '../master-daemon.js';
 import { verificationEffects, verifyDeployment } from '../master-verification.js';
 import { bindReviewer, launchReview, readReviewLedger, reconcileReviews, reviewerCredentialDirectory, saveReviewerProfile, summarizeReviews, verifyReviewerInstallation } from '../reviewer.js';
@@ -81,6 +82,9 @@ export const masterCommands = defineCommands([
         const result = await response.json(); if (!response.ok) { const error = new Error(JSON.stringify(result)); (error as any).confirmedRefusal = response.status >= 400 && response.status < 500; throw error; } return result;
       };
       const coordinator = await masterApi('status'); assertMasterBinding(master, coordinator);
+      // The CLI's own commit, for the version-skew guard: the checkout this file runs from.
+      const cli = { commit: cliCommit(fileURLToPath(new URL('../..', import.meta.url))) };
+      const assertProtocol = (status: any) => { const skew = mergeProtocolSkew(status, cli); if (skew) throw new Error(skew); };
       if (id === 'start') {
         const kind = workerProfileSchema.shape.kind.safeParse(args[0]); if (!kind.success) throw new Error('Use master start with a supported agent kind such as codex or claude');
         const separator = args.indexOf('--'); const agentArgs = separator < 0 ? [] : args.slice(separator + 1);
@@ -154,6 +158,7 @@ export const masterCommands = defineCommands([
         // the one thing the operator must act on, and the recent ledger entries say who changed what.
         const administration = { browser: master.browser ? { profile: master.browser.profile } : null, ...summarizeAdministration((await readAdministrationLedger(root)).entries, await readSudoState(root)) };
         return print({ ...buildMasterStatus(snapshot, master.workers, runtime.agents, credentials, containment, reviews, master.baseBranch, coordinator), autoMerge: master.autoMerge, mergeApproval: master.autoMerge ? 'routine merges permitted after gates pass' : 'explicit operator approval required for each merge',
+          versionSkew: mergeProtocolSkew(coordinator, cli), cli,
           reviewer: master.reviewer ? { identity: `${master.reviewer.slug}[bot]`, appId: master.reviewer.appId, profiles: master.reviewers.map(profile => profile.name) } : null,
           administration, daemon, runtime: { herdr: { available: runtime.available, reason: runtime.reason }, reviews: reviewRuntime } });
       }
@@ -191,6 +196,9 @@ export const masterCommands = defineCommands([
       }
       if (id === 'merge') {
         if (!args[0]) throw new Error('Use master merge GY-N or master merge --all');
+        // Skew is refused before any candidate is read, so a server that has not deployed the
+        // CLI's protocol is reported as such rather than as an invalid gate verification.
+        assertProtocol(coordinator);
         const snapshot = await masterApi('work-snapshot');
         const selected = args[0] === '--all' ? currentMergeCandidates(snapshot.work, snapshot.now, coordinator.actor.id) : snapshot.work.filter((item: any) => item.id === args[0] || item.key === args[0]);
         if (!selected.length) throw new Error(args[0] === '--all' ? 'No work has a current all-gates-passing merge authorization' : `Unknown work item ${args[0]}`);
@@ -216,8 +224,12 @@ export const masterCommands = defineCommands([
         // loop satisfy a gate it is supposed to be waiting on.
         if (coordinator.actor.role !== 'coordinator') throw new Error('The durable master loop requires a coordinator credential; operator, producer, and worker credentials are refused');
         if (coordinator.actor.proofs?.length) throw new Error('The durable master loop refuses a credential that is also allowed to produce evidence');
+        assertProtocol(coordinator);
         const state = await readDaemonState(root, master);
         const effects = daemonEffects(root, master, { snapshot: () => masterApi('work-snapshot'), mutate: masterMutation, executionOwner: coordinator.actor.id });
+        // The loop outlives deployments: every guarded merge re-reads the server's protocol first.
+        const guardedMerge = effects.merge;
+        effects.merge = async work => { assertProtocol(await masterApi('status')); return guardedMerge(work); };
         const result = await runDaemon(master, state, effects, { once: values.once, intervalMs: intervalSeconds * 1000, identity: { pid: process.pid, host: master.hostId } });
         return print({ repository: master.repository, coordinator: coordinator.actor.id, intervalSeconds, cycles: result.cycles.length, stopped: result.stopped ? 'signal' : 'completed', last: result.cycles.at(-1) ?? null });
       }

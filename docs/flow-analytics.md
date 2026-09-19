@@ -9,7 +9,11 @@ facts. No number on this surface comes from a client claim, and no aggregate is 
 person.
 
 Open it from the control plane sidebar (**Flow analytics**) or read it from
-`GET /api/analytics/flow`.
+`GET /api/analytics/flow`. The same page carries the **Attribution** section — target
+mismatches, paid runs avoided, re-anchoring, signature regeneration, immutable-preview share and
+cost accounting for validation requests, read from `GET /api/analytics/attribution` and
+documented in [candidate-to-deployment attribution](attribution.md#metrics). It shares the
+page's window filter and has its own coverage, exclusions, states and drill-downs.
 
 ## What establishes a fact
 
@@ -265,6 +269,8 @@ returns the same rows in the same order.
 | `GET /api/analytics/flow` | The full report for a window and filter |
 | `GET /api/analytics/flow/drilldown` | Bounded underlying records for one metric |
 | `GET /api/analytics/flow/export` | The same bounded records as deterministic CSV or JSON |
+| `GET /api/analytics/attribution` | The [attribution](attribution.md#metrics) report for a window |
+| `GET /api/analytics/attribution/drilldown` | Bounded underlying attribution records for one metric |
 | `GET /api/deployments` | The latest recorded deployment observations |
 | `POST /api/deployments` | Record one deployment-provider observation |
 

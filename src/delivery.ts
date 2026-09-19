@@ -5,6 +5,7 @@ import type pg from 'pg';
 import { admin, demand, type Principal, type ReleaseDelivery, type Work } from './model.js';
 import { save } from './store.js';
 import { deliveryPolicy, type Environment, type Registration, type RollbackFencing, type Validation } from './validation.js';
+import { digestHash } from './attribution.js';
 
 const name = z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9._/-]*$/).max(150);
 const digest = z.string().regex(/^sha256:[a-f0-9]{64}$/);
@@ -86,7 +87,8 @@ export interface EnvironmentDelivery {
 const hash = (v: unknown) => createHash('sha256').update(JSON.stringify(v)).digest('hex');
 const same = isDeepStrictEqual;
 // Canonical: jsonb reorders object keys, so hash ordered tuples rather than stored objects.
-const manifestHash = (manifest: { service: string; digest: string }[]) => hash([...manifest].sort((a, b) => a.service.localeCompare(b.service)).map(a => [a.service, a.digest]));
+// This is the content address src/attribution.ts matches observed targets against.
+const manifestHash = digestHash;
 export const historyLimit = 100, incidentLimit = 100, segmentLimit = 200, leaseMs = 60_000;
 
 /** Union of intervals: merge every pair that overlaps or touches, keep the newest when bounded. */
@@ -561,6 +563,9 @@ export class Delivery {
       const observation: DeploymentObservation = { ...data, id: randomUUID(), observer: actor.id, generation: state.generation, authoritative: !rejection.length, rejection, receivedAt: now.toISOString(), states };
       await db.query('INSERT INTO delivery_observations(id,environment_id,registration_id,snapshot_id,document,received_at) VALUES($1,$2,$3,$4,$5,$6)', [observation.id, data.environment.id, registration.id, data.snapshotId, JSON.stringify(observation), now]);
       await this.event(db, actor.id, rejection.length ? 'observation-rejected' : 'observed', { observationId: observation.id, environment: data.environment.id, generation: state.generation, snapshotId: data.snapshotId, rejection, states });
+      // An authoritative observation is also what validation requests on this environment are
+      // attributed against: a moved target re-anchors them, a contradicted pass is undermined.
+      if (observation.authoritative) await this.validation.reanchoring.observed(db, observation, actor.id, now);
       return { id: observation.id, authoritative: observation.authoritative, rejection, duplicate: false, receivedAt: observation.receivedAt };
     });
   }
