@@ -15,11 +15,11 @@
 | `src/onboarding.ts`, `src/github-setup.ts` | Repository discovery and local GitHub App registration |
 | `scripts/contracts.mjs`, `scripts/*contract*.mjs`, `scripts/*acceptance*.mjs` | Trusted contract registry, protected HTTP harnesses, and separate evidence publisher |
 | `scripts/protect-github.mjs`, `scripts/verify-enforcement.mjs` | Bind the App-owned check; inspect live merge enforcement read-only |
-| `scripts/check-docs.mjs` | Link, anchor and generated-index check for the guides (`npm run docs:check`) |
+| `scripts/check-docs.mjs` | Link and anchor check for the guides, and the generator of the two index pages (`npm run docs:check`, `--write`, `--manifest`) |
 | `web/main.tsx` → `web/pages/` | The dashboard shell; one page component per view, the sidebar generated from `web/pages/index.tsx` |
 | `integrations/herdr/` | Native Herdr ledger pane and open action |
 | `tests/` | Real Postgres integration and HTTP tests; `tests/hotspots.test.ts` guards the layout below |
-| `docs/` | Guides, the [glossary](glossary.md), and the rendered diagrams under `docs/diagrams/` (regenerate with `node scripts/render-docs-diagrams.mjs`); `docs/protocol/` is one page per protocol topic; `npm run docs:check` verifies links, anchors, generated indexes, and diagram files |
+| `docs/` | Guides, the [glossary](glossary.md), and the rendered diagrams under `docs/diagrams/` (regenerate with `node scripts/render-docs-diagrams.mjs`); `docs/protocol/` is one page per protocol topic; `docs/README.md` and `docs/protocol.md` are generated in full; `npm run docs:check` verifies links, anchors, generated indexes, and diagram files |
 
 ## Where a new feature goes
 
@@ -32,9 +32,10 @@ Every feature used to edit the same six files, so every merge made every other o
 | A schema, type or gate rule | The concern module under `src/model/` (`policy`, `work`, `evidence`, `review`, `escalation`, `delegation`, `delivery`, `bootstrap`, `gates`, `queue`). Existing imports from `src/model.ts` keep working through the barrel. | Grow `src/model.ts` past its barrel |
 | A table | A `defineTable` in the concern's module under `src/store/tables/` (or a new module spread into `tables` in `src/store/schema.ts`). The migration, `ledgerTables`, export order and sequences are derived from it, so a backup can never miss a table. | Hand-edit `migration` or a table list |
 | A dashboard view | One page component under `web/pages/` and one entry in `views` in `web/pages/index.tsx`; the sidebar and main pane render from that list. | Add a branch to `web/main.tsx` |
-| A protocol topic | One page under `docs/protocol/` with a `<!-- page: Agent protocol \| N \| summary -->` first line, then `npm run docs:check -- --write` to regenerate the index in `docs/protocol.md`. Other guides declare their `docs/README.md` section the same way. | Edit the generated index blocks by hand |
+| A protocol topic | One page under `docs/protocol/` with a `<!-- page: Agent protocol \| N \| summary -->` first line, then `npm run docs:check -- --write` to regenerate `docs/protocol.md`. Other guides declare their `docs/README.md` section the same way. Both index pages are generated in full (their prose lives in `scripts/check-docs.mjs`); `graphyard sync` regenerates them on a merge conflict, and the regression guard exempts them once the deployment sets `GRAPHYARD_GENERATED_FILES` to the paths `scripts/check-docs.mjs --manifest` prints, so an item that adds a page does not need the index in its `plannedFiles`. | Edit a generated index page by hand, or put its path in `plannedFiles` |
+| Text in the managed `AGENTS.md` blocks | The template in `src/repository-setup.ts` (`managedInstructions`) or `src/master.ts` (`managedMasterInstructions`), then re-render `AGENTS.md` and commit both; `tests/generated-index.test.ts` fails while the committed blocks differ from the templates, so a stale `AGENTS.md` never reaches main and no unrelated PR has to regenerate it. | Commit an `AGENTS.md` regeneration from another CLI version |
 
-`tests/hotspots.test.ts` enforces this: each assembler has a line and byte size budget, every command, route, table and page module must be reachable from its registry, and the docs indexes must be current. Raise a budget only together with a further split.
+`tests/hotspots.test.ts` enforces this: each assembler has a line and byte size budget, every command, route, table and page module must be reachable from its registry, and the generated index pages must be current. Raise a budget only together with a further split.
 
 ## Validate a change
 

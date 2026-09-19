@@ -1046,8 +1046,9 @@ test('master run executes the durable loop as a supervised process and master st
 test('sync merges origin/BASE without rebasing, passes in-scope and new files, and refuses every out-of-scope file that no longer matches the base', async () => {
   const cwd = await mkdtemp(join(tmpdir(), 'graphyard-sync-'));
   const http = createServer((req, res) => { res.setHeader('Content-Type', 'application/json');
+    const task = { id: 'task', key: 'GY-1', plannedFiles: ['src/scoped/', 'tests/'], workspaces: [{ epoch: 1, host: 'machine-a', path: cwd, branch: 'graphyard/gy-1-1' }] };
     res.end(JSON.stringify(req.url === '/api/status' ? { baseBranch: 'main', repository: 'owner/project', actor: { id: 'worker-a', role: 'worker' } }
-      : [{ id: 'task', key: 'GY-1', plannedFiles: ['src/scoped/', 'tests/'], workspaces: [{ epoch: 1, host: 'machine-a', path: cwd, branch: 'graphyard/gy-1-1' }] }])); });
+      : req.url === '/api/work-snapshot' ? { now: new Date().toISOString(), work: [task] } : [task])); });
   await new Promise<void>(r => http.listen(0, '127.0.0.1', r));
   const env = { ...process.env, GRAPHYARD_TOKEN: 'fixture', GRAPHYARD_URL: `http://127.0.0.1:${(http.address() as any).port}` };
   const origin = join(cwd, 'origin'), clone = join(cwd, 'clone');
@@ -1086,7 +1087,7 @@ test('sync merges origin/BASE without rebasing, passes in-scope and new files, a
     // A conflicting base change stops before any scope verdict; nothing is rebased or resolved for the worker.
     await writeFile(join(origin, 'src/scoped/feature.ts'), 'feature from main\n'); await commit(origin, 'Conflicting change');
     const conflicted = await refusal();
-    assert.equal(conflicted.merged, false); assert.deepEqual(conflicted.conflicts, ['src/scoped/feature.ts']); assert.match(conflicted.next, /Resolve each conflict/);
+    assert.equal(conflicted.merged, false); assert.deepEqual(conflicted.conflicts, [{ path: 'src/scoped/feature.ts', generated: false, shippedBy: [], landedSince: false }]); assert.deepEqual(conflicted.regenerated, []); assert.match(conflicted.next, /Resolve each remaining conflict/);
     await git(clone, 'merge', '--abort');
     await git(clone, 'checkout', '-q', '-b', 'graphyard/gy-9-1');
     await assert.rejects(sync(), /not one/);

@@ -74,10 +74,17 @@ worker must claim the item under its own identity and use the assigned worktree.
 Treat prompt delivery as an invitation, never as ownership. Use durable handoffs
 when an agent, provider account, machine, or context window changes.
 
-Independent review is launched, never performed by the master:
-`graphyard master review GY-N [PROFILE]` verifies the exact candidate, launches the
-bound reviewer identity read-only, and `master status` closes that session when the
-verdict lands. Never approve a candidate yourself. Reconcile branch protection with
+Review and proof collection start on their own. When a candidate passes the build gate
+the control plane records a review request and one producer request per proof group,
+each bound to the exact head, base and policy revision, and `graphyard master run`
+launches the configured reviewer profile and a producer session for each of them within
+30 seconds, without a keystroke. A head change cancels those sessions and requests the
+new head afresh unless the merge queue carried the approval or the proof. You handle
+findings, rework and merges; you never launch reviews or producers by hand. `master
+status` shows, per candidate, what is requested, what is running and since when, and
+any launch the loop refused; `graphyard master review GY-N [PROFILE]` is the recovery
+path for a refused reviewer launch once its cause is fixed. Never approve a candidate
+yourself, and never submit evidence. Reconcile branch protection with
 `graphyard master protection` after any review-policy change.
 
 GitHub administration of the managed repository is yours, not the operator's:
