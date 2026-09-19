@@ -219,7 +219,7 @@ test('master withdraw takes back the master\'s own request through the decide ro
   const decisionId = randomUUID();
   const now = () => new Date().toISOString();
   const item = { id: 'blocked-1', key: 'GY-70', title: 'Needs an operator', stage: 'ready', ready: true, blocker: null, priority: 1, epoch: 0, dependencies: [], criteria: [{ id: 'AC-1', text: 'Proven', proofs: ['integration:loop'] }], policy: { checks: ['test'], review: true }, plannedFiles: [], workspaces: [], evidence: [], gates: [], violations: [], createdAt: now(), updatedAt: now(), stageEnteredAt: now(), lease: null, candidate: null, submission: null, reworkRequested: false, scenarioRequirements: [], observation: null, revision: 12, policyRevision: 1 };
-  const decisions = [{ id: decisionId, workId: item.id, action: 'release', input: { expectedRevision: 11 }, reason: 'Next by priority', requestedBy: 'master-operator', requestedAt: now(), state: 'stale', approvedBy: null, approvedAt: null, approvalReason: null, outcome: 'Task revision changed (now 12); reload and request again; the decision was not applied', refusals: [], race: { expected: { revision: 11 }, current: { revision: 12 } } }];
+  const decisions: any[] = [{ id: decisionId, workId: item.id, action: 'release', input: { expectedRevision: 11 }, reason: 'Next by priority', requestedBy: 'master-operator', requestedAt: now(), state: 'stale', approvedBy: null, approvedAt: null, approvalReason: null, outcome: 'Task revision changed (now 12); reload and request again; the decision was not applied', refusals: [], race: { expected: { revision: 11 }, current: { revision: 12 } } }];
   let withdrawalBody: any, authorization = '';
   const stub = createServer((req, res) => {
     res.setHeader('Content-Type', 'application/json');
@@ -258,6 +258,22 @@ test('master withdraw takes back the master\'s own request through the decide ro
     assert.ok(attention, 'the stale decision raises master attention');
     assert.equal(attention.role, 'master'); assert.equal(attention.approvedBy, 'approver');
     assert.match(attention.next, /graphyard master decide GY-70 release .*graphyard master approver GY-70 DECISION/);
+    // A later decision of the same action supersedes the stale one: it stays listed for the
+    // record but raises no attention, so the loop is never told to re-request an action that
+    // already moved on.
+    const again = { ...decisions[0], id: randomUUID(), state: 'applied', outcome: 'Released to ready', race: null };
+    decisions.push(again);
+    const superseded = JSON.parse((await exec(process.execPath, [launcher, 'master', 'status'], { cwd: root, env })).stdout);
+    assert.deepEqual(superseded.terminalDecisions.map((entry: any) => entry.id), [decisionId], 'the stale decision stays listed for the record');
+    assert.equal(superseded.attentionItems.some((entry: any) => entry.subject === 'GY-70' && entry.text.includes('is stale')), false, 'a superseded stale decision raises no attention');
+    // When the later decision goes stale too, it is the one that raises attention: the latest
+    // decision for the action, not every stale one in the history.
+    decisions[1] = { ...again, state: 'stale', outcome: 'Task revision changed (now 13); reload and request again; the decision was not applied', race: { expected: { revision: 12 }, current: { revision: 13 } } };
+    const raised = JSON.parse((await exec(process.execPath, [launcher, 'master', 'status'], { cwd: root, env })).stdout);
+    assert.deepEqual(raised.terminalDecisions.map((entry: any) => entry.id), [decisionId, again.id]);
+    const staleAttention = raised.attentionItems.filter((entry: any) => entry.subject === 'GY-70' && entry.text.includes('is stale'));
+    assert.equal(staleAttention.length, 1, 'only the latest stale decision for the action raises attention');
+    assert.ok(staleAttention[0].text.includes(again.id), 'attention names the latest stale decision, not the superseded one');
   } finally {
     await new Promise<void>(resolve => stub.close(() => resolve()));
     await rm(root, { recursive: true, force: true }); await rm(credentialDirectory, { recursive: true, force: true });
