@@ -18,7 +18,8 @@ import { proofPreview } from '../src/coordination.js';
 import { setTimeout as delay } from 'node:timers/promises';
 import { GitHubPermissionRefusal, installationFingerprint, permissionHoldMs, permissionRefusalLimit, processJob, type AppPermissionReport, type GitHub } from '../src/github.js';
 import { acknowledgeContainment, containmentGraceMs, isConfirmedCoordinationRefusal } from '../src/quarantine.js';
-import { probeSupervisorAbsence, supervise } from '../src/supervisor.js';
+import { supervise } from '../src/supervisor.js';
+import { probeSupervisorAbsence } from '../src/containment-probe.js';
 import { assertDispatchable, assessContainment, buildMasterStatus, snapshotWithClock } from '../src/master.js';
 // @ts-expect-error The trusted runner intentionally uses dependency-free JavaScript outside the candidate source.
 import { exercise } from '../scripts/acceptance-contract.mjs';
@@ -253,7 +254,7 @@ async function quarantinedByDeadSupervisor(hostId = 'coordinator-host') {
   return { work: (await store.list()).find(item => item.id === w.id)!, settlementHash, settlementToken, path, hostId };
 }
 const deadProbe = (workspacePath: string, overrides: Partial<ReturnType<typeof probeSupervisorAbsence>> = {}) => () =>
-  ({ method: 'linux-proc-systemd' as const, platform: 'linux', uid: 1000, workspacePath, processes: [], scopes: [], inaccessible: 0, unverifiable: [], ...overrides });
+  ({ method: 'linux-proc-systemd' as const, platform: 'linux', uid: 1000, workspacePath, processes: [], scopes: [], held: [], recordedScope: null, inaccessible: 0, unverifiable: [], ...overrides });
 
 test('master status verifies supervisor death on the registered host and the coordinator settles it with recorded evidence', async () => {
   const { work, settlementHash, path, hostId } = await quarantinedByDeadSupervisor();
