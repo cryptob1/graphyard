@@ -2,13 +2,15 @@ import { createHash, createPublicKey, randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { isDeepStrictEqual } from 'node:util';
 import type pg from 'pg';
-import { admin, demand, proofSchema, Refusal, type EvidenceArtifact, type Principal, type Work } from './model.js';
+import { admin, demand, proofSchema, Refusal, type Evidence, type EvidenceArtifact, type Principal, type Work } from './model.js';
 import { save, wakeJob } from './store.js';
 import { authorizedForEveryProof, authorizedForProof } from './proof-grants.js';
 import { Engine } from './engine.js';
 import { producerIndependenceRefusal } from './delegation.js';
 import type { Scenario } from './scenarios.js';
 import { defaultArtifactCapacityBytes, type ArtifactBackend } from './artifacts.js';
+import { appendAttribution, candidateManifest, compatibilitySignature, signatureDifferences, type TargetIdentity, type SignatureComponent } from './attribution.js';
+import { Reanchoring, TargetMismatchRefusal, type RequestAttribution } from './reanchor.js';
 
 const name = z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9._/-]*$/).max(150);
 const digest = z.string().regex(/^sha256:[a-f0-9]{64}$/);
@@ -24,7 +26,10 @@ export const definitionSchema = z.discriminatedUnion('kind', [
   // `delivery` is the environment's release policy: how recent a verified common interval
   // must be, and whether selecting an expected release needs a separate operator approval.
   // Absent, the defaults are the conservative ones.
-  z.object({ ...base, kind: z.literal('environment'), repository: z.string().regex(/^[\w.-]+\/[\w.-]+$/), url: z.url().max(2000).refine(s => { const u = new URL(s); return u.protocol === 'https:' && !u.username && !u.password && !u.hash && !u.search; }, 'Use HTTPS without credentials, query or fragment'), instance: name, immutable: z.literal(true), services: resourceNames, resources: resourceNames, delivery: z.object({ freshnessSeconds: z.number().int().min(30).max(86_400), approvalRequired: z.boolean(), automaticRollback: z.boolean().optional() }).strict().optional() }).strict(),
+  // `immutable: false` declares shared staging: a target other candidates and releases move
+  // under a request. Such a target may only execute once an observer has independently
+  // measured it running the candidate manifest; an immutable preview needs no such gate.
+  z.object({ ...base, kind: z.literal('environment'), repository: z.string().regex(/^[\w.-]+\/[\w.-]+$/), url: z.url().max(2000).refine(s => { const u = new URL(s); return u.protocol === 'https:' && !u.username && !u.password && !u.hash && !u.search; }, 'Use HTTPS without credentials, query or fragment'), instance: name, immutable: z.boolean(), services: resourceNames, resources: resourceNames, delivery: z.object({ freshnessSeconds: z.number().int().min(30).max(86_400), approvalRequired: z.boolean(), automaticRollback: z.boolean().optional() }).strict().optional() }).strict(),
   // Observer and promoter registrations are D3's deployment identities: an observer reports
   // runtime facts for its named services only, a promoter may define and select the expected
   // release. `services` is required for both and refused for every other role.
@@ -45,10 +50,16 @@ type Bundle = Definition & { kind: 'bundle' };
 const attestationSchema = z.object({ registration: ref, workId: z.uuid(), expectedWorkRevision: revision, sourceSha: sha, baseSha: sha, buildInputsDigest: digest, artifacts, provenanceUrl: z.url().max(2000) }).strict();
 export type BuildAttestation = z.infer<typeof attestationSchema> & { id: string; producer: string; at: string; repository: string };
 const candidateSchema = z.object({ workId: z.uuid(), expectedWorkRevision: revision, proof: proofSchema, environment: ref, bundle: ref, buildAttestationId: z.uuid(), requiredArtifacts: resourceNames, artifactStorage: z.enum(['external', 'postgres']).default('external') }).strict();
-export type ValidationCandidate = z.infer<typeof candidateSchema> & { id: string; sourceSha: string; baseSha: string; policyRevision: number; scenario: { revision: number; hash: string; environment: string }; createdAt: string; createdBy: string };
+/** `manifestHash` and `signature` are content addresses derived from the trusted build, bundle, environment and policy the candidate binds; see src/attribution.ts. */
+export type ValidationCandidate = z.infer<typeof candidateSchema> & { id: string; sourceSha: string; baseSha: string; policyRevision: number; scenario: { revision: number; hash: string; environment: string }; createdAt: string; createdBy: string;
+  manifestHash?: string; digestHash?: string; signature?: string; signatureComponents?: Record<SignatureComponent, string>; reanchoredFrom?: { candidateId: string; requestId: string } };
 const requestSchema = z.object({ candidateId: z.uuid(), expectedWorkRevision: revision, runner: ref, collector: ref, deadline: z.iso.datetime(), maxAttempts: z.number().int().min(1).max(5) }).strict();
-export type Attempt = { id: string; epoch: number; dispatchedAt: string; expiresAt: string; acknowledgedAt?: string; lastHeartbeatAt?: string; finishedAt?: string; state: 'dispatched' | 'running' | 'completed' | 'expired' | 'cancelled' | 'superseded'; settled: boolean };
-export type ValidationRequest = z.infer<typeof requestSchema> & { id: string; workId: string; proof: string; state: 'queued' | 'dispatched' | 'running' | 'collecting' | 'completed' | 'cancelled' | 'expired' | 'superseded'; attempts: Attempt[]; createdAt: string; createdBy: string; result?: { accepted: boolean; passed: boolean; reasons: string[] } };
+export type Attempt = { id: string; epoch: number; dispatchedAt: string; expiresAt: string; acknowledgedAt?: string; lastHeartbeatAt?: string; finishedAt?: string; state: 'dispatched' | 'running' | 'completed' | 'expired' | 'cancelled' | 'superseded'; settled: boolean;
+  /** The independently observed target identity when the grant was issued; the result must hold it across the whole window. */
+  target?: { state: TargetIdentity['state']; observationIds: string[]; observedAt: string | null; digestHash: string | null } };
+export type ValidationRequest = z.infer<typeof requestSchema> & { id: string; workId: string; proof: string; state: 'queued' | 'dispatched' | 'running' | 'collecting' | 'completed' | 'cancelled' | 'expired' | 'superseded'; attempts: Attempt[]; createdAt: string; createdBy: string; result?: { accepted: boolean; passed: boolean; reasons: string[] };
+  /** What the request is bound to for attribution: manifest, signature, target kind and the target observed at creation. Never rewritten; a moved target supersedes the request and a fresh one is created. */
+  attribution?: RequestAttribution };
 const commandSchema = z.object({ requestId: z.uuid(), attemptId: z.uuid(), epoch: revision }).strict();
 const reportSchema = commandSchema.extend({
   execution: z.enum(['completed', 'cancelled', 'timed_out']), behavior: z.enum(['passed', 'failed', 'blocked', 'unmeasured']),
@@ -75,6 +86,8 @@ export class Validation {
   /** External artifact bytes, when configured. Null keeps bytes in the Postgres row. */
   artifactBackend: ArtifactBackend | null = null;
   artifactCapacityBytes = defaultArtifactCapacityBytes;
+  /** Target checks and automatic re-anchoring; see src/reanchor.ts. */
+  readonly reanchoring = new Reanchoring(this);
   constructor(readonly engine: Engine, readonly principals: Principal[], readonly repository: string) {}
   get store() { return this.engine.store; }
   async list(cursor?: string) {
@@ -106,7 +119,7 @@ export class Validation {
     const build = (await this.store.pool.query('SELECT document FROM validation_builds WHERE id=$1', [candidate.buildAttestationId])).rows[0]?.document as BuildAttestation;
     return { ...candidate, build };
   }
-  private async event(db: pg.PoolClient, actor: string, kind: string, payload: unknown, workId?: string) { await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [workId ?? null, actor, `validation.${kind}`, JSON.stringify(payload)]); }
+  async event(db: pg.PoolClient, actor: string, kind: string, payload: unknown, workId?: string) { await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [workId ?? null, actor, `validation.${kind}`, JSON.stringify(payload)]); }
   async definition(db: pg.PoolClient, kind: Definition['kind'], selected: { id: string; revision: number }, current = true): Promise<Definition> {
     const rows = (await db.query('SELECT document FROM validation_definitions WHERE kind=$1 AND id=$2 ORDER BY revision DESC', [kind, selected.id])).rows;
     const found = rows.find(r => r.document.revision === selected.revision)?.document as Definition | undefined;
@@ -122,31 +135,31 @@ export class Validation {
     await this.definition(db, 'environment', r.environment);
     return r;
   }
-  private async work(db: pg.PoolClient, id: string, now: Date, expected?: number): Promise<Work> {
+  async work(db: pg.PoolClient, id: string, now: Date, expected?: number): Promise<Work> {
     const work = (await db.query('SELECT document FROM work_items WHERE id=$1', [id])).rows[0]?.document as Work | undefined;
     demand(work && work.stage !== 'done' && !work.observation?.merged, 'Work missing or already delivered');
     demand(!work.mergeExecution || Date.parse(work.mergeExecution.expiresAt) <= now.getTime(), 'A merge execution is active');
     demand(expected === undefined || work.revision === expected, 'Work changed; read current revision');
     return work;
   }
-  private async candidate(db: pg.PoolClient, id: string) {
+  async candidate(db: pg.PoolClient, id: string) {
     const c = (await db.query('SELECT document FROM validation_candidates WHERE id=$1', [id])).rows[0]?.document as ValidationCandidate | undefined;
     demand(c, 'Validation candidate not found', 404); return c;
   }
-  private async request(db: pg.PoolClient, id: string) {
+  async request(db: pg.PoolClient, id: string) {
     const r = (await db.query('SELECT document FROM validation_requests WHERE id=$1', [id])).rows[0]?.document as ValidationRequest | undefined;
     demand(r, 'Validation request not found', 404); return r;
   }
-  private async persist(db: pg.PoolClient, r: ValidationRequest) { await db.query('UPDATE validation_requests SET document=$2 WHERE id=$1', [r.id, JSON.stringify(r)]); }
-  private async changed(db: pg.PoolClient, w: Work, actor: string, kind: string, now: Date, details: unknown) {
+  async persist(db: pg.PoolClient, r: ValidationRequest) { await db.query('UPDATE validation_requests SET document=$2 WHERE id=$1', [r.id, JSON.stringify(r)]); }
+  async changed(db: pg.PoolClient, w: Work, actor: string, kind: string, now: Date, details: unknown) {
     if (w.mergeExecution && Date.parse(w.mergeExecution.expiresAt) <= now.getTime()) w.mergeExecution = null;
     demand(!w.mergeExecution, 'A merge execution is active');
     const all: Work[] = (await db.query('SELECT document FROM work_items')).rows.map(r => r.document);
     this.engine.evaluate(w, all.map(x => x.id === w.id ? w : x), now);
     await save(db, w, actor, `validation.${kind}`, now, details); await wakeJob(db, w.id);
   }
-  private compatible(w: Work, c: ValidationCandidate) { return w.stage !== 'done' && !w.observation?.merged && w.candidate?.sha === c.sourceSha && w.candidate.baseSha === c.baseSha && w.policyRevision === c.policyRevision && w.scenarioRequirements.some(s => s.proof === c.proof && s.revision === c.scenario.revision && s.hash === c.scenario.hash && s.environment === c.scenario.environment); }
-  private async valid(db: pg.PoolClient, c: ValidationCandidate, w: Work) {
+  compatible(w: Work, c: ValidationCandidate) { return w.stage !== 'done' && !w.observation?.merged && w.candidate?.sha === c.sourceSha && w.candidate.baseSha === c.baseSha && w.policyRevision === c.policyRevision && w.scenarioRequirements.some(s => s.proof === c.proof && s.revision === c.scenario.revision && s.hash === c.scenario.hash && s.environment === c.scenario.environment); }
+  async valid(db: pg.PoolClient, c: ValidationCandidate, w: Work) {
     demand(this.compatible(w, c), 'Candidate no longer matches current work or requirements');
     const environment = await this.definition(db, 'environment', c.environment) as Environment;
     demand(environment.repository === this.repository, 'Validation repository scope differs', 403);
@@ -246,46 +259,85 @@ export class Validation {
     admin(actor); const data = candidateSchema.parse(input);
     return this.withReceipt(actor, 'candidate', data, key, async (db, now) => {
       const w = await this.work(db, data.workId, now, data.expectedWorkRevision);
-      demand(w.candidate && w.observation && w.observation.candidate.sha === w.candidate.sha && w.observation.candidate.baseSha === w.candidate.baseSha, 'Independently observed source required');
-      const s = w.scenarioRequirements.find(s => s.proof === data.proof);
-      demand(s && w.criteria.some(ac => ac.proofs.includes(data.proof)), 'Proof must be required by current work and pin a registered scenario');
-      const e = await this.definition(db, 'environment', data.environment) as Environment;
-      const b = await this.definition(db, 'bundle', data.bundle) as Bundle;
-      demand(e.id === s.environment && b.scenario === data.proof.replace(/^e2e:/, '') && b.scenarioRevision === s.revision && b.scenarioHash === s.hash, 'Environment or approved bundle differs from required scenario');
-      const build = (await db.query('SELECT document AS attestation FROM validation_builds WHERE id=$1', [data.buildAttestationId])).rows[0]?.attestation as BuildAttestation | undefined;
-      demand(build && build.workId === w.id && build.repository === this.repository && build.sourceSha === w.candidate.sha && build.baseSha === w.candidate.baseSha, 'Missing or mismatched trusted build provenance');
-      const builder = await this.registration(db, build.registration, 'builder'); demand(same(builder.environment, data.environment), 'Build environment differs');
-      const c: ValidationCandidate = { ...data, id: randomUUID(), sourceSha: w.candidate.sha, baseSha: w.candidate.baseSha, policyRevision: w.policyRevision, scenario: s, createdAt: now.toISOString(), createdBy: actor.id };
-      await db.query('INSERT INTO validation_candidates VALUES($1,$2)', [c.id, JSON.stringify(c)]);
-      (w.validation ??= {})[data.proof] = { candidateId: c.id };
+      const c = await this.mintCandidate(db, actor.id, data, w, now);
       await this.changed(db, w, actor.id, 'candidate', now, { candidate: c });
       await this.reconcileWithin(db, now); return c;
     });
   }
+  /**
+   * The immutable candidate record. Its manifest hash and compatibility signature are
+   * derived here from the trusted build attestation, the approved bundle, the environment
+   * revision and the work's policy; a later candidate for the same proof whose signature
+   * differs records which component moved, so regeneration is visible history.
+   */
+  async mintCandidate(db: pg.PoolClient, actor: string, data: z.infer<typeof candidateSchema>, w: Work, now: Date, reanchoredFrom?: { candidateId: string; requestId: string }) {
+    demand(w.candidate && w.observation && w.observation.candidate.sha === w.candidate.sha && w.observation.candidate.baseSha === w.candidate.baseSha, 'Independently observed source required');
+    const s = w.scenarioRequirements.find(s => s.proof === data.proof);
+    demand(s && w.criteria.some(ac => ac.proofs.includes(data.proof)), 'Proof must be required by current work and pin a registered scenario');
+    const e = await this.definition(db, 'environment', data.environment) as Environment;
+    const b = await this.definition(db, 'bundle', data.bundle) as Bundle;
+    demand(e.id === s.environment && b.scenario === data.proof.replace(/^e2e:/, '') && b.scenarioRevision === s.revision && b.scenarioHash === s.hash, 'Environment or approved bundle differs from required scenario');
+    const build = (await db.query('SELECT document AS attestation FROM validation_builds WHERE id=$1', [data.buildAttestationId])).rows[0]?.attestation as BuildAttestation | undefined;
+    demand(build && build.workId === w.id && build.repository === this.repository && build.sourceSha === w.candidate.sha && build.baseSha === w.candidate.baseSha, 'Missing or mismatched trusted build provenance');
+    const builder = await this.registration(db, build.registration, 'builder'); demand(same(builder.environment, data.environment), 'Build environment differs');
+    const manifest = candidateManifest(build, data.environment);
+    const { signature, components } = compatibilitySignature({ manifestHash: manifest.hash, sourceSha: w.candidate.sha, baseSha: w.candidate.baseSha, policyRevision: w.policyRevision, buildInputsDigest: build.buildInputsDigest,
+      bundle: { digest: b.digest, runnerImageDigest: b.runnerImageDigest, scenarioHash: b.scenarioHash, scenarioRevision: b.scenarioRevision }, environment: data.environment, requiredArtifacts: data.requiredArtifacts, proof: data.proof });
+    const c: ValidationCandidate = { ...data, id: randomUUID(), sourceSha: w.candidate.sha, baseSha: w.candidate.baseSha, policyRevision: w.policyRevision, scenario: s, createdAt: now.toISOString(), createdBy: actor,
+      manifestHash: manifest.hash, digestHash: manifest.digestHash, signature, signatureComponents: components, ...(reanchoredFrom ? { reanchoredFrom } : {}) };
+    const previous = w.validation?.[data.proof]?.candidateId ? await this.candidate(db, w.validation[data.proof].candidateId) : undefined;
+    await db.query('INSERT INTO validation_candidates VALUES($1,$2)', [c.id, JSON.stringify(c)]);
+    if (previous && previous.signature !== signature) {
+      const changed = signatureDifferences(previous.signatureComponents, components);
+      await appendAttribution(db, now, { workId: w.id, workKey: w.key, proof: data.proof, environmentId: e.id, candidateId: c.id, requestId: null, attemptId: null, kind: 'signature-regenerated', dedupe: `signature-regenerated:${c.id}`,
+        details: { previousCandidateId: previous.id, previousSignature: previous.signature ?? null, signature, changed, manifestHash: manifest.hash, buildId: build.id, reason: `Compatibility signature regenerated: ${changed.join(', ')} changed` } });
+    }
+    (w.validation ??= {})[data.proof] = { candidateId: c.id };
+    return c;
+  }
   async createRequest(actor: Principal, input: unknown, key: string) {
     admin(actor); const data = requestSchema.parse(input);
-    return this.withReceipt(actor, 'request', data, key, async (db, now) => {
-      const c = await this.candidate(db, data.candidateId); const w = await this.work(db, c.workId, now, data.expectedWorkRevision); await this.valid(db, c, w);
-      demand(w.validation?.[c.proof]?.candidateId === c.id, 'Candidate selection superseded');
-      const runner = await this.registration(db, data.runner, 'runner'), collector = await this.registration(db, data.collector, 'collector');
-      const build = (await db.query('SELECT document FROM validation_builds WHERE id=$1', [c.buildAttestationId])).rows[0]?.document as BuildAttestation;
-      demand(build && collector.principalId !== build.producer, 'Build producer and result collector must be distinct principals');
-      // The collector mints trusted evidence, so it carries the same independence
-      // requirement as any other proof producer.
-      const dependent = producerIndependenceRefusal(this.principals.find(p => p.id === collector.principalId) ?? { id: collector.principalId, role: 'producer' }, w, this.principals);
-      demand(!dependent, dependent ?? 'Result collector is not independent', 403);
-      demand(same(runner.environment, c.environment) && same(collector.environment, c.environment) && collector.proofs.includes(c.proof), 'Runner/collector environment or proof scope differs');
-      demand(Date.parse(data.deadline) > now.getTime() && Date.parse(data.deadline) <= now.getTime() + 3_600_000, 'Deadline must be within the next hour');
-      // Backpressure: a runner's queue is bounded by its registration. A request the runner
-      // could not reach for an hour is a deadline miss waiting to happen, not a plan.
-      const queued = Number((await db.query("SELECT count(*) FROM validation_requests WHERE document->>'state'='queued' AND document->'runner'->>'id'=$1", [data.runner.id])).rows[0].count);
-      const queueLimit = runner.queueLimit ?? defaultQueueLimit;
-      demand(queued < queueLimit, `Runner ${data.runner.id} already has ${queued} queued requests, its queue limit; wait for dwell to drain, cancel stale requests or register more runners`, 429);
-      const r: ValidationRequest = { ...data, id: randomUUID(), workId: w.id, proof: c.proof, state: 'queued', attempts: [], createdAt: now.toISOString(), createdBy: actor.id };
-      await db.query('INSERT INTO validation_requests VALUES($1,$2)', [r.id, JSON.stringify(r)]);
-      w.validation![c.proof] = { candidateId: c.id, requestId: r.id };
-      await this.changed(db, w, actor.id, 'requested', now, { request: r }); await this.reconcileWithin(db, now); return r;
-    });
+    try {
+      return await this.withReceipt(actor, 'request', data, key, async (db, now) => {
+        const c = await this.candidate(db, data.candidateId); const w = await this.work(db, c.workId, now, data.expectedWorkRevision);
+        const r = await this.mintRequest(db, actor.id, data, c, w, now);
+        await this.changed(db, w, actor.id, 'requested', now, { request: r }); await this.reconcileWithin(db, now); return r;
+      });
+    } catch (error) {
+      // The refusal rolled the request back; the avoided paid run is still history.
+      if (error instanceof TargetMismatchRefusal) await this.store.transaction((db, now) => error.ledger(db, now));
+      throw error;
+    }
+  }
+  /**
+   * The request record, bound at creation to the candidate's manifest and signature and to
+   * the target its environment's observers currently report. A target already known to run
+   * something else is refused here — before any paid execution — and the refusal is ledgered.
+   */
+  async mintRequest(db: pg.PoolClient, actor: string, data: z.infer<typeof requestSchema>, c: ValidationCandidate, w: Work, now: Date, reanchoredFrom?: RequestAttribution['reanchoredFrom']) {
+    await this.valid(db, c, w);
+    demand(w.validation?.[c.proof]?.candidateId === c.id, 'Candidate selection superseded');
+    const runner = await this.registration(db, data.runner, 'runner'), collector = await this.registration(db, data.collector, 'collector');
+    const build = (await db.query('SELECT document FROM validation_builds WHERE id=$1', [c.buildAttestationId])).rows[0]?.document as BuildAttestation;
+    demand(build && collector.principalId !== build.producer, 'Build producer and result collector must be distinct principals');
+    // The collector mints trusted evidence, so it carries the same independence
+    // requirement as any other proof producer.
+    const dependent = producerIndependenceRefusal(this.principals.find(p => p.id === collector.principalId) ?? { id: collector.principalId, role: 'producer' }, w, this.principals);
+    demand(!dependent, dependent ?? 'Result collector is not independent', 403);
+    demand(same(runner.environment, c.environment) && same(collector.environment, c.environment) && collector.proofs.includes(c.proof), 'Runner/collector environment or proof scope differs');
+    demand(Date.parse(data.deadline) > now.getTime() && Date.parse(data.deadline) <= now.getTime() + 3_600_000, 'Deadline must be within the next hour');
+    // Backpressure: a runner's queue is bounded by its registration. A request the runner
+    // could not reach for an hour is a deadline miss waiting to happen, not a plan.
+    const queued = Number((await db.query("SELECT count(*) FROM validation_requests WHERE document->>'state'='queued' AND document->'runner'->>'id'=$1", [data.runner.id])).rows[0].count);
+    const queueLimit = runner.queueLimit ?? defaultQueueLimit;
+    demand(queued < queueLimit, `Runner ${data.runner.id} already has ${queued} queued requests, its queue limit; wait for dwell to drain, cancel stale requests or register more runners`, 429);
+    const environment = await this.definition(db, 'environment', c.environment) as Environment;
+    const attribution = await this.reanchoring.bind(db, c, w, environment, build, now, reanchoredFrom);
+    const r: ValidationRequest = { ...data, id: randomUUID(), workId: w.id, proof: c.proof, state: 'queued', attempts: [], createdAt: now.toISOString(), createdBy: actor, attribution };
+    await db.query('INSERT INTO validation_requests VALUES($1,$2)', [r.id, JSON.stringify(r)]);
+    await this.reanchoring.checked(db, r, c, w, 'request', attribution.target, now);
+    w.validation![c.proof] = { candidateId: c.id, requestId: r.id };
+    return r;
   }
   async dispatch(actor: Principal, input: unknown, key: string) {
     demand(actor.role === 'worker', 'Runner credential required', 403);
@@ -298,6 +350,7 @@ export class Validation {
       await poll(null);
       await this.reconcileWithin(db, now);
       const queued: ValidationRequest[] = (await db.query("SELECT document FROM validation_requests WHERE document->>'state'='queued' ORDER BY document->>'createdAt',id")).rows.map(r => r.document);
+      let withheld: string | null = null;
       for (const r of queued.filter(r => same(r.runner, data.registration))) {
         const c = await this.candidate(db, r.candidateId); const w = await this.work(db, r.workId, now);
         await this.valid(db, c, w); await this.registration(db, r.collector, 'collector');
@@ -308,7 +361,12 @@ export class Validation {
         const busy = (await db.query('SELECT resource FROM validation_resources WHERE resource=ANY($1::text[])', [resources])).rowCount;
         if (busy) continue;
         demand(r.attempts.length < r.maxAttempts, 'Attempt budget exhausted');
-        const attempt: Attempt = { id: randomUUID(), epoch: r.attempts.length + 1, dispatchedAt: now.toISOString(), expiresAt: new Date(Math.min(now.getTime() + 30_000, Date.parse(r.deadline))).toISOString(), state: 'dispatched', settled: false };
+        // The grant is the last moment before paid execution. A target that observers already
+        // report running another manifest is not granted: the request is superseded and
+        // re-anchored instead. Shared staging additionally needs a measured match first.
+        const target = await this.reanchoring.gate(db, r, c, w, environment, actor.id, now);
+        if (!target) { withheld = `Request ${r.id} was not granted: ${environment.immutable === false ? 'shared staging has no measured observation of the candidate manifest yet' : 'observers report the target running another manifest, so it was superseded and re-anchored'}`; continue; }
+        const attempt: Attempt = { id: randomUUID(), epoch: r.attempts.length + 1, dispatchedAt: now.toISOString(), expiresAt: new Date(Math.min(now.getTime() + 30_000, Date.parse(r.deadline))).toISOString(), state: 'dispatched', settled: false, target };
         r.attempts.push(attempt); r.state = 'dispatched'; await this.persist(db, r);
         for (const resource of resources) await db.query('INSERT INTO validation_resources VALUES($1,$2)', [resource, r.id]);
         w.validation![c.proof] = { candidateId: c.id, requestId: r.id, attemptId: attempt.id };
@@ -320,7 +378,7 @@ export class Validation {
           // and of the privileges its evidence would cover — would be the runner's.
           executionAuthority: { host: registration.executionHost!, attestationPublicKey: registration.attestationPublicKey!, network: registration.executionNetwork!, testAccountDigest: registration.testAccountDigest ?? null } };
       }
-      return { request: null, reason: 'No eligible request or protected resources are still reserved' };
+      return { request: null, reason: withheld ?? 'No eligible request or protected resources are still reserved' };
     });
   }
   async runnerCommand(actor: Principal, command: 'ack' | 'heartbeat', input: unknown, key: string) {
@@ -413,7 +471,11 @@ export class Validation {
     });
   }
   async result(actor: Principal, input: unknown, key: string) {
-    demand(actor.role === 'producer', 'A separate trusted collector is required', 403); const data = reportSchema.parse(input);
+    demand(actor.role === 'producer', 'A separate trusted collector is required', 403);
+    // A SHA offered as target proof is a client claim, whoever offers it. It is refused
+    // before the report is even parsed, and the refusal is ledgered against the request.
+    await this.reanchoring.refuseClaimedTarget(actor, input);
+    const data = reportSchema.parse(input);
     return this.withReceipt(actor, 'result', data, key, async (db, now) => {
       const r = await this.request(db, data.requestId);
       const pinned = await this.definition(db, 'registration', r.collector, false) as Registration;
@@ -430,9 +492,15 @@ export class Validation {
       if (rejection.length) {
         const result = { accepted: false, passed: false, reasons: rejection };
         // Commit rejection + receipt. Throwing here would erase the audit.
-        await this.event(db, actor.id, 'result-rejected', { requestId: r.id, attemptId: data.attemptId, epoch: data.epoch, reportHash: hash(data), result }, r.workId); return result;
+        await this.event(db, actor.id, 'result-rejected', { requestId: r.id, attemptId: data.attemptId, epoch: data.epoch, reportHash: hash(data), result }, r.workId);
+        // A rejected report that claimed success is a success claim Graphyard declined to turn into evidence.
+        if (data.behavior === 'passed' && w) await appendAttribution(db, now, { workId: w.id, workKey: w.key, proof: r.proof, environmentId: c.environment.id, candidateId: c.id, requestId: r.id, attemptId: data.attemptId, kind: 'unsupported-claim-refused', dedupe: `unsupported-claim-refused:${r.id}:${data.attemptId}:${hash(data)}`, details: { claim: 'result', reasons: rejection, reason: rejection.join('; ') } });
+        return result;
       }
       const reasons = await this.reportReasons(db, c, data);
+      // The collector's word about the target is necessary, never sufficient: observers must
+      // have seen the candidate manifest running for the whole window, and nothing else.
+      const attribution = await this.reanchoring.settle(db, current, a!, c, w, data, reasons, now);
       let expiresAt: string | undefined;
       const evidenceArtifacts: EvidenceArtifact[] = [];
       if (c.artifactStorage === 'postgres') {
@@ -460,7 +528,10 @@ export class Validation {
       current.state = 'completed'; current.result = result; a!.state = 'completed'; a!.finishedAt = now.toISOString(); a!.settled = data.executionSettled;
       if (a!.settled) await db.query('DELETE FROM validation_resources WHERE request_id=$1', [r.id]);
       await this.persist(db, current);
-      w.evidence.push({ id: randomUUID(), proof: c.proof, sha: c.sourceSha, baseSha: c.baseSha, policyRevision: c.policyRevision, producer: actor.id, trusted: true, result: result.passed ? 'pass' : 'fail', executed: data.executed, skipped: data.skipped, at: now.toISOString(), ...(expiresAt ? { expiresAt } : {}), artifacts: evidenceArtifacts, scenarioRevision: c.scenario.revision, environment: c.scenario.environment, validation: { candidateId: c.id, requestId: r.id, attemptId: a!.id } });
+      const evidence: Evidence = { id: randomUUID(), proof: c.proof, sha: c.sourceSha, baseSha: c.baseSha, policyRevision: c.policyRevision, producer: actor.id, trusted: true, result: result.passed ? 'pass' : 'fail', executed: data.executed, skipped: data.skipped, at: now.toISOString(), ...(expiresAt ? { expiresAt } : {}), artifacts: evidenceArtifacts, scenarioRevision: c.scenario.revision, environment: c.scenario.environment, validation: { candidateId: c.id, requestId: r.id, attemptId: a!.id }, attribution };
+      w.evidence.push(evidence);
+      await appendAttribution(db, now, { workId: w.id, workKey: w.key, proof: c.proof, environmentId: c.environment.id, candidateId: c.id, requestId: r.id, attemptId: a!.id, kind: 'evidence-bound', dedupe: `evidence-bound:${evidence.id}`,
+        details: { evidenceId: evidence.id, result: evidence.result, ...attribution, reason: `Evidence ${evidence.result}: bound to manifest, signature and target observations` } });
       await this.changed(db, w, actor.id, 'result', now, { requestId: r.id, attemptId: a!.id, report: data, result }); return result;
     });
   }
@@ -755,7 +826,7 @@ export class Validation {
     const artifacts: ArtifactCapacity = { backend: this.artifactBackend?.label ?? 'postgres', capacityBytes: this.artifactCapacityBytes, usedBytes: Number(artifactRow.used), retained: Number(artifactRow.retained), pending: Number(artifactRow.pending), uploadFailed: Number(artifactRow.failed), expired: Number(artifactRow.expired), expiringWithin24h: Number(artifactRow.expiring), awaitingDeletion: Number(artifactRow.awaiting) };
     return { now: now.toISOString(), runners, resources, requests: diagnoses, artifacts };
   }
-  private async reportReasons(db: pg.PoolClient, c: ValidationCandidate, data: Report) {
+  async reportReasons(db: pg.PoolClient, c: ValidationCandidate, data: Report) {
     const e = await this.definition(db, 'environment', c.environment) as Environment, b = await this.definition(db, 'bundle', c.bundle) as Bundle;
     const build = (await db.query('SELECT document AS attestation FROM validation_builds WHERE id=$1', [c.buildAttestationId])).rows[0].attestation as BuildAttestation;
     const reasons: string[] = [];
@@ -798,7 +869,7 @@ export class Validation {
       return r;
     });
   }
-  private async endActiveAttempt(db: pg.PoolClient, r: ValidationRequest, state: 'cancelled' | 'expired' | 'superseded', now: Date) {
+  async endActiveAttempt(db: pg.PoolClient, r: ValidationRequest, state: 'cancelled' | 'expired' | 'superseded', now: Date) {
     const a = r.attempts.at(-1);
     if (!a || !['dispatched', 'running', 'collecting'].includes(r.state)) return;
     if (r.state === 'dispatched') {
@@ -808,7 +879,7 @@ export class Validation {
     }
     a.state = state; a.finishedAt = now.toISOString();
   }
-  private async invalidateBinding(db: pg.PoolClient, r: ValidationRequest, now: Date, actor: string) {
+  async invalidateBinding(db: pg.PoolClient, r: ValidationRequest, now: Date, actor: string) {
     const w = (await db.query('SELECT document FROM work_items WHERE id=$1', [r.workId])).rows[0]?.document as Work;
     if (w && w.stage !== 'done' && w.validation?.[r.proof]?.requestId === r.id) {
       delete w.validation[r.proof].attemptId;
