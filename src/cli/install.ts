@@ -4,6 +4,7 @@ import { parseArgs } from 'node:util';
 import { availableRuntimes, discover } from '../onboarding.js';
 import { startGithubSetup, updateAppPermissions } from '../github-setup.js';
 import { applyProposal, loadAppliedSetup, loadProposal, readSetupStatus, repositoryScanDifference, saveProposal, scanProposal, setupDrift, setupRepository } from '../repository-setup.js';
+import { delegationLimitAssignments } from '../install/limits.js';
 import { defineCommands } from './registry.js';
 import { readSecretFromStdin } from './context.js';
 
@@ -22,6 +23,25 @@ const interactiveGithubSetup = (root: string) => async (repository: string, depl
     } catch (error: any) { if (error.code !== 'ENOENT') throw error; }
   }
 };
+
+/**
+ * The capacity variables that accompany the principals `init --apply` registers: derived from
+ * the roster in .graphyard/principals.json, and — when the operator credential reaches the
+ * server — compared with what the deployment runs with, so a re-run after the roster grew
+ * reports the deployed value that no longer covers it beside the value to set.
+ */
+export async function capacityForPrincipals(principalsFile: string, status: () => Promise<any>) {
+  const registry = JSON.parse(await readFile(principalsFile, 'utf8'));
+  let deployed: Record<string, string | null> | null = null, error: string | null = null;
+  try {
+    const live = await status();
+    deployed = live?.delegationLimits?.deployed ?? null;
+    if (!deployed) error = 'the server reports no delegationLimits; deploy main first, then rerun init --scan --apply to compare';
+  } catch (failure: any) { error = `the server could not be read (${failure.message})`; }
+  const limits = delegationLimitAssignments(registry.principals, deployed);
+  return { variables: limits.variables, lines: limits.lines, drift: limits.drift,
+    next: `Set ${limits.lines.join(' ')} beside GRAPHYARD_PRINCIPALS on the Graphyard deployment${limits.drift.length ? ` (drift: ${limits.drift.map(entry => entry.reason).join(' ')})` : error ? `; no drift can be reported because ${error}` : ''}` };
+}
 
 /** Repository onboarding: propose and apply the delivery workflow, register Apps, inspect readiness. */
 export const installCommands = defineCommands([
@@ -46,7 +66,7 @@ export const installCommands = defineCommands([
           const url = values.url ?? stored.proposal.server;
           if (!url) throw new Error('Applying requires the Graphyard server URL; pass --url');
           const result = await applyProposal(root, stored.proposal, { url, githubSetup: interactiveGithubSetup(root) });
-          return print({ proposal: stored.file, ...result });
+          return print({ proposal: stored.file, ...result, capacity: await capacityForPrincipals(result.principalsFile, () => context.api('status')) });
         }
         await saveProposal(root, fresh);
         const applied = await loadAppliedSetup(root);

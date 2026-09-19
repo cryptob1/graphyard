@@ -7,7 +7,7 @@ import { mkdir, writeFile, readFile } from 'node:fs/promises';
 import { execFileSync } from 'node:child_process';
 import { register } from 'tsx/esm/api';
 register();
-const { delegationLimitAssignments } = await import('../src/install/limits.ts');
+const { delegationLimitAssignments, readDeployedDelegationLimits } = await import('../src/install/limits.ts');
 const directory = new URL('../.graphyard/', import.meta.url);
 await mkdir(directory, { recursive: true, mode: 0o700 });
 const file = new URL('credentials.json', directory);
@@ -29,12 +29,9 @@ let deployed = null;
 const url = process.env.GRAPHYARD_URL?.replace(/\/$/, '');
 const operator = principals.find(principal => principal.role === 'admin');
 if (url && operator) {
-  try {
-    const response = await fetch(`${url}/api/status`, { headers: { Authorization: `Bearer ${operator.token}` }, signal: AbortSignal.timeout(15_000) });
-    const status = await response.json();
-    if (response.ok && status.delegationLimits?.deployed) deployed = status.delegationLimits.deployed;
-    else console.error(`Deployed limits could not be read from ${url} (${response.status}); no drift can be reported`);
-  } catch (error) { console.error(`Deployed limits could not be read from ${url}: ${error.message}; no drift can be reported`); }
+  const live = await readDeployedDelegationLimits(url, operator.token);
+  if (live.error) console.error(live.error);
+  deployed = live.deployed;
 }
 const limits = delegationLimitAssignments(principals, deployed);
 for (const entry of limits.drift) console.error(`Drift: ${entry.reason}`);

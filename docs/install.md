@@ -11,7 +11,7 @@ export GRAPHYARD_CLI=/absolute/path/to/graphyard/bin/graphyard.mjs
 
 ## Fresh installation
 
-1. **Deploy the server** with Postgres and an HTTPS origin, following [deployment](deployment.md). Set `GRAPHYARD_PRINCIPALS` with one cryptographically random token per role, the four [capacity variables](deployment.md#delegation-capacity-variables) derived from that principal set (`GRAPHYARD_MAX_REVIEWERS` at least the number of `producer` principals), plus `GITHUB_REPOSITORY`, `GITHUB_BASE_BRANCH`, and `GITHUB_CI_APP_IDS`. Installer adapters write the capacity variables for you; set them by hand only when configuring the deployment directly.
+1. **Deploy the server** with Postgres and an HTTPS origin, following [deployment](deployment.md). Set `GRAPHYARD_PRINCIPALS` with one cryptographically random token per role, the four [capacity variables](deployment.md#delegation-capacity-variables) derived from that principal set (`GRAPHYARD_MAX_REVIEWERS` at least the number of `producer` principals), plus `GITHUB_REPOSITORY`, `GITHUB_BASE_BRANCH`, and `GITHUB_CI_APP_IDS`. The Railway adapters write the capacity variables for you and `init --scan --apply` prints them as `capacity.lines` beside the principals it registers; set them by hand only when configuring the deployment directly.
 2. **Register the control-plane App** from the managed repository checkout:
 
    ```sh

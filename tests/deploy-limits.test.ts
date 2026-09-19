@@ -1,6 +1,6 @@
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile } from 'node:fs/promises';
+import { mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import EmbeddedPostgres from 'embedded-postgres';
@@ -9,7 +9,8 @@ import { Engine } from '../src/engine.js';
 import { server, type Credential } from '../src/server.js';
 import { ProofGrants } from '../src/proof-grants.js';
 import { defaultDelegationLimits, delegationLimitDrift, delegationLimits, requiredDelegationLimits, validateDelegationPrincipals } from '../src/delegation.js';
-import { delegationLimitAssignments } from '../src/install/limits.js';
+import { delegationLimitAssignments, readDeployedDelegationLimits } from '../src/install/limits.js';
+import { capacityForPrincipals } from '../src/cli/install.js';
 import { controlPlaneAttention } from '../src/master.js';
 import type { Principal } from '../src/model.js';
 
@@ -78,11 +79,55 @@ test('integration:deploy-limit-install — installers derive the variables from 
   assert.equal(rerun.variables.GRAPHYARD_MAX_REVIEWERS, '4');
   // A deployed value above the roster is kept, never narrowed.
   assert.equal(delegationLimitAssignments(roster, { GRAPHYARD_MAX_REVIEWERS: '8' }).variables.GRAPHYARD_MAX_REVIEWERS, '8');
-  // The Railway adapter sets exactly these lines and reports drift on every run.
-  const adapter = await readFile(new URL('../scripts/provision-railway.mjs', import.meta.url), 'utf8');
+
+  // Every adapter reads what the deployment runs with from the server's status with the operator credential.
+  const calls: { url: string; auth: string | undefined }[] = [];
+  const stub = (body: unknown, ok = true, status = 200): typeof fetch => async (input: any, init: any) => { calls.push({ url: String(input), auth: init?.headers?.Authorization }); return { ok, status, json: async () => body } as Response; };
+  const read = await readDeployedDelegationLimits('https://graphyard.example/', 'operator-token', stub({ delegationLimits: { deployed: { GRAPHYARD_MAX_REVIEWERS: '2', GRAPHYARD_MAX_SLICE_LEADS: null } } }));
+  assert.deepEqual(read, { deployed: { GRAPHYARD_MAX_REVIEWERS: '2', GRAPHYARD_MAX_SLICE_LEADS: null }, error: null });
+  assert.deepEqual(calls, [{ url: 'https://graphyard.example/api/status', auth: 'Bearer operator-token' }]);
+  assert.match(delegationLimitAssignments(roster, read.deployed).drift[0].reason, /GRAPHYARD_MAX_REVIEWERS=2 no longer covers the 4 producer principals/);
+  // A server that cannot be read, or one older than this release, is reported rather than treated as drift-free.
+  const older = await readDeployedDelegationLimits('https://graphyard.example', 'operator-token', stub({ ok: true }));
+  assert.equal(older.deployed, null); assert.match(older.error!, /reports no delegationLimits; deploy main first/);
+  const denied = await readDeployedDelegationLimits('https://graphyard.example', 'operator-token', stub({ error: 'forbidden' }, false, 403));
+  assert.equal(denied.deployed, null); assert.match(denied.error!, /HTTP 403.*no drift can be reported/);
+  const down = await readDeployedDelegationLimits('https://graphyard.example', 'operator-token', async () => { throw new Error('ECONNREFUSED'); });
+  assert.equal(down.deployed, null); assert.match(down.error!, /ECONNREFUSED; no drift can be reported/);
+
+  // The Railway provisioning adapter sets exactly these lines and reports drift on every run.
+  const script = (name: string) => readFile(new URL(`../${name}`, import.meta.url), 'utf8');
+  const adapter = await script('scripts/provision-railway.mjs');
+  assert.match(adapter, /readDeployedDelegationLimits\(url, operator\.token\)/);
   assert.match(adapter, /delegationLimitAssignments\(principals, deployed\)/);
   assert.match(adapter, /\.\.\.limits\.lines/);
   assert.match(adapter, /for \(const entry of limits\.drift\) console\.error\(`Drift: \$\{entry\.reason\}`\)/);
+  // The integrations adapter generates one more producer: its limits derive from the roster it deploys, not from credentials.json alone.
+  const integrations = await script('scripts/configure-integrations.mjs');
+  assert.match(integrations, /const roster = \[\.\.\.principals\.filter\(p => p\.id !== producer\.id\), producer\]/);
+  assert.match(integrations, /readDeployedDelegationLimits\(url, operator\.token\)/);
+  assert.match(integrations, /delegationLimitAssignments\(roster, deployed\)/);
+  assert.match(integrations, /GRAPHYARD_PRINCIPALS: JSON\.stringify\(roster\), \.\.\.limits\.variables/);
+  assert.match(integrations, /for \(const entry of limits\.drift\) console\.error\(`Drift: \$\{entry\.reason\}`\)/);
+  const generated = delegationLimitAssignments([...roster, { id: 'trusted-acceptance', role: 'producer' }], { GRAPHYARD_MAX_REVIEWERS: '4' });
+  assert.equal(generated.variables.GRAPHYARD_MAX_REVIEWERS, '5');
+  assert.match(generated.drift[0].reason, /GRAPHYARD_MAX_REVIEWERS=4 no longer covers the 5 producer principals/);
+  // The Railway IaC preserves every variable the adapters set, so `railway config apply` cannot drop them.
+  const iac = await script('.railway/railway.ts');
+  for (const variable of ['GRAPHYARD_PRINCIPALS', 'GRAPHYARD_MAX_SLICE_LEADS', 'GRAPHYARD_MAX_ENGINEERS_PER_LEAD', 'GRAPHYARD_MIN_REVIEWERS', 'GRAPHYARD_MAX_REVIEWERS', 'RAILWAY_API_TOKEN']) assert.match(iac, new RegExp(`${variable}: preserve\\(\\)`), `.railway/railway.ts preserves ${variable}`);
+
+  // `init --scan --apply` prints the lines for the principals it registered and compares them with the deployment.
+  const principalsFile = join(await mkdtemp(join(tmpdir(), 'graphyard-init-capacity-')), 'principals.json');
+  await writeFile(principalsFile, JSON.stringify({ version: 1, principals: [operator, { id: 'master', role: 'coordinator' }, { id: 'worker-1', role: 'worker' }, { id: 'evidence', role: 'producer' }, { id: 'acceptance', role: 'producer' }, { id: 'observer', role: 'producer' }] }));
+  const capacity = await capacityForPrincipals(principalsFile, async () => ({ delegationLimits: { deployed: { GRAPHYARD_MAX_REVIEWERS: '2' } } }));
+  assert.equal(capacity.variables.GRAPHYARD_MAX_REVIEWERS, '3');
+  assert.deepEqual(capacity.lines, ['GRAPHYARD_MAX_SLICE_LEADS=3', 'GRAPHYARD_MAX_ENGINEERS_PER_LEAD=2', 'GRAPHYARD_MIN_REVIEWERS=1', 'GRAPHYARD_MAX_REVIEWERS=3']);
+  assert.match(capacity.next, /Set GRAPHYARD_MAX_SLICE_LEADS=3 .*GRAPHYARD_MAX_REVIEWERS=3 beside GRAPHYARD_PRINCIPALS .*drift: GRAPHYARD_MAX_REVIEWERS=2 no longer covers the 3 producer principals/);
+  const unreachable = await capacityForPrincipals(principalsFile, async () => { throw new Error('Configure GRAPHYARD_URL'); });
+  assert.deepEqual(unreachable.drift, []);
+  assert.match(unreachable.next, /no drift can be reported because the server could not be read \(Configure GRAPHYARD_URL\)/);
+  const predates = await capacityForPrincipals(principalsFile, async () => ({ ok: true }));
+  assert.match(predates.next, /reports no delegationLimits; deploy main first/);
 });
 
 test('manual:deploy-limit-docs — the deployment, install, operations and master guides document the variables, derivation, drift and observation', async () => {
