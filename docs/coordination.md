@@ -17,6 +17,8 @@ A criterion states an outcome and names one or more required proofs. For example
 
 The repository's tests define the actual assertions. Graphyard checks evidence identity, version, result and execution counts; it does not independently understand booking semantics. Register an E2E scenario before referring to it. A configured proof name alone does not establish a trusted producer: authorize the reporter separately as described in the [protocol](protocol/evidence.md).
 
+Every `unit:` and `integration:` proof is producer-runnable: when the candidate passes the build gate the control plane requests a producer session for each proof group and the master loop launches it on the exact head (see [automatic dispatch at submit](master-agent.md#automatic-dispatch-at-submit)). A `manual:` proof stays with the human operator unless the item lists it in `producerProofs` (on `create` and in a `requirements` revision), which marks it producer-runnable and adds it to the `manual` group; `e2e:` proofs run through the validation runner. A criterion's proof names never change meaning through that list — it only says who may run them.
+
 Work details show required proofs as **unmeasured**, **incomplete**, **failed**, or **passed**. Untrusted assertions and evidence for another head, base, policy, scenario or environment cannot produce a pass. A later matching failure or incomplete run supersedes the earlier pass. The preview uses the same applicability rules as the gate, but only the server authorizes progression.
 
 ## Revise requirements explicitly
@@ -36,11 +38,12 @@ Example `revision.json`:
   "criteria": [{"id":"AC-1","text":"Retries produce one SMS request","proofs":["integration:sms-idempotency"]}],
   "dependencies": [],
   "plannedFiles": ["src/booking/", "src/sms/send.ts"],
-  "exclusiveResources": ["staging:sms-test-account"]
+  "exclusiveResources": ["staging:sms-test-account"],
+  "producerProofs": []
 }
 ```
 
-The command replaces the full requirements document; omitted criteria are removed, not implicitly retained. Keep the same criterion ID when clarifying the same obligation. Removed IDs are retired and cannot be recycled for unrelated requirements. Dependencies must name existing items and cannot form a cycle.
+The command replaces the full requirements document; omitted criteria are removed, not implicitly retained, and an omitted `producerProofs` leaves every manual proof with the operator. Keep the same criterion ID when clarifying the same obligation. Removed IDs are retired and cannot be recycled for unrelated requirements. Dependencies must name existing items and cannot form a cycle.
 
 Stop the worker and release its lease first. Only the human operator's `admin` credential may revise requirements this way (a scoped operator agent may only add); workers cannot weaken their own gates. Concurrent edits compare the expected policy revision. Every successful revision records the authenticated actor, reason, complete requirements and new policy revision in append-only history. Historical snapshots retain previous criteria.
 
