@@ -9,7 +9,7 @@ import { loadConnection, managedInstructions, serverOrigin } from './repository-
 import { resourceConflicts } from './coordination.js';
 import { mergeOrder } from './delegation.js';
 import { launchPlan, masterHarnessPlan, writeHarnessPermissions } from './harness.js';
-import { CHECK_NAME, deliveryState, deploySmokeRequired, evidenceIndependenceRefusals, exhaustedReviewerProfiles, nativeReviewRequired, postDeployMs, productionLatencyMs, providerDelayAfterVerification, reviewerProfileFor, reviewProviderOf, rollbackGuidance, standingEscalations, type Work } from './model.js';
+import { CHECK_NAME, carriedApproval, deliveryState, deploySmokeRequired, describeQueueBinding, evidenceIndependenceRefusals, exhaustedReviewerProfiles, nativeReviewRequired, postDeployMs, productionLatencyMs, providerDelayAfterVerification, reviewerProfileFor, reviewProviderOf, rollbackGuidance, standingEscalations, type CarriedApproval, type QueueBindingReport, type Work } from './model.js';
 import { containmentAttestation, containmentSettlementRefusals, containmentVerificationSchema, type ContainmentVerification } from './quarantine.js';
 import { probeSupervisorAbsence } from './containment-probe.js';
 import { predictQueue, type QueuePlacement } from './merge-queue.js';
@@ -23,7 +23,7 @@ const safeEnvironment = z.record(
   z.string().min(1).max(1000).refine(value => !/[\u0000-\u001f\u007f]/.test(value), 'Profile environment values cannot contain control characters'),
 ).default({});
 
-export const agentKindSchema = z.enum(['pi', 'claude', 'codex', 'gemini', 'cursor', 'devin', 'agy', 'cline', 'omp', 'mastracode', 'opencode', 'copilot', 'kimi', 'kiro', 'droid', 'amp', 'grok', 'hermes', 'kilo', 'qodercli', 'qwen', 'maki']);
+export const agentKindSchema = z.enum(['pi', 'claude', 'codex', 'gemini', 'cursor', 'devin', 'agy', 'cline', 'omp', 'mastracode', 'opencode', 'copilot', 'kimi', 'kiro', 'droid', 'amp', 'grok', 'hermes', 'kilo', 'qodercli', 'qwen', 'maki', 'muse']);
 const profileName = z.string().trim().regex(/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,79}$/);
 // 'auto' installs the runtime's own non-interactive startup contract; 'prompt' keeps the
 // runtime's approval prompts and requires a human in the session tab.
@@ -58,6 +58,24 @@ export const reviewerProfileSchema = z.object({
 }).strict();
 export type ReviewerProfile = z.infer<typeof reviewerProfileSchema>;
 
+// A producer session runs one proof group on one exact head and submits evidence under its own
+// producer principal. It is launched like a worker — its own credential file, runtime and
+// environment — but never claims work: trust follows the principal's proof grants, and the
+// control plane refuses its evidence as soon as that principal ever holds an assignment.
+export const producerProfileSchema = z.object({
+  name: profileName,
+  principal: z.string().trim().min(1).max(200),
+  agentName: z.string().trim().min(1).max(100),
+  kind: agentKindSchema,
+  credentialFile: z.string(),
+  agentArgs: z.array(z.string().max(1000)).max(30).default([]),
+  approvals: approvalMode,
+  environment: safeEnvironment,
+}).strict().superRefine((profile, context) => {
+  if (!isAbsolute(profile.credentialFile)) context.addIssue({ code: 'custom', message: 'credentialFile must be absolute', path: ['credentialFile'] });
+});
+export type ProducerProfile = z.infer<typeof producerProfileSchema>;
+
 export const reviewerIdentitySchema = z.object({
   appId: z.number().int().positive(),
   installationId: z.number().int().positive(),
@@ -75,6 +93,12 @@ export const masterRunSchema = z.object({
   deploymentUrl: z.string().url().max(500).optional(),
   deploymentShaField: z.string().trim().min(1).max(100).regex(/^[A-Za-z0-9_]+(?:\.[A-Za-z0-9_]+)*$/).default('commit'),
   smokeWorkflow: z.string().trim().min(1).max(200).regex(/^[A-Za-z0-9][A-Za-z0-9._-]*$/, 'Name the trusted post-deployment smoke workflow file, such as deploy-smoke.yml').optional(),
+  // Automatic dispatch at submit: how often the loop reads the control plane's review and
+  // producer requests (the launch bound is 30 seconds from the request), which reviewer profile
+  // answers a request when more than one is configured, and how long a producer session may run.
+  dispatchIntervalSeconds: z.number().int().min(5).max(30).default(10),
+  reviewerProfile: profileName.optional(),
+  producerTimeoutMinutes: z.number().int().min(5).max(1440).default(120),
 }).strict();
 export type MasterRun = z.infer<typeof masterRunSchema>;
 
@@ -102,6 +126,7 @@ export const masterConfigSchema = z.object({
   workers: z.array(workerProfileSchema).max(100).default([]),
   reviewer: reviewerIdentitySchema.optional(),
   reviewers: z.array(reviewerProfileSchema).max(20).default([]),
+  producers: z.array(producerProfileSchema).max(20).default([]),
   run: masterRunSchema.prefault({}),
   // The operator's own authenticated browser profile, used only by master browser flows.
   browser: masterBrowserSchema.optional(),
@@ -130,10 +155,17 @@ worker must claim the item under its own identity and use the assigned worktree.
 Treat prompt delivery as an invitation, never as ownership. Use durable handoffs
 when an agent, provider account, machine, or context window changes.
 
-Independent review is launched, never performed by the master:
-\`graphyard master review GY-N [PROFILE]\` verifies the exact candidate, launches the
-bound reviewer identity read-only, and \`master status\` closes that session when the
-verdict lands. Never approve a candidate yourself. Reconcile branch protection with
+Review and proof collection start on their own. When a candidate passes the build gate
+the control plane records a review request and one producer request per proof group,
+each bound to the exact head, base and policy revision, and \`graphyard master run\`
+launches the configured reviewer profile and a producer session for each of them within
+30 seconds, without a keystroke. A head change cancels those sessions and requests the
+new head afresh unless the merge queue carried the approval or the proof. You handle
+findings, rework and merges; you never launch reviews or producers by hand. \`master
+status\` shows, per candidate, what is requested, what is running and since when, and
+any launch the loop refused; \`graphyard master review GY-N [PROFILE]\` is the recovery
+path for a refused reviewer launch once its cause is fixed. Never approve a candidate
+yourself, and never submit evidence. Reconcile branch protection with
 \`graphyard master protection\` after any review-policy change.
 
 GitHub administration of the managed repository is yours, not the operator's:
@@ -242,6 +274,18 @@ export async function inspectWorkerCredentials(root: string, profiles: WorkerPro
   }
   return health;
 }
+export async function readProducerCredential(root: string, file: string) {
+  await externalCredential(root, file, 'Producer');
+  return readCredentialFile(file);
+}
+export async function inspectProducerCredentials(root: string, profiles: ProducerProfile[]) {
+  const health: Record<string, { available: boolean; reason: string | null }> = {};
+  for (const profile of profiles) {
+    try { await readProducerCredential(root, profile.credentialFile); health[profile.name] = { available: true, reason: null }; }
+    catch (error) { health[profile.name] = { available: false, reason: error instanceof Error ? error.message : 'Producer credential is unavailable' }; }
+  }
+  return health;
+}
 
 export async function atomicPrivateWrite(file: string, value: unknown) {
   const temporary = `${file}.${randomUUID()}.tmp`;
@@ -284,7 +328,7 @@ export async function setupMaster(root: string, input: { url: string; token: str
   await assertOutsideWorktrees(root, credentialDirectory, 'Coordinator credential directory');
   const identity = createHash('sha256').update(`${url}\0${detected.repository}`).digest('hex').slice(0, 20);
   const credentialFile = resolve(credentialDirectory, `${identity}.token`);
-  const config = masterConfigSchema.parse({ version: 1, url, credentialFile, cliPath: resolve(input.cliPath), repository: detected.repository, baseBranch: status.baseBranch, githubAppId: status.githubAppId, hostId: input.hostId ?? previous?.hostId ?? hostname(), herdrWorkspace: input.herdrWorkspace ?? previous?.herdrWorkspace, masterAgentName: previous?.masterAgentName ?? `graphyard-master-${repositoryName}`, autoMerge: input.autoMerge ?? previous?.autoMerge ?? true, mergeMethod: input.mergeMethod ?? previous?.mergeMethod ?? 'merge', workers: previous?.workers ?? [], ...(previous?.reviewer ? { reviewer: previous.reviewer } : {}), reviewers: previous?.reviewers ?? [], run: { ...previous?.run, ...input.run }, ...(input.browser ?? previous?.browser ? { browser: input.browser ?? previous?.browser } : {}) });
+  const config = masterConfigSchema.parse({ version: 1, url, credentialFile, cliPath: resolve(input.cliPath), repository: detected.repository, baseBranch: status.baseBranch, githubAppId: status.githubAppId, hostId: input.hostId ?? previous?.hostId ?? hostname(), herdrWorkspace: input.herdrWorkspace ?? previous?.herdrWorkspace, masterAgentName: previous?.masterAgentName ?? `graphyard-master-${repositoryName}`, autoMerge: input.autoMerge ?? previous?.autoMerge ?? true, mergeMethod: input.mergeMethod ?? previous?.mergeMethod ?? 'merge', workers: previous?.workers ?? [], ...(previous?.reviewer ? { reviewer: previous.reviewer } : {}), reviewers: previous?.reviewers ?? [], producers: previous?.producers ?? [], run: { ...previous?.run, ...input.run }, ...(input.browser ?? previous?.browser ? { browser: input.browser ?? previous?.browser } : {}) });
   const instructionsFile = resolve(root, 'AGENTS.md');
   let existing = ''; let mode = 0o644;
   try { const info = await lstat(instructionsFile); if (!info.isFile()) throw new Error('Refusing to replace a non-regular AGENTS.md'); mode = info.mode & 0o777; existing = await readFile(instructionsFile, 'utf8'); }
@@ -322,6 +366,26 @@ export async function saveWorkerProfile(root: string, profileInput: unknown, ver
   config.workers.push(profile); await atomicPrivateWrite(resolve(root, '.graphyard/master.json'), config);
   return { added: profile.name, principal: profile.principal, mode: profile.mode, workers: config.workers.length,
     launch: profile.mode === 'launch' ? launchPlan(profile.kind, profile.approvals, profile.agentArgs, profile.environment) : null };
+}
+
+/**
+ * A producer profile is verified the way a worker profile is — its credential authenticates
+ * exactly the named principal in the producer role — and additionally kept apart from every
+ * worker principal: evidence from an identity that implements is never trusted, so a shared
+ * principal would only ever launch sessions whose evidence the control plane refuses.
+ */
+export async function saveProducerProfile(root: string, profileInput: unknown, verify: (token: string) => Promise<any>) {
+  const profile = producerProfileSchema.parse(profileInput);
+  const config = await loadMasterConfig(root);
+  await externalCredential(root, profile.credentialFile, 'Producer');
+  const status = await verify(await readCredentialFile(profile.credentialFile));
+  if (status.actor?.role !== 'producer' || status.actor.id !== profile.principal) throw new Error('Producer credential does not match the profile principal and producer role');
+  if (config.producers.some(item => item.name === profile.name || item.agentName === profile.agentName || item.principal === profile.principal)) throw new Error('Producer profile name, agent name, and principal must be unique');
+  if (config.workers.some(item => item.agentName === profile.agentName) || config.reviewers.some(item => item.agentName === profile.agentName)) throw new Error('A worker or reviewer profile already uses that Herdr agent name');
+  if (config.workers.some(item => item.principal === profile.principal)) throw new Error('A producer principal cannot also be a worker principal; the control plane refuses evidence from an implementer');
+  config.producers.push(profile); await atomicPrivateWrite(resolve(root, '.graphyard/master.json'), config);
+  return { added: profile.name, principal: profile.principal, kind: profile.kind, proofs: Array.isArray(status.actor?.proofs) ? status.actor.proofs : [], producers: config.producers.length,
+    launch: launchPlan(profile.kind, profile.approvals, profile.agentArgs, profile.environment) };
 }
 
 export type HerdrAgent = { name?: string; pane_id?: string; agent?: string; agent_status?: string; cwd?: string; foreground_cwd?: string; tokens?: Record<string, string> };
@@ -457,20 +521,44 @@ export function mergeProtocolSkew(status: { build?: { commit?: string | null; pr
   const serverCommit = status?.build?.commit ?? 'an unknown commit', cliCommit = cli.commit ?? 'an unknown commit';
   return `server runs ${serverCommit}, CLI expects ${cliCommit}: deploy main first (server merge protocol ${serverProtocol}, CLI merge protocol ${cliProtocol}${serverProtocol < cliProtocol ? '; the deployment has not served the commit the CLI runs' : '; update the CLI checkout to the deployed commit'})`;
 }
-export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profiles: WorkerProfile[], agents: HerdrAgent[], credentialHealth: Record<string, { available: boolean; reason: string | null }> = {}, containment: Record<string, ContainmentAssessment> = {}, reviews: { pending: any[]; completed: any[] } = { pending: [], completed: [] }, baseBranch = 'main', controlPlane?: ControlPlaneStatus) {
+/** Sessions the local ledgers hold and the launches the dispatcher refused, as `master status` joins them onto each candidate's requests. */
+export interface DispatchSessions { producers: { pending: any[]; completed: any[] }; failures: { requestId: string; kind: string; attempts: number; reason: string; at: string; nextAt: string }[] }
+const noSessions: DispatchSessions = { producers: { pending: [], completed: [] }, failures: [] };
+/**
+ * What is running for one candidate and since when: every open request the control plane
+ * holds for the current head, the session (if any) launched for it, and the launch failure
+ * standing against it, plus the last resolved requests so a re-request reads with its history.
+ */
+export function describeDispatch(work: Work, reviews: { pending: any[]; completed: any[] }, sessions: DispatchSessions, now: number) {
+  const state = work.autoDispatch;
+  if (!state) return null;
+  const since = (at: string) => Math.max(0, now - Date.parse(at));
+  const session = (records: any[], requestId: string) => {
+    const record = [...records].reverse().find(entry => entry.requestId === requestId);
+    return record ? { id: record.review ?? record.producer, profile: record.profile, agentName: record.agentName, state: record.state, requestedAt: record.requestedAt, sinceMs: since(record.requestedAt), ...(record.verdict !== undefined ? { verdict: record.verdict } : {}), ...(record.outcome ? { outcome: record.outcome } : {}), resolution: record.resolution ?? null, attention: record.attention ?? null } : null;
+  };
+  const failure = (requestId: string) => sessions.failures.find(entry => entry.requestId === requestId) ?? null;
+  const describe = (request: NonNullable<typeof state.review>, records: any[]) => ({ requestId: request.id, sha: request.sha, baseSha: request.baseSha, policyRevision: request.policyRevision, requestedAt: request.requestedAt, sinceMs: since(request.requestedAt), reason: request.reason,
+    ...(request.group ? { group: request.group, proofs: request.proofs } : {}), session: session(records, request.id), failure: failure(request.id) });
+  const reviewRecords = [...reviews.completed, ...reviews.pending], producerRecords = [...sessions.producers.completed, ...sessions.producers.pending];
+  return { review: state.review ? describe(state.review, reviewRecords) : null, producers: state.producers.map(request => describe(request, producerRecords)),
+    recent: state.history.slice(-5).map(request => ({ kind: request.kind, ...(request.group ? { group: request.group } : {}), sha: request.sha, state: request.state, resolution: request.resolution ?? null, resolvedAt: request.resolvedAt ?? null })) };
+}
+export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profiles: WorkerProfile[], agents: HerdrAgent[], credentialHealth: Record<string, { available: boolean; reason: string | null }> = {}, containment: Record<string, ContainmentAssessment> = {}, reviews: { pending: any[]; completed: any[] } = { pending: [], completed: [] }, baseBranch = 'main', controlPlane?: ControlPlaneStatus, sessions: DispatchSessions = noSessions) {
   const now = Date.parse(snapshot.now);
   const installation = controlPlaneAttention(controlPlane);
-  const sessions = profiles.map(profile => {
+  const workerSessions = profiles.map(profile => {
     const agent = agents.find(candidate => candidate.name === profile.agentName);
     const credential = credentialHealth[profile.name] ?? { available: true, reason: null };
     return { profile: profile.name, principal: profile.principal, agentName: profile.agentName, mode: profile.mode, state: agent?.agent_status ?? 'offline', pane: agent?.pane_id ?? null, cwd: agent?.foreground_cwd ?? agent?.cwd ?? null, contextPercent: agent?.tokens?.agent_watcher_context_pct ? Number(agent.tokens.agent_watcher_context_pct) : null, credential };
   });
   const placements = predictQueue(snapshot.work, now);
+  const queueRows = placements.map(placement => queueRow(placement, describeQueueBinding(snapshot.work.find(work => work.id === placement.id)!, snapshot.work, new Date(now), placement)));
   const rows = snapshot.work.filter(work => work.stage !== 'done').map(work => {
     const placement = placements.find(entry => entry.id === work.id) ?? null;
     const active = !!work.lease && Date.parse(work.lease.expiresAt) > now;
     const profile = active ? profiles.find(item => item.principal === work.lease!.owner) : undefined;
-    const session = profile ? sessions.find(item => item.profile === profile.name) : undefined;
+    const session = profile ? workerSessions.find(item => item.profile === profile.name) : undefined;
     const first = work.gates.find(gate => !gate.passed);
     const freshObservation = !!work.observation && now - Date.parse(work.observation.at) >= 0 && now - Date.parse(work.observation.at) < 120_000;
     const activeMerge = !!work.mergeExecution && Date.parse(work.mergeExecution.expiresAt) > now;
@@ -495,24 +583,28 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
         attestation: assessed?.settleable ? null : containmentAttestation(work.key) }
       : null;
     const gaps = work.proofGaps ?? [];
+    const dispatch = describeDispatch(work, reviews, sessions, now);
+    const stalledLaunch = [dispatch?.review, ...(dispatch?.producers ?? [])].find(request => request?.failure);
     const attention = quarantine ? quarantine.settleable
       ? `Containment quarantine from epoch ${quarantine.epoch} is verified settleable; run master settle-containment ${work.key}`
       : `Containment quarantine from epoch ${quarantine.epoch} blocks dispatch: ${quarantine.refusals[0]}`
       : active && (!session || !['working', 'idle'].includes(session.state)) ? `Assigned worker session is ${session?.state ?? 'offline'}`
       : gaps.length ? `No principal is authorized to produce ${gaps.join(', ')}; grant the proof name before dispatch`
       : review?.exhausted ? `Every configured reviewer profile is exhausted for the current candidate (${review.failedOver.map(entry => `${entry.profile}: ${entry.exhaustion}`).join(', ')})`
+      : stalledLaunch ? `Automatic ${stalledLaunch.failure!.kind} launch for ${work.key} refused ${stalledLaunch.failure!.attempts} time(s): ${stalledLaunch.failure!.reason}`
       : work.blocker || dwellMs > 3_600_000 ? first?.reasons[0] ?? `Work has remained at ${work.stage} for more than one hour` : null;
-    return { key: work.key, title: work.title, stage: work.stage, owner: active ? work.lease!.owner : null, profile: profile?.name ?? null, session: session?.state ?? null, refusal: first ? { gate: first.name, reason: first.reasons[0] } : null, mergeable, review, proofGaps: gaps, containment: quarantine, attention, queue: placement ? queueRow(placement) : null };
+    return { key: work.key, title: work.title, stage: work.stage, owner: active ? work.lease!.owner : null, profile: profile?.name ?? null, session: session?.state ?? null, refusal: first ? { gate: first.name, reason: first.reasons[0] } : null, mergeable, review, dispatch, proofGaps: gaps, containment: quarantine, attention, queue: placement ? queueRows.find(row => row.key === work.key) ?? null : null };
   });
   const delivered = snapshot.work.filter(work => work.stage === 'done' && work.delivery && deploySmokeRequired(work.policy)).map(work => deliveredRow(work, now, baseBranch));
   // Merge-to-production over every delivery with an observed deployment, whether or not its
   // policy asked for a smoke proof, so the periodic measurement reads one number for the repository.
   const mergeToProduction = latencyPercentiles(snapshot.work.map(work => mergeToProductionMs(work)).filter((value): value is number => value !== null));
   return { observedAt: snapshot.now,
-    counts: { open: rows.length, ready: rows.filter(row => row.stage === 'ready').length, active: rows.filter(row => row.owner).length, attention: rows.filter(row => row.attention).length + installation.attention.length, proofAuthorityGaps: rows.filter(row => row.proofGaps.length).length, mergeable: rows.filter(row => row.mergeable).length, reviewsPending: reviews.pending.length, reviewFailover: rows.filter(row => row.review?.failedOver.length).length, queued: placements.length,
+    counts: { open: rows.length, ready: rows.filter(row => row.stage === 'ready').length, active: rows.filter(row => row.owner).length, attention: rows.filter(row => row.attention).length + installation.attention.length, proofAuthorityGaps: rows.filter(row => row.proofGaps.length).length, mergeable: rows.filter(row => row.mergeable).length, reviewsPending: reviews.pending.length, producersPending: sessions.producers.pending.length,
+      dispatchRequested: rows.reduce((total, row) => total + (row.dispatch ? (row.dispatch.review ? 1 : 0) + row.dispatch.producers.length : 0), 0), dispatchRunning: rows.reduce((total, row) => total + (row.dispatch ? [row.dispatch.review, ...row.dispatch.producers].filter(request => request?.session?.state === 'pending').length : 0), 0), reviewFailover: rows.filter(row => row.review?.failedOver.length).length, queued: placements.length,
       quarantined: rows.filter(row => row.containment).length, settleableQuarantines: rows.filter(row => row.containment?.settleable).length,
       awaitingSmoke: delivered.filter(row => row.state === 'awaiting-deployment' || row.state === 'awaiting-smoke').length, postDeployFailures: delivered.filter(row => row.state === 'delivered-with-failure').length },
-    workers: sessions, reviews, work: rows, queue: placements.map(queueRow), delivered, latency: { mergeToProduction }, controlPlane: installation };
+    workers: workerSessions, reviews, producers: sessions.producers, work: rows, queue: queueRows, delivered, latency: { mergeToProduction }, controlPlane: installation };
 }
 
 /**
@@ -541,10 +633,15 @@ export function latencyPercentiles(values: number[]) {
   return { count: sorted.length, p50Ms: at(50), p90Ms: at(90) };
 }
 
-function queueRow(placement: QueuePlacement) {
+/**
+ * One queue entry as the master reads it. `binding` says, per entry, whether its review and each
+ * required proof bind the published tip exactly, were carried across a Graphyard-authored tip or a
+ * tree-identical base advance, or must be produced afresh — and the recorded reason for each.
+ */
+function queueRow(placement: QueuePlacement, binding: QueueBindingReport | null) {
   return { key: placement.key, position: placement.position + 1, size: placement.size, predictedBase: placement.predictedBase,
     predictedTip: placement.tip, validated: placement.current, waitMs: placement.waitMs, waitMinutes: Math.floor(placement.waitMs / 60_000),
-    enqueuedAt: placement.enqueuedAt, ahead: placement.predecessors, reasons: placement.reasons };
+    enqueuedAt: placement.enqueuedAt, ahead: placement.predecessors, reasons: placement.reasons, binding };
 }
 export function herdrJson(args: string[], run: (command: string, args: string[]) => string = (command, commandArgs) => execFileSync(command, commandArgs, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] })) {
   const parsed = JSON.parse(run('herdr', args));
@@ -624,8 +721,8 @@ export async function startMaster(root: string, kind: WorkerProfile['kind'], age
     herdrJson(['agent', 'start', config.masterAgentName, '--kind', kind, '--pane', created.pane, '--', ...agentArgs], run);
     const prompt = `You are the dedicated Graphyard master agent for ${config.repository}. Do not implement product work, claim worker leases, submit evidence, weaken requirements, or bypass gates. Read AGENTS.md, run node ${config.cliPath} master guide, then run node ${config.cliPath} master status. Use Graphyard as assignment and progression truth and Herdr only for session health and control. Route ready work to configured worker profiles, require workers to claim for themselves, preserve handoffs, surface decisions that need the operator, and invoke routine merge only through graphyard master merge after every exact-candidate gate passes.`;
     const reviewInstruction = config.reviewer
-      ? `Independent review runs under your own control: launch it with node ${config.cliPath} master review GY-N and let master status reconcile the verdict and close the session. The reviewer identity is ${config.reviewer.slug}[bot]; never review a candidate yourself.`
-      : `No reviewer identity is registered yet. Run node ${config.cliPath} master reviewer setup before routing work that needs independent review, and never approve a candidate yourself.`;
+      ? `Independent review and proof collection start on their own: when a candidate passes the build gate the control plane records a review request and producer requests bound to its exact head, and node ${config.cliPath} master run launches the reviewer identity ${config.reviewer.slug}[bot] and one producer session per proof group for them within 30 seconds. Read the findings, route rework, and merge; never launch reviews or producers by hand, never review a candidate yourself, and never submit evidence. master status shows what is running per candidate and since when, and node ${config.cliPath} master review GY-N is only the recovery path for a refused reviewer launch.`
+      : `No reviewer identity is registered yet. Run node ${config.cliPath} master reviewer setup before routing work that needs independent review; once it is registered, master run launches reviews and producers for every submitted head on its own. Never approve a candidate yourself.`;
     const mergeInstruction = config.autoMerge
       ? 'Automatic routine merging is enabled. Use the guarded merge command when all gates pass.'
       : 'Automatic merging is disabled. Wait for explicit operator approval for each merge. Do not invoke master merge or master merge --all without that approval; the operator can invoke the guarded command directly.';
@@ -669,7 +766,7 @@ export async function dispatchWork(root: string, work: Work, profile: WorkerProf
     await readCredentialFile(profile.credentialFile!);
     if (target) throw new Error('Launch profile agent name is already visible in Herdr');
     const prepared = await prepare(root, work.key, profile.name);
-    const prompt = `Implement ${work.key}: ${work.title}. The Graphyard worker launcher has claimed this item under principal ${profile.principal}, created its assigned worktree, and placed this agent under lease supervision. Run node ${config.cliPath} status ${work.key} before editing. Work only in the current assigned worktree, satisfy the stated criteria without weakening them, open a PR, and submit it with complete as your last action: complete ends your lease and the supervisor then stops this session, which is the attempt ending, not lease loss. Stop immediately if the supervisor reports lease loss before you have submitted. Do not submit trusted evidence or merge the PR.`;
+    const prompt = `Implement ${work.key}: ${work.title}. The Graphyard worker launcher has claimed this item under principal ${profile.principal}, created its assigned worktree, and placed this agent under lease supervision. Run node ${config.cliPath} status ${work.key} before editing. Work only in the current assigned worktree, satisfy the stated criteria without weakening them, open a PR, and submit it with complete as your last action: complete ends your lease and the supervisor then stops this session, which is the attempt ending, not lease loss. Stop immediately if the supervisor reports lease loss before you have submitted. Do not submit trusted evidence or merge the PR; the control plane requests the independent review and the proof producers for your exact head as soon as it passes the build gate, so ask nobody to launch them.`;
     let pane: string | undefined, tabId: string | undefined;
     try {
       const launch = launchPlan(profile.kind, profile.approvals, profile.agentArgs, profile.environment);
@@ -786,17 +883,81 @@ export function assertMergeProtection(protection: any, config: MasterConfig, wor
   if (!protectedBranch) throw new Error(`${work.key} managed-branch protection changed after merge authorization; Graphyard refused the merge`);
 }
 /**
+ * The real head of the managed base branch, read from `refs/heads/<base>`. A pull request's
+ * `baseRefOid` is GitHub's cached view of the same ref, refreshed only when the pull request is
+ * recomputed (a push to its head), so right after a predecessor merges it still names the
+ * pre-merge base and would refuse every follower in the queue. The landing check therefore
+ * never reads it: the server-side observation reads the ref (GY-57) and the broker does the same.
+ */
+export function readBaseTip(repository: string, baseBranch: string, run: (command: string, args: string[]) => string): string {
+  const ref = JSON.parse(run('gh', ['api', `repos/${repository}/git/ref/heads/${baseBranch.split('/').map(encodeURIComponent).join('/')}`]));
+  const tip = ref?.object?.sha;
+  if (ref?.object?.type !== 'commit' || typeof tip !== 'string' || !/^[a-f0-9]{40}$/.test(tip)) throw new Error(`GitHub did not return a readable head for refs/heads/${baseBranch} of ${repository}`);
+  return tip;
+}
+/**
  * The validated commit must still land its tested tree. Only a Graphyard-published speculative tip
  * may land, because publication is what proves the validated commit already contains its base. The
  * base branch must then still be exactly that base, or have advanced only through earlier queue
- * merges, which leave its tree untouched. Any other advance refuses the merge.
+ * merges, which leave its tree untouched. Any other advance refuses the merge, naming both the
+ * real base tip and the validated base with their trees. The base tip is `refs/heads/<base>` as
+ * GitHub serves it now, never the pull request's cached `baseRefOid`.
  */
-export function assertQueuedLanding(work: Work, authorization: { sha: string; baseSha: string }, baseRefOid: string, repository: string, run: (command: string, args: string[]) => string) {
+export function assertQueuedLanding(work: Work, authorization: { sha: string; baseSha: string }, baseBranch: string, repository: string, run: (command: string, args: string[]) => string): { baseTip: string; baseTree: string | null } {
   const speculation = work.queue?.speculation;
   if (!speculation || speculation.tip !== authorization.sha || speculation.base !== authorization.baseSha || !speculation.baseTree) throw new Error(`${work.key} has no published merge-queue tip for the authorized commit; the queue is the only path onto the base branch`);
-  if (baseRefOid === authorization.baseSha) return;
-  const commit = JSON.parse(run('gh', ['api', `repos/${repository}/commits/${baseRefOid}`]));
-  if (commit?.commit?.tree?.sha !== speculation.baseTree) throw new Error(`${work.key} base branch advanced outside the merge queue; the validated tip would no longer land its tested tree`);
+  const baseTip = readBaseTip(repository, baseBranch, run);
+  if (baseTip === authorization.baseSha) return { baseTip, baseTree: null };
+  const commit = JSON.parse(run('gh', ['api', `repos/${repository}/commits/${baseTip}`]));
+  const baseTree = commit?.commit?.tree?.sha;
+  if (typeof baseTree !== 'string' || !/^[a-f0-9]{40}$/.test(baseTree)) throw new Error(`GitHub did not return a tree for ${baseBranch} head ${baseTip} of ${repository}`);
+  if (baseTree !== speculation.baseTree) throw new Error(`${work.key} base branch ${baseBranch} advanced outside the merge queue: its head ${baseTip} (tree ${baseTree}) is not tree-identical to validated base ${authorization.baseSha} (tree ${speculation.baseTree}); the validated tip would no longer land its tested tree`);
+  return { baseTip, baseTree };
+}
+/** The GitHub review states a re-post decision reads; anything else is a comment, not a verdict. */
+const verdictStates = ['APPROVED', 'CHANGES_REQUESTED', 'DISMISSED'];
+export type CarriedApprovalRepost = { posted: boolean; reviewId: number | null; reason: string };
+/**
+ * GitHub dismisses a stale review on any push to the branch, Graphyard's own mechanical tip
+ * publication included, and a native review requirement then demands an approval after that
+ * push. When the control plane carried the approval of H to its authored tip H', the master
+ * re-posts that approval bound to H' — through the reviewer App that approved H, and only that
+ * identity; never through the control-plane App — so the provider merge is not refused for a
+ * review the record already accepts. A verdict the reviewer has since changed is never replaced.
+ */
+export async function repostCarriedApproval(config: MasterConfig, work: Work, carried: CarriedApproval, dependencies: {
+  run: (command: string, args: string[]) => string;
+  mint?: (credentialFile: string, repository: string) => Promise<{ token: string }>;
+  fetcher?: typeof fetch;
+}): Promise<CarriedApprovalRepost> {
+  const candidate = work.candidate!;
+  if (carried.provider !== 'github') return { posted: false, reviewId: null, reason: `the carried ${carried.provider} approval needs no native review re-post` };
+  const identity = config.reviewer ? `${config.reviewer.slug}[bot]` : null;
+  if (!identity || identity.toLowerCase() !== carried.reviewer.toLowerCase()) return { posted: false, reviewId: null, reason: `the approval of ${carried.originalSha.slice(0, 12)} was posted by ${carried.reviewer}, not by the bound reviewer App${identity ? ` ${identity}` : ''}; only the identity that approved it may re-post it, so the provider may still require a fresh native approval` };
+  const reviews = JSON.parse(dependencies.run('gh', ['api', '--paginate', `repos/${config.repository}/pulls/${candidate.pr}/reviews`]));
+  if (!Array.isArray(reviews)) throw new Error(`GitHub did not return a review list for ${work.key}`);
+  const own = reviews.filter((review: any) => String(review?.user?.login ?? '').toLowerCase() === identity.toLowerCase() && verdictStates.includes(review?.state));
+  const latest = own.at(-1);
+  if (latest?.commit_id === candidate.sha && latest.state === 'APPROVED') return { posted: false, reviewId: Number(latest.id), reason: `${identity} already approved tip ${candidate.sha.slice(0, 12)}` };
+  if (latest?.state === 'CHANGES_REQUESTED') throw new Error(`${work.key}: ${identity} requested changes after approving ${carried.originalSha.slice(0, 12)}; the carried approval is not re-posted over a changed verdict`);
+  const original = carried.reviewId !== undefined ? own.find((review: any) => Number(review.id) === carried.reviewId) : own.find((review: any) => review.commit_id === carried.originalSha && review.state !== 'CHANGES_REQUESTED');
+  if (!original || original.commit_id !== carried.originalSha) throw new Error(`${work.key}: the approval of ${carried.originalSha.slice(0, 12)} by ${identity} is no longer on the pull request; the carried binding cannot be re-posted`);
+  const mint = dependencies.mint ?? (async (file: string, repository: string) => {
+    const { mintReviewerToken, reviewerCredentialSchema } = await import('./reviewer.js');
+    await privateFile(file);
+    return mintReviewerToken(reviewerCredentialSchema.parse(JSON.parse(await readFile(file, 'utf8'))), repository, dependencies.fetcher);
+  });
+  const { token } = await mint(config.reviewer!.credentialFile, config.repository);
+  const body = `Graphyard carried this identity's approval of ${carried.originalSha} (review ${carried.reviewId ?? 'n/a'}) to Graphyard-authored merge-queue tip ${candidate.sha}: ${carried.reason}. Re-posted by the reviewer App so branch protection sees the approval after the control plane's own tip publication.`;
+  const response = await (dependencies.fetcher ?? fetch)(`https://api.github.com/repos/${config.repository}/pulls/${candidate.pr}/reviews`, {
+    method: 'POST', signal: AbortSignal.timeout(15_000),
+    headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json', 'Content-Type': 'application/json', 'X-GitHub-Api-Version': '2022-11-28' },
+    body: JSON.stringify({ commit_id: candidate.sha, event: 'APPROVE', body }),
+  });
+  if (!response.ok) throw new Error(`The reviewer App could not re-post the carried approval for ${work.key} (${response.status})`);
+  const posted: any = await response.json();
+  if (posted?.state !== 'APPROVED' || posted?.commit_id !== candidate.sha || String(posted?.user?.login ?? '').toLowerCase() !== identity.toLowerCase() || !Number.isSafeInteger(posted?.id)) throw new Error(`GitHub did not record the re-posted approval for ${work.key} as ${identity} on ${candidate.sha.slice(0, 12)}`);
+  return { posted: true, reviewId: posted.id, reason: `re-posted the carried approval of ${carried.originalSha.slice(0, 12)} as ${identity} on tip ${candidate.sha.slice(0, 12)}` };
 }
 export function githubProviderDelay(verifiedTime: number, serverDelayMs: number, response: string, providerToDatabaseOffsetMin = 0) {
   const header = /^Date:\s*(.+?)\r?$/gmi.exec(response);
@@ -816,7 +977,7 @@ function recordedVerification(execution: MergeExecution) {
   if (!Number.isFinite(verifiedAt) || !execution.clockOffset) throw Object.assign(new Error('Resumed merge execution carries an incomplete verification record'), { confirmedRefusal: true });
   return { executionId: execution.id, sha: execution.sha, verifiedAt: execution.verifiedAt!, providerDelayMs: providerDelayAfterVerification(verifiedAt, execution.clockOffset), clockOffset: execution.clockOffset };
 }
-export async function mergeWork(config: MasterConfig, work: Work, freshSnapshot: () => Promise<{ work: Work[]; now: string }>, acquire: (work: Work, authorization: ReturnType<typeof assertMergeCandidate>) => Promise<{ execution: MergeExecution }>, cancel: (work: Work, execution: MergeExecution, reason: string) => Promise<unknown>, verify: (work: Work, execution: MergeExecution) => Promise<{ executionId: string; sha: string; verifiedAt: string; providerDelayMs: number; clockOffset?: { min: number; max: number } }>, run: (command: string, args: string[]) => string = (command, args) => execFileSync(command, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 90_000 }), executionOwner?: string, commit?: (work: Work, execution: MergeExecution) => Promise<{ executionId: string; sha: string; committingAt: string }>) {
+export async function mergeWork(config: MasterConfig, work: Work, freshSnapshot: () => Promise<{ work: Work[]; now: string }>, acquire: (work: Work, authorization: ReturnType<typeof assertMergeCandidate>) => Promise<{ execution: MergeExecution }>, cancel: (work: Work, execution: MergeExecution, reason: string) => Promise<unknown>, verify: (work: Work, execution: MergeExecution) => Promise<{ executionId: string; sha: string; verifiedAt: string; providerDelayMs: number; clockOffset?: { min: number; max: number } }>, run: (command: string, args: string[]) => string = (command, args) => execFileSync(command, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 90_000 }), executionOwner?: string, commit?: (work: Work, execution: MergeExecution) => Promise<{ executionId: string; sha: string; committingAt: string }>, repost?: (work: Work, carried: CarriedApproval) => Promise<CarriedApprovalRepost>) {
   const before = await freshSnapshot(); const current = before.work.find(item => item.id === work.id);
   if (!current || current.revision !== work.revision) throw new Error(`${work.key} changed before GitHub verification; retry`);
   const authorization = assertMergeCandidate(current, before.now, executionOwner);
@@ -824,9 +985,16 @@ export async function mergeWork(config: MasterConfig, work: Work, freshSnapshot:
   // have called GitHub, so nothing is retried until observation reconciles the execution. A
   // verified execution that never reached the commit resumes below; the provider was not attempted.
   if (current.mergeExecution?.committingAt) return { key: authorization.key, pr: authorization.pr, sha: authorization.sha, method: config.mergeMethod, result: 'the provider commit was already recorded; Graphyard retained the execution until GitHub reconciles the provider outcome and refuses a new attempt until then' };
-  const pr = JSON.parse(run('gh', ['pr', 'view', String(authorization.pr), '--repo', config.repository, '--json', 'headRefOid,baseRefOid,baseRefName,state,isDraft']));
+  // The pull request answers for its own head, base branch name and state; the base tip is read
+  // from the ref itself inside assertQueuedLanding, because `baseRefOid` is a cached value.
+  const pr = JSON.parse(run('gh', ['pr', 'view', String(authorization.pr), '--repo', config.repository, '--json', 'headRefOid,baseRefName,state,isDraft']));
   if (pr.headRefOid !== authorization.sha || pr.baseRefName !== config.baseBranch || pr.state !== 'OPEN' || pr.isDraft) throw new Error(`${work.key} changed on GitHub before merge`);
-  assertQueuedLanding(current, authorization, pr.baseRefOid, config.repository, run);
+  assertQueuedLanding(current, authorization, config.baseBranch, config.repository, run);
+  // An approval the control plane carried onto its authored tip is re-posted through the
+  // reviewer App before any authority is acquired, so a native review requirement that GitHub
+  // re-armed on the tip publication is met by the same identity that gave the approval.
+  const carried = carriedApproval(current);
+  const reposted = carried && repost ? await repost(current, carried) : null;
   const authorityBudgetStartedAt = performance.now();
   const after = await freshSnapshot(); const latest = after.work.find(item => item.id === work.id);
   if (!latest || latest.revision !== authorization.revision) throw new Error(`${work.key} changed after GitHub verification; retry`);
@@ -838,9 +1006,9 @@ export async function mergeWork(config: MasterConfig, work: Work, freshSnapshot:
   let providerStarted = false; let cancelled = false;
   let verificationStarted = false; let verificationCompleted = false;
   try {
-    const lockedPr = JSON.parse(run('gh', ['pr', 'view', String(authorization.pr), '--repo', config.repository, '--json', 'headRefOid,baseRefOid,baseRefName,state,isDraft']));
+    const lockedPr = JSON.parse(run('gh', ['pr', 'view', String(authorization.pr), '--repo', config.repository, '--json', 'headRefOid,baseRefName,state,isDraft']));
     if (lockedPr.headRefOid !== authorization.sha || lockedPr.baseRefName !== config.baseBranch || lockedPr.state !== 'OPEN' || lockedPr.isDraft) throw new Error(`${work.key} changed on GitHub after merge authority was acquired`);
-    assertQueuedLanding(latest, authorization, lockedPr.baseRefOid, config.repository, run);
+    assertQueuedLanding(latest, authorization, config.baseBranch, config.repository, run);
     const remaining = remainingAtSnapshot - (performance.now() - authorityBudgetStartedAt);
     if (!Number.isFinite(remaining) || remaining <= 90_000) throw new Error(`${work.key} merge execution does not remain valid for the provider timeout; refresh gate inputs and retry`);
     const protection = JSON.parse(run('gh', ['api', `repos/${config.repository}/branches/${encodeURIComponent(config.baseBranch)}/protection`]));
@@ -901,7 +1069,10 @@ export async function mergeWork(config: MasterConfig, work: Work, freshSnapshot:
     // clears the execution, the revocation window reopens, and this stale SHA could
     // merge before the asynchronously published GitHub check changes. Revalidate the
     // committed authority and its remaining lifetime immediately before the provider
-    // mutation; the mutation is refused on any missing, fenced or expired authority.
+    // mutation; the mutation is refused on any missing, fenced or expired authority. The base
+    // branch is re-read from its ref for the same reason: a base that advanced outside the
+    // queue during the wait would land a different tree than the one the tip was tested on.
+    assertQueuedLanding(latest, authorization, config.baseBranch, config.repository, run);
     const preProvider = await freshSnapshot();
     const finalExecution = preProvider.work.find(item => item.id === work.id)?.mergeExecution;
     const remainingBeforeProvider = remainingAtSnapshot - (performance.now() - authorityBudgetStartedAt);
@@ -922,7 +1093,7 @@ export async function mergeWork(config: MasterConfig, work: Work, freshSnapshot:
     if (providerStarted && !cancelled) throw new Error(`${error instanceof Error ? error.message : 'GitHub merge call failed'}; the merge outcome is unknown, so Graphyard retained execution ${granted.execution.id} until observation or expiry`);
     throw error;
   }
-  return { key: authorization.key, pr: authorization.pr, sha: authorization.sha, method: config.mergeMethod, result: 'merge requested; Graphyard will mark Done only after observing the merge' };
+  return { key: authorization.key, pr: authorization.pr, sha: authorization.sha, method: config.mergeMethod, result: 'merge requested; Graphyard will mark Done only after observing the merge', ...(reposted ? { carriedApproval: reposted } : {}) };
 }
 
 /**
@@ -936,5 +1107,6 @@ export function mergeExecutor(config: MasterConfig, snapshot: () => Promise<{ wo
     (latest, authorization) => mutation(`work/${latest.id}/merge-acquire`, { expectedRevision: authorization.revision, sha: authorization.sha, baseSha: authorization.baseSha, policyRevision: authorization.policyRevision }, stepKey(latest, 'acquire')),
     (latest, execution, reason) => mutation(`work/${latest.id}/merge-cancel`, { executionId: execution.id, reason }, stepKey(latest, 'cancel', execution.id)),
     (latest, execution) => mutation(`work/${latest.id}/merge-verify`, { executionId: execution.id }, stepKey(latest, 'verify', execution.id)), run, executionOwner,
-    (latest, execution) => mutation(`work/${latest.id}/merge-commit`, { executionId: execution.id }, stepKey(latest, 'commit', execution.id)));
+    (latest, execution) => mutation(`work/${latest.id}/merge-commit`, { executionId: execution.id }, stepKey(latest, 'commit', execution.id)),
+    (latest, carried) => repostCarriedApproval(config, latest, carried, { run: run ?? ((command, args) => execFileSync(command, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 90_000 })) }));
 }

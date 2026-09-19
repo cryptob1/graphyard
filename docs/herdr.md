@@ -1,11 +1,11 @@
 <!-- page: Operate Graphyard | 4 | worker installation and multi-machine use. -->
 # Herdr integration
 
-Herdr runs visible agent sessions. Graphyard remains authoritative for work ownership, leases, evidence, and progression.
+Herdr is the runtime that launches, shows, and stops agent sessions. Graphyard remains authoritative for work ownership, leases, evidence, and progression. Terms follow the [glossary](glossary.md).
 
 ## Install the plugin
 
-Requires Node 24, Herdr 0.7.1 or newer, and a Graphyard checkout.
+Requires Node 24, Herdr 0.7.1 or newer, and a Graphyard checkout. Supervised Muse launch and lifecycle detection require Herdr 0.9.1 or newer, which recognizes kind `muse`, plus an installed, provider-authenticated `muse` executable.
 
 From the managed repository, with an individual worker token:
 
@@ -36,19 +36,21 @@ release GY-1 1
 quit
 ```
 
-`claim` returns an epoch. It does not prove an agent started. `handoff` prints the assigned workspace and launch command. Run workers under lease supervision:
+`claim` returns an epoch. It does not prove a session started. `handoff` prints the assigned worktree and launch command. Run worker sessions under lease supervision:
 
 ```sh
 node "$GRAPHYARD_CLI" watch GY-1 EPOCH -- YOUR_AGENT_COMMAND
 ```
 
-A direct `watch` invocation stops the worker process group on Unix. On Windows it can stop only the direct child, so use external containment if the agent may spawn descendants. Master-created foreground Herdr launches require Linux with a working systemd user manager. See [operations](operations.md) for recovery.
+A direct `watch` invocation stops the worker process group on Unix. On Windows it can stop only the direct child, so use external containment if the worker session may spawn descendants. Master-created foreground Herdr launches require Linux with a working systemd user manager. See [operations](operations.md) for recovery.
 
 ## Master mode
 
 For several workers, use the [master-agent mode](master-agent.md). It joins Graphyard work state with Herdr session health, dispatches trusted local launch profiles, and requests guarded merges.
 
-A visible session is health information, not ownership. Graphyard recognizes ownership only after the worker's authenticated claim.
+A visible session is health information, not ownership. Graphyard recognizes ownership only after the worker principal's authenticated claim.
+
+Muse is available as `kind: "muse"` in a master launch profile; see [Muse](master-agent.md#muse). Dispatch still follows the normal authenticated claim, assigned-worktree, Herdr pane, and `graphyard watch` path under the profile's own worker credential. Herdr's Muse states make launch, active work, waiting, blocked, exit, and offline sessions observable, but cannot claim, release, renew, or advance Graphyard work. A failed launch is cleaned up before release, and lease loss terminates the supervised process. There is no supported unsupervised Muse dispatch path.
 
 ## Multiple machines
 
@@ -65,13 +67,13 @@ Local master launch profiles run on the coordinator host. Version 0.1 does not r
 
 ## Assignment names
 
-Optional `displayName` and `runtime` fields in `GRAPHYARD_PRINCIPALS` control labels such as **Atlas · Codex**. The authenticated principal still determines ownership. Renaming a principal affects future claims and does not rewrite history.
+Optional `displayName` and `runtime` fields in `GRAPHYARD_PRINCIPALS` control labels such as **Atlas · Codex**. The authenticated principal, not the label or the runtime, determines ownership. Renaming a principal affects future claims and does not rewrite history.
 
 ## First fleet check
 
 Before scaling:
 
-1. race two identities for one item and confirm one claim wins;
+1. race two worker principals for one item and confirm one claim wins;
 2. stop the winner and reclaim after lease expiry;
 3. confirm the old epoch is refused;
 4. submit stale evidence and confirm acceptance stays closed;
@@ -89,7 +91,7 @@ Its fixed inventory is:
 | `expiry-recovery` | The lease expires without a heartbeat, the stopped machine cannot renew it, and the second machine claims the next epoch. |
 | `stale-owner-refused` | Heartbeat, release, workspace, submit, blocked, quarantine, launch, rereview, and a fresh claim all refuse for the superseded owner. |
 | `isolated-worktrees` | The replacement cannot reserve the stopped machine's branch or an overlapping path, registers its own worktree, and the earlier reservation is retained. |
-| `supervised-fence-recovery` | A supervised worker that quarantined containment and stopped without settling keeps the item fenced: operator rework is refused while the fences are live, and surrendering the lease does not lift launch authority. After both expire, rework succeeds, the stopped machine's settlement capability no longer applies, and the second machine owns the work. |
+| `supervised-fence-recovery` | A supervised worker that quarantined containment and stopped without settling keeps the item fenced: `admin` rework is refused while the fences are live, and surrendering the lease does not lift launch authority. After both expire, rework succeeds, the stopped machine's settlement capability no longer applies, and the second machine owns the work. |
 
 The contract waits on the lease and launch fences the candidate itself reports, measured by the candidate's clock, so it exercises the shipped defaults rather than a test-only timeout. It also refuses to certify a candidate that has shortened them: each fence must be reported as at least the two-minute default, and must then hold for that long on the harness's own clock, which the candidate does not control. Only this repository's test suite substitutes shorter fences, against its own short-fenced engine.
 

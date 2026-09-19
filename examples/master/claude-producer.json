@@ -1,0 +1,12 @@
+{
+  "name": "claude-producer",
+  "principal": "proof-runner-1",
+  "agentName": "produce-claude-1",
+  "kind": "claude",
+  "credentialFile": "/home/operator/.config/graphyard/producers/proof-runner-1.token",
+  "agentArgs": [],
+  "approvals": "auto",
+  "environment": {
+    "CLAUDE_CONFIG_DIR": "/home/operator/.config/claude-producer"
+  }
+}

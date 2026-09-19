@@ -95,6 +95,18 @@ test('worker profiles support existing sessions and launch profiles without embe
   assert.equal(workerProfileSchema.safeParse({ name: 'launch', principal: 'worker-b', agentName: 'eng-b', mode: 'launch', kind: 'codex', credentialFile: '/private/worker.token', environment: { CODEX_HOME: '/profiles/two' } }).success, true);
 });
 
+test('Muse launch profiles validate like every other runtime and carry no embedded secrets', () => {
+  const muse = { name: 'muse-primary', principal: 'muse-1', agentName: 'engineering-muse-1', mode: 'launch', kind: 'muse', credentialFile: '/private/muse-1.token' };
+  const parsed = workerProfileSchema.parse({ ...muse, agentArgs: ['--approval-mode', 'never', '--trust-workspace'] });
+  assert.equal(parsed.kind, 'muse'); assert.equal(parsed.approvals, 'auto'); assert.deepEqual(parsed.agentArgs, ['--approval-mode', 'never', '--trust-workspace']);
+  assert.equal(workerProfileSchema.safeParse({ ...muse, credentialFile: undefined }).success, false, 'a launched Muse worker needs its own credential file');
+  assert.equal(workerProfileSchema.safeParse({ ...muse, credentialFile: 'relative/muse.token' }).success, false);
+  assert.equal(workerProfileSchema.safeParse({ ...muse, environment: { MUSE_API_KEY: 'secret' } }).success, false, 'provider secrets belong to the runtime login, not the profile');
+  assert.equal(workerProfileSchema.safeParse({ ...muse, environment: { GRAPHYARD_TOKEN: 'coordinator' } }).success, false, 'GRAPHYARD_ variables are owned by the launcher');
+  assert.equal(workerProfileSchema.safeParse({ ...muse, mode: 'existing', kind: undefined, credentialFile: undefined }).success, true);
+  assert.equal(workerProfileSchema.safeParse({ ...muse, kind: 'muse-code' }).success, false);
+});
+
 test('master status derives ownership from Graphyard and only joins Herdr health', () => {
   const active = work({ stage: 'build', lease: { owner: 'worker-a', epoch: 3, expiresAt: '2030-01-01T00:10:00Z' }, gates: [{ name: 'build', passed: false, reasons: ['Worker has not submitted'] }] });
   const result = buildMasterStatus({ work: [active], now: '2030-01-01T00:00:00Z' }, [{ name: 'profile-a', principal: 'worker-a', agentName: 'eng-a', mode: 'existing', agentArgs: [], approvals: 'auto', environment: {} }], [{ name: 'eng-a', agent_status: 'working', pane_id: 'p1' }]);
@@ -105,8 +117,31 @@ test('master status derives ownership from Graphyard and only joins Herdr health
   assert.equal(unavailable.available, false); assert.deepEqual(unavailable.agents, []); assert.match(unavailable.reason!, /Graphyard work state remains authoritative/);
 });
 
+test('Muse lifecycle telemetry is health-only: working, idle, blocked, done, exit, offline, and lease loss', () => {
+  const active = work({ stage: 'build', lease: { owner: 'muse-1', epoch: 3, expiresAt: '2030-01-01T00:10:00Z' } });
+  const profile = { name: 'muse-primary', principal: 'muse-1', agentName: 'engineering-muse-1', mode: 'launch' as const, kind: 'muse' as const, credentialFile: '/private/muse-1.token', agentArgs: [], approvals: 'auto' as const, environment: {} };
+  const agent = (state: string) => [{ name: profile.agentName, agent: 'muse', agent_status: state, pane_id: 'muse-pane', cwd: '/worktrees/GY-42-3' }];
+  for (const state of ['working', 'idle']) {
+    const status = buildMasterStatus({ work: [active], now: '2030-01-01T00:00:00Z' }, [profile], agent(state));
+    assert.equal(status.work[0].owner, 'muse-1'); assert.equal(status.work[0].session, state); assert.equal(status.work[0].attention, null);
+    assert.equal(status.workers[0].state, state); assert.equal(status.workers[0].pane, 'muse-pane'); assert.equal(status.counts.active, 1);
+  }
+  for (const state of ['blocked', 'done']) {
+    const status = buildMasterStatus({ work: [active], now: '2030-01-01T00:00:00Z' }, [profile], agent(state));
+    assert.equal(status.work[0].owner, 'muse-1', `a ${state} Muse session neither releases nor advances Graphyard work`); assert.equal(status.work[0].session, state);
+    assert.match(status.work[0].attention!, new RegExp(`session is ${state}`));
+  }
+  const exited = buildMasterStatus({ work: [active], now: '2030-01-01T00:00:00Z' }, [profile], []);
+  assert.equal(exited.work[0].owner, 'muse-1', 'a Muse exit cannot release or change Graphyard ownership');
+  assert.equal(exited.work[0].session, 'offline'); assert.match(exited.work[0].attention!, /offline/); assert.equal(exited.workers[0].state, 'offline');
+  const expired = buildMasterStatus({ work: [active], now: '2030-01-01T00:20:00Z' }, [profile], agent('working'));
+  assert.equal(expired.work[0].owner, null, 'Muse telemetry cannot extend a lost lease'); assert.equal(expired.counts.active, 0);
+  const spoofed = buildMasterStatus({ work: [active], now: '2030-01-01T00:00:00Z' }, [profile], [{ name: 'muse-1', agent: 'muse', agent_status: 'working' }]);
+  assert.equal(spoofed.work[0].session, 'offline', 'a Muse session named after the principal is not the profile session');
+});
+
 test('master commands refuse a changed repository or managed base binding', () => {
-  const config = { version: 1 as const, url: 'https://graphyard.example', credentialFile: '/outside/master.token', cliPath: launcher, repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'machine-a', masterAgentName: 'graphyard-master-project', autoMerge: true, mergeMethod: 'merge' as const, workers: [], reviewers: [], run: { intervalSeconds: 20, deploymentShaField: 'commit' } };
+  const config = { version: 1 as const, url: 'https://graphyard.example', credentialFile: '/outside/master.token', cliPath: launcher, repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'machine-a', masterAgentName: 'graphyard-master-project', autoMerge: true, mergeMethod: 'merge' as const, workers: [], reviewers: [], producers: [], run: { intervalSeconds: 20, deploymentShaField: 'commit', dispatchIntervalSeconds: 10, producerTimeoutMinutes: 120 } };
   assert.doesNotThrow(() => assertMasterBinding(config, { actor: { role: 'coordinator' }, repository: 'OWNER/project', baseBranch: 'main', githubAppId: 1234 }));
   assert.throws(() => assertMasterBinding(config, { actor: { role: 'coordinator' }, repository: 'owner/other', baseBranch: 'main', githubAppId: 1234 }), /rerun master init/);
   assert.throws(() => assertMasterBinding(config, { actor: { role: 'coordinator' }, repository: 'owner/project', baseBranch: 'release', githubAppId: 1234 }), /rerun master init/);
@@ -158,6 +193,69 @@ test('dispatch launches through watch and requires lifecycle-reported readiness 
     const dependency = work({ id: 'dependency', key: 'GY-41', stage: 'build' });
     await assert.rejects(dispatchWork(root, work({ stage: 'ready', lease: null, submission: null, candidate: null, mergeAuthorization: null, dependencies: [dependency.id] }), profile, [], undefined, [dependency]), /unfinished dependencies/);
   } finally { await rm(root, { recursive: true, force: true }); await rm(credentialDirectory, { recursive: true, force: true }); }
+});
+
+test('Muse dispatch runs the installed binary through claim, assigned worktree, Herdr, and watch with its own credential only', async () => {
+  const root = await repository(); const credentialDirectory = await mkdtemp(join(tmpdir(), 'graphyard-master-credentials-')); const calls: string[][] = [];
+  const previousToken = process.env.GRAPHYARD_TOKEN; process.env.GRAPHYARD_TOKEN = coordinatorToken;
+  try {
+    const credential = join(credentialDirectory, 'muse-1.token'); await writeFile(credential, workerToken, { mode: 0o600 });
+    await setupMaster(root, { url: 'https://graphyard.example', token: coordinatorToken, cliPath: launcher, credentialDirectory, herdrWorkspace: 'workspace-graphyard' }, coordinatorStatus as typeof fetch);
+    await assert.rejects(saveWorkerProfile(root, { name: 'muse-primary', principal: 'muse-1', agentName: 'engineering-muse-1', mode: 'launch', kind: 'muse', credentialFile: credential }, async () => ({ actor: { id: 'muse-1', role: 'coordinator' } })), /worker role/);
+    await assert.rejects(saveWorkerProfile(root, { name: 'muse-primary', principal: 'muse-1', agentName: 'engineering-muse-1', mode: 'launch', kind: 'muse', credentialFile: credential }, async () => ({ actor: { id: 'muse-2', role: 'worker' } })), /profile principal/);
+    const saved = await saveWorkerProfile(root, { name: 'muse-primary', principal: 'muse-1', agentName: 'engineering-muse-1', mode: 'launch', kind: 'muse', credentialFile: credential, agentArgs: ['--approval-mode', 'never', '--trust-workspace'] }, async token => ({ actor: { id: token === workerToken ? 'muse-1' : 'wrong', role: 'worker' } }));
+    assert.equal(saved.launch!.applied, false); assert.match(saved.launch!.reason!, /no non-interactive launch contract for muse/); assert.deepEqual(saved.launch!.args, ['--approval-mode', 'never', '--trust-workspace']);
+    const profile = (await loadMasterConfig(root)).workers[0];
+    assert.equal(profile.kind, 'muse');
+    // The claim runs under the profile's own credential file: the coordinator token in the
+    // master's environment never reaches the worker process.
+    const prepareCalls: { args: string[]; options: any }[] = []; const base = 'c'.repeat(40);
+    const prepared = await prepareWorkerLaunch(root, 'GY-42', 'muse-primary', (command, args, options) => {
+      prepareCalls.push({ args, options });
+      if (command === 'git') return args[0] === 'rev-parse' ? `${base}\n` : '';
+      return args[1] === 'claim' ? JSON.stringify({ epoch: 4, lease: { owner: 'muse-1' } }) : JSON.stringify({ path: join(root, 'assigned') });
+    });
+    assert.equal(prepared.epoch, 4); const claim = prepareCalls.find(call => call.args[1] === 'claim')!;
+    assert.equal(claim.options.env.GRAPHYARD_TOKEN_FILE, credential); assert.equal(claim.options.env.GRAPHYARD_TOKEN, undefined); assert.equal(claim.options.env.GRAPHYARD_MASTER_TOKEN, undefined);
+    let probes = 0;
+    const result = await dispatchWork(root, work({ stage: 'ready', lease: null, submission: null, candidate: null, mergeAuthorization: null }), profile, [], (_command, args) => { calls.push(args); return JSON.stringify({ result: args[0] === 'tab' ? { type: 'tab_created', root_pane: { pane_id: 'muse-pane', tab_id: 'muse-tab' }, tab: { tab_id: 'muse-tab' } } : args[1] === 'get' ? { type: 'agent_info', agent: { pane_id: 'muse-pane', agent_status: ++probes === 1 ? 'working' : 'idle' } } : {} }); }, undefined, async () => ({ epoch: 4, path: join(root, 'assigned'), base }));
+    assert.match(result.ownership, /supervising/); assert.equal(result.principal, 'muse-1'); assert.equal(result.launch.applied, false);
+    const tab = calls[0]; assert.deepEqual(tab.slice(0, 4), ['tab', 'create', '--workspace', 'workspace-graphyard']);
+    assert.equal(tab[tab.indexOf('--cwd') + 1], join(root, 'assigned'));
+    const tabEnvironment = tab.flatMap((argument, index) => argument === '--env' ? [tab[index + 1]] : []);
+    assert.ok(tabEnvironment.includes(`GRAPHYARD_TOKEN_FILE=${credential}`)); assert.ok(tabEnvironment.includes('GRAPHYARD_HERDR_AGENT_KIND=muse'));
+    assert.ok(tabEnvironment.every(entry => !entry.startsWith('GRAPHYARD_TOKEN=') && !entry.startsWith('GRAPHYARD_MASTER_TOKEN=') && !entry.includes(coordinatorToken)), 'the Muse tab receives only its own credential file');
+    assert.deepEqual(calls[1].slice(0, 3), ['pane', 'run', 'muse-pane']);
+    assert.match(calls[1][3], /'watch' 'GY-42' '4' '--' 'muse' '--approval-mode' 'never' '--trust-workspace'$/, 'Muse starts only under graphyard watch with the profile arguments');
+    assert.doesNotMatch(calls[1][3], /herdr agent start|GRAPHYARD_TOKEN/);
+    assert.equal(probes, 2, 'prompting waits for Herdr to report the Muse session ready');
+    assert.deepEqual(calls.at(-2)!.slice(0, 3), ['agent', 'rename', 'muse-pane']); assert.deepEqual(calls.at(-1)!.slice(0, 3), ['agent', 'prompt', 'engineering-muse-1']);
+    assert.match(calls.at(-1)![3], /principal muse-1/); assert.equal(JSON.stringify(calls).includes(coordinatorToken), false); assert.equal(JSON.stringify(calls).includes(workerToken), false);
+    // A Muse session that never becomes visible is closed and its epoch released; one Herdr
+    // cannot confirm closed keeps the epoch fenced.
+    const failedCalls: string[][] = []; let releasedEpoch = 0;
+    await assert.rejects(dispatchWork(root, work({ stage: 'ready', lease: null, submission: null, candidate: null, mergeAuthorization: null }), profile, [], (_command, args) => { failedCalls.push(args); return JSON.stringify({ result: args[0] === 'tab' ? { pane_id: 'late-muse' } : args[0] === 'pane' && args[1] === 'list' ? { panes: [] } : {} }); }, undefined, async () => ({ epoch: 5, path: join(root, 'late'), base }), async (_root, _key, epoch) => { releasedEpoch = epoch; }, 1), /did not become visible/);
+    assert.equal(releasedEpoch, 5); assert.deepEqual(failedCalls.at(-2), ['pane', 'close', 'late-muse']); assert.deepEqual(failedCalls.at(-1), ['pane', 'list']);
+    let blockedRelease = 0;
+    await assert.rejects(dispatchWork(root, work({ stage: 'ready', lease: null, submission: null, candidate: null, mergeAuthorization: null }), profile, [], (_command, args) => {
+      if (args[0] === 'agent' && args[1] === 'get') return JSON.stringify({ result: { agent: { pane_id: 'blocked-muse', agent_status: 'blocked' } } });
+      return JSON.stringify({ result: args[0] === 'tab' ? { pane_id: 'blocked-muse' } : args[0] === 'pane' && args[1] === 'list' ? { panes: [] } : {} });
+    }, undefined, async () => ({ epoch: 6, path: join(root, 'blocked'), base }), async (_root, _key, epoch) => { blockedRelease = epoch; }, 5_000), /blocked before it is ready/);
+    assert.equal(blockedRelease, 6);
+    let unsafeRelease = false;
+    await assert.rejects(dispatchWork(root, work({ stage: 'ready', lease: null, submission: null, candidate: null, mergeAuthorization: null }), profile, [], (_command, args) => {
+      if (args[0] === 'pane' && args[1] === 'close') throw new Error('daemon unavailable');
+      return JSON.stringify({ result: args[0] === 'tab' ? { pane_id: 'unsafe-muse' } : {} });
+    }, undefined, async () => ({ epoch: 7, path: join(root, 'unsafe'), base }), async () => { unsafeRelease = true; }, 1), /retained epoch 7/);
+    assert.equal(unsafeRelease, false, 'ownership remains fenced until Muse pane shutdown is confirmed');
+    // An already-running Muse session is observable but never adopted for new work.
+    await assert.rejects(dispatchWork(root, work({ stage: 'ready', lease: null, submission: null, candidate: null, mergeAuthorization: null }), profile, [{ name: 'engineering-muse-1', agent: 'muse', agent_status: 'idle', cwd: root }]), /already visible in Herdr/);
+    const existing = { ...profile, name: 'muse-existing', principal: 'muse-2', agentName: 'engineering-muse-2', mode: 'existing' as const, kind: undefined, credentialFile: undefined };
+    await assert.rejects(dispatchWork(root, work({ stage: 'ready', lease: null, submission: null, candidate: null, mergeAuthorization: null }), existing, [{ name: 'engineering-muse-2', agent: 'muse', agent_status: 'idle', cwd: root }]), /cannot be safely adopted/);
+  } finally {
+    if (previousToken === undefined) delete process.env.GRAPHYARD_TOKEN; else process.env.GRAPHYARD_TOKEN = previousToken;
+    await rm(root, { recursive: true, force: true }); await rm(credentialDirectory, { recursive: true, force: true });
+  }
 });
 
 test('dispatch claimability permits operator-authorized rework independent of display stage', () => {
@@ -279,6 +377,9 @@ test('worker preparation claims and creates the assigned worktree from the curre
   } finally { await rm(root, { recursive: true, force: true }); await rm(credentialDirectory, { recursive: true, force: true }); }
 });
 
+// GitHub's answer for `git/ref/heads/main`: the real base tip the landing check reads.
+const baseRef = (sha: string) => JSON.stringify({ ref: 'refs/heads/main', object: { type: 'commit', sha } });
+
 // A fake store for the broker: before acquire the record carries no execution; afterwards it
 // carries the one the engine recorded, and after merge-commit the committed one, which is
 // what the two pre-provider re-reads check. `override` shapes what a numbered read returns.
@@ -292,33 +393,38 @@ function broker(item: Work, active: NonNullable<Work['mergeExecution']>, overrid
 }
 
 test('routine merge is exact-candidate, double-checked, and never uses an admin bypass', async () => {
-  const candidate = work({ observation: { at: new Date().toISOString(), candidate: { sha: 'a'.repeat(40), baseSha: 'b'.repeat(40), pr: 42, branch: 'graphyard/gy-42-1', author: 'worker' } } as any }); const config = { version: 1 as const, url: 'https://graphyard.example', credentialFile: '/outside/master.token', cliPath: launcher, repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'machine-a', masterAgentName: 'graphyard-master-project', autoMerge: true, mergeMethod: 'merge' as const, workers: [], reviewers: [], run: { intervalSeconds: 20, deploymentShaField: 'commit' } };
+  const candidate = work({ observation: { at: new Date().toISOString(), candidate: { sha: 'a'.repeat(40), baseSha: 'b'.repeat(40), pr: 42, branch: 'graphyard/gy-42-1', author: 'worker' } } as any }); const config = { version: 1 as const, url: 'https://graphyard.example', credentialFile: '/outside/master.token', cliPath: launcher, repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'machine-a', masterAgentName: 'graphyard-master-project', autoMerge: true, mergeMethod: 'merge' as const, workers: [], reviewers: [], producers: [], run: { intervalSeconds: 20, deploymentShaField: 'commit', dispatchIntervalSeconds: 10, producerTimeoutMinutes: 120 } };
   const calls: string[][] = [];
   const execution = { id: '11111111-1111-4111-8111-111111111111', owner: 'master', sha: candidate.candidate!.sha, baseSha: candidate.candidate!.baseSha, policyRevision: 2, authorizationRevision: candidate.revision, issuedAt: new Date().toISOString(), expiresAt: new Date(Date.now() + 120_000).toISOString() };
   const acquire = async () => ({ execution }); const cancel = async () => ({}); const verify = async () => ({ executionId: execution.id, sha: execution.sha, verifiedAt: new Date(Date.now() - 2000).toISOString(), providerDelayMs: 0, clockOffset: { min: 0, max: 0 } });
   const store = broker(candidate, execution);
   const result = await mergeWork(config, candidate, store.snapshot, store.acquire, cancel, verify, (_command, args) => {
     calls.push(args);
-    if (args[1] === 'view') return JSON.stringify({ headRefOid: candidate.candidate!.sha, baseRefOid: candidate.candidate!.baseSha, baseRefName: 'main', state: 'OPEN', isDraft: false });
+    if (args[1] === 'view') return JSON.stringify({ headRefOid: candidate.candidate!.sha, baseRefName: 'main', state: 'OPEN', isDraft: false });
+    if (args[1]?.includes('/git/ref/heads/')) return baseRef(candidate.candidate!.baseSha);
     if (args.includes('--include')) return `Date: ${new Date().toUTCString()}\n\n{}`;
     return args[1] === '--method' ? JSON.stringify({ merged: true, sha: 'c'.repeat(40) }) : JSON.stringify(validProtection);
   }, undefined, store.commit);
   assert.equal(result.result.startsWith('merge requested'), true);
   assert.equal(calls.filter(args => args.includes('--include')).length, 2, 'the broker reads provider time again after committing');
-  assert.deepEqual(calls[5].slice(0, 3), ['api', '--method', 'PUT']); assert.ok(calls[5].includes(`sha=${candidate.candidate!.sha}`)); assert.equal(calls[5].includes('--admin'), false);
+  const put = calls.filter(args => args[1] === '--method');
+  assert.equal(put.length, 1); assert.deepEqual(put[0].slice(0, 3), ['api', '--method', 'PUT']); assert.ok(put[0].includes(`sha=${candidate.candidate!.sha}`)); assert.equal(put[0].includes('--admin'), false);
+  assert.equal(calls.filter(args => args[1] === 'repos/owner/project/git/ref/heads/main').length, 3, 'the real base tip is read before authority, under the lock, and again before the provider call');
+  assert.equal(calls.some(args => args[0] === 'pr' && args.includes('--json') && String(args.at(-1)).includes('baseRefOid')), false, 'the cached pr.baseRefOid is never requested');
   assert.doesNotThrow(() => assertMergeProtection(validProtection, config, candidate));
   assert.throws(() => assertMergeProtection({ ...validProtection, required_status_checks: { ...validProtection.required_status_checks, checks: [] } }, config, candidate), /protection changed/);
   assert.throws(() => assertMergeProtection({ ...validProtection, required_status_checks: { ...validProtection.required_status_checks, strict: true } }, config, candidate), /requires branches to be up to date/);
   assert.throws(() => assertMergeCandidate(work({ gates: [{ name: 'acceptance', passed: false, reasons: ['Human approval required'] }] })), /does not have/);
-  let reads = 0; await assert.rejects(mergeWork(config, candidate, async () => ({ work: [reads++ ? work({ revision: 10 }) : candidate], now: new Date().toISOString() }), acquire, cancel, verify, () => JSON.stringify({ headRefOid: candidate.candidate!.sha, baseRefOid: candidate.candidate!.baseSha, baseRefName: 'main', state: 'OPEN', isDraft: false })), /changed after/);
+  let reads = 0; await assert.rejects(mergeWork(config, candidate, async () => ({ work: [reads++ ? work({ revision: 10 }) : candidate], now: new Date().toISOString() }), acquire, cancel, verify, (_command, args) => args[1] === 'view' ? JSON.stringify({ headRefOid: candidate.candidate!.sha, baseRefName: 'main', state: 'OPEN', isDraft: false }) : baseRef(candidate.candidate!.baseSha)), /changed after/);
   const releaseStore = broker(candidate, execution);
-  await assert.rejects(mergeWork(config, candidate, releaseStore.snapshot, releaseStore.acquire, cancel, verify, () => JSON.stringify({ headRefOid: candidate.candidate!.sha, baseRefOid: candidate.candidate!.baseSha, baseRefName: 'release', state: 'OPEN', isDraft: false })), /changed on GitHub/);
+  await assert.rejects(mergeWork(config, candidate, releaseStore.snapshot, releaseStore.acquire, cancel, verify, () => JSON.stringify({ headRefOid: candidate.candidate!.sha, baseRefName: 'release', state: 'OPEN', isDraft: false })), /changed on GitHub/);
   const stale = work({ observation: { at: '2000-01-01T00:00:00Z' } as any });
   await assert.rejects(mergeWork(config, stale, async () => ({ work: [stale], now: new Date().toISOString() }), acquire, cancel, verify), /does not have/);
   let cancelled = '';
   const lostStore = broker(candidate, execution);
   await assert.rejects(mergeWork(config, candidate, lostStore.snapshot, lostStore.acquire, async (_work, authority) => { cancelled = authority.id; }, verify, (_command, args) => {
-    if (args[1] === 'view') return JSON.stringify({ headRefOid: candidate.candidate!.sha, baseRefOid: candidate.candidate!.baseSha, baseRefName: 'main', state: 'OPEN', isDraft: false });
+    if (args[1] === 'view') return JSON.stringify({ headRefOid: candidate.candidate!.sha, baseRefName: 'main', state: 'OPEN', isDraft: false });
+    if (args[1]?.includes('/git/ref/heads/')) return baseRef(candidate.candidate!.baseSha);
     if (args.includes('--include')) return `Date: ${new Date().toUTCString()}\n\n{}`;
     if (args[1] !== '--method') return JSON.stringify(validProtection);
     throw new Error('provider response lost');
@@ -326,7 +432,8 @@ test('routine merge is exact-candidate, double-checked, and never uses an admin 
   assert.equal(cancelled, '', 'an unknown provider outcome retains authority');
   const refusedStore = broker(candidate, execution);
   await assert.rejects(mergeWork(config, candidate, refusedStore.snapshot, refusedStore.acquire, async (_work, authority) => { cancelled = authority.id; }, verify, (_command, args) => {
-    if (args[1] === 'view') return JSON.stringify({ headRefOid: candidate.candidate!.sha, baseRefOid: candidate.candidate!.baseSha, baseRefName: 'main', state: 'OPEN', isDraft: false });
+    if (args[1] === 'view') return JSON.stringify({ headRefOid: candidate.candidate!.sha, baseRefName: 'main', state: 'OPEN', isDraft: false });
+    if (args[1]?.includes('/git/ref/heads/')) return baseRef(candidate.candidate!.baseSha);
     if (args.includes('--include')) return `Date: ${new Date().toUTCString()}\n\n{}`;
     if (args[1] !== '--method') return JSON.stringify(validProtection);
     return JSON.stringify({ merged: false, message: 'branch protection refused merge' });
@@ -335,21 +442,24 @@ test('routine merge is exact-candidate, double-checked, and never uses an admin 
   cancelled = '';
   const verifyLost = broker(candidate, execution);
   await assert.rejects(mergeWork(config, candidate, verifyLost.snapshot, verifyLost.acquire, async (_work, authority) => { cancelled = authority.id; }, async () => { throw new Error('verification response lost'); }, (_command, args) => {
-    if (args[1] === 'view') return JSON.stringify({ headRefOid: candidate.candidate!.sha, baseRefOid: candidate.candidate!.baseSha, baseRefName: 'main', state: 'OPEN', isDraft: false });
+    if (args[1] === 'view') return JSON.stringify({ headRefOid: candidate.candidate!.sha, baseRefName: 'main', state: 'OPEN', isDraft: false });
+    if (args[1]?.includes('/git/ref/heads/')) return baseRef(candidate.candidate!.baseSha);
     return JSON.stringify(validProtection);
   }), /retained execution/);
   assert.equal(cancelled, '', 'an unknown verification outcome retains authority for replay');
   const confirmed = Object.assign(new Error('verification refused'), { confirmedRefusal: true });
   const verifyRefused = broker(candidate, execution);
   await assert.rejects(mergeWork(config, candidate, verifyRefused.snapshot, verifyRefused.acquire, async (_work, authority) => { cancelled = authority.id; }, async () => { throw confirmed; }, (_command, args) => {
-    if (args[1] === 'view') return JSON.stringify({ headRefOid: candidate.candidate!.sha, baseRefOid: candidate.candidate!.baseSha, baseRefName: 'main', state: 'OPEN', isDraft: false });
+    if (args[1] === 'view') return JSON.stringify({ headRefOid: candidate.candidate!.sha, baseRefName: 'main', state: 'OPEN', isDraft: false });
+    if (args[1]?.includes('/git/ref/heads/')) return baseRef(candidate.candidate!.baseSha);
     return JSON.stringify(validProtection);
   }), /verification refused/);
   assert.equal(cancelled, execution.id, 'a confirmed verification refusal cancels authority');
   const resumed = work({ observation: candidate.observation, mergeExecution: execution }); let reacquired = false;
   const resumedStore = broker(resumed, execution);
   const resumedResult = await mergeWork(config, resumed, resumedStore.snapshot, async () => { reacquired = true; return { execution }; }, cancel, verify, (_command, args) => {
-    if (args[1] === 'view') return JSON.stringify({ headRefOid: resumed.candidate!.sha, baseRefOid: resumed.candidate!.baseSha, baseRefName: 'main', state: 'OPEN', isDraft: false });
+    if (args[1] === 'view') return JSON.stringify({ headRefOid: resumed.candidate!.sha, baseRefName: 'main', state: 'OPEN', isDraft: false });
+    if (args[1]?.includes('/git/ref/heads/')) return baseRef(resumed.candidate!.baseSha);
     if (args.includes('--include')) return `Date: ${new Date().toUTCString()}\n\n{}`;
     return args[1] === '--method' ? JSON.stringify({ merged: true, sha: 'c'.repeat(40) }) : JSON.stringify(validProtection);
   }, execution.owner, resumedStore.commit);
@@ -363,7 +473,8 @@ test('routine merge is exact-candidate, double-checked, and never uses an admin 
   const uncommittedStore = broker(uncommitted, verifiedExecution); const resumedCalls: string[][] = []; let recommitted = '';
   const uncommittedResult = await mergeWork(config, uncommitted, uncommittedStore.snapshot, async () => { throw new Error('must not reacquire'); }, cancel, async () => { throw new Error('must not verify an already verified execution'); }, (_command, args) => {
     resumedCalls.push(args);
-    if (args[1] === 'view') return JSON.stringify({ headRefOid: uncommitted.candidate!.sha, baseRefOid: uncommitted.candidate!.baseSha, baseRefName: 'main', state: 'OPEN', isDraft: false });
+    if (args[1] === 'view') return JSON.stringify({ headRefOid: uncommitted.candidate!.sha, baseRefName: 'main', state: 'OPEN', isDraft: false });
+    if (args[1]?.includes('/git/ref/heads/')) return baseRef(uncommitted.candidate!.baseSha);
     if (args.includes('--include')) return `Date: ${new Date().toUTCString()}\n\n{}`;
     return args[1] === '--method' ? JSON.stringify({ merged: true, sha: 'c'.repeat(40) }) : JSON.stringify(validProtection);
   }, execution.owner, async (_work, held) => { recommitted = held.id; return uncommittedStore.commit(); });
@@ -380,7 +491,8 @@ test('routine merge is exact-candidate, double-checked, and never uses an admin 
   const lateExecution = { ...execution, issuedAt: new Date(Date.now() - 110_000).toISOString(), expiresAt: new Date(Date.now() + 10_000).toISOString() };
   const late = work({ observation: candidate.observation, mergeExecution: lateExecution }); cancelled = '';
   await assert.rejects(mergeWork(config, late, async () => ({ work: [late], now: new Date().toISOString() }), async () => { throw new Error('must not reacquire'); }, async (_work, authority) => { cancelled = authority.id; }, verify, (_command, args) => {
-    if (args[1] === 'view') return JSON.stringify({ headRefOid: late.candidate!.sha, baseRefOid: late.candidate!.baseSha, baseRefName: 'main', state: 'OPEN', isDraft: false });
+    if (args[1] === 'view') return JSON.stringify({ headRefOid: late.candidate!.sha, baseRefName: 'main', state: 'OPEN', isDraft: false });
+    if (args[1]?.includes('/git/ref/heads/')) return baseRef(late.candidate!.baseSha);
     return JSON.stringify(validProtection);
   }, execution.owner), /does not remain valid/);
   assert.equal(cancelled, lateExecution.id, 'a resumed execution uses its actual remaining lifetime');
@@ -393,7 +505,8 @@ test('routine merge is exact-candidate, double-checked, and never uses an admin 
   const skewed = broker(narrow, narrowExecution);
   await assert.rejects(mergeWork(config, narrow, skewed.snapshot, skewed.acquire, async (_work, authority) => { cancelled = authority.id; },
     async () => ({ executionId: execution.id, sha: execution.sha, verifiedAt: new Date(Date.now() - 2000).toISOString(), providerDelayMs: 0, clockOffset: { min: -5000, max: 5000 } }), (_command, args) => {
-      if (args[1] === 'view') return JSON.stringify({ headRefOid: narrow.candidate!.sha, baseRefOid: narrow.candidate!.baseSha, baseRefName: 'main', state: 'OPEN', isDraft: false });
+      if (args[1] === 'view') return JSON.stringify({ headRefOid: narrow.candidate!.sha, baseRefName: 'main', state: 'OPEN', isDraft: false });
+      if (args[1]?.includes('/git/ref/heads/')) return baseRef(narrow.candidate!.baseSha);
       if (args.includes('--include')) return `Date: ${new Date().toUTCString()}\n\n{}`;
       if (args[1] === '--method') throw new Error('the provider must not be invoked without reserved attribution margin');
       return JSON.stringify(validProtection);
@@ -401,7 +514,8 @@ test('routine merge is exact-candidate, double-checked, and never uses an admin 
   assert.equal(cancelled, narrowExecution.id, 'a refusal before commit releases the execution');
   const tight = broker(narrow, narrowExecution);
   assert.match((await mergeWork(config, narrow, tight.snapshot, tight.acquire, cancel, verify, (_command, args) => {
-    if (args[1] === 'view') return JSON.stringify({ headRefOid: narrow.candidate!.sha, baseRefOid: narrow.candidate!.baseSha, baseRefName: 'main', state: 'OPEN', isDraft: false });
+    if (args[1] === 'view') return JSON.stringify({ headRefOid: narrow.candidate!.sha, baseRefName: 'main', state: 'OPEN', isDraft: false });
+    if (args[1]?.includes('/git/ref/heads/')) return baseRef(narrow.candidate!.baseSha);
     if (args.includes('--include')) return `Date: ${new Date().toUTCString()}\n\n{}`;
     return args[1] === '--method' ? JSON.stringify({ merged: true, sha: 'c'.repeat(40) }) : JSON.stringify(validProtection);
   }, execution.owner, tight.commit)).result, /merge requested/);
@@ -413,7 +527,8 @@ test('routine merge is exact-candidate, double-checked, and never uses an admin 
   let providerCalls: string[][] = [];
   const gh = (_command: string, args: string[]) => {
     providerCalls.push(args);
-    if (args[1] === 'view') return JSON.stringify({ headRefOid: candidate.candidate!.sha, baseRefOid: candidate.candidate!.baseSha, baseRefName: 'main', state: 'OPEN', isDraft: false });
+    if (args[1] === 'view') return JSON.stringify({ headRefOid: candidate.candidate!.sha, baseRefName: 'main', state: 'OPEN', isDraft: false });
+    if (args[1]?.includes('/git/ref/heads/')) return baseRef(candidate.candidate!.baseSha);
     if (args.includes('--include')) return `Date: ${new Date().toUTCString()}\n\n{}`;
     return args[1] === '--method' ? JSON.stringify({ merged: true, sha: 'c'.repeat(40) }) : JSON.stringify(validProtection);
   };
@@ -454,14 +569,15 @@ test('routine merge is exact-candidate, double-checked, and never uses an admin 
 
 test('merge broker refuses the provider call when committed authority died during the clock wait', async () => {
   const candidate = work({ observation: { at: new Date().toISOString(), candidate: { sha: 'a'.repeat(40), baseSha: 'b'.repeat(40), pr: 42, branch: 'graphyard/gy-42-1', author: 'worker' } } as any });
-  const config = { version: 1 as const, url: 'https://graphyard.example', credentialFile: '/outside/master.token', cliPath: launcher, repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'machine-a', masterAgentName: 'graphyard-master-project', autoMerge: true, mergeMethod: 'merge' as const, workers: [], reviewers: [], run: { intervalSeconds: 20, deploymentShaField: 'commit' } };
+  const config = { version: 1 as const, url: 'https://graphyard.example', credentialFile: '/outside/master.token', cliPath: launcher, repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'machine-a', masterAgentName: 'graphyard-master-project', autoMerge: true, mergeMethod: 'merge' as const, workers: [], reviewers: [], producers: [], run: { intervalSeconds: 20, deploymentShaField: 'commit', dispatchIntervalSeconds: 10, producerTimeoutMinutes: 120 } };
   const execution = { id: '22222222-2222-4222-8222-222222222222', owner: 'master', sha: candidate.candidate!.sha, baseSha: candidate.candidate!.baseSha, policyRevision: 2, authorizationRevision: candidate.revision, issuedAt: new Date().toISOString(), expiresAt: new Date(Date.now() + 120_000).toISOString() };
   const acquire = async () => ({ execution });
   const verify = async () => ({ executionId: execution.id, sha: execution.sha, verifiedAt: new Date(Date.now() - 2000).toISOString(), providerDelayMs: 0, clockOffset: { min: 0, max: 0 } });
   const commit = async () => ({ executionId: execution.id, sha: execution.sha, committingAt: new Date(Date.now() - 2000).toISOString() });
   let puts = 0; let cancelled = '';
   const run = (_command: string, args: string[]) => {
-    if (args[1] === 'view') return JSON.stringify({ headRefOid: candidate.candidate!.sha, baseRefOid: candidate.candidate!.baseSha, baseRefName: 'main', state: 'OPEN', isDraft: false });
+    if (args[1] === 'view') return JSON.stringify({ headRefOid: candidate.candidate!.sha, baseRefName: 'main', state: 'OPEN', isDraft: false });
+    if (args[1]?.includes('/git/ref/heads/')) return baseRef(candidate.candidate!.baseSha);
     if (args.includes('--include')) return `Date: ${new Date().toUTCString()}\n\n{}`;
     if (args[1] !== '--method') return JSON.stringify(validProtection);
     puts++;
@@ -495,11 +611,12 @@ test('manual merge remains guarded when automatic merge is disabled and GitHub c
     'a provider clock behind the database must cross the translated commit boundary');
   assert.throws(() => githubProviderDelay(Date.now(), 0, '{}'), /server time/);
   const candidate = work({ observation: { at: new Date().toISOString(), candidate: { sha: 'a'.repeat(40), baseSha: 'b'.repeat(40), pr: 42, branch: 'graphyard/gy-42-1', author: 'worker' } } as any });
-  const config = { version: 1 as const, url: 'https://graphyard.example', credentialFile: '/outside/master.token', cliPath: launcher, repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'machine-a', masterAgentName: 'graphyard-master-project', autoMerge: false, mergeMethod: 'merge' as const, workers: [], reviewers: [], run: { intervalSeconds: 20, deploymentShaField: 'commit' } };
+  const config = { version: 1 as const, url: 'https://graphyard.example', credentialFile: '/outside/master.token', cliPath: launcher, repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'machine-a', masterAgentName: 'graphyard-master-project', autoMerge: false, mergeMethod: 'merge' as const, workers: [], reviewers: [], producers: [], run: { intervalSeconds: 20, deploymentShaField: 'commit', dispatchIntervalSeconds: 10, producerTimeoutMinutes: 120 } };
   const execution = { id: '11111111-1111-4111-8111-111111111111', owner: 'master', sha: candidate.candidate!.sha, baseSha: candidate.candidate!.baseSha, policyRevision: 2, authorizationRevision: candidate.revision, issuedAt: new Date().toISOString(), expiresAt: new Date(Date.now() + 120_000).toISOString() };
   const store = broker(candidate, execution);
   const result = await mergeWork(config, candidate, store.snapshot, store.acquire, async () => ({}), async () => ({ executionId: execution.id, sha: execution.sha, verifiedAt: new Date(Date.now() - 2000).toISOString(), providerDelayMs: 0, clockOffset: { min: 0, max: 0 } }), (_command, args) => {
-    if (args[1] === 'view') return JSON.stringify({ headRefOid: candidate.candidate!.sha, baseRefOid: candidate.candidate!.baseSha, baseRefName: 'main', state: 'OPEN', isDraft: false });
+    if (args[1] === 'view') return JSON.stringify({ headRefOid: candidate.candidate!.sha, baseRefName: 'main', state: 'OPEN', isDraft: false });
+    if (args[1]?.includes('/git/ref/heads/')) return baseRef(candidate.candidate!.baseSha);
     if (args.includes('--include')) return `Date: ${new Date().toUTCString()}\n\n{}`;
     return args[1] === '--method' ? JSON.stringify({ merged: true, sha: 'c'.repeat(40) }) : JSON.stringify(validProtection);
   }, undefined, store.commit);
@@ -517,6 +634,33 @@ test('merge-all selection and execution do not let refusing work starve eligible
     return { key: item.key, result: 'merged' };
   });
   assert.deepEqual(batch, [{ key: 'GY-50', result: 'refused', reason: 'candidate changed' }, { key: 'GY-51', result: 'merged' }]);
+});
+
+test('unit:queue-authored-tip-carry — the broker re-posts a carried approval through the reviewer identity before acquiring merge authority, and refuses when the re-post fails', async () => {
+  const carry = { from: { sha: 'f'.repeat(40), baseSha: 'b'.repeat(40) }, to: { sha: 'a'.repeat(40), baseSha: 'b'.repeat(40) }, policyRevision: 2, at: new Date().toISOString(), predecessor: 'base branch', changedFiles: ['src/other.ts'], reviewedFiles: ['src/queue.ts'],
+    approval: { carried: true, provider: 'github', reviewer: 'graphyard-reviewer[bot]', sha: 'f'.repeat(40), reviewId: 900, originalSha: 'f'.repeat(40), reason: 'carried' }, evidence: [] };
+  const base = work({ observation: { at: new Date().toISOString(), candidate: { sha: 'a'.repeat(40), baseSha: 'b'.repeat(40), pr: 42, branch: 'graphyard/gy-42-1', author: 'worker' } } as any });
+  const candidate = { ...base, queue: { ...base.queue!, speculation: { ...base.queue!.speculation!, carry } } } as Work;
+  const config = { version: 1 as const, url: 'https://graphyard.example', credentialFile: '/outside/master.token', cliPath: launcher, repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'machine-a', masterAgentName: 'graphyard-master-project', autoMerge: true, mergeMethod: 'merge' as const, workers: [], reviewers: [], producers: [], run: { intervalSeconds: 20, deploymentShaField: 'commit', dispatchIntervalSeconds: 10, producerTimeoutMinutes: 120 } };
+  const execution = { id: '11111111-1111-4111-8111-111111111111', owner: 'master', sha: candidate.candidate!.sha, baseSha: candidate.candidate!.baseSha, policyRevision: 2, authorizationRevision: candidate.revision, issuedAt: new Date().toISOString(), expiresAt: new Date(Date.now() + 120_000).toISOString() };
+  const verify = async () => ({ executionId: execution.id, sha: execution.sha, verifiedAt: new Date(Date.now() - 2000).toISOString(), providerDelayMs: 0, clockOffset: { min: 0, max: 0 } });
+  const gh = (_command: string, args: string[]) => {
+    if (args[1] === 'view') return JSON.stringify({ headRefOid: candidate.candidate!.sha, baseRefName: 'main', state: 'OPEN', isDraft: false });
+    if (args[1]?.includes('/git/ref/heads/')) return baseRef(candidate.candidate!.baseSha);
+    if (args.includes('--include')) return `Date: ${new Date().toUTCString()}\n\n{}`;
+    return args[1] === '--method' ? JSON.stringify({ merged: true, sha: 'c'.repeat(40) }) : JSON.stringify(validProtection);
+  };
+  const order: string[] = [];
+  const store = broker(candidate, execution);
+  const result = await mergeWork(config, candidate, store.snapshot, async () => { order.push('acquire'); return store.acquire(); }, async () => ({}), verify, gh, execution.owner, store.commit,
+    async (item, carried) => { order.push('repost'); assert.equal(item.key, 'GY-42'); assert.equal(carried.reviewer, 'graphyard-reviewer[bot]'); return { posted: true, reviewId: 901, reason: 're-posted' }; });
+  assert.deepEqual(order, ['repost', 'acquire'], 'the carried approval is re-posted before any authority is acquired');
+  assert.deepEqual(result.carriedApproval, { posted: true, reviewId: 901, reason: 're-posted' });
+  await assert.rejects(mergeWork(config, candidate, broker(candidate, execution).snapshot, async () => { throw new Error('must not acquire'); }, async () => ({}), verify, gh, execution.owner, store.commit,
+    async () => { throw new Error('reviewer requested changes after approving'); }), /reviewer requested changes/);
+  const plain = broker(base, execution); let reposts = 0;
+  await mergeWork(config, base, plain.snapshot, plain.acquire, async () => ({}), verify, gh, execution.owner, plain.commit, async () => { reposts++; return { posted: false, reviewId: null, reason: '' }; });
+  assert.equal(reposts, 0, 'an exact approval needs no re-post');
 });
 
 const queueEntry = (sequence: number, enqueuedAt: string, speculation: any = null) => ({ sequence, enqueuedAt, policyRevision: 2, speculation });
@@ -542,19 +686,112 @@ test('master status reports queue position, predicted tip, and per-entry wait ti
   assert.equal(status.work[1].mergeable, false, 'only the queue head can hold a merge authorization');
 });
 
-test('a merge only proceeds while the validated tip still lands its tested tree', () => {
-  const tip = 'a'.repeat(40), validatedBase = 'b'.repeat(40), baseTree = 'e'.repeat(40), advanced = 'f'.repeat(40);
+test('unit:landing-real-base-tip — a merge only proceeds while the validated tip still lands its tested tree on the real base branch head', () => {
+  const tip = 'a'.repeat(40), validatedBase = 'b'.repeat(40), baseTree = 'e'.repeat(40), advanced = 'f'.repeat(40), stale = '3'.repeat(40);
   const queued = work({ queue: queueEntry(1, '2030-01-01T00:30:00Z', { ref: 'refs/graphyard/queue/gy-42', tip, base: validatedBase, baseTree, predecessors: ['GY-41'], policyRevision: 2, publishedAt: '2030-01-01T00:31:00Z' }) } as Partial<Work>);
   const authorization = { sha: tip, baseSha: validatedBase };
   const reads: string[][] = [];
-  const run = (tree: string) => (_command: string, args: string[]) => { reads.push(args); return JSON.stringify({ commit: { tree: { sha: tree } } }); };
-  assert.doesNotThrow(() => assertQueuedLanding(queued, authorization, validatedBase, 'owner/project', run('unused')));
-  assert.equal(reads.length, 0, 'an unchanged base needs no extra provider call');
-  assert.doesNotThrow(() => assertQueuedLanding(queued, authorization, advanced, 'owner/project', run(baseTree)));
-  assert.deepEqual(reads[0], ['api', `repos/owner/project/commits/${advanced}`]);
-  assert.throws(() => assertQueuedLanding(queued, authorization, advanced, 'owner/project', run('9'.repeat(40))), /would no longer land its tested tree/);
-  assert.throws(() => assertQueuedLanding(work({ queue: null } as Partial<Work>), authorization, validatedBase, 'owner/project', run(baseTree)), /no published merge-queue tip/);
-  assert.throws(() => assertQueuedLanding(work({ queue: { ...queued.queue!, speculation: { ...queued.queue!.speculation!, tip: '7'.repeat(40) } } } as Partial<Work>), authorization, validatedBase, 'owner/project', run(baseTree)), /no published merge-queue tip/);
+  // GitHub as the check sees it: `git/ref/heads/main` names the real base tip; a commit read
+  // answers with its tree. The trees are keyed by commit so a stale cached base could be told apart.
+  const github = (head: string, trees: Record<string, string>) => (_command: string, args: string[]) => {
+    reads.push(args);
+    if (args[1] === 'repos/owner/project/git/ref/heads/main') return JSON.stringify({ ref: 'refs/heads/main', object: { type: 'commit', sha: head } });
+    const sha = args[1].split('/commits/')[1];
+    if (!(sha in trees)) throw new Error(`unexpected read ${args.join(' ')}`);
+    return JSON.stringify({ sha, commit: { tree: { sha: trees[sha] } } });
+  };
+  // 1. The real base is exactly the validated base: no tree read is needed.
+  assert.deepEqual(assertQueuedLanding(queued, authorization, 'main', 'owner/project', github(validatedBase, {})), { baseTip: validatedBase, baseTree: null });
+  assert.deepEqual(reads, [['api', 'repos/owner/project/git/ref/heads/main']], 'an unchanged base needs only the ref read');
+  // 2. The real base advanced through the queue: its tree is the validated tree, so the tip lands.
+  reads.length = 0;
+  assert.deepEqual(assertQueuedLanding(queued, authorization, 'main', 'owner/project', github(advanced, { [advanced]: baseTree })), { baseTip: advanced, baseTree });
+  assert.deepEqual(reads, [['api', 'repos/owner/project/git/ref/heads/main'], ['api', `repos/owner/project/commits/${advanced}`]]);
+  // 3. The real base tree differs: refused, naming both commits and both trees.
+  reads.length = 0;
+  assert.throws(() => assertQueuedLanding(queued, authorization, 'main', 'owner/project', github(advanced, { [advanced]: '9'.repeat(40) })), (error: Error) => {
+    assert.match(error.message, /would no longer land its tested tree/);
+    for (const named of [advanced, '9'.repeat(40), validatedBase, baseTree]) assert.ok(error.message.includes(named), `the refusal names ${named}`);
+    return true;
+  });
+  // 4. The pull request's cached baseRefOid is stale (still the pre-merge base with another tree)
+  // while the real ref is tree-identical: the check never consults the cached value, so it passes.
+  reads.length = 0;
+  const cached = { baseRefOid: stale };
+  assert.deepEqual(assertQueuedLanding(queued, authorization, 'main', 'owner/project', github(advanced, { [advanced]: baseTree, [stale]: '9'.repeat(40) })), { baseTip: advanced, baseTree });
+  assert.equal(reads.some(args => args[1].includes(cached.baseRefOid)), false, 'the cached pull-request base is never read');
+  assert.equal(reads.some(args => args[1].includes('/pulls/') || args[0] === 'pr'), false, 'the landing check never asks the pull request for its base');
+  // Unreadable answers refuse rather than pass.
+  assert.throws(() => assertQueuedLanding(queued, authorization, 'main', 'owner/project', () => JSON.stringify({ object: { type: 'tag', sha: advanced } })), /readable head for refs\/heads\/main/);
+  assert.throws(() => assertQueuedLanding(queued, authorization, 'main', 'owner/project', (_command, args) => args[1].includes('/git/ref/') ? JSON.stringify({ object: { type: 'commit', sha: advanced } }) : JSON.stringify({ sha: advanced })), /did not return a tree/);
+  // Branch names with slashes are addressed segment by segment.
+  reads.length = 0;
+  assertQueuedLanding(queued, authorization, 'release/2030', 'owner/project', (_command, args) => { reads.push(args); return JSON.stringify({ object: { type: 'commit', sha: validatedBase } }); });
+  assert.deepEqual(reads[0], ['api', 'repos/owner/project/git/ref/heads/release/2030']);
+  // No published tip, or a tip other than the authorized commit, is refused before any read.
+  assert.throws(() => assertQueuedLanding(work({ queue: null } as Partial<Work>), authorization, 'main', 'owner/project', github(validatedBase, {})), /no published merge-queue tip/);
+  assert.throws(() => assertQueuedLanding(work({ queue: { ...queued.queue!, speculation: { ...queued.queue!.speculation!, tip: '7'.repeat(40) } } } as Partial<Work>), authorization, 'main', 'owner/project', github(validatedBase, {})), /no published merge-queue tip/);
+});
+
+test('integration:landing-follower-merges — the broker lands a queued follower after its predecessor merged while GitHub still caches the pre-merge pr.baseRefOid, and refuses a base whose tree differs', async () => {
+  // GY-42's tip was validated on predictedBase, the predecessor's queue tip. The predecessor
+  // merged: refs/heads/main is now mergedBase, a different commit with the same tree. The pull
+  // request still reports the pre-predecessor base (staleCached) with another tree entirely.
+  const predictedBase = 'b'.repeat(40), mergedBase = '2'.repeat(40), staleCached = '3'.repeat(40), validatedTree = 'e'.repeat(40);
+  const candidate = work({ observation: { at: new Date().toISOString(), candidate: { sha: 'a'.repeat(40), baseSha: predictedBase, pr: 42, branch: 'graphyard/gy-42-1', author: 'worker' } } as any });
+  const config = { version: 1 as const, url: 'https://graphyard.example', credentialFile: '/outside/master.token', cliPath: launcher, repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'machine-a', masterAgentName: 'graphyard-master-project', autoMerge: true, mergeMethod: 'merge' as const, workers: [], reviewers: [], producers: [], run: { intervalSeconds: 20, deploymentShaField: 'commit', dispatchIntervalSeconds: 10, producerTimeoutMinutes: 120 } };
+  const execution = { id: '44444444-4444-4444-8444-444444444444', owner: 'master', sha: candidate.candidate!.sha, baseSha: predictedBase, policyRevision: 2, authorizationRevision: candidate.revision, issuedAt: new Date().toISOString(), expiresAt: new Date(Date.now() + 120_000).toISOString() };
+  const verify = async () => ({ executionId: execution.id, sha: execution.sha, verifiedAt: new Date(Date.now() - 2000).toISOString(), providerDelayMs: 0, clockOffset: { min: 0, max: 0 } });
+  const github = (head: string, trees: Record<string, string>) => {
+    const calls: string[][] = [];
+    const run = (_command: string, args: string[]) => {
+      calls.push(args);
+      if (args[1] === 'view') return JSON.stringify({ headRefOid: candidate.candidate!.sha, baseRefOid: staleCached, baseRefName: 'main', state: 'OPEN', isDraft: false });
+      if (args[1] === 'repos/owner/project/git/ref/heads/main') return JSON.stringify({ ref: 'refs/heads/main', object: { type: 'commit', sha: head } });
+      if (args[1]?.startsWith('repos/owner/project/commits/')) { const sha = args[1].split('/commits/')[1]; assert.ok(sha in trees, `unexpected commit read ${sha}`); return JSON.stringify({ sha, commit: { tree: { sha: trees[sha] } } }); }
+      if (args.includes('--include')) return `Date: ${new Date().toUTCString()}\n\n{}`;
+      return args[1] === '--method' ? JSON.stringify({ merged: true, sha: 'c'.repeat(40) }) : JSON.stringify(validProtection);
+    };
+    return { calls, run };
+  };
+  // Tree-identical advance: the follower lands, and the stale cached base is never consulted.
+  const landing = github(mergedBase, { [mergedBase]: validatedTree, [staleCached]: '9'.repeat(40) });
+  const store = broker(candidate, execution); let cancelled = '';
+  const result = await mergeWork(config, candidate, store.snapshot, store.acquire, async (_work, authority) => { cancelled = authority.id; }, verify, landing.run, execution.owner, store.commit);
+  assert.match(result.result, /merge requested/);
+  assert.equal(cancelled, '');
+  assert.equal(landing.calls.filter(args => args[1] === '--method').length, 1, 'the provider merge was requested');
+  assert.equal(landing.calls.filter(args => args[1] === 'repos/owner/project/git/ref/heads/main').length, 3, 'every landing check reads the real base ref');
+  assert.equal(landing.calls.filter(args => args[1] === `repos/owner/project/commits/${mergedBase}`).length, 3, 'and compares the tree of the real head');
+  assert.equal(landing.calls.some(args => args[1]?.includes(staleCached)), false, 'the cached pr.baseRefOid is never read');
+  // The exact validated base still lands with no tree read at all.
+  const exact = github(predictedBase, {}); const exactStore = broker(candidate, execution);
+  assert.match((await mergeWork(config, candidate, exactStore.snapshot, exactStore.acquire, async () => ({}), verify, exact.run, execution.owner, exactStore.commit)).result, /merge requested/);
+  assert.equal(exact.calls.some(args => args[1]?.includes('/commits/')), false);
+  // A base whose tree differs refuses before any authority is acquired, naming both commits and trees.
+  const outside = '4'.repeat(40), outsideTree = '5'.repeat(40);
+  const diverged = github(outside, { [outside]: outsideTree }); const divergedStore = broker(candidate, execution); let acquired = false;
+  await assert.rejects(mergeWork(config, candidate, divergedStore.snapshot, async () => { acquired = true; return divergedStore.acquire(); }, async () => ({}), verify, diverged.run, execution.owner, divergedStore.commit), (error: Error) => {
+    assert.match(error.message, /advanced outside the merge queue/);
+    for (const named of [outside, outsideTree, predictedBase, validatedTree]) assert.ok(error.message.includes(named), `the refusal names ${named}`);
+    return true;
+  });
+  assert.equal(acquired, false, 'no authority is acquired for a tip that would not land its tested tree');
+  assert.equal(diverged.calls.some(args => args[1] === '--method'), false);
+  // A base that diverges only after authority was acquired is refused under the lock and the
+  // execution is released; one that diverges during the post-commit clock wait is refused
+  // before the provider call and retained for reconciliation.
+  for (const [divergeAt, expectation, retained] of [[2, /advanced outside the merge queue/, false], [3, /advanced outside the merge queue/, true]] as const) {
+    let refReads = 0; cancelled = ''; const late = broker(candidate, execution);
+    const moving = github(mergedBase, { [mergedBase]: validatedTree, [outside]: outsideTree });
+    const run = (command: string, args: string[]) => {
+      if (args[1] === 'repos/owner/project/git/ref/heads/main' && ++refReads >= divergeAt) return JSON.stringify({ ref: 'refs/heads/main', object: { type: 'commit', sha: outside } });
+      return moving.run(command, args);
+    };
+    await assert.rejects(mergeWork(config, candidate, late.snapshot, late.acquire, async (_work, authority) => { cancelled = authority.id; }, verify, run, execution.owner, late.commit), expectation);
+    assert.equal(moving.calls.some(args => args[1] === '--method'), false, 'the provider is never asked to land a different tree');
+    assert.equal(cancelled, retained ? '' : execution.id, retained ? 'a post-commit refusal retains the execution' : 'a refusal under the lock releases the execution');
+  }
 });
 
 test('master status surfaces reviewer failover and exhausted reviewer capacity', () => {
@@ -595,7 +832,7 @@ test('master status surfaces reviewer failover and exhausted reviewer capacity',
 });
 
 test('agent review policies keep Graphyard branch protection without a native approval count', () => {
-  const config = { version: 1 as const, url: 'https://graphyard.example', credentialFile: '/outside/master.token', cliPath: launcher, repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'machine-a', masterAgentName: 'graphyard-master-project', autoMerge: true, mergeMethod: 'merge' as const, workers: [], reviewers: [], run: { intervalSeconds: 20, deploymentShaField: 'commit' } };
+  const config = { version: 1 as const, url: 'https://graphyard.example', credentialFile: '/outside/master.token', cliPath: launcher, repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'machine-a', masterAgentName: 'graphyard-master-project', autoMerge: true, mergeMethod: 'merge' as const, workers: [], reviewers: [], producers: [], run: { intervalSeconds: 20, deploymentShaField: 'commit', dispatchIntervalSeconds: 10, producerTimeoutMinutes: 120 } };
   const protection = (overrides: Record<string, unknown> = {}) => ({ required_pull_request_reviews: { required_approving_review_count: 0 },
     required_status_checks: { strict: false, checks: [{ context: 'Graphyard / merge', app_id: 1234 }] }, enforce_admins: { enabled: true }, ...overrides });
   const agent = work({ policy: { checks: ['test'], review: true, reviewProvider: 'agent', reviewerProfiles: [{ name: 'claude-reviewer', runtime: 'claude', reviewerApp: 'claude-reviewer', timeoutSeconds: 1800 }] } });

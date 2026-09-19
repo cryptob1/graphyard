@@ -3,13 +3,15 @@ import { z } from 'zod';
 import { Store, save, wakeJob } from './store.js';
 import { authorizedForProof, unauthorizedProofs } from './proof-grants.js';
 import { workspacePath, pathsOverlap, validBranch } from './workspace.js';
-import { activeLease, admin, assertReviewerProfiles, operatorCapability, escalationTriggers, holdsMergeExecution, MergeExecutionInProgress, providerDelayAfterVerification, raiseEscalation, releaseLeadHold, resolveEscalation, standingEscalations, attestationFor, attestationKinds, attestationsFromLedger, leaseLapseCause, leaseLossEpoch, leaseLossReason, settleableLeaseLoss, submittedEpoch, type Attestation, requireCurrent, createSchema, criterionSchema, currentEvidence, deploySmokeProof, deploySmokeRequired, inheritedObligations, pathScopeContains, requiredProofs, resourcesSchema, demand, evaluate, exhaustedReviewerProfiles, proofSchema, reviewerProfileFor, reviewerProfileSchema, reviewProviders, reviewProviderOf, type Criterion, type Principal, type ReviewerApp, type ReviewFailover, type Work, type Observation, type ReviewRequest, type OperatorCapability } from './model.js';
+import { activeLease, admin, assertReviewerProfiles, operatorCapability, escalationTriggers, holdsMergeExecution, MergeExecutionInProgress, providerDelayAfterVerification, raiseEscalation, releaseLeadHold, resolveEscalation, standingEscalations, attestationFor, attestationKinds, attestationsFromLedger, leaseLapseCause, leaseLossEpoch, leaseLossReason, settleableLeaseLoss, submittedEpoch, type Attestation, requireCurrent, createSchema, criterionSchema, currentEvidence, decideCarry, deploySmokeProof, deploySmokeRequired, evidenceBindsCandidate, exactApproval, inheritedObligations, pathScopeContains, requiredProofs, resourcesSchema, demand, evaluate, exhaustedReviewerProfiles, proofSchema, reviewerProfileFor, reviewerProfileSchema, reviewProviders, reviewProviderOf, type Criterion, type Evidence, type Principal, type ReviewerApp, type ReviewFailover, type Work, type Observation, type ReviewRequest, type OperatorCapability } from './model.js';
 import { resourceConflicts } from './coordination.js';
 import { containmentAttestation, containmentSettlementRefusals, containmentVerificationSchema } from './quarantine.js';
 import { activeEngineers, delegationLimits, implementerIdentities, leadMay, producerIndependenceRefusal, sessionKind } from './delegation.js';
-import { queueHistoryLimit, type QueueSpeculation } from './merge-queue.js';
+import { queueHistoryLimit, queueSequencingReason, type QueueSpeculation } from './merge-queue.js';
 import { githubFromEnv } from './github.js';
 import { regressionRefusals } from './regression-guard.js';
+import { ciFamilyAllows, ciProofFamilies, ciRunBindingSchema, ciRunRefusal, isCiProducer, refuseCiProducer, staleCiAttemptRefusal, type CiRunObservation } from './model/ci-proofs.js';
+import { reconcileAutoDispatch, type DispatchTransition } from './model/dispatch.js';
 
 const epoch = z.number().int().positive();
 const sha = z.string().regex(/^[a-f0-9]{40}$/);
@@ -29,7 +31,7 @@ export const containmentScopeSchema = z.object({ unit: z.string().trim().min(1).
 const commands = {
   create: createSchema.extend({ reason: z.string().trim().min(1).max(2000).optional() }),
   ready: z.object({ expectedRevision: z.number().int().positive().optional(), reason: z.string().trim().min(1).max(2000).optional() }).strict(),
-  requirements: z.object({ expectedPolicyRevision: z.number().int().positive(), reason: z.string().trim().min(1).max(2000), criteria: z.array(criterionSchema).min(1).max(50), dependencies: z.array(z.string().uuid()).max(50), plannedFiles: createSchema.shape.plannedFiles, exclusiveResources: resourcesSchema }).strict(),
+  requirements: z.object({ expectedPolicyRevision: z.number().int().positive(), reason: z.string().trim().min(1).max(2000), criteria: z.array(criterionSchema).min(1).max(50), dependencies: z.array(z.string().uuid()).max(50), plannedFiles: createSchema.shape.plannedFiles, exclusiveResources: resourcesSchema, producerProofs: createSchema.shape.producerProofs }).strict(),
   reviewpolicy: z.object({ provider: z.enum(reviewProviders), reviewerProfiles: z.array(reviewerProfileSchema).min(1).max(10).optional(), expectedPolicyRevision: z.number().int().positive(), reason: z.string().trim().min(1).max(2000) }).strict(),
   unblock: z.object({ reason: z.string().trim().min(1).max(2000), expectedRevision: z.number().int().positive().optional() }).strict(),
   rework: z.object({ reason: z.string().min(1).max(2000), previousWorkerStopped: z.literal(true) }).strict(),
@@ -55,11 +57,17 @@ const commands = {
   workspace: z.object({ epoch, host: z.string().trim().min(1).max(200), path: z.string().startsWith('/').max(1000).refine(p => !/[\u0000-\u001f]/.test(p), 'Invalid path').transform(workspacePath), branch: z.string().max(200).refine(validBranch, 'Invalid Graphyard branch name') }).strict(),
   submit: z.object({ epoch, pr: z.number().int().positive() }).strict(),
   blocked: z.object({ epoch, reason: z.string().max(2000).nullable() }).strict(),
-  evidence: z.object({ proof: proofSchema, sha, baseSha: sha, policyRevision: z.number().int().positive(), result: z.enum(['pass', 'fail']), executed: z.number().int().min(0), skipped: z.number().int().min(0), url: publicArtifactUrl.optional(), artifacts: z.array(evidenceArtifact).max(30).optional(), scenarioRevision: z.number().int().positive().optional(), environment: z.string().min(1).max(100).optional(), provenance: z.object({
+  // `scopeFiles` is the producer's declaration of what the proof depends on, in the planned-files
+  // scope syntax; the merge queue carries a proof across its own authored tip only inside it.
+  evidence: z.object({ proof: proofSchema, sha, baseSha: sha, policyRevision: z.number().int().positive(), result: z.enum(['pass', 'fail']), executed: z.number().int().min(0), skipped: z.number().int().min(0), url: publicArtifactUrl.optional(), artifacts: z.array(evidenceArtifact).max(30).optional(), scenarioRevision: z.number().int().positive().optional(), environment: z.string().min(1).max(100).optional(),
+    scopeFiles: z.array(z.string().min(1).max(500)).min(1).max(100).optional(), provenance: z.object({
     provider: z.literal('github-actions'), repository: z.string().regex(/^[\w.-]+\/[\w.-]+$/), workflowCommit: sha,
     runId: z.string().regex(/^[1-9]\d*$/), runAttempt: z.number().int().positive(),
     artifact: z.object({ id: z.number().int().positive(), name: z.string().min(1).max(200), digest: z.string().regex(/^sha256:[a-f0-9]{64}$/), url: publicArtifactUrl, createdAt: z.iso.datetime() }).strict(),
-  }).strict().optional() }).strict(),
+  }).strict().optional(),
+    // The CI producer names the workflow job that ran the contract; the control plane reads that
+    // job back from GitHub and accepts the record only when it completed on this commit.
+    ciRun: ciRunBindingSchema.optional() }).strict(),
   // The coordinator's observation of the running release covering a delivered merge. It names the
   // serving commit and where it was read; whether it is exact is derived, never asserted.
   deployment: z.object({ sha, mergeSha: sha, source: z.enum(['endpoint', 'github-deployment']), observedAt: z.iso.datetime() }).strict(),
@@ -124,6 +132,9 @@ export class Engine {
    * disables the pre-check, and every later observation still re-derives the refusal.
    */
   submissionObserver: ((work: Work) => Promise<Observation>) | null | undefined = undefined;
+  // Auto-dispatch transitions the last evaluation of a document produced, written to the ledger
+  // by the transaction that persists it. Keyed by the object, so a probe clone records nothing.
+  private dispatchTransitions = new WeakMap<Work, DispatchTransition[]>();
   // The launch fence is a deployment-independent safety default; only tests shorten it.
   constructor(public store: Store, public ciAppIds: number[] = [15368], public leaseSeconds = 120, public repository = process.env.GITHUB_REPOSITORY ?? '', public launchFence = launchFenceMs) {}
   private async observeSubmission(actor: Principal, id: string | null, data: { epoch: number; pr: number }, key: string): Promise<Observation | null> {
@@ -164,7 +175,7 @@ export class Engine {
       demand(!renewed, `${renewed?.id}: ${obligation.proof} is already a bootstrap obligation inherited from ${obligation.key} ${obligation.criterionId} and cannot be deferred again`);
     }
   }
-  async execute(actor: Principal, command: Command, id: string | null, input: unknown, key: string, context: { observation?: Observation } = {}) {
+  async execute(actor: Principal, command: Command, id: string | null, input: unknown, key: string, context: { observation?: Observation; ciRun?: CiRunObservation | null } = {}) {
     demand(Object.hasOwn(commands, command), 'Unknown command', 404);
     // Leads coordinate through rulings; no lifecycle command is lead-permitted.
     demand(actor.role !== 'slice-lead' || leadMay(command), 'Slice leads cannot perform lifecycle mutations', 403);
@@ -299,7 +310,7 @@ export class Engine {
         if (retired.length || narrowed.length) raiseEscalation(work, { trigger: 'requirement-weakening', reason: `Requirement revision retires ${retired.map(ac => ac.id).join(', ') || 'no criterion'} and narrows proofs for ${narrowed.map(ac => ac.id).join(', ') || 'no criterion'}`, at: now.toISOString(), actor: actor.id });
         work.retiredCriterionIds = [...(work.retiredCriterionIds ?? []), ...work.criteria.filter(ac => !data.criteria.some((next: { id: string }) => next.id === ac.id)).map(ac => ac.id)];
         work.criteria = revised;
-        work.dependencies = data.dependencies; work.plannedFiles = data.plannedFiles; work.exclusiveResources = data.exclusiveResources;
+        work.dependencies = data.dependencies; work.plannedFiles = data.plannedFiles; work.exclusiveResources = data.exclusiveResources; work.producerProofs = data.producerProofs;
         work.scenarioRequirements = pins; work.policyRevision++;
         this.refuseRenewedDeferral(work, all);
         work.proofGaps = await unauthorizedProofs(db, this.principals, [...proofs, ...(deploySmokeRequired(work.policy) ? [deploySmokeProof] : [])]);
@@ -480,8 +491,25 @@ export class Engine {
         // that could mint trust must be independent of the implementation and the lead.
         const dependent = actor.role === 'worker' ? null : producerIndependenceRefusal(actor, work, this.principals);
         demand(!dependent, dependent ?? 'Evidence producer is not independent', 403);
-        // Trust is decided by the live grant set, never by the deployment environment.
-        const trusted = await authorizedForProof(db, actor, data.proof);
+        // Trust is decided by the live grant set, never by the deployment environment. The CI
+        // producer's authority is additionally clipped to the automatable families: a grant it
+        // holds outside them is inert, so manual proofs and deploy smoke never arrive from CI.
+        const ciProducer = isCiProducer(actor);
+        const trusted = await authorizedForProof(db, actor, data.proof) && (!ciProducer || ciFamilyAllows(data.proof));
+        let ciRun: Evidence['ciRun'] | undefined;
+        if (ciProducer || data.ciRun) {
+          // The CI lane refuses instead of storing an untrusted record: every refusal here is a
+          // configuration or provenance fault the operator must see, not an assertion to keep.
+          demand(ciProducer, 'A CI run binding is accepted only from the CI producer principal', 403);
+          demand(data.ciRun, 'CI producer evidence must name the workflow job that produced it', 400);
+          demand(ciFamilyAllows(data.proof), `CI evidence is accepted only for ${ciProofFamilies.map(family => `${family}:*`).join(' and ')} proofs; ${data.proof} needs a producer session`, 403);
+          demand(trusted, `The CI producer ${actor.id} is not granted ${data.proof}`, 403);
+          const refusal = ciRunRefusal(data.ciRun, context.ciRun, data, this.repository, this.ciAppIds);
+          demand(!refusal, refusal ?? 'CI run binding refused', context.ciRun ? 403 : 503);
+          const stale = staleCiAttemptRefusal(work.evidence, data);
+          demand(!stale, stale ?? 'Stale CI attempt');
+          ciRun = { ...data.ciRun, headSha: context.ciRun!.headSha, job: context.ciRun!.name, conclusion: context.ciRun!.conclusion!, verifiedAt: context.ciRun!.observedAt };
+        }
         if (data.proof === deploySmokeProof) {
           // Post-deployment proof is a trust boundary with no untrusted tier: it is accepted only
           // from a producer granted the proof, only once Graphyard has observed the deployment,
@@ -494,24 +522,33 @@ export class Engine {
             `${deploySmokeProof} evidence must name the observed deployed commit ${work.delivery!.deployment!.sha} as sha and merge commit ${work.delivery!.mergeSha} as baseSha`);
           demand(data.policyRevision === work.policyRevision, 'Policy revision does not match this delivery');
         }
-        const evidence = { ...data, id: randomUUID(), producer: actor.id, trusted, at: now.toISOString() };
+        const evidence: Evidence = { ...data, id: randomUUID(), producer: actor.id, trusted, at: now.toISOString(), ...(ciRun ? { ciRun } : {}) };
         work.evidence.push(evidence);
         if (data.proof === deploySmokeProof) work.delivery!.smoke = { evidenceId: evidence.id, result: data.result, sha: data.sha, mergeSha: data.baseSha, producer: actor.id, at: evidence.at, executed: data.executed, skipped: data.skipped, ...(data.url ? { url: data.url } : {}) };
         if (trusted && data.policyRevision !== work.policyRevision) raiseEscalation(work, { trigger: 'evidence-policy-conflict', reason: `Evidence policy v${data.policyRevision} conflicts with current policy v${work.policyRevision}`, at: now.toISOString(), actor: actor.id });
       }
       if (command === 'revoke') {
+        refuseCiProducer(actor, 'revocation');
         // Producer authority is the same live grant set that decides trust at submission.
         demand(actor.role === 'admin' || actor.role === 'producer' && await authorizedForProof(db, actor, data.proof),
           'Evidence revocation requires an operator or the trusted producer authorized for this proof', 403);
         // Revoke every applicable record for the tuple, not merely the newest: leaving an older
         // accepted run behind would silently re-authorize the same candidate.
-        const withdrawn = work.evidence.filter(item => item.trusted && !item.revocation && item.proof === data.proof
+        const direct = work.evidence.filter(item => item.trusted && !item.revocation && item.proof === data.proof
           && item.sha === data.sha && item.baseSha === data.baseSha && item.policyRevision === data.policyRevision);
-        demand(withdrawn.length, 'No trusted evidence matches this proof and candidate; reload before revoking', 404);
-        const execution = work.mergeExecution
-          && work.mergeExecution.sha === data.sha
-          && work.mergeExecution.baseSha === data.baseSha
+        demand(direct.length, 'No trusted evidence matches this proof and candidate; reload before revoking', 404);
+        // A reused record (D6) stands on the executed one it names, so withdrawing the executed
+        // pass withdraws every record derived from it, for whichever later heads they cover.
+        const directIds = new Set(direct.map(item => item.id));
+        const withdrawn = work.evidence.filter(item => directIds.has(item.id) || item.trusted && !item.revocation && !!item.reuse && directIds.has(item.reuse.evidenceId));
+        // The execution is recalled when a withdrawn record — executed or derived — bound its
+        // candidate, exactly or carried across a Graphyard-authored tip, for a proof the
+        // candidate's criteria require.
+        const execution = work.mergeExecution && work.candidate
+          && work.mergeExecution.sha === work.candidate.sha
+          && work.mergeExecution.baseSha === work.candidate.baseSha
           && work.mergeExecution.policyRevision === data.policyRevision
+          && withdrawn.some(item => evidenceBindsCandidate(work!, item))
           && work.criteria.some(criterion => criterion.proofs.includes(data.proof))
           ? work.mergeExecution : null;
         // mergeCommit is the serialization point immediately before the provider mutation.
@@ -532,6 +569,7 @@ export class Engine {
       // Delivery is an immutable snapshot. A late containment cleanup or a post-deployment fact may
       // append its audit/revision metadata, but stale inputs must not re-evaluate it.
       if (!deliveredContainmentCleanup && !postDeployment) this.evaluate(work, all, now);
+      await this.recordDispatch(db, work, now);
       await save(db, work, actor.id, command, now, command === 'settle' ? { epoch: data.epoch } : actor.role === 'operator-agent' ? { before, intent: data, reason: data.reason ?? null } : data);
       if (work.submission && !postDeployment && !['heartbeat', 'release', 'claim', 'workspace'].includes(command)) await wakeJob(db, work.id);
       await db.query('INSERT INTO receipts(actor,key,fingerprint,result) VALUES($1,$2,$3,$4)', [actor.id, key, fingerprint, JSON.stringify(work)]);
@@ -575,6 +613,7 @@ export class Engine {
       demand(Number.isFinite(expiresAt) && expiresAt - now.getTime() > 95_000, 'Required gate inputs expire too soon for a bounded merge execution; refresh them and retry');
       const execution = { id: randomUUID(), owner: actor.id, sha: data.sha, baseSha: data.baseSha, policyRevision: data.policyRevision, authorizationRevision: work.revision, issuedAt: now.toISOString(), expiresAt: new Date(expiresAt).toISOString() };
       work.mergeExecution = execution;
+      await this.recordDispatch(db, work, now);
       await save(db, work, actor.id, 'merge.execution.acquired', now, { executionId: execution.id, owner: execution.owner, sha: execution.sha, baseSha: execution.baseSha, policyRevision: execution.policyRevision });
       const result = { key: work.key, revision: work.revision, execution };
       await db.query('INSERT INTO receipts(actor,key,fingerprint,result) VALUES($1,$2,$3,$4)', [actor.id, key, fingerprint, JSON.stringify(result)]);
@@ -594,6 +633,7 @@ export class Engine {
       demand(work, 'Work item not found', 404);
       demand(work.mergeExecution?.id === data.executionId && work.mergeExecution.owner === actor.id, 'Merge execution is missing, expired, superseded, or owned by another coordinator');
       work.mergeExecution = null; this.evaluate(work, all, now);
+      await this.recordDispatch(db, work, now);
       await save(db, work, actor.id, 'merge.execution.cancelled', now, { executionId: data.executionId, reason: data.reason });
       await wakeJob(db, work.id);
       const result = { key: work.key, revision: work.revision, cancelled: data.executionId };
@@ -677,6 +717,7 @@ export class Engine {
         && work.mergeAuthorization.policyRevision === execution.policyRevision,
       'Merge authorization changed after final verification; provider merge refused');
       execution.committingAt = now.toISOString();
+      await this.recordDispatch(db, work, now);
       await save(db, work, actor.id, 'merge.execution.committed', now, { executionId: execution.id, sha: execution.sha, committingAt: execution.committingAt });
       const result = { key: work.key, executionId: execution.id, sha: execution.sha, committingAt: execution.committingAt, revision: work.revision };
       await db.query('INSERT INTO receipts(actor,key,fingerprint,result) VALUES($1,$2,$3,$4)', [actor.id, key, fingerprint, JSON.stringify(result)]);
@@ -703,10 +744,15 @@ export class Engine {
       if (work.observation) work.observation.agentReview = provider === 'agent'
         ? { provider: 'agent', sha: request.sha, approved: false, profile: request.profile, reviewerApp: request.reviewerApp, reason: `Waiting for reviewer profile ${request.profile} to post a verdict through its registered App` }
         : { provider: 'codex', sha: request.sha, approved: false, reason: 'Waiting for dispatched Codex review' };
-      this.evaluate(work, all, now); await save(db, work, 'github', 'review.requested', now); return work;
+      this.evaluate(work, all, now); await this.recordDispatch(db, work, now); await save(db, work, 'github', 'review.requested', now); return work;
     });
   }
-  /** Records the Graphyard-published speculative tip this candidate must now be validated on. */
+  /**
+   * Records the Graphyard-published speculative tip this candidate must now be validated on, and
+   * decides — once, from the record as it stands and GitHub's account of the tip — which of the
+   * replaced head's bindings carry to it. A carried binding and a re-required one are both
+   * written to the ledger with the reason, so the audit trail says why no fresh round was needed.
+   */
   async bindSpeculativeTip(id: string, expectedRevision: number, speculation: QueueSpeculation, jobToken: string) {
     return this.store.transaction(async (db, now) => {
       const job = (await db.query('SELECT 1 FROM jobs WHERE work_id=$1 AND token=$2 AND locked_until>$3', [id, jobToken, now])).rows[0];
@@ -716,12 +762,33 @@ export class Engine {
       requireCurrent(work && work.revision === expectedRevision && work.stage !== 'done' && !work.observation?.merged, 'Task changed while the speculative tip was built');
       demand(!holdsMergeExecution(work, now.getTime()), 'Merge execution is active');
       requireCurrent(work.queue && speculation.policyRevision === work.policyRevision, 'Queue entry or policy changed while the speculative tip was built');
-      work.queue!.speculation = speculation;
+      const carry = work.candidate && speculation.tip !== work.candidate.sha ? this.decideTipCarry(work, all, speculation, now) : null;
+      work.queue!.speculation = { ...speculation, carry };
       work.queueHistory = [...(work.queueHistory ?? []), { at: now.toISOString(), event: 'predicted' as const, sequence: work.queue!.sequence, tip: speculation.tip }].slice(-queueHistoryLimit);
       this.evaluate(work, all, now);
-      await save(db, work, 'graphyard', 'queue.predicted', now, { tip: speculation.tip, base: speculation.base, ref: speculation.ref, predecessors: speculation.predecessors });
+      if (carry) await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, 'graphyard', 'queue.carry', JSON.stringify({ details: { ...carry, merge: speculation.merge ?? null } })]);
+      await this.recordDispatch(db, work, now);
+      await save(db, work, 'graphyard', 'queue.predicted', now, { tip: speculation.tip, base: speculation.base, ref: speculation.ref, predecessors: speculation.predecessors,
+        ...(carry ? { carry: { approval: carry.approval.carried ? 'carried' : 'required', evidence: Object.fromEntries(carry.evidence.map(entry => [entry.proof, entry.carried ? 'carried' : 'required'])) } } : {}) });
       await wakeJob(db, work.id);
       return work;
+    });
+  }
+  /** The carry decision for a tip that replaced the candidate's head; see model/carry.ts for the rule. */
+  private decideTipCarry(work: Work, all: Work[], speculation: QueueSpeculation, now: Date) {
+    const candidate = work.candidate!, observation = work.observation;
+    const aheadKey = speculation.predecessors.at(-1) ?? null;
+    const ahead = aheadKey ? all.find(item => item.key === aheadKey) : undefined;
+    // The base branch is validated by definition. A queue entry is validated when every gate
+    // passes on exactly the tip predicted here, the merge gate refusing only for its turn.
+    const validated = !aheadKey ? true : !!ahead && ahead.stage === 'merge' && ahead.candidate?.sha === speculation.base && !ahead.violations.length
+      && ahead.gates.every(gate => gate.passed || gate.name === 'merge' && gate.reasons.every(queueSequencingReason));
+    const observed = !!observation && observation.candidate.sha === candidate.sha && observation.candidate.baseSha === candidate.baseSha;
+    return decideCarry({
+      from: { sha: candidate.sha, baseSha: candidate.baseSha }, to: { sha: speculation.tip, baseSha: speculation.base }, policyRevision: work.policyRevision, at: now.toISOString(),
+      merge: speculation.merge, predecessor: { key: aheadKey, validated }, reviewedFiles: observed ? observation!.files : [],
+      approval: exactApproval(work), proofs: requiredProofs(work, all).map(proof => ({ proof, evidence: currentEvidence(work, proof, now) })),
+      app: this.controlPlaneAppId ? `control-plane (App ${this.controlPlaneAppId})` : 'control-plane',
     });
   }
   /** Removes an entry whose speculative validation cannot succeed, with the reason on the record. */
@@ -738,6 +805,7 @@ export class Engine {
       work.queueHistory = [...(work.queueHistory ?? []), { at: now.toISOString(), event: 'ejected' as const, sequence, reason, ...(work.queue!.speculation ? { tip: work.queue!.speculation.tip } : {}) }].slice(-queueHistoryLimit);
       work.queue = null;
       this.evaluate(work, all, now);
+      await this.recordDispatch(db, work, now);
       await save(db, work, 'graphyard', 'queue.ejected', now, { sequence, reason });
       for (const behind of all) if (behind.queue && behind.id !== work.id) await wakeJob(db, behind.id);
       return work;
@@ -775,6 +843,7 @@ export class Engine {
         reason: next ? `Reviewer profile ${failover.profile} is exhausted (${failover.exhaustion}); Graphyard failed over to ${next.name}`
           : `Every configured reviewer profile is exhausted for this candidate; the last was ${failover.profile} (${failover.exhaustion})` };
       this.evaluate(work, all, now);
+      await this.recordDispatch(db, work, now);
       await save(db, work, 'github', 'review.failover', now, failover);
       return work;
     });
@@ -787,6 +856,15 @@ export class Engine {
     else if (work.candidate && !work.observation?.merged && (!work.mergeAuthorization || work.mergeAuthorization.sha !== work.candidate.sha || work.mergeAuthorization.baseSha !== work.candidate.baseSha)) {
       work.mergeAuthorization = { sha: work.candidate.sha, baseSha: work.candidate.baseSha, policyRevision: work.policyRevision, at: now.toISOString() };
     }
+    // What the exact head still needs from a launched reviewer or producer, decided from the
+    // gates just evaluated; the transitions reach the ledger with the document (recordDispatch).
+    this.dispatchTransitions.set(work, reconcileAutoDispatch(work, all, now));
+  }
+  /** Append the auto-dispatch transitions of the last evaluation to the ledger, once, beside the document save. */
+  private async recordDispatch(db: { query: (text: string, values: unknown[]) => Promise<unknown> }, work: Work, now: Date) {
+    const transitions = this.dispatchTransitions.get(work) ?? [];
+    this.dispatchTransitions.delete(work);
+    for (const transition of transitions) await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, 'graphyard', transition.event, JSON.stringify({ details: { ...transition.request, at: now.toISOString() } })]);
   }
   async reconcile() {
     await this.store.transaction(async (db, now) => {
@@ -832,6 +910,7 @@ export class Engine {
         this.evaluate(work, all, now);
         if (JSON.stringify(work) !== before) {
           for (const entry of ledger) await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, 'graphyard', entry.kind, JSON.stringify({ details: { ...entry.details, at: now.toISOString() } })]);
+          await this.recordDispatch(db, work, now);
           await save(db, work, 'graphyard', 'reconciled', now, ledger.length ? { ledger: ledger.map(entry => entry.kind) } : undefined);
           if (work.submission) await wakeJob(db, work.id);
         }
@@ -929,6 +1008,16 @@ export class Engine {
         work.formalReviewBaseline = { pr: observation.candidate.pr, policyRevision: work.policyRevision, reviewIds: [...observation.reviewIds] };
       }
       this.evaluate(work, all, now);
+      // The base branch advanced to a commit whose tree is the bound base's tree — an earlier
+      // queue merge — so the published tip and every binding on it stand. The advance is written
+      // to the record and the ledger with both shas and the tree, and nothing is republished.
+      const speculation = work.queue?.speculation;
+      if (speculation && !observation.merged && observation.baseTip && observation.baseTree && speculation.tip === observation.candidate.sha && speculation.base === observation.candidate.baseSha
+        && speculation.base !== observation.baseTip && speculation.baseTree === observation.baseTree && speculation.carriedBase?.sha !== observation.baseTip) {
+        speculation.carriedBase = { sha: observation.baseTip, tree: observation.baseTree, at: now.toISOString() };
+        await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, 'graphyard', 'queue.base-carried',
+          JSON.stringify({ details: { tip: speculation.tip, boundBase: speculation.base, baseTree: speculation.baseTree, baseTip: observation.baseTip, at: now.toISOString() } })]);
+      }
       if (observation.merged) {
         const violation = 'Merge observed without a prior authorization for this candidate';
         if (authorizedSnapshot && observation.mergeSha) {
@@ -949,6 +1038,7 @@ export class Engine {
         // expired, so the execution — committed or not — is reconciled and the record reopens.
         work.mergeExecution = null;
       }
+      await this.recordDispatch(db, work, now);
       await save(db, work, 'github', 'github.observed', now);
       return work;
     });

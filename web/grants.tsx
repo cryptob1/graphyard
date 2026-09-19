@@ -38,7 +38,7 @@ export default function ProofGrantsView({ api, work, canEdit }: { api: (path: st
   const required = [...new Set(work.filter(w => w.stage !== 'done').flatMap(w => w.criteria.flatMap(ac => ac.proofs)))].sort();
   const coverage = required.map(proof => ({ proof, producers: authorities.filter(a => grantsAuthorize(a.patterns, proof)).map(a => a.principalId), items: work.filter(w => w.stage !== 'done' && w.criteria.some(ac => ac.proofs.includes(proof))).map(w => w.key) }));
   const gaps = coverage.filter(entry => !entry.producers.length);
-  return <><header><div className="breadcrumb">Authority <span>/</span> Proof grants</div><a href="/docs/operations#proof-authority-grants">Read the guide ↗</a></header>
+  return <><header><div className="breadcrumb">Authority <span>/</span> Proof grants</div><a href="/docs/operations-reference#proof-authority-grants">Read the guide ↗</a></header>
     <div className="page-heading"><div><div className="eyebrow">AUTHORITY LIVES HERE</div><h1>Proof authority</h1><p>Who may produce trusted evidence, for which proof names. Changes take effect immediately, without a redeploy.</p></div></div>
     {loadError && <div role="alert" className="notice danger">{loadError} <button disabled={loading} onClick={() => void load()}>Retry loading proof grants</button></div>}
     <div className="notice">Trust still follows the credential. Worker, reader, and coordinator principals can never hold a grant. The deployment environment allowlist is a bootstrap seed only: once a principal has a grant record, editing the environment changes nothing.</div>

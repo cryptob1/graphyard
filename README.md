@@ -2,7 +2,7 @@
 
 **Turn a fleet of coding agents into an engineering system.**
 
-Graphyard is an open-source control plane for coordinating coding agents across machines and worktrees. Agent runtimes write code. Graphyard records ownership, dependencies, evidence, gate decisions, and the exact change allowed to merge.
+Graphyard is an open-source control plane for coordinating coding agents across machines and worktrees. Agent sessions, hosted by runtimes such as Herdr, write the code. Graphyard records ownership, dependencies, evidence, gate decisions, and the exact change allowed to merge.
 
 ```text
 Backlog → Ready → Build → Review → Test → Acceptance → Merge → Done
@@ -10,7 +10,7 @@ Backlog → Ready → Build → Review → Test → Acceptance → Merge → Don
 
 A card stops at its first refusing gate and explains what is missing. `graphyard complete` submits an implementation; only an observed, authorized merge makes work Done.
 
-[Install](docs/install.md) · [How it works](docs/how-graphyard-works.md) · [Onboard a repository](docs/onboarding.md) · [Documentation](docs/README.md)
+[Install](docs/install.md) · [How it works](docs/how-graphyard-works.md) · [Glossary](docs/glossary.md) · [Onboard a repository](docs/onboarding.md) · [Documentation](docs/README.md)
 
 ## Why Graphyard
 
@@ -40,11 +40,11 @@ Graphyard currently governs work through a verified GitHub merge. The packaged P
 
 - **Git** owns source history.
 - **GitHub** owns PR and merge facts.
-- **Agent runtimes** own live sessions.
-- **Trusted runners** produce allowed evidence.
+- **Agent runtimes** such as Herdr own live agent sessions.
+- **Proof producers** (CI workflows and trusted runners) produce trusted evidence.
 - **Graphyard** owns coordination and progression.
 
-Herdr is the first packaged runtime integration. Codex, Claude, OpenCode, custom agents, and humans can use the same CLI and HTTP protocol.
+Herdr is the first packaged runtime integration. Codex, Claude Code, opencode, custom agents, and human operators can use the same CLI and HTTP protocol.
 
 ## Install
 

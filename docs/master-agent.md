@@ -1,13 +1,13 @@
 <!-- page: Operate Graphyard | 5 | routing, recovery, and guarded merges. -->
 # Master-agent operating mode
 
-The master is a dedicated coordinator session. It reads Graphyard, watches Herdr health, routes ready work, handles handoffs, requests guarded merges, and administers the managed repository's GitHub App, installation, and branch protection — through the API when it can and through the operator's own browser profile when only a GitHub page can do it. It does not implement work, hold worker leases, or produce evidence.
+The master is the coordinator: a `coordinator` principal run as the durable `master run` loop plus an optional visible master session. It reads Graphyard, watches Herdr session health, routes ready work, launches the independent reviewer and the proof producers the control plane requests for every submitted head, handles findings and handoffs, requests guarded merges, and administers the managed repository's GitHub App, installation, and branch protection — through the API when it can and through the human operator's own browser profile when only a GitHub page can do it. It does not implement work, hold worker leases, review candidates, or produce evidence.
 
-Graphyard remains the source of truth. Herdr only reports live session health.
+Graphyard remains the source of truth. Herdr only reports live session health. Terms follow the [glossary](glossary.md).
 
 ## Install
 
-Requires Node 24, Herdr 0.7.1 or newer, a Graphyard checkout, and GitHub CLI authenticated as an identity allowed to merge the protected base branch.
+Requires Node 24, Herdr 0.7.1 or newer, a Graphyard checkout, and GitHub CLI authenticated as an identity allowed to merge the protected base branch. Muse profiles require Herdr 0.9.1 or newer, which recognizes kind `muse` natively, and an installed, provider-authenticated `muse` executable on the coordinator host.
 
 Create a `coordinator` principal on the Graphyard server. From a clean coordinator checkout, list Herdr workspaces and bind the master to this repository's workspace:
 
@@ -28,7 +28,7 @@ At the token prompt, paste the token, press Enter, then press Ctrl-D to send EOF
 
 `master start` also installs the master's own harness permissions for harnesses that have a command classifier. See [harness permissions](#harness-permissions).
 
-Run the coordinator under a dedicated OS identity or machine. Implementation agents running as the same OS user may read its GitHub CLI credentials; Graphyard tokens cannot create a filesystem boundary.
+Run the coordinator under a dedicated OS identity or machine. Worker sessions running as the same OS user may read its GitHub CLI credentials; Graphyard tokens cannot create a filesystem boundary.
 
 ## Add a worker
 
@@ -37,6 +37,7 @@ Use a template:
 - [Codex](../examples/master/codex-worker.json)
 - [Claude](../examples/master/claude-worker.json)
 - [Cursor](../examples/master/cursor-worker.json)
+- [Muse](../examples/master/muse-worker.json)
 - [existing session](../examples/master/existing-worker.json)
 
 Keep profile files in the ignored `.graphyard/profiles/` directory so the master can write them itself. A launch profile points to a mode-0600 worker-token file outside every repository worktree:
@@ -51,6 +52,21 @@ Provider login and Graphyard identity are separate. Profiles cannot contain Grap
 Every launch profile carries an approval mode; see [approval modes](#approval-modes).
 
 `launch` profiles are supervised and can receive new work. `existing` profiles add health visibility for a session that already owns work; Graphyard will not inject a new assignment into an unsupervised process.
+
+### Muse
+
+Muse is an adapter at the runtime boundary, not a second control plane. A profile with `kind: "muse"` (template: [`muse-worker.json`](../examples/master/muse-worker.json)) goes through exactly the path every other launched runtime takes:
+
+1. `master dispatch` reads the profile's own mode-0600 worker credential and refuses one that does not authenticate as that profile's principal with the `worker` role;
+2. the claim and the assigned worktree are created under that credential alone — the tab receives `GRAPHYARD_TOKEN_FILE` for the Muse worker's file, never `GRAPHYARD_TOKEN`, the coordinator token, an operator token, a trusted evidence-producer token, or another worker's file;
+3. Herdr starts the installed `muse` binary inside `graphyard watch`, so the supervisor heartbeats the lease, filters server credentials out of the environment, and terminates the process on lease loss or epoch supersession;
+4. the prompt is delivered only after Herdr reports the session ready; a launch that never becomes visible, blocks before it is ready, or refuses the prompt is closed and its epoch released, and one Herdr cannot confirm closed keeps the epoch fenced.
+
+Prerequisites: Herdr 0.9.1 or newer and a `muse` executable on the coordinator host that is already logged in to its provider (`muse login`); provider credentials live in that login, never in the profile. Graphyard generates no `auto` startup contract for Muse yet, so the template carries Muse's own non-interactive flags in `agentArgs` (`--approval-mode never --trust-workspace`); `master worker add` reports that Graphyard added nothing. Muse's OS sandbox stays on with those flags; use `--yolo` in `agentArgs` only when that trade-off is acceptable for the profile.
+
+Herdr reports a Muse session as `working`, `idle`, `blocked`, `done`, or absent, which `master status` shows as `offline`. Those states are health telemetry only: a working session does not extend a lease, an exited or missing session does not release one, and a session named after a principal does not become its owner. Graphyard's authenticated lease and epoch remain the sole ownership and lifecycle authority; a `blocked`, `done`, or `offline` session under an active lease is flagged for attention, and an expired lease shows no owner regardless of what Muse reports.
+
+There is no supported unsupervised path: do not start `muse` directly for dispatched work, adopt an already-running Muse session with an `existing` profile (it stays observable only), reuse the coordinator credential, or grant the Muse worker principal operator or trusted evidence-producer authority.
 
 Local dispatch requires Linux with a working systemd user manager for durable containment. On macOS or Linux without user systemd, route work to a separately supervised remote worker instead.
 
@@ -77,6 +93,9 @@ or a Herdr tab. `master init` accepts the loop's settings:
 | `--deployment-url URL` | JSON endpoint that reports the commit the running release serves |
 | `--deployment-sha-field PATH` | Dotted field holding that commit; default `commit` |
 | `--smoke-workflow FILE` | Workflow file, such as `deploy-smoke.yml`, that the loop asks GitHub to run against the live deployment once it serves a delivery whose policy sets `deploySmoke` |
+| `--dispatch-interval SECONDS` | Seconds between reads of the control plane's review and producer requests, 5–30; default 10 (see [automatic dispatch at submit](#automatic-dispatch-at-submit)) |
+| `--reviewer-profile NAME` | The reviewer profile automatic dispatch launches when more than one is configured |
+| `--producer-timeout MINUTES` | How long a launched producer session may run before it is recorded as expired, 5–1440; default 120 |
 
 Each cycle:
 
@@ -87,9 +106,11 @@ Each cycle:
    attestation is history (`lease.expired` with its cause), never an incident;
 2. **dispatches claimable work** to a healthy worker profile, through the same launcher
    `master dispatch` uses: the worker claims under its own identity and the loop holds no lease;
-3. **shepherds reviews and proofs** — one recorded request per exact candidate, a request to the
-   trusted producer workflow when automatable proof is missing, and an escalation for anything only
-   a human or a producer may resolve;
+3. **shepherds reviews and proofs** — the reviewer and producer sessions the control plane
+   requested for each exact head are launched on the dispatcher's own cadence (see
+   [automatic dispatch at submit](#automatic-dispatch-at-submit)), a request goes to the trusted
+   producer workflow when automatable proof is missing and one is configured, and anything only a
+   human may resolve is escalated;
 4. **invokes only the guarded merge**, when automatic merging is enabled;
 5. **verifies the deployed SHA** against what Graphyard recorded as delivered, and for a delivery
    whose policy sets `deploySmoke` records that observation on the item, requests the trusted smoke
@@ -131,15 +152,98 @@ refused merge is the gate working: the loop records the refusal and keeps cyclin
 An unhealthy profile — an unreadable credential, a name already busy in Herdr, or a recent failed
 launch — is routed around for a ten-minute cool-off while other profiles keep receiving work.
 
-Judgment calls stay with an agent or a human: reading a worker's report, deciding whether a review
-finding needs rework, choosing how to route a novel failure. The loop keeps the mechanical steps
-running underneath them.
+Judgment calls stay with the visible master session or the human operator: reading a worker's
+report, deciding whether a review finding needs rework, choosing how to route a novel failure. The
+loop keeps the mechanical steps running underneath them.
+
+## Automatic dispatch at submit
+
+Review and proof collection start the moment a candidate is ready for them, not when someone
+notices it. The control plane and the loop each own half of that:
+
+**The control plane records what the exact head needs.** Whenever a work item is evaluated —
+a submission, a GitHub observation, evidence, a queue publication, a policy change — and its
+candidate passes the build gate (submitted, observed, open, not a draft, not awaiting rework),
+it records on the item, under `autoDispatch`:
+
+- one **review request** when the policy expects a GitHub verdict and no approval binds the
+  head: neither an exact approval of it nor one the merge queue [carried](#merge-queue) onto a
+  Graphyard-authored tip. A head that does not contain the base tip is not requested until it
+  does, because a review of it would be dismissed when GitHub recomputes the merge base. `codex`
+  and `agent` policies are dispatched by the control plane through GitHub itself and record no
+  request here;
+- one **producer request per proof group** — `unit`, `integration`, and `manual` for the
+  proofs the item lists in `producerProofs` — naming every proof of that group that no trusted
+  passing evidence binds, exactly or carried. A proof whose trusted evidence already failed on
+  this head is not requested again: that is a finding to route, not a run to repeat.
+
+Every request is bound to head, base and policy revision. A head change, a base change, or a
+policy revision cancels each request with the reason (`head changed from … to …`) and requests
+the new head afresh unless a carried binding covers it; an observed approval, a `CHANGES_REQUESTED`
+verdict, or trusted evidence satisfies it; rework, closure and merge cancel it. Each transition
+is a `dispatch.requested`, `dispatch.satisfied` or `dispatch.cancelled` entry in the item's
+history, and the last fifty resolved requests stay on the record under `autoDispatch.history`.
+
+**The loop launches them within 30 seconds.** `master run` reads those requests every
+`dispatchIntervalSeconds` (5–30, default 10) beside its coordination cycle and, for every open
+request that has no session yet:
+
+- launches the reviewer profile — `run.reviewerProfile`, or the only configured one — through
+  the same launcher as `master review GY-N`: exact head verified, an hour-long read-only App
+  token in a private `GH_CONFIG_DIR`, the runtime's approval contract pre-seeded so no keystroke
+  is needed, and a prompt that polls `gh pr view --json mergeable` until GitHub has recomputed the
+  merge base before the verdict is posted;
+- launches one producer session per proof group on a free, independent producer profile. A
+  producer profile is a `kind`, a producer credential file and an environment declared in
+  `.graphyard/master.json` next to the worker profiles (`master producer add FILE`, template
+  [examples/master/claude-producer.json](../examples/master/claude-producer.json)); its credential
+  is verified to authenticate exactly the named principal in the producer role, and it can never
+  share a principal with a worker profile, because the control plane refuses evidence from an
+  identity that has implemented the item — a profile whose principal has held an assignment on
+  the item is skipped for that item for the same reason. The session receives the credential as a
+  path in `GRAPHYARD_TOKEN_FILE`, never as a value, works in a detached worktree of the exact
+  head outside every Graphyard worktree, and submits each proof with `graphyard evidence` bound
+  to that exact head, base and policy revision — a failing run as `fail`, never omitted. With
+  fewer free producer profiles than groups the remaining groups wait and `master status` says
+  so; add profiles for parallelism.
+
+A launch happens **once per request id**: the reviewer ledger (`.graphyard/reviews.json`) and
+the producer ledger (`.graphyard/producers.json`) record which request each session answers,
+so a restart, a second tick or a re-read snapshot never doubles a session, and a request the
+control plane satisfied or cancelled is never launched. The ledgers record launch, completion
+and outcome per session: a reviewer session completes on its verdict and expires with its
+token; a producer session completes when every proof of its group has a trusted outcome (or
+one failed), expires after `producerTimeoutMinutes`, and is recorded as `failed` when Herdr
+reports it finished five minutes without submitting. A session whose head the control plane
+cancelled is closed on the next tick with its token withdrawn and the reason on the record — a
+head change cancels the in-flight sessions for the old head.
+
+A launch the loop could not perform — a stale observation, a busy profile, Herdr refusing — is
+recorded in the dispatch cursor beside the coordinator credential with a widening retry
+(30 seconds, doubling to 10 minutes, at most twelve attempts), and `master status` raises it as
+that row's `attention`. Once its cause is fixed, `master review GY-N [PROFILE]` is the recovery
+path for a reviewer request past its attempts; producers retry on their own once a profile is
+free.
+
+`master status` shows it all per candidate under each row's `dispatch`: the open review and
+producer requests with `requestedAt`, `sinceMs` and the recorded reason; the `session` launched
+for each (profile, agent, state, verdict or per-proof outcome, and how long it has run); any
+`failure` standing against it; and `recent`, the last resolved requests with their resolution.
+`producers` lists the pending and recent producer sessions, `dispatch` reports the dispatcher's
+cadence, last tick and failures, and `counts.dispatchRequested` and `counts.dispatchRunning`
+total the requests and the sessions running for them.
+
+What this leaves the master — the loop's judgment half, or the visible session — is the
+findings: read a `CHANGES_REQUESTED` verdict or a failed proof, decide whether it needs rework,
+route it, and merge when every gate passes. The master handles findings, reworks and merges; it
+never launches reviews or producers by hand, never approves a candidate, and never submits
+evidence.
 
 ## Operate
 
 The master is a perpetual coordinator, not a one-shot dispatcher. Whether the
-mechanical steps run in the [durable loop](#durable-loop) or an agent session drives
-them by hand, keep cycling through these steps until both parts of the terminal
+mechanical steps run in the [durable loop](#durable-loop) or the visible master session
+drives them by hand, keep cycling through these steps until both parts of the terminal
 condition hold: (1) every in-scope work item is Done or has a genuinely external
 blocker recorded in Graphyard; and (2) every merged change is deployed and
 live-verified against the exact deployed release, or a genuinely external deployment
@@ -147,7 +251,8 @@ blocker is recorded in Graphyard:
 
 1. Run `master status` and treat Graphyard as progression truth.
 2. Dispatch ready work to an appropriate worker profile.
-3. Shepherd review findings, rework, and trusted proof collection to completion.
+3. Route review findings and failed proofs to rework; the reviewer and the producers for every
+   submitted head are launched by the loop, never by hand.
 4. Request a guarded merge only when the exact candidate passes every gate.
 5. Run [deployment verification](#deployment-verification) for each delivery with
    `master verify-deployment GY-N`: the required live behavior is established against
@@ -162,9 +267,9 @@ step 5. Stop only when every in-scope work item is Done or genuinely externally
 blocked, and either the exact deployed release has passed live verification or a
 genuinely external deployment blocker is recorded in Graphyard.
 
-In-scope work is every item Graphyard has released: unreleased backlog is the
-operator's to release with `ready`, so it neither blocks nor satisfies the terminal
-condition. A per-item blocker is the `blocked` record the lease holder writes on the
+In-scope work is every item Graphyard has released: unreleased backlog is the human
+operator's (or a scoped operator agent's, with `intent:ready`) to release with `ready`,
+so it neither blocks nor satisfies the terminal condition. A per-item blocker is the `blocked` record the lease holder writes on the
 item; a session that went quiet without one is not a blocker, it is work to dispatch
 again.
 
@@ -199,7 +304,7 @@ pre-merge gate: nothing about it changes which candidates merge. The command
 2. identifies the checkout whose CLI emits the instructions — the commit the configured
    launcher's checkout is at — and refuses a local-only reading: a checkout at any commit
    other than the deployed release, or one with uncommitted changes;
-3. reads what that release emits the way an operator would: `master guide`, and the
+3. reads what that release emits the way the human operator would: `master guide`, and the
    `AGENTS.md` a fresh `init --url` writes into a scratch git checkout outside every
    repository, with no Graphyard credential in the environment. Both must carry the
    perpetual cycle, deployment verification as a step of it, the terminal condition, the
@@ -235,7 +340,7 @@ Run `status` at startup, after dispatch, when a worker reports completion, and w
 
 For work using the [identity-bound agent review provider](github.md#identity-bound-agent-review-providers), each row carries a `review` object with the currently dispatched reviewer profile and runtime, plus the failover entries recorded for the current candidate; `counts.reviewFailover` totals the items that failed over. A reviewer runs out of quota or goes silent past its timeout, Graphyard records that and moves to the next configured profile on its own — no master action is required. When every profile is exhausted the row is flagged for attention and the review gate stays closed. That is a capacity decision for the operator: add reviewer capacity, wait for quota, or revise the review policy. Never treat exhaustion as an approval, and never merge around a closed review gate.
 
-`master status` also reports facts about the installation itself under `controlPlane`: `attention` lists a GitHub App permission the installation lacks (with the installation page where the pending request is accepted), a preflight that could not verify the permissions, the number of integration jobs held on that shortfall, every capacity variable that no longer covers the configured principals (`Set GRAPHYARD_MAX_REVIEWERS=N on the deployment`, under `delegationLimits`), and how far the base branch is ahead of what production serves; `appPermissions` carries the missing entries and when they were last verified; `counts.attention` includes these items. `controlPlane.production` is the control plane's own [deployment observation](deployment.md#production-deployment-observation): the serving commit, `aheadBy`, the newest provider deployment with its status, the pending and deployed items, and the open incidents; when main is ahead the attention line reads `main is N commits ahead of production (serving …): <failing deployment reason>`. `controlPlane.build` is the commit and merge protocol the server runs, `versionSkew` is the refusal `master merge` would raise (`null` when the CLI and server agree), and `latency.mergeToProduction` is the merge-to-production p50/p90 over every delivery with an observed deployment, which the periodic measurement records beside `delivered[].mergeToProductionMs`. A permission shortfall is an operator action, not a merge decision: the affected jobs are held rather than retried, the gates they feed stay closed, and `graphyard github-setup --update-permissions` on the machine holding the App credentials prints the exact steps. `master init` reports the same attention in its result. See [App permissions](github.md#app-permissions).
+`master status` also reports facts about the installation itself under `controlPlane`: `attention` lists a GitHub App permission the installation lacks (with the installation page where the pending request is accepted), a preflight that could not verify the permissions, the number of integration jobs held on that shortfall, every capacity variable that no longer covers the configured principals (`Set GRAPHYARD_MAX_REVIEWERS=N on the deployment`, under `delegationLimits`), and how far the base branch is ahead of what production serves; `appPermissions` carries the missing entries and when they were last verified; `counts.attention` includes these items. `controlPlane.production` is the control plane's own [deployment observation](deployment.md#production-deployment-observation): the serving commit, `aheadBy`, the newest provider deployment with its status, the pending and deployed items, and the open incidents; when main is ahead the attention line reads `main is N commits ahead of production (serving …): <failing deployment reason>`. `controlPlane.build` is the commit and merge protocol the server runs, `versionSkew` is the refusal `master merge` would raise (`null` when the CLI and server agree), and `latency.mergeToProduction` is the merge-to-production p50/p90 over every delivery with an observed deployment, which the periodic measurement records beside `delivered[].mergeToProductionMs`. A permission shortfall is an administration action — the human operator, or the master through the operator's browser profile — not a merge decision: the affected jobs are held rather than retried, the gates they feed stay closed, and `graphyard github-setup --update-permissions` on the machine holding the App credentials prints the exact steps. `master init` reports the same attention in its result. See [App permissions](github.md#app-permissions).
 
 Dispatch:
 
@@ -264,6 +369,7 @@ A launched session that stops to ask "run everything?" or "trust this folder?" i
 | Codex | `--ask-for-approval never --sandbox workspace-write` | directory-trust and per-command approval | only the workspace-write sandbox still limits a command |
 | Cursor | `--force --trust` | "Run Everything" and fresh-worktree workspace trust | every proposed command runs in the assigned worktree |
 | opencode | `OPENCODE_PERMISSION={"edit":"allow","bash":"allow","webfetch":"allow"}` | edit, bash, and webfetch prompts | edits, shell commands, and fetches happen without asking |
+| Muse | nothing generated; the [template](../examples/master/muse-worker.json) passes `--approval-mode never --trust-workspace` in `agentArgs` | tool-approval and workspace-trust prompts | tool calls run without asking inside Muse's own sandbox |
 
 The trade-off is real: an `auto` session runs whatever it decides to run inside its own worktree, under its own provider and Graphyard credentials. What it cannot do is change: it still holds only a worker credential, still works in one assigned worktree, and still cannot merge, produce trusted evidence, or weaken a requirement. Use `prompt` when a human should stay in the loop for a particular profile. A profile that already sets the runtime's own approval flags keeps exactly those; Graphyard never overrides an explicit choice.
 
@@ -271,7 +377,7 @@ The trade-off is real: an `auto` session runs whatever it decides to run inside 
 
 ## Independent review
 
-The reviewer is a separate GitHub identity: not the pull-request author, and not the Graphyard control-plane App that publishes the gate check.
+The reviewer is a separate GitHub identity: not the pull-request author, and not the Graphyard control-plane App that publishes the gate check. Once it is registered and a reviewer profile exists, `master run` launches it for every submitted head on its own (see [automatic dispatch at submit](#automatic-dispatch-at-submit)); `master review` remains the launcher the loop uses and the recovery path when a launch was refused.
 
 ```sh
 node "$GRAPHYARD_CLI" master reviewer setup
@@ -340,7 +446,7 @@ A browser-driven change is therefore as attributable as a CLI one, and a refusal
 ### The only operator interactions left
 
 - **Device approval.** When GitHub answers with its *Confirm access* page, the flow clicks *Use GitHub Mobile*, reads the two-digit pairing code, writes it to `.graphyard/master-actions/sudo.json`, and reports it in the session output and in `master status` under `administration.sudo` with the instruction to approve the prompt on your device and choose that code. It then waits with a bounded, retrying poll — three seconds between reads, three minutes in total, and an expired code re-issued at most three times — and continues where it was once the approval lands. A prompt nobody approves fails with the code and the rerun command rather than hanging; a prompt without a GitHub Mobile option is refused rather than guessed at with a password or authenticator.
-- **Human-only decisions.** The guides mark these human-only: choosing which review provider an item uses, releasing backlog work, revising requirements, clearing blockers, satisfying a manual proof, authorizing rework, and approving a merge when automatic merging is disabled stay with a person. The flows change nothing outside the three targets above.
+- **Human-only decisions.** The guides mark these human-only: choosing which review provider an item uses, releasing backlog work, revising requirements, clearing blockers, satisfying a manual proof, authorizing rework, and approving a merge when automatic merging is disabled stay with the human operator. The flows change nothing outside the three targets above.
 
 ### What the master must never do
 
@@ -386,7 +492,7 @@ Version 0.1 cannot remotely launch a supervised Herdr tab on another host. The m
 A master merge succeeds only when Graphyard has a current authorization for the exact PR head, base, and policy. Immediately before the GitHub call, Graphyard rechecks:
 
 - every gate and current evidence;
-- PR head, base, draft state, and mergeability;
+- PR head, base branch, draft state, and mergeability, with the base tip read from `refs/heads/<base>` rather than the pull request's cached `baseRefOid` (see [merge queue](#merge-queue));
 - CI producer identity and current-head review;
 - branch protection and the App-owned required check, including that "require branches to be up to date" is off, which the merge queue requires;
 - a short-lived, single-use merge execution.
@@ -402,11 +508,16 @@ Use `master init --no-auto-merge` when an operator must approve each merge reque
 Candidates that pass their own gates enter a single merge queue and land in order. `master status` reports the queue directly:
 
 - `queue` lists every entry with its `position`, `size`, `predictedBase`, `predictedTip`, `ahead` keys, `validated` flag, `waitMinutes`, and refusal `reasons`;
+- each entry's `binding` says how it is bound to its published tip: `base` names the bound base and tree, whether the placement binds it exactly or as a tree-identical advance, and `carriedTo` when the base branch advanced only by such a commit; `approval` and each `evidence` entry are `exact` (bound to the tip itself), `carried` (carried across a Graphyard-authored tip, with the reviewer, original sha or evidence id) or `required` (a fresh review or proof is needed), each with the recorded reason;
 - each work row carries the same placement under `queue`, and `counts.queued` totals the entries.
 
-Only the head of the queue can hold a merge authorization, so `master merge --all` merges one entry per pass and the rest stay refused with an explicit position reason. That is normal, not a fault. Immediately before the provider call the master also rechecks that what lands is a Graphyard-published queue tip for exactly the authorized commit, and that the base branch still lets it land its tested tree: either the base is exactly the commit the candidate was validated on, or it advanced only through earlier queue merges, which leave that tree untouched. Any other advance, or an authorization with no published tip behind it, refuses the merge.
+Only the head of the queue can hold a merge authorization, so `master merge --all` merges one entry per pass and the rest stay refused with an explicit position reason. That is normal, not a fault. Before acquiring authority, again under the acquired execution, and once more immediately before the provider call, the master rechecks that what lands is a Graphyard-published queue tip for exactly the authorized commit, and that the base branch still lets it land its tested tree: either the base is exactly the commit the candidate was validated on, or it advanced only through earlier queue merges, which leave that tree untouched. Any other advance, or an authorization with no published tip behind it, refuses the merge.
+
+The real-base rule: every one of those checks reads the base branch's head from `refs/heads/<base>` (`gh api repos/OWNER/REPO/git/ref/heads/BASE`) and compares that commit's tree with the tree the tip was validated on. The pull request's `baseRefOid` is never consulted — GitHub caches it and refreshes it only on a push to the pull request's head, so right after a predecessor merges it still names the pre-merge base and would refuse every follower in the queue, the exact case the queue exists to make cheap. A refusal names both commits and both trees (`its head <sha> (tree <tree>) is not tree-identical to validated base <sha> (tree <tree>)`); a base whose tree differs from the validated tree is refused no matter what the pull request reports.
 
 Entries behind the head are re-based by Graphyard, not by the worker. Do not request rework, reassign, or ask an agent to rebase a queued candidate because its position or predicted tip changed; check `queue` and the entry's refusal reason first. An entry that fails its speculative validation is ejected with a recorded reason and must be repaired and re-queued — there is no command to reinsert or reorder it. The mechanism and its invariants are in [GitHub enforcement](github.md#merge-queue).
+
+A follower whose predecessor merges keeps its tip and bindings: the base branch advanced only by a commit tree-identical to the tip it was validated on, and the row's `binding.base.carriedTo` names that advance. When Graphyard replaces an approved head with its own authored tip, the approval and the scope-disjoint proofs carry to it under the rule in [binding carry](github.md#binding-carry-across-a-graphyard-authored-tip); a `required` binding in the row names exactly what the predecessor touched and what must be produced afresh. Launch a review or a proof only for a `required` binding, never because a tip's sha changed. GitHub dismisses reviews on Graphyard's own tip push; `master merge` re-posts a carried approval through the bound reviewer App before it acquires authority, and the result reports it under `carriedApproval`. A carried approval given by a human reviewer cannot be re-posted: the provider may then still require a fresh native approval, which the row and the merge result say.
 
 For the full correctness model, see [GitHub enforcement](github.md) and [architecture](architecture.md).
 
@@ -427,7 +538,8 @@ Every other lapse is `lease.expired` history with its cause — `submitted` (the
 `complete`), `blocked-awaiting-operator` (the worker reported `blocked` and stopped to wait on
 you), or `stopped-by-attestation` (you stopped the worker and said so with
 `rework --previous-worker-stopped` or `recover-containment --previous-worker-stopped`, before or
-after the lapse) — and raises nothing. Do not treat any of those as an incident needing a human.
+after the lapse) — and raises nothing. Do not treat any of those as an incident needing the human
+operator.
 
 Who settles what:
 
@@ -435,10 +547,11 @@ Who settles what:
   a bound submission, a carried blocked report, or a stopped-worker attestation in the ledger
   (`escalation.auto-settled`, with the note and the attestation it rests on). Attest first, then
   wait a tick: your `rework --previous-worker-stopped` for the lapsed epoch is the attestation;
-- you, as an admin of any session kind, settle a control-plane-raised `lease-loss` yourself by
-  citing the attestation: `resolve GY-N lease-loss --attestation blocked|stopped-worker "reason"`.
-  The server verifies the citation against the ledger and refuses one that is not there; the
-  `escalation.resolved` entry records who, why and which attestation;
+- you, with your `admin` credential — this path does not require a declared human session —
+  settle a control-plane-raised `lease-loss` yourself by citing the attestation:
+  `resolve GY-N lease-loss --attestation blocked|stopped-worker "reason"`. The server verifies the
+  citation against the ledger and refuses one that is not there; the `escalation.resolved` entry
+  records who, why and which attestation;
 - a lapse nothing explains — no report, no attestation — is a vanished worker and stays for a
   declared human session, as do `security-concern`, `requirement-weakening`,
   `evidence-policy-conflict` and any lease-loss a lead raised. Never work around those.
@@ -451,7 +564,7 @@ its own live supervisor by the pid in its name, so another item's running worker
 item's fence; a scope you cannot attribute from that report belongs to someone — verify whose
 before stopping it.
 
-The master does not clear blockers, revise requirements, or satisfy human gates on its own. See [operations](operations.md) for recovery commands, including [restarting the durable loop](operations.md#master-coordination-loop).
+The master does not clear blockers, revise requirements, or satisfy human gates on its own. See [operations](operations.md) for recovery commands, including [restarting the durable loop](operations-reference.md#master-coordination-loop).
 
 ## Master commands
 
@@ -461,11 +574,12 @@ The master does not clear blockers, revise requirements, or satisfy human gates 
 | `master start KIND` | Launch the visible master session with its harness rules |
 | `master status` | Work truth, session health, reviews, queue, and `administration` (recent browser actions, pending sudo code) |
 | `master dispatch GY-N PROFILE` | Invite a worker to claim ready work |
-| `master review GY-N [PROFILE]` | Launch the independent reviewer on the exact candidate |
+| `master producer add FILE` | Add a proof-producer launch profile with its own producer credential |
+| `master review GY-N [PROFILE]` | Launch the independent reviewer on the exact candidate (the loop does this on its own; recovery path) |
 | `master protection [--apply]` | Reconcile branch protection through the API |
 | `master browser app-permissions` | Raise the control-plane App's permissions through the browser |
 | `master browser installation-accept` | Accept the installation's pending permission request through the browser |
 | `master browser protection [--dry-run]` | Reconcile branch protection through the browser |
 | `master harness [KIND] [--apply]` | Generate the master's own harness permissions |
 | `master merge GY-N\|--all` | Guarded merge of authorized candidates |
-| `master run [--once]` | The durable coordination loop |
+| `master run [--once]` | The durable coordination loop, with the dispatcher that launches requested reviews and producers |

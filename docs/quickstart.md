@@ -30,7 +30,7 @@ provider. That is expected for local evaluation and is reported, not hidden. Gra
 polls GitHub, so gates continue to work, more slowly. Use a public provider for real work.
 
 Open `http://127.0.0.1:4310` and sign in with the admin credential file named in the
-installation summary.
+installation summary; that is the human operator's credential.
 
 ## Let Graphyard propose the delivery workflow
 
@@ -50,12 +50,12 @@ one ignored file, `.graphyard/setup-proposal.json`, proposing:
 - the CI system and the required check names;
 - build/test commands with their proof names;
 - the deploy target and how to verify a deployed SHA;
-- the candidate environment topology (ephemeral, pooled, or partial — see [operations](operations.md#setup-proposals-and-drift));
+- the candidate environment topology (ephemeral, pooled, or partial — see [operations](operations-reference.md#setup-proposals-and-drift));
 - the default policy: required checks, GitHub as review provider, and evidence expectations;
-- worker/reviewer profiles for the agent runtimes present on this machine;
+- worker and reviewer launch profiles for the agent runtimes present on this machine;
 - the GitHub App registration.
 
-Review the proposal with the operator. A sample proposal for a Node/Railway repository is in
+The human operator reviews the proposal. A sample proposal for a Node/Railway repository is in
 [examples/setup-proposal.json](../examples/setup-proposal.json). On the one-command path the
 installer applies it: pass each proposed check as `--required-check NAME` and each proof a
 CI runner may submit as `--producer-proof NAME`, and nothing is applied without `--apply`.
@@ -71,8 +71,9 @@ Re-running a matching apply changes nothing and reports drift.
 
 ## Create work
 
-In the UI, create a small task for this repository, add its acceptance criteria, and move it
-to Ready. All listed proofs must pass. Only an admin can [revise
+In the dashboard, create a small task for this repository, add its acceptance criteria, and
+move it to Ready. All listed proofs must pass. Only the human operator's `admin` credential
+(or, additively, a scoped operator agent) can [revise
 requirements](coordination.md#revise-requirements-explicitly); workers cannot weaken their
 own task.
 
@@ -98,7 +99,7 @@ node "$GRAPHYARD_CLI" watch GY-1 EPOCH -- YOUR_AGENT_COMMAND
 
 Replace `EPOCH` with the value returned by `claim`. A direct `watch` invocation stops the
 worker process group on Unix. On Windows it can stop only the direct child, so use external
-containment if the agent may spawn descendants. Foreground Herdr launches have stricter host
+containment if the worker session may spawn descendants. Foreground Herdr launches have stricter host
 requirements; see [Herdr integration](herdr.md) and [operations](operations.md).
 
 ## Submit the PR
@@ -109,6 +110,8 @@ Push the assigned branch, open a PR, then:
 node "$GRAPHYARD_CLI" complete GY-1 EPOCH PR_NUMBER
 ```
 
-Graphyard now evaluates review, CI, acceptance, and merge gates. A trusted producer — not the
-implementation worker — submits required evidence; grant one with `--producer-proof NAME`
-when you install. Done means Graphyard observed an authorized merge.
+Graphyard now evaluates review, CI, acceptance, and merge gates. A proof producer — never the
+worker — submits the required evidence; grant one with `--producer-proof NAME` when you
+install. Done means Graphyard observed an authorized merge.
+
+Use [repository onboarding](onboarding.md) to connect Herdr, more machines, and the master-agent flow.

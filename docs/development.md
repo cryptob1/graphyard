@@ -9,6 +9,7 @@
 | `src/store.ts` → `src/store/` | Postgres transactions, immutable events and job leasing; `src/store/tables/` is the schema registry |
 | `src/engine.ts` | Authenticated commands, ownership, evidence, reconciliation |
 | `src/github.ts` | App authentication, provider observations, check publishing |
+| `src/validation.ts`, `src/evidence-reuse.ts`, `src/evidence-replay.ts` | The validation runner protocol; reuse policies and decisions; artifact replay and execution analytics |
 | `src/server.ts` → `src/server/` | HTTP authentication and app assembly; `src/server/routes/` holds one route module per resource |
 | `src/cli.ts` → `src/cli/` | The launcher; one command module per command group, the help text generated from them |
 | `src/onboarding.ts`, `src/github-setup.ts` | Repository discovery and local GitHub App registration |
@@ -18,7 +19,7 @@
 | `web/main.tsx` → `web/pages/` | The dashboard shell; one page component per view, the sidebar generated from `web/pages/index.tsx` |
 | `integrations/herdr/` | Native Herdr ledger pane and open action |
 | `tests/` | Real Postgres integration and HTTP tests; `tests/hotspots.test.ts` guards the layout below |
-| `docs/` | User, architecture, deployment, protocol, and recovery guides; `docs/protocol/` is one page per protocol topic |
+| `docs/` | Guides, the [glossary](glossary.md), and the rendered diagrams under `docs/diagrams/` (regenerate with `node scripts/render-docs-diagrams.mjs`); `docs/protocol/` is one page per protocol topic; `npm run docs:check` verifies links, anchors, generated indexes, and diagram files |
 
 ## Where a new feature goes
 
@@ -64,7 +65,7 @@ The [repository bootstrap guide](first-pr.md) documents Graphyard's protected re
 5. Multi-repository delivery graphs and release coordination.
 6. Pagination, archival export, and measured fleet-scale load tests.
 
-Each task should define an observable outcome and trusted proof names before an implementation agent claims it. Do not weaken policy to get the system's own PRs through its gates. A future policy-engine migration needs an explicit bootstrap/recovery procedure under operator control.
+Each task should define an observable outcome and trusted proof names before a worker claims it. Do not weaken policy to get the system's own PRs through its gates. A future policy-engine migration needs an explicit bootstrap/recovery procedure under the human operator's control.
 
 ## Contributing
 

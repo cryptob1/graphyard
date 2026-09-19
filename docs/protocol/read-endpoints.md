@@ -5,7 +5,7 @@
 | --- | --- |
 | `GET /healthz` | Database reachability, no token required |
 | `GET /api/status` | Current principal, integration configuration, the App permission preflight (`appPermissions`: required, granted, missing, attention, installation URL) and `heldJobs`, failed jobs, server time |
-| `GET /api/work-snapshot` | Work, integration job metadata and database time from one snapshot |
+| `GET /api/work-snapshot` | Work (including each item's `autoDispatch` review and producer requests), integration job metadata and database time from one snapshot |
 | `GET /api/work` | Work aggregates, in creation order |
 | `GET /api/events?work=UUID` | Latest 300 events for one item; omit filter for latest global events |
 | `GET /api/analytics/flow` | Bounded delivery-flow report for a 7-, 30-, or 90-day window |

@@ -11,7 +11,7 @@ A **manifest** maps every service of an environment to an artifact digest and a 
 
 | Manifest of | Derived from | Established by |
 | --- | --- | --- |
-| A release | The release revision: its `manifest`, `sourceSha`, environment revision and explicit `members` | Operator, or a promoter with a current lease, citing a builder's attestation and independently observed merges ([delivery](delivery.md#define-and-select-a-release)) |
+| A release | The release revision: its `manifest`, `sourceSha`, environment revision and explicit `members` | The human operator (`admin`), or a promoter with a current lease, citing a builder's attestation and independently observed merges ([delivery](delivery.md#define-and-select-a-release)) |
 | A candidate | The validation build attestation the candidate pins: `artifacts`, `sourceSha`, `baseSha` | A `builder` registration attesting the independently observed candidate source ([validation](validation.md#configure-a-candidate)) |
 
 `GET /api/attribution/manifest/RELEASE_ID/REVISION` returns a release manifest with its `hash` (services, sources and configuration revision), its `digestHash` (services and digests only — the content address an observed target is matched against, identical to the release registry's `manifestHash`) and its membership, excluded members included. Implementation workers, validation clients and observers cannot create or revise a release; a deployment's self-reported version and any SHA a client sends are never part of a manifest.
@@ -21,7 +21,7 @@ A **manifest** maps every service of an environment to an artifact digest and a 
 | Who or what | May establish |
 | --- | --- |
 | Builder registration (`producer`) | Source → artifact mapping, as a build attestation |
-| Operator or promoter | Release identity and membership |
+| Human operator (`admin`) or promoter | Release identity and membership |
 | Observer registration (`producer`) with a current lease | What its services are running, per instance, with a `measurement` of `provider` or `host-attestation` |
 | Collector registration (`producer`) | The result of an attempt, rechecked by Graphyard against the pinned candidate and the observers' record |
 | Implementation worker, runner, validation client, application self-report, client-supplied SHA | Nothing. A worker or runner credential is refused; a `self-report` or `unknown` measurement is `unknown` even when the claimed digest agrees; a `sha`, `sourceSha`, `commitSha` or similar field on a result is refused before the report is parsed and the refusal is ledgered |
@@ -32,7 +32,7 @@ The ledger lives in two tables, `attribution_records` and `attribution_reanchors
 
 ## Exact-target validation
 
-When an operator creates a validation request, the request record is bound once to:
+When the human operator creates a validation request, the request record is bound once to:
 
 - the candidate's manifest hash and digest hash, derived from its trusted build attestation;
 - the candidate's **compatibility signature** (below);
@@ -116,7 +116,7 @@ The Attribution section of the analytics page, and `GET /api/analytics/attributi
 | Unsupported-success claims prevented | Refused client SHAs, unsupported collector claims, changed targets and undermined passes |
 | Cost accounting | Spent, attributed, wasted and saved units, with run durations |
 
-Every report carries `coverage` (records and requests read, scan bounds, open waits and rollouts) and `exclusions` (open convergence waits, unconverged rollouts, clock-inverted intervals). Every aggregate drills down, bounded to 200 rows, to the work item, release or manifest, request, attempt, evidence and artifact behind it; identifiers beyond the work key require an operator, coordinator or producer role. The metrics derive from the ledger and immutable validation records only: editing a work document changes no figure, and there is no endpoint that writes to the ledger.
+Every report carries `coverage` (records and requests read, scan bounds, open waits and rollouts) and `exclusions` (open convergence waits, unconverged rollouts, clock-inverted intervals). Every aggregate drills down, bounded to 200 rows, to the work item, release or manifest, request, attempt, evidence and artifact behind it; identifiers beyond the work key require the `admin`, `coordinator` or `producer` role. The metrics derive from the ledger and immutable validation records only: editing a work document changes no figure, and there is no endpoint that writes to the ledger.
 
 ## Verification
 

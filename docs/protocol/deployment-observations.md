@@ -1,8 +1,8 @@
 <!-- page: Agent protocol | 10 | recording deployment-provider observations that feed flow analytics without moving a gate. -->
 # Deployment observations
 
-`POST /api/deployments` records one deployment-provider observation. It requires a producer
-or operator credential; implementation workers cannot record one.
+`POST /api/deployments` records one deployment-provider observation. It requires a `producer`
+credential or the human operator's `admin` credential; workers cannot record one.
 
 ```json
 {

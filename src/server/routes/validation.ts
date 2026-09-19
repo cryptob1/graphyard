@@ -1,7 +1,10 @@
-import { Sent, defineRoutes, parseJson } from '../routes.js';
+import { refuseCiProducer } from '../../model/ci-proofs.js';
+import { Next, Sent, defineRoutes, parseJson } from '../routes.js';
 
 /** The validation runner protocol: artifacts, definitions, candidates, attempts and commands. */
 export const validationRoutes = defineRoutes('validation', [
+  // The CI producer's only lane is CI-produced evidence; it never uploads, collects, reuses or replays.
+  { method: 'POST', path: /^\/api\/validation(?:\/|$)/, handle: async ({ actor }) => { refuseCiProducer(actor, 'the validation protocol'); return Next; } },
   { method: 'POST', path: '/api/validation/artifacts', handle: async context => context.services.validation.uploadArtifact(context.actor, await parseJson(context, 11_200_000), context.idempotencyKey()) },
   {
     method: 'GET', path: /^\/api\/validation\/artifacts\/([^/]+)\/([^/]+)$/,
@@ -21,6 +24,12 @@ export const validationRoutes = defineRoutes('validation', [
   { method: 'GET', path: '/api/validation/capacity', handle: ({ services }) => services.validation.capacity() },
   { method: 'POST', path: '/api/validation/artifacts/migrate', handle: async context => context.services.validation.migrateArtifacts(context.actor, await parseJson(context, undefined, '{}')) },
   { method: 'GET', path: '/api/validation/definitions', handle: ({ url, services }) => services.validation.definitions(url.searchParams.get('cursor') ?? undefined) },
+  // D6: scoped evidence reuse, artifact replay and execution analytics.
+  { method: 'POST', path: '/api/validation/reuse', handle: async context => context.services.validation.reuse.decide(context.actor, await parseJson(context), context.idempotencyKey()) },
+  { method: 'GET', path: '/api/validation/reuse', handle: ({ url, services }) => services.validation.reuse.decisions(url.searchParams.get('cursor') ?? undefined) },
+  { method: 'POST', path: '/api/validation/replay', handle: async context => context.services.validation.replay.replay(context.actor, await parseJson(context)) },
+  { method: 'GET', path: '/api/validation/replays', handle: ({ url, services }) => services.validation.replay.replays(url.searchParams.get('cursor') ?? undefined) },
+  { method: 'GET', path: '/api/validation/analytics', handle: ({ services }) => services.validation.replay.analytics() },
   { method: 'GET', path: /^\/api\/validation\/candidate\/([^/]+)$/, handle: ({ services }, [id]) => services.validation.readCandidate(id) },
   // The host attestor's independent read of what it is about to execute. Read-only,
   // and refused to the worker and producer credentials that run and collect.

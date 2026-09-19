@@ -7,6 +7,7 @@ import { applyProposal, loadAppliedSetup, loadProposal, readSetupStatus, reposit
 import { applyInstall, buildPlan, prepareInstall, providers, type InstallInputs } from '../install/index.js';
 import { runManifestFlow } from '../install/manifest.js';
 import { delegationLimitAssignments } from '../install/limits.js';
+import { ciProducerProvisioningSteps, readRoster, registerCiProducer } from '../install/ci-proofs.js';
 import { completionProfiles, readinessChecklist, summarizeDefinitions, type CompletionProfile } from '../readiness.js';
 import { defineCommands } from './registry.js';
 import { readSecretFromStdin } from './context.js';
@@ -121,8 +122,13 @@ export const installCommands = defineCommands([
           if (differences.length) throw new Error(`${differences.join('; ')}. Rerun init --scan, review the refreshed proposal, then apply it again. The stored proposal was left unchanged.`);
           const url = values.url ?? stored.proposal.server;
           if (!url) throw new Error('Applying requires the Graphyard server URL; pass --url');
+          // Apply rewrites the registry from the reviewed proposal; the CI producer's token is read
+          // first so a re-run keeps the repository secret valid, then the entry is merged back in.
+          const roster = await readRoster(resolve(root, '.graphyard/principals.json'));
           const result = await applyProposal(root, stored.proposal, { url, githubSetup: interactiveGithubSetup(root) });
-          return print({ proposal: stored.file, ...result, capacity: await capacityForPrincipals(result.principalsFile, () => context.api('status')) });
+          const ciProofs = await registerCiProducer(result.principalsFile, roster);
+          return print({ proposal: stored.file, ...result, ciProofs: { ...ciProofs, next: ciProducerProvisioningSteps(stored.proposal.repository, url) },
+            capacity: await capacityForPrincipals(result.principalsFile, () => context.api('status')) });
         }
         await saveProposal(root, fresh);
         const applied = await loadAppliedSetup(root);

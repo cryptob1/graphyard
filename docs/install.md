@@ -1,4 +1,4 @@
-<!-- page: Start here | 1 | the one command, the agent-executable runbook behind it, and the App-permission migration an upgrade can require. -->
+<!-- page: Start here | 0 | the one command, the agent-executable runbook behind it, and the App-permission migration an upgrade can require. -->
 # Install Graphyard
 
 One command installs a complete Graphyard control plane for a GitHub repository on the
@@ -262,6 +262,20 @@ worker. See [the first PR](first-pr.md) and [repository onboarding](onboarding.m
 linked pull request. The installer therefore does not require a check that cannot yet pass.
 When the summary's `nextSteps` says so, rerun `--apply` after that first pull request; the
 installer then binds `Graphyard / merge` to the Graphyard App in branch protection.
+
+## Connect proofs in CI
+
+`unit:*` and `integration:*` proofs can run as trusted CI jobs instead of a producer session.
+They publish through the [CI producer](deployment.md#ci-producer) — `ci-proofs`, a `producer`
+with `runtime: github-actions` granted `unit:*` and `integration:*` only. `init --scan --apply`
+registers it in `.graphyard/principals.json` and prints `ciProofs.next`: restrict the
+`graphyard-reporting` environment to the default branch, store that token as its
+`GRAPHYARD_CI_PRODUCER_TOKEN` secret, set `GRAPHYARD_URL` on the environment, and deploy the
+principals array including it. From then on every push to a candidate branch runs the item's
+registered `unit:*` and `integration:*` proofs and publishes their evidence; see
+[proofs in CI](github.md#proofs-in-ci). Manual proofs still need a producer session, and the
+[hard rules](#hard-rules) apply to this token as to every other: it is a secret, never printed
+and never committed.
 
 ## Re-running the installer
 

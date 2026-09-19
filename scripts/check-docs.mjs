@@ -130,6 +130,9 @@ const MANUAL_MARKERS = [
   /docker compose --profile full\b/g,
 ];
 const SETUP_DOCS = /\(((?:docs\/)?(?:install|onboarding|quickstart|deployment)\.md)[^)]*\)/;
+// Historical records quote the text of past decisions; docs/README.md says they are not setup
+// instructions, so a manual step quoted there is a record, not a stale guide.
+const HISTORY = /^docs\/history\//;
 const FALLBACK_FILE = 'docs/deployment.md';
 const FALLBACK_HEADING = '## Manual fallback';
 
@@ -168,7 +171,7 @@ for (const file of files) {
   const rule = primary.find(entry => entry.file === relative);
   const command = content.indexOf(ONE_COMMAND);
   const fallback = relative === FALLBACK_FILE ? content.indexOf(FALLBACK_HEADING) : -1;
-  for (const marker of MANUAL_MARKERS) {
+  for (const marker of HISTORY.test(relative) ? [] : MANUAL_MARKERS) {
     for (const match of content.matchAll(marker)) {
       if (relative === FALLBACK_FILE) {
         if (fallback < 0 || match.index < fallback) installFailures.push(`${relative}: "${match[0]}" appears outside the labelled manual fallback`);

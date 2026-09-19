@@ -3,7 +3,7 @@
 
 A supervisor that dies without settling (a crashed process, an exhausted provider account) leaves an epoch-bound quarantine that no capability can lower, because the capability died with it. The terminal path is an operator attestation. A coordinator that can *prove* the supervisor is gone may settle it instead, with the proof recorded.
 
-`POST /api/work/UUID/autosettle` requires the coordinator or operator role and carries the quarantine's epoch and settlement hash, an audit reason, and a host verification record. The control plane re-checks everything it can check itself and never trusts the report for those facts:
+`POST /api/work/UUID/autosettle` requires the `coordinator` or `admin` role and carries the quarantine's epoch and settlement hash, an audit reason, and a host verification record. The control plane re-checks everything it can check itself and never trusts the report for those facts:
 
 - the quarantine still exists, at exactly that epoch and settlement hash;
 - no lease of another epoch supersedes it;

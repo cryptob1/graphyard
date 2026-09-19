@@ -5,7 +5,7 @@ import { createInterface } from 'node:readline';
 import { isDeepStrictEqual } from 'node:util';
 import { z } from 'zod';
 import { inspectRunnerRepository, oracleBundleDigest, snapshotRunnerSources } from '../runner-setup.js';
-import { accountFileDigest, assertRunnerCredentialScope, attemptGrantSchema, authorityWatch, containerNames, executionRecordSchema, observeContainers, runnerPlanSchema } from '../runner-executor.js';
+import { accountFileDigest, acknowledgeAttempt, assertRunnerCredentialScope, attemptGrantSchema, authorityWatch, containerNames, executionRecordSchema, observeContainers, runnerPlanSchema } from '../runner-executor.js';
 import { assembleResult, collectArtifacts, collectionBinding, collectionInputs, collectorInputSchema, verifyExecutionAttestation } from '../runner-collector.js';
 import { superviseAttempt, supervisionRequestSchema } from '../runner-attestor.js';
 import { adapterContracts, reportAdapter } from '../report-adapters.js';
@@ -119,9 +119,11 @@ export const runnerCommands = defineCommands([
         // Acknowledgement happens between the attestor's preflight and its first container.
         // Every local refusal therefore still precedes the ACK: an unacknowledged attempt
         // expires and releases its runner, environment and external reservations, while an
-        // acknowledged one holds them until an operator settles it by hand.
+        // acknowledged one holds them until an operator settles it by hand. An ambiguous
+        // answer is retried under the same request key and body until the control plane
+        // confirms the acknowledgement; heartbeats start only after that confirmation.
         const acknowledge = async () => {
-          await api('validation/ack', attemptCommand, `${grant.attemptId}-ack`);
+          await acknowledgeAttempt(api, attemptCommand);
           attemptAuthority.renewed();
           heartbeat = setInterval(() => { void api('validation/heartbeat', attemptCommand, `${grant.attemptId}-beat-${++beat}`)
             .then(() => attemptAuthority.renewed())

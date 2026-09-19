@@ -2,8 +2,9 @@
 # Bootstrap mode for a change that introduces its own proof harness
 
 A criterion whose proof does not yet exist cannot be proven by the change that creates it: the
-protected harness refuses to run against a base that lacks the contract, so the item stalls. An
-operator may declare that one criterion in **bootstrap mode**. The proof is deferred for this
+protected harness refuses to run against a base that lacks the contract, so the item stalls. The
+human operator (`admin`), or an operator agent holding `policy:bootstrap`, may declare that one
+criterion in **bootstrap mode**. The proof is deferred for this
 candidate only and is never dropped.
 
 ## Bootstrap declaration
@@ -22,8 +23,8 @@ candidate only and is never dropped.
 
 `reason` is required and nonblank. `contractPaths` names the contract the deferred proof belongs
 to, as exact paths or directory prefixes ending `/`, `/*` or `/**`. Every contract path must lie
-inside the item's own `plannedFiles`, so an operator cannot bind an obligation to a contract this
-change does not own. Contract paths must be unique.
+inside the item's own `plannedFiles`, so no requirement revision can bind an obligation to a
+contract this change does not own. Contract paths must be unique.
 
 A criterion whose proofs include an `e2e:` name cannot use bootstrap mode: an E2E proof pins a
 scenario revision, environment, and hash on its own work item, and an inherited obligation carries
@@ -55,7 +56,7 @@ evaluated regardless of what that item declares.
 
 An obligation is discharged only when some change is delivered with trusted, passing, complete
 evidence for that proof bound to its merged candidate and policy — the same standard as any other
-proof. No operator or administrator command retires one.
+proof. No `admin` or operator-agent command retires one.
 
 ## Inspecting obligations
 

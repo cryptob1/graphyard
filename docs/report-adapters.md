@@ -1,7 +1,7 @@
 <!-- page: Build integrations | 5 | what each supported report format proves, observes and refuses. -->
 # Report adapters
 
-A report adapter is how the trusted collector turns the two files an attempt writes — an offline inventory and an execution report — into a verdict. Each adapter is a published contract: it says what an accepted verification proves, which of those facts were independently observed rather than reported, which producers and versions its fixtures cover, and how every failure condition is classified. Nothing in a contract yields a pass.
+A report adapter is how the trusted collector turns the two files an attempt writes — an offline inventory and an execution report — into a verdict. Each adapter is a published contract: it says what an accepted verification proves, which of those facts were independently observed rather than reported, which test frameworks and reporter versions its fixtures cover (the contract's `producers` field names report producers, not proof producers), and how every failure condition is classified. Nothing in a contract yields a pass.
 
 Print the contracts the running CLI ships:
 
@@ -23,12 +23,12 @@ The report format is pinned in the operator-approved **bundle definition**, besi
 
 ## Supported formats
 
-| Format | Kind | Producers covered by contract fixtures | Files the phases write |
+| Format | Kind | Frameworks and reporters covered by contract fixtures | Files the phases write |
 | --- | --- | --- | --- |
 | `graphyard-playwright-v1` | end-to-end | `@playwright/test` 1.63.x through the [packaged runner image](runner-setup.md#the-approved-runner-image) and its built-in reporter | `inventory.json`, `report.json` |
 | `junit-xml-v1` | unit / integration | `node --test --test-reporter=junit` (Node 20–24), `pytest --junitxml` (7.x–8.x, `xunit2`), `jest-junit` 16.x, Maven Surefire/Failsafe 3.x XML, `go-junit-report` v2 | `inventory.json` (`graphyard-inventory-v1`), `report.xml` |
 
-Fixtures under `tests/fixtures/reports/` are real producer output. A producer outside the listed versions may parse and still be refused as unsupported structure; that refusal names the element it did not understand.
+Fixtures under `tests/fixtures/reports/` are real framework output. A framework or reporter outside the listed versions may parse and still be refused as unsupported structure; that refusal names the element it did not understand.
 
 ### `graphyard-playwright-v1`
 
@@ -48,7 +48,7 @@ The inventory is a `graphyard-inventory-v1` document the pinned image writes in 
 
 An identity is `sha256(suitePath ␟ classname ␟ name)` where `suitePath` is every enclosing `<testsuite name>` from the root joined with `/`, and `␟` is U+001F. The same case executed twice is a retry, not two passes. The adapter verifies against the inventory; it does not observe the enumeration itself, which is the pinned image's responsibility.
 
-Only structure is published. The raw XML can carry assertion messages, stack traces, `<properties>` and captured stdio, so it is parsed into a minimised projection — identities, statuses, timings and counts — and **that** is what the collector uploads; the raw bytes stay at the execution boundary, where the attestor measured them. The XML reader refuses `DOCTYPE` and entity declarations, unknown root elements (an NUnit `<test-run>`, a `.trx` `<TestRun>`), and any element it does not recognise, so an unfamiliar producer fails visibly instead of being half-read.
+Only structure is published. The raw XML can carry assertion messages, stack traces, `<properties>` and captured stdio, so it is parsed into a minimised projection — identities, statuses, timings and counts — and **that** is what the collector uploads; the raw bytes stay at the execution boundary, where the attestor measured them. The XML reader refuses `DOCTYPE` and entity declarations, unknown root elements (an NUnit `<test-run>`, a `.trx` `<TestRun>`), and any element it does not recognise, so an unfamiliar reporter fails visibly instead of being half-read.
 
 Failure semantics: `<failure>` and `<error>` are `behavior: failed`; `<skipped>`, a `flakyFailure`/`rerunFailure`, a duplicate case, a count mismatch, an overflow and any refused document never pass.
 
@@ -64,4 +64,4 @@ This prints the adapter's verdict and the projection it would publish. It reads 
 
 ## Adding an adapter
 
-An adapter is added to `src/report-adapters.ts` with its contract fields filled in, contract fixtures from real producers, and tests showing that failures, skips, retries, inconsistent reports and unknown documents are refused. The format name then joins `reportFormats`, which is what bundle definitions and dispatch grants validate against. Runner images that write the new format are approved by digest like any other; the adapter never selects them.
+An adapter is added to `src/report-adapters.ts` with its contract fields filled in, contract fixtures from real frameworks and reporters, and tests showing that failures, skips, retries, inconsistent reports and unknown documents are refused. The format name then joins `reportFormats`, which is what bundle definitions and dispatch grants validate against. Runner images that write the new format are approved by digest like any other; the adapter never selects them.

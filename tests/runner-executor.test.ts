@@ -4,8 +4,9 @@ import { mkdtemp, mkdir, writeFile, rename, symlink, realpath, rm, chmod, stat }
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
+import { isDeepStrictEqual } from 'node:util';
 import { oracleBundleDigest } from '../src/runner-setup.js';
-import { accountFileDigest, approvedAccountDigest, assertAncestryFixed, assertIsolation, assertRunnerCredentialScope, attemptBoundaryPath, authorityWatch, boundaryIdentity, containerEnvironment, containerNames, executeAttempt, executionCommand, executionPlanSchema, observeContainers, preflightAttempt, type ExecutionPlan, type Runner, type Settler } from '../src/runner-executor.js';
+import { accountFileDigest, acknowledgeAttempt, acknowledgementRetry, approvedAccountDigest, assertAncestryFixed, assertIsolation, assertRunnerCredentialScope, attemptBoundaryPath, authorityWatch, boundaryIdentity, containerEnvironment, containerNames, executeAttempt, executionCommand, executionPlanSchema, observeContainers, preflightAttempt, type ExecutionPlan, type Runner, type Settler } from '../src/runner-executor.js';
 
 const image = `sha256:${'1'.repeat(64)}`;
 const runAsUser = `${process.getuid!()}:${process.getgid!()}`;
@@ -442,4 +443,92 @@ test('a renewed attempt authority survives a lost packet but never a confirmed r
   assert.equal(refused.lost, true);
   clock += 1_000; refused.renewed();
   assert.equal(refused.lost, true, 'a confirmed refusal is never recovered from');
+});
+
+/** One attempt as the control plane holds it, answering `validation/ack` the way the server does. */
+const acknowledgementFixture = () => {
+  const command = { requestId: randomUUID(), attemptId: randomUUID(), epoch: 1 };
+  const held = { id: command.requestId, state: 'dispatched', attempts: [{ id: command.attemptId, epoch: 1, dispatchedAt: new Date().toISOString() } as Record<string, unknown>] };
+  const sent: { path: string; body: unknown; key: string }[] = [];
+  const commit = () => { held.state = 'running'; held.attempts[0].acknowledgedAt ??= new Date().toISOString(); return structuredClone(held); };
+  return { command, held, sent, commit };
+};
+
+test('an acknowledgement whose response is lost after the commit is retried under the same key and body, and the replay confirms it', async () => {
+  const { command, sent, commit } = acknowledgementFixture();
+  const pauses: number[] = [];
+  const confirmed = await acknowledgeAttempt(async (path, body, key) => {
+    sent.push({ path, body: structuredClone(body), key });
+    // First send: the server committed the ACK, then the connection dropped before the
+    // reply — what the runner sees is a transport error with no decision in it.
+    const replay = commit();
+    if (sent.length === 1) throw new TypeError('fetch failed: socket hang up');
+    // Second send: the idempotency receipt replays the committed request document.
+    return replay;
+  }, command, { retryMs: 5, sleep: async ms => { pauses.push(ms); } });
+  assert.equal(confirmed.sends, 2);
+  assert.ok(confirmed.acknowledgedAt);
+  assert.equal(sent.length, 2);
+  assert.deepEqual(sent.map(s => s.path), ['validation/ack', 'validation/ack']);
+  assert.equal(sent[1].key, sent[0].key, 'the retry carries the same request key');
+  assert.equal(sent[0].key, `${command.attemptId}-ack`, 'the key is the attempt\'s, so a second runner process could not resend a different one');
+  assert.deepEqual(sent[1].body, sent[0].body, 'the retry carries an identical body');
+  assert.deepEqual(sent[0].body, command);
+  assert.deepEqual(pauses, [5], 'one bounded pause separates the sends');
+});
+
+test('an acknowledgement retries 408, 429 and 5xx answers but never a refusal the server confirmed', async () => {
+  // Ambiguous HTTP answers: the api helper marks none of these as a confirmed refusal.
+  for (const status of [408, 429, 502, 503, 504]) {
+    const { command, sent, commit } = acknowledgementFixture();
+    const confirmed = await acknowledgeAttempt(async (path, body, key) => {
+      sent.push({ path, body, key });
+      if (sent.length === 1) throw Object.assign(new Error(`{"error":"gateway ${status}"}`), { confirmedRefusal: false });
+      return commit();
+    }, command, { retryMs: 0, sleep: async () => {} });
+    assert.equal(confirmed.sends, 2, `${status} is ambiguous and retried`);
+  }
+  // A confirmed refusal is a decision — expired, superseded, wrong principal — and a
+  // second send could not change it, so it is surfaced at once.
+  const { command, sent } = acknowledgementFixture();
+  const refusal = Object.assign(new Error('{"error":"Attempt lease expired, cancelled or superseded"}'), { confirmedRefusal: true });
+  await assert.rejects(acknowledgeAttempt(async (path, body, key) => { sent.push({ path, body, key }); throw refusal; }, command, { retryMs: 0, sleep: async () => {} }), refusal);
+  assert.equal(sent.length, 1, 'a confirmed refusal is never retried');
+});
+
+test('an acknowledgement is bounded, and an answer that does not confirm this attempt is not success', async () => {
+  // Bounded by sends: after the last ambiguous answer the runner gives up without a
+  // heartbeat, and says so.
+  const { command, sent } = acknowledgementFixture();
+  const pauses: number[] = [];
+  await assert.rejects(acknowledgeAttempt(async (path, body, key) => { sent.push({ path, body, key }); throw new Error('The operation was aborted due to timeout'); },
+    command, { attempts: 3, retryMs: 10, windowMs: 60_000, sleep: async ms => { pauses.push(ms); } }), /stayed ambiguous after 3 sends within its retry bound; no heartbeat was sent and no container was started: The operation was aborted due to timeout/);
+  assert.equal(sent.length, 3);
+  assert.deepEqual(pauses, [10, 20], 'each pause doubles the previous one');
+  assert.ok(new Set(sent.map(s => s.key)).size === 1 && sent.every(s => isDeepStrictEqual(s.body, command)), 'every send is the same acknowledgement');
+
+  // Bounded by time: no send starts after the window that a committed acknowledgement's
+  // lease could still be replayed within, whatever the send count allows.
+  let clock = 0; const late = acknowledgementFixture();
+  await assert.rejects(acknowledgeAttempt(async (path, body, key) => { late.sent.push({ path, body, key }); clock += 30_000; throw new Error('The operation was aborted due to timeout'); },
+    late.command, { attempts: 5, retryMs: 1_000, windowMs: 60_000, now: () => clock, sleep: async ms => { clock += ms; } }), /stayed ambiguous after 2 sends/);
+  assert.equal(late.sent.length, 2);
+
+  // The documented defaults are the bound the guide states.
+  assert.deepEqual(acknowledgementRetry, { attempts: 5, retryMs: 1_000, windowMs: 60_000 });
+
+  // A 2xx is not confirmation by itself. An answer that shows another attempt, an
+  // unacknowledged one, or a request that is not `running` is refused without a retry:
+  // sending again could not make it this attempt's acknowledgement.
+  for (const answer of [
+    {},
+    { id: command.requestId, state: 'dispatched', attempts: [{ id: command.attemptId, epoch: 1 }] },
+    { id: command.requestId, state: 'running', attempts: [{ id: command.attemptId, epoch: 1 }] },
+    { id: command.requestId, state: 'running', attempts: [{ id: command.attemptId, epoch: 1, acknowledgedAt: new Date().toISOString() }, { id: randomUUID(), epoch: 2, acknowledgedAt: new Date().toISOString() }] },
+    { id: randomUUID(), state: 'running', attempts: [{ id: command.attemptId, epoch: 1, acknowledgedAt: new Date().toISOString() }] },
+  ]) {
+    let sends = 0;
+    await assert.rejects(acknowledgeAttempt(async () => { sends++; return answer; }, command, { retryMs: 0, sleep: async () => {} }), /without confirming this attempt as acknowledged and running/);
+    assert.equal(sends, 1);
+  }
 });
