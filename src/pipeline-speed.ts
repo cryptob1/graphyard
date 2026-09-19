@@ -56,6 +56,16 @@ export function endAttempt(work: Work, epoch: number, end: NonNullable<PipelineA
   attempt.endedAt = new Date(Math.max(Date.parse(attempt.claimedAt), Number.isFinite(ended) ? ended : Date.parse(attempt.claimedAt))).toISOString();
   attempt.end = end;
 }
+/**
+ * A lapsed lease ends its attempt at the lease's own deadline: the worker was entitled to run
+ * until then and no later, whichever command notices the lapse first (reconciliation, a
+ * replacement claim or a requirements revision). The end never passes the noticing instant, so
+ * execution is never counted past `now` even if a caller reaches here with a deadline ahead of it.
+ */
+export function endLapsedAttempt(work: Work, lease: { epoch: number; expiresAt: string }, now: Date) {
+  const deadline = Date.parse(lease.expiresAt);
+  endAttempt(work, lease.epoch, 'expired', new Date(Number.isFinite(deadline) ? Math.min(deadline, now.getTime()) : now.getTime()));
+}
 export function recordSubmission(work: Work, epoch: number, now: Date) {
   const timeline = pipelineTimeline(work);
   timeline.submittedAt ??= now.toISOString();

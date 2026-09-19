@@ -11,7 +11,7 @@ Every work document carries `pipeline`, a small timeline the control plane appen
 }
 ```
 
-- `attempts` — one entry per lease epoch. `claim` opens it; `submit` (`end: submitted`), `release` (`released`), a lapse that reconciliation or a replacement claim records (`expired`, at the lease's own deadline) or `rework` of a live lease (`reworked`) closes it. An attempt still open when a later claim arrives is closed as `expired`.
+- `attempts` — one entry per lease epoch. `claim` opens it; `submit` (`end: submitted`), `release` (`released`), a lapse that reconciliation, a replacement claim or a requirements revision records (`expired`, at the lease's own deadline, never after the instant that recorded it) or `rework` of a live lease (`reworked`) closes it. An attempt still open when a later claim arrives is closed as `expired`.
 - `submittedAt` — the first `submit`; the submit→merge clock starts here and a resubmission after rework does not restart it. `resubmittedAt` is the latest `submit`.
 - `reworkRounds` — `rework` commands for an item that had already submitted. Rework of an unsubmitted item only ends its attempt.
 - `interventions` — hand-offs to a master or operator: every `blocked` report with a reason, and every `requirements` revision of an item somebody has already claimed. Clearing a blocker (`reason: null`) counts nothing.

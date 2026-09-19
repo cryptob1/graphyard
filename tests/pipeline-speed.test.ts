@@ -19,7 +19,7 @@ import { parseLocalScopeDiff } from '../src/sync.js';
 import { managedInstructions } from '../src/repository-setup.js';
 import { assertDispatchable, buildMasterStatus, dispatchSchedule, managedMasterInstructions, masterConfigSchema, type MasterConfig } from '../src/master.js';
 import { emptyDispatchCursor, runDispatchTick, type DispatchEffects } from '../src/auto-dispatch.js';
-import { acceptedMergeAt, beginAttempt, endAttempt, nearestRankPercentiles, pipelineSpeed, pipelineSpeedSummary, recordIntervention, recordRework, recordSubmission, speedTarget, type PipelineTimeline } from '../src/pipeline-speed.js';
+import { acceptedMergeAt, beginAttempt, endAttempt, endLapsedAttempt, nearestRankPercentiles, pipelineSpeed, pipelineSpeedSummary, recordIntervention, recordRework, recordSubmission, speedTarget, type PipelineTimeline } from '../src/pipeline-speed.js';
 // @ts-expect-error Dependency-free protected workflow script.
 import { planCiProofs } from '../scripts/contracts.mjs';
 // @ts-expect-error Dependency-free measurement script.
@@ -467,6 +467,26 @@ test('integration:speed-metrics — the engine keeps every item\'s timeline thro
   assert.equal(lapsed.pipeline!.attempts[0].end, 'expired'); assert.ok(Date.parse(lapsed.pipeline!.attempts[0].endedAt!) <= Date.now());
   const released = await engine.execute(implementer, 'release', (await claimed('Released attempt')).id, { epoch: 1 }, randomUUID());
   assert.equal(released.pipeline!.attempts[0].end, 'released');
+  // A requirements revision is refused while the lease is live, so the attempt it discards has always
+  // lapsed: it ends at the lease's deadline, not at the revision instant, and execution stops there.
+  let revised = await claimed('Revised under a lapsed lease', ['src/pipeline-speed.ts']);
+  const revision = { expectedPolicyRevision: revised.policyRevision, reason: 'Add a proof', criteria: revised.criteria.map(({ id, text, proofs }) => ({ id, text, proofs })), dependencies: [], plannedFiles: revised.plannedFiles, exclusiveResources: [], producerProofs: [] };
+  await assert.rejects(engine.execute(operator, 'requirements', revised.id, revision, randomUUID()), /Stop and release the active worker before revising requirements/);
+  assert.equal((await reload(revised)).pipeline!.attempts[0].endedAt, null, 'a refused revision ends nothing');
+  const deadline = new Date(Date.parse(revised.pipeline!.attempts[0].claimedAt) + 1).toISOString();
+  await store.pool.query("UPDATE work_items SET document=jsonb_set(document,'{lease,expiresAt}',to_jsonb($2::text)) WHERE id=$1", [revised.id, deadline]);
+  revised = await engine.execute(operator, 'requirements', revised.id, revision, randomUUID());
+  assert.equal(revised.lease, null); assert.deepEqual(revised.pipeline!.interventions, { blocked: 0, requirements: 1 });
+  assert.deepEqual([revised.pipeline!.attempts[0].end, revised.pipeline!.attempts[0].endedAt], ['expired', deadline]);
+  assert.equal(pipelineSpeed(revised, Date.now()).executionMs, 1, 'execution stops at the deadline, not at the revision');
+  // Whichever command records a lapse, the attempt never ends after the instant that recorded it.
+  const clamped = { pipeline: undefined } as unknown as Work;
+  beginAttempt(clamped, { epoch: 1, owner: 'w' }, new Date('2026-09-20T10:00:00Z'));
+  endLapsedAttempt(clamped, { epoch: 1, expiresAt: '2026-09-20T10:02:00Z' }, new Date('2026-09-20T10:00:30Z'));
+  assert.deepEqual([clamped.pipeline!.attempts[0].end, clamped.pipeline!.attempts[0].endedAt], ['expired', '2026-09-20T10:00:30.000Z']);
+  assert.equal(pipelineSpeed(clamped, Date.parse('2026-09-20T10:02:00Z')).executionMs, 30_000);
+  endLapsedAttempt(clamped, { epoch: 1, expiresAt: '2026-09-20T10:05:00Z' }, new Date('2026-09-20T10:06:00Z'));
+  assert.equal(clamped.pipeline!.attempts[0].endedAt, '2026-09-20T10:00:30.000Z', 'an ended attempt is not reopened');
   // The guides say where to read it.
   const guide = await read('docs/master-agent.md');
   for (const fragment of ['## Pipeline speed', 'speed.submitToMerge', 'executionMs', 'waitMs', 'reworkRounds', 'interventions', 'scripts/measure-pipeline-speed.mjs', '30 minutes', '60 minutes']) assert.ok(guide.includes(fragment), `docs/master-agent.md must document: ${fragment}`);

@@ -12,7 +12,7 @@ import { githubFromEnv } from './github.js';
 import { regressionRefusals } from './regression-guard.js';
 import { ciFamilyAllows, ciProofFamilies, ciRunBindingSchema, ciRunRefusal, isCiProducer, refuseCiProducer, staleCiAttemptRefusal, type CiRunObservation } from './model/ci-proofs.js';
 import { reconcileAutoDispatch, type DispatchTransition } from './model/dispatch.js';
-import { beginAttempt, endAttempt, recordIntervention, recordRework, recordSubmission } from './pipeline-speed.js';
+import { beginAttempt, endAttempt, endLapsedAttempt, recordIntervention, recordRework, recordSubmission } from './pipeline-speed.js';
 
 const epoch = z.number().int().positive();
 const sha = z.string().regex(/^[a-f0-9]{40}$/);
@@ -317,8 +317,8 @@ export class Engine {
         work.proofGaps = await unauthorizedProofs(db, this.principals, [...proofs, ...(deploySmokeRequired(work.policy) ? [deploySmokeProof] : [])]);
         work.formalReviewResetRequired = true; work.formalReviewBaseline = undefined;
         // The revision is a hand-off for an item already under way: its timeline counts it, and the
-        // lapsed lease it discards ends that attempt.
-        if (work.lease) endAttempt(work, work.lease.epoch, 'expired', work.lease.expiresAt);
+        // lapsed lease it discards (a live one was refused above) ends that attempt at its deadline.
+        if (work.lease) endLapsedAttempt(work, work.lease, now);
         recordIntervention(work, 'requirements');
         work.lease = null; work.observation = null; work.mergeAuthorization = null; work.reviewRequest = null;
         // A submitted implementation must be explicitly reconsidered for changed intent.
@@ -413,7 +413,7 @@ export class Engine {
           if (explained) await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, 'graphyard', 'lease.expired',
             JSON.stringify({ details: { owner: work.lease.owner, epoch: work.lease.epoch, expiresAt: work.lease.expiresAt, submission: work.submission, ...explained, at: now.toISOString() } })]);
           else raiseEscalation(work, { trigger: 'lease-loss', reason: leaseLossReason(work.lease), at: now.toISOString(), actor: 'graphyard' });
-          endAttempt(work, work.lease.epoch, 'expired', work.lease.expiresAt);
+          endLapsedAttempt(work, work.lease, now);
         }
         work.epoch++;
         work.implementers = [...new Set([...implementerIdentities(work), actor.id])];
@@ -907,7 +907,7 @@ export class Engine {
           const explained = leaseLapseCause(work, lost, attestations);
           if (explained) ledger.push({ kind: 'lease.expired', details: { owner: lost.owner, epoch: lost.epoch, expiresAt: lost.expiresAt, submission: work.submission, ...explained } });
           else raiseEscalation(work, { trigger: 'lease-loss', reason: leaseLossReason(lost), at: now.toISOString(), actor: 'graphyard' });
-          endAttempt(work, lost.epoch, 'expired', lost.expiresAt);
+          endLapsedAttempt(work, lost, now);
         }
         // A standing lease-loss for an epoch whose candidate was already bound predates that
         // rule, and one the control plane raised for an epoch whose blocked report or stopped-worker
