@@ -23,6 +23,7 @@ The sections below are generated from each page's `<!-- page: Section | order | 
 - [Operations and recovery](operations.md) — stalled work, expired leases, rework, and outages.
 - [Coordinating independent agents](coordination.md) — dependencies, requirement revisions, overlap, and shared resources.
 - [Scoped operator-agent automation](operator-automation.md) — least-privilege operator agents with server-enforced scope.
+- [Shipping pulse](shipping-pulse.md) — repository delivery flow: throughput, intent-to-merge, and deployment lag without rankings.
 
 ## Build integrations
 

@@ -19,7 +19,7 @@ Graphyard ships one application Docker image and uses a separate Postgres servic
 | `DATABASE_URL` | Reference `${{Postgres.DATABASE_URL}}` to use Railway private networking |
 | `HOST` | `0.0.0.0` for Railway/container ingress |
 | `PORT` | `4310`, or the port supplied by Railway |
-| `GRAPHYARD_PRINCIPALS` | JSON array of individual operator, coordinator, worker, reader, and proof-producer credentials |
+| `GRAPHYARD_PRINCIPALS` | JSON array of individual operator, coordinator, worker, reader, and proof-producer credentials. A producer's optional `proofs` allowlist scopes acceptance-evidence collection only; a separate optional `deploymentProviders` allowlist is what authorizes recording that provider's production deployments (see [shipping pulse](shipping-pulse.md)). Grant each lane to the credential that needs it rather than widening the other. |
 | `GITHUB_REPOSITORY` | `owner/repository`; one repository per control plane |
 | `GITHUB_BASE_BRANCH` | Usually `main` |
 | `GITHUB_APP_ID` | Dedicated Graphyard GitHub App ID |

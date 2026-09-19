@@ -9,6 +9,7 @@ import { Delivery } from '../delivery.js';
 import { OperatorAgents } from '../operator-agent.js';
 import { delegationLimits, validateDelegationPrincipals } from '../delegation.js';
 import { ProofGrants } from '../proof-grants.js';
+import { ProductionDelivery } from '../production-delivery.js';
 import { artifactCapacityFromEnv, type ArtifactBackend } from '../artifacts.js';
 import { Next, Sent, matchRoute, type RouteContext, type RouteModule, type Services } from './routes.js';
 import { authenticate, operatorAgentRouteGuard, operatorVisible } from './auth.js';
@@ -20,11 +21,12 @@ import { delegationRoutes } from './routes/delegation.js';
 import { validationRoutes } from './routes/validation.js';
 import { deliveryRoutes } from './routes/delivery.js';
 import { scenarioRoutes } from './routes/scenarios.js';
+import { shippingPulseRoutes } from './routes/shipping-pulse.js';
 import { statusRoutes } from './routes/status.js';
 import { workRoutes } from './routes/work.js';
 import { staticRoutes } from './static.js';
 
-export const principalSchema = z.array(z.object({ id: z.string().min(1), role: z.enum(['admin', 'coordinator', 'slice-lead', 'worker', 'producer', 'reader']), token: z.string().min(32), proofs: z.array(z.string()).optional(), displayName: z.string().trim().min(1).max(100).regex(/^[^\u0000-\u001f\u007f]+$/).optional(), runtime: z.string().trim().min(1).max(80).regex(/^[^\u0000-\u001f\u007f]+$/).optional(), slice: z.enum(['product', 'infrastructure', 'docs-experience']).optional(), sessionKind: z.enum(['human', 'ai']).optional() }).strict()).min(1);
+export const principalSchema = z.array(z.object({ id: z.string().min(1), role: z.enum(['admin', 'coordinator', 'slice-lead', 'worker', 'producer', 'reader']), token: z.string().min(32), proofs: z.array(z.string()).optional(), deploymentProviders: z.array(z.string().trim().min(1).max(40)).max(20).optional(), displayName: z.string().trim().min(1).max(100).regex(/^[^\u0000-\u001f\u007f]+$/).optional(), runtime: z.string().trim().min(1).max(80).regex(/^[^\u0000-\u001f\u007f]+$/).optional(), slice: z.enum(['product', 'infrastructure', 'docs-experience']).optional(), sessionKind: z.enum(['human', 'ai']).optional() }).strict()).min(1);
 export type Credential = Principal & { token: string };
 
 /** Routes that answer without a bearer token. */
@@ -37,7 +39,7 @@ export const publicRoutes: readonly RouteModule[] = [healthRoutes, githubRoutes]
 export const apiRoutes: readonly RouteModule[] = [
   operatorAgentRoutes, proofGrantRoutes,
   { name: 'operator-agent-scope', routes: [operatorAgentRouteGuard] },
-  delegationRoutes, validationRoutes, deliveryRoutes, scenarioRoutes, statusRoutes, workRoutes,
+  delegationRoutes, validationRoutes, deliveryRoutes, shippingPulseRoutes, scenarioRoutes, statusRoutes, workRoutes,
 ];
 
 async function body(req: IncomingMessage, limit = 1_000_000) {
@@ -74,13 +76,14 @@ export function assembleServices(engine: Engine, credentials: Credential[], gith
   validation.artifactBackend = artifacts.backend; validation.artifactCapacityBytes = artifacts.capacityBytes;
   const delivery = new Delivery(validation);
   const operatorAgents = new OperatorAgents(engine.store, repository, credentials.map(credential => ({ id: credential.id, tokenHash: createHash('sha256').update(credential.token).digest('hex') })));
+  const productionDelivery = new ProductionDelivery(engine.store);
   engine.operatorAuthorizer = operatorAgents.revalidate.bind(operatorAgents);
   // Proof authority is Graphyard state. The configured registry only identifies which
   // principals exist and what role each holds; the grant store decides what they may prove.
   const configured = credentials.map(({ token, ...actor }) => actor);
   engine.principals = configured;
   const proofGrants = new ProofGrants(engine.store, configured);
-  return { engine, github, repository, principals, limits, validation, delivery, operatorAgents, proofGrants };
+  return { engine, github, repository, principals, limits, validation, delivery, operatorAgents, proofGrants, productionDelivery };
 }
 
 export function server(engine: Engine, credentials: Credential[], github: GitHub | null = null, artifacts: ArtifactOptions = { backend: null, capacityBytes: artifactCapacityFromEnv() }) {

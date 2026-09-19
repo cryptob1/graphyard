@@ -32,6 +32,11 @@ export const operatorCredentialHash = Symbol('operatorCredentialHash');
 export interface Principal {
   id: string; role: 'admin' | 'operator-agent' | 'coordinator' | 'slice-lead' | 'worker' | 'producer' | 'reader';
   proofs?: string[]; displayName?: string; runtime?: string;
+  // Deployment observation is a separate lane from acceptance-proof collection. A
+  // producer's `proofs` allowlist grants no authority here and is never widened to
+  // cover it: recording provider deployments requires this explicit per-provider
+  // scope, so a build or test collector cannot forge production-delivery history.
+  deploymentProviders?: string[];
   slice?: SliceId; sessionKind?: 'human' | 'ai';
   capabilities?: OperatorCapability[];
   scope?: { repositories: string[]; workItems: string[] };
@@ -57,7 +62,7 @@ export interface Observation {
   clockOffset?: { min: number; max: number };
   reviewIds?: number[];
   agentReview?: AgentReview;
-  prState?: 'open' | 'closed'; draft?: boolean;
+  prState?: 'open' | 'closed'; draft?: boolean; prCreatedAt?: string;
   candidate: Candidate; checks: { name: string; result: string; appId: number }[];
   reviews: { reviewer: string; sha: string; state: string; id?: number; submittedAt?: string }[];
   merged: boolean; mergeSha: string | null; mergedAt?: string | null; mergeable: boolean;

@@ -5,6 +5,7 @@ import type { Validation } from '../validation.js';
 import type { Delivery } from '../delivery.js';
 import type { OperatorAgents } from '../operator-agent.js';
 import type { ProofGrants } from '../proof-grants.js';
+import type { ProductionDelivery } from '../production-delivery.js';
 import type { delegationLimits } from '../delegation.js';
 import type { Principal } from '../model.js';
 
@@ -13,7 +14,7 @@ export interface Services {
   engine: Engine; github: GitHub | null; repository: string;
   principals: { actor: Principal; hash: Buffer }[];
   limits: ReturnType<typeof delegationLimits>;
-  validation: Validation; delivery: Delivery; operatorAgents: OperatorAgents; proofGrants: ProofGrants;
+  validation: Validation; delivery: Delivery; operatorAgents: OperatorAgents; proofGrants: ProofGrants; productionDelivery: ProductionDelivery;
 }
 
 /** The response was written by the handler itself (raw bytes, or a status other than 200). */
