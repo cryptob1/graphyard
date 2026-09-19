@@ -8,6 +8,8 @@ import { resourceConflicts } from './coordination.js';
 import { containmentAttestation, containmentSettlementRefusals, containmentVerificationSchema } from './quarantine.js';
 import { activeEngineers, delegationLimits, implementerIdentities, leadMay, producerIndependenceRefusal, sessionKind } from './delegation.js';
 import { queueHistoryLimit, type QueueSpeculation } from './merge-queue.js';
+import { githubFromEnv } from './github.js';
+import { regressionRefusals } from './regression-guard.js';
 
 const epoch = z.number().int().positive();
 const sha = z.string().regex(/^[a-f0-9]{40}$/);
@@ -19,7 +21,7 @@ const evidenceArtifact = z.object({
   kind: z.enum(['log', 'report', 'screenshot', 'trace', 'other']), label: z.string().trim().min(1).max(200),
   mediaType: z.string().trim().min(1).max(200).optional(), size: z.number().int().min(0).optional(),
   digest: z.string().regex(/^sha256:[a-f0-9]{64}$/).optional(), expiresAt: z.iso.datetime().optional(),
-  availability: z.enum(['available', 'expired', 'redacted', 'missing', 'external']), url: publicArtifactUrl.optional(),
+  availability: z.enum(['available', 'expired', 'redacted', 'missing', 'upload-failed', 'external']), url: publicArtifactUrl.optional(),
 }).strict().refine(value => value.availability === 'external' ? !!value.url : !value.url, 'Only external artifacts may carry a public URL');
 // Longer than acknowledgeContainment's three 30-second HTTP attempts plus retry delays.
 export const launchFenceMs = 120_000;
@@ -96,7 +98,23 @@ export class Engine {
   // Reviewer identities and the control-plane App are deployment facts, not client input.
   reviewerApps: ReviewerApp[] = [];
   controlPlaneAppId?: number;
+  /**
+   * Observes the pull request a worker submits before the submission is recorded, so a candidate
+   * that reverts shipped code outside its planned files is refused at `complete` instead of after
+   * review. Left undefined, the deployment's GitHub App (from the environment) observes; null
+   * disables the pre-check, and every later observation still re-derives the refusal.
+   */
+  submissionObserver: ((work: Work) => Promise<Observation>) | null | undefined = undefined;
   constructor(public store: Store, public ciAppIds: number[] = [15368], public leaseSeconds = 120, public repository = process.env.GITHUB_REPOSITORY ?? '') {}
+  private async observeSubmission(actor: Principal, id: string | null, data: { epoch: number; pr: number }, key: string): Promise<Observation | null> {
+    if (this.submissionObserver === undefined) { const github = await githubFromEnv(); this.submissionObserver = github ? probe => github.observe(probe) : null; }
+    if (!this.submissionObserver || !id) return null;
+    // A replayed submission returns its receipt; it must not depend on the provider again.
+    if ((await this.store.pool.query('SELECT 1 FROM receipts WHERE actor=$1 AND key=$2', [actor.id, key])).rowCount) return null;
+    const work = (await this.store.list()).find(w => w.id === id || w.key === id);
+    if (!work || work.stage === 'done' || !work.workspaces.some(w => w.epoch === data.epoch)) return null;
+    return this.submissionObserver({ ...work, submission: { epoch: data.epoch, pr: data.pr } });
+  }
   /**
    * Bootstrap deferral is an operator act. It requires the explicit policy:bootstrap capability,
    * a reason, and a contract scope inside the task's own planned files. The audit fields are
@@ -126,13 +144,15 @@ export class Engine {
       demand(!renewed, `${renewed?.id}: ${obligation.proof} is already a bootstrap obligation inherited from ${obligation.key} ${obligation.criterionId} and cannot be deferred again`);
     }
   }
-  async execute(actor: Principal, command: Command, id: string | null, input: unknown, key: string) {
+  async execute(actor: Principal, command: Command, id: string | null, input: unknown, key: string, context: { observation?: Observation } = {}) {
     demand(Object.hasOwn(commands, command), 'Unknown command', 404);
     // Leads coordinate through rulings; no lifecycle command is lead-permitted.
     demand(actor.role !== 'slice-lead' || leadMay(command), 'Slice leads cannot perform lifecycle mutations', 403);
     demand(key && key.length <= 200, 'An Idempotency-Key is required', 400);
     const data: any = commands[command].parse(input);
     const fingerprint = createHash('sha256').update(JSON.stringify({ command, id, data })).digest('hex');
+    // Provider I/O stays outside the coordination transaction.
+    const observation = command === 'submit' ? context.observation ?? await this.observeSubmission(actor, id, data, key) : null;
     return this.store.transaction(async (db, now) => {
       if (actor.role === 'operator-agent') {
         demand(this.operatorAuthorizer, 'Operator-agent authorization is unavailable', 503);
@@ -376,6 +396,12 @@ export class Engine {
         demand(work.workspaces.some(w => w.epoch === data.epoch), 'Register the assignment workspace first');
         demand(!all.some(w => w.id !== work!.id && w.submission?.pr === data.pr), 'Pull request is already linked to another task');
         demand(!work.submission || work.submission.pr === data.pr, 'A submitted task cannot switch pull requests');
+        if (observation) {
+          demand(observation.candidate.pr === data.pr, 'Observed pull request does not match the submission');
+          demand(work.workspaces.some(w => w.epoch === data.epoch && w.branch === observation.candidate.branch), 'PR branch does not match the assigned workspace');
+          const regressions = regressionRefusals(work, observation, all);
+          demand(!regressions.length, `Submission refused for ${work.key}: ${regressions.join('; ')}`);
+        }
         work.submission = { epoch: data.epoch, pr: data.pr };
         work.reworkRequested = false;
       }

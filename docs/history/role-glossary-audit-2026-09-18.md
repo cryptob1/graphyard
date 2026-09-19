@@ -64,6 +64,22 @@ Method: each page was read in full; every occurrence of the audited words was cl
 
 Pages read with no ambiguous instance found: `runner-setup.md` (every *operator* is the human operator approving digests and registrations), `visual-identity.md`, `delegation.md` (GY-31; already uses the canonical roles and `sessionKind` language), and the two `docs/history/` snapshots.
 
+### Text merged from `main` after the first pass (GY-55 regression guard, GY-19 recovery)
+
+The candidate was rebased on `main` after GY-55 (submit-time regression guard) and GY-19 (runner capacity, artifact backends, delivery rollback) merged. Their new pages and passages were audited the same way:
+
+| Page | Before | After | Reason |
+| --- | --- | --- | --- |
+| `recovery.md` (new, GY-19) | "until … an operator settles with evidence"; "until an operator resolves it with evidence" | "until … the human operator settles it with evidence"; "until the human operator resolves it with evidence" | Which operator. |
+| `recovery.md` | "(`POST /api/validation/artifacts/migrate`, operator only)"; "`rollback-resolve` (operator)" | "the human operator's `admin` credential only"; "(human operator, `admin`)" | Names the credential the server checks. |
+| `recovery.md` | "An operator, or a promoter through its `delegate` lease, requests a rollback" | "The human operator (`admin`), or a promoter through its `delegate` lease, requests a rollback" | Which operator, which credential. |
+| `delivery.md` (rollback row, GY-19) | "Operator or promoter; …; operator" in the *Written by* column | "Human operator (`admin`) or promoter; …; human operator (`admin`)" | Consistent with the rest of the table. |
+| `coordination.md` (GY-55) | "A worker that merges the base branch … and a reviewer is a slow and unreliable way to notice." | "A worker session that merges the base branch … and an independent reviewer is a slow and unreliable way to notice." | Session vs role; the reviewer's independence is the point. |
+| `coordination.md` | "The scope is the operator's."; "A master that returns a refused candidate for rework should quote…" | "The scope is the human operator's."; "A master that asks the human operator to return a refused candidate for rework (rework stays `admin` only) should quote…" | Which operator; the master holds no rework authority, so the original read as if it did. |
+| `protocol.md` (GY-55) | "`plannedFiles` can be changed only by the operator `requirements` command." | "… only by the audited `requirements` command (the human operator's `admin` credential, or additively a scoped operator agent)." | Consistent with the `requirements` row of the commands table. |
+
+Read with no ambiguous instance: the `sync` command text in `coordination.md` and `protocol.md` (*worker* names the role), the `scopeFiles` paragraph, `validation.md`'s capacity sentence, and the `rollback` registration sentence in `validation.md`. The safety statements these passages add — a worker cannot widen `plannedFiles`; a refused submission writes nothing; an `unknown` rollback outcome blocks successors until resolved with evidence — are preserved word for word apart from the role terms above. `recovery.md` was added to the in-app docs navigation.
+
 ## Concision samples (before / after)
 
 | Page | Before | After |

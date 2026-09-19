@@ -503,7 +503,10 @@ test('releases view labels verification precisely, shows membership and reports 
     history: [{ generation: 1, releaseId: 'release-0', releaseRevision: 1, policyRevision: 1, selectedAt: '2025-12-31T00:00:00Z', selectedBy: 'operator', outcome: 'verified', verifiedAt: '2025-12-31T00:10:00Z', supersededAt: '2026-01-01T00:00:00Z' }, { generation: 2, releaseId: 'release-1', releaseRevision: 1, policyRevision: 1, selectedAt: '2026-01-01T00:00:00Z', selectedBy: 'operator', outcome: 'selected' }],
     coverage: {}, verification: { generation: 2, status: 'mismatched', reasons: ['Instance api-1 of api runs sha256:ffff instead of sha256:1111'], interval: null, evaluatedAt: '2026-01-01T00:01:00Z', verifiedAt: null },
     incidents: [{ id: 'incident', generation: 1, releaseId: 'release-0', releaseRevision: 1, at: '2025-12-31T01:00:00Z', observationId: 'obs', reasons: ['Instance api-1 of api is unhealthy'] }], cursor: 9, lastNotification: { at: '2026-01-01T00:00:30Z', provider: 'railway', payloadHash: 'x' } };
-  await page.route('**/api/delivery', route => route.fulfill(fail ? { status: 503, json: { error: 'Delivery state unavailable' } } : { json: { environments: [environment], releases: [release], now: '2026-01-01T00:02:00Z' } }));
+  const rollback = { id: 'rollback-1', environmentId: 'production', environmentRevision: 1, generation: 2, failed: { releaseId: 'release-0', releaseRevision: 1, generation: 1, manifestHash: 'g', incidentIds: ['incident'] }, target: { releaseId: 'release-1', releaseRevision: 1, manifestHash: 'h', approvalId: null, verifiedAt: '2025-12-30T00:00:00Z' },
+    reason: 'Incident', automatic: true, requestedBy: 'graphyard', requestedAt: '2026-01-01T00:00:00Z', repairWorkId: null, state: 'applied', verifiedAt: null, interval: null, history: [],
+    operation: { id: 'op-12345678', registration: { id: 'rollback', revision: 1 }, principal: 'railway-rollback', epoch: 1, fencing: 'provider', claimedAt: '2026-01-01T00:00:10Z', precondition: { environment: 'production', generation: 2, expectedRunning: 'g', token: 't' }, outcome: 'applied', settledAt: '2026-01-01T00:00:40Z', providerOperationId: 'dep-9', detail: null, resolvedBy: null, evidence: null, reports: [] } };
+  await page.route('**/api/delivery', route => route.fulfill(fail ? { status: 503, json: { error: 'Delivery state unavailable' } } : { json: { environments: [environment], releases: [release], rollbacks: [rollback], now: '2026-01-01T00:02:00Z' } }));
   await login(page); await page.getByRole('button', { name: '⇈ Releases' }).click();
   await expect(page.getByRole('heading', { name: 'Releases', level: 1 })).toBeVisible();
   await expect(page.getByRole('alert')).toContainText('Delivery state unavailable');
@@ -516,6 +519,8 @@ test('releases view labels verification precisely, shows membership and reports 
   await expect(card).toContainText('✓ GY-1 · merge eeeeeeeeeeee');
   await expect(card).toContainText('× GY-2 · merge ffffffffffff · excluded (reverted) · Reverted');
   await expect(card).toContainText('Incidents (1)');
+  await expect(card).toContainText('Rollbacks (1)');
+  await expect(card).toContainText('release-0 r1 → release-1 r1 · applied · automatic · operation op-12345 by railway-rollback (provider fencing, applied) · provider applied it; not complete until the target is observed and verified');
   await expect(card).toContainText('a hint to observe again, not proof');
   await card.getByText('Selection history (2)').click();
   await expect(card).toContainText('Generation 1 · release-0 r1 · verified');
