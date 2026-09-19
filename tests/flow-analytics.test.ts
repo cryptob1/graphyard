@@ -256,9 +256,12 @@ async function deliver(work: Work, slice: string, mergeSha: string, overrides: P
   assert.ok(latest.gates.every(gate => gate.passed), `the published tip clears the merge gate: ${JSON.stringify(latest.gates.find(gate => !gate.passed)?.reasons)}`);
   const granted = await engine.acquireMerge(coordinator, work.id, { expectedRevision: latest.revision, sha: head, baseSha: base, policyRevision: latest.policyRevision }, randomUUID());
   const verified = await engine.verifyMerge(coordinator, work.id, { executionId: granted.execution.id }, { ...observation(latest, slice, overrides), prState: 'open', draft: false }, randomUUID());
+  // The merge broker (GY-4) only attributes a merge observation to an execution it committed
+  // to the provider, so the commit must precede the merged observation, as in tests/system.test.ts.
+  const committed = await engine.commitMerge(coordinator, work.id, { executionId: granted.execution.id }, randomUUID());
   const mergedAt = new Date(Math.ceil((Date.parse(verified.verifiedAt) + 1) / 1000) * 1000).toISOString().replace(/\.\d+Z$/, 'Z');
   latest = await current();
-  const delivered = await engine.observe(latest.id, latest.revision, { ...observation(latest, slice, overrides), merged: true, mergeSha, mergedAt });
+  const delivered = await engine.observe(latest.id, committed.revision, { ...observation(latest, slice, overrides), merged: true, mergeSha, mergedAt });
   assert.equal(delivered.stage, 'done');
   await settle(mergedAt);
   return { delivered, mergedAt, mergeSha };
