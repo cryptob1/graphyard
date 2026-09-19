@@ -250,7 +250,11 @@ export class Reanchoring {
     const excluding = releases.filter(release => !containsWork(release)), including = releases.filter(containsWork);
     if ((containing.length || including.length) && !foreign.length && !excluding.length) {
       const release = including[0] ? { id: including[0].id, revision: including[0].revision } : undefined;
-      return { contains: true, buildId: containing[0]?.id ?? (await this.releaseBuild(db, w, including[0]))?.id, via: containing[0] ? 'build-attestation' : 'release-membership', release, reasons: containing[0] || release ? [] : ['A release names the change but no build attestation for this work item covers its manifest'] };
+      const buildId = containing[0]?.id ?? (await this.releaseBuild(db, w, including[0]))?.id;
+      // Membership alone cannot mint: a fresh candidate binds to a build attestation, so a
+      // release that names the change without one stays blocked with the reason on record.
+      if (!buildId) return { contains: null, release, reasons: ['A release names the change but no build attestation for this work item covers its manifest'] };
+      return { contains: true, buildId, via: containing[0] ? 'build-attestation' : 'release-membership', release, reasons: [] };
     }
     if (!containing.length && !including.length && (foreign.length || excluding.length)) {
       return { contains: false, reasons: [`The observed target is a trusted manifest that does not contain the intended change (${foreign[0] ? `built from ${foreign[0].sourceSha}` : `release ${excluding[0].id} r${excluding[0].revision} does not include ${w.key}`})`] };

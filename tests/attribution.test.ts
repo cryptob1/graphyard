@@ -377,10 +377,24 @@ test('integration:safe-automatic-reanchor', async () => {
   w = await current(f.w.id);
   assert.equal(w.validation![f.proof].reanchor?.state, 'blocked'); assert.match(w.validation![f.proof].reanchor!.reasons[0], /does not contain the intended change/);
   assert.equal((await records(f.w.id, 'reanchor-blocked')).at(-1)?.details.contains, false);
-  // Rollback to B is a movement like any other: the standing blocked binding is retried and rescheduled.
+  // A trusted release that names the change but has no build attestation of this work item for its manifest cannot mint a candidate: membership stays unresolved, with the reason on record.
+  const named = { api: d('9'), web: d('a') };
+  const namedRelease = await release(f, named, sha);
+  await observe(f, named);
+  w = await current(f.w.id);
+  assert.equal(w.validation![f.proof].requestId, undefined); assert.equal(w.validation![f.proof].reanchor?.state, 'blocked');
+  assert.deepEqual(w.validation![f.proof].reanchor!.reasons, ['A release names the change but no build attestation for this work item covers its manifest']);
+  const unattested = (await records(f.w.id, 'reanchor-blocked')).at(-1)!;
+  assert.equal(unattested.details.contains, null, 'membership without an attestation is unknown, not a yes'); assert.equal(unattested.details.reason, w.validation![f.proof].reanchor!.reasons[0]); assert.deepEqual(unattested.details.release, { id: namedRelease.id, revision: namedRelease.revision });
+  // Once a build attestation of this candidate covers the released manifest, the next observation reschedules through release membership.
+  const buildNamed = await attest(f, named);
+  await observe(f, named);
+  w = await current(f.w.id); assert.equal(w.validation![f.proof].reanchor, undefined); assert.equal((await candidate(w.validation![f.proof].candidateId)).buildAttestationId, buildNamed.id);
+  assert.equal((await records(f.w.id, 'rescheduled')).at(-1)?.details.via, 'build-attestation');
+  // Rollback to B is a movement like any other: the standing binding is superseded and rescheduled.
   await observe(f, B);
   w = await current(f.w.id); assert.equal(w.validation![f.proof].reanchor, undefined); assert.equal((await candidate(w.validation![f.proof].candidateId)).buildAttestationId, buildB.id);
-  assert.equal((await store.pool.query('SELECT count(*)::int AS n FROM attribution_reanchors WHERE fresh_request_id IN (SELECT id FROM validation_requests WHERE document->>\'workId\'=$1)', [f.w.id])).rows[0].n, 4);
+  assert.equal((await store.pool.query('SELECT count(*)::int AS n FROM attribution_reanchors WHERE fresh_request_id IN (SELECT id FROM validation_requests WHERE document->>\'workId\'=$1)', [f.w.id])).rows[0].n, 5);
   await cleanup(f);
 });
 
