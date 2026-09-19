@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 import { startGithubSetup } from '../github-setup.js';
 import { resourceConflicts } from '../coordination.js';
-import { assertMasterBinding, continueMergeBatch, currentMergeCandidates, dispatchWork, listHerdrAgents, loadMasterConfig, masterHarness, mergeExecutor, mergeProtocolSkew, readCredentialFile, readWorkerCredential, saveProducerProfile, saveWorkerProfile, setupMaster, snapshotWithClock, startMaster, verifyContainmentDeath, workerProfileSchema } from '../master.js';
+import { assertMasterBinding, continueMergeBatch, currentMergeCandidates, dispatchWork, environmentKinds, listHerdrAgents, loadMasterConfig, masterHarness, mergeExecutor, mergeProtocolSkew, readCredentialFile, readWorkerCredential, saveProducerProfile, saveWorkerProfile, setupAgentEnvironments, setupMaster, snapshotWithClock, startMaster, verifyContainmentDeath, workerProfileSchema } from '../master.js';
 import { cliCommit } from '../protocol-version.js';
 import { daemonEffects, readDaemonState, runDaemon, type DaemonState } from '../master-daemon.js';
 import { verificationEffects, verifyDeployment } from '../master-verification.js';
@@ -34,6 +34,9 @@ export const masterCommands = defineCommands([
       "                                PROFILE is the operator's Chrome profile the master",
       '                                administers GitHub through; the dispatch settings bound the',
       '                                automatic reviewer and producer launches',
+      '  master environments [--create KIND[,KIND]] [--directory DIR] [--apply]',
+      '                                Discover or create agent accounts (~/.coding_agents), report',
+      '                                login and quota; --apply generates profiles from them',
       '  master start AGENT_KIND       Launch the dedicated visible Herdr master session',
       '  master worker add FILE        Add an existing or launchable Herdr worker profile',
       '  master reviewer setup [--name NAME]     Register the separate reviewer GitHub App in a',
@@ -105,6 +108,12 @@ export const masterCommands = defineCommands([
         const separator = args.indexOf('--'); const agentArgs = separator < 0 ? [] : args.slice(separator + 1);
         if (separator > 1 || separator < 0 && args.length > 1) throw new Error('Put agent-specific arguments after --');
         return print(await startMaster(root, kind.data, agentArgs, listHerdrAgents()));
+      }
+      if (id === 'environments') {
+        const { values } = parseArgs({ args, options: { create: { type: 'string' }, directory: { type: 'string' }, apply: { type: 'boolean' } }, allowPositionals: false });
+        const create = (values.create ?? '').split(',').filter(Boolean) as typeof environmentKinds[number][];
+        if (create.some(kind => !environmentKinds.includes(kind))) throw new Error(`master environments --create takes ${environmentKinds.join(', ')}`);
+        return print(await setupAgentEnvironments(root, { directory: values.directory, create, apply: !!values.apply, verify: credential => masterApi('status', credential) }));
       }
       if (id === 'worker' && args[0] === 'add' && args[1]) return print(await saveWorkerProfile(root, JSON.parse(await readFile(args[1], 'utf8')), credential => masterApi('status', credential)));
       if (id === 'producer') {
@@ -252,7 +261,7 @@ export const masterCommands = defineCommands([
         return print({ repository: master.repository, coordinator: coordinator.actor.id, intervalSeconds, dispatchIntervalSeconds: master.run.dispatchIntervalSeconds, cycles: result.cycles.length, stopped: result.stopped ? 'signal' : 'completed', last: result.cycles.at(-1) ?? null,
           dispatch: { ticks: dispatched.ticks.length, launched: dispatched.ticks.reduce((total, tick) => total + tick.launched.length, 0), refused: dispatched.ticks.reduce((total, tick) => total + tick.refused.length, 0), last: dispatched.ticks.at(-1) ?? null } });
       }
-      throw new Error('Use master init, start, worker add, producer add, reviewer, review, protection, browser, harness, status, dispatch, settle-containment, run, merge, verify-deployment, or guide');
+      throw new Error('Use master init, environments, start, worker add, producer add, reviewer, review, protection, browser, harness, status, dispatch, settle-containment, run, merge, verify-deployment, or guide');
     },
   },
 ]);

@@ -6,7 +6,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { z } from 'zod';
 import type { Work } from './model.js';
 import type { DispatchRequest } from './model/dispatch.js';
-import { assertOutsideWorktrees, inspectProducerCredentials, listHerdrAgents, type HerdrAgent, type MasterConfig, type ProducerProfile, type ReviewerProfile } from './master.js';
+import { assertOutsideWorktrees, inspectProducerCredentials, listHerdrAgents, readEnvironmentLog, type EnvironmentLog, type HerdrAgent, type MasterConfig, type ProducerProfile, type ReviewerProfile } from './master.js';
 import { launchReview, reconcileReviews, type ReviewRecord } from './reviewer.js';
 import { independentProducerProfiles, launchProducer, reconcileProducers, type ProducerRecord } from './producer.js';
 
@@ -37,6 +37,12 @@ export const dispatchCursorSchema = z.object({
   lastFailure: z.object({ at: z.string(), reason: z.string().max(500) }).strict().nullable().default(null),
   /** Launches that refused, by request id, with the widening retry time; cleared by the launch that succeeds. */
   failures: z.record(z.string(), dispatchFailureSchema).default({}),
+  /**
+   * What launches last observed about each agent account and the launches that skipped an account,
+   * with the reason. Read from the environment log beside the cursor, which every launcher writes;
+   * never persisted in the cursor itself.
+   */
+  accounts: z.object({ environments: z.record(z.string(), z.any()), skipped: z.array(z.any()) }).optional(),
 }).strict();
 export type DispatchCursor = z.infer<typeof dispatchCursorSchema>;
 
@@ -62,15 +68,20 @@ export async function readDispatchCursor(root: string, config: MasterConfig): Pr
   const file = dispatchCursorPath(config);
   await assertOutsideWorktrees(root, dirname(file), 'Master dispatch cursor directory');
   let raw: string;
+  const withAccounts = async (cursor: DispatchCursor): Promise<DispatchCursor> => {
+    const log: EnvironmentLog = await readEnvironmentLog(config);
+    return Object.keys(log.environments).length || log.skipped.length ? { ...cursor, accounts: { environments: log.environments, skipped: log.skipped } } : cursor;
+  };
   try { raw = await readFile(file, 'utf8'); }
-  catch (error: any) { if (error.code === 'ENOENT') return emptyDispatchCursor(config); throw error; }
+  catch (error: any) { if (error.code === 'ENOENT') return withAccounts(emptyDispatchCursor(config)); throw error; }
   const cursor = dispatchCursorSchema.parse(JSON.parse(raw));
   if (cursor.url !== config.url || cursor.repository.toLowerCase() !== config.repository.toLowerCase()) throw new Error('Master dispatch cursor belongs to another Graphyard server or repository; remove it before running the loop');
-  return cursor;
+  return withAccounts(cursor);
 }
 export async function writeDispatchCursor(config: MasterConfig, cursor: DispatchCursor) {
   const file = dispatchCursorPath(config), temporary = `${file}.${randomUUID()}.tmp`;
-  await writeFile(temporary, JSON.stringify(dispatchCursorSchema.parse(cursor), null, 2), { mode: 0o600, flag: 'wx' });
+  const { accounts: _accounts, ...persisted } = cursor;
+  await writeFile(temporary, JSON.stringify(dispatchCursorSchema.parse(persisted), null, 2), { mode: 0o600, flag: 'wx' });
   await rename(temporary, file); await chmod(file, 0o600);
 }
 
@@ -97,12 +108,33 @@ export interface DispatchEffects {
   persist: (cursor: DispatchCursor) => Promise<void>;
 }
 
-export interface DispatchLaunch { kind: 'review' | 'producer'; work: string; requestId: string; sha: string; profile: string; group?: string; proofs?: string[] }
+export interface DispatchLaunch { kind: 'review' | 'producer'; work: string; requestId: string; sha: string; profile: string; group?: string; proofs?: string[]; failover?: string[]; relaunched?: boolean }
 export interface DispatchWait { kind: 'review' | 'producer'; work: string; requestId: string; sha: string; reason: string; group?: string }
 export interface DispatchTick { at: string; launched: DispatchLaunch[]; refused: (DispatchFailure & { requestId: string })[]; waiting: DispatchWait[]; skipped: number }
 
 const message = (error: unknown) => error instanceof Error ? error.message : String(error);
 const retryDelay = (attempts: number) => Math.min(dispatchRetryMinMs * 2 ** Math.max(0, attempts - 1), dispatchRetryMaxMs);
+
+/**
+ * Launch on the first profile that can: a profile none of whose agent accounts is logged in with
+ * quota left is skipped for the next, with its reason kept for the tick, and a session whose runtime
+ * never accepted its prompt (the launcher closed it) is launched once more before the request is
+ * refused. Any other refusal stops at the profile that raised it.
+ */
+async function launchWithFailover<P extends { name: string }>(profiles: P[], launch: (profile: P) => Promise<unknown>) {
+  const failover: string[] = [];
+  for (const profile of profiles) {
+    for (let attempt = 1; ; attempt++) {
+      try { await launch(profile); return { profile, failover, relaunched: attempt > 1 }; }
+      catch (error: any) {
+        if (error?.promptDropped && attempt < 2) continue;
+        if (error?.accountsExhausted) { failover.push(`${profile.name}: ${message(error)}`); break; }
+        throw error;
+      }
+    }
+  }
+  throw new Error(failover.join('; ') || 'no profile could launch');
+}
 
 /**
  * One tick: settle the sessions the ledgers hold against the snapshot, then launch a session for
@@ -142,10 +174,13 @@ export async function runDispatchTick(config: MasterConfig, cursor: DispatchCurs
         if (!profile) wait('review', item, review, reason!);
         else if (busy.has(profile.agentName)) wait('review', item, review, `reviewer agent ${profile.agentName} is busy in Herdr`);
         else {
+          // The selected profile answers; the other reviewer profiles are its failover when none of
+          // its accounts can launch.
+          const order = [profile, ...config.reviewers.filter(other => other.name !== profile.name && !busy.has(other.agentName))];
           try {
-            await effects.launchReview(item, review, profile, agents, observedAt);
-            busy.add(profile.agentName); delete cursor.failures[review.id];
-            tick.launched.push({ kind: 'review', work: item.key, requestId: review.id, sha: review.sha, profile: profile.name });
+            const launched = await launchWithFailover(order, candidate => effects.launchReview(item, review, candidate, agents, observedAt));
+            busy.add(launched.profile.agentName); delete cursor.failures[review.id];
+            tick.launched.push({ kind: 'review', work: item.key, requestId: review.id, sha: review.sha, profile: launched.profile.name, ...(launched.failover.length ? { failover: launched.failover } : {}), ...(launched.relaunched ? { relaunched: true } : {}) });
           } catch (error) { refuse('review', item, review, error); }
           await effects.persist(cursor);
         }
@@ -156,17 +191,17 @@ export async function runDispatchTick(config: MasterConfig, cursor: DispatchCurs
       if (!herdr) { wait('producer', item, request, 'Herdr session inventory is unavailable'); continue; }
       if (!retryable(request)) { wait('producer', item, request, `launch refused ${cursor.failures[request.id].attempts} time(s): ${cursor.failures[request.id].reason}; ${cursor.failures[request.id].attempts >= dispatchFailureLimit ? 'no further automatic attempt' : `next attempt at ${cursor.failures[request.id].nextAt}`}`); continue; }
       const independent = independentProducerProfiles(item, config.producers);
-      const free = independent.find(profile => credentials[profile.name]?.available !== false && !busy.has(profile.agentName));
-      if (!free) {
+      const usable = independent.filter(profile => credentials[profile.name]?.available !== false && !busy.has(profile.agentName));
+      if (!usable.length) {
         wait('producer', item, request, !config.producers.length ? 'no producer profile is configured; add one with master producer add'
           : !independent.length ? `every producer principal (${config.producers.map(profile => profile.principal).join(', ')}) has held an assignment on ${item.key}; its evidence would not be trusted`
           : `every independent producer profile is busy or unavailable (${independent.map(profile => `${profile.name}: ${credentials[profile.name]?.available === false ? credentials[profile.name].reason : 'busy'}`).join('; ')})`);
         continue;
       }
       try {
-        await effects.launchProducer(item, request, free, agents, observedAt);
-        busy.add(free.agentName); delete cursor.failures[request.id];
-        tick.launched.push({ kind: 'producer', work: item.key, requestId: request.id, sha: request.sha, profile: free.name, group: request.group, proofs: request.proofs });
+        const launched = await launchWithFailover(usable, candidate => effects.launchProducer(item, request, candidate, agents, observedAt));
+        busy.add(launched.profile.agentName); delete cursor.failures[request.id];
+        tick.launched.push({ kind: 'producer', work: item.key, requestId: request.id, sha: request.sha, profile: launched.profile.name, group: request.group, proofs: request.proofs, ...(launched.failover.length ? { failover: launched.failover } : {}), ...(launched.relaunched ? { relaunched: true } : {}) });
       } catch (error) { refuse('producer', item, request, error); }
       await effects.persist(cursor);
     }
@@ -196,7 +231,7 @@ export async function runAutoDispatch(config: MasterConfig, cursor: DispatchCurs
     try {
       const tick = await runDispatchTick(config, cursor, effects, now, options.readTimeoutMs);
       ticks.push(tick);
-      for (const launch of tick.launched) log(`[graphyard-dispatch] launched ${launch.kind} for ${launch.work} ${launch.sha.slice(0, 12)} on ${launch.profile}${launch.group ? ` (${launch.group}: ${launch.proofs?.join(', ')})` : ''}`);
+      for (const launch of tick.launched) log(`[graphyard-dispatch] launched ${launch.kind} for ${launch.work} ${launch.sha.slice(0, 12)} on ${launch.profile}${launch.group ? ` (${launch.group}: ${launch.proofs?.join(', ')})` : ''}${launch.failover?.length ? ` after skipping ${launch.failover.join('; ')}` : ''}${launch.relaunched ? ' (relaunched after a dropped prompt)' : ''}`);
       for (const refusal of tick.refused) log(`[graphyard-dispatch] ${refusal.kind} launch for ${refusal.work} refused (attempt ${refusal.attempts}): ${refusal.reason}`);
     } catch (error) {
       // A failed tick launched nothing it has not already recorded, so it is retried promptly;
@@ -233,5 +268,10 @@ export function dispatchSummary(cursor: DispatchCursor, now: number, intervalMs:
   const lagMs = Number.isFinite(lastTickAt) ? now - lastTickAt : null;
   return { running: lagMs !== null && lagMs < Math.max(3 * intervalMs, 60_000), ticks: cursor.ticks, lastTickAt: cursor.lastTickAt, lagMs, intervalMs,
     lastSuccessAt: cursor.lastSuccessAt, consecutiveFailures: cursor.consecutiveFailures, lastFailure: cursor.lastFailure,
-    failures: Object.entries(cursor.failures).map(([requestId, failure]) => ({ requestId, ...failure })) };
+    failures: Object.entries(cursor.failures).map(([requestId, failure]) => ({ requestId, ...failure })),
+    // Each agent account as the last launch check saw it, and the launches that skipped one and why.
+    accounts: cursor.accounts ? {
+      environments: Object.values(cursor.accounts.environments).map((health: any) => ({ environment: health.name, kind: health.kind, loggedIn: health.loggedIn, quota: health.quota, healthy: health.healthy, reason: health.reason, usage: health.usage, login: health.login, checkedAt: health.checkedAt })),
+      skipped: cursor.accounts.skipped.slice(-20),
+    } : { environments: [], skipped: [] } };
 }

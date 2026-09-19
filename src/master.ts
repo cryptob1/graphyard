@@ -1,7 +1,8 @@
 import { execFileSync } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
-import { chmod, lstat, mkdir, readFile, realpath } from 'node:fs/promises';
-import { dirname, isAbsolute, relative, resolve, sep } from 'node:path';
+import { existsSync } from 'node:fs';
+import { chmod, lstat, mkdir, readdir, readFile, realpath, stat } from 'node:fs/promises';
+import { basename, dirname, isAbsolute, relative, resolve, sep } from 'node:path';
 import { homedir, hostname } from 'node:os';
 import { z } from 'zod';
 import { assertRepository, discover, localDirectory, saveDiscovery } from './onboarding.js';
@@ -9,7 +10,7 @@ import { loadConnection, managedInstructions, serverOrigin } from './repository-
 import { dispatchOrder, dispatchOverlap, resourceConflicts, scopeBreadth } from './coordination.js';
 import type { ConflictReport } from './conflicts.js';
 import { mergeOrder } from './delegation.js';
-import { launchPlan, masterHarnessPlan, writeHarnessPermissions } from './harness.js';
+import { launchPlan, masterHarnessPlan, writeHarnessPermissions, type HarnessRule } from './harness.js';
 import { CHECK_NAME, carriedApproval, deliveryState, deploySmokeRequired, describeQueueBinding, evidenceIndependenceRefusals, exhaustedReviewerProfiles, nativeReviewRequired, postDeployMs, productionLatencyMs, providerDelayAfterVerification, reviewerProfileFor, reviewProviderOf, rollbackGuidance, standingEscalations, type CarriedApproval, type QueueBindingReport, type Work } from './model.js';
 import { containmentAttestation, containmentSettlementRefusals, containmentVerificationSchema, type ContainmentVerification } from './quarantine.js';
 import { probeSupervisorAbsence } from './containment-probe.js';
@@ -30,6 +31,21 @@ const profileName = z.string().trim().regex(/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,79}$/)
 // runtime's approval prompts and requires a human in the session tab.
 const approvalMode = z.enum(['auto', 'prompt']).default('auto');
 
+// An agent environment is one isolated config and login home for one agent CLI account, such as
+// ~/.coding_agents/claude-b. The Graphyard principal a profile claims under is independent of the
+// provider account its session runs on: a profile names the accounts it may use, in failover order,
+// and every launch runs on the first of them that is logged in and has provider quota left.
+export const environmentKinds = ['claude', 'codex', 'opencode', 'cursor'] as const;
+export type EnvironmentKind = typeof environmentKinds[number];
+export const environmentVariable: Record<EnvironmentKind, string> = { claude: 'CLAUDE_CONFIG_DIR', codex: 'CODEX_HOME', opencode: 'XDG_DATA_HOME', cursor: 'CURSOR_CONFIG_DIR' };
+export const agentEnvironmentSchema = z.object({
+  name: profileName,
+  kind: z.enum(environmentKinds),
+  home: z.string().min(1).max(500).refine(isAbsolute, 'An agent environment home must be an absolute path'),
+}).strict();
+export type AgentEnvironment = z.infer<typeof agentEnvironmentSchema>;
+const accountList = z.array(profileName).min(1).max(20).optional();
+
 export const workerProfileSchema = z.object({
   name: profileName,
   principal: z.string().trim().min(1).max(200),
@@ -40,6 +56,7 @@ export const workerProfileSchema = z.object({
   agentArgs: z.array(z.string().max(1000)).max(30).default([]),
   approvals: approvalMode,
   environment: safeEnvironment,
+  accounts: accountList,
 }).strict().superRefine((profile, context) => {
   if (profile.mode === 'launch' && !profile.kind) context.addIssue({ code: 'custom', message: 'A launched worker requires kind', path: ['kind'] });
   if (profile.mode === 'launch' && !profile.credentialFile) context.addIssue({ code: 'custom', message: 'A launched worker requires credentialFile', path: ['credentialFile'] });
@@ -56,6 +73,7 @@ export const reviewerProfileSchema = z.object({
   agentArgs: z.array(z.string().max(1000)).max(30).default([]),
   approvals: approvalMode,
   environment: safeEnvironment,
+  accounts: accountList,
 }).strict();
 export type ReviewerProfile = z.infer<typeof reviewerProfileSchema>;
 
@@ -72,6 +90,7 @@ export const producerProfileSchema = z.object({
   agentArgs: z.array(z.string().max(1000)).max(30).default([]),
   approvals: approvalMode,
   environment: safeEnvironment,
+  accounts: accountList,
 }).strict().superRefine((profile, context) => {
   if (!isAbsolute(profile.credentialFile)) context.addIssue({ code: 'custom', message: 'credentialFile must be absolute', path: ['credentialFile'] });
 });
@@ -100,6 +119,9 @@ export const masterRunSchema = z.object({
   dispatchIntervalSeconds: z.number().int().min(5).max(30).default(10),
   reviewerProfile: profileName.optional(),
   producerTimeoutMinutes: z.number().int().min(5).max(1440).default(120),
+  // An account whose provider usage reached this percentage of any window is skipped at launch:
+  // a session started just below a hard limit would stall mid-task.
+  quotaCeilingPercent: z.number().int().min(50).max(100).optional(),
 }).strict();
 export type MasterRun = z.infer<typeof masterRunSchema>;
 
@@ -128,6 +150,8 @@ export const masterConfigSchema = z.object({
   reviewer: reviewerIdentitySchema.optional(),
   reviewers: z.array(reviewerProfileSchema).max(20).default([]),
   producers: z.array(producerProfileSchema).max(20).default([]),
+  // The agent environments profiles may launch on, discovered or created by master environments.
+  environments: z.array(agentEnvironmentSchema).max(50).optional(),
   run: masterRunSchema.prefault({}),
   // The operator's own authenticated browser profile, used only by master browser flows.
   browser: masterBrowserSchema.optional(),
@@ -266,26 +290,32 @@ export async function readWorkerCredential(root: string, file: string) {
   return readCredentialFile(file);
 }
 
-export async function inspectWorkerCredentials(root: string, profiles: WorkerProfile[]) {
+export async function inspectWorkerCredentials(root: string, profiles: WorkerProfile[], probe?: EnvironmentProbe) {
   const health: Record<string, { available: boolean; reason: string | null }> = {};
   for (const profile of profiles) {
     if (profile.mode === 'existing') health[profile.name] = { available: true, reason: null };
     else try { await readWorkerCredential(root, profile.credentialFile!); health[profile.name] = { available: true, reason: null }; }
     catch (error) { health[profile.name] = { available: false, reason: error instanceof Error ? error.message : 'Worker credential is unavailable' }; }
   }
-  return health;
+  return withAccountHealth(root, 'worker', profiles.filter(profile => profile.mode === 'launch'), health, probe);
+}
+// A profile's accounts are part of whether it can launch, so status and the durable loop read them
+// with its credential: a profile none of whose accounts is logged in with quota left is unavailable.
+async function withAccountHealth<T extends { available: boolean; reason: string | null }>(root: string, role: LaunchRole, profiles: { name: string; accounts?: string[] }[], health: Record<string, T>, probe?: EnvironmentProbe) {
+  if (!profiles.some(profile => profile.accounts?.length)) return health;
+  return inspectProfileAccounts(await readMasterConfig(root), role, profiles, health, probe);
 }
 export async function readProducerCredential(root: string, file: string) {
   await externalCredential(root, file, 'Producer');
   return readCredentialFile(file);
 }
-export async function inspectProducerCredentials(root: string, profiles: ProducerProfile[]) {
+export async function inspectProducerCredentials(root: string, profiles: ProducerProfile[], probe?: EnvironmentProbe) {
   const health: Record<string, { available: boolean; reason: string | null }> = {};
   for (const profile of profiles) {
     try { await readProducerCredential(root, profile.credentialFile); health[profile.name] = { available: true, reason: null }; }
     catch (error) { health[profile.name] = { available: false, reason: error instanceof Error ? error.message : 'Producer credential is unavailable' }; }
   }
-  return health;
+  return withAccountHealth(root, 'producer', profiles, health, probe);
 }
 
 export async function atomicPrivateWrite(file: string, value: unknown) {
@@ -350,8 +380,16 @@ export async function setupMaster(root: string, input: { url: string; token: str
   const remedy = appPermissions?.missing?.length || status.appPermissions?.attention?.length ? 'Accept the GitHub App permission request (run graphyard github-setup --update-permissions on the machine holding .graphyard/github-app.json, or graphyard master browser app-permissions and installation-accept, for the exact steps)'
     : delegationLimits?.drift.length ? `Set ${delegationLimits.drift.map(entry => `${entry.variable}=${entry.required}`).join(' ')} on the deployment`
     : production?.incidents.length ? `Deploy main: ${production.attention[0] ?? production.incidents[0].reason}` : null;
-  const start = config.reviewer ? `run graphyard master start codex (or another supported agent kind) and add worker and reviewer profiles` : `run graphyard master reviewer setup to register the independent reviewer identity, then graphyard master start codex (or another supported agent kind) and add worker and reviewer profiles`;
+  const profiles = 'graphyard master environments --apply to generate worker, reviewer and producer profiles from the logged-in agent accounts';
+  const start = config.reviewer ? `run ${profiles}, then graphyard master start codex (or another supported agent kind)` : `run graphyard master reviewer setup to register the independent reviewer identity, then ${profiles}, then graphyard master start codex (or another supported agent kind)`;
+  // Which agent accounts this machine has, and which are logged in; quota is read by master environments.
+  const environmentDirectory = agentEnvironmentRoot();
+  const environments = await Promise.all((await discoverAgentEnvironments(environmentDirectory).catch(() => [] as AgentEnvironment[])).map(async environment => {
+    const health = await checkAgentEnvironment(environment, { quota: false });
+    return { environment: environment.name, kind: environment.kind, home: environment.home, loggedIn: health.loggedIn, login: health.login };
+  }));
   return { repository: config.repository, server: config.url, role: status.actor.role, autoMerge: config.autoMerge, workers: config.workers.length, run: config.run, browser: config.browser ?? null, config: '.graphyard/master.json', reviewer: config.reviewer ? `${config.reviewer.slug}[bot]` : null, attention,
+    agentEnvironments: { directory: environmentDirectory, discovered: environments },
     next: remedy ? `${remedy}, then ${start}` : start[0].toUpperCase() + start.slice(1) };
 }
 
@@ -366,7 +404,7 @@ export async function saveWorkerProfile(root: string, profileInput: unknown, ver
   if (config.workers.some(worker => worker.name === profile.name || worker.agentName === profile.agentName || worker.principal === profile.principal)) throw new Error('Worker profile name, agent name, and principal must be unique');
   config.workers.push(profile); await atomicPrivateWrite(resolve(root, '.graphyard/master.json'), config);
   return { added: profile.name, principal: profile.principal, mode: profile.mode, workers: config.workers.length,
-    launch: profile.mode === 'launch' ? launchPlan(profile.kind, profile.approvals, profile.agentArgs, profile.environment) : null };
+    launch: profile.mode === 'launch' ? agentLaunchPlan(profile.kind, profile.approvals, profile.agentArgs, profile.environment) : null };
 }
 
 /**
@@ -386,7 +424,427 @@ export async function saveProducerProfile(root: string, profileInput: unknown, v
   if (config.workers.some(item => item.principal === profile.principal)) throw new Error('A producer principal cannot also be a worker principal; the control plane refuses evidence from an implementer');
   config.producers.push(profile); await atomicPrivateWrite(resolve(root, '.graphyard/master.json'), config);
   return { added: profile.name, principal: profile.principal, kind: profile.kind, proofs: Array.isArray(status.actor?.proofs) ? status.actor.proofs : [], producers: config.producers.length,
-    launch: launchPlan(profile.kind, profile.approvals, profile.agentArgs, profile.environment) };
+    launch: agentLaunchPlan(profile.kind, profile.approvals, profile.agentArgs, profile.environment) };
+}
+
+/** Where agent environments live: one directory per account, named <agent>-<letter>. */
+export function agentEnvironmentRoot(input?: string) {
+  return resolve(input ?? process.env.GRAPHYARD_AGENT_ENVIRONMENTS ?? resolve(homedir(), '.coding_agents'));
+}
+const environmentDirectory = /^(claude|codex|opencode|cursor)(?:-([a-z0-9][a-z0-9_-]{0,30}))?$/;
+export async function discoverAgentEnvironments(directory = agentEnvironmentRoot()): Promise<AgentEnvironment[]> {
+  let entries: string[];
+  try { entries = await readdir(directory); } catch (error: any) { if (error.code === 'ENOENT') return []; throw error; }
+  const found: AgentEnvironment[] = [];
+  for (const name of entries) {
+    const match = environmentDirectory.exec(name);
+    if (!match) continue;
+    const home = resolve(directory, name);
+    try { if (!(await stat(home)).isDirectory()) continue; } catch { continue; }
+    found.push(agentEnvironmentSchema.parse({ name, kind: match[1], home }));
+  }
+  return found.sort((a, b) => a.name.localeCompare(b.name));
+}
+/** A new, empty environment for an agent CLI: the next free <agent>-<letter> directory, mode 0700. */
+export async function createAgentEnvironment(directory: string, kind: EnvironmentKind, existing: AgentEnvironment[]) {
+  const taken = new Set(existing.map(environment => environment.name));
+  const letter = [...'abcdefghijklmnopqrstuvwxyz'].find(candidate => !taken.has(`${kind}-${candidate}`));
+  if (!letter) throw new Error(`Every ${kind}-<letter> environment name is taken under ${directory}`);
+  const home = resolve(directory, `${kind}-${letter}`);
+  await mkdir(home, { recursive: true, mode: 0o700 });
+  return agentEnvironmentSchema.parse({ name: `${kind}-${letter}`, kind, home });
+}
+/**
+ * The one runtime setting a fresh environment needs before an unattended launch: Claude Code asks
+ * once per config home to confirm the bypass-permissions mode every launch requests, and that
+ * confirmation would hold a new session at a dialog nobody is watching.
+ */
+export async function prepareAgentEnvironment(environment: AgentEnvironment) {
+  if (environment.kind !== 'claude') return [] as string[];
+  const file = resolve(environment.home, 'settings.json');
+  let settings: Record<string, unknown> = {};
+  try {
+    const parsed = JSON.parse(await readFile(file, 'utf8'));
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error(`${file} is not a JSON object; resolve it before preparing the environment`);
+    settings = parsed;
+  } catch (error: any) { if (error.code !== 'ENOENT') throw error; }
+  if (settings.skipDangerousModePermissionPrompt === true) return [];
+  await atomicPrivateText(file, `${JSON.stringify({ ...settings, skipDangerousModePermissionPrompt: true }, null, 2)}\n`);
+  return [`${file}: skipDangerousModePermissionPrompt`];
+}
+
+export function loginCommand(environment: AgentEnvironment) {
+  const home = shellQuote(environment.home);
+  return { claude: `CLAUDE_CONFIG_DIR=${home} claude, then /login`, codex: `CODEX_HOME=${home} codex login`,
+    opencode: `XDG_DATA_HOME=${home} opencode auth login`, cursor: `CURSOR_CONFIG_DIR=${home} cursor-agent login` }[environment.kind];
+}
+
+export interface AccountUsage { window: string; percent: number; resetsAt: string | null }
+export interface EnvironmentHealth {
+  name: string; kind: EnvironmentKind; home: string; variable: string; checkedAt: string;
+  loggedIn: boolean; quota: 'available' | 'exhausted' | 'unknown'; usage: AccountUsage[];
+  /** Launchable: logged in and not exhausted. Unknown quota is launchable; the runtime reports its own limit. */
+  healthy: boolean; reason: string | null; note: string | null; login: string | null;
+}
+export interface EnvironmentProbe {
+  fetch?: typeof fetch; now?: () => number; ceilingPercent?: number; timeoutMs?: number; cacheMs?: number;
+  /** false reads only the login, never the provider: for reports that must not reach the network. */
+  quota?: boolean;
+}
+export const defaultQuotaCeilingPercent = 95;
+const healthCache = new Map<string, { at: number; health: EnvironmentHealth }>();
+
+async function readJsonFile(file: string): Promise<any> {
+  try { return JSON.parse(await readFile(file, 'utf8')); } catch { return null; }
+}
+const windowName = (minutes: number) => minutes >= 1440 && minutes % 1440 === 0 ? `${minutes / 1440}d` : minutes >= 60 && minutes % 60 === 0 ? `${minutes / 60}h` : `${minutes}m`;
+
+// Claude Code keeps its subscription login in the environment's .credentials.json. The usage the
+// provider meters against it is read from the same endpoint Claude Code's /usage reads; the token
+// is sent only to its own provider and never leaves this function.
+async function claudeAccount(environment: AgentEnvironment, probe: EnvironmentProbe, now: number) {
+  const oauth = (await readJsonFile(resolve(environment.home, '.credentials.json')))?.claudeAiOauth;
+  if (!oauth || typeof oauth !== 'object' || !(oauth.accessToken || oauth.refreshToken)) return { loggedIn: false, usage: [], note: null };
+  if (probe.quota === false) return { loggedIn: true, usage: [], note: 'quota not read' };
+  if (typeof oauth.accessToken !== 'string' || typeof oauth.expiresAt === 'number' && oauth.expiresAt <= now) return { loggedIn: true, usage: [], note: 'the stored access token has expired; Claude Code refreshes it at launch, so quota is read on the next check' };
+  try {
+    const response = await (probe.fetch ?? fetch)('https://api.anthropic.com/api/oauth/usage', { headers: { Authorization: `Bearer ${oauth.accessToken}`, 'anthropic-beta': 'oauth-2025-04-20' }, signal: AbortSignal.timeout(probe.timeoutMs ?? 5_000) });
+    if (!response.ok) return { loggedIn: response.status !== 401 || !!oauth.refreshToken, usage: [], note: `the provider usage endpoint answered ${response.status}` };
+    const body: any = await response.json();
+    const usage = (['five_hour', 'seven_day'] as const).flatMap(key => typeof body?.[key]?.utilization === 'number'
+      ? [{ window: key === 'five_hour' ? '5h' : '7d', percent: body[key].utilization, resetsAt: typeof body[key].resets_at === 'string' ? new Date(body[key].resets_at).toISOString() : null }] : []);
+    return { loggedIn: true, usage, note: null };
+  } catch (error) { return { loggedIn: true, usage: [], note: `the provider usage endpoint is unreachable: ${error instanceof Error ? error.message : 'unknown reason'}` }; }
+}
+
+// Codex records the provider's rate-limit windows in every session it writes; the newest record
+// is the account's last reported usage.
+async function newestCodexRateLimits(home: string) {
+  const directories = async (directory: string) => { try { return (await readdir(directory)).filter(name => /^\d+$/.test(name)).sort().reverse().map(name => resolve(directory, name)); } catch { return []; } };
+  const files: { file: string; modified: number }[] = [];
+  for (const year of await directories(resolve(home, 'sessions'))) {
+    for (const month of await directories(year)) {
+      for (const day of await directories(month)) {
+        for (const name of (await readdir(day).catch(() => [] as string[])).filter(entry => entry.endsWith('.jsonl'))) {
+          const file = resolve(day, name);
+          try { files.push({ file, modified: (await stat(file)).mtimeMs }); } catch { /* removed while listing */ }
+        }
+        if (files.length >= 5) break;
+      }
+      if (files.length >= 5) break;
+    }
+    if (files.length >= 5) break;
+  }
+  for (const { file } of files.sort((a, b) => b.modified - a.modified).slice(0, 5)) {
+    const text = await readFile(file, 'utf8').catch(() => '');
+    for (const line of text.slice(-1_000_000).split('\n').reverse()) {
+      if (!line.includes('"rate_limits"')) continue;
+      let record: any; try { record = JSON.parse(line); } catch { continue; }
+      const limits = record?.payload?.rate_limits ?? record?.payload?.info?.rate_limits ?? record?.rate_limits;
+      if (limits && (limits.primary || limits.secondary)) return limits;
+    }
+  }
+  return null;
+}
+async function codexAccount(environment: AgentEnvironment, probe: EnvironmentProbe) {
+  const auth = await readJsonFile(resolve(environment.home, 'auth.json'));
+  const loggedIn = !!auth && (typeof auth.tokens?.access_token === 'string' || typeof auth.OPENAI_API_KEY === 'string' && !!auth.OPENAI_API_KEY);
+  if (!loggedIn || probe.quota === false) return { loggedIn, usage: [], note: loggedIn ? 'quota not read' : null, reached: false };
+  const limits = await newestCodexRateLimits(environment.home);
+  if (!limits) return { loggedIn, usage: [], note: 'no Codex session has reported rate limits for this account yet', reached: false };
+  const usage = [limits.primary, limits.secondary].filter(window => window && typeof window.used_percent === 'number').map((window: any) => ({
+    window: typeof window.window_minutes === 'number' ? windowName(window.window_minutes) : 'window', percent: window.used_percent,
+    resetsAt: typeof window.resets_at === 'number' ? new Date(window.resets_at * 1000).toISOString() : null }));
+  return { loggedIn, usage, note: null, reached: !!limits.rate_limit_reached_type };
+}
+
+export async function checkAgentEnvironment(environment: AgentEnvironment, probe: EnvironmentProbe = {}): Promise<EnvironmentHealth> {
+  const now = probe.now?.() ?? Date.now(), ceiling = probe.ceilingPercent ?? defaultQuotaCeilingPercent;
+  const cacheKey = `${environment.name}\0${environment.home}\0${ceiling}\0${probe.quota !== false}`, cached = healthCache.get(cacheKey);
+  if (cached && now - cached.at >= 0 && now - cached.at < (probe.cacheMs ?? 30_000)) return cached.health;
+  const account: { loggedIn: boolean; usage: AccountUsage[]; note: string | null; reached?: boolean } = environment.kind === 'claude' ? await claudeAccount(environment, probe, now)
+    : environment.kind === 'codex' ? await codexAccount(environment, probe)
+    : environment.kind === 'opencode' ? { loggedIn: Object.keys((await readJsonFile(resolve(environment.home, 'opencode/auth.json'))) ?? {}).length > 0, usage: [], note: 'OpenCode exposes no provider quota Graphyard can read; its providers report their own limits in the session' }
+    : { loggedIn: (candidate => !!candidate && !!(candidate.userId || candidate.email))((await readJsonFile(resolve(environment.home, 'cli-config.json')))?.authInfo), usage: [], note: 'Cursor exposes no quota Graphyard can read; the session reports its own limit' };
+  const future = (usage: AccountUsage) => !usage.resetsAt || Date.parse(usage.resetsAt) > now;
+  const spent = account.usage.filter(usage => usage.percent >= ceiling && future(usage));
+  const exhausted = spent.length > 0 || !!account.reached && account.usage.some(future);
+  const quota = !account.loggedIn ? 'unknown' as const : exhausted ? 'exhausted' as const : account.usage.length ? 'available' as const : 'unknown' as const;
+  const reason = !account.loggedIn ? `${environment.name} is not logged in`
+    : exhausted ? `${environment.name} quota is exhausted (${(spent.length ? spent : account.usage).map(usage => `${usage.window} window at ${usage.percent}%${usage.resetsAt ? ` until ${usage.resetsAt}` : ''}`).join(', ')}; ceiling ${ceiling}%)` : null;
+  const health: EnvironmentHealth = { name: environment.name, kind: environment.kind, home: environment.home, variable: environmentVariable[environment.kind], checkedAt: new Date(now).toISOString(),
+    loggedIn: account.loggedIn, quota, usage: account.usage, healthy: !reason, reason, note: account.note, login: account.loggedIn ? null : loginCommand(environment) };
+  healthCache.set(cacheKey, { at: now, health });
+  return health;
+}
+
+export type LaunchRole = 'worker' | 'reviewer' | 'producer';
+export interface AccountSkip { at: string; role: LaunchRole; profile: string; environment: string; reason: string; work: string | null }
+/** Every account of a profile was skipped: the caller fails over to its next profile, or reports the skips. */
+export class NoHealthyAccountError extends Error {
+  readonly accountsExhausted = true;
+  constructor(message: string, readonly skipped: AccountSkip[]) { super(message); }
+}
+
+// What the launch loop last observed about each environment, and the recent launches it skipped
+// away from and why, kept beside the coordinator's other private state so master status can say it.
+const environmentLogSchema = z.object({
+  version: z.literal(1),
+  environments: z.record(z.string(), z.any()).default({}),
+  skipped: z.array(z.object({ at: z.string(), role: z.enum(['worker', 'reviewer', 'producer']), profile: z.string(), environment: z.string(), reason: z.string().max(500), work: z.string().nullable() }).strict()).max(50).default([]),
+}).strict();
+export type EnvironmentLog = { version: 1; environments: Record<string, EnvironmentHealth>; skipped: AccountSkip[] };
+export function environmentLogPath(config: Pick<MasterConfig, 'credentialFile'>) {
+  return resolve(dirname(config.credentialFile), `${basename(config.credentialFile).replace(/\.token$/, '')}.environments.json`);
+}
+export async function readEnvironmentLog(config: Pick<MasterConfig, 'credentialFile'>): Promise<EnvironmentLog> {
+  try { return environmentLogSchema.parse(JSON.parse(await readFile(environmentLogPath(config), 'utf8'))) as EnvironmentLog; }
+  catch { return { version: 1, environments: {}, skipped: [] }; }
+}
+export async function recordEnvironmentLog(config: Pick<MasterConfig, 'credentialFile'>, health: EnvironmentHealth[], skipped: AccountSkip[] = []) {
+  if (!health.length && !skipped.length) return;
+  const log = await readEnvironmentLog(config);
+  for (const entry of health) log.environments[entry.name] = entry;
+  log.skipped = [...log.skipped, ...skipped.map(entry => ({ ...entry, reason: entry.reason.slice(0, 500) }))].slice(-50);
+  await atomicPrivateWrite(environmentLogPath(config), log);
+}
+
+/**
+ * The account a launch runs on: the first of the profile's accounts that is logged in with quota
+ * left. Every account passed over is recorded with its reason. A profile that names no accounts
+ * launches exactly as configured, on whatever its environment variables select.
+ */
+export async function selectAccount(config: Pick<MasterConfig, 'environments' | 'credentialFile' | 'run'>, role: LaunchRole, profile: { name: string; accounts?: string[] }, probe: EnvironmentProbe & { work?: string } = {}) {
+  if (!profile.accounts?.length) return { account: null, health: null, skipped: [] as AccountSkip[] };
+  const at = new Date(probe.now?.() ?? Date.now()).toISOString();
+  const checked: EnvironmentHealth[] = [], skipped: AccountSkip[] = [];
+  for (const name of profile.accounts) {
+    const environment = (config.environments ?? []).find(candidate => candidate.name === name);
+    if (!environment) { skipped.push({ at, role, profile: profile.name, environment: name, reason: `${name} is not a configured agent environment; run master environments --apply`, work: probe.work ?? null }); continue; }
+    const health = await checkAgentEnvironment(environment, { ...probe, ceilingPercent: probe.ceilingPercent ?? config.run.quotaCeilingPercent });
+    checked.push(health);
+    if (health.healthy) {
+      await recordEnvironmentLog(config, checked, skipped).catch(() => {});
+      return { account: environment, health, skipped };
+    }
+    skipped.push({ at, role, profile: profile.name, environment: name, reason: health.reason!, work: probe.work ?? null });
+  }
+  await recordEnvironmentLog(config, checked, skipped).catch(() => {});
+  throw new NoHealthyAccountError(`No healthy agent account for ${role} profile ${profile.name}: ${skipped.map(entry => entry.reason).join('; ')}`, skipped);
+}
+
+/**
+ * Each runtime's broadest non-interactive approval mode. Claude Code, Codex and Cursor already get
+ * theirs from the launch contract; OpenCode's contract allows edit, bash and webfetch only, so its
+ * other permissions (directories outside the worktree, repeated tool calls, subagents, …) would
+ * still stop a session to ask, and are allowed here too.
+ */
+export const openCodeAllowAll = { '*': 'allow', edit: 'allow', bash: 'allow', webfetch: 'allow', external_directory: 'allow', doom_loop: 'allow' };
+export function agentLaunchPlan(kind: string | undefined, approvals: 'auto' | 'prompt' = 'auto', agentArgs: string[] = [], environment: Record<string, string> = {}) {
+  const plan = launchPlan(kind, approvals, agentArgs, environment);
+  if (!plan.applied || kind !== 'opencode') return plan;
+  return { ...plan, environment: { ...plan.environment, OPENCODE_PERMISSION: JSON.stringify(openCodeAllowAll) }, prompts: 'every permission prompt, including edits, shell commands, fetches, and paths outside the worktree',
+    tradeoff: 'opencode edits files, runs shell commands, fetches URLs, and reaches outside its worktree without asking.' };
+}
+
+/**
+ * What a session launches with once its account is chosen: the account's kind and home, the
+ * profile's arguments when they belong to that runtime, and the runtime's broadest approval mode.
+ * Codex keeps its workspace sandbox, so the paths and network access the role needs are added to it:
+ * a worker commits into the repository's shared Git directory and pushes; a producer builds in a
+ * detached worktree under the temporary directory.
+ */
+export function accountLaunch(profile: { kind?: string; approvals: 'auto' | 'prompt'; agentArgs: string[]; environment: Record<string, string> }, account: AgentEnvironment | null, reach: { writable?: string[] } = {}) {
+  const kind = account?.kind ?? profile.kind;
+  const plan = agentLaunchPlan(kind, profile.approvals, !account || account.kind === profile.kind ? profile.agentArgs : [], profile.environment);
+  const environment: Record<string, string> = { ...plan.environment, ...profile.environment };
+  if (account) {
+    environment[environmentVariable[account.kind]] = account.home;
+    // mise resolves installed runtimes under XDG_DATA_HOME; keep it on the operator's own install.
+    if (account.kind === 'opencode') {
+      const mise = process.env.MISE_DATA_DIR ?? resolve(process.env.XDG_DATA_HOME ?? resolve(homedir(), '.local/share'), 'mise');
+      if (existsSync(mise)) environment.MISE_DATA_DIR = mise;
+    }
+  }
+  const extra = kind === 'codex' && plan.applied ? ['-c', 'sandbox_workspace_write.network_access=true', ...(reach.writable ?? []).flatMap(path => ['--add-dir', path])] : [];
+  return { kind, args: [...plan.args, ...extra], environment, plan, account: account?.name ?? null };
+}
+
+/** The Git directory every worktree of the repository commits into. */
+export function sharedGitDirectory(root: string) {
+  try { return execFileSync('git', ['rev-parse', '--path-format=absolute', '--git-common-dir'], { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim() || null; }
+  catch { return null; }
+}
+
+/**
+ * Account health for every profile that names accounts, joined onto the credential health status
+ * and the durable loop already read: a profile none of whose accounts can launch is unavailable,
+ * with each account's reason.
+ */
+export async function inspectProfileAccounts<T extends { available: boolean; reason: string | null }>(config: Pick<MasterConfig, 'environments' | 'credentialFile' | 'run'>, role: LaunchRole, profiles: { name: string; accounts?: string[] }[], health: Record<string, T>, probe: EnvironmentProbe = {}) {
+  const result: Record<string, T & { accounts?: { environment: string; healthy: boolean; reason: string | null; quota: string }[] }> = { ...health };
+  for (const profile of profiles) {
+    if (!profile.accounts?.length || result[profile.name]?.available === false) continue;
+    const accounts: { environment: string; healthy: boolean; reason: string | null; quota: string }[] = [];
+    for (const name of profile.accounts) {
+      const environment = (config.environments ?? []).find(candidate => candidate.name === name);
+      if (!environment) { accounts.push({ environment: name, healthy: false, reason: `${name} is not a configured agent environment`, quota: 'unknown' }); continue; }
+      const checked = await checkAgentEnvironment(environment, { ...probe, ceilingPercent: probe.ceilingPercent ?? config.run.quotaCeilingPercent });
+      accounts.push({ environment: name, healthy: checked.healthy, reason: checked.reason, quota: checked.quota });
+    }
+    const usable = accounts.some(account => account.healthy);
+    result[profile.name] = { ...(result[profile.name] ?? { available: true, reason: null } as T), available: usable, reason: usable ? null : `No healthy agent account: ${accounts.map(account => account.reason).join('; ')}`, accounts };
+  }
+  return result;
+}
+
+/**
+ * Prompt delivery the runtime visibly accepted. Herdr submits the prompt and reports whether the
+ * agent left its idle state for it; a runtime that reported ready before its input was (OpenCode
+ * does, while its UI loads) drops the text and stays idle, which Herdr answers as a stalled prompt.
+ * A stalled prompt is delivered again after a pause; one still refused after every attempt fails
+ * the launch, whose caller closes the session and launches afresh. Anything else Herdr refuses
+ * fails at once.
+ */
+export const promptAttempts = 3, promptAcceptMs = 20_000, promptRetryPauseMs = 3_000;
+export class PromptNotAcceptedError extends Error { readonly promptDropped = true; }
+export function herdrErrorCode(error: unknown) {
+  const text = [(error as any)?.herdrCode, (error as any)?.stdout, (error as any)?.stderr, (error as any)?.message].filter(value => value !== undefined && value !== null).map(String).join('\n');
+  return (error as any)?.herdrCode ?? /"code"\s*:\s*"([a-z_]+)"/.exec(text)?.[1] ?? null;
+}
+export interface PromptDelivery { attempts?: number; acceptMs?: number; pauseMs?: number }
+export function deliverPrompt(target: string, text: string, run?: (command: string, args: string[]) => string, options: PromptDelivery & { confirm?: 'inline' | 'follow' } = {}) {
+  const attempts = options.attempts ?? promptAttempts, acceptMs = options.acceptMs ?? promptAcceptMs, pauseMs = options.pauseMs ?? promptRetryPauseMs;
+  const accepted = ['--until', 'working', '--until', 'blocked', '--timeout', String(acceptMs)];
+  const stalls: string[] = [];
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    try {
+      // Herdr takes options only after the prompt text; 'follow' submits it and then waits for the
+      // agent to leave idle, which is the same confirmation for a caller whose text must come last.
+      if (options.confirm === 'follow') { herdrJson(['agent', 'prompt', target, text], run); herdrJson(['agent', 'wait', target, ...accepted], run); }
+      else herdrJson(['agent', 'prompt', target, text, '--wait', ...accepted], run);
+      return { attempts: attempt, accepted: true as const };
+    } catch (error) {
+      const code = herdrErrorCode(error);
+      if (code !== 'agent_prompt_stalled' && code !== 'timeout') throw error;
+      stalls.push(code);
+      if (attempt < attempts) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, pauseMs);
+    }
+  }
+  throw new PromptNotAcceptedError(`${target} did not visibly accept its prompt after ${attempts} deliveries (${stalls.join(', ')}); the session is closed and relaunched rather than left idle`);
+}
+
+/**
+ * Onboarding for agent environments: discover the per-account homes (or create new ones), report
+ * which are logged in and how much quota each has left, and generate the master's worker, reviewer
+ * and producer profiles from the logged-in ones — no hand-written profile JSON.
+ *
+ * Every launch profile runs on the logged-in accounts, its own runtime's first, rotated so the
+ * profiles spread across accounts. Worker and producer principals come from the credential files
+ * the operator issued beside the coordinator's (workers/*.token, producers/*.token), each verified
+ * against the control plane for its role before a profile uses it. One reviewer profile is
+ * generated per logged-in account. Without apply nothing is written; the report is the plan.
+ */
+export async function setupAgentEnvironments(root: string, input: { directory?: string; create?: EnvironmentKind[]; apply?: boolean; probe?: EnvironmentProbe; verify: (token: string) => Promise<any> }) {
+  const config = await loadMasterConfig(root);
+  const directory = agentEnvironmentRoot(input.directory);
+  const discovered = await discoverAgentEnvironments(directory);
+  const created: string[] = [];
+  for (const kind of input.create ?? []) {
+    if (!input.apply) { created.push(`${kind} (a new ${kind}-<letter> directory under ${directory}; rerun with --apply)`); continue; }
+    const environment = await createAgentEnvironment(directory, kind, discovered);
+    discovered.push(environment); created.push(environment.name);
+  }
+  const prepared = input.apply ? (await Promise.all(discovered.map(environment => prepareAgentEnvironment(environment)))).flat() : [];
+  const probe = { ...input.probe, ceilingPercent: input.probe?.ceilingPercent ?? config.run.quotaCeilingPercent };
+  const health = await Promise.all(discovered.map(environment => checkAgentEnvironment(environment, probe)));
+  const loggedIn = discovered.filter((_, index) => health[index].loggedIn);
+
+  const next: MasterConfig = JSON.parse(JSON.stringify(config));
+  next.environments = [...(config.environments ?? []).filter(existing => !discovered.some(found => found.name === existing.name)), ...discovered].sort((a, b) => a.name.localeCompare(b.name));
+  // Same-runtime accounts first (the profile's own arguments apply to them), each list rotated so
+  // consecutive profiles start on different accounts; the profile's current home, if it is one, leads.
+  const accountsFor = (kind: string | undefined, index: number, home?: string) => {
+    const rotate = (list: AgentEnvironment[]) => { if (!list.length) return list; const first = home ? list.findIndex(entry => entry.home === home) : -1; const start = first >= 0 ? first : index % list.length; return [...list.slice(start), ...list.slice(0, start)]; };
+    return [...rotate(loggedIn.filter(entry => entry.kind === kind)), ...rotate(loggedIn.filter(entry => entry.kind !== kind))].map(entry => entry.name);
+  };
+  const same = (a?: string[], b?: string[]) => JSON.stringify(a ?? []) === JSON.stringify(b ?? []);
+  const changes: { role: LaunchRole; profile: string; action: 'added' | 'accounts'; accounts: string[]; principal?: string }[] = [];
+  const skipped: { file: string; reason: string }[] = [];
+  const agentNames = () => new Set([...next.workers, ...next.reviewers, ...next.producers].map(profile => profile.agentName));
+  // A profile whose runtime has no environment support keeps launching exactly as configured.
+  const supported = (kind?: string) => (environmentKinds as readonly string[]).includes(kind ?? '');
+  const migrate = <P extends { name: string; kind?: string; environment: Record<string, string>; accounts?: string[] }>(role: LaunchRole, profile: P, index: number) => {
+    if (!supported(profile.kind)) return;
+    const variable = environmentVariable[profile.kind as EnvironmentKind];
+    const generated = accountsFor(profile.kind, index, profile.environment[variable]);
+    // An order already chosen is kept; accounts logged in since are appended to it.
+    const accounts = profile.accounts?.length ? [...profile.accounts, ...generated.filter(name => !profile.accounts!.includes(name))] : generated;
+    if (!accounts.length || same(profile.accounts, accounts)) return;
+    // The account now supplies the home the profile used to pin by hand.
+    if (profile.environment[variable] && loggedIn.some(entry => entry.home === profile.environment[variable])) delete profile.environment[variable];
+    profile.accounts = accounts; changes.push({ role, profile: profile.name, action: 'accounts', accounts });
+  };
+
+  if (loggedIn.length) {
+    next.workers.filter(profile => profile.mode === 'launch').forEach((profile, index) => migrate('worker', profile, index));
+    next.producers.forEach((profile, index) => migrate('producer', profile, index));
+    next.reviewers.forEach((profile, index) => migrate('reviewer', profile, index));
+    const credentialHome = dirname(dirname(config.credentialFile));
+    const issued = async (role: 'worker' | 'producer') => {
+      const folder = resolve(credentialHome, `${role}s`);
+      const files = (await readdir(folder).catch(() => [] as string[])).filter(name => name.endsWith('.token')).sort().map(name => resolve(folder, name));
+      const found: { file: string; principal: string }[] = [];
+      for (const file of files) {
+        if ([...next.workers, ...next.producers].some(profile => profile.credentialFile === file)) continue;
+        try {
+          await externalCredential(root, file, role === 'worker' ? 'Worker' : 'Producer');
+          const status = await input.verify(await readCredentialFile(file));
+          if (status.actor?.role !== role || typeof status.actor.id !== 'string') { skipped.push({ file, reason: `authenticates ${status.actor?.role ?? 'no'} role, not ${role}` }); continue; }
+          found.push({ file, principal: status.actor.id });
+        } catch (error) { skipped.push({ file, reason: error instanceof Error ? error.message : 'unreadable credential' }); }
+      }
+      return found;
+    };
+    const profileNameOf = (value: string) => value.replace(/[^a-zA-Z0-9._-]/g, '-').replace(/^[^a-zA-Z0-9]+/, '').slice(0, 80) || 'agent';
+    for (const { file, principal } of await issued('worker')) {
+      const name = profileNameOf(principal);
+      if (next.workers.some(profile => profile.principal === principal || profile.name === name) || agentNames().has(name)) { skipped.push({ file, reason: `a profile already uses principal or name ${principal}` }); continue; }
+      const index = next.workers.filter(profile => profile.mode === 'launch').length, accounts = accountsFor(undefined, index);
+      const kind = next.environments.find(entry => entry.name === accounts[0])!.kind;
+      next.workers.push(workerProfileSchema.parse({ name, principal, agentName: name, mode: 'launch', kind, credentialFile: file, accounts: accountsFor(kind, index) }));
+      changes.push({ role: 'worker', profile: name, action: 'added', accounts: accountsFor(kind, index), principal });
+    }
+    for (const { file, principal } of await issued('producer')) {
+      const name = profileNameOf(`produce-${principal}`);
+      if (next.workers.some(profile => profile.principal === principal)) { skipped.push({ file, reason: `${principal} is also a worker principal; the control plane refuses evidence from an implementer` }); continue; }
+      if (next.producers.some(profile => profile.principal === principal || profile.name === name) || agentNames().has(name)) { skipped.push({ file, reason: `a profile already uses principal or name ${principal}` }); continue; }
+      const index = next.producers.length, accounts = accountsFor(undefined, index);
+      const kind = next.environments.find(entry => entry.name === accounts[0])!.kind;
+      next.producers.push(producerProfileSchema.parse({ name, principal, agentName: name, kind, credentialFile: file, accounts: accountsFor(kind, index) }));
+      changes.push({ role: 'producer', profile: name, action: 'added', accounts: accountsFor(kind, index), principal });
+    }
+    for (const environment of loggedIn) {
+      const name = profileNameOf(`review-${environment.name}`);
+      if (next.reviewers.some(profile => profile.name === name) || agentNames().has(name)) continue;
+      const accounts = [environment.name, ...accountsFor(environment.kind, 0).filter(entry => entry !== environment.name)];
+      next.reviewers.push(reviewerProfileSchema.parse({ name, agentName: name, kind: environment.kind, accounts }));
+      changes.push({ role: 'reviewer', profile: name, action: 'added', accounts });
+    }
+    // Automatic review answers with one profile and fails over to the rest.
+    if (next.reviewers.length > 1 && !next.run.reviewerProfile) next.run.reviewerProfile = next.reviewers[0].name;
+  }
+  const parsed = masterConfigSchema.parse(next);
+  if (input.apply) await atomicPrivateWrite(resolve(root, '.graphyard/master.json'), parsed);
+  const report = health.map(entry => ({ environment: entry.name, kind: entry.kind, home: entry.home, variable: entry.variable, loggedIn: entry.loggedIn, quota: entry.quota, usage: entry.usage, healthy: entry.healthy, reason: entry.reason, note: entry.note, login: entry.login }));
+  const loggedOut = report.filter(entry => !entry.loggedIn);
+  return { directory, applied: !!input.apply, environments: report, created, prepared, profiles: changes, skipped,
+    counts: { environments: report.length, loggedIn: loggedIn.length, workers: parsed.workers.length, reviewers: parsed.reviewers.length, producers: parsed.producers.length },
+    next: !report.length ? `No agent environments under ${directory}; rerun with --create claude (or codex, opencode, cursor) --apply, then log each one in`
+      : !loggedIn.length ? `No environment is logged in; log in with: ${loggedOut.map(entry => entry.login).join(' ; ')}, then rerun master environments --apply`
+      : !input.apply ? 'Rerun with --apply to write these environments and profiles to .graphyard/master.json'
+      : loggedOut.length ? `Profiles use the ${loggedIn.length} logged-in environment(s). Log in the rest (${loggedOut.map(entry => entry.login).join(' ; ')}) and rerun master environments --apply to add them`
+      : 'Every environment is logged in and every profile uses it; master run checks login and quota before each launch and fails over between them' };
 }
 
 export type HerdrAgent = { name?: string; pane_id?: string; agent?: string; agent_status?: string; cwd?: string; foreground_cwd?: string; tokens?: Record<string, string> };
@@ -672,7 +1130,7 @@ function queueRow(placement: QueuePlacement, binding: QueueBindingReport | null)
 }
 export function herdrJson(args: string[], run: (command: string, args: string[]) => string = (command, commandArgs) => execFileSync(command, commandArgs, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] })) {
   const parsed = JSON.parse(run('herdr', args));
-  if (parsed.error) throw new Error(`Herdr refused the operation: ${parsed.error.message ?? parsed.error}`);
+  if (parsed.error) throw Object.assign(new Error(`Herdr refused the operation: ${parsed.error.message ?? parsed.error}`), { herdrCode: typeof parsed.error.code === 'string' ? parsed.error.code : undefined });
   return parsed.result ?? parsed;
 }
 function herdrRun(args: string[], run: (command: string, args: string[]) => string = (command, commandArgs) => execFileSync(command, commandArgs, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] })) { run('herdr', args); }
@@ -731,8 +1189,39 @@ export function stopCreatedHerdrTab(pane: string | undefined, tab: string | unde
   throw new Error(`Herdr still reports tab ${tab} after close`);
 }
 
+/**
+ * The master's harness rules cover everything the master owns, not only the coordination loop:
+ * editing its own configuration, restarting and reading the durable loop, administering the
+ * deployment it verifies, and re-running CI for a candidate. None of these reaches a merge, a
+ * verdict, evidence, or a credential; the enforced boundaries are unchanged.
+ */
 export function masterHarness(root: string, config: MasterConfig, harness: string) {
-  return masterHarnessPlan({ harness, root, cliPath: config.cliPath, repository: config.repository, baseBranch: config.baseBranch, credentialHome: dirname(dirname(config.credentialFile)) });
+  const plan = masterHarnessPlan({ harness, root, cliPath: config.cliPath, repository: config.repository, baseBranch: config.baseBranch, credentialHome: dirname(dirname(config.credentialFile)) });
+  if (plan.harness === 'codex') return { ...plan, manual: `${plan.manual}# The master's own commands reach GitHub, Graphyard, the deployment and its private state beside\n# its credential, so start it with its broadest approval mode (master start codex adds these):\n#   --ask-for-approval never --sandbox workspace-write -c sandbox_workspace_write.network_access=true --add-dir ${JSON.stringify(dirname(config.credentialFile))}\n` };
+  if (plan.harness !== 'claude') return plan;
+  const workflows = [config.run.proofWorkflow, config.run.smokeWorkflow].filter((name): name is string => !!name);
+  const owned: HarnessRule[] = [
+    { rule: 'Read(./.graphyard/master.json)', why: 'Read the master configuration the loop runs from: profiles, agent environments, run settings. It holds paths to credentials, never their values.' },
+    { rule: 'Edit(./.graphyard/master.json)', why: 'Tune the master\'s own configuration (run settings, the automatic reviewer profile, profile accounts) without an operator; every profile is revalidated when the master next loads it.' },
+    { rule: 'Write(./.graphyard/master.json)', why: 'Rewrite the master configuration when master environments or a profile change regenerates it.' },
+    { rule: 'Bash(systemctl --user restart graphyard-master*)', why: 'Restart the durable loop after a configuration or CLI change; it resumes from its persisted cursors.' },
+    { rule: 'Bash(systemctl --user start graphyard-master*)', why: 'Start the durable loop when master status reports it is not running.' },
+    { rule: 'Bash(systemctl --user stop graphyard-master*)', why: 'Stop the durable loop before an upgrade; nothing is lost, its cursors are persisted before every action.' },
+    { rule: 'Bash(systemctl --user status graphyard-master*)', why: 'Read whether the durable loop is running.' },
+    { rule: 'Bash(systemctl --user daemon-reload)', why: 'Reload the loop\'s user unit after it is edited.' },
+    { rule: 'Bash(journalctl --user -u graphyard-master*)', why: 'Read the loop\'s launch, failover and refusal log.' },
+    { rule: 'Bash(railway status:*)', why: 'Read which release the deployment serves while verifying a delivery.' },
+    { rule: 'Bash(railway logs:*)', why: 'Read deployment logs when a release does not serve a delivery.' },
+    { rule: 'Bash(railway deployment:*)', why: 'List deployments and their commits to find the exact release to verify or redeploy.' },
+    { rule: 'Bash(railway redeploy:*)', why: 'Redeploy the current release after an infrastructure failure; it builds only what the base branch already holds.' },
+    { rule: 'Bash(gh run list:*)', why: 'Find the CI and workflow runs of a candidate or delivery.' },
+    { rule: 'Bash(gh run view:*)', why: 'Read a run\'s jobs and logs when a gate reports a failing check.' },
+    { rule: 'Bash(gh run watch:*)', why: 'Follow a run the loop is waiting on.' },
+    { rule: 'Bash(gh run rerun:*)', why: 'Re-run a flaky or infrastructure-failed run on the same commit; the check still has to pass on that exact head.' },
+    ...workflows.map(name => ({ rule: `Bash(gh workflow run ${name}:*)`, why: `Request the configured ${name} workflow by hand, as master run does; the provider runs it with its own trusted secret.` })),
+    ...(config.run.deploymentUrl ? [{ rule: `Bash(curl -fsS ${config.run.deploymentUrl}*)`, why: 'Read the deployed release\'s identity endpoint while verifying a delivery.' }] : []),
+  ];
+  return { ...plan, allow: [...plan.allow, ...owned.filter(entry => !plan.allow.some(existing => existing.rule === entry.rule))] };
 }
 export async function startMaster(root: string, kind: WorkerProfile['kind'], agentArgs: string[], agents: HerdrAgent[], run?: (command: string, args: string[]) => string) {
   if (!kind) throw new Error('Choose a supported master agent kind');
@@ -745,7 +1234,11 @@ export async function startMaster(root: string, kind: WorkerProfile['kind'], age
   try {
     const created = createdHerdrTab(herdrJson(['tab', 'create', ...(config.herdrWorkspace ? ['--workspace', config.herdrWorkspace] : []), '--cwd', root, '--label', `Graphyard master · ${config.repository}`, '--env', 'GRAPHYARD_MASTER=1', '--no-focus'], run));
     pane = created.pane; tabId = created.tab;
-    herdrJson(['agent', 'start', config.masterAgentName, '--kind', kind, '--pane', created.pane, '--', ...agentArgs], run);
+    // The master runs with its runtime's broadest approval mode too; the harness rules above, not
+    // runtime prompts, say what it may do. Codex's sandbox is widened to the private state the
+    // master's own commands write beside its credential.
+    const launch = accountLaunch({ kind, approvals: 'auto', agentArgs, environment: {} }, null, { writable: [dirname(config.credentialFile)] });
+    herdrJson(['agent', 'start', config.masterAgentName, '--kind', kind, '--pane', created.pane, '--', ...launch.args], run);
     const prompt = `You are the dedicated Graphyard master agent for ${config.repository}. Do not implement product work, claim worker leases, submit evidence, weaken requirements, or bypass gates. Read AGENTS.md, run node ${config.cliPath} master guide, then run node ${config.cliPath} master status. Use Graphyard as assignment and progression truth and Herdr only for session health and control. Route ready work to configured worker profiles, require workers to claim for themselves, preserve handoffs, surface decisions that need the operator, and invoke routine merge only through graphyard master merge after every exact-candidate gate passes.`;
     const reviewInstruction = config.reviewer
       ? `Independent review and proof collection start on their own: when a candidate passes the build gate the control plane records a review request and producer requests bound to its exact head, and node ${config.cliPath} master run launches the reviewer identity ${config.reviewer.slug}[bot] and one producer session per proof group for them within 30 seconds. Read the findings, route rework, and merge; never launch reviews or producers by hand, never review a candidate yourself, and never submit evidence. master status shows what is running per candidate and since when, and node ${config.cliPath} master review GY-N is only the recovery path for a refused reviewer launch.`
@@ -756,7 +1249,7 @@ export async function startMaster(root: string, kind: WorkerProfile['kind'], age
     const administrationInstruction = config.browser
       ? `GitHub administration of ${config.repository} is yours: reconcile protection with node ${config.cliPath} master protection --apply, and when only a GitHub page can do it run node ${config.cliPath} master browser app-permissions, installation-accept, or protection, which drive the operator's browser profile ${config.browser.profile} headless, record every step, verify through the API, and append an audit entry. Report a pending sudo code from master status; the operator only approves it on their device. Never ask the operator to click through what those flows cover.`
       : `No browser profile is configured, so App permission updates, installation acceptance, and page-only protection changes still need the operator; ask them to rerun node ${config.cliPath} master init --browser-profile PROFILE so those become yours.`;
-    herdrJson(['agent', 'prompt', config.masterAgentName, `${prompt} ${reviewInstruction} ${administrationInstruction} ${mergeInstruction}`], run);
+    deliverPrompt(config.masterAgentName, `${prompt} ${reviewInstruction} ${administrationInstruction} ${mergeInstruction}`, run, { confirm: 'follow' });
   } catch (error) {
     const malformedTab = (error as any)?.herdrTab as string | undefined;
     if (pane || tabId || malformedTab) try { stopCreatedHerdrTab(pane, tabId ?? malformedTab, run); }
@@ -769,7 +1262,7 @@ export async function startMaster(root: string, kind: WorkerProfile['kind'], age
 type WorkerCommand = (command: string, args: string[], options?: any) => string | Buffer;
 type PreparedWorker = { epoch: number; path: string; base: string };
 
-export interface DispatchOptions { allowOverlap?: boolean }
+export interface DispatchOptions { allowOverlap?: boolean; probe?: EnvironmentProbe; prompt?: PromptDelivery }
 export const describeOverlap = (overlap: ReturnType<typeof dispatchOverlap>) => overlap.map(ahead => `${ahead.key} (${ahead.state}, ${ahead.stage}) on ${ahead.paths.join(', ')}`).join('; ');
 export function assertDispatchable(work: Work, allWork: Work[], observedAt: string, options: DispatchOptions = {}) {
   const now = Date.parse(observedAt);
@@ -791,40 +1284,55 @@ export async function dispatchWork(root: string, work: Work, profile: WorkerProf
   assertDispatchable(work, allWork, observedAt, options);
   const config = await loadMasterConfig(root);
   let target = agents.find(agent => agent.name === profile.agentName);
+  let selected: Awaited<ReturnType<typeof selectAccount>> | undefined, launched: ReturnType<typeof accountLaunch> | undefined, relaunched = 0;
   if (profile.mode === 'existing') {
     if (!target) throw new Error('Existing worker is not visible in Herdr');
     throw new Error('Existing sessions are observable but cannot be safely adopted for new work; use a launch profile so Graphyard supervises the agent process');
   } else {
     await readCredentialFile(profile.credentialFile!);
     if (target) throw new Error('Launch profile agent name is already visible in Herdr');
-    const prepared = await prepare(root, work.key, profile.name);
-    const prompt = `Implement ${work.key}: ${work.title}. The Graphyard worker launcher has claimed this item under principal ${profile.principal}, created its assigned worktree, and placed this agent under lease supervision. Run node ${config.cliPath} status ${work.key} before editing. Work only in the current assigned worktree, satisfy the stated criteria without weakening them, open a PR, and submit it with complete as your last action: complete ends your lease and the supervisor then stops this session, which is the attempt ending, not lease loss. Stop immediately if the supervisor reports lease loss before you have submitted. Do not submit trusted evidence or merge the PR; the control plane requests the independent review and the proof producers for your exact head as soon as it passes the build gate, so ask nobody to launch them.`;
-    let pane: string | undefined, tabId: string | undefined;
-    try {
-      const launch = launchPlan(profile.kind, profile.approvals, profile.agentArgs, profile.environment);
-      const tabArgs = ['tab', 'create', ...(config.herdrWorkspace ? ['--workspace', config.herdrWorkspace] : []), '--cwd', prepared.path, '--label', `${work.key} · ${profile.agentName}`, '--env', `GRAPHYARD_URL=${config.url}`, '--env', `GRAPHYARD_TOKEN_FILE=${profile.credentialFile}`, '--env', `GRAPHYARD_HOST_ID=${config.hostId}`, '--env', `GRAPHYARD_HERDR_AGENT_KIND=${profile.kind}`, ...Object.entries({ ...launch.environment, ...profile.environment }).flatMap(([key, value]) => ['--env', `${key}=${value}`]), '--no-focus'];
-      const created = createdHerdrTab(herdrJson(tabArgs, run)); pane = created.pane; tabId = created.tab;
-      const supervised = [process.execPath, config.cliPath, 'watch', work.key, String(prepared.epoch), '--', profile.kind!, ...launch.args].map(shellQuote).join(' ');
-      herdrRun(['pane', 'run', pane, supervised], run);
-      waitForHerdrAgent(pane, run, agentTimeoutMs);
-      herdrJson(['agent', 'rename', pane, profile.agentName], run);
-      herdrJson(['agent', 'prompt', profile.agentName, prompt], run);
-      target = { name: profile.agentName, pane_id: pane, agent_status: 'idle', cwd: prepared.path };
-    } catch (error) {
-      const malformedTab = (error as any)?.herdrTab as string | undefined;
-      if (pane || tabId || malformedTab) {
-        try { stopCreatedHerdrTab(pane, tabId ?? malformedTab, run); }
-        catch { throw new Error(`${error instanceof Error ? error.message : 'Worker launch failed'}; Herdr could not confirm pane shutdown, so Graphyard retained epoch ${prepared.epoch}`); }
-      }
-      try { await release(root, work.key, prepared.epoch, profile.name); }
-      catch { throw new Error(`${error instanceof Error ? error.message : 'Worker launch failed'}; the pane was stopped but Graphyard could not release epoch ${prepared.epoch}`); }
-      throw error;
+    // The account is chosen before anything is claimed: a profile whose accounts are all logged out
+    // or out of quota claims nothing, and the refusal names every account it skipped and why.
+    selected = await selectAccount(config, 'worker', profile, { ...options.probe, work: work.key });
+    const launch = accountLaunch(profile, selected.account, { writable: [sharedGitDirectory(root)].filter((path): path is string => !!path) });
+    launched = launch;
+    // A prompt the runtime never accepted closes the session and releases the claim; the launch is
+    // then made once more from a fresh claim, rather than leaving an idle session holding the item.
+    for (let attempt = 1; ; attempt++) {
+      try { target = await launchWorker(root, config, work, profile, launch, run, prepare, release, agentTimeoutMs, options.prompt); break; }
+      catch (error) { if (!(error instanceof PromptNotAcceptedError) || attempt >= 2) throw error; relaunched++; }
     }
   }
   const overlap = dispatchOverlap(work, allWork, Date.parse(observedAt));
   return { work: work.key, profile: profile.name, principal: profile.principal, agentName: profile.agentName, pane: target.pane_id ?? null, approvals: profile.approvals,
-    launch: launchPlan(profile.kind, profile.approvals, profile.agentArgs, profile.environment), ownership: 'worker launcher claimed and is supervising the agent process',
+    launch: launched?.plan ?? agentLaunchPlan(profile.kind, profile.approvals, profile.agentArgs, profile.environment), ownership: 'worker launcher claimed and is supervising the agent process',
+    account: selected?.account ? { environment: selected.account.name, kind: selected.account.kind, quota: selected.health?.quota ?? null, skipped: selected.skipped } : null, relaunched,
     overlap: overlap.length ? { allowed: true, ahead: overlap, note: `Dispatched over a planned-file overlap with ${describeOverlap(overlap)}; expect a sync → review → proof round for whichever lands second` } : null };
+}
+
+async function launchWorker(root: string, config: MasterConfig, work: Work, profile: WorkerProfile, launch: ReturnType<typeof accountLaunch>, run: ((command: string, args: string[]) => string) | undefined, prepare: (root: string, key: string, profileName: string) => Promise<PreparedWorker>, release: (root: string, key: string, epoch: number, profileName: string) => Promise<void>, agentTimeoutMs: number, delivery?: PromptDelivery): Promise<HerdrAgent> {
+  const prepared = await prepare(root, work.key, profile.name);
+  const prompt = `Implement ${work.key}: ${work.title}. The Graphyard worker launcher has claimed this item under principal ${profile.principal}, created its assigned worktree, and placed this agent under lease supervision. Run node ${config.cliPath} status ${work.key} before editing. Work only in the current assigned worktree, satisfy the stated criteria without weakening them, open a PR, and submit it with complete as your last action: complete ends your lease and the supervisor then stops this session, which is the attempt ending, not lease loss. Stop immediately if the supervisor reports lease loss before you have submitted. Do not submit trusted evidence or merge the PR; the control plane requests the independent review and the proof producers for your exact head as soon as it passes the build gate, so ask nobody to launch them.`;
+  let pane: string | undefined, tabId: string | undefined;
+  try {
+    const tabArgs = ['tab', 'create', ...(config.herdrWorkspace ? ['--workspace', config.herdrWorkspace] : []), '--cwd', prepared.path, '--label', `${work.key} · ${profile.agentName}`, '--env', `GRAPHYARD_URL=${config.url}`, '--env', `GRAPHYARD_TOKEN_FILE=${profile.credentialFile}`, '--env', `GRAPHYARD_HOST_ID=${config.hostId}`, '--env', `GRAPHYARD_HERDR_AGENT_KIND=${launch.kind}`, ...Object.entries(launch.environment).flatMap(([key, value]) => ['--env', `${key}=${value}`]), '--no-focus'];
+    const created = createdHerdrTab(herdrJson(tabArgs, run)); pane = created.pane; tabId = created.tab;
+    const supervised = [process.execPath, config.cliPath, 'watch', work.key, String(prepared.epoch), '--', launch.kind!, ...launch.args].map(shellQuote).join(' ');
+    herdrRun(['pane', 'run', pane, supervised], run);
+    waitForHerdrAgent(pane, run, agentTimeoutMs);
+    herdrJson(['agent', 'rename', pane, profile.agentName], run);
+    deliverPrompt(profile.agentName, prompt, run, delivery);
+    return { name: profile.agentName, pane_id: pane, agent_status: 'working', cwd: prepared.path };
+  } catch (error) {
+    const malformedTab = (error as any)?.herdrTab as string | undefined;
+    if (pane || tabId || malformedTab) {
+      try { stopCreatedHerdrTab(pane, tabId ?? malformedTab, run); }
+      catch { throw new Error(`${error instanceof Error ? error.message : 'Worker launch failed'}; Herdr could not confirm pane shutdown, so Graphyard retained epoch ${prepared.epoch}`); }
+    }
+    try { await release(root, work.key, prepared.epoch, profile.name); }
+    catch { throw new Error(`${error instanceof Error ? error.message : 'Worker launch failed'}; the pane was stopped but Graphyard could not release epoch ${prepared.epoch}`); }
+    throw error;
+  }
 }
 
 const shellQuote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;

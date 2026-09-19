@@ -4,8 +4,7 @@ import { mkdir, readFile, rm, realpath } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { dirname, resolve } from 'node:path';
 import { z } from 'zod';
-import { assertOutsideWorktrees, atomicPrivateWrite, createdHerdrTab, herdrJson, loadMasterConfig, privateFile, reviewerIdentitySchema, reviewerProfileSchema, closeHerdrPane, stopCreatedHerdrTab, type MasterConfig, type ReviewerIdentity, type ReviewerProfile } from './master.js';
-import { launchPlan } from './harness.js';
+import { accountLaunch, agentLaunchPlan, assertOutsideWorktrees, atomicPrivateWrite, createdHerdrTab, deliverPrompt, herdrJson, loadMasterConfig, privateFile, reviewerIdentitySchema, reviewerProfileSchema, closeHerdrPane, selectAccount, stopCreatedHerdrTab, type EnvironmentProbe, type PromptDelivery, type MasterConfig, type ReviewerIdentity, type ReviewerProfile } from './master.js';
 import type { Work } from './model.js';
 
 const sha40 = z.string().regex(/^[0-9a-f]{40}$/i);
@@ -121,7 +120,7 @@ export async function saveReviewerProfile(root: string, profileInput: unknown) {
   if (config.reviewers.some(item => item.name === profile.name || item.agentName === profile.agentName)) throw new Error('Reviewer profile name and agent name must be unique');
   if (config.workers.some(item => item.agentName === profile.agentName)) throw new Error('A worker profile already uses that Herdr agent name');
   await atomicPrivateWrite(resolve(root, '.graphyard/master.json'), { ...config, reviewers: [...config.reviewers, profile] });
-  const launch = launchPlan(profile.kind, profile.approvals, profile.agentArgs, profile.environment);
+  const launch = agentLaunchPlan(profile.kind, profile.approvals, profile.agentArgs, profile.environment);
   return { added: profile.name, agentName: profile.agentName, kind: profile.kind, reviewers: config.reviewers.length + 1, launch };
 }
 
@@ -175,6 +174,9 @@ export async function launchReview(root: string, work: Work, profileName: string
   now?: () => Date;
   /** The control-plane review request this launch answers; recorded so the request is never launched twice. */
   requestId?: string;
+  /** How the profile's agent accounts are checked before the launch, and how its prompt is confirmed. */
+  probe?: EnvironmentProbe;
+  prompt?: PromptDelivery;
 } = {}) {
   const now = dependencies.now ?? (() => new Date());
   const config = await loadMasterConfig(root);
@@ -187,6 +189,8 @@ export async function launchReview(root: string, work: Work, profileName: string
   const pending = ledger.reviews.find(record => record.state === 'pending' && record.key === work.key);
   if (pending) throw new Error(`A reviewer session for ${work.key} is already pending on ${pending.sha.slice(0, 7)}; reconcile it with master status before launching another`);
   if (agents.some(agent => agent.name === profile.agentName)) throw new Error(`Reviewer agent ${profile.agentName} is already visible in Herdr`);
+  // Before a token is minted: an exhausted or logged-out account is skipped for the profile's next.
+  const selected = await selectAccount(config, 'reviewer', profile, { ...dependencies.probe, work: work.key });
   const credential = await readReviewerCredential(root, config.reviewer.credentialFile);
   if (credential.appId !== config.reviewer.appId || credential.installationId !== config.reviewer.installationId || credential.slug !== config.reviewer.slug) throw new Error('The stored reviewer credential does not match the recorded reviewer identity; rerun master reviewer bind');
   if (credential.appId === config.githubAppId) throw new Error('The reviewer App must be a different GitHub App from the Graphyard control-plane App');
@@ -195,15 +199,15 @@ export async function launchReview(root: string, work: Work, profileName: string
   const id = randomUUID();
   const sessionDirectory = resolve(dirname(config.reviewer.credentialFile), 'sessions', id);
   await writeReviewerSession(sessionDirectory, minted.token);
-  const launch = launchPlan(profile.kind, profile.approvals, profile.agentArgs, profile.environment);
+  const launch = accountLaunch(profile, selected.account);
   let pane: string | undefined, tabId: string | undefined;
   try {
-    const environment = { ...launch.environment, ...profile.environment, GH_CONFIG_DIR: sessionDirectory, GRAPHYARD_REVIEW: `${binding.key}@${binding.sha}` };
+    const environment = { ...launch.environment, GH_CONFIG_DIR: sessionDirectory, GRAPHYARD_REVIEW: `${binding.key}@${binding.sha}` };
     const created = createdHerdrTab(herdrJson(['tab', 'create', ...(config.herdrWorkspace ? ['--workspace', config.herdrWorkspace] : []), '--cwd', root,
       '--label', `${binding.key} review · ${profile.agentName}`, ...Object.entries(environment).flatMap(([name, value]) => ['--env', `${name}=${value}`]), '--no-focus'], dependencies.run));
     pane = created.pane; tabId = created.tab;
-    herdrJson(['agent', 'start', profile.agentName, '--kind', profile.kind, '--pane', created.pane, '--', ...launch.args], dependencies.run);
-    herdrJson(['agent', 'prompt', profile.agentName, reviewPrompt(config, binding)], dependencies.run);
+    herdrJson(['agent', 'start', profile.agentName, '--kind', launch.kind!, '--pane', created.pane, '--', ...launch.args], dependencies.run);
+    deliverPrompt(profile.agentName, reviewPrompt(config, binding), dependencies.run, dependencies.prompt);
   } catch (error) {
     const malformedTab = (error as any)?.herdrTab as string | undefined;
     if (pane || tabId || malformedTab) try { stopCreatedHerdrTab(pane, tabId ?? malformedTab, dependencies.run); }
@@ -216,7 +220,8 @@ export async function launchReview(root: string, work: Work, profileName: string
     ...(dependencies.requestId ? { requestId: dependencies.requestId } : {}) });
   await saveReviewLedger(root, { ...ledger, reviews: [...ledger.reviews, record] });
   return { review: record.id, requestId: record.requestId ?? null, work: binding.key, pr: binding.pr, sha: binding.sha, baseSha: binding.baseSha, policyRevision: binding.policyRevision, profile: profile.name, agentName: profile.agentName,
-    pane: record.pane, reviewer: `${config.reviewer.slug}[bot]`, tokenExpiresAt: minted.expiresAt, approvals: launch.approvals,
+    pane: record.pane, reviewer: `${config.reviewer.slug}[bot]`, tokenExpiresAt: minted.expiresAt, approvals: launch.plan.approvals,
+    account: selected.account ? { environment: selected.account.name, kind: selected.account.kind, quota: selected.health?.quota ?? null, skipped: selected.skipped } : null,
     recorded: 'the request is recorded; master status reconciles the verdict and closes the session' };
 }
 
