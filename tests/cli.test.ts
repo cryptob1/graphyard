@@ -379,6 +379,18 @@ test('supervisor stops a worker when renewal hangs beyond the granted lease', as
   assert.equal(code, 1); assert.equal(count, 2); assert.ok(performance.now() - started < 2000);
 });
 
+test('Muse remains inside the common supervisor and is terminated on lease loss without server credentials', async () => {
+  const previous = process.env.GRAPHYARD_PRINCIPALS;
+  process.env.GRAPHYARD_PRINCIPALS = 'operator-and-producer-fixture';
+  let renewals = 0;
+  try {
+    const museFixture = "if(process.env.GRAPHYARD_PRINCIPALS)process.exit(9);process.on('SIGTERM',()=>{});setInterval(()=>{},20)";
+    const code = await supervise(process.execPath, ['-e', museFixture], 12,
+      async () => ++renewals === 1 ? { ...renewal(200), lease: { ...renewal(200).lease, epoch: 12 } } : Promise.reject(new Error('lease epoch superseded')), { intervalMs: 25, graceMs: 50 });
+    assert.equal(code, 1); assert.equal(renewals, 2);
+  } finally { if (previous === undefined) delete process.env.GRAPHYARD_PRINCIPALS; else process.env.GRAPHYARD_PRINCIPALS = previous; }
+});
+
 test('supervisor kills surviving descendants even after their group leader exits successfully', async () => {
   const cwd = await mkdtemp(join(tmpdir(), 'graphyard-descendants-')), output = join(cwd, 'ticks');
   const descendant = `const fs=require('node:fs'); process.on('SIGTERM',()=>{}); fs.appendFileSync(${JSON.stringify(output)},'.'); process.send('ready'); setInterval(()=>fs.appendFileSync(${JSON.stringify(output)},'.'),10)`;
