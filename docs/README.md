@@ -30,6 +30,7 @@ The sections below are generated from each page's `<!-- page: Section | order | 
 - [Validation candidates and runner protocol](validation.md) — candidates, dispatch, attempts, and trusted result collection.
 - [The packaged Playwright runner and collector](runner-setup.md) — the packaged Playwright runner, host attestor, and collector.
 - [Releases and observed production delivery](delivery.md) — release builds, approvals, and observed production delivery.
+- [Runner capacity, artifact operations and delivery recovery](recovery.md) — runner capacity, artifact retention and migration, and fenced rollback as an observed workflow.
 
 ## Understand or contribute
 

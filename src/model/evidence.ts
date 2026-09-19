@@ -1,7 +1,7 @@
 import type { Work } from './work.js';
 
 export type ArtifactKind = 'log' | 'report' | 'screenshot' | 'trace' | 'other';
-export type ArtifactAvailability = 'available' | 'expired' | 'redacted' | 'missing' | 'external';
+export type ArtifactAvailability = 'available' | 'expired' | 'redacted' | 'missing' | 'upload-failed' | 'external';
 export interface EvidenceArtifact {
   kind: ArtifactKind; label: string; mediaType?: string; size?: number; digest?: string;
   expiresAt?: string; availability: ArtifactAvailability;
@@ -16,6 +16,11 @@ export interface Evidence {
   executed: number; skipped: number; url?: string; at: string; expiresAt?: string;
   artifacts?: EvidenceArtifact[];
   scenarioRevision?: number; environment?: string;
+  provenance?: {
+    provider: 'github-actions'; repository: string; workflowCommit: string;
+    runId: string; runAttempt: number;
+    artifact: { id: number; name: string; digest: string; url: string; createdAt: string };
+  };
   validation?: { candidateId: string; requestId: string; attemptId: string };
 }
 

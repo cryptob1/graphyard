@@ -5,6 +5,7 @@ import { githubFromEnv, processJob } from '../github.js';
 import { Validation } from '../validation.js';
 import { Delivery } from '../delivery.js';
 import { ProofGrants } from '../proof-grants.js';
+import { artifactBackendFromEnv, artifactCapacityFromEnv } from '../artifacts.js';
 import { principalSchema, server } from './index.js';
 
 /** Process entry: configuration, migration, the HTTP server and the reconciliation tick. */
@@ -17,13 +18,16 @@ export async function main() {
   const engine = new Engine(store, (process.env.GITHUB_CI_APP_IDS ?? '15368').split(',').map(Number));
   engine.reviewerApps = parseReviewerApps(process.env.GRAPHYARD_REVIEWER_APPS);
   const github = await githubFromEnv();
-  const http = server(engine, credentials, github);
+  const artifacts = { backend: artifactBackendFromEnv(), capacityBytes: artifactCapacityFromEnv() };
+  const http = server(engine, credentials, github, artifacts);
   // One-time materialization of the deployment allowlist. Operators manage proof authority
   // inside Graphyard from here on; a later environment edit no longer changes authority.
   const seeded = await new ProofGrants(store, credentials.map(({ token, ...actor }) => actor)).seed();
   if (seeded.length) console.log(`Seeded proof grants for ${seeded.map(grant => grant.principalId).join(', ')}`);
   const validation = new Validation(engine, credentials.map(({ token, ...actor }) => actor), github?.config.repository ?? process.env.GITHUB_REPOSITORY ?? '');
+  validation.artifactBackend = artifacts.backend; validation.artifactCapacityBytes = artifacts.capacityBytes;
   const delivery = new Delivery(validation);
+  console.log(`Artifact storage: ${artifacts.backend?.label ?? 'postgres'}; capacity ${artifacts.capacityBytes} bytes`);
   await validation.expireArtifacts();
   await validation.reconcile(true);
   let running = false;

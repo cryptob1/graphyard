@@ -5,10 +5,19 @@ import { defineCommands } from './registry.js';
 export const validationCommands = defineCommands([
   {
     name: 'validation',
-    help: ['  validation [ACTION file.json] List validation state or submit a protocol command'],
+    help: [
+      '  validation [ACTION file.json] List validation state or submit a protocol command',
+      '  validation capacity          Runner capacity, queue dwell, reserved resources and the',
+      '                                diagnosed next step for every live request',
+      '  validation artifact-migrate TARGET [LIMIT]',
+      '                                Move retained artifacts between postgres and the configured',
+      '                                external backend, verifying each digest (operator)',
+    ],
     async run(context) {
       const { id, args, api, base, print } = context;
       if (!id || id === 'requests') return print(await api('validation' + (args[0] ? `?cursor=${encodeURIComponent(args[0])}` : '')));
+      if (id === 'capacity') return print(await api('validation/capacity'));
+      if (id === 'artifact-migrate' && args[0]) return print(await api('validation/artifacts/migrate', { target: args[0], ...(args[1] ? { limit: Number(args[1]) } : {}) }));
       if (id === 'artifact-upload' && args.length === 1) return print(await api('validation/artifacts', JSON.parse(await readFile(args[0], 'utf8'))));
       if (id === 'artifact-download' && args.length === 3) {
         const token = await context.individualToken(); if (!token) throw new Error('An individual Graphyard credential is required');

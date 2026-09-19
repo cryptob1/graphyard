@@ -28,7 +28,7 @@ flowchart LR
 
 `receipts` stores the result of each successful command under `(principal, idempotency key)` plus a fingerprint of the command. Retries return the original result. A key reused for different input refuses. Read fresh status after replaying an old claim response; an idempotent replay is not a renewed lease.
 
-`releases`, `release_builds`, `release_approvals` and `delivery_observations` are immutable like the event ledger; `delivery_environments` holds each environment's derived delivery state with the observation cursor its sweep resumes from, and `delivery_leases` the epoch each running observer or promoter currently holds.
+`releases`, `release_builds`, `release_approvals` and `delivery_observations` are immutable like the event ledger; `delivery_environments` holds each environment's derived delivery state with the observation cursor its sweep resumes from, and `delivery_leases` the epoch each running observer, promoter or rollback executor currently holds. `delivery_rollbacks` holds each rollback with its single provider operation identity, and `validation_runner_polls` the last dispatch poll per runner registration; `validation_artifacts` rows name their backend, location and retention state whether the bytes live in the row or in an S3-compatible store (see [recovery](recovery.md)).
 
 `jobs` is a durable integration queue, with next-attempt time, owner token, lease expiry, error, and attempt count. It is created transactionally with PR submission. Jobs are processed with Postgres `FOR UPDATE SKIP LOCKED`, then acknowledged with the exact owner token. GitHub calls occur outside coordination transactions.
 

@@ -1,4 +1,4 @@
-<!-- page: Agent protocol | 10 | webhook verification, review-provider changes, re-review, and the work snapshot. -->
+<!-- page: Agent protocol | 11 | webhook verification, review-provider changes, re-review, and the work snapshot. -->
 # GitHub webhook and review providers
 
 `POST /api/github/webhook` uses GitHub HMAC verification instead of a bearer token. It validates the repository and delivery ID, deduplicates deliveries in Postgres, and wakes durable jobs. Own-App check events are ignored to prevent publication loops. The payload never directly marks a gate passed.

@@ -34,5 +34,13 @@ export const deliveryLeases = defineTable({
   name: 'delivery_leases', orderBy: 'registration_id',
   ddl: `CREATE TABLE IF NOT EXISTS delivery_leases (registration_id text PRIMARY KEY, principal text NOT NULL, epoch int NOT NULL, expires_at timestamptz NOT NULL);`,
 });
+export const deliveryRollbacks = defineTable({
+  name: 'delivery_rollbacks', orderBy: 'id',
+  ddl: `CREATE TABLE IF NOT EXISTS delivery_rollbacks (
+  id uuid PRIMARY KEY, environment_id text NOT NULL, generation int NOT NULL, document jsonb NOT NULL,
+  created_at timestamptz NOT NULL DEFAULT clock_timestamp()
+);
+CREATE INDEX IF NOT EXISTS delivery_rollback_environment ON delivery_rollbacks(environment_id,created_at);`,
+});
 
-export const deliveryTables = [releaseBuilds, releases, releaseApprovals, deliveryEnvironments, deliveryObservations, deliveryLeases];
+export const deliveryTables = [releaseBuilds, releases, releaseApprovals, deliveryEnvironments, deliveryObservations, deliveryLeases, deliveryRollbacks];

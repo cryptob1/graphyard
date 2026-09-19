@@ -4,7 +4,7 @@ import { isDeepStrictEqual } from 'node:util';
 import type pg from 'pg';
 import { admin, demand, type Principal, type ReleaseDelivery, type Work } from './model.js';
 import { save } from './store.js';
-import { deliveryPolicy, type Environment, type Registration, type Validation } from './validation.js';
+import { deliveryPolicy, type Environment, type Registration, type RollbackFencing, type Validation } from './validation.js';
 
 const name = z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9._/-]*$/).max(150);
 const digest = z.string().regex(/^sha256:[a-f0-9]{64}$/);
@@ -42,6 +42,33 @@ export type VerificationStatus = 'unselected' | 'unobserved' | 'incomplete' | 'u
 export interface Interval { from: string; to: string }
 export interface ReleaseSelection { generation: number; releaseId: string; releaseRevision: number; policyRevision: number; selectedAt: string; selectedBy: string; outcome: 'selected' | 'verified' | 'skipped'; verifiedAt?: string; interval?: Interval; supersededAt?: string }
 export interface Incident { id: string; generation: number; releaseId: string; releaseRevision: number; at: string; observationId: string; reasons: string[] }
+/**
+ * D4 rollback. A rollback is a selection of a previously verified release plus one external
+ * operation with a durable identity. It is requested, claimed by a registered executor,
+ * settled with the executor's outcome, and complete only once the target is observed running
+ * and the environment verifies — `applied` is the provider's word, `verified` is Graphyard's.
+ */
+export type RollbackState = 'requested' | 'in-flight' | 'applied' | 'failed' | 'unknown' | 'verified' | 'cancelled' | 'superseded';
+export interface RollbackReport { at: string; actor: string; outcome: 'applied' | 'failed' | 'unknown'; providerOperationId: string | null; detail: string | null; authoritative: boolean; reasons: string[] }
+export interface RollbackOperation {
+  id: string; registration: { id: string; revision: number }; principal: string; epoch: number; fencing: RollbackFencing; claimedAt: string;
+  /** What the provider write must be conditioned on: the manifest that should still be running, and the generation this operation acts for. */
+  precondition: { environment: string; generation: number; expectedRunning: string; token: string };
+  outcome: 'applied' | 'failed' | 'unknown' | 'cancelled' | null; settledAt: string | null; providerOperationId: string | null; detail: string | null;
+  resolvedBy: string | null; evidence: string | null; reports: RollbackReport[];
+}
+export interface RollbackRequest {
+  id: string; environmentId: string; environmentRevision: number; generation: number;
+  failed: { releaseId: string; releaseRevision: number; generation: number; manifestHash: string; incidentIds: string[] };
+  target: { releaseId: string; releaseRevision: number; manifestHash: string; approvalId: string | null; verifiedAt: string };
+  reason: string; automatic: boolean; requestedBy: string; requestedAt: string; repairWorkId: string | null;
+  state: RollbackState; operation: RollbackOperation | null; verifiedAt: string | null; interval: Interval | null;
+  history: { at: string; state: RollbackState; actor: string; note: string }[];
+}
+export const rollbackSchema = z.object({ environment: ref, target: ref, expectedGeneration: generation, reason: z.string().trim().min(1).max(2000), repairWorkId: z.uuid().optional(), delegate: delegateSchema.optional() }).strict();
+export const rollbackClaimSchema = z.object({ rollbackId: z.uuid(), registration: ref, epoch: revision }).strict();
+export const rollbackSettleSchema = z.object({ rollbackId: z.uuid(), operationId: z.uuid(), registration: ref, epoch: revision, outcome: z.enum(['applied', 'failed', 'unknown']), providerOperationId: z.string().trim().min(1).max(200).optional(), detail: z.string().trim().max(2000).optional() }).strict();
+export const rollbackResolveSchema = z.object({ rollbackId: z.uuid(), operationId: z.uuid().optional(), outcome: z.enum(['applied', 'failed', 'cancelled']), reason: z.string().trim().min(1).max(2000), evidence: z.url().max(2000).optional() }).strict();
 export interface EnvironmentDelivery {
   environmentId: string; generation: number;
   expected: { releaseId: string; releaseRevision: number; manifestHash: string; buildId: string; policyRevision: number; approvalId: string | null; selectedAt: string; selectedBy: string } | null;
@@ -53,6 +80,8 @@ export interface EnvironmentDelivery {
   /** The last observation sequence applied. Sweeps resume from here. */
   cursor: number;
   lastNotification?: { at: string; provider: string; payloadHash: string };
+  /** Why the sweep last declined to roll back automatically, so the refusal is visible without an event per tick. */
+  automaticRollbackRefusal?: { at: string; generation: number; reasons: string[] };
 }
 const hash = (v: unknown) => createHash('sha256').update(JSON.stringify(v)).digest('hex');
 const same = isDeepStrictEqual;
@@ -182,7 +211,7 @@ export class Delivery {
     const data = leaseSchema.parse(input);
     return this.store.transaction(async (db, now) => {
       const registration = await this.validation.definition(db, 'registration', data.registration) as Registration;
-      demand(registration.enabled && (registration.role === 'observer' || registration.role === 'promoter') && registration.principalId === actor.id, 'Registration is not an enabled deployment identity of this principal', 403);
+      demand(registration.enabled && ['observer', 'promoter', 'rollback'].includes(registration.role) && registration.principalId === actor.id, 'Registration is not an enabled deployment identity of this principal', 403);
       await this.environment(db, registration.environment);
       const current = (await db.query('SELECT principal,epoch,expires_at FROM delivery_leases WHERE registration_id=$1', [registration.id])).rows[0];
       // Renewal keeps the epoch; anything else — first acquisition, expiry, a stale renewal — is a new epoch that supersedes outstanding authority.
@@ -263,31 +292,241 @@ export class Delivery {
       const state = await this.state(db, environment.id);
       demand(state.generation === data.expectedGeneration, 'Release generation changed; read the current selection');
       const release = await this.release(db, data.release);
-      demand(release.environment.id === environment.id && release.environment.revision === environment.revision, 'Release was defined for a different environment or policy revision');
-      const policy = deliveryPolicy(environment);
-      let approval: ReleaseApproval | null = null;
-      if (policy.approvalRequired || data.approvalId) {
-        demand(data.approvalId, 'This environment requires an operator approval of the release');
-        approval = (await db.query('SELECT document FROM release_approvals WHERE id=$1', [data.approvalId])).rows[0]?.document as ReleaseApproval | undefined ?? null;
-        demand(approval && approval.releaseId === release.id && approval.releaseRevision === release.revision && approval.manifestHash === release.manifestHash && approval.buildId === release.buildId
-          && approval.environment.id === environment.id && approval.policyRevision === environment.revision, 'Approval does not bind this exact release revision, manifest, provenance and policy revision');
-      }
-      const at = now.toISOString();
-      for (const previous of state.history.filter(h => h.generation === state.generation && !h.supersededAt)) {
-        previous.supersededAt = at;
-        // Superseded is not unhealthy: a release that was never verified is skipped, one that was keeps its verification.
-        if (previous.outcome === 'selected') previous.outcome = 'skipped';
-      }
-      state.generation += 1;
-      state.expected = { releaseId: release.id, releaseRevision: release.revision, manifestHash: release.manifestHash, buildId: release.buildId, policyRevision: environment.revision, approvalId: approval?.id ?? null, selectedAt: at, selectedBy: actor.id };
-      state.history.push({ generation: state.generation, releaseId: release.id, releaseRevision: release.revision, policyRevision: environment.revision, selectedAt: at, selectedBy: actor.id, outcome: 'selected' });
-      if (state.history.length > historyLimit) state.history.splice(0, state.history.length - historyLimit);
-      state.coverage = {};
-      state.verification = { generation: state.generation, status: 'unobserved', reasons: [`No authoritative observation for generation ${state.generation} yet`], interval: null, evaluatedAt: at, verifiedAt: null };
-      await this.persist(db, state);
+      const approval = await this.approvalFor(db, environment, release, data.approvalId);
+      await this.applySelection(db, state, environment, release, approval, actor.id, now, 'Selected as the expected release');
       await this.event(db, actor.id, 'selected', { environment: environment.id, generation: state.generation, release: data.release, approvalId: approval?.id ?? null, delegate: data.delegate ?? null });
       return state;
     });
+  }
+  /** The approval a selection needs: one that binds this exact release revision, manifest, build and policy revision, when the policy asks for one. */
+  private async approvalFor(db: pg.PoolClient, environment: Environment, release: Release, approvalId?: string) {
+    demand(release.environment.id === environment.id && release.environment.revision === environment.revision, 'Release was defined for a different environment or policy revision');
+    const policy = deliveryPolicy(environment);
+    if (!policy.approvalRequired && !approvalId) return null;
+    demand(approvalId, 'This environment requires an operator approval of the release');
+    const approval = (await db.query('SELECT document FROM release_approvals WHERE id=$1', [approvalId])).rows[0]?.document as ReleaseApproval | undefined ?? null;
+    demand(approval && this.approvalBinds(approval, environment, release), 'Approval does not bind this exact release revision, manifest, provenance and policy revision');
+    return approval;
+  }
+  private approvalBinds(approval: ReleaseApproval, environment: Environment, release: Release) {
+    return approval.releaseId === release.id && approval.releaseRevision === release.revision && approval.manifestHash === release.manifestHash && approval.buildId === release.buildId && approval.environment.id === environment.id && approval.policyRevision === environment.revision;
+  }
+  /**
+   * Advance the generation to a new expected release. Refused while a serialized rollback
+   * operation is unresolved: without a provider-side fence, only a settled or cancelled
+   * operation makes it safe to authorize a successor mutation or supersede its target.
+   */
+  private async applySelection(db: pg.PoolClient, state: EnvironmentDelivery, environment: Environment, release: Release, approval: ReleaseApproval | null, actor: string, now: Date, note: string) {
+    await this.assertNoSerializedOperation(db, environment.id);
+    const at = now.toISOString();
+    for (const previous of state.history.filter(h => h.generation === state.generation && !h.supersededAt)) {
+      previous.supersededAt = at;
+      // Superseded is not unhealthy: a release that was never verified is skipped, one that was keeps its verification.
+      if (previous.outcome === 'selected') previous.outcome = 'skipped';
+    }
+    // Rollbacks of the superseded generation that never completed lose their target; the
+    // operation records stay, so a late outcome from a partitioned executor is history only.
+    for (const rollback of await this.rollbacks(db, environment.id, state.generation)) {
+      if (['requested', 'in-flight', 'unknown', 'applied'].includes(rollback.state)) {
+        await this.transition(db, rollback, 'superseded', actor, `Generation ${state.generation} superseded by a newer selection`, now);
+      }
+    }
+    state.generation += 1;
+    state.expected = { releaseId: release.id, releaseRevision: release.revision, manifestHash: release.manifestHash, buildId: release.buildId, policyRevision: environment.revision, approvalId: approval?.id ?? null, selectedAt: at, selectedBy: actor };
+    state.history.push({ generation: state.generation, releaseId: release.id, releaseRevision: release.revision, policyRevision: environment.revision, selectedAt: at, selectedBy: actor, outcome: 'selected' });
+    if (state.history.length > historyLimit) state.history.splice(0, state.history.length - historyLimit);
+    state.coverage = {};
+    state.verification = { generation: state.generation, status: 'unobserved', reasons: [`No authoritative observation for generation ${state.generation} yet`, note], interval: null, evaluatedAt: at, verifiedAt: null };
+    delete state.automaticRollbackRefusal;
+    await this.persist(db, state);
+  }
+  private async rollbacks(db: pg.PoolClient, environmentId: string, generation?: number): Promise<RollbackRequest[]> {
+    return (await db.query('SELECT document FROM delivery_rollbacks WHERE environment_id=$1 AND ($2::int IS NULL OR generation=$2) ORDER BY created_at,id', [environmentId, generation ?? null])).rows.map(r => r.document);
+  }
+  private async rollback(db: pg.PoolClient, id: string): Promise<RollbackRequest> {
+    const found = (await db.query('SELECT document FROM delivery_rollbacks WHERE id=$1', [id])).rows[0]?.document as RollbackRequest | undefined;
+    demand(found, 'Rollback not found', 404); return found!;
+  }
+  private async persistRollback(db: pg.PoolClient, rollback: RollbackRequest) {
+    await db.query('INSERT INTO delivery_rollbacks(id,environment_id,generation,document) VALUES($1,$2,$3,$4) ON CONFLICT(id) DO UPDATE SET document=EXCLUDED.document', [rollback.id, rollback.environmentId, rollback.generation, JSON.stringify(rollback)]);
+  }
+  private async transition(db: pg.PoolClient, rollback: RollbackRequest, state: RollbackState, actor: string, note: string, now: Date) {
+    rollback.state = state; rollback.history.push({ at: now.toISOString(), state, actor, note });
+    await this.persistRollback(db, rollback);
+    await this.event(db, actor, `rollback-${state}`, { rollbackId: rollback.id, environment: rollback.environmentId, generation: rollback.generation, operationId: rollback.operation?.id ?? null, note });
+  }
+  /**
+   * The serialized in-flight barrier: an operation whose provider cannot fence writes blocks
+   * every successor until it is proven settled or cancelled. An unknown outcome blocks
+   * whatever the fencing — nobody knows what the provider did, so nothing may build on it.
+   */
+  private async assertNoSerializedOperation(db: pg.PoolClient, environmentId: string) {
+    for (const rollback of await this.rollbacks(db, environmentId)) {
+      if (!['in-flight', 'unknown'].includes(rollback.state) || rollback.state === 'in-flight' && rollback.operation?.fencing === 'provider') continue;
+      demand(false, `Rollback ${rollback.id} has an unresolved ${rollback.operation?.fencing ?? 'serialized'} operation ${rollback.operation?.id} (${rollback.state}); no successor mutation or selection is authorized until it is settled by its executor or resolved by an operator with evidence`, 409);
+    }
+  }
+  /**
+   * Request a rollback: select a previously verified release of this environment as the
+   * expected one and open the operation record an executor will claim. The target is an
+   * approved, tested reversible action — a release revision that verified here before, with
+   * an approval that still binds it where the policy requires one. A rollback never claims
+   * that migrations or external side effects are undone; the record links the repair work.
+   */
+  async requestRollback(actor: Principal, input: unknown, key: string) {
+    const data = rollbackSchema.parse(input);
+    return this.withReceipt(actor, 'rollback', data, key, async (db, now) => {
+      const environment = await this.environment(db, data.environment);
+      await this.promoter(db, actor, environment, data.delegate, now);
+      const state = await this.state(db, environment.id);
+      demand(state.generation === data.expectedGeneration, 'Release generation changed; read the current selection');
+      demand(state.expected, 'No expected release is selected; there is nothing to roll back from');
+      const target = await this.release(db, data.target);
+      demand(target.environment.id === environment.id && target.environment.revision === environment.revision, 'Rollback target was defined for a different environment or policy revision');
+      const verified = state.history.filter(h => h.releaseId === target.id && h.releaseRevision === target.revision && h.outcome === 'verified').at(-1);
+      demand(verified, 'A rollback target must be a release revision that was verified in this environment before', 409);
+      demand(!(state.expected!.releaseId === target.id && state.expected!.releaseRevision === target.revision), 'The target is already the expected release');
+      const approval = await this.approvalForTarget(db, environment, target);
+      if (data.repairWorkId) demand((await db.query('SELECT 1 FROM work_items WHERE id=$1', [data.repairWorkId])).rowCount, 'Repair work item not found', 404);
+      return this.openRollback(db, state, environment, target, approval, verified!.verifiedAt!, actor.id, data.reason, false, data.repairWorkId ?? null, now);
+    });
+  }
+  private async approvalForTarget(db: pg.PoolClient, environment: Environment, target: Release) {
+    if (!deliveryPolicy(environment).approvalRequired) return null;
+    const approvals: ReleaseApproval[] = (await db.query("SELECT document FROM release_approvals WHERE document->>'releaseId'=$1 ORDER BY document->>'at' DESC", [target.id])).rows.map(r => r.document);
+    const approval = approvals.find(a => this.approvalBinds(a, environment, target));
+    demand(approval, 'The rollback target has no approval binding the current policy revision; approve it again first', 409);
+    return approval!;
+  }
+  private async openRollback(db: pg.PoolClient, state: EnvironmentDelivery, environment: Environment, target: Release, approval: ReleaseApproval | null, verifiedAt: string, actor: string, reason: string, automatic: boolean, repairWorkId: string | null, now: Date) {
+    const failed = { releaseId: state.expected!.releaseId, releaseRevision: state.expected!.releaseRevision, generation: state.generation, manifestHash: state.expected!.manifestHash, incidentIds: state.incidents.filter(i => i.generation === state.generation).map(i => i.id) };
+    await this.applySelection(db, state, environment, target, approval, actor, now, `Rollback to ${target.id} r${target.revision} requested; awaiting an executor and then observation of the target`);
+    const at = now.toISOString();
+    const rollback: RollbackRequest = { id: randomUUID(), environmentId: environment.id, environmentRevision: environment.revision, generation: state.generation, failed,
+      target: { releaseId: target.id, releaseRevision: target.revision, manifestHash: target.manifestHash, approvalId: approval?.id ?? null, verifiedAt }, reason, automatic, requestedBy: actor, requestedAt: at, repairWorkId,
+      state: 'requested', operation: null, verifiedAt: null, interval: null, history: [{ at, state: 'requested', actor, note: reason }] };
+    await this.persistRollback(db, rollback);
+    await this.event(db, actor, 'rollback-requested', { rollbackId: rollback.id, environment: environment.id, generation: rollback.generation, failed, target: rollback.target, automatic, repairWorkId }, repairWorkId ?? undefined);
+    return rollback;
+  }
+  /** The executor registration the caller acts through: enabled, current, the caller's own, covering the whole environment, with a live lease. */
+  private async executor(db: pg.PoolClient, actor: Principal, selected: { id: string; revision: number }, environmentId: string, epoch: number, now: Date) {
+    demand(actor.role === 'producer', 'A rollback executor credential is required', 403);
+    const registration = await this.validation.registration(db, selected, 'rollback');
+    demand(registration.principalId === actor.id, 'Wrong rollback executor principal', 403);
+    const environment = await this.environment(db, registration.environment);
+    demand(environment.id === environmentId && same([...registration.services!].sort(), [...environment.services].sort()), 'Rollback executor must be registered for the whole environment', 403);
+    await this.assertLease(db, registration, actor, epoch, now, 'Executor lease epoch is expired or superseded; acquire the lease again');
+    return registration;
+  }
+  /**
+   * Claim the operation. One executor holds it; a retry from the same executor — after a
+   * restart, with a fresh idempotency key — gets the same operation identity back rather than
+   * a second one, so the provider sees one operation however many times the claim is sent.
+   */
+  async claimRollback(actor: Principal, input: unknown, key: string) {
+    const data = rollbackClaimSchema.parse(input);
+    return this.withReceipt(actor, 'rollback-claim', data, key, async (db, now) => {
+      const rollback = await this.rollback(db, data.rollbackId);
+      const registration = await this.executor(db, actor, data.registration, rollback.environmentId, data.epoch, now);
+      const target = await this.release(db, { id: rollback.target.releaseId, revision: rollback.target.releaseRevision });
+      const grant = (operation: RollbackOperation) => ({ rollback, operation, target: { release: { id: target.id, revision: target.revision }, sourceSha: target.sourceSha, manifest: target.manifest } });
+      if (rollback.state === 'in-flight' && rollback.operation?.principal === actor.id && rollback.operation.registration.id === data.registration.id) return grant(rollback.operation);
+      const state = await this.state(db, rollback.environmentId);
+      demand(state.generation === rollback.generation && rollback.state !== 'superseded', 'Rollback target was superseded by a newer selection; nothing may apply it', 409);
+      demand(rollback.state === 'requested', `Rollback is ${rollback.state}${rollback.operation ? ` under operation ${rollback.operation.id} held by ${rollback.operation.principal}` : ''}`, 409);
+      demand(!rollback.automatic || registration.rollback!.automatic && registration.rollback!.fencing !== 'none', 'An automatic rollback may only be executed by a fenced adapter registered for automatic rollback', 403);
+      for (const other of await this.rollbacks(db, rollback.environmentId)) demand(other.id === rollback.id || !['in-flight', 'unknown'].includes(other.state), `Rollback ${other.id} has an unresolved operation ${other.operation?.id} (${other.state}); one operation at a time per environment`, 409);
+      const id = randomUUID();
+      const operation: RollbackOperation = { id, registration: data.registration, principal: actor.id, epoch: data.epoch, fencing: registration.rollback!.fencing, claimedAt: now.toISOString(),
+        precondition: { environment: rollback.environmentId, generation: rollback.generation, expectedRunning: rollback.failed.manifestHash, token: hash([rollback.environmentId, rollback.generation, id]) },
+        outcome: null, settledAt: null, providerOperationId: null, detail: null, resolvedBy: null, evidence: null, reports: [] };
+      rollback.operation = operation;
+      await this.transition(db, rollback, 'in-flight', actor.id, `Claimed by ${data.registration.id} with ${operation.fencing} fencing`, now);
+      return grant(operation);
+    });
+  }
+  /**
+   * The executor's outcome. It is accepted only for the operation that was claimed, from the
+   * executor that claimed it, under a lease that is current now: a partitioned executor
+   * re-acquires its lease and reports against the same operation identity. A report for a
+   * superseded target is kept as non-authoritative history — the provider fence is what
+   * stopped the write, and Graphyard records what the executor says happened either way.
+   */
+  async settleRollback(actor: Principal, input: unknown, key: string) {
+    const data = rollbackSettleSchema.parse(input);
+    return this.withReceipt(actor, 'rollback-settle', data, key, async (db, now) => {
+      const rollback = await this.rollback(db, data.rollbackId), operation = rollback.operation;
+      demand(operation && operation.id === data.operationId, 'Operation identity differs from the claimed operation', 403);
+      demand(operation!.principal === actor.id && operation!.registration.id === data.registration.id, 'Wrong rollback executor for this operation', 403);
+      await this.executor(db, actor, data.registration, rollback.environmentId, data.epoch, now);
+      const state = await this.state(db, rollback.environmentId);
+      const reasons: string[] = [];
+      if (rollback.state === 'superseded' || state.generation !== rollback.generation) reasons.push('Rollback target was superseded by a newer selection; the outcome is recorded but authorizes nothing');
+      else if (!['in-flight', 'unknown'].includes(rollback.state)) reasons.push(`Rollback is already ${rollback.state}; the report is recorded as history only`);
+      const report: RollbackReport = { at: now.toISOString(), actor: actor.id, outcome: data.outcome, providerOperationId: data.providerOperationId ?? null, detail: data.detail ?? null, authoritative: !reasons.length, reasons };
+      operation!.reports.push(report);
+      if (report.authoritative) {
+        Object.assign(operation!, { outcome: data.outcome, settledAt: report.at, providerOperationId: report.providerOperationId, detail: report.detail });
+        await this.transition(db, rollback, data.outcome, actor.id, data.outcome === 'applied' ? 'Provider reports the target applied; awaiting observation of the target' : data.outcome === 'failed' ? 'Provider operation failed; the barrier is released' : 'Outcome unknown; further mutations are blocked pending reconciliation', now);
+      } else { await this.persistRollback(db, rollback); await this.event(db, actor.id, 'rollback-report-rejected', { rollbackId: rollback.id, operationId: operation!.id, report }); }
+      return { accepted: report.authoritative, state: rollback.state, reasons };
+    });
+  }
+  /** Operator resolution of an operation whose executor is gone or whose outcome is ambiguous; settlement evidence is required to declare an outcome. */
+  async resolveRollback(actor: Principal, input: unknown, key: string) {
+    admin(actor); const data = rollbackResolveSchema.parse(input);
+    return this.withReceipt(actor, 'rollback-resolve', data, key, async (db, now) => {
+      const rollback = await this.rollback(db, data.rollbackId);
+      if (rollback.state === 'requested') {
+        demand(data.outcome === 'cancelled', 'An unclaimed rollback can only be cancelled', 409);
+        await this.transition(db, rollback, 'cancelled', actor.id, data.reason, now); return rollback;
+      }
+      demand(['in-flight', 'unknown'].includes(rollback.state), `Rollback is ${rollback.state}; only an in-flight or unknown operation can be resolved`, 409);
+      demand(rollback.operation && (!data.operationId || rollback.operation.id === data.operationId), 'Operation identity differs', 409);
+      demand(data.evidence, 'Resolving an operation requires settlement evidence: a URL to the independent provider record that proves its outcome', 400);
+      Object.assign(rollback.operation!, { outcome: data.outcome, settledAt: now.toISOString(), resolvedBy: actor.id, evidence: data.evidence, detail: data.reason });
+      await this.transition(db, rollback, data.outcome, actor.id, `Resolved by operator with evidence ${data.evidence}: ${data.reason}`, now);
+      return rollback;
+    });
+  }
+  /**
+   * Automatic rollback, opt-in per environment: when a verified generation degrades, select
+   * the most recent release that verified here before — with its approval still binding —
+   * and open the operation for a registered automatic, fenced executor. Anything missing is
+   * a visible refusal on the environment, never a guess.
+   */
+  private async automaticRollback(db: pg.PoolClient, state: EnvironmentDelivery, now: Date) {
+    const environment = await this.validation.definition(db, 'environment', { id: state.environmentId, revision: state.expected!.policyRevision }, false) as Environment;
+    if (!deliveryPolicy(environment).automaticRollback) return;
+    if ((await this.rollbacks(db, environment.id, state.generation)).length) return;
+    const reasons: string[] = [];
+    const registrations: Registration[] = (await db.query("SELECT DISTINCT ON (id) document FROM validation_definitions WHERE kind='registration' ORDER BY id,revision DESC")).rows.map(r => r.document);
+    const executors = registrations.filter(r => r.role === 'rollback' && r.enabled && r.environment.id === environment.id && r.environment.revision === environment.revision && r.rollback?.automatic && r.rollback.fencing !== 'none' && same([...r.services!].sort(), [...environment.services].sort()));
+    if (!executors.length) reasons.push('Automatic rollback refused: no enabled rollback adapter with provider or serialized fencing is registered for automatic rollback across this environment');
+    const previous = [...state.history].reverse().find(h => h.outcome === 'verified' && !(h.releaseId === state.expected!.releaseId && h.releaseRevision === state.expected!.releaseRevision));
+    if (!previous) reasons.push('Automatic rollback refused: no earlier release verified in this environment to roll back to');
+    let target: Release | null = null, approval: ReleaseApproval | null = null;
+    if (previous) {
+      target = (await db.query('SELECT document FROM releases WHERE id=$1 AND revision=$2', [previous.releaseId, previous.releaseRevision])).rows[0]?.document ?? null;
+      if (!target || target.environment.revision !== environment.revision) reasons.push('Automatic rollback refused: the previously verified release is not defined for the current policy revision');
+      else try { approval = await this.approvalForTarget(db, environment, target); } catch (error) { reasons.push(`Automatic rollback refused: ${(error as Error).message}`); }
+    }
+    try { await this.assertNoSerializedOperation(db, environment.id); } catch (error) { reasons.push(`Automatic rollback refused: ${(error as Error).message}`); }
+    if (reasons.length) {
+      if (!same(state.automaticRollbackRefusal?.reasons, reasons) || state.automaticRollbackRefusal?.generation !== state.generation) await this.event(db, 'graphyard', 'rollback-refused', { environment: environment.id, generation: state.generation, reasons });
+      state.automaticRollbackRefusal = { at: now.toISOString(), generation: state.generation, reasons };
+      state.verification.reasons.push(...reasons); return;
+    }
+    await this.openRollback(db, state, environment, target!, approval, previous!.verifiedAt!, 'graphyard', `Automatic rollback: generation ${state.generation - 1} degraded after verification`, true, null, now);
+  }
+  /** A rollback completes only when Graphyard verifies the generation it selected: the target observed running across the manifest, healthy, with measured identity and a fresh common interval. */
+  private async completeRollbacks(db: pg.PoolClient, state: EnvironmentDelivery, now: Date) {
+    for (const rollback of await this.rollbacks(db, state.environmentId, state.generation)) {
+      if (rollback.state !== 'applied') continue;
+      rollback.verifiedAt = state.verification.verifiedAt; rollback.interval = state.verification.interval;
+      await this.transition(db, rollback, 'verified', 'graphyard', `Target ${rollback.target.releaseId} r${rollback.target.releaseRevision} observed running and verified over ${state.verification.interval?.from} → ${state.verification.interval?.to}`, now);
+    }
   }
   /**
    * Ingest one observation from a service-scoped observer. Everything about who observed
@@ -355,6 +594,8 @@ export class Delivery {
         const manifest = await this.manifest(db, state);
         for (const row of batch) { if (manifest) fold(state, row.document as DeploymentObservation, manifest); state.cursor = Number(row.seq); applied++; }
         await this.evaluate(db, state, manifest, now);
+        if (state.verification.verifiedAt && state.verification.generation === state.generation && ['verified', 'stale'].includes(state.verification.status)) await this.completeRollbacks(db, state, now);
+        if (state.verification.status === 'degraded') await this.automaticRollback(db, state, now);
         if (JSON.stringify(state) !== before) await this.persist(db, state);
       }
       return { environments: states.length, applied, complete };
@@ -415,8 +656,9 @@ export class Delivery {
   async status() {
     const environments: EnvironmentDelivery[] = (await this.store.pool.query('SELECT document FROM delivery_environments ORDER BY environment_id')).rows.map(r => r.document);
     const releases: Release[] = (await this.store.pool.query('SELECT document FROM releases ORDER BY id,revision DESC')).rows.map(r => r.document);
+    const rollbacks: RollbackRequest[] = (await this.store.pool.query('SELECT document FROM delivery_rollbacks ORDER BY created_at DESC,id DESC LIMIT 200')).rows.map(r => r.document);
     const now = (await this.store.pool.query('SELECT clock_timestamp() AS now')).rows[0].now as Date;
-    return { environments, releases: releases.slice(0, 200), now: now.toISOString() };
+    return { environments, releases: releases.slice(0, 200), rollbacks, now: now.toISOString() };
   }
   async observations(environmentId: string, cursor?: string) {
     name.parse(environmentId);

@@ -41,6 +41,18 @@ export interface AssignmentIdentity { owner: string; epoch: number; displayName?
 export interface Lease { owner: string; epoch: number; expiresAt: string }
 export interface Workspace { host: string; path: string; branch: string; epoch: number; owner: string }
 export interface Candidate { sha: string; baseSha: string; pr: number; branch: string; author: string }
+/**
+ * One file the candidate changes, as the provider reports it against the merge base, together
+ * with the blob the candidate's bound base (the base branch tip, or a speculative tip's predicted
+ * base) holds at the same path. `baseSha` is null when that base has no such file and undefined
+ * when the observation never compared it (a file inside the planned scope, or an observation
+ * recorded before the regression guard existed).
+ */
+export interface ScopeFile {
+  path: string; status: 'added' | 'modified' | 'removed' | 'renamed' | 'copied' | 'changed' | 'unchanged';
+  previousPath?: string; sha: string | null; additions: number; deletions: number; binary: boolean;
+  baseSha?: string | null; previousBaseSha?: string | null;
+}
 export interface Observation {
   clockOffset?: { min: number; max: number };
   reviewIds?: number[];
@@ -53,6 +65,8 @@ export interface Observation {
   // base so a speculative binding never hides where the managed branch actually points.
   baseTip?: string; baseTree?: string;
   protected: boolean; files: string[]; at: string;
+  /** The candidate diff compared against its bound base; see regression-guard.ts. */
+  scopeFiles?: ScopeFile[];
 }
 export interface Gate { name: string; passed: boolean; reasons: string[] }
 export interface Escalation { trigger: EscalationTrigger; reason: string; at: string; actor: string }

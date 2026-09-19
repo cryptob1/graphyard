@@ -1,4 +1,4 @@
-<!-- page: Agent protocol | 9 | deferring a proof onto the contract the change introduces, and the obligation it leaves. -->
+<!-- page: Agent protocol | 10 | deferring a proof onto the contract the change introduces, and the obligation it leaves. -->
 # Bootstrap mode for a change that introduces its own proof harness
 
 A criterion whose proof does not yet exist cannot be proven by the change that creates it: the

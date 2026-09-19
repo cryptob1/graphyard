@@ -35,11 +35,24 @@ export const validationArtifacts = defineTable({
   media_type text NOT NULL, bytes bytea, deleted_at timestamptz,
   UNIQUE(request_id,attempt_id,name)
 );
-CREATE INDEX IF NOT EXISTS validation_artifact_expiry ON validation_artifacts(expires_at) WHERE bytes IS NOT NULL;`,
+CREATE INDEX IF NOT EXISTS validation_artifact_expiry ON validation_artifacts(expires_at) WHERE bytes IS NOT NULL;
+ALTER TABLE validation_artifacts ADD COLUMN IF NOT EXISTS backend text NOT NULL DEFAULT 'postgres';
+ALTER TABLE validation_artifacts ADD COLUMN IF NOT EXISTS location text;
+ALTER TABLE validation_artifacts ADD COLUMN IF NOT EXISTS state text NOT NULL DEFAULT 'stored';
+ALTER TABLE validation_artifacts ADD COLUMN IF NOT EXISTS size bigint;
+UPDATE validation_artifacts SET size=octet_length(bytes) WHERE size IS NULL AND bytes IS NOT NULL;
+UPDATE validation_artifacts SET state='expired' WHERE state='stored' AND backend='postgres' AND bytes IS NULL;
+CREATE INDEX IF NOT EXISTS validation_artifact_retained ON validation_artifacts(expires_at) WHERE state='stored';`,
+});
+export const validationRunnerPolls = defineTable({
+  name: 'validation_runner_polls', orderBy: 'registration_id',
+  ddl: `CREATE TABLE IF NOT EXISTS validation_runner_polls (
+  registration_id text PRIMARY KEY, principal text NOT NULL, polled_at timestamptz NOT NULL, granted_request_id uuid
+);`,
 });
 export const validationResources = defineTable({
   name: 'validation_resources', orderBy: 'resource',
   ddl: `CREATE TABLE IF NOT EXISTS validation_resources (resource text PRIMARY KEY, request_id uuid NOT NULL REFERENCES validation_requests(id));`,
 });
 
-export const validationTables = [validationDefinitions, validationBuilds, validationCandidates, validationRequests, validationArtifacts, validationResources];
+export const validationTables = [validationDefinitions, validationBuilds, validationCandidates, validationRequests, validationArtifacts, validationRunnerPolls, validationResources];

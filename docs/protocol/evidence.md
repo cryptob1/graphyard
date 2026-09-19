@@ -1,4 +1,4 @@
-<!-- page: Agent protocol | 8 | evidence submission, proof authority grants, and the post-deployment smoke proof. -->
+<!-- page: Agent protocol | 9 | evidence submission, proof authority grants, and the post-deployment smoke proof. -->
 # Evidence and proof authority
 
 ```json

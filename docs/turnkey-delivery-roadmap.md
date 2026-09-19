@@ -142,6 +142,8 @@ Acceptance checks:
 
 ## D4 — Operate runners and recover delivery failures
 
+*Shipped as capacity reporting, request diagnostics and backpressure on the runner path, an artifact backend interface with an S3-compatible option, capacity bound, verified retention and digest-checked migration, and the authorized, fenced, observed rollback workflow. See [runner capacity, artifact operations and delivery recovery](recovery.md). The requirements below remain the standard this path is held to; the acceptance checks at the end of this section are the ones `tests/recovery.test.ts` runs, one named test per check.*
+
 Extend the execution-resource safety shipped in D2 with capacity reporting, backpressure, queue dwell and richer dispatch/heartbeat diagnostics. Execution-scoped leases, external fencing and verified settlement before reassignment are D2 prerequisites; D4 adds operational scale without relaxing those guarantees.
 
 Extend D2's already-shipped private artifact storage, access controls, hashes, retention and redaction with a documented backend interface, capacity management, S3-compatible options and operational recovery. Backend migrations must preserve authorization and retention policies, and verify artifact integrity. Baseline security and durable storage are prerequisites from D2, not deferred to this increment.

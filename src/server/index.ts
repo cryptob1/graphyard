@@ -9,6 +9,7 @@ import { Delivery } from '../delivery.js';
 import { OperatorAgents } from '../operator-agent.js';
 import { delegationLimits, validateDelegationPrincipals } from '../delegation.js';
 import { ProofGrants } from '../proof-grants.js';
+import { artifactCapacityFromEnv, type ArtifactBackend } from '../artifacts.js';
 import { Next, Sent, matchRoute, type RouteContext, type RouteModule, type Services } from './routes.js';
 import { authenticate, operatorAgentRouteGuard, operatorVisible } from './auth.js';
 import { healthRoutes } from './routes/health.js';
@@ -46,7 +47,10 @@ async function body(req: IncomingMessage, limit = 1_000_000) {
 }
 
 /** Wire the engine, its integrations and the configured principals into the shared services. */
-export function assembleServices(engine: Engine, credentials: Credential[], github: GitHub | null): Services {
+/** Where retained validation artifacts live and how much the postgres backend may hold. */
+export interface ArtifactOptions { backend: ArtifactBackend | null; capacityBytes: number }
+
+export function assembleServices(engine: Engine, credentials: Credential[], github: GitHub | null, artifacts: ArtifactOptions = { backend: null, capacityBytes: artifactCapacityFromEnv() }): Services {
   const limits = delegationLimits();
   validateDelegationPrincipals(credentials, limits);
   const principals = credentials.map(({ token, ...actor }) => ({ actor, hash: createHash('sha256').update(token).digest() }));
@@ -67,6 +71,7 @@ export function assembleServices(engine: Engine, credentials: Credential[], gith
   demand(!engine.reviewerApps.some(app => app.appId === engine.controlPlaneAppId),
     'A registered reviewer App must be distinct from the Graphyard control-plane App');
   const validation = new Validation(engine, principals.map(p => p.actor), repository);
+  validation.artifactBackend = artifacts.backend; validation.artifactCapacityBytes = artifacts.capacityBytes;
   const delivery = new Delivery(validation);
   const operatorAgents = new OperatorAgents(engine.store, repository, credentials.map(credential => ({ id: credential.id, tokenHash: createHash('sha256').update(credential.token).digest('hex') })));
   engine.operatorAuthorizer = operatorAgents.revalidate.bind(operatorAgents);
@@ -78,8 +83,8 @@ export function assembleServices(engine: Engine, credentials: Credential[], gith
   return { engine, github, repository, principals, limits, validation, delivery, operatorAgents, proofGrants };
 }
 
-export function server(engine: Engine, credentials: Credential[], github: GitHub | null = null) {
-  const services = assembleServices(engine, credentials, github);
+export function server(engine: Engine, credentials: Credential[], github: GitHub | null = null, artifacts: ArtifactOptions = { backend: null, capacityBytes: artifactCapacityFromEnv() }) {
+  const services = assembleServices(engine, credentials, github, artifacts);
   const unauthenticated: Principal = { id: '', role: 'reader' };
   return createServer(async (req, res) => {
     res.setHeader('X-Content-Type-Options', 'nosniff');

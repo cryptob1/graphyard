@@ -8,7 +8,8 @@ export const deliveryCommands = defineCommands([
     help: [
       '  delivery [ACTION file.json]  Show releases and observed delivery, or submit a',
       '                                release/observation command (build|release|approve|',
-      '                                select|lease|observe|notify|sweep)',
+      '                                select|lease|observe|notify|sweep|rollback|rollback-claim|',
+      '                                rollback-settle|rollback-resolve)',
       '  delivery observations ENV [CURSOR]',
       "                                Page through an environment's deployment observations",
     ],
@@ -16,7 +17,7 @@ export const deliveryCommands = defineCommands([
       if (!id || id === 'status') return print(await api('delivery'));
       if (id === 'observations' && args[0]) return print(await api(`delivery/observations?environment=${encodeURIComponent(args[0])}${args[1] ? `&cursor=${encodeURIComponent(args[1])}` : ''}`));
       if (id === 'sweep') return print(await api('delivery/sweep', {}));
-      if (!['build', 'release', 'approve', 'select', 'lease', 'observe', 'notify'].includes(id) || !args[0]) throw new Error('Use delivery [status] | delivery observations ENV [CURSOR] | delivery sweep | delivery ACTION file.json');
+      if (!['build', 'release', 'approve', 'select', 'lease', 'observe', 'notify', 'rollback', 'rollback-claim', 'rollback-settle', 'rollback-resolve'].includes(id) || !args[0]) throw new Error('Use delivery [status] | delivery observations ENV [CURSOR] | delivery sweep | delivery ACTION file.json');
       return print(await api(`delivery/${id}`, JSON.parse(await readFile(args[0], 'utf8'))));
     },
   },

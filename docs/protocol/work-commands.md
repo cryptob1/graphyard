@@ -1,7 +1,7 @@
 <!-- page: Agent protocol | 4 | creating work and every `POST /api/work/UUID/COMMAND` mutation. -->
 # Work commands
 
-Create with `POST /api/work` and the structure in [examples/work.json](../../examples/work.json). Required fields are `title` and nonempty `criteria`; each criterion requires a unique `AC-N` ID, text, and at least one proof, and may carry an operator-only `bootstrap` declaration. The policy defaults to checks `test` and `typecheck`, plus independent review. Dependencies refer to existing UUIDs. Operator requirement revisions explicitly reject cycles. Optional `exclusiveResources` reserves named resources during active ownership; `plannedFiles` supplies advisory overlap scopes.
+Create with `POST /api/work` and the structure in [examples/work.json](../../examples/work.json). Required fields are `title` and nonempty `criteria`; each criterion requires a unique `AC-N` ID, text, and at least one proof, and may carry an operator-only `bootstrap` declaration. The policy defaults to checks `test` and `typecheck`, plus independent review. Dependencies refer to existing UUIDs. Operator requirement revisions explicitly reject cycles. Optional `exclusiveResources` reserves named resources during active ownership; `plannedFiles` declares the change boundary the [regression guard](regression-guard.md#submit-time-regression-guard) enforces at submit and the scopes overlap warnings compare.
 
 Human-only intake origins additionally require a credential declaring `sessionKind: "human"`; routine origins are unchanged. `POST /api/intake` records a backlog intake item and `POST /api/work/UUID/lead-ruling` records a slice-lead ruling; both require `Idempotency-Key` and replay the original result, so a lost response never duplicates immutable history. See [slice-lead delegation](../delegation.md).
 
@@ -21,7 +21,7 @@ Other commands use `POST /api/work/UUID/COMMAND` (display keys also work):
 | `release` | `{"epoch":1}` |
 | `blocked` | `{"epoch":1,"reason":"Waiting for API contract"}`; null clears |
 | `workspace` | `{"epoch":1,"host":"build-machine-a","path":"/work/GY-1","branch":"graphyard/gy-1-1"}` |
-| `submit` | `{"epoch":1,"pr":123}` |
+| `submit` | `{"epoch":1,"pr":123}`; the server observes the pull request first and refuses, naming the files, when it reverts, deletes or rewrites files outside `plannedFiles` relative to the base it is bound to, see [regression guard](regression-guard.md#submit-time-regression-guard) |
 | `evidence` | See below |
 | `deployment` | `{"sha":"<serving commit>","mergeSha":"<the item's merge commit>","source":"endpoint","observedAt":"2026-09-18T10:00:00Z"}`; coordinator or admin, delivered work only, once per delivery. Whether the serving commit is the merge itself or a descendant is derived, never asserted. See [post-deployment smoke proof](../github.md#post-deployment-smoke-proof) |
 

@@ -17,6 +17,9 @@ export const validationRoutes = defineRoutes('validation', [
     },
   },
   { method: 'GET', path: '/api/validation', handle: ({ url, services }) => services.validation.list(url.searchParams.get('cursor') ?? undefined) },
+  // D4: runner capacity, queue dwell, reserved resources and a diagnosed next step per live request.
+  { method: 'GET', path: '/api/validation/capacity', handle: ({ services }) => services.validation.capacity() },
+  { method: 'POST', path: '/api/validation/artifacts/migrate', handle: async context => context.services.validation.migrateArtifacts(context.actor, await parseJson(context, undefined, '{}')) },
   { method: 'GET', path: '/api/validation/definitions', handle: ({ url, services }) => services.validation.definitions(url.searchParams.get('cursor') ?? undefined) },
   { method: 'GET', path: /^\/api\/validation\/candidate\/([^/]+)$/, handle: ({ services }, [id]) => services.validation.readCandidate(id) },
   // The host attestor's independent read of what it is about to execute. Read-only,

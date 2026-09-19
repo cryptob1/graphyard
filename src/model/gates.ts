@@ -6,6 +6,7 @@ import { currentEvidence, evidenceIndependenceRefusals } from './evidence.js';
 import { inheritedObligations } from './bootstrap.js';
 import { exhaustedReviewerProfiles, reviewProviderOf, reviewerProfileFor } from './review.js';
 import { placeInQueue } from './queue.js';
+import { regressionRefusals } from '../regression-guard.js';
 
 // Pure evaluation: neither worker assertions nor UI state can authorize progression.
 export function evaluate(work: Work, all: Work[], now: Date, ciAppIds: number[]): { stage: Stage; gates: Gate[]; violations: string[]; queue: QueueEntry | null; queueSequence: number; queueEjection: QueueEjection | null; queueHistory: QueueHistoryEntry[] } {
@@ -17,7 +18,10 @@ export function evaluate(work: Work, all: Work[], now: Date, ciAppIds: number[])
   const obs = work.observation;
   const current = !!candidate && !!obs && obs.candidate.sha === candidate.sha && obs.candidate.baseSha === candidate.baseSha;
   const fresh = current && now.getTime() - Date.parse(obs!.at) < 120_000;
-  add('build', [...(!work.submission || work.reworkRequested ? ['Worker has not submitted implementation for this attempt'] : []), ...(!candidate ? ['Pull request has not been independently observed'] : []), ...(!work.workspaces.length ? ['No workspace registered'] : [])]);
+  // A candidate that reverts, deletes or rewrites shipped files outside its planned scope never
+  // reaches review: the refusal names every file and is re-derived from each new observation.
+  add('build', [...(!work.submission || work.reworkRequested ? ['Worker has not submitted implementation for this attempt'] : []), ...(!candidate ? ['Pull request has not been independently observed'] : []), ...(!work.workspaces.length ? ['No workspace registered'] : []),
+    ...(current ? regressionRefusals(work, obs!, all) : [])]);
   const reviews = current ? obs!.reviews : [];
   const changesRequested = reviews.some(r => r.state === 'CHANGES_REQUESTED');
   const agentReview = current ? obs!.agentReview : undefined;

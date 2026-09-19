@@ -46,7 +46,7 @@ function observation(work: Work, sha = head): Observation {
   return { clockOffset: { min: 0, max: 0 }, candidate: { sha, baseSha: base, pr: work.submission!.pr, branch: work.workspaces.at(-1)!.branch, author: 'implementer' },
     checks: [{ name: 'test', result: 'success', appId: 15368 }, { name: 'typecheck', result: 'success', appId: 15368 }],
     reviews: [{ reviewer: 'independent-reviewer', sha, state: 'APPROVED' }], protected: true, mergeable: true,
-    merged: false, mergeSha: null, files: ['src/delegation.ts'], at: new Date().toISOString() };
+    merged: false, mergeSha: null, files: ['src/delegation.ts'], scopeFiles: [], at: new Date().toISOString() };
 }
 // Drive an item to an observed candidate, then release the lease so later tests
 // in the same slice are not blocked by a stale active engineer.

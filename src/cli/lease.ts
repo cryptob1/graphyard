@@ -36,7 +36,11 @@ export const leaseCommands = defineCommands([
   {
     name: 'complete',
     scope: 'work',
-    help: ['  complete GY-N EPOCH PR        Submit implementation; gates decide completion'],
+    help: [
+      '  complete GY-N EPOCH PR        Submit implementation; gates decide completion.',
+      '                                Refused when the PR reverts, deletes or rewrites files',
+      '                                outside plannedFiles relative to the base branch',
+    ],
     run: async (context, work) => context.print(await workMutation(context, work)('submit', { epoch: Number(context.args[0]), pr: Number(context.args[1]) })),
   },
   {
