@@ -27,7 +27,9 @@ export interface ReadinessItem {
 /** Everything the checklist judges. Each fact is optional: an absent fact is `unknown`, never `ready`. */
 export interface ReadinessFacts {
   repository?: string | null;
-  server?: { url: string; reachable: boolean; role?: string; github?: boolean; githubPermissions?: Record<string, string>; failure?: string } | null;
+  server?: { url: string; reachable: boolean; role?: string; github?: boolean; githubPermissions?: Record<string, string>; failure?: string;
+    /** The server's App-permission preflight (GY-52), when it has run: authoritative over the raw permission map. */
+    appPermissions?: { verifiedAt: string | null; missing: { permission: string; required: string; granted?: string | null }[]; attention: string[] } | null } | null;
   setup?: { proposal: string | null; appliedAt: string | null; githubApp: { appId: number; slug: string } | null; drift: string[]; unreadable: string[] } | null;
   proposal?: Pick<SetupProposal, 'stack' | 'ci' | 'checks' | 'proofs' | 'deploy' | 'environment' | 'profiles'> | null;
   /** Counts of enabled validation definitions the server holds, by kind and role. */
@@ -93,10 +95,14 @@ export function readinessChecklist(profile: CompletionProfile, facts: ReadinessF
   const permissions = server?.githubPermissions ?? {};
   const needed: [string, string[]][] = [['pull_requests', ['write']], ['checks', ['write']], ['contents', ['write']], ['issues', ['read', 'write']]];
   const lacking = github ? needed.filter(([scope, accepted]) => !accepted.includes(permissions[scope] ?? '')).map(([scope]) => scope) : [];
+  // A verified preflight names the exact shortfall and the migration command that
+  // repairs it; the raw permission map only says which scopes look short.
+  const preflight = github && server?.appPermissions?.verifiedAt ? server.appPermissions : null;
+  const shortfall = preflight?.missing.map(entry => `${entry.permission} needs ${entry.required}${entry.granted ? ` (granted ${entry.granted})` : ''}`) ?? [];
   item({ id: 'github-permissions', title: 'App permissions cover checks, reviews and the merge queue', profiles: all,
-    status: !github ? 'unknown' : lacking.length ? 'missing' : 'ready',
-    detail: !github ? 'depends on the GitHub App' : lacking.length ? `insufficient: ${lacking.join(', ')}` : 'pull_requests, checks, contents and issues are granted',
-    recovery: !github ? scanFirst.github : !lacking.length ? null : `Grant ${lacking.join(', ')} to the App under GitHub → Settings → Developer settings → GitHub Apps → Permissions, accept the new permissions on the installation, then rerun \`graphyard doctor\`` });
+    status: !github ? 'unknown' : preflight ? (shortfall.length ? 'missing' : 'ready') : lacking.length ? 'missing' : 'ready',
+    detail: !github ? 'depends on the GitHub App' : preflight ? (shortfall.length ? `preflight ${preflight.verifiedAt}: ${shortfall.join(', ')}` : `preflight ${preflight.verifiedAt}: every declared permission is granted`) : lacking.length ? `insufficient: ${lacking.join(', ')}` : 'pull_requests, checks, contents and issues are granted',
+    recovery: !github ? scanFirst.github : preflight ? (shortfall.length ? `Run \`graphyard github-setup --update-permissions\`: ${preflight.attention[0] ?? shortfall.join(', ')}` : null) : !lacking.length ? null : `Grant ${lacking.join(', ')} to the App under GitHub → Settings → Developer settings → GitHub Apps → Permissions, accept the new permissions on the installation, then rerun \`graphyard doctor\`` });
 
   const proposal = facts.proposal ?? null;
   item({ id: 'required-checks', title: 'Required CI checks discovered', profiles: all,

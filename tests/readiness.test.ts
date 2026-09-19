@@ -36,6 +36,15 @@ test('missing credentials and permissions are reported with direct recovery', ()
   const limited = readinessChecklist('through-merge', { repository: 'owner/orders-api', server: { ...connected, githubPermissions: { pull_requests: 'write', checks: 'read', issues: 'read' } }, setup: applied, proposal: example });
   const permissions = limited.items.find(i => i.id === 'github-permissions')!;
   assert.equal(permissions.status, 'missing'); assert.match(permissions.detail, /checks, contents/); assert.match(permissions.recovery!, /Grant checks, contents to the App/);
+  // A verified App-permission preflight outranks the raw scope map and names the migration.
+  const preflight = { verifiedAt: '2030-01-01T00:00:00Z', missing: [{ permission: 'contents', required: 'write', granted: 'read' }], attention: ['contents: write is required for the merge queue'] };
+  const migrate = readinessChecklist('through-merge', { repository: 'owner/orders-api', server: { ...connected, appPermissions: preflight }, setup: applied, proposal: example });
+  const owed = migrate.items.find(i => i.id === 'github-permissions')!;
+  assert.equal(owed.status, 'missing'); assert.match(owed.detail, /contents needs write \(granted read\)/); assert.match(owed.recovery!, /github-setup --update-permissions/); assert.equal(migrate.next, owed.recovery);
+  const verified = readinessChecklist('through-merge', { repository: 'owner/orders-api', server: { ...connected, githubPermissions: {}, appPermissions: { ...preflight, missing: [], attention: [] } }, setup: applied, proposal: example });
+  assert.equal(verified.items.find(i => i.id === 'github-permissions')!.status, 'ready');
+  const unverified = readinessChecklist('through-merge', { repository: 'owner/orders-api', server: { ...connected, appPermissions: { ...preflight, verifiedAt: null } }, setup: applied, proposal: example });
+  assert.equal(unverified.items.find(i => i.id === 'github-permissions')!.status, 'ready');
   const registered = readinessChecklist('through-merge', { repository: 'owner/orders-api', server: { ...connected, github: false }, setup: applied, proposal: example });
   const app = registered.items.find(i => i.id === 'github-app')!;
   assert.equal(app.status, 'missing'); assert.match(app.detail, /registered locally but the server does not report it/); assert.match(app.recovery!, /GITHUB_APP_ID, GITHUB_INSTALLATION_ID/);
