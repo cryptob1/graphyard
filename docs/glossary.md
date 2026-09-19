@@ -35,7 +35,7 @@ A *principal* is an identity Graphyard authenticates: the `id` in `GRAPHYARD_PRI
 
 ### 5. Worker lease and worktree
 
-A *lease* is time-limited ownership of one work item by one worker principal at one *epoch*; a heartbeat renews it, expiry or release ends it, and every claim raises the epoch. The *assigned worktree* is the Git worktree registered as the assignment's workspace `(host ID, absolute path)` with a globally reserved branch. Ownership ends when the lease ends, not when a session dies or a runtime says so.
+A *lease* is time-limited ownership of one work item by one worker principal at one *epoch*; a heartbeat renews it; submitting the candidate (`complete`), release, or expiry ends it; and every claim raises the epoch. The *assigned worktree* is the Git worktree registered as the assignment's workspace `(host ID, absolute path)` with a globally reserved branch. Ownership ends when the lease ends, not when a session dies or a runtime says so.
 
 **Canonical usage:** *lease*, *epoch*, *assigned worktree*. A *workspace* is the registered `(host, path)`; a *worktree* is the Git checkout at that path.
 

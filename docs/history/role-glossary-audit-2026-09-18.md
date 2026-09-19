@@ -131,6 +131,16 @@ GY-35 (flow analytics) then added `flow-analytics.md`, `protocol/deployment-obse
 
 Read with no ambiguous instance: the rest of `flow-analytics.md` (*a worker assertion is stored and never counted as trusted* restates the evidence-trust boundary; *a reviewer is slow* and *an item whose worker was replaced* name roles; *no principal ID … is stored* uses *principal* in the glossary sense), the `read-endpoints.md` rows (*not available to operator agents* is the canonical term), and the `deployment.md` environment row.
 
+GY-61 (lease lifecycle) then rewrote the submission paragraphs of `protocol/leases.md`, added the *lease-loss* scope paragraphs to `master-agent.md` and `delegation.md`, and extended the master loop's session-closing step:
+
+| Page | Before | After | Reason |
+| --- | --- | --- | --- |
+| `protocol/leases.md` (GY-61) | "To reassign submitted work, an operator must stop the previous process and request `rework`." | "To reassign submitted work, the human operator must stop the previous process and request `rework`." | Which operator: `rework` is `admin` only; re-applies the rewrite this audit had already recorded for the sentence GY-61 replaced. |
+| `master-agent.md` (GY-61) | "do not ask the operator to resolve one" | "do not ask the human operator to resolve one" | Which operator: only a declared human session resolves an escalation. |
+| `glossary.md` (lease row) | "a heartbeat renews it, expiry or release ends it" | "a heartbeat renews it; submitting the candidate (`complete`), release, or expiry ends it" | `submit` now ends the lease in the same transaction that binds the candidate; the definition names every way a lease ends. |
+
+Read with no ambiguous instance: the rest of the new `leases.md` text (*worker*, *reconciliation*, and *declared human session* are canonical; the refusal message is quoted verbatim), the `delegation.md` trigger row and paragraphs (GY-31 text, where bare *operator* is the human and *replacement claim* names the worker command), and the master loop's session-closing step. The boundaries these passages add — a submitted epoch's lease has ended, so a heartbeat or release for it is refused; only an unsubmitted epoch raises `lease-loss`; reconciliation auto-settles a standing `lease-loss` only when that epoch already has a bound submission, and `resolve` with its declared-human-session requirement is untouched for every other escalation — are preserved word for word apart from the role terms above. The primary operations page's *Submitted implementation needs rework* recipe already conditions the escalation on a lease still being held, so it needed no change.
+
 ## Concision samples (before / after)
 
 | Page | Before | After |
