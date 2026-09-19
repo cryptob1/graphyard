@@ -110,7 +110,8 @@ export class Engine {
    * disables the pre-check, and every later observation still re-derives the refusal.
    */
   submissionObserver: ((work: Work) => Promise<Observation>) | null | undefined = undefined;
-  constructor(public store: Store, public ciAppIds: number[] = [15368], public leaseSeconds = 120, public repository = process.env.GITHUB_REPOSITORY ?? '') {}
+  // The launch fence is a deployment-independent safety default; only tests shorten it.
+  constructor(public store: Store, public ciAppIds: number[] = [15368], public leaseSeconds = 120, public repository = process.env.GITHUB_REPOSITORY ?? '', public launchFence = launchFenceMs) {}
   private async observeSubmission(actor: Principal, id: string | null, data: { epoch: number; pr: number }, key: string): Promise<Observation | null> {
     if (this.submissionObserver === undefined) { const github = await githubFromEnv(); this.submissionObserver = github ? probe => github.observe(probe) : null; }
     if (!this.submissionObserver || !id) return null;
@@ -375,7 +376,7 @@ export class Engine {
           && work.containmentQuarantine.settlementHash === data.settlementHash,
         'Containment quarantine is missing, superseded, or does not match this launch');
         work.containmentQuarantine.launchAcknowledgedAt ??= now.toISOString();
-        work.containmentQuarantine.launchExpiresAt ??= new Date(now.getTime() + launchFenceMs).toISOString();
+        work.containmentQuarantine.launchExpiresAt ??= new Date(now.getTime() + this.launchFence).toISOString();
       }
       if (command === 'settle') {
         demand(actor.role === 'worker' && work.containmentQuarantine?.owner === actor.id && work.containmentQuarantine.epoch === data.epoch,

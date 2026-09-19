@@ -1,15 +1,15 @@
 import { readFile } from 'node:fs/promises';
 import { pathToFileURL } from 'node:url';
-import { contracts } from './acceptance-contract.mjs';
+import { contract } from './contracts.mjs';
 
 // GitHub's maximum page size, and a bound on how many pages one run's inventory may take.
 const PAGE_SIZE = 100, PAGE_LIMIT = 100;
 export function validateReport(report, expected) {
-  // The report names the proof it claims; only a proof this harness can actually produce,
-  // with that proof's complete case inventory, may be published.
-  const required = contracts[report.proof]?.cases;
-  if (report.schema !== 1 || !['pass', 'fail'].includes(report.result) || !required || !Number.isSafeInteger(report.executed) || report.executed < 0 || report.executed > required.length || !Number.isSafeInteger(report.skipped) || report.skipped < 0 || report.skipped > required.length) throw new Error('Incomplete acceptance report');
-  if (!Array.isArray(report.cases) || report.cases.length !== required.length || required.some(id => report.cases.filter(c => c.id === id && ['pass', 'fail', 'skipped'].includes(c.result)).length !== 1)) throw new Error('Required acceptance case inventory is incomplete');
+  // The inventory is selected by the reported proof and fixed in protected source; a report can
+  // never widen, shrink, or rename the cases its own proof requires.
+  const { requiredCases } = contract(report.proof);
+  if (report.schema !== 1 || !['pass', 'fail'].includes(report.result) || !Number.isSafeInteger(report.executed) || report.executed < 0 || report.executed > requiredCases.length || !Number.isSafeInteger(report.skipped) || report.skipped < 0 || report.skipped > requiredCases.length) throw new Error('Incomplete acceptance report');
+  if (!Array.isArray(report.cases) || report.cases.length !== requiredCases.length || requiredCases.some(id => report.cases.filter(c => c.id === id && ['pass', 'fail', 'skipped'].includes(c.result)).length !== 1)) throw new Error('Required acceptance case inventory is incomplete');
   const executed = report.cases.filter(c => c.result !== 'skipped').length, skipped = report.cases.filter(c => c.result === 'skipped').length;
   if (report.executed !== executed || report.skipped !== skipped) throw new Error('Acceptance counts do not match the case inventory');
   if ((report.result === 'pass') !== report.cases.every(c => c.result === 'pass')) throw new Error('Acceptance result does not match the case inventory');

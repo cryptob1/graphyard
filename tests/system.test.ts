@@ -21,7 +21,9 @@ import { acknowledgeContainment, containmentGraceMs, isConfirmedCoordinationRefu
 import { probeSupervisorAbsence, supervise } from '../src/supervisor.js';
 import { assertDispatchable, assessContainment, buildMasterStatus, snapshotWithClock } from '../src/master.js';
 // @ts-expect-error The trusted runner intentionally uses dependency-free JavaScript outside the candidate source.
-import { exercise, judgeMergeAuthorization, mergeAuthorizationCases } from '../scripts/acceptance-contract.mjs';
+import { exercise } from '../scripts/acceptance-contract.mjs';
+// @ts-expect-error The trusted runner intentionally uses dependency-free JavaScript outside the candidate source.
+import { judgeMergeAuthorization, requiredCases as mergeAuthorizationCases } from '../scripts/merge-authorization-contract.mjs';
 // @ts-expect-error The trusted runner intentionally uses dependency-free JavaScript outside the candidate source.
 import { mergeAuthorizationPrincipals, probeMergeAuthorization } from '../scripts/merge-authorization-probe.mjs';
 
