@@ -6,15 +6,16 @@ import { pathToFileURL } from 'node:url';
 import { z } from 'zod';
 import { Store } from './store.js';
 import { Engine, type Command } from './engine.js';
-import { Refusal, demand, parseReviewerApps, type Principal } from './model.js';
+import { Refusal, demand, operatorScopeIncludes, parseReviewerApps, type Principal } from './model.js';
 import { githubFromEnv, processJob, type GitHub } from './github.js';
 import { Validation } from './validation.js';
 import { Delivery } from './delivery.js';
 import { defineScenario, scenarios } from './scenarios.js';
 import { OperatorAgents } from './operator-agent.js';
+import { delegationLimits, delegationSnapshot, producerIndependenceRefusal, recordEvidenceRefusal, recordIntake, recordLeadRuling, recordLeadViolation, validateDelegationPrincipals } from './delegation.js';
 import { ProofGrants } from './proof-grants.js';
 
-export const principalSchema = z.array(z.object({ id: z.string().min(1), role: z.enum(['admin', 'coordinator', 'worker', 'producer', 'reader']), token: z.string().min(32), proofs: z.array(z.string()).optional(), displayName: z.string().trim().min(1).max(100).regex(/^[^\u0000-\u001f\u007f]+$/).optional(), runtime: z.string().trim().min(1).max(80).regex(/^[^\u0000-\u001f\u007f]+$/).optional() }).strict()).min(1);
+export const principalSchema = z.array(z.object({ id: z.string().min(1), role: z.enum(['admin', 'coordinator', 'slice-lead', 'worker', 'producer', 'reader']), token: z.string().min(32), proofs: z.array(z.string()).optional(), displayName: z.string().trim().min(1).max(100).regex(/^[^\u0000-\u001f\u007f]+$/).optional(), runtime: z.string().trim().min(1).max(80).regex(/^[^\u0000-\u001f\u007f]+$/).optional(), slice: z.enum(['product', 'infrastructure', 'docs-experience']).optional(), sessionKind: z.enum(['human', 'ai']).optional() }).strict()).min(1);
 export type Credential = Principal & { token: string };
 async function body(req: IncomingMessage, limit = 1_000_000) {
   const chunks: Buffer[] = []; let size = 0;
@@ -22,6 +23,8 @@ async function body(req: IncomingMessage, limit = 1_000_000) {
   return Buffer.concat(chunks);
 }
 export function server(engine: Engine, credentials: Credential[], github: GitHub | null = null) {
+  const limits = delegationLimits();
+  validateDelegationPrincipals(credentials, limits);
   const principals = credentials.map(({ token, ...actor }) => ({ actor, hash: createHash('sha256').update(token).digest() }));
   // The engine is constructed with the repository that this control plane is
   // authorized to coordinate.  GITHUB_REPOSITORY is merely a process default
@@ -98,10 +101,18 @@ export function server(engine: Engine, credentials: Credential[], github: GitHub
           return send(200, operatorRoute[2] === 'configure' ? await operatorAgents.configure(actor, operatorRoute[1], data, key)
             : operatorRoute[2] === 'rotate' ? await operatorAgents.rotate(actor, operatorRoute[1], data, key) : await operatorAgents.revoke(actor, operatorRoute[1], data, key));
         }
-        const operatorVisible = (items: any[]) => actor.role !== 'operator-agent' ? items : items.filter(item => actor.scope?.workItems.includes('*') || actor.scope?.workItems.includes(item.id) || actor.scope?.workItems.includes(item.key));
+        const operatorVisible = (items: any[]) => items.filter(item => operatorScopeIncludes(actor, item));
         if (actor.role === 'operator-agent') demand(
-          url.pathname === '/api/status' || url.pathname === '/api/work-snapshot' || url.pathname === '/api/work' || url.pathname === '/api/events' || /^\/api\/work(?:\/[^/]+\/[a-z]+)?$/.test(url.pathname),
+          url.pathname === '/api/status' || url.pathname === '/api/work-snapshot' || url.pathname === '/api/work' || url.pathname === '/api/events'
+          || url.pathname === '/api/delegation' || url.pathname === '/api/intake' || /^\/api\/work(?:\/[^/]+\/[a-z]+)?$/.test(url.pathname),
           'Route is not available to operator agents', 403);
+        // Delegation is a read over work items, so it is filtered by the same scope
+        // rule as every other read; a scoped agent never sees out-of-scope owners,
+        // workers, or bottlenecks here or inside /api/status.
+        if (url.pathname === '/api/delegation' && req.method === 'GET') return send(200, delegationSnapshot(principals.map(p => p.actor), operatorVisible(await engine.store.list()), Date.now(), limits));
+        if (url.pathname === '/api/intake' && req.method === 'POST') return send(200, await recordIntake(engine.store, actor, JSON.parse((await body(req)).toString()), String(req.headers['idempotency-key'] ?? '')));
+        const leadRoute = url.pathname.match(/^\/api\/work\/([^/]+)\/lead-ruling$/);
+        if (leadRoute && req.method === 'POST') return send(200, await recordLeadRuling(engine.store, actor, leadRoute[1], JSON.parse((await body(req)).toString()), String(req.headers['idempotency-key'] ?? '')));
         if (url.pathname === '/api/validation/artifacts' && req.method === 'POST') return send(200, await validation.uploadArtifact(actor, JSON.parse((await body(req, 11_200_000)).toString()), String(req.headers['idempotency-key'] ?? '')));
         const artifactRead = url.pathname.match(/^\/api\/validation\/artifacts\/([^/]+)\/([^/]+)$/);
         if (artifactRead && req.method === 'GET') {
@@ -164,7 +175,7 @@ export function server(engine: Engine, credentials: Credential[], github: GitHub
           const githubPermissions = github ? await github.reviewPermissions() : {};
           const dispatchAvailable = !!githubRepository && githubPermissions.pull_requests === 'write' && ['read', 'write'].includes(githubPermissions.issues) && githubPermissions.checks === 'write';
           const observedAt = (await engine.store.pool.query('SELECT clock_timestamp() AS now')).rows[0].now as Date;
-          return send(200, { actor, repository: repository || null, baseBranch: github?.config.base ?? process.env.GITHUB_BASE_BRANCH ?? 'main', github: !!github, check: 'Graphyard / merge', reviewProviders: ['github', ...(dispatchAvailable ? ['codex'] : []), ...(dispatchAvailable && engine.reviewerApps.length ? ['agent'] : [])], reviewerApps: engine.reviewerApps, githubPermissions, githubRepository, githubAppId: github?.config.appId ?? null, githubInstallationId: github?.config.installationId ?? null, jobs, now: observedAt.toISOString() });
+          return send(200, { actor, delegation: delegationSnapshot(principals.map(p => p.actor), operatorVisible(await engine.store.list()), observedAt.getTime(), limits), repository: repository || null, baseBranch: github?.config.base ?? process.env.GITHUB_BASE_BRANCH ?? 'main', github: !!github, check: 'Graphyard / merge', reviewProviders: ['github', ...(dispatchAvailable ? ['codex'] : []), ...(dispatchAvailable && engine.reviewerApps.length ? ['agent'] : [])], reviewerApps: engine.reviewerApps, githubPermissions, githubRepository, githubAppId: github?.config.appId ?? null, githubInstallationId: github?.config.installationId ?? null, jobs, now: observedAt.toISOString() });
         }
         if (req.method === 'GET' && url.pathname === '/api/work-snapshot') { const snapshot = await engine.store.workSnapshot(); const visibleWork = operatorVisible(snapshot.work); return send(200, { ...snapshot, work: visibleWork, jobs: actor.role === 'operator-agent' ? snapshot.jobs.filter(job => visibleWork.some(work => work.id === job.work_id)) : snapshot.jobs }); }
         if (req.method === 'GET' && url.pathname === '/api/work') return send(200, operatorVisible(await engine.store.list()));
@@ -174,8 +185,19 @@ export function server(engine: Engine, credentials: Credential[], github: GitHub
           if (actor.role === 'operator-agent') { demand(id, 'Operator-agent history reads require a scoped work item', 403); const item = (await engine.store.list()).find(w => w.id === id); demand(item && operatorVisible([item]).length, 'Work item is outside this operator-agent scope', 403); }
           return send(200, await engine.store.events(id));
         }
+        // Every mutating work route refuses a slice lead the same way and leaves
+        // the same ledger entry. Routing order decides which handler matches
+        // first; it must never decide whether the attempt is recorded.
+        const refuseLead = async (id: string | null, attemptedAction: string) => {
+          if (actor.role !== 'slice-lead') return;
+          await recordLeadViolation(engine.store, actor, id, attemptedAction);
+          demand(false, 'Slice leads cannot perform lifecycle mutations', 403);
+        };
         const mergeRoute = url.pathname.match(/^\/api\/work\/([^/]+)\/merge-(acquire|cancel|verify)$/);
         if (req.method === 'POST' && mergeRoute) {
+          // These routes sit above the generic work route, so their own refusal
+          // is recorded here rather than inherited from a handler never reached.
+          await refuseLead(mergeRoute[1], `merge-${mergeRoute[2]}`);
           const data = JSON.parse((await body(req)).toString() || '{}'), key = String(req.headers['idempotency-key'] ?? '');
           if (mergeRoute[2] === 'acquire') return send(200, await engine.acquireMerge(actor, mergeRoute[1], data, key));
           if (mergeRoute[2] === 'cancel') return send(200, await engine.cancelMerge(actor, mergeRoute[1], data, key));
@@ -194,8 +216,23 @@ export function server(engine: Engine, credentials: Credential[], github: GitHub
         }
         const match = url.pathname.match(/^\/api\/work(?:\/([^/]+)\/([a-z]+))?$/);
         if (req.method === 'POST' && match) {
+          const attempted = match[2] ?? 'create';
+          // Creating work names no existing item, so the refusal is recorded
+          // unscoped rather than dropped for want of a ledger to append to.
+          await refuseLead(match[1] ?? null, attempted);
           const raw = await body(req);
-          const result = await engine.execute(actor, (match[2] ?? 'create') as Command, match[1] ?? null, JSON.parse(raw.toString() || '{}'), String(req.headers['idempotency-key'] ?? ''));
+          if (attempted === 'evidence' && match[1] && actor.role !== 'worker') {
+            const item = (await engine.store.list()).find(w => w.id === match[1] || w.key === match[1]);
+            const dependent = item ? producerIndependenceRefusal(actor, item, engine.principals) : null;
+            if (item && dependent) {
+              // An unparsable body is still a recorded refusal; the engine repeats this decision.
+              let proof: unknown = null;
+              try { proof = JSON.parse(raw.toString() || '{}')?.proof; } catch { proof = null; }
+              await recordEvidenceRefusal(engine.store, actor, item.id, proof, dependent);
+              demand(false, dependent, 403);
+            }
+          }
+          const result = await engine.execute(actor, attempted as Command, match[1] ?? null, JSON.parse(raw.toString() || '{}'), String(req.headers['idempotency-key'] ?? ''));
           return send(200, result);
         }
         return send(404, { error: 'Route not found' });

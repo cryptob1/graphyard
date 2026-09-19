@@ -188,6 +188,7 @@ Environment: GRAPHYARD_URL, GRAPHYARD_TOKEN (individual role-scoped credential)
   scenario file.json           Publish a scenario version (operator)
   ready GY-N REASON            Release backlog item with an audit reason (operator)
   unblock GY-N REASON           Clear a blocker with an audit reason (operator)
+  resolve GY-N TRIGGER REASON   Resolve a standing escalation with an audit reason (operator)
   rework GY-N --previous-worker-stopped REASON  Authorize reassignment (operator)
   recover-containment GY-N --previous-worker-stopped REASON
                                 Release delivered work's stopped-worker quarantine (operator)
@@ -719,6 +720,10 @@ Never share an operator or producer credential with an implementation agent.`); 
   if (command === 'ready') return print(await mutate(command, args.length ? { expectedRevision: work.revision, reason: args.join(' ') } : {}));
   if (command === 'claim') return print(await mutate(command, {}));
   if (command === 'unblock') return print(await mutate('unblock', { expectedRevision: work.revision, reason: args.join(' ') }));
+  if (command === 'resolve') {
+    if (!args[0] || !args.slice(1).length) throw new Error('Name the standing escalation trigger and an audit reason');
+    return print(await mutate('resolve', { trigger: args[0], expectedRevision: work.revision, reason: args.slice(1).join(' ') }));
+  }
   if (command === 'rework') {
     if (args[0] !== '--previous-worker-stopped') throw new Error('Stop the previous worker first, then pass --previous-worker-stopped and an audit reason');
     return print(await mutate('rework', { reason: args.slice(1).join(' '), previousWorkerStopped: true }));
