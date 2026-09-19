@@ -18,6 +18,20 @@ CREATE OR REPLACE FUNCTION graphyard_immutable() RETURNS trigger LANGUAGE plpgsq
 BEGIN RAISE EXCEPTION 'The event ledger is append-only'; END $$;
 DROP TRIGGER IF EXISTS immutable_events ON events;
 CREATE TRIGGER immutable_events BEFORE UPDATE OR DELETE ON events FOR EACH ROW EXECUTE FUNCTION graphyard_immutable();
+CREATE TABLE IF NOT EXISTS lead_rulings (
+  id uuid PRIMARY KEY, work_id uuid NOT NULL REFERENCES work_items(id), lead_id text NOT NULL,
+  slice_id text NOT NULL, action text NOT NULL, rule_id text NOT NULL, reason text NOT NULL,
+  created_at timestamptz NOT NULL DEFAULT clock_timestamp()
+);
+DROP TRIGGER IF EXISTS immutable_lead_rulings ON lead_rulings;
+CREATE TRIGGER immutable_lead_rulings BEFORE UPDATE OR DELETE ON lead_rulings FOR EACH ROW EXECUTE FUNCTION graphyard_immutable();
+CREATE TABLE IF NOT EXISTS intake_items (
+  id uuid PRIMARY KEY, origin text NOT NULL, title text NOT NULL, description text NOT NULL,
+  source_work_id uuid REFERENCES work_items(id), submitted_by text NOT NULL,
+  created_at timestamptz NOT NULL DEFAULT clock_timestamp()
+);
+DROP TRIGGER IF EXISTS immutable_intake_items ON intake_items;
+CREATE TRIGGER immutable_intake_items BEFORE UPDATE OR DELETE ON intake_items FOR EACH ROW EXECUTE FUNCTION graphyard_immutable();
 CREATE TABLE IF NOT EXISTS receipts (
   actor text NOT NULL, key text NOT NULL, fingerprint text NOT NULL, result jsonb NOT NULL,
   PRIMARY KEY(actor,key)
@@ -103,7 +117,7 @@ CREATE TABLE IF NOT EXISTS delivery_leases (registration_id text PRIMARY KEY, pr
  * about who may produce trusted evidence, so a restore that left it empty would let the
  * next start re-seed the environment allowlist over grants the operator revoked.
  */
-export const ledgerTables = ['work_items', 'events', 'receipts', 'operator_agents', 'operator_credentials', 'proof_grants', 'proof_grant_history', 'jobs', 'webhook_receipts',
+export const ledgerTables = ['work_items', 'events', 'lead_rulings', 'intake_items', 'receipts', 'operator_agents', 'operator_credentials', 'proof_grants', 'proof_grant_history', 'jobs', 'webhook_receipts',
   'validation_definitions', 'validation_builds', 'validation_candidates', 'validation_requests', 'validation_artifacts', 'validation_resources', 'scenarios',
   'release_builds', 'releases', 'release_approvals', 'delivery_environments', 'delivery_observations', 'delivery_leases', 'graphyard_schema'] as const;
 

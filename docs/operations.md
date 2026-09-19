@@ -43,6 +43,12 @@ and the [operating guide](master-agent.md#durable-loop).
 - **Worker profiles.** A failed launch cools its profile off for ten minutes and work routes to
   another profile. `daemon.profiles` holds the reason. A profile that never recovers usually has an
   unreadable credential file or an agent name already taken in Herdr.
+- **GitHub administration.** `master status` reports browser-driven administration under
+  `administration`: the last five audit entries with who did what and whether the API verified it,
+  and `sudo` when a flow is waiting on GitHub's *Confirm access* prompt — approve it on your device
+  and choose the two-digit code shown. A refused flow names its record directory under
+  `.graphyard/master-actions/`; `record.json` and the numbered screenshots show exactly what the
+  page offered. See [GitHub administration through the browser](master-agent.md#github-administration-through-the-browser).
 
 ## Lost worker before submission
 
@@ -60,9 +66,11 @@ When it refuses, or when the worker ran on a machine, user, or systemd manager t
 
 An operator can clear an existing blocker with `graphyard unblock GY-N "Contract verified"`. The CLI sends the task revision it just read and the reason is recorded in the event ledger; stale requests and attempts to clear no blocker are refused. Scoped operator agents similarly release unreleased backlog work with `graphyard ready GY-N "Requirements approved"`, which carries the current revision and reason. Workers may only clear their own blockers while holding the current lease. After the operator resolves an abandoned blocker and the old lease expires, a new worker can claim normally.
 
+An escalation is not a blocker: it refuses the merge gate until a human operator clears it with `graphyard resolve GY-N TRIGGER "audit reason"`. The request must name one standing trigger and carries the task revision the CLI just read, so each concern is cleared individually and a stale request cannot clear a later incident that shares a trigger; the reason is recorded in the event ledger. Resolution requires a credential declaring `sessionKind: "human"`, so no AI principal — lead, worker, producer, scoped operator agent, or an `admin` credential that declares `ai` or declares nothing — can resolve one. See [slice-lead delegation](delegation.md#an-unresolved-escalation-refuses-delivery).
+
 ## Submitted implementation needs rework
 
-An active owner may keep its heartbeat running and update the assigned branch. GitHub observations automatically invalidate old evidence after a push. To reassign: stop the previous worker, then run `graphyard rework GY-N --previous-worker-stopped "Reproduce review failure"` as an operator. This fences old API commands, closes the build gate, and wakes integration reconciliation. A new worker claims with a higher epoch and registers the existing PR branch in a fresh workspace, usually in another clone or on another host. Resubmit the same PR with the new epoch. Keep the old worktree for inspection. GitHub check revocation is asynchronous; suspend merging until the refusing check is visible. Merged work requires a follow-up item.
+An active owner may keep its heartbeat running and update the assigned branch. GitHub observations automatically invalidate old evidence after a push. To reassign: stop the previous worker, then run `graphyard rework GY-N --previous-worker-stopped "Reproduce review failure"` as an operator. This fences old API commands, closes the build gate, and wakes integration reconciliation. If the stopped worker still held its lease, reopening the item records a `lease-loss` escalation against that epoch; it refuses the merge gate until you resolve it, so clear it with `resolve` once the replacement assignment is verified. A new worker claims with a higher epoch and registers the existing PR branch in a fresh workspace, usually in another clone or on another host. Resubmit the same PR with the new epoch. Keep the old worktree for inspection. GitHub check revocation is asynchronous; suspend merging until the refusing check is visible. Merged work requires a follow-up item.
 
 ## Worktree creation failed
 

@@ -12,7 +12,7 @@ function observation(work: Work, overrides: Partial<Observation> = {}): Observat
     candidate: { ...work.candidate! }, checks: [{ name: 'test', result: 'success', appId: 15368 }],
     reviews: [{ reviewer: 'reviewer', sha: work.candidate!.sha, state: 'APPROVED' }],
     merged: false, mergeSha: null, mergeable: true, protected: true, prState: 'open', draft: false,
-    baseTip: work.candidate!.baseSha, files: ['src/engine.ts'], at: now.toISOString(), ...overrides,
+    baseTip: work.candidate!.baseSha, files: ['src/engine.ts'], scopeFiles: [], at: now.toISOString(), ...overrides,
   };
 }
 function evidence(work: Work, overrides: Partial<Evidence> = {}): Evidence {

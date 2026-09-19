@@ -6,6 +6,7 @@ import { admin, demand, proofSchema, type EvidenceArtifact, type Principal, type
 import { save, wakeJob } from './store.js';
 import { authorizedForEveryProof, authorizedForProof } from './proof-grants.js';
 import { Engine } from './engine.js';
+import { producerIndependenceRefusal } from './delegation.js';
 import type { Scenario } from './scenarios.js';
 import { defaultReportFormat, reportFormats } from './report-adapters.js';
 
@@ -246,6 +247,10 @@ export class Validation {
       const runner = await this.registration(db, data.runner, 'runner'), collector = await this.registration(db, data.collector, 'collector');
       const build = (await db.query('SELECT document FROM validation_builds WHERE id=$1', [c.buildAttestationId])).rows[0]?.document as BuildAttestation;
       demand(build && collector.principalId !== build.producer, 'Build producer and result collector must be distinct principals');
+      // The collector mints trusted evidence, so it carries the same independence
+      // requirement as any other proof producer.
+      const dependent = producerIndependenceRefusal(this.principals.find(p => p.id === collector.principalId) ?? { id: collector.principalId, role: 'producer' }, w, this.principals);
+      demand(!dependent, dependent ?? 'Result collector is not independent', 403);
       demand(same(runner.environment, c.environment) && same(collector.environment, c.environment) && collector.proofs.includes(c.proof), 'Runner/collector environment or proof scope differs');
       demand(Date.parse(data.deadline) > now.getTime() && Date.parse(data.deadline) <= now.getTime() + 3_600_000, 'Deadline must be within the next hour');
       const r: ValidationRequest = { ...data, id: randomUUID(), workId: w.id, proof: c.proof, state: 'queued', attempts: [], createdAt: now.toISOString(), createdBy: actor.id };
@@ -388,6 +393,8 @@ export class Validation {
       try { await this.registration(db, r.runner, 'runner'); await this.registration(db, r.collector, 'collector'); await this.valid(db, c, w); } catch { rejection.push('Candidate or registration authority was revoked or superseded'); }
       if (!a || a.id !== data.attemptId || a.epoch !== data.epoch || current.state !== 'collecting' || Date.parse(a.expiresAt) <= now.getTime() || Date.parse(r.deadline) <= now.getTime()) rejection.push('Result does not hold the current live acknowledged attempt under collection authority');
       if (w.validation?.[r.proof]?.candidateId !== c.id || w.validation?.[r.proof]?.requestId !== r.id || w.validation?.[r.proof]?.attemptId !== a?.id) rejection.push('A newer validation selection supersedes this result');
+      const dependent = producerIndependenceRefusal(actor, w, this.principals);
+      if (dependent) rejection.push(dependent);
       if (rejection.length) {
         const result = { accepted: false, passed: false, reasons: rejection };
         // Commit rejection + receipt. Throwing here would erase the audit.

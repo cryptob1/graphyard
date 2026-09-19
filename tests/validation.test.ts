@@ -34,18 +34,18 @@ const id = () => randomUUID();
 async function definitions(): Promise<Definition[]> { return (await store.pool.query('SELECT document FROM validation_definitions ORDER BY kind,id,revision DESC')).rows.map(r => r.document); }
 async function current(workId: string) { return (await store.list()).find(w => w.id === workId)!; }
 /** `runnerAuthority` adds execution authority the operator pinned on the runner registration. */
-async function fixture(artifactStorage: 'external' | 'postgres' = 'external', runnerAuthority: Record<string, unknown> = {}) {
+async function fixture(artifactStorage: 'external' | 'postgres' = 'external', runnerAuthority: Record<string, unknown> = {}, slice?: Work['slice']) {
   const n = ++serial, environment = { id: `preview-${n}`, revision: 1 }, runnerRef = { id: `runner-${n}`, revision: 1 }, collectorRef = { id: `collector-${n}`, revision: 1 }, builderRef = { id: `builder-${n}`, revision: 1 }, bundle = { id: `bundle-${n}`, revision: 1 }, proof = `e2e:scenario-${n}`;
   collector.proofs!.push(proof);
   const scenario = await defineScenario(store, operator, { id: `scenario-${n}`, title: 'Behavior', purpose: 'Prove behavior', steps: ['Execute'], expected: ['Correct'], environment: environment.id, runner: 'playwright', testPath: 'tests/behavior.spec.ts' }, id());
   await validation.define(operator, { kind: 'environment', id: environment.id, expectedRevision: 0, repository: 'test/repository', url: 'https://preview.example.test', instance: `instance-${n}`, immutable: true, services: ['api'], resources: [`test-account-${n}`] }, id());
   for (const [ref, actor, role] of [[runnerRef, runner, 'runner'], [collectorRef, collector, 'collector'], [builderRef, builder, 'builder']] as const) await validation.define(operator, { kind: 'registration', id: ref.id, expectedRevision: 0, principalId: actor.id, role, environment, adapterVersion: 'test-v1', proofs: role === 'collector' ? [proof] : [], enabled: true, ...(role === 'runner' ? { executionHost: 'unix:///var/run/docker.sock', attestationPublicKey, executionNetwork: 'gy-isolated', ...runnerAuthority } : {}) }, id());
   await validation.define(operator, { kind: 'bundle', id: bundle.id, expectedRevision: 0, scenario: scenario.id, scenarioRevision: scenario.revision, scenarioHash: scenario.hash, digest, runnerImageDigest: inputs }, id());
-  let w = await engine.execute(operator, 'create', null, { title: 'Validation fixture', criteria: [{ id: 'AC-1', text: 'Behavior is proven', proofs: [proof] }] }, id());
+  let w = await engine.execute(operator, 'create', null, { title: 'Validation fixture', ...(slice ? { slice } : {}), criteria: [{ id: 'AC-1', text: 'Behavior is proven', proofs: [proof] }] }, id());
   w = await engine.execute(operator, 'ready', w.id, {}, id()); w = await engine.execute(worker, 'claim', w.id, {}, id());
   w = await engine.execute(worker, 'workspace', w.id, { epoch: 1, host: 'test', path: `/tmp/validation-${n}`, branch: `graphyard/validation-${n}` }, id());
   w = await engine.execute(worker, 'submit', w.id, { epoch: 1, pr: n }, id());
-  w = await engine.observe(w.id, w.revision, { candidate: { sha, baseSha: base, pr: n, branch: `graphyard/validation-${n}`, author: 'implementer' }, checks: [{ name: 'test', appId: 15368, result: 'success' }, { name: 'typecheck', appId: 15368, result: 'success' }], reviews: [{ reviewer: 'other', sha, state: 'APPROVED' }], merged: false, mergeSha: null, protected: true, mergeable: true, files: [], at: new Date().toISOString() });
+  w = await engine.observe(w.id, w.revision, { candidate: { sha, baseSha: base, pr: n, branch: `graphyard/validation-${n}`, author: 'implementer' }, checks: [{ name: 'test', appId: 15368, result: 'success' }, { name: 'typecheck', appId: 15368, result: 'success' }], reviews: [{ reviewer: 'other', sha, state: 'APPROVED' }], merged: false, mergeSha: null, protected: true, mergeable: true, files: [], scopeFiles: [], at: new Date().toISOString() });
   const build: any = await validation.attestBuild(builder, { registration: builderRef, workId: w.id, expectedWorkRevision: w.revision, sourceSha: sha, baseSha: base, buildInputsDigest: inputs, artifacts: [{ service: 'api', digest }], provenanceUrl: 'https://ci.example.test/build/1' }, id());
   const candidateInput = { workId: w.id, expectedWorkRevision: w.revision, proof, environment, bundle, buildAttestationId: build.id, requiredArtifacts: ['report'], artifactStorage };
   const c = await validation.createCandidate(operator, candidateInput, id()) as ValidationCandidate;
@@ -369,6 +369,17 @@ test('builder and collector registrations cannot collapse onto one producer prin
   const build: any = await validation.attestBuild(collector, { registration: shared, workId: f.w.id, expectedWorkRevision: (await current(f.w.id)).revision, sourceSha: sha, baseSha: base, buildInputsDigest: inputs, artifacts: [{ service: 'api', digest }], provenanceUrl: 'https://ci.example.test/build/shared' }, id());
   const c: any = await validation.createCandidate(operator, { ...f.candidateInput, expectedWorkRevision: (await current(f.w.id)).revision, buildAttestationId: build.id }, id());
   await assert.rejects(validation.createRequest(operator, { ...f.requestInput, candidateId: c.id, expectedWorkRevision: (await current(f.w.id)).revision }, id()), /distinct principals/); await cleanup(f);
+});
+test('a collector bound to the work item\'s own slice cannot be selected to mint trusted evidence', async () => {
+  const f = await fixture('external', {}, 'product');
+  // A coordinator identity cannot even be registered as a collector, and a proof
+  // agent bound to the item's own slice is refused selection.
+  await assert.rejects(validation.define(operator, { kind: 'registration', id: `lead-collector-${f.n}`, expectedRevision: 0, principalId: 'product-lead', role: 'collector', environment: f.environment, adapterVersion: 'test-v1', proofs: [f.proof], enabled: true }, id()), /separate role/);
+  collector.slice = 'product';
+  try {
+    await assert.rejects(validation.createRequest(operator, { ...f.requestInput, expectedWorkRevision: (await current(f.w.id)).revision }, id()), /independent of that slice/);
+  } finally { delete collector.slice; }
+  await cleanup(f);
 });
 test('completed evidence is retained across idle ticks but revoked on definition changes', async () => {
   const f = await fixture(), command = await start(f); await validation.result(collector, report(f, command), id());

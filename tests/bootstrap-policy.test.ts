@@ -38,7 +38,7 @@ function observation(work: Work, overrides: Partial<Observation> = {}): Observat
   return { clockOffset: { min: 0, max: 0 }, candidate: { sha: head, baseSha: base, pr: work.submission!.pr, branch: work.workspaces[0].branch, author: 'implementer' },
     checks: [{ name: 'test', result: 'success', appId: 15368 }, { name: 'typecheck', result: 'success', appId: 15368 }],
     reviews: [{ reviewer: 'reviewer', sha: head, state: 'APPROVED' }], merged: false, mergeSha: null, mergeable: true,
-    protected: true, files: [], at: new Date().toISOString(), prState: 'open', draft: false, ...overrides };
+    protected: true, files: [], scopeFiles: [], at: new Date().toISOString(), prState: 'open', draft: false, ...overrides };
 }
 
 /** An item taken through claim, workspace, submission and an observed, reviewed, green candidate. */
@@ -74,7 +74,7 @@ function fixture(overrides: Partial<Work> = {}): Work {
     gates: [], violations: [],
     observation: { candidate: { sha: head, baseSha: base, pr: 7, branch: 'graphyard/gy-2-1', author: 'implementer' },
       checks: [{ name: 'test', result: 'success', appId: 15368 }], reviews: [{ reviewer: 'reviewer', sha: head, state: 'APPROVED' }],
-      merged: false, mergeSha: null, mergeable: true, protected: true, files: [], at, prState: 'open', draft: false },
+      merged: false, mergeSha: null, mergeable: true, protected: true, files: [], scopeFiles: [], at, prState: 'open', draft: false },
     ...overrides } as Work;
 }
 const trusted = (proof: string, extra: Record<string, unknown> = {}) => ({ id: randomUUID(), proof, sha: head, baseSha: base, policyRevision: 2,

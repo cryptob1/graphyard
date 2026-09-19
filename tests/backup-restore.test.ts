@@ -13,6 +13,7 @@ import { Validation } from '../src/validation.js';
 import { Delivery } from '../src/delivery.js';
 import { defineScenario } from '../src/scenarios.js';
 import { ProofGrants, authorizedForProof } from '../src/proof-grants.js';
+import { recordIntake, recordLeadRuling } from '../src/delegation.js';
 import type { Principal } from '../src/model.js';
 import { backupDigest, backupSchema, createBackup, ledgerCounts, restoreBackup, verifyBackup } from '../src/backup.js';
 import { schemaVersion } from '../src/release.js';
@@ -26,7 +27,8 @@ const builder: Principal = { id: 'builder', role: 'producer' };
 const auditor: Principal = { id: 'auditor', role: 'producer', proofs: ['manual:audit'] };
 const observer: Principal = { id: 'observer', role: 'producer' };
 const promoter: Principal = { id: 'promoter', role: 'producer' };
-const principals = [operator, worker, runner, collector, builder, auditor, observer, promoter];
+const lead: Principal = { id: 'product-lead', role: 'slice-lead', slice: 'product', sessionKind: 'ai' };
+const principals = [operator, worker, runner, collector, builder, auditor, observer, promoter, lead];
 const sha = 'a'.repeat(40), base = 'b'.repeat(40), digest = `sha256:${'c'.repeat(64)}`, inputs = `sha256:${'d'.repeat(64)}`;
 let pg: EmbeddedPostgres, port: number, scratch: string;
 const id = () => randomUUID();
@@ -51,6 +53,8 @@ after(async () => { if (pg) await pg.stop(); });
  * revoked. Both are what a restore that re-seeded the environment would get wrong. And the
  * delivery side of the same environment: an attested release build, the release selected
  * from it under an approval, the observer's lease and the observation that verified it.
+ * And the delegation ledger: a slice lead's standing ruling over an item in its slice and
+ * an intake item citing it, both immutable rows a restore has to carry as history.
  */
 async function populate(store: Store) {
   const engine = new Engine(store, [15368], 120, 'test/repository');
@@ -71,7 +75,9 @@ async function populate(store: Store) {
   await validation.define(operator, { kind: 'bundle', id: 'bundle-1', expectedRevision: 0, scenario: 'booking', scenarioRevision: second.revision, scenarioHash: second.hash, digest, runnerImageDigest: inputs, reportFormat: 'junit-xml-v1' }, id());
   // An assigned item under a live lease, with history, plus a second item still in backlog.
   let w = await engine.execute(operator, 'create', null, { title: 'Booking flow', criteria: [{ id: 'AC-1', text: 'Booking is proven', proofs: ['e2e:booking'] }] }, id());
-  await engine.execute(operator, 'create', null, { title: 'Later work', criteria: [{ id: 'AC-1', text: 'Later', proofs: ['unit:later'] }] }, id());
+  const later = await engine.execute(operator, 'create', null, { title: 'Later work', slice: 'product', criteria: [{ id: 'AC-1', text: 'Later', proofs: ['unit:later'] }] }, id());
+  await recordLeadRuling(store, lead, later.id, { action: 'send-back', ruleId: 'rules/plan-v1#coverage', reason: 'Negative coverage is missing' }, id());
+  await recordIntake(store, operator, { origin: 'verification-finding', title: 'Cancellation is unproven', description: 'Found while reviewing the plan', sourceWorkId: later.id }, id());
   w = await engine.execute(operator, 'ready', w.id, {}, id()); w = await engine.execute(worker, 'claim', w.id, {}, id());
   w = await engine.execute(worker, 'workspace', w.id, { epoch: 1, host: 'worker-host', path: '/srv/worktrees/booking', branch: 'graphyard/booking-1' }, id());
   w = await engine.execute(worker, 'submit', w.id, { epoch: 1, pr: 7 }, id());
@@ -120,7 +126,9 @@ async function snapshot(store: Store) {
   const environments = (await store.pool.query('SELECT environment_id, document FROM delivery_environments ORDER BY environment_id')).rows;
   const observations = (await store.pool.query('SELECT seq, id, environment_id, registration_id, snapshot_id, document, received_at FROM delivery_observations ORDER BY seq')).rows;
   const leases = (await store.pool.query('SELECT registration_id, principal, epoch, expires_at FROM delivery_leases ORDER BY registration_id')).rows;
-  return { work, events, scenarios, requests, resources, artifacts, definitions, grants, grantHistory, releases, approvals, environments, observations, leases };
+  const rulings = (await store.pool.query('SELECT id, work_id, lead_id, slice_id, action, rule_id, reason, created_at FROM lead_rulings ORDER BY created_at, id')).rows;
+  const intake = (await store.pool.query('SELECT id, origin, title, description, source_work_id, submitted_by, created_at FROM intake_items ORDER BY created_at, id')).rows;
+  return { work, events, scenarios, requests, resources, artifacts, definitions, grants, grantHistory, releases, approvals, environments, observations, leases, rulings, intake };
 }
 
 test('the documented backup and restore exercise preserves assignments, history, scenario revisions and pending requests, and the restored ledger keeps ordering', async () => {
@@ -134,6 +142,9 @@ test('the documented backup and restore exercise preserves assignments, history,
   assert.deepEqual(before.grantHistory.map(h => [Number(h.seq), h.principal_id, h.document.kind]), [[1, 'collector', 'seed'], [2, 'builder', 'seed'], [3, 'auditor', 'seed'], [4, 'observer', 'seed'], [5, 'promoter', 'seed'], [6, 'builder', 'grant'], [7, 'auditor', 'revoke']]);
   assert.equal(before.releases.length, 1); assert.equal(before.approvals.length, 1); assert.equal(before.observations.length, 1); assert.equal(before.leases.length, 1);
   assert.equal(before.environments[0].document.verification?.status, 'verified', 'the fixture holds a selected release the observer has verified');
+  assert.deepEqual(before.rulings.map(r => [r.lead_id, r.action]), [[lead.id, 'send-back']], 'the fixture holds a standing slice-lead ruling');
+  assert.deepEqual(before.intake.map(i => [i.origin, i.submitted_by]), [['verification-finding', operator.id]], 'the fixture holds an intake item citing sliced work');
+  assert.equal(before.work.find(w => w.slice === 'product')!.leadHold?.action, 'send-back');
 
   const backup = await createBackup(source.pool);
   assert.ok(backup.sequences.some(s => s.name.endsWith('proof_grant_history_seq_seq') && s.value === 7), 'the grant history sequence travels with the backup');
