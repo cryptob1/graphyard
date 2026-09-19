@@ -107,8 +107,17 @@ export const workspaceCommands = defineCommands([
       const exclusiveResources = [...(work.exclusiveResources ?? [])];
       const settlementRequestId = foreground ? randomUUID() : '';
       const launchRequestId = foreground ? randomUUID() : '';
-      process.exitCode = await supervise(args[separator + 1], args.slice(separator + 2), epoch,
-        () => api(`work/${work.id}/heartbeat`, { epoch }, randomUUID()), {
+      // `complete` ends the lease, so the renewal after a submission is refused by design: say
+      // so before the supervisor stops the session, so the stop reads as the end of the attempt
+      // rather than as a lost assignment.
+      const renew = async () => {
+        try { return await api(`work/${work.id}/heartbeat`, { epoch }, randomUUID()); }
+        catch (error) {
+          if (error instanceof Error && error.message.includes('ended when') && error.message.includes('was submitted')) console.error(`${work.key} epoch ${epoch} was submitted; its implementation lease has ended and the worker session is being stopped.`);
+          throw error;
+        }
+      };
+      process.exitCode = await supervise(args[separator + 1], args.slice(separator + 2), epoch, renew, {
           detached: !foreground,
           quarantine: foreground ? {
             establish: () => establishContainment(
