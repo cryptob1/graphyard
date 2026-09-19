@@ -56,9 +56,8 @@ export const masterCommands = defineCommands([
       '                                Settle a containment quarantine whose supervisor this',
       '                                host verifies dead; unverifiable signals refuse',
       '  master merge GY-N|--all       Merge exact authorized candidates without bypasses',
-      '  master config FIELD=VALUE…   Tune the run settings and profile accounts the master owns',
-      '                                (accounts:PROFILE=a,b); autoMerge, identities and credential',
-      '                                paths stay operator-only',
+      '  master config FIELD=VALUE…   Tune owned run settings and profile accounts',
+      '                                (accounts:PROFILE=a,b); autoMerge and credential paths stay operator-only',
       '  master verify-deployment GY-N Verify that the deployed release serves a delivery and',
       '                                emits the current instructions; refuse stale or local-only',
       '                                observations, record the exact release observed',
@@ -233,23 +232,20 @@ export const masterCommands = defineCommands([
         const { values } = parseArgs({ args, options: { once: { type: 'boolean' }, interval: { type: 'string' } }, allowPositionals: false });
         const intervalSeconds = values.interval ? Number(values.interval) : master.run.intervalSeconds;
         if (!Number.isInteger(intervalSeconds) || intervalSeconds < 5 || intervalSeconds > 900) throw new Error('Use master run --interval with whole seconds between 5 and 900');
-        // A coordinator credential is the daemon's entire authority. Anything broader would let the
-        // loop satisfy a gate it is supposed to be waiting on.
+        // A coordinator credential is the daemon's entire authority; anything broader could satisfy a gate the loop must wait on.
         if (coordinator.actor.role !== 'coordinator') throw new Error('The durable master loop requires a coordinator credential; operator, producer, and worker credentials are refused');
         if (coordinator.actor.proofs?.length) throw new Error('The durable master loop refuses a credential that is also allowed to produce evidence');
         assertProtocol(coordinator);
         const state = await readDaemonState(root, master);
-        // The cycle and the dispatcher poll the bounded coordination view (asked for by header, so
-        // an older server answers with whole documents); the guarded merge re-reads the full
-        // documents, since it is the last check before GitHub is asked to merge.
+        // The cycle and the dispatcher poll the bounded coordination view (by header, so an older
+        // server answers with whole documents); the guarded merge re-reads the full documents.
         const live = liveMasterConfig(root, master), current = () => live.current, reload = () => live.reload();
         const coordinationSnapshot = (timeoutMs?: number) => masterApi('work-snapshot', masterToken, timeoutMs, { [coordinationViewHeader]: 'coordination' });
         const effects = daemonEffects(root, current, { snapshot: () => coordinationSnapshot(), mutate: masterMutation, executionOwner: coordinator.actor.id });
         const guardedMerge: typeof effects.merge = work => mergeExecutor(current(), () => masterApi('work-snapshot'), masterMutation, coordinator.actor.id, randomUUID())(work);
         // The loop outlives deployments: every guarded merge re-reads the server's protocol first.
         effects.merge = async work => { assertProtocol(await masterApi('status')); return guardedMerge(work); };
-        // Automatic dispatch runs beside the cycle on its own, shorter cadence, launching requested
-        // reviews and producers within 30 seconds whatever the cycle interval; it stops with the daemon.
+        // Automatic dispatch runs beside the cycle on a shorter cadence; it stops with the daemon.
         const dispatchCursor = await readDispatchCursor(root, master);
         const stopping = new AbortController();
         const daemonRun = runDaemon(master, state, effects, { once: values.once, intervalMs: values.interval ? intervalSeconds * 1000 : () => current().run.intervalSeconds * 1000, identity: { pid: process.pid, host: master.hostId }, reload }).finally(() => stopping.abort());
