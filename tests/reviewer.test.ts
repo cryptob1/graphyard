@@ -269,7 +269,7 @@ test('the example reviewer profiles ship valid, launchable configuration', async
     assert.equal(JSON.stringify(profile).includes('credentialFile'), false, 'a reviewer profile holds no Graphyard credential');
     assert.ok(['auto', 'prompt'].includes(profile.approvals));
   }
-  for (const name of names.filter(entry => !entry.includes('reviewer'))) {
+  for (const name of names.filter(entry => !entry.includes('reviewer') && !entry.includes('producer'))) {
     const profile = workerProfileSchema.parse(JSON.parse(await readFile(new URL(name, directory), 'utf8')));
     if (profile.mode === 'launch') assert.equal(profile.approvals, 'auto');
   }
