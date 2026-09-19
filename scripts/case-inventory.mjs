@@ -1,5 +1,8 @@
-// Shared case ledger for every trusted contract. Each contract binds it to its own fixed
+// Shared case ledger for trusted contracts. Each contract binds it to its own fixed
 // `requiredCases`, so the ledger can never name a case the contract does not register.
+// Semantics match the ledger `acceptance-contract.mjs` carries inline for the claim-safety
+// inventory; that contract is outside this change's planned files, so it adopts this module
+// in a follow-up rather than here.
 //
 // Records each case as it runs so an interrupted exercise still reports which cases
 // completed, which one failed, and which never executed. A started case counts as
