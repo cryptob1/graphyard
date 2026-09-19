@@ -20,6 +20,8 @@ export default function ShippingPulse({ token, repository }: { token: string; re
         const response = await fetch('/api/shipping-pulse', { headers: { Authorization: `Bearer ${token}` }, signal: AbortSignal.any([controller.signal, AbortSignal.timeout(15000)]) });
         if (!response.ok) throw new Error(String(response.status));
         const next = await response.json();
+        // Opening Insights lands here, so a malformed body reads as unavailable instead of breaking the page.
+        if (!next || typeof next !== 'object' || !next.counts || !Array.isArray(next.weeks) || !Array.isArray(next.recent)) throw new Error('The shipping pulse report is malformed');
         if (active) { setPulse(next); setUnavailable(false); readAt.current = performance.now(); setElapsed(0); }
       } catch { if (active) { setUnavailable(true); setElapsed(performance.now() - readAt.current); } }
     };

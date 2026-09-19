@@ -1,44 +1,79 @@
-import React from 'react';
-import { deliveryState, postDeployMs, stages, type Work } from '../../src/model';
-import { fileConflicts } from '../../src/coordination';
-import { assignment } from '../assignment';
-import { CandidatePr } from '../candidate';
+import { useState } from 'react';
+import type { Work } from '../../src/model';
 import SessionBadge from '../components/session-badge';
-import { age, deliveryLabel } from '../format';
+import Term, { Explained } from '../components/term';
+import WorkCard from '../components/work-card';
+import { CandidatePr } from '../candidate';
+import { age } from '../format';
 import { formatDuration } from '../duration';
+import { homeNumbers } from '../home-numbers';
+import { byAttention, phaseLabel, phaseOf, phases, plainStatus, type Phase } from '../plain-status';
 import type { Dashboard } from './dashboard';
 
-/** The delivery graph and the work board: one page, two arrangements of the same ledger. */
-export default function OverviewPage({ work, status, connected, lastUpdated, view, filter, setFilter, query, setQuery, setSelected, setCreating, observedAt, queue }: Dashboard) {
-  const visible = work.filter(w => (!filter || w.stage === filter) && `${w.key} ${w.title}`.toLowerCase().includes(query.toLowerCase()));
-  const blocked = work.filter(w => w.blocker || w.submission && w.gates.some(g => !g.passed));
-  const active = work.filter(w => assignment(w, observedAt).active);
-  const delegation = status?.delegation;
-  const slicePanel = delegation && <section aria-label="Delivery slices"><div className="section-title"><h2>Delivery slices</h2><span>BOUNDED AI COORDINATION</span></div>
-    <div className="cards">{delegation.slices.map((slice: any) => <div className="slice-card" key={slice.id}>
+const week = 7 * 24 * 60 * 60 * 1000;
+const openPhases = phases.filter(phase => phase !== 'shipped');
+
+/**
+ * The home page answers three questions on one screen: what is stuck and why, what is in
+ * progress, and what shipped recently. Everything else about an item is one click away in its
+ * details; analytics live under Insights.
+ */
+export default function OverviewPage({ work, status, filter, setFilter, query, setQuery, setSelected, setCreating, setView, observedAt, queue }: Dashboard) {
+  const [phase, setPhase] = useState<Phase | null>(null);
+  const [board, setBoard] = useState(false);
+  const [timings, setTimings] = useState(false);
+  const now = Number.isNaN(observedAt) ? Date.now() : observedAt;
+  const numbers = homeNumbers(work, now);
+  const match = (w: Work) => `${w.key} ${w.title}`.toLowerCase().includes(query.toLowerCase()) && (!phase || phaseOf(w, now) === phase) && (!filter || w.stage === filter);
+  const open = byAttention(work.filter(w => w.stage !== 'done' && match(w)), now);
+  const stuck = open.filter(w => plainStatus(w, now).tone === 'stuck');
+  const moving = open.filter(w => plainStatus(w, now).tone !== 'stuck');
+  const inProgress = moving.filter(w => !['needs-worker', 'not-started'].includes(phaseOf(w, now)));
+  const waiting = moving.filter(w => phaseOf(w, now) === 'needs-worker');
+  const notStarted = moving.filter(w => phaseOf(w, now) === 'not-started');
+  const shippedAt = (w: Work) => Date.parse(w.observation?.mergedAt ?? w.stageEnteredAt);
+  const recent = work.filter(w => w.stage === 'done' && now - shippedAt(w) <= week && match(w)).sort((a, b) => shippedAt(b) - shippedAt(a));
+  const card = (w: Work) => <WorkCard key={w.id} item={w} repository={status?.repository} now={now} onOpen={setSelected}/>;
+  const list = (title: string, items: Work[], note?: string) => items.length > 0 && <section className="work-list" aria-label={title}><h2>{title} <span className="count">{items.length}</span>{note && <small> {note}</small>}</h2><div className="cards">{items.map(card)}</div></section>;
+  const slices = (status?.delegation?.slices ?? []).filter((slice: any) => slice.lead);
+  const dwell = (p: Phase) => {
+    const times = work.filter(w => w.stage !== 'done' && phaseOf(w, now) === p).map(w => now - Date.parse(w.stageEnteredAt)).sort((a, b) => a - b);
+    return times.length ? <span title="Time in this stage for its open items: the oldest, then the 50th and 95th percentile">{`oldest ${age(new Date(now - times.at(-1)!).toISOString())} · p50 ${formatDuration(times[Math.floor(times.length * .5)] / 60000)} · p95 ${formatDuration(times[Math.min(times.length - 1, Math.floor(times.length * .95))] / 60000)}`}</span> : <span title="No items in this stage">—</span>;
+  };
+  return <>
+    <div className="page-heading"><h1>Work</h1>{status?.actor?.role === 'admin' && <button onClick={() => setCreating(true)}>＋ New work item</button>}</div>
+    {status && !status.github && <div className="notice">GitHub is not connected, so nothing can merge yet. <a href="/docs/github">Set it up ↗</a></div>}
+    {status?.appPermissions?.attention?.length > 0 && <div className="notice danger" role="alert"><strong>GitHub App permissions need attention.</strong>{status.appPermissions.attention.map((line: string) => <p key={line}>{line}</p>)}{status.heldJobs > 0 && <p>{status.heldJobs} integration job{status.heldJobs === 1 ? ' is' : 's are'} held rather than retried until the permission is accepted.</p>}{/^https:\/\/github\.com\//.test(status.appPermissions.installationUrl ?? '') && <a href={status.appPermissions.installationUrl} target="_blank" rel="noreferrer noopener">Review the App installation on GitHub ↗</a>} <a href="/docs/github#app-permissions">Migration guide ↗</a></div>}
+    {status?.jobs?.length > 0 && <div className="notice danger">{status.jobs.length} GitHub update(s) failed: {status.jobs[0].error}</div>}
+    <div className="metrics" aria-label="Open items">
+      <div><span>Open</span><strong>{numbers.open}</strong></div>
+      <div><span>Being built</span><strong>{numbers.building}</strong></div>
+      <div><span>Need a worker</span><strong>{numbers.needsWorker}</strong></div>
+      <div className={numbers.stuck ? 'stuck-tile' : ''}><span>Stuck</span><strong>{numbers.stuck}</strong></div>
+    </div>
+    <section className="stage-strip" aria-label="Stages">
+      <div className="graph">{openPhases.map(p => <button key={p} className={`node ${phase === p ? 'selected' : ''}`} aria-pressed={phase === p} onClick={() => setPhase(phase === p ? null : p)}><span>{phaseLabel[p]}</span><strong>{numbers.byPhase[p]}</strong>{timings && <small>{dwell(p)}</small>}</button>)}</div>
+    </section>
+    {slices.length > 0 && <section aria-label="Delivery slices"><h2><Term term="delivery slice">Delivery slices</Term></h2><div className="cards">{status.delegation.slices.map((slice: any) => <div className="slice-card" key={slice.id}>
       <div className="card-top"><span>{slice.name}</span>{slice.lead ? <SessionBadge kind={slice.lead.sessionKind} suffix="lead"/> : <span className="identity none">No lead assigned</span>}</div>
       <h3>{slice.lead ? slice.lead.displayName ?? slice.lead.id : 'Unassigned'}</h3>
-      {slice.lead?.displayName && <p className="muted">Lead session {slice.lead.id}</p>}
-      <p>{(slice.engineers ?? slice.workers).length}/{delegation.limits.maxEngineersPerLead} active engineers · {slice.workers.length} {slice.workers.length === 1 ? 'claimed item' : 'claimed items'} · {slice.bottlenecks.length} {slice.bottlenecks.length === 1 ? 'bottleneck' : 'bottlenecks'}</p>
+      <p>{(slice.engineers ?? slice.workers).length}/{status.delegation.limits.maxEngineersPerLead} active engineers · {slice.workers.length} {slice.workers.length === 1 ? 'claimed item' : 'claimed items'} · {slice.bottlenecks.length} {slice.bottlenecks.length === 1 ? 'bottleneck' : 'bottlenecks'}</p>
       <p className="muted">Workers: {slice.workers.length ? slice.workers.map((worker: any) => <span className="session" key={worker.key}>{worker.key} · {worker.displayName ?? worker.id} <SessionBadge kind={worker.sessionKind}/></span>) : 'none'}</p>
       <p className="muted">Bottlenecks: {slice.bottlenecks.length ? slice.bottlenecks.map((bottleneck: any) => `${bottleneck.key} — ${bottleneck.reason}`).join(' · ') : 'none'}</p>
-    </div>)}</div>
-    <p className="muted">Independent review/proof sessions ({delegation.reviewers.length}): {delegation.reviewers.length ? delegation.reviewers.map((agent: any) => <span className="session" key={agent.id}>{agent.displayName ?? agent.id} <SessionBadge kind={agent.sessionKind}/></span>) : 'none configured'}</p>
-    <p className="muted"><SessionBadge kind="human"/> sessions retain goals, policy, waivers, exceptions, and ambiguity. <SessionBadge kind="ai"/> leads coordinate only: they never implement, hold a worker lease, produce trusted evidence, or merge.</p></section>;
-  const postDeploy = work.filter(w => deliveryState(w) && deliveryState(w) !== 'delivered');
-  const postDeployFailures = postDeploy.filter(w => deliveryState(w) === 'delivered-with-failure');
-  const postDeployTimes = postDeploy.map(w => postDeployMs(w, observedAt)).filter((v): v is number => v !== null).sort((a, b) => a - b);
-  const card = (w: Work) => <div className={`card ${w.violations.length || deliveryState(w) === 'delivered-with-failure' ? 'violation' : ''}`} key={w.id} onClick={() => setSelected(w.id)}><div className="card-top"><span>{w.key}</span><span>P{w.priority} · {age(w.stageEnteredAt)}</span></div><h3><button className="card-open" aria-label={`${w.title} — open ${w.key} details`} onClick={e => { e.stopPropagation(); setSelected(w.id); }}>{w.title}</button></h3><div className="card-meta"><span className={`dot ${assignment(w, observedAt).active ? 'green' : ''}`}/><span className="assignment-label" title={assignment(w, observedAt).owner ? `${assignment(w, observedAt).text} · Worker ID: ${assignment(w, observedAt).owner}` : undefined}>{assignment(w, observedAt).text}</span><span className="push">{w.candidate ? <CandidatePr repository={status?.repository} candidate={w.candidate} workKey={w.key}/> : 'No PR'}</span></div>{fileConflicts(w, work).length > 0 && <p className="amber">File overlap with {fileConflicts(w, work).map(c => c.key).join(', ')}</p>}{w.gates.find(g => !g.passed) && <p className="reason">{w.gates.find(g => !g.passed)!.reasons[0]}</p>}{deliveryState(w) === 'delivered-with-failure' && <p className="reason danger-text">Post-deployment smoke proof failed · rollback guidance in details</p>}{(deliveryState(w) === 'awaiting-deployment' || deliveryState(w) === 'awaiting-smoke') && <p className="reason">{deliveryLabel[deliveryState(w)!]} · e2e:deploy-smoke pending</p>}</div>;
-  return <><header><div className="breadcrumb">Workspace <span>/</span> {status?.repository ?? 'Graphyard'}</div><div className="live"><span className={`dot ${connected ? 'green' : ''}`}/>{connected ? `Updated ${lastUpdated} · refreshes every 5s` : `Disconnected · last updated ${lastUpdated ?? 'never'}`}</div></header>
-      <div className="page-heading"><div><div className="eyebrow">ENGINEERING, IN VIEW</div><h1>{view === 'graph' ? 'Delivery graph' : 'Work board'}</h1><p>Every change has an owner. Every transition needs proof.</p></div>{status?.actor?.role === 'admin' && <button onClick={() => setCreating(true)}>＋ New work item</button>}</div>
-      {status && !status.github && <div className="notice">GitHub enforcement is not connected. Work can be coordinated; merge gates remain closed. <a href="/docs/github">Setup guide ↗</a></div>}
-      {status?.appPermissions?.attention?.length > 0 && <div className="notice danger" role="alert"><strong>GitHub App permissions need attention.</strong>{status.appPermissions.attention.map((line: string) => <p key={line}>{line}</p>)}{status.heldJobs > 0 && <p>{status.heldJobs} integration job{status.heldJobs === 1 ? ' is' : 's are'} held rather than retried until the permission is accepted.</p>}{/^https:\/\/github\.com\//.test(status.appPermissions.installationUrl ?? '') && <a href={status.appPermissions.installationUrl} target="_blank" rel="noreferrer noopener">Review the App installation on GitHub ↗</a>} <a href="/docs/github#app-permissions">Migration guide ↗</a></div>}
-      {status?.jobs?.length > 0 && <div className="notice danger">{status.jobs.length} integration job(s) need attention: {status.jobs[0].error}</div>}
-      {slicePanel}
-      <div className="metrics"><div><span>Open work</span><strong>{work.filter(w => w.stage !== 'done').length}</strong><small>Across the delivery graph</small></div><div><span>Active assignments</span><strong>{active.length}<i className="dot green"/></strong><small>{new Set(active.flatMap(w => w.workspaces.filter(s => s.epoch === w.epoch).map(s => s.host))).size} registered machines</small></div><div><span>Awaiting evidence</span><strong className="amber">{blocked.length}</strong><small>Explicit reasons, actionable next steps</small></div><div><span>Delivered</span><strong>{work.filter(w => w.stage === 'done').length}</strong><small>Observed merge · verified gates</small></div><div><span>Post-deploy failures</span><strong className={postDeployFailures.length ? 'danger-text' : ''}>{postDeployFailures.length}</strong><small>{postDeploy.length ? `${postDeploy.filter(w => deliveryState(w) === 'smoke-passed').length} smoke passed · ${postDeploy.length - postDeployFailures.length - postDeploy.filter(w => deliveryState(w) === 'smoke-passed').length} pending` : 'No delivery requires e2e:deploy-smoke'}</small></div></div>
-      {view === 'graph' && <section className="graph-section"><div className="section-title"><h2>From intent to delivery</h2><span>SELECT A STAGE TO INSPECT</span></div><div className="graph">{stages.map((stage, i) => { const items = work.filter(w => w.stage === stage); const dwell = items.map(w => Date.now() - Date.parse(w.stageEnteredAt)).sort((a, b) => a - b); return <React.Fragment key={stage}>{i > 0 && <span className="connector">→</span>}<button className={`node ${filter === stage ? 'selected' : ''} ${items.some(w => w.submission && w.gates.some(g => !g.passed)) ? 'waiting' : ''}`} onClick={() => setFilter(filter === stage ? null : stage)}><span>{stage}</span><strong>{items.length}</strong><small>{items.length ? `Oldest ${age(items.reduce((a, b) => a.stageEnteredAt < b.stageEnteredAt ? a : b).stageEnteredAt)}` : 'Clear'}</small><small>{dwell.length ? <span title="Current time in stage for this stage's items, at the 50th and 95th percentile">{`p50 ${formatDuration(dwell[Math.floor(dwell.length * .5)] / 60000)} · p95 ${formatDuration(dwell[Math.min(dwell.length - 1, Math.floor(dwell.length * .95))] / 60000)}`}</span> : <span title="No dwell data to summarize for this stage yet">—</span>}</small></button></React.Fragment>; })}<span className="connector">→</span><button className={`node ${filter === 'done' ? 'selected' : ''} ${postDeployFailures.length ? 'waiting' : ''}`} onClick={() => setFilter(filter === 'done' ? null : 'done')} aria-label="post-deploy, delivered work awaiting or holding a smoke verdict"><span>post-deploy</span><strong>{postDeploy.length}</strong><small>{postDeployFailures.length ? `${postDeployFailures.length} failed smoke` : postDeploy.length ? `${postDeploy.filter(w => deliveryState(w) === 'smoke-passed').length} smoke passed` : 'Clear'}</small><small>{postDeployTimes.length ? <span title="Post-deploy time for delivered items, at the 50th and 95th percentile">{`p50 ${formatDuration(postDeployTimes[Math.floor(postDeployTimes.length * .5)] / 60000)} · p95 ${formatDuration(postDeployTimes[Math.min(postDeployTimes.length - 1, Math.floor(postDeployTimes.length * .95))] / 60000)}`}</span> : <span title="No post-deploy data to summarize yet">—</span>}</small></button></div><p className="graph-note"><span className="dot amber-bg"/> Items appear at their first refusing gate. Dwell measures current time in stage. Post-deploy measures merge to smoke verdict for deliveries whose policy requires e2e:deploy-smoke.</p></section>}
-      {queue.length > 0 && <section className="graph-section"><div className="section-title"><h2>Merge queue <span className="count">{queue.length}</span></h2><span>VALIDATED ON THE TIP IT WILL LAND</span></div>{queue.map(entry => <button className="card" key={entry.id} onClick={() => setSelected(entry.id)}><div className="card-top"><span>{entry.position + 1}. {entry.key}</span><span>Waiting {age(entry.enqueuedAt)}</span></div><div className="card-meta"><span className={`dot ${entry.current ? 'green' : ''}`}/><span className="assignment-label">{entry.current ? 'Validated on its predicted tip' : 'Awaiting speculative validation'}</span><span className="push">{entry.predecessors.length ? `behind ${entry.predecessors.join(', ')}` : 'head of queue'}</span></div><p className="reason">Predicted base <code>{entry.predictedBase ? entry.predictedBase.slice(0, 12) : 'pending'}</code> · predicted tip <code>{entry.tip ? entry.tip.slice(0, 12) : 'pending'}</code></p>{entry.reasons.map(reason => <p className="reason" key={reason}>{reason}</p>)}</button>)}<p className="graph-note"><span className="dot amber-bg"/> Entries merge in order. Each is validated against the base branch plus every entry ahead of it, so an earlier merge does not invalidate the ones behind it.</p></section>}
-      <section><div className="section-title"><h2>{filter ? `${filter[0].toUpperCase()}${filter.slice(1)} work` : 'Work ledger'} <span className="count">{visible.length}</span></h2><div className="filters">{filter && <button className="text-button" onClick={() => setFilter(null)}>Clear filter ×</button>}<input aria-label="Search work" placeholder="Search work…" value={query} onChange={e => setQuery(e.target.value)}/></div></div>
-      {work.length === 0 ? <div className="empty"><span>◇</span><h2>Your delivery graph starts with intent.</h2><p>Create a work item, define what proves it works,<br/>and let an agent claim the implementation.</p>{status?.actor?.role === 'admin' && <button onClick={() => setCreating(true)}>Create the first work item</button>}</div> : view === 'board' ? <div className="board">{stages.filter(s => !filter || filter === s).map(s => <div className="column" key={s}><h3>{s} <span>{visible.filter(w => w.stage === s).length}</span></h3>{visible.filter(w => w.stage === s).map(card)}</div>)}</div> : <div className="cards">{visible.map(card)}</div>}</section>
-      <footer>Graphyard <span>Ownership is explicit. Evidence drives progression.</span></footer></>;
+    </div>)}</div><p className="muted">Independent review/proof sessions ({status.delegation.reviewers.length}): {status.delegation.reviewers.length ? status.delegation.reviewers.map((agent: any) => <span className="session" key={agent.id}>{agent.displayName ?? agent.id} <SessionBadge kind={agent.sessionKind}/></span>) : 'none configured'}</p></section>}
+    <div className="list-tools"><button className="text-button" onClick={() => setTimings(v => !v)} aria-expanded={timings}>{timings ? 'Hide times' : 'Show times'}</button>{(phase || filter) && <button className="text-button" onClick={() => { setPhase(null); setFilter(null); }}>Clear filter ×</button>}<input aria-label="Search work" placeholder="Search work…" value={query} onChange={e => setQuery(e.target.value)}/><button className="text-button" aria-pressed={board} onClick={() => setBoard(v => !v)}>{board ? 'List view' : 'Board view'}</button></div>
+    <div className="home-columns"><div>
+    {work.length === 0 ? <div className="empty"><h2>No work yet.</h2><p>Create a work item, say what must be true when it is done, and an agent will pick it up.</p>{status?.actor?.role === 'admin' && <button onClick={() => setCreating(true)}>Create the first work item</button>}</div>
+      : board ? <div className="board">{openPhases.map(p => <div className="column" key={p}><h3>{phaseLabel[p]} <span>{open.filter(w => phaseOf(w, now) === p).length}</span></h3>{open.filter(w => phaseOf(w, now) === p).map(card)}</div>)}</div>
+      : <>{list('Stuck', stuck)}{list('In progress', inProgress)}{list('Needs a worker', waiting)}
+        {notStarted.length > 0 && <details className="work-list"><summary>Not started <span className="count">{notStarted.length}</span></summary><div className="cards">{notStarted.map(card)}</div></details>}
+        {!open.length && <p className="muted">No open item matches.</p>}</>}
+    </div><aside>
+    {queue.length > 0 && <section className="graph-section" aria-label="Merge queue"><h2><Term term="merge queue">Merge queue</Term> <span className="count">{queue.length}</span></h2>{queue.map(entry => <button className="card" key={entry.id} onClick={() => setSelected(entry.id)}><div className="card-top"><span>{entry.position + 1}. {entry.key}</span><span>Waiting {age(entry.enqueuedAt)}</span></div><p className="reason">{entry.predecessors.length ? `Behind ${entry.predecessors.join(', ')}` : 'Next to merge'} · {entry.current ? 'tested with the changes ahead of it' : 'being re-tested'}</p></button>)}</section>}
+    <section className="work-list shipped-recently" aria-label="Shipped this week"><h2>Shipped this week <span className="count">{numbers.shippedThisWeek}</span></h2>
+      {recent.length ? <ul className="shipped-list">{recent.slice(0, 5).map(w => <li key={w.id}><button className="text-button" onClick={() => setSelected(w.id)}>{w.key} <span data-title>{w.title}</span></button>{w.candidate && <CandidatePr repository={status?.repository} candidate={w.candidate} workKey={w.key}/>}{plainStatus(w, now).tone === 'stuck' && <span className="danger-text"><Explained sentence={plainStatus(w, now).blocking!}/></span>}</li>)}</ul> : <p className="muted">Nothing shipped in the last seven days.</p>}
+      {work.some(w => w.stage === 'done') && <button className="text-button" onClick={() => setView('shipped')}>See everything shipped →</button>}
+    </section>
+    </aside></div>
+  </>;
 }
