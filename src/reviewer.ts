@@ -4,7 +4,7 @@ import { mkdir, readFile, rm, realpath } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { dirname, resolve } from 'node:path';
 import { z } from 'zod';
-import { assertOutsideWorktrees, atomicPrivateWrite, createdHerdrTab, herdrJson, loadMasterConfig, privateFile, reviewerIdentitySchema, reviewerProfileSchema, closeHerdrPane, stopCreatedHerdrTab, type MasterConfig, type ReviewerIdentity, type ReviewerProfile } from './master.js';
+import { assertOutsideWorktrees, atomicPrivateWrite, autonomousSession, createdHerdrTab, herdrJson, loadMasterConfig, prepareSessionHarness, privateFile, reviewerIdentitySchema, reviewerProfileSchema, closeHerdrPane, stopCreatedHerdrTab, type HerdrAgent, type MasterConfig, type ReviewerIdentity, type ReviewerProfile } from './master.js';
 import { launchPlan } from './harness.js';
 import type { Work } from './model.js';
 
@@ -29,11 +29,15 @@ export const reviewRecordSchema = z.object({
   // The control plane's review request this session answers (autoDispatch.review.id); a launch
   // by hand records none. One session per request id is what makes automatic dispatch idempotent.
   requestId: z.string().min(1).max(64).optional(),
-  state: z.enum(['pending', 'completed', 'expired', 'cancelled']),
+  /** Which launch for the request this is: a failed or expired session is relaunched as the next attempt. */
+  attempt: z.number().int().min(1).max(50).optional(),
+  state: z.enum(['pending', 'completed', 'expired', 'cancelled', 'failed']),
+  /** When Herdr first reported the session finished or blocked without a verdict. */
+  idleSince: z.string().min(1).max(40).optional(),
   verdict: z.object({ state: z.string().min(1).max(40), reviewer: z.string().min(1).max(100), reviewId: z.number().int().positive(), submittedAt: z.string().min(1).max(40) }).optional(),
   closedAt: z.string().min(1).max(40).optional(),
   closeFailure: z.string().min(1).max(500).optional(),
-  /** Why a session ended without a verdict: the head it was reviewing is no longer the candidate. */
+  /** Why a session ended without a verdict: the head it was reviewing is no longer the candidate, or it stopped without one. */
   resolution: z.string().min(1).max(500).optional(),
 }).strict();
 export type ReviewRecord = z.infer<typeof reviewRecordSchema>;
@@ -125,6 +129,43 @@ export async function saveReviewerProfile(root: string, profileInput: unknown) {
   return { added: profile.name, agentName: profile.agentName, kind: profile.kind, reviewers: config.reviewers.length + 1, launch };
 }
 
+/** Remove a reviewer profile; an automatic-dispatch setting that named it is cleared with it. */
+export async function removeReviewerProfile(root: string, name: string) {
+  const config = await loadMasterConfig(root);
+  const removed = config.reviewers.find(item => item.name === name);
+  if (!removed) throw new Error(`Unknown reviewer profile ${name}`);
+  const reviewers = config.reviewers.filter(item => item.name !== name);
+  const clearedAutomatic = config.run.reviewerProfile === name;
+  const run = { ...config.run }; if (clearedAutomatic) delete run.reviewerProfile;
+  await atomicPrivateWrite(resolve(root, '.graphyard/master.json'), { ...config, reviewers, run });
+  return { removed: name, agentName: removed.agentName, reviewers: reviewers.length, clearedAutomatic,
+    automatic: run.reviewerProfile ?? (reviewers.length === 1 ? reviewers[0].name : null),
+    next: reviewers.length ? 'master run adopts the change on its next tick' : 'No reviewer profile remains; review requests wait until one is added with master reviewer add' };
+}
+
+/** The file `master reviewer setup` registers the reviewer App into before it is bound. */
+export const reviewerRegistrationFile = (config: Pick<MasterConfig, 'credentialFile' | 'repository'>) => resolve(reviewerCredentialDirectory(config), `${config.repository.replace('/', '-')}-registration.json`);
+/**
+ * A reviewer App that exists but is not the bound identity: registered by `master reviewer setup`
+ * and never bound (the browser flow stopped before the installation was verified, or the bind
+ * failed), or bound to a credential file that is gone. Only the App's public facts are read.
+ */
+export async function reviewerBindingHealth(config: Pick<MasterConfig, 'credentialFile' | 'repository' | 'reviewer'>) {
+  const attention: string[] = [];
+  let registered: { appId?: unknown; slug?: unknown; installationId?: unknown } | null = null;
+  try { registered = JSON.parse(await readFile(reviewerRegistrationFile(config), 'utf8')); }
+  catch (error: any) { if (error.code !== 'ENOENT') attention.push(`The reviewer App registration ${reviewerRegistrationFile(config)} is unreadable: ${error instanceof Error ? error.message : 'unknown reason'}`); }
+  const app = registered && Number.isSafeInteger(registered.appId) ? { appId: registered.appId as number, slug: typeof registered.slug === 'string' ? registered.slug : null, installationId: Number.isSafeInteger(registered.installationId) ? registered.installationId as number : null } : null;
+  if (app && app.appId !== config.reviewer?.appId) {
+    attention.push(`Reviewer App ${app.slug ?? app.appId} (App ${app.appId}) is registered for ${config.repository} but not bound${config.reviewer ? `; the bound reviewer is App ${config.reviewer.appId}` : ''}. ${app.installationId ? 'Its installation is recorded: rerun master reviewer setup to bind it, or master reviewer bind FILE --key-stdin' : 'Install it on the repository, then rerun master reviewer setup to verify and bind it'}; until then no reviewer can be launched with it`);
+  }
+  if (config.reviewer) {
+    try { await privateFile(config.reviewer.credentialFile); }
+    catch (error: any) { attention.push(`The bound reviewer App ${config.reviewer.slug} has no usable credential at ${config.reviewer.credentialFile} (${error.code ?? (error instanceof Error ? error.message : 'unknown reason')}); rerun master reviewer bind`); }
+  }
+  return { registered: app, bound: config.reviewer ? { appId: config.reviewer.appId, slug: config.reviewer.slug } : null, attention };
+}
+
 // A launched reviewer reads one exact candidate. Everything a verdict is bound to is verified
 // here, before a token exists: a stale or unobserved candidate never reaches a reviewer session.
 export function assertReviewCandidate(work: Work, observedAt: string) {
@@ -157,7 +198,8 @@ export function reviewPrompt(config: MasterConfig, binding: ReviewBinding) {
     + `Judge only whether this diff is correct, safe, and matches what ${binding.key} requires; never weaken a requirement to let it pass. `
     + `GH_CONFIG_DIR points at a reviewer credential that expires within the hour and can only read this repository and write reviews. `
     + `Immediately before posting, run gh pr view ${binding.pr} --repo ${config.repository} --json mergeable,mergeStateStatus,headRefOid and repeat it every 5 seconds until mergeable is no longer UNKNOWN: GitHub recomputes the merge base lazily and dismisses a verdict posted before that recompute. `
-    + `If gh reports a head commit other than ${binding.sha}, stop and report that instead of reviewing a different commit. Then stop; Graphyard closes this session once it observes your verdict.`;
+    + `If gh reports a head commit other than ${binding.sha}, stop and report that instead of reviewing a different commit. Then stop; Graphyard closes this session once it observes your verdict. `
+    + autonomousSession('post the verdict yourself, APPROVE or REQUEST_CHANGES, as soon as you have judged the diff', `record a blocker as one review with event=COMMENT on commit ${binding.sha} (or, when posting is itself refused, as a final line starting BLOCKED:)`);
 }
 
 async function writeReviewerSession(directory: string, token: string) {
@@ -198,11 +240,13 @@ export async function launchReview(root: string, work: Work, profileName: string
   const launch = launchPlan(profile.kind, profile.approvals, profile.agentArgs, profile.environment);
   let pane: string | undefined, tabId: string | undefined;
   try {
+    // The reviewer loads its own role rules, never the master's: it may post this one verdict.
+    const harness = await prepareSessionHarness(root, config, { role: 'reviewer', kind: profile.kind, profile: profile.name, pr: binding.pr });
     const environment = { ...launch.environment, ...profile.environment, GH_CONFIG_DIR: sessionDirectory, GRAPHYARD_REVIEW: `${binding.key}@${binding.sha}` };
     const created = createdHerdrTab(herdrJson(['tab', 'create', ...(config.herdrWorkspace ? ['--workspace', config.herdrWorkspace] : []), '--cwd', root,
       '--label', `${binding.key} review · ${profile.agentName}`, ...Object.entries(environment).flatMap(([name, value]) => ['--env', `${name}=${value}`]), '--no-focus'], dependencies.run));
     pane = created.pane; tabId = created.tab;
-    herdrJson(['agent', 'start', profile.agentName, '--kind', profile.kind, '--pane', created.pane, '--', ...launch.args], dependencies.run);
+    herdrJson(['agent', 'start', profile.agentName, '--kind', profile.kind, '--pane', created.pane, '--', ...launch.args, ...harness.args], dependencies.run);
     herdrJson(['agent', 'prompt', profile.agentName, reviewPrompt(config, binding)], dependencies.run);
   } catch (error) {
     const malformedTab = (error as any)?.herdrTab as string | undefined;
@@ -213,7 +257,7 @@ export async function launchReview(root: string, work: Work, profileName: string
   }
   const record: ReviewRecord = reviewRecordSchema.parse({ id, key: binding.key, pr: binding.pr, sha: binding.sha, baseSha: binding.baseSha, policyRevision: binding.policyRevision,
     profile: profile.name, agentName: profile.agentName, pane: pane ?? null, sessionDirectory, requestedAt: now().toISOString(), tokenExpiresAt: minted.expiresAt, state: 'pending',
-    ...(dependencies.requestId ? { requestId: dependencies.requestId } : {}) });
+    ...(dependencies.requestId ? { requestId: dependencies.requestId, attempt: ledger.reviews.filter(entry => entry.requestId === dependencies.requestId).length + 1 } : {}) });
   await saveReviewLedger(root, { ...ledger, reviews: [...ledger.reviews, record] });
   return { review: record.id, requestId: record.requestId ?? null, work: binding.key, pr: binding.pr, sha: binding.sha, baseSha: binding.baseSha, policyRevision: binding.policyRevision, profile: profile.name, agentName: profile.agentName,
     pane: record.pane, reviewer: `${config.reviewer.slug}[bot]`, tokenExpiresAt: minted.expiresAt, approvals: launch.approvals,
@@ -233,6 +277,9 @@ export function observeReviewVerdict(repository: string, record: ReviewRecord, r
  * replaced, or the item left review altogether. The session is closed and its token withdrawn;
  * a verdict it managed to post for the old head settles nothing the record does not already say.
  */
+/** A session Herdr reports finished or blocked is given this long to post its verdict before it is recorded as failed. */
+export const reviewIdleGraceMs = 5 * 60_000;
+
 export function staleReviewReason(record: Pick<ReviewRecord, 'key' | 'sha' | 'baseSha' | 'policyRevision'>, work: Work[] | undefined): string | null {
   const item = work?.find(candidate => candidate.key === record.key);
   if (!item) return null;
@@ -254,6 +301,8 @@ export async function reconcileReviews(root: string, config: MasterConfig, depen
   observe?: (record: ReviewRecord, reviewer: string) => { state: string; reviewer: string; reviewId: number; submittedAt: string } | null;
   now?: () => Date;
   work?: Work[];
+  /** Herdr's agent list; null when Herdr could not be read, when a session is never judged finished. */
+  agents?: HerdrAgent[] | null;
 } = {}) {
   const ledger = await readReviewLedger(root);
   if (!config.reviewer) return { reviews: ledger.reviews, changed: 0 };
@@ -266,14 +315,30 @@ export async function reconcileReviews(root: string, config: MasterConfig, depen
     const verdict = record.verdict ?? observe(record, reviewer) ?? undefined;
     const expired = !verdict && Date.parse(record.tokenExpiresAt) <= now.getTime();
     const stale = verdict ? null : staleReviewReason(record, dependencies.work);
-    if (!verdict && !expired && !stale) continue;
+    // A session that finished, vanished or sits blocked without a verdict is waiting on input it
+    // will never get: after a grace period it is recorded as failed, and the request relaunched.
+    let failed: string | null = null;
+    if (!verdict && !expired && !stale && dependencies.agents) {
+      const agent = dependencies.agents.find(candidate => candidate.name === record.agentName);
+      if (!agent || ['done', 'idle', 'blocked'].includes(agent.agent_status ?? '')) {
+        if (!record.idleSince) { record.idleSince = now.toISOString(); changed++; }
+        else if (now.getTime() - Date.parse(record.idleSince) >= reviewIdleGraceMs) failed = agent?.agent_status === 'blocked'
+          ? `the reviewer session ended waiting on input (Herdr reports it blocked) instead of deciding on its own, without a verdict on ${record.sha.slice(0, 12)}`
+          : `the reviewer session finished (${agent?.agent_status ?? 'gone from Herdr'}) without posting a verdict on ${record.sha.slice(0, 12)}`;
+      } else if (record.idleSince) { delete record.idleSince; changed++; }
+    }
+    if (!verdict && !expired && !stale && !failed) continue;
     if (verdict) record.verdict = verdict;
     let closeFailure: string | undefined;
     try { if (record.pane) closeHerdrPane(record.pane, dependencies.run); }
     catch (error) { closeFailure = `Herdr could not close pane ${record.pane}: ${error instanceof Error ? error.message : 'unknown reason'}`; }
     if (!closeFailure) await rm(record.sessionDirectory, { recursive: true, force: true });
     record.closeFailure = closeFailure;
-    if (!closeFailure) { record.state = verdict ? 'completed' : stale ? 'cancelled' : 'expired'; record.closedAt = now.toISOString(); if (stale) record.resolution = stale; }
+    if (!closeFailure) {
+      record.state = verdict ? 'completed' : stale ? 'cancelled' : failed ? 'failed' : 'expired'; record.closedAt = now.toISOString();
+      if (stale ?? failed) record.resolution = (stale ?? failed)!;
+      else if (!verdict) record.resolution = `the reviewer token expired at ${record.tokenExpiresAt} without a verdict on ${record.sha.slice(0, 12)}`;
+    }
     changed++;
   }
   if (changed) await saveReviewLedger(root, ledger);
@@ -281,7 +346,7 @@ export async function reconcileReviews(root: string, config: MasterConfig, depen
 }
 
 export function summarizeReviews(records: ReviewRecord[]) {
-  const describe = (record: ReviewRecord) => ({ review: record.id, requestId: record.requestId ?? null, work: record.key, pr: record.pr, sha: record.sha, policyRevision: record.policyRevision, profile: record.profile, agentName: record.agentName,
+  const describe = (record: ReviewRecord) => ({ review: record.id, requestId: record.requestId ?? null, attempt: record.attempt ?? 1, work: record.key, pr: record.pr, sha: record.sha, policyRevision: record.policyRevision, profile: record.profile, agentName: record.agentName,
     state: record.state, verdict: record.verdict?.state ?? null, requestedAt: record.requestedAt, tokenExpiresAt: record.tokenExpiresAt, closedAt: record.closedAt ?? null, resolution: record.resolution ?? null, attention: record.closeFailure ?? null });
   return { pending: records.filter(record => record.state === 'pending').map(describe), completed: records.filter(record => record.state !== 'pending').slice(-20).map(describe) };
 }
