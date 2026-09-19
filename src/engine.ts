@@ -508,11 +508,16 @@ export class Engine {
           'Evidence revocation requires an operator or the trusted producer authorized for this proof', 403);
         // Revoke every applicable record for the tuple, not merely the newest: leaving an older
         // accepted run behind would silently re-authorize the same candidate.
-        const withdrawn = work.evidence.filter(item => item.trusted && !item.revocation && item.proof === data.proof
+        const direct = work.evidence.filter(item => item.trusted && !item.revocation && item.proof === data.proof
           && item.sha === data.sha && item.baseSha === data.baseSha && item.policyRevision === data.policyRevision);
-        demand(withdrawn.length, 'No trusted evidence matches this proof and candidate; reload before revoking', 404);
-        // The execution is recalled when a withdrawn record bound its candidate — exactly, or
-        // carried across a Graphyard-authored tip — for a proof the candidate's criteria require.
+        demand(direct.length, 'No trusted evidence matches this proof and candidate; reload before revoking', 404);
+        // A reused record (D6) stands on the executed one it names, so withdrawing the executed
+        // pass withdraws every record derived from it, for whichever later heads they cover.
+        const directIds = new Set(direct.map(item => item.id));
+        const withdrawn = work.evidence.filter(item => directIds.has(item.id) || item.trusted && !item.revocation && !!item.reuse && directIds.has(item.reuse.evidenceId));
+        // The execution is recalled when a withdrawn record — executed or derived — bound its
+        // candidate, exactly or carried across a Graphyard-authored tip, for a proof the
+        // candidate's criteria require.
         const execution = work.mergeExecution && work.candidate
           && work.mergeExecution.sha === work.candidate.sha
           && work.mergeExecution.baseSha === work.candidate.baseSha

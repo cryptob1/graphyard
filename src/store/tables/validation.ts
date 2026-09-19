@@ -55,4 +55,35 @@ export const validationResources = defineTable({
   ddl: `CREATE TABLE IF NOT EXISTS validation_resources (resource text PRIMARY KEY, request_id uuid NOT NULL REFERENCES validation_requests(id));`,
 });
 
-export const validationTables = [validationDefinitions, validationBuilds, validationCandidates, validationRequests, validationArtifacts, validationRunnerPolls, validationResources];
+/**
+ * D6: the durable attempt order. One row per dispatched attempt, numbered by the sequence
+ * the dispatch transaction took, so "the newest attempt" is decided by when authority was
+ * granted and never by when a result happened to arrive.
+ */
+export const validationAttempts = defineTable({
+  name: 'validation_attempts', orderBy: 'seq', serial: 'seq',
+  ddl: `CREATE TABLE IF NOT EXISTS validation_attempts (
+  seq bigserial PRIMARY KEY, request_id uuid NOT NULL REFERENCES validation_requests(id), attempt_id uuid NOT NULL UNIQUE,
+  epoch int NOT NULL, work_id uuid NOT NULL, proof text NOT NULL, candidate_id uuid NOT NULL, dispatched_at timestamptz NOT NULL
+);
+${appendOnly('validation_attempts')}
+CREATE INDEX IF NOT EXISTS validation_attempt_work ON validation_attempts(work_id,proof,seq DESC);`,
+});
+/** D6: every reuse decision, granted or refused, with the applicability findings it rests on. */
+export const validationReuseDecisions = defineTable({
+  name: 'validation_reuse_decisions', orderBy: 'seq', serial: 'seq',
+  ddl: `CREATE TABLE IF NOT EXISTS validation_reuse_decisions (
+  seq bigserial PRIMARY KEY, id uuid NOT NULL UNIQUE, work_id uuid NOT NULL, proof text NOT NULL, document jsonb NOT NULL
+);
+${appendOnly('validation_reuse_decisions')}`,
+});
+/** D6: replay records — a deterministic verifier re-run over retained artifacts, with its coverage and cost. */
+export const validationReplays = defineTable({
+  name: 'validation_replays', orderBy: 'seq', serial: 'seq',
+  ddl: `CREATE TABLE IF NOT EXISTS validation_replays (
+  seq bigserial PRIMARY KEY, id uuid NOT NULL UNIQUE, request_id uuid NOT NULL REFERENCES validation_requests(id), attempt_id uuid NOT NULL, document jsonb NOT NULL
+);
+${appendOnly('validation_replays')}`,
+});
+
+export const validationTables = [validationDefinitions, validationBuilds, validationCandidates, validationRequests, validationArtifacts, validationRunnerPolls, validationResources, validationAttempts, validationReuseDecisions, validationReplays];
