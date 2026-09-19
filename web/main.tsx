@@ -5,9 +5,11 @@ import './style.css';
 import Docs from './docs';
 import type { IntegrationJob } from '../src/coordination';
 import { predictQueue } from '../src/merge-queue';
-import SessionBadge from './components/session-badge';
+import Sidebar from './components/sidebar';
 import type { Dashboard } from './pages/dashboard';
-import { viewFor, views } from './pages';
+import { primaryEntry, viewFor, views } from './pages';
+import TopBar from './components/top-bar';
+import { useFeatures } from './features';
 import LoginPage from './pages/login';
 import WorkDetails from './pages/work-details';
 import CreateWork from './pages/create-work';
@@ -25,7 +27,7 @@ function App() {
   const [error, setError] = useState('');
   const [connected, setConnected] = useState(false);
   const [lastUpdated, setLastUpdated] = useState<string | null>(null);
-  const [view, setView] = useState('graph');
+  const [view, setView] = useState('work');
   const [filter, setFilter] = useState<Stage | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
   const [events, setEvents] = useState<any[]>([]);
@@ -35,12 +37,11 @@ function App() {
   const [jobs, setJobs] = useState<IntegrationJob[]>([]);
   const [editingRequirements, setEditingRequirements] = useState(false);
   const [query, setQuery] = useState('');
-  const [operatorAgents, setOperatorAgents] = useState<any[]>([]);
   async function api(path: string, data?: unknown) {
     const response = await fetch(`/api/${path}`, { method: data === undefined ? 'GET' : 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', 'Idempotency-Key': crypto.randomUUID() }, body: data === undefined ? undefined : JSON.stringify(data) });
     const body = await response.json(); if (!response.ok) throw new Error(body.error + (body.issues ? `: ${body.issues.map((i: any) => i.message).join(', ')}` : '')); return body;
   }
-  function signOut() { sessionEpoch.current++; setBusy(false); sessionStorage.removeItem('graphyard-token'); setToken(''); setDraftToken(''); setStatus(null); setWork([]); setJobs([]); setOperatorAgents([]); setView('graph'); setEditingRequirements(false); setObservedAt(Number.NaN); setSelected(null); setEvents([]); setCreating(false); setConnected(false); setLastUpdated(null); setError(''); }
+  function signOut() { sessionEpoch.current++; setBusy(false); sessionStorage.removeItem('graphyard-token'); setToken(''); setDraftToken(''); setStatus(null); setWork([]); setJobs([]); setView('work'); setEditingRequirements(false); setObservedAt(Number.NaN); setSelected(null); setEvents([]); setCreating(false); setConnected(false); setLastUpdated(null); setError(''); }
   async function refresh(epoch: number) { const [items, system] = await Promise.all([api('work-snapshot'), api('status')]); if (epoch !== sessionEpoch.current) return; setWork(items.work); setJobs(items.jobs ?? []); setObservedAt(Date.parse(items.now)); setStatus(system); setConnected(true); setLastUpdated(new Date().toLocaleTimeString()); setError(''); }
   useEffect(() => {
     if (!token) return;
@@ -71,11 +72,11 @@ function App() {
   const item = work.find(w => w.id === selected);
   const queue = predictQueue(work, observedAt);
   async function action(id: string, command: string, data: unknown = {}) { const epoch = sessionEpoch.current; setBusy(true); try { await api(`work/${id}/${command}`, data); if (epoch !== sessionEpoch.current) return; await refresh(epoch); } catch (e) { if (epoch === sessionEpoch.current) setError((e as Error).message); } finally { if (epoch === sessionEpoch.current) setBusy(false); } }
-  async function showAutomation() { const epoch = sessionEpoch.current; setView('automation'); try { const agents = await api('operator-agents'); if (epoch === sessionEpoch.current) setOperatorAgents(agents); } catch (e) { if (epoch === sessionEpoch.current) setError((e as Error).message); } }
-  const dashboard: Dashboard = { token, work, status, error, connected, lastUpdated, view, setView, filter, setFilter, selected, setSelected, creating, setCreating, busy, setBusy, observedAt, jobs, query, setQuery, operatorAgents, events, editingRequirements, setEditingRequirements, codexAvailable, queue, sessionEpoch, api, refresh, action, showAutomation, setError, signOut };
+  const { features, operatorAgents } = useFeatures(token, !!status, api, status?.actor?.role === 'admin', work.some(w => w.scenarioRequirements?.length > 0));
+  const dashboard: Dashboard = { token, work, status, error, connected, lastUpdated, view, setView, filter, setFilter, selected, setSelected, creating, setCreating, busy, setBusy, observedAt, jobs, query, setQuery, operatorAgents, features, events, editingRequirements, setEditingRequirements, codexAvailable, queue, sessionEpoch, api, refresh, action, setError, signOut };
   if (!token || !status) return <LoginPage token={token} error={error} signOut={signOut} setError={setError} sessionEpoch={sessionEpoch} setToken={setToken} draftToken={draftToken} setDraftToken={setDraftToken}/>;
-  return <div className="shell"><aside className="sidebar"><div className="brand"><img className="mark" src="/graphyard-symbol.svg" alt="" width="32" height="32"/> graphyard</div><div className="workspace-label">CONTROL PLANE</div>{views.map(entry => (!entry.adminOnly || status?.actor?.role === 'admin') && (!entry.visible || entry.visible(dashboard)) && <button key={entry.id} className={view === entry.id ? 'nav active' : 'nav'} onClick={() => entry.open ? entry.open(dashboard) : setView(entry.id)}>{entry.icon} <span>{entry.label}</span>{entry.count && <small>{entry.count(dashboard)}</small>}</button>)}<a className="nav" href="/docs">↗ <span>Documentation</span></a><div className="sidebar-bottom"><span className={`dot ${connected ? 'green' : ''}`}/>{connected ? 'Control plane connected' : 'Disconnected · data may be stale'}<p>{status?.actor?.id} · {status?.actor?.role} <SessionBadge kind={status?.actor?.sessionKind}/></p><button className="text-button" onClick={signOut}>Sign out</button></div></aside>
-    <main className="main">{error && <div role="alert" className="notice danger">{error}</div>}{viewFor(view).render(dashboard)}</main>
+  return <div className="shell"><Sidebar entries={views.map(entry => primaryEntry(dashboard, entry))} dashboard={dashboard}/>
+    <main className="main"><TopBar {...dashboard}/>{error && <div role="alert" className="notice danger">{error}</div>}{viewFor(view).render(dashboard)}</main>
     {item && <WorkDetails {...dashboard} item={item}/>}
     {creating && <CreateWork {...dashboard}/>}
   </div>;
