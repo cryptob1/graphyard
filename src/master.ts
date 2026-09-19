@@ -1370,6 +1370,18 @@ export function approvedMerge(work: Work, decisions: { action: string; state: st
 }
 
 /**
+ * With automatic merging off, an approver agent's merge decision for the exact candidate stands in
+ * for the operator: a named item without one is refused, and `--all` keeps only approved ones.
+ */
+export async function approvedMerges(selected: Work[], decisions: (work: Work) => Promise<{ decisions: Parameters<typeof approvedMerge>[1] }>, single: boolean) {
+  const approved: Work[] = [];
+  for (const work of selected) {
+    if (approvedMerge(work, (await decisions(work)).decisions)) approved.push(work);
+    else if (single) throw new Error(`${work.key} has no approved merge decision for its current candidate; request one with graphyard master decide ${work.key} merge REASON`);
+  }
+  return approved;
+}
+/**
  * A roster rotation, previewed against the principals the server authenticates now. It may add
  * principals and rotate tokens; it may never drop a live principal or change its role. Tokens
  * are never read into the report.
@@ -1450,7 +1462,8 @@ async function jsonArgument(value: string) { return JSON.parse(value.startsWith(
  * own intent commands, two-party decisions, the approver session, roster rotation and the loop
  * restart. Each authenticates as the identity the command belongs to, never as another.
  */
-export async function runAutonomyCommand(root: string, config: MasterConfig, id: typeof autonomySubcommands[number], args: string[], deps: AutonomyDependencies) {
+export async function runAutonomyCommand(root: string, config: MasterConfig, id: string, args: string[], deps: AutonomyDependencies) {
+  if (!(autonomySubcommands as readonly string[]).includes(id)) throw new Error(`Unknown autonomy command ${id}`);
   const fetcher = deps.fetcher ?? fetch;
   const call = async (token: string, path: string, body?: unknown) => {
     const response = await fetcher(`${config.url}/api/${path}`, { method: body === undefined ? 'GET' : 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', 'Idempotency-Key': process.env.GRAPHYARD_REQUEST_ID ?? randomUUID() }, ...(body === undefined ? {} : { body: JSON.stringify(body) }), signal: AbortSignal.timeout(30_000) });
