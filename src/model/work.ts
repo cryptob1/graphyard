@@ -44,6 +44,7 @@ export interface Principal {
 }
 export interface AssignmentIdentity { owner: string; epoch: number; displayName?: string; runtime?: string; claimedAt?: string }
 export interface Lease { owner: string; epoch: number; expiresAt: string }
+export interface ContainmentScope { unit: string; pid: number }
 export interface Workspace { host: string; path: string; branch: string; epoch: number; owner: string }
 // createdAt is the provider's pull-request creation time; older observations predate it.
 export interface Candidate { sha: string; baseSha: string; pr: number; branch: string; author: string; createdAt?: string }
@@ -88,7 +89,9 @@ export interface Work extends Create {
   id: string; key: string; stage: Stage; revision: number; policyRevision: number;
   createdAt: string; updatedAt: string; stageEnteredAt: string; ready: boolean;
   epoch: number; lease: Lease | null; lastAssignment?: AssignmentIdentity; workspaces: Workspace[]; candidate: Candidate | null;
-  containmentQuarantine?: { owner: string; epoch: number; at: string; settlementHash: string; launchAcknowledgedAt?: string; launchExpiresAt?: string; leaseExpiresAt?: string } | null;
+  // `scope` is the exact systemd scope unit the supervisor launched the session in and that
+  // supervisor's pid, so settlement can attribute a live scope to this assignment or another.
+  containmentQuarantine?: { owner: string; epoch: number; at: string; settlementHash: string; launchAcknowledgedAt?: string; launchExpiresAt?: string; leaseExpiresAt?: string; scope?: ContainmentScope } | null;
   submission: { epoch: number; pr: number } | null;
   queue?: QueueEntry | null; queueSequence?: number; queueEjection?: QueueEjection | null; queueHistory?: QueueHistoryEntry[];
   reworkRequested: boolean;

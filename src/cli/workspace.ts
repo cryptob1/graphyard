@@ -2,7 +2,7 @@ import { mkdir, realpath } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import { resolve } from 'node:path';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { supervise } from '../supervisor.js';
+import { supervise, systemdContainment } from '../supervisor.js';
 import { localScopeFindings } from '../sync.js';
 import { assertRepository, discover } from '../onboarding.js';
 import { acknowledgeContainment, containmentCredentials, establishContainment, revalidateContainment, settleContainment } from '../quarantine.js';
@@ -107,13 +107,31 @@ export const workspaceCommands = defineCommands([
       const exclusiveResources = [...(work.exclusiveResources ?? [])];
       const settlementRequestId = foreground ? randomUUID() : '';
       const launchRequestId = foreground ? randomUUID() : '';
-      process.exitCode = await supervise(args[separator + 1], args.slice(separator + 2), epoch,
-        () => api(`work/${work.id}/heartbeat`, { epoch }, randomUUID()), {
+      // The scope is created here rather than inside the supervisor so its exact unit name and
+      // this supervisor's pid are recorded on the quarantine: settlement later holds everything
+      // that unit still contains and can tell it from a neighbouring assignment's scope.
+      const scoped = foreground && process.platform === 'linux' ? systemdContainment(args[separator + 1], args.slice(separator + 2)) : null;
+      const unit = scoped?.args.find(arg => arg.startsWith('--unit='))?.slice('--unit='.length);
+      const scope = unit ? { unit, pid: process.pid } : undefined;
+      // `complete` ends the lease, so the renewal after a submission is refused by design: say
+      // so before the supervisor stops the session, so the stop reads as the end of the attempt
+      // rather than as a lost assignment.
+      const renew = async () => {
+        try { return await api(`work/${work.id}/heartbeat`, { epoch }, randomUUID()); }
+        catch (error) {
+          if (error instanceof Error && error.message.includes('ended when') && error.message.includes('was submitted')) console.error(`${work.key} epoch ${epoch} was submitted; its implementation lease has ended and the worker session is being stopped.`);
+          throw error;
+        }
+      };
+      process.exitCode = await supervise(args[separator + 1], args.slice(separator + 2), epoch, renew, {
           detached: !foreground,
+          ...(scoped ? { containment: scoped } : {}),
           quarantine: foreground ? {
+            // The quarantine records the exact scope unit and supervisor pid the session is
+            // launched in, and launch is refused unless the confirmed record names them.
             establish: () => establishContainment(
-              requestId => api(`work/${work.id}/quarantine`, { epoch, settlementHash: containment!.settlementHash }, requestId),
-              { epoch, settlementHash: containment!.settlementHash, exclusiveResources, requestId: containment!.requestId },
+              requestId => api(`work/${work.id}/quarantine`, { epoch, settlementHash: containment!.settlementHash, ...(scope ? { scope } : {}) }, requestId),
+              { epoch, settlementHash: containment!.settlementHash, exclusiveResources, requestId: containment!.requestId, ...(scope ? { scope } : {}) },
             ),
             revalidate: async () => revalidateContainment(await api('work-snapshot'), {
               workId: work.id, principal: workerStatus.actor.id, epoch, settlementHash: containment!.settlementHash,

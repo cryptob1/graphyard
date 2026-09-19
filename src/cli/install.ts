@@ -5,6 +5,7 @@ import { availableRuntimes, discover } from '../onboarding.js';
 import { startGithubSetup, updateAppPermissions } from '../github-setup.js';
 import { applyProposal, loadAppliedSetup, loadProposal, readSetupStatus, repositoryScanDifference, saveProposal, scanProposal, setupDrift, setupRepository } from '../repository-setup.js';
 import { delegationLimitAssignments } from '../install/limits.js';
+import { completionProfiles, readinessChecklist, summarizeDefinitions, type CompletionProfile } from '../readiness.js';
 import { defineCommands } from './registry.js';
 import { readSecretFromStdin } from './context.js';
 
@@ -90,29 +91,52 @@ export const installCommands = defineCommands([
   },
   {
     name: 'doctor',
-    help: ['  doctor                       Inspect local discovery and live integration readiness'],
+    help: [
+      '  doctor [--profile PROFILE]   Inspect local discovery, live integration readiness and the',
+      '                                readiness checklist for a completion profile',
+    ],
     async run(context) {
+      const { base, api } = context;
       const root = context.repositoryRoot();
       const discovered = await discover(root);
+      const { values } = parseArgs({ args: context.rest, options: { profile: { type: 'string' } }, allowPositionals: false });
+      const profile = (values.profile ?? 'through-merge') as CompletionProfile;
+      if (!completionProfiles.includes(profile)) throw new Error(`Unknown completion profile ${values.profile}; choose one of ${completionProfiles.join(', ')}`);
       let live: any = null, failure: string | undefined;
-      try { live = await context.api('status'); } catch (error: any) { failure = error.message; }
+      try { live = await api('status'); } catch (error: any) { failure = error.message; }
+      const setup = await readSetupStatus(root).catch((error: any) => ({ error: error.message }));
+      const stored = await loadProposal(root).catch(() => null);
       const appPermissions = live?.appPermissions ?? null;
       // Capacity drift and production lag are the two installation facts a deploy can break
       // silently; the server reports both and doctor repeats them beside the App preflight.
       const delegationLimits = live?.delegationLimits ?? null, production = live?.production ?? null;
-      return context.print({ discovered, server: context.base, cliPath: await context.activeCliPath(), hostId: context.individualHostId(), connected: !!live, githubConfigured: !!live?.github, role: live?.actor?.role, failure,
-        setup: await readSetupStatus(root).catch((error: any) => ({ error: error.message })),
+      // Validation definitions are readable by operators and readers; every other credential
+      // leaves the runner-path items `unknown` with the command that reads them.
+      let definitions: { kind: string; id: string; revision: number; role?: string; enabled?: boolean }[] | null = null;
+      if (live && ['admin', 'reader'].includes(live.actor?.role)) { try { definitions = (await api('validation/definitions')).definitions; } catch { definitions = null; } }
+      const readiness = readinessChecklist(profile, {
+        repository: discovered.repository ?? null,
+        server: { url: base, reachable: !!live, role: live?.actor?.role, github: !!live?.github, githubPermissions: live?.githubPermissions ?? {}, appPermissions, failure },
+        setup: 'error' in setup ? { proposal: null, appliedAt: null, githubApp: null, drift: [], unreadable: [String(setup.error)] } : { ...setup, unreadable: setup.unreadable.filter((entry): entry is string => typeof entry === 'string') },
+        proposal: stored?.proposal ?? null,
+        validation: definitions ? summarizeDefinitions(definitions) : null,
+      });
+      // A ready checklist still deploys nothing: once every item is ready, capacity drift and
+      // an undeployed merge are the next actions; until then the checklist's own gap comes first.
+      const next = !readiness.ready ? readiness.next
+        : delegationLimits?.drift?.length ? `Set ${delegationLimits.drift.map((entry: any) => `${entry.variable}=${entry.required}`).join(' ')} on the deployment: ${delegationLimits.drift[0].reason}`
+        : production?.incidents?.length ? `Production has not deployed ${production.incidents.map((incident: any) => incident.key).join(', ')}: ${production.incidents[0].reason}`
+        : readiness.next;
+      return context.print({ discovered, server: base, cliPath: await context.activeCliPath(), hostId: context.individualHostId(), connected: !!live, githubConfigured: !!live?.github, role: live?.actor?.role, release: live?.release ?? null, failure,
+        setup,
         appPermissions: appPermissions ? { verifiedAt: appPermissions.verifiedAt, missing: appPermissions.missing, attention: appPermissions.attention, installationUrl: appPermissions.installationUrl } : null,
         heldJobs: live?.heldJobs ?? 0,
         build: live?.build ?? null,
         delegationLimits: delegationLimits ? { limits: delegationLimits.limits, deployed: delegationLimits.deployed, drift: delegationLimits.drift, attention: delegationLimits.attention } : null,
         production: production ? { provider: production.provider, serving: production.serving, running: production.running, aheadBy: production.ahead?.by ?? null, incidents: production.incidents, attention: production.attention, error: production.error } : null,
-        next: !live ? 'Configure GRAPHYARD_URL and an individual token' : !live.github ? 'Complete github-setup and configure the server App credentials'
-          : appPermissions?.missing?.length ? `Run graphyard github-setup --update-permissions: ${appPermissions.attention[0]}`
-          : delegationLimits?.drift?.length ? `Set ${delegationLimits.drift.map((entry: any) => `${entry.variable}=${entry.required}`).join(' ')} on the deployment: ${delegationLimits.drift[0].reason}`
-          : production?.incidents?.length ? `Production has not deployed ${production.incidents.map((incident: any) => incident.key).join(', ')}: ${production.incidents[0].reason}`
-          : 'Submit a real PR and inspect every gate; configured is not proof of enforcement',
-        limits: ['CI discovery is a proposal, not executed-test inventory', 'Herdr two-host recovery and GitHub refusal-to-acceptance must be demonstrated'] });
+        readiness,
+        next,
+        limits: ['CI discovery is a proposal, not executed-test inventory', 'Herdr two-host recovery and GitHub refusal-to-acceptance must be demonstrated', 'A ready checklist is configuration, never evidence: the first real PR must visibly pass every gate'] });
     },
   },
   {

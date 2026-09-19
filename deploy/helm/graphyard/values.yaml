@@ -1,0 +1,101 @@
+# Graphyard on Kubernetes. The topology is the one the deployment guide describes: a
+# stateless control-plane Deployment whose replicas share one Postgres ledger, a Service,
+# an Ingress terminating TLS, and a Secret the pods read credentials from. Migrations run
+# in a pre-install/pre-upgrade hook Job with the same image, so a release that cannot
+# migrate — or that is older than the schema the database already carries — refuses
+# before any pod is replaced.
+
+image:
+  repository: ghcr.io/cryptob1/graphyard
+  # Defaults to the chart's appVersion. Pin a digest for immutability: tag: "0.1.0@sha256:..."
+  tag: ""
+  pullPolicy: IfNotPresent
+imagePullSecrets: []
+
+replicaCount: 1
+
+# Non-secret configuration. Every value becomes an environment variable on the server.
+config:
+  githubRepository: ""        # owner/repository; one repository per control plane
+  githubBaseBranch: main
+  githubAppId: ""
+  githubInstallationId: ""
+  githubCiAppIds: "15368"
+  reviewerApps: "[]"          # JSON array; identities only, never keys
+  extraEnv: {}                # additional plain environment variables
+
+# Credentials. Either name an existing Secret carrying these keys, or (evaluation only)
+# let the chart create one from the values below. Never commit populated values.
+secrets:
+  existingSecret: ""
+  create: false
+  # Keys of the Secret. GITHUB_PRIVATE_KEY is mounted as a file and referenced through
+  # GITHUB_PRIVATE_KEY_FILE; the others are injected as environment variables.
+  databaseUrl: ""             # DATABASE_URL; leave empty with postgresql.enabled to use the bundled database
+  principals: ""              # GRAPHYARD_PRINCIPALS JSON array
+  githubPrivateKey: ""        # PEM
+  githubWebhookSecret: ""
+
+# Evaluation-only Postgres: a single-replica StatefulSet with a PersistentVolumeClaim.
+# Production installations point DATABASE_URL at a managed database with its own backups.
+postgresql:
+  enabled: false
+  image: postgres:17-alpine
+  database: graphyard
+  username: graphyard
+  password: ""                # required when enabled; stored in the chart-managed Secret
+  persistence:
+    size: 5Gi
+    storageClass: ""
+  resources:
+    requests: { cpu: 100m, memory: 256Mi }
+    limits: { memory: 1Gi }
+
+# Schema migration before pods roll. Uses `graphyard db migrate` from the same image.
+migration:
+  enabled: true
+  backoffLimit: 2
+  activeDeadlineSeconds: 600
+
+# Scheduled logical backups with `graphyard db backup` into a PersistentVolumeClaim.
+# A backup is as sensitive as the database: bind the claim to protected storage.
+backup:
+  enabled: false
+  schedule: "0 3 * * *"
+  retainDays: 14
+  persistence:
+    size: 10Gi
+    storageClass: ""
+    existingClaim: ""
+
+service:
+  type: ClusterIP
+  port: 80
+
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  hosts: []                   # - host: graphyard.example.com
+  tls: []                     # - secretName: graphyard-tls, hosts: [graphyard.example.com]
+
+resources:
+  requests: { cpu: 100m, memory: 256Mi }
+  limits: { memory: 1Gi }
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  runAsGroup: 1000
+  fsGroup: 1000
+  seccompProfile: { type: RuntimeDefault }
+containerSecurityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities: { drop: [ALL] }
+
+podAnnotations: {}
+nodeSelector: {}
+tolerations: []
+affinity: {}
+terminationGracePeriodSeconds: 30

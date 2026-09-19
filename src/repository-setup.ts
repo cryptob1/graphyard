@@ -67,12 +67,27 @@ origin/BASE byte-for-byte: restore them, never re-resolve a merge in favour of y
 branch. Only an operator can widen plannedFiles, through an audited requirements revision.
 
 Submit the PR with \`complete GY-N EPOCH PR_NUMBER\`. This reports implementation
-completion; it does not set Done. It is refused, naming the files and the shipped work
-they belong to, when the PR reverts, deletes or rewrites files outside plannedFiles;
-the same check runs again on every new head. CI, trusted evidence, independent review,
-and Graphyard's merge gate decide progression. Report blockers explicitly.
+completion and ends your lease in the same transaction; it does not set Done. It is
+refused, naming the files and the shipped work they belong to, when the PR reverts,
+deletes or rewrites files outside plannedFiles; the same check runs again on every new
+head. Make \`complete\` your last action: do not heartbeat, edit, or push after it. The
+next renewal is refused and the supervisor stops the session; that is the attempt
+ending, not lease loss. CI, trusted evidence, independent review, and Graphyard's
+merge gate decide progression. Report blockers explicitly.
 Never use an operator/producer token for implementation or weaken proof requirements.
 Herdr runs sessions; Graphyard remains the source of ownership truth.
+
+A dedicated master coordinator must keep cycling: status, dispatch ready work,
+shepherd review and proof collection, guarded merge, then deployment verification.
+Repeat until both conditions hold: (1) every in-scope item is Done or has a genuinely
+external blocker recorded in Graphyard; and (2) every merged change is deployed and
+live-verified against the exact deployed release, or a genuinely external deployment
+blocker is recorded in Graphyard. Delivered work is immutable, so a deployment
+blocker is recorded as a follow-up work item naming the delivered item, its merge
+commit, and the external cause; the delivery stays pending until the release serves it.
+An observed merge alone does not end the loop. Ordinary review findings, rework,
+idle workers, and proof setup are not stopping conditions. Close finished agent
+sessions as part of the cycle.
 ${end}`;
   return starts ? existing.slice(0, existing.indexOf(start)) + section + existing.slice(existing.indexOf(end) + end.length) : `${existing}${existing.endsWith('\n') || !existing ? '' : '\n'}\n${section}\n`;
 }

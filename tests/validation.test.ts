@@ -230,8 +230,8 @@ test('replayed execution grants cannot revive revoked authority or expired ACKs'
 test('requirement revisions invalidate reports and completed evidence; changing oracle bytes requires a new scenario', async () => {
   const f = await fixture(), command = await start(f);
   await validation.result(collector, report(f, command), id());
-  await engine.execute(worker, 'release', f.w.id, { epoch: 1 }, id());
   let w = await current(f.w.id);
+  assert.equal(w.lease, null, 'submission ended the implementation lease');
   w = await engine.execute(operator, 'requirements', w.id, { expectedPolicyRevision: w.policyRevision, reason: 'Refined acceptance requirement', criteria: w.criteria.map(ac => ({ ...ac, text: 'Updated behavior assertion' })), dependencies: [], plannedFiles: [], exclusiveResources: [] }, id());
   await validation.reconcile();
   assert.equal((await validation.list()).requests.find(r => r.id === f.r.id)?.state, 'superseded');
@@ -342,7 +342,7 @@ test('the host attestor reads current attempt authority itself, under a read-onl
   // so a plan carrying a substituted target or network cannot match it.
   assert.deepEqual(dispatched.grant, { requestId: f.r.id, attemptId: d.attempt.id, epoch: d.attempt.epoch, runner: f.runnerRef,
     executionHost: 'unix:///var/run/docker.sock', attestationPublicKey, executionNetwork: 'gy-isolated',
-    bundleDigest: digest, runnerImageDigest: inputs, targetUrl: 'https://preview.example.test', deadline: f.requestInput.deadline,
+    bundleDigest: digest, runnerImageDigest: inputs, reportFormat: 'graphyard-playwright-v1', targetUrl: 'https://preview.example.test', deadline: f.requestInput.deadline,
     testAccountDigest: null });
 
   await validation.runnerCommand(runner, 'ack', command, id());
@@ -539,4 +539,32 @@ test('artifact boundary accepts 8 MiB without regex stack overflow and rejects m
   await assert.rejects(validation.uploadArtifact(collector, { ...input, bytes: 'YQ= ' }, id()), /canonical base64/);
   const artifact: any = await validation.uploadArtifact(collector, { ...input, bytes: Buffer.alloc(8_388_608).toString('base64') }, id());
   assert.equal(artifact.size, 8_388_608); assert.equal((await validation.readArtifact(operator, f.r.id, artifact.id)).bytes.length, 8_388_608); await cleanup(f);
+});
+
+test('the report format is operator-pinned bundle authority: it defaults, travels in every grant, and cannot change without a new scenario', async () => {
+  const f = await fixture();
+  const bundle = (await definitions()).find(d => d.kind === 'bundle' && d.id === f.c.bundle.id)! as any;
+  assert.equal(bundle.reportFormat, 'graphyard-playwright-v1');
+  const { revision, createdAt, createdBy, ...data } = bundle;
+  // Re-pinning the same bytes under another adapter is a change of executable authority.
+  await assert.rejects(validation.define(operator, { ...data, expectedRevision: revision, reportFormat: 'junit-xml-v1' }, id()), /new scenario/);
+  await assert.rejects(validation.define(operator, { ...data, expectedRevision: revision, reportFormat: 'nunit-3' }, id()));
+  // A bundle stored before formats existed is read as the Playwright default.
+  await store.pool.query("UPDATE validation_definitions SET document=document-'reportFormat' WHERE kind='bundle' AND id=$1", [f.c.bundle.id]).catch(() => {});
+  const d: any = await validation.dispatch(runner, { registration: f.runnerRef }, id());
+  assert.equal(d.bundle.reportFormat, 'graphyard-playwright-v1');
+  const command = { requestId: f.r.id, attemptId: d.attempt.id, epoch: d.attempt.epoch };
+  await validation.runnerCommand(runner, 'ack', command, id());
+  const reader: Principal = { id: 'attestor-reader', role: 'reader' };
+  assert.equal((await validation.attemptAuthority(reader, f.r.id)).grant.reportFormat, 'graphyard-playwright-v1');
+  assert.equal((await validation.collectionAuthority(collector, command) as any).reportFormat, 'graphyard-playwright-v1');
+  await cleanup(f);
+
+  // A JUnit-pinned bundle dispatches with its format in every grant.
+  const g = await fixture();
+  const stored = (await definitions()).find(d => d.kind === 'bundle' && d.id === g.c.bundle.id)! as any;
+  const junitBundle = { id: `${stored.id}-junit`, revision: 1 };
+  await validation.define(operator, { kind: 'bundle', id: junitBundle.id, expectedRevision: 0, scenario: stored.scenario, scenarioRevision: stored.scenarioRevision, scenarioHash: stored.scenarioHash, digest: stored.digest, runnerImageDigest: stored.runnerImageDigest, reportFormat: 'junit-xml-v1' }, id())
+    .then(() => assert.fail('another bundle for the same scenario revision must carry the same authority'), (error: Error) => assert.match(error.message, /new scenario/));
+  await cleanup(g);
 });

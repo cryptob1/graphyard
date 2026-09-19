@@ -3,6 +3,7 @@ import { demand } from '../../model.js';
 import { delegationSnapshot } from '../../delegation.js';
 import { installationSettingsUrl } from '../../github.js';
 import { controlPlanePermissions, requiredPermissions } from '../../github-permissions.js';
+import { releaseInfo, schemaVersion } from '../../release.js';
 import { defineRoutes } from '../routes.js';
 
 /** Control-plane status and the work reads every client polls. */
@@ -25,7 +26,7 @@ export const statusRoutes = defineRoutes('status', [
         // that no longer cover the roster, what production serves against the base branch, and
         // the build/protocol the CLI checks before brokering a merge. Production names work
         // items across the repository, so a scoped operator agent does not see it.
-        delegationLimits: services.delegationLimits, build, production: actor.role === 'operator-agent' ? null : production?.status() ?? null, now: observedAt.toISOString() };
+        delegationLimits: services.delegationLimits, build, production: actor.role === 'operator-agent' ? null : production?.status() ?? null, now: observedAt.toISOString(), release: releaseInfo(), schema: schemaVersion };
     },
   },
   {

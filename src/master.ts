@@ -11,7 +11,7 @@ import { mergeOrder } from './delegation.js';
 import { launchPlan, masterHarnessPlan, writeHarnessPermissions } from './harness.js';
 import { CHECK_NAME, deliveryState, deploySmokeRequired, evidenceIndependenceRefusals, exhaustedReviewerProfiles, nativeReviewRequired, postDeployMs, productionLatencyMs, providerDelayAfterVerification, reviewerProfileFor, reviewProviderOf, rollbackGuidance, standingEscalations, type Work } from './model.js';
 import { containmentAttestation, containmentSettlementRefusals, containmentVerificationSchema, type ContainmentVerification } from './quarantine.js';
-import { probeSupervisorAbsence } from './supervisor.js';
+import { probeSupervisorAbsence } from './containment-probe.js';
 import { predictQueue, type QueuePlacement } from './merge-queue.js';
 import { MERGE_PROTOCOL } from './protocol-version.js';
 import { attentionLines, type ProductionReport } from './production-watch.js';
@@ -150,6 +150,20 @@ triggers GitHub Mobile and reports the two-digit code in \`master status\`; appr
 that prompt on their device, and decisions the docs mark human-only, are the only
 operator interactions left. Never store, export, or reuse the profile's cookies
 outside those flows.
+
+Keep cycling: status, dispatch ready work, shepherd review and proof collection,
+guarded merge, then deployment verification. Repeat until both conditions hold:
+(1) every in-scope item is Done or has a genuinely external blocker recorded in
+Graphyard; and (2) every merged change is deployed and live-verified against the exact
+deployed release, or a genuinely external deployment blocker is recorded in Graphyard.
+Verify each delivery with \`graphyard master verify-deployment GY-N\`: it refuses a
+stale or local-only observation and records only the exact deployed release it observed.
+Delivered work is immutable, so a deployment blocker is recorded as a follow-up work
+item naming the delivered item, its merge commit, and the external cause;
+\`master status\` keeps the delivery under \`pending\` until the release serves it.
+An observed merge alone does not end the loop. Ordinary review findings, rework,
+idle workers, and proof setup are not stopping conditions. Close finished agent
+sessions as part of the cycle.
 
 Check the automatic-merge preference in master status. When disabled, wait for
 explicit operator approval for each merge. Otherwise routine merges may use
@@ -324,6 +338,8 @@ function reviewState(work: Work) {
 export interface ContainmentAssessment {
   key: string; id: string; epoch: number; owner: string; at: string;
   host: string | null; workspacePath: string | null;
+  /** The exact scope unit and supervisor pid the launch recorded, when the supervisor reported them. */
+  scope: { unit: string; pid: number } | null;
   settleable: boolean; refusals: string[]; attestation: string;
   verification: ContainmentVerification | null;
 }
@@ -356,7 +372,7 @@ export function verifyContainmentDeath(
   const workspace = work.workspaces.find(item => item.epoch === quarantine?.epoch) ?? null;
   const assessment: ContainmentAssessment = {
     key: work.key, id: work.id, epoch: quarantine?.epoch ?? work.epoch, owner: quarantine?.owner ?? '', at: quarantine?.at ?? '',
-    host: workspace?.host ?? null, workspacePath: workspace?.path ?? null,
+    host: workspace?.host ?? null, workspacePath: workspace?.path ?? null, scope: quarantine?.scope ?? null,
     settleable: false, refusals: [], attestation: containmentAttestation(work.key), verification: null,
   };
   if (!quarantine) return { ...assessment, refusals: ['No containment quarantine is recorded for this task'] };
@@ -366,7 +382,9 @@ export function verifyContainmentDeath(
   const bounded = (value: number) => Number.isInteger(value) && Math.abs(value) <= 86_400_000;
   if (!bounded(options.clockOffset.min) || !bounded(options.clockOffset.max))
     return { ...assessment, refusals: ['The control-plane clock could not be compared with this host'] };
-  const probe = (options.probe ?? probeSupervisorAbsence)({ key: work.key, epoch: quarantine.epoch, workspacePath: workspace.path });
+  // The probe is told the exact scope the launch recorded, so it can hold everything that
+  // scope still contains and attribute a neighbour's scope to its own live supervisor.
+  const probe = (options.probe ?? probeSupervisorAbsence)({ key: work.key, epoch: quarantine.epoch, workspacePath: workspace.path, scope: quarantine.scope ?? null });
   const verification = containmentVerificationSchema.parse({ ...probe, host: options.hostId, observedAt: (options.localNow ?? new Date()).toISOString(), clockOffset: options.clockOffset });
   const refusals = containmentSettlementRefusals(work, verification, { now: Date.parse(options.observedAt) });
   return { ...assessment, settleable: !refusals.length, refusals, verification };
@@ -378,7 +396,7 @@ export function assessContainment(work: Work[], options: { hostId: string; obser
     try { assessments[item.id] = verifyContainmentDeath(item, options); }
     catch (error) {
       assessments[item.id] = { key: item.key, id: item.id, epoch: item.containmentQuarantine!.epoch, owner: item.containmentQuarantine!.owner, at: item.containmentQuarantine!.at,
-        host: options.hostId, workspacePath: item.workspaces.find(workspace => workspace.epoch === item.containmentQuarantine!.epoch)?.path ?? null,
+        host: options.hostId, workspacePath: item.workspaces.find(workspace => workspace.epoch === item.containmentQuarantine!.epoch)?.path ?? null, scope: item.containmentQuarantine!.scope ?? null,
         settleable: false, refusals: [`Host verification could not be completed: ${error instanceof Error ? error.message : String(error)}`],
         attestation: containmentAttestation(item.key), verification: null };
     }
@@ -468,6 +486,10 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
         settleable: assessed?.settleable ?? false,
         refusals: assessed?.refusals ?? ['Supervisor absence has not been verified on the registered host'],
         host: assessed?.host ?? work.workspaces.find(item => item.epoch === work.containmentQuarantine!.epoch)?.host ?? null,
+        scope: work.containmentQuarantine.scope ?? null,
+        // Each process the verification found holding the fence, with cmdline and cwd, so the
+        // master reads what it would stop before it stops anything.
+        held: assessed?.verification?.held ?? [],
         verifiedAt: assessed?.verification?.observedAt ?? null,
         // A refusal is only useful with the path that still works.
         attestation: assessed?.settleable ? null : containmentAttestation(work.key) }
@@ -647,7 +669,7 @@ export async function dispatchWork(root: string, work: Work, profile: WorkerProf
     await readCredentialFile(profile.credentialFile!);
     if (target) throw new Error('Launch profile agent name is already visible in Herdr');
     const prepared = await prepare(root, work.key, profile.name);
-    const prompt = `Implement ${work.key}: ${work.title}. The Graphyard worker launcher has claimed this item under principal ${profile.principal}, created its assigned worktree, and placed this agent under lease supervision. Run node ${config.cliPath} status ${work.key} before editing. Work only in the current assigned worktree, satisfy the stated criteria without weakening them, open a PR, and submit it with complete. Stop immediately if the supervisor reports lease loss. Do not submit trusted evidence or merge the PR.`;
+    const prompt = `Implement ${work.key}: ${work.title}. The Graphyard worker launcher has claimed this item under principal ${profile.principal}, created its assigned worktree, and placed this agent under lease supervision. Run node ${config.cliPath} status ${work.key} before editing. Work only in the current assigned worktree, satisfy the stated criteria without weakening them, open a PR, and submit it with complete as your last action: complete ends your lease and the supervisor then stops this session, which is the attempt ending, not lease loss. Stop immediately if the supervisor reports lease loss before you have submitted. Do not submit trusted evidence or merge the PR.`;
     let pane: string | undefined, tabId: string | undefined;
     try {
       const launch = launchPlan(profile.kind, profile.approvals, profile.agentArgs, profile.environment);

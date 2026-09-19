@@ -1,4 +1,4 @@
-<!-- page: Build integrations | 5 | release builds, approvals, and observed production delivery. -->
+<!-- page: Build integrations | 6 | release builds, approvals, and observed production delivery. -->
 # Releases and observed production delivery
 
 Graphyard records which release each environment is expected to run, and verifies it only from what authenticated, service-scoped observers measured actually running. Desired state, provider-reported deployment success and independently observed runtime state are three separate records, and a merge that completed work is a fourth: a green merge never stands in for verified production behavior.

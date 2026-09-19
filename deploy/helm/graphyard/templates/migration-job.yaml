@@ -1,0 +1,53 @@
+{{- if .Values.migration.enabled }}
+# Runs before every upgrade (and before the first install when the database is external),
+# with the image being rolled out. `graphyard db migrate` applies the additive schema and
+# records the generation it reached; it refuses when the database was already migrated by a
+# newer release, so a rollback under an unknown schema stops here instead of replacing
+# healthy pods. With the bundled evaluation database there is nothing to migrate before the
+# first install: the StatefulSet does not exist yet, and the server migrates on start.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "graphyard.fullname" . }}-migrate-{{ .Release.Revision }}
+  labels:
+    {{- include "graphyard.labels" . | nindent 4 }}
+    app.kubernetes.io/component: migration
+  annotations:
+    helm.sh/hook: {{ if .Values.postgresql.enabled }}pre-upgrade{{ else }}pre-install,pre-upgrade{{ end }}
+    helm.sh/hook-weight: "0"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: {{ .Values.migration.backoffLimit }}
+  activeDeadlineSeconds: {{ .Values.migration.activeDeadlineSeconds }}
+  template:
+    metadata:
+      labels:
+        {{- include "graphyard.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: migration
+    spec:
+      restartPolicy: Never
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      {{- include "graphyard.waitForPostgresql" . | nindent 6 }}
+      containers:
+        - name: migrate
+          image: {{ include "graphyard.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.containerSecurityContext | nindent 12 }}
+          command: ["node", "bin/graphyard.mjs", "db", "migrate"]
+          env:
+            {{- include "graphyard.env" . | nindent 12 }}
+          envFrom:
+            {{- include "graphyard.configEnvFrom" . | nindent 12 }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            {{- include "graphyard.secretMounts" . | nindent 12 }}
+      volumes:
+        {{- include "graphyard.secretVolume" . | nindent 8 }}
+{{- end }}

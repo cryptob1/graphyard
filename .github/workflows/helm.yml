@@ -1,0 +1,33 @@
+name: Helm chart
+on:
+  push:
+    branches: [main]
+  pull_request:
+    paths: ['deploy/helm/**', 'Dockerfile', 'src/**', 'bin/**', 'package*.json', '.github/workflows/helm.yml']
+permissions:
+  contents: read
+jobs:
+  chart:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with: { persist-credentials: false }
+      - uses: actions/setup-node@v4
+        with: { node-version: '24' }
+      - name: Lint and render the chart
+        run: |
+          set -euo pipefail
+          helm lint deploy/helm/graphyard --strict --set secrets.existingSecret=graphyard-credentials
+          helm template graphyard deploy/helm/graphyard --set secrets.existingSecret=graphyard-credentials > /dev/null
+          # An installation with nowhere to hold credentials must not render.
+          if helm template graphyard deploy/helm/graphyard > /dev/null 2>&1; then echo 'chart rendered without credentials' >&2; exit 1; fi
+      - name: Build the candidate image
+        run: |
+          version="$(node -p "require('./package.json').version")"
+          docker build --build-arg "GRAPHYARD_VERSION=$version" --build-arg "GRAPHYARD_BUILD_REVISION=$GITHUB_SHA" --tag "graphyard:$version" .
+          docker tag "graphyard:$version" "graphyard:$version-next"
+      - uses: helm/kind-action@v1
+        with: { cluster_name: graphyard }
+      - name: Install, exercise, upgrade and restore on a real cluster
+        run: bash deploy/helm/exercise.sh "graphyard:$(node -p "require('./package.json').version")"

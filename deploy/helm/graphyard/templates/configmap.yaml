@@ -1,0 +1,20 @@
+{{- include "graphyard.validate" . -}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "graphyard.fullname" . }}
+  labels:
+    {{- include "graphyard.labels" . | nindent 4 }}
+data:
+  GITHUB_BASE_BRANCH: {{ .Values.config.githubBaseBranch | quote }}
+  GITHUB_CI_APP_IDS: {{ .Values.config.githubCiAppIds | quote }}
+  GRAPHYARD_REVIEWER_APPS: {{ .Values.config.reviewerApps | quote }}
+  {{- with .Values.config.githubRepository }}
+  GITHUB_REPOSITORY: {{ . | quote }}
+  {{- end }}
+  {{- with .Values.config.githubAppId }}
+  GITHUB_APP_ID: {{ . | quote }}
+  {{- end }}
+  {{- with .Values.config.githubInstallationId }}
+  GITHUB_INSTALLATION_ID: {{ . | quote }}
+  {{- end }}

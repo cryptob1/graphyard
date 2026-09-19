@@ -24,7 +24,7 @@ async function boundary(run: (paths: { oracle: string; collection: string; outpu
       executionHost: 'unix:///var/run/docker.sock', attestationPublicKey: 'test-public-key-material-at-least-32-bytes',
       executionNetwork: 'gy-isolated',
       bundleDigest: bundle.digest, runnerImageDigest: image, targetUrl: 'https://preview.example.test/', deadline: new Date(Date.now() + 600_000).toISOString(),
-      testAccountDigest: null },
+      reportFormat: 'graphyard-playwright-v1', testAccountDigest: null },
     imageRepository: 'ghcr.io/example/graphyard-runner', oraclePath: oracle, outputPath: collection, timeoutMs: 60_000, memoryMb: 2048, cpus: 2, pidsLimit: 256, runAsUser };
   // Preflight provisions one boundary per attempt beneath the collection root. The fixture
   // creates the same directory so the structural checks can also be exercised directly.

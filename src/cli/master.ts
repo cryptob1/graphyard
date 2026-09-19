@@ -8,6 +8,7 @@ import { resourceConflicts } from '../coordination.js';
 import { assertMasterBinding, assessContainment, buildMasterStatus, continueMergeBatch, currentMergeCandidates, dispatchWork, inspectWorkerCredentials, listHerdrAgents, loadMasterConfig, masterHarness, mergeExecutor, mergeProtocolSkew, observeHerdrAgents, readCredentialFile, readWorkerCredential, saveWorkerProfile, setupMaster, snapshotWithClock, startMaster, verifyContainmentDeath, workerProfileSchema } from '../master.js';
 import { cliCommit } from '../protocol-version.js';
 import { daemonEffects, daemonSummary, readDaemonState, runDaemon } from '../master-daemon.js';
+import { verificationEffects, verifyDeployment } from '../master-verification.js';
 import { bindReviewer, launchReview, readReviewLedger, reconcileReviews, reviewerCredentialDirectory, saveReviewerProfile, summarizeReviews, verifyReviewerInstallation } from '../reviewer.js';
 import { applyProtection, protectionPlan, readProtection } from '../protection.js';
 import { writeHarnessPermissions } from '../harness.js';
@@ -48,6 +49,9 @@ export const masterCommands = defineCommands([
       '                                Settle a containment quarantine whose supervisor this',
       '                                host verifies dead; unverifiable signals refuse',
       '  master merge GY-N|--all       Merge exact authorized candidates without bypasses',
+      '  master verify-deployment GY-N Verify that the deployed release serves a delivery and',
+      '                                emits the current instructions; refuse stale or local-only',
+      '                                observations, record the exact release observed',
       '  master run [--once] [--interval SECONDS]',
       '                                Run the durable coordination loop as a supervised process',
       '  master guide                  Print the complete master-agent operating guide',
@@ -166,11 +170,16 @@ export const masterCommands = defineCommands([
         if (!work.containmentQuarantine) throw new Error(`${work.key} has no containment quarantine to settle`);
         const assessment = verifyContainmentDeath(work, { hostId: master.hostId, observedAt: snapshot.now, clockOffset });
         if (!assessment.settleable) {
-          console.error(`Automatic containment settlement refused for ${work.key}:\n- ${assessment.refusals.join('\n- ')}\n${assessment.attestation}`);
+          // Every process still holding the fence is printed with its command line and working
+          // directory: the master verifies whose it is before stopping anything.
+          const held = assessment.verification?.held ?? [];
+          const processes = held.length ? `\nProcesses holding the fence (verify before stopping anything):\n${held.map(entry => `- pid ${entry.pid}${entry.unit ? ` in ${entry.unit}` : ''}: cmdline "${entry.command}" cwd ${entry.cwd ?? '<unreadable>'}`).join('\n')}` : '';
+          const recorded = assessment.scope ? `\nRecorded launch scope: ${assessment.scope.unit} (supervisor pid ${assessment.scope.pid}); systemd reports it ${assessment.verification?.recordedScope?.activeState ?? 'unqueried'}` : '\nThis quarantine recorded no launch scope; every live graphyard-watch scope is judged by its members';
+          console.error(`Automatic containment settlement refused for ${work.key}:\n- ${assessment.refusals.join('\n- ')}${recorded}${processes}\n${assessment.attestation}`);
           process.exitCode = 1; return;
         }
         const settled = await masterMutation(`work/${work.id}/autosettle`, { epoch: assessment.epoch, settlementHash: work.containmentQuarantine.settlementHash, reason: args.slice(1).join(' '), verification: assessment.verification });
-        return print({ key: settled.key, epoch: assessment.epoch, containmentQuarantine: settled.containmentQuarantine, stage: settled.stage, verification: assessment.verification });
+        return print({ key: settled.key, epoch: assessment.epoch, scope: assessment.scope, containmentQuarantine: settled.containmentQuarantine, stage: settled.stage, verification: assessment.verification });
       }
       if (id === 'dispatch') {
         if (!args[0]) throw new Error('Use master dispatch GY-N PROFILE');
@@ -198,6 +207,15 @@ export const masterCommands = defineCommands([
         const results = args[0] === '--all' ? await continueMergeBatch(selected, mergeOne) : [await mergeOne(selected[0])];
         return print({ requestId: outerRequest, results });
       }
+      if (id === 'verify-deployment') {
+        if (!args[0]) throw new Error('Use master verify-deployment GY-N');
+        const snapshot = await masterApi('work-snapshot');
+        const work = snapshot.work.find((item: any) => item.id === args[0] || item.key === args[0]);
+        if (!work) throw new Error(`Unknown work item ${args[0]}`);
+        const result = await verifyDeployment(work, verificationEffects(master, { snapshot: () => masterApi('work-snapshot'), mutate: masterMutation }));
+        if (result.result === 'refused') process.exitCode = 1;
+        return print(result);
+      }
       if (id === 'run') {
         const { values } = parseArgs({ args, options: { once: { type: 'boolean' }, interval: { type: 'string' } }, allowPositionals: false });
         const intervalSeconds = values.interval ? Number(values.interval) : master.run.intervalSeconds;
@@ -215,7 +233,7 @@ export const masterCommands = defineCommands([
         const result = await runDaemon(master, state, effects, { once: values.once, intervalMs: intervalSeconds * 1000, identity: { pid: process.pid, host: master.hostId } });
         return print({ repository: master.repository, coordinator: coordinator.actor.id, intervalSeconds, cycles: result.cycles.length, stopped: result.stopped ? 'signal' : 'completed', last: result.cycles.at(-1) ?? null });
       }
-      throw new Error('Use master init, start, worker add, reviewer, review, protection, browser, harness, status, dispatch, settle-containment, run, merge, or guide');
+      throw new Error('Use master init, start, worker add, reviewer, review, protection, browser, harness, status, dispatch, settle-containment, run, merge, verify-deployment, or guide');
     },
   },
 ]);
