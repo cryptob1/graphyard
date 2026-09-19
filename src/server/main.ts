@@ -6,6 +6,7 @@ import { Validation } from '../validation.js';
 import { Delivery } from '../delivery.js';
 import { ProofGrants } from '../proof-grants.js';
 import { artifactBackendFromEnv, artifactCapacityFromEnv } from '../artifacts.js';
+import { projectFlow } from '../flow-analytics.js';
 import { principalSchema, server } from './index.js';
 import { buildIdentity } from '../protocol-version.js';
 import { ProductionWatch, railwayProvider } from '../production-watch.js';
@@ -58,6 +59,7 @@ export async function main() {
     // backlog of observations drains across ticks without ever skipping one.
     try {
       await validation.expireArtifacts(); await validation.reconcile(); await engine.reconcile(); await delivery.sweep();
+      await projectFlow(engine.store, { batches: 4 });
       // Provider polling is bounded inside the watch to once a minute; incidents it raises
       // land in the ledger and in /api/status, and are announced here once each.
       const before = production.status().incidents.map(incident => incident.id);
