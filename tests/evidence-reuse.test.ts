@@ -37,7 +37,7 @@ let pg: EmbeddedPostgres, store: Store, engine: Engine, validation: Validation;
 let serial = 0;
 
 before(async () => {
-  const port = Number(process.env.GRAPHYARD_REUSE_TEST_PORT ?? Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 16);
+  const port = Number(process.env.GRAPHYARD_REUSE_TEST_PORT ?? Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 17);
   pg = new EmbeddedPostgres({ databaseDir: await mkdtemp(join(tmpdir(), 'graphyard-reuse-')), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await pg.initialise(); await pg.start(); await pg.createDatabase('reuse_test');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/reuse_test`); await store.init();

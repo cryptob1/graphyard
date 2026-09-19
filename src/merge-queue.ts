@@ -1,4 +1,5 @@
 import type { Observation, Work } from './model.js';
+import { evidenceBindsCandidate, type QueueCarry, type TipMerge } from './model/carry.js';
 
 // Graphyard publishes speculative tips outside refs/heads and refs/tags: the namespace is
 // owned by the App, is never a branch a worker can push, and never appears as a PR head.
@@ -7,6 +8,12 @@ export function queueRef(key: string) { return `refs/graphyard/queue/${key.toLow
 export interface QueueSpeculation {
   ref: string; tip: string; base: string; baseTree: string;
   predecessors: string[]; policyRevision: number; publishedAt: string;
+  /** How Graphyard produced the tip, when it replaced the head; absent when the head already contained its base. */
+  merge?: TipMerge | null;
+  /** Which bindings of the replaced head carried to the tip, decided when the tip was bound. */
+  carry?: QueueCarry | null;
+  /** The base-branch commit the bound base was last found tree-identical to: the advance that carried the binding. */
+  carriedBase?: { sha: string; tree: string; at: string } | null;
 }
 export interface QueueEntry { sequence: number; enqueuedAt: string; policyRevision: number; speculation: QueueSpeculation | null }
 export interface QueueEjection { at: string; sequence: number; reason: string; sha: string | null; policyRevision: number }
@@ -14,6 +21,10 @@ export interface QueueHistoryEntry { at: string; event: 'enqueued' | 'predicted'
 export interface QueuePlacement {
   id: string; key: string; position: number; size: number; sequence: number; enqueuedAt: string; waitMs: number;
   predecessors: string[]; predictedBase: string | null; tip: string | null;
+  /** The base-branch commit the chain of predictions rests on, as the head entry observed it. */
+  base: { sha: string; tree: string | null } | null;
+  /** How a current entry binds its predicted base: the exact commit, or a tree-identical advance of it. */
+  binding: 'exact' | 'tree-equivalent' | null;
   current: boolean; publishable: boolean; reasons: string[];
 }
 
@@ -42,12 +53,14 @@ export function predictQueue(all: Work[], now: number): QueuePlacement[] {
     // Entry 0 predicts against the observed base branch; every other entry predicts against the
     // validated tip of the entry directly ahead, which is what main will hold once it merges.
     const predictedBase = position === 0 ? observedBaseTip(work) : placements[position - 1].tip;
+    const base = position === 0 ? predictedBase ? { sha: predictedBase, tree: work.observation?.baseTree ?? null } : null : placements[position - 1].base;
     const published = !!speculation && !!candidate && speculation.tip === candidate.sha
       && speculation.base === candidate.baseSha && speculation.policyRevision === work.policyRevision;
-    // An earlier queue merge advances the base branch without changing the validated tree.
-    // Re-binding to that advance needs no new commit, so no proof or review is invalidated.
-    const treeEquivalent = position === 0 && published && !!work.observation?.baseTree && work.observation.baseTree === speculation!.baseTree;
     const onPrediction = !!candidate && !!predictedBase && candidate.baseSha === predictedBase;
+    // An earlier queue merge advances the base branch to a new commit whose tree is exactly the
+    // validated base's tree. Re-binding to that advance needs no new commit, so the published tip,
+    // the candidate, the review and every proof stay bound; the advance is recorded, not republished.
+    const treeEquivalent = !onPrediction && position === 0 && published && !!work.observation?.baseTree && work.observation.baseTree === speculation!.baseTree;
     // Only a Graphyard-published tip may land. Publication is what proves the validated commit
     // already contains its predicted base, so the merge result is that commit's tested tree even
     // though the candidate branch is deliberately behind the base branch while it waits its turn.
@@ -60,7 +73,7 @@ export function predictQueue(all: Work[], now: number): QueuePlacement[] {
     placements.push({
       id: work.id, key: work.key, position, size: entries.length, sequence: entry.sequence, enqueuedAt: entry.enqueuedAt,
       waitMs: Math.max(0, now - Date.parse(entry.enqueuedAt)), predecessors: entries.slice(0, position).map(ahead => ahead.key),
-      predictedBase, tip: current && candidate ? candidate.sha : null, current,
+      predictedBase, tip: current && candidate ? candidate.sha : null, base, binding: current ? treeEquivalent ? 'tree-equivalent' : 'exact' : null, current,
       publishable: !current && !!predictedBase && !!candidate, reasons,
     });
   }
@@ -115,13 +128,13 @@ export function ejectionReason(work: Work, ciAppIds: number[]): string | null {
   });
   if (check) return `Required CI check ${check} did not pass on speculative tip ${tip}`;
   if (observation.reviews.some(review => review.sha === candidate.sha && review.state === 'CHANGES_REQUESTED')) return `Review requested changes on speculative tip ${tip}`;
-  const proof = work.evidence.find(item => item.trusted && item.result === 'fail' && item.sha === candidate.sha
-    && item.baseSha === candidate.baseSha && item.policyRevision === work.policyRevision);
+  // Evidence binds the tip exactly or carried across a Graphyard-authored tip; either way a
+  // failure or a withdrawal of it is an adverse conclusion about this tip.
+  const proof = work.evidence.find(item => item.trusted && item.result === 'fail' && evidenceBindsCandidate(work, item) && item.policyRevision === work.policyRevision);
   if (proof) return `Proof ${proof.proof} failed on speculative tip ${tip}`;
   // A withdrawn proof is an explicit adverse conclusion, not a missing one: the entry leaves the
   // queue instead of holding its position while everything behind it waits.
-  const revoked = work.evidence.find(item => item.trusted && !!item.revocation && item.sha === candidate.sha
-    && item.baseSha === candidate.baseSha && item.policyRevision === work.policyRevision);
+  const revoked = work.evidence.find(item => item.trusted && !!item.revocation && evidenceBindsCandidate(work, item) && item.policyRevision === work.policyRevision);
   if (revoked) return `Proof ${revoked.proof} was revoked on speculative tip ${tip}: ${revoked.revocation!.reason}`;
   return null;
 }
