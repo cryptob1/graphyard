@@ -33,7 +33,10 @@ export const createSchema = z.object({
     .refine(proofs => !proofs || new Set(proofs).size === proofs.length, 'producerProofs must be unique'),
 }).strict();
 export type Create = z.infer<typeof createSchema>;
-export const operatorCapabilities = ['intent:create', 'intent:ready', 'intent:unblock', 'policy:requirements', 'policy:review-provider', 'policy:bootstrap'] as const;
+// The `decision:*` capabilities request a two-party decision (see model/approval.ts); an agent
+// holding one still needs a second, independent agent holding `decision:approve` to apply it.
+export const operatorCapabilities = ['intent:create', 'intent:ready', 'intent:unblock', 'policy:requirements', 'policy:review-provider', 'policy:bootstrap',
+  'decision:resolve', 'decision:attest', 'decision:merge', 'decision:rework', 'decision:grant', 'decision:approve'] as const;
 export type OperatorCapability = typeof operatorCapabilities[number];
 export const operatorCredentialHash = Symbol('operatorCredentialHash');
 export interface Principal {

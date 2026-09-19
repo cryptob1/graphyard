@@ -9,7 +9,7 @@ One short definition and one canonical usage per term. Every guide in `docs/` us
 
 The person who administers a Graphyard installation. They hold an `admin` credential that declares `sessionKind: "human"`, and usually the GitHub repository-administrator identity as well.
 
-The guides mark these decisions human-only: setting goals, releasing backlog work, revising requirements, choosing review providers, clearing blockers, resolving escalations, attesting `manual:` proofs, authorizing rework, and approving a merge when automatic merging is off. Graphyard enforces the declaration for two of them: resolving an escalation and recording human-only intake (goals, policy and requirement changes, waivers) are refused from any credential that declares `sessionKind: "ai"` or declares nothing. The one exception is a `lease-loss` the control plane raised for a lapse the events ledger already explains (a worker `blocked` report or a stopped-worker attestation for that epoch): any `admin` credential settles it by citing that explanation (`resolve … --attestation`), and reconciliation settles it on its own. The rest are gated on the credential's role, not its declared session: rework, `manual:` proof attestation, and proof-authority grants need `admin`; releasing, unblocking, adding requirements, and selecting a review provider are also open to a [scoped operator agent](operator-automation.md) holding the matching capability (see the roles table below). Merge approval when automatic merging is off is a master-loop preference (`master init --no-auto-merge`): the loop records that the item awaits explicit operator approval instead of invoking the guarded merge, and every gate stays in force.
+Autonomy is the default: agents act without asking. The human operator keeps exactly three decisions: **goals and priorities**, **spending money or opening third-party accounts**, and **issuing credentials to people** (which includes approving a GitHub sudo prompt on their own device). Every other decision is made by one agent role and approved by a second, independent agent role; [Who decides](#who-decides) names both for each decision. A two-party decision is enforced by the control plane, not by convention: the approving identity is never the requester, never an identity that has held an assignment on the item, never the producer of evidence the decision rests on, and never the principal a grant would empower. Each refusal names its conflict, and requester, approver and reason are appended to the item's history. A declared human `admin` session may still make any of these decisions directly, but nothing waits for one: the engine's direct `resolve` and human-only intake (goals, policy and requirement changes, waivers) still require a declared human session, so agents resolve escalations through the two-party `resolve` decision instead.
 
 **Canonical usage:** *human operator*. Bare *operator* always means this person. *Administrator* is the same person in a GitHub or deployment context. Never write *operator* for the scoped operator agent.
 
@@ -17,7 +17,7 @@ The guides mark these decisions human-only: setting goals, releasing backlog wor
 
 A language-model program that reads and writes through an agent runtime. "Agent" says what kind of program it is, not what it may do; authority comes only from the credential it holds.
 
-**Canonical usage:** *agent* alone only when the role does not matter. Otherwise name the role: *worker*, *master*, *slice lead*, *reviewer*, *proof producer*, *operator agent*.
+**Canonical usage:** *agent* alone only when the role does not matter. Otherwise name the role: *worker*, *master*, *approver*, *slice lead*, *reviewer*, *proof producer*, *operator agent*.
 
 ### 3. Agent session (Herdr-managed session or runtime)
 
@@ -61,15 +61,35 @@ The session supervisor that launches, shows, and stops agent sessions, and the f
 
 | Role (credential) | Normally held by | May | Never |
 | --- | --- | --- | --- |
-| `admin` | Human operator | Create and release work, revise requirements, attest `manual:` proofs, grant proof authority, rework, resolve escalations (all of them from a declared human session; a ledger-explained `lease-loss` from any `admin` session) | Mint trusted automated evidence; be shared with any AI session |
-| `operator-agent` | Operator agent (optional, scoped) | Create intent, release or unblock in-scope work, add requirements, select a review provider — each only with the matching capability | Remove or rewrite requirements, resolve escalations, hold a lease, submit evidence, merge |
+| `admin` | Human operator | Set goals and priorities; provision the master's agent identities once at onboarding (`master autonomy`); issue credentials to people; make any decision below directly (escalation resolution from a declared human session) | Mint trusted automated evidence; be shared with any AI session |
+| `operator-agent` | The master's own operator-agent identity, and the separate approver identity (both provisioned by `master autonomy`); other scoped operator agents | Master identity: create, release, unblock, add requirements, select a review provider, request two-party decisions. Approver identity: approve decisions it did not request, on items it never held, not resting on its own evidence. Each only with the matching capability | Approve its own request; hold a lease; submit evidence except through an approved `attest` decision; merge |
 | `coordinator` | Master (durable loop and optional visible session) | Read work and runtime health, dispatch, request the guarded merge, record deployment observations, settle a verified-dead quarantine | Claim, implement, produce evidence, revise requirements, bypass a gate |
 | `slice-lead` | Slice lead | Rule on plans and failures in its slice, escalate | Implement, hold a lease, submit evidence, review its own slice, merge |
 | `worker` | Worker | Claim, heartbeat, register its worktree, submit its candidate, record untrusted assertions | Receive `admin`, `coordinator`, or `producer` tokens; satisfy an acceptance gate |
 | `producer` | Proof producer (CI workflow, trusted runner, or deployment observer) | Submit trusted evidence for granted proof names | Hold an assignment on the item it proves; act as a lead |
 | `reader` | Dashboards | Read work, status, and events | Mutate anything |
 
-A *master* is the coordinator: the durable `master run` loop plus an optional visible master session, holding only the `coordinator` credential. *Slice lead*, *worker*, *reviewer*, *proof producer*, and *operator agent* name a session by its role.
+A *master* is the coordinator: the durable `master run` loop plus the visible master session. The loop holds only the `coordinator` credential; the visible session also acts as the master's operator-agent identity for intent and decision requests. The *approver* is a separate agent session holding the approver operator-agent identity, launched per decision with `master approver GY-N DECISION`; it judges and approves, and never implements, requests, or produces evidence. *Slice lead*, *worker*, *reviewer*, *proof producer*, *approver*, and *operator agent* name a session by its role.
+
+## Who decides
+
+Every decision names the agent role that makes it and the independent agent role that approves it. The master requests two-party decisions with `graphyard master decide GY-N ACTION REASON`; the approver applies them with `graphyard master approve GY-N DECISION REASON` from its own session.
+
+| Decision | Made by | Approved by |
+| --- | --- | --- |
+| Create work, release backlog work, clear a blocker, add requirements (`master create`, `release`, `unblock`, `requirements`) | Master (operator-agent identity) | Approver, when requested as a `release` or `unblock` decision; applied directly only because the intent is non-weakening, and the independent reviewer and proof producers judge every candidate that follows |
+| Rewrite, remove, or narrow requirements (`decide … requirements`) | Master | Approver; the narrowing still raises a `requirement-weakening` escalation |
+| Resolve an escalation (`decide … resolve`) | Master | Approver |
+| Attest a `manual:` proof (`decide … attest`) | Master | Approver that produced no evidence for that proof |
+| Authorize rework, or recover a delivered item's containment, attesting the previous worker stopped (`decide … rework`, `decide … recover`) | Master | Approver |
+| Grant proof authority to a producer (`decide … grant`) | Master | Approver that is not the grantee |
+| Approve a merge when automatic merging is off (`decide … merge`, then `master merge`) | Master | Approver that produced no evidence on the item |
+| Select a review provider | Master (operator-agent identity) | The reviewer approves each candidate under it |
+| Approve a candidate | Reviewer | Branch protection and the merge gate |
+| Produce trusted evidence | Proof producer | The acceptance gate |
+| Merge | Master (guarded merge) | The control plane's merge gate, rechecked on the exact candidate |
+| GitHub administration, rotating agent principals in the roster, restarting the loop | Master | API verification and the audit ledger; a rotation preview that refuses to drop a live principal |
+| Goals and priorities; spending money or opening third-party accounts; issuing credentials to people | **Human operator** | — |
 
 ## Say this, not that
 
@@ -83,6 +103,7 @@ A *master* is the coordinator: the durable `master run` loop plus an optional vi
 | "the tester", "QA" | *proof producer* | Evidence trust is a granted credential, not a job title. |
 | "user" | *human operator*, *reader*, or the role meant | *User* hides who holds authority. |
 | "human" alone | *human operator* | The declared human session is what Graphyard checks. |
+| "ask the operator to approve" | *request a decision; the approver agent approves* | Only goals, spending or accounts, and credentials for people wait for a human. |
 
 ## Diagram legend
 
