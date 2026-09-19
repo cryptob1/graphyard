@@ -1,4 +1,4 @@
-import type { Work } from './model.js';
+import type { Observation, Work } from './model.js';
 
 // Graphyard publishes speculative tips outside refs/heads and refs/tags: the namespace is
 // owned by the App, is never a branch a worker can push, and never appears as a PR head.
@@ -66,8 +66,30 @@ export function predictQueue(all: Work[], now: number): QueuePlacement[] {
   }
   return placements;
 }
+/**
+ * True for a merge-gate reason that only sequences a queued candidate: it is waiting its turn
+ * or for its speculative tip, not refused by protection, mergeability, freshness, or a hold.
+ * Kept beside the messages above so a wording change is visible here.
+ */
+export function queueSequencingReason(reason: string) {
+  return /^(Merge queue position \d+ of \d+: |Speculative tip on predicted base [0-9a-f]+ has not been published|Waiting for \S+ to publish its speculative tip$)/.test(reason);
+}
 export function queuePlacement(work: Work, all: Work[], now: number) {
   return predictQueue(all, now).find(placement => placement.id === work.id) ?? null;
+}
+
+// Observations retain every immutable check run for delivery analytics. Gates and the
+// merge-queue ejection rule use only the newest trusted run for a required name; GitHub
+// check-run IDs are immutable and increase as the provider creates retries. Array
+// position is a fallback for legacy observations that predate run identity capture.
+export function latestCheck(checks: Observation['checks']): Observation['checks'][number] | undefined {
+  return checks.reduce<Observation['checks'][number] | undefined>((latest, check) => {
+    if (!latest) return check;
+    if (check.id !== undefined && latest.id !== undefined) return check.id > latest.id ? check : latest;
+    if (check.id !== undefined) return check;
+    if (latest.id !== undefined) return latest;
+    return check;
+  }, undefined);
 }
 
 /**
@@ -84,7 +106,13 @@ export function ejectionReason(work: Work, ciAppIds: number[]): string | null {
   if (!candidate || !observation || observation.candidate.sha !== candidate.sha || observation.candidate.baseSha !== candidate.baseSha) return null;
   const tip = candidate.sha.slice(0, 12);
   if (observation.prState === 'closed') return 'Pull request was closed without merging';
-  const check = work.policy.checks.find(name => observation.checks.some(run => run.name === name && ciAppIds.includes(run.appId) && failedConclusions.has(run.result)));
+  // Observations retain every run, including superseded ones; only the newest trusted run
+  // for a required check decides, exactly as the test gate does, so a successful retry
+  // never leaves an entry ejected by the failure it replaced.
+  const check = work.policy.checks.find(name => {
+    const run = latestCheck(observation.checks.filter(entry => entry.name === name && ciAppIds.includes(entry.appId)));
+    return !!run && failedConclusions.has(run.result);
+  });
   if (check) return `Required CI check ${check} did not pass on speculative tip ${tip}`;
   if (observation.reviews.some(review => review.sha === candidate.sha && review.state === 'CHANGES_REQUESTED')) return `Review requested changes on speculative tip ${tip}`;
   const proof = work.evidence.find(item => item.trusted && item.result === 'fail' && item.sha === candidate.sha

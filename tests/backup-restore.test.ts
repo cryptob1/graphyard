@@ -15,7 +15,9 @@ import { defineScenario } from '../src/scenarios.js';
 import { ProofGrants, authorizedForProof } from '../src/proof-grants.js';
 import { recordIntake, recordLeadRuling } from '../src/delegation.js';
 import type { Principal } from '../src/model.js';
+import { projectFlow } from '../src/flow-analytics.js';
 import { backupDigest, backupSchema, createBackup, ledgerCounts, restoreBackup, verifyBackup } from '../src/backup.js';
+import { ledgerSeeded } from '../src/store.js';
 import { schemaVersion } from '../src/release.js';
 
 const run = promisify(execFile);
@@ -139,14 +141,20 @@ async function snapshot(store: Store) {
   const intake = (await store.pool.query('SELECT id, origin, title, description, source_work_id, submitted_by, created_at FROM intake_items ORDER BY created_at, id')).rows;
   const polls = (await store.pool.query('SELECT registration_id, principal, polled_at, granted_request_id FROM validation_runner_polls ORDER BY registration_id')).rows;
   const rollbacks = (await store.pool.query('SELECT id, environment_id, generation, document, created_at FROM delivery_rollbacks ORDER BY created_at, id')).rows;
-  return { work, events, scenarios, requests, resources, artifacts, definitions, grants, grantHistory, releases, approvals, environments, observations, leases, rulings, intake, polls, rollbacks };
+  const flowFacts = (await store.pool.query('SELECT id, work_id, kind, observed_at, source_event, dedupe FROM flow_facts ORDER BY id')).rows;
+  const flowCheckpoint = (await store.pool.query('SELECT id, last_event FROM flow_projection ORDER BY id')).rows;
+  return { work, events, scenarios, requests, resources, artifacts, definitions, grants, grantHistory, releases, approvals, environments, observations, leases, rulings, intake, polls, rollbacks, flowFacts, flowCheckpoint };
 }
 
 test('the documented backup and restore exercise preserves assignments, history, scenario revisions and pending requests, and the restored ledger keeps ordering', async () => {
   const source = new Store(url('source')); await source.init();
   const seeded = await populate(source);
+  // The flow projection has folded the ledger so far: durable facts plus the checkpoint
+  // row the migration seeds and the projection advances.
+  await projectFlow(source);
   const before = await snapshot(source);
   assert.ok(before.work.find(w => w.id === seeded.workId)!.lease, 'the fixture holds a live assignment');
+  assert.ok(before.flowFacts.length > 0 && Number(before.flowCheckpoint[0].last_event) > 0, 'the fixture holds projected flow facts behind an advanced checkpoint');
   assert.equal(before.requests.find(r => r.id === seeded.requestId)!.document.state, 'collecting');
   assert.equal(before.scenarios.length, 2);
   assert.deepEqual(before.grants.map(g => [g.principal_id, g.document.patterns]), [['auditor', []], ['builder', ['unit:*']], ['collector', ['e2e:booking']], ['observer', []], ['promoter', []]]);
@@ -171,6 +179,10 @@ test('the documented backup and restore exercise preserves assignments, history,
   const restored = new Store(url('restored'));
   await assert.rejects(restoreBackup(restored.pool, backup), /relation "graphyard_schema" does not exist|migrated/);
   await restored.init();
+  // A migrated target is empty except at the checkpoints the migration seeds; those are
+  // replaced by the backup's rows rather than refused as occupied state.
+  assert.deepEqual(ledgerSeeded, ['flow_projection']);
+  assert.deepEqual((await snapshot(restored)).flowCheckpoint.map(r => [r.id, Number(r.last_event)]), [[1, 0]], 'the migration seeds the projection checkpoint');
   const result = await restoreBackup(restored.pool, backup);
   assert.equal(result.fromSchema, schemaVersion); assert.deepEqual(result.tablesLeftEmpty, []);
   assert.deepEqual(await ledgerCounts(restored.pool), await ledgerCounts(source.pool));

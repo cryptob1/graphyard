@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { z } from 'zod';
 import type pg from 'pg';
-import { ledgerOrder, ledgerSequences, ledgerTables } from './store.js';
+import { ledgerOrder, ledgerSeeded, ledgerSequences, ledgerTables } from './store.js';
 import { releaseInfo, schemaVersion } from './release.js';
 
 /**
@@ -95,7 +95,9 @@ export function verifyBackup(input: unknown): Backup {
  * environment allowlist, and restoring beside that seed would leave two proof authorities
  * claiming the same principals. Migrate the target with `db migrate` instead. Tables the
  * backup does not carry — added by a later migration — stay empty and are reported, and
- * the migration that follows a restore fills in whatever the newer schema needs.
+ * the migration that follows a restore fills in whatever the newer schema needs. A
+ * checkpoint the migration itself seeds is not live state: the backup's checkpoint
+ * replaces the seed, or the seed stays when the backup predates the table.
  */
 export async function restoreBackup(pool: pg.Pool, input: unknown) {
   const backup = verifyBackup(input);
@@ -106,7 +108,7 @@ export async function restoreBackup(pool: pg.Pool, input: unknown) {
     const current = Number((await db.query('SELECT COALESCE(MAX(version),0) AS version FROM graphyard_schema')).rows[0].version);
     if (current !== schemaVersion) throw new Error(`Restore requires a database migrated to schema generation ${schemaVersion} (found ${current}); run \`graphyard db migrate\` with the release that took the backup or a newer one, then restore`);
     for (const name of ledgerTables) {
-      if (name === 'graphyard_schema') continue;
+      if (name === 'graphyard_schema' || ledgerSeeded.includes(name)) continue;
       const count = Number((await db.query(`SELECT count(*) AS n FROM ${name}`)).rows[0].n);
       if (count) throw new Error(`Restore requires an empty database: ${name} already holds ${count} row(s). ${name.startsWith('proof_grant')
         ? 'A release that started against this database has already seeded proof authority from its environment; restore into a database migrated with `graphyard db migrate` instead, so the backup\'s grants and their history are the only authority'
@@ -115,6 +117,7 @@ export async function restoreBackup(pool: pg.Pool, input: unknown) {
     const restored: Record<string, number> = {};
     for (const table of backup.tables) {
       if (table.name === 'graphyard_schema') continue;
+      if (ledgerSeeded.includes(table.name)) await db.query(`DELETE FROM ${table.name}`);
       // Chunked so a large ledger does not become one enormous parameter.
       for (let at = 0; at < table.rows.length; at += 500) {
         await db.query(`INSERT INTO ${table.name} SELECT * FROM json_populate_recordset(NULL::${table.name}, $1::json)`, [JSON.stringify(table.rows.slice(at, at + 500))]);

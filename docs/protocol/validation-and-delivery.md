@@ -1,4 +1,4 @@
-<!-- page: Agent protocol | 12 | where the validation runner and release delivery APIs are documented. -->
+<!-- page: Agent protocol | 13 | where the validation runner and release delivery APIs are documented. -->
 # Validation runner and delivery APIs
 
 The [validation protocol](../validation.md) documents versioned environments, trusted registrations, immutable candidates, explicit dispatch/ACK, result collection and recovery. Use `graphyard validation` to inspect requests. Automatic runner execution is a later increment.

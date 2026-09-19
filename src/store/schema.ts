@@ -7,6 +7,7 @@ import { validationTables } from './tables/validation.js';
 import { scenarioTables } from './tables/scenarios.js';
 import { deliveryTables } from './tables/delivery.js';
 import { productionTables } from './tables/production.js';
+import { flowTables } from './tables/flow.js';
 import { schemaGenerationTables } from './tables/schema-generation.js';
 
 /**
@@ -15,7 +16,7 @@ import { schemaGenerationTables } from './tables/schema-generation.js';
  */
 export const tables: readonly TableDefinition[] = [
   ...workTables, ...delegationTables, ...operatorAgentTables, ...proofGrantTables,
-  ...validationTables, ...scenarioTables, ...deliveryTables, ...productionTables, ...schemaGenerationTables,
+  ...validationTables, ...scenarioTables, ...deliveryTables, ...productionTables, ...flowTables, ...schemaGenerationTables,
 ];
 
 /** The additive startup migration: the append-only trigger function, then each table's DDL. */
@@ -34,3 +35,9 @@ export const ledgerTables = tables.map(table => table.name);
 export const ledgerOrder: Record<string, string> = Object.fromEntries(tables.map(table => [table.name, table.orderBy]));
 /** The serial sequences a restore advances, one per table that has one. */
 export const ledgerSequences = tables.flatMap(table => table.serial ? [{ table: table.name, column: table.serial }] : []);
+/**
+ * Tables whose migration seeds a row — a projection checkpoint — so a freshly migrated
+ * database is never empty at them. A restore replaces the seed with the backup's row
+ * instead of refusing the table as occupied; every other table must be empty.
+ */
+export const ledgerSeeded = tables.filter(table => /\bINSERT INTO\b/i.test(table.ddl)).map(table => table.name);
