@@ -105,7 +105,7 @@ export function sshTransport(host: string, user = 'root', base: Transport = loca
   };
 }
 
-export interface RecordedCommand { program: string; args: string[]; input?: string }
+export interface RecordedCommand { program: string; args: string[]; input?: string; cwd?: string }
 export interface BundleFileRecord { content: string; mode: number; owner?: string }
 export interface FakeTransportOptions {
   /** First match wins; a response is stdout, a full result, or a thunk for stateful fakes. */
@@ -126,7 +126,7 @@ export function fakeTransport(options: FakeTransportOptions = {}) {
     commands, files,
     line: (index: number) => [commands[index].program, ...commands[index].args].join(' '),
     async exec(program, args, runOptions = {}) {
-      commands.push({ program, args, ...(runOptions.input === undefined ? {} : { input: runOptions.input }) });
+      commands.push({ program, args, ...(runOptions.input === undefined ? {} : { input: runOptions.input }), ...(runOptions.cwd === undefined ? {} : { cwd: runOptions.cwd }) });
       const line = [program, ...args].join(' ');
       const response = responses.find(candidate => line.includes(candidate.match));
       if (!response) return { stdout: '', stderr: '', code: 0 };

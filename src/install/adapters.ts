@@ -1,5 +1,5 @@
 import { fingerprint, Vault } from './secrets.js';
-import { SERVER_CONTAINER_UID, type Transport } from './transport.js';
+import { SERVER_CONTAINER_UID, shellQuote, type Transport } from './transport.js';
 import { SERVER_PORT, type EnvValue, type PlanAction, type PreflightItem, type Provider } from './types.js';
 import { packageVersion } from '../release.js';
 
@@ -27,6 +27,13 @@ export interface AdapterContext {
   port: number;
   /** Absolute path of an attached data disk; when set, Postgres stores its data there. */
   dataPath: string | null;
+  /**
+   * The Graphyard-owned directory the Railway CLI links, creates, and deploys from. Every
+   * link-resolving railway command runs with this as its working directory, so an unrelated
+   * `railway init` someone ran inside the managed checkout is never mistaken for the
+   * Graphyard project, and `railway up` can never upload the managed repository's tree.
+   */
+  railwayDir: string;
   wait: (ms: number) => Promise<void>;
   transport: Transport;
   ssh: (host: string, user?: string) => Transport;
@@ -323,6 +330,31 @@ async function waitForDocker(ctx: AdapterContext, remote: Transport, attempts = 
   throw new Error(`Docker did not become available on ${ctx.service}; inspect the server's cloud-init output`);
 }
 
+/**
+ * Postgres must never silently fall back to the root disk: cloud-init mounts the attached
+ * volume, but the attach is asynchronous and its `allowFailure` means a failed attach would
+ * otherwise surface only as a ledger that evaporates on rebuild. Wait for the mount, try the
+ * mount cloud-init prepared if the device appeared late, and refuse to deploy onto a server
+ * whose data disk is missing.
+ */
+async function waitForDataVolume(ctx: AdapterContext, remote: Transport, attempts = 15) {
+  if (!ctx.dataPath) return;
+  const mounted = async () => {
+    const result = await remote.exec('findmnt', ['-n', '-o', 'SOURCE', '--target', ctx.dataPath!], { allowFailure: true, timeout: 60_000 }).catch(() => ({ stdout: '', stderr: '', code: 1 }));
+    return result.code === 0 && !!result.stdout.trim();
+  };
+  for (let attempt = 0; attempt < attempts; attempt++) {
+    if (await mounted()) return;
+    await ctx.wait(4_000);
+  }
+  const device = await remote.exec('sh', ['-c', 'ls /dev/disk/by-id/scsi-0HC_Volume_* 2>/dev/null | head -1'], { allowFailure: true, timeout: 60_000 }).catch(() => ({ stdout: '', stderr: '', code: 1 }));
+  if (device.code === 0 && device.stdout.trim()) {
+    await remote.exec('sh', ['-c', `mkdir -p ${shellQuote(ctx.dataPath)} && mount ${shellQuote(ctx.dataPath)}`], { allowFailure: true, timeout: 120_000 }).catch(() => ({ stdout: '', stderr: '', code: 1 }));
+    if (await mounted()) return;
+  }
+  throw new Error(`The data volume did not appear at ${ctx.dataPath} on ${ctx.service}, so Postgres would write to the root disk and lose the ledger on rebuild. Attach it with "hcloud volume attach ${ctx.service}-data --server ${ctx.service} --automount", then rerun graphyard install --apply.`);
+}
+
 export const hetznerAdapter: ProviderAdapter = {
   provider: 'hetzner',
   async preflight(ctx) {
@@ -370,6 +402,7 @@ export const hetznerAdapter: ProviderAdapter = {
     }
     const remote = ctx.ssh(await hetznerAddress(ctx), ctx.sshUser);
     await waitForDocker(ctx, remote);
+    await waitForDataVolume(ctx, remote);
     await remote.exec('mkdir', ['-p', ctx.workdir, ...(ctx.dataPath ? [`${ctx.dataPath}/postgres`] : [])], { timeout: 120_000 });
   },
   async setEnv(ctx, values) {
@@ -447,6 +480,18 @@ async function resolveRailwayWorkspace(ctx: AdapterContext): Promise<RailwayWork
 
 const railwayInitArgs = (ctx: AdapterContext, workspace: RailwayWorkspace | null) => ['init', '--name', `graphyard-${ctx.installId}`, ...(workspace ? ['--workspace', workspace.id] : [])];
 
+/**
+ * Every railway command that resolves the linked project runs in the Graphyard link
+ * directory, never in the process cwd: the process cwd is the managed repository checkout
+ * (the runbook requires it), and a checkout that is already linked to the user's own
+ * Railway project would otherwise be observed, provisioned, and deployed as if it were
+ * Graphyard's. Account-level preflight commands (`--version`, `whoami`) read no link and
+ * keep the ambient cwd.
+ */
+async function runRailway(ctx: AdapterContext, args: string[], options: { input?: string; timeout?: number; allowFailure?: boolean } = {}) {
+  return ctx.transport.exec('railway', args, { ...options, cwd: ctx.railwayDir });
+}
+
 export const railwayAdapter: ProviderAdapter = {
   provider: 'railway',
   async preflight(ctx) {
@@ -464,7 +509,7 @@ export const railwayAdapter: ProviderAdapter = {
   },
   async observe(ctx) {
     const observation = emptyObservation();
-    const status = await ctx.transport.exec('railway', ['status', '--json'], { allowFailure: true, timeout: 180_000 });
+    const status = await runRailway(ctx, ['status', '--json'], { allowFailure: true, timeout: 180_000 });
     if (status.code !== 0) return observation;
     let services: string[] = [];
     try {
@@ -476,7 +521,7 @@ export const railwayAdapter: ProviderAdapter = {
     observation.database = services.some(name => /postgres/i.test(name));
     observation.app = services.includes(ctx.service);
     if (!observation.app) return observation;
-    const variables = await ctx.transport.exec('railway', ['variables', '--service', ctx.service, '--json'], { allowFailure: true, timeout: 180_000 });
+    const variables = await runRailway(ctx, ['variables', '--service', ctx.service, '--json'], { allowFailure: true, timeout: 180_000 });
     if (variables.code === 0) {
       try {
         const parsed = JSON.parse(variables.stdout) as Record<string, string>;
@@ -484,7 +529,7 @@ export const railwayAdapter: ProviderAdapter = {
         for (const [name, value] of Object.entries(parsed)) observation.variables[name] = variableMarker(name, String(value));
       } catch { /* an unparsable listing is reported as no observed variables */ }
     }
-    const domains = await ctx.transport.exec('railway', ['domain', '--service', ctx.service, '--json'], { allowFailure: true, timeout: 180_000 });
+    const domains = await runRailway(ctx, ['domain', '--service', ctx.service, '--json'], { allowFailure: true, timeout: 180_000 });
     if (domains.code === 0) {
       const found = /[a-z0-9-]+(?:\.[a-z0-9-]+)+/i.exec(domains.stdout.replace(/https?:\/\//g, ''));
       if (found) observation.url = `https://${found[0]}`;
@@ -495,37 +540,45 @@ export const railwayAdapter: ProviderAdapter = {
     // Preflight ran first and settled the workspace; a plan built without it shows the bare command.
     const workspace = railwayWorkspaces.get(ctx) ?? chooseRailwayWorkspace(ctx.workspace, []);
     return [
-      { id: 'provider.provision.project', target: 'provider', title: `Link or create the Railway project for ${ctx.repository}${workspace.selected ? ` in workspace ${workspace.selected.name}` : ''}`, state: observation.compute ? 'satisfied' : 'create', command: `railway ${railwayInitArgs(ctx, workspace.selected).join(' ')}`, ...(workspace.selected ? { values: [{ name: 'workspace', value: `${workspace.selected.name} (${workspace.selected.id})`, secret: false }] } : {}) },
+      { id: 'provider.provision.project', target: 'provider', title: `Link or create the Railway project for ${ctx.repository}${workspace.selected ? ` in workspace ${workspace.selected.name}` : ''}, linked from ${ctx.railwayDir}`, state: observation.compute ? 'satisfied' : 'create', command: `railway ${railwayInitArgs(ctx, workspace.selected).join(' ')}`, ...(workspace.selected ? { values: [{ name: 'workspace', value: `${workspace.selected.name} (${workspace.selected.id})`, secret: false }] } : {}) },
       { id: 'provider.provision.database', target: 'provider', title: 'Add the managed Postgres database', state: observation.database ? 'satisfied' : 'create', command: 'railway add --database postgres' },
-      { id: 'provider.provision.app', target: 'provider', title: `Add the ${ctx.service} application service built from the repository Dockerfile`, state: observation.app ? 'satisfied' : 'create', command: `railway add --service ${ctx.service}` },
+      { id: 'provider.provision.app', target: 'provider', title: `Add the ${ctx.service} application service built from the Graphyard checkout's root Dockerfile`, state: observation.app ? 'satisfied' : 'create', command: `railway add --service ${ctx.service}` },
     ];
   },
   async provision(ctx, observation) {
+    // The link directory is created here rather than during preparation, so a refused apply
+    // and every --plan still leave the machine untouched.
+    await ctx.transport.exec('mkdir', ['-p', ctx.railwayDir], { timeout: 60_000 });
     if (!observation.compute) {
       const workspace = await resolveRailwayWorkspace(ctx);
       if (workspace.problem) throw new Error(`Railway workspace: ${workspace.problem}`);
-      await ctx.transport.exec('railway', railwayInitArgs(ctx, workspace.selected), { timeout: 600_000 });
+      await runRailway(ctx, railwayInitArgs(ctx, workspace.selected), { timeout: 600_000 });
     }
-    if (!observation.database) await ctx.transport.exec('railway', ['add', '--database', 'postgres'], { timeout: 600_000 });
-    if (!observation.app) await ctx.transport.exec('railway', ['add', '--service', ctx.service], { timeout: 600_000 });
+    if (!observation.database) await runRailway(ctx, ['add', '--database', 'postgres'], { timeout: 600_000 });
+    if (!observation.app) await runRailway(ctx, ['add', '--service', ctx.service], { timeout: 600_000 });
   },
   async setEnv(ctx, values) {
     const plain = values.filter(value => !value.secret);
-    if (plain.length) await ctx.transport.exec('railway', ['variables', '--service', ctx.service, '--skip-deploys', ...plain.flatMap(value => ['--set', `${value.name}=${value.value}`])], { timeout: 300_000 });
+    if (plain.length) await runRailway(ctx, ['variables', '--service', ctx.service, '--skip-deploys', ...plain.flatMap(value => ['--set', `${value.name}=${value.value}`])], { timeout: 300_000 });
     // Secrets go over standard input: a process argument is visible to every local process.
-    for (const secret of values.filter(value => value.secret)) await ctx.transport.exec('railway', ['variable', 'set', '--service', ctx.service, '--skip-deploys', '--stdin', secret.name], { input: secret.value, timeout: 300_000 });
+    for (const secret of values.filter(value => value.secret)) await runRailway(ctx, ['variable', 'set', '--service', ctx.service, '--skip-deploys', '--stdin', secret.name], { input: secret.value, timeout: 300_000 });
   },
-  async deploy(ctx) { await ctx.transport.exec('railway', ['up', '--service', ctx.service, '--ci', '--detach'], { timeout: 1_800_000 }); },
+  async deploy(ctx) {
+    // The source is the Graphyard checkout the CLI runs from — never the process cwd, which
+    // is the managed repository's tree: an implicit `railway up` there would build and
+    // deploy the user's application (or its Nixpacks guess) as the Graphyard service.
+    await runRailway(ctx, ['up', ctx.sourceRoot, '--service', ctx.service, '--ci', '--detach'], { timeout: 1_800_000 });
+  },
   async url(ctx) {
     const args = ['domain', '--service', ctx.service, '--port', String(SERVER_PORT), ...(ctx.domain ? [ctx.domain] : [])];
-    const result = await ctx.transport.exec('railway', args, { timeout: 600_000 });
+    const result = await runRailway(ctx, args, { timeout: 600_000 });
     const found = /[a-z0-9-]+(?:\.[a-z0-9-]+)+/i.exec(`${result.stdout}\n${ctx.domain ?? ''}`.replace(/https?:\/\//g, ''));
     if (!found) throw new Error('Railway did not return an HTTPS domain for the service');
     return `https://${found[0]}`;
   },
   health: httpHealth,
   async logs(ctx, lines = 100) {
-    const result = await ctx.transport.exec('railway', ['logs', '--service', ctx.service, '--lines', String(lines)], { allowFailure: true, timeout: 180_000 });
+    const result = await runRailway(ctx, ['logs', '--service', ctx.service, '--lines', String(lines)], { allowFailure: true, timeout: 180_000 });
     return ctx.vault.scrub(result.stdout || result.stderr);
   },
 };

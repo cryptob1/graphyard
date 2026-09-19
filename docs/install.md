@@ -79,6 +79,13 @@ account with exactly one workspace needs nothing; an account with several needs
 `--workspace NAME-OR-ID`, and the plan's `Railway workspace` preflight item lists the choices
 (`railway whoami --json` prints them too) until one is passed.
 
+On `railway` the installer also never uses the working directory as the Railway project link.
+It links, provisions, and deploys from a Graphyard-owned directory under
+`~/.config/graphyard/<install>/railway`, and it always uploads the Graphyard checkout the CLI
+runs from — never the managed repository's tree. A checkout that is already linked to your own
+Railway project is therefore neither confused with the Graphyard project nor built and
+deployed as one, and the plan names the link directory so you can inspect it.
+
 `hetzner` and `docker-host` need `--domain`, with its A record already pointed at the host.
 The installer verifies its own health endpoint and receives GitHub webhooks over HTTPS, and
 both reject the internal certificate Caddy could otherwise issue for a bare host address — so
@@ -114,7 +121,7 @@ Add the options the instruction called for:
 | `--ssh-key NAME` | Hetzner Cloud SSH key for the created server; required on `hetzner` (`hcloud ssh-key list`) |
 | `--base-branch NAME` | Protected base branch (default `main`) |
 | `--port N` | Host port for a local `compose` install (default 4310) |
-| `--image REF` | Control-plane image for `hetzner` and `docker-host` (default: the [versioned release image](deployment.md#versioned-images) for this checkout's version, `ghcr.io/cryptob1/graphyard:X.Y.Z`; pin a digest here). `railway` builds the root `Dockerfile` and `compose` builds the image from the checkout |
+| `--image REF` | Control-plane image for `hetzner` and `docker-host` (default: the [versioned release image](deployment.md#versioned-images) for this checkout's version, `ghcr.io/cryptob1/graphyard:X.Y.Z`; pin a digest here). `railway` builds the Graphyard checkout's root `Dockerfile` and `compose` builds the image from that checkout |
 | `--required-check NAME` | Also require this existing CI check on the base branch; repeatable |
 | `--review-count N` | Approving reviews to require, when the policy's default is not what you want |
 
@@ -203,7 +210,8 @@ then install it on OWNER/REPO. Over SSH, forward port 4311 first.
 
 Ask the human to open that page, register the App, and install it on the managed
 repository. GitHub returns the App ID, private key, and webhook secret directly to this
-machine; nothing is copied by hand and no key is printed.
+machine — stored under the install directory, outside every Git checkout. Nothing is copied
+by hand and no key is printed.
 
 Over SSH, forward the port first:
 
@@ -245,7 +253,7 @@ installer continues on its own.
 | `status.role` | `admin` |
 | `status.repository` | `OWNER/REPO` |
 | `status.githubAppId` | the same number as `github.appId` |
-| `webhook.delivered` | `true` |
+| `webhook.delivered` | `true` on `railway`, `hetzner`, and `docker-host`. A local `compose` install serves `127.0.0.1` only, which GitHub can never reach, so `delivered` stays `false` there by design — the plan's `verify.webhook` action says so up front, and the other verifications are unaffected |
 | `protection` | names the base branch checks and administrator enforcement |
 | `profiles.master.configured` | `true` |
 | `profiles.workers` | one entry per `--workers` |
@@ -377,6 +385,7 @@ a step to reduce it — and worker identities are never Apps. The reasons are in
 | `Run graphyard install from the checkout of the repository being managed` | wrong working directory | `cd` into the `OWNER/REPO` checkout |
 | `This checkout is X; rerun from Y` | `--repo` and the Git origin disagree | correct `--repo` or change directory |
 | `did not become healthy` | the container cannot start or reach Postgres | `node "$GRAPHYARD_CLI" install --provider PROVIDER --repo OWNER/REPO --logs` |
+| `The data volume did not appear at /mnt/graphyard` | the Hetzner volume is not attached or not mounted, and Postgres would silently write to the root disk | run the `hcloud volume attach … --automount` command the error prints, then rerun `--apply` |
 | `The GitHub App confirmation did not complete in time` | nobody opened the browser page | rerun `--apply`; it resumes from the saved App credentials |
 | `webhook.delivered` is `false` with `statusCode: 401` | the App webhook secret and `GITHUB_WEBHOOK_SECRET` differ | rerun `--apply`; it rewrites both sides |
 | `webhook.delivered` is `false` with no delivery | GitHub cannot reach the URL | confirm the HTTPS URL is public and `GET /healthz` answers from outside |

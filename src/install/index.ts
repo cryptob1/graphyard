@@ -1,6 +1,7 @@
 import { execFileSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { hostname } from 'node:os';
+import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { discover } from '../onboarding.js';
 import { adapterFor, carriesCredential, isProviderReference, variableMarker, type AdapterContext, type AdapterObservation, type ProviderAdapter, DEFAULT_IMAGE } from './adapters.js';
@@ -34,8 +35,8 @@ export interface InstallDependencies {
   log?: (line: string) => void;
   detectRuntimes?: (transport: Transport) => Promise<DetectedRuntime[]>;
   detectHerdr?: (transport: Transport) => Promise<HerdrState>;
-  /** Runs the App-manifest browser flow and resolves once the human has confirmed. */
-  githubApp?: (request: { root: string; repository: string; origin: string; reviewer?: string }) => Promise<AppFacts & { slug: string; botUserId?: number }>;
+  /** Runs the App-manifest browser flow and resolves once the human has confirmed. The registration credentials are written to `file`, which the installer keeps under the install directory, never inside a repository. */
+  githubApp?: (request: { root: string; repository: string; origin: string; file: string; reviewer?: string }) => Promise<AppFacts & { slug: string; botUserId?: number }>;
   registerProfiles?: (request: ProfileRequest) => Promise<ProfileRegistration>;
   runHerdr?: (args: string[]) => string;
   /** Test seam: exercise the orchestration against a scripted provider. */
@@ -110,6 +111,7 @@ export async function prepareInstall(cwd: string, rawInputs: InstallInputs, depe
     workspace: inputs.workspace ?? null,
     serverType: inputs.serverType ?? 'cx22', location: inputs.location ?? 'nbg1',
     databasePassword, port: inputs.port ?? SERVER_PORT, dataPath: provider === 'hetzner' ? '/mnt/graphyard' : null,
+    railwayDir: `${directory}/railway`,
     wait: dependencies.wait ?? ((ms: number) => new Promise(accept => setTimeout(accept, ms))),
     transport, ssh, fetch: dependencies.fetch ?? fetch, vault,
   };
@@ -273,8 +275,13 @@ export async function buildPlan(session: InstallSession): Promise<InstallPlan> {
   actions.push({ id: 'github.protection', target: 'github', state: protectionOk ? 'satisfied' : protection ? 'update' : 'create', title: `Require status checks (${[...session.requiredChecks, CHECK_NAME].join(', ')}) with "require branches to be up to date" off, which the merge queue needs, ${reviewPhrase}, conversation resolution, and administrator enforcement on ${session.inputs.baseBranch}` });
   if (session.inputs.reviewer) actions.push({ id: 'github.reviewer', target: 'github', state: record?.reviewers.some(reviewer => reviewer.name === session.inputs.reviewer) ? 'satisfied' : 'create', title: `Register the reviewer App "${session.inputs.reviewer}" and add its identity to GRAPHYARD_REVIEWER_APPS`, human: 'One additional browser confirmation, because a reviewer is a separate GitHub identity with no control-plane authority.' });
 
+  // A local Compose install serves loopback only, so GitHub can never deliver to it. Saying
+  // so in the plan keeps an agent from chasing an unconfirmable step as if it were a failure.
+  const webhookExpectation = context.provider === 'compose'
+    ? ' A loopback Compose install is unreachable from GitHub, so this stays unconfirmed by design; the rest of the verification is unaffected.'
+    : '';
   actions.push({ id: 'verify.status', target: 'graphyard', state: 'update', title: 'Verify authenticated GET /api/status reports the admin actor, the managed repository, and the bound App' });
-  actions.push({ id: 'verify.webhook', target: 'graphyard', state: 'update', title: 'Publish one neutral check run and confirm GitHub delivered it to the server' });
+  actions.push({ id: 'verify.webhook', target: 'graphyard', state: 'update', title: `Publish one neutral check run and confirm GitHub delivered it to the server.${webhookExpectation}` });
   actions.push({ id: 'local.profiles', target: 'local', state: record?.profiles.length ? 'satisfied' : 'create', title: 'Register master, reviewer, and worker profiles for authenticated agent runtimes on this machine' });
   actions.push({ id: 'local.herdr', target: 'local', state: 'update', title: 'Bind Herdr when it is installed: link and enable the Graphyard plugin for this repository' });
 
@@ -325,6 +332,15 @@ export async function applyInstall(session: InstallSession, plan: InstallPlan): 
   }
 }
 
+/**
+ * The App manifest flow's registration credentials (the App private key and webhook secret)
+ * are stored beside the rest of the installation's secrets, under the install directory and
+ * outside every Git checkout — the runbook's hard rule, which the default would otherwise
+ * break by writing `<repository>/.graphyard/github-app.json`.
+ */
+const appCredentialFile = (session: InstallSession, reviewer?: string) =>
+  resolve(session.directory, reviewer ? `github-reviewer-${reviewer}.json` : 'github-app.json');
+
 async function performInstall(session: InstallSession, plan: InstallPlan): Promise<InstallSummary> {
   const { adapter, context, deps, vault } = session;
   if (session.mode !== 'apply') throw new Error('Apply requires a session prepared in apply mode; --plan sessions create nothing');
@@ -353,7 +369,7 @@ async function performInstall(session: InstallSession, plan: InstallPlan): Promi
   const facts = await resolveApp(session, url, record);
   vault.add(facts.privateKey); vault.add(facts.webhookSecret);
   if (session.inputs.reviewer && !session.reviewers.some(reviewer => reviewer.name === session.inputs.reviewer)) {
-    const reviewerFacts = await deps.githubApp!({ root: session.root, repository: session.inputs.repository, origin: url, reviewer: session.inputs.reviewer });
+    const reviewerFacts = await deps.githubApp!({ root: session.root, repository: session.inputs.repository, origin: url, file: appCredentialFile(session, session.inputs.reviewer), reviewer: session.inputs.reviewer });
     if (!reviewerFacts.botUserId) throw new Error('GitHub did not return the reviewer bot identity; rerun the reviewer registration');
     if (reviewerFacts.appId === facts.appId) throw new Error('A reviewer App must be a different identity from the Graphyard control-plane App');
     session.reviewers = [...session.reviewers, { name: session.inputs.reviewer, appId: reviewerFacts.appId, botUserId: reviewerFacts.botUserId }];
@@ -445,7 +461,7 @@ async function authenticatedStatus(session: InstallSession, url: string) {
 async function resolveApp(session: InstallSession, url: string, record: InstallRecord): Promise<AppFacts & { slug: string }> {
   const { deps } = session;
   if (!deps.githubApp) throw new Error('No GitHub App flow is available in this environment');
-  const facts = await deps.githubApp({ root: session.root, repository: session.inputs.repository, origin: url });
+  const facts = await deps.githubApp({ root: session.root, repository: session.inputs.repository, origin: url, file: appCredentialFile(session) });
   if (record.github && record.github.appId !== facts.appId) session.deps.log(`GitHub App changed from ${record.github.appId} to ${facts.appId}`);
   return facts;
 }

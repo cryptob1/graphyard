@@ -168,3 +168,47 @@ test('the saved App file holds the credentials and the plan never does', async (
     assert.ok(!JSON.stringify(record).includes(appKey));
   } finally { await fixture.cleanup(); }
 });
+
+test('the App registration credentials are stored under the install directory, never inside the managed repository', async () => {
+  const fixture = await harness({ provider: 'railway' });
+  const announced: string[] = [];
+  try {
+    // The real manifest flow, wired exactly as the CLI wires it, so the file the credentials
+    // reach is the one the installer chose — under the install directory, outside every
+    // Git checkout, per the runbook's hard rule.
+    const deps = {
+      ...fixture.deps,
+      githubApp: (request: { root: string; repository: string; origin: string; file: string; reviewer?: string }) => runManifestFlow(request.root, request.repository, request.origin, {
+        port: 0, poll: 5, reviewer: request.reviewer,
+        announce: message => announced.push(message),
+        dependencies: {
+          file: request.file,
+          convert: async () => ({ id: request.reviewer ? GRAPHYARD_APP_ID + 1 : GRAPHYARD_APP_ID, slug: request.reviewer ? `${request.reviewer}-app` : 'graphyard-owner-project', pem: appKey, webhook_secret: WEBHOOK_SECRET }),
+          verify: async () => {},
+          resolveBot: async () => ({ id: 900_001, type: 'Bot' }),
+        },
+      }),
+    };
+    const session = await prepareInstall(fixture.root, { repository: 'owner/project', provider: 'railway', reviewer: 'claude' }, deps);
+    const applied = applyInstall(session, await buildPlan(session));
+    await driveSetup(announced, 0, 500);
+    await driveSetup(announced, 1, 501);
+    await applied;
+
+    assert.equal((await stat(`${session.directory}/github-app.json`)).mode & 0o777, 0o600);
+    assert.equal((await stat(`${session.directory}/github-reviewer-claude.json`)).mode & 0o777, 0o600);
+    await assert.rejects(stat(`${fixture.root}/.graphyard/github-app.json`), { code: 'ENOENT' }, 'the App private key was written inside the managed repository');
+    await assert.rejects(stat(`${fixture.root}/.graphyard/github-reviewer-claude.json`), { code: 'ENOENT' }, 'the reviewer App key was written inside the managed repository');
+    assert.ok(!announced.join('\n').includes(appKey) && !announced.join('\n').includes(WEBHOOK_SECRET));
+  } finally { await fixture.cleanup(); }
+});
+
+async function driveSetup(announced: string[], index: number, installationId: number) {
+  for (let attempt = 0; attempt < 500 && announced.length <= index; attempt++) await new Promise(accept => setTimeout(accept, 10));
+  const url = announced[index]?.match(/http:\/\/127\.0\.0\.1:\d+/)?.[0];
+  assert.ok(url, `setup URL ${index} was never announced`);
+  const page = await (await fetch(url)).text();
+  const state = page.match(/state=([a-f0-9]+)/)![1];
+  assert.equal((await fetch(`${url}/created?code=install-test&state=${state}`, { redirect: 'manual' })).status, 303);
+  assert.equal((await fetch(`${url}/installed?installation_id=${installationId}`, { redirect: 'manual' })).status, 303);
+}

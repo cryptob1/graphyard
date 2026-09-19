@@ -56,7 +56,9 @@ test('--apply provisions Postgres and the application, sets every variable, and 
       const lines = fixture.allCommandLines();
       if (provider === 'railway') {
         assert.ok(lines.some(line => line.includes('railway add --database postgres')), 'Postgres was not provisioned');
-        assert.ok(lines.some(line => line.includes('railway up --service')), 'the application was not deployed');
+        const up = lines.filter(line => line.includes('railway up'));
+        assert.ok(up.length >= 2, 'the application was not deployed');
+        for (const line of up) assert.match(line, /railway up \S+ --service graphyard-owner-project --ci --detach/, `the deploy did not name its source and service: ${line}`);
         assert.ok(lines.some(line => line.includes('railway domain --service')), 'no HTTPS domain was obtained');
       } else {
         const compose = bundle(fixture, 'compose.yaml')!;
@@ -241,7 +243,7 @@ test('a uid-1000 container reads the key a real transport wrote, through a real 
       provider: 'compose', repository: 'owner/project', installId: 'key-mount', service: 'graphyard-key-mount',
       domain: null, image: 'alpine:3', workdir, sourceRoot: workdir, sshHost: null, sshUser: 'root',
       sshKey: null, workspace: null, serverType: '', location: '', databasePassword: 'database-password-for-the-key-mount-test',
-      port: 4310, dataPath: null, wait: async () => {}, transport: docker, ssh: () => docker, fetch, vault: new Vault(),
+      port: 4310, dataPath: null, railwayDir: `${workdir}/railway`, wait: async () => {}, transport: docker, ssh: () => docker, fetch, vault: new Vault(),
     };
     await composeAdapter.setEnv(context, [{ name: 'GITHUB_PRIVATE_KEY', value: appKey, secret: true }]);
     // `--user 1000:1000` mirrors the image's USER node. Whatever the local writer's uid is,
@@ -343,6 +345,56 @@ test('Railway project creation names the resolved workspace, and a provider fail
     const session = await prepareInstall(refused.root, inputsFor('railway'), { ...refused.deps, transport: transport as Transport });
     await assert.rejects(applyInstall(session, await buildPlan(session)), { message: 'railway exited with 1: --workspace required in non-interactive mode (multiple workspaces available)' });
   } finally { await refused.cleanup(); }
+});
+
+test('Railway runs against the Graphyard link directory and deploys the Graphyard source, never the managed checkout', async () => {
+  const fixture = await harness({ provider: 'railway' });
+  try {
+    // The process cwd is the managed repository checkout (the runbook requires it), and the
+    // Graphyard source is somewhere else entirely: an implicit `railway up` in the cwd would
+    // build and deploy the managed repository's own tree as the Graphyard service.
+    const sourceRoot = '/srv/graphyard-checkout';
+    const session = await prepareInstall(fixture.root, inputsFor('railway'), { ...fixture.deps, sourceRoot });
+    const plan = await buildPlan(session);
+    assert.match(plan.actions.find(action => action.id === 'provider.provision.project')!.title, new RegExp(`linked from ${session.context.railwayDir.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`));
+    const summary = await applyInstall(session, plan);
+    assert.equal(summary.health, true);
+
+    const railway = fixture.transport.commands.filter(command => command.program === 'railway');
+    assert.ok(railway.length >= 6, 'railway was not driven');
+    // Account-level preflight reads no link; every project command resolves the link only
+    // from the Graphyard-owned directory, so a checkout already linked to the user's own
+    // Railway project is never mistaken for the Graphyard project.
+    for (const command of railway) {
+      const projectCommand = !['--version', 'whoami'].includes(command.args[0]);
+      assert.equal(command.cwd, projectCommand ? session.context.railwayDir : undefined, `railway ${command.args[0]} ran in ${command.cwd ?? 'the process cwd (the managed repository)'}`);
+    }
+    const up = railway.filter(command => command.args[0] === 'up');
+    assert.ok(up.length >= 2);
+    for (const command of up) {
+      assert.equal(command.args[1], sourceRoot, 'the deploy did not upload the Graphyard checkout');
+      assert.ok(!command.args.some(argument => argument === fixture.root), 'the deploy uploaded the managed repository');
+      assert.equal(command.cwd, session.context.railwayDir);
+    }
+    assert.ok(railway.some(command => command.args[0] === 'init'), 'the project was not created');
+    assert.ok(fixture.transport.commands.some(command => command.program === 'mkdir' && command.args.includes(session.context.railwayDir)), 'the link directory was not created');
+  } finally { await fixture.cleanup(); }
+
+  // A repository that is itself linked to a Railway project must be invisible to observe:
+  // only a link inside the Graphyard directory counts as the Graphyard project.
+  const linked = await harness({ provider: 'railway', installed: true });
+  try {
+    const session = await prepareInstall(linked.root, inputsFor('railway'), linked.deps, 'plan');
+    await buildPlan(session);
+    // The fake transport answers `railway status` whatever the cwd, so the assertion is on
+    // the directory the command was pointed at: not the managed checkout, which a live CLI
+    // would have resolved to the user's own project.
+    const status = linked.transport.commands.find(command => command.program === 'railway' && command.args[0] === 'status')!;
+    assert.ok(status, 'observe never inspected the provider');
+    assert.notEqual(status.cwd, undefined);
+    assert.notEqual(status.cwd, linked.root);
+    assert.equal(status.cwd, session.context.railwayDir);
+  } finally { await linked.cleanup(); }
 });
 
 test('a failed provider command surfaces its stderr, scrubbed of every generated secret', async () => {

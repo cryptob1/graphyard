@@ -46,6 +46,9 @@ export function providerResponses(provider: Provider, state: { installed: boolea
       { match: 'hcloud context active', result: 'graphyard' },
       { match: 'hcloud server create', result: () => { created = true; return ''; } },
       { match: `hcloud server describe ${state.service}`, result: () => created ? JSON.stringify({ public_net: { ipv4: { ip: '203.0.113.10' } } }) : { stdout: '', stderr: 'server not found', code: 1 } },
+      // cloud-init mounted the data volume; the installer refuses to deploy Postgres
+      // onto a server whose attached disk never appeared.
+      { match: 'findmnt', result: '/dev/disk/by-id/scsi-0HC_Volume_000000\n' },
       ...compose,
     ];
   }
