@@ -1,22 +1,8 @@
 import type { Work } from './work.js';
 import type { BootstrapMode } from './policy.js';
-
-// Deliberately bounded scope syntax: exact paths or directory prefixes ending /, /*, /**.
-// Unsupported glob expressions are not interpreted as semantic dependency knowledge.
-export function pathScope(value: string) {
-  const path = value.replace(/^\.\//, '');
-  const prefix = path.endsWith('/') || /\/\*{1,2}$/.test(path);
-  return { path: prefix ? path.replace(/\*+$/, '') : path, prefix };
-}
-export function pathScopesOverlap(a: string, b: string) {
-  const left = pathScope(a), right = pathScope(b);
-  return left.path === right.path || left.prefix && right.path.startsWith(left.path) || right.prefix && left.path.startsWith(right.path);
-}
-/** True when `outer` covers every file `inner` can name. A file scope contains only itself. */
-export function pathScopeContains(outer: string, inner: string) {
-  const wide = pathScope(outer), narrow = pathScope(inner);
-  return wide.path === narrow.path ? wide.prefix || !narrow.prefix : wide.prefix && narrow.path.startsWith(wide.path);
-}
+import { evidenceBindsCandidate } from './carry.js';
+import { pathScopesOverlap } from './scope.js';
+export { pathScope, pathScopeContains, pathScopesOverlap } from './scope.js';
 
 export interface BootstrapObligation extends BootstrapMode { key: string; workId: string; criterionId: string; proof: string }
 
@@ -26,10 +12,9 @@ export interface BootstrapObligation extends BootstrapMode { key: string; workId
  * or worker asserts can retire an obligation.
  */
 export function deliveredProof(work: Work, proof: string) {
-  const candidate = work.candidate;
-  return work.stage === 'done' && !!candidate && work.evidence.some(evidence => evidence.proof === proof && evidence.trusted
+  return work.stage === 'done' && !!work.candidate && work.evidence.some(evidence => evidence.proof === proof && evidence.trusted
     && evidence.result === 'pass' && evidence.executed > 0 && evidence.skipped === 0
-    && evidence.sha === candidate.sha && evidence.baseSha === candidate.baseSha && evidence.policyRevision === work.policyRevision);
+    && evidenceBindsCandidate(work, evidence) && evidence.policyRevision === work.policyRevision);
 }
 
 /** Every bootstrap deferral no delivered change has proven yet. Derived, never asserted. */

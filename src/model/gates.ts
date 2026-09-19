@@ -5,7 +5,8 @@ import { escalationRefusals } from './escalation.js';
 import { leadHoldRefusal } from './delegation.js';
 import { currentEvidence, evidenceIndependenceRefusals } from './evidence.js';
 import { inheritedObligations } from './bootstrap.js';
-import { exhaustedReviewerProfiles, reviewProviderOf, reviewerProfileFor } from './review.js';
+import { exactApproval, exhaustedReviewerProfiles, reviewProviderOf, reviewerProfileFor } from './review.js';
+import { carriedApproval, evidenceBindsCandidate } from './carry.js';
 import { placeInQueue } from './queue.js';
 import { regressionRefusals } from '../regression-guard.js';
 
@@ -28,21 +29,9 @@ export function evaluate(work: Work, all: Work[], now: Date, ciAppIds: number[])
   const agentReview = current ? obs!.agentReview : undefined;
   const provider = reviewProviderOf(work.policy);
   const selectedProfile = reviewerProfileFor(work);
-  // A dispatched provider verdict counts only for the exact recorded request.
-  const dispatchedApproval = (expected: 'codex' | 'agent') => !!candidate && !!agentReview?.approved && agentReview.provider === expected
-    && agentReview.sha === candidate.sha && work.reviewRequest?.commentId === agentReview.requestId
-    && work.reviewRequest?.sha === candidate.sha && work.reviewRequest?.baseSha === candidate.baseSha
-    && work.reviewRequest?.policyRevision === work.policyRevision;
-  const reviewPassed = provider === 'codex' ? dispatchedApproval('codex')
-    : provider === 'agent' ? dispatchedApproval('agent')
-      // The approving identity must be the profile Graphyard currently dispatched to,
-      // and that profile must still be configured with the same registered App.
-      && !!agentReview!.profile && !!agentReview!.reviewerApp
-      && work.reviewRequest!.provider === 'agent' && work.reviewRequest!.profile === agentReview!.profile
-      && work.reviewRequest!.reviewerApp === agentReview!.reviewerApp
-      && selectedProfile?.name === agentReview!.profile && selectedProfile?.reviewerApp === agentReview!.reviewerApp
-    : !!candidate && reviews.some(r => r.sha === candidate.sha && r.state === 'APPROVED' && r.reviewer !== candidate.author
-      && (!work.formalReviewResetRequired || work.formalReviewBaseline?.pr === candidate.pr && work.formalReviewBaseline.policyRevision === work.policyRevision && Number.isSafeInteger(r.id) && r.id! > 0 && !work.formalReviewBaseline.reviewIds.includes(r.id!)));
+  // An approval binds the exact commit: the one the provider approved (see exactApproval), or the
+  // one Graphyard carried it to across its own authored tip (see carry.ts). Nothing else counts.
+  const reviewPassed = !!exactApproval(work) || !!carriedApproval(work);
   const reviewRefusal = provider === 'codex' ? agentReview?.reason ?? 'Verified clean Codex review of the current commit is required'
     : provider === 'agent' ? !selectedProfile
       ? `Every configured reviewer profile is exhausted for this candidate (${exhaustedReviewerProfiles(work).join(', ') || 'none configured'}); add reviewer capacity or select another review provider`
@@ -65,8 +54,7 @@ export function evaluate(work: Work, all: Work[], now: Date, ciAppIds: number[])
     const scenario = work.scenarioRequirements?.find(s => s.proof === proof);
     // Name an explicit revocation: an operator otherwise cannot tell a revoked
     // candidate apart from one that was never proven.
-    const revoked = work.evidence.some(e => e.proof === proof && e.trusted && !!e.revocation
-      && e.sha === work.candidate?.sha && e.baseSha === work.candidate?.baseSha && e.policyRevision === work.policyRevision);
+    const revoked = work.evidence.some(e => e.proof === proof && e.trusted && !!e.revocation && evidenceBindsCandidate(work, e) && e.policyRevision === work.policyRevision);
     return `${proof} needs trusted passing evidence, with executed > 0 and skipped = 0, for this candidate and policy${scenario ? `; scenario v${scenario.revision} in ${scenario.environment}` : ''}${revoked && !currentEvidence(work, proof, now) ? '; previously accepted evidence was revoked' : ''}`;
   };
   // A bootstrap criterion's proofs are deferred here and required of the next change that
