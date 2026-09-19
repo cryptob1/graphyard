@@ -279,6 +279,9 @@ test('worker preparation claims and creates the assigned worktree from the curre
   } finally { await rm(root, { recursive: true, force: true }); await rm(credentialDirectory, { recursive: true, force: true }); }
 });
 
+// GitHub's answer for `git/ref/heads/main`: the real base tip the landing check reads.
+const baseRef = (sha: string) => JSON.stringify({ ref: 'refs/heads/main', object: { type: 'commit', sha } });
+
 // A fake store for the broker: before acquire the record carries no execution; afterwards it
 // carries the one the engine recorded, and after merge-commit the committed one, which is
 // what the two pre-provider re-reads check. `override` shapes what a numbered read returns.
@@ -299,26 +302,31 @@ test('routine merge is exact-candidate, double-checked, and never uses an admin 
   const store = broker(candidate, execution);
   const result = await mergeWork(config, candidate, store.snapshot, store.acquire, cancel, verify, (_command, args) => {
     calls.push(args);
-    if (args[1] === 'view') return JSON.stringify({ headRefOid: candidate.candidate!.sha, baseRefOid: candidate.candidate!.baseSha, baseRefName: 'main', state: 'OPEN', isDraft: false });
+    if (args[1] === 'view') return JSON.stringify({ headRefOid: candidate.candidate!.sha, baseRefName: 'main', state: 'OPEN', isDraft: false });
+    if (args[1]?.includes('/git/ref/heads/')) return baseRef(candidate.candidate!.baseSha);
     if (args.includes('--include')) return `Date: ${new Date().toUTCString()}\n\n{}`;
     return args[1] === '--method' ? JSON.stringify({ merged: true, sha: 'c'.repeat(40) }) : JSON.stringify(validProtection);
   }, undefined, store.commit);
   assert.equal(result.result.startsWith('merge requested'), true);
   assert.equal(calls.filter(args => args.includes('--include')).length, 2, 'the broker reads provider time again after committing');
-  assert.deepEqual(calls[5].slice(0, 3), ['api', '--method', 'PUT']); assert.ok(calls[5].includes(`sha=${candidate.candidate!.sha}`)); assert.equal(calls[5].includes('--admin'), false);
+  const put = calls.filter(args => args[1] === '--method');
+  assert.equal(put.length, 1); assert.deepEqual(put[0].slice(0, 3), ['api', '--method', 'PUT']); assert.ok(put[0].includes(`sha=${candidate.candidate!.sha}`)); assert.equal(put[0].includes('--admin'), false);
+  assert.equal(calls.filter(args => args[1] === 'repos/owner/project/git/ref/heads/main').length, 3, 'the real base tip is read before authority, under the lock, and again before the provider call');
+  assert.equal(calls.some(args => args[0] === 'pr' && args.includes('--json') && String(args.at(-1)).includes('baseRefOid')), false, 'the cached pr.baseRefOid is never requested');
   assert.doesNotThrow(() => assertMergeProtection(validProtection, config, candidate));
   assert.throws(() => assertMergeProtection({ ...validProtection, required_status_checks: { ...validProtection.required_status_checks, checks: [] } }, config, candidate), /protection changed/);
   assert.throws(() => assertMergeProtection({ ...validProtection, required_status_checks: { ...validProtection.required_status_checks, strict: true } }, config, candidate), /requires branches to be up to date/);
   assert.throws(() => assertMergeCandidate(work({ gates: [{ name: 'acceptance', passed: false, reasons: ['Human approval required'] }] })), /does not have/);
-  let reads = 0; await assert.rejects(mergeWork(config, candidate, async () => ({ work: [reads++ ? work({ revision: 10 }) : candidate], now: new Date().toISOString() }), acquire, cancel, verify, () => JSON.stringify({ headRefOid: candidate.candidate!.sha, baseRefOid: candidate.candidate!.baseSha, baseRefName: 'main', state: 'OPEN', isDraft: false })), /changed after/);
+  let reads = 0; await assert.rejects(mergeWork(config, candidate, async () => ({ work: [reads++ ? work({ revision: 10 }) : candidate], now: new Date().toISOString() }), acquire, cancel, verify, (_command, args) => args[1] === 'view' ? JSON.stringify({ headRefOid: candidate.candidate!.sha, baseRefName: 'main', state: 'OPEN', isDraft: false }) : baseRef(candidate.candidate!.baseSha)), /changed after/);
   const releaseStore = broker(candidate, execution);
-  await assert.rejects(mergeWork(config, candidate, releaseStore.snapshot, releaseStore.acquire, cancel, verify, () => JSON.stringify({ headRefOid: candidate.candidate!.sha, baseRefOid: candidate.candidate!.baseSha, baseRefName: 'release', state: 'OPEN', isDraft: false })), /changed on GitHub/);
+  await assert.rejects(mergeWork(config, candidate, releaseStore.snapshot, releaseStore.acquire, cancel, verify, () => JSON.stringify({ headRefOid: candidate.candidate!.sha, baseRefName: 'release', state: 'OPEN', isDraft: false })), /changed on GitHub/);
   const stale = work({ observation: { at: '2000-01-01T00:00:00Z' } as any });
   await assert.rejects(mergeWork(config, stale, async () => ({ work: [stale], now: new Date().toISOString() }), acquire, cancel, verify), /does not have/);
   let cancelled = '';
   const lostStore = broker(candidate, execution);
   await assert.rejects(mergeWork(config, candidate, lostStore.snapshot, lostStore.acquire, async (_work, authority) => { cancelled = authority.id; }, verify, (_command, args) => {
-    if (args[1] === 'view') return JSON.stringify({ headRefOid: candidate.candidate!.sha, baseRefOid: candidate.candidate!.baseSha, baseRefName: 'main', state: 'OPEN', isDraft: false });
+    if (args[1] === 'view') return JSON.stringify({ headRefOid: candidate.candidate!.sha, baseRefName: 'main', state: 'OPEN', isDraft: false });
+    if (args[1]?.includes('/git/ref/heads/')) return baseRef(candidate.candidate!.baseSha);
     if (args.includes('--include')) return `Date: ${new Date().toUTCString()}\n\n{}`;
     if (args[1] !== '--method') return JSON.stringify(validProtection);
     throw new Error('provider response lost');
@@ -326,7 +334,8 @@ test('routine merge is exact-candidate, double-checked, and never uses an admin 
   assert.equal(cancelled, '', 'an unknown provider outcome retains authority');
   const refusedStore = broker(candidate, execution);
   await assert.rejects(mergeWork(config, candidate, refusedStore.snapshot, refusedStore.acquire, async (_work, authority) => { cancelled = authority.id; }, verify, (_command, args) => {
-    if (args[1] === 'view') return JSON.stringify({ headRefOid: candidate.candidate!.sha, baseRefOid: candidate.candidate!.baseSha, baseRefName: 'main', state: 'OPEN', isDraft: false });
+    if (args[1] === 'view') return JSON.stringify({ headRefOid: candidate.candidate!.sha, baseRefName: 'main', state: 'OPEN', isDraft: false });
+    if (args[1]?.includes('/git/ref/heads/')) return baseRef(candidate.candidate!.baseSha);
     if (args.includes('--include')) return `Date: ${new Date().toUTCString()}\n\n{}`;
     if (args[1] !== '--method') return JSON.stringify(validProtection);
     return JSON.stringify({ merged: false, message: 'branch protection refused merge' });
@@ -335,21 +344,24 @@ test('routine merge is exact-candidate, double-checked, and never uses an admin 
   cancelled = '';
   const verifyLost = broker(candidate, execution);
   await assert.rejects(mergeWork(config, candidate, verifyLost.snapshot, verifyLost.acquire, async (_work, authority) => { cancelled = authority.id; }, async () => { throw new Error('verification response lost'); }, (_command, args) => {
-    if (args[1] === 'view') return JSON.stringify({ headRefOid: candidate.candidate!.sha, baseRefOid: candidate.candidate!.baseSha, baseRefName: 'main', state: 'OPEN', isDraft: false });
+    if (args[1] === 'view') return JSON.stringify({ headRefOid: candidate.candidate!.sha, baseRefName: 'main', state: 'OPEN', isDraft: false });
+    if (args[1]?.includes('/git/ref/heads/')) return baseRef(candidate.candidate!.baseSha);
     return JSON.stringify(validProtection);
   }), /retained execution/);
   assert.equal(cancelled, '', 'an unknown verification outcome retains authority for replay');
   const confirmed = Object.assign(new Error('verification refused'), { confirmedRefusal: true });
   const verifyRefused = broker(candidate, execution);
   await assert.rejects(mergeWork(config, candidate, verifyRefused.snapshot, verifyRefused.acquire, async (_work, authority) => { cancelled = authority.id; }, async () => { throw confirmed; }, (_command, args) => {
-    if (args[1] === 'view') return JSON.stringify({ headRefOid: candidate.candidate!.sha, baseRefOid: candidate.candidate!.baseSha, baseRefName: 'main', state: 'OPEN', isDraft: false });
+    if (args[1] === 'view') return JSON.stringify({ headRefOid: candidate.candidate!.sha, baseRefName: 'main', state: 'OPEN', isDraft: false });
+    if (args[1]?.includes('/git/ref/heads/')) return baseRef(candidate.candidate!.baseSha);
     return JSON.stringify(validProtection);
   }), /verification refused/);
   assert.equal(cancelled, execution.id, 'a confirmed verification refusal cancels authority');
   const resumed = work({ observation: candidate.observation, mergeExecution: execution }); let reacquired = false;
   const resumedStore = broker(resumed, execution);
   const resumedResult = await mergeWork(config, resumed, resumedStore.snapshot, async () => { reacquired = true; return { execution }; }, cancel, verify, (_command, args) => {
-    if (args[1] === 'view') return JSON.stringify({ headRefOid: resumed.candidate!.sha, baseRefOid: resumed.candidate!.baseSha, baseRefName: 'main', state: 'OPEN', isDraft: false });
+    if (args[1] === 'view') return JSON.stringify({ headRefOid: resumed.candidate!.sha, baseRefName: 'main', state: 'OPEN', isDraft: false });
+    if (args[1]?.includes('/git/ref/heads/')) return baseRef(resumed.candidate!.baseSha);
     if (args.includes('--include')) return `Date: ${new Date().toUTCString()}\n\n{}`;
     return args[1] === '--method' ? JSON.stringify({ merged: true, sha: 'c'.repeat(40) }) : JSON.stringify(validProtection);
   }, execution.owner, resumedStore.commit);
@@ -363,7 +375,8 @@ test('routine merge is exact-candidate, double-checked, and never uses an admin 
   const uncommittedStore = broker(uncommitted, verifiedExecution); const resumedCalls: string[][] = []; let recommitted = '';
   const uncommittedResult = await mergeWork(config, uncommitted, uncommittedStore.snapshot, async () => { throw new Error('must not reacquire'); }, cancel, async () => { throw new Error('must not verify an already verified execution'); }, (_command, args) => {
     resumedCalls.push(args);
-    if (args[1] === 'view') return JSON.stringify({ headRefOid: uncommitted.candidate!.sha, baseRefOid: uncommitted.candidate!.baseSha, baseRefName: 'main', state: 'OPEN', isDraft: false });
+    if (args[1] === 'view') return JSON.stringify({ headRefOid: uncommitted.candidate!.sha, baseRefName: 'main', state: 'OPEN', isDraft: false });
+    if (args[1]?.includes('/git/ref/heads/')) return baseRef(uncommitted.candidate!.baseSha);
     if (args.includes('--include')) return `Date: ${new Date().toUTCString()}\n\n{}`;
     return args[1] === '--method' ? JSON.stringify({ merged: true, sha: 'c'.repeat(40) }) : JSON.stringify(validProtection);
   }, execution.owner, async (_work, held) => { recommitted = held.id; return uncommittedStore.commit(); });
@@ -380,7 +393,8 @@ test('routine merge is exact-candidate, double-checked, and never uses an admin 
   const lateExecution = { ...execution, issuedAt: new Date(Date.now() - 110_000).toISOString(), expiresAt: new Date(Date.now() + 10_000).toISOString() };
   const late = work({ observation: candidate.observation, mergeExecution: lateExecution }); cancelled = '';
   await assert.rejects(mergeWork(config, late, async () => ({ work: [late], now: new Date().toISOString() }), async () => { throw new Error('must not reacquire'); }, async (_work, authority) => { cancelled = authority.id; }, verify, (_command, args) => {
-    if (args[1] === 'view') return JSON.stringify({ headRefOid: late.candidate!.sha, baseRefOid: late.candidate!.baseSha, baseRefName: 'main', state: 'OPEN', isDraft: false });
+    if (args[1] === 'view') return JSON.stringify({ headRefOid: late.candidate!.sha, baseRefName: 'main', state: 'OPEN', isDraft: false });
+    if (args[1]?.includes('/git/ref/heads/')) return baseRef(late.candidate!.baseSha);
     return JSON.stringify(validProtection);
   }, execution.owner), /does not remain valid/);
   assert.equal(cancelled, lateExecution.id, 'a resumed execution uses its actual remaining lifetime');
@@ -393,7 +407,8 @@ test('routine merge is exact-candidate, double-checked, and never uses an admin 
   const skewed = broker(narrow, narrowExecution);
   await assert.rejects(mergeWork(config, narrow, skewed.snapshot, skewed.acquire, async (_work, authority) => { cancelled = authority.id; },
     async () => ({ executionId: execution.id, sha: execution.sha, verifiedAt: new Date(Date.now() - 2000).toISOString(), providerDelayMs: 0, clockOffset: { min: -5000, max: 5000 } }), (_command, args) => {
-      if (args[1] === 'view') return JSON.stringify({ headRefOid: narrow.candidate!.sha, baseRefOid: narrow.candidate!.baseSha, baseRefName: 'main', state: 'OPEN', isDraft: false });
+      if (args[1] === 'view') return JSON.stringify({ headRefOid: narrow.candidate!.sha, baseRefName: 'main', state: 'OPEN', isDraft: false });
+      if (args[1]?.includes('/git/ref/heads/')) return baseRef(narrow.candidate!.baseSha);
       if (args.includes('--include')) return `Date: ${new Date().toUTCString()}\n\n{}`;
       if (args[1] === '--method') throw new Error('the provider must not be invoked without reserved attribution margin');
       return JSON.stringify(validProtection);
@@ -401,7 +416,8 @@ test('routine merge is exact-candidate, double-checked, and never uses an admin 
   assert.equal(cancelled, narrowExecution.id, 'a refusal before commit releases the execution');
   const tight = broker(narrow, narrowExecution);
   assert.match((await mergeWork(config, narrow, tight.snapshot, tight.acquire, cancel, verify, (_command, args) => {
-    if (args[1] === 'view') return JSON.stringify({ headRefOid: narrow.candidate!.sha, baseRefOid: narrow.candidate!.baseSha, baseRefName: 'main', state: 'OPEN', isDraft: false });
+    if (args[1] === 'view') return JSON.stringify({ headRefOid: narrow.candidate!.sha, baseRefName: 'main', state: 'OPEN', isDraft: false });
+    if (args[1]?.includes('/git/ref/heads/')) return baseRef(narrow.candidate!.baseSha);
     if (args.includes('--include')) return `Date: ${new Date().toUTCString()}\n\n{}`;
     return args[1] === '--method' ? JSON.stringify({ merged: true, sha: 'c'.repeat(40) }) : JSON.stringify(validProtection);
   }, execution.owner, tight.commit)).result, /merge requested/);
@@ -413,7 +429,8 @@ test('routine merge is exact-candidate, double-checked, and never uses an admin 
   let providerCalls: string[][] = [];
   const gh = (_command: string, args: string[]) => {
     providerCalls.push(args);
-    if (args[1] === 'view') return JSON.stringify({ headRefOid: candidate.candidate!.sha, baseRefOid: candidate.candidate!.baseSha, baseRefName: 'main', state: 'OPEN', isDraft: false });
+    if (args[1] === 'view') return JSON.stringify({ headRefOid: candidate.candidate!.sha, baseRefName: 'main', state: 'OPEN', isDraft: false });
+    if (args[1]?.includes('/git/ref/heads/')) return baseRef(candidate.candidate!.baseSha);
     if (args.includes('--include')) return `Date: ${new Date().toUTCString()}\n\n{}`;
     return args[1] === '--method' ? JSON.stringify({ merged: true, sha: 'c'.repeat(40) }) : JSON.stringify(validProtection);
   };
@@ -461,7 +478,8 @@ test('merge broker refuses the provider call when committed authority died durin
   const commit = async () => ({ executionId: execution.id, sha: execution.sha, committingAt: new Date(Date.now() - 2000).toISOString() });
   let puts = 0; let cancelled = '';
   const run = (_command: string, args: string[]) => {
-    if (args[1] === 'view') return JSON.stringify({ headRefOid: candidate.candidate!.sha, baseRefOid: candidate.candidate!.baseSha, baseRefName: 'main', state: 'OPEN', isDraft: false });
+    if (args[1] === 'view') return JSON.stringify({ headRefOid: candidate.candidate!.sha, baseRefName: 'main', state: 'OPEN', isDraft: false });
+    if (args[1]?.includes('/git/ref/heads/')) return baseRef(candidate.candidate!.baseSha);
     if (args.includes('--include')) return `Date: ${new Date().toUTCString()}\n\n{}`;
     if (args[1] !== '--method') return JSON.stringify(validProtection);
     puts++;
@@ -499,7 +517,8 @@ test('manual merge remains guarded when automatic merge is disabled and GitHub c
   const execution = { id: '11111111-1111-4111-8111-111111111111', owner: 'master', sha: candidate.candidate!.sha, baseSha: candidate.candidate!.baseSha, policyRevision: 2, authorizationRevision: candidate.revision, issuedAt: new Date().toISOString(), expiresAt: new Date(Date.now() + 120_000).toISOString() };
   const store = broker(candidate, execution);
   const result = await mergeWork(config, candidate, store.snapshot, store.acquire, async () => ({}), async () => ({ executionId: execution.id, sha: execution.sha, verifiedAt: new Date(Date.now() - 2000).toISOString(), providerDelayMs: 0, clockOffset: { min: 0, max: 0 } }), (_command, args) => {
-    if (args[1] === 'view') return JSON.stringify({ headRefOid: candidate.candidate!.sha, baseRefOid: candidate.candidate!.baseSha, baseRefName: 'main', state: 'OPEN', isDraft: false });
+    if (args[1] === 'view') return JSON.stringify({ headRefOid: candidate.candidate!.sha, baseRefName: 'main', state: 'OPEN', isDraft: false });
+    if (args[1]?.includes('/git/ref/heads/')) return baseRef(candidate.candidate!.baseSha);
     if (args.includes('--include')) return `Date: ${new Date().toUTCString()}\n\n{}`;
     return args[1] === '--method' ? JSON.stringify({ merged: true, sha: 'c'.repeat(40) }) : JSON.stringify(validProtection);
   }, undefined, store.commit);
@@ -528,7 +547,8 @@ test('unit:queue-authored-tip-carry — the broker re-posts a carried approval t
   const execution = { id: '11111111-1111-4111-8111-111111111111', owner: 'master', sha: candidate.candidate!.sha, baseSha: candidate.candidate!.baseSha, policyRevision: 2, authorizationRevision: candidate.revision, issuedAt: new Date().toISOString(), expiresAt: new Date(Date.now() + 120_000).toISOString() };
   const verify = async () => ({ executionId: execution.id, sha: execution.sha, verifiedAt: new Date(Date.now() - 2000).toISOString(), providerDelayMs: 0, clockOffset: { min: 0, max: 0 } });
   const gh = (_command: string, args: string[]) => {
-    if (args[1] === 'view') return JSON.stringify({ headRefOid: candidate.candidate!.sha, baseRefOid: candidate.candidate!.baseSha, baseRefName: 'main', state: 'OPEN', isDraft: false });
+    if (args[1] === 'view') return JSON.stringify({ headRefOid: candidate.candidate!.sha, baseRefName: 'main', state: 'OPEN', isDraft: false });
+    if (args[1]?.includes('/git/ref/heads/')) return baseRef(candidate.candidate!.baseSha);
     if (args.includes('--include')) return `Date: ${new Date().toUTCString()}\n\n{}`;
     return args[1] === '--method' ? JSON.stringify({ merged: true, sha: 'c'.repeat(40) }) : JSON.stringify(validProtection);
   };
@@ -568,19 +588,112 @@ test('master status reports queue position, predicted tip, and per-entry wait ti
   assert.equal(status.work[1].mergeable, false, 'only the queue head can hold a merge authorization');
 });
 
-test('a merge only proceeds while the validated tip still lands its tested tree', () => {
-  const tip = 'a'.repeat(40), validatedBase = 'b'.repeat(40), baseTree = 'e'.repeat(40), advanced = 'f'.repeat(40);
+test('unit:landing-real-base-tip — a merge only proceeds while the validated tip still lands its tested tree on the real base branch head', () => {
+  const tip = 'a'.repeat(40), validatedBase = 'b'.repeat(40), baseTree = 'e'.repeat(40), advanced = 'f'.repeat(40), stale = '3'.repeat(40);
   const queued = work({ queue: queueEntry(1, '2030-01-01T00:30:00Z', { ref: 'refs/graphyard/queue/gy-42', tip, base: validatedBase, baseTree, predecessors: ['GY-41'], policyRevision: 2, publishedAt: '2030-01-01T00:31:00Z' }) } as Partial<Work>);
   const authorization = { sha: tip, baseSha: validatedBase };
   const reads: string[][] = [];
-  const run = (tree: string) => (_command: string, args: string[]) => { reads.push(args); return JSON.stringify({ commit: { tree: { sha: tree } } }); };
-  assert.doesNotThrow(() => assertQueuedLanding(queued, authorization, validatedBase, 'owner/project', run('unused')));
-  assert.equal(reads.length, 0, 'an unchanged base needs no extra provider call');
-  assert.doesNotThrow(() => assertQueuedLanding(queued, authorization, advanced, 'owner/project', run(baseTree)));
-  assert.deepEqual(reads[0], ['api', `repos/owner/project/commits/${advanced}`]);
-  assert.throws(() => assertQueuedLanding(queued, authorization, advanced, 'owner/project', run('9'.repeat(40))), /would no longer land its tested tree/);
-  assert.throws(() => assertQueuedLanding(work({ queue: null } as Partial<Work>), authorization, validatedBase, 'owner/project', run(baseTree)), /no published merge-queue tip/);
-  assert.throws(() => assertQueuedLanding(work({ queue: { ...queued.queue!, speculation: { ...queued.queue!.speculation!, tip: '7'.repeat(40) } } } as Partial<Work>), authorization, validatedBase, 'owner/project', run(baseTree)), /no published merge-queue tip/);
+  // GitHub as the check sees it: `git/ref/heads/main` names the real base tip; a commit read
+  // answers with its tree. The trees are keyed by commit so a stale cached base could be told apart.
+  const github = (head: string, trees: Record<string, string>) => (_command: string, args: string[]) => {
+    reads.push(args);
+    if (args[1] === 'repos/owner/project/git/ref/heads/main') return JSON.stringify({ ref: 'refs/heads/main', object: { type: 'commit', sha: head } });
+    const sha = args[1].split('/commits/')[1];
+    if (!(sha in trees)) throw new Error(`unexpected read ${args.join(' ')}`);
+    return JSON.stringify({ sha, commit: { tree: { sha: trees[sha] } } });
+  };
+  // 1. The real base is exactly the validated base: no tree read is needed.
+  assert.deepEqual(assertQueuedLanding(queued, authorization, 'main', 'owner/project', github(validatedBase, {})), { baseTip: validatedBase, baseTree: null });
+  assert.deepEqual(reads, [['api', 'repos/owner/project/git/ref/heads/main']], 'an unchanged base needs only the ref read');
+  // 2. The real base advanced through the queue: its tree is the validated tree, so the tip lands.
+  reads.length = 0;
+  assert.deepEqual(assertQueuedLanding(queued, authorization, 'main', 'owner/project', github(advanced, { [advanced]: baseTree })), { baseTip: advanced, baseTree });
+  assert.deepEqual(reads, [['api', 'repos/owner/project/git/ref/heads/main'], ['api', `repos/owner/project/commits/${advanced}`]]);
+  // 3. The real base tree differs: refused, naming both commits and both trees.
+  reads.length = 0;
+  assert.throws(() => assertQueuedLanding(queued, authorization, 'main', 'owner/project', github(advanced, { [advanced]: '9'.repeat(40) })), (error: Error) => {
+    assert.match(error.message, /would no longer land its tested tree/);
+    for (const named of [advanced, '9'.repeat(40), validatedBase, baseTree]) assert.ok(error.message.includes(named), `the refusal names ${named}`);
+    return true;
+  });
+  // 4. The pull request's cached baseRefOid is stale (still the pre-merge base with another tree)
+  // while the real ref is tree-identical: the check never consults the cached value, so it passes.
+  reads.length = 0;
+  const cached = { baseRefOid: stale };
+  assert.deepEqual(assertQueuedLanding(queued, authorization, 'main', 'owner/project', github(advanced, { [advanced]: baseTree, [stale]: '9'.repeat(40) })), { baseTip: advanced, baseTree });
+  assert.equal(reads.some(args => args[1].includes(cached.baseRefOid)), false, 'the cached pull-request base is never read');
+  assert.equal(reads.some(args => args[1].includes('/pulls/') || args[0] === 'pr'), false, 'the landing check never asks the pull request for its base');
+  // Unreadable answers refuse rather than pass.
+  assert.throws(() => assertQueuedLanding(queued, authorization, 'main', 'owner/project', () => JSON.stringify({ object: { type: 'tag', sha: advanced } })), /readable head for refs\/heads\/main/);
+  assert.throws(() => assertQueuedLanding(queued, authorization, 'main', 'owner/project', (_command, args) => args[1].includes('/git/ref/') ? JSON.stringify({ object: { type: 'commit', sha: advanced } }) : JSON.stringify({ sha: advanced })), /did not return a tree/);
+  // Branch names with slashes are addressed segment by segment.
+  reads.length = 0;
+  assertQueuedLanding(queued, authorization, 'release/2030', 'owner/project', (_command, args) => { reads.push(args); return JSON.stringify({ object: { type: 'commit', sha: validatedBase } }); });
+  assert.deepEqual(reads[0], ['api', 'repos/owner/project/git/ref/heads/release/2030']);
+  // No published tip, or a tip other than the authorized commit, is refused before any read.
+  assert.throws(() => assertQueuedLanding(work({ queue: null } as Partial<Work>), authorization, 'main', 'owner/project', github(validatedBase, {})), /no published merge-queue tip/);
+  assert.throws(() => assertQueuedLanding(work({ queue: { ...queued.queue!, speculation: { ...queued.queue!.speculation!, tip: '7'.repeat(40) } } } as Partial<Work>), authorization, 'main', 'owner/project', github(validatedBase, {})), /no published merge-queue tip/);
+});
+
+test('integration:landing-follower-merges — the broker lands a queued follower after its predecessor merged while GitHub still caches the pre-merge pr.baseRefOid, and refuses a base whose tree differs', async () => {
+  // GY-42's tip was validated on predictedBase, the predecessor's queue tip. The predecessor
+  // merged: refs/heads/main is now mergedBase, a different commit with the same tree. The pull
+  // request still reports the pre-predecessor base (staleCached) with another tree entirely.
+  const predictedBase = 'b'.repeat(40), mergedBase = '2'.repeat(40), staleCached = '3'.repeat(40), validatedTree = 'e'.repeat(40);
+  const candidate = work({ observation: { at: new Date().toISOString(), candidate: { sha: 'a'.repeat(40), baseSha: predictedBase, pr: 42, branch: 'graphyard/gy-42-1', author: 'worker' } } as any });
+  const config = { version: 1 as const, url: 'https://graphyard.example', credentialFile: '/outside/master.token', cliPath: launcher, repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'machine-a', masterAgentName: 'graphyard-master-project', autoMerge: true, mergeMethod: 'merge' as const, workers: [], reviewers: [], run: { intervalSeconds: 20, deploymentShaField: 'commit' } };
+  const execution = { id: '44444444-4444-4444-8444-444444444444', owner: 'master', sha: candidate.candidate!.sha, baseSha: predictedBase, policyRevision: 2, authorizationRevision: candidate.revision, issuedAt: new Date().toISOString(), expiresAt: new Date(Date.now() + 120_000).toISOString() };
+  const verify = async () => ({ executionId: execution.id, sha: execution.sha, verifiedAt: new Date(Date.now() - 2000).toISOString(), providerDelayMs: 0, clockOffset: { min: 0, max: 0 } });
+  const github = (head: string, trees: Record<string, string>) => {
+    const calls: string[][] = [];
+    const run = (_command: string, args: string[]) => {
+      calls.push(args);
+      if (args[1] === 'view') return JSON.stringify({ headRefOid: candidate.candidate!.sha, baseRefOid: staleCached, baseRefName: 'main', state: 'OPEN', isDraft: false });
+      if (args[1] === 'repos/owner/project/git/ref/heads/main') return JSON.stringify({ ref: 'refs/heads/main', object: { type: 'commit', sha: head } });
+      if (args[1]?.startsWith('repos/owner/project/commits/')) { const sha = args[1].split('/commits/')[1]; assert.ok(sha in trees, `unexpected commit read ${sha}`); return JSON.stringify({ sha, commit: { tree: { sha: trees[sha] } } }); }
+      if (args.includes('--include')) return `Date: ${new Date().toUTCString()}\n\n{}`;
+      return args[1] === '--method' ? JSON.stringify({ merged: true, sha: 'c'.repeat(40) }) : JSON.stringify(validProtection);
+    };
+    return { calls, run };
+  };
+  // Tree-identical advance: the follower lands, and the stale cached base is never consulted.
+  const landing = github(mergedBase, { [mergedBase]: validatedTree, [staleCached]: '9'.repeat(40) });
+  const store = broker(candidate, execution); let cancelled = '';
+  const result = await mergeWork(config, candidate, store.snapshot, store.acquire, async (_work, authority) => { cancelled = authority.id; }, verify, landing.run, execution.owner, store.commit);
+  assert.match(result.result, /merge requested/);
+  assert.equal(cancelled, '');
+  assert.equal(landing.calls.filter(args => args[1] === '--method').length, 1, 'the provider merge was requested');
+  assert.equal(landing.calls.filter(args => args[1] === 'repos/owner/project/git/ref/heads/main').length, 3, 'every landing check reads the real base ref');
+  assert.equal(landing.calls.filter(args => args[1] === `repos/owner/project/commits/${mergedBase}`).length, 3, 'and compares the tree of the real head');
+  assert.equal(landing.calls.some(args => args[1]?.includes(staleCached)), false, 'the cached pr.baseRefOid is never read');
+  // The exact validated base still lands with no tree read at all.
+  const exact = github(predictedBase, {}); const exactStore = broker(candidate, execution);
+  assert.match((await mergeWork(config, candidate, exactStore.snapshot, exactStore.acquire, async () => ({}), verify, exact.run, execution.owner, exactStore.commit)).result, /merge requested/);
+  assert.equal(exact.calls.some(args => args[1]?.includes('/commits/')), false);
+  // A base whose tree differs refuses before any authority is acquired, naming both commits and trees.
+  const outside = '4'.repeat(40), outsideTree = '5'.repeat(40);
+  const diverged = github(outside, { [outside]: outsideTree }); const divergedStore = broker(candidate, execution); let acquired = false;
+  await assert.rejects(mergeWork(config, candidate, divergedStore.snapshot, async () => { acquired = true; return divergedStore.acquire(); }, async () => ({}), verify, diverged.run, execution.owner, divergedStore.commit), (error: Error) => {
+    assert.match(error.message, /advanced outside the merge queue/);
+    for (const named of [outside, outsideTree, predictedBase, validatedTree]) assert.ok(error.message.includes(named), `the refusal names ${named}`);
+    return true;
+  });
+  assert.equal(acquired, false, 'no authority is acquired for a tip that would not land its tested tree');
+  assert.equal(diverged.calls.some(args => args[1] === '--method'), false);
+  // A base that diverges only after authority was acquired is refused under the lock and the
+  // execution is released; one that diverges during the post-commit clock wait is refused
+  // before the provider call and retained for reconciliation.
+  for (const [divergeAt, expectation, retained] of [[2, /advanced outside the merge queue/, false], [3, /advanced outside the merge queue/, true]] as const) {
+    let refReads = 0; cancelled = ''; const late = broker(candidate, execution);
+    const moving = github(mergedBase, { [mergedBase]: validatedTree, [outside]: outsideTree });
+    const run = (command: string, args: string[]) => {
+      if (args[1] === 'repos/owner/project/git/ref/heads/main' && ++refReads >= divergeAt) return JSON.stringify({ ref: 'refs/heads/main', object: { type: 'commit', sha: outside } });
+      return moving.run(command, args);
+    };
+    await assert.rejects(mergeWork(config, candidate, late.snapshot, late.acquire, async (_work, authority) => { cancelled = authority.id; }, verify, run, execution.owner, late.commit), expectation);
+    assert.equal(moving.calls.some(args => args[1] === '--method'), false, 'the provider is never asked to land a different tree');
+    assert.equal(cancelled, retained ? '' : execution.id, retained ? 'a post-commit refusal retains the execution' : 'a refusal under the lock releases the execution');
+  }
 });
 
 test('master status surfaces reviewer failover and exhausted reviewer capacity', () => {
