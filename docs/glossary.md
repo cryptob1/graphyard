@@ -1,3 +1,4 @@
+<!-- page: Start here | 2 | human operator, agent session, principal, lease, reviewer, proof producer, control plane, runtime: one definition each, plus the diagram legend. -->
 # Glossary
 
 One short definition and one canonical usage per term. Every guide in `docs/` uses these words in these senses; when a sentence needs a different sense, it says so explicitly. The diagrams in [How Graphyard works](how-graphyard-works.md) and [Architecture](architecture.md) use the legend at the end of this page.

@@ -274,6 +274,90 @@ test('mobile sign out is reachable and removes the session', async ({ page }) =>
   expect(await page.evaluate(() => sessionStorage.getItem('graphyard-token'))).toBeNull();
 });
 
+const pulseFixture = (overrides: Record<string, unknown> = {}) => ({ generatedAt: new Date().toISOString(), range: { start: '2026-06-29T00:00:00.000Z', end: new Date().toISOString(), weeks: 12, semantics: 'repository-utc-inclusive' }, completeness: 'complete', truncated: false, counts: { days7: 3, days30: 8 }, intentToMerge: { medianHours: 12.5, sampleSize: 7, excluded: 1 }, prToProduction: { averageHours: 30, medianHours: 24, p90Hours: 48, sampleSize: 6, eligible: 8, excluded: 2, coveragePercent: 75, sparse: false, exclusions: { 'no-verifiable-production-deployment': 2 }, split: { prToMergeAverageHours: 18, mergeToProductionAverageHours: 12 } }, weeks: Array.from({ length: 12 }, (_, index) => ({ start: new Date(Date.UTC(2026, 5, 29 + index * 7)).toISOString(), end: new Date(Date.UTC(2026, 6, 5 + index * 7)).toISOString(), count: index % 4 })), recent: [{ key: 'GY-9', title: 'Exact delivery', pullRequest: 42, mergeSha: 'abcdef1234567890abcdef1234567890abcdef12', mergedAt: '2026-09-15T12:00:00.000Z', quality: { passingProofs: 4, requiredProofs: 4, violations: [] } }], ...overrides });
+
+for (const viewport of [{ name: 'desktop', width: 1280, height: 900 }, { name: 'mobile', width: 390, height: 844 }]) test(`shipping pulse exposes exact metrics, links and chart text on ${viewport.name}`, async ({ page }) => {
+  await page.setViewportSize(viewport); await fixture(page);
+  await page.route('**/api/shipping-pulse', route => route.fulfill({ json: pulseFixture() }));
+  await login(page); await page.getByRole('button', { name: /Shipping pulse/ }).click();
+  await expect(page.getByRole('heading', { name: 'Shipping pulse' })).toBeVisible();
+  await expect(page.getByLabel('Delivery metrics')).toContainText('3');
+  await expect(page.getByText('12.5h')).toBeVisible(); await expect(page.getByText('7 included · 1 excluded')).toBeVisible();
+  await expect(page.getByLabel('Pull request to production metrics')).toContainText('30h');
+  await expect(page.getByText('6 included of 8')).toBeVisible();
+  await expect(page.getByRole('list', { name: 'Weekly delivery counts' }).getByRole('listitem')).toHaveCount(12);
+  await expect(page.getByRole('link', { name: /PR #42/ })).toHaveAttribute('href', 'https://github.com/fixture/repository/pull/42');
+  await expect(page.getByRole('link', { name: /Commit abcdef12/ })).toHaveAttribute('href', 'https://github.com/fixture/repository/commit/abcdef1234567890abcdef1234567890abcdef12');
+  // Deployment times are the provider's clock carried onto the repository clock with the
+  // bracket the collector measured. The method note must say that rather than describe the
+  // durations as exact, which would overstate values known only to that precision.
+  await expect(page.locator('.pulse-method')).toContainText('carried onto the repository clock at ingestion using the offset bracket the collector measured');
+  await expect(page.getByText('EXACT VERIFIED CONTAINMENT')).toHaveCount(0);
+  const shell = page.locator('.shell'); expect((await shell.evaluate(element => element.scrollWidth <= element.clientWidth))).toBe(true);
+});
+
+test('shipping pulse labels sparse and unavailable production samples without fabricating zero', async ({ page }) => {
+  await fixture(page);
+  // The second delivery's authorizing snapshot cannot be resolved, so its proof totals are
+  // unknown. An unknown total must never be drawn as 0/0, which would read as a clean record.
+  const unresolved = { key: 'GY-10', title: 'Unretained authorization', pullRequest: 43, mergeSha: 'bcdef01234567890abcdef1234567890abcdef12', mergedAt: '2026-09-14T12:00:00.000Z', quality: { passingProofs: null, requiredProofs: null, violations: [], unavailableReason: 'The immutable snapshot that authorized this delivery is no longer in the retained ledger, so recorded proof totals are unknown.' } };
+  await page.route('**/api/shipping-pulse', route => route.fulfill({ json: pulseFixture({ prToProduction: { averageHours: null, medianHours: null, p90Hours: null, sampleSize: 0, eligible: 1, excluded: 1, coveragePercent: 0, sparse: true, exclusions: { 'no-verifiable-production-deployment': 1 }, split: { prToMergeAverageHours: null, mergeToProductionAverageHours: null } }, recent: [...pulseFixture().recent, unresolved] }) }));
+  await login(page); await page.getByRole('button', { name: /Shipping pulse/ }).click();
+  await expect(page.getByText('Sparse sample.')).toBeVisible();
+  await expect(page.getByLabel('Pull request to production metrics')).toContainText('Unavailable');
+  await page.getByText('Why records were excluded').click();
+  await expect(page.getByText('no verifiable production deployment: 1')).toBeVisible();
+  const entry = page.locator('.delivery-list article').filter({ hasText: 'GY-10' });
+  await expect(entry).toContainText('Recorded proof totals unavailable');
+  await expect(entry).toContainText('no longer in the retained ledger');
+  await expect(entry).not.toContainText('0/0');
+  await expect(page.locator('.delivery-list article').filter({ hasText: 'GY-9' })).toContainText('4/4 recorded proofs passed');
+});
+
+test('shipping pulse distinguishes loading, unavailable, empty, partial, and stale data', async ({ page }) => {
+  await fixture(page); let mode = 'loading'; let release!: () => void; const pending = new Promise<void>(resolve => { release = resolve; });
+  await page.route('**/api/shipping-pulse', async route => {
+    if (mode === 'loading') { await pending; return route.abort(); }
+    if (mode === 'unavailable') return route.abort();
+    if (mode === 'empty') return route.fulfill({ json: pulseFixture({ recent: [], counts: { days7: 0, days30: 0 }, weeks: Array.from({ length: 12 }, (_, index) => ({ start: new Date(Date.UTC(2026, 5, 29 + index * 7)).toISOString(), end: new Date(Date.UTC(2026, 6, 5 + index * 7)).toISOString(), count: 0 })) }) });
+    return route.fulfill({ json: pulseFixture({ completeness: 'partial', partialReason: 'More production observations matched a merge than the query cap reads.' }) });
+  });
+  await login(page); await page.getByRole('button', { name: /Shipping pulse/ }).click();
+  await expect(page.getByRole('status')).toContainText('Loading shipping pulse');
+  mode = 'unavailable'; release(); await expect(page.getByRole('alert')).toContainText('unavailable');
+  mode = 'empty'; await page.getByRole('button', { name: /Delivery graph/ }).click(); await page.getByRole('button', { name: /Shipping pulse/ }).click();
+  await expect(page.getByText('No deliveries in this window')).toBeVisible(); await expect(page.getByLabel('Delivery metrics')).toHaveCount(0);
+  mode = 'partial'; await page.getByRole('button', { name: /Delivery graph/ }).click(); await page.getByRole('button', { name: /Shipping pulse/ }).click();
+  await expect(page.getByText('Partial history.')).toBeVisible(); await expect(page.getByText('More production observations matched a merge than the query cap reads.')).toBeVisible();
+  // Partial at the production cap does not truncate the delivery sample, so the durations
+  // are not labelled as sampled here; only the delivery cap does that.
+  await expect(page.getByText('Sampled durations:')).toHaveCount(0);
+  // Staleness is measured from this browser's own last successful read, so it appears
+  // when a refresh fails while data is on screen - never from a repository/browser clock gap.
+  mode = 'unavailable'; await page.getByRole('button', { name: 'Refresh' }).click();
+  await expect(page.getByText('Data is stale.')).toBeVisible();
+  await expect(page.getByText('Partial history.')).toBeVisible();
+});
+
+test('truncated history labels durations as newest-delivery samples, never as bounds', async ({ page }) => {
+  await fixture(page);
+  // The delivery cap makes counts lower bounds but leaves the durations a sample of the
+  // newest work, so every duration group must say so rather than read as a bound.
+  await page.route('**/api/shipping-pulse', route => route.fulfill({ json: pulseFixture({ completeness: 'partial', truncated: true, partialReason: 'More than 1000 exact deliveries occurred in the bounded window; only the newest 1000 were read. The counts are lower bounds. The durations are not bounds.' }) }));
+  await login(page); await page.getByRole('button', { name: /Shipping pulse/ }).click();
+  await expect(page.getByText('Partial history.')).toBeVisible();
+  await expect(page.getByText('The counts are lower bounds. The durations are not bounds.')).toBeVisible();
+  const sampled = page.getByText('Sampled durations:');
+  await expect(sampled).toHaveCount(2);
+  await expect(sampled.first()).toContainText('they are not lower bounds');
+});
+
+test('shipping pulse is not offered to operator agents whose scoped API cannot serve it', async ({ page }) => {
+  await fixture(page, 'operator-agent'); await login(page);
+  await expect(page.getByRole('button', { name: /Delivery graph/ })).toBeVisible();
+  await expect(page.getByRole('button', { name: /Shipping pulse/ })).toHaveCount(0);
+});
+
 async function checkDialog(page: Page, trigger: ReturnType<Page['getByRole']>) {
   await trigger.click(); const dialog = page.getByRole('dialog'); await expect(dialog).toBeVisible();
   await expect(dialog.getByRole('button', { name: /Close/ })).toBeFocused();

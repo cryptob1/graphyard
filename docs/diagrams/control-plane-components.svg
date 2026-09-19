@@ -1,8 +1,8 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 560 1231" width="560" height="1231" role="img" aria-labelledby="title desc" font-family='Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif'>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 560 1289" width="560" height="1289" role="img" aria-labelledby="title desc" font-family='Inter, "Segoe UI", Roboto, "Helvetica Neue", Arial, "Liberation Sans", ui-sans-serif, system-ui, -apple-system, sans-serif'>
 <title id="title">Graphyard control-plane components</title>
 <desc id="desc">Agent sessions in a runtime such as Herdr, the human dashboard, and a proof producer each call the HTTP API and CLI under their own principals. The API hands each mutation to the coordination engine, which runs one advisory-locked transaction that writes the work aggregate and an event to Postgres. A reconciliation worker ticks every two seconds, expires leases, leases integration jobs, exchanges pull request, check, review, and protection facts with GitHub, publishes the required check, and runs the guarded merge. GitHub webhooks wake jobs but are never trusted as workflow truth.</desc>
 <defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#9fb39c"/></marker></defs>
-<rect width="560" height="1231" fill="#111714"/>
+<rect width="560" height="1289" fill="#111714"/>
 <text x="20" y="36.2" font-size="18" font-weight="700" fill="#e6ede4" text-anchor="start">Control-plane components</text>
 <rect x="20" y="47.760000000000005" width="163" height="178.5" rx="14" fill="#2a2338" stroke="#c3b1ec" stroke-width="2"/>
 <text x="32" y="77.7" font-size="16" font-weight="650" fill="#e9e0f9" text-anchor="start">Agent sessions</text>
@@ -10,13 +10,13 @@
 <text x="32" y="115.1" font-size="14" font-weight="400" fill="#e9e0f9" text-anchor="start">and lead sessions</text>
 <text x="32" y="133.5" font-size="14" font-weight="400" fill="#e9e0f9" text-anchor="start">in Herdr or</text>
 <text x="32" y="152.0" font-size="14" font-weight="400" fill="#e9e0f9" text-anchor="start">another runtime,</text>
-<text x="32" y="170.5" font-size="14" font-weight="400" fill="#e9e0f9" text-anchor="start">each using the CLI</text>
-<text x="32" y="189.0" font-size="14" font-weight="400" fill="#e9e0f9" text-anchor="start">under its own</text>
+<text x="32" y="170.5" font-size="14" font-weight="400" fill="#e9e0f9" text-anchor="start">each using the</text>
+<text x="32" y="189.0" font-size="14" font-weight="400" fill="#e9e0f9" text-anchor="start">CLI under its own</text>
 <text x="32" y="207.5" font-size="14" font-weight="400" fill="#e9e0f9" text-anchor="start">principal.</text>
 <rect x="198" y="47.760000000000005" width="163" height="160.0" rx="14" fill="#3a3020" stroke="#e0c27a" stroke-width="2"/>
 <text x="210" y="77.7" font-size="16" font-weight="650" fill="#f6e7b8" text-anchor="start">Dashboard</text>
-<text x="210" y="96.6" font-size="14" font-weight="400" fill="#f6e7b8" text-anchor="start">Human operator and</text>
-<text x="210" y="115.1" font-size="14" font-weight="400" fill="#f6e7b8" text-anchor="start">readers. Same</text>
+<text x="210" y="96.6" font-size="14" font-weight="400" fill="#f6e7b8" text-anchor="start">Human operator</text>
+<text x="210" y="115.1" font-size="14" font-weight="400" fill="#f6e7b8" text-anchor="start">and readers. Same</text>
 <text x="210" y="133.5" font-size="14" font-weight="400" fill="#f6e7b8" text-anchor="start">authorization as</text>
 <text x="210" y="152.0" font-size="14" font-weight="400" fill="#f6e7b8" text-anchor="start">the API; no</text>
 <text x="210" y="170.5" font-size="14" font-weight="400" fill="#f6e7b8" text-anchor="start">lifecycle-state</text>
@@ -38,57 +38,62 @@
 <line x1="101.5" y1="228.24" x2="101.5" y2="283.76" stroke="#9fb39c" stroke-width="2.5" marker-end="url(#arrow)"/>
 <line x1="279.5" y1="209.76" x2="279.5" y2="283.76" stroke="#9fb39c" stroke-width="2.5" marker-end="url(#arrow)"/>
 <line x1="458" y1="243.76" x2="458" y2="283.76" stroke="#9fb39c" stroke-width="2.5" marker-end="url(#arrow)"/>
-<rect x="20" y="419.84000000000003" width="520" height="86.1" rx="4" fill="#182a36" stroke="#8fc1e6" stroke-width="2"/>
+<rect x="20" y="419.84000000000003" width="520" height="104.6" rx="4" fill="#182a36" stroke="#8fc1e6" stroke-width="2"/>
 <text x="32" y="449.8" font-size="16" font-weight="650" fill="#d8ecf9" text-anchor="start">Coordination engine</text>
-<text x="32" y="468.7" font-size="14" font-weight="400" fill="#d8ecf9" text-anchor="start">One advisory-locked transaction per mutation: ownership, epochs,</text>
-<text x="32" y="487.1" font-size="14" font-weight="400" fill="#d8ecf9" text-anchor="start">gates, evidence trust, merge authority. No external I/O inside.</text>
+<text x="32" y="468.7" font-size="14" font-weight="400" fill="#d8ecf9" text-anchor="start">One advisory-locked transaction per mutation: ownership,</text>
+<text x="32" y="487.1" font-size="14" font-weight="400" fill="#d8ecf9" text-anchor="start">epochs, gates, evidence trust, merge authority. No external I/O</text>
+<text x="32" y="505.6" font-size="14" font-weight="400" fill="#d8ecf9" text-anchor="start">inside.</text>
 <line x1="280" y1="375.84000000000003" x2="280" y2="415.84000000000003" stroke="#9fb39c" stroke-width="2.5" marker-end="url(#arrow)"/>
 <text x="290" y="401.8" font-size="13" font-weight="400" fill="#b8c6b7" text-anchor="start">authenticated commands</text>
-<rect x="20" y="551.9200000000001" width="520" height="86.1" rx="4" fill="#182a36" stroke="#8fc1e6" stroke-width="2"/>
-<text x="32" y="581.9" font-size="16" font-weight="650" fill="#d8ecf9" text-anchor="start">Postgres</text>
-<text x="32" y="600.7" font-size="14" font-weight="400" fill="#d8ecf9" text-anchor="start">work_items aggregate, append-only events and receipts, jobs queue,</text>
-<text x="32" y="619.2" font-size="14" font-weight="400" fill="#d8ecf9" text-anchor="start">releases and delivery observations. Triggers reject ledger edits.</text>
-<line x1="280" y1="507.9200000000001" x2="280" y2="547.9200000000001" stroke="#9fb39c" stroke-width="2.5" marker-end="url(#arrow)"/>
-<text x="290" y="533.9" font-size="13" font-weight="400" fill="#b8c6b7" text-anchor="start">aggregate + event in one transaction</text>
-<rect x="20" y="684.0000000000001" width="230" height="160.0" rx="4" fill="#182a36" stroke="#8fc1e6" stroke-width="2"/>
-<text x="32" y="714.0" font-size="16" font-weight="650" fill="#d8ecf9" text-anchor="start">Reconciliation worker</text>
-<text x="32" y="732.8" font-size="14" font-weight="400" fill="#d8ecf9" text-anchor="start">Two-second tick: expires</text>
-<text x="32" y="751.3" font-size="14" font-weight="400" fill="#d8ecf9" text-anchor="start">leases, leases jobs with</text>
-<text x="32" y="769.8" font-size="14" font-weight="400" fill="#d8ecf9" text-anchor="start">SKIP LOCKED, applies</text>
-<text x="32" y="788.3" font-size="14" font-weight="400" fill="#d8ecf9" text-anchor="start">observations, publishes the</text>
-<text x="32" y="806.7" font-size="14" font-weight="400" fill="#d8ecf9" text-anchor="start">required check, runs the</text>
-<text x="32" y="825.2" font-size="14" font-weight="400" fill="#d8ecf9" text-anchor="start">guarded merge.</text>
-<rect x="310" y="684.0000000000001" width="230" height="123.0" rx="4" fill="#262d28" stroke="#b8c2bb" stroke-width="2"/>
-<text x="322" y="714.0" font-size="16" font-weight="650" fill="#e3e9e3" text-anchor="start">GitHub</text>
-<text x="322" y="732.8" font-size="14" font-weight="400" fill="#e3e9e3" text-anchor="start">PR, reviews, checks, branch</text>
-<text x="322" y="751.3" font-size="14" font-weight="400" fill="#e3e9e3" text-anchor="start">protection, merge facts.</text>
-<text x="322" y="769.8" font-size="14" font-weight="400" fill="#e3e9e3" text-anchor="start">Read by the worker; never</text>
-<text x="322" y="788.3" font-size="14" font-weight="400" fill="#e3e9e3" text-anchor="start">trusted from a session.</text>
-<line x1="158" y1="640.0000000000001" x2="158" y2="680.0000000000001" stroke="#9fb39c" stroke-width="2.5" marker-end="url(#arrow)"/>
-<text x="168" y="666.0" font-size="13" font-weight="400" fill="#b8c6b7" text-anchor="start">jobs</text>
-<line x1="254" y1="718.0000000000001" x2="306" y2="718.0000000000001" stroke="#9fb39c" stroke-width="2.5" marker-end="url(#arrow)"/>
-<line x1="306" y1="718.0000000000001" x2="254" y2="718.0000000000001" stroke="#9fb39c" stroke-width="2.5" marker-end="url(#arrow)"/>
-<line x1="306" y1="758.0000000000001" x2="254" y2="758.0000000000001" stroke="#9fb39c" stroke-width="1.5" stroke-dasharray="6 5" marker-end="url(#arrow)"/>
-<text x="280" y="779.5" font-size="12" font-weight="400" fill="#b8c6b7" text-anchor="middle">webhook</text>
-<text x="20" y="870.6" font-size="13" font-weight="400" fill="#b8c6b7" text-anchor="start">Solid pair: the worker reads PR, CI, review, and protection facts and</text>
-<text x="20" y="887.7" font-size="13" font-weight="400" fill="#b8c6b7" text-anchor="start">publishes the "Graphyard / merge" check. Dashed: a signed webhook only</text>
-<text x="20" y="904.9" font-size="13" font-weight="400" fill="#b8c6b7" text-anchor="start">wakes a job; the worker refetches before it trusts anything.</text>
-<text x="20" y="943.7" font-size="18" font-weight="700" fill="#e6ede4" text-anchor="start">Legend (glossary terms)</text>
-<g transform="translate(0 955.2)"><rect x="20" y="0" width="34" height="22" rx="9" fill="#3a3020" stroke="#e0c27a" stroke-width="2"/></g>
-<text x="66" y="969.9" font-size="14" font-weight="400" fill="#e6ede4" text-anchor="start">Human operator (human authority)</text>
-<g transform="translate(0 985.2)"><rect x="20" y="0" width="34" height="22" rx="9" fill="#22311f" stroke="#c5e69b" stroke-width="2"/></g>
-<text x="66" y="999.9" font-size="14" font-weight="400" fill="#e6ede4" text-anchor="start">AI agent session (one role, one credential)</text>
-<g transform="translate(0 1015.2)"><rect x="20" y="0" width="34" height="22" rx="3" fill="#182a36" stroke="#8fc1e6" stroke-width="2"/></g>
-<text x="66" y="1029.9" font-size="14" font-weight="400" fill="#e6ede4" text-anchor="start">Graphyard control plane</text>
-<g transform="translate(0 1045.2)"><rect x="20" y="0" width="34" height="22" rx="9" fill="#2a2338" stroke="#c3b1ec" stroke-width="2"/></g>
-<text x="66" y="1059.9" font-size="14" font-weight="400" fill="#e6ede4" text-anchor="start">Herdr runtime (session supervision)</text>
-<g transform="translate(0 1075.2)"><rect x="20" y="0" width="34" height="22" rx="3" fill="#262d28" stroke="#b8c2bb" stroke-width="2"/></g>
-<text x="66" y="1089.9" font-size="14" font-weight="400" fill="#e6ede4" text-anchor="start">GitHub and other external facts</text>
-<g transform="translate(0 1105.2)"><rect x="20" y="0" width="34" height="22" rx="11" fill="#111714" stroke="#c5e69b" stroke-width="1.5" stroke-dasharray="3 3"/></g>
-<text x="66" y="1119.9" font-size="14" font-weight="400" fill="#e6ede4" text-anchor="start">Chip: credential, lease epoch, or assigned worktree the session</text>
-<text x="66" y="1138.4" font-size="14" font-weight="400" fill="#e6ede4" text-anchor="start">holds</text>
-<g transform="translate(0 1150.2)"><line x1="20" y1="11" x2="54" y2="11" stroke="#9fb39c" stroke-width="2.5" marker-end="url(#arrow)"/></g>
-<text x="66" y="1164.9" font-size="14" font-weight="400" fill="#e6ede4" text-anchor="start">Solid arrow: an authenticated command or authority</text>
-<g transform="translate(0 1180.2)"><line x1="20" y1="11" x2="54" y2="11" stroke="#9fb39c" stroke-width="1.5" stroke-dasharray="6 5" marker-end="url(#arrow)"/></g>
-<text x="66" y="1194.9" font-size="14" font-weight="400" fill="#e6ede4" text-anchor="start">Dashed arrow: observation or health report, never authority</text>
+<rect x="20" y="570.4000000000001" width="520" height="104.6" rx="4" fill="#182a36" stroke="#8fc1e6" stroke-width="2"/>
+<text x="32" y="600.4" font-size="16" font-weight="650" fill="#d8ecf9" text-anchor="start">Postgres</text>
+<text x="32" y="619.2" font-size="14" font-weight="400" fill="#d8ecf9" text-anchor="start">work_items aggregate, append-only events and receipts, jobs</text>
+<text x="32" y="637.7" font-size="14" font-weight="400" fill="#d8ecf9" text-anchor="start">queue, releases and delivery observations. Triggers reject</text>
+<text x="32" y="656.2" font-size="14" font-weight="400" fill="#d8ecf9" text-anchor="start">ledger edits.</text>
+<line x1="280" y1="526.4000000000001" x2="280" y2="566.4000000000001" stroke="#9fb39c" stroke-width="2.5" marker-end="url(#arrow)"/>
+<text x="290" y="543.8" font-size="13" font-weight="400" fill="#b8c6b7" text-anchor="start">aggregate + event in one</text>
+<text x="290" y="561.0" font-size="13" font-weight="400" fill="#b8c6b7" text-anchor="start">transaction</text>
+<rect x="20" y="720.96" width="230" height="181.1" rx="4" fill="#182a36" stroke="#8fc1e6" stroke-width="2"/>
+<text x="32" y="750.9" font-size="16" font-weight="650" fill="#d8ecf9" text-anchor="start">Reconciliation</text>
+<text x="32" y="772.0" font-size="16" font-weight="650" fill="#d8ecf9" text-anchor="start">worker</text>
+<text x="32" y="790.9" font-size="14" font-weight="400" fill="#d8ecf9" text-anchor="start">Two-second tick: expires</text>
+<text x="32" y="809.4" font-size="14" font-weight="400" fill="#d8ecf9" text-anchor="start">leases, leases jobs with</text>
+<text x="32" y="827.9" font-size="14" font-weight="400" fill="#d8ecf9" text-anchor="start">SKIP LOCKED, applies</text>
+<text x="32" y="846.3" font-size="14" font-weight="400" fill="#d8ecf9" text-anchor="start">observations, publishes</text>
+<text x="32" y="864.8" font-size="14" font-weight="400" fill="#d8ecf9" text-anchor="start">the required check, runs</text>
+<text x="32" y="883.3" font-size="14" font-weight="400" fill="#d8ecf9" text-anchor="start">the guarded merge.</text>
+<rect x="310" y="720.96" width="230" height="141.5" rx="4" fill="#262d28" stroke="#b8c2bb" stroke-width="2"/>
+<text x="322" y="750.9" font-size="16" font-weight="650" fill="#e3e9e3" text-anchor="start">GitHub</text>
+<text x="322" y="769.8" font-size="14" font-weight="400" fill="#e3e9e3" text-anchor="start">PR, reviews, checks,</text>
+<text x="322" y="788.3" font-size="14" font-weight="400" fill="#e3e9e3" text-anchor="start">branch protection, merge</text>
+<text x="322" y="806.7" font-size="14" font-weight="400" fill="#e3e9e3" text-anchor="start">facts. Read by the worker;</text>
+<text x="322" y="825.2" font-size="14" font-weight="400" fill="#e3e9e3" text-anchor="start">never trusted from a</text>
+<text x="322" y="843.7" font-size="14" font-weight="400" fill="#e3e9e3" text-anchor="start">session.</text>
+<line x1="158" y1="676.96" x2="158" y2="716.96" stroke="#9fb39c" stroke-width="2.5" marker-end="url(#arrow)"/>
+<text x="168" y="703.0" font-size="13" font-weight="400" fill="#b8c6b7" text-anchor="start">jobs</text>
+<line x1="254" y1="754.96" x2="306" y2="754.96" stroke="#9fb39c" stroke-width="2.5" marker-end="url(#arrow)"/>
+<line x1="306" y1="754.96" x2="254" y2="754.96" stroke="#9fb39c" stroke-width="2.5" marker-end="url(#arrow)"/>
+<line x1="306" y1="794.96" x2="254" y2="794.96" stroke="#9fb39c" stroke-width="1.5" stroke-dasharray="6 5" marker-end="url(#arrow)"/>
+<text x="280" y="816.4" font-size="12" font-weight="400" fill="#b8c6b7" text-anchor="middle">webhook</text>
+<text x="20" y="928.7" font-size="13" font-weight="400" fill="#b8c6b7" text-anchor="start">Solid pair: the worker reads PR, CI, review, and protection facts and</text>
+<text x="20" y="945.8" font-size="13" font-weight="400" fill="#b8c6b7" text-anchor="start">publishes the "Graphyard / merge" check. Dashed: a signed webhook only</text>
+<text x="20" y="963.0" font-size="13" font-weight="400" fill="#b8c6b7" text-anchor="start">wakes a job; the worker refetches before it trusts anything.</text>
+<text x="20" y="1001.8" font-size="18" font-weight="700" fill="#e6ede4" text-anchor="start">Legend (glossary terms)</text>
+<g transform="translate(0 1013.3)"><rect x="20" y="0" width="34" height="22" rx="9" fill="#3a3020" stroke="#e0c27a" stroke-width="2"/></g>
+<text x="66" y="1028.0" font-size="14" font-weight="400" fill="#e6ede4" text-anchor="start">Human operator (human authority)</text>
+<g transform="translate(0 1043.3)"><rect x="20" y="0" width="34" height="22" rx="9" fill="#22311f" stroke="#c5e69b" stroke-width="2"/></g>
+<text x="66" y="1058.0" font-size="14" font-weight="400" fill="#e6ede4" text-anchor="start">AI agent session (one role, one credential)</text>
+<g transform="translate(0 1073.3)"><rect x="20" y="0" width="34" height="22" rx="3" fill="#182a36" stroke="#8fc1e6" stroke-width="2"/></g>
+<text x="66" y="1088.0" font-size="14" font-weight="400" fill="#e6ede4" text-anchor="start">Graphyard control plane</text>
+<g transform="translate(0 1103.3)"><rect x="20" y="0" width="34" height="22" rx="9" fill="#2a2338" stroke="#c3b1ec" stroke-width="2"/></g>
+<text x="66" y="1118.0" font-size="14" font-weight="400" fill="#e6ede4" text-anchor="start">Herdr runtime (session supervision)</text>
+<g transform="translate(0 1133.3)"><rect x="20" y="0" width="34" height="22" rx="3" fill="#262d28" stroke="#b8c2bb" stroke-width="2"/></g>
+<text x="66" y="1148.0" font-size="14" font-weight="400" fill="#e6ede4" text-anchor="start">GitHub and other external facts</text>
+<g transform="translate(0 1163.3)"><rect x="20" y="0" width="34" height="22" rx="11" fill="#111714" stroke="#c5e69b" stroke-width="1.5" stroke-dasharray="3 3"/></g>
+<text x="66" y="1178.0" font-size="14" font-weight="400" fill="#e6ede4" text-anchor="start">Chip: credential, lease epoch, or assigned worktree the</text>
+<text x="66" y="1196.5" font-size="14" font-weight="400" fill="#e6ede4" text-anchor="start">session holds</text>
+<g transform="translate(0 1208.3)"><line x1="20" y1="11" x2="54" y2="11" stroke="#9fb39c" stroke-width="2.5" marker-end="url(#arrow)"/></g>
+<text x="66" y="1223.0" font-size="14" font-weight="400" fill="#e6ede4" text-anchor="start">Solid arrow: an authenticated command or authority</text>
+<g transform="translate(0 1238.3)"><line x1="20" y1="11" x2="54" y2="11" stroke="#9fb39c" stroke-width="1.5" stroke-dasharray="6 5" marker-end="url(#arrow)"/></g>
+<text x="66" y="1253.0" font-size="14" font-weight="400" fill="#e6ede4" text-anchor="start">Dashed arrow: observation or health report, never authority</text>
 </svg>

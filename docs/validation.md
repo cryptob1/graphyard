@@ -1,3 +1,4 @@
+<!-- page: Build integrations | 3 | candidates, dispatch, attempts, and trusted result collection. -->
 # Validation candidates and runner protocol
 
 Graphyard now coordinates durable validation requests. The human operator pins a source/artifact candidate, approved executable test bundle and separate runner/collector identities. Runners explicitly acknowledge an assignment, renew its lease and execute outside the control plane; only an authorized collector can publish its result.

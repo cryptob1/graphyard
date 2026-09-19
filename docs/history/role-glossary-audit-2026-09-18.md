@@ -1,3 +1,4 @@
+<!-- page: Maintainer and historical records | 3 | the ambiguity audit, concision samples, and safety-parity check behind the glossary. -->
 # Role-glossary audit — September 18, 2026
 
 > **Historical record.** This audit records how the [glossary](../glossary.md) was applied across the documentation after GY-28 (role clarifications in *How Graphyard works*) and GY-31 (slice-lead delegation) landed. Use the [current documentation index](../README.md) for setup and operations.
@@ -89,6 +90,18 @@ GY-52 (declared App permissions) followed with `install.md` (new, added to the i
 | `master-agent.md` (GY-52) | "A permission shortfall is an operator action, not a merge decision" | "A permission shortfall is an administration action — the human operator, or the master through the operator's browser profile — not a merge decision" | Which operator: `github.md` makes keeping App permissions current the master's browser-flow job, so bare *operator* read as if only the human could act. |
 
 Read with no ambiguous instance: `install.md` (*its owner* is the App's GitHub owner; *worker identities are never Apps* names the role), the `github.md` permission tables (*never an agent's changes* means any agent, where the role does not matter), and the *master status* attention paragraph. The paragraph GY-52 added to the old operations page — permission errors hold jobs rather than retry — now lives in `operations-reference.md` under *GitHub job fails*, and the primary page's *GitHub jobs and outages* recipe gained one sentence pointing at it; six filler words elsewhere on the primary page were removed to keep the 650-word budget, none from a safety statement.
+
+GY-56 (hotspot decomposition) then split `protocol.md` into one page per topic under `docs/protocol/` and made the `docs/README.md` and `protocol.md` indexes generated from each page's `<!-- page: … -->` line; GY-34 added `shipping-pulse.md`. The glossary rewrites recorded above for `protocol.md` were re-applied to the pages that now hold that text (`roles.md`, `work-commands.md`, `leases.md`, `regression-guard.md`, `evidence.md`, `github-webhook.md`), the `roles.md` note that defines *operator* for the protocol pages was reworded to cover the whole family, and the glossary, reference, and audit pages received index lines. Passages that previously relied on that note but now render on their own page were rewritten:
+
+| Page | Before | After | Reason |
+| --- | --- | --- | --- |
+| `protocol/bootstrap-mode.md` (GY-56) | "An operator may declare that one criterion in **bootstrap mode**." | "The human operator (`admin`), or an operator agent holding `policy:bootstrap`, may declare that one criterion in **bootstrap mode**." | Which operator: the `bootstrap` declaration is accepted from `admin` or a scoped operator agent, and the page no longer sits under the roles note. |
+| `protocol/bootstrap-mode.md` (GY-56) | "so an operator cannot bind an obligation to a contract this change does not own" | "so no requirement revision can bind an obligation to a contract this change does not own" | The rule is a server check on every revision, whoever sends it; the rewrite forbids strictly more. |
+| `protocol/bootstrap-mode.md` (GY-56) | "No operator or administrator command retires one." | "No `admin` or operator-agent command retires one." | *Operator* and *administrator* named the same `admin` credential twice and left the scoped operator agent unmentioned. |
+| `protocol/work-commands.md`, `protocol/containment-settlement.md` (GY-56) | "coordinator or operator" | "`coordinator` or `admin`" | Role names for the two credentials `autosettle` accepts. |
+| `shipping-pulse.md` (GY-34) | "the operator may already have revised requirements or policy by the time the delivery is written" | "the human operator or a scoped operator agent may already have revised requirements or policy …" | Both principals can revise requirements; the sentence explains why proof totals read the cited snapshot, and the boundary is unchanged. |
+
+Read with no ambiguous instance: the rest of `shipping-pulse.md` (*worker scorecard* and *implementation workers* name the role; *operator agents* is the canonical term; *producer* names the credential, and the `deploymentProviders` paragraph restates the evidence-trust boundary without weakening it), the *Where a new feature goes* table in `development.md` (no role, session, or authority named), and the split protocol pages, whose text is otherwise unchanged from the audited `protocol.md`.
 
 ## Concision samples (before / after)
 

@@ -13,6 +13,7 @@ const pages = [
   ['test-cases', 'E2E test cases'], ['validation', 'Validation runner protocol'], ['runner-setup', 'Runner preparation & artifacts'], ['delivery', 'Releases & observed delivery'], ['recovery', 'Runner capacity & delivery recovery'],
   ['first-pr', 'Graphyard repository bootstrap'],
   ['turnkey-delivery-roadmap', 'Turnkey E2E & delivery roadmap'],
+  ['shipping-pulse', 'Shipping pulse'],
   ['history/implementation-audit-2026-09-13', 'Historical implementation audit'],
   ['history/role-glossary-audit-2026-09-18', 'Historical role-glossary audit'],
   ['history/huck-engineer-comparison', 'Historical Huck investigation'],

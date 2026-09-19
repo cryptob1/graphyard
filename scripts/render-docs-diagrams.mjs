@@ -5,7 +5,9 @@
 import { writeFileSync } from 'node:fs';
 
 const WIDTH = 560;
-const FONT = 'Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif';
+// Arial-metric faces come before the generic families so Linux hosts with Liberation Sans do not
+// fall through to the wider DejaVu Sans; the wrap estimates below still assume DejaVu widths.
+const FONT = 'Inter, "Segoe UI", Roboto, "Helvetica Neue", Arial, "Liberation Sans", ui-sans-serif, system-ui, -apple-system, sans-serif';
 // One opaque surface, so the diagram reads identically on GitHub light, GitHub dark and the
 // dark in-app docs. Foreground/background pairs all exceed 7:1 contrast.
 const SURFACE = '#111714', TEXT = '#e6ede4', MUTED = '#b8c6b7', LINE = '#9fb39c';
@@ -19,8 +21,10 @@ const KIND = {
 const TAG = { stroke: '#c5e69b', fill: '#111714', text: '#c5e69b' };
 
 const esc = s => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-function wrap(text, width, size) {
-  const perChar = size * 0.53, max = Math.max(4, Math.floor(width / perChar));
+// Per-character width estimates measured on DejaVu Sans, the widest face in the stack, so a line
+// that fits the estimate fits every host font; narrower faces simply wrap a little early.
+function wrap(text, width, size, weight = 400) {
+  const perChar = size * (weight >= 600 ? 0.62 : 0.56), max = Math.max(4, Math.floor(width / perChar));
   const lines = [];
   for (const paragraph of text.split('\n')) {
     let line = '';
@@ -42,7 +46,7 @@ class Canvas {
   // A labelled box. `kind` picks the glossary colour; `tags` are small chips for lease/worktree/credential facts.
   box({ x, y, w, kind, title, body = '', tags = [], dashed = false, pad = 12, titleSize = 16, bodySize = 14 }) {
     const c = KIND[kind];
-    const titleLines = wrap(title, w - pad * 2, titleSize), bodyLines = body ? wrap(body, w - pad * 2, bodySize) : [];
+    const titleLines = wrap(title, w - pad * 2, titleSize, 650), bodyLines = body ? wrap(body, w - pad * 2, bodySize) : [];
     let h = pad + titleSize * 1.32 * titleLines.length + (bodyLines.length ? 4 + bodySize * 1.32 * bodyLines.length : 0);
     if (tags.length) h += 10 + 24;
     h += pad;
@@ -82,7 +86,7 @@ class Canvas {
   }
   // A two-headed arrow, drawn as two lines so both ends carry a head.
   both(x1, y1, x2, y2, options) { this.arrow(x1, y1, x2, y2, options); this.parts.push(`<line x1="${x2}" y1="${y2}" x2="${x1}" y2="${y1}" stroke="${LINE}" stroke-width="2.5" marker-end="url(#arrow)"/>`); }
-  heading(y, text) { this.height = Math.max(this.height, y + 30); return this.text(20, y, [text], { size: 18, weight: 700 }) + y + 8; }
+  heading(y, text) { const lines = wrap(text, WIDTH - 40, 18, 700); const h = this.text(20, y, lines, { size: 18, weight: 700 }); this.height = Math.max(this.height, y + h + 8); return y + h + 8; }
   note(y, text, w = WIDTH - 40) { const lines = wrap(text, w, 13); const h = this.text(20, y, lines, { size: 13, fill: MUTED }); this.height = Math.max(this.height, y + h); return y + h; }
   legend(y, extra = []) {
     let cy = this.heading(y, 'Legend (glossary terms)');

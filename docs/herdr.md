@@ -1,3 +1,4 @@
+<!-- page: Operate Graphyard | 4 | worker installation and multi-machine use. -->
 # Herdr integration
 
 Herdr is the runtime that launches, shows, and stops agent sessions. Graphyard remains authoritative for work ownership, leases, evidence, and progression. Terms follow the [glossary](glossary.md).

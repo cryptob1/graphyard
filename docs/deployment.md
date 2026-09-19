@@ -1,3 +1,4 @@
+<!-- page: Operate Graphyard | 1 | Railway, Docker Compose, backups, and upgrades. -->
 # Deployment
 
 If this is the first Graphyard installation for a repository, follow [Repository onboarding](onboarding.md) for the complete sequence through Herdr, the master, workers, and the first PR. This guide is the deployment reference for that path.
@@ -18,7 +19,7 @@ Graphyard ships one application Docker image and uses a separate Postgres servic
 | `DATABASE_URL` | Reference `${{Postgres.DATABASE_URL}}` to use Railway private networking |
 | `HOST` | `0.0.0.0` for Railway/container ingress |
 | `PORT` | `4310`, or the port supplied by Railway |
-| `GRAPHYARD_PRINCIPALS` | JSON array of principals: the human operator's `admin`, the master's `coordinator`, `slice-lead`, `worker`, `reader`, and `producer` credentials, each with a `sessionKind` |
+| `GRAPHYARD_PRINCIPALS` | JSON array of principals: the human operator's `admin`, the master's `coordinator`, `slice-lead`, `worker`, `reader`, and `producer` credentials, each with a `sessionKind`. A producer's optional `proofs` allowlist scopes acceptance-evidence collection only; a separate optional `deploymentProviders` allowlist is what authorizes recording that provider's production deployments (see [shipping pulse](shipping-pulse.md)). Grant each lane to the credential that needs it rather than widening the other. |
 | `GITHUB_REPOSITORY` | `owner/repository`; one repository per control plane |
 | `GITHUB_BASE_BRANCH` | Usually `main` |
 | `GITHUB_APP_ID` | Dedicated Graphyard GitHub App ID |

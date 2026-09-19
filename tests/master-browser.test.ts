@@ -342,7 +342,7 @@ test('master harness writes the allow rules the browser flows need, each with a 
 test('the generated master instructions and the guides assign GitHub administration to the master through the browser', async () => {
   const read = async (name: string) => readFile(new URL(`../${name}`, import.meta.url), 'utf8');
   const instructions = managedMasterInstructions('');
-  const [masterAgent, onboarding, github, help] = await Promise.all([read('docs/master-agent.md'), read('docs/onboarding.md'), read('docs/github.md'), read('src/cli.ts')]);
+  const [masterAgent, onboarding, github, help] = await Promise.all([read('docs/master-agent.md'), read('docs/onboarding.md'), read('docs/github.md'), read('src/cli/master.ts')]);
   for (const flow of browserFlows) {
     assert.ok(instructions.includes(`master browser ${flow}`), `the generated instructions must name ${flow}`);
     assert.ok(masterAgent.includes(`master browser ${flow}`), `docs/master-agent.md must name ${flow}`);

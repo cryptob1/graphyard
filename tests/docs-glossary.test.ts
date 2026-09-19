@@ -27,7 +27,8 @@ test('the glossary defines the eight distinctions once, with a canonical usage e
 
 test('the primary operations page fits a three-minute skim and keeps its structure', () => {
   const page = read('docs/operations.md');
-  const withoutCode = page.replace(/```[\s\S]*?```/g, '');
+  // HTML comments (the index declaration) are not rendered on GitHub or in the app.
+  const withoutCode = page.replace(/<!--[\s\S]*?-->/g, '').replace(/```[\s\S]*?```/g, '');
   const body = withoutCode.split(/^## Deeper references$/m)[0];
   assert.ok(withoutCode.length < page.length, 'the page keeps at least one recipe command block');
   // Inline code spans count as one word each; navigation is the trailing references list.

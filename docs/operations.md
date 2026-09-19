@@ -1,3 +1,4 @@
+<!-- page: Operate Graphyard | 7 | daily checklist, incident decision tree, and recovery recipes in three minutes. -->
 # Operations and recovery
 
 Three minutes for the human operator. Detail: [operations reference](operations-reference.md); terms: [glossary](glossary.md).
