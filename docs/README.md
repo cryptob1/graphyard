@@ -17,7 +17,6 @@ This page is generated in full from each page's `<!-- page: Section | order | su
 - [Deployment](deployment.md) — versioned images, Railway, Docker Compose, the Helm chart, backups, upgrades, and restores.
 - [Install and upgrade](install.md) — the shortest install path and the App-permission migration an upgrade can require.
 - [GitHub enforcement](github.md) — App permissions, branch protection, CI producers, and Codex review.
-- [Reading the dashboard](dashboard.md) — the dashboard page by page: what each number, sentence and marker means, and where everything else moved.
 - [Herdr integration](herdr.md) — worker installation and multi-machine use.
 - [Master-agent operating mode](master-agent.md) — routing, recovery, and guarded merges.
 - [Slice-lead delegation](delegation.md) — bounded product, infrastructure, and docs/experience coordination.
