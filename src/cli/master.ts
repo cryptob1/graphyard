@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 import { startGithubSetup } from '../github-setup.js';
 import { resourceConflicts } from '../coordination.js';
-import { assertMasterBinding, continueMergeBatch, currentMergeCandidates, dispatchWork, listHerdrAgents, loadMasterConfig, masterHarness, mergeExecutor, mergeProtocolSkew, readCredentialFile, readWorkerCredential, saveProducerProfile, saveWorkerProfile, setupMaster, snapshotWithClock, startMaster, verifyContainmentDeath, workerProfileSchema } from '../master.js';
+import { approvedMerges, assertMasterBinding, autonomySubcommands, continueMergeBatch, runAutonomyCommand, currentMergeCandidates, dispatchWork, listHerdrAgents, loadMasterConfig, masterHarness, mergeExecutor, mergeProtocolSkew, readCredentialFile, readWorkerCredential, saveProducerProfile, saveWorkerProfile, setupMaster, snapshotWithClock, startMaster, verifyContainmentDeath, workerProfileSchema } from '../master.js';
 import { cliCommit } from '../protocol-version.js';
 import { daemonEffects, readDaemonState, runDaemon, type DaemonState } from '../master-daemon.js';
 import { verificationEffects, verifyDeployment } from '../master-verification.js';
@@ -68,6 +68,12 @@ export const masterCommands = defineCommands([
       '                                Run the durable coordination loop as a supervised process;',
       '                                it launches the reviewer and the proof producers for every',
       '                                submitted head within 30 seconds of the request',
+      '  master autonomy [--admin-token-stdin --apply]  Provision the master and approver identities',
+      '  master create FILE|release GY-N|unblock GY-N|requirements GY-N FILE REASON  Own intent',
+      '  master decide GY-N ACTION [JSON|@FILE] REASON  Request a two-party decision',
+      '  master decisions GY-N | approver GY-N DECISION [KIND] | approve GY-N DECISION REASON',
+      '  master principals [--apply]   Preview or apply a roster rotation keeping live principals',
+      '  master restart                Restart this host\'s master loop detached',
       '  master guide                  Print the complete master-agent operating guide',
     ],
     async run(context) {
@@ -100,6 +106,8 @@ export const masterCommands = defineCommands([
       // The CLI's own commit, for the version-skew guard: the checkout this file runs from.
       const cli = { commit: cliCommit(fileURLToPath(new URL('../..', import.meta.url))) };
       const assertProtocol = (status: any) => { const skew = mergeProtocolSkew(status, cli); if (skew) throw new Error(skew); };
+      if ((autonomySubcommands as readonly string[]).includes(id ?? '')) return print(await runAutonomyCommand(root, master, id!, args,
+        { coordinator: masterApi, readSecret: () => readSecretFromStdin(10_000), agents: listHerdrAgents, daemonLock: async () => (await readDaemonState(root, master)).lock }));
       if (id === 'start') {
         const kind = workerProfileSchema.shape.kind.safeParse(args[0]); if (!kind.success) throw new Error('Use master start with a supported agent kind such as codex or claude');
         const separator = args.indexOf('--'); const agentArgs = separator < 0 ? [] : args.slice(separator + 1);
@@ -209,6 +217,7 @@ export const masterCommands = defineCommands([
         const snapshot = await masterApi('work-snapshot');
         const selected = args[0] === '--all' ? currentMergeCandidates(snapshot.work, snapshot.now, coordinator.actor.id) : snapshot.work.filter((item: any) => item.id === args[0] || item.key === args[0]);
         if (!selected.length) throw new Error(args[0] === '--all' ? 'No work has a current all-gates-passing merge authorization' : `Unknown work item ${args[0]}`);
+        if (!master.autoMerge) selected.splice(0, selected.length, ...await approvedMerges(selected, item => masterApi(`work/${item.id}/decisions`), args[0] !== '--all'));
         const outerRequest = process.env.GRAPHYARD_REQUEST_ID ?? randomUUID();
         const mergeOne = mergeExecutor(master, () => masterApi('work-snapshot'), masterMutation, coordinator.actor.id, outerRequest);
         const results = args[0] === '--all' ? await continueMergeBatch(selected, mergeOne) : [await mergeOne(selected[0])];
@@ -252,7 +261,7 @@ export const masterCommands = defineCommands([
         return print({ repository: master.repository, coordinator: coordinator.actor.id, intervalSeconds, dispatchIntervalSeconds: master.run.dispatchIntervalSeconds, cycles: result.cycles.length, stopped: result.stopped ? 'signal' : 'completed', last: result.cycles.at(-1) ?? null,
           dispatch: { ticks: dispatched.ticks.length, launched: dispatched.ticks.reduce((total, tick) => total + tick.launched.length, 0), refused: dispatched.ticks.reduce((total, tick) => total + tick.refused.length, 0), last: dispatched.ticks.at(-1) ?? null } });
       }
-      throw new Error('Use master init, start, worker add, producer add, reviewer, review, protection, browser, harness, status, dispatch, settle-containment, run, merge, verify-deployment, or guide');
+      throw new Error(`Use master init, start, worker add, producer add, reviewer, review, protection, browser, harness, status, dispatch, settle-containment, run, merge, verify-deployment, ${autonomySubcommands.join(', ')}, or guide`);
     },
   },
 ]);
