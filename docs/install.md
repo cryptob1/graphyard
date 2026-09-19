@@ -23,6 +23,7 @@ export GRAPHYARD_CLI=/absolute/path/to/graphyard/bin/graphyard.mjs
 3. **Configure the server** with `GITHUB_APP_ID`, `GITHUB_INSTALLATION_ID`, `GITHUB_PRIVATE_KEY`, and `GITHUB_WEBHOOK_SECRET` from that file, then redeploy. At startup the server preflights the installed permissions against the declaration and logs any shortfall.
 4. **Verify** with `node "$GRAPHYARD_CLI" doctor` (`appPermissions.missing` must be empty) and `node "$GRAPHYARD_CLI" status`, which reports `appPermissions` and `heldJobs`. Then [require the check](github.md#require-the-check) on the base branch and submit a real pull request; configured is not proof of enforcement.
 5. Optionally register [reviewer Apps](github.md#register-the-reviewer-app) with `--reviewer NAME`; each holds only the reviewer declaration and never Contents: write.
+6. **Connect proofs in CI.** `init --scan --apply` registers the [CI producer](deployment.md#ci-producer) — `ci-proofs`, a producer with `runtime: github-actions` granted `unit:*` and `integration:*` only — in `.graphyard/principals.json` and prints `ciProofs.next`: restrict the `graphyard-reporting` environment to the default branch, store that token as its `GRAPHYARD_CI_PRODUCER_TOKEN` secret, set `GRAPHYARD_URL` on the environment, and deploy the principals array including it. From then on every push to a candidate branch runs the item's registered `unit:*` and `integration:*` proofs and publishes their evidence; see [proofs in CI](github.md#proofs-in-ci). Manual proofs still need a producer session.
 
 ## Upgrading an existing installation
 

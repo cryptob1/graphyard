@@ -9,7 +9,8 @@ import { contract } from './contracts.mjs';
 
 const [metadataFile, image, output, proof = 'integration:claim-safety'] = process.argv.slice(2);
 if (!metadataFile || !image || !output) throw new Error('Usage: run-acceptance metadata.json image output.json [proof]');
-const { exercise, createInventory, candidate = httpCandidate } = contract(proof);
+const { exercise, createInventory, candidate = httpCandidate, kind = 'integration' } = contract(proof);
+if (kind !== 'integration') throw new Error(`${proof} is a ${kind} contract; run-unit-acceptance.mjs executes it against the prepared candidate checkout`);
 const harness = fileURLToPath(new URL('.', import.meta.url));
 const metadata = JSON.parse(await readFile(metadataFile, 'utf8'));
 const scratch = await mkdtemp(join(tmpdir(), 'graphyard-acceptance-'));

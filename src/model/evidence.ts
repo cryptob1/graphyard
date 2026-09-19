@@ -1,4 +1,5 @@
 import type { Work } from './work.js';
+import type { CiRun } from './ci-proofs.js';
 import { evidenceBindsCandidate } from './carry.js';
 
 export type ArtifactKind = 'log' | 'report' | 'screenshot' | 'trace' | 'other';
@@ -30,6 +31,12 @@ export interface Evidence {
     artifact: { id: number; name: string; digest: string; url: string; createdAt: string };
   };
   validation?: { candidateId: string; requestId: string; attemptId: string };
+  /**
+   * CI-produced evidence: the GitHub Actions job that executed the registered contract on this
+   * commit, as the control plane read it back from GitHub before accepting the record. Only the
+   * CI producer principal writes this lane; see docs/protocol/evidence.md.
+   */
+  ciRun?: CiRun;
   /** What a validation result was attributed to: the exact manifest, compatibility signature and independently observed target; see docs/attribution.md. */
   attribution?: EvidenceAttribution;
   /**
