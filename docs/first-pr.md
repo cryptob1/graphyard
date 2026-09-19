@@ -39,10 +39,12 @@ Graphyard's own repository uses a protected acceptance workflow to prove its HTT
 
    `proof` is resolved against the registry in `scripts/contracts.mjs` in the protected
    checkout this run uses, and the dispatch is refused before any candidate code is fetched
-   when that checkout does not register it. Work requiring `integration:herdr-recovery`
-   dispatches the same workflow with `-f proof=integration:herdr-recovery`. That contract
-   waits out the candidate's real lease and launch fences, so its exercise job runs for
-   several minutes.
+   when that checkout does not register it. Each dispatch produces exactly one proof, and the
+   reporter refuses a report whose case inventory does not match the proof it claims. Work
+   requiring `integration:herdr-recovery` dispatches the same workflow with
+   `-f proof=integration:herdr-recovery`. That contract waits out the candidate's real lease
+   and launch fences, so its exercise job runs for several minutes. Work requiring
+   `integration:merge-authorization` dispatches it with `-f proof=integration:merge-authorization`.
 
 7. Confirm current-head review, CI, trusted acceptance evidence, branch protection, and guarded merge all pass. Rerun the inspection; the same command should now report `permitted` with no refusals. Push a new commit once to verify old proof becomes stale.
 
@@ -54,13 +56,13 @@ The exercise job runs candidate code with disposable principals. A separate `gra
 
 Because a trusted run executes only protected source, a contract must reach protected `main` before any work item may require its proof. Land the harness, its registry entry, and its unprivileged CI job as their own change, gated by review, CI and the proofs that already exist; then require the new proof of later work.
 
-A contract exports its fixed `requiredCases`, a `createInventory` bound to exactly those cases through the shared ledger in `scripts/case-inventory.mjs`, and an `exercise` that records every case through that ledger as it runs. The runner selects all three by proof, so an interrupted run reports the completed, failing and unexecuted cases under the contract's own names and never under another proof's.
+A contract exports its fixed `requiredCases`, a `createInventory` bound to exactly those cases through the shared ledger in `scripts/case-inventory.mjs`, and an `exercise` that records every case through that ledger as it runs. The runner selects all three by proof, so an interrupted run reports the completed, failing and unexecuted cases under the contract's own names and never under another proof's. A contract whose scenario needs facts the candidate exposes no client route for also exports `candidate`, which describes the protected launcher the runner starts inside the same contained container in place of the image entrypoint; the runner still drives the candidate over HTTP only and judges in its own process.
 
 Preparation enforces that order rather than trusting the dispatch. It first resolves the requested proof against the registry in this protected checkout, before any candidate code is fetched. It then fetches the candidate's base commit alone and refuses unless that base already carries the contract's source file, so the change that introduces a contract can never be the change its own trusted proof certifies. Assigning a new proof to the change that introduces it therefore fails closed instead of producing evidence a candidate effectively wrote for itself.
 
 The CI job for the new contract runs the identical fixed inventory against every candidate, so the change that introduces a contract is still executed end to end — it simply publishes no trusted evidence.
 
-`integration:claim-safety` covers API authorization, competing claims, stale epochs, worker evidence trust, and unfinished dependencies. `integration:herdr-recovery` covers [cross-machine lease recovery](herdr.md#automated-recovery-contract). Neither proves arbitrary product behavior or production delivery, and neither replaces the [two-machine operational drill](coordination.md#two-machine-operational-drill) on real hosts.
+`integration:claim-safety` covers API authorization, competing claims, stale epochs, worker evidence trust, and unfinished dependencies. `integration:herdr-recovery` covers [cross-machine lease recovery](herdr.md#automated-recovery-contract). `integration:merge-authorization` covers the restricted [merge broker](github.md#enforcement-boundary): who may reach it, who may revoke accepted evidence, and that a revoked candidate is refused by acquisition, replay, verification, concurrent attempts, and post-merge attribution. That scenario needs an observed GitHub candidate, which no client-controlled route can invent, so its protected launcher (`scripts/merge-authorization-server.mjs`) supplies those observations inside the isolated container while the controller drives the candidate over HTTP and judges the transcript with `scripts/merge-authorization-contract.mjs`; candidate output is never accepted as the proof transcript. None of these proves arbitrary product behavior or production delivery, and none replaces the [two-machine operational drill](coordination.md#two-machine-operational-drill) on real hosts.
 
 The refused and permitted reports are the operator's inspection record for the `manual:github-enforcement` criterion. They are not evidence: an operator inspects them and attests the proof from a separate admin session, and Graphyard re-verifies the exact candidate before merging.
 

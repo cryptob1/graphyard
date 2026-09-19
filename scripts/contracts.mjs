@@ -9,12 +9,16 @@
 // by the unprivileged CI job, which runs the identical inventory but publishes no evidence.
 import * as claimSafety from './acceptance-contract.mjs';
 import * as herdrRecovery from './herdr-recovery-contract.mjs';
+import * as mergeAuthorization from './merge-authorization-contract.mjs';
 
 // `source` is the protected path a trusted run executes, and the path whose presence in the
-// candidate's base proves the contract was staged before it was required.
+// candidate's base proves the contract was staged before it was required. A contract that
+// cannot drive a plain HTTP candidate exports `candidate`, describing the protected launcher
+// the runner starts inside the container instead of the image's own entrypoint.
 export const contracts = {
   'integration:claim-safety': { ...claimSafety, source: 'scripts/acceptance-contract.mjs' },
   'integration:herdr-recovery': { ...herdrRecovery, source: 'scripts/herdr-recovery-contract.mjs' },
+  'integration:merge-authorization': { ...mergeAuthorization, source: 'scripts/merge-authorization-contract.mjs' },
 };
 
 export function contract(proof) {

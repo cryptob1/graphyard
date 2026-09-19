@@ -73,6 +73,20 @@ An escalation is not a blocker: it refuses the merge gate until a human operator
 
 An active owner may keep its heartbeat running and update the assigned branch. GitHub observations automatically invalidate old evidence after a push. To reassign: stop the previous worker, then run `graphyard rework GY-N --previous-worker-stopped "Reproduce review failure"` as an operator. This fences old API commands, closes the build gate, and wakes integration reconciliation. If the stopped worker still held its lease, reopening the item records a `lease-loss` escalation against that epoch; it refuses the merge gate until you resolve it, so clear it with `resolve` once the replacement assignment is verified. A new worker claims with a higher epoch and registers the existing PR branch in a fresh workspace, usually in another clone or on another host. Resubmit the same PR with the new epoch. Keep the old worktree for inspection. GitHub check revocation is asynchronous; suspend merging until the refusing check is visible. Merged work requires a follow-up item.
 
+## Accepted evidence turns out to be wrong
+
+A trusted run can be invalidated after it was accepted — the wrong artifact was measured, the runner is now known to have been misconfigured, or the reported result was withdrawn upstream. Revoking is narrower than a requirement revision: it leaves criteria, policy revision, review and the submitted attempt untouched and only withdraws the runs that no longer stand.
+
+```sh
+cat > revoke.json <<'JSON'
+{ "proof": "integration:claim-safety", "sha": "HEAD_SHA", "baseSha": "BASE_SHA", "policyRevision": 1,
+  "reason": "Producer retracted the reported run" }
+JSON
+graphyard revoke GY-N revoke.json
+```
+
+Run it as an operator, or as the producer allowlisted for that proof; nobody else may. The acceptance gate closes immediately and names the withdrawal, merge authorization is dropped, an in-flight merge execution is cancelled rather than waited out, and reconciliation republishes a refusing GitHub check. Do not wait for that check before revoking — the ledger is authoritative the moment the command returns, and the [merge broker](github.md#enforcement-boundary) refuses the candidate whether or not GitHub has caught up. If the broker's final provider commit already won serialization, revocation refuses instead of claiming it recalled an irrevocable provider call, and keeps refusing after the execution's authority expires until GitHub has been observed for it; wait for that reconciliation — the withdrawal is accepted once the pull request is seen unmerged after the expiry — and use a follow-up item if the merge landed. The [merge queue](github.md#merge-queue) treats the withdrawal like a failed proof: the entry is ejected so the items behind it are not held up, and the same commit does not re-enter — a fresh trusted run satisfies acceptance again, but a new candidate is what lands, at the back of the queue. Delivered work is immutable and needs a follow-up item instead.
+
 ## Worktree creation failed
 
 The reservation is deliberately retained. Inspect Git output and the local branch/worktree state. If no files were created, an operator can run the exact intended Git worktree operation locally. If ownership expired, use a new attempt and fresh path. Never run blanket worktree deletion across worker machines.
