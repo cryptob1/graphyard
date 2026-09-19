@@ -81,7 +81,10 @@ or a Herdr tab. `master init` accepts the loop's settings:
 Each cycle:
 
 1. **closes finished worker sessions** — a launched agent whose principal holds no active lease has
-   no authority left, so its pane is closed rather than left holding a provider seat;
+   no authority left, so its pane is closed rather than left holding a provider seat. `complete`
+   ends the worker's lease, so a submitted item's session is closed here on the next cycle; a
+   lease that lapses after submission, under a `blocked` report, or after your stopped-worker
+   attestation is history (`lease.expired` with its cause), never an incident;
 2. **dispatches claimable work** to a healthy worker profile, through the same launcher
    `master dispatch` uses: the worker claims under its own identity and the loop holds no lease;
 3. **shepherds reviews and proofs** — one recorded request per exact candidate, a request to the
@@ -278,7 +281,7 @@ A foreground worker runs inside a containment quarantine that its supervisor set
 
 `master status` reports every such quarantine on each work row under `containment`, with `counts.quarantined` and `counts.settleableQuarantines` totalling them. For a quarantine whose workspace is registered on this coordinator's host, status also verifies it: it checks that the worker lease and the launch authority have both been expired past their grace window — measured from the lease deadline the quarantine retains, since reconciliation clears the expired lease record long before that window closes — then inspects this host for any surviving supervisor process, any process running in the assigned workspace, and any live `graphyard-watch` containment scope.
 
-A live scope is dismissed only when every member it still holds is positively attributed to another assignment, by following that member's ancestry to a live supervisor naming a different work key or epoch. Another worker's scope on the same machine is therefore ordinary; an orphaned scope left by a dead supervisor is not, and it fences until an operator attests.
+The quarantine records the exact scope unit the session was launched in and the supervisor's pid (`containment.scope`), and status reports what systemd says of that unit. Everything the recorded scope still holds fences this item, whatever a member's working directory or ancestry says. Any other live `graphyard-watch-*` scope is dismissed only when its members are positively attributed to another assignment: by the live supervisor whose pid the scope name carries, when that supervisor runs `watch` for a different work key or epoch from another workspace, or by following a member's own ancestry to such a supervisor. Another worker's scope on the same machine is therefore ordinary, even when its session has reparented away from its supervisor; an orphaned scope left by a dead supervisor is not, and it fences until an operator attests. Every process still holding the fence is listed in `containment.held`, and printed by `master settle-containment`, with its pid, cmdline and cwd — read them before stopping anything.
 
 - `settleable: true` with no `refusals` means the supervisor is verifiably gone. Run `master settle-containment GY-N "reason"`. The control plane re-checks the deadlines and the verification before clearing the fence, and records the verification in the event ledger.
 - Any `refusals` entry means something could not be proven — the host is unreachable or not the registered one, a scope or process query failed, a process is still present, or the clocks disagree. Automatic settlement refuses, and so does the control plane. Stop the supervisor yourself and use the operator attestation path (`rework GY-N --previous-worker-stopped`, or `recover-containment GY-N --previous-worker-stopped` once the work is delivered).
@@ -327,10 +330,41 @@ For the full correctness model, see [GitHub enforcement](github.md) and [archite
 For a dead worker or provider change:
 
 1. stop the old worker and supervisor;
-2. release or let the lease expire, and settle any containment quarantine it left;
+2. release or let the lease expire, and settle any containment quarantine it left; a submitted
+   attempt has no lease left to release, because `complete` ended it;
 3. request operator rework if a candidate was already submitted;
 4. claim with the replacement worker at a higher epoch;
 5. create a fresh workspace and preserve the old attempt.
+
+A `lease-loss` escalation stands only for a worker that silently vanished: a lease that lapsed
+with no submission, no carried `blocked` report and no stopped-worker attestation for its epoch.
+Every other lapse is `lease.expired` history with its cause — `submitted` (the lease ended at
+`complete`), `blocked-awaiting-operator` (the worker reported `blocked` and stopped to wait on
+you), or `stopped-by-attestation` (you stopped the worker and said so with
+`rework --previous-worker-stopped` or `recover-containment --previous-worker-stopped`, before or
+after the lapse) — and raises nothing. Do not treat any of those as an incident needing a human.
+
+Who settles what:
+
+- reconciliation settles, on deploy and every later tick, a standing `lease-loss` whose epoch has
+  a bound submission, a carried blocked report, or a stopped-worker attestation in the ledger
+  (`escalation.auto-settled`, with the note and the attestation it rests on). Attest first, then
+  wait a tick: your `rework --previous-worker-stopped` for the lapsed epoch is the attestation;
+- you, as an admin of any session kind, settle a control-plane-raised `lease-loss` yourself by
+  citing the attestation: `resolve GY-N lease-loss --attestation blocked|stopped-worker "reason"`.
+  The server verifies the citation against the ledger and refuses one that is not there; the
+  `escalation.resolved` entry records who, why and which attestation;
+- a lapse nothing explains — no report, no attestation — is a vanished worker and stays for a
+  declared human session, as do `security-concern`, `requirement-weakening`,
+  `evidence-policy-conflict` and any lease-loss a lead raised. Never work around those.
+
+Before `master settle-containment` stops anything, read its report: the quarantine records the
+exact scope unit and supervisor pid the session was launched in (`containment.scope`), and a
+refusal prints every process still holding the fence with its cmdline and cwd, and says what
+systemd reports for the recorded scope. A neighbouring `graphyard-watch-*` scope is attributed to
+its own live supervisor by the pid in its name, so another item's running worker is not this
+item's fence; a scope you cannot attribute from that report belongs to someone — verify whose
+before stopping it.
 
 The master does not clear blockers, revise requirements, or satisfy human gates on its own. See [operations](operations.md) for recovery commands, including [restarting the durable loop](operations.md#master-coordination-loop).
 

@@ -1,7 +1,7 @@
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 import { z } from 'zod';
-import type { Work, Workspace } from './model.js';
+import type { ContainmentScope, Work, Workspace } from './model.js';
 
 export class PrelaunchContainmentError extends Error {
   constructor(message: string, public readonly settleAllowed: boolean) { super(message); }
@@ -47,7 +47,7 @@ export function isConfirmedCoordinationRefusal(status: number, body: unknown) {
 
 export async function establishContainment(
   mutate: (requestId: string) => Promise<any>,
-  expected: { epoch: number; settlementHash: string; exclusiveResources: string[]; requestId: string },
+  expected: { epoch: number; settlementHash: string; exclusiveResources: string[]; requestId: string; scope?: ContainmentScope },
   options: { attempts?: number; retryMs?: number } = {},
 ) {
   const attempts = options.attempts ?? 3;
@@ -57,7 +57,10 @@ export async function establishContainment(
       const result = await mutate(expected.requestId);
       const quarantine = result?.containmentQuarantine;
       if (quarantine?.epoch !== expected.epoch || quarantine?.settlementHash !== expected.settlementHash
-        || JSON.stringify(result?.exclusiveResources ?? []) !== JSON.stringify(expected.exclusiveResources))
+        || JSON.stringify(result?.exclusiveResources ?? []) !== JSON.stringify(expected.exclusiveResources)
+        // The record must name the exact scope this supervisor launches into, or settlement
+        // could later attribute a neighbour's scope to this assignment.
+        || (expected.scope && (quarantine?.scope?.unit !== expected.scope.unit || quarantine?.scope?.pid !== expected.scope.pid)))
         throw new Error('Graphyard returned a mismatched containment quarantine');
       return result;
     } catch (error) {
@@ -165,6 +168,15 @@ export const containmentVerificationSchema = z.object({
     /** Members that descend from a live supervisor of a different work key or epoch. */
     attributed: z.array(z.number().int().positive()).max(200).default([]),
   }).strict()).max(50),
+  /**
+   * Every process reported above as holding the fence — a surviving supervisor or workspace
+   * process, or a member a live scope still holds — with its command line and working
+   * directory (null when unreadable) and the scope it was found in, so the master can verify
+   * each one before stopping anything.
+   */
+  held: z.array(z.object({ pid: z.number().int().positive(), command: z.string().max(500), cwd: z.string().max(1000).nullable(), unit: z.string().max(200).nullable() }).strict()).max(400).default([]),
+  /** The scope the quarantine recorded at launch and how systemd reports it now. */
+  recordedScope: z.object({ unit: z.string().min(1).max(200), pid: z.number().int().positive(), activeState: z.string().min(1).max(40) }).strict().nullable().default(null),
   /** Privileged host processes outside every containment scope that withheld inspection. */
   inaccessible: z.number().int().min(0),
   unverifiable: z.array(z.string().min(1).max(500)).max(50),
@@ -174,6 +186,11 @@ export type ContainmentVerification = z.infer<typeof containmentVerificationSche
 export const containmentAttestation = (key: string) =>
   `Confirm the previous worker is stopped and use the operator attestation path: rework ${key} --previous-worker-stopped REASON, or recover-containment ${key} --previous-worker-stopped REASON once the work is delivered`;
 
+/** What the master must read before stopping anything: the process's command line and cwd. */
+export function heldDetail(verification: Pick<ContainmentVerification, 'held'>, pid: number) {
+  const found = verification.held.find(entry => entry.pid === pid);
+  return found ? `; pid ${pid} cmdline "${found.command}" cwd ${found.cwd ?? '<unreadable>'}` : '';
+}
 /**
  * Pure refusal evaluation, shared by the verifying coordinator and the control plane.
  * Every check states what it could not prove; an empty result is the only authorization.
@@ -217,10 +234,14 @@ export function containmentSettlementRefusals(
   if (max < min) refusals.push('Host verification reported inconsistent clock bounds');
   else if (max - min > tolerance) refusals.push(`Verifying host could not bound its clock against the control plane within ${tolerance}ms`);
   else if (min > tolerance || max < -tolerance) refusals.push(`Verifying host clock differs from the control plane by more than ${tolerance}ms; clocks disagree`);
+  // The verification must have looked for the exact scope the launch recorded, so a probe run
+  // against a different record cannot settle this one.
+  if (quarantine.scope && (verification.recordedScope?.unit !== quarantine.scope.unit || verification.recordedScope?.pid !== quarantine.scope.pid))
+    refusals.push(`Host verification did not inspect recorded containment scope ${quarantine.scope.unit} (supervisor pid ${quarantine.scope.pid}) of epoch ${quarantine.epoch}`);
   for (const failure of verification.unverifiable) refusals.push(`Host verification was incomplete: ${failure}`);
   for (const process of verification.processes)
-    refusals.push(`Process ${process.pid} of the contained worker is still present on ${verification.host} (matched by ${process.evidence === 'command' ? 'supervisor command line' : 'assigned workspace'})`);
+    refusals.push(`Process ${process.pid} of the contained worker is still present on ${verification.host} (matched by ${process.evidence === 'command' ? 'supervisor command line' : 'assigned workspace'})${heldDetail(verification, process.pid)}`);
   for (const scope of verification.scopes.filter(entry => entry.processes.length))
-    refusals.push(`Containment scope ${scope.unit} is ${scope.activeState} and still holds ${scope.processes.length} process(es) that are not attributed to another assignment`);
+    refusals.push(`Containment scope ${scope.unit}${quarantine.scope?.unit === scope.unit ? ` (the scope epoch ${quarantine.epoch} was launched in)` : ''} is ${scope.activeState} and still holds ${scope.processes.length} process(es) that are not attributed to another assignment${scope.processes.map(pid => heldDetail(verification, pid)).join('')}`);
   return refusals;
 }

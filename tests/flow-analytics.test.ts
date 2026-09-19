@@ -255,11 +255,11 @@ async function deliver(work: Work, slice: string, mergeSha: string, overrides: P
   latest = await engine.observe(latest.id, latest.revision, { ...observation(latest, slice, overrides), prState: 'open', draft: false });
   assert.ok(latest.gates.every(gate => gate.passed), `the published tip clears the merge gate: ${JSON.stringify(latest.gates.find(gate => !gate.passed)?.reasons)}`);
   const granted = await engine.acquireMerge(coordinator, work.id, { expectedRevision: latest.revision, sha: head, baseSha: base, policyRevision: latest.policyRevision }, randomUUID());
-  await engine.verifyMerge(coordinator, work.id, { executionId: granted.execution.id }, { ...observation(latest, slice, overrides), prState: 'open', draft: false }, randomUUID());
-  // The broker recognizes a merge only after the commit step opened it; the provider's
-  // whole-second merge instant must fall after that commit.
-  const committed = await engine.commitMerge(coordinator, work.id, { executionId: granted.execution.id }, randomUUID());
-  const mergedAt = new Date(Math.ceil((Date.parse(committed.committingAt) + 1) / 1000) * 1000).toISOString().replace(/\.\d+Z$/, 'Z');
+  const verified = await engine.verifyMerge(coordinator, work.id, { executionId: granted.execution.id }, { ...observation(latest, slice, overrides), prState: 'open', draft: false }, randomUUID());
+  // The broker commits the verified execution before the provider call; only then does the
+  // merged observation complete the delivery.
+  await engine.commitMerge(coordinator, work.id, { executionId: granted.execution.id }, randomUUID());
+  const mergedAt = new Date(Math.ceil((Date.parse(verified.verifiedAt) + 1) / 1000) * 1000).toISOString().replace(/\.\d+Z$/, 'Z');
   latest = await current();
   const delivered = await engine.observe(latest.id, latest.revision, { ...observation(latest, slice, overrides), merged: true, mergeSha, mergedAt });
   assert.equal(delivered.stage, 'done');
@@ -478,8 +478,12 @@ test('integration:flow-analytics-edge-cases', async () => {
 test('integration:flow-analytics-operations', async () => {
   const slice = 'gy35-ops';
   const now = Date.now();
-  const blocked = await submitted(slice);
+  // A blocker is reported from the live attempt: `submit` ends the lease it needs.
+  let blocked = await released(slice);
+  blocked = await engine.execute(worker, 'claim', blocked.id, {}, randomUUID());
+  blocked = await engine.execute(worker, 'workspace', blocked.id, { epoch: blocked.epoch, host: 'machine-a', path: `/tmp/${blocked.id}`, branch: `graphyard/${blocked.key.toLowerCase()}` }, randomUUID());
   await engine.execute(worker, 'blocked', blocked.id, { epoch: blocked.epoch, reason: 'Waiting on an external provider decision' }, randomUUID());
+  blocked = await engine.execute(worker, 'submit', blocked.id, { epoch: blocked.epoch, pr: ++pullRequest }, randomUUID());
   const root = await released(slice);
   const middle = await released(slice, { dependencies: [root.id] });
   const leaf = await released(slice, { dependencies: [middle.id] });
@@ -496,8 +500,11 @@ test('integration:flow-analytics-operations', async () => {
   await engine.execute(second, 'claim', reviewed.id, {}, randomUUID());
 
   const longReason = `Waiting on a provider incident: ${'x'.repeat(260)}`;
-  const longBlocked = await submitted(slice, second);
+  let longBlocked = await released(slice);
+  longBlocked = await engine.execute(second, 'claim', longBlocked.id, {}, randomUUID());
+  longBlocked = await engine.execute(second, 'workspace', longBlocked.id, { epoch: longBlocked.epoch, host: 'machine-a', path: `/tmp/${longBlocked.id}`, branch: `graphyard/${longBlocked.key.toLowerCase()}` }, randomUUID());
   await engine.execute(second, 'blocked', longBlocked.id, { epoch: longBlocked.epoch, reason: longReason }, randomUUID());
+  longBlocked = await engine.execute(second, 'submit', longBlocked.id, { epoch: longBlocked.epoch, pr: ++pullRequest }, randomUUID());
 
   const { report, dataset } = await analyse({ slice });
   const operations = report.operations;
