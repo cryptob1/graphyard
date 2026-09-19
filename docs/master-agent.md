@@ -83,7 +83,8 @@ Each cycle:
 1. **closes finished worker sessions** — a launched agent whose principal holds no active lease has
    no authority left, so its pane is closed rather than left holding a provider seat. `complete`
    ends the worker's lease, so a submitted item's session is closed here on the next cycle; a
-   lease that lapses after submission is history (`lease.expired`), never an incident;
+   lease that lapses after submission, under a `blocked` report, or after your stopped-worker
+   attestation is history (`lease.expired` with its cause), never an incident;
 2. **dispatches claimable work** to a healthy worker profile, through the same launcher
    `master dispatch` uses: the worker claims under its own identity and the loop holds no lease;
 3. **shepherds reviews and proofs** — one recorded request per exact candidate, a request to the
@@ -136,6 +137,88 @@ running underneath them.
 
 ## Operate
 
+The master is a perpetual coordinator, not a one-shot dispatcher. Whether the
+mechanical steps run in the [durable loop](#durable-loop) or an agent session drives
+them by hand, keep cycling through these steps until both parts of the terminal
+condition hold: (1) every in-scope work item is Done or has a genuinely external
+blocker recorded in Graphyard; and (2) every merged change is deployed and
+live-verified against the exact deployed release, or a genuinely external deployment
+blocker is recorded in Graphyard:
+
+1. Run `master status` and treat Graphyard as progression truth.
+2. Dispatch ready work to an appropriate worker profile.
+3. Shepherd review findings, rework, and trusted proof collection to completion.
+4. Request a guarded merge only when the exact candidate passes every gate.
+5. Run [deployment verification](#deployment-verification) for each delivery with
+   `master verify-deployment GY-N`: the required live behavior is established against
+   the exact deployed release, and local or stale observations are refused rather than
+   counted.
+6. Close finished agent sessions, then return to status and continue the cycle.
+
+Ordinary review findings, rework, idle workers, and proof setup are not stopping
+conditions. Resolve or route them and continue. Done marks an observed merge, not a
+deployed release, so the last merge never satisfies the terminal condition before
+step 5. Stop only when every in-scope work item is Done or genuinely externally
+blocked, and either the exact deployed release has passed live verification or a
+genuinely external deployment blocker is recorded in Graphyard.
+
+In-scope work is every item Graphyard has released: unreleased backlog is the
+operator's to release with `ready`, so it neither blocks nor satisfies the terminal
+condition. A per-item blocker is the `blocked` record the lease holder writes on the
+item; a session that went quiet without one is not a blocker, it is work to dispatch
+again.
+
+A deployment blocker has its own record because delivered work is immutable and
+accepts no `blocked` mutation. When a delivery cannot be verified live for a
+genuinely external reason — the provider will not roll out, the release endpoint is
+gone, or a rollback decision is pending — record it as a follow-up work item naming
+the delivered item, its merge commit, and the external cause; `daemon.deployment`
+keeps listing the delivery under `pending` (or `unavailable` when no probe can
+answer), and `delivered` keeps it `awaiting-deployment` or `awaiting-smoke`, until
+the release serves it. Only that recorded follow-up satisfies part (2) without live
+verification. An unverified deployment with no such record is never terminal, and
+neither is a delivery whose release moved on before the smoke ran; see
+[operations](operations.md#delivered-with-a-failed-smoke-proof) for the failure path.
+
+### Deployment verification
+
+Done marks an observed merge. What the running release serves is a separate fact, and
+the loop establishes it after delivery with one command per delivered item:
+
+```sh
+node "$GRAPHYARD_CLI" master verify-deployment GY-42
+```
+
+It is an operational step the master performs and records after delivery, never a
+pre-merge gate: nothing about it changes which candidates merge. The command
+
+1. observes the deployed release through the loop's deployment probe (`--deployment-url`,
+   or the provider's deployment record for the base branch) and refuses when nothing
+   answers, when the observation is older than five minutes, or when the release does not
+   yet contain the item's merge commit;
+2. identifies the checkout whose CLI emits the instructions — the commit the configured
+   launcher's checkout is at — and refuses a local-only reading: a checkout at any commit
+   other than the deployed release, or one with uncommitted changes;
+3. reads what that release emits the way an operator would: `master guide`, and the
+   `AGENTS.md` a fresh `init --url` writes into a scratch git checkout outside every
+   repository, with no Graphyard credential in the environment. Both must carry the
+   perpetual cycle, deployment verification as a step of it, the terminal condition, the
+   exact-release requirement, the non-stopping conditions, and the finished-agent closure
+   duty. This check applies when the launcher is a checkout of the managed repository —
+   Graphyard verifying its own release; for another managed repository the release's
+   coverage of the merge is the whole check;
+4. records the observation on the delivered item as its deployment observation
+   (`delivery.deployment`, and a `deployment` event in the item's history), bound to the
+   exact commit observed, the merge commit it covers, the probe source, and the observation
+   time. The control plane accepts one observation per delivery and refuses a second, so a
+   later rollout is verified through a follow-up item, never by rewriting the record.
+
+A refusal prints every reason, exits nonzero, and records nothing; the loop keeps cycling.
+A verification that already stands for the same release reports `recorded: existing`
+and writes nothing twice. `master status` shows the recorded observation under
+`delivered` for deliveries whose policy sets `deploySmoke`; the item's `events` show it
+for every delivery.
+
 ```sh
 node "$GRAPHYARD_CLI" master status
 node "$GRAPHYARD_CLI" master dispatch GY-42 codex-primary
@@ -143,6 +226,7 @@ node "$GRAPHYARD_CLI" master review GY-42
 node "$GRAPHYARD_CLI" master settle-containment GY-42 "Supervisor died on provider usage limit"
 node "$GRAPHYARD_CLI" master merge GY-42
 node "$GRAPHYARD_CLI" master merge --all
+node "$GRAPHYARD_CLI" master verify-deployment GY-42
 ```
 
 Run `status` at startup, after dispatch, when a worker reports completion, and when an integration event arrives. Owners, stages, refusals, merge candidates, and pending and completed reviews come from Graphyard. Missing Herdr telemetry never erases an assignment.
@@ -151,7 +235,7 @@ Run `status` at startup, after dispatch, when a worker reports completion, and w
 
 For work using the [identity-bound agent review provider](github.md#identity-bound-agent-review-providers), each row carries a `review` object with the currently dispatched reviewer profile and runtime, plus the failover entries recorded for the current candidate; `counts.reviewFailover` totals the items that failed over. A reviewer runs out of quota or goes silent past its timeout, Graphyard records that and moves to the next configured profile on its own — no master action is required. When every profile is exhausted the row is flagged for attention and the review gate stays closed. That is a capacity decision for the operator: add reviewer capacity, wait for quota, or revise the review policy. Never treat exhaustion as an approval, and never merge around a closed review gate.
 
-`master status` also reports facts about the installation itself under `controlPlane`: `attention` lists a GitHub App permission the installation lacks (with the installation page where the pending request is accepted), a preflight that could not verify the permissions, and the number of integration jobs held on that shortfall; `appPermissions` carries the missing entries and when they were last verified; `counts.attention` includes these items. A permission shortfall is an operator action, not a merge decision: the affected jobs are held rather than retried, the gates they feed stay closed, and `graphyard github-setup --update-permissions` on the machine holding the App credentials prints the exact steps. `master init` reports the same attention in its result. See [App permissions](github.md#app-permissions).
+`master status` also reports facts about the installation itself under `controlPlane`: `attention` lists a GitHub App permission the installation lacks (with the installation page where the pending request is accepted), a preflight that could not verify the permissions, the number of integration jobs held on that shortfall, every capacity variable that no longer covers the configured principals (`Set GRAPHYARD_MAX_REVIEWERS=N on the deployment`, under `delegationLimits`), and how far the base branch is ahead of what production serves; `appPermissions` carries the missing entries and when they were last verified; `counts.attention` includes these items. `controlPlane.production` is the control plane's own [deployment observation](deployment.md#production-deployment-observation): the serving commit, `aheadBy`, the newest provider deployment with its status, the pending and deployed items, and the open incidents; when main is ahead the attention line reads `main is N commits ahead of production (serving …): <failing deployment reason>`. `controlPlane.build` is the commit and merge protocol the server runs, `versionSkew` is the refusal `master merge` would raise (`null` when the CLI and server agree), and `latency.mergeToProduction` is the merge-to-production p50/p90 over every delivery with an observed deployment, which the periodic measurement records beside `delivered[].mergeToProductionMs`. A permission shortfall is an operator action, not a merge decision: the affected jobs are held rather than retried, the gates they feed stay closed, and `graphyard github-setup --update-permissions` on the machine holding the App credentials prints the exact steps. `master init` reports the same attention in its result. See [App permissions](github.md#app-permissions).
 
 Dispatch:
 
@@ -280,7 +364,7 @@ A foreground worker runs inside a containment quarantine that its supervisor set
 
 `master status` reports every such quarantine on each work row under `containment`, with `counts.quarantined` and `counts.settleableQuarantines` totalling them. For a quarantine whose workspace is registered on this coordinator's host, status also verifies it: it checks that the worker lease and the launch authority have both been expired past their grace window — measured from the lease deadline the quarantine retains, since reconciliation clears the expired lease record long before that window closes — then inspects this host for any surviving supervisor process, any process running in the assigned workspace, and any live `graphyard-watch` containment scope.
 
-A live scope is dismissed only when every member it still holds is positively attributed to another assignment, by following that member's ancestry to a live supervisor naming a different work key or epoch. Another worker's scope on the same machine is therefore ordinary; an orphaned scope left by a dead supervisor is not, and it fences until an operator attests.
+The quarantine records the exact scope unit the session was launched in and the supervisor's pid (`containment.scope`), and status reports what systemd says of that unit. Everything the recorded scope still holds fences this item, whatever a member's working directory or ancestry says. Any other live `graphyard-watch-*` scope is dismissed only when its members are positively attributed to another assignment: by the live supervisor whose pid the scope name carries, when that supervisor runs `watch` for a different work key or epoch from another workspace, or by following a member's own ancestry to such a supervisor. Another worker's scope on the same machine is therefore ordinary, even when its session has reparented away from its supervisor; an orphaned scope left by a dead supervisor is not, and it fences until an operator attests. Every process still holding the fence is listed in `containment.held`, and printed by `master settle-containment`, with its pid, cmdline and cwd — read them before stopping anything.
 
 - `settleable: true` with no `refusals` means the supervisor is verifiably gone. Run `master settle-containment GY-N "reason"`. The control plane re-checks the deadlines and the verification before clearing the fence, and records the verification in the event ledger.
 - Any `refusals` entry means something could not be proven — the host is unreachable or not the registered one, a scope or process query failed, a process is still present, or the clocks disagree. Automatic settlement refuses, and so does the control plane. Stop the supervisor yourself and use the operator attestation path (`rework GY-N --previous-worker-stopped`, or `recover-containment GY-N --previous-worker-stopped` once the work is delivered).
@@ -309,6 +393,8 @@ A master merge succeeds only when Graphyard has a current authorization for the 
 
 The command never uses an admin bypass. Graphyard marks Done only after independently observing the matching merge. Direct or late merges remain visible violations.
 
+Before any candidate is read, the broker compares the merge protocol it speaks with the one the server reports in `GET /api/status` (`build.protocol`; a server that reports none is protocol 1). A mismatch refuses with `server runs <sha>, CLI expects <sha>: deploy main first` — the deployment has not served the commit the CLI runs, typically because the container failed to start — instead of failing later with an invalid gate verification. The durable loop makes the same check at start-up and before every guarded merge. Deploy main (see [merged but not deployed](operations.md#merged-but-not-deployed)) and retry; never downgrade the CLI to match a stale server.
+
 Use `master init --no-auto-merge` when an operator must approve each merge request. This preference does not weaken the checks.
 
 ## Merge queue
@@ -335,12 +421,35 @@ For a dead worker or provider change:
 4. claim with the replacement worker at a higher epoch;
 5. create a fresh workspace and preserve the old attempt.
 
-A `lease-loss` escalation stands only for an attempt abandoned before it submitted, or for an
-assignment a replacement claim or rework discarded, and only a declared human session resolves it.
-A lease that expired after `complete` raises nothing, and a standing `lease-loss` whose epoch
-already has a bound submission is settled by reconciliation itself (`escalation.auto-settled`,
-`auto-settled: submitted before expiry`) — do not ask the operator to resolve one, and do not
-treat a submitted item whose worker session has ended as an incident needing rework.
+A `lease-loss` escalation stands only for a worker that silently vanished: a lease that lapsed
+with no submission, no carried `blocked` report and no stopped-worker attestation for its epoch.
+Every other lapse is `lease.expired` history with its cause — `submitted` (the lease ended at
+`complete`), `blocked-awaiting-operator` (the worker reported `blocked` and stopped to wait on
+you), or `stopped-by-attestation` (you stopped the worker and said so with
+`rework --previous-worker-stopped` or `recover-containment --previous-worker-stopped`, before or
+after the lapse) — and raises nothing. Do not treat any of those as an incident needing a human.
+
+Who settles what:
+
+- reconciliation settles, on deploy and every later tick, a standing `lease-loss` whose epoch has
+  a bound submission, a carried blocked report, or a stopped-worker attestation in the ledger
+  (`escalation.auto-settled`, with the note and the attestation it rests on). Attest first, then
+  wait a tick: your `rework --previous-worker-stopped` for the lapsed epoch is the attestation;
+- you, as an admin of any session kind, settle a control-plane-raised `lease-loss` yourself by
+  citing the attestation: `resolve GY-N lease-loss --attestation blocked|stopped-worker "reason"`.
+  The server verifies the citation against the ledger and refuses one that is not there; the
+  `escalation.resolved` entry records who, why and which attestation;
+- a lapse nothing explains — no report, no attestation — is a vanished worker and stays for a
+  declared human session, as do `security-concern`, `requirement-weakening`,
+  `evidence-policy-conflict` and any lease-loss a lead raised. Never work around those.
+
+Before `master settle-containment` stops anything, read its report: the quarantine records the
+exact scope unit and supervisor pid the session was launched in (`containment.scope`), and a
+refusal prints every process still holding the fence with its cmdline and cwd, and says what
+systemd reports for the recorded scope. A neighbouring `graphyard-watch-*` scope is attributed to
+its own live supervisor by the pid in its name, so another item's running worker is not this
+item's fence; a scope you cannot attribute from that report belongs to someone — verify whose
+before stopping it.
 
 The master does not clear blockers, revise requirements, or satisfy human gates on its own. See [operations](operations.md) for recovery commands, including [restarting the durable loop](operations.md#master-coordination-loop).
 

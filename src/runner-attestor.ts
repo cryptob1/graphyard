@@ -91,7 +91,7 @@ export async function superviseAttempt(input: unknown, options: AttestorIdentity
   // Every kind the boundary may hold is measured, so the attestation does not depend on
   // how the separate collector happens to be configured. The collector publishes its own
   // required subset and each of those digests must match one measured here.
-  const collected = await collectArtifacts(record.outputPath, Object.keys(artifactKinds));
+  const collected = await collectArtifacts(record.outputPath, Object.keys(artifactKinds), plan.grant.reportFormat);
   // Measuring by pathname is only meaningful while the pathname still leads to the
   // boundary preflight approved. Nothing is signed otherwise: an attestation over an
   // older attempt's output would be a valid signature on someone else's execution.

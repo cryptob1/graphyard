@@ -80,7 +80,7 @@ test('a self-hosted plan treats DATABASE_URL as a secret and names the required 
   try {
     const session = await prepareInstall(fixture.root, { repository: 'owner/project', provider: 'compose' }, fixture.deps, 'apply');
     const core = coreEnv(session);
-    assert.deepEqual(core.map(value => value.name), ['HOST', 'PORT', 'DATABASE_URL', 'GRAPHYARD_PRINCIPALS', 'GITHUB_REPOSITORY', 'GITHUB_BASE_BRANCH', 'GRAPHYARD_REVIEWER_APPS']);
+    assert.deepEqual(core.map(value => value.name), ['HOST', 'PORT', 'DATABASE_URL', 'GRAPHYARD_PRINCIPALS', 'GITHUB_REPOSITORY', 'GITHUB_BASE_BRANCH', 'GRAPHYARD_REVIEWER_APPS', 'GRAPHYARD_MAX_SLICE_LEADS', 'GRAPHYARD_MAX_ENGINEERS_PER_LEAD', 'GRAPHYARD_MIN_REVIEWERS', 'GRAPHYARD_MAX_REVIEWERS']);
     assert.equal(core.find(value => value.name === 'DATABASE_URL')!.secret, true);
     const plan = await buildPlan(session);
     assert.equal(plan.actions.find(action => action.id === 'provider.env.core')!.values!.find(value => value.name === 'DATABASE_URL')!.value, REDACTED);

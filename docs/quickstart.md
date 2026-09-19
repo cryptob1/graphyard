@@ -22,7 +22,8 @@ node "$GRAPHYARD_CLI" install --provider compose --repo OWNER/REPO --apply
 application on this machine, and publishes the server on `http://127.0.0.1:4310`. Use
 `--port N` if that port is taken. The installer generates one credential per role under
 `~/.config/graphyard/<install>/`, runs the GitHub App flow — one browser confirmation — and
-verifies health, authenticated status, and webhook delivery.
+verifies health, authenticated status, and webhook delivery. `curl -s
+http://127.0.0.1:4310/healthz` names the version and schema generation you are running.
 
 A loopback URL is not reachable from GitHub, so webhook delivery stays unconfirmed on this
 provider. That is expected for local evaluation and is reported, not hidden. Graphyard still

@@ -15,7 +15,7 @@ The sections below are generated from each page's `<!-- page: Section | order | 
 
 ## Operate Graphyard
 
-- [Deployment](deployment.md) — provider reference behind the installer, the variables table, a manual fallback, backups, and upgrades.
+- [Deployment](deployment.md) — provider reference behind the installer: versioned images, the variables table, a manual fallback for Railway, Docker Compose and the Helm chart, backups, upgrades, and restores.
 - [GitHub enforcement](github.md) — App permissions, branch protection, CI producers, and Codex review.
 - [Herdr integration](herdr.md) — worker installation and multi-machine use.
 - [Master-agent operating mode](master-agent.md) — routing, recovery, and guarded merges.
@@ -32,6 +32,7 @@ The sections below are generated from each page's `<!-- page: Section | order | 
 - [E2E test-case registry](test-cases.md) — versioned E2E scenarios pinned to environments.
 - [Validation candidates and runner protocol](validation.md) — candidates, dispatch, attempts, and trusted result collection.
 - [The packaged Playwright runner and collector](runner-setup.md) — the packaged Playwright runner, host attestor, and collector.
+- [Report adapters](report-adapters.md) — what each supported report format proves, observes and refuses.
 - [Releases and observed production delivery](delivery.md) — release builds, approvals, and observed production delivery.
 - [Runner capacity, artifact operations and delivery recovery](recovery.md) — runner capacity, artifact retention and migration, and fenced rollback as an observed workflow.
 

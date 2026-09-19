@@ -6,6 +6,7 @@ import { discover } from '../onboarding.js';
 import { adapterFor, carriesCredential, variableMarker, type AdapterContext, type AdapterObservation, type ProviderAdapter, DEFAULT_IMAGE } from './adapters.js';
 import { applyProtection, appClient, configureWebhook, detectCiAppIds, effectiveReviewCount, headSha, githubCli, installationClient, protectionSatisfied, readProtection, readWebhookConfig, triggerDelivery, verifyDelivery, webhookUrlFor, CHECK_NAME, type AppFacts, type DeliveryProof } from './github.js';
 import { detectHerdr, detectRuntimes, masterRuntime, reviewerProfiles, workerProfiles, type DetectedRuntime, type HerdrState, type ReviewerProfileDraft, type WorkerProfileDraft } from './runtimes.js';
+import { delegationLimitAssignments, delegationLimitVariables } from './limits.js';
 import { assertOutsideRepository, ensureTokens, fingerprint, installDirectory, installRecordSchema, plannedPrincipals, prepareInstallDirectory, principalOfRole, principalsVariable, readInstallRecord, tokenFile, workerPrincipals, writeInstallRecord, Vault, type InstallRecord } from './secrets.js';
 import { localTransport, sshTransport, type Transport } from './transport.js';
 import { installIdFor, REDACTED, SERVER_PORT, type EnvValue, type InstallInputs, type InstallPlan, type PlanAction, type PlanDrift, type PlanValue, type PlannedPrincipal, type Provider } from './types.js';
@@ -156,6 +157,7 @@ async function stableDatabasePassword(directory: string, create: boolean) {
 export function coreEnv(session: InstallSession): EnvValue[] {
   const { context, inputs } = session;
   const databaseUrl = context.provider === 'railway' ? '${{Postgres.DATABASE_URL}}' : `postgres://graphyard:${context.databasePassword}@db:5432/graphyard`;
+  const capacity = delegationLimitAssignments(session.principals);
   return [
     { name: 'HOST', value: '0.0.0.0', secret: false },
     { name: 'PORT', value: String(SERVER_PORT), secret: false },
@@ -164,6 +166,10 @@ export function coreEnv(session: InstallSession): EnvValue[] {
     { name: 'GITHUB_REPOSITORY', value: inputs.repository, secret: false },
     { name: 'GITHUB_BASE_BRANCH', value: inputs.baseBranch, secret: false },
     { name: 'GRAPHYARD_REVIEWER_APPS', value: JSON.stringify(session.reviewers.map(reviewer => ({ id: reviewer.name, runtime: reviewer.name.replace(/-reviewer$/, ''), appId: reviewer.appId, botUserId: reviewer.botUserId }))), secret: false },
+    // The capacity limits derived from the principal set being deployed; the server derives the
+    // same values when they are unset, and an explicit value keeps the install predictable
+    // across upgrades. A re-run after the roster changed reports the old values as drift.
+    ...delegationLimitVariables.map(name => ({ name, value: capacity.variables[name], secret: false })),
   ];
 }
 

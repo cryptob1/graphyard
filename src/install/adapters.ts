@@ -1,8 +1,10 @@
 import { fingerprint, Vault } from './secrets.js';
 import type { Transport } from './transport.js';
 import { SERVER_PORT, type EnvValue, type PlanAction, type PreflightItem, type Provider } from './types.js';
+import { packageVersion } from '../release.js';
 
-export const DEFAULT_IMAGE = 'ghcr.io/cryptob1/graphyard:main';
+/** The versioned release image for the checkout's own version, as .github/workflows/release.yml publishes it. */
+export const DEFAULT_IMAGE = `ghcr.io/cryptob1/graphyard:${packageVersion}`;
 
 export interface AdapterContext {
   provider: Provider;

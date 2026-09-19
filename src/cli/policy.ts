@@ -1,4 +1,5 @@
 import { readFile } from 'node:fs/promises';
+import { attestationKinds, leaseLossEpoch, standingEscalations } from '../model.js';
 import { defineCommands, workMutation } from './registry.js';
 
 /** Operator decisions about one work item: requirements, release, recovery and review policy. */
@@ -29,11 +30,25 @@ export const policyCommands = defineCommands([
   {
     name: 'resolve',
     scope: 'work',
-    help: ['  resolve GY-N TRIGGER REASON   Resolve a standing escalation with an audit reason (operator)'],
+    help: [
+      '  resolve GY-N TRIGGER [--attestation blocked|stopped-worker] REASON',
+      '                                Resolve a standing escalation with an audit reason (declared',
+      '                                human); a control-plane-raised lease-loss may instead be',
+      '                                settled by any admin session citing the ledger attestation',
+    ],
     async run(context, work) {
       const { args } = context;
-      if (!args[0] || !args.slice(1).length) throw new Error('Name the standing escalation trigger and an audit reason');
-      return context.print(await workMutation(context, work)('resolve', { trigger: args[0], expectedRevision: work.revision, reason: args.slice(1).join(' ') }));
+      const flag = args.indexOf('--attestation');
+      const kind = flag < 0 ? undefined : args[flag + 1];
+      if (flag >= 0 && !attestationKinds.includes(kind as any)) throw new Error(`Pass the attestation kind after --attestation: ${attestationKinds.join(' or ')}`);
+      const positional = flag < 0 ? args : [...args.slice(0, flag), ...args.slice(flag + 2)];
+      if (!positional[0] || !positional.slice(1).length) throw new Error('Name the standing escalation trigger and an audit reason');
+      // The citation names the epoch the standing lease-loss belongs to, read from the record
+      // the admin has in front of them; the server verifies the attestation in the ledger.
+      const standing = standingEscalations(work).find((entry: any) => entry.trigger === positional[0]);
+      const epoch = standing ? leaseLossEpoch(standing) : null;
+      if (kind && epoch === null) throw new Error(`${work.key} has no standing lease-loss to settle by attestation; standing escalations are ${standingEscalations(work).map((entry: any) => entry.trigger).join(', ') || 'none'}`);
+      return context.print(await workMutation(context, work)('resolve', { trigger: positional[0], expectedRevision: work.revision, reason: positional.slice(1).join(' '), ...(kind ? { attestation: { kind, epoch } } : {}) }));
     },
   },
   {

@@ -107,6 +107,7 @@ Add the options the instruction called for:
 | `--ssh-host HOST` / `--ssh-user USER` | Target for `docker-host` |
 | `--base-branch NAME` | Protected base branch (default `main`) |
 | `--port N` | Host port for a local `compose` install (default 4310) |
+| `--image REF` | Control-plane image for `hetzner` and `docker-host` (default: the [versioned release image](deployment.md#versioned-images) for this checkout's version, `ghcr.io/cryptob1/graphyard:X.Y.Z`; pin a digest here). `railway` builds the root `Dockerfile` and `compose` builds the image from the checkout |
 | `--required-check NAME` | Also require this existing CI check on the base branch; repeatable |
 | `--review-count N` | Approving reviews to require, when the policy's default is not what you want |
 
@@ -312,6 +313,30 @@ Upgrade in this order:
 4. Nothing else is needed. The next preflight sees the accepted permission and releases the
    held jobs; no restart is required. Confirm with `doctor` that `appPermissions.missing` is
    empty and `heldJobs` is `0`.
+
+### Capacity limits and drift
+
+An upgrade never changes the roster, but a release can change a default. The server therefore
+derives any unset `GRAPHYARD_MAX_*`/`GRAPHYARD_MIN_*` limit from the principals it is
+configured with and starts; it refuses start-up only for a principal newly added beyond an
+explicit limit, naming the variable and the value to set. Both `doctor` and `master status`
+report `delegationLimits` drift — a deployed value, or an unset default, that no longer covers
+the principals — as `Set GRAPHYARD_MAX_REVIEWERS=N on the deployment`. The installer derives
+the four variables from the principal set it deploys and sets them beside
+`GRAPHYARD_PRINCIPALS`; re-running it after the principal set changes reports the deployed
+value that no longer covers the principals as `drift` on `provider.env.core` and sets the
+corrected values. Set them by hand on a manual deployment and redeploy. See
+[delegation capacity variables](deployment.md#delegation-capacity-variables).
+
+### Confirm the deployment served the upgrade
+
+A container that exits at start-up leaves the previous release serving and `/healthz` green.
+After deploying, confirm `/healthz` reports the `commit` you deployed, and read `production`
+in `doctor` or `controlPlane.production` in `master status`: `main is N commits ahead of
+production` with the provider's failure reason means the upgrade never started.
+`master merge` refuses with `server runs <sha>, CLI expects <sha>: deploy main first` while
+the deployed server speaks an older merge protocol than the CLI checkout. See
+[production deployment observation](deployment.md#production-deployment-observation).
 
 Only the control-plane App gains a permission in this migration. Reviewer Apps keep their own
 declaration — `github-setup --update-permissions --reviewer NAME` reports any excess grant as

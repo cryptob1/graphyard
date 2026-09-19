@@ -70,9 +70,12 @@ agent-executable runbook, so `install Graphyard for OWNER/REPO on railway follow
 docs/install.md` is a complete instruction for a coding agent. Graphyard is not published to
 npm yet; run the CLI from a Graphyard checkout.
 
-Graphyard is one application container plus Postgres. It does not require Temporal,
-LangGraph, Redis, or Kubernetes. [Deployment](docs/deployment.md) is the provider reference
-behind the installer, including the full variables table and a manual fallback.
+Graphyard is one application container plus Postgres. Every release publishes a versioned
+image; the installer runs it on Railway, a Hetzner or Docker host, or Docker Compose, and
+the ledger is backed up, upgraded and restored with the shipped `graphyard db` commands. It
+does not require Temporal, LangGraph, Redis, or a hosted account; Kubernetes is supported
+through the Helm chart, not required. [Deployment](docs/deployment.md) is the provider
+reference behind the installer, including the full variables table and a manual fallback.
 
 ## Evaluate it on one machine
 
