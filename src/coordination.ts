@@ -1,4 +1,4 @@
-import { bootstrapObligations, currentEvidence, grantsAuthorize, inheritedObligations, pathScopesOverlap, type BootstrapObligation, type ProofAuthority, type Work } from './model.js';
+import { bootstrapObligations, currentEvidence, describeQueueBinding, evidenceBindsCandidate, grantsAuthorize, inheritedObligations, pathScopesOverlap, type BootstrapObligation, type ProofAuthority, type Work } from './model.js';
 
 export interface IntegrationJob { work_id: string; available_at: string; locked_until: string | null; error: string | null; held_until?: string | null }
 export interface Diagnostic { kind: string; message: string; next: string }
@@ -48,6 +48,19 @@ export function diagnose(work: Work, all: Work[], now: number, jobs: Integration
   for (const obligation of inheritedObligations(work, all)) add('bootstrap-obligation', `${obligation.proof} is inherited from ${obligation.key} ${obligation.criterionId} because this item plans to touch ${obligation.contractPaths.join(', ')}`,
     'Produce trusted passing evidence for this proof; a bootstrap deferral cannot be renewed by the change that inherits it.');
   for (const proof of work.proofGaps ?? []) add('proof-authority-gap', `No principal is authorized to produce ${proof}`, 'Grant the proof name to a producer principal with `graphyard grants grant`; the acceptance gate cannot be satisfied until someone can produce it.');
+  if (work.submission && work.observation?.baseTipContained === false) add('base-behind', `Candidate ${work.candidate?.sha.slice(0, 12)} does not contain the base branch tip ${work.observation.baseTip?.slice(0, 12) ?? ''}`,
+    `No review is requested for it: run graphyard sync ${work.key} and push, or let the merge queue publish a tip that contains the base once the candidate is proven.`);
+  // Per queued item: which bindings were carried across the Graphyard-authored tip or a
+  // tree-identical base advance, and which must be produced afresh, each with its reason.
+  const binding = describeQueueBinding(work, all, new Date(now));
+  if (binding) {
+    const tip = binding.tip.slice(0, 12);
+    if (binding.base.carriedTo) add('queue-base-carried', `Bound base ${binding.base.sha.slice(0, 12)} carried to tree-identical base branch tip ${binding.base.carriedTo.sha.slice(0, 12)} (tree ${binding.base.tree.slice(0, 12)})`, 'Nothing is republished; the published tip lands its tested tree.');
+    for (const entry of [{ what: 'Approval', ...binding.approval }, ...binding.evidence.map(entry => ({ what: `Proof ${entry.proof}`, ...entry }))]) {
+      if (entry.state === 'carried') add('queue-binding-carried', `${entry.what} carried to tip ${tip}: ${entry.reason}`, 'No fresh review or proof round is required for it.');
+      else if (entry.state === 'required') add('queue-binding-required', `${entry.what} is required afresh for tip ${tip}: ${entry.reason}`, entry.what === 'Approval' ? `Request an independent review of ${tip}.` : `Produce trusted evidence for ${tip}.`);
+    }
+  }
   for (const violation of work.violations) add('violation', violation, 'An operator must investigate; do not bypass the gate.');
   const first = work.gates.find(g => !g.passed);
   if (work.submission && first) for (const reason of first.reasons) add(`gate-${first.name}`, reason, `Satisfy the ${first.name} gate; new observations and evidence trigger reevaluation.`);
@@ -58,8 +71,7 @@ export function proofPreview(work: Work, all: Work[] = []) {
   const measure = (criterion: string, proof: string, deferred?: BootstrapObligation, inherited?: BootstrapObligation) => {
     const pin = work.scenarioRequirements.find(s => s.proof === proof);
     const evidence = currentEvidence(work, proof);
-    const revoked = !evidence && work.evidence.some(e => e.proof === proof && e.trusted && !!e.revocation
-      && e.sha === work.candidate?.sha && e.baseSha === work.candidate?.baseSha && e.policyRevision === work.policyRevision);
+    const revoked = !evidence && work.evidence.some(e => e.proof === proof && e.trusted && !!e.revocation && evidenceBindsCandidate(work, e) && e.policyRevision === work.policyRevision);
     const status = deferred ? 'deferred' : revoked ? 'revoked'
       : !evidence ? 'unmeasured' : evidence.executed < 1 || evidence.skipped > 0 ? 'incomplete' : evidence.result === 'fail' ? 'failed' : 'passed';
     return { criterion, proof, status, scenario: pin, producer: evidence?.producer, evidenceId: evidence?.id, bootstrap: deferred ?? inherited };
