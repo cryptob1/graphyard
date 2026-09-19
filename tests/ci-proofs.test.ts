@@ -223,6 +223,16 @@ test('integration:ci-proofs-workflow the acceptance workflow plans, exercises an
   assert.match(ci, /workflow-lint:/); assert.match(ci, /actionlint_1\.7\.12_linux_amd64\.tar\.gz/); assert.match(ci, /sha256sum --check/);
 });
 
+test('the unit runner installs the candidate before the protected inventory lands and verifies it byte for byte before the run', async () => {
+  // A candidate's install lifecycle scripts run during `npm ci`; the inventory must be copied after
+  // them, and checked right before the test process starts, or the judged cases are not the harness's.
+  const runner = await readFile(new URL('../scripts/run-unit-acceptance.mjs', import.meta.url), 'utf8');
+  const install = runner.indexOf("execFileSync('npm', ['ci'"), copy = runner.indexOf('await copyFile(join(harness, selected.file)'), compare = runner.indexOf('.equals(await readFile(join(candidate, selected.file)))'), run = runner.indexOf('spawnSync(process.execPath');
+  assert.ok(install >= 0 && copy >= 0 && compare >= 0 && run >= 0);
+  assert.ok(install < copy && copy < compare && compare < run);
+  assert.doesNotMatch(runner.slice(compare, run), /execFileSync|spawnSync|copyFile/);
+});
+
 // ---------------------------------------------------------------------------
 // integration:ci-proofs-trust — the control plane's own judgement of a CI binding (pure part;
 // the server-side refusals run against a real database in ci-proofs-trust.test.ts)

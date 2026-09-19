@@ -18,11 +18,18 @@ const candidate = resolve(candidateDirectory);
 const metadata = JSON.parse(await readFile(metadataFile, 'utf8'));
 let cases = selected.requiredCases.map(id => ({ id, result: 'skipped' })), passed = false;
 try {
+  // Dependencies are installed before the inventory lands: the candidate's lifecycle scripts
+  // (preinstall/postinstall/prepare, or a dependency's) run during `npm ci` and could otherwise
+  // rewrite the file after it was copied.
+  execFileSync('npm', ['ci', '--no-audit', '--no-fund'], { cwd: candidate, stdio: ['ignore', 'inherit', 'inherit'] });
   // The protected inventory replaces whatever the candidate carries at that path, so the cases
   // judged are the ones this checkout registers. The candidate's own source is what they import.
+  // It is copied and byte-compared immediately before the run so nothing between the copy and the
+  // test process can substitute the candidate's own version.
+  const protectedInventory = await readFile(join(harness, selected.file));
   await mkdir(dirname(join(candidate, selected.file)), { recursive: true });
   await copyFile(join(harness, selected.file), join(candidate, selected.file));
-  execFileSync('npm', ['ci', '--no-audit', '--no-fund'], { cwd: candidate, stdio: ['ignore', 'inherit', 'inherit'] });
+  if (!protectedInventory.equals(await readFile(join(candidate, selected.file)))) throw new Error(`${selected.file} in the candidate checkout does not match the protected inventory`);
   // Only the inventory's own titles run; the rest of the file is the ordinary CI suite's business.
   // The TAP stream is judged from stdout; a failing test fails the process, which is reported
   // through the inventory rather than by throwing here.
