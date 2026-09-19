@@ -4,12 +4,14 @@
 
 Keep a dedicated master coordinator running until both parts of the terminal
 condition hold: (1) every in-scope item is Done or has a genuinely external blocker
-recorded in Graphyard; and (2) the merged change is deployed and live-verified against
+recorded in Graphyard; and (2) every merged change is deployed and live-verified against
 the exact deployed release, or a genuinely external deployment blocker is recorded
 in Graphyard. Repeatedly run status, dispatch ready work, shepherd review and trusted
 proof collection, request guarded merges, and verify deployment and live behavior
 against the exact deployed release. Close finished agent sessions and return to
-status after every material event.
+status after every material event. The [durable loop](#master-coordination-loop)
+runs the mechanical steps; the coordinator's judgment calls sit on top of it and
+follow the same terminal condition.
 
 Ordinary review findings, rework, idle workers, and proof setup are not stopping
 conditions. They are work for the coordinator to route and follow through. A local
@@ -17,6 +19,19 @@ or stale check is not deployment verification, and blockers must be recorded in
 Graphyard rather than inferred from an inactive session. Done marks an observed
 merge, so it never authorizes stopping before deployment and live verification
 against the exact deployed release.
+
+Blockers have exactly two records. A per-item blocker is written by the lease holder
+with `graphyard blocked GY-N EPOCH "reason"` and cleared as described under
+[blocked item with no owner](#blocked-item-with-no-owner). A deployment blocker
+cannot be written on the delivered item — delivered work is immutable — so it is a
+follow-up work item that names the delivered item, its merge commit, and the
+genuinely external cause. Until that release is live-verified, `daemon.deployment`
+lists the delivery under `pending` (or `unavailable` when no probe answers) and
+`delivered` keeps it `awaiting-deployment` or `awaiting-smoke`; those observations
+are the coordinator's evidence that verification is still owed, and the follow-up
+item is the only record that lets the loop stop without it. Never satisfy the
+deployment step from a local checkout, a stale observation, or a delivery the
+release has since moved past.
 
 ## Daily checks
 

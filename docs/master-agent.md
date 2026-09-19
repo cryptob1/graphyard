@@ -133,11 +133,13 @@ running underneath them.
 
 ## Operate
 
-The master is a perpetual coordinator, not a one-shot dispatcher. Keep cycling
-through these steps until both parts of the terminal condition hold: (1) every
-in-scope work item is Done or has a genuinely external blocker recorded in Graphyard;
-and (2) the merged change is deployed and live-verified against the exact deployed
-release, or a genuinely external deployment blocker is recorded in Graphyard:
+The master is a perpetual coordinator, not a one-shot dispatcher. Whether the
+mechanical steps run in the [durable loop](#durable-loop) or an agent session drives
+them by hand, keep cycling through these steps until both parts of the terminal
+condition hold: (1) every in-scope work item is Done or has a genuinely external
+blocker recorded in Graphyard; and (2) every merged change is deployed and
+live-verified against the exact deployed release, or a genuinely external deployment
+blocker is recorded in Graphyard:
 
 1. Run `master status` and treat Graphyard as progression truth.
 2. Dispatch ready work to an appropriate worker profile.
@@ -153,6 +155,24 @@ deployed release, so the last merge never satisfies the terminal condition befor
 step 5. Stop only when every in-scope work item is Done or genuinely externally
 blocked, and either the exact deployed release has passed live verification or a
 genuinely external deployment blocker is recorded in Graphyard.
+
+In-scope work is every item Graphyard has released: unreleased backlog is the
+operator's to release with `ready`, so it neither blocks nor satisfies the terminal
+condition. A per-item blocker is the `blocked` record the lease holder writes on the
+item; a session that went quiet without one is not a blocker, it is work to dispatch
+again.
+
+A deployment blocker has its own record because delivered work is immutable and
+accepts no `blocked` mutation. When a delivery cannot be verified live for a
+genuinely external reason — the provider will not roll out, the release endpoint is
+gone, or a rollback decision is pending — record it as a follow-up work item naming
+the delivered item, its merge commit, and the external cause; `daemon.deployment`
+keeps listing the delivery under `pending` (or `unavailable` when no probe can
+answer), and `delivered` keeps it `awaiting-deployment` or `awaiting-smoke`, until
+the release serves it. Only that recorded follow-up satisfies part (2) without live
+verification. An unverified deployment with no such record is never terminal, and
+neither is a delivery whose release moved on before the smoke ran; see
+[operations](operations.md#delivered-with-a-failed-smoke-proof) for the failure path.
 
 ```sh
 node "$GRAPHYARD_CLI" master status

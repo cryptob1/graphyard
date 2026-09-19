@@ -77,12 +77,14 @@ Herdr runs sessions; Graphyard remains the source of ownership truth.
 A dedicated master coordinator must keep cycling: status, dispatch ready work,
 shepherd review and proof collection, guarded merge, then deployment verification.
 Repeat until both conditions hold: (1) every in-scope item is Done or has a genuinely
-external blocker recorded in Graphyard; and (2) the merged change is deployed and
+external blocker recorded in Graphyard; and (2) every merged change is deployed and
 live-verified against the exact deployed release, or a genuinely external deployment
-blocker is recorded in Graphyard.
-An observed merge alone does not end the loop. Ordinary review findings, rework, idle
-workers, and proof setup are not stopping conditions. Close finished agent sessions
-as part of the cycle.
+blocker is recorded in Graphyard. Delivered work is immutable, so a deployment
+blocker is recorded as a follow-up work item naming the delivered item, its merge
+commit, and the external cause; the delivery stays pending until the release serves it.
+An observed merge alone does not end the loop. Ordinary review findings, rework,
+idle workers, and proof setup are not stopping conditions. Close finished agent
+sessions as part of the cycle.
 ${end}`;
   return starts ? existing.slice(0, existing.indexOf(start)) + section + existing.slice(existing.indexOf(end) + end.length) : `${existing}${existing.endsWith('\n') || !existing ? '' : '\n'}\n${section}\n`;
 }

@@ -152,11 +152,14 @@ outside those flows.
 Keep cycling: status, dispatch ready work, shepherd review and proof collection,
 guarded merge, then deployment verification. Repeat until both conditions hold:
 (1) every in-scope item is Done or has a genuinely external blocker recorded in
-Graphyard; and (2) the merged change is deployed and live-verified against the exact
+Graphyard; and (2) every merged change is deployed and live-verified against the exact
 deployed release, or a genuinely external deployment blocker is recorded in Graphyard.
-An observed merge alone does
-not end the loop. Ordinary review findings, rework, idle workers, and proof setup
-are not stopping conditions. Close finished agent sessions as part of the cycle.
+Delivered work is immutable, so a deployment blocker is recorded as a follow-up work
+item naming the delivered item, its merge commit, and the external cause;
+\`master status\` keeps the delivery under \`pending\` until the release serves it.
+An observed merge alone does not end the loop. Ordinary review findings, rework,
+idle workers, and proof setup are not stopping conditions. Close finished agent
+sessions as part of the cycle.
 
 Check the automatic-merge preference in master status. When disabled, wait for
 explicit operator approval for each merge. Otherwise routine merges may use
