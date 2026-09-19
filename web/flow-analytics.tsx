@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import Dialog from './dialog';
 import AttributionSection from './attribution';
+import Term from './components/term';
 import { stages } from '../src/model';
 import { flowWindows } from '../src/flow-analytics';
 
@@ -22,6 +23,39 @@ function duration(ms: number | null | undefined) {
 function count(value: number | null | undefined) { return value === null || value === undefined ? '—' : String(value); }
 function label(bucket: string) { return new Date(bucket).toISOString().slice(5, 10); }
 
+const toMerged = ['pr-created-to-review-start', 'review-start-to-review-complete', 'review-complete-to-evidence-complete', 'evidence-complete-to-merge-authorized', 'merge-authorized-to-merged'];
+/**
+ * Pull request opened to merged, per merged commit, from the phase drill-down rows: the sum of
+ * the five consecutive phases, counted only when every one of them was measured. Percentiles
+ * are nearest-rank. Nothing measured gives n 0, which the summary omits rather than shows.
+ */
+export function submitToMerge(rows: { workKey: string; bucket: string; valueMs: number | null; commit: string | null }[]) {
+  const episodes = new Map<string, Map<string, number>>();
+  for (const row of rows) if (toMerged.includes(row.bucket) && typeof row.valueMs === 'number') {
+    const key = `${row.workKey}:${row.commit}`; (episodes.get(key) ?? episodes.set(key, new Map()).get(key)!).set(row.bucket, row.valueMs);
+  }
+  const totals = [...episodes.values()].filter(phases => toMerged.every(phase => phases.has(phase))).map(phases => toMerged.reduce((sum, phase) => sum + phases.get(phase)!, 0)).sort((a, b) => a - b);
+  const rank = (p: number) => totals[Math.max(0, Math.ceil(p * totals.length) - 1)];
+  return { n: totals.length, p50Ms: totals.length ? rank(0.5) : null, p90Ms: totals.length ? rank(0.9) : null };
+}
+
+/**
+ * The default screen: where undelivered work is waiting, by plain reason, and how long a pull
+ * request takes to merge. Categories with no items and unmeasured figures are left out.
+ */
+export function FlowSummary({ report, merge, onDrill }: { report: Report; merge: ReturnType<typeof submitToMerge> | null; onDrill(category: { id: string; label: string }): void }) {
+  const waiting = report.bottleneck.categories.filter((category: any) => category.id !== 'delivered' && category.count > 0);
+  return <div className="flow-summary">
+    <section aria-labelledby="flow-bottleneck">
+      <h2 id="flow-bottleneck">Where work is waiting</h2>
+      {waiting.length ? <div className="flow-cards">{waiting.map((category: any) => <button key={category.id} className="flow-card" title={category.definition} onClick={() => onDrill(category)}><span>{category.label}</span><strong>{category.count}</strong></button>)}</div>
+        : <p>Nothing is waiting: every item in this window has shipped.</p>}
+    </section>
+    {merge && merge.n > 0 && <section aria-labelledby="flow-merge"><h2 id="flow-merge">Pull request opened → merged</h2>
+      <p className="flow-headline"><strong>{duration(merge.p50Ms)}</strong> typical (<Term term="p50 / p90">p50</Term>) · <strong>{duration(merge.p90Ms)}</strong> slowest one in ten (<Term term="p50 / p90">p90</Term>) · {merge.n} merged</p></section>}
+  </div>;
+}
+
 /** Fetch an export as a file: the server names it through Content-Disposition. */
 async function download(token: string, path: string) {
   const response = await fetch(`/api/${path}`, { headers: { Authorization: `Bearer ${token}` } });
@@ -29,24 +63,29 @@ async function download(token: string, path: string) {
   return { blob: await response.blob(), name: /filename="([^"]+)"/.exec(response.headers.get('content-disposition') ?? '')?.[1] ?? 'graphyard-flow-export' };
 }
 
-export default function FlowAnalytics({ request, token, canAudit }: { request: (path: string) => Promise<any>; token: string; canAudit: boolean }) {
+/** `initial` renders already-read reports (the fixture tests do); the page refreshes them as usual. */
+export default function FlowAnalytics({ request, token, canAudit, initial }: { request: (path: string) => Promise<any>; token: string; canAudit: boolean; initial?: { report: Report; merge: ReturnType<typeof submitToMerge> | null; attribution?: Report } }) {
   const [days, setDays] = useState<number>(30);
   const [type, setType] = useState('');
   const [stage, setStage] = useState('');
   const [slice, setSlice] = useState('');
-  const [report, setReport] = useState<Report | null>(null);
-  const [loading, setLoading] = useState(true);
+  const [report, setReport] = useState<Report | null>(initial?.report ?? null);
+  const [loading, setLoading] = useState(!initial);
   const [error, setError] = useState('');
   const [drill, setDrill] = useState<{ metric: string; key: string | null; title: string } | null>(null);
   const [rows, setRows] = useState<any>(null);
   const [drillError, setDrillError] = useState('');
   const [exported, setExported] = useState('');
+  const [merge, setMerge] = useState<ReturnType<typeof submitToMerge> | null>(initial?.merge ?? null);
   const version = useRef(0);
   const query = `window=${days}${type ? `&type=${type}` : ''}${stage ? `&stage=${stage}` : ''}${slice ? `&slice=${encodeURIComponent(slice)}` : ''}`;
 
   const load = async () => {
     const current = ++version.current; setLoading(true);
-    try { const value = await request(`analytics/flow?${query}`); if (current === version.current) { setReport(value); setError(''); } }
+    try {
+      const [value, phases] = await Promise.all([request(`analytics/flow?${query}`), request(`analytics/flow/drilldown?${query}&metric=phase`).catch(() => null)]);
+      if (current === version.current) { setReport(value); setMerge(phases?.rows ? submitToMerge(phases.rows) : null); setError(''); }
+    }
     catch (e) { if (current === version.current) setError((e as Error).message); }
     finally { if (current === version.current) setLoading(false); }
   };
@@ -93,30 +132,32 @@ export default function FlowAnalytics({ request, token, canAudit }: { request: (
   };
 
   return <>
-    <header><div className="breadcrumb">Delivery <span>/</span> Flow analytics</div><a href="/docs/flow-analytics">Read the guide ↗</a></header>
-    <div className="page-heading"><div><div className="eyebrow">WHERE DELIVERY IS WAITING</div><h1>Flow analytics</h1><p>Observed flow, queueing, and capacity from the append-only ledger. Never a measure of a person.</p></div></div>
+    <div className="page-heading"><h1>Flow analytics</h1></div>
 
     <form className="flow-filters" aria-label="Flow analytics filters" onSubmit={event => event.preventDefault()}>
       <label>Window<select value={days} aria-label="Window" onChange={event => setDays(Number(event.target.value))}>{flowWindows.map(value => <option key={value} value={value}>{value} days</option>)}</select></label>
-      <label>Work type<select value={type} aria-label="Work type" onChange={event => setType(event.target.value)}><option value="">All types</option>{(report?.availableTypes ?? []).map((value: string) => <option key={value} value={value}>{value}</option>)}</select></label>
-      <label>Stage<select value={stage} aria-label="Stage" onChange={event => setStage(event.target.value)}><option value="">All stages</option>{stages.map(value => <option key={value} value={value}>{value}</option>)}</select></label>
-      <label>Delivery slice<select value={slice} aria-label="Delivery slice" onChange={event => setSlice(event.target.value)}><option value="">All slices</option>{(report?.availableSlices ?? []).map((value: string) => <option key={value} value={value}>{value}</option>)}</select></label>
       <button type="button" onClick={() => void load()} disabled={loading}>{loading ? 'Refreshing…' : 'Refresh'}</button>
     </form>
 
     {loading && <p role="status">Loading flow analytics…</p>}
     {error && <div role="alert" className="notice danger">{error} <button onClick={() => void load()}>Retry flow analytics</button>{report && <p>Values below are from the earlier observation at {new Date(report.generatedAt).toLocaleString()} and may be stale.</p>}</div>}
-    {report && <p className={`flow-state flow-state-${state}`} data-state={state}>{stateText[state]}</p>}
+    {report && state !== 'complete' && <p className={`flow-state flow-state-${state}`} data-state={state}>{stateText[state]}</p>}
+    {report && <FlowSummary report={report} merge={merge} onDrill={category => setDrill({ metric: 'bottleneck', key: category.id, title: category.label })}/>}
 
+    <details className="flow-details"><summary>Show details</summary>
+    <form className="flow-filters" aria-label="More flow analytics filters" onSubmit={event => event.preventDefault()}>
+      <label>Work type<select value={type} aria-label="Work type" onChange={event => setType(event.target.value)}><option value="">All types</option>{(report?.availableTypes ?? []).map((value: string) => <option key={value} value={value}>{value}</option>)}</select></label>
+      <label>Stage<select value={stage} aria-label="Stage" onChange={event => setStage(event.target.value)}><option value="">All stages</option>{stages.map(value => <option key={value} value={value}>{value}</option>)}</select></label>
+      <label>Delivery slice<select value={slice} aria-label="Delivery slice" onChange={event => setSlice(event.target.value)}><option value="">All slices</option>{(report?.availableSlices ?? []).map((value: string) => <option key={value} value={value}>{value}</option>)}</select></label>
+    </form>
+    {report && state === 'complete' && <p className={`flow-state flow-state-${state}`} data-state={state}>{stateText[state]}</p>}
     {report && <>
       <p className="muted">Observed at {new Date(report.generatedAt).toLocaleString()} · window {new Date(report.window.from).toLocaleString()} to {new Date(report.window.to).toLocaleString()} · {report.window.boundaries} · {report.coverage.workItems} work item(s), {report.coverage.facts} durable record(s).</p>
 
-      <section aria-labelledby="flow-bottleneck">
-        <div className="section-title"><h2 id="flow-bottleneck">Where delivery is waiting now</h2><span>SELECT A CATEGORY TO DRILL DOWN</span></div>
+      <section aria-labelledby="flow-bottleneck-all">
+        <div className="section-title"><h2 id="flow-bottleneck-all">Every wait category</h2></div>
         <p>{report.bottleneck.narrative}</p>
-        <div className="flow-cards">{report.bottleneck.categories.map((category: any) => <button key={category.id} className="flow-card" onClick={() => setDrill({ metric: 'bottleneck', key: category.id, title: category.label })}>
-          <span>{category.label}</span><strong>{category.count}</strong><small>{category.definition}</small>
-        </button>)}</div>
+        <dl className="flow-definitions">{report.bottleneck.categories.map((category: any) => <div key={category.id}><dt>{category.label}: {category.count}</dt><dd>{category.definition}</dd></div>)}</dl>
         <p className="muted">Scope: {report.bottleneck.scope.undelivered} undelivered of {report.bottleneck.scope.workItems} selected item(s). Observed {new Date(report.bottleneck.observedAt).toLocaleString()}. {report.bottleneck.unclassified.length ? `Unclassified: ${report.bottleneck.unclassified.join(', ')}.` : 'Every undelivered item is classified.'}</p>
       </section>
 
@@ -220,7 +261,7 @@ export default function FlowAnalytics({ request, token, canAudit }: { request: (
       </section>
     </>}
 
-    <AttributionSection request={request} days={days} canAudit={canAudit}/>
+    <AttributionSection request={request} days={days} canAudit={canAudit} initialReport={initial?.attribution}/>
 
     {report && <>
       <section aria-labelledby="flow-provenance">
@@ -235,6 +276,7 @@ export default function FlowAnalytics({ request, token, canAudit }: { request: (
         <p className="muted">{report.privacy.statement}</p>
       </section>
     </>}
+    </details>
 
     {drill && <Dialog onClose={() => setDrill(null)}>
       <section role="dialog" aria-modal="true" aria-label={`${drill.title} drill-down`} className="drawer" onClick={event => event.stopPropagation()}>
