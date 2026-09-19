@@ -1,4 +1,4 @@
-import { bootstrapObligations, currentEvidence, describeQueueBinding, evidenceBindsCandidate, grantsAuthorize, inheritedObligations, pathScopesOverlap, type BootstrapObligation, type ProofAuthority, type Work } from './model.js';
+import { bootstrapObligations, currentEvidence, describeQueueBinding, evidenceBindsCandidate, grantsAuthorize, inheritedObligations, pathScope, pathScopesOverlap, type BootstrapObligation, type ProofAuthority, type Stage, type Work } from './model.js';
 
 export interface IntegrationJob { work_id: string; available_at: string; locked_until: string | null; error: string | null; held_until?: string | null }
 export interface Diagnostic { kind: string; message: string; next: string }
@@ -7,15 +7,61 @@ export function resourceConflicts(work: Work, all: Work[], now: number) {
     .flatMap(w => (work.exclusiveResources ?? []).filter(r => w.exclusiveResources?.includes(r)).map(resource => ({ resource, key: w.key })));
 }
 
+/** The paths an item is known to touch: its planned scope plus the files its PR was observed to change. */
+const touchedPaths = (work: Work) => [...new Set([...work.plannedFiles, ...(work.observation?.files ?? [])])];
+
 export function fileConflicts(work: Work, all: Work[]) {
   if (work.stage === 'done') return [];
-  const paths = [...new Set([...work.plannedFiles, ...(work.observation?.files ?? [])])];
+  const paths = touchedPaths(work);
   return all.filter(w => w.id !== work.id && w.stage !== 'done' && (w.lease || w.submission || w.ready))
     .flatMap(w => {
-      const theirs = [...new Set([...w.plannedFiles, ...(w.observation?.files ?? [])])];
+      const theirs = touchedPaths(w);
       const matches = paths.filter(path => theirs.some(other => pathScopesOverlap(path, other)));
       return matches.length ? [{ key: w.key, paths: matches }] : [];
     });
+}
+
+export interface OverlapAhead { key: string; stage: Stage; state: 'claimed' | 'submitted'; paths: string[]; theirs: string[] }
+/**
+ * The items ahead of `work` that make its planned files a soft exclusive resource: every item that
+ * is claimed (a live lease, or a quarantine still holding its assignment) or submitted but not yet
+ * merged. Whichever of two overlapping items lands second re-integrates the first, so an item with
+ * an overlap is held rather than dispatched unless an operator allows it. A ready item nobody has
+ * claimed is not ahead of anything; ordering among those is `dispatchOrder`.
+ */
+export function dispatchOverlap(work: Work, all: Work[], now: number): OverlapAhead[] {
+  if (work.stage === 'done') return [];
+  const mine = touchedPaths(work);
+  return all.filter(w => w.id !== work.id && w.stage !== 'done').flatMap(w => {
+    const claimed = !!w.containmentQuarantine || !!w.lease && Date.parse(w.lease.expiresAt) > now;
+    if (!claimed && !w.submission) return [];
+    const theirs = touchedPaths(w);
+    const paths = mine.filter(path => theirs.some(other => pathScopesOverlap(path, other)));
+    if (!paths.length) return [];
+    return [{ key: w.key, stage: w.stage, state: claimed ? 'claimed' as const : 'submitted' as const, paths, theirs: theirs.filter(other => mine.some(path => pathScopesOverlap(path, other))) }];
+  });
+}
+
+/** A directory scope at the repository root (`src/`, `docs/`, `tests/`, `/`): it overlaps almost everything. */
+export const broadScope = (scope: string) => { const { path, prefix } = pathScope(scope); return prefix && path.split('/').filter(Boolean).length <= 1; };
+export interface ScopeBreadth { files: number; directories: number; broad: string[]; highConflict: boolean }
+/**
+ * How much of the repository a planned scope can reach, without a tree to count files in: exact
+ * files, directory scopes, and the root-level directories that touch nearly every other item.
+ */
+export function scopeBreadth(plannedFiles: string[]): ScopeBreadth {
+  const broad = plannedFiles.filter(broadScope);
+  const directories = plannedFiles.filter(scope => pathScope(scope).prefix).length;
+  return { files: plannedFiles.length - directories, directories, broad, highConflict: broad.length > 0 };
+}
+/**
+ * Smallest scope first among ready items of the same operator priority: fewest root-level
+ * directories, then fewest directories, then fewest files, then the older item. A small item that
+ * lands early is one fewer re-integration for everything it would otherwise have waited behind.
+ */
+export function dispatchOrder(a: Work, b: Work) {
+  const left = scopeBreadth(a.plannedFiles), right = scopeBreadth(b.plannedFiles);
+  return a.priority - b.priority || left.broad.length - right.broad.length || left.directories - right.directories || left.files - right.files || Date.parse(a.createdAt) - Date.parse(b.createdAt);
 }
 
 export function diagnose(work: Work, all: Work[], now: number, jobs: IntegrationJob[] = []): Diagnostic[] {

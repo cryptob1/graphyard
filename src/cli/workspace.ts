@@ -1,12 +1,48 @@
-import { mkdir, realpath } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
+import { mkdir, readFile, realpath, writeFile } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import { resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { execFileSync, spawnSync } from 'node:child_process';
+import type { Work } from '../model.js';
 import { supervise, systemdContainment } from '../supervisor.js';
-import { localScopeFindings } from '../sync.js';
+import { attributeConflicts, hasConflictMarkers, localScopeFindings, managedServerUrl, parseGeneratedManifest, regenerateManagedBlocks, type GeneratedManifest } from '../sync.js';
+import { managedInstructions } from '../repository-setup.js';
+import { managedMasterInstructions } from '../master.js';
 import { assertRepository, discover } from '../onboarding.js';
 import { acknowledgeContainment, containmentCredentials, establishContainment, revalidateContainment, settleContainment } from '../quarantine.js';
 import { defineCommands, workMutation } from './registry.js';
+
+/**
+ * The generated files a repository declares for sync: `scripts/check-docs.mjs --manifest` names
+ * the paths its `--write` renders in full. A repository without the script declares none.
+ */
+const generatedManifestScript = 'scripts/check-docs.mjs';
+async function localGeneratedManifest(cwd: string): Promise<GeneratedManifest | null> {
+  if (!existsSync(resolve(cwd, generatedManifestScript))) return null;
+  const result = spawnSync(process.execPath, [generatedManifestScript, '--manifest'], { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+  return result.status === 0 ? parseGeneratedManifest(result.stdout) : null;
+}
+// The renderer's own exit status is not consulted: with other files still conflicted its link
+// check fails, but the generated files are written first, and each is judged by its content.
+function regenerateGenerated(cwd: string, manifest: GeneratedManifest) {
+  const [command, ...args] = manifest.regenerate;
+  spawnSync(command === 'node' ? process.execPath : command, args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+}
+/**
+ * Graphyard's own repository renders the AGENTS.md blocks with the templates the merged tree
+ * carries, so the result matches what its drift test expects; any other repository, and a tree
+ * whose sources will not load, use the templates this CLI ships.
+ */
+const agentsTemplateSources = ['src/repository-setup.ts', 'src/master.ts'];
+async function agentsRenderers(cwd: string) {
+  const [setupFile, masterFile] = agentsTemplateSources.map(file => resolve(cwd, file));
+  if (existsSync(setupFile) && existsSync(masterFile)) try {
+    const [setup, master] = await Promise.all([import(pathToFileURL(setupFile).href), import(pathToFileURL(masterFile).href)]);
+    if (typeof setup.managedInstructions === 'function' && typeof master.managedMasterInstructions === 'function') return { managedInstructions: setup.managedInstructions as typeof managedInstructions, managedMasterInstructions: master.managedMasterInstructions as typeof managedMasterInstructions, source: 'worktree' };
+  } catch {}
+  return { managedInstructions, managedMasterInstructions, source: 'cli' };
+}
 
 /** Local worktrees and the supervised worker launch. */
 export const workspaceCommands = defineCommands([
@@ -14,30 +50,74 @@ export const workspaceCommands = defineCommands([
     name: 'sync',
     scope: 'work',
     help: [
-      '  sync GY-N                     Merge origin/BASE (never rebase) and list every file outside',
-      '                                plannedFiles that no longer matches it; run before every push',
+      '  sync GY-N                     Merge origin/BASE (never rebase), regenerate generated files',
+      '                                (docs indexes, AGENTS.md blocks) instead of hand-merging them,',
+      '                                name the shipped items behind each remaining conflict, and',
+      '                                list every file outside plannedFiles that no longer matches',
+      '                                the base; run before every push',
     ],
-    async run({ api, print }, work) {
+    async run({ api, print, base: serverUrl }, work) {
       // The canonical way to take the base branch: a merge keeps the worker's history and makes every
       // resolution visible, and the same classifier the control plane applies at complete runs here,
-      // against the fetched tip, before anything is pushed.
+      // against the fetched tip, before anything is pushed. Files the repository declares generated
+      // are rendered afresh from the merged sources rather than merged by hand; every other conflict
+      // is the worker's, reported with the shipped items that landed it.
       const baseBranch = String((await api('status')).baseBranch ?? 'main');
+      const cwd = process.cwd();
       const git = (...gitArgs: string[]) => execFileSync('git', gitArgs, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'inherit'] }).trim();
+      const quietly = (...gitArgs: string[]) => spawnSync('git', gitArgs, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
       const branch = git('symbolic-ref', '--short', 'HEAD');
       if (!work.workspaces.some((w: any) => w.branch === branch)) throw new Error(`Run sync from a workspace branch registered for ${work.key}; ${branch} is not one`);
-      git('fetch', '--quiet', 'origin');
-      const baseTip = git('rev-parse', `refs/remotes/origin/${baseBranch}`);
-      const merge = spawnSync('git', ['merge', '--no-edit', `refs/remotes/origin/${baseBranch}`], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
-      if (merge.status !== 0) {
-        const conflicts = git('diff', '--name-only', '--diff-filter=U').split('\n').filter(Boolean);
-        print({ key: work.key, base: `origin/${baseBranch}`, baseTip, merged: false, conflicts, detail: `${merge.stdout}${merge.stderr}`.trim(), plannedFiles: work.plannedFiles,
-          next: `Resolve each conflict, then commit the merge and rerun sync ${work.key} before pushing. Files outside plannedFiles must match origin/${baseBranch} byte-for-byte: git checkout ${baseTip.slice(0, 12)} -- PATH restores one.` });
+      const unmerged = () => quietly('diff', '--name-only', '--diff-filter=U').stdout.split('\n').filter(Boolean);
+      const generated = await localGeneratedManifest(cwd);
+      // A merge the previous sync left for the worker to resolve is continued, not restarted.
+      const continuing = quietly('rev-parse', '-q', '--verify', 'MERGE_HEAD').status === 0;
+      let baseTip: string, mergeBase: string, detail = '';
+      if (continuing) { baseTip = git('rev-parse', 'MERGE_HEAD'); mergeBase = git('merge-base', 'HEAD', baseTip); }
+      else {
+        git('fetch', '--quiet', 'origin');
+        baseTip = git('rev-parse', `refs/remotes/origin/${baseBranch}`); mergeBase = git('merge-base', 'HEAD', baseTip);
+        const merge = quietly('merge', '--no-commit', '--no-edit', `refs/remotes/origin/${baseBranch}`);
+        detail = `${merge.stdout}${merge.stderr}`.trim();
+        if (merge.status !== 0 && !unmerged().length) throw new Error(`git merge failed without a conflict to resolve: ${detail}`);
+      }
+      const regenerated: string[] = [];
+      let conflicts = unmerged();
+      if (conflicts.length && generated && conflicts.some(path => generated.files.includes(path))) {
+        regenerateGenerated(cwd, generated);
+        for (const path of conflicts.filter(path => generated.files.includes(path))) {
+          if (hasConflictMarkers(await readFile(resolve(cwd, path), 'utf8'))) continue;
+          git('add', '--', path); regenerated.push(path);
+        }
+      }
+      if (conflicts.includes('AGENTS.md') && !conflicts.some(path => agentsTemplateSources.includes(path))) {
+        const conflicted = await readFile(resolve(cwd, 'AGENTS.md'), 'utf8');
+        const url = managedServerUrl(quietly('show', `${baseTip}:AGENTS.md`).stdout) ?? managedServerUrl(conflicted) ?? serverUrl;
+        const renderers = await agentsRenderers(cwd);
+        const rendered = regenerateManagedBlocks(conflicted, text => { const worker = renderers.managedInstructions(text, url); return worker.includes('<!-- graphyard-master -->') ? renderers.managedMasterInstructions(worker) : worker; });
+        if (rendered !== null) { await writeFile(resolve(cwd, 'AGENTS.md'), rendered); git('add', '--', 'AGENTS.md'); regenerated.push(`AGENTS.md (managed blocks rendered from the ${renderers.source} templates)`); }
+      }
+      conflicts = unmerged();
+      if (conflicts.length) {
+        const landed = new Set(git('rev-list', `${mergeBase}..${baseTip}`).split('\n').filter(Boolean));
+        // Attribution is a courtesy: an unreadable snapshot never hides the conflict list.
+        const all: Work[] = await api('work-snapshot').then((snapshot: any) => Array.isArray(snapshot?.work) ? snapshot.work : []).catch(() => []);
+        const remaining = attributeConflicts(conflicts, all, sha => landed.has(sha), generated?.files ?? []);
+        print({ key: work.key, base: `origin/${baseBranch}`, baseTip, merged: false, conflicts: remaining, regenerated, detail, plannedFiles: work.plannedFiles,
+          next: `Resolve each remaining conflict (each names the shipped items that landed it), stage it, and rerun sync ${work.key}: it regenerates the generated files from the resolved sources and commits the merge. Files outside plannedFiles must match origin/${baseBranch} byte-for-byte: git checkout ${baseTip.slice(0, 12)} -- PATH restores one.` });
         process.exitCode = 1; return;
       }
+      // The merged sources decide what the generated files say, whether or not they conflicted.
+      if (generated) {
+        regenerateGenerated(cwd, generated);
+        for (const path of generated.files) if (quietly('diff', '--quiet', '--', path).status !== 0 || quietly('ls-files', '--error-unmatch', '--', path).status !== 0) { git('add', '--', path); if (!regenerated.includes(path)) regenerated.push(path); }
+      }
+      if (quietly('rev-parse', '-q', '--verify', 'MERGE_HEAD').status === 0) git('commit', '--no-edit', '--quiet');
+      else if (quietly('diff', '--cached', '--quiet').status !== 0) git('commit', '--quiet', '-m', `Regenerate generated files after sync ${work.key}`);
       const raw = git('diff', '--raw', '-M', '-z', '--no-abbrev', baseTip, 'HEAD'), numstat = git('diff', '--numstat', '-M', '-z', baseTip, 'HEAD');
-      const findings = localScopeFindings(work.plannedFiles ?? [], raw, numstat);
+      const findings = localScopeFindings(work.plannedFiles ?? [], raw, numstat, generated?.files ?? []);
       const refused = findings.filter(finding => finding.refused);
-      print({ key: work.key, base: `origin/${baseBranch}`, baseTip, head: git('rev-parse', 'HEAD'), merged: true, plannedFiles: work.plannedFiles, ok: !refused.length,
+      print({ key: work.key, base: `origin/${baseBranch}`, baseTip, head: git('rev-parse', 'HEAD'), merged: true, regenerated, generated: generated?.files ?? [], plannedFiles: work.plannedFiles, ok: !refused.length,
         files: findings, refused: refused.map(finding => `${finding.path}: ${finding.detail}`),
         next: refused.length ? `Restore each listed file to origin/${baseBranch} (git checkout ${baseTip.slice(0, 12)} -- PATH; for a rename, restore the original path), commit, and rerun sync ${work.key}. Do not push until it reports ok. Only an operator can widen plannedFiles, through an audited requirements revision.`
           : `Every file outside plannedFiles matches origin/${baseBranch}. Push, then complete ${work.key} EPOCH PR.` });

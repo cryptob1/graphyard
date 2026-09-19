@@ -5,17 +5,17 @@ import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 import { startGithubSetup } from '../github-setup.js';
 import { resourceConflicts } from '../coordination.js';
-import { assertMasterBinding, assessContainment, buildMasterStatus, continueMergeBatch, currentMergeCandidates, dispatchWork, inspectWorkerCredentials, listHerdrAgents, loadMasterConfig, masterHarness, mergeExecutor, mergeProtocolSkew, observeHerdrAgents, readCredentialFile, readWorkerCredential, saveProducerProfile, saveWorkerProfile, setupMaster, snapshotWithClock, startMaster, verifyContainmentDeath, workerProfileSchema } from '../master.js';
+import { assertMasterBinding, continueMergeBatch, currentMergeCandidates, dispatchWork, listHerdrAgents, loadMasterConfig, masterHarness, mergeExecutor, mergeProtocolSkew, readCredentialFile, readWorkerCredential, saveProducerProfile, saveWorkerProfile, setupMaster, snapshotWithClock, startMaster, verifyContainmentDeath, workerProfileSchema } from '../master.js';
 import { cliCommit } from '../protocol-version.js';
-import { daemonEffects, daemonSummary, readDaemonState, runDaemon } from '../master-daemon.js';
+import { daemonEffects, readDaemonState, runDaemon } from '../master-daemon.js';
 import { verificationEffects, verifyDeployment } from '../master-verification.js';
-import { bindReviewer, launchReview, readReviewLedger, reconcileReviews, reviewerCredentialDirectory, saveReviewerProfile, summarizeReviews, verifyReviewerInstallation } from '../reviewer.js';
-import { readProducerLedger, reconcileProducers, summarizeProducers } from '../producer.js';
-import { dispatchEffects, dispatchSummary, readDispatchCursor, runAutoDispatch } from '../auto-dispatch.js';
+import { bindReviewer, launchReview, reviewerCredentialDirectory, saveReviewerProfile, verifyReviewerInstallation } from '../reviewer.js';
+import { dispatchEffects, readDispatchCursor, runAutoDispatch } from '../auto-dispatch.js';
 import { applyProtection, protectionPlan, readProtection } from '../protection.js';
 import { writeHarnessPermissions } from '../harness.js';
-import { browserFlows, readAdministrationLedger, readSudoState, runBrowserFlow, summarizeAdministration, type BrowserFlow } from '../master-browser.js';
+import { browserFlows, runBrowserFlow, type BrowserFlow } from '../master-browser.js';
 import { defineCommands } from './registry.js';
+import { masterStatusReport } from './master-status.js';
 import { readSecretFromStdin } from './context.js';
 
 /**
@@ -49,8 +49,13 @@ export const masterCommands = defineCommands([
       '                                profile: app-permissions, installation-accept, or protection.',
       '                                Recorded with screenshots, verified via the API, audited',
       "  master harness [KIND] [--apply]  Generate the master's own harness permissions",
-      '  master status                 Join Graphyard work truth with Herdr session health',
-      '  master dispatch GY-N PROFILE  Invite a worker to claim ready work in a visible tab',
+      '  master status                 Join Graphyard work truth with Herdr session health; the',
+      '                                dispatch order, planned-file overlaps holding items, and',
+      '                                which open candidates git cannot merge with each other',
+      '  master dispatch GY-N PROFILE [--allow-overlap]',
+      '                                Invite a worker to claim ready work in a visible tab; an',
+      '                                item whose planned files overlap a claimed or unmerged',
+      '                                item is held unless --allow-overlap is passed',
       '  master settle-containment GY-N REASON',
       '                                Settle a containment quarantine whose supervisor this',
       '                                host verifies dead; unverifiable signals refuse',
@@ -157,31 +162,7 @@ export const masterCommands = defineCommands([
         if (!kind.success) throw new Error('Use master harness with a supported agent kind such as claude or codex');
         return print(await writeHarnessPermissions(root, masterHarness(root, master, kind.data!), !!values.apply));
       }
-      if (id === 'status') {
-        const runtime = observeHerdrAgents();
-        const credentials = await inspectWorkerCredentials(root, master.workers);
-        let reviews = summarizeReviews((await readReviewLedger(root)).reviews), reviewRuntime = { available: true, reason: null as string | null };
-        const { snapshot, clockOffset } = await snapshotWithClock(() => masterApi('work-snapshot'));
-        // Sessions the automatic dispatcher launched are settled against this same snapshot: a
-        // head change cancels them here as well as in the loop, so status never shows a stale one.
-        try { reviews = summarizeReviews((await reconcileReviews(root, master, { work: snapshot.work })).reviews); }
-        catch (error) { reviewRuntime = { available: false, reason: `Reviewer verdicts could not be reconciled with GitHub: ${error instanceof Error ? error.message : 'unknown reason'}` }; }
-        let producers = summarizeProducers((await readProducerLedger(root)).producers);
-        try { producers = summarizeProducers((await reconcileProducers(root, master, snapshot.work, runtime.available ? runtime.agents : null)).producers); } catch { /* the ledger as last written stands */ }
-        const dispatchCursor = await readDispatchCursor(root, master).catch(error => ({ error: error instanceof Error ? error.message : 'Master dispatch cursor is unreadable' }));
-        const dispatch = 'error' in dispatchCursor ? { running: false, failures: [] as { requestId: string; kind: string; attempts: number; reason: string; at: string; nextAt: string }[], error: dispatchCursor.error } : dispatchSummary(dispatchCursor, Date.now(), master.run.dispatchIntervalSeconds * 1000);
-        const containment = assessContainment(snapshot.work, { hostId: master.hostId, observedAt: snapshot.now, clockOffset });
-        const daemonState = await readDaemonState(root, master).catch(error => ({ error: error instanceof Error ? error.message : 'Master daemon state is unreadable' }));
-        const daemon = 'error' in daemonState ? { running: false, error: daemonState.error } : daemonSummary(daemonState, Date.now(), master.run.intervalSeconds * 1000);
-        // Browser administration is reported beside the work it unblocks: a pending sudo code is
-        // the one thing the operator must act on, and the recent ledger entries say who changed what.
-        const administration = { browser: master.browser ? { profile: master.browser.profile } : null, ...summarizeAdministration((await readAdministrationLedger(root)).entries, await readSudoState(root)) };
-        return print({ ...buildMasterStatus(snapshot, master.workers, runtime.agents, credentials, containment, reviews, master.baseBranch, coordinator, { producers, failures: dispatch.failures }), autoMerge: master.autoMerge, mergeApproval: master.autoMerge ? 'routine merges permitted after gates pass' : 'explicit operator approval required for each merge',
-          versionSkew: mergeProtocolSkew(coordinator, cli), cli,
-          reviewer: master.reviewer ? { identity: `${master.reviewer.slug}[bot]`, appId: master.reviewer.appId, profiles: master.reviewers.map(profile => profile.name), automatic: master.run.reviewerProfile ?? (master.reviewers.length === 1 ? master.reviewers[0].name : null) } : null,
-          producerProfiles: master.producers.map(profile => ({ name: profile.name, principal: profile.principal, kind: profile.kind, agentName: profile.agentName })),
-          administration, daemon, dispatch, runtime: { herdr: { available: runtime.available, reason: runtime.reason }, reviews: reviewRuntime } });
-      }
+      if (id === 'status') return print(await masterStatusReport(root, master, masterApi, coordinator, cli));
       if (id === 'settle-containment') {
         if (!args[0] || !args.slice(1).join(' ').trim()) throw new Error('Use master settle-containment GY-N REASON');
         const { snapshot, clockOffset } = await snapshotWithClock(() => masterApi('work-snapshot'));
@@ -202,17 +183,18 @@ export const masterCommands = defineCommands([
         return print({ key: settled.key, epoch: assessment.epoch, scope: assessment.scope, containmentQuarantine: settled.containmentQuarantine, stage: settled.stage, verification: assessment.verification });
       }
       if (id === 'dispatch') {
-        if (!args[0]) throw new Error('Use master dispatch GY-N PROFILE');
+        const { values, positionals } = parseArgs({ args, options: { 'allow-overlap': { type: 'boolean' } }, allowPositionals: true });
+        if (!positionals[0]) throw new Error('Use master dispatch GY-N PROFILE [--allow-overlap]');
         const snapshot = await masterApi('work-snapshot');
-        const work = snapshot.work.find((item: any) => item.id === args[0] || item.key === args[0]);
-        const profile = master.workers.find(item => item.name === args[1]);
-        if (!work) throw new Error(`Unknown work item ${args[0]}`); if (!profile) throw new Error(`Unknown worker profile ${args[1]}`);
+        const work = snapshot.work.find((item: any) => item.id === positionals[0] || item.key === positionals[0]);
+        const profile = master.workers.find(item => item.name === positionals[1]);
+        if (!work) throw new Error(`Unknown work item ${positionals[0]}`); if (!profile) throw new Error(`Unknown worker profile ${positionals[1]}`);
         const conflicts = resourceConflicts(work, snapshot.work, Date.parse(snapshot.now)); if (conflicts.length) throw new Error(`Dispatch blocked by exclusive resources: ${conflicts.map((conflict: any) => `${conflict.resource} held by ${conflict.key}`).join(', ')}`);
         if (profile.credentialFile) {
           const workerStatus = await masterApi('status', await readWorkerCredential(root, profile.credentialFile));
           if (workerStatus.actor?.role !== 'worker' || workerStatus.actor.id !== profile.principal) throw new Error('Worker credential no longer matches the configured principal; update the profile before dispatch');
         }
-        return print(await dispatchWork(root, work, profile, listHerdrAgents(), undefined, snapshot.work, undefined, undefined, undefined, snapshot.now));
+        return print(await dispatchWork(root, work, profile, listHerdrAgents(), undefined, snapshot.work, undefined, undefined, undefined, snapshot.now, { allowOverlap: !!values['allow-overlap'] }));
       }
       if (id === 'merge') {
         if (!args[0]) throw new Error('Use master merge GY-N or master merge --all');
