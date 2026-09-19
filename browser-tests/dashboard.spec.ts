@@ -22,6 +22,16 @@ async function fixture(page: Page, role = 'admin') {
 const cardSelect = (page: Page) => page.getByRole('button', { name: /Browser fixture.*GY-1/ });
 
 async function login(page: Page, value = 'browser-fixture') { await page.getByLabel('Access token').fill(value); await page.getByRole('button', { name: 'Open control plane' }).click(); }
+// The sidebar has four primary entries (Work, Shipped, Insights, Settings); the other pages are
+// tabs under Insights or Settings. In the item view, details and policy edits are collapsed.
+const workHeading = (page: Page) => page.getByRole('heading', { name: 'Work', level: 1, exact: true });
+const openWork = (page: Page) => page.getByRole('navigation', { name: 'Primary' }).getByRole('button', { name: /Work/ }).click();
+async function openPage(page: Page, section: 'Insights' | 'Settings', tab: string) {
+  await page.getByRole('navigation', { name: 'Primary' }).getByRole('button', { name: new RegExp(section) }).click();
+  await page.getByRole('button', { name: tab, exact: true }).click();
+}
+const moreDetails = (page: Page) => page.getByRole('dialog').getByText('More details', { exact: true }).click();
+const editMenu = (page: Page) => page.getByRole('dialog').getByText('Edit', { exact: true }).click();
 
 for (const viewport of [{ name: 'desktop', width: 1280, height: 900 }, { name: 'mobile', width: 390, height: 844 }]) {
   test(`How Graphyard works is a readable visual guide on ${viewport.name}`, async ({ page }) => {
@@ -214,25 +224,22 @@ for (const viewport of [{ name: 'desktop', width: 1280, height: 900 }, { name: '
       return route.fulfill({ json: [] });
     });
     await page.goto('/'); await login(page);
+    // Time in stage is behind "Show times". Every fixture item is handed in and waiting for review.
+    await page.getByRole('button', { name: 'Show times' }).click();
     const node = (stage: string) => page.locator('.node', { hasText: stage });
-    await expect(node('Ready')).toContainText('Oldest 45m');
-    await expect(node('Ready')).toContainText('p50 45m · p95 45m');
-    await expect(node('Review')).toContainText('Oldest 14h 54m');
-    await expect(node('Review')).toContainText('p50 14h 54m · p95 14h 54m');
-    await expect(node('Build')).toContainText('Oldest 2d 3h');
-    await expect(node('Build')).toContainText('p50 2d 3h · p95 2d 3h');
-    await expect(node('Backlog')).toContainText('Clear');
-    await expect(node('Backlog')).toContainText('—');
-    await expect(page.locator('.node small span[title]')).toHaveCount(9);
-    await expect(node('post-deploy')).toContainText('—');
-    await expect(node('post-deploy').locator('span[title]')).toHaveAttribute('title', 'No post-deploy data to summarize yet');
-    await expect(node('Build').locator('span[title]')).toHaveAttribute('title', /50th and 95th percentile/);
-    await expect(node('Merge').locator('span[title]')).toHaveAttribute('title', 'No dwell data to summarize for this stage yet');
-    await expect(node('Build').locator('span[title]')).toHaveCSS('text-transform', 'none');
-    await expect(page.locator('.card-top', { hasText: 'GY-2' })).toContainText('45m');
-    await expect(page.locator('.card-top', { hasText: 'GY-3' })).toContainText('14h 54m');
-    await expect(page.locator('.card-top', { hasText: 'GY-5' })).toContainText('2d 3h');
-    await expect(page.locator('.card-top', { hasText: 'GY-6' })).toContainText('2d 2h');
+    await expect(node('In review')).toContainText('oldest 2d 3h');
+    await expect(node('In review')).toContainText('p50 14h 54m · p95 2d 3h');
+    await expect(node('Needs a worker')).toContainText('—');
+    await expect(node('Not started')).toContainText('—');
+    await expect(page.locator('.node small span[title]')).toHaveCount(7);
+    await expect(node('In review').locator('span[title]')).toHaveAttribute('title', /50th and 95th percentile/);
+    await expect(node('Merging').locator('span[title]')).toHaveAttribute('title', 'No items in this stage');
+    await expect(node('In review').locator('span[title]')).toHaveCSS('text-transform', 'none');
+    const age = (key: string) => page.locator('.card', { hasText: key }).locator('.status-line');
+    await expect(age('GY-2')).toHaveAttribute('title', 'In this step for 45m');
+    await expect(age('GY-3')).toHaveAttribute('title', 'In this step for 14h 54m');
+    await expect(age('GY-5')).toHaveAttribute('title', 'In this step for 2d 3h');
+    await expect(age('GY-6')).toHaveAttribute('title', 'In this step for 2d 2h');
     const clipped = await page.locator('.node').evaluateAll(nodes => nodes.flatMap(node => [node, ...node.querySelectorAll('small')].map(element => element.scrollWidth > element.clientWidth)));
     expect(clipped).not.toContain(true);
   });
@@ -243,23 +250,23 @@ test('invalid login remains on login; whitespace is trimmed and loading never cl
   await login(page, 'invalid');
   await expect(page.getByRole('alert')).toContainText('rejected');
   await expect(page.getByLabel('Access token')).toBeVisible();
-  await expect(page.getByRole('heading', { name: 'Delivery graph' })).toHaveCount(0);
-  await expect(page.getByText('GitHub enforcement is not connected', { exact: false })).toHaveCount(0);
+  await expect(workHeading(page)).toHaveCount(0);
+  await expect(page.getByText('GitHub is not connected', { exact: false })).toHaveCount(0);
   state.pause = true; await login(page, '  browser-fixture  ');
   await expect(page.getByRole('status')).toContainText('Verifying');
-  await expect(page.getByRole('heading', { name: 'Delivery graph' })).toBeVisible();
+  await expect(workHeading(page)).toBeVisible();
   await expect(page.getByText('fixture/repository')).toBeVisible();
 });
 
 test('connection loss labels stale data, recovers, and revoked sessions clear the dashboard', async ({ page }) => {
   const state = await fixture(page); await login(page);
-  await expect(page.getByText('Control plane connected')).toBeVisible();
+  await expect(page.getByText('Connected', { exact: true })).toBeVisible();
   state.offline = true;
   await expect(page.getByText('Disconnected · data may be stale')).toBeVisible({ timeout: 10000 });
   await expect(page.getByRole('alert')).toContainText('stale');
   await expect(page.getByRole('heading', { name: 'Browser fixture' })).toBeVisible();
   state.offline = false;
-  await expect(page.getByText('Control plane connected')).toBeVisible({ timeout: 10000 });
+  await expect(page.getByText('Connected', { exact: true })).toBeVisible({ timeout: 10000 });
   await expect(page.getByRole('alert')).toHaveCount(0);
   state.unauthorized = true;
   await expect(page.getByLabel('Access token')).toBeVisible({ timeout: 10000 });
@@ -279,7 +286,7 @@ const pulseFixture = (overrides: Record<string, unknown> = {}) => ({ generatedAt
 for (const viewport of [{ name: 'desktop', width: 1280, height: 900 }, { name: 'mobile', width: 390, height: 844 }]) test(`shipping pulse exposes exact metrics, links and chart text on ${viewport.name}`, async ({ page }) => {
   await page.setViewportSize(viewport); await fixture(page);
   await page.route('**/api/shipping-pulse', route => route.fulfill({ json: pulseFixture() }));
-  await login(page); await page.getByRole('button', { name: /Shipping pulse/ }).click();
+  await login(page); await openPage(page, 'Insights', 'Shipping pulse');
   await expect(page.getByRole('heading', { name: 'Shipping pulse' })).toBeVisible();
   await expect(page.getByLabel('Delivery metrics')).toContainText('3');
   await expect(page.getByText('12.5h')).toBeVisible(); await expect(page.getByText('7 included · 1 excluded')).toBeVisible();
@@ -302,7 +309,7 @@ test('shipping pulse labels sparse and unavailable production samples without fa
   // unknown. An unknown total must never be drawn as 0/0, which would read as a clean record.
   const unresolved = { key: 'GY-10', title: 'Unretained authorization', pullRequest: 43, mergeSha: 'bcdef01234567890abcdef1234567890abcdef12', mergedAt: '2026-09-14T12:00:00.000Z', quality: { passingProofs: null, requiredProofs: null, violations: [], unavailableReason: 'The immutable snapshot that authorized this delivery is no longer in the retained ledger, so recorded proof totals are unknown.' } };
   await page.route('**/api/shipping-pulse', route => route.fulfill({ json: pulseFixture({ prToProduction: { averageHours: null, medianHours: null, p90Hours: null, sampleSize: 0, eligible: 1, excluded: 1, coveragePercent: 0, sparse: true, exclusions: { 'no-verifiable-production-deployment': 1 }, split: { prToMergeAverageHours: null, mergeToProductionAverageHours: null } }, recent: [...pulseFixture().recent, unresolved] }) }));
-  await login(page); await page.getByRole('button', { name: /Shipping pulse/ }).click();
+  await login(page); await openPage(page, 'Insights', 'Shipping pulse');
   await expect(page.getByText('Sparse sample.')).toBeVisible();
   await expect(page.getByLabel('Pull request to production metrics')).toContainText('Unavailable');
   await page.getByText('Why records were excluded').click();
@@ -322,12 +329,12 @@ test('shipping pulse distinguishes loading, unavailable, empty, partial, and sta
     if (mode === 'empty') return route.fulfill({ json: pulseFixture({ recent: [], counts: { days7: 0, days30: 0 }, weeks: Array.from({ length: 12 }, (_, index) => ({ start: new Date(Date.UTC(2026, 5, 29 + index * 7)).toISOString(), end: new Date(Date.UTC(2026, 6, 5 + index * 7)).toISOString(), count: 0 })) }) });
     return route.fulfill({ json: pulseFixture({ completeness: 'partial', partialReason: 'More production observations matched a merge than the query cap reads.' }) });
   });
-  await login(page); await page.getByRole('button', { name: /Shipping pulse/ }).click();
+  await login(page); await openPage(page, 'Insights', 'Shipping pulse');
   await expect(page.getByRole('status')).toContainText('Loading shipping pulse');
   mode = 'unavailable'; release(); await expect(page.getByRole('alert')).toContainText('unavailable');
-  mode = 'empty'; await page.getByRole('button', { name: /Delivery graph/ }).click(); await page.getByRole('button', { name: /Shipping pulse/ }).click();
+  mode = 'empty'; await openWork(page); await openPage(page, 'Insights', 'Shipping pulse');
   await expect(page.getByText('No deliveries in this window')).toBeVisible(); await expect(page.getByLabel('Delivery metrics')).toHaveCount(0);
-  mode = 'partial'; await page.getByRole('button', { name: /Delivery graph/ }).click(); await page.getByRole('button', { name: /Shipping pulse/ }).click();
+  mode = 'partial'; await openWork(page); await openPage(page, 'Insights', 'Shipping pulse');
   await expect(page.getByText('Partial history.')).toBeVisible(); await expect(page.getByText('More production observations matched a merge than the query cap reads.')).toBeVisible();
   // Partial at the production cap does not truncate the delivery sample, so the durations
   // are not labelled as sampled here; only the delivery cap does that.
@@ -344,7 +351,7 @@ test('truncated history labels durations as newest-delivery samples, never as bo
   // The delivery cap makes counts lower bounds but leaves the durations a sample of the
   // newest work, so every duration group must say so rather than read as a bound.
   await page.route('**/api/shipping-pulse', route => route.fulfill({ json: pulseFixture({ completeness: 'partial', truncated: true, partialReason: 'More than 1000 exact deliveries occurred in the bounded window; only the newest 1000 were read. The counts are lower bounds. The durations are not bounds.' }) }));
-  await login(page); await page.getByRole('button', { name: /Shipping pulse/ }).click();
+  await login(page); await openPage(page, 'Insights', 'Shipping pulse');
   await expect(page.getByText('Partial history.')).toBeVisible();
   await expect(page.getByText('The counts are lower bounds. The durations are not bounds.')).toBeVisible();
   const sampled = page.getByText('Sampled durations:');
@@ -354,7 +361,7 @@ test('truncated history labels durations as newest-delivery samples, never as bo
 
 test('shipping pulse is not offered to operator agents whose scoped API cannot serve it', async ({ page }) => {
   await fixture(page, 'operator-agent'); await login(page);
-  await expect(page.getByRole('button', { name: /Delivery graph/ })).toBeVisible();
+  await expect(page.getByRole('navigation', { name: 'Primary' }).getByRole('button', { name: /Work/ })).toBeVisible();
   await expect(page.getByRole('button', { name: /Shipping pulse/ })).toHaveCount(0);
 });
 
@@ -371,7 +378,7 @@ test('all three dialogs move, trap, and restore focus and close with Escape', as
   const state = await fixture(page); await login(page);
   await checkDialog(page, cardSelect(page));
   await checkDialog(page, page.getByRole('button', { name: '＋ New work item' }));
-  await page.getByRole('button', { name: '✓ Test cases' }).click();
+  await openPage(page, 'Settings', 'Test cases');
   await checkDialog(page, page.getByRole('button', { name: '＋ New test case' }));
   expect(state.writes).toBe(0);
 });
@@ -384,7 +391,7 @@ test('reader has no creation controls; graph filters and search still work', asy
   await expect(page.getByRole('heading', { name: 'Browser fixture' })).toHaveCount(0);
   await page.getByLabel('Search work').fill('GY-1');
   await expect(page.getByRole('heading', { name: 'Browser fixture' })).toBeVisible();
-  await page.getByRole('button', { name: '✓ Test cases' }).click();
+  await openPage(page, 'Settings', 'Test cases');
   await expect(page.getByRole('heading', { name: 'Test-case library' })).toBeVisible();
   await expect(page.getByRole('button', { name: '＋ New test case' })).toHaveCount(0);
 });
@@ -457,12 +464,12 @@ test('a delayed post-create refresh cannot restore the signed-out session or lea
   await page.route('**/api/status', async route => { await rejected; return route.fulfill({ status: 401, json: { error: 'Rejected' } }); });
   await login(page, 'invalid');
   await expect(page.getByRole('status')).toContainText('Verifying');
-  await expect(page.getByRole('heading', { name: 'Delivery graph' })).toHaveCount(0);
+  await expect(workHeading(page)).toHaveCount(0);
   rejectLogin();
   await expect(page.getByRole('alert')).toContainText('rejected');
   await expect(page.getByLabel('Access token')).toBeVisible();
   await expect(page.getByRole('heading', { name: 'Browser fixture' })).toHaveCount(0);
-  await expect(page.getByRole('heading', { name: 'Delivery graph' })).toHaveCount(0);
+  await expect(workHeading(page)).toHaveCount(0);
 });
 
  test('polling retains loaded history when an event refresh fails', async ({ page }) => {
@@ -471,7 +478,7 @@ test('a delayed post-create refresh cannot restore the signed-out session or lea
     eventReads++;
     return eventReads === 1 ? route.fulfill({ json: [{ seq: 1, kind: 'fixture-created', actor: 'fixture', created_at: '2026-01-01T00:00:00Z' }] }) : route.fulfill({ status: 503, json: { error: 'History temporarily unavailable' } });
   });
-  await login(page); await cardSelect(page).click();
+  await login(page); await cardSelect(page).click(); await moreDetails(page);
   await expect(page.getByRole('dialog').getByText('fixture-created', { exact: true })).toBeVisible();
   await expect.poll(() => eventReads, { timeout: 10000 }).toBeGreaterThan(1);
   await expect(page.getByRole('dialog').getByText('fixture-created', { exact: true })).toBeVisible();
@@ -481,7 +488,7 @@ test('history groups observation noise and bounds expanded rows without losing o
   await fixture(page);
   const events = Array.from({ length: 60 }, (_, i) => ({ seq: 60 - i, kind: i < 40 ? 'github.observed' : `work.event-${i}`, actor: 'github', created_at: new Date(Date.UTC(2026, 0, 1, 0, 60 - i)).toISOString() }));
   await page.route('**/api/events**', route => route.fulfill({ json: events }));
-  await login(page); await cardSelect(page).click();
+  await login(page); await cardSelect(page).click(); await moreDetails(page);
   const history = page.getByRole('region', { name: 'Work history', exact: true });
   await expect(history.getByText('github.observed × 40', { exact: true })).toBeVisible();
   await expect(history.locator('.timeline > div')).toHaveCount(20);
@@ -501,7 +508,7 @@ test('history groups observation noise and bounds expanded rows without losing o
  test('unavailable review providers disable selection and explain the missing connection', async ({page}) => {
   await fixture(page);
   await page.route('**/api/status',route=>route.fulfill({json:{actor:{id:'fixture',role:'admin'},github:true,reviewProviders:['github'],repository:'fixture/repository',jobs:[]}}));
-  await login(page);await cardSelect(page).click();
+  await login(page);await cardSelect(page).click();await editMenu(page);
   await expect(page.getByRole('button',{name:'Use Codex cloud review'})).toBeDisabled();
   await expect(page.getByText(/Codex review is unavailable/)).toBeVisible();
   await page.getByLabel('Close details').click();await page.getByRole('button',{name:'New work item'}).click();
@@ -513,8 +520,9 @@ test('history groups observation noise and bounds expanded rows without losing o
   const assigned={...work,lease:{owner:'worker-a',epoch:1,expiresAt:'2026-01-01T00:01:00Z'},lastAssignment:{owner:'worker-a',epoch:1,displayName:'Atlas',runtime:'Codex'}};
   await page.route('**/api/work-snapshot',route=>route.fulfill({json:{work:[assigned],now:'2026-01-01T00:00:00Z'}}));
   await page.route('**/api/status',route=>route.fulfill({json:{actor:{id:'fixture',role:'reader'},github:true,jobs:[],now:'2026-01-01T00:02:00Z'}}));
-  await login(page);const card=page.locator('.card').first();await expect(card).toContainText('Atlas · Codex');await expect(card).not.toContainText('Last worked by');
-  await expect(card.locator('.dot.green')).toHaveCount(1);
+  // The item view names the active worker; a lapsed lease would read "Last worked by".
+  await login(page);await cardSelect(page).click();const owner=page.getByRole('dialog').locator('.assignment-details');
+  await expect(owner).toHaveText('Atlas · Codex');await expect(owner).not.toContainText('Last worked by');
  });
 
  test('maximum-length agent labels fit board cards and remain available in details', async ({page}) => {
@@ -522,14 +530,13 @@ test('history groups observation noise and bounds expanded rows without losing o
   const displayName='A'.repeat(100),runtime='R'.repeat(80),identity=`${displayName} · ${runtime}`;
   const assigned={...work,lease:{owner:'worker-a',epoch:1,expiresAt:'2026-01-01T00:01:00Z'},lastAssignment:{owner:'worker-a',epoch:1,displayName,runtime}};
   await page.route('**/api/work-snapshot',route=>route.fulfill({json:{work:[assigned],now:'2026-01-01T00:00:00Z'}}));
-  await login(page);await page.getByRole('button',{name:/Work board/}).click();
-  const card=page.locator('.card').first(),label=card.locator('.assignment-label');
-  await expect(label).toHaveText(identity);
-  await expect(label).toHaveAttribute('title',`${identity} · Worker ID: worker-a`);
-  const bounds=await card.evaluate(e=>{const label=e.querySelector('.assignment-label')!;return {card:e.clientWidth,content:e.scrollWidth,label:label.clientWidth,text:label.scrollWidth,ellipsis:getComputedStyle(label).textOverflow}});
-  expect(bounds.content).toBeLessThanOrEqual(bounds.card);expect(bounds.text).toBeGreaterThan(bounds.label);expect(bounds.ellipsis).toBe('ellipsis');
+  await login(page);await page.getByRole('button',{name:'Board view'}).click();
+  const card=page.locator('.card').first();
+  const bounds=await card.evaluate(e=>({card:e.clientWidth,content:e.scrollWidth}));
+  expect(bounds.content).toBeLessThanOrEqual(bounds.card);
   await card.click();const details=page.getByRole('dialog').locator('.assignment-details');
   await expect(details).toHaveText(identity);
+  await moreDetails(page);await expect(page.getByRole('dialog')).toContainText('Worker ID: worker-a');
   expect(await details.evaluate(e=>e.scrollWidth<=e.clientWidth)).toBe(true);
  });
 
@@ -540,7 +547,7 @@ test('scenario loading, failure, retry and real empty library are distinct', asy
     await pending;
     return route.fulfill(failing ? { status: 503, json: { error: 'Runner catalog unavailable' } } : { json: [] });
   });
-  await login(page); await page.getByRole('button', { name: 'Test cases', exact: false }).click();
+  await login(page); await openPage(page, 'Settings', 'Test cases');
   await expect(page.getByRole('status')).toHaveText('Loading test cases…');
   await expect(page.getByText('Describe the behavior you need to prove.')).toHaveCount(0);
   release(); await expect(page.getByRole('alert')).toContainText('unavailable');
@@ -566,7 +573,7 @@ test('a failed re-read keeps already-observed test cases visible and marks them 
   await fixture(page); let reads = false;
   await page.route('**/api/scenarios', route => route.request().method() === 'POST' ? (reads = true, route.fulfill({ json: savedScenario }))
     : reads ? route.fulfill({ status: 503, json: { error: 'Runner catalog unavailable' } }) : route.fulfill({ json: [savedScenario] }));
-  await login(page); await page.getByRole('button', { name: 'Test cases', exact: false }).click();
+  await login(page); await openPage(page, 'Settings', 'Test cases');
   await expect(page.getByRole('heading', { name: 'Saved case' })).toBeVisible();
   await publishCase(page, 'published-case');
   await expect(page.getByRole('alert')).toContainText('unavailable');
@@ -579,7 +586,7 @@ test('a failed re-read reports unknown contents instead of claiming an empty or 
   await fixture(page); let reads = false;
   await page.route('**/api/scenarios', route => route.request().method() === 'POST' ? (reads = true, route.fulfill({ json: savedScenario }))
     : reads ? route.fulfill({ status: 503, json: { error: 'Runner catalog unavailable' } }) : route.fulfill({ json: [] }));
-  await login(page); await page.getByRole('button', { name: 'Test cases', exact: false }).click();
+  await login(page); await openPage(page, 'Settings', 'Test cases');
   await expect(page.getByText('Describe the behavior you need to prove.')).toBeVisible();
   await publishCase(page, 'published-case');
   await expect(page.getByRole('alert')).toContainText('unavailable');
@@ -593,7 +600,7 @@ test('a rejected publish never reports the library as unread or stale', async ({
   await fixture(page);
   await page.route('**/api/scenarios', route => route.request().method() === 'POST'
     ? route.fulfill({ status: 400, json: { error: 'Stable ID exceeds 100 characters' } }) : route.fulfill({ json: [savedScenario] }));
-  await login(page); await page.getByRole('button', { name: 'Test cases', exact: false }).click();
+  await login(page); await openPage(page, 'Settings', 'Test cases');
   await expect(page.getByRole('heading', { name: 'Saved case' })).toBeVisible();
   await publishCase(page, 'rejected-case');
   await expect(page.getByRole('alert')).toContainText('Stable ID exceeds 100 characters');
@@ -608,7 +615,7 @@ test('a rejected publish leaves a confirmed empty library reported as empty', as
   await fixture(page);
   await page.route('**/api/scenarios', route => route.request().method() === 'POST'
     ? route.fulfill({ status: 400, json: { error: 'Stable ID exceeds 100 characters' } }) : route.fulfill({ json: [] }));
-  await login(page); await page.getByRole('button', { name: 'Test cases', exact: false }).click();
+  await login(page); await openPage(page, 'Settings', 'Test cases');
   await expect(page.getByText('Describe the behavior you need to prove.')).toBeVisible();
   await publishCase(page, 'rejected-case');
   await expect(page.getByRole('alert')).toContainText('Stable ID exceeds 100 characters');
@@ -624,7 +631,7 @@ test('a publish error is not carried into the next form', async ({ page }) => {
   await page.route('**/api/scenarios', route => route.request().method() === 'POST'
     ? (reject ? route.fulfill({ status: 400, json: { error: 'Stable ID exceeds 100 characters' } }) : route.fulfill({ json: savedScenario }))
     : route.fulfill({ json: [] }));
-  await login(page); await page.getByRole('button', { name: 'Test cases', exact: false }).click();
+  await login(page); await openPage(page, 'Settings', 'Test cases');
   await expect(page.getByText('Describe the behavior you need to prove.')).toBeVisible();
   await publishCase(page, 'rejected-case');
   await expect(page.getByRole('alert')).toContainText('Stable ID exceeds 100 characters');
@@ -636,7 +643,10 @@ test('a publish error is not carried into the next form', async ({ page }) => {
 test('work details explain missing proof and operator can revise explicit criteria', async ({ page }) => {
   const state = await fixture(page); await login(page);
   await cardSelect(page).click();
+  await expect(page.getByRole('dialog').locator('.marker-pending')).toContainText('manual:browser pending');
+  await moreDetails(page);
   await expect(page.getByText('AC-1 · manual:browser · unmeasured')).toBeVisible();
+  await editMenu(page);
   await page.getByRole('button', { name: 'Revise requirements', exact: true }).click();
   const form = page.getByRole('form', { name: 'Revise requirements' });
   await form.getByRole('button', { name: 'Add criterion' }).click();
@@ -663,7 +673,7 @@ test('releases view labels verification precisely, shows membership and reports 
     reason: 'Incident', automatic: true, requestedBy: 'graphyard', requestedAt: '2026-01-01T00:00:00Z', repairWorkId: null, state: 'applied', verifiedAt: null, interval: null, history: [],
     operation: { id: 'op-12345678', registration: { id: 'rollback', revision: 1 }, principal: 'railway-rollback', epoch: 1, fencing: 'provider', claimedAt: '2026-01-01T00:00:10Z', precondition: { environment: 'production', generation: 2, expectedRunning: 'g', token: 't' }, outcome: 'applied', settledAt: '2026-01-01T00:00:40Z', providerOperationId: 'dep-9', detail: null, resolvedBy: null, evidence: null, reports: [] } };
   await page.route('**/api/delivery', route => route.fulfill(fail ? { status: 503, json: { error: 'Delivery state unavailable' } } : { json: { environments: [environment], releases: [release], rollbacks: [rollback], now: '2026-01-01T00:02:00Z' } }));
-  await login(page); await page.getByRole('button', { name: '⇈ Releases' }).click();
+  await login(page); await openPage(page, 'Insights', 'Releases');
   await expect(page.getByRole('heading', { name: 'Releases', level: 1 })).toBeVisible();
   await expect(page.getByRole('alert')).toContainText('Delivery state unavailable');
   await expect(page.getByText('No release selected yet.')).toHaveCount(0);
@@ -692,7 +702,7 @@ test('validation view reports failures honestly and bounds request history', asy
     const older = new URL(route.request().url()).searchParams.has('cursor'); if (older) olderReads++;
     return route.fulfill(fail ? { status: 503, json: { error: 'Validation unavailable' } } : { json: { candidates: [], requests: older ? requests.slice(20) : requests.slice(0,20), nextCursor: older ? null : 'page-two' } });
   });
-  await login(page); await page.getByRole('button', { name: '↻ Validation' }).click();
+  await login(page); await openPage(page, 'Insights', 'Validation');
   await expect(page.getByRole('heading', { name: 'Validation requests' })).toBeVisible();
   await expect(page.getByRole('alert')).toContainText('Validation unavailable');
   await expect(page.getByText('No validation requested yet.')).toHaveCount(0);
@@ -729,17 +739,20 @@ test('merge queue shows each entry with its position, predicted tip, and wait', 
   const entries = section.locator('button.card');
   await expect(entries).toHaveCount(2);
   await expect(entries.nth(0)).toContainText('1. GY-10');
-  await expect(entries.nth(0)).toContainText('head of queue');
+  await expect(entries.nth(0)).toContainText('Next to merge');
   await expect(entries.nth(0)).toContainText('Waiting 45m');
-  await expect(entries.nth(0)).toContainText(`predicted tip ${headSha.slice(0, 12)}`);
   await expect(entries.nth(1)).toContainText('2. GY-11');
-  await expect(entries.nth(1)).toContainText('behind GY-10');
-  await expect(entries.nth(1)).toContainText(`Predicted base ${headSha.slice(0, 12)}`);
-  await expect(entries.nth(1)).toContainText('Merge queue position 2 of 2: GY-10 is ahead');
+  await expect(entries.nth(1)).toContainText('Behind GY-10');
   await entries.nth(1).click();
+  // The item view says where it is in line; the predicted base and tip are under More details.
   const drawer = page.getByRole('dialog', { name: 'Behind the head' });
+  await expect(drawer.locator('.status-sentence')).toHaveText('Queued to merge — 2nd in line, after GY-10');
+  await moreDetails(page);
   await expect(drawer.getByRole('heading', { name: 'Merge queue' })).toBeVisible();
   await expect(drawer).toContainText('Position 2 of 2');
+  await expect(drawer).toContainText(`Predicted base ${headSha.slice(0, 12)}`);
+  await expect(drawer).toContainText(`predicted tip ${tipSha.slice(0, 12)}`);
+  await expect(drawer).toContainText('Merge queue position 2 of 2: GY-10 is ahead');
   await expect(drawer).toContainText('refs/graphyard/queue/gy-11');
 });
 
@@ -882,12 +895,13 @@ test('legacy abbreviated SHAs and invalid candidate references never become link
   }
   await page.route('**/api/work-snapshot', route => route.fulfill({ json: { work: [{ ...work, candidate: null }], now: '2026-01-01T00:00:00Z' } }));
   await login(page);
-  await expect(page.locator('.card').getByText('No PR', { exact: true })).toBeVisible();
+  await expect(page.locator('.card').getByRole('link')).toHaveCount(0);
+  await expect(page.locator('.card .status-line')).toBeVisible();
 });
 
 test('proof authority shows the live grant set, its source, and unproducible required proof', async ({ page }) => {
   await fixture(page); await login(page);
-  await page.getByRole('button', { name: '⚷ Proof authority' }).click();
+  await openPage(page, 'Settings', 'Proof authority');
   await expect(page.getByRole('heading', { name: 'Proof authority' })).toBeVisible();
   // The fixture item requires manual:browser, which the operator role covers, so the only
   // honest report is that nothing is unproducible.
@@ -899,7 +913,7 @@ test('proof authority shows the live grant set, its source, and unproducible req
 
 test('an operator grants authority through the dashboard and a reader cannot', async ({ page }) => {
   const state = await fixture(page); await login(page);
-  await page.getByRole('button', { name: '⚷ Proof authority' }).click();
+  await openPage(page, 'Settings', 'Proof authority');
   let body: any;
   await page.route('**/api/proof-grants/acceptance/grant', async route => { body = route.request().postDataJSON(); await route.fulfill({ json: proofGrants.grants[0] }); });
   const form = page.locator('form.grant-form').first();
@@ -912,7 +926,7 @@ test('an operator grants authority through the dashboard and a reader cannot', a
   expect(state.writes).toBe(0);
   await page.getByRole('button', { name: 'Sign out' }).click();
   await fixture(page, 'reader'); await login(page);
-  await page.getByRole('button', { name: '⚷ Proof authority' }).click();
+  await openPage(page, 'Settings', 'Proof authority');
   await expect(page.getByText('ci · integration:*')).toBeVisible();
   await expect(page.locator('form.grant-form')).toHaveCount(0);
 });

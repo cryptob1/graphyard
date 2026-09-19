@@ -110,18 +110,24 @@ async function fixture(page: Page, role = 'admin', mutate: (report: any) => any 
   await page.goto('/');
   await page.getByLabel('Access token').fill('browser-fixture');
   await page.getByRole('button', { name: 'Open control plane' }).click();
+  // Flow analytics is a tab under Insights.
+  await page.getByRole('button', { name: /Insights/ }).click();
   await page.getByRole('button', { name: 'Flow analytics' }).click();
   await expect(page.getByRole('heading', { name: 'Flow analytics', level: 1 })).toBeVisible();
   return state;
 }
+// The page opens on where work waits and pull-request-to-merge time; everything else is behind Show details.
+const showDetails = (page: Page) => page.getByText('Show details', { exact: true }).click();
 
 test('integration:flow-analytics-browser', async ({ page }) => {
   const state = await fixture(page);
   await expect(page.locator('.flow-state')).toHaveAttribute('data-state', /complete|sparse/);
 
-  // Every aggregate is visible with its count, and the narrative matches the cards.
+  // The default view: each wait category with items is a card with its count; nothing else.
   const reviewCard = page.getByRole('button', { name: /Waiting on review/ });
   await expect(reviewCard).toContainText('1');
+  await expect(page.getByRole('img', { name: /Cumulative flow by stage/ })).toBeHidden();
+  await showDetails(page);
   await expect(page.getByText(/undelivered item\(s\) are/)).toBeVisible();
 
   // Each visualization is paired with an equivalent data table.
@@ -202,6 +208,7 @@ for (const viewport of [{ name: 'desktop', width: 1280, height: 900 }, { name: '
   test(`flow analytics is keyboard reachable, labelled, and usable on ${viewport.name}`, async ({ page }) => {
     await page.setViewportSize({ width: viewport.width, height: viewport.height });
     await fixture(page, 'reader');
+    await showDetails(page);
     for (const name of ['Window', 'Work type', 'Stage', 'Delivery slice']) await expect(page.getByLabel(name, { exact: true })).toBeVisible();
     await expect(page.getByRole('region', { name: 'Cumulative flow data table' })).toBeVisible();
     await expect(page.getByRole('img', { name: /Cumulative flow by stage/ })).toBeVisible();
