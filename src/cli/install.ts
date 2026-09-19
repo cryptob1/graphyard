@@ -4,6 +4,7 @@ import { parseArgs } from 'node:util';
 import { availableRuntimes, discover } from '../onboarding.js';
 import { startGithubSetup, updateAppPermissions } from '../github-setup.js';
 import { applyProposal, loadAppliedSetup, loadProposal, readSetupStatus, repositoryScanDifference, saveProposal, scanProposal, setupDrift, setupRepository } from '../repository-setup.js';
+import { delegationLimitAssignments } from '../install/limits.js';
 import { completionProfiles, readinessChecklist, summarizeDefinitions, type CompletionProfile } from '../readiness.js';
 import { defineCommands } from './registry.js';
 import { readSecretFromStdin } from './context.js';
@@ -23,6 +24,25 @@ const interactiveGithubSetup = (root: string) => async (repository: string, depl
     } catch (error: any) { if (error.code !== 'ENOENT') throw error; }
   }
 };
+
+/**
+ * The capacity variables that accompany the principals `init --apply` registers: derived from
+ * the roster in .graphyard/principals.json, and — when the operator credential reaches the
+ * server — compared with what the deployment runs with, so a re-run after the roster grew
+ * reports the deployed value that no longer covers it beside the value to set.
+ */
+export async function capacityForPrincipals(principalsFile: string, status: () => Promise<any>) {
+  const registry = JSON.parse(await readFile(principalsFile, 'utf8'));
+  let deployed: Record<string, string | null> | null = null, error: string | null = null;
+  try {
+    const live = await status();
+    deployed = live?.delegationLimits?.deployed ?? null;
+    if (!deployed) error = 'the server reports no delegationLimits; deploy main first, then rerun init --scan --apply to compare';
+  } catch (failure: any) { error = `the server could not be read (${failure.message})`; }
+  const limits = delegationLimitAssignments(registry.principals, deployed);
+  return { variables: limits.variables, lines: limits.lines, drift: limits.drift,
+    next: `Set ${limits.lines.join(' ')} beside GRAPHYARD_PRINCIPALS on the Graphyard deployment${limits.drift.length ? ` (drift: ${limits.drift.map(entry => entry.reason).join(' ')})` : error ? `; no drift can be reported because ${error}` : ''}` };
+}
 
 /** Repository onboarding: propose and apply the delivery workflow, register Apps, inspect readiness. */
 export const installCommands = defineCommands([
@@ -47,7 +67,7 @@ export const installCommands = defineCommands([
           const url = values.url ?? stored.proposal.server;
           if (!url) throw new Error('Applying requires the Graphyard server URL; pass --url');
           const result = await applyProposal(root, stored.proposal, { url, githubSetup: interactiveGithubSetup(root) });
-          return print({ proposal: stored.file, ...result });
+          return print({ proposal: stored.file, ...result, capacity: await capacityForPrincipals(result.principalsFile, () => context.api('status')) });
         }
         await saveProposal(root, fresh);
         const applied = await loadAppliedSetup(root);
@@ -87,6 +107,9 @@ export const installCommands = defineCommands([
       const setup = await readSetupStatus(root).catch((error: any) => ({ error: error.message }));
       const stored = await loadProposal(root).catch(() => null);
       const appPermissions = live?.appPermissions ?? null;
+      // Capacity drift and production lag are the two installation facts a deploy can break
+      // silently; the server reports both and doctor repeats them beside the App preflight.
+      const delegationLimits = live?.delegationLimits ?? null, production = live?.production ?? null;
       // Validation definitions are readable by operators and readers; every other credential
       // leaves the runner-path items `unknown` with the command that reads them.
       let definitions: { kind: string; id: string; revision: number; role?: string; enabled?: boolean }[] | null = null;
@@ -98,12 +121,21 @@ export const installCommands = defineCommands([
         proposal: stored?.proposal ?? null,
         validation: definitions ? summarizeDefinitions(definitions) : null,
       });
+      // A ready checklist still deploys nothing: once every item is ready, capacity drift and
+      // an undeployed merge are the next actions; until then the checklist's own gap comes first.
+      const next = !readiness.ready ? readiness.next
+        : delegationLimits?.drift?.length ? `Set ${delegationLimits.drift.map((entry: any) => `${entry.variable}=${entry.required}`).join(' ')} on the deployment: ${delegationLimits.drift[0].reason}`
+        : production?.incidents?.length ? `Production has not deployed ${production.incidents.map((incident: any) => incident.key).join(', ')}: ${production.incidents[0].reason}`
+        : readiness.next;
       return context.print({ discovered, server: base, cliPath: await context.activeCliPath(), hostId: context.individualHostId(), connected: !!live, githubConfigured: !!live?.github, role: live?.actor?.role, release: live?.release ?? null, failure,
         setup,
         appPermissions: appPermissions ? { verifiedAt: appPermissions.verifiedAt, missing: appPermissions.missing, attention: appPermissions.attention, installationUrl: appPermissions.installationUrl } : null,
         heldJobs: live?.heldJobs ?? 0,
+        build: live?.build ?? null,
+        delegationLimits: delegationLimits ? { limits: delegationLimits.limits, deployed: delegationLimits.deployed, drift: delegationLimits.drift, attention: delegationLimits.attention } : null,
+        production: production ? { provider: production.provider, serving: production.serving, running: production.running, aheadBy: production.ahead?.by ?? null, incidents: production.incidents, attention: production.attention, error: production.error } : null,
         readiness,
-        next: readiness.next,
+        next,
         limits: ['CI discovery is a proposal, not executed-test inventory', 'Herdr two-host recovery and GitHub refusal-to-acceptance must be demonstrated', 'A ready checklist is configuration, never evidence: the first real PR must visibly pass every gate'] });
     },
   },

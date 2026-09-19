@@ -57,8 +57,8 @@ the exact commit observed. Each refusal names its cause and the fix:
 
 ## Daily checks
 
-- `/healthz` should return 200, confirm database connectivity, and name the release (`version`, `revision`) and schema generation you expect to be running.
-- Authenticated `/api/status` should show no persistent integration errors.
+- `/healthz` should return 200, confirm database connectivity, and name the release (`version`, `revision`), the deployed `commit` and the schema generation you expect to be running.
+- Authenticated `/api/status` should show no persistent integration errors, no `delegationLimits.attention`, and no open `production.incidents`.
 - Inspect the delivery graph for old work, stale observations, and blockers.
 - Keep backups and verify a restore in an isolated environment periodically: `graphyard db backup`, `db verify` and `db restore` are the shipped procedure — see [backup, upgrade, rollback](deployment.md#backup-upgrade-rollback).
 - Monitor Postgres size: events contain work snapshots and evidence is retained. The MVP has no automatic retention pruning.
@@ -241,6 +241,41 @@ the item's merge commit, and the base branch.
    is live now.
 
 Graphyard v0.1 does not execute rollbacks or reverts itself.
+
+## Merged but not deployed
+
+A merged commit that production never served is a **deployment incident**, recorded by the control
+plane's [production observation](deployment.md#production-deployment-observation) within five minutes
+of the merge: immediately when the provider reports the deployment `FAILED` or `CRASHED`, and after the
+five-minute grace period when no deployment of the merge is observed at all. The incident is an
+append-only `delivery.deployment-incident` event on the delivered item; it appears in `GET /api/status`
+under `production.incidents`, in `graphyard doctor` as `next`, and in `graphyard master status` under
+`controlPlane.production` with the attention line `main is N commits ahead of production (serving …):
+<reason>`. `/healthz` stays green throughout, because the previous release is still serving — that is
+exactly why the observation exists.
+
+1. Read the reason. A provider failure names the deployment and its URL; open the provider's build or
+   deploy log for the exit. A start-up refusal is printed there verbatim — for a capacity limit it names
+   the variable and value to set, such as `set GRAPHYARD_MAX_REVIEWERS=4 on the deployment`.
+2. Fix the deployment, not the ledger: set the variable, or land the fix through a new work item. Do not
+   revert the merge to clear the incident unless the change itself is wrong.
+3. When a deployment containing the merge serves, the watch appends `delivery.deployment-recovered` and
+   the attention line clears on the next pass. Nothing is edited or deleted.
+4. If `master merge` refuses with `server runs <sha>, CLI expects <sha>: deploy main first`, the CLI
+   checkout speaks a newer merge protocol than the deployed server: deploy main and retry rather than
+   downgrading the CLI.
+
+Without a Railway token the control plane still detects the miss from its own build commit and asks for
+`RAILWAY_API_TOKEN` in the incident reason so the next one carries the provider's failure.
+
+## Capacity variables no longer cover the principals
+
+`delegationLimits.attention` in `/api/status`, `doctor`, and `master status` names each
+`GRAPHYARD_MAX_*`/`GRAPHYARD_MIN_*` variable whose deployed value (or unset default) no longer covers
+the configured principals, with the value to set. The server has already derived a working limit and
+started; set the variable as asked and redeploy so the value is explicit. Re-running the installer does
+the same and reports the drift. Adding a principal beyond an explicit limit is the one case that refuses
+start-up, with the same sentence, and the previous release keeps serving until the variable is raised.
 
 ## Merge bypass
 

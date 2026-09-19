@@ -52,20 +52,94 @@ async function once<T>(store: Store, actor: Principal, key: string, fingerprintI
   });
 }
 
-export function delegationLimits(env: NodeJS.ProcessEnv = process.env): DelegationLimits {
-  const integer = (name: string, fallback: number) => { const value = Number(env[name] ?? fallback); demand(Number.isInteger(value) && value > 0, `${name} must be a positive integer`, 500); return value; };
-  const result = { maxLeads: integer('GRAPHYARD_MAX_SLICE_LEADS', 3), maxEngineersPerLead: integer('GRAPHYARD_MAX_ENGINEERS_PER_LEAD', 2), minReviewers: integer('GRAPHYARD_MIN_REVIEWERS', 1), maxReviewers: integer('GRAPHYARD_MAX_REVIEWERS', 2) };
+/** The environment variables the limits are read from, in the order an installer sets them. */
+export const delegationLimitVariables = ['GRAPHYARD_MAX_SLICE_LEADS', 'GRAPHYARD_MAX_ENGINEERS_PER_LEAD', 'GRAPHYARD_MIN_REVIEWERS', 'GRAPHYARD_MAX_REVIEWERS'] as const;
+export type DelegationLimitVariable = typeof delegationLimitVariables[number];
+const limitDefaults: Record<DelegationLimitVariable, number> = { GRAPHYARD_MAX_SLICE_LEADS: 3, GRAPHYARD_MAX_ENGINEERS_PER_LEAD: 2, GRAPHYARD_MIN_REVIEWERS: 1, GRAPHYARD_MAX_REVIEWERS: 2 };
+type Roster = readonly Pick<Principal, 'id' | 'role'>[];
+const countLeads = (principals: Roster) => principals.filter(p => p.role === 'slice-lead').length;
+const countProducers = (principals: Roster) => principals.filter(p => p.role === 'producer').length;
+
+/**
+ * The values an installer sets from the principal set it generates: the defaults, widened
+ * to cover every lead and producer in the roster. Any explicit value already deployed is
+ * kept when it covers the roster, so a re-run never narrows a limit an operator raised.
+ */
+export function requiredDelegationLimits(principals: Roster, deployed: Record<string, string | undefined> = {}): Record<DelegationLimitVariable, string> {
+  const widened = (name: DelegationLimitVariable, needed: number) => {
+    const explicit = Number(deployed[name]);
+    return String(Math.max(limitDefaults[name], needed, Number.isInteger(explicit) && explicit > 0 ? explicit : 0));
+  };
+  return {
+    GRAPHYARD_MAX_SLICE_LEADS: widened('GRAPHYARD_MAX_SLICE_LEADS', countLeads(principals)),
+    GRAPHYARD_MAX_ENGINEERS_PER_LEAD: widened('GRAPHYARD_MAX_ENGINEERS_PER_LEAD', 0),
+    GRAPHYARD_MIN_REVIEWERS: widened('GRAPHYARD_MIN_REVIEWERS', 0),
+    GRAPHYARD_MAX_REVIEWERS: widened('GRAPHYARD_MAX_REVIEWERS', countProducers(principals)),
+  };
+}
+
+/**
+ * Where each deployed value fails to cover the principal set: the variable, what is deployed
+ * (`null` when unset), and the value to set. A drift entry is the exact sentence an operator
+ * or installer acts on; the server derives a start-up limit from the same roster so an
+ * uncovered value warns instead of refusing an install that was already running.
+ */
+export interface DelegationLimitDrift { variable: DelegationLimitVariable; deployed: string | null; required: string; principals: number; reason: string }
+export function delegationLimitDrift(principals: Roster, env: Record<string, string | undefined> = {}): DelegationLimitDrift[] {
+  const drift: DelegationLimitDrift[] = [];
+  const check = (variable: DelegationLimitVariable, count: number, noun: string) => {
+    const deployed = env[variable] ?? null;
+    const limit = deployed === null ? limitDefaults[variable] : Number(deployed);
+    if (Number.isInteger(limit) && limit > 0 && count > limit) drift.push({ variable, deployed, required: String(count), principals: count,
+      reason: deployed === null
+        ? `${variable} is unset and its default of ${limit} does not cover the ${count} ${noun} principals configured in GRAPHYARD_PRINCIPALS; the limit is derived as ${count} for this start. Set ${variable}=${count} on the deployment so the value is explicit.`
+        : `${variable}=${deployed} no longer covers the ${count} ${noun} principals configured in GRAPHYARD_PRINCIPALS. Set ${variable}=${count} on the deployment.` });
+  };
+  check('GRAPHYARD_MAX_SLICE_LEADS', countLeads(principals), 'slice-lead');
+  check('GRAPHYARD_MAX_REVIEWERS', countProducers(principals), 'producer');
+  return drift;
+}
+
+/**
+ * The limits a server runs with. An explicit variable is authoritative. An unset one derives
+ * from the principals already configured: the default, or the roster size when the roster is
+ * larger, so a new default can never refuse an installation that was starting before it. The
+ * derivation is reported as drift, never silently.
+ */
+export function delegationLimits(env: NodeJS.ProcessEnv = process.env, principals: Roster = []): DelegationLimits {
+  const integer = (name: DelegationLimitVariable, derived: number) => {
+    if (env[name] === undefined) return Math.max(limitDefaults[name], derived);
+    const value = Number(env[name]); demand(Number.isInteger(value) && value > 0, `${name} must be a positive integer`, 500); return value;
+  };
+  const result = { maxLeads: integer('GRAPHYARD_MAX_SLICE_LEADS', countLeads(principals)), maxEngineersPerLead: integer('GRAPHYARD_MAX_ENGINEERS_PER_LEAD', 0), minReviewers: integer('GRAPHYARD_MIN_REVIEWERS', 0), maxReviewers: integer('GRAPHYARD_MAX_REVIEWERS', countProducers(principals)) };
   demand(result.minReviewers <= result.maxReviewers, 'Reviewer minimum cannot exceed maximum', 500);
   return result;
 }
 
-export function validateDelegationPrincipals(principals: (Principal & { token?: string })[], limits = defaultDelegationLimits) {
+/**
+ * Roster validation at start-up. Separation-of-duties rules refuse outright: they are the
+ * security-relevant configuration. The capacity limits distinguish the principals this
+ * installation already ran with (`known`, the producers and leads it seeded before) from
+ * ones added since: an over-limit roster of known principals starts with an attention item
+ * naming the variable and value to set, and only a principal added beyond the limit is
+ * refused, with the same variable and value in the refusal. Without a known set every
+ * principal counts as new, which is the strict check a fresh configuration gets.
+ */
+export function validateDelegationPrincipals(principals: (Principal & { token?: string })[], limits = defaultDelegationLimits, known?: readonly string[]): { attention: string[] } {
+  const attention: string[] = [];
   const leads = principals.filter(p => p.role === 'slice-lead');
-  demand(leads.length <= limits.maxLeads, `Slice lead limit exceeded: ${leads.length}/${limits.maxLeads}`);
+  const reviewers = principals.filter(p => p.role === 'producer');
+  const overLimit = (group: Principal[], limit: number, variable: DelegationLimitVariable, what: string) => {
+    if (group.length <= limit) return;
+    const added = known ? group.filter(p => !known.includes(p.id)).map(p => p.id) : group.map(p => p.id);
+    const fix = `set ${variable}=${group.length} on the deployment`;
+    demand(!added.length, `${what} limit exceeded: ${group.length}/${limit}; ${fix} before adding ${added.join(', ')}`);
+    attention.push(`${what} limit exceeded: ${group.length}/${limit}; the ${group.length} configured principals were already running here, so the server started and enforces ${group.length}. ${fix[0].toUpperCase()}${fix.slice(1)}.`);
+  };
+  overLimit(leads, limits.maxLeads, 'GRAPHYARD_MAX_SLICE_LEADS', 'Slice lead');
   for (const lead of leads) demand(lead.sessionKind === 'ai' && lead.slice && sliceIds.includes(lead.slice), 'Slice leads must be AI sessions assigned to a formal slice');
   for (const slice of sliceIds) demand(leads.filter(p => p.slice === slice).length <= 1, `Slice ${slice} already has a lead`);
-  const reviewers = principals.filter(p => p.role === 'producer');
-  demand(reviewers.length <= limits.maxReviewers, `Independent review/proof agent limit exceeded: ${reviewers.length}/${limits.maxReviewers}`);
+  overLimit(reviewers, limits.maxReviewers, 'GRAPHYARD_MAX_REVIEWERS', 'Independent review/proof agent');
   // Review/proof agents are shared and independent: never a lead identity, never
   // bound to one slice. Co-located credentials are not a separation of duties.
   const leadIds = new Set(leads.map(p => p.id));
@@ -83,6 +157,7 @@ export function validateDelegationPrincipals(principals: (Principal & { token?: 
   demand(new Set(tokens).size === tokens.length, 'Slice leads require distinct principals and credentials');
   // Bootstrap (no leads) keeps working without any producer configured.
   if (leads.length) demand(reviewers.length >= limits.minReviewers, `Slice delegation requires at least ${limits.minReviewers} independent review/proof agent(s): ${reviewers.length} configured`);
+  return { attention };
 }
 
 export { implementerIdentities } from './model.js';
