@@ -245,7 +245,8 @@ export async function launchReview(root: string, work: Work, profileName: string
   let pane: string | undefined, tabId: string | undefined;
   try {
     // The reviewer loads its own role rules, never the master's: it may post this one verdict.
-    const harness = await prepareSessionHarness(root, config, { role: 'reviewer', kind: profile.kind, profile: profile.name, pr: binding.pr });
+    // The harness follows the account's runtime, so a cross-runtime failover keeps its role rules.
+    const harness = await prepareSessionHarness(root, config, { role: 'reviewer', kind: launch.kind, profile: profile.name, pr: binding.pr });
     const environment = { ...launch.environment, GH_CONFIG_DIR: sessionDirectory, GRAPHYARD_REVIEW: `${binding.key}@${binding.sha}` };
     const created = createdHerdrTab(herdrJson(['tab', 'create', ...(config.herdrWorkspace ? ['--workspace', config.herdrWorkspace] : []), '--cwd', root,
       '--label', `${binding.key} review · ${profile.agentName}`, ...Object.entries(environment).flatMap(([name, value]) => ['--env', `${name}=${value}`]), '--no-focus'], dependencies.run));

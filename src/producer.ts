@@ -144,8 +144,9 @@ export async function launchProducer(root: string, work: Work, request: Dispatch
   const selected = await selectAccount(config, 'producer', profile, { ...dependencies.probe, work: work.key });
   // A producer builds in a detached worktree under /tmp that commits into the repository's Git directory.
   const launch = accountLaunch(profile, selected.account, { writable: ['/tmp', sharedGitDirectory(root)].filter((path): path is string => !!path) });
-  // The producer loads its own role rules, never the master's.
-  const harness = await prepareSessionHarness(root, config, { role: 'producer', kind: profile.kind, profile: profile.name, credentialFiles: [profile.credentialFile] });
+  // The producer loads its own role rules, never the master's. The harness follows the account's
+  // runtime, so a cross-runtime failover keeps its role rules.
+  const harness = await prepareSessionHarness(root, config, { role: 'producer', kind: launch.kind, profile: profile.name, credentialFiles: [profile.credentialFile] });
   let pane: string | undefined, tabId: string | undefined;
   try {
     const environment = { ...launch.environment, GRAPHYARD_URL: config.url, GRAPHYARD_TOKEN_FILE: profile.credentialFile, GRAPHYARD_HOST_ID: config.hostId, GRAPHYARD_PRODUCER: `${binding.key}@${binding.sha}` };

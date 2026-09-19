@@ -6,9 +6,9 @@ import { mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { accountLaunch, agentLaunchPlan, buildMasterStatus, checkAgentEnvironment, deliverPrompt, discoverAgentEnvironments, dispatchWork, herdrErrorCode, inspectProducerCredentials, inspectWorkerCredentials, loadMasterConfig, masterHarness, masterSettingsFromArgs, NoHealthyAccountError, prepareAgentEnvironment, PromptNotAcceptedError, readEnvironmentLog, saveMasterSettings, selectAccount, setupAgentEnvironments, setupMaster, startMaster, type EnvironmentProbe } from '../src/master.js';
-import { bindReviewer, launchReview, readReviewLedger, saveReviewerProfile } from '../src/reviewer.js';
-import { launchProducer } from '../src/producer.js';
+import { accountLaunch, agentLaunchPlan, buildMasterStatus, checkAgentEnvironment, deliverPrompt, discoverAgentEnvironments, dispatchWork, herdrErrorCode, inspectProducerCredentials, inspectWorkerCredentials, loadMasterConfig, masterHarness, masterSettingsFromArgs, NoHealthyAccountError, prepareAgentEnvironment, PromptNotAcceptedError, readEnvironmentLog, saveMasterSettings, selectAccount, sessionHarnessFile, setupAgentEnvironments, setupMaster, sharedGitDirectory, startMaster, type EnvironmentProbe } from '../src/master.js';
+import { bindReviewer, launchReview, readReviewLedger, saveReviewLedger, saveReviewerProfile } from '../src/reviewer.js';
+import { launchProducer, readProducerLedger, saveProducerLedger } from '../src/producer.js';
 import { dispatchSummary, readDispatchCursor, runDispatchTick, type DispatchEffects } from '../src/auto-dispatch.js';
 import { atomicPrivateWrite } from '../src/master.js';
 import type { Work } from '../src/model.js';
@@ -176,20 +176,26 @@ test('integration:agent-env-discovery — onboarding discovers or creates one en
 
 test('integration:agent-quota-failover — every launch checks login and quota, skips an exhausted or logged-out account with its reason in master status, and fails over to the next healthy one', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'graphyard-quota-'));
-  const homes = { spent: await account(directory, 'claude-a', 'claude'), out: await account(directory, 'claude-b', null), fresh: await account(directory, 'claude-c', 'claude'), codex: await account(directory, 'codex', 'codex') };
+  const homes = { spent: await account(directory, 'claude-a', 'claude'), out: await account(directory, 'claude-b', null), fresh: await account(directory, 'claude-c', 'claude'), codex: await account(directory, 'codex', 'codex'), codexB: await account(directory, 'codex-b', 'codex') };
   await codexUsage(homes.codex, 98);
   const { root, credentialDirectory, cleanup } = await master({ reviewer: true });
   try {
+    // The repository carries Claude project settings, as master start writes them: a Claude session
+    // launched here must load its role file instead of inheriting the repository's rules.
+    await mkdir(join(root, '.claude'), { recursive: true });
+    await writeFile(join(root, '.claude', 'settings.local.json'), '{}\n');
     const probe = usage({ 'claude-a-oauth-token': { five: 3, seven: 100 }, 'claude-c-oauth-token': { five: 12, seven: 3 } });
     const credential = await token(credentialDirectory, 'workers', 'worker-a', 'worker-a-token-');
     const producerCredential = await token(credentialDirectory, 'producers', 'proof-runner', 'proof-runner-token-');
     let config = await configure(root, next => {
-      next.environments = [{ name: 'claude-a', kind: 'claude', home: homes.spent }, { name: 'claude-b', kind: 'claude', home: homes.out }, { name: 'claude-c', kind: 'claude', home: homes.fresh }, { name: 'codex', kind: 'codex', home: homes.codex }];
+      next.environments = [{ name: 'claude-a', kind: 'claude', home: homes.spent }, { name: 'claude-b', kind: 'claude', home: homes.out }, { name: 'claude-c', kind: 'claude', home: homes.fresh }, { name: 'codex', kind: 'codex', home: homes.codex }, { name: 'codex-b', kind: 'codex', home: homes.codexB }];
       next.workers = [{ name: 'worker-a', principal: 'worker-a', agentName: 'eng-a', mode: 'launch', kind: 'codex', credentialFile: credential, agentArgs: ['--model', 'gpt-codex'], approvals: 'auto', environment: {}, accounts: ['codex', 'claude-a', 'claude-b', 'claude-c'] },
         { name: 'worker-spent', principal: 'worker-b', agentName: 'eng-b', mode: 'launch', kind: 'claude', credentialFile: credential, agentArgs: [], approvals: 'auto', environment: {}, accounts: ['claude-a', 'claude-b'] }];
       next.reviewers = [{ name: 'review-spent', agentName: 'review-a', kind: 'claude', agentArgs: [], approvals: 'auto', environment: {}, accounts: ['claude-a', 'claude-b'] },
-        { name: 'review-fresh', agentName: 'review-c', kind: 'claude', agentArgs: [], approvals: 'auto', environment: {}, accounts: ['claude-c'] }];
-      next.producers = [{ name: 'producer-a', principal: 'proof-runner', agentName: 'produce-a', kind: 'claude', credentialFile: producerCredential, agentArgs: [], approvals: 'auto', environment: {}, accounts: ['claude-b', 'claude-c'] }];
+        { name: 'review-fresh', agentName: 'review-c', kind: 'claude', agentArgs: [], approvals: 'auto', environment: {}, accounts: ['claude-c'] },
+        { name: 'review-cross', agentName: 'review-x', kind: 'codex', agentArgs: [], approvals: 'auto', environment: {}, accounts: ['codex', 'claude-c'] }];
+      next.producers = [{ name: 'producer-a', principal: 'proof-runner', agentName: 'produce-a', kind: 'claude', credentialFile: producerCredential, agentArgs: [], approvals: 'auto', environment: {}, accounts: ['claude-b', 'claude-c'] },
+        { name: 'producer-cross', principal: 'proof-runner', agentName: 'produce-x', kind: 'claude', credentialFile: producerCredential, agentArgs: [], approvals: 'auto', environment: {}, accounts: ['claude-a', 'claude-b', 'codex-b'] }];
       next.run.reviewerProfile = 'review-spent';
     });
 
@@ -217,7 +223,8 @@ test('integration:agent-quota-failover — every launch checks login and quota, 
     const dispatched = await dispatchWork(root, ready(), config.workers[0], [], herdr(calls), [ready()], async () => ({ epoch: ++claims, path: join(root, 'assigned'), base: 'c'.repeat(40) }), async () => {}, 5_000, new Date().toISOString(), { probe });
     const tab = tabEnvironment(calls[0]);
     assert.equal(tab.CLAUDE_CONFIG_DIR, homes.fresh); assert.equal(tab.GRAPHYARD_HERDR_AGENT_KIND, 'claude'); assert.equal(tab.CODEX_HOME, undefined);
-    assert.match(calls[1][3], /'--' 'claude' '--permission-mode' 'bypassPermissions'$/); assert.doesNotMatch(calls[1][3], /gpt-codex/);
+    assert.ok(calls[1][3]!.endsWith(`'--' 'claude' '--permission-mode' 'bypassPermissions' '--setting-sources' 'user' '--settings' '${sessionHarnessFile(root, 'worker', 'worker-a')}'`), 'the failed-over worker runs the account runtime and loads its role file, not the repository settings');
+    assert.doesNotMatch(calls[1][3]!, /gpt-codex/);
     assert.equal(dispatched.account!.environment, 'claude-c'); assert.deepEqual(dispatched.account!.skipped.map(entry => entry.environment), ['codex', 'claude-a', 'claude-b']);
     let claimed = false;
     await assert.rejects(dispatchWork(root, ready(), config.workers[1], [], herdr([]), [ready()], async () => { claimed = true; return { epoch: 9, path: root, base: 'c'.repeat(40) }; }, async () => {}, 5_000, new Date().toISOString(), { probe }), /No healthy agent account for worker profile worker-spent/);
@@ -246,6 +253,38 @@ test('integration:agent-quota-failover — every launch checks login and quota, 
     const produced = await launchProducer(root, producing, requested, config.producers[0], [], new Date().toISOString(), { run: herdr(produceCalls), probe });
     assert.equal(produced.account!.environment, 'claude-c'); assert.deepEqual(produced.account!.skipped.map(entry => entry.environment), ['claude-b']);
     assert.equal(tabEnvironment(produceCalls[0]).GRAPHYARD_TOKEN_FILE, producerCredential);
+
+    // Cross-runtime failover for a reviewer: the Codex profile's only Codex account is exhausted, so
+    // the session runs on the Claude account — with the reviewer's role harness following the
+    // account's --kind, never the repository's master rules.
+    const reviewLedger = await readReviewLedger(root);
+    await saveReviewLedger(root, { ...reviewLedger, reviews: reviewLedger.reviews.filter(record => record.state !== 'pending') });
+    const reviewCrossCalls: string[][] = [];
+    const reviewedCross = await launchReview(root, work(), 'review-cross', [], new Date().toISOString(), { run: herdr(reviewCrossCalls), mint, probe });
+    assert.equal(reviewedCross.account!.environment, 'claude-c');
+    assert.equal(tabEnvironment(reviewCrossCalls[0]).CLAUDE_CONFIG_DIR, homes.fresh);
+    const reviewStart = reviewCrossCalls.find(args => args[0] === 'agent' && args[1] === 'start')!;
+    assert.equal(reviewStart[4], 'claude', 'the session runs the account\'s runtime, not the profile\'s');
+    assert.deepEqual(reviewStart.slice(reviewStart.indexOf('--') + 1), ['--permission-mode', 'bypassPermissions', '--setting-sources', 'user', '--settings', sessionHarnessFile(root, 'reviewer', 'review-cross')]);
+    const roleFile = JSON.parse(await readFile(sessionHarnessFile(root, 'reviewer', 'review-cross'), 'utf8'));
+    assert.ok(roleFile.permissions.allow.includes('Bash(gh api --method POST repos/owner/project/pulls/68/reviews*)'), 'the failed-over reviewer keeps its one verdict allow');
+    assert.ok(roleFile.permissions.deny.includes('Bash(git push:*)'), 'the failed-over reviewer keeps its role denies');
+    assert.equal(JSON.stringify(roleFile).includes('master:*'), false, 'the master\'s own rules never ride a reviewer session');
+
+    // Cross-runtime failover for a producer: the Claude profile's Claude accounts are spent or
+    // logged out, so the session runs on the healthy Codex account with no Claude flags on its line.
+    const produceLedger = await readProducerLedger(root);
+    await saveProducerLedger(root, { ...produceLedger, producers: produceLedger.producers.filter(record => record.state !== 'pending') });
+    const requestedCross = { ...requested, id: 'request-producer-cross', proofs: ['integration:prompt-delivery-confirmed'] };
+    const producingCross = work({ autoDispatch: { review: null, producers: [requestedCross], history: [] } } as any);
+    const produceCrossCalls: string[][] = [];
+    const producedCross = await launchProducer(root, producingCross, requestedCross, config.producers.find(profile => profile.name === 'producer-cross')!, [], new Date().toISOString(), { run: herdr(produceCrossCalls), probe });
+    assert.equal(producedCross.account!.environment, 'codex-b'); assert.deepEqual(producedCross.account!.skipped.map(entry => entry.environment), ['claude-a', 'claude-b']);
+    const produceStart = produceCrossCalls.find(args => args[0] === 'agent' && args[1] === 'start')!;
+    assert.equal(produceStart[4], 'codex', 'the session runs the account\'s runtime, not the profile\'s');
+    const produceTail = produceStart.slice(produceStart.indexOf('--') + 1);
+    assert.deepEqual(produceTail, ['--ask-for-approval', 'never', '--sandbox', 'workspace-write', '-c', 'sandbox_workspace_write.network_access=true', '--add-dir', '/tmp', '--add-dir', sharedGitDirectory(root)]);
+    assert.equal(produceTail.includes('--setting-sources'), false, 'no Claude harness flags ride a Codex command line');
 
     const review = { id: 'request-review', kind: 'review', provider: 'github', sha: 'a'.repeat(40), baseSha: 'b'.repeat(40), policyRevision: 2, pr: 68, state: 'requested', requestedAt: new Date().toISOString(), reason: 'r' } as any;
     const item = work({ autoDispatch: { review, producers: [], history: [] } } as any);
