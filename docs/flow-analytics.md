@@ -19,7 +19,7 @@ Open it from the control plane sidebar (**Flow analytics**) or read it from
 | GitHub observation | pull-request creation time, review submission and state, merge time and merge commit | Collected by the control plane's own App credential |
 | CI observation | check run name, result, and transitions | Observed through the same GitHub observation |
 | Evidence records | proof, result, executed and skipped counts, trust, expiry | Trust follows the submitting credential; a worker assertion is stored and never counted as trusted |
-| Deployment-provider observation | environment, artifact commit, contained merge commits, state, start and finish | Recorded through `POST /api/deployments` with a producer or operator credential |
+| Deployment-provider observation | environment, artifact commit, contained merge commits, state, start and finish | Recorded through `POST /api/deployments` with a `producer` or `admin` credential |
 
 A work item's current document is a *mutable snapshot*. It is never used as evidence here.
 The present state shown by the bottleneck summary is read back from the last durable gate
@@ -129,7 +129,7 @@ rollback remain repository-wide across every observed environment.
 Every undelivered item in scope falls into exactly one category, decided by its latest
 durable gate fact:
 
-1. **Not released** — intent an operator has not released.
+1. **Not released** — intent that neither the human operator nor a scoped operator agent has released.
 2. **Blocked** — an explicit blocker is recorded.
 3. **Dependency-blocked** — the ready gate refuses because a prerequisite is not delivered.
 4. **In implementation** — released and unblocked, no candidate observed yet.
@@ -271,7 +271,7 @@ returns the same rows in the same order.
 Query parameters: `window` (7, 30, 90; default 30), `type`, `stage`, `slice`, `asOf`
 (never later than the server clock), `metric`, `key`, and `format` (`json` or `csv`).
 
-A deployment observation is recorded by a producer or operator credential:
+A deployment observation is recorded by a `producer` credential or the human operator's `admin` credential:
 
 ```json
 {
@@ -292,7 +292,7 @@ part of that artifact. Abbreviations are refused. The same provider, external ID
 is recorded once; a semantically identical repeat is reported as a duplicate (JSON object
 key order is immaterial), while a repeat that changes any immutable field or containment is
 refused.
-Implementation workers do not hold producer credentials, so they cannot record deployment
+Workers hold neither `producer` nor `admin` credentials, so they cannot record deployment
 observations.
 
 See also [architecture](architecture.md), [agent protocol and API](protocol.md), and

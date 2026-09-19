@@ -121,6 +121,16 @@ GY-4 (merge broker) then added evidence revocation: a *Revocation* section in `p
 
 Read with no ambiguous instance: the rest of the *Revocation* section (*workers, coordinators, other producers and operator agents* are role names), the broker paragraphs in `github.md` (*the owning coordinator* names the `coordinator` credential; *the provider* is GitHub), the `first-pr.md` contract paragraphs (*the runner*, *the controller*, and *the protected launcher* are pieces of the acceptance workflow, not roles), and the `coordination.md` sentence, whose link was pointed at the reference page that now holds the runbook text. The boundaries these passages add — only `admin` or the granted producer may revoke; revocation withdraws every trusted record for the tuple; a committed provider mutation refuses withdrawal until GitHub is observed; a revoked queue entry is ejected and the same commit does not re-enter — are preserved word for word apart from the role terms above.
 
+GY-35 (flow analytics) then added `flow-analytics.md`, `protocol/deployment-observations.md`, the `flow_facts` paragraph in `architecture.md`, the analytics rows in `protocol/read-endpoints.md`, and a `GRAPHYARD_PRODUCTION_ENVIRONMENT` row in `deployment.md`:
+
+| Page | Before | After | Reason |
+| --- | --- | --- | --- |
+| `flow-analytics.md`, `protocol/deployment-observations.md`, `architecture.md` (GY-35) | "a producer or operator credential" (three instances); "implementation workers cannot record one" | "a `producer` or `admin` credential" / "a `producer` credential or the human operator's `admin` credential"; "workers cannot record one" | Which operator, which credential: `POST /api/deployments` checks the `producer` or `admin` role, and an operator agent is refused. *Worker* is the canonical role name. |
+| `flow-analytics.md` (GY-35) | "**Not released** — intent an operator has not released." | "intent that neither the human operator nor a scoped operator agent has released." | Bare *operator* is the human, but `intent:ready` lets a scoped operator agent release in-scope work too. |
+| `flow-analytics.md` (GY-35) | "Implementation workers do not hold producer credentials, so they cannot record deployment observations." | "Workers hold neither `producer` nor `admin` credentials, so they cannot record deployment observations." | Names both accepted credentials; the boundary is unchanged. |
+
+Read with no ambiguous instance: the rest of `flow-analytics.md` (*a worker assertion is stored and never counted as trusted* restates the evidence-trust boundary; *a reviewer is slow* and *an item whose worker was replaced* name roles; *no principal ID … is stored* uses *principal* in the glossary sense), the `read-endpoints.md` rows (*not available to operator agents* is the canonical term), and the `deployment.md` environment row.
+
 ## Concision samples (before / after)
 
 | Page | Before | After |
