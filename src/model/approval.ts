@@ -14,11 +14,11 @@ import { createSchema, escalationTriggers, operatorCapability, type OperatorCapa
  * human-only is not a decision here: goals and priorities, spending money or opening
  * third-party accounts, and issuing credentials to people.
  */
-export const decisionActions = ['release', 'unblock', 'requirements', 'resolve', 'attest', 'merge', 'rework', 'grant'] as const;
+export const decisionActions = ['release', 'unblock', 'requirements', 'resolve', 'attest', 'merge', 'rework', 'recover', 'grant'] as const;
 export type DecisionAction = typeof decisionActions[number];
 export const decisionCapabilities: Record<DecisionAction, OperatorCapability> = {
   release: 'intent:ready', unblock: 'intent:unblock', requirements: 'policy:requirements', resolve: 'decision:resolve',
-  attest: 'decision:attest', merge: 'decision:merge', rework: 'decision:rework', grant: 'decision:grant',
+  attest: 'decision:attest', merge: 'decision:merge', rework: 'decision:rework', recover: 'decision:rework', grant: 'decision:grant',
 };
 export const approveCapability: OperatorCapability = 'decision:approve';
 
@@ -35,7 +35,9 @@ export const decisionInputs = {
   resolve: z.object({ trigger: z.enum(escalationTriggers), expectedRevision: revision }).strict(),
   attest: z.object({ proof: proofSchema.refine(proof => proof.startsWith('manual:'), 'Only manual: proofs are attested; automated proofs come from producers'), sha, baseSha: sha, policyRevision: revision, result: z.enum(['pass', 'fail']), executed: z.number().int().min(0), skipped: z.number().int().min(0), url: z.url().max(2000).optional() }).strict(),
   merge: z.object({ sha, baseSha: sha, policyRevision: revision }).strict(),
+  // Both carry the requester's attestation that the previous worker is stopped.
   rework: z.object({ previousWorkerStopped: z.literal(true) }).strict(),
+  recover: z.object({ previousWorkerStopped: z.literal(true) }).strict(),
   grant: z.object({ principal: principalId, patterns: z.array(z.string().min(1).max(200)).min(1).max(50), expectedRevision: z.number().int().min(0).optional() }).strict(),
 } satisfies Record<DecisionAction, z.ZodType>;
 const reason = z.string().trim().min(1).max(2000);
@@ -103,6 +105,7 @@ export function approvalConflict(decision: Pick<Decision, 'id' | 'action' | 'inp
 
 /** The item must still be in the state the decision was requested against. */
 export function decisionPrecondition(action: DecisionAction, input: any, work: Work): string | null {
+  if (action === 'recover') return work.stage === 'done' && work.containmentQuarantine ? null : 'Containment recovery applies to delivered work that is still quarantined';
   if (work.stage === 'done') return 'Delivered work is immutable; create a follow-up task';
   if ((action === 'release' || action === 'unblock' || action === 'resolve') && input.expectedRevision !== work.revision) return `Task revision changed (now ${work.revision}); reload and request again`;
   if (action === 'release' && (work.stage !== 'backlog' || work.ready)) return 'Only unreleased backlog work can be released';

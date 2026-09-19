@@ -69,6 +69,20 @@ not implement work, hold worker leases, submit evidence, or bypass gates. Run
 `graphyard master status` at startup and after every material event. Graphyard is
 the source of assignment and progression truth; Herdr supplies live session health.
 
+Autonomy is the default: act without asking. The operator sets goals; agents make
+every other call. Only three decisions are human: goals and priorities, spending money
+or opening third-party accounts, and issuing credentials to people. Every other
+decision names the agent that makes it and the independent agent that approves it.
+Create, release, unblock, and add requirements with your own operator-agent identity
+(`graphyard master create|release|unblock|requirements`). Request every other
+decision (requirement rewrites, escalation resolution, `manual:` attestation,
+rework, containment recovery, proof grants, and merge approval when automatic
+merging is off) with `graphyard master decide GY-N ACTION REASON`, then launch the
+independent approver with `graphyard master approver GY-N DECISION`. The server
+refuses self-approval and any approver that held an assignment on the item or produced
+its evidence. Never ask a human to run a command an agent identity may run: `master
+status` names who resolves each attention item and the next command.
+
 Dispatch only ready work with `graphyard master dispatch GY-N PROFILE`. The
 worker must claim the item under its own identity and use the assigned worktree.
 Treat prompt delivery as an invitation, never as ownership. Use durable handoffs
@@ -98,7 +112,7 @@ Each drives the operator's own authenticated browser profile headless, records e
 step and screenshot under `.graphyard/master-actions/`, verifies the result through
 the API, and appends an attributable audit entry. On a Confirm-access page the flow
 triggers GitHub Mobile and reports the two-digit code in `master status`; approving
-that prompt on their device, and decisions the docs mark human-only, are the only
+that prompt on their device, and the three human-only decisions above, are the only
 operator interactions left. Never store, export, or reuse the profile's cookies
 outside those flows.
 
@@ -116,12 +130,13 @@ An observed merge alone does not end the loop. Ordinary review findings, rework,
 idle workers, and proof setup are not stopping conditions. Close finished agent
 sessions as part of the cycle.
 
-Check the automatic-merge preference in master status. When disabled, wait for
-explicit operator approval for each merge. Otherwise routine merges may use
-`graphyard master merge --all`. The command rechecks the
-exact current candidate, every configured gate, and GitHub state immediately before
-merging. Human gates, stale observations, failures, and changed commits remain
-blocking. Never use an administrative merge bypass, edit a candidate, or read a
+Check the automatic-merge preference in master status. When disabled, each merge
+needs an approved merge decision: request it with `graphyard master decide GY-N
+merge`, and `graphyard master merge` refuses a candidate the approver agent has not
+approved. Otherwise routine merges may use `graphyard master merge --all`. The command
+rechecks the exact current candidate, every configured gate, and GitHub state
+immediately before merging. Unapproved decisions, stale observations, failures, and
+changed commits remain blocking. Never use an administrative merge bypass, edit a candidate, or read a
 worker credential. Read `docs/master-agent.md`
 in Graphyard or run `graphyard master guide` for the complete operating loop.
 <!-- /graphyard-master -->

@@ -168,6 +168,7 @@ async function applyThroughEngine(services: Services, decision: Decision, approv
     case 'unblock': await engine.execute(actor, 'unblock', decision.workId, { reason, expectedRevision: input.expectedRevision }, key); return 'Blocker cleared';
     case 'requirements': { const work = await engine.execute(actor, 'requirements', decision.workId, { ...input, reason }, key); return `Requirements revised to policy revision ${work.policyRevision}`; }
     case 'rework': await engine.execute(actor, 'rework', decision.workId, { reason, previousWorkerStopped: true }, key); return 'Rework authorized';
+    case 'recover': await engine.execute(actor, 'recover', decision.workId, { reason, previousWorkerStopped: true }, key); return 'Containment quarantine recovered';
     case 'attest': await engine.execute(actor, 'evidence', decision.workId, input, key); return `${input.proof} attested ${input.result} for ${input.sha}`;
     case 'grant': { const grant = await services.proofGrants.grant(actor, input.principal, { patterns: input.patterns, reason, ...(input.expectedRevision === undefined ? {} : { expectedRevision: input.expectedRevision }) }, key); return `Granted ${input.patterns.join(', ')} to ${input.principal} (grant revision ${grant.revision})`; }
     default: throw new Error(`No engine application for ${decision.action}`);
