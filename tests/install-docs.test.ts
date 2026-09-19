@@ -16,6 +16,8 @@ async function documentationCopy() {
   await cp(resolve(repository, 'README.md'), join(directory, 'README.md'));
   await cp(resolve(repository, 'examples'), join(directory, 'examples'), { recursive: true });
   await cp(resolve(repository, 'AGENTS.md'), join(directory, 'AGENTS.md'));
+  // The install rules bind any repository that ships the installer.
+  await cp(resolve(repository, 'src/install'), join(directory, 'src/install'), { recursive: true });
   return directory;
 }
 
@@ -122,6 +124,19 @@ test('the check fails when the runbook itself is missing', async () => {
     await rm(join(directory, 'docs/install.md'));
     const result = run(directory);
     assert.equal(result.status, 1);
-    assert.match(result.stderr, /the primary install runbook is missing|missing install\.md/);
+    assert.match(result.stderr, /docs\/install\.md: the primary install runbook is missing/);
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
+test('the install rules bind only a repository that ships the installer', async () => {
+  const directory = await documentationCopy();
+  try {
+    const onboarding = join(directory, 'docs/onboarding.md');
+    const content = await readFile(onboarding, 'utf8');
+    await writeFile(onboarding, content.replace('## 1. Install the control plane', '## 1. Install the control plane\n\nFirst run `railway init --name graphyard`.\n'));
+    assert.match(run(directory).stderr, /"railway init" precedes the one-command install path/);
+    await rm(join(directory, 'src/install'), { recursive: true });
+    // The copy omits unrelated link targets, so only the install rules are asserted absent.
+    assert.doesNotMatch(run(directory).stderr, /one-command install path|install runbook|manual fallback/);
   } finally { await rm(directory, { recursive: true, force: true }); }
 });

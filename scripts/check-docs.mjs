@@ -157,7 +157,9 @@ for (const file of files) {
 
 // The one-command install is the documented primary path. These rules keep it that way:
 // no guide may lead with a manual provisioning sequence, and the manual steps that remain
-// live in one clearly labelled fallback beside the variables table.
+// live in one clearly labelled fallback beside the variables table. They bind every repository
+// that ships the installer, so deleting the runbook fails the check rather than skipping it.
+const shipsInstaller = existsSync('src/install');
 const ONE_COMMAND = 'install --provider';
 const MANUAL_MARKERS = [
   /scripts\/provision-railway\.mjs/g,
@@ -185,10 +187,12 @@ const primary = [
 
 const installFailures = [];
 let runbook = '';
-try {
-  runbook = readFileSync('docs/install.md', 'utf8');
-} catch {
-  installFailures.push('docs/install.md: the primary install runbook is missing');
+if (shipsInstaller) {
+  try {
+    runbook = readFileSync('docs/install.md', 'utf8');
+  } catch {
+    installFailures.push('docs/install.md: the primary install runbook is missing');
+  }
 }
 
 if (runbook) {
@@ -204,7 +208,7 @@ if (runbook) {
   }
 }
 
-for (const file of files) {
+for (const file of shipsInstaller ? files : []) {
   const content = readFileSync(file, 'utf8');
   const relative = file.replace(`${process.cwd()}/`, '');
   const rule = primary.find(entry => entry.file === relative);
@@ -230,10 +234,12 @@ for (const file of files) {
   }
 }
 
-const deployment = readFileSync(FALLBACK_FILE, 'utf8');
-if (!deployment.includes(FALLBACK_HEADING)) installFailures.push(`${FALLBACK_FILE}: the manual path must be labelled "${FALLBACK_HEADING}"`);
-if (!/^\|\s*`GRAPHYARD_PRINCIPALS`\s*\|/m.test(deployment)) installFailures.push(`${FALLBACK_FILE}: the variables table must document GRAPHYARD_PRINCIPALS`);
-if (!/variables listed above|variables table/.test(deployment.slice(deployment.indexOf(FALLBACK_HEADING)))) installFailures.push(`${FALLBACK_FILE}: the manual fallback must point at the variables table`);
+if (shipsInstaller) {
+  const deployment = readFileSync(FALLBACK_FILE, 'utf8');
+  if (!deployment.includes(FALLBACK_HEADING)) installFailures.push(`${FALLBACK_FILE}: the manual path must be labelled "${FALLBACK_HEADING}"`);
+  if (!/^\|\s*`GRAPHYARD_PRINCIPALS`\s*\|/m.test(deployment)) installFailures.push(`${FALLBACK_FILE}: the variables table must document GRAPHYARD_PRINCIPALS`);
+  if (!/variables listed above|variables table/.test(deployment.slice(deployment.indexOf(FALLBACK_HEADING)))) installFailures.push(`${FALLBACK_FILE}: the manual fallback must point at the variables table`);
+}
 
 failures.push(...installFailures);
 
