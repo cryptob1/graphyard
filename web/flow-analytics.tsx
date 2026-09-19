@@ -65,16 +65,20 @@ export default function FlowAnalytics({ request, download, canAudit }: { request
   }
 
   const coverage = report?.coverage;
-  const state = error ? 'unavailable' : loading && !report ? 'loading' : !report ? 'unavailable'
+  // A refresh in flight never inherits the previous report's coverage state: the figures on
+  // screen belong to an earlier observation and possibly to different filters.
+  const state = error ? 'unavailable' : loading || !report ? 'loading'
     : coverage.workItems === 0 ? 'empty'
-    : coverage.truncated || coverage.workItemsTruncated || coverage.deploymentsTruncated || coverage.deploymentMergesTruncated ? 'partial'
+    : coverage.truncated || coverage.workItemsTruncated || coverage.deploymentsTruncated || coverage.deploymentMergesTruncated || coverage.sliceFilterTruncated ? 'partial'
     : coverage.projection.stale || Date.now() - Date.parse(report.generatedAt) > 120_000 ? 'stale'
     : coverage.sparse ? 'sparse' : 'complete';
   const stateText: Record<string, string> = {
-    loading: 'Loading flow analytics…',
+    loading: report ? `Refreshing: the figures below are from the earlier observation at ${new Date(report.generatedAt).toLocaleString()} and may not match the selected filters.` : 'Loading flow analytics…',
     unavailable: 'Flow analytics are unavailable. Displayed values, if any, are from an earlier observation.',
     empty: 'No work item matches this window and filter. Nothing is inferred and nothing is shown as zero.',
-    partial: `Partial: a scan bound was reached (${coverage?.scanLimit} records, ${coverage?.workItemScanLimit} work items, or ${coverage?.deploymentScanLimit} deployment observations), so some records in this window are not included.`,
+    partial: coverage?.sliceFilterTruncated && !(coverage.truncated || coverage.workItemsTruncated || coverage.deploymentsTruncated || coverage.deploymentMergesTruncated)
+      ? `Partial: ${coverage.slices.truncatedInRepository} work item(s) change more than ${coverage.slices.limit} top-level areas, so this slice filter may have missed them.`
+      : `Partial: a scan bound was reached (${coverage?.scanLimit} records, ${coverage?.workItemScanLimit} work items, ${coverage?.deploymentScanLimit} deployment observations, or ${coverage?.slices?.limit} areas per item), so some records in this window are not included.`,
     stale: 'Stale: the durable projection is behind the ledger, or this observation is older than two minutes.',
     sparse: 'Sparse: too few records in this window for the distributions to be representative.',
     complete: 'Complete: every record in this window is included in the figures below.',

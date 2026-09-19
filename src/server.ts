@@ -12,7 +12,7 @@ import { Validation } from './validation.js';
 import { Delivery } from './delivery.js';
 import { defineScenario, scenarios } from './scenarios.js';
 import { OperatorAgents } from './operator-agent.js';
-import { computeFlow, flowDrilldown, flowExport, flowWindows, projectFlow, readFlow, type FlowWindow } from './flow-analytics.js';
+import { computeFlow, flowDrilldown, flowExport, flowWindows, productionEnvironmentFromEnv, projectFlow, readFlow, type FlowWindow } from './flow-analytics.js';
 import { delegationLimits, delegationSnapshot, producerIndependenceRefusal, recordEvidenceRefusal, recordIntake, recordLeadRuling, recordLeadViolation, validateDelegationPrincipals } from './delegation.js';
 import { ProofGrants } from './proof-grants.js';
 import { artifactBackendFromEnv, artifactCapacityFromEnv, type ArtifactBackend } from './artifacts.js';
@@ -38,10 +38,10 @@ const flowQuerySchema = z.object({
   slice: z.string().max(200).nullish(), asOf: z.string().datetime().nullish(),
   metric: z.string().max(60).nullish(), key: z.string().max(200).nullish(), format: z.enum(['json', 'csv']).default('json'),
 }).strict();
-function flowQuery(url: URL) {
+function flowQuery(url: URL, productionEnvironment: string) {
   const raw = Object.fromEntries([...url.searchParams].filter(([, value]) => value !== ''));
   const parsed = flowQuerySchema.parse(raw);
-  return { ...parsed, days: parsed.window as FlowWindow };
+  return { ...parsed, days: parsed.window as FlowWindow, productionEnvironment };
 }
 function canonicalJson(value: unknown): string {
   if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
@@ -56,6 +56,8 @@ async function body(req: IncomingMessage, limit = 1_000_000) {
 export function server(engine: Engine, credentials: Credential[], github: GitHub | null = null, artifacts: { backend: ArtifactBackend | null; capacityBytes: number } = { backend: null, capacityBytes: artifactCapacityFromEnv() }) {
   const limits = delegationLimits();
   validateDelegationPrincipals(credentials, limits);
+  // Read once at boot so every analytics response of this process names the same environment.
+  const productionEnvironment = productionEnvironmentFromEnv();
   const principals = credentials.map(({ token, ...actor }) => ({ actor, hash: createHash('sha256').update(token).digest() }));
   // The engine is constructed with the repository that this control plane is
   // authorized to coordinate.  GITHUB_REPOSITORY is merely a process default
@@ -139,7 +141,7 @@ export function server(engine: Engine, credentials: Credential[], github: GitHub
           || url.pathname === '/api/delegation' || url.pathname === '/api/intake' || /^\/api\/work(?:\/[^/]+\/[a-z]+)?$/.test(url.pathname),
           'Route is not available to operator agents', 403);
         if (url.pathname.startsWith('/api/analytics/flow') && req.method === 'GET') {
-          const query = flowQuery(url);
+          const query = flowQuery(url, productionEnvironment);
           // Bounded catch-up keeps the read current without blocking on a full backfill.
           await projectFlow(engine.store, { batches: 3 });
           const dataset = await readFlow(engine.store, query);

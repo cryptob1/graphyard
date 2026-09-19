@@ -87,11 +87,11 @@ block of every report and in every export.
 | Throughput | Delivered facts per daily bucket. A delivered fact is written only when an authorized merge is independently observed. |
 | Lead time | Delivered observation time minus work-created time, reported as a daily trend and as p50/p75/p90 bands. |
 | Queue versus active work time | Active time is the union of lease intervals clipped to the window. Queue time is released, undelivered time with no active lease. |
-| Merge-ready dwell | From the gate fact where the candidate became merge ready (no gate refuses, or only merge-queue sequencing remains) to the observed merge, or to the observation instant for items still merge ready. |
-| Phase durations | Per candidate episode: pull-request created, review start, review complete, evidence complete, merge authorized, merged, production. |
+| Merge-ready dwell | From the gate fact where the candidate became merge ready (no gate refuses, or only merge-queue sequencing remains) to the next refusing gate fact, to the observed merge, or to the observation instant for items still merge ready, clipped to the window. Gate facts recorded after the merge never open an interval; an interval that ended before the window is excluded as `merge-ready-dwell-outside-window` rather than measured as a whole window. |
+| Phase durations | Per candidate episode: pull-request created, review start, review complete, evidence complete, merge authorized, merged, production. The production milestone is the earliest successful deployment of the configured production environment that contains the merge commit. |
 | CI duration, failure, retry | Per check name and commit, first pending observation to first terminal observation, plus terminal failures and repeat terminal transitions. |
 | Evidence wait, expiry, staleness | Wait is review completion to the completing evidence record. Expiry counts evidence whose expiry precedes the observation instant; staleness counts evidence bound to a superseded commit. |
-| Operations | Recorded blockers, gate refusal reasons, dependency critical path, currently unblocked work, review rounds and findings, rework rate, lease lifecycle, queue depth. |
+| Operations | Recorded blockers, gate refusal reasons, dependency critical path, currently unblocked work, review rounds and findings, rework rate, lease lifecycle, queue depth. A gate fact's identity includes its recorded refusal reasons, so a gate that keeps refusing for a different reason is a new fact and refusal history follows the evaluator. |
 | Deployment | Frequency, latency from observed merge to deployment start, failure rate, and rollbacks, from deployment-provider observations. |
 
 Percentiles use linear interpolation between the two nearest ranks of the sorted sample.
@@ -109,6 +109,19 @@ contaminate a later phase.
 A phase with a missing endpoint is not estimated. It is counted under `unknown` with the
 reason: `pull-request-creation-time-not-observed`, `not-observed`,
 `episode-started-before-window`, or `clock-inverted` when the end precedes the start.
+
+### The production environment
+
+Deployment providers name environments freely, so the `merged-to-production` phase only
+ends at a successful deployment whose `environment` equals the configured production
+environment: `GRAPHYARD_PRODUCTION_ENVIRONMENT`, default `production`. The report names it
+as `productionEnvironment` (also under `operations.deployments`, with
+`productionObservations`), and exports carry it in their metadata. A staging or preview
+deployment never closes the phase; such an episode is counted under `unknown` as
+`deployed-only-outside-production-environment`, distinct from
+`no-production-deployment-observed-for-this-commit` and from
+`no-deployment-provider-observations-recorded`. Deployment frequency, latency, failure, and
+rollback remain repository-wide across every observed environment.
 
 ### Bottleneck categories
 
@@ -154,15 +167,23 @@ review is waiting on.
   the declared planned scope is used and reported separately as `declared` provenance.
 
 `coverage.slices` reports how many items were classified by observation, by declaration, and
-not at all.
+not at all. An item is bounded to its first twelve sorted top-level areas
+(`coverage.slices.limit`); `coverage.slices.truncated` counts selected items at that bound,
+`coverage.slices.truncatedInRepository` counts every such item, and a slice filter over a
+repository with any of them reports `coverage.sliceFilterTruncated` and the **partial**
+state, because the filter may have missed those items.
 
 ## Coverage, exclusions, and honest states
 
 Every report carries `coverage` (items, records, scan bound, projection lag, provenance
 counts) and `exclusions` (each reason with a count and the work items affected, such as
-`clock-inverted-transition`, `missing-created-fact`, `ci-start-not-observed`, or
+`clock-inverted-transition`, `clock-inverted-lead-time`, `missing-created-fact`,
+`merge-ready-dwell-outside-window`, `ci-start-not-observed`, or
 `deployment-without-observed-merge`). Metrics with no data at all are listed in
-`unavailable` with a reason.
+`unavailable` with a reason. A drill-down applies the same predicate as its aggregate:
+the lead-time drill-down omits exactly the deliveries the aggregate excluded (the throughput
+drill-down still lists them, with no duration), and the blocker drill-down matches the
+bounded reason label the aggregate is keyed by.
 Deployment exclusions use deterministic non-provider labels; provider deployment IDs are
 never included in the reader-visible report. Exact provider identifiers remain restricted
 to audit roles through the deployment endpoint and authorized drill-downs.
@@ -171,7 +192,7 @@ The page shows exactly one state:
 
 | State | Meaning |
 | --- | --- |
-| Loading | A read is in flight; no figure is claimed yet. |
+| Loading | A read is in flight. On first load no figure is claimed; on a refresh the figures still on screen are labelled as an earlier observation that may not match the selected filters, and the previous coverage state is never carried over. |
 | Unavailable | The control plane refused or is unreachable. Any figures on screen are labelled as an earlier observation. |
 | Empty | No work item matches this window and filter. |
 | Partial | The scan bound was reached, so some records in the window are not included. |
@@ -215,8 +236,8 @@ Aggregation is bounded in date range (7, 30, or 90 days), work items scanned, re
 scanned, deployment observations, daily buckets, drill-down rows, and payload size.
 Reaching a bound is reported, never hidden: `coverage.truncated`,
 `coverage.workItemsTruncated`, `coverage.deploymentsTruncated`,
-`coverage.deploymentMergesTruncated`, and the **partial** state
-say so. Reads use indexed
+`coverage.deploymentMergesTruncated`, `coverage.sliceFilterTruncated`, and the
+**partial** state say so. Reads use indexed
 access paths on `flow_facts` — `(observed_at, id)`, `(work_id, observed_at, id)`,
 `(kind, observed_at, id)`, and `(work_id, kind, observed_at DESC, id DESC)` for bounded
 latest-state lookups — with deterministic ordering, so repeating a bounded query

@@ -63,6 +63,19 @@ export type FlowWindow = typeof flowWindows[number];
 export const flowLimits = { batch: 400, batches: 20, scan: 20_000, work: 2000, buckets: 90, drilldown: 200, distinct: 25, deployments: 500, deploymentMerges: 5000, payloadBytes: 4_000_000 };
 export const sparseSampleSize = 5;
 const day = 86_400_000;
+/**
+ * The deployment-provider environment whose successful deployments end the production
+ * phase. Providers name environments freely, so a staging or preview deployment must never
+ * close a phase that is labelled production; the name is configuration, not a guess.
+ */
+export const defaultProductionEnvironment = 'production';
+export function productionEnvironmentFromEnv(env: NodeJS.ProcessEnv = process.env) {
+  const raw = env.GRAPHYARD_PRODUCTION_ENVIRONMENT;
+  if (raw === undefined) return defaultProductionEnvironment;
+  const value = raw.trim();
+  if (!value || value.length > 100) throw new Error('GRAPHYARD_PRODUCTION_ENVIRONMENT must name a deployment-provider environment (1-100 characters)');
+  return value;
+}
 
 export type FlowSource = 'graphyard' | 'github' | 'ci' | 'evidence' | 'deployment';
 export const flowKinds = ['work.created', 'work.released', 'dependencies.changed', 'blocker.set', 'blocker.cleared',
@@ -95,16 +108,20 @@ function time(value: string | null | undefined) { const parsed = Date.parse(valu
 // A delivery slice is the top-level area of the repository a work item changes.
 // Observed changed files (trusted GitHub observation) win; declared planned scope is a
 // labelled intent fallback so pre-PR work is still groupable without inventing facts.
-export function workSlices(work: Pick<Work, 'plannedFiles' | 'observation'>): { slices: string[]; provenance: 'observed' | 'declared' | 'unclassified' } {
+// An item is bounded to `sliceLimit` roots (sorted, so the retained set is deterministic);
+// `truncated` reports that bound so a slice filter's coverage can say what it may miss.
+export const sliceLimit = 12;
+export function workSlices(work: Pick<Work, 'plannedFiles' | 'observation'>): { slices: string[]; provenance: 'observed' | 'declared' | 'unclassified'; truncated: boolean } {
   const roots = (paths: string[]) => [...new Set(paths.map(p => {
     const clean = p.replace(/^\.\//, '').replace(/\*+$/, '');
     return clean.includes('/') ? clean.split('/')[0] : clean ? 'root' : '';
-  }).filter(Boolean))].sort().slice(0, 12);
+  }).filter(Boolean))].sort();
+  const bounded = (all: string[], provenance: 'observed' | 'declared') => ({ slices: all.slice(0, sliceLimit), provenance, truncated: all.length > sliceLimit });
   const observed = roots(work.observation?.files ?? []);
-  if (observed.length) return { slices: observed, provenance: 'observed' };
+  if (observed.length) return bounded(observed, 'observed');
   const declared = roots(work.plannedFiles ?? []);
-  if (declared.length) return { slices: declared, provenance: 'declared' };
-  return { slices: [], provenance: 'unclassified' };
+  if (declared.length) return bounded(declared, 'declared');
+  return { slices: [], provenance: 'unclassified', truncated: false };
 }
 
 // Derives normalized facts from one ledger event and advances the per-item projection
@@ -235,11 +252,15 @@ export function deriveFacts(event: LedgerEvent, state: ProjectionState): FlowFac
   // classification can tell "queued and ready" from "blocked" without reading live state.
   const queued = !!work.queue;
   const mergeBlockers = (gates.find(g => g.name === 'merge')?.reasons ?? []).filter(reason => !queueSequencingReason(reason)).length;
-  const gateKey = JSON.stringify([work.stage, unmet, dependencyWaiting, !!work.candidate, blocker, !!work.ready, work.violations?.length ?? 0, queued, mergeBlockers > 0]);
+  // The recorded refusal reasons are part of the identity: a gate that keeps refusing for a
+  // different reason (protection, then freshness) is a new durable fact, so refusal history
+  // never keeps reporting a reason the evaluator has already replaced.
+  const reasons = (firstUnmet?.reasons ?? []).slice(0, 5);
+  const gateKey = JSON.stringify([work.stage, unmet, dependencyWaiting, !!work.candidate, blocker, !!work.ready, work.violations?.length ?? 0, queued, mergeBlockers > 0, firstUnmet?.name ?? null, reasons]);
   if (gateKey !== state.gateKey)
     push('gates.changed', recordedAt, 'graphyard', String(sourceEvent), {
       stage: work.stage, unmet, firstUnmet: firstUnmet?.name ?? null, firstUnmetReason: firstUnmet?.reasons[0] ?? null,
-      reasons: (firstUnmet?.reasons ?? []).slice(0, 5), dependencyWaiting, hasCandidate: !!work.candidate,
+      reasons, dependencyWaiting, hasCandidate: !!work.candidate,
       released: !!work.ready, blocker, violations: work.violations?.length ?? 0, pr: work.candidate?.pr ?? null,
       queued, mergeBlockers,
     });
@@ -307,7 +328,7 @@ export async function projectFlow(store: Store, options: { batch?: number; batch
   return { processed, inserted, checkpoint };
 }
 
-export interface FlowQuery { days: FlowWindow; type?: string | null; stage?: string | null; slice?: string | null; asOf?: string | null; limit?: number }
+export interface FlowQuery { days: FlowWindow; type?: string | null; stage?: string | null; slice?: string | null; asOf?: string | null; limit?: number; productionEnvironment?: string }
 export interface FlowDataset {
   observedAt: string; from: string; to: string; days: FlowWindow;
   work: Work[]; included: Work[]; facts: FlowFact[]; latest: FlowFact[]; carryIn: FlowFact[]; deployments: DeploymentObservation[];
@@ -402,6 +423,32 @@ export function mergeReadyGate(gate: Record<string, any> | undefined): boolean {
   if (!unmet.length) return true;
   return unmet.length === 1 && unmet[0] === 'merge' && gate.queued === true && gate.mergeBlockers === 0;
 }
+/**
+ * Merge-ready intervals of one item, from its ordered gate facts. An interval opens at the
+ * first gate fact that is merge ready and closes at the next refusing gate fact, at the
+ * observed merge, or stays open to the observation time. Gate facts observed at or after the
+ * merge describe post-delivery state and never open an interval. Intervals are reported with
+ * their real endpoints and then clipped to the window; one that ends before the window (an item
+ * merged before it opened) contributes nothing rather than a full-window duration.
+ */
+export function mergeReadyIntervals(gateFacts: FlowFact[], mergedAt: number | null, from: number, to: number) {
+  const ordered = [...gateFacts].sort((a, b) => time(a.observedAt)! - time(b.observedAt)! || (a.id ?? 0) - (b.id ?? 0));
+  const intervals: { readyAt: number; endAt: number; closedBy: 'refused' | 'merged' | 'open'; startMs: number; endMs: number; ms: number; inWindow: boolean }[] = [];
+  const close = (readyAt: number, endAt: number, closedBy: 'refused' | 'merged' | 'open') => {
+    const startMs = Math.max(from, readyAt), endMs = Math.min(to, endAt);
+    intervals.push({ readyAt, endAt, closedBy, startMs, endMs, ms: Math.max(0, endMs - startMs), inWindow: endAt > from && readyAt < to && endMs >= startMs });
+  };
+  let readyAt: number | null = null;
+  for (const fact of ordered) {
+    const at = time(fact.observedAt)!;
+    if (mergedAt !== null && at >= mergedAt) break;
+    const ready = mergeReadyGate(fact.details);
+    if (ready && readyAt === null) readyAt = at;
+    if (!ready && readyAt !== null) { close(readyAt, at, 'refused'); readyAt = null; }
+  }
+  if (readyAt !== null) close(readyAt, mergedAt ?? to, mergedAt !== null ? 'merged' : 'open');
+  return intervals;
+}
 // Classification is read back from the durable gate fact, never from a live client claim.
 export function classifyWait(gate: Record<string, any> | undefined, delivered: boolean): WaitCategory | null {
   if (delivered) return 'delivered';
@@ -445,15 +492,17 @@ export const metricDefinitions: Record<string, { label: string; formula: string;
   throughput: { label: 'Throughput', formula: 'Count of delivered facts per daily bucket. A delivered fact is written only when an authorized merge is independently observed.', sources: ['flow_facts:delivered'] },
   leadTime: { label: 'Lead time', formula: 'Delivered observation time minus the work-created time, per delivered item in the window.', sources: ['flow_facts:work.created', 'flow_facts:delivered'] },
   queueVsActive: { label: 'Queue versus active work time', formula: 'Active time is the union of lease intervals clipped to the window. Queue time is released, undelivered time in the window with no active lease.', sources: ['flow_facts:lease.claimed', 'flow_facts:lease.released', 'flow_facts:lease.lost'] },
-  mergeReadyDwell: { label: 'Merge-ready dwell', formula: 'Interval from the gate fact where the candidate became merge ready (no gate refuses, or only merge-queue sequencing remains) to the observed merge, or to the observation time for items still merge ready.', sources: ['flow_facts:gates.changed', 'flow_facts:merged'] },
-  phases: { label: 'Phase durations', formula: 'Per candidate episode (one commit under review), the interval between consecutive milestones. A milestone uses the independently observed provider timestamp when the provider supplies one.', sources: ['flow_facts:candidate.observed', 'flow_facts:review.submitted', 'flow_facts:review.completed', 'flow_facts:gates.changed', 'flow_facts:merge.authorized', 'flow_facts:merged', 'deployment_observations'] },
+  mergeReadyDwell: { label: 'Merge-ready dwell', formula: 'Interval from the gate fact where the candidate became merge ready (no gate refuses, or only merge-queue sequencing remains) to the next refusing gate fact, to the observed merge, or to the observation time for items still merge ready, clipped to the window. Gate facts observed after the merge never open an interval, and an interval that ended before the window is excluded rather than measured.', sources: ['flow_facts:gates.changed', 'flow_facts:merged'] },
+  phases: { label: 'Phase durations', formula: 'Per candidate episode (one commit under review), the interval between consecutive milestones. A milestone uses the independently observed provider timestamp when the provider supplies one. The production milestone is the earliest successful deployment of the configured production environment (report.productionEnvironment) that contains the merge commit; a deployment to any other environment never ends the phase.', sources: ['flow_facts:candidate.observed', 'flow_facts:review.submitted', 'flow_facts:review.completed', 'flow_facts:gates.changed', 'flow_facts:merge.authorized', 'flow_facts:merged', 'deployment_observations'] },
   ci: { label: 'CI duration, failure and retry', formula: 'Per check name and commit, the interval between the first pending observation and the first terminal observation. Durations are bounded by Graphyard observation intervals, not by provider start timestamps.', sources: ['flow_facts:check.observed'] },
   evidence: { label: 'Evidence wait, expiry and staleness', formula: 'Wait is review completion to the gate fact where acceptance stops refusing. Expiry counts recorded evidence whose expiry precedes the observation time; staleness counts evidence bound to a superseded commit.', sources: ['flow_facts:evidence.recorded', 'flow_facts:gates.changed'] },
   operations: { label: 'Operational analytics', formula: 'Counts of recorded blockers, gate refusal reasons, review rounds and findings, rework, lease lifecycle, and queue depth sampled at daily boundaries. Aggregates are never keyed by a person.', sources: ['flow_facts:blocker.set', 'flow_facts:gates.changed', 'flow_facts:review.submitted', 'flow_facts:rework.requested', 'flow_facts:lease.claimed'] },
-  deployments: { label: 'Deployment frequency, latency, failure and rollback', formula: 'Deployment-provider observations join their independently observed contained merge SHAs to merged facts. Latency is deployment start minus the latest contained observed merge. Deployment observations are repository-wide, so slice, type and stage filters do not narrow them. Absent observations are reported as unavailable, never as zero.', sources: ['deployment_observations', 'deployment_merge_observations', 'flow_facts:merged'] },
+  deployments: { label: 'Deployment frequency, latency, failure and rollback', formula: 'Deployment-provider observations of every environment join their independently observed contained merge SHAs to merged facts. Latency is deployment start minus the latest contained observed merge. Deployment observations are repository-wide, so slice, type and stage filters do not narrow them. Absent observations are reported as unavailable, never as zero.', sources: ['deployment_observations', 'deployment_merge_observations', 'flow_facts:merged'] },
   bottleneck: { label: 'Bottleneck summary', formula: 'Each undelivered item is classified by its latest durable gate fact into exactly one wait category.', sources: ['flow_facts:gates.changed', 'flow_facts:delivered'] },
 };
 
+// Blocker aggregates and their drill-down share one bounded reason label.
+export const blockerReasonKey = (fact: FlowFact) => String(fact.details.reason ?? '').slice(0, 200) || null;
 function bucketStarts(from: number, to: number) {
   const starts: number[] = [];
   for (let at = from; at < to && starts.length < flowLimits.buckets; at += day) starts.push(at);
@@ -465,9 +514,21 @@ function valueAt(points: { at: number; value: any }[], at: number) {
   return value;
 }
 
+/**
+ * The earliest successful deployment of the configured production environment that contains
+ * the merge commit. A deployment observed only in another environment is named as such so a
+ * reader can tell "staging only" from "never deployed" and from "no provider observations".
+ */
+export function productionDeployment(deployments: DeploymentObservation[], mergeSha: string, productionEnvironment: string) {
+  const containing = deployments.filter(entry => entry.state === 'succeeded' && entry.containedMergeShas.includes(mergeSha));
+  const deployment = containing.filter(entry => entry.environment === productionEnvironment).sort((a, b) => time(a.startedAt)! - time(b.startedAt)! || a.id.localeCompare(b.id))[0];
+  if (deployment) return { deployment, reason: null };
+  return { deployment: undefined, reason: !deployments.length ? 'no-deployment-provider-observations-recorded' : containing.length ? 'deployed-only-outside-production-environment' : 'no-production-deployment-observed-for-this-commit' };
+}
 // Pure aggregation. Given the bounded dataset it always produces the same report.
 export function computeFlow(dataset: FlowDataset, query: FlowQuery) {
   const to = time(dataset.to)!, from = time(dataset.from)!;
+  const productionEnvironment = query.productionEnvironment ?? defaultProductionEnvironment;
   const excluded = new Map<string, Set<string>>();
   const exclude = (reason: string, key: string) => { (excluded.get(reason) ?? excluded.set(reason, new Set()).get(reason)!).add(key); };
   const unavailable: { metric: string; reason: string }[] = [];
@@ -586,20 +647,12 @@ export function computeFlow(dataset: FlowDataset, query: FlowQuery) {
   const mergeReadyValues: number[] = [];
   const mergeReadyCurrent: { key: string; sinceMs: number }[] = [];
   for (const item of stageScope) {
-    const gateFacts = [...(carry.get(`${item.id}:gates.changed`) ? [carry.get(`${item.id}:gates.changed`)!] : []), ...itemFacts(item.id, 'gates.changed')]
-      .sort((a, b) => time(a.observedAt)! - time(b.observedAt)!);
+    const gateFacts = [...(carry.get(`${item.id}:gates.changed`) ? [carry.get(`${item.id}:gates.changed`)!] : []), ...itemFacts(item.id, 'gates.changed')];
     const mergedFact = latest.get(`${item.id}:merged`);
-    let readySince: number | null = null;
-    for (const fact of gateFacts) {
-      const ready = mergeReadyGate(fact.details);
-      const at = Math.max(from, time(fact.observedAt)!);
-      if (ready && readySince === null) readySince = at;
-      if (!ready && readySince !== null) { mergeReadyValues.push(Math.max(0, at - readySince)); readySince = null; }
-    }
-    if (readySince !== null) {
-      const end = mergedFact && time(mergedFact.observedAt)! >= readySince ? time(mergedFact.observedAt)! : to;
-      mergeReadyValues.push(Math.max(0, end - readySince));
-      if (!mergedFact) mergeReadyCurrent.push({ key: item.key, sinceMs: to - readySince });
+    for (const interval of mergeReadyIntervals(gateFacts, mergedFact ? time(mergedFact.observedAt) : null, from, to)) {
+      if (!interval.inWindow) { exclude('merge-ready-dwell-outside-window', item.key); continue; }
+      mergeReadyValues.push(interval.ms);
+      if (interval.closedBy === 'open') mergeReadyCurrent.push({ key: item.key, sinceMs: to - interval.startMs });
     }
   }
   const mergeReadyDwell = { ...distribution(mergeReadyValues), current: mergeReadyCurrent.sort((a, b) => b.sinceMs - a.sinceMs).slice(0, flowLimits.distinct) };
@@ -632,7 +685,7 @@ export function computeFlow(dataset: FlowDataset, query: FlowQuery) {
       const authorized = first('merge.authorized', () => true);
       const merged = first('merged', () => true);
       const mergeSha = merged?.details.mergeSha ?? sha;
-      const deployment = dataset.deployments.filter(entry => entry.containedMergeShas.includes(mergeSha) && entry.state === 'succeeded').sort((a, b) => time(a.startedAt)! - time(b.startedAt)!)[0];
+      const production = productionDeployment(dataset.deployments, mergeSha, productionEnvironment);
       const partial = startedAt < from;
       const milestone = (fact: FlowFact | undefined, source: string) => fact ? { at: time(fact.observedAt)!, source } : { at: null, source, reason: partial ? 'episode-started-before-window' : 'not-observed' };
       episodes.push({
@@ -646,7 +699,7 @@ export function computeFlow(dataset: FlowDataset, query: FlowQuery) {
           'evidence-complete': milestone(evidenceComplete, 'graphyard'),
           'merge-authorized': milestone(authorized, 'graphyard'),
           merged: milestone(merged, 'github'),
-          production: deployment ? { at: time(deployment.startedAt)!, source: 'deployment-provider' } : { at: null, source: 'deployment-provider', reason: dataset.deployments.length ? 'no-deployment-observed-for-this-commit' : 'no-deployment-provider-observations-recorded' },
+          production: production.deployment ? { at: time(production.deployment.startedAt)!, source: 'deployment-provider' } : { at: null, source: 'deployment-provider', reason: production.reason! },
         },
       });
     }
@@ -802,6 +855,8 @@ export function computeFlow(dataset: FlowDataset, query: FlowQuery) {
   const deployments = {
     observations: dataset.deployments.length,
     environments: [...new Set(dataset.deployments.map(entry => entry.environment))].sort(),
+    productionEnvironment,
+    productionObservations: dataset.deployments.filter(entry => entry.environment === productionEnvironment).length,
     succeeded: deployedSuccess.length,
     failed: dataset.deployments.filter(entry => entry.state === 'failed').length,
     rollbacks: dataset.deployments.filter(entry => entry.state === 'rolled_back').length,
@@ -813,7 +868,7 @@ export function computeFlow(dataset: FlowDataset, query: FlowQuery) {
   if (!dataset.deployments.length) unavailable.push({ metric: 'deployments', reason: 'No deployment-provider observation has been recorded for this window. Deployment metrics are unavailable, not zero.' });
 
   const operations = {
-    blockers: counted(scopedFacts.filter(fact => fact.kind === 'blocker.set'), fact => String(fact.details.reason ?? '').slice(0, 200) || null),
+    blockers: counted(scopedFacts.filter(fact => fact.kind === 'blocker.set'), blockerReasonKey),
     refusals: counted(scopedFacts.filter(fact => fact.kind === 'gates.changed'), fact => fact.details.firstUnmetReason ? String(fact.details.firstUnmetReason).slice(0, 200) : null),
     refusalGates: counted(scopedFacts.filter(fact => fact.kind === 'gates.changed'), fact => fact.details.firstUnmet ?? null),
     criticalPath: { length: criticalPath.length, chain: criticalPath.slice(-flowLimits.distinct) },
@@ -845,8 +900,11 @@ export function computeFlow(dataset: FlowDataset, query: FlowQuery) {
     unclassified: classified.filter(entry => !entry.category).map(entry => entry.key),
   };
 
-  const sliceSummary = { observed: 0, declared: 0, unclassified: 0 };
-  for (const item of stageScope) sliceSummary[workSlices(item).provenance]++;
+  const sliceSummary = { observed: 0, declared: 0, unclassified: 0, truncated: 0, limit: sliceLimit };
+  for (const item of stageScope) { const classified = workSlices(item); sliceSummary[classified.provenance]++; if (classified.truncated) sliceSummary.truncated++; }
+  // A slice filter cannot see roots beyond an item's bound, so items truncated anywhere in
+  // the repository are part of the filter's coverage, not only those already selected.
+  const slicesTruncatedInRepository = dataset.work.filter(item => workSlices(item).truncated).length;
   const observedTimes = scopedFacts.filter(fact => fact.details.timestampSource === 'github').length;
   const coverage = {
     workItems: stageScope.length, workItemsInRepository: dataset.work.length, selected: dataset.included.length,
@@ -858,16 +916,18 @@ export function computeFlow(dataset: FlowDataset, query: FlowQuery) {
     deploymentMergeScanLimit: flowLimits.deploymentMerges, deploymentMergesTruncated: dataset.deploymentMergesTruncated,
     oldestFact: dataset.facts[0]?.observedAt ?? null, newestFact: dataset.facts.at(-1)?.observedAt ?? null,
     providerTimestamps: observedTimes, controlPlaneTimestamps: scopedFacts.length - observedTimes,
-    slices: sliceSummary,
+    slices: { ...sliceSummary, truncatedInRepository: slicesTruncatedInRepository },
+    // A slice filter over an item whose roots were bounded may have missed that item.
+    sliceFilterTruncated: !!query.slice && slicesTruncatedInRepository > 0,
     projection: { ...dataset.projection, stale: dataset.projection.pendingEvents > 0 },
     sparse: dataset.facts.length < sparseSampleSize,
-    complete: !dataset.truncated && !dataset.workTruncated && !dataset.deploymentsTruncated && !dataset.deploymentMergesTruncated && dataset.projection.pendingEvents === 0,
+    complete: !dataset.truncated && !dataset.workTruncated && !dataset.deploymentsTruncated && !dataset.deploymentMergesTruncated && dataset.projection.pendingEvents === 0 && !(query.slice && slicesTruncatedInRepository > 0),
   };
   const exclusions = [...excluded].map(([reason, keys]) => ({ reason, count: keys.size, items: [...keys].sort().slice(0, flowLimits.distinct) }))
     .sort((a, b) => b.count - a.count || a.reason.localeCompare(b.reason));
 
   return {
-    generatedAt: dataset.observedAt, timezone: 'UTC',
+    generatedAt: dataset.observedAt, timezone: 'UTC', productionEnvironment,
     window: { days: query.days, from: dataset.from, to: dataset.to, boundaries: 'Half-open interval [from, to) in UTC. Daily buckets start at the window start and are labelled by their start instant.' },
     filters: { type: query.type ?? null, stage: query.stage ?? null, slice: query.slice ?? null },
     availableSlices: [...new Set(dataset.work.flatMap(item => workSlices(item).slices))].sort(),
@@ -921,11 +981,18 @@ export function flowDrilldown(dataset: FlowDataset, report: FlowReport, request:
       && (!selectedStage || fact.details.from === selectedStage) && (!key || fact.details.from === key) && typeof fact.details.dwellMs === 'number'))
       row(fact.workKey, String(fact.details.from), fact.observedAt, fact.details.dwellMs, null, null, `${fact.details.from} to ${fact.details.to}`);
   } else if (metric === 'lead-time' || metric === 'throughput') {
+    // Throughput counts every delivered fact. Lead time applies the aggregate's own
+    // predicate, so a delivery without a created fact or with an inverted clock order is
+    // absent here exactly as it is excluded there, never emitted as a negative duration.
     for (const fact of dataset.facts.filter(fact => fact.kind === 'delivered' && scopedIds.has(fact.workId))) {
       const created = dataset.latest.find(entry => entry.workId === fact.workId && entry.kind === 'work.created');
       const bucket = new Date(Math.floor((time(fact.observedAt)! - time(dataset.from)!) / day) * day + time(dataset.from)!).toISOString();
       if (key && bucket !== key) continue;
-      row(fact.workKey, bucket, fact.observedAt, created ? time(fact.observedAt)! - time(created.observedAt)! : null, fact.details.pr ?? null, fact.details.mergeSha ?? null, 'Observed authorized merge');
+      const leadMs = created ? time(fact.observedAt)! - time(created.observedAt)! : null;
+      const measurable = leadMs !== null && leadMs >= 0;
+      if (metric === 'lead-time' && !measurable) continue;
+      row(fact.workKey, bucket, fact.observedAt, measurable ? leadMs : null, fact.details.pr ?? null, fact.details.mergeSha ?? null,
+        measurable ? 'Observed authorized merge' : created ? 'Observed authorized merge; lead time excluded (clock-inverted-lead-time)' : 'Observed authorized merge; lead time excluded (missing-created-fact)');
     }
   } else if (metric === 'phase') {
     const pairs = [
@@ -951,7 +1018,7 @@ export function flowDrilldown(dataset: FlowDataset, report: FlowReport, request:
         const gateCleared = facts.filter(fact => fact.kind === 'gates.changed' && fact.details.hasCandidate && !(fact.details.unmet ?? []).includes('acceptance')).sort((a, b) => time(a.observedAt)! - time(b.observedAt)!)[0];
         const evidenceComplete = gateCleared ? facts.filter(fact => fact.kind === 'evidence.recorded' && time(fact.observedAt)! <= time(gateCleared.observedAt)!).sort((a, b) => time(a.observedAt)! - time(b.observedAt)!).at(-1) ?? gateCleared : undefined;
         const merged = first('merged');
-        const deployment = dataset.deployments.filter(entry => entry.state === 'succeeded' && entry.containedMergeShas.includes(merged?.details.mergeSha ?? sha)).sort((a, b) => time(a.startedAt)! - time(b.startedAt)!)[0];
+        const deployment = productionDeployment(dataset.deployments, merged?.details.mergeSha ?? sha, report.productionEnvironment).deployment;
         const milestones: Record<string, number | null> = {
           'pr-created': candidate.details.supersedes ? startedAt : time(candidate.details.prCreatedAt), 'review-start': reviewStart ? time(reviewStart.observedAt) : null,
           'review-complete': reviewComplete ? time(reviewComplete.observedAt) : null, 'evidence-complete': evidenceComplete ? time(evidenceComplete.observedAt) : null,
@@ -972,22 +1039,12 @@ export function flowDrilldown(dataset: FlowDataset, report: FlowReport, request:
   } else if (metric === 'merge-ready') {
     for (const item of scoped) {
       const carried = dataset.carryIn.find(fact => fact.workId === item.id && fact.kind === 'gates.changed');
-      const gates = [...(carried ? [carried] : []), ...dataset.facts.filter(fact => fact.workId === item.id && fact.kind === 'gates.changed')]
-        .sort((a, b) => time(a.observedAt)! - time(b.observedAt)!);
-      let since: number | null = null;
-      for (const fact of gates) {
-        const ready = mergeReadyGate(fact.details);
-        if (ready && since === null) since = Math.max(time(dataset.from)!, time(fact.observedAt)!);
-        if (!ready && since !== null) {
-          row(item.key, 'merge-ready', new Date(since).toISOString(), Math.max(0, time(fact.observedAt)! - since), null, null, 'Merge ready until a later gate observation refused');
-          since = null;
-        }
-      }
-      if (since !== null) {
-        const merged = latest.get(`${item.id}:merged`);
-        const end = merged && time(merged.observedAt)! >= since ? time(merged.observedAt)! : time(dataset.to)!;
-        row(item.key, 'merge-ready', new Date(since).toISOString(), Math.max(0, end - since), merged?.details.pr ?? null, merged?.details.mergeSha ?? null,
-          merged ? 'Merge ready until the observed merge' : 'Merge ready (queued or every gate passed); merge not yet observed');
+      const gates = [...(carried ? [carried] : []), ...dataset.facts.filter(fact => fact.workId === item.id && fact.kind === 'gates.changed')];
+      const merged = latest.get(`${item.id}:merged`);
+      for (const interval of mergeReadyIntervals(gates, merged ? time(merged.observedAt) : null, time(dataset.from)!, time(dataset.to)!)) {
+        if (!interval.inWindow) continue;
+        row(item.key, 'merge-ready', new Date(interval.startMs).toISOString(), interval.ms, interval.closedBy === 'merged' ? merged?.details.pr ?? null : null, interval.closedBy === 'merged' ? merged?.details.mergeSha ?? null : null,
+          interval.closedBy === 'refused' ? 'Merge ready until a later gate observation refused' : interval.closedBy === 'merged' ? 'Merge ready until the observed merge' : 'Merge ready (queued or every gate passed); merge not yet observed');
       }
     }
   } else if (metric === 'deployments') {
@@ -1001,8 +1058,9 @@ export function flowDrilldown(dataset: FlowDataset, report: FlowReport, request:
     for (const fact of dataset.facts.filter(fact => fact.kind === 'review.submitted' && scopedIds.has(fact.workId) && (!key || fact.details.reviewState === key)))
       row(fact.workKey, String(fact.details.reviewState), fact.observedAt, null, null, fact.details.sha ?? null, `independent=${fact.details.independent}; timestamp=${fact.details.timestampSource}`);
   } else if (metric === 'blockers') {
-    for (const fact of dataset.facts.filter(fact => fact.kind === 'blocker.set' && scopedIds.has(fact.workId) && (!key || fact.details.reason === key)))
-      row(fact.workKey, 'blocker', fact.observedAt, null, null, null, String(fact.details.reason ?? ''));
+    // The aggregate keys on the bounded reason label; the drill-down must match the same label.
+    for (const fact of dataset.facts.filter(fact => fact.kind === 'blocker.set' && scopedIds.has(fact.workId) && (!key || blockerReasonKey(fact) === key)))
+      row(fact.workKey, blockerReasonKey(fact) ?? 'blocker', fact.observedAt, null, null, null, String(fact.details.reason ?? ''));
   } else {
     return { metric, key, supported: drilldownMetrics, error: `Unknown drill-down metric; choose one of ${drilldownMetrics.join(', ')}`, columns, rows: [], total: 0, truncated: false };
   }
@@ -1021,7 +1079,7 @@ export function flowExport(report: FlowReport, drilldown: ReturnType<typeof flow
   const metadata = {
     metric: drilldown.metric, key: drilldown.key ?? null,
     definition: metricDefinitions[drilldown.metric === 'stage-dwell' ? 'stageDwell' : drilldown.metric === 'lead-time' ? 'leadTime' : drilldown.metric === 'merge-ready' ? 'mergeReadyDwell' : drilldown.metric === 'phase' ? 'phases' : drilldown.metric === 'blockers' ? 'operations' : drilldown.metric === 'review' ? 'operations' : drilldown.metric]?.formula ?? 'See the metric definitions in the report.',
-    generatedAt: report.generatedAt, timezone: report.timezone,
+    generatedAt: report.generatedAt, timezone: report.timezone, productionEnvironment: report.productionEnvironment,
     window: `${report.window.from}/${report.window.to}`, windowDays: report.window.days, windowBoundaries: report.window.boundaries,
     filterType: report.filters.type, filterStage: report.filters.stage, filterSlice: report.filters.slice,
     coverageWorkItems: report.coverage.workItems, coverageFacts: report.coverage.facts,

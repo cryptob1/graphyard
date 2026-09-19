@@ -163,6 +163,9 @@ test('flow analytics distinguishes loading, unavailable, empty, sparse, partial,
   await page.getByRole('button', { name: 'Refresh' }).click();
   await expect(page.getByRole('status')).toContainText('Loading flow analytics…');
   await expect(page.locator('.flow-state')).toBeVisible();
+  await expect(page.locator('.flow-state')).toHaveAttribute('data-state', 'loading');
+  await expect(page.locator('.flow-state')).toContainText('earlier observation');
+  await expect(page.locator('.flow-state')).toHaveAttribute('data-state', /complete|sparse/);
   state.delay = false;
 
   state.status = 503;
@@ -176,6 +179,7 @@ test('flow analytics distinguishes loading, unavailable, empty, sparse, partial,
   const base = state.report;
   const variants: [string, (report: any) => any][] = [
     ['partial', report => ({ ...report, coverage: { ...report.coverage, truncated: true, complete: false } })],
+    ['partial', report => ({ ...report, coverage: { ...report.coverage, sliceFilterTruncated: true, slices: { ...report.coverage.slices, truncatedInRepository: 2 }, complete: false } })],
     ['stale', report => ({ ...report, coverage: { ...report.coverage, projection: { ...report.coverage.projection, stale: true, pendingEvents: 12 } } })],
     ['empty', report => ({ ...report, coverage: { ...report.coverage, workItems: 0 } })],
   ];
@@ -183,6 +187,7 @@ test('flow analytics distinguishes loading, unavailable, empty, sparse, partial,
     state.report = mutate(base);
     await page.getByRole('button', { name: 'Refresh' }).click();
     await expect(page.locator('.flow-state')).toHaveAttribute('data-state', expected);
+    if (state.report.coverage.sliceFilterTruncated) await expect(page.locator('.flow-state')).toContainText('this slice filter may have missed them');
   }
   await expect(page.getByText('nothing is shown as zero')).toBeVisible();
 });

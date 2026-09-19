@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { ejectionReason, nextQueueSequence, queueHistoryLimit, queuePlacement } from './merge-queue.js';
+import { ejectionReason, latestCheck, nextQueueSequence, queueHistoryLimit, queuePlacement } from './merge-queue.js';
 import type { QueueEjection, QueueEntry, QueueHistoryEntry } from './merge-queue.js';
 import { regressionRefusals } from './regression-guard.js';
 
@@ -450,20 +450,6 @@ export function currentEvidence(work: Work, proof: string, now = new Date()): Ev
     && (!validation || !!validation.attemptId && e.validation?.candidateId === validation.candidateId && e.validation?.requestId === validation.requestId && e.validation?.attemptId === validation.attemptId)
     && (!scenario || e.scenarioRevision === scenario.revision && e.environment === scenario.environment)).at(-1);
   return latest && (!latest.expiresAt || Date.parse(latest.expiresAt) > now.getTime()) ? latest : undefined;
-}
-
-// Observations retain every immutable check run for delivery analytics. Gates use
-// only the newest trusted run for a required name; GitHub check-run IDs are
-// immutable and increase as the provider creates retries. Array position is a
-// fallback for legacy observations that predate run identity capture.
-function latestCheck(checks: Observation['checks']): Observation['checks'][number] | undefined {
-  return checks.reduce<Observation['checks'][number] | undefined>((latest, check) => {
-    if (!latest) return check;
-    if (check.id !== undefined && latest.id !== undefined) return check.id > latest.id ? check : latest;
-    if (check.id !== undefined) return check;
-    if (latest.id !== undefined) return latest;
-    return check;
-  }, undefined);
 }
 
 /** True when the policy asks for the post-deployment smoke proof. Older documents carry no flag. */

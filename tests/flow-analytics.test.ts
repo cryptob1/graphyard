@@ -309,6 +309,40 @@ test('integration:flow-analytics-phase-durations', async () => {
   assert.equal(phaseRows.total, 1);
   assert.equal(phaseRows.rows[0].valueMs, 1000, 'phase drill-down returns the duration behind the aggregate');
   assert.equal(phaseRows.rows[0].commit, head);
+
+  // Merge-ready dwell closes at the observed merge; gate facts recorded after the merge
+  // (the item is done, every gate passes) never reopen it up to the observation instant.
+  const readyRows = flowDrilldown(dataset, report, { metric: 'merge-ready' }).rows.filter(row => row.workKey === work.key);
+  assert.ok(readyRows.length >= 1, 'the delivered item was merge ready before its merge');
+  assert.ok(readyRows.every(row => Date.parse(String(row.observedAt)) + Number(row.valueMs) <= Date.parse(mergedAt) + 1), 'no merge-ready interval extends past the observed merge');
+  assert.ok(readyRows.some(row => row.detail === 'Merge ready until the observed merge' && row.commit === mergeSha));
+  assert.ok(!report.mergeReadyDwell.current.some(entry => entry.key === work.key), 'a merged item is not merge ready now');
+  assert.ok(report.mergeReadyDwell.maxMs! < 3600_000, 'dwell is bounded by the real merge, not by the observation instant');
+
+  // A staging deployment must never end a phase that is labelled production.
+  const stagingOnly = await submitted(slice, second);
+  let stagingWork = await engine.observe(stagingOnly.id, stagingOnly.revision, observation(stagingOnly, slice, { reviews: approval(head, 9203) }));
+  stagingWork = await engine.execute(producer, 'evidence', stagingWork.id, proof(), randomUUID());
+  const stagingMerge = '5'.repeat(40);
+  const stagingDelivery = await deliver(stagingWork, slice, stagingMerge, { reviews: approval(head, 9203) });
+  const stagedAt = new Date(Date.parse(stagingDelivery.mergedAt) + 1000).toISOString();
+  const staged = await api('/api/deployments', tokens.producer, { method: 'POST', body: JSON.stringify({ provider: 'railway', externalId: 'deploy-staging-1', environment: 'staging', sha: stagingMerge, containedMergeShas: [stagingMerge], state: 'succeeded', startedAt: stagedAt }) });
+  assert.equal(staged.status, 200);
+  await settle(stagedAt);
+  const withStaging = await analyse({ slice });
+  const production = withStaging.report.phases.find(entry => entry.phase === 'merged-to-production')!;
+  assert.equal(withStaging.report.productionEnvironment, 'production');
+  assert.equal(production.n, 1, 'the staging deployment does not end the production phase');
+  assert.equal(production.unknown['deployed-only-outside-production-environment'], 1, 'a staging-only deployment is named as such, not counted as production');
+  assert.equal(withStaging.report.operations.deployments.productionObservations, 1);
+  assert.ok(withStaging.report.operations.deployments.environments.includes('staging'));
+  assert.equal(flowDrilldown(withStaging.dataset, withStaging.report, { metric: 'phase', key: 'merged-to-production' }).rows.filter(row => row.workKey === stagingWork.key).length, 0, 'the phase drill-down honours the same environment');
+  const stagingIsProduction = computeFlow(withStaging.dataset, { days: 30, slice, productionEnvironment: 'staging' });
+  assert.equal(stagingIsProduction.productionEnvironment, 'staging');
+  assert.equal(stagingIsProduction.phases.find(entry => entry.phase === 'merged-to-production')!.n, 1, 'the configured environment decides which deployment ends the phase');
+  assert.equal(stagingIsProduction.phases.find(entry => entry.phase === 'merged-to-production')!.unknown['deployed-only-outside-production-environment'], 1);
+  const exported = JSON.parse(flowExport(withStaging.report, flowDrilldown(withStaging.dataset, withStaging.report, { metric: 'phase' }), 'json'));
+  assert.equal(exported.metadata.productionEnvironment, 'production', 'exports preserve the environment the production phase was measured against');
 });
 
 test('integration:flow-analytics-edge-cases', async () => {
@@ -370,6 +404,32 @@ test('integration:flow-analytics-edge-cases', async () => {
   assert.ok(!JSON.stringify(readerReport.body).includes('release-42'));
   assert.ok(!JSON.stringify(readerReport.body).includes(unlinkedExternalId));
 
+  // An item that became merge ready and merged before the window contributes nothing to
+  // merge-ready dwell; its interval is excluded rather than measured as a whole window.
+  const priorMerge = await submitted(slice, second);
+  await seedFact(priorMerge, 'gates.changed', now - 40 * day, { stage: 'merge', unmet: [], firstUnmet: null, firstUnmetReason: null, reasons: [], dependencyWaiting: [], hasCandidate: true, released: true, blocker: null, violations: 0, pr: priorMerge.submission!.pr, queued: false, mergeBlockers: 0 }, 'merge');
+  await seedFact(priorMerge, 'merged', now - 39 * day, { pr: priorMerge.submission!.pr, sha: head, mergeSha: '7'.repeat(40), timestampSource: 'github' }, 'merge');
+  const priorReport = await analyse({ slice });
+  assert.ok(!priorReport.report.mergeReadyDwell.current.some(entry => entry.key === priorMerge.key));
+  assert.ok(flowDrilldown(priorReport.dataset, priorReport.report, { metric: 'merge-ready' }).rows.every(row => row.workKey !== priorMerge.key), 'a pre-window merge has no in-window merge-ready row');
+  assert.ok(priorReport.report.exclusions.some(entry => entry.reason === 'merge-ready-dwell-outside-window' && entry.items.includes(priorMerge.key)));
+  assert.ok((priorReport.report.mergeReadyDwell.maxMs ?? 0) < 29 * day, 'no item is measured as merge ready for the whole window');
+
+  // A delivery whose creation time is later than its merge is excluded from lead time and
+  // from the lead-time drill-down alike, never emitted as a negative duration.
+  const inverted = await released(slice);
+  await seedFact(inverted, 'delivered', now - 3 * day, { mergeSha: '3'.repeat(40), pr: null, timestampSource: 'graphyard' }, 'done');
+  const invertedReport = await analyse({ slice });
+  assert.ok(invertedReport.report.exclusions.some(entry => entry.reason === 'clock-inverted-lead-time' && entry.items.includes(inverted.key)));
+  const leadRows = flowDrilldown(invertedReport.dataset, invertedReport.report, { metric: 'lead-time' });
+  assert.equal(leadRows.total, invertedReport.report.leadTime.bands.n, 'lead-time drill-down rows substantiate the aggregate n');
+  assert.ok(leadRows.rows.every(row => row.workKey !== inverted.key && Number(row.valueMs) >= 0));
+  const throughputRows = flowDrilldown(invertedReport.dataset, invertedReport.report, { metric: 'throughput' });
+  assert.equal(throughputRows.total, invertedReport.report.throughput.reduce((sum, bucket) => sum + bucket.delivered, 0), 'throughput drill-down still counts every delivery');
+  const invertedRow = throughputRows.rows.find(row => row.workKey === inverted.key)!;
+  assert.equal(invertedRow.valueMs, null);
+  assert.match(String(invertedRow.detail), /clock-inverted-lead-time/);
+
   // Outliers are reported, never silently dropped; sparse samples are flagged.
   assert.equal(distribution([1, 1, 1, 1, 1, 1, 1, 1, 1, 1000]).outliers, 1);
   assert.equal(distribution([5]).sparse, true);
@@ -397,6 +457,19 @@ test('integration:flow-analytics-edge-cases', async () => {
   assert.equal(derive(12, 'failure', 103).filter(fact => fact.kind === 'check.observed').length, 0, 'replaying the same run remains idempotent');
   const actionRequired = derive(13, 'action_required', 104).find(fact => fact.kind === 'check.observed')!;
   assert.equal(actionRequired.details.pending, false, 'action_required is a terminal conclusion, not an in-progress run');
+
+  // A gate that keeps refusing for a different reason is a new durable fact, so refusal
+  // history follows the evaluator instead of keeping the first reason it recorded.
+  const gateState: ProjectionState = {};
+  const gated = (seq: number, reasons: string[]) => deriveFacts({
+    seq, work_id: eventWork.id, actor: 'system', kind: 'observed', created_at: new Date(now + seq).toISOString(),
+    payload: { work: { ...eventWork, gates: eventWork.gates.map(gate => gate.name === 'merge' ? { name: 'merge', passed: false, reasons } : { ...gate, passed: true, reasons: [] }) } },
+  }, gateState).filter(fact => fact.kind === 'gates.changed');
+  assert.equal(gated(20, ['Required Graphyard check and merge-queue branch protection have not been verified']).length, 1);
+  assert.equal(gated(21, ['Required Graphyard check and merge-queue branch protection have not been verified']).length, 0, 'an unchanged refusal records nothing new');
+  const freshness = gated(22, ['GitHub observation missing or older than two minutes']);
+  assert.equal(freshness.length, 1, 'a changed refusal reason is a new gate fact');
+  assert.equal(freshness[0].details.firstUnmetReason, 'GitHub observation missing or older than two minutes');
 });
 
 test('integration:flow-analytics-operations', async () => {
@@ -419,9 +492,19 @@ test('integration:flow-analytics-operations', async () => {
   await engine.execute(operator, 'rework', reviewed.id, { reason: 'Previous worker stopped; reproduce the failure', previousWorkerStopped: true }, randomUUID());
   await engine.execute(second, 'claim', reviewed.id, {}, randomUUID());
 
-  const { report } = await analyse({ slice });
+  const longReason = `Waiting on a provider incident: ${'x'.repeat(260)}`;
+  const longBlocked = await submitted(slice, second);
+  await engine.execute(second, 'blocked', longBlocked.id, { epoch: longBlocked.epoch, reason: longReason }, randomUUID());
+
+  const { report, dataset } = await analyse({ slice });
   const operations = report.operations;
   assert.ok(operations.blockers.some(entry => entry.reason === 'Waiting on an external provider decision' && entry.count === 1));
+  const truncatedBlocker = operations.blockers.find(entry => entry.reason === longReason.slice(0, 200))!;
+  assert.ok(truncatedBlocker && truncatedBlocker.count === 1, 'long blocker reasons aggregate under a bounded label');
+  const blockerRows = flowDrilldown(dataset, report, { metric: 'blockers', key: truncatedBlocker.reason });
+  assert.equal(blockerRows.total, 1, 'selecting the bounded label reaches the record behind the aggregate');
+  assert.equal(blockerRows.rows[0].workKey, longBlocked.key);
+  assert.equal(blockerRows.rows[0].detail, longReason, 'the drill-down carries the full recorded reason');
   assert.ok(operations.refusals.length > 0 && operations.refusals.every(entry => entry.count > 0));
   assert.ok(operations.refusalGates.some(entry => entry.reason === 'ready' || entry.reason === 'review' || entry.reason === 'build'));
   assert.equal(operations.criticalPath.length, 3);
