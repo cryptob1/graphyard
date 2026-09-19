@@ -4,6 +4,8 @@ import assert from 'node:assert/strict';
 import { validateReport, validateArtifactProvenance, observeArtifactProvenance, publishReport } from '../scripts/publish-acceptance.mjs';
 // @ts-expect-error Dependency-free protected workflow script.
 import { createInventory, requiredCases } from '../scripts/acceptance-contract.mjs';
+// @ts-expect-error Dependency-free protected workflow script.
+import { requiredCases as recoveryCases, createInventory as createRecoveryInventory } from '../scripts/herdr-recovery-contract.mjs';
 const expected = { repository: 'owner/repo', workId: '00000000-0000-4000-8000-000000000001', pr: 1, policyRevision: 1, runId: '123', runAttempt: '2', harnessCommit: 'c'.repeat(40) };
 const report = () => ({ ...expected, schema: 1, proof: 'integration:claim-safety', result: 'pass', sha: 'a'.repeat(40), baseSha: 'b'.repeat(40), testedTree: 'd'.repeat(40), cases: requiredCases.map((id: string) => ({ id, result: 'pass' })), executed: 5, skipped: 0 });
 const provenance = { provider: 'github-actions', repository: expected.repository, workflowCommit: expected.harnessCommit, runId: expected.runId, runAttempt: 2, artifact: { id: 45, name: 'graphyard-acceptance', digest: `sha256:${'d'.repeat(64)}`, url: 'https://api.github.com/repos/owner/repo/actions/artifacts/45/zip', createdAt: '2026-09-16T12:00:00Z' } };
@@ -105,6 +107,24 @@ test('a partially executed inventory publishes only as failing evidence', () => 
   assert.doesNotThrow(() => validateReport(partial, named));
   assert.throws(() => validateReport({ ...partial, result: 'pass' }, named));
   assert.throws(() => validateReport({ ...partial, executed: requiredCases.length, skipped: 0 }, named));
+});
+test('each proof is validated against its own protected inventory', () => {
+  const recovery = { ...report(), proof: 'integration:herdr-recovery' };
+  // Both inventories hold five cases, so only the case names bind a report to its contract.
+  assert.equal(recoveryCases.length, requiredCases.length);
+  assert.throws(() => validateReport(recovery, expected), /inventory is incomplete/);
+  assert.throws(() => validateReport({ ...report(), proof: 'integration:invented' }, expected), /Unknown trusted acceptance proof/);
+  assert.doesNotThrow(() => validateReport({ ...recovery, cases: recoveryCases.map((id: string) => ({ id, result: 'pass' })) }, expected));
+  assert.throws(() => validateReport({ ...recovery, cases: recoveryCases.map((id: string) => ({ id, result: 'pass' })) }, { ...expected, proof: 'integration:claim-safety' }), /Report proof does not match/);
+  // Each contract's ledger is bound to its own inventory, so a partial recovery run publishes
+  // under the recovery case names and never under the claim-safety ones.
+  const ledger = createRecoveryInventory();
+  assert.deepEqual(ledger.cases, recoveryCases.map((id: string) => ({ id, result: 'skipped' })));
+  assert.throws(() => ledger.begin(requiredCases[0]), /Unknown acceptance case/);
+  ledger.begin(recoveryCases[0]); ledger.pass(recoveryCases[0]); ledger.begin(recoveryCases[1]);
+  const partial = { ...recovery, result: 'fail', cases: ledger.cases, executed: ledger.executed, skipped: ledger.skipped };
+  assert.doesNotThrow(() => validateReport(partial, expected));
+  assert.throws(() => validateReport({ ...partial, proof: 'integration:claim-safety' }, expected), /inventory is incomplete/);
 });
 test('reporter binds evidence to the observed candidate and forwards failures instead of retaining a stale pass', async () => {
   const work = { id: expected.workId, stage: 'acceptance', policyRevision: 1, candidate: { pr: 1, sha: 'a'.repeat(40), baseSha: 'b'.repeat(40) } };

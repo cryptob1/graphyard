@@ -2,6 +2,7 @@
 import { readFile } from 'node:fs/promises';
 import { execFileSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
+import { contracts } from './contracts.mjs';
 const apply = process.argv.includes('--apply');
 const root = new URL('../', import.meta.url), repository = 'cryptob1/graphyard';
 const url = 'https://graphyard-production.up.railway.app';
@@ -12,7 +13,7 @@ try {
   try { app = JSON.parse(await readFile(new URL('.graphyard/github-app.json', root), 'utf8')); } catch (error) { if (error.code !== 'ENOENT') throw error; }
   if (!apply) {
     console.log(JSON.stringify({ repository, url, appRegistered: !!app?.appId, installationVerified: !!app?.installationId,
-      changes: ['Restrict graphyard-reporting environment to main only', 'Send App credentials to Railway secret variables', 'Generate a proof-scoped producer in memory; store only in Railway and the restricted GitHub environment', 'Set Graphyard URL on that environment', 'Stage variables without deploying; preview Railway IaC before rollout'],
+      changes: ['Restrict graphyard-reporting environment to main only', 'Send App credentials to Railway secret variables', `Generate a producer scoped to ${Object.keys(contracts).join(' and ')} in memory; store only in Railway and the restricted GitHub environment`, 'Set Graphyard URL on that environment', 'Stage variables without deploying; preview Railway IaC before rollout'],
       blockedBy: !app?.installationId ? 'Complete graphyard github-setup and install the App first' : null }, null, 2));
     process.exit(0);
   }
@@ -26,7 +27,8 @@ try {
   if (!policies.length) gh(['api', '--method', 'POST', `${endpoint}/deployment-branch-policies`, '--input', '-'], JSON.stringify({ name: 'main', type: 'branch' }));
   policies = JSON.parse(gh(['api', `${endpoint}/deployment-branch-policies`])).branch_policies;
   if (policies.length !== 1 || policies[0].name !== 'main' || policies[0].type !== 'branch') throw new Error('Reporter environment must allow only main');
-  const producer = { id: 'trusted-acceptance', role: 'producer', proofs: ['integration:claim-safety'], token: randomBytes(32).toString('hex') };
+  // The reporter may publish exactly the protected contract inventories and nothing else.
+  const producer = { id: 'trusted-acceptance', role: 'producer', proofs: Object.keys(contracts), token: randomBytes(32).toString('hex') };
   const variables = { GITHUB_APP_ID: String(app.appId), GITHUB_INSTALLATION_ID: String(app.installationId), GITHUB_PRIVATE_KEY: app.privateKey, GITHUB_WEBHOOK_SECRET: app.webhookSecret,
     GRAPHYARD_PRINCIPALS: JSON.stringify([...principals.filter(p => p.id !== producer.id), producer]) };
   stage = 'stage Railway secret variables';

@@ -103,6 +103,14 @@ GY-56 (hotspot decomposition) then split `protocol.md` into one page per topic u
 
 Read with no ambiguous instance: the rest of `shipping-pulse.md` (*worker scorecard* and *implementation workers* name the role; *operator agents* is the canonical term; *producer* names the credential, and the `deploymentProviders` paragraph restates the evidence-trust boundary without weakening it), the *Where a new feature goes* table in `development.md` (no role, session, or authority named), and the split protocol pages, whose text is otherwise unchanged from the audited `protocol.md`.
 
+GY-2 (Herdr recovery contract) then added the *Automated recovery contract* section of `herdr.md`, *Adding a trusted contract* in `first-pr.md`, and a sentence each in `coordination.md` and the old operations page (now in `operations-reference.md` under *Coordination diagnosis and recovery drills*):
+
+| Page | Before | After | Reason |
+| --- | --- | --- | --- |
+| `herdr.md` (GY-2) | "operator rework is refused while the fences are live" | "`admin` rework is refused while the fences are live" | Which operator: `rework` is an `admin` command; the refusal is the same. |
+
+Read with no ambiguous instance: main's added sentence in `coordination.md` (merged after the drill sentence this audit had already rewritten to *the human operator*) and the rest of both new sections (*worker principals*, *host IDs*, *producer credential*, and *protected checkout* name credentials and runtimes; the statement that a trusted run publishes no evidence for the change that introduces its contract adds an evidence-trust boundary and weakens none).
+
 ## Concision samples (before / after)
 
 | Page | Before | After |
