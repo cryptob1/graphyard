@@ -12,7 +12,7 @@ import type { ConflictReport } from './conflicts.js';
 import { mergeOrder } from './delegation.js';
 import { launchPlan, masterHarnessPlan, writeHarnessPermissions, type HarnessPlan, type HarnessRule } from './harness.js';
 import { CHECK_NAME, carriedApproval, deliveryState, deploySmokeRequired, describeQueueBinding, evidenceIndependenceRefusals, exhaustedReviewerProfiles, nativeReviewRequired, postDeployMs, productionLatencyMs, providerDelayAfterVerification, reviewerProfileFor, reviewProviderOf, rollbackGuidance, standingEscalations, type CarriedApproval, type QueueBindingReport, type Work } from './model.js';
-import { containmentAttestation, containmentSettlementRefusals, containmentVerificationSchema, type ContainmentVerification } from './quarantine.js';
+import { containmentAttestation, containmentGraceMs, containmentSettlementRefusals, containmentVerificationSchema, type ContainmentVerification } from './quarantine.js';
 import { probeSupervisorAbsence } from './containment-probe.js';
 import { predictQueue, type QueuePlacement } from './merge-queue.js';
 import { MERGE_PROTOCOL } from './protocol-version.js';
@@ -953,6 +953,36 @@ export interface ContainmentAssessment {
   verification: ContainmentVerification | null;
 }
 
+export type ContainmentPhase =
+  | { state: 'live'; owner: string; epoch: number; expiresAt: string }
+  | { state: 'grace'; lapsedAt: string; remainingMs: number }
+  | { state: 'lapsed'; lapsedAt: string | null };
+/**
+ * Where a containment quarantine stands against its worker's lease. Every supervised launch
+ * records one, so while its owner still holds the quarantined epoch's lease it is a session at
+ * work, not something to act on. Once the lease lapses, the grace window runs from the later of
+ * the lease and launch deadlines, and only then can supervisor absence be verified.
+ */
+export function containmentPhase(work: Work, now: number, graceMs = containmentGraceMs): ContainmentPhase | null {
+  const quarantine = work.containmentQuarantine;
+  if (!quarantine) return null;
+  const lease = work.lease;
+  if (lease && lease.owner === quarantine.owner && lease.epoch === quarantine.epoch && Date.parse(lease.expiresAt) > now)
+    return { state: 'live', owner: lease.owner, epoch: lease.epoch, expiresAt: lease.expiresAt };
+  const deadlines = [lease?.epoch === quarantine.epoch ? lease.expiresAt : undefined, quarantine.leaseExpiresAt, quarantine.launchExpiresAt]
+    .map(value => value ? Date.parse(value) : NaN).filter(Number.isFinite);
+  if (!deadlines.length) return { state: 'lapsed', lapsedAt: null };
+  const lapsed = Math.max(...deadlines), lapsedAt = new Date(lapsed).toISOString();
+  return lapsed + graceMs > now ? { state: 'grace', lapsedAt, remainingMs: lapsed + graceMs - now } : { state: 'lapsed', lapsedAt };
+}
+/** Why a quarantined item cannot be dispatched: in progress by its live owner, or unverified containment. */
+export function containmentHold(work: Work, now: number): string | null {
+  const phase = containmentPhase(work, now);
+  if (!phase) return null;
+  if (phase.state === 'live') return `${work.key} is in progress by ${phase.owner} under lease epoch ${phase.epoch} (active until ${phase.expiresAt})`;
+  return `Dispatch blocked by unverified worker containment from epoch ${work.containmentQuarantine!.epoch}`;
+}
+
 /** Quarantines this coordinator could verify: the registered host is the one it runs on. */
 export function containmentQuarantines(work: Work[], hostId: string) {
   return work.filter(item => item.containmentQuarantine
@@ -998,10 +1028,11 @@ export function verifyContainmentDeath(
   const refusals = containmentSettlementRefusals(work, verification, { now: Date.parse(options.observedAt) });
   return { ...assessment, settleable: !refusals.length, refusals, verification };
 }
-/** Verify every quarantine this host is responsible for, keyed by work id. */
+/** Verify every lapsed quarantine this host is responsible for, keyed by work id; a live worker's is not probed. */
 export function assessContainment(work: Work[], options: { hostId: string; observedAt: string; clockOffset: { min: number; max: number }; probe?: typeof probeSupervisorAbsence }) {
   const assessments: Record<string, ContainmentAssessment> = {};
   for (const item of containmentQuarantines(work, options.hostId)) {
+    if (containmentPhase(item, Date.parse(options.observedAt))?.state === 'live') continue;
     try { assessments[item.id] = verifyContainmentDeath(item, options); }
     catch (error) {
       assessments[item.id] = { key: item.key, id: item.id, epoch: item.containmentQuarantine!.epoch, owner: item.containmentQuarantine!.owner, at: item.containmentQuarantine!.at,
@@ -1046,9 +1077,10 @@ export function installationOwner(source: 'app-permissions' | 'held-jobs' | 'del
  * identity may run is routed to an agent: decisions a human used to make go to the master and
  * its independent approver through graphyard master decide.
  */
-export function workAttentionOwner(work: Work, cause: 'containment-settleable' | 'containment' | 'session' | 'proof-gap' | 'reviewer-exhausted' | 'launch-review' | 'launch-producer' | 'gate'): AttentionOwner {
+export function workAttentionOwner(work: Work, cause: 'containment-settleable' | 'containment-grace' | 'containment' | 'session' | 'proof-gap' | 'reviewer-exhausted' | 'launch-review' | 'launch-producer' | 'gate'): AttentionOwner {
   const key = work.key;
   if (cause === 'containment-settleable') return agentOwner('master', `graphyard master settle-containment ${key} REASON`);
+  if (cause === 'containment-grace') return agentOwner('master', `Wait out the grace window, then graphyard master status verifies the host and graphyard master settle-containment ${key} REASON once settleable`);
   if (cause === 'containment') return agentOwner('master', `Stop the recorded supervisor on its host, then graphyard master decide ${key} ${work.stage === 'done' ? 'recover' : 'rework'} REASON and graphyard master approver ${key} DECISION`, 'approver');
   if (cause === 'session') return agentOwner('master', `herdr agent list to inspect the session; once the lease lapses, graphyard master dispatch ${key} PROFILE`);
   if (cause === 'proof-gap') return agentOwner('master', `graphyard master decide ${key} grant '{"principal":"PRODUCER","patterns":["${(work.proofGaps ?? [])[0] ?? 'PROOF'}"]}' REASON, then graphyard master approver ${key} DECISION`, 'approver');
@@ -1161,10 +1193,14 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
     const dwellMs = now - Date.parse(work.stageEnteredAt);
     const review = reviewState(work);
     const assessed = containment[work.id];
-    const quarantine = work.containmentQuarantine
+    const phase = containmentPhase(work, now);
+    const quarantine = work.containmentQuarantine && phase
       ? { epoch: work.containmentQuarantine.epoch, owner: work.containmentQuarantine.owner, at: work.containmentQuarantine.at,
-        settleable: assessed?.settleable ?? false,
-        refusals: assessed?.refusals ?? ['Supervisor absence has not been verified on the registered host'],
+        // A live owner's containment is its running session; the grace window and settlement apply only once the lease lapses.
+        phase: phase.state, lapsedAt: phase.state === 'live' ? null : phase.lapsedAt, graceRemainingMs: phase.state === 'grace' ? phase.remainingMs : null,
+        hold: containmentHold(work, now)!,
+        settleable: phase.state !== 'live' && (assessed?.settleable ?? false),
+        refusals: phase.state === 'live' ? [containmentHold(work, now)!] : assessed?.refusals ?? ['Supervisor absence has not been verified on the registered host'],
         host: assessed?.host ?? work.workspaces.find(item => item.epoch === work.containmentQuarantine!.epoch)?.host ?? null,
         scope: work.containmentQuarantine.scope ?? null,
         // Each process the verification found holding the fence, with cmdline and cwd, so the
@@ -1172,17 +1208,20 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
         held: assessed?.verification?.held ?? [],
         verifiedAt: assessed?.verification?.observedAt ?? null,
         // A refusal is only useful with the path that still works.
-        attestation: assessed?.settleable ? null : containmentAttestation(work.key) }
+        attestation: phase.state === 'live' || assessed?.settleable ? null : containmentAttestation(work.key) }
       : null;
+    const seconds = (ms: number) => `${Math.ceil(ms / 1000)}s`;
+    const containmentAttention: [string, Parameters<typeof workAttentionOwner>[1]] | null = !quarantine || quarantine.phase === 'live' ? null
+      : quarantine.settleable ? [`Containment quarantine from epoch ${quarantine.epoch} is verified settleable; run master settle-containment ${work.key}`, 'containment-settleable']
+      : quarantine.phase === 'grace' ? [`Worker lease for epoch ${quarantine.epoch} lapsed at ${quarantine.lapsedAt}; containment grace window has ${seconds(quarantine.graceRemainingMs!)} remaining before supervisor absence can be verified`, 'containment-grace']
+      : [`Containment quarantine from epoch ${quarantine.epoch} blocks dispatch: ${quarantine.lapsedAt ? `worker lease lapsed at ${quarantine.lapsedAt}, past the ${seconds(containmentGraceMs)} grace window; ` : ''}${quarantine.refusals[0]}`, 'containment'];
     const gaps = work.proofGaps ?? [];
     const held = scheduling.held.find(entry => entry.key === work.key) ?? null;
     const conflictReport = candidateConflicts.report[work.key];
     const conflicts = work.submission && work.candidate ? { candidates: (conflictReport?.conflicts ?? []).map(conflict => conflict.key), files: conflictReport?.conflicts ?? [], unprobed: conflictReport?.unprobed ?? [], probed: !!conflictReport && candidateConflicts.available } : null;
     const dispatch = describeDispatch(work, reviews, sessions, now);
     const stalledLaunch = [dispatch?.review, ...(dispatch?.producers ?? [])].find(request => request?.failure);
-    const [attention, cause]: [string | null, Parameters<typeof workAttentionOwner>[1] | null] = quarantine ? quarantine.settleable
-      ? [`Containment quarantine from epoch ${quarantine.epoch} is verified settleable; run master settle-containment ${work.key}`, 'containment-settleable']
-      : [`Containment quarantine from epoch ${quarantine.epoch} blocks dispatch: ${quarantine.refusals[0]}`, 'containment']
+    const [attention, cause]: [string | null, Parameters<typeof workAttentionOwner>[1] | null] = containmentAttention ? containmentAttention
       : active && (!session || !['working', 'idle'].includes(session.state)) ? [`Assigned worker session is ${session?.state ?? 'offline'}`, 'session']
       : gaps.length ? [`No principal is authorized to produce ${gaps.join(', ')}; grant the proof name before dispatch`, 'proof-gap']
       : review?.exhausted ? [`Every configured reviewer profile is exhausted for the current candidate (${review.failedOver.map(entry => `${entry.profile}: ${entry.exhaustion}`).join(', ')})`, 'reviewer-exhausted']
@@ -1199,7 +1238,7 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
   return { observedAt: snapshot.now,
     counts: { open: rows.length, ready: rows.filter(row => row.stage === 'ready').length, active: rows.filter(row => row.owner).length, attention: rows.filter(row => row.attention).length + installation.attention.length, proofAuthorityGaps: rows.filter(row => row.proofGaps.length).length, mergeable: rows.filter(row => row.mergeable).length, reviewsPending: reviews.pending.length, producersPending: sessions.producers.pending.length,
       dispatchRequested: rows.reduce((total, row) => total + (row.dispatch ? (row.dispatch.review ? 1 : 0) + row.dispatch.producers.length : 0), 0), dispatchRunning: rows.reduce((total, row) => total + (row.dispatch ? [row.dispatch.review, ...row.dispatch.producers].filter(request => request?.session?.state === 'pending').length : 0), 0), reviewFailover: rows.filter(row => row.review?.failedOver.length).length, queued: placements.length,
-      quarantined: rows.filter(row => row.containment).length, settleableQuarantines: rows.filter(row => row.containment?.settleable).length,
+      quarantined: rows.filter(row => row.containment && row.containment.phase !== 'live').length, settleableQuarantines: rows.filter(row => row.containment?.settleable).length,
       awaitingSmoke: delivered.filter(row => row.state === 'awaiting-deployment' || row.state === 'awaiting-smoke').length, postDeployFailures: delivered.filter(row => row.state === 'delivered-with-failure').length },
     // Every attention item with the role that resolves it and the next command, work items first.
     attentionItems: [...rows.flatMap(row => row.attention && row.attentionOwner ? [{ subject: row.key, text: row.attention, ...row.attentionOwner }] : []), ...installation.attentionItems] as AttentionItem[],
@@ -1401,7 +1440,8 @@ export function assertDispatchable(work: Work, allWork: Work[], observedAt: stri
   const now = Date.parse(observedAt);
   if (!Number.isFinite(now)) throw new Error('Dispatch requires a valid Graphyard snapshot clock');
   if (!work.ready || work.blocker) throw new Error('Dispatch requires released work without a blocker');
-  if (work.containmentQuarantine) throw new Error(`Dispatch blocked by unverified worker containment from epoch ${work.containmentQuarantine.epoch}`);
+  const hold = containmentHold(work, now);
+  if (hold) throw new Error(hold);
   const unfinished = work.dependencies.map(id => allWork.find(item => item.id === id)).filter(dependency => !dependency || dependency.stage !== 'done');
   if (unfinished.length) throw new Error(`Dispatch blocked by unfinished dependencies: ${unfinished.map(dependency => dependency?.key ?? 'unknown').join(', ')}`);
   if (work.lease && Date.parse(work.lease.expiresAt) > now) throw new Error(`Dispatch blocked by active owner ${work.lease.owner}`);
