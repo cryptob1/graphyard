@@ -317,6 +317,8 @@ Operators/readers have this single repository's audit access. Implementation wor
 
 ## Persistence and retention
 
+An S3-compatible backend, a retained-bytes capacity bound, `upload-failed` as a visible artifact state, verified deletion and digest-checked migration between backends are described in [artifact backends, capacity and migration](recovery.md#artifact-backends-capacity-and-migration).
+
 No separate public bucket or collector storage password is required for the initial Postgres backend. Use the persistent Postgres volume from [deployment](deployment.md); disposable/ephemeral databases are unsuitable for deployed artifact storage. The collector holds only its scoped Graphyard credential, never the database password. Budget database storage for artifacts: up to 8 MiB per required name, with a maximum of 30 names per candidate.
 
 Retention is seven days from upload. Reads refuse immediately at expiry; a bounded sweep deletes the stored bytes in batches of 50 and appends a deletion event. Metadata remains auditable. Evidence requiring those artifacts expires at the earliest required artifact expiry, without falling back to an older pass or rewriting completed delivery history. A repeated upload receipt cannot extend retention.

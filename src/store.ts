@@ -87,6 +87,16 @@ CREATE TABLE IF NOT EXISTS validation_artifacts (
   UNIQUE(request_id,attempt_id,name)
 );
 CREATE INDEX IF NOT EXISTS validation_artifact_expiry ON validation_artifacts(expires_at) WHERE bytes IS NOT NULL;
+ALTER TABLE validation_artifacts ADD COLUMN IF NOT EXISTS backend text NOT NULL DEFAULT 'postgres';
+ALTER TABLE validation_artifacts ADD COLUMN IF NOT EXISTS location text;
+ALTER TABLE validation_artifacts ADD COLUMN IF NOT EXISTS state text NOT NULL DEFAULT 'stored';
+ALTER TABLE validation_artifacts ADD COLUMN IF NOT EXISTS size bigint;
+UPDATE validation_artifacts SET size=octet_length(bytes) WHERE size IS NULL AND bytes IS NOT NULL;
+UPDATE validation_artifacts SET state='expired' WHERE state='stored' AND backend='postgres' AND bytes IS NULL;
+CREATE INDEX IF NOT EXISTS validation_artifact_retained ON validation_artifacts(expires_at) WHERE state='stored';
+CREATE TABLE IF NOT EXISTS validation_runner_polls (
+  registration_id text PRIMARY KEY, principal text NOT NULL, polled_at timestamptz NOT NULL, granted_request_id uuid
+);
 CREATE TABLE IF NOT EXISTS validation_resources (resource text PRIMARY KEY, request_id uuid NOT NULL REFERENCES validation_requests(id));
 CREATE TABLE IF NOT EXISTS scenarios (id text NOT NULL, revision int NOT NULL, document jsonb NOT NULL, PRIMARY KEY(id,revision));
 DROP TRIGGER IF EXISTS immutable_scenarios ON scenarios;
@@ -110,6 +120,11 @@ CREATE INDEX IF NOT EXISTS delivery_observation_environment ON delivery_observat
 DROP TRIGGER IF EXISTS immutable_delivery_observations ON delivery_observations;
 CREATE TRIGGER immutable_delivery_observations BEFORE UPDATE OR DELETE ON delivery_observations FOR EACH ROW EXECUTE FUNCTION graphyard_immutable();
 CREATE TABLE IF NOT EXISTS delivery_leases (registration_id text PRIMARY KEY, principal text NOT NULL, epoch int NOT NULL, expires_at timestamptz NOT NULL);
+CREATE TABLE IF NOT EXISTS delivery_rollbacks (
+  id uuid PRIMARY KEY, environment_id text NOT NULL, generation int NOT NULL, document jsonb NOT NULL,
+  created_at timestamptz NOT NULL DEFAULT clock_timestamp()
+);
+CREATE INDEX IF NOT EXISTS delivery_rollback_environment ON delivery_rollbacks(environment_id,created_at);
 `;
 
 export class Store {
