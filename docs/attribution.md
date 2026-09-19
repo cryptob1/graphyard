@@ -28,6 +28,8 @@ A **manifest** maps every service of an environment to an artifact digest and a 
 
 Every mutation that touches attribution runs inside one coordination transaction with the ledger writes it produces; no provider or network call happens inside those transactions.
 
+The ledger lives in two tables, `attribution_records` and `attribution_reanchors`, registered in the schema registry so every logical backup carries them. Adding them moved the schema generation from 1 to 2: a release running this code migrates a generation-1 database additively on start, and a generation-1 backup restores into it with both tables reported as left empty (see [Deployment](deployment.md#backup-upgrade-rollback)).
+
 ## Exact-target validation
 
 When an operator creates a validation request, the request record is bound once to:

@@ -14,7 +14,7 @@ The sections below are generated from each page's `<!-- page: Section | order | 
 
 ## Operate Graphyard
 
-- [Deployment](deployment.md) — Railway, Docker Compose, backups, and upgrades.
+- [Deployment](deployment.md) — versioned images, Railway, Docker Compose, the Helm chart, backups, upgrades, and restores.
 - [Install and upgrade](install.md) — the shortest install path and the App-permission migration an upgrade can require.
 - [GitHub enforcement](github.md) — App permissions, branch protection, CI producers, and Codex review.
 - [Herdr integration](herdr.md) — worker installation and multi-machine use.
@@ -32,9 +32,10 @@ The sections below are generated from each page's `<!-- page: Section | order | 
 - [E2E test-case registry](test-cases.md) — versioned E2E scenarios pinned to environments.
 - [Validation candidates and runner protocol](validation.md) — candidates, dispatch, attempts, and trusted result collection.
 - [The packaged Playwright runner and collector](runner-setup.md) — the packaged Playwright runner, host attestor, and collector.
+- [Report adapters](report-adapters.md) — what each supported report format proves, observes and refuses.
 - [Releases and observed production delivery](delivery.md) — release builds, approvals, and observed production delivery.
-- [Runner capacity, artifact operations and delivery recovery](recovery.md) — runner capacity, artifact retention and migration, and fenced rollback as an observed workflow.
 - [Candidate-to-deployment attribution](attribution.md) — release manifests, exact-target validation, safe re-anchoring, and attribution analytics.
+- [Runner capacity, artifact operations and delivery recovery](recovery.md) — runner capacity, artifact retention and migration, and fenced rollback as an observed workflow.
 
 ## Understand or contribute
 

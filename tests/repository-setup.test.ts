@@ -15,12 +15,19 @@ const fetcher = async () => new Response(JSON.stringify({ actor: { id: 'worker-a
 async function repo() { const root = await mkdtemp(join(tmpdir(), 'graphyard-init-')); execFileSync('git', ['init', '-q', root]); return root; }
 
 test('managed instructions refresh one section and preserve all surrounding operator content', () => {
-  const original = '# Operator rules\nNever delete customer data.\n';
+  const bootstrap = "The initial MVP is a single-agent bootstrap under the operator's supervision. Do not launch other agents for bootstrap work.";
+  const original = `# Operator rules\n${bootstrap}\nNever delete customer data.\n`;
   const first = managedInstructions(original, 'https://one.example');
+  assert.match(first, /dedicated master coordinator must keep cycling: status, dispatch ready work,\nshepherd review and proof collection, guarded merge, then deployment verification/);
+  assert.match(first, /both conditions hold: \(1\) every in-scope item is Done or has a genuinely\nexternal blocker recorded in Graphyard; and \(2\) every merged change is deployed and\nlive-verified against the exact deployed release, or a genuinely external deployment\nblocker is recorded in Graphyard/);
+  assert.match(first, /Delivered work is immutable, so a deployment\nblocker is recorded as a follow-up work item naming the delivered item, its merge\ncommit, and the external cause/);
+  assert.match(first, /An observed merge alone does not end the loop/);
+  for (const condition of ['Ordinary review findings', 'rework', 'idle workers', 'proof setup', 'Close finished agent\\s+sessions']) assert.match(first, new RegExp(condition));
   const surrounding = `${first}\n## Team review\nAsk the maintainer.\n`;
   const updated = managedInstructions(surrounding, 'https://two.example');
   assert.ok(updated.startsWith(original)); assert.ok(updated.endsWith('## Team review\nAsk the maintainer.\n'));
   assert.equal(updated.split('<!-- graphyard -->').length, 2); assert.doesNotMatch(updated, /one.example/);
+  assert.equal(updated.split(bootstrap).length - 1, 1, 'setup preserves the protected bootstrap rule byte-for-byte');
   assert.equal(managedInstructions(updated, 'https://two.example'), updated);
   assert.match(updated, /Run `sync GY-N` before every push/); assert.match(updated, /never rebase/);
   assert.match(updated, /Files outside plannedFiles must match\norigin\/BASE byte-for-byte/); assert.match(updated, /Only an operator can widen plannedFiles/);

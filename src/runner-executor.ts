@@ -5,6 +5,7 @@ import { spawn } from 'node:child_process';
 import { dirname, relative, resolve, sep } from 'node:path';
 import { z } from 'zod';
 import { oracleBundleDigest } from './runner-setup.js';
+import { defaultReportFormat, reportAdapter, reportFormats, type ReportFormat } from './report-adapters.js';
 
 const digest = z.string().regex(/^sha256:[a-f0-9]{64}$/);
 const name = z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9._/-]*$/).max(150);
@@ -49,6 +50,12 @@ export const attemptGrantSchema = z.object({
   attestationPublicKey: z.string().min(32).max(4096),
   executionNetwork: dockerNetwork,
   bundleDigest: digest, runnerImageDigest: digest, targetUrl, deadline: z.iso.datetime(),
+  /**
+   * The report format the approved bundle definition pins beside the runner image. It
+   * names which files the two phases must write and which adapter the collector verifies
+   * them with; bytes in any other format are refused rather than sniffed.
+   */
+  reportFormat: z.enum(reportFormats).default(defaultReportFormat),
   /**
    * Which test-account material this attempt is approved to run with, as a digest of the
    * approved entries themselves — `null` when it is approved to run with none.
@@ -95,8 +102,13 @@ export const runnerPlanSchema = executionPlanSchema.omit({ grant: true, runAsUse
   supervisor: z.object({ command: z.string().min(1).max(4096), args: z.array(z.string().max(4096)).max(32).default([]) }).strict(),
 }).strict();
 export type Phase = 'enumerate' | 'execute';
-/** Both phases write through the approved reporter built into the pinned image. */
-export const reportFiles: Record<Phase, string> = { enumerate: 'inventory.json', execute: 'report.json' };
+/** Both phases write through the approved reporter built into the pinned image; the file
+ * each phase must write is fixed by the report format the bundle approval pinned. */
+export const reportFilesFor = (format: ReportFormat): Record<Phase, string> => {
+  const { artifacts } = reportAdapter(format);
+  return { enumerate: artifacts.inventory.file, execute: artifacts.report.file };
+};
+export const reportFiles: Record<Phase, string> = reportFilesFor(defaultReportFormat);
 
 // Control-plane, provider and package-manager variables must never reach the boundary
 // that talks to the deployed candidate. NODE_*/npm_* additionally redirect module
@@ -143,7 +155,7 @@ export function containerEnvironment(plan: ExecutionPlan, phase: Phase, testAcco
     ...approved,
     HOME: '/scratch', TMPDIR: '/scratch', CI: '1',
     GRAPHYARD_PHASE: phase,
-    GRAPHYARD_REPORT_FILE: `/output/${reportFiles[phase]}`,
+    GRAPHYARD_REPORT_FILE: `/output/${reportFilesFor(plan.grant.reportFormat)[phase]}`,
     // The enumeration pass must not be able to observe or be steered by the target.
     ...(phase === 'execute' ? { GRAPHYARD_TARGET_URL: plan.grant.targetUrl } : {}),
   };

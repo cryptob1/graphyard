@@ -1,0 +1,81 @@
+{{- if .Values.backup.enabled }}
+{{- if not .Values.backup.persistence.existingClaim }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "graphyard.fullname" . }}-backups
+  labels:
+    {{- include "graphyard.labels" . | nindent 4 }}
+    app.kubernetes.io/component: backup
+spec:
+  accessModes: [ReadWriteOnce]
+  {{- with .Values.backup.persistence.storageClass }}
+  storageClassName: {{ . | quote }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ .Values.backup.persistence.size }}
+---
+{{- end }}
+# Logical backups with the shipped `graphyard db backup`: every ledger table from one
+# snapshot, verified by digest on restore. Backups hold private artifacts and evidence;
+# the claim they land on deserves the database's own protection.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ include "graphyard.fullname" . }}-backup
+  labels:
+    {{- include "graphyard.labels" . | nindent 4 }}
+    app.kubernetes.io/component: backup
+spec:
+  schedule: {{ .Values.backup.schedule | quote }}
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      template:
+        metadata:
+          labels:
+            {{- include "graphyard.selectorLabels" . | nindent 12 }}
+            app.kubernetes.io/component: backup
+        spec:
+          restartPolicy: Never
+          {{- with .Values.imagePullSecrets }}
+          imagePullSecrets:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          securityContext:
+            {{- toYaml .Values.podSecurityContext | nindent 12 }}
+          containers:
+            - name: backup
+              image: {{ include "graphyard.image" . | quote }}
+              imagePullPolicy: {{ .Values.image.pullPolicy }}
+              securityContext:
+                {{- toYaml .Values.containerSecurityContext | nindent 16 }}
+              command: ["sh", "-c"]
+              args:
+                - |
+                  set -eu
+                  name="/backups/graphyard-$(date -u +%Y%m%dT%H%M%SZ).json"
+                  node bin/graphyard.mjs db backup "$name"
+                  node bin/graphyard.mjs db verify "$name" > /dev/null
+                  find /backups -name 'graphyard-*.json' -mtime +{{ .Values.backup.retainDays }} -delete
+                  ls -l /backups
+              env:
+                {{- include "graphyard.env" . | nindent 16 }}
+              envFrom:
+                {{- include "graphyard.configEnvFrom" . | nindent 16 }}
+              resources:
+                {{- toYaml .Values.resources | nindent 16 }}
+              volumeMounts:
+                {{- include "graphyard.secretMounts" . | nindent 16 }}
+                - name: backups
+                  mountPath: /backups
+          volumes:
+            {{- include "graphyard.secretVolume" . | nindent 12 }}
+            - name: backups
+              persistentVolumeClaim:
+                claimName: {{ default (printf "%s-backups" (include "graphyard.fullname" .)) .Values.backup.persistence.existingClaim }}
+{{- end }}

@@ -1,12 +1,64 @@
 <!-- page: Operate Graphyard | 7 | stalled work, expired leases, rework, and outages. -->
 # Operations and recovery
 
+## Perpetual master loop
+
+Keep a dedicated master coordinator running until both parts of the terminal
+condition hold: (1) every in-scope item is Done or has a genuinely external blocker
+recorded in Graphyard; and (2) every merged change is deployed and live-verified against
+the exact deployed release, or a genuinely external deployment blocker is recorded
+in Graphyard. Repeatedly run status, dispatch ready work, shepherd review and trusted
+proof collection, request guarded merges, and verify deployment and live behavior
+against the exact deployed release. Close finished agent sessions and return to
+status after every material event. The [durable loop](#master-coordination-loop)
+runs the mechanical steps; the coordinator's judgment calls sit on top of it and
+follow the same terminal condition.
+
+Ordinary review findings, rework, idle workers, and proof setup are not stopping
+conditions. They are work for the coordinator to route and follow through. A local
+or stale check is not deployment verification, and blockers must be recorded in
+Graphyard rather than inferred from an inactive session. Done marks an observed
+merge, so it never authorizes stopping before deployment and live verification
+against the exact deployed release.
+
+Blockers have exactly two records. A per-item blocker is written by the lease holder
+with `graphyard blocked GY-N EPOCH "reason"` and cleared as described under
+[blocked item with no owner](#blocked-item-with-no-owner). A deployment blocker
+cannot be written on the delivered item — delivered work is immutable — so it is a
+follow-up work item that names the delivered item, its merge commit, and the
+genuinely external cause. Until that release is live-verified, `daemon.deployment`
+lists the delivery under `pending` (or `unavailable` when no probe answers) and
+`delivered` keeps it `awaiting-deployment` or `awaiting-smoke`; those observations
+are the coordinator's evidence that verification is still owed, and the follow-up
+item is the only record that lets the loop stop without it. Never satisfy the
+deployment step from a local checkout, a stale observation, or a delivery the
+release has since moved past.
+
+The deployment step is `master verify-deployment GY-N`, run once per delivered item
+after the merge is observed; it is never a pre-merge gate. It observes the deployed
+release through the probe configured with `master init --deployment-url`, checks
+that the launcher checkout is that exact release with no uncommitted changes, reads
+the instructions the release emits (`master guide`, and a fresh `init` into a scratch
+checkout outside the repository), and records the observation on the item bound to
+the exact commit observed. Each refusal names its cause and the fix:
+
+- *unobserved*: no probe is configured or it did not answer — configure
+  `--deployment-url` or wait for the endpoint, then rerun;
+- *stale*: the observation is older than five minutes — rerun; the command observes
+  afresh each time;
+- *does not serve the merge yet*: the rollout is lagging — keep cycling; record a
+  follow-up item only for a genuinely external cause;
+- *local checkout*: the launcher is at another commit or is dirty — `git fetch` and
+  check out the deployed commit in the Graphyard checkout, then rerun;
+- *already records deployment*: the release moved on after verification — verify
+  the new release through a follow-up item.
+
 ## Daily checks
 
-- `/healthz` should return 200 and confirm database connectivity.
+- `/healthz` should return 200, confirm database connectivity, and name the release (`version`, `revision`) and schema generation you expect to be running.
 - Authenticated `/api/status` should show no persistent integration errors.
 - Inspect the delivery graph for old work, stale observations, and blockers.
-- Keep backups and verify a restore in an isolated environment periodically.
+- Keep backups and verify a restore in an isolated environment periodically: `graphyard db backup`, `db verify` and `db restore` are the shipped procedure — see [backup, upgrade, rollback](deployment.md#backup-upgrade-rollback).
 - Monitor Postgres size: events contain work snapshots and evidence is retained. The MVP has no automatic retention pruning.
 
 ## Master coordination loop
@@ -241,6 +293,12 @@ requires editing production configuration.
 Every grant and revoke appends an immutable history row and an event, recording the actor,
 the reason, the patterns applied, and the resulting effective set. Read one principal's
 record with `graphyard grants history ID`; the ledger itself rejects updates and deletes.
+
+## Readiness checklist per completion profile
+
+`graphyard doctor --profile through-merge|preview-validation|production-verification` prints an explicit checklist for the selected [completion profile](turnkey-delivery-roadmap.md#product-promise-and-boundary). Every item states what was observed and, when it is `missing` or `unknown`, the direct command or setting that resolves it: the repository remote, the control-plane connection and the credential's role, the reviewed-and-applied setup proposal and its drift, the dedicated GitHub App and the permissions it lacks, discovered required checks, worker profiles, the review provider, and — for preview validation — the Playwright suite, the immutable environment, runner/collector/builder registrations and the approved bundle. Detected test frameworks are mapped to the [report adapter](report-adapters.md) that accepts their output; a framework with no adapter is reported as unsupported with the recovery, never as covered.
+
+`unknown` is never `ready`: an item the command could not judge (no server, a worker credential that cannot read validation definitions) says what it depends on. `production-verification` stays `missing` until release observations ship (roadmap D3); until then production verification is an explicit manual proof. A ready checklist is configuration, not evidence — the first real PR still has to pass every gate visibly.
 
 ## Setup proposals and drift
 

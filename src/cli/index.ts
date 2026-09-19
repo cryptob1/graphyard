@@ -1,6 +1,7 @@
 import { createContext } from './context.js';
 import type { CliCommand } from './registry.js';
 import { installCommands } from './install.js';
+import { dbCommands } from './db.js';
 import { masterCommands } from './master.js';
 import { workCommands } from './work.js';
 import { policyCommands } from './policy.js';
@@ -18,7 +19,7 @@ import { workspaceCommands } from './workspace.js';
  * one module, or adds a module here; nothing else in the launcher changes.
  */
 export const commands: readonly CliCommand[] = [
-  ...installCommands, ...masterCommands, ...workCommands, ...policyCommands,
+  ...installCommands, ...dbCommands, ...masterCommands, ...workCommands, ...policyCommands,
   ...validationCommands, ...deliveryCommands, ...runnerCommands, ...scenarioCommands,
   ...grantsCommands, ...operatorAgentCommands, ...leaseCommands, ...workspaceCommands,
 ];

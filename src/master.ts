@@ -149,6 +149,20 @@ that prompt on their device, and decisions the docs mark human-only, are the onl
 operator interactions left. Never store, export, or reuse the profile's cookies
 outside those flows.
 
+Keep cycling: status, dispatch ready work, shepherd review and proof collection,
+guarded merge, then deployment verification. Repeat until both conditions hold:
+(1) every in-scope item is Done or has a genuinely external blocker recorded in
+Graphyard; and (2) every merged change is deployed and live-verified against the exact
+deployed release, or a genuinely external deployment blocker is recorded in Graphyard.
+Verify each delivery with \`graphyard master verify-deployment GY-N\`: it refuses a
+stale or local-only observation and records only the exact deployed release it observed.
+Delivered work is immutable, so a deployment blocker is recorded as a follow-up work
+item naming the delivered item, its merge commit, and the external cause;
+\`master status\` keeps the delivery under \`pending\` until the release serves it.
+An observed merge alone does not end the loop. Ordinary review findings, rework,
+idle workers, and proof setup are not stopping conditions. Close finished agent
+sessions as part of the cycle.
+
 Check the automatic-merge preference in master status. When disabled, wait for
 explicit operator approval for each merge. Otherwise routine merges may use
 \`graphyard master merge --all\`. The command rechecks the

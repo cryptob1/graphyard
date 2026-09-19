@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8" standalone="no"?>
+<test-run id="2" name="Orders.Tests.dll" testcasecount="2" result="Passed" total="2" passed="2" failed="0">
+  <test-suite type="Assembly" id="0-1000" name="Orders.Tests.dll" result="Passed">
+    <test-case id="0-1001" name="CreatesAnOrder" fullname="Orders.Tests.OrderServiceTest.CreatesAnOrder" result="Passed" />
+  </test-suite>
+</test-run>
