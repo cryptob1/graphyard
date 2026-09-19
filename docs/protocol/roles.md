@@ -7,7 +7,7 @@ Terms follow the [glossary](../glossary.md). On the protocol pages *operator* me
 
 | Role | Permissions |
 | --- | --- |
-| `admin` | Create/release work, revise requirements, rework, participate as a worker, attest manual proofs, grant proof authority; with `sessionKind: "human"`, resolve escalations and record human-only intake |
+| `admin` | Create/release work, revise requirements, rework, participate as a worker, attest manual proofs, grant proof authority; with `sessionKind: "human"`, resolve escalations and record human-only intake; from any declared session kind, settle a control-plane-raised `lease-loss` the events ledger explains by citing its attestation |
 | `coordinator` | Read work and integration state for master-agent routing; acquire, verify, or cancel only the engine's bounded merge execution authority; settle a containment quarantine whose supervisor it has verified dead on the registered host; record the deployment observation on delivered work |
 | `operator-agent` | Only explicitly configured intent/policy capabilities (`intent:create`, `intent:ready`, `intent:unblock`, `policy:requirements`, `policy:review-provider`, `policy:bootstrap`) within a server-enforced repository/work allowlist; never leases, evidence, identity administration, or merge execution |
 | `slice-lead` | Record rulings on work in its own slice and escalate; every lifecycle mutation from this role is refused and recorded, see [slice-lead delegation](../delegation.md) |

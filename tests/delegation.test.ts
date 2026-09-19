@@ -822,10 +822,10 @@ test('integration:automatic-escalation — every trigger escalates and no lead c
   await engine.execute(workerB, 'release', replaced.id, { epoch: replaced.epoch }, id());
 
   // Operator rework discards whatever unfinished assignment still stood, and that
-  // is the last moment the loss is visible: reconciliation only ever sees an
+  // is the last moment its end is visible: reconciliation only ever sees an
   // expired lease, and the replacement claim guards on a lease this path has
-  // already cleared. A worker stopped mid-implementation never released its own
-  // lease, so the incident is recorded here rather than falling between the two.
+  // already cleared. The admin's own stopped-worker attestation explains that end,
+  // so it is recorded as `lease.expired` history rather than as a vanished worker.
   let stranded = await engine.execute(admin, 'create', null, input('escalation-rework-lease', 'infrastructure'), id());
   stranded = await engine.execute(admin, 'ready', stranded.id, {}, id());
   stranded = await engine.execute(workerA, 'claim', stranded.id, {}, id());
@@ -834,24 +834,22 @@ test('integration:automatic-escalation — every trigger escalates and no lead c
   assert.ok(stranded.lease, 'the stopped worker never released the lease it was implementing under');
   stranded = await engine.execute(admin, 'rework', stranded.id, { reason: 'Worker session was closed before it submitted', previousWorkerStopped: true }, id());
   assert.equal(stranded.lease, null);
-  assert.equal(stranded.escalation!.trigger, 'lease-loss');
-  assert.match(stranded.escalation!.reason, new RegExp(`${workerA.id} lost lease epoch ${strandedEpoch}`));
-  assert.equal(stranded.escalation!.actor, 'graphyard');
+  assert.deepEqual(standingEscalations(stranded), [], 'a lease the attesting admin discarded is not a lost worker');
   assert.equal(stranded.lastAssignment!.owner, workerA.id, 'the discarded assignment is still attributable');
-  assert.match(stranded.gates.find(gate => gate.name === 'merge')!.reasons.join(' '), /Unresolved lease-loss escalation/);
-  // Reconciliation has no expired lease left to notice, so a record that was not
-  // written here can never be recovered later.
+  const discarded = (await store.events(stranded.id)).filter(event => event.kind === 'lease.expired');
+  assert.deepEqual(discarded.map(event => [event.payload.details.epoch, event.payload.details.cause, event.payload.details.attestation.source, event.payload.details.attestation.actor]), [[strandedEpoch, 'stopped-by-attestation', 'rework', admin.id]]);
+  // Reconciliation has no expired lease left to notice.
   await engine.reconcile();
   stranded = await reload(stranded);
-  assert.deepEqual(stranded.escalations!.map(entry => entry.trigger), ['lease-loss']);
-  // The replacement engineer still claims the reopened item, and the claim
-  // neither clears the standing incident nor records a second one.
+  assert.deepEqual(standingEscalations(stranded), []);
+  // The replacement engineer claims the reopened item; a lead still cannot resolve the
+  // standing incident on the replaced item, and the admin can.
   stranded = await engine.execute(workerB, 'claim', stranded.id, {}, id());
   assert.equal(stranded.lease!.owner, workerB.id);
-  assert.deepEqual(stranded.escalations!.map(entry => entry.trigger), ['lease-loss'], 'the incident survives the replacement claim');
-  await assert.rejects(engine.execute(lead, 'resolve', stranded.id, { trigger: 'lease-loss', reason: 'Reassigned already', expectedRevision: stranded.revision }, id()), /Slice leads cannot perform lifecycle mutations/);
-  stranded = await engine.execute(admin, 'resolve', stranded.id, { trigger: 'lease-loss', reason: 'Replacement engineer assigned and verified', expectedRevision: stranded.revision }, id());
-  assert.deepEqual(stranded.escalations, []);
+  replaced = await reload(replaced);
+  await assert.rejects(engine.execute(lead, 'resolve', replaced.id, { trigger: 'lease-loss', reason: 'Reassigned already', expectedRevision: replaced.revision }, id()), /Slice leads cannot perform lifecycle mutations/);
+  replaced = await engine.execute(admin, 'resolve', replaced.id, { trigger: 'lease-loss', reason: 'Replacement engineer assigned and verified', expectedRevision: replaced.revision }, id());
+  assert.deepEqual(replaced.escalations, []);
   await engine.execute(workerB, 'release', stranded.id, { epoch: stranded.epoch }, id());
   // Rework that discards no assignment raises nothing: the incident is the lost
   // lease, not the reassignment that follows it.
