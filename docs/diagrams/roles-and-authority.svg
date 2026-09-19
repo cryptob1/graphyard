@@ -1,0 +1,123 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 560 1593" width="560" height="1593" role="img" aria-labelledby="title desc" font-family='Inter, "Segoe UI", Roboto, "Helvetica Neue", Arial, "Liberation Sans", ui-sans-serif, system-ui, -apple-system, sans-serif'>
+<title id="title">Who holds which authority in Graphyard</title>
+<desc id="desc">The human operator, holding an admin credential declared human, makes the human-only decisions and sends them to the Graphyard control plane. Below the control plane, the Herdr runtime hosts three agent sessions, each with one credential: the master (coordinator), the slice lead (slice-lead), and the worker (worker credential, lease epoch, and assigned worktree). Beside them are the reviewer (a separate GitHub identity with no Graphyard credential), the proof producer (producer credential with a grant), and the optional scoped operator agent. Sessions send authenticated commands to Graphyard; the worker pushes its branch and opens the pull request on GitHub; the reviewer approves the exact head on GitHub. Graphyard observes GitHub facts and merges only through the guarded path.</desc>
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#9fb39c"/></marker></defs>
+<rect width="560" height="1593" fill="#111714"/>
+<text x="20" y="36.2" font-size="18" font-weight="700" fill="#e6ede4" text-anchor="start">Who holds which authority</text>
+<rect x="20" y="47.760000000000005" width="520" height="175.5" rx="14" fill="#3a3020" stroke="#e0c27a" stroke-width="2"/>
+<text x="32" y="77.7" font-size="16" font-weight="650" fill="#f6e7b8" text-anchor="start">Human operator</text>
+<text x="32" y="96.6" font-size="14" font-weight="400" fill="#f6e7b8" text-anchor="start">admin credential declaring sessionKind: "human". Sets goals,</text>
+<text x="32" y="115.1" font-size="14" font-weight="400" fill="#f6e7b8" text-anchor="start">releases backlog work, revises requirements, resolves</text>
+<text x="32" y="133.5" font-size="14" font-weight="400" fill="#f6e7b8" text-anchor="start">escalations, attests manual proofs, and approves merges when</text>
+<text x="32" y="152.0" font-size="14" font-weight="400" fill="#f6e7b8" text-anchor="start">automatic merging is off. No session below can resolve an</text>
+<text x="32" y="170.5" font-size="14" font-weight="400" fill="#f6e7b8" text-anchor="start">escalation or attest a proof.</text>
+<rect x="32" y="187.28000000000003" width="55.0" height="24" rx="12" fill="#111714" stroke="#c5e69b" stroke-width="1.5" stroke-dasharray="3 3"/>
+<text x="40" y="204.9" font-size="13" font-weight="400" fill="#c5e69b" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace">admin</text>
+<rect x="95" y="187.28000000000003" width="156.4" height="24" rx="12" fill="#111714" stroke="#c5e69b" stroke-width="1.5" stroke-dasharray="3 3"/>
+<text x="103" y="204.9" font-size="13" font-weight="400" fill="#c5e69b" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace">sessionKind: human</text>
+<line x1="280" y1="223.28000000000003" x2="280" y2="267.28000000000003" stroke="#9fb39c" stroke-width="2.5" marker-end="url(#arrow)"/>
+<text x="290" y="251.3" font-size="13" font-weight="400" fill="#b8c6b7" text-anchor="start">human-only decisions</text>
+<rect x="20" y="269.28000000000003" width="520" height="141.5" rx="4" fill="#182a36" stroke="#8fc1e6" stroke-width="2"/>
+<text x="32" y="299.2" font-size="16" font-weight="650" fill="#d8ecf9" text-anchor="start">Graphyard control plane</text>
+<text x="32" y="318.1" font-size="14" font-weight="400" fill="#d8ecf9" text-anchor="start">Server, Postgres, dashboard, and CLI. Records ownership (lease</text>
+<text x="32" y="336.6" font-size="14" font-weight="400" fill="#d8ecf9" text-anchor="start">+ epoch), requirements, the candidate (PR, head SHA, base SHA),</text>
+<text x="32" y="355.1" font-size="14" font-weight="400" fill="#d8ecf9" text-anchor="start">evidence, gate decisions, and merge authorization. Gates are</text>
+<text x="32" y="373.5" font-size="14" font-weight="400" fill="#d8ecf9" text-anchor="start">deterministic; there is no lifecycle-state endpoint and no</text>
+<text x="32" y="392.0" font-size="14" font-weight="400" fill="#d8ecf9" text-anchor="start">merge bypass.</text>
+<rect x="20" y="498.80000000000007" width="320" height="524.64" rx="14" fill="#2a2338" stroke="#c3b1ec" stroke-width="2"/>
+<text x="32" y="522.8000000000001" font-size="16" font-weight="650" fill="#e9e0f9">Herdr runtime hosts the sessions</text>
+<rect x="32" y="538.8000000000001" width="296" height="157.0" rx="14" fill="#22311f" stroke="#c5e69b" stroke-width="2"/>
+<text x="44" y="568.8" font-size="16" font-weight="650" fill="#e1f3c8" text-anchor="start">Master (coordinator)</text>
+<text x="44" y="587.6" font-size="14" font-weight="400" fill="#e1f3c8" text-anchor="start">Durable loop plus an optional</text>
+<text x="44" y="606.1" font-size="14" font-weight="400" fill="#e1f3c8" text-anchor="start">visible session. Dispatches ready</text>
+<text x="44" y="624.6" font-size="14" font-weight="400" fill="#e1f3c8" text-anchor="start">work, shepherds review, requests</text>
+<text x="44" y="643.1" font-size="14" font-weight="400" fill="#e1f3c8" text-anchor="start">the guarded merge.</text>
+<rect x="44" y="659.84" width="101.8" height="24" rx="12" fill="#111714" stroke="#c5e69b" stroke-width="1.5" stroke-dasharray="3 3"/>
+<text x="52" y="677.4" font-size="13" font-weight="400" fill="#c5e69b" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace">coordinator</text>
+<rect x="32" y="705.8400000000001" width="296" height="138.6" rx="14" fill="#22311f" stroke="#c5e69b" stroke-width="2"/>
+<text x="44" y="735.8" font-size="16" font-weight="650" fill="#e1f3c8" text-anchor="start">Slice lead</text>
+<text x="44" y="754.7" font-size="14" font-weight="400" fill="#e1f3c8" text-anchor="start">Rules on plans and failures inside</text>
+<text x="44" y="773.1" font-size="14" font-weight="400" fill="#e1f3c8" text-anchor="start">one slice, citing a rule ID. Never</text>
+<text x="44" y="791.6" font-size="14" font-weight="400" fill="#e1f3c8" text-anchor="start">implements or merges.</text>
+<rect x="44" y="808.4000000000001" width="94.0" height="24" rx="12" fill="#111714" stroke="#c5e69b" stroke-width="1.5" stroke-dasharray="3 3"/>
+<text x="52" y="826.0" font-size="13" font-weight="400" fill="#c5e69b" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace">slice-lead</text>
+<rect x="32" y="854.4000000000001" width="296" height="157.0" rx="14" fill="#22311f" stroke="#c5e69b" stroke-width="2"/>
+<text x="44" y="884.4" font-size="16" font-weight="650" fill="#e1f3c8" text-anchor="start">Worker</text>
+<text x="44" y="903.2" font-size="14" font-weight="400" fill="#e1f3c8" text-anchor="start">Claims one item, edits only its</text>
+<text x="44" y="921.7" font-size="14" font-weight="400" fill="#e1f3c8" text-anchor="start">assigned worktree, opens the PR,</text>
+<text x="44" y="940.2" font-size="14" font-weight="400" fill="#e1f3c8" text-anchor="start">submits the exact commit. Stops on</text>
+<text x="44" y="958.7" font-size="14" font-weight="400" fill="#e1f3c8" text-anchor="start">lease loss.</text>
+<rect x="44" y="975.44" width="62.8" height="24" rx="12" fill="#111714" stroke="#c5e69b" stroke-width="1.5" stroke-dasharray="3 3"/>
+<text x="52" y="993.0" font-size="13" font-weight="400" fill="#c5e69b" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace">worker</text>
+<rect x="114.8" y="975.44" width="117.4" height="24" rx="12" fill="#111714" stroke="#c5e69b" stroke-width="1.5" stroke-dasharray="3 3"/>
+<text x="122.8" y="993.0" font-size="13" font-weight="400" fill="#c5e69b" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace">lease · epoch</text>
+<rect x="240.2" y="975.44" width="78.4" height="24" rx="12" fill="#111714" stroke="#c5e69b" stroke-width="1.5" stroke-dasharray="3 3"/>
+<text x="248.2" y="993.0" font-size="13" font-weight="400" fill="#c5e69b" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace">worktree</text>
+<rect x="352" y="498.80000000000007" width="188" height="175.5" rx="14" fill="#22311f" stroke="#c5e69b" stroke-width="2"/>
+<text x="364" y="528.8" font-size="16" font-weight="650" fill="#e1f3c8" text-anchor="start">Reviewer</text>
+<text x="364" y="547.6" font-size="14" font-weight="400" fill="#e1f3c8" text-anchor="start">A separate GitHub</text>
+<text x="364" y="566.1" font-size="14" font-weight="400" fill="#e1f3c8" text-anchor="start">identity approves</text>
+<text x="364" y="584.6" font-size="14" font-weight="400" fill="#e1f3c8" text-anchor="start">the exact head.</text>
+<text x="364" y="603.1" font-size="14" font-weight="400" fill="#e1f3c8" text-anchor="start">Holds no Graphyard</text>
+<text x="364" y="621.5" font-size="14" font-weight="400" fill="#e1f3c8" text-anchor="start">credential.</text>
+<rect x="364" y="638.32" width="94.0" height="24" rx="12" fill="#111714" stroke="#c5e69b" stroke-width="1.5" stroke-dasharray="3 3"/>
+<text x="372" y="655.9" font-size="13" font-weight="400" fill="#c5e69b" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace">GitHub App</text>
+<rect x="352" y="684.32" width="188" height="175.5" rx="14" fill="#22311f" stroke="#c5e69b" stroke-width="2"/>
+<text x="364" y="714.3" font-size="16" font-weight="650" fill="#e1f3c8" text-anchor="start">Proof producer</text>
+<text x="364" y="733.1" font-size="14" font-weight="400" fill="#e1f3c8" text-anchor="start">CI workflow or</text>
+<text x="364" y="751.6" font-size="14" font-weight="400" fill="#e1f3c8" text-anchor="start">trusted runner.</text>
+<text x="364" y="770.1" font-size="14" font-weight="400" fill="#e1f3c8" text-anchor="start">Submits evidence</text>
+<text x="364" y="788.6" font-size="14" font-weight="400" fill="#e1f3c8" text-anchor="start">bound to head, base,</text>
+<text x="364" y="807.1" font-size="14" font-weight="400" fill="#e1f3c8" text-anchor="start">and policy revision.</text>
+<rect x="364" y="823.84" width="78.4" height="24" rx="12" fill="#111714" stroke="#c5e69b" stroke-width="1.5" stroke-dasharray="3 3"/>
+<text x="372" y="841.4" font-size="13" font-weight="400" fill="#c5e69b" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace">producer</text>
+<rect x="450.4" y="823.84" width="55.0" height="24" rx="12" fill="#111714" stroke="#c5e69b" stroke-width="1.5" stroke-dasharray="3 3"/>
+<text x="458.4" y="841.4" font-size="13" font-weight="400" fill="#c5e69b" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace">grant</text>
+<rect x="352" y="869.84" width="188" height="157.0" rx="14" fill="#22311f" stroke="#c5e69b" stroke-width="2"/>
+<text x="364" y="899.8" font-size="16" font-weight="650" fill="#e1f3c8" text-anchor="start">Operator agent</text>
+<text x="364" y="918.7" font-size="14" font-weight="400" fill="#e1f3c8" text-anchor="start">Optional, scoped.</text>
+<text x="364" y="937.1" font-size="14" font-weight="400" fill="#e1f3c8" text-anchor="start">Adds intent and</text>
+<text x="364" y="955.6" font-size="14" font-weight="400" fill="#e1f3c8" text-anchor="start">requirements; never</text>
+<text x="364" y="974.1" font-size="14" font-weight="400" fill="#e1f3c8" text-anchor="start">removes them.</text>
+<rect x="364" y="990.88" width="125.2" height="24" rx="12" fill="#111714" stroke="#c5e69b" stroke-width="1.5" stroke-dasharray="3 3"/>
+<text x="372" y="1008.5" font-size="13" font-weight="400" fill="#c5e69b" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace">operator-agent</text>
+<line x1="180" y1="494.80000000000007" x2="180" y2="414.80000000000007" stroke="#9fb39c" stroke-width="2.5" marker-end="url(#arrow)"/>
+<text x="170" y="435.1" font-size="13" font-weight="400" fill="#b8c6b7" text-anchor="end">claim, heartbeat, submit,</text>
+<text x="170" y="452.2" font-size="13" font-weight="400" fill="#b8c6b7" text-anchor="end">dispatch, merge request:</text>
+<text x="170" y="469.4" font-size="13" font-weight="400" fill="#b8c6b7" text-anchor="end">each under its own</text>
+<text x="170" y="486.5" font-size="13" font-weight="400" fill="#b8c6b7" text-anchor="end">credential</text>
+<line x1="446" y1="494.80000000000007" x2="446" y2="414.80000000000007" stroke="#9fb39c" stroke-width="2.5" marker-end="url(#arrow)"/>
+<text x="436" y="452.2" font-size="13" font-weight="400" fill="#b8c6b7" text-anchor="end">evidence,</text>
+<text x="436" y="469.4" font-size="13" font-weight="400" fill="#b8c6b7" text-anchor="end">bounded intent</text>
+<rect x="20" y="1082.88" width="520" height="104.6" rx="4" fill="#262d28" stroke="#b8c2bb" stroke-width="2"/>
+<text x="32" y="1112.8" font-size="16" font-weight="650" fill="#e3e9e3" text-anchor="start">GitHub</text>
+<text x="32" y="1131.7" font-size="14" font-weight="400" fill="#e3e9e3" text-anchor="start">Pull request, reviews, CI checks, branch protection, and the</text>
+<text x="32" y="1150.2" font-size="14" font-weight="400" fill="#e3e9e3" text-anchor="start">observed merge. Graphyard reads these facts; it never trusts a</text>
+<text x="32" y="1168.7" font-size="14" font-weight="400" fill="#e3e9e3" text-anchor="start">session’s report of them.</text>
+<line x1="132" y1="1030.88" x2="132" y2="1078.88" stroke="#9fb39c" stroke-width="2.5" marker-end="url(#arrow)"/>
+<text x="142" y="1060.9" font-size="13" font-weight="400" fill="#b8c6b7" text-anchor="start">push branch, open PR</text>
+<line x1="446" y1="1030.88" x2="446" y2="1078.88" stroke="#9fb39c" stroke-width="2.5" marker-end="url(#arrow)"/>
+<text x="436" y="1060.9" font-size="13" font-weight="400" fill="#b8c6b7" text-anchor="end">approve exact head</text>
+<text x="20" y="1216.0" font-size="13" font-weight="400" fill="#b8c6b7" text-anchor="start">Graphyard and GitHub: Graphyard observes the PR, reviews, checks, and</text>
+<text x="20" y="1233.2" font-size="13" font-weight="400" fill="#b8c6b7" text-anchor="start">protection; publishes the required "Graphyard / merge" check; and</text>
+<text x="20" y="1250.3" font-size="13" font-weight="400" fill="#b8c6b7" text-anchor="start">merges only through the guarded, exact-candidate path. Herdr reports</text>
+<text x="20" y="1267.5" font-size="13" font-weight="400" fill="#b8c6b7" text-anchor="start">whether a session is alive; it never decides ownership or progression.</text>
+<text x="20" y="1306.3" font-size="18" font-weight="700" fill="#e6ede4" text-anchor="start">Legend (glossary terms)</text>
+<g transform="translate(0 1317.8)"><rect x="20" y="0" width="34" height="22" rx="9" fill="#3a3020" stroke="#e0c27a" stroke-width="2"/></g>
+<text x="66" y="1332.5" font-size="14" font-weight="400" fill="#e6ede4" text-anchor="start">Human operator (human authority)</text>
+<g transform="translate(0 1347.8)"><rect x="20" y="0" width="34" height="22" rx="9" fill="#22311f" stroke="#c5e69b" stroke-width="2"/></g>
+<text x="66" y="1362.5" font-size="14" font-weight="400" fill="#e6ede4" text-anchor="start">AI agent session (one role, one credential)</text>
+<g transform="translate(0 1377.8)"><rect x="20" y="0" width="34" height="22" rx="3" fill="#182a36" stroke="#8fc1e6" stroke-width="2"/></g>
+<text x="66" y="1392.5" font-size="14" font-weight="400" fill="#e6ede4" text-anchor="start">Graphyard control plane</text>
+<g transform="translate(0 1407.8)"><rect x="20" y="0" width="34" height="22" rx="9" fill="#2a2338" stroke="#c3b1ec" stroke-width="2"/></g>
+<text x="66" y="1422.5" font-size="14" font-weight="400" fill="#e6ede4" text-anchor="start">Herdr runtime (session supervision)</text>
+<g transform="translate(0 1437.8)"><rect x="20" y="0" width="34" height="22" rx="3" fill="#262d28" stroke="#b8c2bb" stroke-width="2"/></g>
+<text x="66" y="1452.5" font-size="14" font-weight="400" fill="#e6ede4" text-anchor="start">GitHub and other external facts</text>
+<g transform="translate(0 1467.8)"><rect x="20" y="0" width="34" height="22" rx="11" fill="#111714" stroke="#c5e69b" stroke-width="1.5" stroke-dasharray="3 3"/></g>
+<text x="66" y="1482.5" font-size="14" font-weight="400" fill="#e6ede4" text-anchor="start">Chip: credential, lease epoch, or assigned worktree the</text>
+<text x="66" y="1501.0" font-size="14" font-weight="400" fill="#e6ede4" text-anchor="start">session holds</text>
+<g transform="translate(0 1512.8)"><line x1="20" y1="11" x2="54" y2="11" stroke="#9fb39c" stroke-width="2.5" marker-end="url(#arrow)"/></g>
+<text x="66" y="1527.5" font-size="14" font-weight="400" fill="#e6ede4" text-anchor="start">Solid arrow: an authenticated command or authority</text>
+<g transform="translate(0 1542.8)"><line x1="20" y1="11" x2="54" y2="11" stroke="#9fb39c" stroke-width="1.5" stroke-dasharray="6 5" marker-end="url(#arrow)"/></g>
+<text x="66" y="1557.5" font-size="14" font-weight="400" fill="#e6ede4" text-anchor="start">Dashed arrow: observation or health report, never authority</text>
+</svg>

@@ -1,4 +1,4 @@
-<!-- page: Start here | 3 | run Graphyard locally for evaluation. -->
+<!-- page: Start here | 4 | run Graphyard locally for evaluation. -->
 # Local quickstart
 
 Use this path to evaluate Graphyard on one machine. For a real repository and Herdr fleet, use [repository onboarding](onboarding.md).
@@ -19,7 +19,7 @@ npm run build
 npm start
 ```
 
-Open `http://localhost:4310` and sign in with the operator token from `.env`. `curl -s http://localhost:4310/healthz` names the version and schema generation you are running.
+Open `http://localhost:4310` and sign in with the `admin` token from `.env`; that is the human operator's credential. `curl -s http://localhost:4310/healthz` names the version and schema generation you are running.
 
 Keep this Graphyard checkout running. Clone the configured writable repository separately; Graphyard does not accept a pull request whose head belongs to a different repository.
 
@@ -39,12 +39,12 @@ The scan is read-only. It inspects package manifests, CI workflows, deploy confi
 - the CI system and the required check names;
 - build/test commands with their proof names;
 - the deploy target and how to verify a deployed SHA;
-- the candidate environment topology (ephemeral, pooled, or partial — see [operations](operations.md#setup-proposals-and-drift));
+- the candidate environment topology (ephemeral, pooled, or partial — see [operations](operations-reference.md#setup-proposals-and-drift));
 - the default policy: required checks, GitHub as review provider, and evidence expectations;
-- worker/reviewer profiles for the agent runtimes present on this machine;
+- worker and reviewer launch profiles for the agent runtimes present on this machine;
 - the GitHub App registration.
 
-Review the proposal with the operator, then apply it. A sample proposal for a Node/Railway repository is in [examples/setup-proposal.json](../examples/setup-proposal.json):
+The human operator reviews the proposal, then applies it. A sample proposal for a Node/Railway repository is in [examples/setup-proposal.json](../examples/setup-proposal.json):
 
 ```sh
 node "$GRAPHYARD_CLI" init --scan --apply --url "$GRAPHYARD_URL"
@@ -70,7 +70,7 @@ Paste the worker token, press Enter, then press Ctrl-D. Commit the generated `AG
 
 ## Create work
 
-In the UI, create a small task for this repository, add its acceptance criteria, and move it to Ready. All listed proofs must pass. Only an admin can [revise requirements](coordination.md#revise-requirements-explicitly); workers cannot weaken their own task.
+In the dashboard, create a small task for this repository, add its acceptance criteria, and move it to Ready. All listed proofs must pass. Only the human operator's `admin` credential (or, additively, a scoped operator agent) can [revise requirements](coordination.md#revise-requirements-explicitly); workers cannot weaken their own task.
 
 ## Claim and launch a worker
 
@@ -84,7 +84,7 @@ cd .graphyard/worktrees/GY-1-EPOCH
 node "$GRAPHYARD_CLI" watch GY-1 EPOCH -- YOUR_AGENT_COMMAND
 ```
 
-Replace `EPOCH` with the value returned by `claim`. A direct `watch` invocation stops the worker process group on Unix. On Windows it can stop only the direct child, so use external containment if the agent may spawn descendants. Foreground Herdr launches have stricter host requirements; see [Herdr integration](herdr.md) and [operations](operations.md).
+Replace `EPOCH` with the value returned by `claim`. A direct `watch` invocation stops the worker process group on Unix. On Windows it can stop only the direct child, so use external containment if the worker session may spawn descendants. Foreground Herdr launches have stricter host requirements; see [Herdr integration](herdr.md) and [operations](operations.md).
 
 ## Submit the PR
 
@@ -94,6 +94,6 @@ Push the assigned branch, open a PR, then:
 node "$GRAPHYARD_CLI" complete GY-1 EPOCH PR_NUMBER
 ```
 
-Graphyard now evaluates review, CI, acceptance, and merge gates. A trusted producer—not the implementation worker—submits required evidence. GitHub integration must be configured before Graphyard can authorize a merge.
+Graphyard now evaluates review, CI, acceptance, and merge gates. A proof producer—never the worker—submits the required evidence. GitHub integration must be configured before Graphyard can authorize a merge.
 
 Use [repository onboarding](onboarding.md) to connect GitHub protection, Herdr, and the master-agent flow.

@@ -17,7 +17,7 @@ Each condition is distinct because its next step is:
 | `queued-waiting-for-slot` | The runner polled, but a resource this request needs is in use by an attempt under a live lease | Wait for that attempt to settle; add a runner registration if dwell keeps growing |
 | `queued-resource-held` | The runner polled, but a needed resource is reserved by an attempt whose settlement was never verified | Verify that execution stopped, then `validation settle` with evidence; never release on a timer |
 | `unacknowledged` | Dispatched, not acknowledged inside the ACK window | No execution was authorized; an expired window settles itself and `validation retry` queues another attempt; inspect the runner's attempt log |
-| `heartbeat-missing` | Acknowledged, but not renewed within the 20-second interval while the lease is still live | The runner is stalled or partitioned and may still be executing; leave its reservations alone until the collector observes settlement or an operator settles with evidence |
+| `heartbeat-missing` | Acknowledged, but not renewed within the 20-second interval while the lease is still live | The runner is stalled or partitioned and may still be executing; leave its reservations alone until the collector observes settlement or the human operator settles it with evidence |
 | `collection-stalled` | The collector holds authority but stopped renewing | Check the collector process; an expired collection keeps the barrier closed |
 | `awaiting-settlement` | Terminal, with reservations held by an unsettled attempt | Verify termination and its external operations, then `validation settle` with evidence |
 | `retryable` | Settled, with attempts and deadline remaining | `validation retry` |
@@ -42,7 +42,7 @@ Provider I/O never happens inside a coordination transaction. An upload to an ex
 
 **Retention.** Expiry is recorded first, under the lock, so reads refuse from that instant. For an external backend the sweep then deletes the object with the lock released, confirms with a `HEAD` that it is gone, and only then records `deleted_at` and a `validation.artifact-deleted` event; a deletion the store refused is retried on the next sweep, never assumed. Failed uploads and objects left behind by a migration into Postgres are removed the same way.
 
-**Migration.** `graphyard validation artifact-migrate s3|postgres [LIMIT]` (`POST /api/validation/artifacts/migrate`, operator only) moves up to `LIMIT` (default 20, maximum 100) retained, unexpired artifacts per call between the row and the configured backend. Each artifact's bytes are copied, read back and compared with the recorded digest before the row names the new backend; a copy that fails its digest is discarded and the source stays, listed under `refused` with the reason. Retention (`expires_at`), the request/attempt binding, the evidence reference and every access rule are row state and do not move. The old copy is removed after the move — from the object store with verified deletion, from the row by clearing its bytes. Run it until `remaining` is zero, then switch `GRAPHYARD_ARTIFACT_BACKEND` on every replica; a server that is not configured for a row's backend refuses to read it rather than guessing.
+**Migration.** `graphyard validation artifact-migrate s3|postgres [LIMIT]` (`POST /api/validation/artifacts/migrate`, the human operator's `admin` credential only) moves up to `LIMIT` (default 20, maximum 100) retained, unexpired artifacts per call between the row and the configured backend. Each artifact's bytes are copied, read back and compared with the recorded digest before the row names the new backend; a copy that fails its digest is discarded and the source stays, listed under `refused` with the reason. Retention (`expires_at`), the request/attempt binding, the evidence reference and every access rule are row state and do not move. The old copy is removed after the move — from the object store with verified deletion, from the row by clearing its bytes. Run it until `remaining` is zero, then switch `GRAPHYARD_ARTIFACT_BACKEND` on every replica; a server that is not configured for a row's backend refuses to read it rather than guessing.
 
 ## Rollback
 
@@ -72,13 +72,13 @@ A rollback is an integration workflow with four records: the failed candidate (t
 | `serialized` | The adapter observes its own operation settle but cannot fence the write | Yes | No selection, rollback or other mutation of the environment is authorized until the operation is settled or resolved; lease expiry alone releases nothing |
 | `none` | Neither | **No** — definition refuses `automatic: true`, and a claim of an automatic rollback refuses | Same serialized barrier as above |
 
-An `unknown` outcome blocks successors whatever the fencing, until an operator resolves it with evidence.
+An `unknown` outcome blocks successors whatever the fencing, until the human operator resolves it with evidence.
 
 The executor holds a lease like an observer: `POST /api/delivery/lease` with its registration, renewed with the epoch, re-acquired after a partition.
 
 ### Request
 
-An operator, or a promoter through its `delegate` lease, requests a rollback with `POST /api/delivery/rollback`:
+The human operator (`admin`), or a promoter through its `delegate` lease, requests a rollback with `POST /api/delivery/rollback`:
 
 ```json
 {
@@ -119,7 +119,7 @@ One executor holds the operation. A retry of the claim — after a restart, with
 
 A report is accepted only for the claimed operation, from the executor that claimed it, under a lease that is current now. An executor whose lease lapsed re-acquires it and reports against the same operation with the new epoch; a report for a superseded target, or after the rollback already completed, is retained with `authoritative: false` and its reasons. `applied` moves the rollback to `applied`, `failed` releases the barrier, `unknown` blocks everything until resolved.
 
-`POST /api/delivery/rollback-resolve` (operator) cancels an unclaimed rollback, or declares an in-flight or unknown operation `applied`, `failed` or `cancelled` with a `reason` and settlement `evidence` — a URL to the independent provider record that proves the outcome:
+`POST /api/delivery/rollback-resolve` (human operator, `admin`) cancels an unclaimed rollback, or declares an in-flight or unknown operation `applied`, `failed` or `cancelled` with a `reason` and settlement `evidence` — a URL to the independent provider record that proves the outcome:
 
 ```json
 {

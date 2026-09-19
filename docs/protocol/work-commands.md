@@ -1,7 +1,7 @@
 <!-- page: Agent protocol | 4 | creating work and every `POST /api/work/UUID/COMMAND` mutation. -->
 # Work commands
 
-Create with `POST /api/work` and the structure in [examples/work.json](../../examples/work.json). Required fields are `title` and nonempty `criteria`; each criterion requires a unique `AC-N` ID, text, and at least one proof, and may carry an operator-only `bootstrap` declaration. The policy defaults to checks `test` and `typecheck`, plus independent review. Dependencies refer to existing UUIDs. Operator requirement revisions explicitly reject cycles. Optional `exclusiveResources` reserves named resources during active ownership; `plannedFiles` declares the change boundary the [regression guard](regression-guard.md#submit-time-regression-guard) enforces at submit and the scopes overlap warnings compare.
+Create with `POST /api/work` and the structure in [examples/work.json](../../examples/work.json). Required fields are `title` and nonempty `criteria`; each criterion requires a unique `AC-N` ID, text, and at least one proof, and may carry a `bootstrap` declaration (`admin`, or an operator agent holding `policy:bootstrap`). The policy defaults to checks `test` and `typecheck`, plus independent review. Dependencies refer to existing UUIDs. Operator requirement revisions explicitly reject cycles. Optional `exclusiveResources` reserves named resources during active ownership; `plannedFiles` declares the change boundary the [regression guard](regression-guard.md#submit-time-regression-guard) enforces at submit and the scopes overlap warnings compare.
 
 Human-only intake origins additionally require a credential declaring `sessionKind: "human"`; routine origins are unchanged. `POST /api/intake` records a backlog intake item and `POST /api/work/UUID/lead-ruling` records a slice-lead ruling; both require `Idempotency-Key` and replay the original result, so a lost response never duplicates immutable history. See [slice-lead delegation](../delegation.md).
 
@@ -9,13 +9,13 @@ Other commands use `POST /api/work/UUID/COMMAND` (display keys also work):
 
 | Command | JSON body |
 | --- | --- |
-| `requirements` | Full criteria, dependencies, plannedFiles, exclusiveResources, expectedPolicyRevision and reason; operator only, see [coordination](../coordination.md). A criterion may carry `bootstrap`, see [bootstrap mode](bootstrap-mode.md) |
+| `requirements` | Full criteria, dependencies, plannedFiles, exclusiveResources, expectedPolicyRevision and reason; `admin`, or an operator agent holding `policy:requirements` (additive only), see [coordination](../coordination.md). A criterion may carry `bootstrap`, see [bootstrap mode](bootstrap-mode.md) |
 | `ready` | Admin: `{}`. Operator-agent: `{"expectedRevision":12,"reason":"Requirements approved"}` with the current work revision and a nonblank audit reason. |
 | `unblock` | Admin: `{"reason":"Contract verified"}`. Operator-agent: `{"expectedRevision":12,"reason":"Contract verified"}` with the current work revision and a nonblank audit reason. |
-| `resolve` | `{"trigger":"security-concern","expectedRevision":12,"reason":"Dependency change reviewed"}` naming one standing escalation trigger, the current work revision, and a nonblank audit reason; admin credentials declaring `sessionKind: "human"` only |
-| `rework` | `{"reason":"Retry implementation","previousWorkerStopped":true}`; operator only |
-| `recover` | `{"reason":"Verified delivered worker stopped","previousWorkerStopped":true}`; operator only, delivered quarantine only |
-| `autosettle` | `{"epoch":1,"settlementHash":"...","reason":"Supervisor verified dead","verification":{...}}`; coordinator or operator, see [automatic containment settlement](containment-settlement.md) |
+| `resolve` | `{"trigger":"security-concern","expectedRevision":12,"reason":"Dependency change reviewed"}` naming one standing escalation trigger, the current work revision, and a nonblank audit reason; `admin` credentials declaring `sessionKind: "human"` only — except that an optional `"attestation":{"kind":"blocked"|"stopped-worker","epoch":N}` lets any `admin` credential settle a control-plane-raised `lease-loss` whose lapse the ledger explains; the citation is verified server-side, see [leases](leases.md) |
+| `rework` | `{"reason":"Retry implementation","previousWorkerStopped":true}`; `admin` only |
+| `recover` | `{"reason":"Verified delivered worker stopped","previousWorkerStopped":true}`; `admin` only, delivered quarantine only |
+| `autosettle` | `{"epoch":1,"settlementHash":"...","reason":"Supervisor verified dead","verification":{...}}`; `coordinator` or `admin`, see [automatic containment settlement](containment-settlement.md) |
 | `claim` | `{}`; returns current lease and epoch |
 | `heartbeat` | `{"epoch":1}` |
 | `release` | `{"epoch":1}` |

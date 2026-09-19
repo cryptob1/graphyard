@@ -1,7 +1,7 @@
 <!-- page: Operate Graphyard | 8 | dependencies, requirement revisions, overlap, and shared resources. -->
 # Coordinating independent agents
 
-Graphyard owns assignment authority and evidence admissibility. Herdr owns processes. Git owns source history. This guide describes coordination features implemented in this change; the two-host operational trial is still a separate validation task.
+Graphyard owns assignment authority and evidence admissibility. Herdr owns session processes. Git owns source history. This guide describes the shipped coordination features; the two-host operational trial is still a separate validation task. Terms follow the [glossary](glossary.md).
 
 ## Start with an observable requirement
 
@@ -21,7 +21,7 @@ Work details show required proofs as **unmeasured**, **incomplete**, **failed**,
 
 ## Revise requirements explicitly
 
-Operators can use **Revise requirements** in work details, or:
+The human operator can use **Revise requirements** in work details, or:
 
 ```sh
 graphyard requirements GY-N revision.json
@@ -42,11 +42,11 @@ Example `revision.json`:
 
 The command replaces the full requirements document; omitted criteria are removed, not implicitly retained. Keep the same criterion ID when clarifying the same obligation. Removed IDs are retired and cannot be recycled for unrelated requirements. Dependencies must name existing items and cannot form a cycle.
 
-Stop the worker and release its lease first. Only an operator may revise requirements; implementation workers cannot weaken their own gates. Concurrent edits compare the expected policy revision. Every successful revision records the authenticated actor, reason, complete requirements and new policy revision in append-only history. Historical snapshots retain previous criteria.
+Stop the worker and release its lease first. Only the human operator's `admin` credential may revise requirements this way (a scoped operator agent may only add); workers cannot weaken their own gates. Concurrent edits compare the expected policy revision. Every successful revision records the authenticated actor, reason, complete requirements and new policy revision in append-only history. Historical snapshots retain previous criteria.
 
 All previous acceptance evidence remains in history but becomes inapplicable to the new policy. Review requests, observations and merge authorization are invalidated. Previously submitted work requires a new claimed attempt and resubmission on its existing PR branch. GitHub check revocation is asynchronous: suspend merging until the refusing check is visible, as with rework. Delivered or observed-merged work requires a follow-up task.
 
-To withdraw specific accepted runs without changing what the work item requires, revoke that evidence instead of revising requirements; see the [operations runbook](operations.md#accepted-evidence-turns-out-to-be-wrong) and the [protocol](protocol/evidence.md#revocation).
+To withdraw specific accepted runs without changing what the work item requires, revoke that evidence instead of revising requirements; see the [operations reference](operations-reference.md#accepted-evidence-turns-out-to-be-wrong) and the [protocol](protocol/evidence.md#revocation).
 
 Existing E2E proof names retain their pinned scenario version. Newly added E2E proofs pin the latest definition at revision time. This command does not silently upgrade existing pins. Selecting a newer revision of the same scenario remains future work. Reuse of an executed pass for a later head of the same item is a separate, policy-bound decision described in [evidence replay, scoped reuse and execution analytics](evidence-reuse.md); a requirement revision always refuses it.
 
@@ -60,13 +60,13 @@ Graphyard compares planned paths and provider-observed PR files against other un
 
 Optional `exclusiveResources` names declare resources that cannot be assigned concurrently, such as `staging:sms-test-account`. Names are case-sensitive lowercase identifiers using letters, digits, `.`, `_`, `:`, `/`, and `-`. Give the same real resource the same name throughout this single-repository installation.
 
-Claiming work atomically reserves all declared names for that assignment. A conflicting active assignment refuses the whole claim. `next` and master dispatch exclude work with busy resources. Reservations normally follow the worker lease: release or expiry makes them claimable again, and an old heartbeat cannot recover expired authority. If an assignment has a containment quarantine, however, all of its declared resources remain reserved after lease expiry. They become available only after the quarantine is cleared: by verified capability settlement, by a coordinator that verified the supervisor dead on the registered host ([automatic containment settlement](protocol/containment-settlement.md)), or by operator-confirmed stopped-worker recovery. Rework performs that recovery for undelivered work and authorizes reassignment. On delivered work, capability settlement or `recover-containment --previous-worker-stopped` removes only the quarantine and releases its resource fence. It appends required audit/revision metadata without re-evaluating stale observation or evidence, preserving Done, recorded gates, candidate, evidence, observation, merge authorization, and the delivery snapshot. Non-delivered settlement retains normal gate evaluation. Submission alone does not release an active lease.
+Claiming work atomically reserves all declared names for that assignment. A conflicting active assignment refuses the whole claim. `next` and master dispatch exclude work with busy resources. Reservations normally follow the worker lease: release or expiry makes them claimable again, and an old heartbeat cannot recover expired authority. If an assignment has a containment quarantine, however, all of its declared resources remain reserved after lease expiry. They become available only after the quarantine is cleared: by verified capability settlement, by a coordinator that verified the supervisor dead on the registered host ([automatic containment settlement](protocol/containment-settlement.md)), or by the human operator's confirmed stopped-worker recovery. Rework performs that recovery for undelivered work and authorizes reassignment. On delivered work, capability settlement or `recover-containment --previous-worker-stopped` removes only the quarantine and releases its resource fence. It appends required audit/revision metadata without re-evaluating stale observation or evidence, preserving Done, recorded gates, candidate, evidence, observation, merge authorization, and the delivery snapshot. Non-delivered settlement retains normal gate evaluation. Submission alone does not release an active lease.
 
 These are coordination reservations, not physical locks on an external account or environment. A disconnected process may still access external systems using its credentials. Use supervised workers and verify that the old process has stopped before touching shared resources. Runner-specific resource fencing and leases spanning independent E2E execution are part of future runner orchestration. Never treat a resource name as a substitute for an access-control boundary.
 
 ## Refuse candidates that revert shipped code outside their scope
 
-`plannedFiles` is also the boundary of what a candidate may change. A worker that merges the base branch and re-resolves a file it does not own in favour of its branch silently deletes code and tests that already merged, and a reviewer is a slow and unreliable way to notice. Graphyard catches it at `complete`, before review, and again on every new head:
+`plannedFiles` is also the boundary of what a candidate may change. A worker session that merges the base branch and re-resolves a file it does not own in favour of its branch silently deletes code and tests that already merged, and an independent reviewer is a slow and unreliable way to notice. Graphyard catches it at `complete`, before review, and again on every new head:
 
 - Every file the pull request changes is classified against the work item's `plannedFiles`. Changes strictly inside scope pass, and so do new files nobody has shipped.
 - Every other file is compared with the commit the candidate is bound to — the base branch tip, or the predicted base of a published speculative tip — by blob identity. A file that matches byte-for-byte passes. A file that is deleted, reverted (lines removed and nothing added), rewritten, renamed away from a shipped path, or a binary that differs is refused. A file the observation could not compare is refused too; absence of evidence is never a pass.
@@ -80,7 +80,7 @@ graphyard sync GY-N
 
 It runs `git fetch origin && git merge origin/BASE` — a merge, never a rebase, so the history and every resolution stay visible — and then classifies the local diff against the fetched base tip with the same rules. It prints every offending file and exits non-zero before anything is pushed; a conflicting merge stops with the conflicted paths and no resolution is made for the worker. The generated `AGENTS.md` block requires `sync` before every push and states that files outside `plannedFiles` must match `origin/BASE` byte-for-byte. Restoring a file is `git checkout BASE_TIP -- PATH`; for a rename, restore the original path.
 
-The scope is the operator's. A worker cannot widen `plannedFiles`: the `workspace`, `submit` and `evidence` commands never accept it, and only the audited [`requirements` revision](#revise-requirements-explicitly) changes it. A master that returns a refused candidate for rework should quote the refusal's file list in the rework reason and ask the worker to run `sync GY-N` and restore each file rather than re-resolve the merge.
+The scope is the human operator's. A worker cannot widen `plannedFiles`: the `workspace`, `submit` and `evidence` commands never accept it, and only the audited [`requirements` revision](#revise-requirements-explicitly) changes it. A master that asks the human operator to return a refused candidate for rework (rework stays `admin` only) should quote the refusal's file list in the rework reason and ask the worker to run `sync GY-N` and restore each file rather than re-resolve the merge.
 
 ## Explain stalls
 
@@ -94,9 +94,9 @@ Released and expired assignments are described as no longer authoritative; the U
 
 ## Two-machine operational drill
 
-Run this with two real hosts, two distinct worker principals, and an operator. Isolated tests using independent connection pools are useful but are **not** evidence that this drill ran. The trusted [`integration:herdr-recovery` contract](herdr.md#automated-recovery-contract) proves the same refusals automatically, but it is evidence about the coordination API, not about two real hosts.
+Run this with two real hosts, two distinct worker principals, and the human operator. Isolated tests using independent connection pools are useful but are **not** evidence that this drill ran. The trusted [`integration:herdr-recovery` contract](herdr.md#automated-recovery-contract) proves the same refusals automatically, but it is evidence about the coordination API, not about two real hosts.
 
-1. Connect both hosts with `graphyard init --herdr --token-stdin`; check distinct host IDs and principal IDs. Keep operator and producer credentials off both worker environments.
+1. Connect both hosts with `graphyard init --herdr --token-stdin`; check distinct host IDs and principal IDs. Keep `admin` and `producer` credentials off both worker environments.
 2. Create a small real work item with a repository test as its acceptance proof. Concurrently claim it from both hosts. Record one winner and one refusal, then register the winner's worktree.
 3. Run the winner through `watch`. Interrupt its connection to Graphyard while retaining logs. Confirm the supervisor terminates its child before treating the host as stopped.
 4. After server-clock lease expiry, claim from the other host. Record the higher epoch and fresh registered workspace. Preserve the first workspace for inspection.

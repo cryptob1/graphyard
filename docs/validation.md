@@ -1,7 +1,7 @@
 <!-- page: Build integrations | 3 | candidates, dispatch, attempts, and trusted result collection. -->
 # Validation candidates and runner protocol
 
-Graphyard now coordinates durable validation requests. Operators pin a source/artifact candidate, approved executable test bundle and separate runner/collector identities. Runners explicitly acknowledge an assignment, renew its lease and execute outside the control plane; only an authorized collector can publish its result.
+Graphyard now coordinates durable validation requests. The human operator pins a source/artifact candidate, approved executable test bundle and separate runner/collector identities. Runners explicitly acknowledge an assignment, renew its lease and execute outside the control plane; only an authorized collector can publish its result.
 
 **This is D1, the protocol and durable authority layer.** It does not launch Playwright, install a runner, fetch build attestations, measure live processes, store traces or verify production delivery. A custom integration must implement the trusted build producer and collector contracts below. The packaged executor, protected artifact storage and guided setup are D2 in the [delivery roadmap](turnkey-delivery-roadmap.md). A runner registration alone does not mean that any process is running.
 
@@ -11,9 +11,9 @@ Keep credentials separate:
 
 | Identity | Existing credential role | Authority |
 | --- | --- | --- |
-| Operator | `admin` | Define environments, approve bundles, register principals, select candidates, request/cancel/recover validation |
-| Implementation agent | `worker` | Existing implementation ownership; cannot define validation authority or publish trusted results |
-| Runner | `worker` with an operator-created runner registration | Poll dispatch, ACK and heartbeat its assigned attempt until collection takes over |
+| Human operator | `admin` | Define environments, approve bundles, register principals, select candidates, request/cancel/recover validation |
+| Worker | `worker` | Existing implementation ownership; cannot define validation authority or publish trusted results |
+| Runner | `worker` with a runner registration created by the human operator | Poll dispatch, ACK and heartbeat its assigned attempt until collection takes over |
 | Build producer | `producer` with a builder registration | Attest independently verified source/build inputs → artifact mapping in its environment |
 | Collector | `producer` with a collector registration and matching `proofs` allowlist | Verify execution, inventory, approved oracle, target identity, artifacts and settlement; publish the bound result |
 
@@ -21,7 +21,7 @@ Configure individual credentials through `GRAPHYARD_PRINCIPALS` as described in 
 
 Definitions have immutable revisions. Updating a registration requires its current `expectedRevision`; the new revision is also a new authorization generation. Revocation (`enabled: false`), scope changes and rotation invalidate outstanding authority. **Rotate in this order:** disable the registration first, replace the credential on every server replica and retire the old replicas, then enable a fresh registration revision. Never re-enable while a replica still accepts the old token. Replacing only an environment variable does not identify old attempts as revoked; the initial disabling transaction invalidates them across replicas before the credential rollout. Revision changes are transactional across replicas. Environment and bundle revisions likewise invalidate requests pinned to prior authorization.
 
-For this first increment all authority-definition commands are operator-only. Delegated policy principals and worker-requested scheduling are not implemented. There is no arbitrary lifecycle setter.
+For this first increment all authority-definition commands require the human operator's `admin` credential. Delegated policy principals and worker-requested scheduling are not implemented. There is no arbitrary lifecycle setter.
 
 For the in-development packaged path, see [runner preparation and private artifacts](runner-setup.md). Source preparation does not enable execution.
 

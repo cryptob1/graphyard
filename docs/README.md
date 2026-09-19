@@ -8,9 +8,10 @@ The sections below are generated from each page's `<!-- page: Section | order | 
 
 ## Start here
 
-1. [How Graphyard works](how-graphyard-works.md) — the lifecycle and authority model in five minutes.
-2. [Onboard a repository](onboarding.md) — Railway, GitHub, Herdr, master, workers, and the first PR.
-3. [Local quickstart](quickstart.md) — run Graphyard locally for evaluation.
+1. [How Graphyard works](how-graphyard-works.md) — the lifecycle and authority model in five minutes, with diagrams.
+2. [Glossary](glossary.md) — human operator, agent session, principal, lease, reviewer, proof producer, control plane, runtime: one definition each, plus the diagram legend.
+3. [Onboard a repository](onboarding.md) — Railway, GitHub, Herdr, master, workers, and the first PR.
+4. [Local quickstart](quickstart.md) — run Graphyard locally for evaluation.
 
 ## Operate Graphyard
 
@@ -20,7 +21,8 @@ The sections below are generated from each page's `<!-- page: Section | order | 
 - [Herdr integration](herdr.md) — worker installation and multi-machine use.
 - [Master-agent operating mode](master-agent.md) — routing, recovery, and guarded merges.
 - [Slice-lead delegation](delegation.md) — bounded product, infrastructure, and docs/experience coordination.
-- [Operations and recovery](operations.md) — stalled work, expired leases, rework, and outages.
+- [Operations and recovery](operations.md) — daily checklist, incident decision tree, and recovery recipes in three minutes.
+- [Operations reference](operations-reference.md) — every procedure in full, credentials, proof authority, drift, and scale limits.
 - [Coordinating independent agents](coordination.md) — dependencies, requirement revisions, overlap, and shared resources.
 - [Scoped operator-agent automation](operator-automation.md) — least-privilege operator agents with server-enforced scope.
 - [Shipping pulse](shipping-pulse.md) — repository delivery flow: throughput, intent-to-merge, and deployment lag without rankings.
@@ -50,4 +52,7 @@ The sections below are generated from each page's `<!-- page: Section | order | 
 - [Graphyard repository bootstrap](first-pr.md) — repository-specific bootstrap procedure for Graphyard maintainers.
 - [Implementation audit — September 13, 2026](history/implementation-audit-2026-09-13.md) — what the September 2026 audit found and what it changed.
 - [Huck Engineer investigation: lessons for Graphyard](history/huck-engineer-comparison.md) — what Huck Engineer taught Graphyard about worker pipelines.
+- [Role-glossary audit — September 18, 2026](history/role-glossary-audit-2026-09-18.md) — the ambiguity audit, concision samples, and safety-parity check behind the glossary.
 <!-- /index -->
+
+Historical records explain past decisions. They are not current setup instructions.

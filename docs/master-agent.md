@@ -1,9 +1,9 @@
 <!-- page: Operate Graphyard | 5 | routing, recovery, and guarded merges. -->
 # Master-agent operating mode
 
-The master is a dedicated coordinator session. It reads Graphyard, watches Herdr health, routes ready work, handles handoffs, requests guarded merges, and administers the managed repository's GitHub App, installation, and branch protection — through the API when it can and through the operator's own browser profile when only a GitHub page can do it. It does not implement work, hold worker leases, or produce evidence.
+The master is the coordinator: a `coordinator` principal run as the durable `master run` loop plus an optional visible master session. It reads Graphyard, watches Herdr session health, routes ready work, handles handoffs, requests guarded merges, and administers the managed repository's GitHub App, installation, and branch protection — through the API when it can and through the human operator's own browser profile when only a GitHub page can do it. It does not implement work, hold worker leases, or produce evidence.
 
-Graphyard remains the source of truth. Herdr only reports live session health.
+Graphyard remains the source of truth. Herdr only reports live session health. Terms follow the [glossary](glossary.md).
 
 ## Install
 
@@ -28,7 +28,7 @@ At the token prompt, paste the token, press Enter, then press Ctrl-D to send EOF
 
 `master start` also installs the master's own harness permissions for harnesses that have a command classifier. See [harness permissions](#harness-permissions).
 
-Run the coordinator under a dedicated OS identity or machine. Implementation agents running as the same OS user may read its GitHub CLI credentials; Graphyard tokens cannot create a filesystem boundary.
+Run the coordinator under a dedicated OS identity or machine. Worker sessions running as the same OS user may read its GitHub CLI credentials; Graphyard tokens cannot create a filesystem boundary.
 
 ## Add a worker
 
@@ -131,15 +131,15 @@ refused merge is the gate working: the loop records the refusal and keeps cyclin
 An unhealthy profile — an unreadable credential, a name already busy in Herdr, or a recent failed
 launch — is routed around for a ten-minute cool-off while other profiles keep receiving work.
 
-Judgment calls stay with an agent or a human: reading a worker's report, deciding whether a review
-finding needs rework, choosing how to route a novel failure. The loop keeps the mechanical steps
-running underneath them.
+Judgment calls stay with the visible master session or the human operator: reading a worker's
+report, deciding whether a review finding needs rework, choosing how to route a novel failure. The
+loop keeps the mechanical steps running underneath them.
 
 ## Operate
 
 The master is a perpetual coordinator, not a one-shot dispatcher. Whether the
-mechanical steps run in the [durable loop](#durable-loop) or an agent session drives
-them by hand, keep cycling through these steps until both parts of the terminal
+mechanical steps run in the [durable loop](#durable-loop) or the visible master session
+drives them by hand, keep cycling through these steps until both parts of the terminal
 condition hold: (1) every in-scope work item is Done or has a genuinely external
 blocker recorded in Graphyard; and (2) every merged change is deployed and
 live-verified against the exact deployed release, or a genuinely external deployment
@@ -162,9 +162,9 @@ step 5. Stop only when every in-scope work item is Done or genuinely externally
 blocked, and either the exact deployed release has passed live verification or a
 genuinely external deployment blocker is recorded in Graphyard.
 
-In-scope work is every item Graphyard has released: unreleased backlog is the
-operator's to release with `ready`, so it neither blocks nor satisfies the terminal
-condition. A per-item blocker is the `blocked` record the lease holder writes on the
+In-scope work is every item Graphyard has released: unreleased backlog is the human
+operator's (or a scoped operator agent's, with `intent:ready`) to release with `ready`,
+so it neither blocks nor satisfies the terminal condition. A per-item blocker is the `blocked` record the lease holder writes on the
 item; a session that went quiet without one is not a blocker, it is work to dispatch
 again.
 
@@ -199,7 +199,7 @@ pre-merge gate: nothing about it changes which candidates merge. The command
 2. identifies the checkout whose CLI emits the instructions — the commit the configured
    launcher's checkout is at — and refuses a local-only reading: a checkout at any commit
    other than the deployed release, or one with uncommitted changes;
-3. reads what that release emits the way an operator would: `master guide`, and the
+3. reads what that release emits the way the human operator would: `master guide`, and the
    `AGENTS.md` a fresh `init --url` writes into a scratch git checkout outside every
    repository, with no Graphyard credential in the environment. Both must carry the
    perpetual cycle, deployment verification as a step of it, the terminal condition, the
@@ -235,7 +235,7 @@ Run `status` at startup, after dispatch, when a worker reports completion, and w
 
 For work using the [identity-bound agent review provider](github.md#identity-bound-agent-review-providers), each row carries a `review` object with the currently dispatched reviewer profile and runtime, plus the failover entries recorded for the current candidate; `counts.reviewFailover` totals the items that failed over. A reviewer runs out of quota or goes silent past its timeout, Graphyard records that and moves to the next configured profile on its own — no master action is required. When every profile is exhausted the row is flagged for attention and the review gate stays closed. That is a capacity decision for the operator: add reviewer capacity, wait for quota, or revise the review policy. Never treat exhaustion as an approval, and never merge around a closed review gate.
 
-`master status` also reports facts about the installation itself under `controlPlane`: `attention` lists a GitHub App permission the installation lacks (with the installation page where the pending request is accepted), a preflight that could not verify the permissions, the number of integration jobs held on that shortfall, every capacity variable that no longer covers the configured principals (`Set GRAPHYARD_MAX_REVIEWERS=N on the deployment`, under `delegationLimits`), and how far the base branch is ahead of what production serves; `appPermissions` carries the missing entries and when they were last verified; `counts.attention` includes these items. `controlPlane.production` is the control plane's own [deployment observation](deployment.md#production-deployment-observation): the serving commit, `aheadBy`, the newest provider deployment with its status, the pending and deployed items, and the open incidents; when main is ahead the attention line reads `main is N commits ahead of production (serving …): <failing deployment reason>`. `controlPlane.build` is the commit and merge protocol the server runs, `versionSkew` is the refusal `master merge` would raise (`null` when the CLI and server agree), and `latency.mergeToProduction` is the merge-to-production p50/p90 over every delivery with an observed deployment, which the periodic measurement records beside `delivered[].mergeToProductionMs`. A permission shortfall is an operator action, not a merge decision: the affected jobs are held rather than retried, the gates they feed stay closed, and `graphyard github-setup --update-permissions` on the machine holding the App credentials prints the exact steps. `master init` reports the same attention in its result. See [App permissions](github.md#app-permissions).
+`master status` also reports facts about the installation itself under `controlPlane`: `attention` lists a GitHub App permission the installation lacks (with the installation page where the pending request is accepted), a preflight that could not verify the permissions, the number of integration jobs held on that shortfall, every capacity variable that no longer covers the configured principals (`Set GRAPHYARD_MAX_REVIEWERS=N on the deployment`, under `delegationLimits`), and how far the base branch is ahead of what production serves; `appPermissions` carries the missing entries and when they were last verified; `counts.attention` includes these items. `controlPlane.production` is the control plane's own [deployment observation](deployment.md#production-deployment-observation): the serving commit, `aheadBy`, the newest provider deployment with its status, the pending and deployed items, and the open incidents; when main is ahead the attention line reads `main is N commits ahead of production (serving …): <failing deployment reason>`. `controlPlane.build` is the commit and merge protocol the server runs, `versionSkew` is the refusal `master merge` would raise (`null` when the CLI and server agree), and `latency.mergeToProduction` is the merge-to-production p50/p90 over every delivery with an observed deployment, which the periodic measurement records beside `delivered[].mergeToProductionMs`. A permission shortfall is an administration action — the human operator, or the master through the operator's browser profile — not a merge decision: the affected jobs are held rather than retried, the gates they feed stay closed, and `graphyard github-setup --update-permissions` on the machine holding the App credentials prints the exact steps. `master init` reports the same attention in its result. See [App permissions](github.md#app-permissions).
 
 Dispatch:
 
@@ -340,7 +340,7 @@ A browser-driven change is therefore as attributable as a CLI one, and a refusal
 ### The only operator interactions left
 
 - **Device approval.** When GitHub answers with its *Confirm access* page, the flow clicks *Use GitHub Mobile*, reads the two-digit pairing code, writes it to `.graphyard/master-actions/sudo.json`, and reports it in the session output and in `master status` under `administration.sudo` with the instruction to approve the prompt on your device and choose that code. It then waits with a bounded, retrying poll — three seconds between reads, three minutes in total, and an expired code re-issued at most three times — and continues where it was once the approval lands. A prompt nobody approves fails with the code and the rerun command rather than hanging; a prompt without a GitHub Mobile option is refused rather than guessed at with a password or authenticator.
-- **Human-only decisions.** The guides mark these human-only: choosing which review provider an item uses, releasing backlog work, revising requirements, clearing blockers, satisfying a manual proof, authorizing rework, and approving a merge when automatic merging is disabled stay with a person. The flows change nothing outside the three targets above.
+- **Human-only decisions.** The guides mark these human-only: choosing which review provider an item uses, releasing backlog work, revising requirements, clearing blockers, satisfying a manual proof, authorizing rework, and approving a merge when automatic merging is disabled stay with the human operator. The flows change nothing outside the three targets above.
 
 ### What the master must never do
 
@@ -411,7 +411,7 @@ The real-base rule: every one of those checks reads the base branch's head from 
 
 Entries behind the head are re-based by Graphyard, not by the worker. Do not request rework, reassign, or ask an agent to rebase a queued candidate because its position or predicted tip changed; check `queue` and the entry's refusal reason first. An entry that fails its speculative validation is ejected with a recorded reason and must be repaired and re-queued — there is no command to reinsert or reorder it. The mechanism and its invariants are in [GitHub enforcement](github.md#merge-queue).
 
-A follower whose predecessor merges keeps its tip and bindings: the base branch advanced only by a commit tree-identical to the tip it was validated on, and the row's `binding.base.carriedTo` names that advance. When Graphyard replaces an approved head with its own authored tip, the approval and the scope-disjoint proofs carry to it under the rule in [binding carry](github.md#binding-carry-across-a-graphyard-authored-tip); a `required` binding in the row names exactly what the predecessor touched and what must be produced afresh. Launch a review or a proof only for a `required` binding, never because a tip's sha changed. GitHub dismisses reviews on Graphyard's own tip push; `master merge` re-posts a carried approval through the bound reviewer App before it acquires authority, and the result reports it under `carriedApproval`. A carried approval given by a human cannot be re-posted: the provider may then still require a fresh native approval, which the row and the merge result say.
+A follower whose predecessor merges keeps its tip and bindings: the base branch advanced only by a commit tree-identical to the tip it was validated on, and the row's `binding.base.carriedTo` names that advance. When Graphyard replaces an approved head with its own authored tip, the approval and the scope-disjoint proofs carry to it under the rule in [binding carry](github.md#binding-carry-across-a-graphyard-authored-tip); a `required` binding in the row names exactly what the predecessor touched and what must be produced afresh. Launch a review or a proof only for a `required` binding, never because a tip's sha changed. GitHub dismisses reviews on Graphyard's own tip push; `master merge` re-posts a carried approval through the bound reviewer App before it acquires authority, and the result reports it under `carriedApproval`. A carried approval given by a human reviewer cannot be re-posted: the provider may then still require a fresh native approval, which the row and the merge result say.
 
 For the full correctness model, see [GitHub enforcement](github.md) and [architecture](architecture.md).
 
@@ -432,7 +432,8 @@ Every other lapse is `lease.expired` history with its cause — `submitted` (the
 `complete`), `blocked-awaiting-operator` (the worker reported `blocked` and stopped to wait on
 you), or `stopped-by-attestation` (you stopped the worker and said so with
 `rework --previous-worker-stopped` or `recover-containment --previous-worker-stopped`, before or
-after the lapse) — and raises nothing. Do not treat any of those as an incident needing a human.
+after the lapse) — and raises nothing. Do not treat any of those as an incident needing the human
+operator.
 
 Who settles what:
 
@@ -440,10 +441,11 @@ Who settles what:
   a bound submission, a carried blocked report, or a stopped-worker attestation in the ledger
   (`escalation.auto-settled`, with the note and the attestation it rests on). Attest first, then
   wait a tick: your `rework --previous-worker-stopped` for the lapsed epoch is the attestation;
-- you, as an admin of any session kind, settle a control-plane-raised `lease-loss` yourself by
-  citing the attestation: `resolve GY-N lease-loss --attestation blocked|stopped-worker "reason"`.
-  The server verifies the citation against the ledger and refuses one that is not there; the
-  `escalation.resolved` entry records who, why and which attestation;
+- you, with your `admin` credential — this path does not require a declared human session —
+  settle a control-plane-raised `lease-loss` yourself by citing the attestation:
+  `resolve GY-N lease-loss --attestation blocked|stopped-worker "reason"`. The server verifies the
+  citation against the ledger and refuses one that is not there; the `escalation.resolved` entry
+  records who, why and which attestation;
 - a lapse nothing explains — no report, no attestation — is a vanished worker and stays for a
   declared human session, as do `security-concern`, `requirement-weakening`,
   `evidence-policy-conflict` and any lease-loss a lead raised. Never work around those.
@@ -456,7 +458,7 @@ its own live supervisor by the pid in its name, so another item's running worker
 item's fence; a scope you cannot attribute from that report belongs to someone — verify whose
 before stopping it.
 
-The master does not clear blockers, revise requirements, or satisfy human gates on its own. See [operations](operations.md) for recovery commands, including [restarting the durable loop](operations.md#master-coordination-loop).
+The master does not clear blockers, revise requirements, or satisfy human gates on its own. See [operations](operations.md) for recovery commands, including [restarting the durable loop](operations-reference.md#master-coordination-loop).
 
 ## Master commands
 

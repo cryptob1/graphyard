@@ -5,22 +5,13 @@ This page is the technical reference for Graphyard's invariants and storage mode
 
 ## Boundary
 
-Graphyard owns coordination decisions. Git owns source history. GitHub owns the actual PR and merge facts. Herdr owns agent sessions. Test runners produce evidence. A Graphyard gate is a deterministic evaluation, never an LLM judgment.
+Graphyard owns coordination decisions. Git owns source history. GitHub owns the actual PR and merge facts. Herdr and other agent runtimes host agent sessions. Proof producers produce evidence. A Graphyard gate is a deterministic evaluation, never an LLM judgment. Terms are defined in the [glossary](glossary.md).
 
 The practical distinction between Graphyard's delivery authority and Herdr's runtime health is summarized in [How Graphyard works](how-graphyard-works.md#graphyard-and-herdr-answer-different-questions).
 
-```mermaid
-flowchart LR
-  H[Herdr / external workers] -->|claims, heartbeats, workspace, submission| A[HTTP API / CLI]
-  U[React UI] --> A
-  A --> E[Coordination engine]
-  E --> P[(Postgres: work, events, receipts, jobs)]
-  P --> R[Reconciliation worker]
-  R -->|read PR / CI / reviews| G[GitHub]
-  R -->|publish required check| G
-  G -->|signed webhook wakes jobs| A
-  T[Trusted proof producer] -->|versioned evidence| A
-```
+![Graphyard control-plane components. Agent sessions in a runtime such as Herdr, the human dashboard, and a proof producer each call the HTTP API and CLI under their own principals. The API hands each mutation to the coordination engine, which runs one advisory-locked transaction that writes the work aggregate and an event to Postgres. A reconciliation worker ticks every two seconds, expires leases, leases integration jobs, exchanges pull request, check, review, and protection facts with GitHub, publishes the required check, and runs the guarded merge. GitHub webhooks wake jobs but are never trusted as workflow truth.](diagrams/control-plane-components.svg)
+
+Text equivalent of the diagram above, top to bottom. Three callers sit at the top: **agent sessions** in a runtime (violet; worker, master, and lead sessions in Herdr or another runtime, each using the CLI under its own principal), the **dashboard** (amber; the human operator and readers, with the same authorization as the API and no lifecycle-state endpoint), and a **proof producer** (green; a CI workflow or trusted runner whose evidence is bound to head, base, and policy). Solid arrows from all three lead to the **HTTP API and CLI** (blue): bearer authentication, schema validation, idempotency receipts, the signed webhook endpoint, and the static UI. Authenticated commands flow to the **coordination engine** (blue), one advisory-locked transaction per mutation covering ownership, epochs, gates, evidence trust, and merge authority, with no external I/O inside. The engine writes the aggregate and an event in one transaction to **Postgres** (blue): the `work_items` aggregate, append-only events and receipts, the jobs queue, releases, and delivery observations, with triggers that reject ledger edits. Jobs flow to the **reconciliation worker** (blue), which ticks every two seconds, expires leases, leases jobs with `SKIP LOCKED`, applies observations, publishes the required check, and runs the guarded merge. A solid two-headed arrow joins it to **GitHub** (grey: PR, reviews, checks, branch protection, merge facts); a dashed arrow from GitHub marks the signed webhook, which only wakes a job. The legend inside the image is the [glossary's diagram legend](glossary.md#diagram-legend).
 
 ## Storage
 
@@ -32,7 +23,7 @@ flowchart LR
 
 `jobs` is a durable integration queue, with next-attempt time, owner token, lease expiry, error, and attempt count. It is created transactionally with PR submission. Jobs are processed with Postgres `FOR UPDATE SKIP LOCKED`, then acknowledged with the exact owner token. GitHub calls occur outside coordination transactions.
 
-`flow_facts` is a normalized, append-only projection of the ledger and of observed provider facts, with its own checkpoint and per-item projection state. It exists so delivery metrics survive upstream retention: a deleted pull request or pruned deployment record cannot erase a fact Graphyard already observed. `deployment_observations` records deployment-provider facts from a producer or operator credential. Both are read only by [flow analytics](flow-analytics.md) and never participate in gate evaluation. `attribution_records` and `attribution_reanchors` are the append-only [attribution](attribution.md) ledger and its re-anchor fence, written only by validation and observation ingest; the analytics read them and no route writes them.
+`flow_facts` is a normalized, append-only projection of the ledger and of observed provider facts, with its own checkpoint and per-item projection state. It exists so delivery metrics survive upstream retention: a deleted pull request or pruned deployment record cannot erase a fact Graphyard already observed. `deployment_observations` records deployment-provider facts from a `producer` or `admin` credential. Both are read only by [flow analytics](flow-analytics.md) and never participate in gate evaluation. `attribution_records` and `attribution_reanchors` are the append-only [attribution](attribution.md) ledger and its re-anchor fence, written only by validation and observation ingest; the analytics read them and no route writes them.
 
 Database triggers reject updates and deletes to the event ledger. This is an application audit guarantee, not tamper-proof storage against a database administrator. Backups and database access controls still matter.
 
@@ -40,7 +31,7 @@ Database triggers reject updates and deletes to the event ledger. This is an app
 
 All short domain mutations acquire one Postgres transaction advisory lock. This deliberately serializes cross-item decisions, including dependency readiness and workspace reservations, across API replicas. Remote calls never hold that lock. The first implementation chooses an easily audited concurrency model; measure contention before replacing it with finer-grained locking.
 
-Work requirements and dependency edges are operator-revisable with an expected policy revision and audit reason. Revisions refuse active ownership and dependency cycles, preserve history, retire removed criterion IDs, and invalidate old acceptance and review authorization. Submitted work requires a new attempt. See [coordination](coordination.md); editing stored JSON directly is unsupported.
+Work requirements and dependency edges are revisable by the human operator (or, additively, by a scoped operator agent) with an expected policy revision and audit reason. Revisions refuse active ownership and dependency cycles, preserve history, retire removed criterion IDs, and invalidate old acceptance and review authorization. Submitted work requires a new attempt. See [coordination](coordination.md); editing stored JSON directly is unsupported.
 
 ## Assignments and workspaces
 
@@ -54,7 +45,7 @@ The CLI reserves before creating a worktree. A failed filesystem operation leave
 
 A candidate is `(PR, head SHA, base SHA)`, independently read from GitHub and checked against the assigned branch. Gates evaluate the candidate together with the current policy revision and the criterion definitions. A push or base change invalidates matching requirements automatically because old evidence no longer matches the tuple.
 
-Evidence carries producer identity derived from authentication. A worker cannot self-assign trust. A producer credential has an allowlist of exact proof names. Operators may attest `manual:` proofs, but cannot use an operator token to mint trusted automated test evidence. Latest submitted trusted evidence for each matching proof/candidate/policy wins, including a later failure. Historical and stale evidence remains visible.
+Evidence carries the producer principal derived from authentication. A worker cannot self-assign trust. A producer credential has a live grant of exact proof names or bounded patterns. The human operator may attest `manual:` proofs, but cannot use an `admin` token to mint trusted automated test evidence. Latest submitted trusted evidence for each matching proof/candidate/policy wins, including a later failure. Historical and stale evidence remains visible.
 
 An executed E2E pass may stand for a later head of the same item only through a recorded reuse decision under an operator-defined applicability policy over Graphyard's own file observations, bound to the exact revisions and superseded by any newer live attempt; a replay of retained artifacts is an audit record that authorizes nothing. See [evidence replay, scoped reuse and execution analytics](evidence-reuse.md).
 
@@ -88,4 +79,4 @@ Evidence received after an earlier merge cannot retroactively invent approval. A
 
 ## Why no workflow framework yet?
 
-LangGraph would be appropriate inside an agent runtime; Graphyard is runtime-independent. Temporal could eventually run long-lived deployment/rollback activities. The MVP has a small set of short database commands and repeatable external observations. Postgres transactions and durable retries cover that workload while keeping deployment to two services. Domain invariants remain Graphyard's responsibility whichever execution mechanism is used.
+LangGraph would be appropriate inside an agent runtime; Graphyard is runtime-independent and runs no agent sessions itself. Temporal could eventually run long-lived deployment/rollback activities. The MVP has a small set of short database commands and repeatable external observations. Postgres transactions and durable retries cover that workload while keeping deployment to two services. Domain invariants remain Graphyard's responsibility whichever execution mechanism is used.

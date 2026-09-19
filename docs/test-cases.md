@@ -41,7 +41,7 @@ graphyard scenario scenario.json
 graphyard scenarios
 ```
 
-The API is `POST /api/scenarios` and `GET /api/scenarios`. All requests require authentication; publication also requires an operator and an idempotency key. Reads return all immutable revisions ordered by ID and newest revision first.
+The API is `POST /api/scenarios` and `GET /api/scenarios`. All requests require authentication; publication also requires the human operator's `admin` credential and an idempotency key. Reads return all immutable revisions ordered by ID and newest revision first.
 
 ## Versioning
 
