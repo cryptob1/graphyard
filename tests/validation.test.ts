@@ -230,8 +230,8 @@ test('replayed execution grants cannot revive revoked authority or expired ACKs'
 test('requirement revisions invalidate reports and completed evidence; changing oracle bytes requires a new scenario', async () => {
   const f = await fixture(), command = await start(f);
   await validation.result(collector, report(f, command), id());
-  await engine.execute(worker, 'release', f.w.id, { epoch: 1 }, id());
   let w = await current(f.w.id);
+  assert.equal(w.lease, null, 'submission ended the implementation lease');
   w = await engine.execute(operator, 'requirements', w.id, { expectedPolicyRevision: w.policyRevision, reason: 'Refined acceptance requirement', criteria: w.criteria.map(ac => ({ ...ac, text: 'Updated behavior assertion' })), dependencies: [], plannedFiles: [], exclusiveResources: [] }, id());
   await validation.reconcile();
   assert.equal((await validation.list()).requests.find(r => r.id === f.r.id)?.state, 'superseded');

@@ -12,7 +12,7 @@ export const leaseCommands = defineCommands([
   {
     name: 'heartbeat',
     scope: 'work',
-    help: ['  heartbeat GY-N EPOCH          Extend current lease'],
+    help: ['  heartbeat GY-N EPOCH          Extend current lease (refused once the epoch is submitted)'],
     run: async (context, work) => context.print(await workMutation(context, work)('heartbeat', { epoch: Number(context.args[0]) })),
   },
   {
@@ -37,9 +37,9 @@ export const leaseCommands = defineCommands([
     name: 'complete',
     scope: 'work',
     help: [
-      '  complete GY-N EPOCH PR        Submit implementation; gates decide completion.',
-      '                                Refused when the PR reverts, deletes or rewrites files',
-      '                                outside plannedFiles relative to the base branch',
+      '  complete GY-N EPOCH PR        Submit implementation and end the lease; gates decide',
+      '                                completion. Refused when the PR reverts, deletes or',
+      '                                rewrites files outside plannedFiles relative to the base',
     ],
     run: async (context, work) => context.print(await workMutation(context, work)('submit', { epoch: Number(context.args[0]), pr: Number(context.args[1]) })),
   },

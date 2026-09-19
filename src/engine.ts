@@ -3,7 +3,7 @@ import { z } from 'zod';
 import { Store, save, wakeJob } from './store.js';
 import { authorizedForProof, unauthorizedProofs } from './proof-grants.js';
 import { workspacePath, pathsOverlap, validBranch } from './workspace.js';
-import { activeLease, admin, assertReviewerProfiles, operatorCapability, escalationTriggers, holdsMergeExecution, MergeExecutionInProgress, providerDelayAfterVerification, raiseEscalation, releaseLeadHold, resolveEscalation, standingEscalations, requireCurrent, createSchema, criterionSchema, currentEvidence, deploySmokeProof, deploySmokeRequired, inheritedObligations, pathScopeContains, requiredProofs, resourcesSchema, demand, evaluate, exhaustedReviewerProfiles, proofSchema, reviewerProfileFor, reviewerProfileSchema, reviewProviders, reviewProviderOf, type Criterion, type Principal, type ReviewerApp, type ReviewFailover, type Work, type Observation, type ReviewRequest, type OperatorCapability } from './model.js';
+import { activeLease, admin, assertReviewerProfiles, operatorCapability, escalationTriggers, holdsMergeExecution, MergeExecutionInProgress, providerDelayAfterVerification, raiseEscalation, releaseLeadHold, resolveEscalation, standingEscalations, attestationFor, attestationKinds, attestationsFromLedger, leaseLapseCause, leaseLossEpoch, leaseLossReason, settleableLeaseLoss, submittedEpoch, type Attestation, requireCurrent, createSchema, criterionSchema, currentEvidence, deploySmokeProof, deploySmokeRequired, inheritedObligations, pathScopeContains, requiredProofs, resourcesSchema, demand, evaluate, exhaustedReviewerProfiles, proofSchema, reviewerProfileFor, reviewerProfileSchema, reviewProviders, reviewProviderOf, type Criterion, type Principal, type ReviewerApp, type ReviewFailover, type Work, type Observation, type ReviewRequest, type OperatorCapability } from './model.js';
 import { resourceConflicts } from './coordination.js';
 import { containmentAttestation, containmentSettlementRefusals, containmentVerificationSchema } from './quarantine.js';
 import { activeEngineers, delegationLimits, implementerIdentities, leadMay, producerIndependenceRefusal, sessionKind } from './delegation.js';
@@ -25,6 +25,7 @@ const evidenceArtifact = z.object({
 }).strict().refine(value => value.availability === 'external' ? !!value.url : !value.url, 'Only external artifacts may carry a public URL');
 // Longer than acknowledgeContainment's three 30-second HTTP attempts plus retry delays.
 export const launchFenceMs = 120_000;
+export const containmentScopeSchema = z.object({ unit: z.string().trim().min(1).max(200), pid: z.number().int().positive() }).strict();
 const commands = {
   create: createSchema.extend({ reason: z.string().trim().min(1).max(2000).optional() }),
   ready: z.object({ expectedRevision: z.number().int().positive().optional(), reason: z.string().trim().min(1).max(2000).optional() }).strict(),
@@ -36,12 +37,17 @@ const commands = {
   // the trigger names which standing concern is cleared, and the revision binds
   // the request to the incident the operator actually read, so a stale client
   // cannot clear a later incident that happens to share a trigger.
-  resolve: z.object({ trigger: z.enum(escalationTriggers), reason: z.string().trim().min(1).max(2000), expectedRevision: z.number().int().positive() }).strict(),
+  // A reconcile-raised lease-loss may instead be settled by any admin session that cites the
+  // ledger attestation explaining the lapse; the citation is verified against the ledger.
+  resolve: z.object({ trigger: z.enum(escalationTriggers), reason: z.string().trim().min(1).max(2000), expectedRevision: z.number().int().positive(),
+    attestation: z.object({ kind: z.enum(attestationKinds), epoch: z.number().int().positive() }).strict().optional() }).strict(),
   recover: z.object({ reason: z.string().min(1).max(2000), previousWorkerStopped: z.literal(true) }).strict(),
   claim: z.object({}).strict(),
   rereview: z.object({ epoch: epoch.optional() }).strict(),
   heartbeat: z.object({ epoch }).strict(),
-  quarantine: z.object({ epoch, settlementHash: z.string().regex(/^[a-f0-9]{64}$/) }).strict(),
+  // The supervisor names the exact systemd scope it launches the session in, and its own pid,
+  // so settlement can tell this assignment's containment from a neighbour's.
+  quarantine: z.object({ epoch, settlementHash: z.string().regex(/^[a-f0-9]{64}$/), scope: containmentScopeSchema.optional() }).strict(),
   launch: z.object({ epoch, settlementHash: z.string().regex(/^[a-f0-9]{64}$/) }).strict(),
   settle: z.object({ epoch, settlementToken: z.string().regex(/^[a-f0-9]{64}$/) }).strict(),
   autosettle: z.object({ epoch, settlementHash: z.string().regex(/^[a-f0-9]{64}$/), reason: z.string().trim().min(1).max(2000), verification: containmentVerificationSchema }).strict(),
@@ -94,6 +100,14 @@ function retainQuarantineFence(work: Work) {
   const retained = quarantine.leaseExpiresAt ? Date.parse(quarantine.leaseExpiresAt) : -Infinity;
   const live = Date.parse(work.lease.expiresAt);
   if (Number.isFinite(live) && !(live <= retained)) quarantine.leaseExpiresAt = work.lease.expiresAt;
+}
+// The attestations that explain a lease's end live in the append-only events ledger, written by
+// the very commands that caused it: the worker's `blocked` report and the admin's
+// `--previous-worker-stopped` rework or recovery. They are read back from there, never from a
+// client, so the classification rests on what was recorded when it happened.
+export async function readAttestations(db: { query: (text: string, values: unknown[]) => Promise<{ rows: any[] }> }, workId: string): Promise<Attestation[]> {
+  const rows = (await db.query("SELECT seq, actor, kind, payload, created_at FROM events WHERE work_id=$1 AND kind IN ('blocked','rework','recover') ORDER BY seq", [workId])).rows;
+  return attestationsFromLedger(rows.map(row => ({ seq: Number(row.seq), actor: row.actor, kind: row.kind, at: new Date(row.created_at).toISOString(), details: row.payload?.details, workEpoch: row.payload?.work?.epoch })));
 }
 export class Engine {
   operatorAuthorizer?: (db: any, now: Date, actor: Principal) => Promise<Principal>;
@@ -300,15 +314,30 @@ export class Engine {
         // Resolution is a human judgement: no lead, worker, producer, or scoped
         // operator agent may clear the escalation that refuses its own delivery.
         // An admin credential that declares `ai`, or declares nothing, is not a
-        // human operator, exactly as for human-only intake.
+        // human operator, exactly as for human-only intake. The one exception is a
+        // lease-loss the control plane itself raised (actor `graphyard`) for a lapse
+        // the ledger already explains: any admin session may settle that by citing the
+        // blocked report or stopped-worker attestation, which is verified here, never
+        // taken from the request. Lead-raised, security and requirement concerns stay human-only.
         admin(actor);
-        demand(sessionKind(actor) === 'human', `Escalation resolution requires a declared human session; ${actor.id} is ${sessionKind(actor)}`, 403);
         const standing = standingEscalations(work);
         demand(standing.length, 'Task has no escalation to resolve');
-        demand(standing.some(entry => entry.trigger === data.trigger), `Standing escalations are ${standing.map(entry => entry.trigger).join(', ')}; reload before resolving`);
+        const target = standing.find(entry => entry.trigger === data.trigger);
+        demand(target, `Standing escalations are ${standing.map(entry => entry.trigger).join(', ')}; reload before resolving`);
         demand(data.expectedRevision === work.revision, 'Task revision changed; reload before resolving');
+        let cited: Attestation | null = null;
+        if (data.attestation) {
+          demand(target!.trigger === 'lease-loss' && target!.actor === 'graphyard', `Only a lease-loss raised by the control plane is settled by citing an attestation; the standing ${target!.trigger} was raised by ${target!.actor}`);
+          const epoch = leaseLossEpoch(target!);
+          demand(epoch !== null && data.attestation.epoch === epoch, `The standing lease-loss belongs to epoch ${epoch ?? 'unknown'}; cite that epoch's attestation`);
+          cited = attestationFor(await readAttestations(db, work.id), epoch!, data.attestation.kind);
+          demand(cited, `The ledger holds no ${data.attestation.kind} ${data.attestation.kind === 'blocked' ? 'report' : 'attestation'} for epoch ${epoch}; a lapse nothing explains needs a declared human session`);
+        }
+        if (sessionKind(actor) !== 'human') demand(cited, `Escalation resolution requires a declared human session; ${actor.id} is ${sessionKind(actor)}. An admin session of any kind may settle only a control-plane-raised lease-loss, by citing the blocked report or stopped-worker attestation that explains it`, 403);
         // Every other standing trigger survives: one resolution clears one concern.
         resolveEscalation(work, data.trigger);
+        await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, actor.id, 'escalation.resolved',
+          JSON.stringify({ details: { trigger: data.trigger, epoch: leaseLossEpoch(target!), escalation: target, resolvedBy: actor.id, sessionKind: sessionKind(actor), reason: data.reason, attestation: cited, at: now.toISOString() } })]);
       }
       if (command === 'rework') {
         admin(actor);
@@ -320,13 +349,16 @@ export class Engine {
         work.containmentQuarantine = null;
         // Reassignment discards whatever assignment still stood. A lease dropped
         // here was never released by its worker, and clearing it is the last
-        // moment the loss is visible: reconcile only ever sees an expired lease,
+        // moment its end is visible: reconcile only ever sees an expired lease,
         // and the replacement claim guards on `work.lease`, which is now null.
-        // So the loss is recorded here, exactly as those two paths record it.
-        // The operator's stopped-worker attestation authorizes the reassignment;
-        // it does not decide whether the incident reaches the record.
+        // So the end is recorded here. The operator's stopped-worker attestation
+        // is itself the explanation: the admin stopped the worker and says so in
+        // this same audited command, so the discarded lease is `lease.expired`
+        // with cause `stopped-by-attestation`, never a silently vanished worker.
         preserveAssignment(work);
-        if (work.lease) raiseEscalation(work, { trigger: 'lease-loss', reason: `Worker ${work.lease.owner} lost lease epoch ${work.lease.epoch}`, at: now.toISOString(), actor: 'graphyard' });
+        if (work.lease) await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, 'graphyard', 'lease.expired',
+          JSON.stringify({ details: { owner: work.lease.owner, epoch: work.lease.epoch, expiresAt: work.lease.expiresAt, submission: work.submission, cause: 'stopped-by-attestation',
+            attestation: { kind: 'stopped-worker', source: 'rework', epoch: work.epoch, actor: actor.id, at: now.toISOString(), reason: data.reason }, at: now.toISOString() } })]);
         work.lease = null;
         // Reopening implementation is the authorized recovery for send-back.
         // A plan rejection remains owned by its originating lead and can only
@@ -356,20 +388,30 @@ export class Engine {
           const limit = delegationLimits().maxEngineersPerLead;
           demand(engineers.size < limit, `Engineer limit for ${work.slice} exceeded: ${engineers.size}/${limit}`);
         }
-        // A replacement claim is itself the proof that the previous assignment was
-        // lost. Record it here so the escalation cannot be erased by the overwrite.
-        if (work.lease) raiseEscalation(work, { trigger: 'lease-loss', reason: `Worker ${work.lease.owner} lost lease epoch ${work.lease.epoch}`, at: now.toISOString(), actor: 'graphyard' });
+        // A replacement claim over a lapsed lease is the last chance to record how that
+        // assignment ended, exactly as reconciliation would have: explained lapses are
+        // history, a silently vanished worker is an escalation the overwrite cannot erase.
+        if (work.lease) {
+          const explained = leaseLapseCause(work, work.lease, await readAttestations(db, work.id));
+          if (explained) await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, 'graphyard', 'lease.expired',
+            JSON.stringify({ details: { owner: work.lease.owner, epoch: work.lease.epoch, expiresAt: work.lease.expiresAt, submission: work.submission, ...explained, at: now.toISOString() } })]);
+          else raiseEscalation(work, { trigger: 'lease-loss', reason: leaseLossReason(work.lease), at: now.toISOString(), actor: 'graphyard' });
+        }
         work.epoch++;
         work.implementers = [...new Set([...implementerIdentities(work), actor.id])];
         work.lastAssignment = { owner: actor.id, epoch: work.epoch, claimedAt: now.toISOString(), ...(actor.displayName ? { displayName: actor.displayName } : {}), ...(actor.runtime ? { runtime: actor.runtime } : {}) };
         work.lease = { owner: actor.id, epoch: work.epoch, expiresAt: new Date(now.getTime() + this.leaseSeconds * 1000).toISOString() };
       }
+      // The lease a worker submitted under ended at that submission. A supervisor that keeps
+      // renewing it is told so, rather than left to read the loss as a superseded epoch.
+      if ((command === 'heartbeat' || command === 'release') && !work.lease && submittedEpoch(work, data.epoch))
+        demand(false, `Implementation lease for epoch ${data.epoch} ended when ${work.key} was submitted; stop heartbeating after complete`);
       if (['heartbeat', 'release', 'workspace', 'submit', 'blocked', 'quarantine', 'launch'].includes(command)) activeLease(work, actor, data.epoch, now);
       if (command === 'heartbeat') work.lease!.expiresAt = new Date(now.getTime() + this.leaseSeconds * 1000).toISOString();
       if (command === 'quarantine') {
         demand(!work.containmentQuarantine || work.containmentQuarantine.owner === actor.id && work.containmentQuarantine.epoch === data.epoch
           && work.containmentQuarantine.settlementHash === data.settlementHash, 'Containment quarantine already exists and cannot be replaced');
-        work.containmentQuarantine ??= { owner: actor.id, epoch: data.epoch, at: now.toISOString(), settlementHash: data.settlementHash };
+        work.containmentQuarantine ??= { owner: actor.id, epoch: data.epoch, at: now.toISOString(), settlementHash: data.settlementHash, ...(data.scope ? { scope: data.scope } : {}) };
       }
       if (command === 'launch') {
         demand(work.containmentQuarantine?.owner === actor.id && work.containmentQuarantine.epoch === data.epoch
@@ -415,6 +457,11 @@ export class Engine {
         }
         work.submission = { epoch: data.epoch, pr: data.pr };
         work.reworkRequested = false;
+        // Binding the candidate ends the implementation lease in the same transaction: submitted
+        // work continues through the gates without one, and a lease left to lapse afterwards
+        // would otherwise read as an abandoned assignment. The workspace and `lastAssignment`
+        // keep the attempt attributable, and rework still needs the stopped-worker attestation.
+        work.lease = null;
       }
       if (command === 'deployment') {
         demand(actor.role === 'coordinator' || actor.role === 'admin', 'Coordinator permission required', 403);
@@ -757,13 +804,35 @@ export class Engine {
         // settles its provider outcome, never by reconciliation.
         if (executing && !leaseLost) continue;
         if (!executing && work.mergeExecution) work.mergeExecution = null;
+        const ledger: { kind: string; details: Record<string, unknown> }[] = [];
+        // The ledger explains a lapse: the epoch's own blocked report or the admin's stopped-worker
+        // attestation. It is read only where a lapse or a standing lease-loss makes it relevant.
+        const standingLoss = standingEscalations(work).some(entry => entry.trigger === 'lease-loss');
+        const attestations = leaseLost || standingLoss ? await readAttestations(db, work.id) : [];
         if (leaseLost) {
           const lost = work.lease!; work.lease = null;
-          raiseEscalation(work, { trigger: 'lease-loss', reason: `Worker ${lost.owner} lost lease epoch ${lost.epoch}`, at: now.toISOString(), actor: 'graphyard' });
+          // A lease that lapses under the epoch it submitted is the expected end of an attempt
+          // whose candidate is already bound, and one that lapses under a carried blocked report
+          // or after a stopped-worker attestation for its epoch ended because the control plane
+          // acted — recorded as history with its cause, never as an incident. Only an epoch with
+          // no submission, no blocked report and no attestation vanished, and that still escalates.
+          const explained = leaseLapseCause(work, lost, attestations);
+          if (explained) ledger.push({ kind: 'lease.expired', details: { owner: lost.owner, epoch: lost.epoch, expiresAt: lost.expiresAt, submission: work.submission, ...explained } });
+          else raiseEscalation(work, { trigger: 'lease-loss', reason: leaseLossReason(lost), at: now.toISOString(), actor: 'graphyard' });
+        }
+        // A standing lease-loss for an epoch whose candidate was already bound predates that
+        // rule, and one the control plane raised for an epoch whose blocked report or stopped-worker
+        // attestation is in the ledger never needed a human either. Settle both here, on deploy and
+        // on every later tick, with the note that says why and the attestation it rests on, so the
+        // backlog does not wait on one click per item.
+        for (const settled of settleableLeaseLoss(work, attestations)) {
+          resolveEscalation(work, settled.escalation.trigger);
+          ledger.push({ kind: 'escalation.auto-settled', details: { trigger: settled.escalation.trigger, epoch: settled.epoch, escalation: settled.escalation, note: settled.note, cause: settled.cause, attestation: settled.attestation, submission: work.submission } });
         }
         this.evaluate(work, all, now);
         if (JSON.stringify(work) !== before) {
-          await save(db, work, 'graphyard', 'reconciled', now);
+          for (const entry of ledger) await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, 'graphyard', entry.kind, JSON.stringify({ details: { ...entry.details, at: now.toISOString() } })]);
+          await save(db, work, 'graphyard', 'reconciled', now, ledger.length ? { ledger: ledger.map(entry => entry.kind) } : undefined);
           if (work.submission) await wakeJob(db, work.id);
         }
       }
