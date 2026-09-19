@@ -102,9 +102,9 @@ test('integration:deploy-limit-install — installers derive the variables from 
   assert.match(adapter, /delegationLimitAssignments\(principals, deployed\)/);
   assert.match(adapter, /\.\.\.limits\.lines/);
   assert.match(adapter, /for \(const entry of limits\.drift\) console\.error\(`Drift: \$\{entry\.reason\}`\)/);
-  // The integrations adapter generates one more producer: its limits derive from the roster it deploys, not from credentials.json alone.
+  // The integrations adapter generates two more producers (the dispatched reporter and the CI producer): its limits derive from the roster it deploys, not from credentials.json alone.
   const integrations = await script('scripts/configure-integrations.mjs');
-  assert.match(integrations, /const roster = \[\.\.\.principals\.filter\(p => p\.id !== producer\.id\), producer\]/);
+  assert.match(integrations, /const roster = withCiProducer\(\[\.\.\.principals\.filter\(p => p\.id !== producer\.id\), producer\]\)/);
   assert.match(integrations, /readDeployedDelegationLimits\(url, operator\.token\)/);
   assert.match(integrations, /delegationLimitAssignments\(roster, deployed\)/);
   assert.match(integrations, /GRAPHYARD_PRINCIPALS: JSON\.stringify\(roster\), \.\.\.limits\.variables/);

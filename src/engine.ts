@@ -3,13 +3,14 @@ import { z } from 'zod';
 import { Store, save, wakeJob } from './store.js';
 import { authorizedForProof, unauthorizedProofs } from './proof-grants.js';
 import { workspacePath, pathsOverlap, validBranch } from './workspace.js';
-import { activeLease, admin, assertReviewerProfiles, operatorCapability, escalationTriggers, holdsMergeExecution, MergeExecutionInProgress, providerDelayAfterVerification, raiseEscalation, releaseLeadHold, resolveEscalation, standingEscalations, attestationFor, attestationKinds, attestationsFromLedger, leaseLapseCause, leaseLossEpoch, leaseLossReason, settleableLeaseLoss, submittedEpoch, type Attestation, requireCurrent, createSchema, criterionSchema, currentEvidence, decideCarry, deploySmokeProof, deploySmokeRequired, evidenceBindsCandidate, exactApproval, inheritedObligations, pathScopeContains, requiredProofs, resourcesSchema, demand, evaluate, exhaustedReviewerProfiles, proofSchema, reviewerProfileFor, reviewerProfileSchema, reviewProviders, reviewProviderOf, type Criterion, type Principal, type ReviewerApp, type ReviewFailover, type Work, type Observation, type ReviewRequest, type OperatorCapability } from './model.js';
+import { activeLease, admin, assertReviewerProfiles, operatorCapability, escalationTriggers, holdsMergeExecution, MergeExecutionInProgress, providerDelayAfterVerification, raiseEscalation, releaseLeadHold, resolveEscalation, standingEscalations, attestationFor, attestationKinds, attestationsFromLedger, leaseLapseCause, leaseLossEpoch, leaseLossReason, settleableLeaseLoss, submittedEpoch, type Attestation, requireCurrent, createSchema, criterionSchema, currentEvidence, decideCarry, deploySmokeProof, deploySmokeRequired, evidenceBindsCandidate, exactApproval, inheritedObligations, pathScopeContains, requiredProofs, resourcesSchema, demand, evaluate, exhaustedReviewerProfiles, proofSchema, reviewerProfileFor, reviewerProfileSchema, reviewProviders, reviewProviderOf, type Criterion, type Evidence, type Principal, type ReviewerApp, type ReviewFailover, type Work, type Observation, type ReviewRequest, type OperatorCapability } from './model.js';
 import { resourceConflicts } from './coordination.js';
 import { containmentAttestation, containmentSettlementRefusals, containmentVerificationSchema } from './quarantine.js';
 import { activeEngineers, delegationLimits, implementerIdentities, leadMay, producerIndependenceRefusal, sessionKind } from './delegation.js';
 import { queueHistoryLimit, queueSequencingReason, type QueueSpeculation } from './merge-queue.js';
 import { githubFromEnv } from './github.js';
 import { regressionRefusals } from './regression-guard.js';
+import { ciFamilyAllows, ciProofFamilies, ciRunBindingSchema, ciRunRefusal, isCiProducer, refuseCiProducer, staleCiAttemptRefusal, type CiRunObservation } from './model/ci-proofs.js';
 import { reconcileAutoDispatch, type DispatchTransition } from './model/dispatch.js';
 
 const epoch = z.number().int().positive();
@@ -63,7 +64,10 @@ const commands = {
     provider: z.literal('github-actions'), repository: z.string().regex(/^[\w.-]+\/[\w.-]+$/), workflowCommit: sha,
     runId: z.string().regex(/^[1-9]\d*$/), runAttempt: z.number().int().positive(),
     artifact: z.object({ id: z.number().int().positive(), name: z.string().min(1).max(200), digest: z.string().regex(/^sha256:[a-f0-9]{64}$/), url: publicArtifactUrl, createdAt: z.iso.datetime() }).strict(),
-  }).strict().optional() }).strict(),
+  }).strict().optional(),
+    // The CI producer names the workflow job that ran the contract; the control plane reads that
+    // job back from GitHub and accepts the record only when it completed on this commit.
+    ciRun: ciRunBindingSchema.optional() }).strict(),
   // The coordinator's observation of the running release covering a delivered merge. It names the
   // serving commit and where it was read; whether it is exact is derived, never asserted.
   deployment: z.object({ sha, mergeSha: sha, source: z.enum(['endpoint', 'github-deployment']), observedAt: z.iso.datetime() }).strict(),
@@ -171,7 +175,7 @@ export class Engine {
       demand(!renewed, `${renewed?.id}: ${obligation.proof} is already a bootstrap obligation inherited from ${obligation.key} ${obligation.criterionId} and cannot be deferred again`);
     }
   }
-  async execute(actor: Principal, command: Command, id: string | null, input: unknown, key: string, context: { observation?: Observation } = {}) {
+  async execute(actor: Principal, command: Command, id: string | null, input: unknown, key: string, context: { observation?: Observation; ciRun?: CiRunObservation | null } = {}) {
     demand(Object.hasOwn(commands, command), 'Unknown command', 404);
     // Leads coordinate through rulings; no lifecycle command is lead-permitted.
     demand(actor.role !== 'slice-lead' || leadMay(command), 'Slice leads cannot perform lifecycle mutations', 403);
@@ -487,8 +491,25 @@ export class Engine {
         // that could mint trust must be independent of the implementation and the lead.
         const dependent = actor.role === 'worker' ? null : producerIndependenceRefusal(actor, work, this.principals);
         demand(!dependent, dependent ?? 'Evidence producer is not independent', 403);
-        // Trust is decided by the live grant set, never by the deployment environment.
-        const trusted = await authorizedForProof(db, actor, data.proof);
+        // Trust is decided by the live grant set, never by the deployment environment. The CI
+        // producer's authority is additionally clipped to the automatable families: a grant it
+        // holds outside them is inert, so manual proofs and deploy smoke never arrive from CI.
+        const ciProducer = isCiProducer(actor);
+        const trusted = await authorizedForProof(db, actor, data.proof) && (!ciProducer || ciFamilyAllows(data.proof));
+        let ciRun: Evidence['ciRun'] | undefined;
+        if (ciProducer || data.ciRun) {
+          // The CI lane refuses instead of storing an untrusted record: every refusal here is a
+          // configuration or provenance fault the operator must see, not an assertion to keep.
+          demand(ciProducer, 'A CI run binding is accepted only from the CI producer principal', 403);
+          demand(data.ciRun, 'CI producer evidence must name the workflow job that produced it', 400);
+          demand(ciFamilyAllows(data.proof), `CI evidence is accepted only for ${ciProofFamilies.map(family => `${family}:*`).join(' and ')} proofs; ${data.proof} needs a producer session`, 403);
+          demand(trusted, `The CI producer ${actor.id} is not granted ${data.proof}`, 403);
+          const refusal = ciRunRefusal(data.ciRun, context.ciRun, data, this.repository, this.ciAppIds);
+          demand(!refusal, refusal ?? 'CI run binding refused', context.ciRun ? 403 : 503);
+          const stale = staleCiAttemptRefusal(work.evidence, data);
+          demand(!stale, stale ?? 'Stale CI attempt');
+          ciRun = { ...data.ciRun, headSha: context.ciRun!.headSha, job: context.ciRun!.name, conclusion: context.ciRun!.conclusion!, verifiedAt: context.ciRun!.observedAt };
+        }
         if (data.proof === deploySmokeProof) {
           // Post-deployment proof is a trust boundary with no untrusted tier: it is accepted only
           // from a producer granted the proof, only once Graphyard has observed the deployment,
@@ -501,12 +522,13 @@ export class Engine {
             `${deploySmokeProof} evidence must name the observed deployed commit ${work.delivery!.deployment!.sha} as sha and merge commit ${work.delivery!.mergeSha} as baseSha`);
           demand(data.policyRevision === work.policyRevision, 'Policy revision does not match this delivery');
         }
-        const evidence = { ...data, id: randomUUID(), producer: actor.id, trusted, at: now.toISOString() };
+        const evidence: Evidence = { ...data, id: randomUUID(), producer: actor.id, trusted, at: now.toISOString(), ...(ciRun ? { ciRun } : {}) };
         work.evidence.push(evidence);
         if (data.proof === deploySmokeProof) work.delivery!.smoke = { evidenceId: evidence.id, result: data.result, sha: data.sha, mergeSha: data.baseSha, producer: actor.id, at: evidence.at, executed: data.executed, skipped: data.skipped, ...(data.url ? { url: data.url } : {}) };
         if (trusted && data.policyRevision !== work.policyRevision) raiseEscalation(work, { trigger: 'evidence-policy-conflict', reason: `Evidence policy v${data.policyRevision} conflicts with current policy v${work.policyRevision}`, at: now.toISOString(), actor: actor.id });
       }
       if (command === 'revoke') {
+        refuseCiProducer(actor, 'revocation');
         // Producer authority is the same live grant set that decides trust at submission.
         demand(actor.role === 'admin' || actor.role === 'producer' && await authorizedForProof(db, actor, data.proof),
           'Evidence revocation requires an operator or the trusted producer authorized for this proof', 403);

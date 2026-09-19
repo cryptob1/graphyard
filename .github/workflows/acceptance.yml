@@ -1,4 +1,10 @@
 name: Trusted Graphyard acceptance
+# Two ways in, one protected harness. A dispatch from main runs the single proof it names for the
+# pull request it names (the master loop's request). A push to a candidate branch with an open
+# pull request into main runs every automatable proof the item requires: GitHub takes the
+# workflow file and this checkout from the default branch for pull_request_target, evaluates the
+# reporting environment's branch policy against the default branch, and the candidate is only
+# ever fetched into an isolated build context — so the producer secrets never meet candidate code.
 on:
   workflow_dispatch:
     inputs:
@@ -18,12 +24,60 @@ on:
         description: Trusted contract to execute, as registered in scripts/contracts.mjs
         required: true
         default: integration:claim-safety
+  pull_request_target:
+    types: [opened, reopened, synchronize]
+    branches: [main]
 permissions:
   contents: read
   actions: read
+concurrency:
+  # A newer push to the same candidate supersedes the run for the older head. The control plane
+  # refuses an older attempt over a newer result as well; cancelling here just saves the minutes.
+  group: acceptance-${{ github.event_name == 'workflow_dispatch' && format('dispatch-{0}-{1}', inputs.pr, inputs.proof) || format('candidate-{0}', github.event.pull_request.number) }}
+  cancel-in-progress: true
 jobs:
+  plan:
+    # Same-repository candidate branches only: a fork's pull request is never planned.
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' || github.event_name == 'pull_request_target' && github.event.pull_request.head.repo.full_name == github.repository && startsWith(github.head_ref, 'graphyard/')
+    runs-on: ubuntu-latest
+    timeout-minutes: 6
+    # The CI producer credential reads which proofs the item requires; this job runs protected
+    # source only. Configure this environment to permit only main BEFORE storing its secrets.
+    environment: graphyard-reporting
+    outputs:
+      mode: ${{ steps.plan.outputs.mode }}
+      proofs: ${{ steps.plan.outputs.proofs }}
+      pr: ${{ steps.plan.outputs.pr }}
+      work_id: ${{ steps.plan.outputs.work_id }}
+      policy_revision: ${{ steps.plan.outputs.policy_revision }}
+      head: ${{ steps.plan.outputs.head }}
+      base: ${{ steps.plan.outputs.base }}
+    steps:
+      - uses: actions/checkout@v4
+        with: { ref: '${{ github.sha }}', persist-credentials: false }
+      - uses: actions/setup-node@v4
+        with: { node-version: '24' }
+      - name: Plan the proofs this run certifies
+        id: plan
+        run: node scripts/enumerate-ci-proofs.mjs
+        env:
+          GRAPHYARD_URL: ${{ vars.GRAPHYARD_URL }}
+          GRAPHYARD_CI_PRODUCER_TOKEN: ${{ secrets.GRAPHYARD_CI_PRODUCER_TOKEN }}
+          GRAPHYARD_PR: ${{ inputs.pr || github.event.pull_request.number }}
+          GRAPHYARD_HEAD: ${{ github.event.pull_request.head.sha }}
+          GRAPHYARD_WORK_ID: ${{ inputs.work_id }}
+          GRAPHYARD_POLICY_REVISION: ${{ inputs.policy_revision }}
+          GRAPHYARD_PROOF: ${{ inputs.proof }}
   exercise:
-    if: github.ref == 'refs/heads/main'
+    needs: plan
+    if: needs.plan.outputs.proofs != '[]'
+    # The job is named after its proof: that name is how the reporter and the control plane find
+    # the check run that decided it.
+    name: ${{ matrix.proof }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.plan.outputs.proofs) }}
     runs-on: ubuntu-latest
     # Recovery contracts wait out the candidate's real lease and launch fences.
     timeout-minutes: 25
@@ -31,37 +85,71 @@ jobs:
       - uses: actions/checkout@v4
         with: { ref: '${{ github.sha }}', persist-credentials: false }
       - uses: actions/setup-node@v4
-        with: { node-version: '24' }
+        with: { node-version: '24', cache: npm }
       # Refuses before any candidate code is fetched when this protected checkout does not
       # register the requested proof, which is the bootstrap ordering rule made explicit.
       - name: Prepare candidate from provider facts
         run: node scripts/prepare-acceptance.mjs
         env:
           GH_TOKEN: ${{ github.token }}
-          GRAPHYARD_PR: ${{ inputs.pr }}
-          GRAPHYARD_WORK_ID: ${{ inputs.work_id }}
-          GRAPHYARD_POLICY_REVISION: ${{ inputs.policy_revision }}
-          GRAPHYARD_PROOF: ${{ inputs.proof }}
+          GRAPHYARD_PR: ${{ needs.plan.outputs.pr }}
+          GRAPHYARD_WORK_ID: ${{ needs.plan.outputs.work_id }}
+          GRAPHYARD_POLICY_REVISION: ${{ needs.plan.outputs.policy_revision }}
+          GRAPHYARD_PROOF: ${{ matrix.proof }}
+          GRAPHYARD_HEAD: ${{ needs.plan.outputs.head }}
+          GRAPHYARD_BASE: ${{ needs.plan.outputs.base }}
+      - name: Restore the isolated database image
+        if: matrix.kind == 'integration'
+        id: database-image
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/postgres-17-alpine.tar
+          key: docker-image-postgres-17-alpine
+      - name: Load or pull the isolated database image
+        if: matrix.kind == 'integration'
+        run: |
+          if [ "$CACHE_HIT" = 'true' ]; then docker load --input "$RUNNER_TEMP/postgres-17-alpine.tar"
+          else docker pull postgres:17-alpine && docker save postgres:17-alpine --output "$RUNNER_TEMP/postgres-17-alpine.tar"; fi
+        env:
+          CACHE_HIT: ${{ steps.database-image.outputs.cache-hit }}
+      - uses: docker/setup-buildx-action@v3
+        if: matrix.kind == 'integration'
       - name: Build isolated candidate
-        run: docker build --tag graphyard-acceptance candidate
+        if: matrix.kind == 'integration'
+        uses: docker/build-push-action@v6
+        with:
+          context: candidate
+          tags: graphyard-acceptance
+          load: true
+          # Layer cache per pull request: a push that leaves package-lock.json alone skips npm ci.
+          cache-from: type=gha,scope=acceptance-${{ needs.plan.outputs.pr }}
+          cache-to: type=gha,mode=max,scope=acceptance-${{ needs.plan.outputs.pr }}
       - name: Execute protected contract against candidate
+        if: matrix.kind == 'integration'
         run: node scripts/run-acceptance.mjs candidate.json graphyard-acceptance acceptance.json "$GRAPHYARD_PROOF"
         env:
-          GRAPHYARD_PROOF: ${{ inputs.proof }}
+          GRAPHYARD_PROOF: ${{ matrix.proof }}
+      # Unit contracts run the protected inventory file against the candidate's source in the
+      # candidate checkout. This job holds no producer credential and a read-only token.
+      - name: Execute protected unit inventory against candidate
+        if: matrix.kind == 'unit'
+        run: node scripts/run-unit-acceptance.mjs candidate.json candidate acceptance.json "$GRAPHYARD_PROOF"
+        env:
+          GRAPHYARD_PROOF: ${{ matrix.proof }}
       - uses: actions/upload-artifact@v4
         if: always() && hashFiles('acceptance.json') != ''
         with:
           # Attempt-scoped so a re-run can never download or attribute an earlier attempt's report.
-          name: graphyard-acceptance-${{ github.run_attempt }}
+          name: graphyard-acceptance-${{ github.run_attempt }}-${{ matrix.slug }}
           path: acceptance.json
           if-no-files-found: error
           retention-days: 14
   publish:
-    needs: exercise
-    if: always() && github.ref == 'refs/heads/main' && needs.exercise.result != 'cancelled'
+    needs: [plan, exercise]
+    if: always() && needs.plan.result == 'success' && needs.plan.outputs.proofs != '[]' && needs.exercise.result != 'cancelled'
     runs-on: ubuntu-latest
     timeout-minutes: 5
-    # Configure this environment to permit only main BEFORE storing its producer secret.
+    # Configure this environment to permit only main BEFORE storing its producer secrets.
     environment: graphyard-reporting
     steps:
       - uses: actions/checkout@v4
@@ -69,15 +157,28 @@ jobs:
       - uses: actions/setup-node@v4
         with: { node-version: '24' }
       - uses: actions/download-artifact@v4
-        with: { name: 'graphyard-acceptance-${{ github.run_attempt }}', path: reports }
+        with: { pattern: 'graphyard-acceptance-${{ github.run_attempt }}-*', path: reports }
       - name: Publish independently produced acceptance evidence
-        run: node scripts/publish-acceptance.mjs reports/acceptance.json
+        if: needs.plan.outputs.mode == 'dispatch'
+        run: node scripts/publish-acceptance.mjs "reports/$GRAPHYARD_ARTIFACT_NAME/acceptance.json"
         env:
           GRAPHYARD_URL: ${{ vars.GRAPHYARD_URL }}
           GRAPHYARD_PRODUCER_TOKEN: ${{ secrets.GRAPHYARD_PRODUCER_TOKEN }}
-          GRAPHYARD_PR: ${{ inputs.pr }}
-          GRAPHYARD_WORK_ID: ${{ inputs.work_id }}
-          GRAPHYARD_POLICY_REVISION: ${{ inputs.policy_revision }}
-          GRAPHYARD_PROOF: ${{ inputs.proof }}
-          GRAPHYARD_ARTIFACT_NAME: graphyard-acceptance-${{ github.run_attempt }}
+          GRAPHYARD_PR: ${{ needs.plan.outputs.pr }}
+          GRAPHYARD_WORK_ID: ${{ needs.plan.outputs.work_id }}
+          GRAPHYARD_POLICY_REVISION: ${{ needs.plan.outputs.policy_revision }}
+          GRAPHYARD_PROOF: ${{ fromJSON(needs.plan.outputs.proofs)[0].proof }}
+          GRAPHYARD_ARTIFACT_NAME: graphyard-acceptance-${{ github.run_attempt }}-${{ fromJSON(needs.plan.outputs.proofs)[0].slug }}
+          GITHUB_TOKEN: ${{ github.token }}
+      # Every report of a candidate push is published through the CI producer, bound to the job
+      # that produced it; the control plane reads that job back before accepting the record.
+      - name: Publish CI-produced evidence for the candidate
+        if: needs.plan.outputs.mode == 'candidate'
+        run: node scripts/publish-acceptance.mjs --candidate-run reports
+        env:
+          GRAPHYARD_URL: ${{ vars.GRAPHYARD_URL }}
+          GRAPHYARD_CI_PRODUCER_TOKEN: ${{ secrets.GRAPHYARD_CI_PRODUCER_TOKEN }}
+          GRAPHYARD_PR: ${{ needs.plan.outputs.pr }}
+          GRAPHYARD_WORK_ID: ${{ needs.plan.outputs.work_id }}
+          GRAPHYARD_POLICY_REVISION: ${{ needs.plan.outputs.policy_revision }}
           GITHUB_TOKEN: ${{ github.token }}
