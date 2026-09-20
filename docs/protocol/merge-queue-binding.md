@@ -12,9 +12,26 @@ Every observation reads the managed branch from `refs/heads/<base>` and records:
 | `observation.baseTip` | The branch head sha. Never the pull request's cached `base.sha`. |
 | `observation.baseTree` | That commit's tree. |
 | `observation.baseTipContained` | The head contains `baseTip`: by ancestry, or as a published queue tip whose bound base is tree-identical to it or which sits behind other queue entries. |
-| `candidate.baseSha` | The bound base: the predicted base of a published speculative tip for this head under this policy revision, otherwise `baseTip`. |
+| `candidate.baseSha` | The bound base: the predicted base of a published speculative tip for this head under this policy revision; otherwise the base the head was already bound to while it is behind `baseTip` and the branch still contains that commit (see [base refresh](#base-refresh)); otherwise `baseTip`. |
 
-A review is requested only while `baseTipContained` is not `false`: `master review` refuses with `does not contain the base branch tip`, the `codex` and `agent` review-provider dispatchers defer, and `diagnose` reports `base-behind`. The worker runs `graphyard sync GY-N` and pushes, or the queue publishes a tip that contains the base once the candidate is proven.
+A review is requested only while `baseTipContained` is not `false`: `master review` refuses with `does not contain the base branch tip`, the `codex` and `agent` review-provider dispatchers defer, and `diagnose` reports `base-behind`. That is a wait, not a round of work: the control plane republishes the head on the moved tip itself, and the request is dispatched for the head it publishes.
+
+## Base refresh
+
+A candidate that is not in the merge queue and whose head no longer contains `baseTip` is brought onto it by the control plane, not by a rework round. One attempt per head, base tip and policy revision; a queued entry is left to its own speculative tip. The record gains `baseRefresh`:
+
+| Field | Meaning |
+| --- | --- |
+| `from` | The head the refresh acted on and the base it was bound to. |
+| `base`, `baseTree` | The base-branch tip it was brought onto, and that commit's tree. |
+| `head` | The republished head, or `null` when the merge conflicted. |
+| `conflict` | Why the base could not be merged in, named for the worker; `null` on success. |
+| `merge` | GitHub's account of the commit, as `queue.speculation.merge` below. |
+| `carry` | The carry decision, by the rule below, with the base branch itself as the predecessor. |
+
+The ledger records `base.refreshed` (or `base.conflict`) with the carry summary, and `base.carry` with the full decision. `master status` reports it per row under `base` (`pending`, `conflict`, `refreshed`), and an item that is only waiting for a refresh is never an attention item; `diagnose` reports `base-behind`, `base-conflict`, `base-refresh-carried` and `base-refresh-required`. `master run` records a `refresh` action per head and base tip: opened when the branch moves, resolved with what the merge did.
+
+A conflict writes nothing. The build gate names it, the item returns to `build`, and the bound base is no longer held, so the approval and every proof are invalidated exactly as they were before any of this existed — resolving a conflict is content nobody reviewed or proved.
 
 ## Evidence `scopeFiles`
 
@@ -33,7 +50,7 @@ When the queue entry ahead merges, the base branch becomes a merge commit whose 
 
 ## Carry across a Graphyard-authored tip
 
-Publishing a tip for an entry not already on its predicted base merges that base into the pull request branch. The speculation records `merge`: the replaced head (`from`), GitHub's account of the tip's `parents` and `author`, `authoredByApp`, `conflicts` (always `false` for the provider merge, which refuses a conflict with `409` and ejects the entry) and `baseChanges`, the paths changed between the replaced head's bound base and the predicted base (`null` when GitHub could not list them completely: the compare API reports files on its first page only and stops at 300, so a list that reaches that cap is treated as truncated). When Graphyard binds the tip it decides once and records `queue.speculation.carry`:
+The same rule decides a base refresh, with the base branch as the predecessor (`predecessor: "base branch"`, always validated) and `baseChanges` taken between the head's bound base and the branch tip. Publishing a tip for an entry not already on its predicted base merges that base into the pull request branch. The speculation records `merge`: the replaced head (`from`), GitHub's account of the tip's `parents` and `author`, `authoredByApp`, `conflicts` (always `false` for the provider merge, which refuses a conflict with `409` and ejects the entry) and `baseChanges`, the paths changed between the replaced head's bound base and the predicted base (`null` when GitHub could not list them completely: the compare API reports files on its first page only and stops at 300, so a list that reaches that cap is treated as truncated). When Graphyard binds the tip it decides once and records `queue.speculation.carry`:
 
 | Field | Meaning |
 | --- | --- |
@@ -46,12 +63,12 @@ Publishing a tip for an entry not already on its predicted base merges that base
 
 Nothing carries unless the tip is a two-parent merge of exactly `from.sha` and `to.baseSha`, authored by the control-plane App, produced by Graphyard's conflict-free merge, over a predecessor whose own gates all pass on that tip, with a complete change list. Within that, the approval carries when the predecessor changed no reviewed file, and each proof carries when its declared scope is disjoint from the change (or the change is empty). Every other case is `carried: false` with the reason that names what was touched.
 
-A carried binding is a standing judgement over the original record: it applies only while the candidate is exactly `to` under the same policy revision (and, for agent review, while the policy still dispatches to the same reviewer App). Revoking the original evidence withdraws the carried binding and ejects the tip. The ledger holds one `queue.carry` event per decision and a `carried`/`required` summary on `queue.predicted`.
+A carried record is named by its `evidenceId`, so a record carried twice — across a base refresh and then across the queue's own tip — is still the one the latest decision names, and the queue's decision starts from the approval that currently binds rather than only from an exact one. A carried binding is a standing judgement over the original record: it applies only while the candidate is exactly `to` under the same policy revision (and, for agent review, while the policy still dispatches to the same reviewer App). Revoking the original evidence withdraws the carried binding and ejects the tip. The ledger holds one `queue.carry` event per decision and a `carried`/`required` summary on `queue.predicted`.
 
 GitHub dismisses stale reviews on Graphyard's own tip push. Before acquiring merge authority, `master merge` re-posts a carried GitHub approval bound to the tip through the reviewer App that gave it — never through the control-plane App, never for a human reviewer's approval, and never over a reviewer that has since requested changes — and reports the outcome as `carriedApproval` in its result.
 
 ## Where it is reported
 
-- `GET /api/work-snapshot` documents: `queue.speculation.merge`, `.carry`, `.carriedBase`; `observation.baseTip`, `.baseTree`, `.baseTipContained`.
-- `master status`: each `queue[]` entry's `binding` — `base` (bound sha and tree, `binding`, `carriedTo`), `approval` and `evidence[]` as `exact`, `carried` or `required` with the reason.
-- `diagnose GY-N`: `base-behind`, `queue-base-carried`, `queue-binding-carried`, `queue-binding-required`.
+- `GET /api/work-snapshot` documents: `queue.speculation.merge`, `.carry`, `.carriedBase`; `baseRefresh`; `observation.baseTip`, `.baseTree`, `.baseTipContained`.
+- `master status`: each `queue[]` entry's `binding` — `base` (bound sha and tree, `binding`, `carriedTo`), `approval` and `evidence[]` as `exact`, `carried` or `required` with the reason; each work row's `base` for a pending refresh, a conflict, or the last refresh's carry.
+- `diagnose GY-N`: `base-behind`, `base-conflict`, `base-refresh-carried`, `base-refresh-required`, `queue-base-carried`, `queue-binding-carried`, `queue-binding-required`.
