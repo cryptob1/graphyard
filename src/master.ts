@@ -1,7 +1,7 @@
 import { execFileSync } from 'node:child_process';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
-import { chmod, lstat, mkdir, readdir, readFile, realpath, stat } from 'node:fs/promises';
+import { chmod, lstat, mkdir, readdir, readFile, realpath, rm, stat, statfs, symlink, writeFile } from 'node:fs/promises';
 import { basename, dirname, isAbsolute, relative, resolve, sep } from 'node:path';
 import { homedir, hostname } from 'node:os';
 import { z } from 'zod';
@@ -119,6 +119,12 @@ export const masterRunSchema = z.object({
   dispatchIntervalSeconds: z.number().int().min(5).max(30).default(10),
   reviewerProfile: profileName.optional(),
   producerTimeoutMinutes: z.number().int().min(5).max(1440).default(120),
+  // Worktree reclamation: how long an assignment worktree may sit untouched before its dependency
+  // directories count as disposable, and the free space below which `master status` raises disk
+  // pressure. Both are read from .graphyard/master.json on every cycle, so a host with a smaller
+  // volume raises the threshold without restarting the loop.
+  reclaimIdleHours: z.number().min(0.25).max(720).optional(),
+  diskThresholdGb: z.number().min(0.1).max(10_000).optional(),
   // An account whose provider usage reached this percentage of any window is skipped at launch:
   // a session started just below a hard limit would stall mid-task.
   quotaCeilingPercent: z.number().int().min(50).max(100).optional(),
@@ -342,15 +348,16 @@ export async function inspectProducerCredentials(root: string, profiles: Produce
 }
 
 export async function atomicPrivateWrite(file: string, value: unknown) {
-  const temporary = `${file}.${randomUUID()}.tmp`;
-  const { writeFile, rename } = await import('node:fs/promises');
-  await writeFile(temporary, JSON.stringify(value, null, 2), { mode: 0o600, flag: 'wx' });
-  await rename(temporary, file); await chmod(file, 0o600);
+  return atomicPrivateText(file, JSON.stringify(value, null, 2));
 }
 async function atomicPrivateText(file: string, value: string) {
   const temporary = `${file}.${randomUUID()}.tmp`;
   const { writeFile, rename } = await import('node:fs/promises');
-  await writeFile(temporary, value, { mode: 0o600, flag: 'wx' }); await rename(temporary, file); await chmod(file, 0o600);
+  // A master file that cannot be written because the host is out of room says so: the same
+  // failure reported as an unexplained write error costs an investigation every time.
+  try { await writeFile(temporary, value, { mode: 0o600, flag: 'wx' }); await rename(temporary, file); }
+  catch (error) { throw writeFailure(error, `Writing ${file}`); }
+  await chmod(file, 0o600);
 }
 
 export async function setupMaster(root: string, input: { url: string; token: string; cliPath: string; hostId?: string; herdrWorkspace?: string; credentialDirectory?: string; autoMerge?: boolean; mergeMethod?: 'merge' | 'squash' | 'rebase'; run?: Partial<MasterRun>; browser?: MasterBrowser }, fetcher: typeof fetch = fetch) {
@@ -1227,6 +1234,256 @@ export function productionSummary(report: Partial<ProductionReport>) {
     deployed: report.deployed ?? [], pending: report.pending ?? [], incidents, error: report.error ?? null,
     attention: attentionLines({ ahead, aheadError: report.aheadError ?? null, serving: report.serving ?? null, incidents: (report.incidents ?? []), error: report.error ?? null, latest: report.latest ?? null, provider: report.provider ?? null }) };
 }
+/*
+ * Disk is a shared resource of the host, and assignment worktrees are the loop's largest consumer
+ * of it: every attempt and every rework checks the repository out again, and a checkout that
+ * installs its own dependencies costs about as much as the source it builds. Two halves keep that
+ * bounded — one install shared by the worktrees that can use it, and a reclaimer that gives back
+ * the installs of finished assignments.
+ */
+
+/**
+ * The disposable artifacts inside an assignment worktree: dependency trees a package manager
+ * recreates from the lockfile. Nothing else is ever removed — not a checkout, not its Git
+ * metadata, never a branch, and never one of Graphyard's registered workspace records.
+ */
+export const dependencyDirectories = ['node_modules'] as const;
+export const defaultReclaimIdleHours = 3, defaultDiskThresholdGb = 10;
+export const reclaimIdleMs = (config: { run: Pick<MasterRun, 'reclaimIdleHours'> }) => (config.run.reclaimIdleHours ?? defaultReclaimIdleHours) * 3_600_000;
+export const diskThresholdBytes = (config: { run: Pick<MasterRun, 'diskThresholdGb'> }) => (config.run.diskThresholdGb ?? defaultDiskThresholdGb) * 1e9;
+export const lockfiles = ['package-lock.json'] as const;
+export const worktreesDirectory = (root: string) => resolve(root, '.graphyard/worktrees');
+const failureText = (error: unknown) => error instanceof Error ? error.message : String(error);
+
+/**
+ * A write that failed because there is no room left, said as exactly that. A full volume and an
+ * exhausted user quota arrive as an errno on a direct write and as text in a child command's
+ * output (`pwd: write error: Disk quota exceeded`); both are the same condition, and reporting
+ * it as an unexplained command failure is what sends the next investigation to the wrong place.
+ */
+export function diskExhaustion(error: unknown): string | null {
+  const record = error as { code?: unknown; stderr?: unknown; stdout?: unknown; message?: unknown } | null;
+  const code = typeof record?.code === 'string' ? record.code : '';
+  if (code === 'ENOSPC') return 'the volume is full (ENOSPC)';
+  if (code === 'EDQUOT') return "the host's disk quota is exhausted (EDQUOT)";
+  const text = [record?.message, record?.stderr, record?.stdout].filter(value => typeof value === 'string' || Buffer.isBuffer(value)).join('\n');
+  if (/no space left on device/i.test(text)) return 'the volume is full (ENOSPC)';
+  if (/disk quota exceeded/i.test(text)) return "the host's disk quota is exhausted (EDQUOT)";
+  return null;
+}
+export const reclaimAdvice = 'the master loop reclaims the dependency directories of finished assignment worktrees on every cycle while free space is low; lower run.reclaimIdleHours in .graphyard/master.json to make more of them disposable, then retry';
+/** The same failure, named by its cause when the cause is exhausted disk and left alone otherwise. */
+export function writeFailure(error: unknown, action: string): Error {
+  const cause = diskExhaustion(error);
+  if (!cause) return error instanceof Error ? error : new Error(String(error));
+  return Object.assign(new Error(`${action} failed because ${cause}: ${reclaimAdvice}`), { code: (error as { code?: string } | null)?.code ?? 'ENOSPC', cause: error });
+}
+
+/** Free space on the volume holding a path, as the kernel reports it to this user. */
+export async function freeBytes(path: string): Promise<number | null> {
+  try { const info = await statfs(path); return Number(info.bavail) * Number(info.bsize); } catch { return null; }
+}
+
+export interface WorktreeDependency { path: string; kind: 'directory' | 'link' }
+export interface WorktreeEntry {
+  path: string; name: string;
+  /** The newest change under the worktree, ignoring the dependency trees an install rewrites. */
+  activityAt: number;
+  dependencies: WorktreeDependency[];
+}
+/**
+ * The newest change inside a worktree, ignoring the dependency trees themselves. A linked
+ * worktree keeps its index and refs in the main repository, so what changes here is the working
+ * tree itself: the session's own edits, checkouts and build output, which is exactly the activity
+ * the idle bound is about.
+ */
+export async function worktreeActivity(path: string, now = Date.now()) {
+  const names = await readdir(path).catch(() => [] as string[]);
+  const targets = [path, ...names.filter(name => !(dependencyDirectories as readonly string[]).includes(name)).map(name => resolve(path, name))];
+  const times = await Promise.all(targets.map(target => lstat(target).then(info => info.mtimeMs).catch(() => 0)));
+  // A timestamp ahead of the clock must not make a worktree look idle for ever.
+  return Math.min(Math.max(0, ...times), now);
+}
+/** Every assignment worktree on this host and the dependency trees it is holding. */
+export async function inventoryWorktrees(root: string, now = Date.now()): Promise<WorktreeEntry[]> {
+  const base = worktreesDirectory(root);
+  const entries = await readdir(base, { withFileTypes: true }).catch(() => []);
+  const worktrees = await Promise.all(entries.filter(entry => entry.isDirectory()).map(async entry => {
+    const path = resolve(base, entry.name);
+    const dependencies: WorktreeDependency[] = [];
+    for (const name of dependencyDirectories) {
+      const info = await lstat(resolve(path, name)).catch(() => null);
+      if (info?.isSymbolicLink()) dependencies.push({ path: resolve(path, name), kind: 'link' });
+      else if (info?.isDirectory()) dependencies.push({ path: resolve(path, name), kind: 'directory' });
+    }
+    return { path, name: entry.name, activityAt: await worktreeActivity(path, now), dependencies };
+  }));
+  return worktrees.sort((a, b) => a.name.localeCompare(b.name));
+}
+
+export type ReclaimDisposition = 'live' | 'recent' | 'idle' | 'superseded' | 'delivered';
+export interface WorktreeReclaimCandidate {
+  path: string; name: string; key: string | null; epoch: number | null; branch: string | null;
+  disposition: ReclaimDisposition; disposable: boolean; idleMs: number; detail: string;
+  dependencies: WorktreeDependency[];
+}
+/**
+ * Which assignment worktrees hold disposable dependency trees. A worktree whose assignment is
+ * finished — delivered, superseded by a later epoch, or untouched beyond the configured age —
+ * can install again from its lockfile whenever it is needed; one whose attempt still holds the
+ * lease is never touched. The decision is a pure function of the Graphyard snapshot and the
+ * filesystem inventory, so the loop and `master status` always answer alike.
+ */
+export function planWorktreeReclaim(entries: WorktreeEntry[], work: Work[], options: { now: number; idleMs: number }): WorktreeReclaimCandidate[] {
+  const minutes = (ms: number) => Math.floor(ms / 60_000);
+  return entries.map(entry => {
+    const owner = work.find(item => item.workspaces.some(space => resolve(space.path) === entry.path));
+    const workspace = owner?.workspaces.find(space => resolve(space.path) === entry.path) ?? null;
+    const idleMs = Math.max(0, options.now - entry.activityAt);
+    const live = !!owner?.lease && owner.lease.epoch === workspace?.epoch && Date.parse(owner.lease.expiresAt) > options.now;
+    const [disposition, detail]: [ReclaimDisposition, string] =
+      live ? ['live', `${owner!.key} epoch ${workspace!.epoch} holds the lease until ${owner!.lease!.expiresAt}`]
+      : owner && owner.stage === 'done' ? ['delivered', `${owner.key} is delivered; the attempt that used this worktree is finished`]
+      : owner && workspace && workspace.epoch < owner.epoch ? ['superseded', `${owner.key} epoch ${workspace.epoch} was superseded by epoch ${owner.epoch}`]
+      : idleMs >= options.idleMs ? ['idle', `Untouched for ${minutes(idleMs)} minutes, past the ${minutes(options.idleMs)}-minute idle bound`]
+      : ['recent', `${owner ? `${owner.key} ` : 'An unregistered worktree '}changed ${minutes(idleMs)} minutes ago, inside the ${minutes(options.idleMs)}-minute idle bound`];
+    return { path: entry.path, name: entry.name, key: owner?.key ?? null, epoch: workspace?.epoch ?? null, branch: workspace?.branch ?? null,
+      disposition, disposable: disposition !== 'live' && disposition !== 'recent' && entry.dependencies.length > 0,
+      idleMs, detail, dependencies: entry.dependencies };
+  });
+}
+/** The only path the reclaimer may remove: a dependency tree one level inside an assignment worktree. */
+function assertDisposable(base: string, target: string) {
+  const worktree = dirname(target);
+  if (!(dependencyDirectories as readonly string[]).includes(basename(target)) || dirname(worktree) !== base || worktree === base)
+    throw new Error(`Refusing to remove ${target}: the reclaimer removes only ${dependencyDirectories.join(', ')} directly inside an assignment worktree`);
+}
+
+export interface WorktreeReclaimReport {
+  root: string; at: string; applied: boolean; scanned: number; idleMs: number;
+  removed: string[]; kept: { path: string; disposition: ReclaimDisposition; detail: string }[];
+  freeBefore: number | null; freeAfter: number | null; freedBytes: number; errors: string[];
+}
+/**
+ * Give the host back the dependency trees of finished assignments. The reclaimer removes nothing
+ * else: a checkout keeps its files and its Git metadata, a branch keeps every commit it holds —
+ * pushed or not — and Graphyard's registered workspace records are never written, so the disk is
+ * freed without any assignment losing history the control plane still refers to.
+ */
+export async function reclaimWorktrees(root: string, work: Work[], options: { idleMs: number; now?: number; apply?: boolean }): Promise<WorktreeReclaimReport> {
+  const now = options.now ?? Date.now(), apply = options.apply !== false, base = worktreesDirectory(root);
+  const plan = planWorktreeReclaim(await inventoryWorktrees(root, now), work, { now, idleMs: options.idleMs });
+  const freeBefore = await freeBytes(base);
+  const removed: string[] = [], errors: string[] = [];
+  for (const candidate of plan.filter(entry => entry.disposable)) {
+    for (const dependency of candidate.dependencies) {
+      try { assertDisposable(base, dependency.path); } catch (error) { errors.push(failureText(error)); continue; }
+      if (!apply) { removed.push(dependency.path); continue; }
+      try { await rm(dependency.path, { recursive: true, force: true }); removed.push(dependency.path); }
+      catch (error) { errors.push(`${dependency.path}: ${writeFailure(error, 'Reclaiming a dependency directory').message}`); }
+    }
+  }
+  const freeAfter = apply ? await freeBytes(base) : freeBefore;
+  return { root, at: new Date(now).toISOString(), applied: apply, scanned: plan.length, idleMs: options.idleMs, removed,
+    kept: plan.filter(entry => !entry.disposable).map(entry => ({ path: entry.path, disposition: entry.disposition, detail: entry.detail })),
+    freeBefore, freeAfter, freedBytes: freeBefore === null || freeAfter === null ? 0 : Math.max(0, freeAfter - freeBefore), errors };
+}
+
+export interface DiskPressure { path: string; freeBytes: number | null; thresholdBytes: number; low: boolean; reclaimable: number; worktrees: number; unavailable: string | null }
+/** Free space beside what a reclaim would give back, in the shape `master status` reports it. */
+export function diskPressure(path: string, free: number | null, thresholdBytes: number, plan: WorktreeReclaimCandidate[]): DiskPressure {
+  return { path, freeBytes: free, thresholdBytes, low: free !== null && free < thresholdBytes,
+    reclaimable: plan.filter(entry => entry.disposable).length, worktrees: plan.length,
+    unavailable: free === null ? `Free space on ${path} could not be read` : null };
+}
+const gigabytes = (bytes: number) => `${(bytes / 1e9).toFixed(1)} GB`;
+/**
+ * The attention item that has to arrive before the volume fills: how much room is left, how much
+ * of it finished worktrees are holding, and the one command that gives it back. It is raised on
+ * the configured threshold rather than on the first failed write, so the master acts while
+ * writes still succeed.
+ */
+export function diskPressureAttention(pressure: DiskPressure): AttentionItem[] {
+  if (!pressure.low || pressure.freeBytes === null) return [];
+  return [{ subject: 'disk', text: `${gigabytes(pressure.freeBytes)} free on ${pressure.path}, below the configured ${gigabytes(pressure.thresholdBytes)} threshold; ${pressure.reclaimable} of ${pressure.worktrees} assignment worktree(s) hold dependency directories a fresh install recreates. Reclaim them before the volume fills`,
+    ...agentOwner('master', 'graphyard master run reclaims every cycle while free space is low (daemon.reclaim in master status says what it took back); lower run.reclaimIdleHours in .graphyard/master.json to make more of them disposable, and graphyard master run --once reclaims immediately when no loop is running') }];
+}
+
+/**
+ * One dependency install, shared by every worktree that can use it. A fresh attempt must start
+ * from a clean checkout of its exact head; what it must not do is spend another gigabyte, and the
+ * first minutes of its session, on a private copy of dependencies it resolves identically.
+ *
+ * A worktree created under the repository already resolves the repository's own install by the
+ * runtime's ordinary upward lookup, so the right answer there is to install nothing and say so. A
+ * worktree outside it gets a mirror instead: a real directory of links, one per installed package,
+ * so the repository's `node_modules/` ignore rule still covers it and the checkout stays clean.
+ * Either way the install must answer for this exact head — the same lockfile, byte for byte — and a
+ * worktree that already has an install of its own is reported and left exactly as it is.
+ */
+export const sharedInstallMarker = '.graphyard-shared';
+export interface SharedDependency { name: string; source: string; how: 'reachable' | 'mirrored' }
+export interface SharedDependencies { shared: SharedDependency[]; skipped: { name: string; reason: string }[] }
+export async function shareDependencies(root: string, worktree: string): Promise<SharedDependencies> {
+  const shared: SharedDependency[] = [], skipped: { name: string; reason: string }[] = [];
+  for (const name of dependencyDirectories) {
+    const own = resolve(worktree, name);
+    if (await lstat(own).catch(() => null)) {
+      const mirrored = await sharedInstallSource(own);
+      if (mirrored) shared.push({ name, source: mirrored, how: 'mirrored' });
+      else skipped.push({ name, reason: `The worktree already has its own ${name}; it is left exactly as it is` });
+      continue;
+    }
+    // What the runtime would resolve from this worktree, before anything is created for it.
+    const reachable = await reachableInstall(worktree, name);
+    if (reachable) {
+      const compatible = await compatibleInstall(dirname(reachable), worktree);
+      if (compatible === true) shared.push({ name, source: reachable, how: 'reachable' });
+      else skipped.push({ name, reason: compatible });
+      continue;
+    }
+    const source = resolve(root, name);
+    if (!(await lstat(source).catch(() => null))?.isDirectory()) { skipped.push({ name, reason: `No shared ${name} install is reachable from ${worktree}` }); continue; }
+    const compatible = await compatibleInstall(root, worktree);
+    if (compatible !== true) { skipped.push({ name, reason: compatible }); continue; }
+    try {
+      const entries = await readdir(source);
+      await mkdir(own, { recursive: true });
+      await Promise.all(entries.map(entry => symlink(resolve(source, entry), resolve(own, entry))));
+      // Written last, so a half-made mirror is never mistaken for a complete one.
+      await writeFile(resolve(own, sharedInstallMarker), `${source}\n`);
+      shared.push({ name, source, how: 'mirrored' });
+    } catch (error) {
+      // A partial mirror would resolve some imports and fail others, which is worse than none.
+      await rm(own, { recursive: true, force: true }).catch(() => {});
+      skipped.push({ name, reason: writeFailure(error, `Sharing ${name} into ${worktree}`).message });
+    }
+  }
+  return { shared, skipped };
+}
+/** The install the runtime resolves from a worktree by its ordinary upward lookup, if any. */
+async function reachableInstall(worktree: string, name: string): Promise<string | null> {
+  for (let directory = dirname(worktree), parent = dirname(directory); ; directory = parent, parent = dirname(directory)) {
+    const candidate = resolve(directory, name);
+    if ((await lstat(candidate).catch(() => null))?.isDirectory()) return candidate;
+    if (parent === directory) return null;
+  }
+}
+/** The install a worktree's dependency directory mirrors, or null when it is the worktree's own. */
+export async function sharedInstallSource(target: string): Promise<string | null> {
+  const marker = await readFile(resolve(target, sharedInstallMarker), 'utf8').catch(() => null);
+  return marker?.trim() || null;
+}
+/** An install answers for a head only when that head resolves the same lockfile, byte for byte. */
+async function compatibleInstall(installed: string, worktree: string): Promise<true | string> {
+  for (const name of lockfiles) {
+    const [a, b] = await Promise.all([readFile(resolve(installed, name)).catch(() => null), readFile(resolve(worktree, name)).catch(() => null)]);
+    if (!a || !b) return `${name} is missing from ${installed} or from this head, so no existing install can be matched to it`;
+    if (createHash('sha256').update(a).digest('hex') !== createHash('sha256').update(b).digest('hex')) return `${name} differs from the install at ${installed}, so this head installs its own dependencies`;
+  }
+  return true;
+}
+
 /**
  * The version-skew guard the broker runs before touching a merge. The CLI and the server
  * each declare the merge protocol they speak; a server behind the CLI — main merged, the
@@ -1643,7 +1900,7 @@ export async function startMaster(root: string, kind: WorkerProfile['kind'], age
 }
 
 type WorkerCommand = (command: string, args: string[], options?: any) => string | Buffer;
-type PreparedWorker = { epoch: number; path: string; base: string; branch?: string };
+type PreparedWorker = { epoch: number; path: string; base: string; branch?: string; dependencies?: SharedDependencies };
 
 export interface DispatchOptions { allowOverlap?: boolean; probe?: EnvironmentProbe; prompt?: PromptDelivery }
 export const describeOverlap = (overlap: ReturnType<typeof dispatchOverlap>) => overlap.map(ahead => `${ahead.key} (${ahead.state}, ${ahead.stage}) on ${ahead.paths.join(', ')}`).join('; ');
@@ -1670,6 +1927,7 @@ export async function dispatchWork(root: string, work: Work, profile: WorkerProf
   let target = agents.find(agent => agent.name === profile.agentName);
   let selected: Awaited<ReturnType<typeof selectAccount>> | undefined, launched: ReturnType<typeof accountLaunch> | undefined, relaunched = 0;
   let harness: Awaited<ReturnType<typeof installWorkerHarness>> | null = null;
+  let dependencies: PreparedWorker['dependencies'] | null = null;
   if (profile.mode === 'existing') {
     if (!target) throw new Error('Existing worker is not visible in Herdr');
     throw new Error('Existing sessions are observable but cannot be safely adopted for new work; use a launch profile so Graphyard supervises the agent process');
@@ -1684,13 +1942,13 @@ export async function dispatchWork(root: string, work: Work, profile: WorkerProf
     // A prompt the runtime never accepted closes the session and releases the claim; the launch is
     // then made once more from a fresh claim, rather than leaving an idle session holding the item.
     for (let attempt = 1; ; attempt++) {
-      try { ({ target, harness } = await launchWorker(root, config, work, profile, launch, run, prepare, release, agentTimeoutMs, options.prompt)); break; }
+      try { ({ target, harness, dependencies } = await launchWorker(root, config, work, profile, launch, run, prepare, release, agentTimeoutMs, options.prompt)); break; }
       catch (error) { if (!(error instanceof PromptNotAcceptedError) || attempt >= 2) throw error; relaunched++; }
     }
   }
   const overlap = dispatchOverlap(work, allWork, Date.parse(observedAt));
   return { work: work.key, profile: profile.name, principal: profile.principal, agentName: profile.agentName, pane: target.pane_id ?? null, approvals: profile.approvals,
-    launch: launched?.plan ?? agentLaunchPlan(profile.kind, profile.approvals, profile.agentArgs, profile.environment), ownership: 'worker launcher claimed and is supervising the agent process', harness,
+    launch: launched?.plan ?? agentLaunchPlan(profile.kind, profile.approvals, profile.agentArgs, profile.environment), ownership: 'worker launcher claimed and is supervising the agent process', harness, dependencies,
     account: selected?.account ? { environment: selected.account.name, kind: selected.account.kind, quota: selected.health?.quota ?? null, skipped: selected.skipped } : null, relaunched,
     overlap: overlap.length ? { allowed: true, ahead: overlap, note: `Dispatched over a planned-file overlap with ${describeOverlap(overlap)}; expect a sync → review → proof round for whichever lands second` } : null };
 }
@@ -1700,7 +1958,7 @@ async function launchWorker(root: string, config: MasterConfig, work: Work, prof
   // The worker's own rules go into its worktree before the session starts, so pushing its
   // branch and opening its pull request never wait on a keypress. A failure is reported, not fatal.
   const harness = await installWorkerHarness(config, { ...profile, kind: launch.kind as WorkerProfile['kind'] }, work.key, prepared).catch(error => ({ applied: false, reason: error instanceof Error ? error.message : 'Worker rules could not be written' }));
-  const prompt = workerPrompt(config, work, profile, prepared.epoch);
+  const prompt = workerPrompt(config, work, profile, prepared.epoch, prepared.dependencies ?? null);
   // The worker loads its own role rules, never the master's: it may push its assigned branch.
   const sessionHarness = await prepareSessionHarness(root, config, { role: 'worker', kind: launch.kind, profile: profile.name, branch: prepared.branch ?? `graphyard/${work.key.toLowerCase()}-${prepared.epoch}`, credentialFiles: [profile.credentialFile!] });
   let pane: string | undefined, tabId: string | undefined;
@@ -1712,7 +1970,7 @@ async function launchWorker(root: string, config: MasterConfig, work: Work, prof
     waitForHerdrAgent(pane, run, agentTimeoutMs);
     herdrJson(['agent', 'rename', pane, profile.agentName], run);
     deliverPrompt(profile.agentName, prompt, run, delivery);
-    return { target: { name: profile.agentName, pane_id: pane, agent_status: 'working', cwd: prepared.path } as HerdrAgent, harness };
+    return { target: { name: profile.agentName, pane_id: pane, agent_status: 'working', cwd: prepared.path } as HerdrAgent, harness, dependencies: prepared.dependencies ?? null };
   } catch (error) {
     const malformedTab = (error as any)?.herdrTab as string | undefined;
     if (pane || tabId || malformedTab) {
@@ -1733,8 +1991,12 @@ export function autonomousSession(outcome: string, blocker: string) {
   return `Decide and act on your own: ${outcome}. Never stop to ask a human for confirmation, never end your turn with a question, and never offer a menu of options to choose from; choose what the criteria and these instructions support and carry it out. `
     + `If a command you need is refused or cannot succeed, ${blocker}, naming the exact command that was blocked and its error, then stop. A session that ends waiting on input is recorded as failed with that reason.`;
 }
-export function workerPrompt(config: Pick<MasterConfig, 'cliPath'>, work: Pick<Work, 'key' | 'title'>, profile: Pick<WorkerProfile, 'principal'>, epoch: number) {
+export function workerPrompt(config: Pick<MasterConfig, 'cliPath'>, work: Pick<Work, 'key' | 'title'>, profile: Pick<WorkerProfile, 'principal'>, epoch: number, dependencies?: Pick<SharedDependencies, 'shared'> | null) {
+  // A session that reinstalls dependencies it already has costs the host a gigabyte per attempt,
+  // so the launcher says which trees are already there rather than leaving it to be guessed.
+  const installed = dependencies?.shared.length ? `The assigned worktree needs no dependency install: ${dependencies.shared.map(entry => `${entry.name} ${entry.how === 'reachable' ? 'already resolves to' : 'is shared with'} the install at ${entry.source}`).join(', ')}, for this exact lockfile. Do not install dependencies again unless you change the lockfile. ` : '';
   return `Implement ${work.key}: ${work.title}. The Graphyard worker launcher has claimed this item under principal ${profile.principal}, created its assigned worktree, and placed this agent under lease supervision. Run node ${config.cliPath} status ${work.key} before editing. Work only in the current assigned worktree, satisfy the stated criteria without weakening them, open a PR, and submit it with complete as your last action: complete ends your lease and the supervisor then stops this session, which is the attempt ending, not lease loss. Stop immediately if the supervisor reports lease loss before you have submitted. Do not submit trusted evidence or merge the PR; the control plane requests the independent review and the proof producers for your exact head as soon as it passes the build gate, so ask nobody to launch them. `
+    + installed
     + autonomousSession('implement the item, open the pull request and submit it with complete', `record a blocker with node ${config.cliPath} blocked ${work.key} ${epoch} REASON`);
 }
 
@@ -1770,7 +2032,10 @@ export async function prepareWorkerLaunch(root: string, key: string, profileName
     if (claim.lease?.owner !== profile.principal || claimedEpoch === null) throw new Error('Worker launcher acquired an unexpected assignment identity');
     const workspace = JSON.parse(String(run(process.execPath, [config.cliPath, 'worktree', key, String(claimedEpoch), base], { cwd: root, env, stdio: ['ignore', 'pipe', 'inherit'] })));
     if (!workspace.path || !isAbsolute(workspace.path)) throw new Error('Worker launcher did not receive an assigned workspace');
-    return { epoch: claimedEpoch, path: workspace.path, base, ...(typeof workspace.branch === 'string' && workspace.branch ? { branch: workspace.branch } : {}) };
+    // The checkout is the attempt's; the dependency tree does not have to be. Sharing is a
+    // convenience for the session that follows, so a refusal is reported, never fatal.
+    const dependencies: SharedDependencies = await shareDependencies(root, workspace.path).catch(error => ({ shared: [], skipped: [{ name: dependencyDirectories[0], reason: failureText(error) }] }));
+    return { epoch: claimedEpoch, path: workspace.path, base, dependencies, ...(typeof workspace.branch === 'string' && workspace.branch ? { branch: workspace.branch } : {}) };
   } catch (error) {
     if (claimedEpoch !== null) try { run(process.execPath, [config.cliPath, 'release', key, String(claimedEpoch)], { cwd: root, env }); }
     catch { throw new Error(`${error instanceof Error ? error.message : 'Workspace preparation failed'}; Graphyard could not release epoch ${claimedEpoch}`); }

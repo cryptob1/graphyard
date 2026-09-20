@@ -148,23 +148,27 @@ Each cycle:
    ends the worker's lease, so a submitted item's session is closed here on the next cycle; a
    lease that lapses after submission, under a `blocked` report, or after your stopped-worker
    attestation is history (`lease.expired` with its cause), never an incident;
-2. **dispatches claimable work** to a healthy worker profile, through the same launcher
+2. **reclaims the disk finished assignments hold** — the dependency directories of worktrees whose
+   assignment is delivered, superseded by a later epoch, or untouched beyond the idle bound are
+   removed, before anything in the cycle asks the host for more room, on a ten-minute cadence or
+   every cycle while free space is below the threshold (see [worktree disk](#worktree-disk));
+3. **dispatches claimable work** to a healthy worker profile, through the same launcher
    `master dispatch` uses: the worker claims under its own identity and the loop holds no lease.
    Ready items are offered [smallest planned scope first](#conflict-avoidance) within a priority,
    and an item whose `plannedFiles` overlap a claimed or unmerged item is held rather than
    dispatched — the loop never overrides a hold; only `master dispatch --allow-overlap` does;
-3. **shepherds reviews and proofs** — the reviewer and producer sessions the control plane
+4. **shepherds reviews and proofs** — the reviewer and producer sessions the control plane
    requested for each exact head are launched on the dispatcher's own cadence (see
    [automatic dispatch at submit](#automatic-dispatch-at-submit)), a request goes to the trusted
    producer workflow when automatable proof is missing and one is configured, and anything that needs
    a two-party decision is surfaced in `master status` with its owner and next command;
-4. **invokes only the guarded merge**, when automatic merging is enabled (with it disabled, the
+5. **invokes only the guarded merge**, when automatic merging is enabled (with it disabled, the
    visible session merges each candidate the approver agent approved);
-5. **verifies the deployed SHA** against what Graphyard recorded as delivered, and for a delivery
+6. **verifies the deployed SHA** against what Graphyard recorded as delivered, and for a delivery
    whose policy sets `deploySmoke` records that observation on the item, requests the trusted smoke
    workflow once per deployed commit, and escalates a failed verdict with rollback guidance (see the
    [post-deployment smoke proof](github.md#post-deployment-smoke-proof));
-6. **records stage p50/p90** for every open stage, delivered lead time, creation-to-deployment
+7. **records stage p50/p90** for every open stage, delivered lead time, creation-to-deployment
    latency, and merge-to-smoke-verdict post-deploy time with the failure count.
 
 Every action lands in `master status` under `daemon`: the current cycle, its measurements, the
@@ -193,6 +197,70 @@ under a `/tmp` this process cannot see — is compared by its registered path an
 loop. The example systemd unit does not set `PrivateTmp`: producer sessions run in Herdr, outside
 the unit, and create their detached proof worktrees under the shared `/tmp`, which a private one
 would hide from the loop.
+
+### Worktree disk
+
+Every attempt and every rework checks the repository out again, and a checkout that installs its own
+dependencies costs about as much as the source it builds. Left alone that is unbounded: a long
+running installation ends with hundreds of worktrees, tens of gigabytes of `node_modules`, and a
+host that starts refusing writes in the middle of a cycle — reported, until the loop knew better, as
+whatever command happened to notice first.
+
+Two halves keep it bounded, and neither needs a decision from anyone.
+
+**One install, shared.** When the launcher prepares an assignment worktree it settles the
+dependency question before the session starts. An assignment worktree lives under the repository, so
+the runtime's ordinary upward lookup already resolves the repository's own install: nothing is
+created, and the worker's prompt says the install is there, naming it, so the attempt does not spend
+its first minutes and another gigabyte installing what it already has. A worktree outside the
+repository — a detached proof worktree, a checkout on another volume — resolves nothing on its own,
+and is given a mirror of that install instead: a real directory of links, one per installed package,
+so the repository's `node_modules/` ignore rule still covers it and the checkout stays clean.
+
+Either way the install has to answer for that exact head: the same `package-lock.json`, byte for
+byte. A head whose lockfile differs installs its own dependencies, and a worktree that already has
+an install of its own is reported and left exactly as it is. The attempt still starts from a clean
+checkout of its exact head — sharing never shows up as a change to it.
+
+**Finished assignments give theirs back.** The loop removes the dependency directories of
+worktrees whose assignment is finished. Scanning the worktree directory is not free, so it keeps to
+a ten-minute cadence — except while the last scan found free space below the threshold, when it
+reclaims on every cycle instead:
+
+| Disposition | Meaning |
+| --- | --- |
+| `delivered` | the item is Done; the attempt that used the worktree is over |
+| `superseded` | the worktree belongs to an epoch a later attempt replaced |
+| `idle` | nothing in the working tree has changed for longer than the idle bound |
+| `live` | the registered epoch still holds the lease — never touched, however idle it looks |
+| `recent` | changed inside the idle bound — left for the session that may still be using it |
+
+It removes dependency directories and nothing else. Checkouts keep their files and their Git
+metadata, branches keep every commit they hold — pushed or not — and Graphyard's registered
+workspace records are never written, so a reclaimed worktree is one `npm install` away from
+working and no assignment loses history the control plane still refers to. What it removed, how
+much room that returned, and what it kept are in `master status` under `daemon.reclaim`.
+
+**Before the volume fills.** `master status` reports the host's free space under `disk`, with the
+worktrees a reclaim would empty. Below the configured threshold it raises an attention item owned by
+the master, naming the free space, what a reclaim would return and how to get more of it, while
+writes still succeed. A write that does fail for want of room — a full volume or an exhausted user
+quota, reported by the kernel or only in a command's own output (`pwd: write error: Disk quota
+exceeded`) — is named as exactly that, with the same guidance, rather than left as an unexplained
+command error.
+
+A running loop is already reclaiming, so the lever is `run.reclaimIdleHours`: lowering it makes more
+worktrees disposable on the next cycle. With no loop running, `master run --once` reclaims and
+cycles once. Room the reclaimer cannot return is a host that needs fewer concurrent assignments or a
+larger volume, and `master status` shows which worktrees it kept and why.
+
+Both bounds live in `.graphyard/master.json` under `run`, and a running loop adopts a change on its
+next cycle:
+
+| Setting | Meaning |
+| --- | --- |
+| `run.reclaimIdleHours` | How long a worktree may sit untouched before its dependency directories count as disposable, 0.25–720; default 3 |
+| `run.diskThresholdGb` | Free space below which `master status` raises disk pressure, 0.1–10000; default 10 |
 
 ### What the loop will not do
 
@@ -733,7 +801,7 @@ The master clears blockers and adds requirements as its operator-agent identity;
 | `master init --token-stdin [--browser-profile PROFILE]` | Install the operating mode; name the operator's browser profile |
 | `master environments [--create KINDS] [--apply]` | Discover or create agent environments, report login and quota, generate profiles from the logged-in ones |
 | `master start KIND` | Launch the visible master session with its harness rules |
-| `master status` | Work truth, session health, reviews, queue, `schedule` (dispatch order, overlap holds, high-conflict scopes), per-candidate `conflicts`, per-row `dispatch` (requested reviews and producers), and `administration` (recent browser actions, pending sudo code) |
+| `master status` | Work truth, session health, reviews, queue, `schedule` (dispatch order, overlap holds, high-conflict scopes), per-candidate `conflicts`, per-row `dispatch` (requested reviews and producers), `disk` (free space and what a reclaim would return), and `administration` (recent browser actions, pending sudo code) |
 | `master dispatch GY-N PROFILE [--allow-overlap]` | Invite a worker to claim ready work; `--allow-overlap` dispatches over a planned-file overlap hold |
 | `master producer add FILE` | Add a proof-producer launch profile with its own producer credential |
 | `master producer replace FILE` | Replace the producer profile of the same name, verified like `add` |
@@ -755,4 +823,4 @@ The master clears blockers and adds requirements as its operator-agent identity;
 | `master approve GY-N DECISION REASON` | Approve, from the approver session only |
 | `master principals [--apply]` | Preview or apply an agent-principal roster rotation that keeps every live principal |
 | `master restart` | Stop this host's durable loop and start it again detached |
-| `master run [--once]` | The durable coordination loop, with the dispatcher that launches requested reviews and producers |
+| `master run [--once]` | The durable coordination loop, with the dispatcher that launches requested reviews and producers; its cycle also reclaims [worktree disk](#worktree-disk) |
