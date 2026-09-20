@@ -394,9 +394,13 @@ token; a producer session completes when every proof of its group has a trusted 
 one failed) and expires after `producerTimeoutMinutes`. Either is recorded as `failed` when
 Herdr reports it finished, gone, or blocked on a prompt for five minutes without its verdict or
 evidence — the resolution says which, and a blocked one says it ended waiting on input. A
-session whose head the control plane cancelled is closed on the next tick with its token
-withdrawn and the reason on the record — a head change cancels the in-flight sessions for the
-old head.
+reviewer session is prompted once, in place, the first time it is seen that way: the loop tells
+it to post the verdict it already judged, so a session that stopped short of posting usually
+answers the prompt instead of costing a relaunch, and the five minutes run from that first
+sight. The master never sends that prompt by hand. A session whose head the control plane
+cancelled is closed on the next tick with its token withdrawn and the reason on the record — a
+head change cancels the in-flight sessions for the old head, and a pending record for such a
+head never blocks the launch for the new one.
 
 **A failed or expired session is relaunched for the same request.** It does not strand the
 request until the head changes: the loop launches the request again as its next `attempt`
@@ -619,10 +623,13 @@ Templates: [Claude](../examples/master/claude-reviewer.json), [Cursor](../exampl
 1. verifies the exact current candidate — submitted, independently observed within the last two minutes, open, not a draft, not awaiting rework, and on a policy that expects a GitHub verdict;
 2. mints an installation token scoped to this repository, to read and review only, valid for at most an hour, and refuses a token that could write code;
 3. writes that token to a private `GH_CONFIG_DIR` outside the repository, never to a command line;
-4. launches the reviewer profile in its own Herdr tab with a read-only prompt naming the exact head, base, and policy revision, and the commit-bound command that posts the verdict;
-5. records the request in `.graphyard/reviews.json`.
+4. cancels any pending record of the same item whose head, base, or policy revision the candidate has superseded — a session for a head that no longer exists decides nothing, so it never blocks the current head's review. A pending record for the *exact* current candidate still refuses the launch: one live session per candidate;
+5. launches the reviewer profile in its own Herdr tab with a read-only prompt naming the exact head, base, and policy revision, and the commit-bound command that posts the verdict. Posting that verdict is granted to the reviewer role — the launch allows exactly that one call and the prompt says so — so the session never has to ask for it;
+6. records the request in `.graphyard/reviews.json`.
 
-`master status` reconciles pending requests: when the reviewer identity posts an `APPROVED` or `CHANGES_REQUESTED` review on that exact commit, Graphyard closes the session, removes its credential directory, and moves the record to completed. A verdict on another commit, from another identity, or a bare comment settles nothing. An unanswered request expires with its token. If Herdr cannot confirm the pane is gone, the record stays pending with the reason attached rather than claiming the credential was withdrawn.
+`master status` reconciles pending requests: when the reviewer identity posts an `APPROVED` or `CHANGES_REQUESTED` review on that exact commit, Graphyard closes the session, removes its credential directory, and moves the record to completed — whether the verdict came on the first attempt or after the loop's retry prompt. A verdict on another commit, from another identity, or a bare comment settles nothing. An unanswered request expires with its token. A session that stopped without posting is prompted once, by the dispatch loop itself, to post the verdict it already judged, through the same [confirmed delivery](#confirmed-prompt-delivery) a launch uses; one still silent after the five-minute grace is recorded as failed and the request relaunched as its next attempt (see [automatic dispatch at submit](#automatic-dispatch-at-submit)). No master ever sends that retry by hand, and no master ever edits the ledger to unstick a record.
+
+Settling a record always withdraws its credential: the session directory is removed even when Herdr could not confirm the pane is gone, because nothing revisits a settled record, so a token left there would sit on disk until it expired on its own. What an unconfirmed pane costs instead is the record's outcome. A verdict, and a superseded head, settle the record regardless — GitHub has already proven the one, and the candidate has already replaced the other — with the close failure kept on the record and shown as `attention` in `master status`. A session that merely failed or expired, which has proven nothing, stays pending with the reason attached, so the next reconcile retries the close.
 
 A reviewer session holds no Graphyard credential and no lease. Its verdict is an ordinary GitHub review: Graphyard's review gate still requires an approval of the current head from someone other than the author, and the merge gate still rechecks everything.
 

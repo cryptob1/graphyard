@@ -251,7 +251,7 @@ export async function reconcileProducers(root: string, config: MasterConfig, wor
     if (!closeFailure) {
       // The session is gone, so its checkout goes with it — whatever the outcome. One that cannot
       // be removed is said so on the record and taken back by the next reclaim pass.
-      const failure = await settleCheckout(root, config, record.checkout);
+      const failure = await settleCheckout(root, record.checkout);
       if (failure) record.checkoutFailure = failure; else delete record.checkoutFailure;
       record.state = next.state; record.resolution = next.resolution; record.closedAt = now.toISOString();
     }

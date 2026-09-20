@@ -1480,7 +1480,7 @@ export async function allocateManagedCheckout(root: string, config: MasterConfig
   return checkout;
 }
 /** Remove a settled session's checkout; the reason when it could not be, never a throw. */
-export async function settleCheckout(root: string, config: MasterConfig, directory: string | undefined, run?: (command: string, args: string[]) => string): Promise<string | null> {
+export async function settleCheckout(root: string, directory: string | undefined, run?: (command: string, args: string[]) => string): Promise<string | null> {
   if (!directory) return null;
   try { await removeSessionCheckout(root, dirname(directory), directory, run); return null; }
   catch (error) { return writeFailure(error, 'Removing the ephemeral checkout', directory).message.slice(0, 500); }
