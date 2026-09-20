@@ -106,9 +106,11 @@ A launch is recorded only once its runtime visibly accepted the prompt: Herdr su
 ## Durable loop
 
 A chat session is a poor coordinator. Its transcript grows without bound, it dies with its
-provider's credits, and recovering it needs a human to hand the role to another session. The
-deterministic part of coordination does not need a language model at all, so run it as a supervised
-process:
+provider's credits, and recovering it needs a human to hand the role to another session. A pipeline
+that waits for one is worse: measured over the eleven deliveries of 2026-09-19/20, 95% of the
+create→merge time had no event anywhere in the system, and work resumed within ninety seconds every
+time the master session came back. The deterministic part of coordination does not need a language
+model at all, so run it as a supervised process, and let it decide the routine cases itself:
 
 ```sh
 node "$GRAPHYARD_CLI" master run              # cycle until stopped
@@ -152,27 +154,110 @@ Each cycle:
    assignment is delivered, superseded by a later epoch, or untouched beyond the idle bound are
    removed, before anything in the cycle asks the host for more room, on a ten-minute cadence or
    every cycle while free space is below the threshold (see [worktree disk](#worktree-disk));
-3. **dispatches claimable work** to a healthy worker profile, through the same launcher
+3. **reclaims the items whose sessions died** — a supervised launch fences its worker in a scope
+   unit, and that fence outlives the session, so a dead worker's item cannot be claimed again until
+   somebody settles the quarantine. Once the lease has lapsed and the grace window has run, the
+   loop verifies on the registered host that the supervisor is gone — the same probe
+   `master settle-containment` runs, re-evaluated by the control plane — and settles it, so the
+   next step can offer the item again. A signal it cannot verify is an escalation, never a
+   settlement (see [containment quarantines](#containment-quarantines));
+4. **dispatches claimable work** to a healthy worker profile, through the same launcher
    `master dispatch` uses: the worker claims under its own identity and the loop holds no lease.
    Ready items are offered [smallest planned scope first](#conflict-avoidance) within a priority,
    and an item whose `plannedFiles` overlap a claimed or unmerged item is held rather than
    dispatched — the loop never overrides a hold; only `master dispatch --allow-overlap` does;
-4. **shepherds reviews and proofs** — the reviewer and producer sessions the control plane
+5. **requests the routine decisions** and launches an approver session for each — a standing
+   verdict, a base branch Graphyard could not merge in, a delivered item still fenced, and the
+   merge itself where automatic merging is off (see [unattended decisions](#unattended-decisions));
+6. **applies open scope requests** — a worker asking for a file outside `plannedFiles` keeps its
+   lease while it waits, so the loop applies the purely additive revision rather than letting the
+   attempt spend its remaining time on a request nobody has read;
+7. **shepherds reviews and proofs** — the reviewer and producer sessions the control plane
    requested for each exact head are launched on the dispatcher's own cadence (see
    [automatic dispatch at submit](#automatic-dispatch-at-submit)), a request goes to the trusted
    producer workflow when automatable proof is missing and one is configured, and anything that needs
-   a two-party decision is surfaced in `master status` with its owner and next command;
-5. **invokes only the guarded merge**, when automatic merging is enabled (with it disabled, the
-   visible session merges each candidate the approver agent approved);
-6. **verifies the deployed SHA** against what Graphyard recorded as delivered, and for a delivery
+   a judgement no rule covers is surfaced in `master status` with its owner and next command;
+8. **invokes only the guarded merge** for a candidate whose gates are all green. With automatic
+   merging off it merges exactly the candidate an approver agent approved, and step 5 is what asked
+   for that approval;
+9. **verifies the deployed SHA** against what Graphyard recorded as delivered, and for a delivery
    whose policy sets `deploySmoke` records that observation on the item, requests the trusted smoke
    workflow once per deployed commit, and escalates a failed verdict with rollback guidance (see the
    [post-deployment smoke proof](github.md#post-deployment-smoke-proof));
-7. **records stage p50/p90** for every open stage, delivered lead time, creation-to-deployment
-   latency, and merge-to-smoke-verdict post-deploy time with the failure count.
+10. **records what it could act on, what it did, and how long each passage took** — stage p50/p90
+    for every open stage, delivered lead time, creation-to-deployment latency, merge-to-smoke-verdict
+    post-deploy time with the failure count, and the four delivery latencies of
+    [liveness and silence](#liveness-and-silence).
 
 Every action lands in `master status` under `daemon`: the current cycle, its measurements, the
 deployment observation, per-profile health, recent actions, and anything still unresolved.
+
+The configured interval is the idle cadence, not a bound on how long ready work may sit: while
+anything is actionable the loop comes back within thirty seconds, whatever `run.intervalSeconds`
+says, so a long interval cannot push a claim past its dispatch budget.
+
+### Unattended decisions
+
+A verdict lands, a base conflicts, a session dies, a worker asks for one more file. Each has one
+correct answer, and each used to wait for a master session to notice — which is where the idle time
+went. The loop makes them, with the master's own two identities and no shortcut through the
+separation the server enforces:
+
+| What the loop sees | What it does | Who applies it |
+| --- | --- | --- |
+| A change request standing against the exact current head, or an agent reviewer that did not approve it | Requests `rework` and launches the approver session for it, then dispatches the next attempt | The approver agent |
+| A base branch the control plane could not merge into the candidate | Requests `rework` naming the conflict — only a fresh attempt can resolve it | The approver agent |
+| A delivered item still fenced by a quarantine whose supervisor is gone | Requests `recover` | The approver agent |
+| Every gate green while automatic merging is off | Requests `merge` for that exact candidate, then merges once it is approved | The approver agent |
+| A lapsed quarantine this host verifies dead | Settles it with the coordinator credential, as `master settle-containment` does | The loop |
+| An open scope request from the lease that raised it | Adds the requested paths to `plannedFiles` — purely additive intent the master applies alone | The loop |
+
+Rework and recovery carry the requester's attestation that the previous worker is stopped, so the
+loop requests neither while a lease is live or a fence still holds. It never approves what it
+requested: the approver session judges from its own identity, and the server refuses self-approval,
+an approver that held an assignment on the item, and one that produced the evidence the decision
+rests on. A loop with no operator-agent identity provisioned (`master autonomy --admin-token-stdin
+--apply`) changes nothing about the rest of the cycle: each routine decision becomes an escalation
+in `master status` naming the two commands a master session runs instead.
+
+Everything else is still a judgement: how to route a novel failure, whether a requirement should
+change, what a finding means. Those reach `master status` with their owner and next command.
+
+### Liveness and silence
+
+Two questions the installation could not answer before: is the loop cycling, and is anything
+waiting on it?
+
+**The loop's own liveness** comes first on the attention list, because a coordinator that stopped is
+why nothing else on that list is moving. `master status` reports `daemon.liveness` as `running`,
+`stalled` (no completed cycle for more than two intervals) or `absent` (no lock, or a lock whose
+process is gone on this host), each with the command that restarts it — `master restart` — and a
+supervised deployment needs no command at all: the packaged unit sets `Restart=always` with no start
+limit, and the loop sends its supervisor a keep-alive after every completed cycle, so a cycle that
+hangs is restarted as surely as a process that exits. `WatchdogSec` must stay longer than two cycle
+intervals; a window that would restart a healthy loop mid-cycle is recorded by name in
+`master status` rather than obeyed.
+
+**Silence** is measured against what the loop could act on. Every cycle records both halves — the
+actionable inventory (claimable work, a routine decision, a scope request, a settleable quarantine,
+a mergeable candidate, a missing proof, a pending base refresh, a delivery awaiting its deployment
+or smoke) and the actions it took — and each subject's wait restarts when the loop acts on it. The
+longest current wait is `daemon.silence.longestIdleMs`, with the subject behind it; past twenty
+minutes it becomes an attention item naming what nothing has acted on. An item nobody is waiting on
+is not silence: a claimed attempt under way asks nothing of the loop.
+
+**The delivery budgets** are measured from what the loop itself observed, cycle by cycle, so no
+figure can disagree with the state it acted on. `daemon.budget` reports each one with `met` and the
+reasons behind it; `met` is null while fewer than ten deliveries are measured, and a per-candidate
+bound is judged on every sample:
+
+| Budget | Bound |
+| --- | --- |
+| ready → claim | p90 at or under 2 minutes |
+| ready → first push | p90 at or under 15 minutes |
+| approval → merge | p90 at or under 10 minutes over at least ten deliveries |
+| mergeable → merge | 5 minutes, per candidate |
+| standing verdict → rework requested | 5 minutes, per candidate |
 
 ### Restartability
 
@@ -264,20 +349,25 @@ next cycle:
 
 ### What the loop will not do
 
-The daemon holds exactly one credential: the coordinator token. It cannot claim a lease, submit
-evidence, revise requirements, release backlog work, or approve a review, and it refuses to start
-if that credential is also allowed to produce evidence. The one fact it writes besides the guarded
-merge is its own deployment observation on a delivered item; the smoke verdict itself comes from
-the workflow's producer, never from the loop. Provider exhaustion, a failing reviewer, a
-missing manual proof, and an unhealthy worker profile are all escalations, never shortcuts. A
-refused merge is the gate working: the loop records the refusal and keeps cycling.
+The loop runs on the coordinator credential, and reads the master's own operator-agent credential
+for exactly the requests in [unattended decisions](#unattended-decisions) — requesting `rework`,
+`recover` and `merge`, and applying an additive scope widening. It never reads the approver's
+credential, never approves a decision (its own least of all), never claims a lease, never submits
+evidence, never rewrites or narrows a requirement, never releases backlog work, and refuses to
+start if its coordinator credential is also allowed to produce evidence. Besides the guarded merge,
+the facts it writes are its own deployment observation on a delivered item and the settlement of a
+quarantine it verified on this host; the smoke verdict itself comes from the workflow's producer.
+Provider exhaustion, a failing reviewer, a missing manual proof, and an unhealthy worker profile
+are all escalations, never shortcuts. A refused merge is the gate working: the loop records the
+refusal and keeps cycling.
 
 An unhealthy profile — an unreadable credential, a name already busy in Herdr, or a recent failed
 launch — is routed around for a ten-minute cool-off while other profiles keep receiving work.
 
-Judgment calls stay with the visible master session, and a two-party decision with the approver
-agent: reading a worker's report, deciding whether a review finding needs rework, choosing how to
-route a novel failure. The loop keeps the mechanical steps running underneath them.
+Judgement no rule covers belongs to the visible master session, and a decision that weakens
+anything belongs to it and the approver agent together: reading a worker's report, rewriting a
+requirement, choosing how to route a novel failure. The loop keeps everything mechanical running
+underneath them, and asks for nothing while it can decide.
 
 ## Automatic dispatch at submit
 

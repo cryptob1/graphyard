@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { probeCandidateConflicts } from '../conflicts.js';
 import { agentOwner, agentToken, assessContainment, buildMasterStatus, diskPressure, diskPressureAttention, diskThresholdBytes, freeBytes, herdrWorkspaceHealth, humanOwner, inspectWorkerCredentials, inventoryWorktrees, mergeProtocolSkew, observeHerdrAgents, planWorktreeReclaim, reclaimIdleMs, snapshotWithClock, worktreesDirectory, type AttentionItem, type MasterConfig } from '../master.js';
 import type { Work } from '../model.js';
-import { daemonSummary, readDaemonState, type DaemonState } from '../master-daemon.js';
+import { daemonSummary, loopAttention, readDaemonState, type DaemonState } from '../master-daemon.js';
 import { readReviewLedger, reconcileReviews, reviewerBindingHealth, summarizeReviews } from '../reviewer.js';
 import { readProducerLedger, reconcileProducers, sessionRetries, summarizeProducers } from '../producer.js';
 import { dispatchSummary, readDispatchCursor } from '../auto-dispatch.js';
@@ -84,7 +84,14 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
   const disk = diskPressure(worktrees, await freeBytes(worktrees), diskThresholdBytes(master), reclaimPlan);
   const diskAttention = diskPressureAttention(disk);
   const daemonState = await readDaemonState(root, master).catch(error => ({ error: error instanceof Error ? error.message : 'Master daemon state is unreadable' }));
-  const daemon = 'error' in daemonState ? { running: false, error: daemonState.error } : daemonSummary(daemonState, Date.now(), master.run.intervalSeconds * 1000);
+  const intervalMs = master.run.intervalSeconds * 1000;
+  const cycling = 'error' in daemonState ? null : daemonSummary(daemonState, Date.now(), intervalMs, master.hostId);
+  const daemon = cycling ?? { running: false, error: (daemonState as { error: string }).error };
+  // The loop's own health comes before every work item: a coordinator that is absent or stalled is
+  // why nothing else on this list is moving, and no other attention item would say so.
+  const loopItems: AttentionItem[] = cycling
+    ? loopAttention({ liveness: cycling.liveness, silence: cycling.silence, budget: cycling.budget })
+    : [{ subject: 'loop', text: `The master loop's cursor cannot be read, so whether it is cycling is unknown: ${(daemonState as { error: string }).error}`, ...agentOwner('master', 'graphyard master restart (a supervised deployment restarts it on its own: systemctl --user restart graphyard-master)') }];
   // Browser administration is reported beside the work it unblocks: a pending sudo code is
   // the one thing the operator must act on, and the recent ledger entries say who changed what.
   const administration = { browser: master.browser ? { profile: master.browser.profile } : null, ...summarizeAdministration((await readAdministrationLedger(root)).entries, await readSudoState(root)) };
@@ -93,14 +100,14 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
   // the one step no agent may take for them; a timed-out one is the master's to rerun.
   const sudo = administration.sudo;
   const scopeRequests = scopeRequestAttention(snapshot);
-  const attentionItems = [...diskAttention, ...scopeRequests, ...(sudo ? [...status.attentionItems, { subject: 'installation', text: sudo.instruction,
+  const attentionItems = [...loopItems, ...diskAttention, ...scopeRequests, ...(sudo ? [...status.attentionItems, { subject: 'installation', text: sudo.instruction,
     ...(Date.parse(sudo.deadline) <= Date.now() ? agentOwner('master', `graphyard master browser ${sudo.flow}`) : humanOwner('issuing credentials to people', sudo.instruction)) }] : [...status.attentionItems])];
   // Setup that stops every launch is the master's to repair.
   for (const text of reviewerBinding.attention) attentionItems.push({ subject: 'setup', text, ...agentOwner('master', 'graphyard master reviewer setup (or graphyard master reviewer bind FILE --key-stdin) to bind the reviewer App') });
   if (workspace.exists === false) attentionItems.push({ subject: 'setup', text: workspace.reason!, ...agentOwner('master', 'Set herdrWorkspace in .graphyard/master.json to a workspace herdr workspace list shows; master run adopts it on its next tick') });
   const decisions = await terminalDecisions(masterApi, snapshot.work);
   return { ...status, attentionItems: [...attentionItems, ...decisions.attentionItems],
-    counts: { ...status.counts, attention: status.counts.attention + diskAttention.length + scopeRequests.filter(item => !(status.work as { key: string; attention: string | null }[]).find(row => row.key === item.subject)?.attention).length },
+    counts: { ...status.counts, attention: status.counts.attention + loopItems.length + diskAttention.length + scopeRequests.filter(item => !(status.work as { key: string; attention: string | null }[]).find(row => row.key === item.subject)?.attention).length },
     terminalDecisions: decisions.listed,
     autoMerge: master.autoMerge, mergeApproval: master.autoMerge ? 'routine merges permitted after gates pass' : 'each merge needs an approved merge decision: graphyard master decide GY-N merge REASON, approved by the approver agent',
     versionSkew: mergeProtocolSkew(coordinator, cli), cli,
