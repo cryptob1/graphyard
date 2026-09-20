@@ -17,6 +17,7 @@ import { probeSupervisorAbsence } from './containment-probe.js';
 import { predictQueue, type QueuePlacement } from './merge-queue.js';
 import { MERGE_PROTOCOL } from './protocol-version.js';
 import { attentionLines, type ProductionReport } from './production-watch.js';
+import { pipelineSpeed, pipelineSpeedSummary } from './pipeline-speed.js';
 
 const safeEnvironment = z.record(
   z.string().regex(/^[A-Z_][A-Z0-9_]*$/)
@@ -1585,12 +1586,17 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
       : work.blocker || dwellMs > 3_600_000 ? [first?.reasons[0] ?? `Work has remained at ${work.stage} for more than one hour`, 'gate'] : [null, null];
     const attentionOwner = cause ? workAttentionOwner(work, cause) : null;
     return { key: work.key, title: work.title, stage: work.stage, owner: active ? work.lease!.owner : null, profile: profile?.name ?? null, session: session?.state ?? null, refusal: first ? { gate: first.name, reason: first.reasons[0] } : null, mergeable, review, dispatch, proofGaps: gaps, containment: quarantine, attention, attentionOwner, queue: placement ? queueRows.find(row => row.key === work.key) ?? null : null,
-      scope: scopeBreadth(work.plannedFiles), overlap: held ? { held: true, ahead: held.ahead, reason: held.reason } : { held: false, ahead: [], reason: null }, conflicts };
+      scope: scopeBreadth(work.plannedFiles), overlap: held ? { held: true, ahead: held.ahead, reason: held.reason } : { held: false, ahead: [], reason: null }, conflicts,
+      // Execution versus wait so far, rework rounds and hand-offs, from the item's own timeline.
+      speed: pipelineSpeed(work, now) };
   });
   const delivered = snapshot.work.filter(work => work.stage === 'done' && work.delivery && deploySmokeRequired(work.policy)).map(work => deliveredRow(work, now, baseBranch));
   // Merge-to-production over every delivery with an observed deployment, whether or not its
   // policy asked for a smoke proof, so the periodic measurement reads one number for the repository.
   const mergeToProduction = latencyPercentiles(snapshot.work.map(work => mergeToProductionMs(work)).filter((value): value is number => value !== null));
+  // Submit→merge p50/p90 over every delivery with a recorded submission, judged against the
+  // pipeline-speed target; the periodic measurement records this beside the production latency.
+  const speed = pipelineSpeedSummary(snapshot.work, now);
   return { observedAt: snapshot.now,
     counts: { open: rows.length, ready: rows.filter(row => row.stage === 'ready').length, active: rows.filter(row => row.owner).length, attention: rows.filter(row => row.attention).length + installation.attention.length, proofAuthorityGaps: rows.filter(row => row.proofGaps.length).length, mergeable: rows.filter(row => row.mergeable).length, reviewsPending: reviews.pending.length, producersPending: sessions.producers.pending.length,
       dispatchRequested: rows.reduce((total, row) => total + (row.dispatch ? (row.dispatch.review ? 1 : 0) + row.dispatch.producers.length : 0), 0), dispatchRunning: rows.reduce((total, row) => total + (row.dispatch ? [row.dispatch.review, ...row.dispatch.producers].filter(request => request?.session?.state === 'pending').length : 0), 0), reviewFailover: rows.filter(row => row.review?.failedOver.length).length, queued: placements.length,
@@ -1598,7 +1604,7 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
       awaitingSmoke: delivered.filter(row => row.state === 'awaiting-deployment' || row.state === 'awaiting-smoke').length, postDeployFailures: delivered.filter(row => row.state === 'delivered-with-failure').length },
     // Every attention item with the role that resolves it and the next command, work items first.
     attentionItems: [...rows.flatMap(row => row.attention && row.attentionOwner ? [{ subject: row.key, text: row.attention, ...row.attentionOwner }] : []), ...installation.attentionItems] as AttentionItem[],
-    workers: workerSessions, reviews, producers: sessions.producers, work: rows, queue: queueRows, delivered, latency: { mergeToProduction }, controlPlane: installation,
+    workers: workerSessions, reviews, producers: sessions.producers, work: rows, queue: queueRows, delivered, latency: { mergeToProduction }, speed, controlPlane: installation,
     schedule: scheduling, conflicts: { available: candidateConflicts.available, reason: candidateConflicts.reason, ...sequenceAdvice(rows.filter(row => row.conflicts).map(row => ({ key: row.key, conflicts: row.conflicts!.candidates }))) } };
 }
 
