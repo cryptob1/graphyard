@@ -501,7 +501,9 @@ test('integration:action-queue-leases — a handler that outlives its claim hold
   // The row as the control plane wrote it, back on offer with this test's own attempt count.
   Object.assign(document.actionQueue!.actions[0], { state: 'pending', claim: null, attempts: 0, history: [] });
   const fleet = [document];
-  const leaseMs = 150;
+  // Scaled down so the case is quick, but wide enough that a loaded runner pausing between
+  // renewals does not decide the outcome: three renewals fit inside every lease.
+  const leaseMs = 300;
   let renewals = 0;
   const holding: ExecutorEffects = {
     claim: async request => ({ action: claimAction(fleet, { id: request.executor, host: request.host, principal: executorA.id }, new Date(), { kinds: request.kinds, leaseMs })?.row ?? null }),
@@ -509,7 +511,7 @@ test('integration:action-queue-leases — a handler that outlives its claim hold
     settle: async (action, result, reason) => settleAction(document, action.id, { executor: 'slow-1', principal: executorA.id }, result, reason, new Date()),
     handlers: { dispatch: async () => { await delay(6 * leaseMs); return 'launched a worker session after a long wait'; } },
   };
-  const running = runExecutorTick({ id: 'slow-1', host: 'host-9' }, holding, Date.now, { renewIntervalMs: Math.floor(leaseMs / 3) });
+  const running = runExecutorTick({ id: 'slow-1', host: 'host-9' }, holding, Date.now, { renewIntervalMs: Math.floor(leaseMs / 4) });
   await delay(3 * leaseMs);
   assert.equal(claimAction(fleet, { id: 'thief', host: 'host-2', principal: executorB.id }, new Date(), { kinds: ['dispatch'] }), null,
     'the row is not offered to a second executor while the first is still inside its handler');
