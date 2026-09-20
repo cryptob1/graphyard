@@ -390,9 +390,12 @@ POST /api/work/GY-N/request
 {"type": "scope-request", "epoch": 3, "paths": ["docs/"], "reason": "the guide describes this contract"}
 ```
 
-Each type names exactly one decider: a `scope-request` is the additive planned-files widening rule
-the control plane applies; a `decision` is an independent approver agent; a `blocker` is a tracked
-follow-up item; a `note` is recorded and decided by nobody; an `escalation` is an approver agent —
+Each type names exactly one decider: a `scope-request` is the additive planned-files widening rule,
+which the control plane applies in the same transaction the request is recorded in — the same
+verdict [the scope requests the loop decides](#scope-requests-the-loop-decides) computes, so the ask is answered
+before the session has finished exiting, and a refusal becomes the item's blocker; a `decision` is
+an independent approver agent; a `blocker` is a tracked follow-up item; a `note` is recorded and
+decided by nobody; an `escalation` is an approver agent —
 unless the request names one of the three human-only decisions (goals and priorities, spending
 money or opening third-party accounts, issuing credentials to people), which routes to the
 operator whatever its type. `master status` lists every open request with its decider, the command
