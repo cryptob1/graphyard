@@ -13,7 +13,7 @@ export default function Sidebar({ entries, dashboard }: { entries: (Entry | null
   const { view, setView, connected, status, signOut } = dashboard;
   return <aside className="sidebar"><div className="sidebar-inner">
     <div className="brand"><img className="mark" src="/graphyard-symbol.svg" alt="" width="32" height="32"/> graphyard</div>
-    <nav className="primary-nav" aria-label="Primary">{entries.map(entry => entry && <button key={entry.id} className={viewFor(view).section === entry.id ? 'nav active' : 'nav'} aria-current={viewFor(view).section === entry.id ? 'page' : undefined} onClick={() => setView(entry.view.id)}>{entry.icon} <span>{entry.label}</span>{entry.view.count && <small>{entry.view.count(dashboard)}</small>}</button>)}</nav>
+    <nav className="primary-nav" aria-label="Primary">{entries.map(entry => entry && <button key={entry.id} className={viewFor(view).section === entry.id ? 'nav active' : 'nav'} aria-current={viewFor(view).section === entry.id ? 'page' : undefined} onClick={() => setView(entry.view.id)}>{entry.icon} <span>{entry.label}</span></button>)}</nav>
     <div className="sidebar-bottom"><span className={`dot ${connected ? 'green' : ''}`}/><span className="connection">{connected ? 'Connected' : 'Disconnected · data may be stale'}</span><p>{status?.actor?.id} · {status?.actor?.role} <SessionBadge kind={status?.actor?.sessionKind}/></p><a className="docs-link" href="/docs">Documentation ↗</a><button className="text-button" onClick={signOut}>Sign out</button></div>
   </div></aside>;
 }
