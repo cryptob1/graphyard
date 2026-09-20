@@ -170,9 +170,10 @@ Each cycle:
    Ready items are offered [smallest planned scope first](#conflict-avoidance) within a priority,
    and an item whose `plannedFiles` overlap a claimed or unmerged item is held rather than
    dispatched — the loop never overrides a hold; only `master dispatch --allow-overlap` does;
-6. **requests the routine decisions** and launches an approver session for each — a standing
-   verdict, a base branch Graphyard could not merge in, a delivered item still fenced, and the
-   merge itself where automatic merging is off (see [unattended decisions](#unattended-decisions));
+6. **requests the routine decisions**, launches an approver session for each, and looks at every
+   one of them again on every cycle until it is applied — a standing verdict, a base branch
+   Graphyard could not merge in, a delivered item still fenced, and the merge itself where
+   automatic merging is off (see [unattended decisions](#unattended-decisions));
 7. **shepherds reviews and proofs** — the reviewer and producer sessions the control plane
    requested for each exact head are launched on the dispatcher's own cadence (see
    [automatic dispatch at submit](#automatic-dispatch-at-submit)), a request goes to the trusted
@@ -208,16 +209,50 @@ separation the server enforces:
 | --- | --- | --- |
 | A change request standing against the exact current head, or an agent reviewer that did not approve it | Requests `rework` and launches the approver session for it, then dispatches the next attempt | The approver agent |
 | A base branch the control plane could not merge into the candidate | Requests `rework` naming the conflict — only a fresh attempt can resolve it | The approver agent |
-| A delivered item still fenced by a quarantine whose supervisor is gone | Requests `recover` | The approver agent |
+| A delivered item still fenced by a quarantine whose supervisor this host verified gone | Requests `recover` | The approver agent |
 | Every gate green while automatic merging is off | Requests `merge` for that exact candidate, then merges once it is approved | The approver agent |
 | A lapsed quarantine this host verifies dead | Settles it with the coordinator credential, as `master settle-containment` does | The loop |
 | An open scope request from the lease that raised it | Asks the control plane to decide it; a request the item already implies is applied without ending the attempt, anything wider is refused and escalated (see [scope requests the loop decides](#scope-requests-the-loop-decides)) | The control plane |
 
-Rework and recovery carry the requester's attestation that the previous worker is stopped, so the
-loop requests neither while a lease is live or a fence still holds. It never approves what it
-requested: the approver session judges from its own identity, and the server refuses self-approval,
-an approver that held an assignment on the item, and one that produced the evidence the decision
-rests on. A loop with no operator-agent identity provisioned (`master autonomy --admin-token-stdin
+Rework and recovery carry the requester's attestation that the previous worker is stopped, and the
+engine lowers the containment fence on it, so the loop attests only what it verified. It requests
+neither while a lease is live, nor while a fence is inside its grace window. With the lease ended it
+requests one in exactly two cases: no fence stands for the item — the worker's own supervisor
+settled it at exit, or the loop settled it in step 4 — or the fence has lapsed and the same cycle's
+probe on the registered host verified that epoch's supervisor gone. The request's reason states
+which, because the approver cannot verify the host and judges the attestation on what the requester
+says it checked. A lapsed fence the host could not verify withholds the decision: it is escalated
+with the probe's refusals (`decision-withheld` for a delivered item or a fence on another host; the
+step 4 containment escalation otherwise), it stays on the silence measure, and nothing is requested.
+
+It never approves what it requested: the approver session judges from its own identity, and the
+server refuses self-approval, an approver that held an assignment on the item, and one that
+produced the evidence the decision rests on.
+
+**A request is not the end of it.** The approver is a launched session like any other: it can die,
+drop its prompt, hit an account limit, decline, or hang. The loop keeps a watch per requested
+decision (`daemon.approvals` in `master status`) and on every cycle reads the decision back from the
+control plane and the session back from Herdr:
+
+| What it sees | What it does |
+| --- | --- |
+| The decision is `applied` | Closes the approver's finished tab and retires the watch once the item has moved on |
+| Still `requested` (or `approved` but not yet applied) and the session is working, inside ten minutes | Waits |
+| The session is gone, ended `idle`/`done`/`blocked` without approving (a decline is only ever visible this way), or has worked past ten minutes | Closes it and launches a replacement — at most three sessions per decision |
+| The decision ended `failed`, `stale` or `withdrawn`, or the server no longer holds it, and the item still needs it | Requests it again — at most three requests per binding, on the usual widening retry interval |
+| Three sessions spent and still unjudged | Escalates once with the decision, how each session ended, and `master approver GY-N DECISION`; stops spending sessions; leaves the request standing |
+| A `merge` decision standing for an earlier candidate | Withdraws it as its requester — it can never apply, and the server refuses a second request while it stands — then requests one for the current candidate |
+| Herdr or the decision history cannot be read | Concludes nothing this cycle |
+
+Each decision's session has its own name, `graphyard-approver-<key>-<first eight characters of the
+decision id>`, so the finished tab of one decision can never refuse the launch of the next on the
+same item; a session a master started for the same decision with `master approver` is adopted
+rather than doubled. A decision stays on the [silence measure](#liveness-and-silence) from the
+moment the item needs it until it is applied: waiting on an approver is the pipeline waiting on its
+own agent, a replacement session restarts that wait, and a decision nobody judges reaches the
+twenty-minute attention item like any other silence. With automatic merging off the merge wait in
+`daemon.escalations` names the decision and the session it is with, so it is raised again whenever
+either changes. A loop with no operator-agent identity provisioned (`master autonomy --admin-token-stdin
 --apply`) changes nothing about the rest of the cycle: each routine decision becomes an escalation
 in `master status` naming the two commands a master session runs instead.
 
@@ -237,12 +272,18 @@ supervised deployment needs no command at all: the packaged unit sets `Restart=a
 limit, and the loop sends its supervisor a keep-alive after every completed cycle, so a cycle that
 hangs is restarted as surely as a process that exits. `WatchdogSec` must stay longer than two cycle
 intervals; a window that would restart a healthy loop mid-cycle is recorded by name in
-`master status` rather than obeyed.
+`master status` rather than obeyed. The keep-alive is sent with `systemd-notify`, a short-lived
+child the unit admits with `NotifyAccess=all`. From systemd 246 that tool waits until the manager
+has processed the message, so it cannot exit before it is attributed to the unit; on an older
+systemd one can be lost to that race, which is why the packaged window is 180 seconds against a
+cycle of at most thirty — a healthy loop would have to lose six in a row to be restarted.
 
 **Silence** is measured against what the loop could act on. Every cycle records both halves — the
-actionable inventory (claimable work, a routine decision, a scope request, a settleable quarantine,
-a mergeable candidate, a missing proof, a pending base refresh, a delivery awaiting its deployment
-or smoke) and the actions it took — and each subject's wait restarts when the loop acts on it. The
+actionable inventory (claimable work, a routine decision from the moment the item needs it until it
+is applied — requested, waiting on an approver, or withheld for want of a verified attestation — a
+scope request, a settleable quarantine, a mergeable candidate, a proof missing on a head no verdict
+stands against, a pending base refresh, a delivery awaiting its deployment or smoke) and the
+actions it took — and each subject's wait restarts when the loop acts on it. The
 longest current wait is `daemon.silence.longestIdleMs`, with the subject behind it; past twenty
 minutes it becomes an attention item naming what nothing has acted on. An item nobody is waiting on
 is not silence: a claimed attempt under way asks nothing of the loop.
@@ -265,8 +306,10 @@ bound is judged on every sample:
 The loop keeps a private cursor next to the coordinator credential, outside every worktree. It is
 written before and after each external action, so a daemon killed mid-action leaves a record that
 the next start resolves **against Graphyard, not against the cursor**: an assignment that landed is
-closed, one that never landed is released for a fresh attempt, and a review request for a candidate
-that already has one is never sent twice. Restarting is therefore always safe, and the supervisor
+closed, one that never landed is released for a fresh attempt, a review request for a candidate
+that already has one is never sent twice, and an interrupted decision request is made again — the
+request already standing on the item is adopted rather than doubled, and so is an approver session
+already listed under that decision's name. Restarting is therefore always safe, and the supervisor
 may restart it as often as it likes.
 
 Whether an assignment landed is read from the attempt epoch, which only a claim advances, and never

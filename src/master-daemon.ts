@@ -10,7 +10,7 @@ import { scopeBlockedBudgetMs, scopeDecisionBudgetMs, scopeDecisionSample, type 
 import { scopePattern, watchAssignment } from './supervisor.js';
 import { baseRefreshConflict, pendingBaseRefresh } from './merge-queue.js';
 import { dispatchOrder } from './coordination.js';
-import { agentOwner, agentToken, approvedMerge, assertDispatchable, assertOutsideWorktrees, assessContainment, closeHerdrPane, containmentPhase, decisionInput, diskExhaustion, diskThresholdBytes, dispatchWork, inspectWorkerCredentials, launchApprover, listHerdrAgents, mergeExecutor, observeHerdrAgents, reclaimAdvice, reclaimIdleMs, reclaimWorktrees, writeFailure, type AttentionItem, type ConfigReload, type ContainmentAssessment, type HerdrAgent, type MasterConfig, type WorkerProfile, type WorktreeReclaimReport } from './master.js';
+import { agentOwner, agentToken, approvedMerge, approverSessionName, assertDispatchable, assertOutsideWorktrees, assessContainment, closeHerdrPane, containmentPhase, decisionInput, diskExhaustion, diskThresholdBytes, dispatchWork, inspectWorkerCredentials, launchApprover, listHerdrAgents, mergeExecutor, observeHerdrAgents, reclaimAdvice, reclaimIdleMs, reclaimWorktrees, writeFailure, type AttentionItem, type ConfigReload, type ContainmentAssessment, type HerdrAgent, type MasterConfig, type WorkerProfile, type WorktreeReclaimReport } from './master.js';
 
 /**
  * The durable coordination loop. Every step is a pure decision over one Graphyard snapshot plus
@@ -134,6 +134,30 @@ export const orphanObservationSchema = z.object({
 }).strict();
 export type OrphanObservation = z.infer<typeof orphanObservationSchema>;
 
+/**
+ * One decision this loop has put to an approver, kept until the item no longer needs it. Reviews
+ * and producers have a ledger because launched sessions die, drop their prompt and hit account
+ * limits; an approver is a launched session like any other, and a request whose approver is gone
+ * is a decision nobody will ever judge. This is what each cycle looks at again.
+ */
+export const approvalWatchSchema = z.object({
+  work: z.string().max(40), action: z.string().max(40), decision: z.string().max(100),
+  agentName: z.string().max(200).nullable().default(null), pane: z.string().max(200).nullable().default(null),
+  requestedAt: z.string(), launchedAt: z.string().nullable().default(null),
+  /** Approver sessions launched (or attempted) for this decision; bounded by `maxApproverLaunches`. */
+  launches: z.number().int().min(0).default(0),
+  /** Requests made for this binding, counting the ones the server settled without applying; bounded by `maxDecisionRequests`. */
+  requests: z.number().int().min(0).default(1),
+  /** How each earlier session ended without a judgement, oldest first. */
+  ended: z.array(z.string().max(300)).max(10).default([]),
+  /** Set once the decision is applied: the watch is kept so the same binding is not requested again. */
+  settledAt: z.string().nullable().default(null),
+  /** Set once every launch is spent on a decision still unjudged: the loop has escalated it. */
+  exhaustedAt: z.string().nullable().default(null),
+  closeAttempts: z.number().int().min(0).default(0),
+}).strict();
+export type ApprovalWatch = z.infer<typeof approvalWatchSchema>;
+
 export const daemonStateSchema = z.object({
   version: z.literal(1), url: z.string(), repository: z.string(),
   lock: z.object({ id: z.string(), pid: z.number().int().positive(), host: z.string(), startedAt: z.string(), heartbeatAt: z.string() }).strict().nullable().default(null),
@@ -156,6 +180,8 @@ export const daemonStateSchema = z.object({
   scope: z.array(scopeMeasurementSchema).default([]),
   /** Per work item, what the loop last saw of an assignment whose Herdr session is gone. */
   orphans: z.record(z.string(), orphanObservationSchema).default({}),
+  /** Per decision action key, the request this loop put to an approver and what became of it. */
+  approvals: z.record(z.string(), approvalWatchSchema).default({}),
 }).strict();
 export type DaemonState = z.infer<typeof daemonStateSchema>;
 
@@ -211,6 +237,9 @@ export function pruneDaemonState(state: DaemonState) {
   const clocks = Object.keys(state.clocks);
   if (clocks.length > retainedClocks) for (const id of clocks.slice(0, clocks.length - retainedClocks)) delete state.clocks[id];
   if (state.scope.length > retainedScopeDecisions) state.scope = state.scope.slice(-retainedScopeDecisions);
+  // A watch is retired when its item moves on; this bound only catches items the loop stopped seeing.
+  const watches = Object.entries(state.approvals).sort((a, b) => Date.parse(a[1].requestedAt) - Date.parse(b[1].requestedAt));
+  if (watches.length > retainedClocks) for (const [key] of watches.slice(0, watches.length - retainedClocks)) delete state.approvals[key];
   return state;
 }
 
@@ -279,6 +308,13 @@ export function reconcilePendingActions(state: DaemonState, work: Work[], now: n
       // landed record is refused by Graphyard, so retrying is safe.
       next.state = item?.delivery?.deployment ? 'done' : 'failed';
       next.detail = next.state === 'done' ? 'Resumed: Graphyard holds the deployment observation' : 'Resumed: no deployment observation was recorded; it may be recorded again';
+    } else if (action.kind === 'decision') {
+      // Both halves are safe to repeat: a request already standing on the item is adopted rather
+      // than made twice, and a session already listed under the decision's name is adopted rather
+      // than launched twice. Left indeterminate, the decision would never be looked at again.
+      next.state = state.approvals[key] ? 'done' : 'failed';
+      next.detail = next.state === 'done' ? 'Resumed: the decision was requested before the restart; its approver session is supervised from here'
+        : 'Resumed: no request was recorded before the restart; a standing one is adopted, otherwise it is requested again';
     } else {
       next.state = 'indeterminate';
       next.detail = `Resumed: the ${action.kind} request was interrupted and its effect is unknown`;
@@ -291,6 +327,8 @@ export function reconcilePendingActions(state: DaemonState, work: Work[], now: n
 export const dispatchKey = (work: Work) => `dispatch:${work.id}:${work.epoch}`;
 export const candidateKey = (kind: DaemonActionKind, work: Work) => `${kind}:${work.id}:${work.candidate?.sha ?? 'none'}:${work.candidate?.baseSha ?? 'none'}:${work.policyRevision}`;
 export const closeKey = (profile: WorkerProfile, pane: string) => `close:${profile.name}:${pane}`;
+/** One routine decision per action, item, binding (the head, or the quarantined epoch) and policy revision. */
+export const decisionKey = (work: Work, decision: Pick<RoutineDecision, 'action' | 'binding'>) => `decision:${decision.action}:${work.id}:${decision.binding}:${work.policyRevision}`;
 /** One decision per request: the instant the worker recorded it identifies the ask. */
 export const scopeKey = (work: Work, request: ScopeRequestState) => `scope:${work.id}:${request.epoch}:${request.at}`;
 
@@ -481,21 +519,87 @@ export interface RoutineDecision { action: RoutineDecisionAction; reason: string
  * Recovery releases a delivered item whose supervisor is still quarantined. A merge decision is
  * needed only where automatic merging is off, and then for the exact candidate that is mergeable.
  */
-export function routineDecision(work: Work, config: Pick<MasterConfig, 'autoMerge'>, now: number): RoutineDecision | null {
+export function routineDecision(work: Work, config: Pick<MasterConfig, 'autoMerge'>, now: number, assessment?: ContainmentAssessment | null): RoutineDecision | null {
+  const needed = neededDecision(work, config);
+  if (!needed) return null;
+  if (needed.action === 'merge') return needed;
+  const stopped = workerStopped(work, now, assessment);
+  // The grounds travel with the request: the approver cannot verify this host, so it is told
+  // exactly what the requester verified and judges the attestation on that.
+  return stopped.stopped ? { ...needed, reason: `${needed.reason} The previous worker is stopped: ${stopped.grounds}.` } : null;
+}
+/** What the item calls for, before asking whether the loop may attest that its worker is stopped. */
+function neededDecision(work: Work, config: Pick<MasterConfig, 'autoMerge'>): RoutineDecision | null {
   if (work.stage === 'done') {
-    const phase = containmentPhase(work, now);
-    return work.containmentQuarantine && phase && phase.state === 'lapsed'
-      ? { action: 'recover', reason: `${work.key} is delivered and its epoch ${work.containmentQuarantine.epoch} containment quarantine has lapsed; recovery releases it without touching the delivery`, binding: String(work.containmentQuarantine.epoch) } : null;
+    return work.containmentQuarantine
+      ? { action: 'recover', reason: `${work.key} is delivered and still fenced by its epoch ${work.containmentQuarantine.epoch} containment quarantine; recovery releases it without touching the delivery.`, binding: String(work.containmentQuarantine.epoch) } : null;
   }
-  // Rework carries the requester's attestation that the previous worker is stopped, so it is only
-  // requested once the attempt has actually ended: no live lease, and no live containment fence.
-  const stopped = (!work.lease || Date.parse(work.lease.expiresAt) <= now) && containmentPhase(work, now)?.state !== 'live';
   const conflict = baseRefreshConflict(work);
-  if (conflict && stopped) return { action: 'rework', reason: `${work.key}: ${conflict}. Only a fresh attempt can resolve it, so the candidate returns to a worker.`, binding: work.candidate!.sha };
+  if (conflict) return { action: 'rework', reason: `${work.key}: ${conflict}. Only a fresh attempt can resolve it, so the candidate returns to a worker.`, binding: work.candidate!.sha };
   const verdict = standingVerdict(work);
-  if (verdict && stopped) return { action: 'rework', reason: `${work.key}: ${verdict.reason}. The verdict stands against the current head, so the item returns to a worker for the next round.`, binding: work.candidate!.sha };
+  if (verdict) return { action: 'rework', reason: `${work.key}: ${verdict.reason}. The verdict stands against the current head, so the item returns to a worker for the next round.`, binding: work.candidate!.sha };
   if (!config.autoMerge && mergeableCandidate(work)) return { action: 'merge', reason: `${work.key}: every gate passes for candidate ${work.candidate!.sha.slice(0, 12)} and automatic merging is off, so the merge needs an approved decision.`, binding: work.candidate!.sha };
   return null;
+}
+/**
+ * Whether the loop may attest that the item's previous worker is stopped. `rework` and `recover`
+ * carry that attestation and the engine lowers the containment fence on it, so it rests only on
+ * what was verified: no lease is held, and either no fence stands — the worker's own supervisor
+ * settled it at exit, or this loop settled it after verifying the supervisor gone — or this host's
+ * probe verified the supervisor gone on the snapshot this cycle acts on. A fence in its grace
+ * window is waited out. A lapsed fence this host could not verify is `unverified`: the decision is
+ * withheld and escalated, never requested on an attestation nobody checked.
+ */
+export function workerStopped(work: Work, now: number, assessment?: ContainmentAssessment | null): { stopped: boolean; grounds: string; unverified: string | null } {
+  if (work.lease && Date.parse(work.lease.expiresAt) > now) return { stopped: false, grounds: '', unverified: null };
+  const quarantine = work.containmentQuarantine;
+  if (!quarantine) return { stopped: true, grounds: `${work.key} holds no lease and no containment fence stands for it`, unverified: null };
+  if (containmentPhase(work, now)?.state !== 'lapsed') return { stopped: false, grounds: '', unverified: null };
+  if (assessment?.settleable && assessment.epoch === quarantine.epoch)
+    return { stopped: true, grounds: `its lease and launch authority have lapsed, and the master loop verified on ${assessment.host ?? 'the registered host'} that the supervisor of epoch ${quarantine.epoch} is gone`, unverified: null };
+  return { stopped: false, grounds: '', unverified: assessment?.refusals.length ? assessment.refusals.join('; ') : `no host verification of the epoch ${quarantine.epoch} supervisor was possible from this loop` };
+}
+/** The decision an item needs but the loop will not request, because the stopped worker is unverified. */
+export function withheldDecision(work: Work, config: Pick<MasterConfig, 'autoMerge'>, now: number, assessment?: ContainmentAssessment | null): { action: RoutineDecisionAction; reason: string } | null {
+  const needed = neededDecision(work, config);
+  if (!needed || needed.action === 'merge') return null;
+  const unverified = workerStopped(work, now, assessment).unverified;
+  return unverified ? { action: needed.action, reason: `${work.key} needs a ${needed.action} decision, but it attests that the previous worker is stopped and that is not verified: ${unverified}` } : null;
+}
+
+// ---- The approver a decision is waiting on -------------------------------------------------
+/*
+ * A requested decision changes nothing until an approver judges it, and the approver is a launched
+ * session: it can die, drop its prompt, hit an account limit, decline, or hang. Each cycle therefore
+ * reads the decision back from the control plane and the session back from Herdr, and takes the one
+ * step that follows. Launches are bounded, so a decision no session will judge ends as an escalation
+ * and an actionable silence rather than as a relaunch every few minutes forever.
+ */
+export const approverJudgeBoundMs = 600_000, approverSettleMs = 60_000, maxApproverLaunches = 3, maxApproverCloses = 3, maxDecisionRequests = 3;
+export type ApprovalStep =
+  | { step: 'wait'; detail: string }
+  | { step: 'settled'; detail: string }
+  | { step: 'rerequest'; detail: string }
+  | { step: 'relaunch'; detail: string }
+  | { step: 'exhausted'; detail: string };
+export function approvalStep(watch: ApprovalWatch, decision: { state: string; outcome?: string | null } | null | undefined,
+  sessions: { agents: HerdrAgent[]; available: boolean }, now: number): ApprovalStep {
+  const label = `${watch.action} decision ${watch.decision} on ${watch.work}`;
+  // `undefined`: the history could not be read this cycle. Nothing is concluded from that.
+  if (decision === undefined) return { step: 'wait', detail: `The decision history of ${watch.work} could not be read; ${label} is looked at again next cycle` };
+  if (decision === null) return { step: 'rerequest', detail: `The control plane no longer holds ${label}` };
+  if (decision.state === 'applied') return { step: 'settled', detail: `The approver applied ${label}` };
+  if (decision.state !== 'requested' && decision.state !== 'approved')
+    return { step: 'rerequest', detail: `${label} ended ${decision.state}${decision.outcome ? ` (${decision.outcome})` : ''}` };
+  if (!sessions.available) return { step: 'wait', detail: `Herdr could not be read, so the approver session of ${label} is unknown this cycle` };
+  const session = watch.agentName ? sessions.agents.find(agent => agent.name === watch.agentName) : undefined;
+  const launchedAt = watch.launchedAt ? Date.parse(watch.launchedAt) : Number.NaN, age = Number.isFinite(launchedAt) ? now - launchedAt : 0;
+  const ended = !session ? `approver session ${watch.agentName ?? '(never launched)'} is gone without judging it`
+    : ['idle', 'done', 'blocked'].includes(session.agent_status ?? '') && age >= approverSettleMs ? `approver session ${watch.agentName} ended ${session.agent_status} without approving it — declined, or its prompt was dropped`
+      : age > approverJudgeBoundMs ? `approver session ${watch.agentName} has not judged it for ${Math.round(age / 60_000)} minutes, past the ${Math.round(approverJudgeBoundMs / 60_000)}-minute bound`
+        : null;
+  if (!ended) return { step: 'wait', detail: `${label} is with approver session ${watch.agentName} (launch ${watch.launches} of ${maxApproverLaunches})` };
+  return watch.launches < maxApproverLaunches ? { step: 'relaunch', detail: `${label}: ${ended}` } : { step: 'exhausted', detail: `${label}: ${ended}` };
 }
 /** Every gate green on a submitted candidate: what "mergeable" means to the cycle and its budget. */
 export const mergeableCandidate = (work: Work) => work.stage === 'merge' && !!work.candidate && !work.violations.length && work.gates.every(gate => gate.passed);
@@ -509,13 +613,22 @@ export const mergeableCandidate = (work: Work) => work.stage === 'merge' && !!wo
  */
 export const silenceBudgetMs = 1_200_000;
 export interface ActionableSubject { key: string; kind: DaemonActionKind; work: string | null; detail: string }
-export function actionableSubjects(config: Pick<MasterConfig, 'autoMerge' | 'run'>, work: Work[], now: number): ActionableSubject[] {
+export function actionableSubjects(config: Pick<MasterConfig, 'autoMerge' | 'run'>, work: Work[], now: number,
+  context: { assessments?: Record<string, ContainmentAssessment>; approvals?: DaemonState['approvals'] } = {}): ActionableSubject[] {
   const subjects: ActionableSubject[] = [];
   const add = (kind: DaemonActionKind, item: Work | null, detail: string) => subjects.push({ key: `${kind}:${item?.key ?? 'pipeline'}`, kind, work: item?.key ?? null, detail });
   for (const item of work) {
     // A routine decision is the one subject a delivered item can still raise: containment recovery.
-    const decision = routineDecision(item, config, now);
-    if (decision) add('decision', item, `${item.key} needs a ${decision.action} decision requested and approved`);
+    // It stays a subject until it is applied. A decision sitting with an approver is the pipeline
+    // waiting on its own agent, and counting that as nothing to act on is how a dead approver used
+    // to make an item disappear from the one measure built to notice it.
+    const decision = routineDecision(item, config, now, context.assessments?.[item.id]);
+    const watch = decision ? context.approvals?.[decisionKey(item, decision)] : undefined;
+    if (decision && !watch?.settledAt) add('decision', item, !watch ? `${item.key} needs a ${decision.action} decision requested and approved`
+      : watch.exhaustedAt ? `${item.key}'s ${decision.action} decision ${watch.decision} is unjudged after ${watch.launches} approver session(s)`
+        : `${item.key}'s ${decision.action} decision ${watch.decision} is requested and waiting for approver session ${watch.agentName ?? '(not launched)'} to judge it`);
+    const withheld = decision ? null : withheldDecision(item, config, now, context.assessments?.[item.id]);
+    if (withheld) add('decision', item, withheld.reason.slice(0, 500));
     if (item.stage === 'done') continue;
     try { assertDispatchable(item, work, new Date(now).toISOString()); add('dispatch', item, `${item.key} is claimable and waiting for a worker`); } catch { /* not claimable: not actionable */ }
     const request = item.scopeRequest;
@@ -524,7 +637,9 @@ export function actionableSubjects(config: Pick<MasterConfig, 'autoMerge' | 'run
     if (item.containmentQuarantine && containmentPhase(item, now)?.state === 'lapsed') add('settle', item, `${item.key} holds a lapsed containment quarantine from epoch ${item.containmentQuarantine.epoch}`);
     if (config.autoMerge && mergeableCandidate(item)) add('merge', item, `${item.key} is mergeable: every gate passes for ${item.candidate!.sha.slice(0, 12)}`);
     if (pendingBaseRefresh(item)) add('refresh', item, `${item.key} is waiting for the control plane to bring its candidate onto the moved base`);
-    if (item.submission && item.candidate && !item.reworkRequested && config.run.proofWorkflow) {
+    // The same heads step 5 shepherds: one a verdict stands against is going back to a worker,
+    // so nothing asks for its proofs and nothing is waiting on them.
+    if (item.submission && item.candidate && !item.reworkRequested && !standingVerdict(item) && config.run.proofWorkflow) {
       const outstanding = missingProofs(item, new Date(now)).filter(proof => !proof.startsWith('manual:'));
       if (outstanding.length) add('proof', item, `${item.key} is missing trusted evidence for ${outstanding.join(', ')}`);
     }
@@ -601,7 +716,9 @@ export function observeItemClock(state: DaemonState, work: Work, now: number): L
     const observed = [work.candidate.createdAt, work.observation?.at].map(time).find(value => value !== null && (readyMs === null || value >= readyMs));
     clock.pushedAt = new Date(observed ?? now).toISOString();
   }
-  if (!clock.approvedAt && work.submission && !work.reworkRequested && work.gates.find(gate => gate.name === 'review')?.passed !== false && work.gates.find(gate => gate.name === 'build')?.passed) clock.approvedAt = at;
+  // An approval is a review gate that passed. An item with no review gate was never approved, so
+  // it measures no approval→merge passage rather than one that starts at its first push.
+  if (!clock.approvedAt && work.submission && !work.reworkRequested && work.gates.find(gate => gate.name === 'review')?.passed === true && work.gates.find(gate => gate.name === 'build')?.passed) clock.approvedAt = at;
   if (!clock.mergeableAt && mergeableCandidate(work)) clock.mergeableAt = at;
   if (work.stage !== 'done') return null;
   const mergedAt = time(work.delivery?.mergedAtRepository ?? work.delivery?.mergedAt) ?? now;
@@ -746,10 +863,23 @@ export interface DaemonEffects {
    * an escalation naming the command a master session runs, exactly as before.
    */
   decide?: (work: Work, action: RoutineDecisionAction, reason: string) => Promise<{ id: string }>;
-  /** Launches the independent approver session for one requested decision. Never the requester. */
-  approver?: (work: Work, decision: string) => Promise<unknown>;
-  /** One item's decision history, for the approved merge decision automatic merging asks for. */
-  decisions?: (work: Work) => Promise<{ decisions: { id: string; action: string; state: string; input: any; approvedBy: string | null }[] }>;
+  /**
+   * Launches the independent approver session for one requested decision, under the name
+   * `approverSessionName` gives it, and reports the session so later cycles can supervise it.
+   * Never the requester.
+   */
+  approver?: (work: Work, decision: string) => Promise<{ agentName: string; pane: string | null }>;
+  /**
+   * One item's decision history: the approved merge decision automatic merging asks for, and what
+   * became of every decision this loop requested.
+   */
+  decisions?: (work: Work) => Promise<{ decisions: { id: string; action: string; state: string; input: any; approvedBy: string | null; outcome?: string | null }[] }>;
+  /**
+   * Takes back one of the loop's own requests, as its requester. Only for a request the item has
+   * moved past — a merge decision bound to an earlier candidate — which would otherwise stand
+   * forever and refuse the request for the current one.
+   */
+  withdraw?: (work: Work, decision: string, reason: string) => Promise<unknown>;
   /** Verifies on this host which quarantined supervisors are demonstrably gone. */
   containment?: (work: Work[], observed: { now: string; clockOffset: { min: number; max: number } }) => Record<string, ContainmentAssessment>;
   /** Settles one quarantine this host verified dead, so the item can be claimed again. */
@@ -1048,46 +1178,154 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
   //     master's own operator-agent identity and launches the independent approver session for it;
   //     it never approves its own request, so the separation the server enforces is unchanged.
   //     Automatic merging turned off is the fourth: the merge itself then waits for that approval.
-  const decisions = new Map<string, { decision: RoutineDecision; requested: boolean }>();
-  // Items whose decision this loop has already put to an approver: they are waiting on that
-  // session's judgement, not on the loop, so they are not counted as something it could act on.
-  const awaitingApproval = new Set<string>();
+  //     A request is not the end of it. The approver is a launched session like any other, so every
+  //     cycle reads the decision back and looks at its session again (see `approvalStep`): a
+  //     finished session is closed, a dead, declining or hung one is replaced within a bound, a
+  //     decision the server settled some other way is requested again, and one no session will
+  //     judge is escalated and left standing on the silence measure.
+  const stamp = new Date(clock).toISOString();
+  // One Herdr read serves the step, and is taken again after anything that changes the inventory.
+  let inventory: { agents: HerdrAgent[]; available: boolean } | null = null;
+  const sessions = () => inventory ??= effects.herdr?.() ?? { agents: effects.agents(), available: true };
+  const note = async (key: string, item: Work, kind: DaemonActionKind, outcome: 'done' | 'failed', detail: string) =>
+    performed.push(await record(state, key, { kind, work: item.key, principal: null, state: outcome, detail: detail.slice(0, 2000), attempts: (state.actions[key]?.attempts ?? 0) + 1, epoch: item.epoch, cycle: state.cycle }, now(), effects.persist));
+  /** Close the approver session a watch names, if Herdr still lists it. False only when it could not be closed. */
+  const closeApprover = async (item: Work, watch: ApprovalWatch, why: string) => {
+    const session = watch.agentName ? sessions().agents.find(agent => agent.name === watch.agentName) : undefined;
+    if (!session?.pane_id) return true;
+    const key = `close:approver:${watch.decision}:${session.pane_id}`;
+    try { await effects.closeSession(session.pane_id); inventory = null; await note(key, item, 'close', 'done', `Closed approver session ${watch.agentName} (${session.agent_status ?? 'unknown'}): ${why}`); return true; }
+    catch (error) { inventory = null; watch.closeAttempts += 1; await note(key, item, 'close', 'failed', `Could not close approver session ${watch.agentName}: ${message(error)}`); return false; }
+  };
+  /** Put a watched decision to an approver session. The launch is counted before it is made. */
+  const launch = async (item: Work, watch: ApprovalWatch, adopt: boolean) => {
+    const name = approverSessionName(item, watch.decision), seen = sessions();
+    // A session a master started for the same decision (`master approver`) is the approver it has.
+    const listed = adopt && seen.available ? seen.agents.find(agent => agent.name === name) : undefined;
+    Object.assign(watch, { launches: watch.launches + 1, agentName: name, pane: listed?.pane_id ?? null, launchedAt: stamp });
+    await effects.persist(state);
+    if (listed) return `adopted approver session ${name}, already judging it`;
+    inventory = null;
+    const launched = await effects.approver!(item, watch.decision);
+    Object.assign(watch, { agentName: launched?.agentName ?? name, pane: launched?.pane ?? null });
+    return `launched independent approver session ${watch.agentName} (launch ${watch.launches} of ${maxApproverLaunches})`;
+  };
+  const escalateUnjudged = async (item: Work, watch: ApprovalWatch, detail: string) => {
+    watch.exhaustedAt = stamp;
+    await note(`escalation:decision-unjudged:${watch.decision}`, item, 'escalation', 'failed', `${detail}. ${watch.launches} approver session(s) and ${watch.requests} request(s) have not produced a judgement${watch.ended.length ? ` (${watch.ended.join('; ')})` : ''}, so the loop has stopped spending sessions on it: read it with graphyard master decisions ${item.key}, then put it to a fresh approver with graphyard master approver ${item.key} ${watch.decision}, or take the request back and decide what the item needs instead`);
+  };
+  /** Request the decision (or adopt the one already standing) and put it to an approver. */
+  const request = async (item: Work, decision: RoutineDecision, key: string, carried: ApprovalWatch | null) => {
+    const verdict = decision.action === 'rework' && !carried ? standingVerdict(item) : null;
+    const attempts = (state.actions[key]?.attempts ?? 0) + 1;
+    await record(state, key, { kind: 'decision', work: item.key, principal: null, state: 'started', detail: `Requesting the ${decision.action} decision for ${item.key}`, attempts, epoch: item.epoch, cycle: state.cycle }, now(), effects.persist);
+    try {
+      const history = effects.decisions ? (await effects.decisions(item).catch(() => ({ decisions: [] }))).decisions : [];
+      const applied = decision.action === 'merge' ? approvedMerge(item, history) : null;
+      if (applied) {
+        state.approvals[key] = approvalWatchSchema.parse({ work: item.key, action: decision.action, decision: applied.id, requestedAt: stamp, settledAt: stamp });
+        performed.push(await record(state, key, { kind: 'decision', work: item.key, principal: null, state: 'done', detail: `${item.key} already holds an applied merge decision for candidate ${decision.binding.slice(0, 12)}; nothing to request`, attempts, epoch: item.epoch, cycle: state.cycle }, now(), effects.persist));
+        return;
+      }
+      // A request whose response was lost is already standing on the item, and the server refuses a
+      // second one; adopting it is what keeps a retry from leaving a decision nobody will judge.
+      let standing = history.find(entry => entry.action === decision.action && (entry.state === 'requested' || entry.state === 'approved'));
+      // Only a merge decision names what it binds. One standing for an earlier candidate can never
+      // apply to this one, and it refuses the request that could: the requester takes it back.
+      if (standing && decision.action === 'merge' && !(standing.input?.sha === item.candidate?.sha && standing.input?.baseSha === item.candidate?.baseSha && standing.input?.policyRevision === item.policyRevision)) {
+        const stale = `merge decision ${standing.id} is ${standing.state} for candidate ${String(standing.input?.sha).slice(0, 12)}, not the current ${decision.binding.slice(0, 12)}`;
+        if (standing.state !== 'requested' || !effects.withdraw) throw new Error(`${stale}, and ${effects.withdraw ? 'only a requested decision can be withdrawn' : 'this loop has no way to withdraw it'}: graphyard master decisions ${item.key}`);
+        await effects.withdraw(item, standing.id, `The candidate moved to ${decision.binding.slice(0, 12)}; ${stale}, so it can never apply and is withdrawn for a request that names the current candidate`);
+        standing = undefined;
+      }
+      const requested = standing ?? await effects.decide!(item, decision.action, decision.reason);
+      const watch = state.approvals[key] = approvalWatchSchema.parse({ work: item.key, action: decision.action, decision: requested.id, requestedAt: stamp, requests: (carried?.requests ?? 0) + 1, ended: carried?.ended ?? [] });
+      await effects.persist(state);
+      // The request alone changes nothing; the approver session is what applies it. A launch that
+      // fails leaves the watch behind, so the next cycle sees a decision with no session and
+      // launches again, inside the same bound.
+      const how = await launch(item, watch, true);
+      // A verdict measured from when the reviewer landed it to when the loop asked for the round it
+      // needs. A base conflict has no verdict behind it, so it is not part of that measurement.
+      const verdictAt = verdict ? Date.parse(verdict.at) : Number.NaN;
+      if (Number.isFinite(verdictAt)) state.latency.push(latencySampleSchema.parse({ work: item.key, at: stamp, verdictToReworkMs: Math.max(0, Math.round(clock - verdictAt)) }));
+      performed.push(await record(state, key, { kind: 'decision', work: item.key, principal: null, state: 'done', detail: `${standing ? `Adopted decision ${requested.id} (${decision.action}), already standing on ${item.key},` : `Requested decision ${requested.id} (${decision.action}) for ${item.key}`} and ${how}: ${decision.reason}`.slice(0, 2000), attempts, epoch: item.epoch, cycle: state.cycle }, now(), effects.persist));
+    } catch (error) {
+      performed.push(await record(state, key, { kind: 'decision', work: item.key, principal: null, state: 'failed', detail: `Could not put the ${decision.action} decision for ${item.key} to an approver: ${message(error)}`.slice(0, 2000), attempts, epoch: item.epoch, cycle: state.cycle }, now(), effects.persist));
+    }
+  };
+  /** Look again at a decision already requested: its state on the control plane, and its session. */
+  const supervise = async (item: Work, decision: RoutineDecision, key: string, watch: ApprovalWatch) => {
+    const history = effects.decisions ? await effects.decisions(item).then(result => result.decisions, () => undefined) : undefined;
+    const step = approvalStep(watch, history === undefined ? undefined : history.find(entry => entry.id === watch.decision) ?? null, sessions(), clock);
+    if (step.step === 'wait' || (watch.exhaustedAt && step.step === 'exhausted')) return;
+    const base = `approver:${watch.decision}`;
+    if (step.step === 'settled') {
+      await closeApprover(item, watch, 'its decision is applied');
+      watch.settledAt = stamp;
+      await note(`${base}:settled`, item, 'decision', 'done', step.detail);
+      return;
+    }
+    // Every other step replaces the session, so the one that ended goes first. While it cannot be
+    // closed its name is still taken, and the step is taken again next cycle.
+    if (!await closeApprover(item, watch, step.detail) && watch.closeAttempts < maxApproverCloses) return;
+    if (watch.ended.at(-1) !== step.detail.slice(0, 300)) watch.ended = [...watch.ended, step.detail.slice(0, 300)].slice(-10);
+    if (step.step === 'rerequest') {
+      // The server settled it some other way — failed on a precondition, stale, withdrawn — and
+      // the item still needs the decision, so it is asked again: a bounded number of times, and on
+      // the same widening interval as any refused action. The watch stays until a new request
+      // replaces it, so the bound survives a request that is itself refused.
+      if (watch.requests >= maxDecisionRequests) { if (!watch.exhaustedAt) await escalateUnjudged(item, watch, step.detail); return; }
+      if (state.actions[key]?.state === 'failed' && !readyToRetry(state.actions[key], state.cycle)) return;
+      if (!state.actions[`${base}:ended`]) await note(`${base}:ended`, item, 'decision', 'failed', `${step.detail}; ${item.key} still needs it, so it is requested again`);
+      await request(item, decision, key, watch);
+      return;
+    }
+    if (step.step === 'exhausted') { await escalateUnjudged(item, watch, step.detail); return; }
+    try { await note(`${base}:launch:${watch.launches + 1}`, item, 'decision', 'done', `${step.detail}; ${await launch(item, watch, false)}`); }
+    catch (error) { await note(`${base}:launch:${watch.launches}`, item, 'decision', 'failed', `${step.detail}; a replacement approver session could not be launched: ${message(error)}`); }
+  };
+
+  const needed = new Set<string>();
   for (const item of snapshot.work) {
-    const decision = routineDecision(item, config, clock);
-    if (!decision) continue;
-    const verdict = decision.action === 'rework' ? standingVerdict(item) : null;
-    const key = `decision:${decision.action}:${item.id}:${decision.binding}:${item.policyRevision}`;
+    const assessment = assessments[item.id];
+    const decision = routineDecision(item, config, clock, assessment);
+    if (!decision) {
+      // The item needs the decision and the loop will not attest what it could not verify. Step 3b
+      // has already escalated an open item whose fence this host assessed and could not settle.
+      const withheld = withheldDecision(item, config, clock, assessment);
+      const escalationKey = `escalation:decision-withheld:${item.id}:${item.containmentQuarantine?.epoch ?? item.epoch}`;
+      const detail = withheld ? `${withheld.reason}. Stop the supervisor on its registered host and settle the fence there (graphyard master settle-containment ${item.key}), or request the decision yourself on an attestation you verified`.slice(0, 2000) : '';
+      if (withheld && !(item.stage !== 'done' && assessment) && state.actions[escalationKey]?.detail !== detail) await note(escalationKey, item, 'escalation', 'done', detail);
+      continue;
+    }
+    const key = decisionKey(item, decision);
+    needed.add(key);
+    const watch = state.approvals[key];
+    if (watch) { if (!watch.settledAt) await supervise(item, decision, key, watch); continue; }
     const previous = state.actions[key];
-    decisions.set(item.id, { decision, requested: previous?.state === 'done' });
-    if (previous?.state === 'done') awaitingApproval.add(item.key);
-    if (previous && (previous.state === 'done' || !readyToRetry(previous, state.cycle))) continue;
+    // A `done` entry with no watch is a cursor written before requests were supervised; the
+    // request path adopts the decision it left standing and launches an approver for it.
+    if (previous?.state === 'failed' && !readyToRetry(previous, state.cycle)) continue;
     if (!effects.decide || !effects.approver) {
       const escalationKey = `escalation:decision:${item.id}:${decision.binding}`;
       const detail = `${item.key} needs a ${decision.action} decision: ${decision.reason} This loop runs without the decision effects, so it cannot request one: graphyard master decide ${item.key} ${decision.action} REASON, then graphyard master approver ${item.key} DECISION`;
       if (state.actions[escalationKey]?.detail !== detail) performed.push(await record(state, escalationKey, { kind: 'escalation', work: item.key, principal: null, state: 'done', detail, attempts: (state.actions[escalationKey]?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist));
       continue;
     }
-    const attempts = (previous?.attempts ?? 0) + 1;
-    await record(state, key, { kind: 'decision', work: item.key, principal: null, state: 'started', detail: `Requesting the ${decision.action} decision for ${item.key}`, attempts, epoch: item.epoch, cycle: state.cycle }, now(), effects.persist);
-    try {
-      // A request whose response was lost is already standing on the item, and the server refuses a
-      // second one; adopting it is what keeps a retry from leaving a decision nobody will judge.
-      const standing = effects.decisions ? (await effects.decisions(item).catch(() => ({ decisions: [] }))).decisions
-        .find(entry => entry.action === decision.action && (entry.state === 'requested' || entry.state === 'approved')) : undefined;
-      const requested = standing ?? await effects.decide(item, decision.action, decision.reason);
-      // The request alone changes nothing; the approver session is what applies it, so a failure to
-      // launch it leaves the action failed and retried rather than a decision nobody will judge.
-      await effects.approver(item, requested.id);
-      // A verdict measured from when the reviewer landed it to when the loop asked for the round it
-      // needs. A base conflict has no verdict behind it, so it is not part of that measurement.
-      const verdictAt = verdict ? Date.parse(verdict.at) : Number.NaN;
-      if (Number.isFinite(verdictAt)) state.latency.push(latencySampleSchema.parse({ work: item.key, at: new Date(clock).toISOString(), verdictToReworkMs: Math.max(0, Math.round(clock - verdictAt)) }));
-      performed.push(await record(state, key, { kind: 'decision', work: item.key, principal: null, state: 'done', detail: `${standing ? `Adopted decision ${requested.id} (${decision.action}), already standing on ${item.key}, and launched` : `Requested decision ${requested.id} (${decision.action}) for ${item.key} and launched`} the independent approver session for it: ${decision.reason}`, attempts, epoch: item.epoch, cycle: state.cycle }, now(), effects.persist));
-      decisions.set(item.id, { decision, requested: true });
-      awaitingApproval.add(item.key);
-    } catch (error) {
-      performed.push(await record(state, key, { kind: 'decision', work: item.key, principal: null, state: 'failed', detail: `Could not put the ${decision.action} decision for ${item.key} to an approver: ${message(error)}`, attempts, epoch: item.epoch, cycle: state.cycle }, now(), effects.persist));
-    }
+    await request(item, decision, key, null);
+  }
+  // A watch whose item no longer needs its decision — applied and moved on, or overtaken by a new
+  // head — has nothing left to judge. Its session is closed rather than left holding a provider
+  // seat, and the watch goes with it; one Herdr cannot be read for stays until it can.
+  for (const [key, watch] of Object.entries(state.approvals)) {
+    if (needed.has(key)) continue;
+    if (!sessions().available) continue;
+    const item = snapshot.work.find(candidate => candidate.key === watch.work);
+    const closed = !item || await closeApprover(item, watch, `${watch.work} no longer needs ${watch.action} decision ${watch.decision}`);
+    // A tab that will not close is left to the operator after a few tries; its name is this
+    // decision's alone, so it can refuse no other launch.
+    if (closed || watch.closeAttempts >= maxApproverCloses) delete state.approvals[key];
   }
 
   // 5. Shepherd reviews and proofs for submitted candidates. Graphyard dispatches provider reviews
@@ -1142,17 +1380,20 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
     const previous = state.actions[key];
     if (!readyToRetry(previous, state.cycle)) continue;
     // With automatic merging off the guarded merge runs for exactly the candidate an approver
-    // agent approved (step 3c requested it). Until that approval is applied, the loop waits on the
+    // agent approved (step 4c requested it). Until that approval is applied, the loop waits on the
     // approver rather than on a person, and says which decision it is waiting for.
     if (!config.autoMerge) {
       const approval = effects.decisions ? approvedMerge(item, (await effects.decisions(item).catch(() => ({ decisions: [] }))).decisions as Parameters<typeof approvedMerge>[1]) : null;
       if (!approval) {
         const waitKey = candidateKey('escalation', item);
-        const requested = decisions.get(item.id)?.requested;
+        const watch = state.approvals[decisionKey(item, { action: 'merge', binding: item.candidate!.sha })];
         // A loop that can request the decision says so and waits for the approver agent; one
         // without the master's operator-agent identity is genuinely waiting on the master session,
-        // and names the two commands that put the same decision to the same approver.
-        const detail = requested ? `Automatic merging is disabled; ${item.key} merges as soon as the approver agent applies the merge decision this loop requested and launched an approver session for`
+        // and names the two commands that put the same decision to the same approver. The wait
+        // names the decision and the session it is with, so it is raised again whenever that
+        // changes — a replaced session, or a decision no session judged — not once and never again.
+        const detail = watch?.exhaustedAt ? `Automatic merging is disabled and merge decision ${watch.decision} for ${item.key} is still unjudged after ${watch.launches} approver session(s); put it to a fresh one with graphyard master approver ${item.key} ${watch.decision}`
+          : watch ? `Automatic merging is disabled; ${item.key} merges as soon as approver session ${watch.agentName ?? '(not launched yet)'} (launch ${watch.launches} of ${maxApproverLaunches}) applies merge decision ${watch.decision}, which this loop requested`
           : effects.decide ? `Automatic merging is disabled; ${item.key} merges once an approver agent applies a merge decision for candidate ${item.candidate!.sha.slice(0, 12)}`
             : `Automatic merging is disabled; ${item.key} awaits explicit operator approval before the guarded merge runs: graphyard master decide ${item.key} merge REASON, then graphyard master approver ${item.key} DECISION`;
         if (state.actions[waitKey]?.detail !== detail) performed.push(await record(state, waitKey, { kind: 'escalation', work: item.key, principal: null, state: 'done', detail, attempts: (state.actions[waitKey]?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist));
@@ -1239,7 +1480,7 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
     const sample = observeItemClock(state, item, clock);
     if (sample) state.latency.push(sample);
   }
-  const actionable = actionableSubjects(config, snapshot.work, clock).filter(subject => !(subject.kind === 'decision' && subject.work && awaitingApproval.has(subject.work)));
+  const actionable = actionableSubjects(config, snapshot.work, clock, { assessments, approvals: state.approvals });
   const silence = trackSilence(state, actionable, performed, clock);
   const { stages, lead, production, postDeploy, postDeployFailures } = stageMetrics(snapshot.work, clock);
   const metrics = cycleMetricsSchema.parse({ cycle: state.cycle, at: new Date(clock).toISOString(), durationMs: Math.max(0, Math.round(now() - startedAt)), open: open.length, actions: performed.length,
@@ -1334,6 +1575,8 @@ export function daemonSummary(state: DaemonState, now: number, intervalMs: numbe
     profiles: state.profiles,
     config: state.config,
     reclaim: state.reclaim,
+    // Every decision the loop has put to an approver and not yet seen applied and retired.
+    approvals: Object.entries(state.approvals).map(([key, watch]) => ({ key, ...watch })),
   };
 }
 
@@ -1470,13 +1713,20 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     // (or a slow repository lengthen it) without restarting the loop.
     reclaim: work => reclaimWorktrees(root, work, { idleMs: reclaimIdleMs(current()) }),
     decide: async (work, action, reason) => asOperatorAgent('POST', `work/${work.id}/decide`, { action, input: decisionInput(action, work, {}), reason }),
-    approver: async (work, decision) => launchApprover(root, work, decision, current().reviewers[0]?.kind ?? 'claude', listHerdrAgents(run), run),
+    approver: async (work, decision) => { const launched = await launchApprover(root, work, decision, current().reviewers[0]?.kind ?? 'claude', listHerdrAgents(run), run); return { agentName: launched.agentName, pane: launched.pane }; },
+    // The same route, as the same requester: only the identity that asked may take a request back.
+    withdraw: (work, decision, reason) => asOperatorAgent('POST', `work/${work.id}/decide`, { action: 'withdraw', decision, reason }),
     decisions: work => asOperatorAgent('GET', `work/${encodeURIComponent(work.id)}/decisions`),
     containment: (work, observed) => assessContainment(work, { hostId: current().hostId, observedAt: observed.now, clockOffset: observed.clockOffset }),
     settleContainment: (work, assessment) => deps.mutate(`work/${work.id}/autosettle`, { epoch: assessment.epoch, settlementHash: work.containmentQuarantine!.settlementHash,
       reason: `The master loop verified on ${assessment.host ?? current().hostId} that the supervisor of epoch ${assessment.epoch} is gone; the item is released for a fresh attempt`, verification: assessment.verification }),
     // systemd's own keep-alive channel. `systemd-notify` is part of systemd, so it is present
     // wherever NOTIFY_SOCKET is, and the loop only speaks to it when the supervisor set one.
+    // Node has no unix datagram socket, so the message goes through that short-lived child, which
+    // the unit admits with NotifyAccess=all. Since systemd 246 the tool waits on a barrier until
+    // the manager has processed the message, so it cannot exit before it is attributed; on an
+    // older systemd a keep-alive can be lost to that race, which is why the packaged window is
+    // 180s against a cycle of at most 30s: a healthy loop would have to lose six in a row.
     notify: state => { run('systemd-notify', state === 'ready' ? ['--ready'] : ['WATCHDOG=1']); },
     persist: state => writeDaemonState(current(), state),
   };

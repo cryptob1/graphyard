@@ -2476,7 +2476,7 @@ export function decisionInput(action: string, work: Work, input: Record<string, 
   return input;
 }
 /** With automatic merging off, the guarded merge runs only for a candidate an approver agent approved. */
-export function approvedMerge(work: Work, decisions: { action: string; state: string; input: any; approvedBy: string | null }[]) {
+export function approvedMerge<T extends { action: string; state: string; input: any; approvedBy: string | null }>(work: Work, decisions: T[]): T | null {
   return decisions.find(decision => decision.action === 'merge' && decision.state === 'applied' && !!work.candidate
     && decision.input.sha === work.candidate.sha && decision.input.baseSha === work.candidate.baseSha && decision.input.policyRevision === work.policyRevision) ?? null;
 }
@@ -2537,10 +2537,18 @@ export async function restartMasterLoop(root: string, config: MasterConfig, lock
  * Launch the independent approver session for one decision: its own Herdr tab, its own
  * credential by path, the approver marker, and a prompt to judge — never to implement.
  */
+/**
+ * One session name per decision, not per item. An item takes several decisions in its life — rework
+ * after a verdict, rework after a base conflict, a merge approval — and an approver stops when it
+ * has judged, leaving its tab listed. Named per item, that finished tab refused the launch of the
+ * next decision's approver until somebody closed it by hand.
+ */
+export const approverSessionName = (work: Pick<Work, 'key'>, decision: string) =>
+  `graphyard-approver-${work.key.toLowerCase()}-${decision.toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 8) || 'decision'}`;
 export async function launchApprover(root: string, work: Work, decision: string, kind: NonNullable<WorkerProfile['kind']>, agents: HerdrAgent[], run?: (command: string, args: string[]) => string) {
   const config = await loadMasterConfig(root);
   await agentToken(root, config, 'approver');
-  const name = `graphyard-approver-${work.key.toLowerCase()}`;
+  const name = approverSessionName(work, decision);
   if (agents.some(agent => agent.name === name)) throw new Error(`Approver session ${name} is already visible in Herdr; let it finish or close it first`);
   const launch = agentLaunchPlan(kind, 'auto');
   const cli = `node ${config.cliPath}`;
