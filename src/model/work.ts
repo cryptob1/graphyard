@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import type { QueueEjection, QueueEntry, QueueHistoryEntry } from '../merge-queue.js';
+import type { BaseRefresh, QueueEjection, QueueEntry, QueueHistoryEntry } from '../merge-queue.js';
 import { criterionSchema, policySchema, resourcesSchema, type Criterion } from './policy.js';
 import type { Evidence } from './evidence.js';
 import type { AgentReview, ReviewFailover, ReviewRequest } from './review.js';
@@ -119,6 +119,12 @@ export interface Work extends Create {
    */
   scopeRequest?: { epoch: number; paths: string[]; reason: string; requestedBy: string; at: string } | null;
   queue?: QueueEntry | null; queueSequence?: number; queueEjection?: QueueEjection | null; queueHistory?: QueueHistoryEntry[];
+  /**
+   * The last time the control plane brought this candidate onto a base branch that had moved
+   * under it, or refused to because the merge conflicts. Decided and written by Graphyard
+   * alone; see merge-queue.ts for the rule and model/carry.ts for what the refresh carries.
+   */
+  baseRefresh?: BaseRefresh | null;
   reworkRequested: boolean;
   scenarioRequirements: { proof: string; revision: number; environment: string; hash: string }[];
   reviewRequest?: ReviewRequest | null;

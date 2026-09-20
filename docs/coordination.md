@@ -106,13 +106,29 @@ Two shared files changed in nearly every pull request and conflicted trivially: 
 
 The scope is set by the item's requirements, not by its worker. A worker cannot widen `plannedFiles`: the `workspace`, `submit` and `evidence` commands never accept it, and only the audited [`requirements` revision](#revise-requirements-explicitly) changes it. A master returning a refused candidate for rework requests a two-party `rework` decision (`graphyard master decide GY-N rework "REASON"`), quotes the refusal's file list in the reason, and asks the worker to run `sync GY-N` and restore each file rather than re-resolve the merge.
 
+## Ship in under thirty minutes
+
+Measured on the ledger before any of this shipped, a routine item took 60–95 minutes from `complete`
+to merge: roughly a third of it execution, a third rework rounds, and a third dead time between
+hops while a chat-paced master polled and serialized every hand-off. The target is a submit→merge
+p50 of at most 30 minutes and p90 of at most 60 minutes for a routine item, judged over at least
+ten deliveries, with a median of at most one rework round and no step between submit and merge that
+waits on a master or operator except a genuine finding or a human-only decision. Five mechanisms
+carry it, none of which weakens a review, evidence, identity, lease or protection rule:
+
+1. **The regression guard and `sync`** ([above](#refuse-candidates-that-revert-shipped-code-outside-their-scope)) remove the most common rework round: `complete` refuses a candidate that reverts shipped code outside its `plannedFiles`, naming the files, and the generated instructions require `sync GY-N` — merge, never rebase, then the same self-check against the fetched tip — before every push.
+2. **Automatic dispatch at submit** ([master guide](master-agent.md#automatic-dispatch-at-submit)): the control plane records the review request and one producer request per proof group on the exact head the moment the build gate passes, the loop launches them together within 30 seconds, a webhook wakes the reconciliation job at once and a finished observation is polled again within 20 seconds (45 after a failure), so submit→observation is seconds, not minutes.
+3. **Proofs in CI** ([GitHub guide](github.md#proofs-in-ci)): every `unit:*` and `integration:*` proof with a contract on `main` runs as trusted CI on the published queue tip with cached dependencies and images, publishing evidence itself; `manual:*` proofs start as producer sessions at submit.
+4. **Conflict avoidance** ([above](#schedule-by-overlap-smallest-scope-first)): overlapping `plannedFiles` are not built concurrently unless an operator overrides, the smallest scope lands first, and generated files never conflict.
+5. **Measurement** ([master guide](master-agent.md#pipeline-speed)): every item carries a [pipeline timeline](protocol/pipeline-speed.md); `master status` reports execution versus wait, rework rounds and hand-offs per item and the submit→merge p50/p90 with the target verdict, and `scripts/measure-pipeline-speed.mjs` records the same figures before and after each change lands.
+
 ## Explain stalls
 
 ```sh
 graphyard diagnose GY-N
 ```
 
-The CLI and work detail drawer explain dependencies, explicit blockers, missing ownership or workspace, busy resources, unobserved/stale PRs, integration failures, overdue unowned integration jobs, violations and the first refusing gate, including an [out-of-scope regression](#refuse-candidates-that-revert-shipped-code-outside-their-scope) refusal with its file list. A submitted head that does not contain the base branch tip is reported as `base-behind`: no review is requested for it until the worker runs `graphyard sync` or the merge queue publishes a tip that contains the base. For a queued candidate, `queue-binding-carried` and `queue-binding-required` say per binding — the approval and each required proof — whether it was carried across Graphyard's authored tip or must be produced afresh, each with the recorded reason, and `queue-base-carried` reports a tree-identical base advance the binding survived; see [the merge queue](github.md#binding-carry-across-a-graphyard-authored-tip). Output includes required proof and file overlap. Work, job metadata and database time come from one snapshot. This is diagnostic evidence, not another lifecycle state setter.
+The CLI and work detail drawer explain dependencies, explicit blockers, missing ownership or workspace, busy resources, unobserved/stale PRs, integration failures, overdue unowned integration jobs, violations and the first refusing gate, including an [out-of-scope regression](#refuse-candidates-that-revert-shipped-code-outside-their-scope) refusal with its file list. A submitted head that does not contain the base branch tip is reported as `base-behind`: no review is requested for it until the control plane brings it onto the moved tip (see [base refresh](github.md#base-refresh-for-in-flight-candidates)) or the merge queue publishes a tip that contains the base. That is a wait on Graphyard, not on anybody, so such an item is never an attention item; `base-conflict` is the one case it cannot absorb, and `base-refresh-carried` and `base-refresh-required` say per binding what the refresh kept. For a queued candidate, `queue-binding-carried` and `queue-binding-required` say per binding — the approval and each required proof — whether it was carried across Graphyard's authored tip or must be produced afresh, each with the recorded reason, and `queue-base-carried` reports a tree-identical base advance the binding survived; see [the merge queue](github.md#binding-carry-across-a-graphyard-authored-tip). Output includes required proof and file overlap. Work, job metadata and database time come from one snapshot. This is diagnostic evidence, not another lifecycle state setter.
 
 Released and expired assignments are described as no longer authoritative; the UI does not invent a cause or claim the process has terminated. Integration errors retain automatic retry information. Missing observation and unavailable connectivity must not be interpreted as successful delivery.
 
