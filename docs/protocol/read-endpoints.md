@@ -36,14 +36,16 @@ item's life rather than of its polling.
 | `cursor` | The `seq` of the previous page's last row; paging never revisits a row |
 | `routine` | `exclude` (default) or `include` to page through the routine rows themselves |
 | `payload` | `full` (default), `details` (the event's own details without the work snapshot it embeds), or `none` |
-| `view` | `rows` (default, the event array) or `history` (the array plus `page` and `routine`) |
+| `view` | `rows` (default, the event array), `history` (the array plus `page` and `routine`), or `page` (`history` without the routine summary, for the pages after the first of one walk) |
 
 `view=history` answers with `filters`, `events`, `page` (`returned`, `hasMore`, `nextCursor`,
 first and last `seq` and instant) and `routine`: the kinds excluded, each with its count and its
 first and last instant over the whole filtered range, the total, and a `statement` that names
 them. The summary's own scan is bounded and reports `truncated` when it filled that bound.
 Following `nextCursor` with `order=asc` retrieves an item's complete lifecycle however old it
-is; `graphyard events GY-N --all` is that walk, and `--kind`, `--since`, `--until`, `--routine`
-and `--payload` are the same parameters.
+is; `graphyard events GY-N --all` is that walk (it asks for the summary once, with the first
+page), and `--kind`, `--since`, `--until`, `--routine` and `--payload` are the same parameters.
+The flags belong to an item's history: `graphyard events` without an item reads the latest rows
+of the whole ledger and takes none.
 
 The initial list API is unpaginated. Do not use it as an unlimited analytics export.

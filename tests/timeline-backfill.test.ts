@@ -11,8 +11,9 @@ import { Engine } from '../src/engine.js';
 import { server } from '../src/server.js';
 import type { Principal, Work } from '../src/model.js';
 import { buildMasterStatus } from '../src/master.js';
-import { pipelineSpeed, pipelineSpeedSummary, type PipelineTimeline } from '../src/pipeline-speed.js';
-import { backfillPipelineTimelines, catchUpPipelineTimelines, pipelineBackfillState, resetPipelineBackfillState } from '../src/pipeline-backfill.js';
+import { mergeTimeline, pipelineSpeed, pipelineSpeedSummary, type PipelineTimeline, type TimelineBackfill } from '../src/pipeline-speed.js';
+import { backfillLimits, backfillPipelineTimelines, catchUpPipelineTimelines, pipelineBackfillState, resetPipelineBackfillState } from '../src/pipeline-backfill.js';
+import { readFlow } from '../src/flow-analytics.js';
 
 const operator: Principal = { id: 'operator', role: 'admin' };
 const worker: Principal = { id: 'worker-a', role: 'worker' };
@@ -49,6 +50,23 @@ const deliver = (id: string, mergedAt: string) => store.pool.query('UPDATE work_
 /** One reconciliation pass, recording the document as it then stood, as the control plane does. */
 const observed = (id: string) => store.pool.query(
   "INSERT INTO events(work_id,actor,kind,payload) SELECT $1,'github','github.observed',jsonb_build_object('work',document,'details','{}'::jsonb) FROM work_items WHERE id=$1", [id]);
+
+/**
+ * Every statement a reconstruction issues, split by whether it ran on a connection holding the
+ * coordination lock (`store.transaction`) or on the plain pool, with the rows the pool returned.
+ */
+async function spied<T>(run: () => Promise<T>) {
+  const pooled: { text: string; values: unknown[]; rows: any[] }[] = []; const locked: string[] = [];
+  const poolQuery = store.pool.query; const transaction = store.transaction;
+  (store.pool as any).query = async (...args: any[]) => { const result = await (poolQuery as any).apply(store.pool, args); if (typeof args[0] === 'string') pooled.push({ text: args[0], values: args[1] ?? [], rows: result.rows }); return result; };
+  store.transaction = (fn => transaction.call(store, async (db: any, now: Date) => {
+    const query = db.query;
+    db.query = (...args: any[]) => { locked.push(String(args[0])); return query.apply(db, args); };
+    try { return await fn(db, now); } finally { db.query = query; }
+  })) as typeof store.transaction;
+  try { return { result: await run(), pooled, locked }; }
+  finally { (store.pool as any).query = poolQuery; store.transaction = transaction; }
+}
 
 async function claimed(title: string) {
   let work = await engine.execute(operator, 'create', null, { title, plannedFiles: ['src/'], criteria: [{ id: 'AC-1', text: 'Measured', proofs: ['integration:timeline-backfill'] }] }, randomUUID());
@@ -108,8 +126,26 @@ test('integration:timeline-backfill — items delivered before the timeline exis
 
   // The work-snapshot read every speed report is derived from runs the catch-up itself.
   resetPipelineBackfillState();
-  const snapshot = await fetch(`${url}/api/work-snapshot`, { headers: { Authorization: `Bearer ${tokens.operator}` } }).then(response => response.json());
+  const { result: snapshot, pooled, locked } = await spied(() => fetch(`${url}/api/work-snapshot`, { headers: { Authorization: `Bearer ${tokens.operator}` } }).then(response => response.json()));
   assert.ok(snapshot.work.length >= 4);
+
+  // The read that must stay small. Every event embeds the whole work document, so a
+  // reconstruction never selects a payload: it projects the paths the replay reads, a bounded
+  // page at a time, on a connection that does not hold the coordination lock.
+  const ledgerReads = pooled.filter(query => /FROM events\b/.test(query.text));
+  assert.ok(ledgerReads.length >= 4, 'each item\'s ledger was read');
+  for (const read of ledgerReads) {
+    assert.doesNotMatch(read.text, /payload(?!\s*->)/, 'a reconstruction never selects the embedded document');
+    assert.ok(Number(read.values.at(-1)) <= backfillLimits.page, 'and reads the ledger a bounded page at a time');
+    for (const row of read.rows) {
+      assert.equal('payload' in row, false);
+      assert.ok(JSON.stringify(row).length < 1000, `a projected ledger row is ${JSON.stringify(row).length} bytes`);
+    }
+  }
+  const embedded = (await store.pool.query('SELECT avg(pg_column_size(payload))::int AS bytes FROM events WHERE work_id=$1', [legacy.id])).rows[0].bytes;
+  assert.ok(embedded > 1000, 'whereas the payload each of those rows carries is a whole document');
+  assert.equal(locked.filter(text => /FROM events\b/.test(text)).length, 0, 'the coordination lock is never held while the ledger is read');
+  assert.ok(locked.some(text => /INSERT INTO events/.test(text)), 'only the short write runs under it');
   const state = pipelineBackfillState();
   assert.equal(state.lastError, null);
   assert.equal(state.lastRun!.pending, false);
@@ -195,4 +231,86 @@ test('integration:timeline-backfill — items delivered before the timeline exis
   const rest = await backfillPipelineTimelines(store, { items: 25 });
   assert.equal(rest.pending, false);
   assert.deepEqual(withoutMarker((await reload(legacy.id)).pipeline!), written.legacy, 'a second reconstruction of the same ledger is the same timeline');
+
+  // A ledger longer than one run reads is continued, not given up on: each pass records where the
+  // replay stood, the next resumes from the row after it, and the timeline is written only once
+  // the ledger has been read to its end — so it is never reported as recording no submission.
+  const clearMarkers = (ids: string[]) => store.pool.query("UPDATE work_items SET document=document #- '{pipeline,backfill}' WHERE id=ANY($1::uuid[])", [ids]);
+  await stripTimeline(legacy.id);
+  const ledgerRows = (await store.pool.query('SELECT count(*)::int AS total, max(seq) AS last FROM events WHERE work_id=$1', [legacy.id])).rows[0];
+  const firstPass = await backfillPipelineTimelines(store, { items: 1, events: 3, page: 2 });
+  assert.deepEqual([firstPass.backfilled, firstPass.events, firstPass.pending, firstPass.items[0].truncated], [1, 3, true, true]);
+  const partial = await reload(legacy.id);
+  assert.equal(partial.pipeline!.backfill!.truncated, true);
+  assert.equal(partial.pipeline!.backfill!.events, 3);
+  assert.ok(partial.pipeline!.backfill!.resume, 'an unfinished pass records where the replay stood');
+  assert.deepEqual(partial.pipeline!.attempts, [], 'and writes no timeline from part of a ledger');
+  assert.equal(pipelineSpeed(partial, now).coverage, 'awaiting-backfill', 'an unfinished reconstruction is awaited, never reported as a ledger without a submission');
+  let passes = 1;
+  while ((await reload(legacy.id)).pipeline!.backfill!.truncated && passes < 100) { await backfillPipelineTimelines(store, { items: 1, events: 3, page: 2 }); passes++; }
+  const continued = await reload(legacy.id);
+  assert.equal(continued.pipeline!.backfill!.truncated, false);
+  assert.equal(continued.pipeline!.backfill!.resume, undefined);
+  assert.equal(continued.pipeline!.backfill!.passes, passes);
+  assert.ok(passes > 2 && continued.pipeline!.backfill!.events >= ledgerRows.total, `${passes} passes read ${continued.pipeline!.backfill!.events} rows`);
+  assert.ok(Number(continued.pipeline!.backfill!.toEvent) >= Number(ledgerRows.last));
+  assert.equal(continued.pipeline!.backfill!.retained, true);
+  assert.deepEqual(withoutMarker(continued.pipeline!), written.legacy, 'a reconstruction taken in bounded passes is the timeline one pass would have written');
+  assert.equal(pipelineSpeed(continued, now).coverage, 'measured');
+
+  // One item that cannot be written does not block the queue behind it: it is recorded, set
+  // aside for the settle window, reported through /api/status, and retried afterwards.
+  await stripTimeline(legacy.id);
+  await clearMarkers([lapsedItem.id, live.id]);
+  await store.pool.query(`CREATE FUNCTION refuse_backfill() RETURNS trigger AS $$ BEGIN RAISE EXCEPTION 'refused for the test'; END $$ LANGUAGE plpgsql`);
+  await store.pool.query(`CREATE TRIGGER refuse_backfill BEFORE UPDATE ON work_items FOR EACH ROW WHEN (OLD.id = '${legacy.id}') EXECUTE FUNCTION refuse_backfill()`);
+  resetPipelineBackfillState();
+  const isolated = await catchUpPipelineTimelines(store);
+  assert.deepEqual(isolated!.failed, [{ key: legacy.key, error: 'refused for the test' }]);
+  assert.deepEqual([isolated!.scanned, isolated!.backfilled, isolated!.pending], [3, 2, false], 'the oldest item failed and both items behind it were reconstructed');
+  assert.ok((await reload(live.id)).pipeline!.backfill && (await reload(lapsedItem.id)).pipeline!.backfill);
+  assert.equal((await reload(legacy.id)).pipeline, undefined, 'the refused write left nothing behind');
+  const reported = await fetch(`${url}/api/status`, { headers: { Authorization: `Bearer ${tokens.operator}` } }).then(response => response.json());
+  assert.deepEqual(reported.pipelineBackfill.failed.map((failure: any) => [failure.key, failure.error]), [[legacy.key, 'refused for the test']]);
+  const aside = await backfillPipelineTimelines(store);
+  assert.deepEqual([aside.scanned, aside.failed.length], [0, 0], 'a failed item is not retried on every read');
+  await store.pool.query('DROP TRIGGER refuse_backfill ON work_items');
+  const retried = await backfillPipelineTimelines(store, { now: Date.now() + backfillLimits.settledMs + 1 });
+  assert.deepEqual([retried.backfilled, retried.failed.length, retried.items[0].key], [1, 0, legacy.key]);
+  assert.deepEqual(pipelineBackfillState().failed, []);
+  assert.deepEqual(withoutMarker((await reload(legacy.id)).pipeline!), written.legacy);
+
+  // One catch-up at a time: a poll that arrives while another is reconstructing does not walk the queue too.
+  await clearMarkers([live.id]);
+  resetPipelineBackfillState();
+  const concurrent = await Promise.all([catchUpPipelineTimelines(store), catchUpPipelineTimelines(store), catchUpPipelineTimelines(store)]);
+  assert.deepEqual(concurrent.map(run => run?.backfilled ?? null), [1, null, null]);
+
+  // An item that straddled the timeline's own deploy: its first submission predates the live
+  // timeline, which therefore holds the resubmission as the first and lacks the early attempt.
+  // A ledger read to its end knows better; what a command recorded for an epoch still stands.
+  const marker: TimelineBackfill = { at: mergedAt, source: 'ledger', events: 40, fromEvent: '1', toEvent: '40', retained: true, truncated: false };
+  const early = { epoch: 1, owner: 'worker-a', claimedAt: '2026-09-01T10:00:00.000Z', endedAt: '2026-09-01T10:30:00.000Z', end: 'submitted' as const };
+  const lateReplayed = { epoch: 2, owner: 'worker-a', claimedAt: '2026-09-01T12:00:00.000Z', endedAt: null, end: null };
+  const lateLive = { ...lateReplayed, endedAt: '2026-09-01T12:20:00.000Z', end: 'submitted' as const };
+  const straddled = mergeTimeline(
+    { attempts: [lateLive], submittedAt: '2026-09-01T12:20:00.000Z', resubmittedAt: '2026-09-01T12:20:00.000Z', reworkRounds: 0, interventions: { blocked: 0, requirements: 0 } },
+    { attempts: [early, lateReplayed], submittedAt: '2026-09-01T10:30:00.000Z', resubmittedAt: '2026-09-01T10:30:00.000Z', reworkRounds: 1, interventions: { blocked: 1, requirements: 0 } }, marker);
+  assert.deepEqual(straddled.attempts, [early, lateLive], 'attempts are united by epoch and the live record of an epoch wins');
+  assert.equal(straddled.submittedAt, '2026-09-01T10:30:00.000Z', 'submit-to-merge starts at the first submission the ledger holds');
+  assert.equal(straddled.resubmittedAt, '2026-09-01T12:20:00.000Z');
+  assert.deepEqual([straddled.reworkRounds, straddled.interventions.blocked], [1, 1]);
+
+  // The remainder a truncated analytics scan reports starts strictly after the last fact it
+  // returned, in the scan's own order: a returned fact is never counted as unread, and an
+  // unreturned sibling at the same instant still is.
+  const sameInstant = new Date(Date.now() - 3_600_000).toISOString(), later = new Date(Date.now() - 1_800_000).toISOString();
+  for (const [index, observedAt] of [sameInstant, sameInstant, sameInstant, later, later].entries())
+    await store.pool.query(`INSERT INTO flow_facts(work_id,work_key,kind,observed_at,recorded_at,source,source_event,stage,work_type,details,dedupe) VALUES($1,$2,'stage.changed',$3,$3,'test',0,'build','feature','{}',$4)`, [live.id, live.key, observedAt, `gy-86-remainder-${index}`]);
+  const earlier = (await store.pool.query('SELECT count(*)::int AS total FROM flow_facts WHERE observed_at<$1', [sameInstant])).rows[0].total;
+  const total = (await store.pool.query('SELECT count(*)::int AS total FROM flow_facts')).rows[0].total;
+  const scan = await readFlow(store, { days: 30, limit: earlier + 2 });
+  assert.equal(scan.truncated, true);
+  assert.equal(scan.covered!.toCovered, sameInstant);
+  assert.equal(scan.covered!.remainingFacts, total - earlier - 2, 'exactly the facts the scan did not return');
 });

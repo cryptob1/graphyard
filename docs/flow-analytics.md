@@ -250,7 +250,8 @@ shorter interval than the one that was asked for. That interval is stated rather
 `window.covered` and `coverage.covered` carry the requested window (`from`, `to`), the instant
 the scan actually reached (`toCovered`), how long that is (`ms` against `windowMs`, and
 `fraction`), the interval nobody examined (`uncovered`), and how many facts are known to remain
-there (`remainingFacts`, itself bounded — `remainingCapped` marks a count that is a floor).
+there (`remainingFacts`: exactly the facts after the last one the scan returned, in the scan's own
+`(observed_at, id)` order; itself bounded — `remainingCapped` marks a count that is a floor).
 `window.covered.statement` says it in one sentence, and `window.truncated` is the flag to branch
 on. An export carries the same four fields (`windowCovered`, `windowCoveredFraction`,
 `windowTruncated`, `windowCoverage`) in its own metadata rows, so a CSV read away from the API

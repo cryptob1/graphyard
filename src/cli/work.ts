@@ -67,9 +67,10 @@ export const workCommands = defineCommands([
     name: 'events',
     scope: 'work',
     help: [
-      '  events [GY-N] [--kind K[,K]] [--since ISO] [--until ISO] [--order asc|desc]',
+      '  events                       Read the latest rows of the whole ledger',
+      '  events GY-N [--kind K[,K]] [--since ISO] [--until ISO] [--order asc|desc]',
       '        [--limit N] [--cursor SEQ] [--payload full|details|none] [--routine] [--all]',
-      '                               Read immutable history. Routine rows (github.observed,',
+      '                               Read an item\'s immutable history. Routine rows (github.observed,',
       '                               heartbeat) are summarised as counts with their first and',
       '                               last instants instead of filling the page; --routine returns',
       '                               them, and --all follows the cursor to the end of the range,',
@@ -88,6 +89,9 @@ export const workCommands = defineCommands([
       // The whole range, one bounded page at a time, as one reconstruction.
       const events = [...page.events];
       let last = page, pages = 1;
+      // The routine summary covers the whole filtered range and came with the first page; the
+      // pages after it ask for the cursor alone rather than the same aggregate again.
+      params.set('view', 'page');
       while (last.page.nextCursor && pages < eventHistoryLimits.pages) {
         params.set('cursor', last.page.nextCursor);
         last = await api(`events?${params}`);

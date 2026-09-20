@@ -190,6 +190,15 @@ test('integration:events-pagination — an item with more than 2,000 events has 
   assert.equal(none.body.events[0].details, undefined);
   assert.equal(none.body.events[0].kind, 'submit');
 
+  // The pages after the first of one walk ask for the cursor alone: the same rows and paging,
+  // without aggregating the routine summary the first page already carried.
+  const firstPage = await read(`events?work=${item.id}&order=asc&limit=5&view=history`);
+  const nextPage = await read(`events?work=${item.id}&order=asc&limit=5&view=page&cursor=${firstPage.body.page.nextCursor}`);
+  assert.equal(nextPage.status, 200);
+  assert.equal(nextPage.body.routine, null);
+  assert.deepEqual(nextPage.body.events.map((event: any) => event.seq), pages[1].events.map((event: any) => event.seq));
+  assert.deepEqual(nextPage.body.page, pages[1].page);
+
   // The command a human runs: one invocation walks the whole history, in order, with the routine
   // rows summarised rather than paged through.
   const walked = await cli(item.key, '--all', '--limit', '5');

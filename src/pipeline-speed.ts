@@ -33,12 +33,18 @@ export interface PipelineTimeline {
 }
 /**
  * What a reconstruction read. `retained` is false when the item's own creation event is no longer
- * in the ledger, so the timeline starts mid-life and its figures are a floor, not a measurement;
- * `truncated` is true when the item has more retained events than one reconstruction reads.
+ * in the ledger, so the timeline starts mid-life and its figures are a floor, not a measurement.
+ * `truncated` is true only while a reconstruction is unfinished: one pass reads a bounded number
+ * of rows, records where the replay stood (`resume`) and is continued from `toEvent` by the next,
+ * so a ledger of any length is read to its end and the timeline is written once it has been.
  */
 export interface TimelineBackfill {
   at: string; source: 'ledger'; events: number; fromEvent: string | null; toEvent: string | null;
   retained: boolean; truncated: boolean;
+  /** Bounded passes this reconstruction has taken so far. */
+  passes?: number;
+  /** The replay as the last pass left it; present only while `truncated`. */
+  resume?: ReplayState;
 }
 declare module './model/work.js' { interface Work { pipeline?: PipelineTimeline } }
 
@@ -96,12 +102,42 @@ export function recordIntervention(work: Work, kind: keyof PipelineTimeline['int
   timeline.interventions[kind] += 1;
 }
 
-/** One ledger row as the events table stores it; only these four columns decide a timeline. */
+/**
+ * One ledger row as a reconstruction reads it. `payload.work` is never the whole embedded
+ * document: the replay reads `updatedAt`, `lease` and `submission` from it and nothing else, so
+ * the backfill projects exactly those paths in SQL (`ledgerReplayColumns`) and a test or a caller
+ * holding a full event row may pass that instead.
+ */
 export interface LedgerEntry { seq: number | string; kind: string; payload: any; created_at: Date | string }
 const instant = (value: Date | string) => value instanceof Date ? value : new Date(value);
 
 /**
- * Rebuild an item's timeline from its own history.
+ * The columns a reconstruction selects: the three document paths and four detail fields the
+ * replay reads, never `payload` itself. Every event embeds the whole work document, so a row read
+ * whole is a document; read this way it is a few hundred bytes whatever the item has grown to.
+ */
+export const ledgerReplayColumns = `seq, kind, created_at, (payload->'work') IS NOT NULL AS has_work,
+  payload->'work'->>'updatedAt' AS updated_at, payload->'work'->'lease' AS lease, payload->'work'->'submission' AS submission,
+  payload->'details'->>'at' AS detail_at, payload->'details'->'epoch' AS detail_epoch, payload->'details'->'pr' AS detail_pr,
+  COALESCE(payload->'details'->>'reason','') <> '' AS detail_reason`;
+/** A projected row (`ledgerReplayColumns`) in the shape the replay reads. */
+export function ledgerEntry(row: any): LedgerEntry {
+  const lease = row.lease && typeof row.lease === 'object' ? { epoch: row.lease.epoch, owner: row.lease.owner, expiresAt: row.lease.expiresAt } : null;
+  const number = (value: unknown) => typeof value === 'number' ? value : undefined;
+  return { seq: row.seq, kind: row.kind, created_at: row.created_at, payload: {
+    ...(row.has_work ? { work: { updatedAt: row.updated_at ?? undefined, lease, submission: row.submission ?? null } } : {}),
+    details: { at: row.detail_at ?? undefined, epoch: number(row.detail_epoch), pr: number(row.detail_pr), reason: row.detail_reason ? true : undefined } } };
+}
+
+/** Where a replay stands between two reads: small, serialisable, and enough to continue from the next row. */
+export interface ReplayState {
+  timeline: PipelineTimeline;
+  lease: { epoch: number; owner: string; expiresAt: string } | null;
+  submission: { epoch: number; pr: number } | null;
+}
+
+/**
+ * Rebuild an item's timeline from its own history, one row at a time.
  *
  * Every lifecycle command wrote the work document it produced into the append-only ledger, so an
  * item that predates the timeline still carries one — unread. This replays those rows through the
@@ -109,13 +145,18 @@ const instant = (value: Date | string) => value instanceof Date ? value : new Da
  * the same arithmetic over the same facts, and a delivery that happened before the timeline
  * shipped is measured rather than reported as unmeasured forever.
  *
+ * The replay holds no rows: `apply` folds one into a state a few hundred bytes wide, so a ledger
+ * of any length is read a page at a time, and `state()` is what a bounded pass records to be
+ * continued from the row after the last one it read.
+ *
  * A lease that vanished between two consecutive documents lapsed at its own deadline, exactly as
  * reconciliation would have recorded it. A requirements revision that kept the lease was a live
  * scope widening, which is not a hand-off.
  */
-export function reconstructTimeline(events: LedgerEntry[]): PipelineTimeline {
-  const shadow = { pipeline: emptyTimeline(), lease: null, submission: null } as unknown as Work;
-  for (const event of events) {
+export function timelineReplay(resume?: ReplayState | null) {
+  const from = resume ? structuredClone(resume) : null;
+  const shadow = { pipeline: from?.timeline ?? emptyTimeline(), lease: from?.lease ?? null, submission: from?.submission ?? null } as unknown as Work;
+  const apply = (event: LedgerEntry) => {
     const snapshot: Work | undefined = event.payload?.work;
     const details = event.payload?.details ?? {};
     // The instant the command decided, not the instant its row reached the table: a saved
@@ -156,20 +197,41 @@ export function reconstructTimeline(events: LedgerEntry[]): PipelineTimeline {
       shadow.lease = snapshot.lease ?? null;
       if (snapshot.submission) shadow.submission = snapshot.submission;
     }
-  }
-  return shadow.pipeline!;
+  };
+  const state = (): ReplayState => structuredClone({
+    timeline: shadow.pipeline!,
+    lease: shadow.lease ? { epoch: shadow.lease.epoch, owner: shadow.lease.owner, expiresAt: shadow.lease.expiresAt } : null,
+    submission: shadow.submission ? { epoch: shadow.submission.epoch, pr: shadow.submission.pr } : null,
+  });
+  return { apply, state, timeline: () => shadow.pipeline! };
+}
+/** The whole replay over rows already in hand. */
+export function reconstructTimeline(events: LedgerEntry[]): PipelineTimeline {
+  const replay = timelineReplay();
+  for (const event of events) replay.apply(event);
+  return replay.timeline();
 }
 
+const earliest = (a: string | null | undefined, b: string | null | undefined) => !a ? b ?? null : !b ? a : Date.parse(b) < Date.parse(a) ? b : a;
+const latest = (a: string | null | undefined, b: string | null | undefined) => !a ? b ?? null : !b ? a : Date.parse(b) > Date.parse(a) ? b : a;
 /**
- * The timeline to keep for an item that was just reconstructed. Whatever a lifecycle command
- * recorded as it happened stands: the reconstruction only fills what was never recorded, and a
- * count it derives can raise a zero but never lower a recorded one.
+ * The timeline to keep for an item whose ledger was just replayed to its end.
+ *
+ * An attempt a lifecycle command recorded as it happened stands as recorded. But a live timeline
+ * is only as old as the timeline itself: an item that submitted before it shipped and was reworked
+ * after carries the later attempts and the *resubmission* as its first, which understates
+ * execution and submit-to-merge. So the two are united rather than one chosen: attempts by epoch
+ * (the live record of an epoch wins), the earliest first submission, the latest resubmission, and
+ * counts that a reconstruction can raise but never lower.
  */
 export function mergeTimeline(live: PipelineTimeline | undefined | null, reconstructed: PipelineTimeline, backfill: TimelineBackfill): PipelineTimeline {
+  const attempts = new Map<number, PipelineAttempt>();
+  for (const attempt of reconstructed.attempts) attempts.set(attempt.epoch, attempt);
+  for (const attempt of live?.attempts ?? []) attempts.set(attempt.epoch, attempt);
   return {
-    attempts: live?.attempts?.length ? live.attempts : reconstructed.attempts,
-    submittedAt: live?.submittedAt ?? reconstructed.submittedAt,
-    resubmittedAt: live?.resubmittedAt ?? reconstructed.resubmittedAt,
+    attempts: [...attempts.values()].sort((a, b) => a.epoch - b.epoch || Date.parse(a.claimedAt) - Date.parse(b.claimedAt)),
+    submittedAt: earliest(live?.submittedAt, reconstructed.submittedAt),
+    resubmittedAt: latest(live?.resubmittedAt, reconstructed.resubmittedAt),
     reworkRounds: Math.max(live?.reworkRounds ?? 0, reconstructed.reworkRounds),
     interventions: {
       blocked: Math.max(live?.interventions?.blocked ?? 0, reconstructed.interventions.blocked),
@@ -181,7 +243,8 @@ export function mergeTimeline(live: PipelineTimeline | undefined | null, reconst
 
 /**
  * Why a delivery is not measured. `awaiting-backfill` is the only one that resolves itself: the
- * item's history is still in the ledger and the reconstruction has not reached it yet.
+ * item's history is still in the ledger and the reconstruction has not reached it, or has not
+ * finished reading it, yet.
  */
 export type SpeedCoverage = 'measured' | 'awaiting-backfill' | 'events-pruned' | 'no-submission';
 
@@ -219,10 +282,11 @@ export function pipelineSpeed(work: Work, now: number): PipelineSpeed {
   const submittedAt = timeline?.submittedAt ?? null;
   const submitted = time(submittedAt);
   const backfill = timeline?.backfill ?? null;
-  // Why an item is not measured: its ledger no longer reaches its creation, the reconstruction has
-  // not reached an item that has no timeline at all yet, or the history genuinely records no submission.
-  const coverage: SpeedCoverage = backfill && !backfill.retained ? 'events-pruned'
-    : !backfill && !timeline?.attempts.length ? 'awaiting-backfill' : 'no-submission';
+  // Why an item is not measured: the reconstruction has not reached it or has not finished
+  // reading it, its ledger no longer reaches its creation, or the history genuinely records no
+  // submission — which is only ever said of a ledger that was read to its end.
+  const coverage: SpeedCoverage = backfill?.truncated || (!backfill && !timeline?.attempts.length) ? 'awaiting-backfill'
+    : backfill && !backfill.retained ? 'events-pruned' : 'no-submission';
   const unmeasured: PipelineSpeed = { attempts: timeline?.attempts.length ?? 0, reworkRounds, interventions, executionMs: null, waitMs: null, openMs: null, submittedAt, mergedAt,
     submitToMergeMs: null, sinceSubmitMs: null, routine: reworkRounds <= 1 && !interventions.blocked && !interventions.requirements, measured: false, coverage, backfill };
   if (!timeline?.attempts.length) return unmeasured;

@@ -366,13 +366,16 @@ export async function readFlow(store: Store, query: FlowQuery): Promise<FlowData
   const truncated = scan.rowCount! > scanLimit;
   const facts = scan.rows.slice(0, scanLimit).map(rowToFact);
   // What an exhausted row bound cost, in window time and in facts left unread, rather than a
-  // silent partial window. The remainder is counted from the last covered instant inclusively, so
-  // facts sharing that instant are reported as unread rather than assumed returned, and the count
-  // is itself bounded and says so.
-  const remainingProbe = truncated ? await store.pool.query(
-    `SELECT count(*)::int AS remaining FROM (SELECT 1 FROM flow_facts WHERE work_id=ANY($1) AND observed_at>=$2 AND observed_at<$3 LIMIT $4) probe`,
-    [ids, facts.at(-1)?.observedAt ?? from, to, flowLimits.remainingProbe + 1]) : null;
-  const covered = truncated ? coveredWindow(from, to, facts.at(-1)?.observedAt ?? from, remainingProbe!.rows[0].remaining as number, scanLimit) : fullyCovered(from, to);
+  // silent partial window. The remainder starts strictly after the last fact the scan returned,
+  // in the scan's own (observed_at, id) order — so neither that fact nor a returned sibling at the
+  // same instant is counted as unread, and an unreturned sibling still is. The boundary instant is
+  // read back by id so it keeps the column's precision. The count is itself bounded and says so.
+  const lastFact = facts.at(-1);
+  const remainingProbe = truncated && lastFact ? await store.pool.query(
+    `SELECT count(*)::int AS remaining FROM (SELECT 1 FROM flow_facts WHERE work_id=ANY($1) AND observed_at<$2
+       AND (observed_at,id) > ((SELECT observed_at FROM flow_facts WHERE id=$3), $3::bigint) LIMIT $4) probe`,
+    [ids, to, lastFact.id, flowLimits.remainingProbe + 1]) : null;
+  const covered = truncated ? coveredWindow(from, to, lastFact?.observedAt ?? from, (remainingProbe?.rows[0].remaining ?? 0) as number, scanLimit) : fullyCovered(from, to);
   // Current state is read as of the observation instant, inclusively: a fact recorded in
   // the same millisecond as the read clock is the state at that instant, never stale.
   // The in-window scan above stays half-open on `to` as documented.

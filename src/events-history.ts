@@ -38,8 +38,12 @@ export interface EventHistoryQuery {
   routine: 'exclude' | 'include';
   /** `full` keeps the event's whole payload; `details` drops the work snapshot it embeds. */
   payload: 'full' | 'details' | 'none';
-  /** `rows` answers with the event array alone; `history` adds paging and the routine summary. */
-  view: 'rows' | 'history';
+  /**
+   * `rows` answers with the event array alone; `history` adds paging and the routine summary;
+   * `page` is `history` without the summary, for the pages after the first of one walk — the
+   * summary covers the whole filtered range, so recomputing it per page only repeats an aggregate.
+   */
+  view: 'rows' | 'history' | 'page';
 }
 
 const kindPattern = /^[\w.:-]{1,100}$/;
@@ -52,7 +56,7 @@ export const eventHistorySchema = z.object({
   order: z.enum(['asc', 'desc']).default('desc'),
   routine: z.enum(['exclude', 'include']).default('exclude'),
   payload: z.enum(['full', 'details', 'none']).default('full'),
-  view: z.enum(['rows', 'history']).default('rows'),
+  view: z.enum(['rows', 'history', 'page']).default('rows'),
 }).strict();
 
 /** Query parameters as the HTTP routes receive them; `kind` may repeat or carry a comma-separated list. */
@@ -147,7 +151,7 @@ export interface EventHistoryPage {
   filters: { work: string | null; kinds: string[]; since: string | null; until: string | null; order: 'asc' | 'desc'; limit: number; routine: 'exclude' | 'include'; payload: 'full' | 'details' | 'none' };
   events: any[];
   page: { returned: number; hasMore: boolean; nextCursor: string | null; firstSeq: string | null; lastSeq: string | null; firstAt: string | null; lastAt: string | null };
-  /** The disclosure of what the filter left out; null for a read that asked only for the rows. */
+  /** The disclosure of what the filter left out; null for a read that did not ask for it (`rows`, `page`). */
   routine: RoutineSummary | null;
 }
 
