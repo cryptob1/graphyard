@@ -1,9 +1,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from 'node:fs/promises';
+import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { dirname, join, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { configuredGeneratedFiles, parseGeneratedFiles } from '../src/generated-files.js';
 import { generatedFilesAssignment, generatedFilesDrift, generatedFilesVariable } from '../src/install/generated-files.js';
@@ -97,6 +98,9 @@ test('integration:generated-files-setup — installers derive the assignment fro
   // The prose is also not accepted when no manifest JSON can back it: the derivation refuses.
   const proseOnly = await fixtureRepo({ 'scripts/check-docs.mjs': `if (process.argv.includes('--manifest')) process.exit(7);\nconsole.log('Checked 12 Markdown files; all relative links, anchors and generated indexes resolve.');\n` });
   try { assert.throws(() => generatedFilesAssignment(proseOnly), /generated-file manifest failed/); } finally { await rm(proseOnly, { recursive: true, force: true }); }
+  // A manifest that declares an empty set declares nothing to exempt; it is not a failure.
+  const empty = await fixtureRepo({ 'scripts/check-docs.mjs': `if (process.argv.includes('--list')) { console.log(''); process.exit(0); }\nif (process.argv.includes('--manifest')) { console.log(JSON.stringify({ generated: [], regenerate: 'node scripts/check-docs.mjs --write' })); process.exit(0); }\nprocess.exit(1);\n` });
+  try { assert.equal(generatedFilesAssignment(empty), null); } finally { await rm(empty, { recursive: true, force: true }); }
   // A script that predates --manifest declares through a well-formed --list line alone.
   const listOnly = await fixtureRepo({ 'scripts/check-docs.mjs': `if (process.argv.includes('--list')) console.log('docs/a.md,docs/b.md'); else process.exit(9);\n` });
   try { assert.equal(generatedFilesAssignment(listOnly)?.value, 'docs/a.md,docs/b.md'); } finally { await rm(listOnly, { recursive: true, force: true }); }
@@ -160,6 +164,61 @@ test('integration:generated-files-setup — the server refuses an unparseable va
   const status = await readFile(new URL('../src/cli/master-status.ts', import.meta.url), 'utf8');
   assert.match(status, /generatedFilesAssignment\(root\)/);
   assert.match(status, /installationOwner\('delegation-limits', text\)/);
+  // The drift is counted like every other attention item, so the summary count never hides it.
+  assert.match(status, /attention: status\.counts\.attention \+ diskAttention\.length \+ generatedFiles\.length/);
   const setup = await readFile(new URL('../src/repository-setup.ts', import.meta.url), 'utf8');
   assert.match(setup, /generatedFilesAssignment\(root\)/);
+});
+
+// The adapters run `npx` and `gh`, so they are exercised against a fixture repository with a
+// recording shim on PATH: what reaches `railway variable set` is the assertion, not the source
+// text. `src` and the dependency install are linked in so the copied adapter resolves them.
+async function adapterFixture(files: Record<string, string>) {
+  const root = await mkdtemp(join(tmpdir(), 'graphyard-adapter-'));
+  await symlink(join(repository, 'src'), join(root, 'src'), 'dir');
+  const resolved = createRequire(import.meta.url).resolve('tsx/esm/api');
+  await symlink(resolved.slice(0, resolved.lastIndexOf(`${sep}node_modules${sep}`) + `${sep}node_modules`.length), join(root, 'node_modules'), 'dir');
+  for (const [path, content] of Object.entries({ 'scripts/provision-railway.mjs': await readFile(join(repository, 'scripts/provision-railway.mjs'), 'utf8'), ...files })) {
+    await mkdir(dirname(join(root, path)), { recursive: true });
+    await writeFile(join(root, path), content);
+  }
+  const record = join(root, 'npx-calls.txt');
+  await mkdir(join(root, 'bin'), { recursive: true });
+  await writeFile(join(root, 'bin/npx'), `#!/bin/sh\nfor arg in "$@"; do printf '%s\\n' "$arg" >> ${JSON.stringify(record)}; done\ncat > /dev/null\n`, { mode: 0o755 });
+  return { root, record };
+}
+
+test('integration:generated-files-setup — the Railway adapter sets the derived variable beside GRAPHYARD_PRINCIPALS', async () => {
+  const credentials = JSON.stringify([{ id: 'operator', role: 'admin', token: 'a'.repeat(40) }, { id: 'agent-1', role: 'worker', token: 'b'.repeat(40) }]);
+  const declared = await adapterFixture({ 'scripts/check-docs.mjs': manifestScript, '.graphyard/credentials.json': credentials });
+  try {
+    const run = spawnSync(process.execPath, ['scripts/provision-railway.mjs'], { cwd: declared.root, encoding: 'utf8', timeout: 120_000,
+      env: { ...process.env, PATH: `${join(declared.root, 'bin')}:${process.env.PATH}`, GRAPHYARD_URL: '' } });
+    assert.equal(run.status, 0, `${run.stdout}${run.stderr}`);
+    const set = (await readFile(declared.record, 'utf8')).split('\n');
+    assert.ok(set.includes('GRAPHYARD_GENERATED_FILES=docs/index.md,docs/list.md'), `the adapter set ${set.filter(entry => entry.startsWith('GRAPHYARD_')).join(' ')}`);
+    assert.ok(set.includes('GRAPHYARD_MAX_REVIEWERS=2'), 'the capacity variables are still set beside it');
+    assert.match(run.stdout, /GRAPHYARD_GENERATED_FILES=docs\/index\.md,docs\/list\.md/);
+  } finally { await rm(declared.root, { recursive: true, force: true }); }
+  // A managed repository that declares no manifest sets no exemption at all.
+  const undeclared = await adapterFixture({ '.graphyard/credentials.json': credentials });
+  try {
+    const run = spawnSync(process.execPath, ['scripts/provision-railway.mjs'], { cwd: undeclared.root, encoding: 'utf8', timeout: 120_000,
+      env: { ...process.env, PATH: `${join(undeclared.root, 'bin')}:${process.env.PATH}`, GRAPHYARD_URL: '' } });
+    assert.equal(run.status, 0, `${run.stdout}${run.stderr}`);
+    assert.ok(!(await readFile(undeclared.record, 'utf8')).includes(generatedFilesVariable));
+  } finally { await rm(undeclared.root, { recursive: true, force: true }); }
+});
+
+test('integration:generated-files-setup — every other adapter deploys the same derived value', async () => {
+  const source = (name: string) => readFile(join(repository, name), 'utf8');
+  // The integrations adapter stages variables one by one through its own secret-safe path, so the
+  // derived value travels in the same record as GRAPHYARD_PRINCIPALS and the capacity variables.
+  const integrations = await source('scripts/configure-integrations.mjs');
+  assert.match(integrations, /const generated = generatedFilesAssignment\(fileURLToPath\(root\)\)/);
+  assert.match(integrations, /GRAPHYARD_PRINCIPALS: JSON\.stringify\(roster\), \.\.\.limits\.variables, \.\.\.\(generated \? \{ \[generated\.variable\]: generated\.value \} : \{\}\)/);
+  // Applying the Railway configuration must not drop what the adapters set.
+  assert.match(await source('.railway/railway.ts'), new RegExp(`${generatedFilesVariable}: preserve\\(\\)`));
+  // The Compose install copies .env.example, so the variable is declared there too.
+  assert.match(await source('.env.example'), new RegExp(`^${generatedFilesVariable}=`, 'm'));
 });

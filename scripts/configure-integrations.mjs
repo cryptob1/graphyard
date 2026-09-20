@@ -12,7 +12,7 @@
 import { readFile, writeFile } from 'node:fs/promises';
 import { execFileSync } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
-import { pathToFileURL } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { setTimeout as sleep } from 'node:timers/promises';
 
 export const trustedAcceptanceId = 'trusted-acceptance';
@@ -142,6 +142,7 @@ async function main() {
   const { contracts } = await import('./contracts.mjs');
   const { delegationLimitAssignments, readDeployedDelegationLimits } = await import('../src/install/limits.ts');
   const { ciProducerId, ciProducerSecret, ciProducerGrants, withCiProducer } = await import('../src/install/ci-proofs.ts');
+  const { generatedFilesAssignment } = await import('../src/install/generated-files.ts');
   const options = parseOptions(process.argv.slice(2));
   const apply = options.apply;
   const root = new URL('../', import.meta.url), repository = 'cryptob1/graphyard';
@@ -153,7 +154,7 @@ async function main() {
     try { app = JSON.parse(await readFile(new URL('.graphyard/github-app.json', root), 'utf8')); } catch (error) { if (error.code !== 'ENOENT') throw error; }
     if (!apply) {
       console.log(JSON.stringify({ repository, url, appRegistered: !!app?.appId, installationVerified: !!app?.installationId,
-        changes: ['Restrict graphyard-reporting environment to main only', 'Send App credentials to Railway secret variables', 'Read the live GRAPHYARD_PRINCIPALS from Railway and merge .graphyard/credentials.json into it by id; a live principal leaves only when named with --remove ID, and the coordinator, admins and live principals are never dropped silently', `Keep the ${trustedAcceptanceId} producer scoped to ${Object.keys(contracts).join(' and ')} and its live token; rotate it only with --rotate ${trustedAcceptanceId}`, `Keep the ${ciProducerId} CI producer scoped to ${ciProducerGrants.join(' and ')} (never manual:* or e2e:*) with runtime github-actions and its live token; rotate it only with --rotate ${ciProducerId}`, 'Print the roster preview by id, role and token change (never a token value)', 'Derive the GRAPHYARD_MAX_*/MIN_* capacity variables from the merged roster, report drift against the deployed values, and set them beside GRAPHYARD_PRINCIPALS', 'Set Graphyard URL on that environment', 'Stage variables without deploying when no token changes; a changed token requires --deploy, which redeploys and sets its GitHub secret only once the deployment authenticates it'],
+        changes: ['Restrict graphyard-reporting environment to main only', 'Send App credentials to Railway secret variables', 'Read the live GRAPHYARD_PRINCIPALS from Railway and merge .graphyard/credentials.json into it by id; a live principal leaves only when named with --remove ID, and the coordinator, admins and live principals are never dropped silently', `Keep the ${trustedAcceptanceId} producer scoped to ${Object.keys(contracts).join(' and ')} and its live token; rotate it only with --rotate ${trustedAcceptanceId}`, `Keep the ${ciProducerId} CI producer scoped to ${ciProducerGrants.join(' and ')} (never manual:* or e2e:*) with runtime github-actions and its live token; rotate it only with --rotate ${ciProducerId}`, 'Print the roster preview by id, role and token change (never a token value)', 'Derive the GRAPHYARD_MAX_*/MIN_* capacity variables from the merged roster, report drift against the deployed values, and set them beside GRAPHYARD_PRINCIPALS', 'Derive GRAPHYARD_GENERATED_FILES from the repository generated-file manifest and set it beside GRAPHYARD_PRINCIPALS', 'Set Graphyard URL on that environment', 'Stage variables without deploying when no token changes; a changed token requires --deploy, which redeploys and sets its GitHub secret only once the deployment authenticates it'],
         options, blockedBy: !app?.installationId ? 'Complete graphyard github-setup and install the App first' : null }, null, 2));
       process.exit(0);
     }
@@ -188,7 +189,7 @@ async function main() {
     // The producer generated here counts toward GRAPHYARD_MAX_REVIEWERS like every other one, so the
     // capacity variables are derived from the roster this run deploys — not from credentials.json
     // alone — and drift against what the deployment runs with now is reported before they are set.
-    stage = 'derive delegation capacity variables';
+    stage = 'derive the delegation capacity and generated-file variables';
     let deployed = null;
     const operator = roster.find(p => p.role === 'admin');
     if (operator) {
@@ -197,9 +198,13 @@ async function main() {
       deployed = liveLimits.deployed;
     }
     const limits = delegationLimitAssignments(roster, deployed);
+    // The regression guard's exemption list is derived from this repository's own generated-file
+    // manifest and deployed beside the roster, so a docs-touching candidate is never refused for
+    // regenerating a page no work item owns. No manifest means no variable and no exemption.
+    const generated = generatedFilesAssignment(fileURLToPath(root));
     for (const entry of limits.drift) console.error(`Drift: ${entry.reason}`);
     const variables = { GITHUB_APP_ID: String(app.appId), GITHUB_INSTALLATION_ID: String(app.installationId), GITHUB_PRIVATE_KEY: app.privateKey, GITHUB_WEBHOOK_SECRET: app.webhookSecret,
-      GRAPHYARD_PRINCIPALS: JSON.stringify(roster), ...limits.variables };
+      GRAPHYARD_PRINCIPALS: JSON.stringify(roster), ...limits.variables, ...(generated ? { [generated.variable]: generated.value } : {}) };
     // Recorded before staging, so a sync the deployment or GitHub leaves unfinished is completed by
     // the next --deploy run rather than forgotten once the staged token reads as live.
     stage = 'record the secret syncs this run owes';
@@ -208,7 +213,7 @@ async function main() {
     for (const [key, value] of Object.entries(variables)) execFileSync('npx', [...railway, 'variable', 'set', '--service', 'graphyard', '--skip-deploys', '--stdin', key], { input: value, stdio: ['pipe', 'ignore', 'pipe'] });
     gh(['variable', 'set', 'GRAPHYARD_URL', '--repo', repository, '--env', 'graphyard-reporting', '--body', url]);
     if (!secrets.length) {
-      console.log(`Integrations configured without printing credentials; capacity set to ${limits.lines.join(' ')}${limits.drift.length ? ` (corrected ${limits.drift.map(entry => entry.variable).join(', ')})` : ''}. No token changed, so no GitHub secret changed and no deployment was triggered. Preview .railway/railway.ts, deploy reviewed code, then verify the App-owned check before requiring it.`);
+      console.log(`Integrations configured without printing credentials; capacity set to ${[...limits.lines, ...(generated ? [generated.line] : [])].join(' ')}${limits.drift.length ? ` (corrected ${limits.drift.map(entry => entry.variable).join(', ')})` : ''}. No token changed, so no GitHub secret changed and no deployment was triggered. Preview .railway/railway.ts, deploy reviewed code, then verify the App-owned check before requiring it.`);
       return;
     }
     stage = 'deploy the staged roster';
@@ -221,7 +226,7 @@ async function main() {
       await saveRecord(secrets.filter(candidate => candidate.id !== entry.id && record.some(owed => owed.id === candidate.id)));
     }
     if (served.pending.length) throw Object.assign(new Error(`The deployment does not authenticate ${served.pending.join(', ')} yet, so ${secrets.filter(entry => served.pending.includes(entry.id)).map(entry => entry.secret).join(', ')} was left unchanged and recorded in .graphyard/pending-secret-sync.json; rerun with --deploy once the deployment is live and it is set then`), { visible: true });
-    console.log(`Integrations configured without printing credentials; capacity set to ${limits.lines.join(' ')}. Deployed the merged roster and updated ${secrets.map(entry => entry.secret).join(', ')} only after the deployment authenticated ${served.served.join(', ')}.`);
+    console.log(`Integrations configured without printing credentials; capacity set to ${[...limits.lines, ...(generated ? [generated.line] : [])].join(' ')}. Deployed the merged roster and updated ${secrets.map(entry => entry.secret).join(', ')} only after the deployment authenticated ${served.served.join(', ')}.`);
   } catch (error) { console.error(error?.visible || stage === 'check the merged roster' ? error.message : `Configuration stopped at: ${stage}. No credential values are logged. Correct the setup and rerun; the live roster is merged again and no token rotates unless named with --rotate.`); process.exitCode = 1; }
 }
 

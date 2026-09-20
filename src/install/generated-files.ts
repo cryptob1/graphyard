@@ -19,8 +19,19 @@ export const generatedManifestScript = 'scripts/check-docs.mjs';
 /** What an installer writes beside GRAPHYARD_PRINCIPALS for one repository's manifest. */
 export interface GeneratedFilesAssignment { variable: typeof generatedFilesVariable; files: string[]; value: string; line: string }
 
+// The manifest is repository code, so it runs with a bound: a script that hangs must not hang
+// `master status` or an install. A killed run has no status and is reported like any other failure.
 const runManifestScript = (root: string, args: string[]) =>
-  spawnSync(process.execPath, [generatedManifestScript, ...args], { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+  spawnSync(process.execPath, [generatedManifestScript, ...args], { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 30_000 });
+
+/**
+ * A manifest that declares an empty set is a declaration, not a failure: the repository renders
+ * no generated page, so the deployment exempts nothing and the variable stays unset.
+ */
+const declaresNothing = (output: string) => {
+  try { const parsed = JSON.parse(output); return Array.isArray(parsed?.generated) && parsed.generated.length === 0; }
+  catch { return false; }
+};
 
 /** The assignment for a parsed declaration, or null when it declares no generated files. */
 const assignment = (files: readonly string[]): GeneratedFilesAssignment | null => {
@@ -65,6 +76,7 @@ export function generatedFilesAssignment(root: string): GeneratedFilesAssignment
   if (manifest.status === 0) {
     const parsed = parseGeneratedManifest(manifest.stdout);
     if (parsed) return assignment(parsed.files);
+    if (declaresNothing(manifest.stdout)) return null;
   }
   if (listed.files) return assignment(listed.files);
   if (manifest.status !== 0)
