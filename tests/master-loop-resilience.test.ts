@@ -11,7 +11,7 @@ import { reconcileAutoDispatch } from '../src/model/dispatch.js';
 import { assertOutsideWorktrees, autonomousSession, buildMasterStatus, dispatchWork, herdrWorkspaceHealth, liveMasterConfig, loadMasterConfig, masterConfigChanges, masterConfigSchema, masterHarness, prepareSessionHarness, removeProducerProfile, replaceProducerProfile, saveProducerProfile, sessionHarnessFile, sessionHarnessPlan, setupMaster, workerHarnessPlan, workerPrompt, type MasterConfig, type MasterRun, type WorkerProfile } from '../src/master.js';
 import { writeHarnessPermissions } from '../src/harness.js';
 import { bindReviewer, launchReview, readReviewLedger, reconcileReviews, removeReviewerProfile, reviewerBindingHealth, reviewerRegistrationFile, reviewIdleGraceMs, reviewPrompt, saveReviewerProfile, summarizeReviews, type ReviewRecord } from '../src/reviewer.js';
-import { launchProducer, producerIdleGraceMs, producerPrompt, readProducerLedger, reconcileProducers, sessionRetries, sessionRetry, sessionRetryBaseMs, sessionRetryLimit, summarizeProducers, type ProducerRecord } from '../src/producer.js';
+import { launchProducer, producerIdleGraceMs, producerPrompt, readProducerLedger, reconcileProducers, sessionRetries, sessionRetry, sessionRetryBaseMs, sessionRetryLimit, summarizeProducers, unstartedRetryLimit, type ProducerRecord } from '../src/producer.js';
 import { emptyDispatchCursor, readDispatchCursor, runAutoDispatch, runDispatchTick, tickReadTimeout, type DispatchEffects } from '../src/auto-dispatch.js';
 import { emptyDaemonState, noteConfigReload, readDaemonState, runCycle, runDaemon, type DaemonEffects } from '../src/master-daemon.js';
 // @ts-expect-error Dependency-free operator script.
@@ -92,7 +92,7 @@ function daemonEffects(overrides: Partial<DaemonEffects> = {}, log: string[] = [
 test('integration:producer-session-retry — a failed or expired producer session is relaunched for the same request on a widening, bounded schedule, and master status shows the attempts and the next retry', async () => {
   // The schedule: one session per request at a time; a failed or expired one waits 1, 4 then 16 minutes; four sessions in all.
   const failedAt = (minutes: number, state = 'failed') => ({ requestId: 'r1', state, requestedAt: iso(minutes * 60_000 - 30_000), closedAt: iso(minutes * 60_000), resolution: 'the session finished (done) without trusted evidence' });
-  assert.deepEqual(sessionRetry([], 'r1', clock), { requestId: 'r1', attempts: 0, limit: sessionRetryLimit, last: null, launch: true, settled: false, nextAt: null, exhausted: false });
+  assert.deepEqual(sessionRetry([], 'r1', clock), { requestId: 'r1', attempts: 0, started: 0, neverStarted: 0, limit: sessionRetryLimit, unstartedLimit: unstartedRetryLimit, last: null, launch: true, settled: false, nextAt: null, exhausted: false });
   assert.equal(sessionRetry([{ requestId: 'r1', state: 'pending', requestedAt: iso(0) }], 'r1', clock + 3_600_000).settled, true, 'a live session is never doubled');
   for (const state of ['completed', 'cancelled']) assert.equal(sessionRetry([{ requestId: 'r1', state, requestedAt: iso(0) }], 'r1', clock).settled, true, `a ${state} session settles the request`);
   const once = [failedAt(0)];
@@ -393,7 +393,8 @@ test('integration:role-scoped-harness-rules — worker, reviewer and producer se
       async () => ({ epoch: 4, path: join(root, 'assigned'), base: 'c'.repeat(40), branch: 'graphyard/gy-69-4' }), async () => {}, 5_000);
     const workerFile = sessionHarnessFile(root, 'worker', 'claude-worker');
     const run = calls.find(call => call[0] === 'pane' && call[1] === 'run')!;
-    assert.match(run[3], new RegExp(`'--' 'claude' '--permission-mode' 'bypassPermissions' '--setting-sources' 'user' '--settings' '${workerFile.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}'$`));
+    // GY-93: the role file is followed by the launch authorization it leaves out, then the request.
+    assert.match(run[3], new RegExp(`'--' 'claude' '--permission-mode' 'bypassPermissions' '--setting-sources' 'user' '--settings' '${workerFile.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}' '--append-system-prompt' '.*' 'Implement GY-69: [^']*'$`));
     const workerSettings = JSON.parse(await readFile(workerFile, 'utf8'));
     assert.ok(workerSettings.permissions.allow.includes('Bash(git push origin graphyard/gy-69-4)'));
     assert.equal(denied(workerSettings.permissions.deny, 'git push origin graphyard/gy-69-4'), false, 'the only deny rules the worker loads cannot block its push');
@@ -408,7 +409,8 @@ test('integration:role-scoped-harness-rules — worker, reviewer and producer se
     const reviewCalls: string[][] = [];
     await launchReview(root, work(), 'claude-reviewer', [], new Date().toISOString(), { run: herdr(reviewCalls), mint });
     const reviewerFile = sessionHarnessFile(root, 'reviewer', 'claude-reviewer');
-    assert.deepEqual(reviewCalls[1].slice(-7), ['--', '--permission-mode', 'bypassPermissions', '--setting-sources', 'user', '--settings', reviewerFile]);
+    assert.deepEqual(reviewCalls[1].slice(-10, -3), ['--', '--permission-mode', 'bypassPermissions', '--setting-sources', 'user', '--settings', reviewerFile]);
+    assert.equal(reviewCalls[1].at(-3), '--append-system-prompt'); assert.match(reviewCalls[1].at(-1)!, /^You are the independent Graphyard reviewer/, 'the request is the positional prompt (GY-93)');
     const reviewerSettings = JSON.parse(await readFile(reviewerFile, 'utf8'));
     assert.ok(reviewerSettings.permissions.allow.includes('Bash(gh api --method POST repos/owner/project/pulls/69/reviews*)'));
     assert.equal(denied(reviewerSettings.permissions.deny, `gh api --method POST repos/owner/project/pulls/69/reviews -f commit_id=${H} -f event=APPROVE`), false, 'the master deny on review calls cannot block the reviewer');
@@ -421,7 +423,8 @@ test('integration:role-scoped-harness-rules — worker, reviewer and producer se
     const produceCalls: string[][] = [];
     await launchProducer(root, item, item.autoDispatch!.producers[0], (await loadMasterConfig(root)).producers[0], [], new Date().toISOString(), { run: herdr(produceCalls) });
     const producerFile = sessionHarnessFile(root, 'producer', 'producer-a');
-    assert.deepEqual(produceCalls[1].slice(-4), ['--setting-sources', 'user', '--settings', producerFile]);
+    assert.deepEqual(produceCalls[1].slice(-7, -3), ['--setting-sources', 'user', '--settings', producerFile]);
+    assert.match(produceCalls[1].at(-1)!, /^You are an independent Graphyard proof producer/, 'the request is the positional prompt (GY-93)');
     const producerSettings = JSON.parse(await readFile(producerFile, 'utf8'));
     assert.ok(producerSettings.permissions.allow.includes(`Bash(node ${launcher} evidence:*)`));
     assert.ok(producerSettings.permissions.deny.includes('Bash(git push:*)'));
@@ -432,7 +435,7 @@ test('integration:role-scoped-harness-rules — worker, reviewer and producer se
     const ledger = await readReviewLedger(root); ledger.reviews = []; await writeFile(join(root, '.graphyard/reviews.json'), JSON.stringify(ledger), { mode: 0o600 });
     const cursorCalls: string[][] = [];
     await launchReview(root, work(), 'cursor-reviewer', [], new Date().toISOString(), { run: herdr(cursorCalls), mint });
-    assert.deepEqual(cursorCalls[1].slice(-3), ['--', '--force', '--trust']);
+    assert.deepEqual(cursorCalls[1].slice(-4, -1), ['--', '--force', '--trust']); assert.match(cursorCalls[1].at(-1)!, /^You are the independent Graphyard reviewer/, 'plus the request (GY-93)');
   } finally { await cleanup(); }
 });
 
