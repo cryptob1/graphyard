@@ -6,7 +6,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { z } from 'zod';
 import { currentEvidence, deliveryState, deploySmokeRequired, exhaustedReviewerProfiles, postDeployMs, productionLatencyMs, reviewProviderOf, reviewerProfileFor, rollbackGuidance, type Work } from './model.js';
 import { dispatchOrder } from './coordination.js';
-import { assertDispatchable, assertOutsideWorktrees, closeHerdrPane, dispatchWork, inspectWorkerCredentials, listHerdrAgents, mergeExecutor, type ConfigReload, type HerdrAgent, type MasterConfig, type WorkerProfile } from './master.js';
+import { assertDispatchable, assertOutsideWorktrees, closeHerdrPane, diskExhaustion, diskThresholdBytes, dispatchWork, inspectWorkerCredentials, listHerdrAgents, mergeExecutor, reclaimAdvice, reclaimIdleMs, reclaimWorktrees, writeFailure, type ConfigReload, type HerdrAgent, type MasterConfig, type WorkerProfile, type WorktreeReclaimReport } from './master.js';
 
 /**
  * The durable coordination loop. Every step is a pure decision over one Graphyard snapshot plus
@@ -15,7 +15,7 @@ import { assertDispatchable, assertOutsideWorktrees, closeHerdrPane, dispatchWor
  * evidence, never calls an operator route, and reaches GitHub only through the guarded merge.
  */
 
-export const daemonActionKinds = ['close', 'dispatch', 'review', 'proof', 'merge', 'deployment', 'smoke', 'escalation', 'config', 'session'] as const;
+export const daemonActionKinds = ['close', 'dispatch', 'review', 'proof', 'merge', 'deployment', 'smoke', 'escalation', 'config', 'session', 'reclaim'] as const;
 export type DaemonActionKind = typeof daemonActionKinds[number];
 export const daemonActionSchema = z.object({
   kind: z.enum(daemonActionKinds),
@@ -54,6 +54,14 @@ export const deploymentObservationSchema = z.object({
 }).strict();
 export type DeploymentObservation = z.infer<typeof deploymentObservationSchema>;
 
+/** What one reclamation did, kept on the cursor so `master status` reports it without rescanning. */
+export const reclaimSummarySchema = z.object({
+  at: z.string(), scanned: z.number().int().min(0), removed: z.number().int().min(0), kept: z.number().int().min(0),
+  freedBytes: z.number().int().min(0), freeBytes: z.number().int().min(0).nullable().default(null),
+  errors: z.array(z.string().max(500)).max(20).default([]),
+}).strict();
+export type ReclaimSummary = z.infer<typeof reclaimSummarySchema>;
+
 export const daemonStateSchema = z.object({
   version: z.literal(1), url: z.string(), repository: z.string(),
   lock: z.object({ id: z.string(), pid: z.number().int().positive(), host: z.string(), startedAt: z.string(), heartbeatAt: z.string() }).strict().nullable().default(null),
@@ -65,10 +73,15 @@ export const daemonStateSchema = z.object({
   deployment: deploymentObservationSchema.nullable().default(null),
   /** The last reload of .graphyard/master.json: what the running loop adopted, or why it refused. */
   config: z.object({ at: z.string(), changed: z.array(z.string().max(100)).max(100), refused: z.string().max(1000).nullable() }).strict().nullable().default(null),
+  /** The last worktree reclamation: what it removed and how much room the host has. */
+  reclaim: reclaimSummarySchema.nullable().default(null),
 }).strict();
 export type DaemonState = z.infer<typeof daemonStateSchema>;
 
 export const retainedActions = 500, retainedMetrics = 100, profileCooldownMs = 600_000, maxProofAttempts = 3;
+/** Reclamation scans the worktree directory, so it runs on its own bounded interval, not every cycle. */
+export const reclaimIntervalMs = 600_000;
+const gigabytes = (bytes: number | null) => bytes === null ? 'an unknown amount of space' : `${(bytes / 1e9).toFixed(1)} GB`;
 
 export function emptyDaemonState(config: MasterConfig): DaemonState {
   return daemonStateSchema.parse({ version: 1, url: config.url, repository: config.repository });
@@ -93,8 +106,13 @@ export async function readDaemonState(root: string, config: MasterConfig): Promi
 
 export async function writeDaemonState(config: MasterConfig, state: DaemonState) {
   const file = daemonStatePath(config), temporary = `${file}.${randomUUID()}.tmp`;
-  await writeFile(temporary, JSON.stringify(daemonStateSchema.parse(state), null, 2), { mode: 0o600, flag: 'wx' });
-  await rename(temporary, file); await chmod(file, 0o600);
+  // The cursor is written twice per external action, so it is usually the first thing a full
+  // volume stops. Saying so is the difference between a disk to reclaim and a mystery.
+  try {
+    await writeFile(temporary, JSON.stringify(daemonStateSchema.parse(state), null, 2), { mode: 0o600, flag: 'wx' });
+    await rename(temporary, file);
+  } catch (error) { throw writeFailure(error, 'Writing the master daemon cursor'); }
+  await chmod(file, 0o600);
 }
 
 /** Keep the cursor bounded without ever discarding an unresolved action. */
@@ -253,6 +271,12 @@ export interface DaemonEffects {
   recordDeployment: (work: Work, observation: { sha: string; source: 'endpoint' | 'github-deployment'; observedAt: string }) => Promise<unknown>;
   /** Asks the provider to run the trusted smoke workflow against the observed deployment. */
   requestSmoke: (work: Work) => void | Promise<void>;
+  /**
+   * Removes the dependency directories of finished assignment worktrees. A loop configured
+   * without it keeps cycling; it simply never reclaims. It touches no checkout, no branch, and
+   * no Graphyard record, so it needs no credential and is safe to run on every cycle.
+   */
+  reclaim?: (work: Work[]) => Promise<WorktreeReclaimReport>;
   agents: () => HerdrAgent[];
   credentials: (profiles: WorkerProfile[]) => Promise<Record<string, { available: boolean; reason: string | null }>>;
   snapshot: () => Promise<{ work: Work[]; now: string }>;
@@ -266,9 +290,9 @@ async function record(state: DaemonState, key: string, action: Omit<DaemonAction
 }
 
 /**
- * One coordination cycle: close finished sessions, dispatch claimable work to a healthy profile,
- * shepherd reviews and proofs, invoke only the guarded merge, verify the deployed SHA, and measure
- * the stages. The cursor is persisted before and after every external action, so a kill between
+ * One coordination cycle: close finished sessions, reclaim the disk finished assignments hold,
+ * dispatch claimable work to a healthy profile, shepherd reviews and proofs, invoke only the
+ * guarded merge, verify the deployed SHA, and measure the stages. The cursor is persisted before and after every external action, so a kill between
  * them leaves an entry the next start reconciles against Graphyard instead of repeating.
  */
 export async function runCycle(config: MasterConfig, state: DaemonState, effects: DaemonEffects, now: () => number = Date.now) {
@@ -315,7 +339,32 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
   // A pane this cycle just closed frees its profile, so health is read after the closures.
   const health = profileHealth(config.workers, credentials, effects.agents(), state, clock);
 
-  // 2. Dispatch claimable work to a healthy profile. The launcher claims under the worker's own
+  // 2. Reclaim the disk the finished assignments are holding, before anything asks for more of
+  //    it. Every attempt and every rework checks the repository out again, so without this step
+  //    the host fills and the loop starts failing at whatever it happens to write next. The
+  //    reclaimer removes dependency directories only: checkouts, branches and Graphyard's
+  //    registered workspace records are never touched, so nothing here can lose work.
+  //    Scanning the worktree directory is not free, so it keeps to its own interval — except
+  //    while the last scan found free space below the configured threshold, when the host needs
+  //    every cycle it can get rather than a cadence.
+  const reclaimedAt = state.reclaim ? Date.parse(state.reclaim.at) : Number.NaN;
+  const pressed = state.reclaim?.freeBytes !== null && state.reclaim?.freeBytes !== undefined && state.reclaim.freeBytes < diskThresholdBytes(config);
+  if (effects.reclaim && (pressed || !(Number.isFinite(reclaimedAt) && clock - reclaimedAt < reclaimIntervalMs))) {
+    try {
+      const report = await effects.reclaim(snapshot.work);
+      state.reclaim = reclaimSummarySchema.parse({ at: report.at, scanned: report.scanned, removed: report.removed.length, kept: report.kept.length,
+        freedBytes: report.freedBytes, freeBytes: report.freeAfter === null ? null : Math.max(0, Math.round(report.freeAfter)), errors: report.errors.slice(0, 20) });
+      if (report.removed.length || report.errors.length) {
+        performed.push(await record(state, `reclaim:${report.at}`, { kind: 'reclaim', work: null, principal: null, state: report.errors.length ? 'failed' : 'done',
+          detail: `Reclaimed ${report.removed.length} dependency director${report.removed.length === 1 ? 'y' : 'ies'} from ${report.scanned} assignment worktree(s), ${gigabytes(report.freedBytes)} recovered, ${gigabytes(report.freeAfter)} free${report.errors.length ? `; ${report.errors.length} could not be removed: ${report.errors[0]}` : ''}`,
+          attempts: 1, cycle: state.cycle }, now(), effects.persist));
+      } else await effects.persist(state);
+    } catch (error) {
+      performed.push(await record(state, `reclaim:${new Date(clock).toISOString()}`, { kind: 'reclaim', work: null, principal: null, state: 'failed', detail: `Worktree reclamation failed: ${message(error)}`, attempts: 1, cycle: state.cycle }, now(), effects.persist));
+    }
+  }
+
+  // 3. Dispatch claimable work to a healthy profile. The launcher claims under the worker's own
   //    identity; the daemon never holds a lease. An unhealthy profile is skipped, not waited on.
   //    An item whose planned files overlap a claimed or unmerged item is not claimable (the
   //    loop never overrides that; `master dispatch --allow-overlap` is the operator's call), and
@@ -352,7 +401,7 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
     }
   }
 
-  // 3. Shepherd reviews and proofs for submitted candidates. Graphyard dispatches provider reviews
+  // 4. Shepherd reviews and proofs for submitted candidates. Graphyard dispatches provider reviews
   //    and trusted producers publish evidence; the daemon records exactly one request per candidate
   //    and escalates what only a human or a producer may resolve.
   for (const item of open.filter(candidate => candidate.submission && candidate.candidate && !candidate.reworkRequested)) {
@@ -397,7 +446,7 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
     }
   }
 
-  // 4. Merge. The only path is the guarded command, which rechecks the exact candidate, every gate,
+  // 5. Merge. The only path is the guarded command, which rechecks the exact candidate, every gate,
   //    branch protection and the published queue tip immediately before the provider call.
   if (config.autoMerge) {
     for (const item of open.filter(candidate => candidate.stage === 'merge')) {
@@ -421,7 +470,7 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
     }
   }
 
-  // 5. Verify what is actually deployed. This is an observation, never a gate: Graphyard already
+  // 6. Verify what is actually deployed. This is an observation, never a gate: Graphyard already
   //    marked the work Done on an observed merge, and a lagging rollout must stay visible as lag.
   const delivered = snapshot.work.filter(item => item.stage === 'done' && item.delivery)
     .sort((a, b) => Date.parse(a.delivery!.mergedAt) - Date.parse(b.delivery!.mergedAt));
@@ -437,7 +486,7 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
     performed.push(await record(state, deploymentKey, { kind: 'deployment', work: null, principal: null, state: 'failed', detail: `Deployment SHA could not be verified: ${message(error)}`, attempts: (state.actions[deploymentKey]?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist));
   }
 
-  // 5b. The second confidence layer. For each delivery whose policy asks for a smoke proof: record
+  // 6b. The second confidence layer. For each delivery whose policy asks for a smoke proof: record
   //     the observation on Graphyard once the release serves its merge, ask the provider to run the
   //     trusted smoke workflow against exactly that commit, and escalate a failed verdict with
   //     rollback guidance. The loop never produces the verdict: the workflow's producer does.
@@ -482,7 +531,7 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
     }
   }
 
-  // 6. Measure. Every cycle records stage p50/p90 whether or not it acted.
+  // 7. Measure. Every cycle records stage p50/p90 whether or not it acted.
   const { stages, lead, production, postDeploy, postDeployFailures } = stageMetrics(snapshot.work, clock);
   const metrics = cycleMetricsSchema.parse({ cycle: state.cycle, at: new Date(clock).toISOString(), durationMs: Math.max(0, Math.round(now() - startedAt)), open: open.length, actions: performed.length, stages, lead, production, postDeploy, postDeployFailures });
   state.metrics.push(metrics);
@@ -494,7 +543,15 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
   return { actions: performed, metrics, deployment: state.deployment, health };
 }
 
-const message = (error: unknown) => error instanceof Error ? error.message : String(error);
+/**
+ * Every failure the cycle records passes through here. A command that failed because the host
+ * ran out of room keeps its own output and gains the name of the condition, so the action reads
+ * as a disk to reclaim rather than as an unexplained command error.
+ */
+const message = (error: unknown) => {
+  const text = error instanceof Error ? error.message : String(error), cause = diskExhaustion(error);
+  return cause ? `${text} — ${cause}: ${reclaimAdvice}` : text;
+};
 function deploymentDetail(observation: DeploymentObservation) {
   if (observation.source === 'unavailable') return `Deployment SHA is unverified: ${observation.reason ?? 'no deployment observation is configured or available'}`;
   return `Deployed SHA ${observation.sha?.slice(0, 12) ?? 'unknown'} from ${observation.source}; verified ${observation.deployed.length} delivered item(s), ${observation.pending.length} not yet serving`;
@@ -560,6 +617,7 @@ export function daemonSummary(state: DaemonState, now: number, intervalMs: numbe
     deployment: state.deployment,
     profiles: state.profiles,
     config: state.config,
+    reclaim: state.reclaim,
   };
 }
 
@@ -651,6 +709,9 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
       run('gh', ['workflow', 'run', config.run.smokeWorkflow!, '--repo', config.repository, '--ref', config.baseBranch,
         '-f', `work_id=${work.id}`, '-f', `deployed_sha=${work.delivery!.deployment!.sha}`, '-f', `merge_sha=${work.delivery!.mergeSha}`, '-f', `policy_revision=${work.policyRevision}`]);
     },
+    // The idle bound comes from the live configuration, so a host under pressure can shorten it
+    // (or a slow repository lengthen it) without restarting the loop.
+    reclaim: work => reclaimWorktrees(root, work, { idleMs: reclaimIdleMs(current()) }),
     persist: state => writeDaemonState(current(), state),
   };
 }

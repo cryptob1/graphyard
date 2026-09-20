@@ -2,6 +2,7 @@ import type { RefObject } from 'react';
 import type { Stage, Work } from '../../src/model';
 import type { IntegrationJob } from '../../src/coordination';
 import type { predictQueue } from '../../src/merge-queue';
+import type { Features } from '../features';
 
 /**
  * The dashboard state every page reads and the actions it may take. The App in
@@ -17,6 +18,10 @@ export interface Dashboard {
   observedAt: number; jobs: IntegrationJob[];
   query: string; setQuery(query: string): void;
   operatorAgents: any[]; events: any[];
+  /** Why the operator-automation read failed, when it did; null when it answered. */
+  operatorAgentsError: string | null;
+  /** Which optional features have anything configured; see web/features.ts. */
+  features: Features;
   editingRequirements: boolean; setEditingRequirements(value: boolean | ((value: boolean) => boolean)): void;
   codexAvailable: boolean;
   queue: ReturnType<typeof predictQueue>;
@@ -25,7 +30,6 @@ export interface Dashboard {
   api(path: string, data?: unknown): Promise<any>;
   refresh(epoch: number): Promise<void>;
   action(id: string, command: string, data?: unknown): Promise<void>;
-  showAutomation(): Promise<void>;
   setError(message: string): void;
   signOut(): void;
 }
