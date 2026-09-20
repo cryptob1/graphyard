@@ -15,7 +15,7 @@ Do not create an operator-agent credential during this bootstrap. After the repo
 
 ## Before you start
 
-You need Node 24, Git, Docker, Herdr 0.7.1+, a Graphyard checkout, a GitHub repository, and a Railway account or another Docker host. Agent providers such as Codex or Claude must already be authenticated on the machine that runs them. The coordinator also needs GitHub CLI authenticated as an identity allowed to merge the protected base branch.
+You need Node 24, Git, Docker, Herdr 0.7.1+, a Graphyard checkout, a GitHub repository, and a Railway account or another Docker host. The agent CLIs (Claude Code, Codex, OpenCode, Cursor) must be installed on the machine that runs them; each provider account is logged in once, in its own [agent environment](#agent-environments). The coordinator also needs GitHub CLI authenticated as an identity allowed to merge the protected base branch.
 
 Graphyard is not published to npm yet. In the commands below:
 
@@ -104,7 +104,7 @@ Supply the coordinator token. Use `master start claude` if preferred. Commit the
 
 The master reads Graphyard truth, watches runtime health, routes work, requests guarded merges, and administers GitHub for the managed repository. It does not implement work or submit evidence.
 
-`master start claude` also writes the master's own harness permissions to `.claude/settings.local.json` before the session starts, so routine master commands do not stop for an approval keypress and the auto-mode classifier does not refuse the GitHub administration flows as permission grants or CI bypasses. Review them with `master harness claude`; every rule is printed with the reason it exists. The generated rules grant no merge path and no credential read. For Codex, `master harness codex` prints the `trust_level = "trusted"` block to add to `$CODEX_HOME/config.toml`; Graphyard does not edit that shared user file for you.
+`master start claude` also writes the master's own harness permissions to `.claude/settings.local.json` before the session starts, so routine master commands do not stop for an approval keypress and the auto-mode classifier does not refuse the GitHub administration flows as permission grants or CI bypasses. Review them with `master harness claude`; every rule is printed with the reason it exists. The generated rules grant no merge path and no credential read, and no direct edit of `.graphyard/master.json`: the master tunes the settings it owns (loop and dispatch cadence, proof and smoke workflows, deployment URL and SHA field, reviewer profile, producer timeout, quota ceiling, and a profile's account order) through `master config FIELD=VALUE…`, while `autoMerge`, the merge method, and every credential and identity path stay operator-only. For Codex, `master harness codex` prints the `trust_level = "trusted"` block to add to `$CODEX_HOME/config.toml`; Graphyard does not edit that shared user file for you.
 
 ## 5. Register the reviewer identity
 
@@ -143,6 +143,38 @@ node "$GRAPHYARD_CLI" master protection --apply
 From here on the master reconciles protection itself after every review-policy change, through the API or, when only the settings page can make the change, with `master browser protection`.
 
 ## 6. Add workers
+
+### Agent environments
+
+Every agent CLI account gets its own isolated config and login home, an *agent environment*: one directory per account, named `<agent>-<letter>`, under `~/.coding_agents` (pass `--directory DIR` or set `GRAPHYARD_AGENT_ENVIRONMENTS` to use another root). Two Claude subscriptions are `claude-a` and `claude-b`; a single Codex login may simply be `codex`. The launcher selects an environment with the runtime's own variable, so accounts never share a login:
+
+| Agent | Variable set to the environment | Login held inside it | Log in with |
+| --- | --- | --- | --- |
+| Claude Code | `CLAUDE_CONFIG_DIR` | `.credentials.json` | `CLAUDE_CONFIG_DIR=… claude`, then `/login` |
+| Codex | `CODEX_HOME` | `auth.json` | `CODEX_HOME=… codex login` |
+| OpenCode | `XDG_DATA_HOME` (data under `opencode/`) | `opencode/auth.json` | `XDG_DATA_HOME=… opencode auth login` |
+| Cursor | `CURSOR_CONFIG_DIR` | `cli-config.json` | `CURSOR_CONFIG_DIR=… cursor-agent login` |
+
+Store each worker principal's token in `~/.config/graphyard/workers/PRINCIPAL.token` and each proof producer's in `~/.config/graphyard/producers/PRINCIPAL.token` (mode 0600; the directory beside the coordinator credential `master init` stored, so `$GRAPHYARD_CONFIG_HOME` if you set it). Then:
+
+```sh
+node "$GRAPHYARD_CLI" master environments                                # discover; report login and quota
+node "$GRAPHYARD_CLI" master environments --create claude,codex --apply  # add claude-<next>, codex-<next>
+CLAUDE_CONFIG_DIR=~/.coding_agents/claude-a claude                       # /login, once per new environment
+node "$GRAPHYARD_CLI" master environments --apply                        # generate the profiles
+node "$GRAPHYARD_CLI" master status
+```
+
+Without `--apply` the command writes nothing: it lists every environment with whether it is logged in, the provider quota it could read (Claude's 5-hour and 7-day usage, Codex's last reported rate-limit windows; OpenCode and Cursor expose none, reported as `unknown`), and the exact login command for each one that is not. With `--apply` it records the environments in `.graphyard/master.json`, sets the one runtime setting an unattended Claude launch needs (`skipDangerousModePermissionPrompt`), and generates profiles from the logged-in environments — no profile JSON by hand:
+
+- one worker profile per worker token, each verified against Graphyard as that principal with the `worker` role;
+- one producer profile per producer token, verified for the `producer` role and never shared with a worker principal;
+- one reviewer profile per logged-in environment, with the first one answering automatic reviews;
+- every profile's `accounts` lists the logged-in environments in failover order, its own runtime's first and rotated so profiles start on different accounts. An existing profile keeps the order it has and gains accounts that logged in since; a home it pinned with `CLAUDE_CONFIG_DIR` becomes its first account.
+
+Rerun `master environments --apply` after logging in another account; nothing changes when nothing new logged in. Before every worker, reviewer and producer launch the master checks the chosen account's login and quota and fails over to the next healthy one; see [agent environments](master-agent.md#agent-environments).
+
+### Profiles by hand
 
 For a trusted worker on the coordinator host, start from a template:
 
@@ -216,6 +248,6 @@ Before adding more workers, stop one worker, let its lease expire, reclaim with 
 
 ## Current manual steps
 
-Version 0.1 still requires the human operator to deploy the server, provision principals, authenticate agent providers, sign the browser profile in to GitHub once, approve GitHub's *Confirm access* prompt on their device when a page asks for it, and connect project-specific trusted evidence. Registering each App is still a first-time click in the manifest flow; App permission updates, installation acceptance, and branch-protection reconciliation are the master's (`master browser …` and `master protection --apply`), and Graphyard still refuses to create protection that is missing the `Graphyard / merge` binding or a classic rule for the base branch. Decisions the guides mark human-only — releasing work, revising requirements, choosing review providers, clearing blockers, manual proofs, rework, and merge approval without automatic merging — stay with you. Self-hosting is the complete product: versioned images, Compose, the Helm chart, backups and restores need no hosted account. A hosted signup flow is not shipped, and turnkey E2E execution covers the [packaged Playwright runner](runner-setup.md) and the [report adapters](report-adapters.md) it accepts.
+Version 0.1 still requires the human operator to deploy the server, provision principals, log each agent environment in to its provider once, sign the browser profile in to GitHub once, approve GitHub's *Confirm access* prompt on their device when a page asks for it, and connect project-specific trusted evidence. Registering each App is still a first-time click in the manifest flow; App permission updates, installation acceptance, and branch-protection reconciliation are the master's (`master browser …` and `master protection --apply`), and Graphyard still refuses to create protection that is missing the `Graphyard / merge` binding or a classic rule for the base branch. Decisions the guides mark human-only — releasing work, revising requirements, choosing review providers, clearing blockers, manual proofs, rework, and merge approval without automatic merging — stay with you. Self-hosting is the complete product: versioned images, Compose, the Helm chart, backups and restores need no hosted account. A hosted signup flow is not shipped, and turnkey E2E execution covers the [packaged Playwright runner](runner-setup.md) and the [report adapters](report-adapters.md) it accepts.
 
 Use the [documentation index](README.md) for deeper setup, operations, and protocol details.
