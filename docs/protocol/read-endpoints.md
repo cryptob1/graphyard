@@ -1,21 +1,24 @@
-<!-- page: Agent protocol | 3 | status, work snapshots, events, delegation, and proof authority reads. -->
+<!-- page: Agent protocol | 3 | which GET returns which fact. -->
 # Read endpoints
 
-| Method and path | Result |
-| --- | --- |
-| `GET /healthz` | Database reachability, no token required |
-| `GET /api/status` | Current principal, integration configuration, the App permission preflight (`appPermissions`: required, granted, missing, attention, installation URL) and `heldJobs`, failed jobs, server time |
-| `GET /api/work-snapshot` | Work (including each item's `autoDispatch` review and producer requests), integration job metadata and database time from one snapshot |
-| `GET /api/work` | Work aggregates, in creation order |
-| `GET /api/events?work=UUID` | Latest 300 events for one item; omit filter for latest global events |
-| `GET /api/analytics/flow` | Bounded delivery-flow report for a 7-, 30-, or 90-day window |
-| `GET /api/analytics/flow/drilldown` | Bounded underlying records behind one aggregate |
-| `GET /api/analytics/flow/export` | The same bounded records as deterministic CSV or JSON |
-| `GET /api/deployments` | Latest recorded deployment-provider observations |
-| `GET /api/delegation` | Slices, leads, engineers, workers, reviewers and bottlenecks; filtered by operator-agent scope |
-| `GET /api/proof-grants` | Live proof authority per principal, and the grant records behind it |
-| `GET /api/proof-grants/ID/history` | Append-only grant history for one principal |
+For a client reading Graphyard, and what bounds each read.
 
-Flow analytics reads are bounded in window, work items, records scanned, buckets, drill-down rows, and payload size, and report when a bound was reached. They are not available to operator agents. See [flow analytics](../flow-analytics.md).
+- `GET /healthz`: Database reachability and the running release; no token required
+- `GET /api/status`: Current principal, integration configuration, the App permission preflight (`appPermissions`) and `heldJobs`, failed jobs, `delegationLimits`, `production`, server time
+- `GET /api/work-snapshot`: Work (including each item's `autoDispatch` requests), integration job metadata and database time from one Postgres statement snapshot, as `{ work, now }` ordered by work number
+- `GET /api/work`: Work aggregates, in creation order
+- `GET /api/events?work=UUID`: Latest 300 events for one item; omit the filter for the latest global events
+- `GET /api/analytics/flow[/drilldown|/export]`: Bounded [delivery-flow](../flow-analytics.md) report, its records, or a deterministic export
+- `GET /api/analytics/attribution[/drilldown]`: The [attribution](../attribution.md) report for a window, and up to 200 underlying rows
+- `GET /api/attribution/manifest/RELEASE_ID/REVISION`: A release manifest with its `hash`, `digestHash` and membership
+- `GET /api/attribution/work/UUID`: One item's attribution ledger, newest last, at most 200 rows
+- `GET /api/deployments`: Latest recorded deployment-provider observations
+- `GET /api/delegation`: Slices, leads, engineers, workers, reviewers and bottlenecks, filtered by operator-agent scope
+- `GET /api/proof-grants[/ID/history]`: Live proof authority per principal, and one principal's append-only grant history
+- `GET /api/delivery[/observations?environment=ID]`: Every environment's delivery state and the release registry, or one environment's paged observations
+- `GET /api/validation[/capacity|/definitions|/candidate/UUID|/attempt/REQUEST_ID]`: Validation requests, runner capacity, definition history, one candidate, or the attempt authority a host attestor reads
+- `GET /api/shipping-pulse`: The repository [delivery pulse](../shipping-pulse.md); not offered to operator agents
 
-The initial list API is unpaginated. Do not use it as an unlimited analytics export. Event payload snapshots can reconstruct historical item revisions; full archival/export pagination is future work.
+Every attribution endpoint is a read: the ledger is written only by validation and observation ingest inside their own transactions, so no credential moves a request, attempt, result or evidence record through these routes, and a `POST` to one is not found.
+
+Flow analytics reads are bounded in window, work items, records scanned, buckets, drill-down rows and payload size, and report when a bound was reached; they are not offered to operator agents. The list API is unpaginated and is not an analytics export: event payload snapshots reconstruct historical revisions, and archival export pagination is future work.

@@ -1,18 +1,12 @@
-<!-- page: Agent protocol | 1 | bearer authentication and what each credential role may do. -->
-# Roles and credentials
+<!-- page: Agent protocol | 1 | authentication, role authority, retries. -->
+# Roles, requests and reads
 
-All control-plane endpoints except `/healthz` require `Authorization: Bearer TOKEN`. Use HTTPS for remote machines. API credentials are not Git credentials.
+For an integration author: which credential may call what.
 
-Terms follow the [glossary](../glossary.md). On the protocol pages *operator* means the human operator acting with the `admin` credential (the server's refusal text says `Operator permission required`); *operator agent* means the scoped `operator-agent` role.
+Every credential's authority is tabulated once, in [the roles at a glance](../glossary.md#the-roles-at-a-glance). All control-plane endpoints except `/healthz` require `Authorization: Bearer TOKEN`, and API credentials are not Git credentials.
 
-| Role | Permissions |
-| --- | --- |
-| `admin` | Create/release work, revise requirements, rework, participate as a worker, attest manual proofs, grant proof authority; with `sessionKind: "human"`, resolve escalations and record human-only intake; from any declared session kind, settle a control-plane-raised `lease-loss` the events ledger explains by citing its attestation |
-| `coordinator` | Read work and integration state for master-agent routing; acquire, verify, or cancel only the engine's bounded merge execution authority; settle a containment quarantine whose supervisor it has verified dead on the registered host; record the deployment observation on delivered work |
-| `operator-agent` | Only explicitly configured intent/policy capabilities (`intent:create`, `intent:ready`, `intent:unblock`, `policy:requirements`, `policy:review-provider`, `policy:bootstrap`) within a server-enforced repository/work allowlist; never leases, evidence, identity administration, or merge execution |
-| `slice-lead` | Record rulings on work in its own slice and escalate; every lifecycle mutation from this role is refused and recorded, see [slice-lead delegation](../delegation.md) |
-| `worker` | Claim work, renew/release own lease, register workspace, report blockers, submit implementation, submit untrusted assertions |
-| `producer` | Submit evidence; only proof names authorized by a live Graphyard grant are trusted |
-| `reader` | Inspect work, status, events |
+## Requests and retries
 
-Except for operator agents, all roles can read engineering metadata in this single-repository installation and have no per-item read ACL in v0.1. Operator-agent reads are restricted to their server-enforced repository/work scope allowlist. Each concurrent worker session must have its own principal; sharing a token makes sessions indistinguishable.
+Every mutation requires `Idempotency-Key`, at most 200 characters. Generate a UUID once and reuse it only when retrying the identical request after a timeout: a successful replay returns the original result without repeating the command, and different input under that key returns `409`. Errors return JSON `{ "error": "actionable reason" }` — `400` invalid JSON or schema, `401` unauthenticated, `403` wrong role, `404` unknown route or item, `409` a coordination refusal, `413` oversize input. Never retry a coordination refusal blindly: read status and resolve its reason.
+
+Reads are listed on their own page: [read endpoints](read-endpoints.md).

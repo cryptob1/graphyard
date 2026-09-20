@@ -1,29 +1,29 @@
-<!-- page: Agent protocol | 4 | creating work and every `POST /api/work/UUID/COMMAND` mutation. -->
+<!-- page: Agent protocol | 2 | creating work and every mutation. -->
 # Work commands
 
-Create with `POST /api/work` and the structure in [examples/work.json](../../examples/work.json). Required fields are `title` and nonempty `criteria`; each criterion requires a unique `AC-N` ID, text, and at least one proof, and may carry a `bootstrap` declaration (`admin`, or an operator agent holding `policy:bootstrap`). The policy defaults to checks `test` and `typecheck`, plus independent review. Dependencies refer to existing UUIDs. Operator requirement revisions explicitly reject cycles. Optional `exclusiveResources` reserves named resources during active ownership; `plannedFiles` declares the change boundary the [regression guard](regression-guard.md#submit-time-regression-guard) enforces at submit and the scopes overlap warnings compare. Optional `producerProofs` lists the `manual:` proofs a launched producer session may run for the item (unit and integration proofs always may); see [automatic dispatch at submit](github-webhook.md#automatic-dispatch-at-submit).
+For an integration author: every mutation a principal may send, with its JSON body.
 
-Human-only intake origins additionally require a credential declaring `sessionKind: "human"`; routine origins are unchanged. `POST /api/intake` records a backlog intake item and `POST /api/work/UUID/lead-ruling` records a slice-lead ruling; both require `Idempotency-Key` and replay the original result, so a lost response never duplicates immutable history. See [slice-lead delegation](../delegation.md).
+- `requirements`: Full criteria, dependencies, plannedFiles, exclusiveResources, optional producerProofs, `expectedPolicyRevision` and reason; `admin`, or an operator agent holding `policy:requirements` (additive only) — see [coordination](../coordination.md#revise-requirements-explicitly)
+- `ready`: Admin `{}`; operator-agent `{"expectedRevision":12,"reason":"Requirements approved"}`
+- `unblock`: Admin `{"reason":"Contract verified"}`; operator-agent with `expectedRevision` and a nonblank reason
+- `resolve`: `{"trigger":"security-concern","expectedRevision":12,"reason":"…"}` naming one standing trigger; declared human `admin` only, except that `"attestation":{"kind":"blocked"|"stopped-worker","epoch":N}` lets any `admin` settle a control-plane-raised `lease-loss` the ledger explains, verified server-side
+- `rework`: `{"reason":"Retry implementation","previousWorkerStopped":true}`; `admin` only
+- `recover`: `{"reason":"Verified delivered worker stopped","previousWorkerStopped":true}`; `admin` only, delivered quarantine only
+- `autosettle`: `{"epoch":1,"settlementHash":"…","reason":"…","verification":{…}}`; `coordinator` or `admin` ([containment settlement](leases.md#automatic-containment-settlement))
+- `decide`, `approve`: `{action, input, reason}` and `{decision, reason}` for a [two-party decision](../operator-automation.md#two-party-decisions)
+- `claim`, `heartbeat`, `release`: `{}` returning the lease and epoch; `{"epoch":1}` for the other two
+- `blocked`: `{"epoch":1,"reason":"Waiting for API contract"}`; `null` clears
+- `workspace`: `{"epoch":1,"host":"build-machine-a","path":"/work/GY-1","branch":"graphyard/gy-1-1"}`
+- `scope`, `scope-request`: The master approves requested paths; a worker requests them while keeping its lease
+- `submit`: `{"epoch":1,"pr":123}`; the server observes the pull request first and refuses, naming the files, when it reverts, deletes or rewrites anything outside `plannedFiles`
+- `evidence`, `revoke`: See [evidence and proof authority](evidence.md)
+- `reviewpolicy`, `rereview`: See [review providers](github-webhook.md)
+- `deployment`: `{"sha":"<serving commit>","mergeSha":"<the item's merge commit>","source":"endpoint","observedAt":"…"}`; coordinator or admin, delivered work only, once per delivery
 
-Other commands use `POST /api/work/UUID/COMMAND` (display keys also work):
+## Submit-time regression guard
 
-| Command | JSON body |
-| --- | --- |
-| `requirements` | Full criteria, dependencies, plannedFiles, exclusiveResources, optional producerProofs, expectedPolicyRevision and reason; `admin`, or an operator agent holding `policy:requirements` (additive only), see [coordination](../coordination.md). A criterion may carry `bootstrap`, see [bootstrap mode](bootstrap-mode.md) |
-| `ready` | Admin: `{}`. Operator-agent: `{"expectedRevision":12,"reason":"Requirements approved"}` with the current work revision and a nonblank audit reason. |
-| `unblock` | Admin: `{"reason":"Contract verified"}`. Operator-agent: `{"expectedRevision":12,"reason":"Contract verified"}` with the current work revision and a nonblank audit reason. |
-| `resolve` | `{"trigger":"security-concern","expectedRevision":12,"reason":"Dependency change reviewed"}` naming one standing escalation trigger, the current work revision, and a nonblank audit reason; `admin` credentials declaring `sessionKind: "human"` only — except that an optional `"attestation":{"kind":"blocked"|"stopped-worker","epoch":N}` lets any `admin` credential settle a control-plane-raised `lease-loss` whose lapse the ledger explains; the citation is verified server-side, see [leases](leases.md) |
-| `rework` | `{"reason":"Retry implementation","previousWorkerStopped":true}`; `admin` only |
-| `recover` | `{"reason":"Verified delivered worker stopped","previousWorkerStopped":true}`; `admin` only, delivered quarantine only |
-| `autosettle` | `{"epoch":1,"settlementHash":"...","reason":"Supervisor verified dead","verification":{...}}`; `coordinator` or `admin`, see [automatic containment settlement](containment-settlement.md) |
-| `claim` | `{}`; returns current lease and epoch |
-| `heartbeat` | `{"epoch":1}` |
-| `release` | `{"epoch":1}` |
-| `blocked` | `{"epoch":1,"reason":"Waiting for API contract"}`; null clears |
-| `workspace` | `{"epoch":1,"host":"build-machine-a","path":"/work/GY-1","branch":"graphyard/gy-1-1"}` |
-| `submit` | `{"epoch":1,"pr":123}`; the server observes the pull request first and refuses, naming the files, when it reverts, deletes or rewrites files outside `plannedFiles` relative to the base it is bound to, see [regression guard](regression-guard.md#submit-time-regression-guard) |
-| `evidence` | See below |
-| `revoke` | See [revocation](evidence.md#revocation) |
-| `deployment` | `{"sha":"<serving commit>","mergeSha":"<the item's merge commit>","source":"endpoint","observedAt":"2026-09-18T10:00:00Z"}`; coordinator or admin, delivered work only, once per delivery. Whether the serving commit is the merge itself or a descendant is derived, never asserted. See [post-deployment smoke proof](../github.md#post-deployment-smoke-proof) |
+Before `submit` is recorded, the control plane observes the pull request through its App, outside the coordination transaction, and classifies every changed file against `plannedFiles` ([the rule](../coordination.md#refuse-candidates-that-revert-shipped-code-outside-their-scope)). Each out-of-scope file is compared by blob identity with the commit the candidate is bound to — the base-branch tip, or the predicted base of a published speculative tip. The refusal is `409` with `Submission refused for GY-N: DETAIL`, one entry per file; it writes nothing and leaves no receipt, so the same idempotency key may be retried once the branch is fixed. The observed head branch must also be the workspace branch registered for the epoch, and without GitHub configured no pre-check runs, while the reconciliation job still evaluates the candidate.
 
-No endpoint sets arbitrary lifecycle state. `complete` in the CLI maps to `submit`, not `done`. Delivered work accepts only `deployment` and `e2e:deploy-smoke` evidence, which extend the delivery snapshot without re-evaluating it.
+## Deployment observations
+
+`POST /api/deployments` records one deployment-provider observation from a `producer` or `admin` credential; workers cannot. It carries `provider`, `externalId`, `environment`, the full artifact `sha`, one to 200 independently verified full `containedMergeShas`, a `state` of `succeeded`, `failed` or `rolled_back`, and `startedAt`/`finishedAt`. Records are append-only and unique per provider, external ID and state: a repeat replaying every immutable field returns `duplicate`, one that differs is refused. They feed [flow analytics](../flow-analytics.md) and never move a gate.

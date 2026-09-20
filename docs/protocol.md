@@ -4,23 +4,15 @@
 
 All control-plane endpoints except `/healthz` require `Authorization: Bearer TOKEN`. Use HTTPS for remote machines. API credentials are not Git credentials.
 
-The protocol is documented one topic per page. This page is generated in full from the pages under `docs/protocol/` by `npm run docs:check -- --write`: add a page there with a `<!-- page: ... -->` line and regenerate, never edit this page by hand. `graphyard sync` regenerates it on a merge conflict and CI fails when it is stale.
+One topic per page. This index is generated in full; never edit it by hand.
 
 ## Agent protocol
 
-1. [Roles and credentials](protocol/roles.md) — bearer authentication and what each credential role may do.
-2. [Requests and retries](protocol/requests.md) — idempotency keys, replay semantics, and the error contract.
-3. [Read endpoints](protocol/read-endpoints.md) — status, work snapshots, events, delegation, and proof authority reads.
-4. [Work commands](protocol/work-commands.md) — creating work and every `POST /api/work/UUID/COMMAND` mutation.
-5. [Leases and supervision](protocol/leases.md) — lease renewal, `watch` supervision, foreground containment, and rework.
-6. [Automatic containment settlement](protocol/containment-settlement.md) — how a coordinator proves a dead supervisor and settles its quarantine.
-7. [Workspaces](protocol/workspaces.md) — worktree registration, branch and path uniqueness, and the launch fence.
-8. [Submit-time regression guard](protocol/regression-guard.md) — how submit classifies every changed file against `plannedFiles` and refuses out-of-scope regressions.
-9. [Evidence and proof authority](protocol/evidence.md) — evidence submission, proof authority grants, and the post-deployment smoke proof.
-10. [Deployment observations](protocol/deployment-observations.md) — recording deployment-provider observations that feed flow analytics without moving a gate.
-11. [Bootstrap mode for a change that introduces its own proof harness](protocol/bootstrap-mode.md) — deferring a proof onto the contract the change introduces, and the obligation it leaves.
-12. [GitHub webhook and review providers](protocol/github-webhook.md) — webhook verification, review-provider changes, re-review, and the work snapshot.
-13. [Validation runner and delivery APIs](protocol/validation-and-delivery.md) — where the validation runner and release delivery APIs are documented.
-14. [Supervised shutdown invariants](protocol/shutdown-invariants.md) — what the supervisor guarantees before, during, and after a contained launch.
-15. [Attribution reads and the attribution ledger](protocol/attribution.md) — reading release manifests, a work item's attribution history, and the attribution analytics; the ledger has no write endpoint.
-16. [Merge-queue bindings and carry](protocol/merge-queue-binding.md) — how a candidate is bound to its base, when the merge queue carries a review or proof across a Graphyard-authored tip, and what the record and ledger say about it.
+1. [Roles, requests and reads](protocol/roles.md) — authentication, role authority, retries.
+2. [Work commands](protocol/work-commands.md) — creating work and every mutation.
+3. [Leases, supervision and workspaces](protocol/leases.md) — leases, supervision, containment, workspaces.
+4. [Read endpoints](protocol/read-endpoints.md) — which GET returns which fact.
+5. [Evidence and proof authority](protocol/evidence.md) — evidence, grants, CI evidence, revocation.
+6. [GitHub webhook and review providers](protocol/github-webhook.md) — webhooks, review providers, dispatch.
+7. [Bootstrap mode for a change that introduces its own proof harness](protocol/bootstrap-mode.md) — deferring a proof onto its own contract.
+8. [Merge-queue bindings and carry](protocol/merge-queue-binding.md) — base binding and carry.

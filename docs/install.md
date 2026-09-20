@@ -1,57 +1,24 @@
-<!-- page: Operate Graphyard | 2 | the shortest install path and the App-permission migration an upgrade can require. -->
+<!-- page: Operate Graphyard | 2 | the shortest install and upgrade path. -->
 # Install and upgrade
 
-The shortest supported path from a GitHub repository to an enforcing Graphyard control plane, and the checks that keep an existing installation enforcing after an upgrade. [Onboard a repository](onboarding.md) walks the same steps with Herdr, a master, and a worker; [deployment](deployment.md) covers the hosting choices.
-
-Graphyard is not published to npm yet, so the CLI is invoked from a Graphyard checkout:
-
-```sh
-export GRAPHYARD_CLI=/absolute/path/to/graphyard/bin/graphyard.mjs
-```
+For an operator installing or upgrading a control plane.
 
 ## Fresh installation
 
-1. **Deploy the server** with Postgres and an HTTPS origin, following [deployment](deployment.md). Set `GRAPHYARD_PRINCIPALS` with one cryptographically random token per role, the four [capacity variables](deployment.md#delegation-capacity-variables) derived from that principal set (`GRAPHYARD_MAX_REVIEWERS` at least the number of `producer` principals), plus `GITHUB_REPOSITORY`, `GITHUB_BASE_BRANCH`, and `GITHUB_CI_APP_IDS`. The Railway adapters write the capacity variables for you and `init --scan --apply` prints them as `capacity.lines` beside the principals it registers; set them by hand only when configuring the deployment directly.
-2. **Register the control-plane App** from the managed repository checkout:
+The seven-step runbook is [onboarding](onboarding.md): deploy the server with Postgres and an HTTPS origin ([deployment](deployment.md)), register the control-plane App, configure it, verify, and add reviewer Apps and workers. Two settings are easy to miss. Set the four [capacity variables](deployment.md#delegation-capacity-variables) — `GRAPHYARD_MAX_SLICE_LEADS`, `GRAPHYARD_MAX_ENGINEERS_PER_LEAD`, `GRAPHYARD_MIN_REVIEWERS`, `GRAPHYARD_MAX_REVIEWERS` — from the principal set you deploy. And connect proofs in CI: `init --scan --apply` registers the [CI producer](deployment.md#ci-producer) and prints `ciProofs.next` — restrict the `graphyard-reporting` environment to the default branch, store that token as its `GRAPHYARD_CI_PRODUCER_TOKEN` secret, set `GRAPHYARD_URL` on it, and deploy the principals array including it. Later pushes to a candidate branch then run the item's registered `unit:*` and `integration:*` proofs ([proofs in CI](first-pr.md#proofs-in-ci)); manual proofs still need a producer session.
 
-   ```sh
-   cd /path/to/OWNER/REPO
-   node "$GRAPHYARD_CLI" github-setup https://YOUR-GRAPHYARD-HOST
-   ```
+Verify with `graphyard doctor` (`appPermissions.missing` must be empty) and `graphyard status`, then [require the check](github.md#require-the-check) on the base branch and submit a real pull request: configured is not proof of enforcement.
 
-   The manifest requests exactly the [declared control-plane permission set](github.md#app-permissions), including Contents: read and write for the merge queue. Install the App only on the managed repository. Credentials land in `.graphyard/github-app.json` with mode 0600 and are never printed.
-3. **Configure the server** with `GITHUB_APP_ID`, `GITHUB_INSTALLATION_ID`, `GITHUB_PRIVATE_KEY`, and `GITHUB_WEBHOOK_SECRET` from that file, then redeploy. At startup the server preflights the installed permissions against the declaration and logs any shortfall.
-4. **Verify** with `node "$GRAPHYARD_CLI" doctor` (`appPermissions.missing` must be empty) and `node "$GRAPHYARD_CLI" status`, which reports `appPermissions` and `heldJobs`. Then [require the check](github.md#require-the-check) on the base branch and submit a real pull request; configured is not proof of enforcement.
-5. Optionally register [reviewer Apps](github.md#register-the-reviewer-app) with `--reviewer NAME`; each holds only the reviewer declaration and never Contents: write.
-6. **Connect proofs in CI.** `init --scan --apply` registers the [CI producer](deployment.md#ci-producer) — `ci-proofs`, a producer with `runtime: github-actions` granted `unit:*` and `integration:*` only — in `.graphyard/principals.json` and prints `ciProofs.next`: restrict the `graphyard-reporting` environment to the default branch, store that token as its `GRAPHYARD_CI_PRODUCER_TOKEN` secret, set `GRAPHYARD_URL` on the environment, and deploy the principals array including it. From then on every push to a candidate branch runs the item's registered `unit:*` and `integration:*` proofs and publishes their evidence; see [proofs in CI](github.md#proofs-in-ci). Manual proofs still need a producer session.
+## Readiness checklist
+
+`graphyard doctor --profile through-merge|preview-validation|production-verification` prints an explicit checklist for the selected [completion profile](turnkey-delivery-roadmap.md#product-promise-and-boundary). Every item states what was observed and, when `missing` or `unknown`, the command or setting that resolves it: the repository remote, the control-plane connection and the credential's role, the reviewed and applied setup proposal and its drift, the dedicated App and the permissions it lacks, discovered required checks, worker profiles, the review provider, the Playwright suite, the immutable environment, the runner, collector and builder registrations and the approved bundle. `unknown` is never `ready`: an item the command could not judge says what it depends on. `production-verification` stays `missing` until release observations ship, so it is an explicit manual proof until then.
 
 ## Upgrading an existing installation
 
-Upgrading the server image never changes the GitHub App. A release that needs a new App permission — the merge queue's Contents: write is the first — therefore leaves an already-installed App short until its owner accepts the change, and the server says so instead of failing quietly:
+Upgrading the server image never changes the GitHub App, so a release needing a new permission leaves an installed App short until its owner accepts the change — and the server says so rather than failing quietly. The startup and five-minute [preflight](github.md#preflight-and-holds) raises an attention item naming the missing permission and the installation page in the server log, `GET /api/status`, the dashboard and `master status`; jobs needing that permission are held rather than retried, so there is no 403 back-off loop and other observations stay fresh; and `master init` reports the same attention with the migration command.
 
-- the startup and five-minute [preflight](github.md#preflight-and-holds) raises an attention item naming the missing permission and the installation page, in the server log, `GET /api/status`, the dashboard, and `graphyard master status` under `controlPlane.attention`;
-- integration jobs that need the permission are held rather than retried, so there is no 403 back-off loop and other observations stay fresh;
-- `graphyard master init` reports the same attention in its result and points at the migration command.
+1. Back up the database and deploy the tested image as [deployment](deployment.md#backup-upgrade-restore) describes.
+2. Read the attention items: `graphyard doctor`, the dashboard, or `graphyard master status`.
+3. On the machine holding `.graphyard/github-app.json`, run the [migration](github.md#migrating-an-existing-app): `graphyard github-setup --update-permissions --wait 600`. It prints the exact browser steps GitHub requires and polls until the installation reports the declared set, exiting nonzero while anything remains.
+4. Nothing else is needed: the next preflight releases the held jobs without a restart. Confirm with `doctor` that `appPermissions.missing` is empty and `heldJobs` is `0`.
 
-Upgrade in this order:
-
-1. Back up the database and deploy the tested image as [deployment](deployment.md#backup-upgrade-rollback) describes.
-2. Read the attention items: `node "$GRAPHYARD_CLI" doctor`, the dashboard, or `node "$GRAPHYARD_CLI" master status`.
-3. On the machine that holds `.graphyard/github-app.json`, run the [migration](github.md#migrating-an-existing-app):
-
-   ```sh
-   node "$GRAPHYARD_CLI" github-setup --update-permissions --wait 600
-   ```
-
-   It prints the exact browser steps GitHub requires — set the permission on the App, then accept the pending request on the installation — and polls until the installation reports the declared set. It exits nonzero while anything remains.
-4. Nothing else is needed. The next preflight sees the accepted permission and releases the held jobs; no restart is required. Confirm with `doctor` that `appPermissions.missing` is empty and `heldJobs` is `0`.
-
-### Capacity limits and drift
-
-An upgrade never changes the roster, but a release can change a default. The server therefore derives any unset `GRAPHYARD_MAX_*`/`GRAPHYARD_MIN_*` limit from the principals it is configured with and starts; it refuses start-up only for a principal newly added beyond an explicit limit, naming the variable and the value to set. Both `doctor` and `master status` report `delegationLimits` drift — a deployed value, or an unset default, that no longer covers the principals — as `Set GRAPHYARD_MAX_REVIEWERS=N on the deployment`. Re-running the installer after adding principals reports the same drift and sets the corrected values; set them by hand on a manual deployment and redeploy. See [delegation capacity variables](deployment.md#delegation-capacity-variables).
-
-### Confirm the deployment served the upgrade
-
-A container that exits at start-up leaves the previous release serving and `/healthz` green. After deploying, confirm `/healthz` reports the `commit` you deployed, and read `production` in `doctor` or `controlPlane.production` in `master status`: `main is N commits ahead of production` with the provider's failure reason means the upgrade never started. `master merge` refuses with `server runs <sha>, CLI expects <sha>: deploy main first` while the deployed server speaks an older merge protocol than the CLI checkout. See [production deployment observation](deployment.md#production-deployment-observation).
-
-Only the control-plane App gains a permission in this migration. Reviewer Apps keep their own declaration — `github-setup --update-permissions --reviewer NAME` reports any excess grant as a step to reduce it — and worker identities are never Apps. The reasons are in [App permissions](github.md#app-permissions).

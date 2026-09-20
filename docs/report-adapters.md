@@ -1,66 +1,20 @@
-<!-- page: Build integrations | 5 | what each supported report format proves, observes and refuses. -->
+<!-- page: Build integrations | 5 | what each report format proves. -->
 # Report adapters
 
-A report adapter is how the trusted collector turns the two files an attempt writes — an offline inventory and an execution report — into a verdict. Each adapter is a published contract: it says what an accepted verification proves, which of those facts were independently observed rather than reported, which test frameworks and reporter versions its fixtures cover (the contract's `producers` field names report producers, not proof producers), and how every failure condition is classified. Nothing in a contract yields a pass.
-
-Print the contracts the running CLI ships:
-
-```bash
-graphyard runner adapters
-```
+For an integrator choosing a report format, and how failures are classified.
 
 ## The format is authority, not a property of the bytes
 
-The report format is pinned in the operator-approved **bundle definition**, beside the runner image digest:
-
-```json
-{ "kind": "bundle", "id": "booking-oracle", "expectedRevision": 0,
-  "scenario": "booking", "scenarioRevision": 2, "scenarioHash": "…",
-  "digest": "sha256:…", "runnerImageDigest": "sha256:…", "reportFormat": "junit-xml-v1" }
-```
-
-`reportFormat` defaults to `graphyard-playwright-v1` and, like the digests, cannot change for a scenario revision once a bundle is approved; a different adapter for the same bytes is a change of executable authority and needs a new scenario revision. The format travels to the runner and the collector through the dispatch grant, so it is covered by the signed attestation's grant digest, and the collector verifies **only** the pinned adapter's structure. Bytes in any other shape — a JUnit file under a Playwright pin, a Playwright report under a JUnit pin, a candidate-authored JSON document under either — are refused rather than sniffed. Unknown format names are refused when the bundle is defined.
-
-## Supported formats
+The report format is pinned in the operator-approved **bundle definition** beside the runner image digest, as `reportFormat`. It defaults to `graphyard-playwright-v1` and, like the digests, cannot change for a scenario revision once a bundle is approved: a different adapter for the same bytes is a change of executable authority needing a new scenario revision. The format travels to the runner and collector through the dispatch grant, so the signed attestation's grant digest covers it, and the collector verifies **only** the pinned adapter's structure. Bytes in any other shape are refused rather than sniffed, and an unknown format name is refused when the bundle is defined.
 
 | Format | Kind | Frameworks and reporters covered by contract fixtures | Files the phases write |
 | --- | --- | --- | --- |
-| `graphyard-playwright-v1` | end-to-end | `@playwright/test` 1.63.x through the [packaged runner image](runner-setup.md#the-approved-runner-image) and its built-in reporter | `inventory.json`, `report.json` |
+| `graphyard-playwright-v1` | end-to-end | `@playwright/test` 1.63.x through the [packaged runner image](#the-approved-runner-image) and its built-in reporter | `inventory.json`, `report.json` |
 | `junit-xml-v1` | unit / integration | `node --test --test-reporter=junit` (Node 20–24), `pytest --junitxml` (7.x–8.x, `xunit2`), `jest-junit` 16.x, Maven Surefire/Failsafe 3.x XML, `go-junit-report` v2 | `inventory.json` (`graphyard-inventory-v1`), `report.xml` |
 
-Fixtures under `tests/fixtures/reports/` are real framework output. A framework or reporter outside the listed versions may parse and still be refused as unsupported structure; that refusal names the element it did not understand.
+## The approved runner image
 
-### `graphyard-playwright-v1`
-
-Proves that every test the approved bundle enumerated offline executed exactly once, without retry, and passed; that no step failed; and that the executed inventory is identical to the one enumerated before execution. The inventory is enumerated by the pinned image with no network, so the target cannot shape it, and both files are measured and signed by the host attestor before the collector reads them. Identities are hashes: titles, step names, error text and stdio never enter the report.
-
-Failure semantics: a failed test is `behavior: failed`; a skipped, timed-out, interrupted, retried or expected-failing test, a reporter error or an overflow is a refusal, never a pass.
-
-### `junit-xml-v1`
-
-For unit and integration suites whose runner emits JUnit XML. Proves that every identity in the offline inventory appears exactly once in the report as passed — no failure, error, skip or rerun — and that the counts a suite declares agree with the cases it contains. A report that disagrees with itself is refused as inconsistent.
-
-The inventory is a `graphyard-inventory-v1` document the pinned image writes in its `enumerate` phase, offline, listing the identity of every test the bundle contains:
-
-```json
-{ "format": "graphyard-inventory-v1", "tests": [{ "id": "<sha256 hex>" }], "overflow": false }
-```
-
-An identity is `sha256(suitePath ␟ classname ␟ name)` where `suitePath` is every enclosing `<testsuite name>` from the root joined with `/`, and `␟` is U+001F. The same case executed twice is a retry, not two passes. The adapter verifies against the inventory; it does not observe the enumeration itself, which is the pinned image's responsibility.
-
-Only structure is published. The raw XML can carry assertion messages, stack traces, `<properties>` and captured stdio, so it is parsed into a minimised projection — identities, statuses, timings and counts — and **that** is what the collector uploads; the raw bytes stay at the execution boundary, where the attestor measured them. The XML reader refuses `DOCTYPE` and entity declarations, unknown root elements (an NUnit `<test-run>`, a `.trx` `<TestRun>`), and any element it does not recognise, so an unfamiliar reporter fails visibly instead of being half-read.
-
-Failure semantics: `<failure>` and `<error>` are `behavior: failed`; `<skipped>`, a `flakyFailure`/`rerunFailure`, a duplicate case, a count mismatch, an overflow and any refused document never pass.
-
-What acceptance under this adapter does **not** establish: which artifact served the traffic — unit and integration reports carry no target identity, so the collector's [independent attribution dimension](runner-setup.md#whole-run-target-attribution) still decides that — nor that a test exercised a deployed target at all.
-
-## Preview a verdict locally
-
-```bash
-graphyard runner verify-report junit-xml-v1 inventory.json report.xml
-```
-
-This prints the adapter's verdict and the projection it would publish. It reads no attempt authority and produces no evidence: evidence comes only from the collector, over bytes the host attestor measured.
+`docker/runner/Dockerfile` builds the image the two phases run in — the supported answer to what to pin as `runnerImageDigest`. Build and push it, then pin the pushed manifest digest, never the tag: every attempt addresses the image as `REPOSITORY@sha256:…`, where the repository is local configuration and the digest is operator-versioned authority from the bundle definition. The image carries the browsers, the Playwright runtime pinned to the reviewed release, and the Graphyard reporter; its entrypoint takes exactly one argument, the phase, and turns it into `playwright test --config /oracle/playwright.config.ts --reporter <built-in>`, adding `--list` for `enumerate`, which reports the declared suite without running a test body and is what makes the approved inventory something the target cannot shape.
 
 ## Adding an adapter
 
