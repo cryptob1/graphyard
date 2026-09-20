@@ -193,11 +193,7 @@ export function nextAction(work: Work, all: Work[], now: Date): NextAction | nul
   // A typed request an agent recorded instead of blocking on a prose question. A scope ask is the
   // control plane's own deterministic rule to apply; a two-party decision is somebody else's
   // judgment, so it leaves the executor loop by the only door that exists for that — escalate.
-  const asks = openAgentRequests(work, now);
-  const scopeAsk = asks.find(ask => ask.type === 'scope-request' && ask.paths?.length);
-  if (scopeAsk) return make('approve-scope', `${scopeAsk.requestedBy} needs files outside plannedFiles for ${key}: ${scopeAsk.paths!.join(', ')} — ${scopeAsk.reason}`,
-    { kind: 'approve-scope', epoch: scopeAsk.epoch ?? work.epoch, paths: [...scopeAsk.paths!], requestedBy: scopeAsk.requestedBy, detail: scopeAsk.reason }, `request:${scopeAsk.id}`);
-  const decision = asks.find(ask => ask.type === 'decision');
+  const decision = openAgentRequests(work, now).find(ask => ask.type === 'decision');
   if (decision) return make('escalate', `${decision.requestedBy} recorded a decision request on ${key} for ${decision.action ?? 'an action'}: ${decision.reason} — decided by ${decision.decider.who}`,
     { kind: 'escalate', trigger: 'decision', detail: decision.decider.command ?? decision.reason }, `request:${decision.id}`);
 
@@ -222,9 +218,11 @@ export function nextAction(work: Work, all: Work[], now: Date): NextAction | nul
       { kind: 'reclaim', epoch: quarantine.epoch, owner: quarantine.owner, leaseExpiresAt: quarantine.leaseExpiresAt ?? null, quarantined: true }, `quarantine:${quarantine.epoch}:${quarantine.settlementHash}`);
   }
 
-  // A worker that asked for scope is idle until it is answered, whatever the gates say.
+  // A worker that asked for scope is idle until it is answered, whatever the gates say. A request
+  // the rule has already decided is not waiting on anybody: an approved one is applied and gone,
+  // and a refused one carries its refusal as the item's blocker, which the ready gate reports.
   const scope = work.scopeRequest;
-  if (scope && work.lease && work.lease.epoch === scope.epoch && Date.parse(work.lease.expiresAt) > now.getTime()) {
+  if (scope && !scope.decision && work.lease && work.lease.epoch === scope.epoch && Date.parse(work.lease.expiresAt) > now.getTime()) {
     return make('approve-scope', `${scope.requestedBy} needs files outside plannedFiles for ${key}: ${scope.paths.join(', ')} — ${scope.reason}`,
       { kind: 'approve-scope', epoch: scope.epoch, paths: [...scope.paths], requestedBy: scope.requestedBy, detail: scope.reason }, `scope:${scope.epoch}:${scope.at}`);
   }

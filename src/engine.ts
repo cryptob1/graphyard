@@ -153,6 +153,39 @@ export async function readAttestations(db: { query: (text: string, values: unkno
   const rows = (await db.query("SELECT seq, actor, kind, payload, created_at FROM events WHERE work_id=$1 AND kind IN ('blocked','rework','recover') ORDER BY seq", [workId])).rows;
   return attestationsFromLedger(rows.map(row => ({ seq: Number(row.seq), actor: row.actor, kind: row.kind, at: new Date(row.created_at).toISOString(), details: row.payload?.details, workEpoch: row.payload?.work?.epoch })));
 }
+/**
+ * Apply this repository's scope rule to an open request and record what it decided (GY-85).
+ *
+ * The verdict is recomputed from the item's own criteria and the documentation rule, never taken
+ * from a caller, so it grants no authority to whoever asked. An approved widening is applied to
+ * the item exactly as an operator widening would be; a refusal becomes the item's blocker, so the
+ * ready gate holds it until somebody decides the scope the item does not already carry.
+ */
+function applyScopeDecision(work: Work, request: NonNullable<Work['scopeRequest']>, now: Date): ScopeDecision {
+  const verdict = decideScopeRequest(work, request);
+  const decision: ScopeDecision = { state: verdict.state, reason: verdict.reason, at: now.toISOString(), decidedBy: 'graphyard',
+    waitedMs: Math.max(0, now.getTime() - Date.parse(request.at)), paths: verdict.paths, requestedBy: request.requestedBy, requestedAt: request.at };
+  work.scopeDecision = decision;
+  // An applied request is answered and cleared, exactly as an operator widening clears it;
+  // a refused one stays open, carrying its refusal, because someone still has to decide it.
+  work.scopeRequest = verdict.state === 'approved' ? null : { ...request, decision };
+  if (verdict.state === 'approved') {
+    // Non-weakening intent the item already carried: applied to the live attempt, which
+    // keeps its lease and its containment fence exactly as an operator widening would.
+    work.plannedFiles = [...new Set([...(work.plannedFiles ?? []), ...verdict.paths])];
+    work.policyRevision++;
+    work.formalReviewResetRequired = true; work.formalReviewBaseline = undefined;
+    work.observation = null; work.mergeAuthorization = null; work.reviewRequest = null;
+    if (work.blocker?.startsWith(scopeRefusalBlocker)) work.blocker = null;
+  } else {
+    // Refused and escalated: the reason is the item's blocker, so the ready gate holds it
+    // until an operator decides the scope the item does not already imply.
+    work.blocker = `${scopeRefusalBlocker}: ${verdict.reason}`;
+    recordIntervention(work, 'blocked');
+  }
+  return decision;
+}
+
 export class Engine {
   operatorAuthorizer?: (db: any, now: Date, actor: Principal) => Promise<Principal>;
   // The configured credential registry, used to report which required proof names
@@ -547,27 +580,7 @@ export class Engine {
         demand(!request!.decision, 'This scope request was already decided');
         demand(work.lease && work.lease.epoch === request!.epoch && Date.parse(work.lease.expiresAt) > now.getTime(),
           'The requesting attempt no longer holds the lease; a fresh attempt asks afresh');
-        const verdict = decideScopeRequest(work, request!);
-        decision = { state: verdict.state, reason: verdict.reason, at: now.toISOString(), decidedBy: 'graphyard',
-          waitedMs: Math.max(0, now.getTime() - Date.parse(request!.at)), paths: verdict.paths, requestedBy: request!.requestedBy, requestedAt: request!.at };
-        work.scopeDecision = decision;
-        // An applied request is answered and cleared, exactly as an operator widening clears it;
-        // a refused one stays open, carrying its refusal, because someone still has to decide it.
-        work.scopeRequest = verdict.state === 'approved' ? null : { ...request!, decision };
-        if (verdict.state === 'approved') {
-          // Non-weakening intent the item already carried: applied to the live attempt, which
-          // keeps its lease and its containment fence exactly as an operator widening would.
-          work.plannedFiles = [...new Set([...(work.plannedFiles ?? []), ...verdict.paths])];
-          work.policyRevision++;
-          work.formalReviewResetRequired = true; work.formalReviewBaseline = undefined;
-          work.observation = null; work.mergeAuthorization = null; work.reviewRequest = null;
-          if (work.blocker?.startsWith(scopeRefusalBlocker)) work.blocker = null;
-        } else {
-          // Refused and escalated: the reason is the item's blocker, so the ready gate holds it
-          // until an operator decides the scope the item does not already imply.
-          work.blocker = `${scopeRefusalBlocker}: ${verdict.reason}`;
-          recordIntervention(work, 'blocked');
-        }
+        decision = applyScopeDecision(work, request!, now);
       }
       if (command === 'session') {
         demand(['worker', 'producer', 'coordinator', 'admin'].includes(actor.role), 'Worker, producer or coordinator permission required', 403);
@@ -598,6 +611,14 @@ export class Engine {
             const outside = data.paths!.filter((path: string) => !(work!.plannedFiles ?? []).some(planned => pathScopeContains(planned, path)));
             demand(outside.length, 'Every named path is already inside plannedFiles; no scope request is needed');
             work.scopeRequest = { epoch: data.epoch, paths: data.paths, reason: data.reason, requestedBy: actor.id, at: now.toISOString() };
+            // A scope ask names a deterministic rule as its decider, and the session is about to
+            // exit: applying that rule here answers it before anybody waits on it. The verdict is
+            // the same one the loop's `autoscope` computes — recomputed from the item's own
+            // criteria — so asking and answering in one transaction grants the asker nothing.
+            // The `scope` command stays the path for a session that keeps working while it waits.
+            decision = applyScopeDecision(work, work.scopeRequest, now);
+            request.state = 'resolved'; request.resolvedAt = now.toISOString();
+            request.resolution = `${decision.state}: ${decision.reason}`;
           }
           if (data.type === 'blocker') { work.blocker = data.reason; recordIntervention(work, 'blocked'); }
           if (data.type === 'escalation') raiseEscalation(work, { trigger: data.trigger, reason: data.reason, at: now.toISOString(), actor: actor.id });

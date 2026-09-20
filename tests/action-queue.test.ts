@@ -19,7 +19,7 @@ import { pipelineSpeedSummary, speedTarget } from '../src/pipeline-speed.js';
 import { executorEffects, executorKinds, runExecutor, runExecutorTick, workerPullIntervalMs, type ExecutorEffects } from '../src/auto-dispatch.js';
 import { runCycle, emptyDaemonState, type DaemonEffects } from '../src/master-daemon.js';
 import { masterConfigSchema } from '../src/master.js';
-import { agentRequestAttention, actionReport, sessionReport } from '../src/cli/master-status.js';
+import { agentRequestAttention, agentRequestReport, actionReport, sessionReport } from '../src/cli/master-status.js';
 import { queueRef, type QueueSpeculation } from '../src/merge-queue.js';
 import WorkDetails from '../web/pages/work-details.js';
 
@@ -589,28 +589,34 @@ test('integration:typed-agent-requests — an agent that needs something records
   // Only one of the three human-only decisions reaches a person, whatever the type.
   for (const humanDecision of humanDecisions) assert.equal(deciderFor('GY-9', { type: 'decision', humanDecision }).kind, 'human');
 
-  // A worker that needs files outside plannedFiles records the ask and gives the item back.
-  let item = await engine.execute(worker, 'claim', (await release(await created())).id, {}, randomUUID());
+  // A worker that needs files outside plannedFiles records the ask and gives the item back. Its
+  // decider is a deterministic rule, so the control plane applies it in the same transaction:
+  // the ask is answered before the session has finished exiting.
+  let item = await engine.execute(worker, 'claim', (await release(await created({ plannedFiles: ['src/'], criteria: [{ id: 'AC-1', text: 'Update the architecture guide for the new contract', proofs: [PROOF] }] }))).id, {}, randomUUID());
   const epoch = item.epoch;
   item = await engine.execute(worker, 'request', item.id, { type: 'scope-request', epoch, paths: ['docs/architecture.md'], reason: 'the contract this item changes is described in the architecture guide' }, randomUUID());
   assert.equal(item.lease, null, 'the attempt ended in the same transaction; nothing waits at a prompt');
-  const scope = openAgentRequests(item, new Date())[0];
+  assert.equal(item.pipeline!.attempts.at(-1)!.end, 'released');
+  const scope = item.agentRequests!.at(-1)!;
   assert.equal(scope.type, 'scope-request');
   assert.equal(scope.releasedLease, true);
   assert.deepEqual(scope.decider, { kind: 'rule', who: 'the additive planned-files widening rule', command: `graphyard master scope ${item.key}` });
-  assert.deepEqual(item.scopeRequest!.paths, ['docs/architecture.md'], 'the typed request is the same fact the existing machinery reads');
-  assert.equal(item.pipeline!.attempts.at(-1)!.end, 'released');
+  assert.equal(scope.state, 'resolved', 'the rule that decides it ran here, so nothing is left waiting');
+  assert.equal(item.scopeDecision!.state, 'approved');
+  assert.match(scope.resolution!, /^approved: additive scope the item already implies/);
+  assert.ok(item.plannedFiles.includes('docs/architecture.md'), 'the widening the item already implied was applied');
+  assert.equal(item.scopeRequest, null);
 
-  // Master status shows it with its decider and how long it has waited, addressed to an agent.
-  const snapshot = { work: await store.list(), now: new Date(Date.now() + 90_000).toISOString() };
-  const attention = agentRequestAttention(snapshot);
-  const line = attention.find(entry => entry.subject === item.key)!;
-  assert.match(line.text, /recorded a scope-request on GY-\d+ 1.5 min ago and released its lease/);
-  assert.match(line.text, /decided by the additive planned-files widening rule/);
-  assert.deepEqual([line.role, line.human, line.humanOnly, line.approvedBy], ['master', false, null, null], 'a rule-decided ask is an agent command, never a question for a person');
-  assert.equal(line.next, `graphyard master scope ${item.key}`, 'the line carries the one command that answers it');
-  const reported = actionReport(snapshot);
-  assert.ok(reported.next.some(entry => entry.key === item.key && entry.kind === 'approve-scope'));
+  // A request the rule cannot approve keeps the refusal as the item's blocker, so the ready gate
+  // holds it and the control plane names an escalation rather than leaving it silently open.
+  let wider = await engine.execute(worker, 'claim', (await release(await created())).id, {}, randomUUID());
+  wider = await engine.execute(worker, 'request', wider.id, { type: 'scope-request', epoch: wider.epoch, paths: ['deploy/helm/'], reason: 'the chart needs the same value' }, randomUUID());
+  assert.equal(wider.scopeDecision!.state, 'refused');
+  assert.match(wider.blocker!, /outside what this item's own criteria and the repository's documentation rule imply/);
+  assert.equal(wider.nextAction!.kind, 'escalate');
+  assert.equal(wider.agentRequests!.at(-1)!.state, 'resolved');
+  assert.ok(!wider.plannedFiles.includes('deploy/helm/'));
+  await engine.execute(operator, 'unblock', wider.id, { reason: 'Operator decided the chart is out of scope for this item' }, randomUUID());
 
   // A decision request names the action an independent approver must approve.
   let decided = await engine.execute(worker, 'claim', (await release(await created())).id, {}, randomUUID());
@@ -619,6 +625,16 @@ test('integration:typed-agent-requests — an agent that needs something records
   assert.equal(decision.decider.kind, 'approver');
   assert.match(decision.decider.command!, /master decide GY-\d+ rework REASON, then graphyard master approver/);
   assert.equal(decided.lease, null);
+  // Master status shows the open request with its decider and how long it has waited, addressed
+  // to an agent; and the control plane names the escalation that leaves the executor loop for it.
+  const snapshot = { work: await store.list(), now: new Date(Date.now() + 90_000).toISOString() };
+  const line = agentRequestAttention(snapshot).find(entry => entry.subject === decided.key)!;
+  assert.match(line.text, /recorded a decision on GY-\d+ 1.5 min ago and released its lease/);
+  assert.match(line.text, /decided by an independent approver agent/);
+  assert.deepEqual([line.role, line.human, line.humanOnly, line.approvedBy], ['master', false, null, 'approver']);
+  assert.equal(line.next, decision.decider.command);
+  assert.ok(agentRequestReport(snapshot).some(entry => entry.key === decided.key && entry.waitedMs >= 90_000));
+  assert.ok(actionReport(snapshot).next.some(entry => entry.key === decided.key && entry.kind === 'escalate'));
 
   // A blocker names a tracked follow-up item and still sets the blocker the gates read.
   let blocked = await engine.execute(worker, 'claim', (await release(await created())).id, {}, randomUUID());

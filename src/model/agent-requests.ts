@@ -81,6 +81,8 @@ const command = (key: string, type: AgentRequestType, action?: string) =>
 export function deciderFor(key: string, request: Pick<AgentRequest, 'type' | 'action' | 'humanDecision'>): Decider {
   if (request.humanDecision) return { kind: 'human', who: `the human operator (${request.humanDecision.replace(/-/g, ' ')})`, command: null };
   switch (request.type) {
+    // Decided in the same transaction the request is recorded in (engine.ts), from the item's own
+    // criteria and this repository's documentation rule; a refusal becomes the item's blocker.
     case 'scope-request': return { kind: 'rule', who: 'the additive planned-files widening rule', command: command(key, 'scope-request') };
     case 'decision': return { kind: 'approver', who: 'an independent approver agent', command: command(key, 'decision', request.action) };
     case 'escalation': return { kind: 'approver', who: 'an independent approver agent', command: command(key, 'escalation') };
