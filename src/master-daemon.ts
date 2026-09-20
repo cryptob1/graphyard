@@ -490,7 +490,7 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
     // The session is blocked, not gone: it still holds its pane, and the one moment somebody
     // needs the attach command is this one. The handle stays running, carrying why it stalled;
     // step 1 records it finished once the agent is actually closed.
-    await effects.recordSession?.(item, { id: `${profile.principal}:${item.epoch}`, kind: 'implementation', runtime: profile.kind ?? profile.mode, host: config.hostId,
+    await effects.recordSession?.(item, { id: `${profile.principal}:${item.epoch}`, kind: 'implementation', principal: profile.principal, runtime: profile.kind ?? profile.mode, host: config.hostId,
       ...(config.herdrWorkspace ? { workspace: config.herdrWorkspace } : {}),
       ...(agent.pane_id ? { pane: agent.pane_id, attach: `herdr pane attach ${agent.pane_id}${config.herdrWorkspace ? ` --workspace ${config.herdrWorkspace}` : ''}` } : {}),
       subject: `${item.key}: ${item.title}`.slice(0, 300), state: 'running',
@@ -648,7 +648,7 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
       // The session is now running somewhere. Put the handle where every Graphyard reader looks,
       // so watching this specific agent never means asking this loop to relay its pane id.
       await effects.recordSession?.(item, {
-        id: `${choice.profile.principal}:${item.epoch + 1}`, kind: 'implementation', runtime: choice.profile.kind ?? choice.profile.mode, host: config.hostId,
+        id: `${choice.profile.principal}:${item.epoch + 1}`, kind: 'implementation', principal: choice.profile.principal, runtime: choice.profile.kind ?? choice.profile.mode, host: config.hostId,
         ...(config.herdrWorkspace ? { workspace: config.herdrWorkspace } : {}),
         ...(dispatched?.pane ? { pane: dispatched.pane, attach: `herdr pane attach ${dispatched.pane}${config.herdrWorkspace ? ` --workspace ${config.herdrWorkspace}` : ''}` } : {}),
         subject: `${item.key}: ${item.title}`.slice(0, 300), state: 'running',

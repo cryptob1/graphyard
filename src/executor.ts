@@ -7,7 +7,7 @@ import type { SessionHandleInput } from './model/sessions.js';
 import { independentProducerProfiles } from './producer.js';
 import { profileHealth, type DaemonState, type DeploymentObservation } from './master-daemon.js';
 import { launchedSessionHandle, selectReviewerProfile, type ExecutorEffects, type ExecutorHandler } from './auto-dispatch.js';
-import type { HerdrAgent, MasterConfig, ProducerProfile, WorkerProfile } from './master.js';
+import type { HerdrAgent, MasterConfig, MergeExecutor, ProducerProfile, WorkerProfile } from './master.js';
 
 /**
  * What a stateless executor actually does when it claims a row.
@@ -43,6 +43,18 @@ export interface ControlPlaneEffects {
   /** Records a launched session's durable handle on the item (AC-8). */
   recordSession?: (work: Work, handle: SessionHandleInput) => Promise<unknown>;
 }
+
+/**
+ * The merge execution instance one executor process owns.
+ *
+ * A merge execution is owned by the executor instance that acquired it, never by the coordinator
+ * principal alone (GY-92): an execution another instance holds is refused rather than resumed, so
+ * a `master run` loop, an interactive `master merge` and any number of executors sharing one
+ * credential never drive the same merge between them. An executor mints its instance once per
+ * process, exactly as the daemon does, so nothing it starts can be resumed by anything else —
+ * including a later executor on the same host, which stands down until the execution lapses.
+ */
+export const executorMergeExecutor = (principal: string, instance = `executor-${randomUUID()}`): MergeExecutor => ({ principal, instance });
 
 const message = (error: unknown) => error instanceof Error ? error.message : String(error);
 /** An executor holds no cool-off state of its own: a failed attempt backs off on its own action row. */
@@ -82,7 +94,7 @@ export function controlPlaneHandlers(config: () => MasterConfig, effects: Contro
     const usable = independent.filter(profile => credentials[profile.name]?.available !== false && !agents.some(agent => agent.name === profile.agentName));
     if (!usable.length) throw new Error(`every independent producer profile is busy or unavailable (${independent.map(profile => `${profile.name}: ${credentials[profile.name]?.available === false ? credentials[profile.name].reason : 'busy'}`).join('; ')})`);
     const launched = await effects.launchProducer(work, request, usable[0], agents, observedAt);
-    await record(work, launchedSessionHandle('proof', request, `${work.key}: ${group} proofs on ${request.sha.slice(0, 12)} (${proofs.join(', ')})`, config().hostId, launched, usable[0].kind, config().herdrWorkspace));
+    await record(work, launchedSessionHandle('proof', request, `${work.key}: ${group} proofs on ${request.sha.slice(0, 12)} (${proofs.join(', ')})`, config().hostId, launched, usable[0].kind, config().herdrWorkspace, usable[0].principal));
     return `launched producer ${usable[0].name} for ${proofs.join(', ')} on ${request.sha.slice(0, 12)}`;
   };
 
@@ -95,7 +107,9 @@ export function controlPlaneHandlers(config: () => MasterConfig, effects: Contro
     const launched = await effects.dispatchWorker(work, choice.profile, agents, { work: all, now: observedAt });
     const workspace = config().herdrWorkspace;
     await record(work, {
-      id: `${choice.profile.principal}:${work.epoch + 1}`, kind: 'implementation',
+      // The worker session's own handle: it fills in the tab and transcript only it has, so the
+      // launcher names it as the principal the handle belongs to.
+      id: `${choice.profile.principal}:${work.epoch + 1}`, kind: 'implementation', principal: choice.profile.principal,
       runtime: choice.profile.kind ?? choice.profile.mode, host: config().hostId,
       ...(workspace ? { workspace } : {}),
       ...(launched?.pane ? { pane: launched.pane, attach: `herdr pane attach ${launched.pane}${workspace ? ` --workspace ${workspace}` : ''}` } : {}),

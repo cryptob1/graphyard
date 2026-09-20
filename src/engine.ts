@@ -15,7 +15,7 @@ import { ciFamilyAllows, ciProofFamilies, ciRunBindingSchema, ciRunRefusal, isCi
 import { decideScopeRequest, liveScopeWidening, scopeRefusalBlocker, type ScopeDecision } from './model/scope.js';
 import { reconcileAutoDispatch, type DispatchTransition } from './model/dispatch.js';
 import { nextAction, nextActionKinds, sameAction } from './model/next-action.js';
-import { claimAction, openActions, reconcileActions, settleAction, type ActionRow } from './model/actions.js';
+import { claimAction, openActions, reconcileActions, renewClaim, settleAction, type ActionRow } from './model/actions.js';
 import { agentRequestLimit, agentRequestSchema, deciderFor, expireAgentRequests, leaseHeldRequestTypes, requestResolutionRefusal, resolveSatisfiedScopeRequests, type AgentRequest } from './model/agent-requests.js';
 import { recordSession, sessionHandleSchema } from './model/sessions.js';
 import { beginAttempt, endAttempt, endLapsedAttempt, recordIntervention, recordRework, recordSubmission } from './pipeline-speed.js';
@@ -109,6 +109,9 @@ const actionClaimSchema = z.object({
   work: z.string().min(1).max(200).optional(),
 }).strict();
 const actionSettleSchema = z.object({ executor: executorName.optional(), result: z.enum(['done', 'failed']), reason: z.string().trim().min(1).max(2000) }).strict();
+// A renewal carries no result: it says only that the executor named on the claim is still
+// inside the handler, and asks for the lease it already holds to run on.
+const actionRenewSchema = z.object({ executor: executorName.optional(), leaseSeconds: z.number().int().min(10).max(900).optional() }).strict();
 const pullAssignmentSchema = z.object({ host: executorName.optional(), work: z.string().min(1).max(200).optional() }).strict();
 // A merge execution is owned by the executor instance that acquired it — one daemon process or
 // one interactive `master merge` request — never by the coordinator principal alone (GY-92). Two
@@ -127,6 +130,8 @@ const mergeVerifySchema = z.object({ executionId: z.string().uuid(), executor: e
  */
 export const mergeExecutionOwner = (actor: Pick<Principal, 'id'>, executor?: string | null) => executor ? `${actor.id}#${executor}` : actor.id;
 const ownedByAnother = 'Merge execution is missing, expired, superseded, or owned by another coordinator executor instance';
+/** The refusal a replay of one idempotency key with different input earns; read back by the pull. */
+export const idempotencyMismatch = 'Idempotency key reused with different input';
 export type Command = keyof typeof commands;
 const operatorCapabilitiesByCommand: Partial<Record<Command, OperatorCapability>> = { create: 'intent:create', ready: 'intent:ready', unblock: 'intent:unblock', requirements: 'policy:requirements', reviewpolicy: 'policy:review-provider' };
 
@@ -320,7 +325,7 @@ export class Engine {
       }
       const receipt = (await db.query('SELECT * FROM receipts WHERE actor=$1 AND key=$2', [actor.id, key])).rows[0];
       if (receipt) {
-        demand(receipt.fingerprint === fingerprint, 'Idempotency key reused with different input');
+        demand(receipt.fingerprint === fingerprint, idempotencyMismatch);
         if (actor.role === 'operator-agent') authorizeOperatorCommand(actor, command, data, receipt.result as Work, this.repository);
         return receipt.result as Work;
       }
@@ -648,6 +653,19 @@ export class Engine {
         // reviewer or producer session holds none, and records its handle under its own identity.
         if (data.epoch !== undefined) activeLease(work, actor, data.epoch, now);
         else demand(actor.role !== 'worker', 'An implementation session records its handle under its assignment epoch');
+        // A launcher records the handle of a session it started under somebody else's credential,
+        // and names whose: that is what lets the session itself fill in the tab and transcript
+        // only it has. Naming another principal is the launch authority a coordinator already
+        // holds, so nobody below it may claim a handle on another session's behalf.
+        demand(!data.principal || data.principal === actor.id || actor.role === 'coordinator' || actor.role === 'admin',
+          'Only a coordinator or an admin records a handle on behalf of the session it launched', 403);
+        // An existing handle is the attach command master status and the dashboard show an
+        // operator. Overwriting one — marking a running worker finished, or replacing the command
+        // somebody is about to run — belongs to that session, its launcher, or an admin, never to
+        // any credential that happens to reach this item.
+        const existing = (work.sessions ?? []).find(handle => handle.id === data.id);
+        demand(!existing || existing.principal === actor.id || actor.role === 'coordinator' || actor.role === 'admin',
+          `Session handle ${data.id} belongs to ${existing?.principal}; only that session, its launcher or an admin may update it`, 403);
         recordSession(work, data, actor.id, now);
       }
       if (command === 'request') {
@@ -857,7 +875,7 @@ export class Engine {
     const fingerprint = createHash('sha256').update(JSON.stringify({ command: 'action.claim', data })).digest('hex');
     return this.store.transaction(async (db, now) => {
       const receipt = (await db.query('SELECT * FROM receipts WHERE actor=$1 AND key=$2', [actor.id, key])).rows[0];
-      if (receipt) { demand(receipt.fingerprint === fingerprint, 'Idempotency key reused with different input'); return receipt.result as { action: ActionRow | null }; }
+      if (receipt) { demand(receipt.fingerprint === fingerprint, idempotencyMismatch); return receipt.result as { action: ActionRow | null }; }
       const all: Work[] = (await db.query('SELECT document FROM work_items ORDER BY number')).rows.map(r => r.document);
       const claimed = claimAction(all, { id: data.executor ?? actor.id, host: data.host, principal: actor.id }, now, { kinds: data.kinds, leaseMs: data.leaseSeconds ? data.leaseSeconds * 1000 : undefined, work: data.work });
       const result = { action: claimed?.row ?? null, open: openActions(all, now, data.kinds).length, at: now.toISOString() };
@@ -882,7 +900,7 @@ export class Engine {
     const fingerprint = createHash('sha256').update(JSON.stringify({ command: 'action.settle', id, data })).digest('hex');
     return this.store.transaction(async (db, now) => {
       const receipt = (await db.query('SELECT * FROM receipts WHERE actor=$1 AND key=$2', [actor.id, key])).rows[0];
-      if (receipt) { demand(receipt.fingerprint === fingerprint, 'Idempotency key reused with different input'); return receipt.result as { action: ActionRow }; }
+      if (receipt) { demand(receipt.fingerprint === fingerprint, idempotencyMismatch); return receipt.result as { action: ActionRow }; }
       const all: Work[] = (await db.query('SELECT document FROM work_items ORDER BY number')).rows.map(r => r.document);
       const work = all.find(item => item.actionQueue?.actions.some(row => row.id === id));
       demand(work, 'Action is not open on any work item', 404);
@@ -892,6 +910,30 @@ export class Engine {
       const result = { action: transition.action, work: { id: work!.id, key: work!.key } };
       await db.query('INSERT INTO receipts(actor,key,fingerprint,result) VALUES($1,$2,$3,$4)', [actor.id, key, fingerprint, JSON.stringify(result)]);
       return result;
+    });
+  }
+  /**
+   * Hold a claim while the handler is still running.
+   *
+   * A claim is a short lease so that a dead executor's row is offered again quickly, but the
+   * handlers are not short: a dispatch prepares a worktree and waits on a runtime, and a guarded
+   * merge chains provider calls that each have their own timeout. Without this a handler that
+   * outlives its lease is run a second time by another executor while the first is still inside
+   * it — the double execution AC-2 forbids. The executor that holds the claim says here that it
+   * is still running; anybody else, and an expired claim, is refused.
+   */
+  async renewClaimedAction(actor: Principal, id: string, input: unknown) {
+    demand(actor.role === 'coordinator' || actor.role === 'admin', 'Coordinator permission required', 403);
+    const data = actionRenewSchema.parse(input);
+    return this.store.transaction(async (db, now) => {
+      const all: Work[] = (await db.query('SELECT document FROM work_items ORDER BY number')).rows.map(r => r.document);
+      const work = all.find(item => item.actionQueue?.actions.some(row => row.id === id));
+      demand(work, 'Action is not open on any work item', 404);
+      const row = renewClaim(work!, id, { executor: data.executor ?? actor.id, principal: actor.id }, now, data.leaseSeconds ? data.leaseSeconds * 1000 : undefined);
+      // A renewal is a fact about a claim, not a decision: it is persisted without re-evaluating
+      // the item and without an event of its own, so a long handler costs one update per interval.
+      await db.query('UPDATE work_items SET document=$2 WHERE id=$1', [work!.id, JSON.stringify(work)]);
+      return { action: row, work: { id: work!.id, key: work!.key } };
     });
   }
   /**
@@ -909,14 +951,18 @@ export class Engine {
     demand(actor.role === 'worker' || actor.role === 'admin', 'Worker permission required', 403);
     demand(key && key.length <= 200, 'An Idempotency-Key is required', 400);
     const data = pullAssignmentSchema.parse(input);
-    // Each offer this pull tries claims under a key derived from the pull's own, so the claim
-    // receipt records which item this pull took. A pull that timed out after its claim committed
-    // replays that receipt instead of walking the offers again — the won item is no longer on
-    // offer, and without this the retry would claim a second item and leave the first held by a
-    // worker that was never told it holds it.
+    // Every offer this pull tries claims under one key derived from the pull's own, so the claim
+    // receipt records which item this pull took — and, because a receipt is written in the same
+    // transaction as the claim it belongs to, one pull key can never claim two items. A pull that
+    // timed out after its claim committed replays that receipt instead of walking the offers
+    // again; without it the retry would take a second item and leave the first held by a worker
+    // that was never told it holds it. The race is decided the same way: a concurrent retry that
+    // reaches a different offer first is refused for reusing the key with different input, and
+    // replays the assignment the winner made rather than claiming beside it.
     const derived = `pull/${createHash('sha256').update(key).digest('hex').slice(0, 32)}`;
-    const prior = (await this.store.pool.query('SELECT key, result FROM receipts WHERE actor=$1 AND key LIKE $2', [actor.id, `${derived}/%`])).rows[0];
-    if (prior) return { assigned: prior.result as Work, offered: 1, refused: [] as { key: string; reason: string }[], replayed: true };
+    const replay = async () => (await this.store.pool.query('SELECT result FROM receipts WHERE actor=$1 AND key=$2', [actor.id, derived])).rows[0]?.result as Work | undefined;
+    const prior = await replay();
+    if (prior) return { assigned: prior, offered: 1, refused: [] as { key: string; reason: string }[], replayed: true };
     const all = await this.store.list();
     const now = new Date((await this.store.pool.query('SELECT clock_timestamp() AS now')).rows[0].now);
     const offers = openActions(all, now, ['dispatch'])
@@ -924,8 +970,18 @@ export class Engine {
       .filter(entry => !data.work || entry.work.id === data.work || entry.work.key === data.work);
     const refused: { key: string; reason: string }[] = [];
     for (const offer of offers) {
-      try { return { assigned: await this.execute(actor, 'claim', offer.work.id, {}, `${derived}/${offer.work.id}`), offered: offers.length, refused }; }
-      catch (error) { if (!(error instanceof Refusal)) throw error; refused.push({ key: offer.work.key, reason: error.message }); }
+      try { return { assigned: await this.execute(actor, 'claim', offer.work.id, {}, derived), offered: offers.length, refused }; }
+      catch (error) {
+        if (!(error instanceof Refusal)) throw error;
+        if (error.message === idempotencyMismatch) {
+          // This pull already claimed a different item — a concurrent retry of the same call got
+          // there first. The claim it made is this pull's assignment; taking another is exactly
+          // the double claim the key exists to prevent.
+          const claimed = await replay();
+          if (claimed) return { assigned: claimed, offered: offers.length, refused, replayed: true };
+        }
+        refused.push({ key: offer.work.key, reason: error.message });
+      }
     }
     return { assigned: null, offered: offers.length, refused, at: now.toISOString() };
   }
@@ -961,7 +1017,7 @@ export class Engine {
       const work = all.find(item => item.id === id || item.key === id);
       demand(work, 'Work item not found', 404);
       if (receipt) {
-        demand(receipt.fingerprint === fingerprint, 'Idempotency key reused with different input');
+        demand(receipt.fingerprint === fingerprint, idempotencyMismatch);
         this.evaluate(work, all, now);
         const execution = receipt.result?.execution;
         demand(execution && work.mergeExecution?.id === execution.id && !work.mergeExecution?.fenced
@@ -1001,7 +1057,7 @@ export class Engine {
     const fingerprint = createHash('sha256').update(JSON.stringify({ command: 'merge.cancel', id, data })).digest('hex');
     return this.store.transaction(async (db, now) => {
       const receipt = (await db.query('SELECT * FROM receipts WHERE actor=$1 AND key=$2', [actor.id, key])).rows[0];
-      if (receipt) { demand(receipt.fingerprint === fingerprint, 'Idempotency key reused with different input'); return receipt.result; }
+      if (receipt) { demand(receipt.fingerprint === fingerprint, idempotencyMismatch); return receipt.result; }
       const all: Work[] = (await db.query('SELECT document FROM work_items ORDER BY number')).rows.map(row => row.document);
       const work = all.find(item => item.id === id || item.key === id);
       demand(work, 'Work item not found', 404);
@@ -1024,7 +1080,7 @@ export class Engine {
     return this.store.transaction(async (db, now) => {
       const receipt = (await db.query('SELECT * FROM receipts WHERE actor=$1 AND key=$2', [actor.id, key])).rows[0];
       if (!receipt) return null;
-      demand(receipt.fingerprint === fingerprint, 'Idempotency key reused with different input');
+      demand(receipt.fingerprint === fingerprint, idempotencyMismatch);
       const work = (await db.query('SELECT document FROM work_items WHERE id::text=$1 OR document->>\'key\'=$1', [id])).rows[0]?.document as Work | undefined;
       demand(work?.mergeExecution?.id === data.executionId && work.mergeExecution.owner === mergeExecutionOwner(actor, data.executor) && work.mergeExecution.verifiedAt === receipt.result.verifiedAt
         && Date.parse(work.mergeExecution.expiresAt) > now.getTime(), 'Replayed merge verification is expired, cancelled, or superseded');
@@ -1038,7 +1094,7 @@ export class Engine {
     return this.store.transaction(async (db, now) => {
       const receipt = (await db.query('SELECT * FROM receipts WHERE actor=$1 AND key=$2', [actor.id, key])).rows[0];
       if (receipt) {
-        demand(receipt.fingerprint === fingerprint, 'Idempotency key reused with different input');
+        demand(receipt.fingerprint === fingerprint, idempotencyMismatch);
         const current = (await db.query('SELECT document FROM work_items WHERE id::text=$1 OR document->>\'key\'=$1', [id])).rows[0]?.document as Work | undefined;
         demand(current?.mergeExecution?.id === data.executionId && current.mergeExecution.owner === mergeExecutionOwner(actor, data.executor) && current.mergeExecution.verifiedAt === receipt.result.verifiedAt
           && !current.mergeExecution.fenced && Date.parse(current.mergeExecution.expiresAt) > now.getTime(), 'Replayed merge verification is expired, cancelled, fenced, or superseded');
@@ -1074,7 +1130,7 @@ export class Engine {
     return this.store.transaction(async (db, now) => {
       const receipt = (await db.query('SELECT * FROM receipts WHERE actor=$1 AND key=$2', [actor.id, key])).rows[0];
       if (receipt) {
-        demand(receipt.fingerprint === fingerprint, 'Idempotency key reused with different input');
+        demand(receipt.fingerprint === fingerprint, idempotencyMismatch);
         const current = (await db.query('SELECT document FROM work_items WHERE id::text=$1 OR document->>\'key\'=$1', [id])).rows[0]?.document as Work | undefined;
         demand(current?.mergeExecution?.id === data.executionId && current.mergeExecution.owner === mergeExecutionOwner(actor, data.executor)
           && current.mergeExecution.committingAt === receipt.result.committingAt && Date.parse(current.mergeExecution.expiresAt) > now.getTime(),

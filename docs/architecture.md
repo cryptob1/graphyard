@@ -76,6 +76,11 @@ next executor takes the row as a further attempt, and the dead one's late settle
 so an interrupted action is retried without being executed twice. Every transition records the
 requester, the executor, the result and the reason on the row.
 
+A claim is a bounded lease, not a bounded handler: an executor still inside one renews the claim
+while it runs, so a dispatch that waits on a runtime or a merge that chains provider calls keeps
+its row, and only an executor that stopped renewing loses it. A renewal carries no result and is
+accepted from nobody but the live claim's own executor and credential.
+
 A claim records the executor's self-asserted name *and* the credential it was made with, and only
 that pair may settle the row. Several executors behind one coordinator credential is an ordinary
 deployment, and a settlement under the wrong name would be refused after the handler had already
@@ -103,8 +108,11 @@ two-party decision, resolve an escalation — and is null for the five mechanica
 Workers pull. A free session asks `POST /api/assignments/claim` (`scripts/graphyard-pull.mjs`) for
 its next assignment and claims it under its own identity through the ordinary claim rules; the control plane
 offers the items it already names as needing a dispatch, in dispatch order. Nothing tracks which
-session is alive. A pull is idempotent on its own key: a retry replays the claim the first call
-made rather than taking a second item and leaving a worker holding a lease nobody told it about.
+session is alive. A pull is idempotent on its own key, and one key can claim at most one item: the
+claim and its receipt are written in the same transaction, a retry replays that receipt, and a
+concurrent retry that reaches another offer first is refused for reusing the key with different
+input and replays the winner's assignment. The shipped worker keeps one key across its transport
+retries, which is what makes the replay reachable when a pull times out after its claim committed.
 
 Two more records make the fleet legible without a relaying coordinator. A typed agent request
 (`src/model/agent-requests.ts`) is what a session records instead of blocking on a prose question:
@@ -115,8 +123,14 @@ than held at a prompt. Recording one is the same write as the command it replace
 the same authority: every type but `note` needs the live lease of the attempt that is asking, and
 only the decider the record names may close it. A session handle (`src/model/sessions.ts`) records
 where a launched session runs: runtime, host, Herdr workspace, tab and pane, and its transcript,
-with the one command or link that attaches to it. Every launcher writes what it knows, and the
-session adds the tab and transcript only it knows, onto the same record.
+with the one command or link that attaches to it. Every launcher writes what it knows and names
+whose session it is, and that session adds the tab and transcript only it knows, onto the same
+record; updating a handle that exists is the named session's, its launcher's or an admin's, because
+the attach command on it is an instruction an operator runs.
+
+A merge brokered from the loop is owned by the executor instance that acquired it, never by the
+coordinator principal alone, so a daemon, an interactive merge and any number of executors sharing
+one credential stand down from each other's in-flight executions instead of resuming them.
 
 Whether this is worth it is a measurement, not a claim: `scripts/measure-throughput.mjs` reads the
 live control plane and judges what it recorded — the deliveries in a window and their submit→merge

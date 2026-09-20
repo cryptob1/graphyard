@@ -69,6 +69,8 @@ export async function main(argv = process.argv.slice(2), env = process.env) {
   if (status.actor?.proofs?.length) throw new Error('An executor refuses a credential that is also allowed to produce evidence');
 
   const live = m.liveMasterConfig(root, config), current = () => live.current;
+  // Minted once per process, exactly as the daemon mints its own (src/executor.ts).
+  const mergeExecutor = x.executorMergeExecutor(status.actor.id);
   const run = (command, args) => execFileSync(command, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 90_000 });
   const snapshot = () => request('work-snapshot', {}, { [v.coordinationViewHeader]: 'coordination' });
   const handlers = x.controlPlaneHandlers(current, {
@@ -79,7 +81,12 @@ export async function main(argv = process.argv.slice(2), env = process.env) {
     dispatchWorker: (work, profile, agents, snap) => m.dispatchWork(root, work, profile, agents, run, snap.work, undefined, undefined, undefined, snap.now),
     launchReview: (work, review, agents, observedAt) => r.launchReview(root, work, current().run.reviewerProfile, agents, observedAt, { run, requestId: review.id }),
     launchProducer: (work, producerRequest, profile, agents, observedAt) => pr.launchProducer(root, work, producerRequest, profile, agents, observedAt, { run }),
-    merge: work => m.mergeExecutor(current(), snapshot, mutate, status.actor.id, randomUUID(), run)(work),
+    // Every merge this process brokers is owned by this executor instance (GY-92), never by the
+    // coordinator principal alone: a `master run` loop, an interactive `master merge` and every
+    // other executor sharing this credential each hold their own. A foreign in-flight execution
+    // is then refused rather than resumed, so two brokers never drive one merge — see
+    // docs/master-agent.md, "Running executors beside the daemon".
+    merge: work => m.mergeExecutor(current(), snapshot, mutate, mergeExecutor, randomUUID(), run)(work),
     observeDeployment: delivered => d.observeDeployment(current(), delivered, run),
     recordSession: (work, handle) => mutate(`work/${work.id}/session`, handle),
   });
@@ -96,6 +103,10 @@ export async function main(argv = process.argv.slice(2), env = process.env) {
     // The settlement names the executor the claim was recorded under, never this credential's own
     // principal: several executors may run behind one coordinator credential.
     settle: (action, result, reason) => mutate(`actions/${action.id}/settle`, { result, reason, ...(action.claim?.executor ? { executor: action.claim.executor } : {}) }),
+    // A handler is not bounded by the claim lease — a dispatch waits on a runtime, a guarded merge
+    // chains provider calls — so while one runs this says the claim is still held. Without it a
+    // slow handler loses its row mid-flight and another executor runs the action beside it.
+    renew: action => mutate(`actions/${action.id}/renew`, { ...(action.claim?.executor ? { executor: action.claim.executor } : {}) }),
     handlers: options.kinds ? Object.fromEntries(options.kinds.filter(kind => handlers[kind]).map(kind => [kind, handlers[kind]])) : handlers,
   };
   const identity = { id: options.name ?? `${status.actor.id}@${config.hostId}:${process.pid}`, host: config.hostId };

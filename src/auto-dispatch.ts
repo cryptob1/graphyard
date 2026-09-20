@@ -7,7 +7,7 @@ import { z } from 'zod';
 import type { Work } from './model.js';
 import type { SessionHandleInput } from './model/sessions.js';
 import type { DispatchRequest } from './model/dispatch.js';
-import type { ActionRow } from './model/actions.js';
+import { actionRenewIntervalMs, type ActionRow } from './model/actions.js';
 import { nextActionKinds, type NextActionKind } from './model/next-action.js';
 import { assertOutsideWorktrees, inspectProducerCredentials, listHerdrAgents, readEnvironmentLog, type ConfigReload, type EnvironmentLog, type HerdrAgent, type MasterConfig, type ProducerProfile, type ReviewerProfile } from './master.js';
 import { launchReview, reconcileReviews, type ReviewRecord } from './reviewer.js';
@@ -138,9 +138,13 @@ export interface DispatchEffects {
  * `POST /api/work/GY-N/session`, which is the only party that has them. A handle with no pane
  * carries no attach command rather than one that cannot work.
  */
-export function launchedSessionHandle(kind: 'review' | 'proof', request: DispatchRequest, subject: string, host: string, launched: { pane?: string | null } | undefined, runtime: string, workspace?: string): SessionHandleInput {
+export function launchedSessionHandle(kind: 'review' | 'proof', request: DispatchRequest, subject: string, host: string, launched: { pane?: string | null } | undefined, runtime: string, workspace?: string, principal?: string): SessionHandleInput {
   return {
     id: request.id, kind, runtime, host,
+    // Whose session it is, when the launcher knows: a producer session runs under its own
+    // credential, and naming it here is what lets that session — and nobody else — fill in the
+    // tab and transcript the launcher cannot see.
+    ...(principal ? { principal } : {}),
     ...(workspace ? { workspace } : {}),
     ...(launched?.pane ? { pane: launched.pane, attach: `herdr pane attach ${launched.pane}${workspace ? ` --workspace ${workspace}` : ''}` } : {}),
     subject: subject.slice(0, 300), state: 'running',
@@ -253,7 +257,7 @@ export async function runDispatchTick(config: MasterConfig, cursor: DispatchCurs
       try {
         const launched = await launchWithFailover(usable, candidate => effects.launchProducer(item, request, candidate, agents, observedAt));
         busy.add(launched.profile.agentName); delete cursor.failures[request.id];
-        await effects.recordSession?.(item, launchedSessionHandle('proof', request, `${item.key}: ${request.group} proofs on ${request.sha.slice(0, 12)} (${(request.proofs ?? []).join(', ')})`, config.hostId, launched.result as { pane?: string | null }, launched.profile.kind, config.herdrWorkspace))
+        await effects.recordSession?.(item, launchedSessionHandle('proof', request, `${item.key}: ${request.group} proofs on ${request.sha.slice(0, 12)} (${(request.proofs ?? []).join(', ')})`, config.hostId, launched.result as { pane?: string | null }, launched.profile.kind, config.herdrWorkspace, launched.profile.principal))
           .catch(() => { /* as above: the session exists whether or not its handle could be written */ });
         tick.launched.push({ kind: 'producer', work: item.key, requestId: request.id, sha: request.sha, profile: launched.profile.name, group: request.group, proofs: request.proofs, ...(launched.failover.length ? { failover: launched.failover } : {}), ...(launched.relaunched ? { relaunched: true } : {}) });
       } catch (error) { refuse('producer', item, request, error); }
@@ -313,7 +317,7 @@ export async function runAutoDispatch(config: MasterConfig, cursor: DispatchCurs
 }
 
 /** Effects bound to the real coordinator process; `config` may be a live source the loop reloads. */
-export function dispatchEffects(root: string, config: MasterConfig | (() => MasterConfig), deps: { snapshot: () => Promise<{ work: Work[]; now: string }>; run?: (command: string, args: string[]) => string }): DispatchEffects {
+export function dispatchEffects(root: string, config: MasterConfig | (() => MasterConfig), deps: { snapshot: () => Promise<{ work: Work[]; now: string }>; mutate?: (path: string, body: unknown, requestId?: string) => Promise<any>; run?: (command: string, args: string[]) => string }): DispatchEffects {
   const run = deps.run ?? ((command, args) => execFileSync(command, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 90_000 }));
   const current = typeof config === 'function' ? config : () => config;
   return {
@@ -324,6 +328,10 @@ export function dispatchEffects(root: string, config: MasterConfig | (() => Mast
     reconcileProducers: (work, agents) => reconcileProducers(root, current(), work, agents, { run }),
     launchReview: (work, request, profile, agents, observedAt) => launchReview(root, work, profile.name, agents, observedAt, { run, requestId: request.id }),
     launchProducer: (work, request, profile, agents, observedAt) => launchProducer(root, work, request, profile, agents, observedAt, { run }),
+    // The handle goes where every Graphyard reader already looks, through the same coordinator
+    // mutation the daemon uses. A dispatcher built without a mutation still launches; it simply
+    // records nothing, and `master run` passes one, so its launches are visible.
+    ...(deps.mutate ? { recordSession: (work: Work, handle: SessionHandleInput) => deps.mutate!(`work/${work.id}/session`, handle, randomUUID()) } : {}),
     persist: cursor => writeDispatchCursor(current(), cursor),
   };
 }
@@ -363,6 +371,12 @@ export interface ExecutorEffects {
   /** Ask the control plane for one row this executor can run; null when the queue has nothing for it. */
   claim: (request: { host: string; executor: string; kinds: NextActionKind[]; leaseSeconds?: number }) => Promise<{ action: ActionRow | null; open?: number }>;
   settle: (action: ActionRow, result: 'done' | 'failed', reason: string) => Promise<unknown>;
+  /**
+   * Say the handler is still running, so the claim holds for another lease. An executor wired
+   * without it can still run every kind — it is simply bounded by one claim lease, and a handler
+   * that outlives that is taken from it by the next executor.
+   */
+  renew?: (action: ActionRow) => Promise<unknown>;
   /** One handler per action kind this executor can run. A kind with no handler is never claimed. */
   handlers: Partial<Record<NextActionKind, ExecutorHandler>>;
 }
@@ -413,7 +427,7 @@ export const executorKinds = (handlers: ExecutorEffects['handlers']): NextAction
  * the next executor sees what this one could not do rather than an action that silently stalls;
  * the row backs off and is offered again.
  */
-export async function runExecutorTick(identity: ExecutorIdentity, effects: ExecutorEffects, now: () => number = Date.now): Promise<ExecutorStep> {
+export async function runExecutorTick(identity: ExecutorIdentity, effects: ExecutorEffects, now: () => number = Date.now, options: { renewIntervalMs?: number } = {}): Promise<ExecutorStep> {
   const kinds = executorKinds(effects.handlers);
   const step = (action: ActionRow | null, result: ExecutorStep['result'], reason: string): ExecutorStep =>
     ({ at: new Date(now()).toISOString(), executor: identity.id, host: identity.host, action, result, kind: action?.kind ?? null, work: action?.key ?? null, reason });
@@ -421,15 +435,23 @@ export async function runExecutorTick(identity: ExecutorIdentity, effects: Execu
   const claimed = await effects.claim({ host: identity.host, executor: identity.id, kinds });
   const action = claimed.action;
   if (!action) return step(null, 'idle', 'the queue has no action this executor can run');
+  // The handlers are not bounded by the claim lease: a dispatch prepares a worktree and waits on
+  // a runtime, and a guarded merge chains provider calls that each have their own timeout. While
+  // one runs, this says so at the renewal interval, so the row is never offered to a second
+  // executor mid-flight. A renewal that fails is not a failure of the action — if the claim is
+  // really gone the settlement refuses, which is where that is decided.
+  const holding = effects.renew ? setInterval(() => { void effects.renew!(action).catch(() => {}); }, options.renewIntervalMs ?? actionRenewIntervalMs) : null;
+  holding?.unref?.();
   try {
     const reason = (await effects.handlers[action.kind]!(action, identity)) || `${action.kind} completed`;
+    if (holding) clearInterval(holding);
     await effects.settle(action, 'done', reason.slice(0, 2000));
     return step(action, 'done', reason);
   } catch (error) {
     const reason = message(error).slice(0, 2000);
     await effects.settle(action, 'failed', reason).catch(() => {});
     return step(action, 'failed', reason);
-  }
+  } finally { if (holding) clearInterval(holding); }
 }
 
 /**
@@ -437,13 +459,13 @@ export async function runExecutorTick(identity: ExecutorIdentity, effects: Execu
  * ran an action tries again immediately, so a queue that fills up is drained as fast as the
  * handlers allow rather than one row per interval.
  */
-export async function runExecutor(identity: ExecutorIdentity, effects: ExecutorEffects, options: { intervalMs: number; once?: boolean; signal?: AbortSignal; now?: () => number; log?: (line: string) => void; maxSteps?: number }) {
+export async function runExecutor(identity: ExecutorIdentity, effects: ExecutorEffects, options: { intervalMs: number; once?: boolean; signal?: AbortSignal; now?: () => number; log?: (line: string) => void; maxSteps?: number; renewIntervalMs?: number }) {
   const now = options.now ?? Date.now, log = options.log ?? (() => {});
   const steps: ExecutorStep[] = [];
   do {
     if (options.signal?.aborted) break;
     let step: ExecutorStep;
-    try { step = await runExecutorTick(identity, effects, now); }
+    try { step = await runExecutorTick(identity, effects, now, { renewIntervalMs: options.renewIntervalMs }); }
     catch (error) {
       step = { at: new Date(now()).toISOString(), executor: identity.id, host: identity.host, action: null, result: 'failed', kind: null, work: null, reason: message(error).slice(0, 2000) };
     }
@@ -475,6 +497,9 @@ export function executorEffects(config: { url: string; token: string; fetcher?: 
     // under the wrong identity is refused after the handler has already run — which is the one
     // way a leased queue can still execute an action twice.
     settle: (action, result, reason) => post(`actions/${action.id}/settle`, { result, reason, ...(action.claim?.executor ? { executor: action.claim.executor } : {}) }),
+    // The same claim, named the same way: a renewal from any other executor or credential is
+    // refused, so holding a row is as bounded as claiming one.
+    renew: action => post(`actions/${action.id}/renew`, { ...(action.claim?.executor ? { executor: action.claim.executor } : {}) }),
     handlers,
   };
 }

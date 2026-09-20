@@ -380,6 +380,35 @@ row. An executor that dies mid-action renews nothing, its claim expires, another
 a further attempt, and the dead one's late settlement is refused — so nothing is run twice. A
 handler that throws returns its row to the queue with the reason and a widening backoff.
 
+A claim is a two-minute lease, and the handlers are not two-minute operations: a dispatch prepares
+a worktree and waits on a runtime, and a guarded merge chains provider calls that each have their
+own timeout. An executor that is still inside a handler says so every thirty seconds and keeps the
+row:
+
+```sh
+POST /api/actions/ID/renew  {"executor": "runner-3"}
+```
+
+Only the executor named on the claim, holding the credential the claim was made with, may renew
+it, and only while it is still live — a claim that already expired may have been taken by somebody
+else, and renewing it would put two executors inside one action. A slow executor therefore keeps
+its row; a dead one loses it within the lease, which is the difference the queue has to make.
+
+### Running executors beside the daemon
+
+`master run` and any number of executors can run against the same control plane. They do not
+coordinate with each other and do not have to: the queue serializes the rows, and every merge is
+brokered under its own **execution instance** — `principal#instance`, minted once per process
+(the daemon's `daemon-…`, each executor's `executor-…`, one per interactive `master merge`). An
+execution another instance holds is refused rather than resumed, so two brokers never drive one
+merge even when they share a coordinator credential; the one that finds a foreign execution stands
+down, its action backs off, and it retries after the first has finished or its authority has
+lapsed. Nothing has to be turned off to add an executor.
+
+The daemon claims nothing from the queue, so a window in which both ran shows deliveries the
+executors settled *and* steps the daemon pushed; a measurement of throughput without a master
+means a window with `master run` stopped.
+
 An executor claims only the kinds it has a handler for, and two kinds may never have one:
 `escalate` and `request-rework` are judgments made in the step itself rather than inside a session
 the step starts, so the shipped executor refuses to start with a handler for either. The other seven
@@ -429,9 +458,13 @@ An item another worker just took is skipped rather than returned as an error. Po
 thirty seconds keeps ready-to-claim inside two minutes with no central runtime-health tracking:
 nothing has to know which session is alive for work to reach it.
 
-A pull carries an idempotency key like every other mutation, and a retry of one replays the claim
-it already made rather than taking a second item — a pull that timed out after its claim committed
-must not leave a worker holding a lease nobody told it about.
+A pull carries an idempotency key like every other mutation, and the shipped worker keeps that one
+key across every transport retry, so a pull that timed out after its claim committed replays that
+claim instead of taking a second item — a worker never holds a lease nobody told it about. One key
+can only ever claim one item: a concurrent retry that reaches a different offer first is refused
+for reusing the key with different input and replays the assignment the winner made. Under
+`--watch` a control plane the worker cannot reach at all is waited out rather than ending the
+session.
 
 ### Typed requests instead of prose questions
 
@@ -439,8 +472,8 @@ A session that needs something records a typed request and exits, giving up its 
 transaction, so the item is free instead of held at a prompt:
 
 ```sh
-POST /api/work/GY-N/request
-{"type": "scope-request", "epoch": 3, "paths": ["docs/"], "reason": "the guide describes this contract"}
+graphyard request GY-N request.json    # {"type": "scope-request", "epoch": 3, "paths": ["docs/"], "reason": "…"}
+POST /api/work/GY-N/request            # the same write, for a session that speaks HTTP
 ```
 
 Recording one is the same write as the command it replaces — a `blocker` sets the blocker the ready
@@ -471,11 +504,19 @@ that attaches to it — `herdr pane attach PANE` while it runs, its transcript o
 Watching a specific agent never needs a master to relay a pane identifier.
 
 Every launcher records one: the worker dispatch (loop or executor), and the reviewer and producer
-launches in automatic dispatch. Each records what it knows — the runtime it launched, the host, the
-Herdr workspace, the pane and the command that attaches to it. What a launcher cannot know, the tab
-the runtime opened under its own control and the transcript the agent writes, the session records
-for itself with `POST /api/work/GY-N/session`, which is the only party that has them; a handle is
-merged field by field, so the two halves meet on one record.
+launches in automatic dispatch — `master run` passes the dispatcher the coordinator mutation it
+records them with, so its launches are as visible as an executor's. Each records what it knows —
+the runtime it launched, the host, the Herdr workspace, the pane and the command that attaches to
+it — and names the principal whose session it is. What a launcher cannot know, the tab the runtime
+opened under its own control and the transcript the agent writes, the session records for itself
+with `graphyard session GY-N handle.json` (`POST /api/work/GY-N/session`), which is the only party
+that has them; a handle is merged field by field, so the two halves meet on one record.
+
+A handle is a fact, but the attach command on it is an instruction somebody runs, so updating one
+that already exists belongs to the session it names, the coordinator that launched it, or an admin.
+Any other credential — a producer token on a CI runner, a worker with no part in that session — is
+refused rather than allowed to mark a running session finished or replace the command an operator
+is about to run.
 
 A session Herdr reports blocked is waiting on input, not gone: the attempt is recorded as failed
 with that reason, and the handle stays `running` carrying why, so the attach command still works

@@ -43,6 +43,12 @@ export interface SessionHandle {
 const line = (max: number) => z.string().trim().min(1).max(max).regex(/^[^\u0000-\u001f\u007f]+$/);
 export const sessionHandleSchema = z.object({
   id: line(120), kind: z.enum(sessionKinds),
+  /**
+   * Whose session this is, when a launcher records the handle of a session it started under
+   * another credential. The session named here is the one that may later fill in the tab and
+   * transcript only it knows, and the one that may end the handle; everybody else is refused.
+   */
+  principal: line(200).optional(),
   epoch: z.number().int().positive().optional(),
   runtime: line(80), host: line(200),
   workspace: line(120).optional(), tab: line(120).optional(), pane: line(120).optional(),
@@ -73,7 +79,9 @@ export function recordSession(work: Work, input: SessionHandleInput, principal: 
   const at = now.toISOString();
   const existing = work.sessions.find(handle => handle.id === input.id);
   const handle: SessionHandle = {
-    id: input.id, kind: input.kind, principal: existing?.principal ?? principal,
+    // The owner is fixed at the first record and never moves: a launcher names the session it
+    // started, and an ordinary update cannot hand the handle to somebody else.
+    id: input.id, kind: input.kind, principal: existing?.principal ?? input.principal ?? principal,
     epoch: input.epoch ?? existing?.epoch ?? null,
     runtime: input.runtime, host: input.host,
     workspace: input.workspace ?? existing?.workspace ?? null, tab: input.tab ?? existing?.tab ?? null, pane: input.pane ?? existing?.pane ?? null,

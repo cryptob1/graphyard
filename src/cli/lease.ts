@@ -44,6 +44,26 @@ export const leaseCommands = defineCommands([
     run: async (context, work) => context.print(await workMutation(context, work)('submit', { epoch: Number(context.args[0]), pr: Number(context.args[1]) })),
   },
   {
+    // AC-7: a session that needs something records the ask instead of holding the lease at a
+    // prompt. The control plane derives the decider and ends the attempt in the same transaction.
+    name: 'request',
+    scope: 'work',
+    help: [
+      '  request GY-N file.json        Record a typed request — scope-request, decision, blocker,',
+      '                                note or escalation — which names its decider and frees the',
+      '                                item; every type but note carries the attempt epoch',
+    ],
+    run: async (context, work) => context.print(await workMutation(context, work)('request', JSON.parse(await readFile(context.args[0], 'utf8')))),
+  },
+  {
+    // AC-8: the coordinates only this session has — the tab its runtime opened and the transcript
+    // it writes — onto the handle its launcher started.
+    name: 'session',
+    scope: 'work',
+    help: ['  session GY-N file.json        Record this session\'s durable handle: runtime, host, workspace, tab, pane, transcript'],
+    run: async (context, work) => context.print(await workMutation(context, work)('session', JSON.parse(await readFile(context.args[0], 'utf8')))),
+  },
+  {
     name: 'evidence',
     scope: 'work',
     help: ['  evidence GY-N file.json       Submit evidence (trust follows credential)'],

@@ -5,19 +5,18 @@ import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 import { startGithubSetup } from '../github-setup.js';
 import { resourceConflicts } from '../coordination.js';
-import { agentToken, approvedMerges, assertMasterBinding, autonomySubcommands, continueMergeBatch, runAutonomyCommand, currentMergeCandidates, daemonExecutor, dispatchWork, listHerdrAgents, liveMasterConfig, loadMasterConfig, masterHarness, masterSettingsFromArgs, mergeExecutor, mergeProtocolSkew, producerCommand, readCredentialFile, readWorkerCredential, saveMasterSettings, saveWorkerProfile, setupMaster, snapshotWithClock, startMaster, verifyContainmentDeath, workerProfileSchema } from '../master.js';
+import { agentToken, approvedMerges, assertMasterBinding, autonomySubcommands, continueMergeBatch, runAutonomyCommand, currentMergeCandidates, dispatchWork, listHerdrAgents, loadMasterConfig, masterHarness, masterSettingsFromArgs, mergeExecutor, mergeProtocolSkew, producerCommand, readCredentialFile, readWorkerCredential, saveMasterSettings, saveWorkerProfile, setupMaster, snapshotWithClock, startMaster, verifyContainmentDeath, workerProfileSchema } from '../master.js';
 import { cliCommit } from '../protocol-version.js';
-import { daemonEffects, readDaemonState, runDaemon } from '../master-daemon.js';
+import { readDaemonState } from '../master-daemon.js';
 import { verificationEffects, verifyDeployment } from '../master-verification.js';
 import { bindReviewer, launchReview, removeReviewerProfile, reviewerCredentialDirectory, saveReviewerProfile, verifyReviewerInstallation } from '../reviewer.js';
-import { dispatchEffects, dispatchReadTimeoutMs, readDispatchCursor, runAutoDispatch } from '../auto-dispatch.js';
 import { applyProtection, protectionPlan, readProtection } from '../protection.js';
 import { writeHarnessPermissions } from '../harness.js';
 import { browserFlows, runBrowserFlow, type BrowserFlow } from '../master-browser.js';
 import { defineCommands } from './registry.js';
 import { approveScopeRequest, cycleBudget, masterStatusReport, scopeRequestCommand } from './master-status.js';
-import { coordinationViewHeader } from '../server/work-view.js';
 import { readSecretFromStdin } from './context.js';
+import { runMasterLoop } from './master-run.js';
 
 /** Every master subcommand authenticates with the coordinator credential the master keeps for itself, never the repository connection file. */
 export const masterCommands = defineCommands([
@@ -239,33 +238,7 @@ export const masterCommands = defineCommands([
         if (result.result === 'refused') process.exitCode = 1;
         return print(result);
       }
-      if (id === 'run') {
-        const { values } = parseArgs({ args, options: { once: { type: 'boolean' }, interval: { type: 'string' } }, allowPositionals: false });
-        const intervalSeconds = values.interval ? Number(values.interval) : master.run.intervalSeconds;
-        if (!Number.isInteger(intervalSeconds) || intervalSeconds < 5 || intervalSeconds > 900) throw new Error('Use master run --interval with whole seconds between 5 and 900');
-        // A coordinator credential is the daemon's entire authority; anything broader could satisfy a gate the loop must wait on.
-        if (coordinator.actor.role !== 'coordinator') throw new Error('The durable master loop requires a coordinator credential; operator, producer, and worker credentials are refused');
-        if (coordinator.actor.proofs?.length) throw new Error('The durable master loop refuses a credential that is also allowed to produce evidence');
-        assertProtocol(coordinator);
-        const state = await readDaemonState(root, master);
-        // The cycle and the dispatcher poll the bounded coordination view (by header, so an older
-        // server answers with whole documents); the guarded merge re-reads the full documents.
-        const live = liveMasterConfig(root, master), current = () => live.current, reload = () => live.reload();
-        const coordinationSnapshot = (timeoutMs?: number) => masterApi('work-snapshot', masterToken, timeoutMs, { [coordinationViewHeader]: 'coordination' });
-        const executor = daemonExecutor(coordinator.actor.id);
-        const effects = daemonEffects(root, current, { snapshot: () => coordinationSnapshot(), mutate: masterMutation, executor });
-        const guardedMerge: typeof effects.merge = work => mergeExecutor(current(), () => masterApi('work-snapshot'), masterMutation, executor, randomUUID())(work);
-        // The loop outlives deployments: every guarded merge re-reads the server's protocol first.
-        effects.merge = async work => { assertProtocol(await masterApi('status')); return guardedMerge(work); };
-        // Automatic dispatch runs beside the cycle on a shorter cadence; it stops with the daemon.
-        const dispatchCursor = await readDispatchCursor(root, master);
-        const stopping = new AbortController();
-        const daemonRun = runDaemon(master, state, effects, { once: values.once, intervalMs: values.interval ? intervalSeconds * 1000 : () => current().run.intervalSeconds * 1000, identity: { pid: process.pid, host: master.hostId }, reload }).finally(() => stopping.abort());
-        const dispatchRun = runAutoDispatch(master, dispatchCursor, dispatchEffects(root, current, { snapshot: () => coordinationSnapshot(dispatchReadTimeoutMs) }), { once: values.once, intervalMs: () => current().run.dispatchIntervalSeconds * 1000, signal: stopping.signal, reload });
-        const [result, dispatched] = await Promise.all([daemonRun, dispatchRun]);
-        return print({ repository: master.repository, coordinator: coordinator.actor.id, intervalSeconds, dispatchIntervalSeconds: master.run.dispatchIntervalSeconds, cycles: result.cycles.length, stopped: result.stopped ? 'signal' : 'completed', last: result.cycles.at(-1) ?? null,
-          dispatch: { ticks: dispatched.ticks.length, launched: dispatched.ticks.reduce((total, tick) => total + tick.launched.length, 0), refused: dispatched.ticks.reduce((total, tick) => total + tick.refused.length, 0), last: dispatched.ticks.at(-1) ?? null } });
-      }
+      if (id === 'run') return print(await runMasterLoop(root, master, args, { coordinator, masterToken, api: masterApi, mutate: masterMutation, assertProtocol }));
       throw new Error(`There is no master ${id}; use master guide for the subcommands`);
     },
   },

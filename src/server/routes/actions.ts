@@ -45,6 +45,13 @@ export const actionRoutes = defineRoutes('actions', [
     },
   },
   {
+    // An executor still inside a handler holds its claim by saying so; see Engine.renewClaimedAction.
+    method: 'POST', path: /^\/api\/actions\/([0-9a-f]{32})\/renew$/,
+    async handle(context, [id]) {
+      return context.services.engine.renewClaimedAction(context.actor, id, await parseJson(context, undefined, '{}'));
+    },
+  },
+  {
     method: 'POST', path: /^\/api\/actions\/([0-9a-f]{32})\/settle$/,
     async handle(context, [id]) {
       return context.services.engine.settleClaimedAction(context.actor, id, await parseJson(context, undefined, '{}'), context.idempotencyKey());

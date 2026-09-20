@@ -41,6 +41,13 @@ export interface ActionClaim {
    */
   principal: string;
   claimedAt: string; expiresAt: string;
+  /**
+   * When the executor last said it was still running the action, and how often it has said so. A
+   * claim is a short lease precisely so a dead executor loses it quickly; a live one that is
+   * simply slow keeps it by renewing, which is what stops a handler outliving its lease from
+   * being run a second time beside the first.
+   */
+  renewedAt?: string; renewals?: number;
   /** Which attempt this claim is: a reclaimed row is claimed again as the next attempt. */
   attempt: number;
 }
@@ -68,6 +75,16 @@ export interface ActionTransition { event: ActionEvent; action: ActionRow }
 export const actionHistoryLimit = 50, actionRecordLimit = 20;
 /** How long a claim holds a row before another executor may take it. */
 export const actionClaimMs = 120_000;
+/**
+ * How often an executor tells the control plane it is still inside the handler.
+ *
+ * The claim is deliberately short, so a dead executor's row is offered again within two minutes.
+ * Handlers are not bounded by that: a dispatch prepares a worktree and waits on a runtime, and a
+ * guarded merge chains several provider calls with their own timeouts. An executor that is still
+ * running renews at this interval — comfortably inside the lease, so a renewal may be lost and
+ * the next one still arrives in time — and one that stopped renews nothing and loses the row.
+ */
+export const actionRenewIntervalMs = 30_000;
 /**
  * How long a completed action holds its situation before the row is offered again. An action's
  * effect is not instant — a launched session has to claim, a provider call has to be observed —
@@ -194,6 +211,30 @@ export function claimAction(all: Work[], executor: { id: string; host: string; p
   row.claim = { executor: executor.id, host: executor.host, principal: executor.principal, claimedAt: at, expiresAt: new Date(now.getTime() + (options.leaseMs ?? actionClaimMs)).toISOString(), attempt: row.attempts };
   record(row, { at, event: 'claimed', requester: row.requestedBy, executor: executor.id, result: null, reason: `attempt ${row.attempts} claimed by ${executor.id} on ${executor.host}` });
   return { work, row };
+}
+
+/**
+ * Extend the live claim of the executor that is still running the action.
+ *
+ * The same ownership rules as settling: only the executor named on the claim, holding the
+ * credential the claim was made with, while the claim is still live. A renewal is a statement
+ * that the handler has not finished, so it never changes the attempt, the state or the history —
+ * the claim simply holds for another lease.
+ */
+export function renewClaim(work: Work, id: string, renewer: { executor: string; principal: string }, now: Date, leaseMs = actionClaimMs): ActionRow {
+  const { executor, principal } = renewer;
+  const row = work.actionQueue?.actions.find(entry => entry.id === id);
+  demand(row, 'Action is not open on this work item', 404);
+  demand(row!.state === 'claimed' && row!.claim, 'Action is not claimed', 409);
+  demand(row!.claim!.executor === executor, `Action is claimed by ${row!.claim!.executor}; a superseded executor cannot renew it`, 409);
+  demand((row!.claim!.principal ?? principal) === principal, `Action was claimed with the credential of ${row!.claim!.principal}; another credential cannot renew it`, 409);
+  // A claim that already expired may have been taken by another executor; renewing it here would
+  // put two executors inside one action, which is the thing the lease exists to prevent.
+  demand(claimLive(row!, now), 'Action claim expired; another executor may already be running it', 409);
+  row!.claim!.expiresAt = new Date(now.getTime() + leaseMs).toISOString();
+  row!.claim!.renewedAt = now.toISOString();
+  row!.claim!.renewals = (row!.claim!.renewals ?? 0) + 1;
+  return row!;
 }
 
 /**
