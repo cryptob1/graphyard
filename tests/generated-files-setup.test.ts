@@ -24,6 +24,14 @@ if (process.argv.includes('--manifest')) { console.log(JSON.stringify({ generate
 process.exit(1);
 `;
 
+// The real predecessor of the manifest script: it does not know `--list`, so the flag falls
+// through to the full docs check, which exits 0 and prints a sentence — never a path list.
+const predecessorScript = `#!/usr/bin/env node
+const generated = ['docs/index.md', 'docs/list.md'];
+if (process.argv.includes('--manifest')) { console.log(JSON.stringify({ generated, regenerate: 'node scripts/check-docs.mjs --write' })); process.exit(0); }
+console.log('Checked 12 Markdown files; all relative links, anchors and generated indexes resolve.');
+`;
+
 const ordersApi = {
   'package.json': JSON.stringify({ name: 'orders-api', scripts: { test: 'vitest run', typecheck: 'tsc --noEmit' }, devDependencies: { vitest: '1.0.0' } }),
   'tests/api.test.ts': 'import { test } from "vitest";\ntest.todo("orders");\n',
@@ -77,6 +85,21 @@ test('integration:generated-files-setup — installers derive the assignment fro
   try { assert.throws(() => generatedFilesAssignment(lying), /GRAPHYARD_GENERATED_FILES names exact repository-relative files/); } finally { await rm(lying, { recursive: true, force: true }); }
   const jsonOnly = await fixtureRepo({ 'scripts/check-docs.mjs': 'if (process.argv.includes("--manifest")) console.log(JSON.stringify({ generated: ["docs/a.md"], regenerate: "node scripts/check-docs.mjs --write" })); else process.exit(1);\n' });
   try { assert.equal(generatedFilesAssignment(jsonOnly)?.value, 'docs/a.md', 'a script that predates --list is read through its manifest JSON'); } finally { await rm(jsonOnly, { recursive: true, force: true }); }
+  // A script that predates --list ignores the flag and still exits 0 with prose on stdout, so
+  // the exit code cannot decide: the manifest JSON is the declaration of record and wins, and
+  // the prose is never taken as the list.
+  const predecessor = await fixtureRepo({ 'scripts/check-docs.mjs': predecessorScript });
+  try {
+    const derived = generatedFilesAssignment(predecessor);
+    assert.equal(derived?.value, 'docs/index.md,docs/list.md', 'the manifest JSON wins over the full-check prose the script printed for --list');
+    assert.ok(!derived!.value.includes('Checked'), 'the full-check sentence is not mistaken for the manifest');
+  } finally { await rm(predecessor, { recursive: true, force: true }); }
+  // The prose is also not accepted when no manifest JSON can back it: the derivation refuses.
+  const proseOnly = await fixtureRepo({ 'scripts/check-docs.mjs': `if (process.argv.includes('--manifest')) process.exit(7);\nconsole.log('Checked 12 Markdown files; all relative links, anchors and generated indexes resolve.');\n` });
+  try { assert.throws(() => generatedFilesAssignment(proseOnly), /generated-file manifest failed/); } finally { await rm(proseOnly, { recursive: true, force: true }); }
+  // A script that predates --manifest declares through a well-formed --list line alone.
+  const listOnly = await fixtureRepo({ 'scripts/check-docs.mjs': `if (process.argv.includes('--list')) console.log('docs/a.md,docs/b.md'); else process.exit(9);\n` });
+  try { assert.equal(generatedFilesAssignment(listOnly)?.value, 'docs/a.md,docs/b.md'); } finally { await rm(listOnly, { recursive: true, force: true }); }
 });
 
 test('integration:generated-files-setup — init --scan --apply sets the derived line beside GRAPHYARD_PRINCIPALS', async () => {
