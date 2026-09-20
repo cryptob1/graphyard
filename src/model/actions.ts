@@ -16,10 +16,11 @@ import type { Work } from './work.js';
  * - **Derived identity.** A row's id is a hash of what it binds (kind, item, binding), never of
  *   when it was made. The same situation always produces the same id, so a re-derivation after a
  *   restart recognises the row it already has instead of queueing a second one.
- * - **Leased claims.** An executor claims a row for a bounded time under its own identity. Only
- *   that claim may settle it. An executor that dies mid-action renews nothing, its claim expires,
- *   and the next executor takes the row as a further attempt — the dead one's late settlement is
- *   refused, so the work is never counted twice.
+ * - **Leased claims.** An executor claims a row for a bounded time under its own identity and the
+ *   credential it holds. Only that claim may settle it. An executor that dies mid-action renews
+ *   nothing, its claim expires, and the next executor takes the row as a further attempt — the
+ *   dead one's late settlement is refused, so the work is never counted twice. Naming another
+ *   executor's identity settles nothing either: the credential on the claim has to match too.
  * - **Complete history.** Every transition records who requested it, who executed it, what the
  *   result was and why, in order, on the row itself.
  *
@@ -33,6 +34,12 @@ export type ActionEvent = 'requested' | 'claimed' | 'reclaimed' | 'completed' | 
 export interface ActionClaim {
   /** The executor identity and the host it runs on; two executors never share a claim. */
   executor: string; host: string;
+  /**
+   * The credential the claim was made with. `executor` is a name the executor asserts — several
+   * executors may run behind one coordinator credential — so the identity alone cannot decide who
+   * may settle. Only the same credential, naming the same executor, may report the result.
+   */
+  principal: string;
   claimedAt: string; expiresAt: string;
   /** Which attempt this claim is: a reclaimed row is claimed again as the next attempt. */
   attempt: number;
@@ -118,7 +125,16 @@ export function reconcileActions(work: Work, all: Work[], now: Date, requester =
 
   const kept: ActionRow[] = [];
   for (const row of queue.actions) {
-    if (row.id !== wanted) { retire(row, next ? `${work.key} now needs ${next.kind} instead: ${next.reason}` : `${work.key} no longer needs this action`); continue; }
+    if (row.id !== wanted) {
+      // An executor holding a live claim still owes a result, and running the action is itself
+      // what moved the situation on. Retiring the row under it would leave that settlement with
+      // nothing to land on — every completed action recorded as a failure, and the history that
+      // says who ran what lost. The row is kept until it settles or its claim expires; the row
+      // the item now needs is opened beside it, and `claimable` keeps this one out of the queue.
+      if (row.state === 'claimed' && claimLive(row, now)) { kept.push(row); continue; }
+      retire(row, next ? `${work.key} now needs ${next.kind} instead: ${next.reason}` : `${work.key} no longer needs this action`);
+      continue;
+    }
     // The claim of an executor that stopped renewing is released; the row stays open.
     if (row.state === 'claimed' && !claimLive(row, now)) {
       const executor = row.claim!.executor;
@@ -165,7 +181,7 @@ export function openActions(all: Work[], now: Date, kinds?: readonly NextActionK
  * instant are serialized: the first writes the claim, the second sees it and takes the next row.
  * Neither knows the other exists, which is the point — executors coordinate through the record.
  */
-export function claimAction(all: Work[], executor: { id: string; host: string }, now: Date, options: { kinds?: readonly NextActionKind[]; leaseMs?: number; work?: string } = {}): { work: Work; row: ActionRow } | null {
+export function claimAction(all: Work[], executor: { id: string; host: string; principal: string }, now: Date, options: { kinds?: readonly NextActionKind[]; leaseMs?: number; work?: string } = {}): { work: Work; row: ActionRow } | null {
   const entry = openActions(all, now, options.kinds).find(candidate => !options.work || candidate.work.id === options.work || candidate.work.key === options.work);
   if (!entry) return null;
   const { work, row } = entry;
@@ -175,7 +191,7 @@ export function claimAction(all: Work[], executor: { id: string; host: string },
   row.attempts += 1;
   row.state = 'claimed';
   delete row.retryAt;
-  row.claim = { executor: executor.id, host: executor.host, claimedAt: at, expiresAt: new Date(now.getTime() + (options.leaseMs ?? actionClaimMs)).toISOString(), attempt: row.attempts };
+  row.claim = { executor: executor.id, host: executor.host, principal: executor.principal, claimedAt: at, expiresAt: new Date(now.getTime() + (options.leaseMs ?? actionClaimMs)).toISOString(), attempt: row.attempts };
   record(row, { at, event: 'claimed', requester: row.requestedBy, executor: executor.id, result: null, reason: `attempt ${row.attempts} claimed by ${executor.id} on ${executor.host}` });
   return { work, row };
 }
@@ -186,11 +202,15 @@ export function claimAction(all: Work[], executor: { id: string; host: string },
  * comes back from the dead cannot overwrite the attempt that replaced it, and no action is
  * counted twice.
  */
-export function settleAction(work: Work, id: string, executor: string, result: 'done' | 'failed', reason: string, now: Date): ActionTransition {
+export function settleAction(work: Work, id: string, settler: { executor: string; principal: string }, result: 'done' | 'failed', reason: string, now: Date): ActionTransition {
+  const { executor, principal } = settler;
   const row = work.actionQueue?.actions.find(entry => entry.id === id);
   demand(row, 'Action is not open on this work item', 404);
   demand(row!.state === 'claimed' && row!.claim, 'Action is not claimed', 409);
   demand(row!.claim!.executor === executor, `Action is claimed by ${row!.claim!.executor}; a superseded executor cannot settle it`, 409);
+  // The credential that claimed is the one that reports. An executor identity is self-asserted,
+  // so without this any coordinator could settle another executor's claim by naming it.
+  demand((row!.claim!.principal ?? principal) === principal, `Action was claimed with the credential of ${row!.claim!.principal}; another credential cannot settle it`, 409);
   demand(claimLive(row!, now), 'Action claim expired; another executor may already be running it', 409);
   const at = now.toISOString();
   const event: ActionEvent = result === 'done' ? 'completed' : 'failed';

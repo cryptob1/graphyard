@@ -82,7 +82,9 @@ export function recordSession(work: Work, input: SessionHandleInput, principal: 
     subject: input.subject,
     startedAt: existing?.startedAt ?? at, updatedAt: at,
     endedAt: input.state === 'finished' ? existing?.endedAt ?? at : null,
-    state: input.state, outcome: input.outcome ?? (input.state === 'finished' ? existing?.outcome ?? null : null),
+    // A running session may carry an outcome too — "waiting on input" is a fact about a session
+    // that has not ended — so the note is kept rather than dropped for want of an end.
+    state: input.state, outcome: input.outcome ?? existing?.outcome ?? null,
   };
   work.sessions = [...work.sessions.filter(entry => entry.id !== input.id), handle].slice(-sessionHandleLimit);
   return handle;

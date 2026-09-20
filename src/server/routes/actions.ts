@@ -51,6 +51,12 @@ export const actionRoutes = defineRoutes('actions', [
     },
   },
   {
+    // What the `resync` and `reclaim` actions run: a fresh provider reading and a reconciliation
+    // pass for one item. It carries no verdict of its own — see Engine.resyncWork.
+    method: 'POST', path: /^\/api\/work\/([^/]+)\/resync$/,
+    handle: (context, [id]) => context.services.engine.resyncWork(context.actor, decodeURIComponent(id)),
+  },
+  {
     method: 'POST', path: '/api/assignments/claim',
     async handle(context) {
       return context.services.engine.pullAssignment(context.actor, await parseJson(context, undefined, '{}'), context.idempotencyKey());

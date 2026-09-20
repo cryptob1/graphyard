@@ -12,11 +12,13 @@ import { Engine } from '../src/engine.js';
 import { server } from '../src/server.js';
 import { evaluate, type Observation, type Principal, type Work } from '../src/model.js';
 import { actionClaimMs, actionId, claimable, claimAction, idleActionable, openActions, queueSnapshot, reconcileActions, settleAction, type ActionRow } from '../src/model/actions.js';
-import { llmRoles, mechanicalActionKinds, nextAction, nextActionKinds, nextActionLlmRoles, refusalAction, type NextActionKind } from '../src/model/next-action.js';
-import { agentRequestTypes, deciderFor, humanDecisions, openAgentRequests } from '../src/model/agent-requests.js';
+import { actionJudgment, executorRunnableKinds, llmRoles, mechanicalActionKinds, nextAction, nextActionKinds, nextActionLlmRoles, refusalAction, type NextActionKind } from '../src/model/next-action.js';
+import { agentRequestTypes, deciderFor, humanDecisions, leaseHeldRequestTypes, openAgentRequests, requestResolutionRefusal } from '../src/model/agent-requests.js';
 import { attachCommand, runningSessions, sessionSummary } from '../src/model/sessions.js';
 import { pipelineSpeedSummary, speedTarget } from '../src/pipeline-speed.js';
-import { executorEffects, executorKinds, runExecutor, runExecutorTick, workerPullIntervalMs, type ExecutorEffects } from '../src/auto-dispatch.js';
+import { executorEffects, executorKinds, launchedSessionHandle, runDispatchTick, runExecutor, runExecutorTick, runWorkerPull, workerPullIntervalMs, emptyDispatchCursor, type DispatchEffects, type ExecutorEffects } from '../src/auto-dispatch.js';
+import { controlPlaneHandlers, judgmentInExecutorLoop } from '../src/executor.js';
+import { judgeThroughput, sampleQueue, settlingExecutors } from '../src/throughput.js';
 import { runCycle, emptyDaemonState, type DaemonEffects } from '../src/master-daemon.js';
 import { masterConfigSchema } from '../src/master.js';
 import { agentRequestAttention, agentRequestReport, actionReport, sessionReport } from '../src/cli/master-status.js';
@@ -27,15 +29,19 @@ import WorkDetails from '../web/pages/work-details.js';
  * GY-87: coordination inverted. The control plane computes a typed next action per item; durable
  * leased rows say whether anybody is running it; stateless executors claim and run them.
  *
- * Each test is named for the proof it produces, so acceptance evidence maps to one executed case
- * per required proof: integration:typed-next-action, integration:action-queue-leases,
+ * Each test that produces a proof is named for it, so acceptance evidence maps to one executed
+ * case per proof: integration:typed-next-action, integration:action-queue-leases,
  * integration:multi-executor-throughput, integration:worker-pull-model,
- * integration:no-llm-in-critical-path, integration:typed-agent-requests,
- * integration:session-handles-visible, and manual:throughput-without-master.
+ * integration:no-llm-in-critical-path, integration:typed-agent-requests and
+ * integration:session-handles-visible. AC-6's proof is deliberately not among them: throughput
+ * over real deliveries is measured against the live control plane by
+ * `scripts/measure-throughput.mjs`, and no case here carries that proof's name, so nothing in
+ * this file can be submitted as its evidence. The cases with ordinary names test the arithmetic
+ * that witness applies.
  *
  * No test here runs a master session. The fleet tests drive whole items to delivery through the
- * queue alone; `runCycle` appears once, in the typed-request test, only to prove what the loop
- * records about a session that stops at a prompt instead of recording a request.
+ * queue, using the handlers Graphyard ships (`src/executor.ts`) over stubbed launchers; `runCycle`
+ * and `runDispatchTick` appear only where what the loop records about a session is the subject.
  */
 
 const operator: Principal = { id: 'operator', role: 'admin', sessionKind: 'human' };
@@ -297,58 +303,86 @@ test('integration:action-queue-leases — actions are durable leased rows: a dea
 
 // ---- The fleet: handlers that stand in for the sessions a real executor launches --------------
 
-interface FleetLog { executed: { executor: string; host: string; id: string; kind: NextActionKind; attempt: number; key: string }[]; idle: number[] }
+interface FleetLog { executed: { executor: string; host: string; id: string; kind: NextActionKind; attempt: number; key: string }[]; idle: number[]; launched: { kind: string; key: string }[] }
 
 /**
- * The effects of one stateless executor. Every handler works from the action's typed inputs and
- * the item that action names; none of them reads a status report, and none of them knows that
- * another executor exists. The handlers stand in for what a real executor starts: a worker
- * session, a reviewer session, a producer session, a provider call.
+ * The master configuration a fleet executor runs under: one worker profile, one reviewer profile
+ * and one independent producer profile, exactly as a host that runs `graphyard executor` has.
  */
-function fleetEffects(identity: Principal, host: string, log: FleetLog, mine: Set<string>, options: { escalate?: boolean } = {}): ExecutorEffects {
+const fleetConfig = masterConfigSchema.parse({
+  version: 1, url: 'https://graphyard.example', credentialFile: '/outside/master.token', cliPath: '/outside/graphyard.mjs',
+  repository: 'owner/project', baseBranch: 'main', githubAppId: 15368, hostId: 'host-1', masterAgentName: 'm', herdrWorkspace: 'wF',
+  workers: [
+    { name: 'claude-worker', principal: worker.id, agentName: 'work-claude', mode: 'launch', kind: 'claude', credentialFile: '/outside/worker.token', approvals: 'auto' },
+    { name: 'cursor-worker', principal: otherWorker.id, agentName: 'work-cursor', mode: 'launch', kind: 'cursor', credentialFile: '/outside/worker-2.token', approvals: 'auto' },
+  ],
+  reviewer: { appId: 4242, installationId: 99, slug: 'graphyard-reviewer', credentialFile: '/outside/reviewer.json', boundAt: '2026-09-01T00:00:00.000Z' },
+  reviewers: [{ name: 'claude-reviewer', agentName: 'review-claude', kind: 'claude', approvals: 'auto' }],
+  producers: [{ name: 'claude-producer', principal: producer.id, agentName: 'proof-claude', kind: 'claude', credentialFile: '/outside/producer.token', approvals: 'auto' }],
+  run: { reviewerProfile: 'claude-reviewer' },
+});
+
+/**
+ * One stateless executor, running the handlers Graphyard ships (`src/executor.ts`) rather than
+ * handlers written for this test. What is stubbed is the outside world each handler reaches —
+ * the worker launcher, the reviewer launcher, the producer launcher, the guarded merge and the
+ * deployment reading — and each stub does what that session really does to the control plane, so
+ * the kind selection, the typed inputs, the session-handle recording and the settle path are all
+ * the shipped code. An executor is still configured with nothing but how to claim, how to settle
+ * and what it can run.
+ */
+function fleetExecutor(identity: Principal, host: string, log: FleetLog, mine: Set<string>, options: { escalate?: boolean } = {}): ExecutorEffects {
   const note = async (action: ActionRow) => {
     log.executed.push({ executor: identity.id, host, id: action.id, kind: action.kind, attempt: action.attempts, key: action.key });
     return reload(action.work);
   };
-  const handlers: ExecutorEffects['handlers'] = {
-    dispatch: async action => {
-      const item = await note(action);
-      if (action.inputs.kind !== 'dispatch') throw new Error('unreachable');
-      if (action.inputs.target === 'proof') {
-        // A producer session: it submits evidence for the exact head the request named.
-        for (const proof of action.inputs.proofs) await engine.execute(producer, 'evidence', item.id, { proof, sha: action.inputs.sha, baseSha: action.inputs.baseSha, policyRevision: action.inputs.policyRevision, result: 'pass', executed: 3, skipped: 0 }, randomUUID());
-        return `produced ${action.inputs.proofs.join(', ')}`;
+  const launched = (kind: string, item: Work, pane: string) => { log.launched.push({ kind, key: item.key }); return { pane }; };
+  const handlers = controlPlaneHandlers(() => fleetConfig, {
+    snapshot: async () => ({ work: await store.list(), now: new Date().toISOString() }),
+    // The control-plane calls each handler makes, against the engine rather than over HTTP. The
+    // provider read behind `resync` is the durable observation job the server runs; the test
+    // stands in for GitHub, exactly as it does for the reviewer's verdict.
+    mutate: async (path, body) => {
+      const [, id, command] = path.split('/');
+      const item = await reload(id);
+      if (command === 'resync') {
+        // A re-read sees the pull request as the provider has it — the checks that have reported,
+        // no verdict yet. The approval arrives from the reviewer session the review action starts.
+        if (item.submission && item.workspaces.length) await engine.observe(item.id, item.revision, observation(item, { reviews: [] }));
+        return engine.resyncWork(identity, id);
       }
-      // A worker session: it claims under its own identity, registers its workspace and submits.
-      let claimed = await engine.execute(worker, 'claim', item.id, {}, randomUUID());
-      claimed = await engine.execute(worker, 'workspace', claimed.id, { epoch: claimed.epoch, host, path: `/tmp/fleet/${claimed.id}-${claimed.epoch}`, branch: `graphyard/${claimed.key.toLowerCase()}-${claimed.epoch}` }, randomUUID());
-      await engine.execute(worker, 'submit', claimed.id, { epoch: claimed.epoch, pr: Number(claimed.key.slice(3)) }, randomUUID());
-      return `worker session claimed epoch ${claimed.epoch} and submitted`;
+      return engine.execute(identity, command as any, id, body, randomUUID());
     },
-    'request-review': async action => {
-      const item = await note(action);
-      // A reviewer session: its verdict reaches Graphyard as a provider observation.
-      await engine.observe(item.id, item.revision, observation(item));
-      return 'reviewer approved the exact head';
+    agents: () => [],
+    workerCredentials: async profiles => Object.fromEntries(profiles.map(profile => [profile.name, { available: true, reason: null }])),
+    producerCredentials: async profiles => Object.fromEntries(profiles.map(profile => [profile.name, { available: true, reason: null }])),
+    // A worker session: it claims under its own identity, registers its workspace and submits.
+    dispatchWorker: async (item, profile) => {
+      const actor = profile.principal === otherWorker.id ? otherWorker : worker;
+      let claimed = await engine.execute(actor, 'claim', item.id, {}, randomUUID());
+      claimed = await engine.execute(actor, 'workspace', claimed.id, { epoch: claimed.epoch, host, path: `/tmp/fleet/${claimed.id}-${claimed.epoch}`, branch: `graphyard/${claimed.key.toLowerCase()}-${claimed.epoch}` }, randomUUID());
+      await engine.execute(actor, 'submit', claimed.id, { epoch: claimed.epoch, pr: Number(claimed.key.slice(3)) }, randomUUID());
+      return launched('worker', item, 'pane-w');
     },
-    resync: async action => {
-      const item = await note(action);
-      await engine.observe(item.id, item.revision, observation(item, item.candidate ? {} : { reviews: [] }));
-      return 're-read the pull request from the provider';
+    // A reviewer session: its verdict reaches Graphyard as a provider observation.
+    launchReview: async item => {
+      const current = await reload(item.id);
+      await engine.observe(current.id, current.revision, observation(current));
+      return launched('review', item, 'pane-r');
     },
-    merge: async action => {
-      await note(action);
-      await mergeItem(identity, await reload(action.work));
-      return 'guarded merge committed and observed';
+    // A producer session: it submits evidence for the exact head the request named.
+    launchProducer: async (item, request) => {
+      const current = await reload(item.id);
+      for (const proof of request.proofs ?? []) await engine.execute(producer, 'evidence', current.id, { proof, sha: request.sha, baseSha: request.baseSha, policyRevision: request.policyRevision, result: 'pass', executed: 3, skipped: 0 }, randomUUID());
+      return launched('producer', item, 'pane-p');
     },
-    reclaim: async action => { await note(action); return 'assignment reclaimed'; },
-    'verify-deployment': async action => {
-      const item = await note(action);
-      await engine.execute(operator, 'deployment', item.id, { sha: mergeSha, mergeSha: item.delivery!.mergeSha, source: 'endpoint', observedAt: new Date().toISOString() }, randomUUID());
-      return 'observed the release serving the merge';
-    },
-    ...(options.escalate ? { escalate: async (action: ActionRow) => { await note(action); return 'escalation resolved'; } } : {}),
-  };
+    merge: async item => { await mergeItem(identity, await reload(item.id)); return { state: 'committed' }; },
+    observeDeployment: async delivered => ({ source: 'endpoint', sha: mergeSha, at: new Date().toISOString(), reason: null, deployed: delivered.map(item => item.key), pending: [] }),
+    recordSession: (item, handle) => engine.execute(identity, 'session', item.id, handle, randomUUID()),
+  });
+  // Every handler is wrapped so the log records which executor ran which attempt; nothing else
+  // about the shipped handler changes.
+  const traced = Object.fromEntries(Object.entries(handlers).map(([kind, handler]) => [kind, async (action: ActionRow, who: { id: string; host: string }) => { await note(action); return handler!(action, who); }]));
   return {
     // Scoped to this test's own items, the way a real executor is scoped to its repository: the
     // control plane still decides what the row is and still settles the race between executors.
@@ -359,8 +393,8 @@ function fleetEffects(identity: Principal, host: string, log: FleetLog, mine: Se
       }
       return { action: null, open: 0 };
     },
-    settle: (action, result, reason) => engine.settleClaimedAction(identity, action.id, { result, reason }, randomUUID()),
-    handlers,
+    settle: (action, result, reason) => engine.settleClaimedAction(identity, action.id, { result, reason, ...(action.claim?.executor ? { executor: action.claim.executor } : {}) }, randomUUID()),
+    handlers: { ...traced, ...(options.escalate ? { escalate: async (action: ActionRow) => { await note(action); return 'escalation resolved'; } } : {}) },
   };
 }
 
@@ -384,11 +418,58 @@ async function drain(effects: ExecutorEffects[], log: FleetLog, mine: Set<string
     const snapshot = (await store.list()).filter(item => mine.has(item.id));
     log.idle.push(idleActionable(snapshot, new Date()).length);
     if (!results.every(result => result.result === 'idle')) continue;
+    // The reconciliation pass re-evaluates every item in the database, which re-enqueues items
+    // other tests left mid-merge; this test's queue stays its own.
+    await isolateQueue(mine);
     await engine.reconcile();
+    // A failed attempt waits out a widening backoff before the row is offered again — thirty
+    // seconds at its shortest. The fleet really does retry; the test brings that wait forward
+    // rather than sleeping through it, so a transient provider conflict costs a step, not a run.
+    await store.pool.query("UPDATE work_items SET document=jsonb_set(document,'{actionQueue,actions}',(SELECT coalesce(jsonb_agg(entry - 'retryAt'),'[]'::jsonb) FROM jsonb_array_elements(document->'actionQueue'->'actions') entry)) WHERE id = ANY($1::uuid[]) AND document->'actionQueue'->'actions' <> '[]'::jsonb", [[...mine]]);
     if ((await tick()).every(result => result.result === 'idle')) return step;
   }
   throw new Error('the queue did not drain within the step budget');
 }
+
+const emptyLog = (): FleetLog => ({ executed: [], idle: [], launched: [] });
+
+test('integration:action-queue-leases — a claim binds to the credential as well as the executor name: an executor whose identity differs from its principal settles once, and nobody else settles for it', async () => {
+  const item = await release(await created());
+  await engine.reconcile();
+  const open = rows(await reload(item)).find(entry => entry.kind === 'dispatch')!;
+  assert.ok(open, 'the item has a dispatch row to claim');
+
+  // Several executors behind one coordinator credential is the documented deployment: each names
+  // itself, and the credential is the same. The settlement must carry the executor name, or the
+  // control plane refuses it *after* the handler has already run — the claim expires, the row is
+  // offered again, and the action runs twice. That is what the shipped HTTP binding prevents.
+  const ran: string[] = [];
+  const handlers = { dispatch: async () => { ran.push('dispatch'); return 'launched a worker session'; } };
+  const bound = executorEffects({ url, token: 'x'.repeat(32) }, handlers);
+  const identity = { id: 'runner-7', host: 'host-9' };
+  assert.notEqual(identity.id, executorA.id, 'the executor identity is not the credential principal');
+  const step = await runExecutorTick(identity, { ...bound, claim: request => bound.claim({ ...request, kinds: ['dispatch'], work: item.id } as any) });
+  assert.equal(step.result, 'done', step.reason);
+  assert.deepEqual(ran, ['dispatch'], 'the handler ran once');
+  const settled = rows(await reload(item)).find(entry => entry.id === step.action!.id) ?? (await reload(item)).actionQueue!.history.find(entry => entry.id === step.action!.id)!;
+  assert.equal(settled.state, 'done', 'the settlement was accepted, so the row is not offered again');
+  assert.equal(settled.attempts, 1, 'the action was executed exactly once');
+  assert.equal(settled.history.at(-1)!.executor, 'runner-7');
+  assert.equal(settled.claim, null);
+
+  // The same row, claimed under one credential, cannot be settled by another that names the same
+  // executor: the identity is self-asserted, the credential is not.
+  const second = await release(await created());
+  await engine.reconcile();
+  const claimed = await engine.claimNextAction(executorA, { host: 'host-1', executor: 'runner-7', work: second.id }, randomUUID());
+  assert.ok(claimed.action, 'the row was claimed');
+  assert.equal(claimed.action!.claim!.principal, executorA.id, 'the claim records the credential as well as the name');
+  await assert.rejects(engine.settleClaimedAction(executorB, claimed.action!.id, { executor: 'runner-7', result: 'done', reason: 'not mine to settle' }, randomUUID()),
+    /was claimed with the credential of executor-a/);
+  // And the executor that does hold it settles normally.
+  const mine = await engine.settleClaimedAction(executorA, claimed.action!.id, { executor: 'runner-7', result: 'done', reason: 'launched' }, randomUUID());
+  assert.equal(mine.action.state, 'done');
+});
 
 // ---- AC-3: two stateless executors on different hosts ----------------------------------------
 
@@ -397,11 +478,13 @@ test('integration:multi-executor-throughput — two executors on different hosts
   for (let index = 0; index < 5; index++) items.push(await release(await created()));
   const mine = new Set(items.map(item => item.id));
   await isolateQueue(mine);
-  const log: FleetLog = { executed: [], idle: [] };
-  const a = fleetEffects(executorA, 'host-1', log, mine), b = fleetEffects(executorB, 'host-2', log, mine);
+  const log = emptyLog();
+  const a = fleetExecutor(executorA, 'host-1', log, mine), b = fleetExecutor(executorB, 'host-2', log, mine);
   // The whole of an executor's configuration: how to claim, how to settle, and what it can run.
   assert.deepEqual(Object.keys(a).sort(), ['claim', 'handlers', 'settle'], 'an executor holds no snapshot, no cursor and no peer list');
-  assert.deepEqual(executorKinds(a.handlers).sort(), ['dispatch', 'merge', 'reclaim', 'request-review', 'resync', 'verify-deployment'].sort());
+  // Exactly the kinds src/executor.ts ships a handler for; nothing in this test adds one.
+  assert.deepEqual(executorKinds(a.handlers).sort(), ['approve-scope', 'dispatch', 'merge', 'reclaim', 'request-review', 'resync', 'verify-deployment'].sort());
+  assert.equal(judgmentInExecutorLoop(a.handlers), null, 'no judgment is made inside the loop');
 
   await drain([a, b], log, mine);
 
@@ -425,6 +508,16 @@ test('integration:multi-executor-throughput — two executors on different hosts
   assert.deepEqual([...new Set(log.executed.map(entry => entry.host))].sort(), ['host-1', 'host-2']);
   for (const item of items) assert.ok(log.executed.some(entry => entry.key === item.key), `${item.key} was executed by the fleet`);
   assert.ok(new Set(log.executed.map(entry => entry.key)).size === items.length);
+  // The launchers the shipped handlers reached: a worker session, a reviewer session and a
+  // producer session per item. Nothing in the loop implemented, reviewed or proved anything.
+  for (const kind of ['worker', 'review', 'producer']) assert.equal(log.launched.filter(entry => entry.kind === kind).length >= items.length, true, `every item had its ${kind} session launched`);
+  // Every launched session left a durable handle on its item, recorded by the handler itself.
+  for (const item of items) {
+    const handles = (await reload(item)).sessions ?? [];
+    assert.deepEqual([...new Set(handles.map(handle => handle.kind))].sort(), ['implementation', 'proof', 'review'], `${item.key} records a handle per launched session`);
+    for (const handle of handles) assert.match(attachCommand(handle), /^herdr pane attach pane-[wrp]/, 'each handle carries the command that attaches to that pane');
+    for (const handle of handles) assert.equal(handle.workspace, fleetConfig.herdrWorkspace, 'and the workspace the executor launched it into');
+  }
 
   // No master session was involved: the only coordinator identities that acted are the two
   // executors, each one settling rows it claimed, and no daemon cycle ran.
@@ -439,19 +532,15 @@ test('integration:multi-executor-throughput — two executors on different hosts
 // ---- AC-4: workers pull -----------------------------------------------------------------------
 
 test('integration:worker-pull-model — a free worker asks the control plane for its next assignment, p90 ready-to-claim stays inside two minutes, and nothing tracks runtime health', async () => {
-  const created: Work[] = [];
-  for (let index = 0; index < 4; index++) created.push(await release(await (async () => engine.execute(operator, 'create', null, { title: `Pull ${index}`, priority: index === 0 ? 0 : 3, plannedFiles: [`src/pull-${index}/`], criteria: [{ id: 'AC-1', text: 'Proven', proofs: [PROOF] }] }, randomUUID()))()));
-  const readyAt = new Map(created.map(item => [item.id, Date.now()]));
+  const offered: Work[] = [];
+  for (let index = 0; index < 4; index++) offered.push(await release(await engine.execute(operator, 'create', null, { title: `Pull ${index}`, priority: index === 0 ? 0 : 3, plannedFiles: [`src/pull-${index}/`], criteria: [{ id: 'AC-1', text: 'Proven', proofs: [PROOF] }] }, randomUUID())));
 
   // The pull: one call, one credential, no configuration. `agent-b` appears in no master profile
   // and no Herdr inventory; the control plane still hands it the work it is entitled to claim.
-  const service: number[] = [];
   const assigned: Work[] = [];
   for (const actor of [worker, otherWorker, worker, otherWorker]) {
-    const started = Date.now();
     const pulled = await engine.pullAssignment(actor, {}, randomUUID());
     assert.ok(pulled.assigned, 'a free worker that asks is given an assignment');
-    service.push(Date.now() - started);
     assigned.push(pulled.assigned!);
     assert.equal(pulled.assigned!.lease!.owner, actor.id, 'the worker claims under its own identity');
   }
@@ -459,35 +548,72 @@ test('integration:worker-pull-model — a free worker asks the control plane for
   // The offer order is the dispatch order the control plane already uses: priority, then the
   // narrowest planned scope, then age. Nothing about worker liveness enters into it.
   assert.equal(assigned[0].priority, 0, 'the highest priority item is offered first');
-
-  // A fifth pull finds nothing left and says so, rather than failing.
-  const empty = await engine.pullAssignment(worker, {}, randomUUID());
-  assert.equal(empty.assigned, null);
-  assert.equal(empty.offered, 0);
+  for (const item of assigned) await engine.execute(item.lease!.owner === worker.id ? worker : otherWorker, 'release', item.id, { epoch: item.lease!.epoch }, randomUUID());
 
   // An item another worker already holds is never offered twice: a racing pull skips it.
   const contested = await release(await engine.execute(operator, 'create', null, { title: 'Contested', plannedFiles: ['src/contested/'], criteria: [{ id: 'AC-1', text: 'Proven', proofs: [PROOF] }] }, randomUUID()));
-  const [first, second] = await Promise.all([engine.pullAssignment(worker, {}, randomUUID()), engine.pullAssignment(otherWorker, {}, randomUUID())]);
+  const [first, second] = await Promise.all([engine.pullAssignment(worker, { work: contested.id }, randomUUID()), engine.pullAssignment(otherWorker, { work: contested.id }, randomUUID())]);
   const winners = [first, second].filter(result => result.assigned);
   assert.equal(winners.length, 1, 'the coordination lock decides the race; the loser is told nothing was left');
   assert.equal(winners[0].assigned!.id, contested.id);
+  await engine.execute(winners[0].assigned!.lease!.owner === worker.id ? worker : otherWorker, 'release', contested.id, { epoch: winners[0].assigned!.lease!.epoch }, randomUUID());
 
-  // Ready-to-claim: the time until the worker's next poll, plus the time the pull itself takes.
-  // The poll interval is the published bound, so the measurement is of the model, not of a fixture.
-  const serviceP90 = [...service].sort((a, b) => a - b)[Math.max(0, Math.ceil(service.length * 0.9) - 1)];
-  const readyToClaimP90 = workerPullIntervalMs + serviceP90;
+  // A pull that timed out after its claim committed is retried with the same key: it replays the
+  // claim it already made. Without that the retry would take a second item and the worker would
+  // hold a lease it was never told about, until it lapsed into a reclaim.
+  const replayable = await release(await engine.execute(operator, 'create', null, { title: 'Replayed pull', plannedFiles: ['src/replay/'], criteria: [{ id: 'AC-1', text: 'Proven', proofs: [PROOF] }] }, randomUUID()));
+  const alsoOffered = await release(await engine.execute(operator, 'create', null, { title: 'Second offer', plannedFiles: ['src/replay-2/'], criteria: [{ id: 'AC-1', text: 'Proven', proofs: [PROOF] }] }, randomUUID()));
+  const retryKey = randomUUID();
+  const won = await engine.pullAssignment(worker, {}, retryKey);
+  assert.ok(won.assigned, 'the pull claimed an item');
+  const heldAfterPull = (await store.list()).filter(entry => entry.lease?.owner === worker.id).map(entry => entry.id).sort();
+  const replayed = await engine.pullAssignment(worker, {}, retryKey);
+  assert.equal(replayed.assigned!.id, won.assigned!.id, 'the retry returns the assignment the first call made');
+  assert.equal((replayed as any).replayed, true);
+  const heldAfterRetry = (await store.list()).filter(entry => entry.lease?.owner === worker.id).map(entry => entry.id).sort();
+  assert.deepEqual(heldAfterRetry, heldAfterPull, 'the retry took no second item');
+  assert.ok(heldAfterPull.includes(won.assigned!.id));
+  for (const item of [replayable, alsoOffered]) {
+    const current = await reload(item);
+    if (current.lease) await engine.execute(worker, 'release', current.id, { epoch: current.lease.epoch }, randomUUID());
+  }
+
+  // Ready-to-claim, measured: the shipped pull loop (`runWorkerPull`) polls at its interval while
+  // items are released under it, and each latency is the time from the item becoming ready to the
+  // claim landing. The interval is scaled down so the measurement fits a test; what is measured is
+  // that the loop claims within one interval of the work appearing, which is the property the
+  // published interval then bounds.
+  const pollMs = 100;
+  const latencies: number[] = [];
+  for (let index = 0; index < 10; index++) {
+    const actor = index % 2 ? worker : otherWorker;
+    const item = await engine.execute(operator, 'create', null, { title: `Polled ${index}`, plannedFiles: [`src/polled-${index}/`], criteria: [{ id: 'AC-1', text: 'Proven', proofs: [PROOF] }] }, randomUUID());
+    // The loop is already polling when the item is released, exactly as an idle session is.
+    const loop = runWorkerPull(() => engine.pullAssignment(actor, { work: item.id }, randomUUID()), { intervalMs: pollMs, maxPolls: 300 });
+    await release(item);
+    const readyAt = Date.now();
+    const result = await loop;
+    assert.ok(result.assigned, `${item.key} was handed to the polling worker`);
+    assert.ok(result.polls >= 1, 'the assignment came from a poll, not from a dispatch');
+    latencies.push(Math.max(0, Date.now() - readyAt));
+    await engine.execute(actor, 'release', result.assigned!.id, { epoch: result.assigned!.lease!.epoch }, randomUUID());
+  }
+  const rank = (values: number[], percentile: number) => [...values].sort((a, b) => a - b)[Math.max(0, Math.ceil(values.length * percentile / 100) - 1)];
+  const measuredP90 = rank(latencies, 90);
+  assert.equal(latencies.length, 10);
+  assert.ok(measuredP90 <= 4 * pollMs, `p90 ready-to-claim ${measuredP90}ms is within a few ${pollMs}ms polls`);
+  // The same loop at the interval Graphyard ships: one interval, plus the service time just
+  // measured above it. Both are inside the two-minute bound the criterion sets.
+  const serviceMs = Math.max(0, measuredP90 - pollMs);
   assert.ok(workerPullIntervalMs <= 120_000, `the published poll interval ${workerPullIntervalMs}ms is inside the two-minute bound`);
-  assert.ok(readyToClaimP90 <= 120_000, `p90 ready-to-claim ${readyToClaimP90}ms is inside two minutes`);
-  for (const item of assigned) assert.ok(Date.now() - readyAt.get(item.id)! < 120_000);
+  assert.ok(workerPullIntervalMs + serviceMs <= 120_000, `p90 ready-to-claim at the shipped interval, ${workerPullIntervalMs + serviceMs}ms, is inside two minutes`);
 
   // No central runtime-health tracking: the request body carries nothing but an optional host,
   // and the control plane consults no profile registry, credential inspection or session inventory.
-  assert.deepEqual(Object.keys((await engine.pullAssignment(worker, {}, randomUUID())) as object).sort(), ['assigned', 'at', 'offered', 'refused']);
-  for (const item of [...assigned, contested]) {
-    const current = await reload(item);
-    if (!current.lease) continue;
-    await engine.execute(current.lease.owner === worker.id ? worker : otherWorker, 'release', current.id, { epoch: current.lease.epoch }, randomUUID());
-  }
+  const idle = await engine.pullAssignment(worker, { work: 'GY-nothing-on-offer' }, randomUUID());
+  assert.equal(idle.assigned, null);
+  assert.equal(idle.offered, 0);
+  assert.deepEqual(Object.keys(idle as object).sort(), ['assigned', 'at', 'offered', 'refused']);
 });
 
 // ---- AC-5: no language model in the critical path ---------------------------------------------
@@ -506,10 +632,15 @@ test('integration:no-llm-in-critical-path — a full ready-to-delivered cycle ru
   const item = await release(await created({ policy: { checks: ['test', 'typecheck'], review: true, deploySmoke: false } }));
   const mine = new Set([item.id]);
   await isolateQueue(mine);
-  const log: FleetLog = { executed: [], idle: [] };
-  const effects = fleetEffects(executorA, 'host-1', log, mine);
+  const log = emptyLog();
+  const effects = fleetExecutor(executorA, 'host-1', log, mine);
   assert.equal(effects.handlers.escalate, undefined, 'this executor cannot resolve an escalation at all');
   assert.ok(!executorKinds(effects.handlers).includes('escalate'));
+  // Not a configuration choice: a kind whose judgment happens in the step itself may never have a
+  // handler, and the executor entry point refuses one that does (src/cli/executor.ts).
+  assert.deepEqual([...executorRunnableKinds].sort(), ['approve-scope', 'dispatch', 'merge', 'reclaim', 'request-review', 'resync', 'verify-deployment'].sort());
+  assert.match(judgmentInExecutorLoop({ ...effects.handlers, escalate: async () => 'resolved' })!, /^escalate is a judgment made in the step itself/);
+  assert.match(judgmentInExecutorLoop({ 'request-rework': async () => 'reworked' })!, /^request-rework is a judgment made in the step itself/);
 
   await drain([effects], log, mine);
   const delivered = await reload(item);
@@ -533,45 +664,106 @@ test('integration:no-llm-in-critical-path — a full ready-to-delivered cycle ru
 });
 
 // ---- AC-6: throughput without a master --------------------------------------------------------
+//
+// AC-6 is a claim about real deliveries — at least ten of them, with a submit→merge p50 inside
+// thirty minutes and nothing idle-but-actionable past five minutes — so `manual:throughput-without-master`
+// is produced by running `scripts/measure-throughput.mjs` against the live control plane, not from
+// this file. A fixture cannot establish it: a fleet of stubs finishing in milliseconds passes a
+// thirty-minute target whatever the loop does, and sampling a run that took three seconds says
+// nothing about a five-minute idle bound. No case here is named for that proof, so nothing in
+// this file can be submitted as its evidence.
+//
+// What is tested here is the arithmetic the witness applies, against windows it must refuse.
 
-test('manual:throughput-without-master — over twelve deliveries with no master session, submit-to-merge p50 stays inside thirty minutes and no item is idle-but-actionable for more than five minutes', async () => {
-  const before = pipelineSpeedSummary(await store.list(), Date.now()).measured;
+test('the throughput witness refuses a window with too few deliveries, a slow p50, an idle-but-actionable row or a hand-off to a master', () => {
+  const at = '2026-09-20T12:00:00.000Z', clock = Date.parse(at);
+  const delivered = (index: number, submitToMergeMinutes: number, interventions = { blocked: 0, requirements: 0 }) => ({
+    id: `work-${index}`, key: `GY-${index}`, stage: 'done', dependencies: [], evidence: [], violations: [], gates: [],
+    delivery: { mergeSha: mergeSha, mergedAt: new Date(clock - 3_600_000 + index).toISOString() },
+    pipeline: {
+      attempts: [{ epoch: 1, owner: 'agent-a', claimedAt: new Date(clock - 7_200_000).toISOString(), endedAt: new Date(clock - 3_600_000 - submitToMergeMinutes * 60_000 + index).toISOString(), end: 'submitted' }],
+      submittedAt: new Date(clock - 3_600_000 - submitToMergeMinutes * 60_000 + index).toISOString(),
+      resubmittedAt: new Date(clock - 3_600_000 - submitToMergeMinutes * 60_000 + index).toISOString(),
+      reworkRounds: 0, interventions,
+    },
+  } as unknown as Work);
+
+  // Ten quick deliveries, nothing waiting: the window is certifiable.
+  const quick = Array.from({ length: 10 }, (_unused, index) => delivered(index, 4));
+  const clean = judgeThroughput(quick, clock, [sampleQueue(quick, new Date(clock))]);
+  assert.equal(clean.met, true, clean.reasons.join('; '));
+  assert.equal(clean.deliveries, 10);
+  assert.equal(clean.worstIdle, null);
+  assert.equal(clean.thresholds.submitToMergeP50Ms, 30 * 60_000);
+  assert.equal(clean.thresholds.idleMs, 5 * 60_000);
+
+  // Nine is not ten; a witness must not certify a window the criterion does not cover.
+  const thin = judgeThroughput(quick.slice(0, 9), clock, [sampleQueue(quick.slice(0, 9), new Date(clock))]);
+  assert.equal(thin.met, false);
+  assert.match(thin.reasons.join('; '), /9 deliveries measured in the window; the criterion asks for at least 10/);
+
+  // A p50 past the target is refused, whatever else the window shows.
+  const slow = Array.from({ length: 10 }, (_unused, index) => delivered(index, 45));
+  const slowVerdict = judgeThroughput(slow, clock, [sampleQueue(slow, new Date(clock))]);
+  assert.equal(slowVerdict.met, false);
+  assert.match(slowVerdict.reasons.join('; '), /submit→merge p50 45 min exceeds the 30-minute target/);
+
+  // A row nobody has claimed past the idle bound is exactly the stall the inversion is for, and
+  // one sample that saw it refuses the window even though every other sample was clean.
+  const stalled = { ...structuredClone(quick[0]), id: 'work-stalled', key: 'GY-STALL', stage: 'ready' } as unknown as Work;
+  stalled.actionQueue = { actions: [{ id: 'a'.repeat(32), kind: 'dispatch', work: stalled.id, key: stalled.key, inputs: { kind: 'dispatch', target: 'implementation', epoch: 0, priority: 1, plannedFiles: [] },
+    gate: 'build', refusal: 'Worker has not submitted implementation for this attempt', reason: 'GY-STALL is ready and unassigned', binding: 'dispatch:0',
+    requestedBy: 'graphyard', requestedAt: new Date(clock - 9 * 60_000).toISOString(), state: 'pending', claim: null, attempts: 0, history: [] }], history: [] } as any;
+  const withStall = [...quick, stalled];
+  const stalledVerdict = judgeThroughput(withStall, clock, [sampleQueue(quick, new Date(clock - 60_000)), sampleQueue(withStall, new Date(clock))]);
+  assert.equal(stalledVerdict.met, false);
+  assert.equal(stalledVerdict.samples, 2);
+  assert.match(stalledVerdict.reasons.join('; '), /GY-STALL was idle but actionable for 9 min/);
+
+  // A hand-off to a master or operator between submit and merge is the thing AC-6 says must not
+  // be needed, so a window that contains one is refused even when every number is inside target.
+  const handed = [...quick.slice(0, 9), delivered(9, 4, { blocked: 1, requirements: 0 })];
+  const handedVerdict = judgeThroughput(handed, clock, [sampleQueue(handed, new Date(clock))]);
+  assert.equal(handedVerdict.met, false);
+  assert.match(handedVerdict.reasons.join('; '), /1 delivery\(ies\) needed a hand-off to a master or operator/);
+
+  // The executors that settled rows come from the queue's own history, which is what says a fleet
+  // rather than a master moved the window: a master daemon claims nothing and so settles nothing.
+  const settled = structuredClone(stalled) as Work;
+  settled.actionQueue!.actions[0].history = [{ at, event: 'completed', requester: 'graphyard', executor: 'executor-a@host-2', result: 'done', reason: 'dispatched' }];
+  assert.deepEqual(settlingExecutors([settled], null), ['executor-a@host-2']);
+  assert.deepEqual(settlingExecutors([settled], clock + 1), [], 'a settlement before the window is not counted in it');
+});
+
+test('the throughput witness is what the fleet run is measured with: a real drain leaves no idle row and no hand-off', async () => {
   const items: Work[] = [];
   for (let index = 0; index < 12; index++) items.push(await release(await created()));
   const mine = new Set(items.map(item => item.id));
   await isolateQueue(mine);
-  const log: FleetLog = { executed: [], idle: [] };
-  const fleet = [fleetEffects(executorA, 'host-1', log, mine), fleetEffects(executorB, 'host-2', log, mine)];
-  const startedAt = Date.now();
+  const log = emptyLog();
+  const fleet = [fleetExecutor(executorA, 'host-1', log, mine), fleetExecutor(executorB, 'host-2', log, mine)];
+  const samples: ReturnType<typeof sampleQueue>[] = [];
   await drain(fleet, log, mine);
-  const elapsed = Date.now() - startedAt;
+  samples.push(sampleQueue((await store.list()).filter(item => mine.has(item.id)), new Date()));
 
-  const all = (await store.list()).filter(item => mine.has(item.id));
   for (const item of items) assert.equal((await reload(item)).stage, 'done', `${item.key} was delivered`);
-  const summary = pipelineSpeedSummary(await store.list(), Date.now());
-  assert.ok(summary.measured - before >= 12, `${summary.measured - before} deliveries measured in this run`);
-  assert.ok(summary.routine.count >= speedTarget.minimumItems, `${summary.routine.count} routine deliveries, at least ${speedTarget.minimumItems}`);
-  assert.equal(speedTarget.submitToMergeP50Ms, 30 * 60_000);
-  assert.ok(summary.submitToMerge.p50Ms <= speedTarget.submitToMergeP50Ms, `submit→merge p50 ${summary.submitToMerge.p50Ms}ms is inside the 30-minute target`);
-  assert.equal(summary.met, true, summary.reason ?? '');
-
-  // Nothing was ever idle-but-actionable: the queue was sampled after every executor step, and no
-  // row sat unclaimed past the five-minute bound. Under a master session the same fleet went idle
-  // exactly where the loop had no step for the situation; here every situation names one.
-  assert.ok(log.idle.length > 10, `${log.idle.length} samples taken`);
+  const all = (await store.list()).filter(item => mine.has(item.id));
+  // The measurement the witness makes, over this run's own items. It says nothing about the
+  // thirty-minute target — twelve deliveries that took seconds cannot — but it does establish
+  // that nothing sat idle-but-actionable, that no hand-off was needed, and that the rows were
+  // settled by the two executors rather than by anything else.
   assert.equal(Math.max(...log.idle), 0, 'no row waited longer than the idle bound at any sample');
-  assert.ok(elapsed < 5 * 60_000, 'the whole run finished inside the idle bound, so the sampling is not vacuous');
+  assert.deepEqual(samples[0].idle, []);
+  const witness = judgeThroughput(all, Date.now(), samples);
+  assert.equal(witness.deliveries, 12);
+  assert.equal(witness.worstIdle, null);
+  assert.equal(witness.handoffs.items, 0, 'no delivery needed a hand-off to a master or operator');
+  assert.deepEqual(witness.executors.sort(), [executorA.id, executorB.id]);
 
   // Every stall had a named action. An open item with no computed action was never observed, and
   // that is the property the inversion buys: there is no situation the loop has no step for.
   const unnamed = all.filter(item => item.stage !== 'done' && !item.nextAction && !item.lease && !item.dependencies.length && item.ready && !item.blocker && !item.queue);
   assert.deepEqual(unnamed.map(item => item.key), [], 'no open, unassigned, unblocked item lacked a typed next action');
-
-  // No master session ran: no daemon cursor was created, no cycle was invoked, and the only
-  // coordinator identities in the ledger are the two executors that claimed rows.
-  const coordinators = new Set<string>();
-  for (const item of items) for (const event of await store.events(item.id)) if (String(event.actor).startsWith('executor-')) coordinators.add(String(event.actor));
-  assert.deepEqual([...coordinators].sort(), [executorA.id, executorB.id]);
   assert.ok(new Set(log.executed.map(entry => entry.executor)).size === 2, 'both executors carried deliveries');
 });
 
@@ -666,10 +858,51 @@ test('integration:typed-agent-requests — an agent that needs something records
   assert.equal(reclaimed.agentRequests!.at(-1)!.state, 'resolved');
   await engine.execute(otherWorker, 'release', reclaimed.id, { epoch: reclaimed.epoch }, randomUUID());
 
-  // An open request is resolved by whoever answers it, with the reason on the record.
+  // A request is closed by the party its record names, and by nobody else. Without that rule a
+  // session could record a request for an independent approver or the human operator and then
+  // resolve it itself, and master status would stop showing the very thing it exists to surface.
+  await assert.rejects(engine.execute(worker, 'request', decided.id, { type: 'note', resolve: decision.id, reason: 'I approve my own request' }, randomUUID()),
+    /agent-a recorded this decision; it is decided by an independent approver agent, never by the session that asked/);
+  await assert.rejects(engine.execute(otherWorker, 'request', decided.id, { type: 'note', resolve: decision.id, reason: 'another worker closes it' }, randomUUID()),
+    /decided by an independent approver agent; a worker credential cannot close it/);
+  await assert.rejects(engine.execute(executorA, 'request', decided.id, { type: 'note', resolve: decision.id, reason: 'the loop closes it' }, randomUUID()),
+    /a coordinator credential cannot close it/);
+  assert.equal(requestResolutionRefusal({ type: 'escalation', requestedBy: 'agent-a', decider: deciderFor('GY-9', { type: 'escalation' }) }, { id: 'operator', role: 'admin' }), null);
+  assert.equal(requestResolutionRefusal({ type: 'blocker', requestedBy: 'agent-a', decider: deciderFor('GY-9', { type: 'blocker' }) }, { id: 'master', role: 'coordinator' }), null,
+    'a blocker names a tracked follow-up item, which the loop opens');
+  assert.equal(requestResolutionRefusal({ type: 'note', requestedBy: 'agent-a', decider: deciderFor('GY-9', { type: 'note' }) }, { id: 'agent-a', role: 'worker' }), null,
+    'a note decides nothing, so its author closes its own record');
+  // The party the record does name closes it, with the reason on the record.
   const answered = await engine.execute(operator, 'request', decided.id, { type: 'note', resolve: decision.id, reason: 'the approver agent approved the rework' }, randomUUID());
   assert.deepEqual(openAgentRequests(answered, new Date()), []);
   assert.equal(answered.agentRequests!.find(entry => entry.id === decision.id)!.resolution, 'the approver agent approved the rework');
+
+  // Recording a typed request is the same write as the command it replaces, so it needs the same
+  // authority: the live lease of the attempt that is asking. Without this rule any worker or
+  // producer credential with no assignment could set the blocker that holds the ready gate, or
+  // raise the escalation that fences every in-flight merge, on any item in the graph.
+  assert.deepEqual([...leaseHeldRequestTypes].sort(), ['blocker', 'decision', 'escalation', 'scope-request']);
+  const unrelated = await release(await created());
+  for (const type of leaseHeldRequestTypes) {
+    const body: Record<string, unknown> = { type, reason: 'no lease on this item' };
+    if (type === 'scope-request') body.paths = ['deploy/'];
+    if (type === 'decision') body.action = 'rework';
+    if (type === 'escalation') body.trigger = 'security-concern';
+    for (const actor of [otherWorker, producer]) {
+      await assert.rejects(engine.execute(actor, 'request', unrelated.id, body, randomUUID()),
+        new RegExp(`A ${type} names the attempt epoch that is asking`), `${actor.role} cannot record a lease-less ${type}`);
+    }
+    // Naming an epoch it does not hold is refused by the lease check itself.
+    await assert.rejects(engine.execute(otherWorker, 'request', unrelated.id, { ...body, epoch: 1 }, randomUUID()), /lease|epoch/i);
+  }
+  const untouched = await reload(unrelated);
+  assert.equal(untouched.blocker, null, 'no blocker was set by a credential holding nothing');
+  assert.equal(untouched.escalation ?? null, null, 'no escalation was raised by a credential holding nothing');
+  assert.deepEqual(untouched.agentRequests ?? [], [], 'nothing was recorded at all');
+  // A note moves nothing a gate reads, so a producer session with no lease may still record one.
+  const noted2 = await engine.execute(producer, 'request', unrelated.id, { type: 'note', reason: 'the acceptance fixture needs a wider timeout on this host' }, randomUUID());
+  assert.equal(openAgentRequests(noted2, new Date())[0].requestedBy, producer.id);
+  assert.equal(noted2.blocker, null);
 
   // A session that ends waiting on input instead of recording one of these is recorded as failed
   // with that reason, and the record names the request it should have made.
@@ -723,7 +956,7 @@ test('integration:session-handles-visible — every launched session records a d
   // Master status reports each running session with what it works on and the command that attaches.
   const snapshot = { work: await store.list(), now: new Date().toISOString() };
   const report = sessionReport(snapshot);
-  const running = report.running.find(entry => entry.id === handle.id)!;
+  const running = report.running.find(entry => entry.id === handle.id && entry.key === item.key)!;
   assert.equal(running.subject, `${item.key}: the inverted loop`);
   assert.equal(running.attach, 'herdr pane attach pane-42 --workspace wE');
   assert.equal(running.key, item.key);
@@ -738,7 +971,7 @@ test('integration:session-handles-visible — every launched session records a d
   assert.equal(finished.attach, 'vishrog:/home/agent/.claude/transcripts/gy-87.jsonl', 'a finished session links its transcript');
   assert.equal(attachCommand({ state: 'finished', attach: null, transcript: null, host: 'h' }), 'no attach command and no transcript were recorded for this session');
   assert.equal(attachCommand({ state: 'running', attach: null, transcript: null, host: 'h' }), 'no attach command and no transcript were recorded for this session');
-  assert.ok(sessionReport({ work: await store.list(), now: new Date().toISOString() }).finished.some(entry => entry.id === handle.id));
+  assert.ok(sessionReport({ work: await store.list(), now: new Date().toISOString() }).finished.some(entry => entry.id === handle.id && entry.key === item.key));
 
   // The dashboard drawer shows the same facts: the running session, its subject and its attach
   // command, and the typed action the control plane computed for the item.
@@ -757,10 +990,77 @@ test('integration:session-handles-visible — every launched session records a d
   assert.ok(markup.includes('/home/agent/.claude/transcripts/gy-87.jsonl'), 'a finished session links its transcript');
   assert.ok(markup.includes('Next action'), 'the drawer names the typed action the control plane computed');
 
-  // The daemon records the handle for every session it launches, so nothing depends on this host's
-  // own ledger to find the agent again.
-  assert.equal(typeof engine.execute, 'function');
   await engine.execute(worker, 'release', current.id, { epoch: current.epoch }, randomUUID());
+});
+
+test('integration:session-handles-visible — the reviewer and producer launchers record a handle for every session they start, and a session blocked at a prompt keeps the attach command somebody needs', async () => {
+  // A launched reviewer or producer session used to exist only in this host's own ledger, which
+  // is the relaying the handle exists to end. The dispatcher records one for each launch, from
+  // the coordinates the launcher itself returns.
+  const item = await submitted();
+  await engine.observe(item.id, item.revision, observation(item, { reviews: [] }));
+  const withRequests = await reload(item);
+  assert.ok(withRequests.autoDispatch?.review, 'the control plane asked for a review of this head');
+  assert.ok(withRequests.autoDispatch!.producers.length, 'and for the proofs this head still owes');
+
+  const handles: { key: string; handle: any }[] = [];
+  const effects: DispatchEffects = {
+    // Scoped to this item: a dispatch tick sweeps the whole graph, and the subject here is the
+    // handle one launch records, not which items the sweep finds.
+    snapshot: async () => ({ work: [await reload(item.id)], now: new Date().toISOString() }),
+    agents: () => [],
+    credentials: async profiles => Object.fromEntries(profiles.map(profile => [profile.name, { available: true, reason: null }])),
+    reconcileReviews: async () => ({ reviews: [] }),
+    reconcileProducers: async () => ({ producers: [] }),
+    // What the real launchers return: the pane of the session they just started. The runtime and
+    // the workspace are what this loop launched it into, and it knows both.
+    launchReview: async () => ({ pane: 'pane-12' }),
+    launchProducer: async () => ({ pane: 'pane-13' }),
+    recordSession: async (work, handle) => { handles.push({ key: work.key, handle }); return engine.execute(executorA, 'session', work.id, handle, randomUUID()); },
+    persist: async () => {},
+  };
+  const tick = await runDispatchTick(fleetConfig, emptyDispatchCursor(fleetConfig), effects);
+  assert.deepEqual(tick.launched.map(entry => entry.kind).sort(), ['producer', 'review'], `the tick launched ${JSON.stringify(tick.waiting)}`);
+  assert.ok(tick.launched.every(entry => entry.work === item.key));
+  assert.equal(handles.length, 2, 'a handle was recorded for each launch');
+  const recorded = (await reload(item)).sessions ?? [];
+  const review = recorded.find(handle => handle.kind === 'review')!, proof = recorded.find(handle => handle.kind === 'proof')!;
+  assert.deepEqual([review.runtime, review.workspace, review.pane], ['claude', 'wF', 'pane-12']);
+  assert.equal(attachCommand(review), 'herdr pane attach pane-12 --workspace wF');
+  assert.match(review.subject, /^GY-\d+: review [0-9a-f]{12} \(PR #\d+\)$/);
+  assert.deepEqual([proof.runtime, proof.workspace, proof.pane], ['claude', 'wF', 'pane-13']);
+  assert.equal(attachCommand(proof), 'herdr pane attach pane-13 --workspace wF');
+  assert.match(proof.subject, new RegExp(`${PROOF}`));
+  // The handle is keyed on the dispatch request, so a relaunch for the same request updates it
+  // rather than leaving two handles for one session.
+  assert.equal(review.id, withRequests.autoDispatch!.review!.id);
+  assert.equal(launchedSessionHandle('review', withRequests.autoDispatch!.review!, 'subject', 'host-1', undefined, 'claude', 'wF').attach, undefined,
+    'a launcher that reports no pane records no attach command it cannot honour');
+
+  // A worker session Herdr reports blocked is waiting on input, not gone: the attempt is recorded
+  // as failed with that reason, and the handle stays running — the one moment anybody needs the
+  // attach command is this one.
+  let waiting = await engine.execute(worker, 'claim', (await release(await created())).id, {}, randomUUID());
+  waiting = await reload(waiting);
+  const blockedConfig = masterConfigSchema.parse({ ...fleetConfig, workers: [{ name: 'claude-worker', principal: worker.id, agentName: 'work-claude', mode: 'launch', kind: 'claude', credentialFile: '/outside/worker.token', approvals: 'auto' }] });
+  const daemonEffects: DaemonEffects = {
+    closeSession: () => {}, dispatch: async () => ({}), requestProof: () => {}, merge: async () => ({}),
+    observeDeployment: async () => ({ source: 'unavailable', sha: null, at: new Date().toISOString(), reason: 'not configured', deployed: [], pending: [] }),
+    recordDeployment: async () => ({}), requestSmoke: () => {},
+    agents: () => [{ name: 'work-claude', pane_id: 'pane-9', agent_status: 'blocked' } as any],
+    credentials: async () => ({ 'claude-worker': { available: true, reason: null } }),
+    recordSession: async (work, handle) => engine.execute(executorA, 'session', work.id, handle, randomUUID()),
+    snapshot: async () => ({ work: await store.list(), now: new Date().toISOString() }),
+    persist: async () => {},
+  };
+  const cycle = await runCycle(blockedConfig, emptyDaemonState(blockedConfig), daemonEffects);
+  const failure = cycle.actions.find(action => action.kind === 'session' && action.work === waiting.key);
+  assert.equal(failure?.state, 'failed', 'the attempt is recorded as failed with the reason');
+  const blocked = (await reload(waiting)).sessions!.find(handle => handle.id === `${worker.id}:${waiting.epoch}`)!;
+  assert.equal(blocked.state, 'running', 'a session waiting at a prompt has not ended');
+  assert.equal(attachCommand(blocked), 'herdr pane attach pane-9 --workspace wF', 'and the command that attaches to it still works');
+  assert.match(blocked.outcome!, /waiting on input instead of recording a typed request/);
+  await engine.execute(worker, 'release', waiting.id, { epoch: waiting.epoch }, randomUUID());
 });
 
 // ---- The pure model, exercised directly -------------------------------------------------------
@@ -783,9 +1083,9 @@ test('integration:typed-next-action — the queue is pure over the snapshot: the
   assert.equal(nextAction(first, [first], new Date(clock))!.kind, 'dispatch');
 
   // An executor claims it; a second executor reading the same snapshot finds nothing left.
-  const claimed = claimAction([first], { id: 'executor-a', host: 'host-1' }, new Date(clock + 2000))!;
+  const claimed = claimAction([first], { id: 'executor-a', host: 'host-1', principal: 'executor-a' }, new Date(clock + 2000))!;
   assert.equal(claimed.row.state, 'claimed');
-  assert.equal(claimAction([first], { id: 'executor-b', host: 'host-2' }, new Date(clock + 2001)), null);
+  assert.equal(claimAction([first], { id: 'executor-b', host: 'host-2', principal: 'executor-b' }, new Date(clock + 2001)), null);
   assert.deepEqual(openActions([first], new Date(clock + 3000)).map(entry => entry.row.id), []);
   assert.equal(queueSnapshot([first], new Date(clock + 3000)).claimed, 1);
 
@@ -807,8 +1107,8 @@ test('integration:typed-next-action — the queue is pure over the snapshot: the
 
   // Settling a row nobody claimed, or one claimed by somebody else, is refused.
   const pending = first.actionQueue!.actions[0];
-  assert.throws(() => settleAction(first, pending.id, 'executor-a', 'done', 'no claim', new Date(clock)), /not claimed/);
-  assert.throws(() => settleAction(first, 'f'.repeat(32), 'executor-a', 'done', 'no such row', new Date(clock)), /not open on this work item/);
+  assert.throws(() => settleAction(first, pending.id, { executor: 'executor-a', principal: 'executor-a' }, 'done', 'no claim', new Date(clock)), /not claimed/);
+  assert.throws(() => settleAction(first, 'f'.repeat(32), { executor: 'executor-a', principal: 'executor-a' }, 'done', 'no such row', new Date(clock)), /not open on this work item/);
 });
 
 test('integration:typed-next-action — the gate evaluator and the action computation agree on every stage of one item', () => {
@@ -846,7 +1146,7 @@ test('integration:typed-next-action — the gate evaluator and the action comput
 });
 
 test('integration:no-llm-in-critical-path — an executor with no handlers claims nothing, and a handler that throws returns its row to the queue with the reason', async () => {
-  const log: FleetLog = { executed: [], idle: [] };
+  const log = emptyLog();
   const idle = await runExecutorTick({ id: executorA.id, host: 'host-1' }, { claim: async () => { throw new Error('never called'); }, settle: async () => ({}), handlers: {} });
   assert.deepEqual([idle.result, idle.reason], ['idle', 'this executor has no handler for any action kind']);
 

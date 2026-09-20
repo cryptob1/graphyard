@@ -76,26 +76,53 @@ next executor takes the row as a further attempt, and the dead one's late settle
 so an interrupted action is retried without being executed twice. Every transition records the
 requester, the executor, the result and the reason on the row.
 
+A claim records the executor's self-asserted name *and* the credential it was made with, and only
+that pair may settle the row. Several executors behind one coordinator credential is an ordinary
+deployment, and a settlement under the wrong name would be refused after the handler had already
+run — the claim would then expire and the action run a second time, which is exactly what the lease
+exists to prevent. A row whose claim is still live is never retired even when the situation has
+moved on, because running the action is usually what moved it: the executor still owes a result,
+and the row the item now needs is opened beside it.
+
 Executors are stateless. One holds a credential, a host name, and a handler per action kind it can
 run; it claims one row, runs it, reports the result, and keeps nothing. Any number of them on any
-number of hosts drive the same queue and never coordinate with each other. An executor claims only
-the kinds it has a handler for, which is what keeps language models out of the loop itself: the
-`escalate` handler can be absent and a full ready-to-delivered cycle still runs. `llmRole` on each
-action names the judgment *inside* what it starts — implement, review, produce evidence, approve a
+number of hosts drive the same queue and never coordinate with each other.
+`scripts/graphyard-executor.mjs` is the one Graphyard ships: it launches worker, reviewer and
+producer sessions, applies the scope rule, re-reads a pull request, brokers the guarded merge and
+records a deployment reading.
+
+An executor claims only the kinds it has a handler for, which is what keeps judgment out of the
+loop itself. `actionJudgment` classifies every kind: `none` is mechanical end to end, `in-session`
+launches a session and walks away — the model works inside it, under its own credential — and
+`in-step` means running the action *is* the judgment. The two `in-step` kinds, `escalate` and
+`request-rework`, may never have a handler, and the executor entry point refuses one that does, so
+a full ready-to-delivered cycle runs with no judgment anywhere in the loop. `llmRole` on each
+action names the judgment inside what it starts — implement, review, produce evidence, approve a
 two-party decision, resolve an escalation — and is null for the five mechanical kinds.
 
-Workers pull. A free session asks `POST /api/assignments/claim` for its next assignment and claims
-it under its own identity through the ordinary claim rules; the control plane offers the items it
-already names as needing a dispatch, in dispatch order. Nothing tracks which session is alive.
+Workers pull. A free session asks `POST /api/assignments/claim` (`scripts/graphyard-pull.mjs`) for
+its next assignment and claims it under its own identity through the ordinary claim rules; the control plane
+offers the items it already names as needing a dispatch, in dispatch order. Nothing tracks which
+session is alive. A pull is idempotent on its own key: a retry replays the claim the first call
+made rather than taking a second item and leaving a worker holding a lease nobody told it about.
 
 Two more records make the fleet legible without a relaying coordinator. A typed agent request
 (`src/model/agent-requests.ts`) is what a session records instead of blocking on a prose question:
 one of `scope-request`, `decision`, `blocker`, `note` or `escalation`, each naming its decider — a
 deterministic rule, an independent approver agent, a tracked follow-up item, or one of the three
 human-only decisions — and the attempt ends in the same transaction, so the item is free rather
-than held at a prompt. A session handle (`src/model/sessions.ts`) records where a launched session
-runs: runtime, host, Herdr workspace, tab and pane, and its transcript, with the one command or
-link that attaches to it.
+than held at a prompt. Recording one is the same write as the command it replaces, so it carries
+the same authority: every type but `note` needs the live lease of the attempt that is asking, and
+only the decider the record names may close it. A session handle (`src/model/sessions.ts`) records
+where a launched session runs: runtime, host, Herdr workspace, tab and pane, and its transcript,
+with the one command or link that attaches to it. Every launcher writes what it knows, and the
+session adds the tab and transcript only it knows, onto the same record.
+
+Whether this is worth it is a measurement, not a claim: `scripts/measure-throughput.mjs` reads the
+live control plane and judges what it recorded — the deliveries in a window and their submit→merge
+p50, every sample of the live queue and the worst row left unclaimed past the five-minute idle
+bound, the hand-offs to a master or operator between submit and merge, and the executor identities
+that settled the rows. A master daemon claims nothing from the queue, so it settles nothing in it.
 
 None of this authorizes progression. An action is a fact about what is missing; the gates still
 decide from evidence and verdicts alone.

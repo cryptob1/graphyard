@@ -346,13 +346,33 @@ row that has waited past the five-minute idle bound. An item with nothing named 
 from anybody — it is delivered, or it is waiting on another item's action (an unfinished
 dependency, a predecessor's place in the merge queue).
 
-An executor holds a coordinator credential, a host name, and one handler per kind it can run:
+An executor holds a coordinator credential, a host name, and one handler per kind it can run.
+Graphyard ships one:
+
+```sh
+node scripts/graphyard-executor.mjs                      # claim, run, report, repeat; Ctrl-C stops it
+node scripts/graphyard-executor.mjs --once               # one claim-run-settle step
+node scripts/graphyard-executor.mjs --kinds merge,resync  # a narrower one; run several with different kinds
+```
+
+It reads this host's `.graphyard/master.json` for the launch profiles the dispatching actions need
+and authenticates with the coordinator credential named there — the same credential `master run`
+uses, and nothing broader. Run as many as you like, on as many hosts; none of them is a master, and
+stopping any of them costs the one claim it held. The routes underneath, for an executor written
+elsewhere:
 
 ```sh
 POST /api/actions/claim   {"host": "runner-3", "kinds": ["dispatch", "merge", "resync"]}
-POST /api/actions/ID/settle {"result": "done", "reason": "reviewer session launched on aaaaaaaaaaaa"}
+POST /api/actions/ID/settle {"result": "done", "reason": "reviewer session launched on aaaaaaaaaaaa", "executor": "runner-3"}
 GET  /api/actions          # the queue, the computed actions, open requests and running sessions
 ```
+
+A claim records both the executor name and the credential it was made with, and only that pair may
+settle it: several executors may run behind one coordinator credential, and a settlement that named
+the wrong one would be refused after the handler had already run — the claim would then expire and
+the action run twice. `POST /api/work/GY-N/resync` is the one route the mechanical kinds add: it
+schedules the provider reading the server already knows how to make and reconciles the item, which
+is what `resync` and `reclaim` mean.
 
 It keeps nothing between calls and knows nothing about other executors: two of them on two hosts
 claiming at the same instant are serialized by the coordination lock, and the loser takes the next
@@ -360,15 +380,44 @@ row. An executor that dies mid-action renews nothing, its claim expires, another
 a further attempt, and the dead one's late settlement is refused — so nothing is run twice. A
 handler that throws returns its row to the queue with the reason and a widening backoff.
 
-An executor claims only the kinds it has a handler for. Configure no `escalate` handler and the
-fleet still delivers: every language model is invoked inside what an action starts — implementing,
-reviewing, producing evidence, approving a two-party decision, resolving an escalation — and never
-in the loop that starts it. That is what the master session is now for: the escalations, the
-findings and the two-party decisions, outside the critical path.
+An executor claims only the kinds it has a handler for, and two kinds may never have one:
+`escalate` and `request-rework` are judgments made in the step itself rather than inside a session
+the step starts, so the shipped executor refuses to start with a handler for either. The other seven
+it ships — it launches a worker, reviewer or producer session, asks the control plane to apply the
+scope rule, re-reads a pull request, brokers the guarded merge, or records a deployment reading.
+Configure no escalation handling and the fleet still delivers: every language model is invoked
+inside what an action starts — implementing, reviewing, producing evidence, approving a two-party
+decision, resolving an escalation — and never in the loop that starts it. That is what the master
+session is now for: the escalations, the findings and the two-party decisions, outside the
+critical path.
+
+### Measuring whether it is working
+
+Whether throughput now follows the number of executors and agents rather than an operator's
+attention is a measurement, not a claim:
+
+```sh
+GRAPHYARD_URL=… GRAPHYARD_TOKEN=… node scripts/measure-throughput.mjs --minutes 30 --json
+```
+
+It reads the live control plane and judges what it recorded: the deliveries in the window and
+their submit→merge p50, every sample of the live queue across the window and the worst row left
+unclaimed past the five-minute idle bound, the hand-offs to a master or operator between submit
+and merge, and the executor identities that settled the rows. It exits non-zero when the window
+does not meet the target, and `--record DIR` keeps each run as a timestamped JSON file. Its
+arithmetic is `src/throughput.ts`, the same module `master status` reports from.
+
+A master daemon claims nothing from the queue and so settles nothing in it, which is what makes
+the executor list evidence that the fleet — not a master session — moved the window.
 
 ### Workers pull their own work
 
 A free worker session asks for its next assignment rather than waiting to be dispatched into:
+
+```sh
+node scripts/graphyard-pull.mjs            # ask once; exits non-zero when there is nothing to take
+node scripts/graphyard-pull.mjs --watch    # keep asking every 30s until there is
+```
 
 ```sh
 POST /api/assignments/claim   {"host": "vishrog"}
@@ -380,6 +429,10 @@ An item another worker just took is skipped rather than returned as an error. Po
 thirty seconds keeps ready-to-claim inside two minutes with no central runtime-health tracking:
 nothing has to know which session is alive for work to reach it.
 
+A pull carries an idempotency key like every other mutation, and a retry of one replays the claim
+it already made rather than taking a second item — a pull that timed out after its claim committed
+must not leave a worker holding a lease nobody told it about.
+
 ### Typed requests instead of prose questions
 
 A session that needs something records a typed request and exits, giving up its lease in the same
@@ -389,6 +442,13 @@ transaction, so the item is free instead of held at a prompt:
 POST /api/work/GY-N/request
 {"type": "scope-request", "epoch": 3, "paths": ["docs/"], "reason": "the guide describes this contract"}
 ```
+
+Recording one is the same write as the command it replaces — a `blocker` sets the blocker the ready
+gate reads, an `escalation` fences every in-flight merge — so it needs the same authority: the live
+lease of the attempt that is asking, named by its epoch. Only a `note`, which moves nothing a gate
+reads, may be recorded without one. Closing a request is the decider's, never the asker's: a
+session cannot record a request for an approver agent or the operator and then answer it itself,
+and `master status` keeps showing it until the party the record names closes it.
 
 Each type names exactly one decider: a `scope-request` is the additive planned-files widening rule,
 which the control plane applies in the same transaction the request is recorded in — the same
@@ -409,6 +469,17 @@ and pane, its transcript, and what it is working on. `master status` reports the
 `sessions`, and the dashboard drawer shows the same per item, each with the one command or link
 that attaches to it — `herdr pane attach PANE` while it runs, its transcript once it has finished.
 Watching a specific agent never needs a master to relay a pane identifier.
+
+Every launcher records one: the worker dispatch (loop or executor), and the reviewer and producer
+launches in automatic dispatch. Each records what it knows — the runtime it launched, the host, the
+Herdr workspace, the pane and the command that attaches to it. What a launcher cannot know, the tab
+the runtime opened under its own control and the transcript the agent writes, the session records
+for itself with `POST /api/work/GY-N/session`, which is the only party that has them; a handle is
+merged field by field, so the two halves meet on one record.
+
+A session Herdr reports blocked is waiting on input, not gone: the attempt is recorded as failed
+with that reason, and the handle stays `running` carrying why, so the attach command still works
+at the one moment somebody needs it.
 
 ## Automatic dispatch at submit
 

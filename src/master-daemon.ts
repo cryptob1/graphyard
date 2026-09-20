@@ -487,7 +487,14 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
     const key = `session:blocked:${profile.name}:${agent.pane_id}:${item.epoch}`;
     if (state.actions[key]) continue;
     performed.push(await record(state, key, { kind: 'session', work: item.key, principal: profile.principal, state: 'failed', detail: `Worker session ${profile.agentName} on ${item.key} (epoch ${item.epoch}) is waiting on input (Herdr reports it blocked) instead of deciding on its own; answer or stop it. A session that needs something records a typed request and exits — POST /api/work/${item.key}/request with a type of scope-request, decision, blocker, note or escalation — which names its decider and frees the item, rather than holding the lease at a prompt`, attempts: 1, epoch: item.epoch, cycle: state.cycle }, now(), effects.persist));
-    await effects.recordSession?.(item, { id: `${profile.principal}:${item.epoch}`, kind: 'implementation', runtime: profile.kind ?? profile.mode, host: config.hostId, ...(agent.pane_id ? { pane: agent.pane_id } : {}), subject: `${item.key}: ${item.title}`.slice(0, 300), state: 'finished', outcome: 'failed: the session ended waiting on input instead of recording a typed request' }).catch(() => {});
+    // The session is blocked, not gone: it still holds its pane, and the one moment somebody
+    // needs the attach command is this one. The handle stays running, carrying why it stalled;
+    // step 1 records it finished once the agent is actually closed.
+    await effects.recordSession?.(item, { id: `${profile.principal}:${item.epoch}`, kind: 'implementation', runtime: profile.kind ?? profile.mode, host: config.hostId,
+      ...(config.herdrWorkspace ? { workspace: config.herdrWorkspace } : {}),
+      ...(agent.pane_id ? { pane: agent.pane_id, attach: `herdr pane attach ${agent.pane_id}${config.herdrWorkspace ? ` --workspace ${config.herdrWorkspace}` : ''}` } : {}),
+      subject: `${item.key}: ${item.title}`.slice(0, 300), state: 'running',
+      outcome: 'waiting on input instead of recording a typed request; answer or stop it, and the attempt is recorded as failed with that reason' }).catch(() => {});
   }
 
   // 1c. A lease that keeps advancing while Herdr no longer reports the session renewing it is an
@@ -642,7 +649,8 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
       // so watching this specific agent never means asking this loop to relay its pane id.
       await effects.recordSession?.(item, {
         id: `${choice.profile.principal}:${item.epoch + 1}`, kind: 'implementation', runtime: choice.profile.kind ?? choice.profile.mode, host: config.hostId,
-        ...(config.herdrWorkspace ? { workspace: config.herdrWorkspace } : {}), ...(dispatched?.pane ? { pane: dispatched.pane, attach: `herdr pane attach ${dispatched.pane}${config.herdrWorkspace ? ` --workspace ${config.herdrWorkspace}` : ''}` } : {}),
+        ...(config.herdrWorkspace ? { workspace: config.herdrWorkspace } : {}),
+        ...(dispatched?.pane ? { pane: dispatched.pane, attach: `herdr pane attach ${dispatched.pane}${config.herdrWorkspace ? ` --workspace ${config.herdrWorkspace}` : ''}` } : {}),
         subject: `${item.key}: ${item.title}`.slice(0, 300), state: 'running',
       }).catch(() => { /* the dispatch landed; a handle that could not be written is not a failed dispatch */ });
       performed.push(await record(state, key, { kind: 'dispatch', work: item.key, principal: choice.profile.principal, epoch: item.epoch, state: 'done', detail: `Dispatched ${item.key} to ${choice.profile.name}; the worker launcher claimed under ${choice.profile.principal}`, attempts: state.actions[key].attempts, cycle: state.cycle }, now(), effects.persist));

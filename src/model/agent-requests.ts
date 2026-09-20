@@ -93,6 +93,39 @@ export function deciderFor(key: string, request: Pick<AgentRequest, 'type' | 'ac
 
 export const agentRequestLimit = 50;
 
+/**
+ * The types that move state a gate reads. Recording one is the same fact as the command it
+ * replaces — `blocked` sets the blocker, an escalation fences the merge, a scope ask widens the
+ * planned files — so it needs exactly the authority that command needs: the live lease on the
+ * item, under the attempt that is asking. Without that rule any worker or producer credential
+ * could block or fence any item in the graph, which is the opposite of what a typed request is
+ * for. A `note` records nothing a gate reads, so it needs no lease.
+ */
+export const leaseHeldRequestTypes: readonly AgentRequestType[] = agentRequestTypes.filter(type => type !== 'note');
+
+/**
+ * Why this actor may not close that request, or null when it may.
+ *
+ * The decider the record names is the only party that closes it. Without this rule a session
+ * could record a request whose decider is an independent approver or the human operator and then
+ * resolve it itself, and master status would stop showing the very thing it exists to surface.
+ * The asker never closes its own ask — a decision is somebody else's by construction — except for
+ * a note, which decides nothing and is its author's own record.
+ */
+export function requestResolutionRefusal(request: Pick<AgentRequest, 'type' | 'requestedBy' | 'decider'>, actor: { id: string; role: string }): string | null {
+  if (request.type === 'note') {
+    return request.requestedBy === actor.id || ['coordinator', 'admin'].includes(actor.role) ? null
+      : `A note is closed by its author (${request.requestedBy}), a coordinator or the operator`;
+  }
+  if (request.requestedBy === actor.id) return `${actor.id} recorded this ${request.type}; it is decided by ${request.decider.who}, never by the session that asked`;
+  // A follow-up is tracked by whoever opens the item that carries it, which the loop does; every
+  // other decider reaches the item through the two-party decision machinery or the operator, and
+  // both apply under an operator identity.
+  const allowed = request.decider.kind === 'follow-up' ? ['coordinator', 'admin'] : ['admin'];
+  if (!allowed.includes(actor.role)) return `This ${request.type} is decided by ${request.decider.who}; a ${actor.role} credential cannot close it`;
+  return null;
+}
+
 /** Open requests, oldest first, with how long each has waited. A request whose epoch lost the lease is closed, not reported. */
 export function openAgentRequests(work: Work, now: Date) {
   return (work.agentRequests ?? []).filter(request => request.state === 'open')

@@ -50,6 +50,27 @@ export const llmRoles: readonly LlmRole[] = ['implement', 'review', 'produce-evi
 /** The action kinds an executor can drive to completion with no language model anywhere in the loop. */
 export const mechanicalActionKinds = nextActionKinds.filter(kind => nextActionLlmRoles[kind] === null);
 
+/**
+ * Where the judgment for a kind happens, which is what decides whether an executor may run it:
+ *
+ * - `none` — mechanical end to end; the step is a provider call or a record.
+ * - `in-session` — the step launches a session and walks away; the model works inside that
+ *   session, under its own credential, never inside the loop.
+ * - `in-step` — running the action *is* the judgment. An executor must never have a handler for
+ *   one of these: configuring one would be the loop quietly deciding what the project reserves
+ *   for an agent, and the row would stop being visible as something a judgment still owes.
+ *
+ * This is the rule `executor.ts` checks when handlers are configured, so adding a kind cannot
+ * silently widen what an executor runs.
+ */
+export const actionJudgment: Record<NextActionKind, 'none' | 'in-session' | 'in-step'> = {
+  dispatch: 'in-session', 'request-review': 'in-session',
+  'request-rework': 'in-step', escalate: 'in-step',
+  'approve-scope': 'none', resync: 'none', reclaim: 'none', merge: 'none', 'verify-deployment': 'none',
+};
+/** Every kind an executor may hold a handler for: everything but the judgments made in the step itself. */
+export const executorRunnableKinds = nextActionKinds.filter(kind => actionJudgment[kind] !== 'in-step');
+
 export type NextActionInputs =
   | { kind: 'dispatch'; target: 'implementation'; epoch: number; priority: number; plannedFiles: string[] }
   | { kind: 'dispatch'; target: 'proof'; group: ProducerGroup; proofs: string[]; requestId: string | null; pr: number; sha: string; baseSha: string; policyRevision: number }

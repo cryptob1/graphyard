@@ -16,7 +16,7 @@ import { decideScopeRequest, liveScopeWidening, scopeRefusalBlocker, type ScopeD
 import { reconcileAutoDispatch, type DispatchTransition } from './model/dispatch.js';
 import { nextAction, nextActionKinds, sameAction } from './model/next-action.js';
 import { claimAction, openActions, reconcileActions, settleAction, type ActionRow } from './model/actions.js';
-import { agentRequestLimit, agentRequestSchema, deciderFor, expireAgentRequests, resolveSatisfiedScopeRequests, type AgentRequest } from './model/agent-requests.js';
+import { agentRequestLimit, agentRequestSchema, deciderFor, expireAgentRequests, leaseHeldRequestTypes, requestResolutionRefusal, resolveSatisfiedScopeRequests, type AgentRequest } from './model/agent-requests.js';
 import { recordSession, sessionHandleSchema } from './model/sessions.js';
 import { beginAttempt, endAttempt, endLapsedAttempt, recordIntervention, recordRework, recordSubmission } from './pipeline-speed.js';
 
@@ -596,10 +596,20 @@ export class Engine {
         if (data.resolve) {
           const open = work.agentRequests.find(entry => entry.id === data.resolve && entry.state === 'open');
           demand(open, 'No open request with that id', 404);
+          // The decider the record names is the only party that may close it; otherwise a session
+          // could record a request for an approver or the operator and answer it itself.
+          const refusal = requestResolutionRefusal(open!, actor);
+          demand(!refusal, refusal ?? '', 403);
           open!.state = 'resolved'; open!.resolvedAt = now.toISOString(); open!.resolution = data.reason;
         } else {
-          if (data.epoch !== undefined) activeLease(work, actor, data.epoch, now);
-          demand(data.type !== 'scope-request' || (data.paths?.length && data.epoch !== undefined), 'A scope request names its attempt epoch and the paths it needs');
+          // Recording a typed request is the same write as the command it replaces, so it needs
+          // the same authority: the live lease of the attempt that is asking. Only a note, which
+          // moves nothing a gate reads, may be recorded without one.
+          if (leaseHeldRequestTypes.includes(data.type)) {
+            demand(data.epoch !== undefined, `A ${data.type} names the attempt epoch that is asking; it is recorded by the session holding the item`);
+            activeLease(work, actor, data.epoch, now);
+          } else if (data.epoch !== undefined) activeLease(work, actor, data.epoch, now);
+          demand(data.type !== 'scope-request' || data.paths?.length, 'A scope request names its attempt epoch and the paths it needs');
           demand(data.type !== 'decision' || data.action, 'A decision request names the action an independent approver must approve');
           demand(data.type !== 'escalation' || data.trigger, 'An escalation request names the trigger it raises');
           const request: AgentRequest = { id: randomUUID(), type: data.type, epoch: data.epoch ?? null, requestedBy: actor.id, at: now.toISOString(), reason: data.reason,
@@ -789,12 +799,12 @@ export class Engine {
       const receipt = (await db.query('SELECT * FROM receipts WHERE actor=$1 AND key=$2', [actor.id, key])).rows[0];
       if (receipt) { demand(receipt.fingerprint === fingerprint, 'Idempotency key reused with different input'); return receipt.result as { action: ActionRow | null }; }
       const all: Work[] = (await db.query('SELECT document FROM work_items ORDER BY number')).rows.map(r => r.document);
-      const claimed = claimAction(all, { id: data.executor ?? actor.id, host: data.host }, now, { kinds: data.kinds, leaseMs: data.leaseSeconds ? data.leaseSeconds * 1000 : undefined, work: data.work });
+      const claimed = claimAction(all, { id: data.executor ?? actor.id, host: data.host, principal: actor.id }, now, { kinds: data.kinds, leaseMs: data.leaseSeconds ? data.leaseSeconds * 1000 : undefined, work: data.work });
       const result = { action: claimed?.row ?? null, open: openActions(all, now, data.kinds).length, at: now.toISOString() };
       // A poll that claims nothing changed nothing, so it leaves no receipt: an idle executor
       // asking every few seconds must not write a row per question it asked.
       if (claimed) {
-        await save(db, claimed.work, actor.id, 'action.claimed', now, { id: claimed.row.id, kind: claimed.row.kind, executor: claimed.row.claim!.executor, host: claimed.row.claim!.host, attempt: claimed.row.attempts });
+        await save(db, claimed.work, actor.id, 'action.claimed', now, { id: claimed.row.id, kind: claimed.row.kind, executor: claimed.row.claim!.executor, host: claimed.row.claim!.host, principal: actor.id, attempt: claimed.row.attempts });
         await db.query('INSERT INTO receipts(actor,key,fingerprint,result) VALUES($1,$2,$3,$4)', [actor.id, key, fingerprint, JSON.stringify(result)]);
       }
       return result;
@@ -816,7 +826,7 @@ export class Engine {
       const all: Work[] = (await db.query('SELECT document FROM work_items ORDER BY number')).rows.map(r => r.document);
       const work = all.find(item => item.actionQueue?.actions.some(row => row.id === id));
       demand(work, 'Action is not open on any work item', 404);
-      const transition = settleAction(work!, id, data.executor ?? actor.id, data.result, data.reason, now);
+      const transition = settleAction(work!, id, { executor: data.executor ?? actor.id, principal: actor.id }, data.result, data.reason, now);
       await save(db, work!, actor.id, `action.${transition.event}`, now, { id, kind: transition.action.kind, executor: data.executor ?? actor.id, result: data.result, reason: data.reason, attempt: transition.action.attempts });
       if (work!.submission) await wakeJob(db, work!.id);
       const result = { action: transition.action, work: { id: work!.id, key: work!.key } };
@@ -837,18 +847,48 @@ export class Engine {
    */
   async pullAssignment(actor: Principal, input: unknown, key: string) {
     demand(actor.role === 'worker' || actor.role === 'admin', 'Worker permission required', 403);
+    demand(key && key.length <= 200, 'An Idempotency-Key is required', 400);
     const data = pullAssignmentSchema.parse(input);
+    // Each offer this pull tries claims under a key derived from the pull's own, so the claim
+    // receipt records which item this pull took. A pull that timed out after its claim committed
+    // replays that receipt instead of walking the offers again — the won item is no longer on
+    // offer, and without this the retry would claim a second item and leave the first held by a
+    // worker that was never told it holds it.
+    const derived = `pull/${createHash('sha256').update(key).digest('hex').slice(0, 32)}`;
+    const prior = (await this.store.pool.query('SELECT key, result FROM receipts WHERE actor=$1 AND key LIKE $2', [actor.id, `${derived}/%`])).rows[0];
+    if (prior) return { assigned: prior.result as Work, offered: 1, refused: [] as { key: string; reason: string }[], replayed: true };
     const all = await this.store.list();
-    const now = new Date();
+    const now = new Date((await this.store.pool.query('SELECT clock_timestamp() AS now')).rows[0].now);
     const offers = openActions(all, now, ['dispatch'])
       .filter(entry => entry.row.inputs.kind === 'dispatch' && entry.row.inputs.target === 'implementation')
       .filter(entry => !data.work || entry.work.id === data.work || entry.work.key === data.work);
     const refused: { key: string; reason: string }[] = [];
     for (const offer of offers) {
-      try { return { assigned: await this.execute(actor, 'claim', offer.work.id, {}, key), offered: offers.length, refused }; }
+      try { return { assigned: await this.execute(actor, 'claim', offer.work.id, {}, `${derived}/${offer.work.id}`), offered: offers.length, refused }; }
       catch (error) { if (!(error instanceof Refusal)) throw error; refused.push({ key: offer.work.key, reason: error.message }); }
     }
     return { assigned: null, offered: offers.length, refused, at: now.toISOString() };
+  }
+  /**
+   * Re-read an item: wake the durable provider observation for it and reconcile the graph.
+   *
+   * This is what the `resync` and `reclaim` actions run. Both say the record is behind the world
+   * — a pull request nobody has observed since the base moved, a lease that expired with nobody
+   * holding the item — and both are answered the same mechanical way: ask the control plane to
+   * look again. It decides nothing itself; it schedules the observation the server already knows
+   * how to make and runs the reconciliation that clears a lapsed lease, then returns the item as
+   * it now stands, so the executor reports what its attempt actually achieved.
+   */
+  async resyncWork(actor: Principal, id: string) {
+    demand(actor.role === 'coordinator' || actor.role === 'admin', 'Coordinator permission required', 403);
+    const before = (await this.store.list()).find(item => item.id === id || item.key === id);
+    demand(before, `Unknown work item ${id}`, 404);
+    // The observation job only exists for an item with a candidate to observe; waking it for one
+    // without a submission would schedule a read of nothing.
+    if (before!.submission) await this.store.transaction(async db => { await wakeJob(db, before!.id); });
+    await this.reconcile();
+    const work = (await this.store.list()).find(item => item.id === before!.id)!;
+    return { work, observationScheduled: !!before!.submission, revision: work.revision, changed: work.revision !== before!.revision };
   }
   async acquireMerge(actor: Principal, id: string, input: unknown, key: string) {
     demand(actor.role === 'coordinator' || actor.role === 'admin', 'Coordinator permission required', 403);
