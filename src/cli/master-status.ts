@@ -1,9 +1,9 @@
 import { randomUUID } from 'node:crypto';
 import { probeCandidateConflicts } from '../conflicts.js';
-import { agentOwner, agentToken, assessContainment, buildMasterStatus, diskPressure, diskPressureAttention, diskThresholdBytes, freeBytes, herdrWorkspaceHealth, humanOwner, inspectWorkerCredentials, installationOwner, inventoryWorktrees, mergeProtocolSkew, observeHerdrAgents, planWorktreeReclaim, reclaimIdleMs, snapshotWithClock, worktreesDirectory, type AttentionItem, type MasterConfig } from '../master.js';
+import { agentOwner, agentToken, assessContainment, buildMasterStatus, diskPressure, diskPressureAttention, diskThresholdBytes, freeBytes, herdrWorkspaceHealth, humanOwner, inspectWorkerCredentials, installationOwner, inventoryWorktrees, mergeProtocolSkew, observeHerdrAgents, planWorktreeReclaim, reclaimIdleMs, snapshotWithClock, worktreesDirectory, type AttentionItem, type HerdrAgent, type MasterConfig, type WorkerProfile } from '../master.js';
 import { generatedFilesAssignment, generatedFilesDrift, generatedFilesVariable, generatedManifestScript } from '../install/generated-files.js';
 import type { Work } from '../model.js';
-import { daemonSummary, readDaemonState, type DaemonState } from '../master-daemon.js';
+import { daemonSummary, orphanedSupervisors, readDaemonState, type DaemonState, type OrphanSupervisor } from '../master-daemon.js';
 import { readReviewLedger, reconcileReviews, reviewerBindingHealth, summarizeReviews } from '../reviewer.js';
 import { readProducerLedger, reconcileProducers, sessionRetries, summarizeProducers } from '../producer.js';
 import { dispatchSummary, readDispatchCursor } from '../auto-dispatch.js';
@@ -21,6 +21,56 @@ export function scopeRequestAttention(snapshot: { work: Work[]; now: string }) {
     const live = request && work.lease && work.lease.epoch === request.epoch && Date.parse(work.lease.expiresAt) > Date.parse(snapshot.now);
     return live ? [{ subject: work.key, text: `${request.requestedBy} needs files outside plannedFiles: ${request.paths.join(', ')} — ${request.reason}`, ...agentOwner('master', `graphyard master scope ${work.key}`) }] : [];
   });
+}
+
+type MasterStatus = ReturnType<typeof buildMasterStatus>;
+
+/**
+ * The command that reclaims an assignment from a watch supervisor that outlived its agent. The
+ * coordination cycle does it on its own; this is how a master runs that cycle once when the loop
+ * is stopped, which is the state the item is usually noticed in.
+ */
+export const supervisorReclaimCommand = 'graphyard master run --once';
+
+/**
+ * One attention line for an assignment whose watch supervisor has outlived its session.
+ *
+ * `Assigned worker session is done` reads as an item that finished, which is exactly what it is
+ * not: the session is gone, the lease is still advancing, and the item cannot be dispatched to
+ * anybody. This names the supervisor holding it, the process and scope it is held by, and the
+ * command that reclaims it — an agent command, never a hand search for a pid.
+ */
+export function orphanSupervisorAttention(orphan: OrphanSupervisor, host: string | null): AttentionItem {
+  return { subject: orphan.key,
+    text: `Lease epoch ${orphan.epoch} of ${orphan.key} is still advancing (to ${orphan.leaseExpiresAt}) while Herdr no longer reports session ${orphan.agentName}: an orphaned watch supervisor (pid ${orphan.scope.pid}, containment scope ${orphan.scope.unit}) holds the item for a worker that cannot act`,
+    ...agentOwner('master', `${supervisorReclaimCommand} stops that supervisor through its containment scope; on ${host ?? 'its registered host'}, systemctl --user kill --kill-whom=all --signal=SIGTERM ${orphan.scope.unit} does the same by hand`) };
+}
+
+/**
+ * Rewrite the session attention of every assignment held by an orphaned supervisor, in the row
+ * and in the attention list alike, so both say the same thing. A Herdr that could not be read
+ * reports no sessions, and every live assignment would then look orphaned, so an unavailable
+ * runtime changes nothing.
+ */
+export function nameOrphanSupervisors(status: MasterStatus, work: Work[], profiles: WorkerProfile[], runtime: { agents: HerdrAgent[]; available: boolean }, now: number): MasterStatus {
+  if (!runtime.available) return status;
+  const orphans = orphanedSupervisors(work, profiles, runtime.agents, now);
+  if (!orphans.length) return status;
+  const rewritten = new Map<string, { previous: string | null; item: AttentionItem }>();
+  const rows = status.work.map(row => {
+    const orphan = orphans.find(entry => entry.key === row.key);
+    if (!orphan) return row;
+    const item = orphanSupervisorAttention(orphan, work.find(candidate => candidate.id === orphan.id)?.workspaces.find(space => space.epoch === orphan.epoch)?.host ?? null);
+    rewritten.set(row.key, { previous: row.attention, item });
+    const { subject, text, ...owner } = item;
+    return { ...row, attention: text, attentionOwner: owner };
+  });
+  const attentionItems = status.attentionItems.map(entry => {
+    const rewrite = rewritten.get(entry.subject);
+    return rewrite && entry.text === rewrite.previous ? rewrite.item : entry;
+  });
+  for (const [key, rewrite] of rewritten) if (!attentionItems.some(entry => entry.subject === key && entry.text === rewrite.item.text)) attentionItems.push(rewrite.item);
+  return { ...status, work: rows, attentionItems };
 }
 
 /**
@@ -89,7 +139,10 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
   // Browser administration is reported beside the work it unblocks: a pending sudo code is
   // the one thing the operator must act on, and the recent ledger entries say who changed what.
   const administration = { browser: master.browser ? { profile: master.browser.profile } : null, ...summarizeAdministration((await readAdministrationLedger(root)).entries, await readSudoState(root)) };
-  const status = buildMasterStatus(snapshot, master.workers, runtime.agents, credentials, containment, reviews, master.baseBranch, coordinator, { producers, failures: dispatch.failures, retries }, probeCandidateConflicts(root, snapshot.work));
+  // A worker session Herdr no longer reports, on an assignment whose lease is still advancing, is
+  // an orphaned supervisor rather than a session that finished; it is named with what reclaims it.
+  const status = nameOrphanSupervisors(buildMasterStatus(snapshot, master.workers, runtime.agents, credentials, containment, reviews, master.baseBranch, coordinator, { producers, failures: dispatch.failures, retries }, probeCandidateConflicts(root, snapshot.work)),
+    snapshot.work, master.workers, runtime, Date.parse(snapshot.now));
   // A waiting sudo prompt is the operator confirming their own GitHub credential on their device,
   // the one step no agent may take for them; a timed-out one is the master's to rerun.
   const sudo = administration.sudo;
