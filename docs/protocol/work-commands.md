@@ -1,4 +1,4 @@
-<!-- page: Agent protocol | 2 | creating work and every mutation. -->
+<!-- page: Agent protocol | 2 | every mutation. -->
 # Work commands
 
 For an integration author: every mutation a principal may send, with its JSON body.
@@ -6,7 +6,7 @@ For an integration author: every mutation a principal may send, with its JSON bo
 - `requirements`: Full criteria, dependencies, plannedFiles, exclusiveResources, optional producerProofs, `expectedPolicyRevision` and reason; `admin`, or an operator agent holding `policy:requirements` (additive only) — see [coordination](../coordination.md#revise-requirements-explicitly)
 - `ready`: Admin `{}`; operator-agent `{"expectedRevision":12,"reason":"Requirements approved"}`
 - `unblock`: Admin `{"reason":"Contract verified"}`; operator-agent with `expectedRevision` and a nonblank reason
-- `resolve`: `{"trigger":"security-concern","expectedRevision":12,"reason":"…"}` naming one standing trigger; declared human `admin` only, except that `"attestation":{"kind":"blocked"|"stopped-worker","epoch":N}` lets any `admin` settle a control-plane-raised `lease-loss` the ledger explains, verified server-side
+- `resolve`: `{"trigger":"security-concern","expectedRevision":12,"reason":"…"}` naming one standing trigger; declared human `admin` only, except that `"attestation":{"kind":"blocked"|"stopped-worker","epoch":N}` lets any `admin` settle a control-plane-raised `lease-loss` the ledger explains
 - `rework`: `{"reason":"Retry implementation","previousWorkerStopped":true}`; `admin` only
 - `recover`: `{"reason":"Verified delivered worker stopped","previousWorkerStopped":true}`; `admin` only, delivered quarantine only
 - `autosettle`: `{"epoch":1,"settlementHash":"…","reason":"…","verification":{…}}`; `coordinator` or `admin` ([containment settlement](leases.md#automatic-containment-settlement))
@@ -22,8 +22,8 @@ For an integration author: every mutation a principal may send, with its JSON bo
 
 ## Submit-time regression guard
 
-Before `submit` is recorded, the control plane observes the pull request through its App, outside the coordination transaction, and classifies every changed file against `plannedFiles` ([the rule](../coordination.md#refuse-candidates-that-revert-shipped-code-outside-their-scope)). Each out-of-scope file is compared by blob identity with the commit the candidate is bound to — the base-branch tip, or the predicted base of a published speculative tip. The refusal is `409` with `Submission refused for GY-N: DETAIL`, one entry per file; it writes nothing and leaves no receipt, so the same idempotency key may be retried once the branch is fixed. The observed head branch must also be the workspace branch registered for the epoch, and without GitHub configured no pre-check runs, while the reconciliation job still evaluates the candidate.
+Before `submit` is recorded, the control plane observes the pull request through its App, outside the coordination transaction, and classifies every changed file against `plannedFiles` ([the rule](../coordination.md#refuse-candidates-that-revert-shipped-code-outside-their-scope)), comparing each out-of-scope file by blob identity with the commit the candidate is bound to — the base-branch tip, or the predicted base of a published speculative tip. The refusal is `409` with `Submission refused for GY-N: DETAIL`, one entry per file; it writes nothing and leaves no receipt, so the same idempotency key may be retried once the branch is fixed. The observed head branch must also be the workspace branch registered for the epoch. Without GitHub configured no pre-check runs, though the reconciliation job still evaluates the candidate.
 
 ## Deployment observations
 
-`POST /api/deployments` records one deployment-provider observation from a `producer` or `admin` credential; workers cannot. It carries `provider`, `externalId`, `environment`, the full artifact `sha`, one to 200 independently verified full `containedMergeShas`, a `state` of `succeeded`, `failed` or `rolled_back`, and `startedAt`/`finishedAt`. Records are append-only and unique per provider, external ID and state: a repeat replaying every immutable field returns `duplicate`, one that differs is refused. They feed [flow analytics](../flow-analytics.md) and never move a gate.
+`POST /api/deployments` records one deployment-provider observation from a `producer` or `admin` credential, never a worker: `provider`, `externalId`, `environment`, the full artifact `sha`, one to 200 verified `containedMergeShas`, a `state` of `succeeded`, `failed` or `rolled_back`, and `startedAt`/`finishedAt`. Records are append-only and unique per provider, external ID and state — a repeat replaying every immutable field returns `duplicate`, one that differs is refused — and they feed [flow analytics](../flow-analytics.md) without moving a gate.

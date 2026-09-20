@@ -3,15 +3,11 @@
 
 For anyone defining an E2E proof: what lives where, and what a report must match.
 
-- **Scenario purpose, setup, actions, expected results, target environment:** Graphyard test-case registry
-- **Executable Playwright, Cypress or custom test:** Git, linked by runner and file path
-- **Scenario version required by a work item:** Pinned in the work item at creation
-- **Commit, base, result, executed and skipped counts, producer, environment:** Graphyard evidence ledger
-- **Screenshots, videos, traces, large logs:** CI or object storage, linked by evidence URL
+The registry holds a scenario's purpose, setup, actions, expected results and target environment; Git holds the executable Playwright, Cypress or custom test, linked by runner and file path; the work item pins the scenario version at creation; the evidence ledger records commit, base, result, executed and skipped counts, producer and environment; and screenshots, videos, traces and large logs stay in CI or object storage, linked by evidence URL.
 
 ## Define, version and link a case
 
-Open **Test cases** → **New test case**, or publish as an operator with `graphyard scenario scenario.json` (`graphyard scenarios` lists them). A definition carries a stable `id`, `title`, `purpose`, `setup`, `steps`, `expected`, `environment`, `runner`, `testPath`, `expectedRevision`:
+Open **Test cases** → **New test case**, or publish as an operator with `graphyard scenario scenario.json` (`graphyard scenarios` lists them). A definition carries a stable `id`, `title`, `purpose`, `setup`, `steps`, `expected`, `environment`, `runner`, `testPath` and `expectedRevision`:
 
 ```json
 {
@@ -30,5 +26,5 @@ Open **Test cases** → **New test case**, or publish as an operator with `graph
 
 ## Report an execution
 
-A trusted producer holding that exact proof name submits ordinary [evidence](protocol/evidence.md) plus `{"scenarioRevision": 1, "environment": "staging"}`. It must match the pinned scenario revision and environment as well as the candidate and policy, so a staging run cannot satisfy a production requirement and an older or newer scenario run cannot accidentally satisfy the pinned version.
+A trusted producer holding that exact proof name submits ordinary [evidence](protocol/evidence.md) plus `{"scenarioRevision": 1, "environment": "staging"}`, which must match the pinned scenario revision and environment as well as the candidate and policy: a staging run cannot satisfy a production requirement, and an older or newer scenario run cannot satisfy the pinned version.
 

@@ -5,7 +5,7 @@ For the operator enabling autonomy: which capabilities an agent holds, and what 
 
 ## Authority model
 
-An `operator-agent` is not the human operator and holds no `admin` authority. Each capability bounds one operation:
+An `operator-agent` is not the human operator and holds no `admin` authority; each capability bounds one operation:
 
 - `intent:create`: Create a validated work intent
 - `intent:ready`: Release an in-scope backlog item
@@ -22,7 +22,7 @@ An `operator-agent` is not the human operator and holds no `admin` authority. Ea
 
 ## Master autonomy setup
 
-Run once, as the human operator, with the `admin` credential on stdin; it provisions the identities and is never stored:
+Run once as the human operator, with the `admin` credential on stdin; it provisions the identities and stores nothing:
 
 ```sh
 graphyard master autonomy                                   # preview: identities, capabilities, harness rules
@@ -31,15 +31,15 @@ printf '%s' "$ADMIN_TOKEN" | graphyard master autonomy --admin-token-stdin --app
 
 ## Two-party decisions
 
-Every decision the guides once reserved for the human operator, other than the three human-only ones, is a two-party decision on one work item.
+Every decision except the three human-only ones is a two-party decision on one work item.
 
-1. The master requests it: `master decide GY-N ACTION [JSON|@FILE] REASON`, sending `POST /api/work/GY-N/decide`. Actions are `release`, `unblock`, `requirements`, `resolve`, `attest`, `merge`, `rework`, `recover` and `grant`. The CLI fills the binding from the item's current state, and the request is refused unless the requester holds the action's capability and the item is still in the state it names; one decision per action may be open at a time.
-2. `master approver GY-N DECISION` launches a separate session running as the approver identity, prompted to judge the reason against the item and the operator's goals.
-3. `master approve GY-N DECISION REASON` applies it. The server refuses, naming the conflict, when the approver requested the decision, has held an assignment on the item, produced evidence the decision rests on, or is the principal a `grant` would empower; it re-checks the requester's live authority and the item's state first.
+1. The master requests it: `master decide GY-N ACTION [JSON|@FILE] REASON` (`POST /api/work/GY-N/decide`), with actions `release`, `unblock`, `requirements`, `resolve`, `attest`, `merge`, `rework`, `recover` and `grant`. The CLI fills the binding from the item's current state; the request is refused unless the requester holds the action's capability and the item is still in the state it names, and one decision per action may be open at a time.
+2. `master approver GY-N DECISION` launches a separate session as the approver identity, prompted to judge the reason against the item and the operator's goals.
+3. `master approve GY-N DECISION REASON` applies it, after re-checking the requester's live authority and the item's state. The server refuses, naming the conflict, when the approver requested the decision, has held an assignment on the item, produced evidence it rests on, or is the principal a `grant` would empower.
 
 ## Harness rules per role
 
-`master autonomy --apply` installs the master's own harness rules, which also deny pointing a command at another identity's credential file, and dispatch installs each worker's rules in its assigned worktree. The master may run its own CLI subcommands at their absolute path, `herdr`, read-only `gh pr`, `gh api user`, `gh api` reads of the base branch's protection and `--method PATCH` writes to its subresources, `gh api user/installations` and `gh api apps/*` reads, `jq`, the audited-thread wrapper, reads of `.graphyard/master-actions/` and writes to `.graphyard/profiles/`. It is denied `gh pr merge`, `gh pr review`, any `gh api` call that merges, posts a review, mints a token, uses GraphQL or uses `PUT`, `POST` or `DELETE`, every direct `agent-browser` command, `git push`, and reads of the coordinator credential home, `.graphyard/connection.json`, `*.pem` and `*.token`. Existing entries are never removed and regeneration is idempotent.
+`master autonomy --apply` installs the master's own harness rules, which also deny pointing a command at another identity's credential file, and dispatch installs each worker's rules in its assigned worktree. The master may run its own CLI subcommands at their absolute path, `herdr`, read-only `gh pr`, `gh api user`, `gh api` reads of the base branch's protection and `--method PATCH` writes to its subresources, `gh api user/installations` and `gh api apps/*` reads, `jq`, the audited-thread wrapper, reads of `.graphyard/master-actions/` and writes to `.graphyard/profiles/`, plus [everything else it owns](master-agent.md#harness-permissions). It is denied `gh pr merge`, `gh pr review`, any `gh api` call that merges, posts a review, mints a token, uses GraphQL or uses `PUT`, `POST` or `DELETE`, every direct `agent-browser` command, `git push`, and reads of the coordinator credential home, `.graphyard/connection.json`, `*.pem` and `*.token`. Existing entries are never removed and regeneration is idempotent.
 
 | Role | May | May not |
 | --- | --- | --- |
@@ -49,8 +49,8 @@ Every decision the guides once reserved for the human operator, other than the t
 
 ## Other operator agents
 
-Keep a random secret of at least 32 characters in a password manager and put only non-secret configuration — `id`, `displayName`, `capabilities`, `scope`, `reason` — in a file. Pass the secret on stdin: `printf '%s' "$SECRET" | graphyard operator-agent setup operator.json --token-stdin`, then `graphyard operator-agent list`. Prefer explicit work IDs over `"*"`. The dashboard's **Operator automation** view shows the redacted identity, fingerprint, capabilities, scopes, revision, revocation state and last mutation; plaintext secrets are never returned or stored. `operator-agent configure ID FILE` changes scope, requiring `expectedRevision` and complete replacement lists. `operator-agent rotate ID SECONDS REASON --token-stdin` issues a new credential with a bounded overlap — zero for immediate cutover, at most 24 hours — so verify the new fingerprint before it ends, and never extend recovery by sharing the admin token. `operator-agent revoke ID REASON` is immediate and fail-closed for every active or transitional credential, and a revoked identity is retained for audit. Never answer a denial by weakening gates: reload the current revisions, confirm the approved capability and scope, and retry with a fresh idempotency key only for a changed request.
+Keep a random secret of at least 32 characters in a password manager and put only non-secret configuration — `id`, `displayName`, `capabilities`, `scope`, `reason` — in a file, then `printf '%s' "$SECRET" | graphyard operator-agent setup operator.json --token-stdin` and `graphyard operator-agent list`. Prefer explicit work IDs over `"*"`. The dashboard's **Operator automation** view shows the redacted identity, fingerprint, capabilities, scopes, revision, revocation state and last mutation; plaintext secrets are never returned or stored. `operator-agent configure ID FILE` changes scope, requiring `expectedRevision` and complete replacement lists; `operator-agent rotate ID SECONDS REASON --token-stdin` issues a new credential with a bounded overlap — zero for immediate cutover, at most 24 hours — so verify the new fingerprint before it ends; `operator-agent revoke ID REASON` is immediate and fail-closed for every active or transitional credential, and a revoked identity is retained for audit. Never answer a denial by weakening gates.
 
 ## Threat model
 
-A stolen credential exercises only its configured capabilities and targets, so revoke it and inspect the immutable events; every route checks authenticated role, capability, repository and work scope, and an agent cannot edit its own scope or credentials. Startup fails closed when a repository-bound engine is paired with an adapter for another repository, expected revisions reject stale policy edits, and idempotency receipts reject changed reuse. The role has no lease commands and no evidence or validation authority of its own — a `manual:` attestation needs an approved `attest` decision. Against self-approval and collusion the server refuses, and records, an approver that requested the decision, held an assignment, produced the evidence or would receive the grant; the master's session refuses `master approve`, and its harness rules deny pointing a command at another identity's credential file, which is why each approver runs in its own launched session. Secrets travel on stdin, responses and events carry fingerprints only, and revoking the identity returns coordination to the human operator while history remains.
+A stolen credential exercises only its configured capabilities and targets: revoke it and inspect the immutable events. Every route checks authenticated role, capability, repository and work scope; an agent cannot edit its own scope or credentials; startup fails closed when a repository-bound engine is paired with another repository's adapter; expected revisions reject stale policy edits; and the role has no lease commands and no evidence authority, so a `manual:` attestation needs an approved `attest` decision. The server refuses and records an approver that requested the decision, held an assignment, produced the evidence or would receive the grant, which is why each approver runs in its own session. Secrets travel on stdin, responses and events carry fingerprints only, and revoking the identity returns coordination to the human operator while history remains.

@@ -1,4 +1,4 @@
-<!-- page: Build integrations | 6 | release builds, approvals, observed delivery. -->
+<!-- page: Build integrations | 6 | releases and observed delivery. -->
 # Releases and observed production delivery
 
 For an integrator recording what production runs.
@@ -12,14 +12,14 @@ For an integrator recording what production runs.
 | Release revision | `admin`, or a `promoter` with a current lease | Immutable manifest, source and explicit membership |
 | Approval | `admin` | Binds one release revision, manifest hash, build and policy revision |
 | Expected release selection | `admin` or promoter | Advances the environment's generation; fenced by `expectedGeneration` |
-| Deployment observation | `producer` with an `observer` registration and a current lease | Append-only runtime facts for the observer's services |
+| Deployment observation | `producer` with an `observer` registration and a current lease | Append-only runtime facts for its services |
 | Rollback request, operation, resolution | `admin` or promoter; a `rollback` registration; `admin` | The [rollback workflow](recovery.md#rollback) |
-| Notification | Any authenticated non-worker credential | A provider webhook relayed as a hint; recorded, never authoritative |
-| Verification, incidents, attribution | Graphyard's bounded sweep | Derived from observations; never asserted by a client |
+| Notification | Any authenticated non-worker credential | A provider webhook relayed as a hint, never authoritative |
+| Verification, incidents, attribution | Graphyard's bounded sweep | Derived from observations, never asserted by a client |
 
 ## Environment policy
 
-Add `delivery` to an environment definition; without it the defaults are a 300-second freshness bound and a required approval.
+Add `delivery` to an environment definition; the defaults are a 300-second freshness bound and a required approval.
 
 ```json
 {
@@ -114,7 +114,7 @@ An observer reads its provider outside any Graphyard transaction and submits wha
 
 ## Verification
 
-Every two seconds the server folds at most fifty new observations into each environment's coverage and re-evaluates, resuming from a stored cursor so an interrupted sweep skips none; `graphyard delivery sweep` drains a backlog sooner. Coverage keeps, per service, the merged intervals in which every listed instance matched the expected digest under measured identity, and the latest observed state.
+Every two seconds the server folds at most fifty new observations into each environment's coverage and re-evaluates, resuming from a stored cursor so an interrupted sweep skips none; `graphyard delivery sweep` drains a backlog sooner. Coverage keeps, per service, the merged intervals in which every listed instance matched the expected digest under measured identity, plus the latest observed state.
 
 - `unselected`: No expected release
 - `unobserved`: Some required service has no authoritative observation for this generation

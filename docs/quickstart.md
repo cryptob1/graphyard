@@ -1,4 +1,4 @@
-<!-- page: Start here | 4 | run Graphyard locally for evaluation. -->
+<!-- page: Start here | 4 | run Graphyard locally. -->
 # Local quickstart
 
 For someone evaluating Graphyard on one machine.
@@ -21,7 +21,7 @@ npm start
 
 ## Propose the delivery workflow, then apply it
 
-Instead of hand-authoring check names, proof names and profiles, let Graphyard propose them. From the writable repository, `node "$GRAPHYARD_CLI" init --scan --url "$GRAPHYARD_URL"` reads package manifests, CI workflows, deploy configuration and the test layout and writes one ignored file, `.graphyard/setup-proposal.json`. Review it — [a Node and Railway sample](../examples/setup-proposal.json) — then apply it with `init --scan --apply` ([what it proposes, applies and reports as drift](operations-reference.md#setup-proposals-and-drift)).
+`node "$GRAPHYARD_CLI" init --scan --url "$GRAPHYARD_URL"` reads package manifests, CI workflows, deploy configuration and the test layout and writes one ignored file, `.graphyard/setup-proposal.json` — [a Node and Railway sample](../examples/setup-proposal.json). Review it, then apply it with `init --scan --apply` ([what it proposes and reports as drift](operations-reference.md#setup-proposals-and-drift)).
 
 ## Create, claim and submit
 
@@ -34,4 +34,3 @@ node "$GRAPHYARD_CLI" worktree GY-1 EPOCH origin/YOUR_BASE_BRANCH
 cd .graphyard/worktrees/GY-1-EPOCH
 node "$GRAPHYARD_CLI" watch GY-1 EPOCH -- YOUR_AGENT_COMMAND
 ```
-

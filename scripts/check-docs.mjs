@@ -21,12 +21,12 @@ const generatedIndexes = [
     file: 'docs/protocol.md',
     directories: ['docs/protocol'],
     sections: ['Agent protocol'],
-    head: `<!-- page: Build integrations | 1 | roles, requests, work commands, leases, workspaces, evidence, and the webhook, one topic per page. -->
+    head: `<!-- page: Build integrations | 1 | roles, commands, leases, evidence, webhook. -->
 # Agent protocol and HTTP API
 
 All control-plane endpoints except \`/healthz\` require \`Authorization: Bearer TOKEN\`. Use HTTPS for remote machines. API credentials are not Git credentials.
 
-One topic per page. This index is generated in full; never edit it by hand.`,
+One topic per page; this index is generated in full.`,
     tail: '',
   },
   {
@@ -35,7 +35,7 @@ One topic per page. This index is generated in full; never edit it by hand.`,
     sections: ['Start here', 'Operate Graphyard', 'Build integrations', 'Understand or contribute', 'Maintainer and historical records'],
     head: `# Graphyard documentation
 
-Choose one path; the reference guides are there when a gate or integration needs deeper investigation. This index is generated in full; never edit it by hand.`,
+Choose one path; the reference guides are there when a gate or integration needs deeper investigation. This index is generated in full.`,
     tail: 'Historical records explain past decisions, not current setup.',
   },
 ];

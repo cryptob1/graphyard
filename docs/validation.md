@@ -1,4 +1,4 @@
-<!-- page: Build integrations | 3 | candidates, attempts, trusted results. -->
+<!-- page: Build integrations | 3 | candidates, attempts, results. -->
 # Validation candidates and runner protocol
 
 For an integrator driving a runner: how an attempt is authorized.
@@ -22,11 +22,11 @@ graphyard validation define|build|candidate|request|dispatch|ack|heartbeat|resul
 
 ## Configure a candidate
 
-Define an [E2E scenario](test-cases.md) first and create work requiring its `e2e:SCENARIO_ID` proof, which pins the scenario revision, hash and environment. An environment definition uses a stable ID matching that scenario's environment, with an optional `delivery` block for its [release policy](delivery.md#environment-policy); the repository must match the managed one, HTTPS targets carry no credentials, query strings or fragments, and resource names identify shared external accounts globally. `immutable: true` is an authorized target *declaration*, not observed proof; `immutable: false` declares shared staging, granted only once an observer has measured the candidate manifest running, and passing only with whole-window observed identity.
+Define an [E2E scenario](test-cases.md) first and create work requiring its `e2e:SCENARIO_ID` proof, which pins the scenario revision, hash and environment. The environment definition uses a stable ID matching that scenario's environment, with an optional `delivery` block for its [release policy](delivery.md#environment-policy); the repository must match the managed one, HTTPS targets carry no credentials, query strings or fragments, and resource names identify shared external accounts globally. `immutable: true` is an authorized target *declaration*, not observed proof; `immutable: false` declares shared staging, granted only once an observer has measured the candidate manifest running and passing only with whole-window observed identity.
 
 ## Requests and attempts
 
-A request carries `candidateId`, `expectedWorkRevision`, versioned `runner` and `collector` references, an absolute ISO UTC `deadline` within the next hour, and `maxAttempts` from 1 to 5; the collector must be authorized for the candidate's proof and environment. Each request is bound at creation to the candidate's manifest, compatibility signature and the target identity its observers report: a target already measured running another manifest refuses it before any paid execution, and one that moves later supersedes and [re-anchors](attribution.md#re-anchoring) it rather than editing it.
+A request carries `candidateId`, `expectedWorkRevision`, versioned `runner` and `collector` references, an absolute ISO UTC `deadline` within the next hour, and `maxAttempts` from 1 to 5; the collector must be authorized for the candidate's proof and environment. Each is bound at creation to the candidate's manifest, compatibility signature and the target identity its observers report: a target already measured running another manifest refuses it before any paid execution, and one that moves later supersedes and [re-anchors](attribution.md#re-anchoring) it.
 
 ## Trusted results
 
@@ -35,11 +35,11 @@ Only the pinned collector may call `result`, publishing `{requestId, attemptId, 
 - `execution`: `completed`, `cancelled` or `timed_out`
 - `behavior`: `passed`, `failed`, `blocked` or `unmeasured`
 - `executed`, `skipped`, `inventoryComplete`: The actual inventory, compared against the offline enumeration
-- `target`: `{instance, artifacts, measurement, coversEntireRun, attribution}`; `measurement` is `provider`, `host-attestation` or `unknown`, and an application self-report is never trusted measurement
+- `target`: `{instance, artifacts, measurement, coversEntireRun, attribution}`; `measurement` is `provider`, `host-attestation` or `unknown`, and a self-report is never trusted measurement
 - `bundleDigest`, `runnerImageDigest`: What actually executed
 - `artifacts`, `artifactState`: Verified artifacts covering the required names; `verified`, `missing`, `upload-failed` or `expired`
 - `executionSettled`: The collector's **own** observation that execution and its operations have finished
 
 ## Recovery
 
-Operator commands take `{requestId, epoch, reason}`. `cancel` stops authorization but never claims a process stopped, so running reservations remain; never-acknowledged dispatches settle safely. `settle` also requires `settlementEvidence`, a URL referencing independent termination proof, and is a manual attestation for use only after confirming the process and its external operations are stopped or fenced. `retry` requires a settled prior attempt, an unexpired deadline, remaining budget and current authority, and invalidates any earlier pass. Revoked definitions need newly authorized configuration and a new request. Never reassign a protected resource because a timer expired: unknown outcomes stay blocked until verified settlement. Every attempt carries a durable `sequence` ([replay and scoped reuse](evidence-reuse.md)).
+Operator commands take `{requestId, epoch, reason}`. `cancel` stops authorization but never claims a process stopped, so running reservations remain, while never-acknowledged dispatches settle safely. `settle` also requires `settlementEvidence`, a URL referencing independent termination proof, and is a manual attestation for use only after confirming the process and its external operations are stopped or fenced. `retry` requires a settled prior attempt, an unexpired deadline, remaining budget and current authority, and invalidates any earlier pass; revoked definitions need newly authorized configuration and a new request. Never reassign a protected resource because a timer expired: unknown outcomes stay blocked until verified settlement. Every attempt carries a durable `sequence` ([replay and scoped reuse](evidence-reuse.md)).

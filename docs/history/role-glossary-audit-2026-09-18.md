@@ -3,4 +3,4 @@
 
 For a maintainer editing the guides: why the role vocabulary is fixed.
 
-The September 2026 audit read every guide for role ambiguity and found seven recurring substitutions: bare *operator* for automation, *the agent* where a role was meant, *session* where a credential was meant, *Herdr owns the work*, *Graphyard runs the agents*, *the tester* or *QA*, and *user*. Each was resolved into one canonical term, and those terms are now the authoritative rule in the canonical usages in [the glossary](../glossary.md#the-eight-distinctions); `tests/docs-glossary.test.ts` keeps the eight distinctions, their canonical usages and the roles table from drifting.
+The audit found seven recurring substitutions across the guides — bare *operator* for automation, *the agent* where a role was meant, *session* for a credential, *Herdr owns the work*, *Graphyard runs the agents*, *the tester* or *QA*, and *user* — and resolved each into one canonical term. Those terms are the authoritative rule in [the glossary](../glossary.md#the-eight-distinctions), and `tests/docs-glossary.test.ts` keeps them from drifting.

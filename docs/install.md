@@ -1,11 +1,11 @@
-<!-- page: Operate Graphyard | 2 | the shortest install and upgrade path. -->
+<!-- page: Operate Graphyard | 2 | install and upgrade. -->
 # Install and upgrade
 
 For an operator installing or upgrading a control plane.
 
 ## Fresh installation
 
-The seven-step runbook is [onboarding](onboarding.md): deploy the server with Postgres and an HTTPS origin ([deployment](deployment.md)), register the control-plane App, configure it, verify, and add reviewer Apps and workers. Two settings are easy to miss. Set the four [capacity variables](deployment.md#delegation-capacity-variables) — `GRAPHYARD_MAX_SLICE_LEADS`, `GRAPHYARD_MAX_ENGINEERS_PER_LEAD`, `GRAPHYARD_MIN_REVIEWERS`, `GRAPHYARD_MAX_REVIEWERS` — from the principal set you deploy. And connect proofs in CI: `init --scan --apply` registers the [CI producer](deployment.md#ci-producer) and prints `ciProofs.next` — restrict the `graphyard-reporting` environment to the default branch, store that token as its `GRAPHYARD_CI_PRODUCER_TOKEN` secret, set `GRAPHYARD_URL` on it, and deploy the principals array including it. Later pushes to a candidate branch then run the item's registered `unit:*` and `integration:*` proofs ([proofs in CI](first-pr.md#proofs-in-ci)); manual proofs still need a producer session.
+The seven-step runbook is [onboarding](onboarding.md): deploy the server with Postgres and an HTTPS origin ([deployment](deployment.md)), register and configure the control-plane App, verify, and add reviewer Apps and workers. Two settings are easy to miss. Set the four [capacity variables](deployment.md#delegation-capacity-variables) — `GRAPHYARD_MAX_SLICE_LEADS`, `GRAPHYARD_MAX_ENGINEERS_PER_LEAD`, `GRAPHYARD_MIN_REVIEWERS`, `GRAPHYARD_MAX_REVIEWERS` — from the principal set you deploy. And connect proofs in CI: `init --scan --apply` registers the [CI producer](deployment.md#ci-producer) and prints `ciProofs.next` — restrict the `graphyard-reporting` environment to the default branch, store that token as its `GRAPHYARD_CI_PRODUCER_TOKEN` secret, set `GRAPHYARD_URL` on it, and deploy the principals array including it. Later pushes to a candidate branch then run the item's registered `unit:*` and `integration:*` proofs ([proofs in CI](first-pr.md#proofs-in-ci)); manual proofs still need a producer session.
 
 Verify with `graphyard doctor` (`appPermissions.missing` must be empty) and `graphyard status`, then [require the check](github.md#require-the-check) on the base branch and submit a real pull request: configured is not proof of enforcement.
 
@@ -15,10 +15,6 @@ Verify with `graphyard doctor` (`appPermissions.missing` must be empty) and `gra
 
 ## Upgrading an existing installation
 
-Upgrading the server image never changes the GitHub App, so a release needing a new permission leaves an installed App short until its owner accepts the change — and the server says so rather than failing quietly. The startup and five-minute [preflight](github.md#preflight-and-holds) raises an attention item naming the missing permission and the installation page in the server log, `GET /api/status`, the dashboard and `master status`; jobs needing that permission are held rather than retried, so there is no 403 back-off loop and other observations stay fresh; and `master init` reports the same attention with the migration command.
+Upgrading the server image never changes the GitHub App, so a release needing a new permission leaves an installed App short until its owner accepts the change — and the server says so rather than failing quietly: the startup and five-minute [preflight](github.md#preflight-and-holds) raises an attention item naming the missing permission and the installation page in the server log, `GET /api/status`, the dashboard and `master status`, and jobs needing that permission are held rather than retried, so there is no 403 back-off loop.
 
-1. Back up the database and deploy the tested image as [deployment](deployment.md#backup-upgrade-restore) describes.
-2. Read the attention items: `graphyard doctor`, the dashboard, or `graphyard master status`.
-3. On the machine holding `.graphyard/github-app.json`, run the [migration](github.md#migrating-an-existing-app): `graphyard github-setup --update-permissions --wait 600`. It prints the exact browser steps GitHub requires and polls until the installation reports the declared set, exiting nonzero while anything remains.
-4. Nothing else is needed: the next preflight releases the held jobs without a restart. Confirm with `doctor` that `appPermissions.missing` is empty and `heldJobs` is `0`.
-
+Back up the database and deploy the tested image as [deployment](deployment.md#backup-upgrade-restore) describes, read the attention items (`graphyard doctor`, the dashboard, or `graphyard master status`), then on the machine holding `.graphyard/github-app.json` run the [migration](github.md#migrating-an-existing-app): `graphyard github-setup --update-permissions --wait 600`, which prints the exact browser steps GitHub requires and polls until the installation reports the declared set, exiting nonzero while anything remains. Nothing else is needed — the next preflight releases the held jobs without a restart — and `doctor` confirms `appPermissions.missing` is empty and `heldJobs` is `0`.

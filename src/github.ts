@@ -7,7 +7,7 @@ import type { Engine } from './engine.js';
 import { CHECK_NAME, carriedApproval, demand, nativeReviewRequired, parseReviewerApps, reviewerProfileFor, reviewProviderOf, type Observation, type ReviewerApp, type ReviewerProfile, type ScopeFile, type TipMerge, type Work, type ReviewRequest } from './model.js';
 import { inPlannedScope } from './regression-guard.js';
 export { CHECK_NAME };
-import { queuePlacement, queueRef, type QueuePlacement, type QueueSpeculation } from './merge-queue.js';
+import { baseRefreshNeeded, heldBase, queuePlacement, queueRef, type BaseRefresh, type QueuePlacement, type QueueSpeculation } from './merge-queue.js';
 import { blockedFeatures, controlPlanePermissions, describeShortfall, permissionShortfalls, requiredPermissions, type PermissionFeature, type PermissionLevel, type PermissionShortfall } from './github-permissions.js';
 
 /** Out-of-scope paths compared against the base tip per observation; the rest are refused as uncompared. */
@@ -255,14 +255,28 @@ export class GitHub {
     demand(typeof comparison?.status === 'string', `GitHub did not compare ${base.slice(0, 12)} with ${head.slice(0, 12)}`, 502);
     return comparison.status === 'ahead' || comparison.status === 'identical';
   }
+  /** The base a published speculative tip was built on, when the head is that tip; otherwise null. */
+  private speculativeBase(work: Work, headSha: string): string | null {
+    const speculation = work.queue?.speculation;
+    return speculation && speculation.tip === headSha && speculation.policyRevision === work.policyRevision ? speculation.base : null;
+  }
   /**
-   * The base a candidate is legitimately bound to. A published speculative tip carries the base it
-   * was built on, and the managed branch advances underneath it while the entries ahead of it land,
-   * so the live branch head is not that binding. Every other candidate binds to the live head.
+   * The base a candidate is legitimately bound to, for the guards that run between observations.
+   * A published speculative tip carries the base it was built on, and the managed branch advances
+   * underneath it while the entries ahead of it land, so the live branch head is not that binding.
+   * Neither is it the binding of a candidate whose head Graphyard has not yet brought onto a
+   * branch that moved: somebody else's merge did not change the tree this one was reviewed and
+   * proved on, so the bound base is held. Deciding that needs an ancestry comparison, so it is
+   * decided in `observe` and only re-read here, for exactly the head and branch head it decided
+   * on. Every other candidate binds to the live head.
    */
   private boundBase(work: Work, pr: any, branch: { tip: string }): string {
-    const speculation = work.queue?.speculation;
-    return speculation && speculation.tip === pr.head.sha && speculation.policyRevision === work.policyRevision ? speculation.base : branch.tip;
+    const speculative = this.speculativeBase(work, pr.head.sha);
+    if (speculative) return speculative;
+    const observation = work.observation;
+    const held = observation && observation.candidate.sha === pr.head.sha && observation.baseTip === branch.tip
+      && heldBase(work, pr.head.sha, branch.tip) === observation.candidate.baseSha ? observation.candidate.baseSha : null;
+    return held ?? branch.tip;
   }
   async observe(work: Work): Promise<Observation> {
     const startedAt = new Date().toISOString();
@@ -275,8 +289,15 @@ export class GitHub {
     const latest = new Map<string, any>();
     for (const r of reviews) if (['APPROVED', 'CHANGES_REQUESTED', 'DISMISSED'].includes(r.state)) latest.set(r.user.login, r);
     // A published speculative tip carries its own validated base. The candidate stays bound to
-    // that exact commit while the managed branch advances underneath it through queue merges.
-    const bound = this.boundBase(work, pr, branch);
+    // that exact commit while the managed branch advances underneath it through queue merges. A
+    // head that already contains the branch tip is up to date and binds to it, as it always did.
+    // A head that does not holds the base it was bound to while Graphyard brings it onto the new
+    // one — but only while the managed branch still contains that commit. A rewind is not an
+    // advance: the binding is given up and the candidate rebinds to the live head.
+    const speculative = this.speculativeBase(work, pr.head.sha);
+    const contained = pr.merged || await this.contains(branch.tip, pr.head.sha);
+    const holding = speculative || contained ? null : heldBase(work, pr.head.sha, branch.tip);
+    const bound = speculative ?? (holding && await this.contains(holding, branch.tip) ? holding : branch.tip);
     // Out-of-scope files are compared with the bound base: the predicted base already contains
     // every queued predecessor, so their changes on a speculative tip are not this candidate's.
     const scopeFiles = await this.compareScope(work.plannedFiles ?? [], files, bound);
@@ -286,8 +307,7 @@ export class GitHub {
     // chain rests on the base branch by publication; the placement reports whether it still does.
     const speculation = work.queue?.speculation;
     const publishedTip = !!speculation && speculation.tip === pr.head.sha && speculation.policyRevision === work.policyRevision;
-    const baseTipContained = pr.merged || await this.contains(branch.tip, pr.head.sha)
-      || publishedTip && (speculation!.baseTree === branch.tree || speculation!.predecessors.length > 0);
+    const baseTipContained = contained || publishedTip && (speculation!.baseTree === branch.tree || speculation!.predecessors.length > 0);
     const provider = reviewProviderOf(work.policy);
     const unready = !pr.merged && (pr.state !== 'open' || pr.draft !== false)
       ? pr.draft ? 'Pull request is draft; mark it ready to request code review' : 'Pull request is not open; reopen it to request code review' : null;
@@ -378,7 +398,12 @@ export class GitHub {
     if (unready) return { provider: 'agent' as const, sha: pr.head.sha, approved: false, profile: profile.name, reviewerApp: app.id, reason: unready };
     return observeAgentReview(this, pr.number, pr.head.sha, reviews, pr.user.id, work.reviewRequest, candidateBase, work.policyRevision, this.config.appId, profile, app);
   }
-  /** A review is requested only for a head that contains the base tip; anything else is refused before any write. */
+  /**
+   * A review is requested only for a head that contains the base tip; anything else is refused
+   * before any write. This is a wait, not a rework round: the control plane brings the head onto
+   * the moved base itself (see `refreshCandidateBase`) and the request is dispatched for the head
+   * it republishes, unless the merge conflicts, which is the one case the worker still owns.
+   */
   private reviewable(work: Work) {
     demand(work.observation?.baseTipContained !== false, `Candidate ${work.candidate?.sha.slice(0, 12)} does not contain the base branch tip ${work.observation?.baseTip?.slice(0, 12)}; a review of it would be dismissed when the merge base changes, so none is requested until the head contains the tip`);
   }
@@ -513,6 +538,40 @@ Use \`verdict:changes-requested\` with the findings, or \`verdict:usage-limit\` 
     const merge = merged ? await this.describeMerge(pr.head.sha, merged, work.candidate!.baseSha, placement.predictedBase!) : null;
     return { ref, tip, base: placement.predictedBase!, baseTree, predecessors: placement.predecessors, policyRevision: work.policyRevision, publishedAt: new Date().toISOString(), merge };
   }
+  /**
+   * Brings one in-flight candidate onto a base branch that moved under it, without a rework round.
+   *
+   * Graphyard merges the new base into the candidate's own pull-request branch — the same
+   * conflict-free provider merge the merge queue uses for a speculative tip — so the head, the
+   * required checks, the review and every proof end up bound to one commit that already contains
+   * the tip. What the merge produced is recorded from GitHub's own account of it, never from the
+   * fact that a merge was asked for, and the binding carry is decided from that (see
+   * model/carry.ts). A conflict writes nothing: the refusal names it and the candidate goes back
+   * to the worker, exactly as a stale candidate always did.
+   */
+  async refreshCandidateBase(work: Work, beforeWrite: () => Promise<void> = async () => {}): Promise<BaseRefresh> {
+    const candidate = work.candidate;
+    demand(candidate && work.observation?.baseTip && !work.queue, 'An unqueued candidate observed behind the base branch is required');
+    const pr = await this.request(`/pulls/${candidate!.pr}`);
+    requireCurrent(pr.head.sha === candidate!.sha && pr.base.ref === this.config.base && pr.state === 'open' && pr.draft === false,
+      'Pull request changed before the base refresh; retry');
+    const branch = await this.baseBranch();
+    requireCurrent(branch.tip === work.observation!.baseTip, `Base branch ${this.config.base} moved before the base refresh; retry`);
+    const from = { sha: candidate!.sha, baseSha: candidate!.baseSha };
+    const record = (fields: Partial<BaseRefresh>): BaseRefresh => ({ from, base: branch.tip, baseTree: branch.tree,
+      policyRevision: work.policyRevision, at: new Date().toISOString(), head: null, conflict: null, merge: null, carry: null, ...fields });
+    await beforeWrite();
+    let merged: string | null;
+    try { merged = await this.mergeBranch(pr.head.ref, branch.tip, `Graphyard base refresh for ${work.key} onto ${this.config.base}`); }
+    catch (error) {
+      if (!(error instanceof SpeculativeConflict)) throw error;
+      return record({ conflict: `Candidate ${candidate!.sha.slice(0, 12)} cannot be brought onto base branch tip ${branch.tip.slice(0, 12)} without resolving a conflict, which is content nobody reviewed or proved: ${error.message}. Run graphyard sync ${work.key}, resolve it and push; the approval and proofs bound to ${candidate!.sha.slice(0, 12)} do not survive the resolution.` });
+    }
+    // GitHub reports the branch already up to date as no merge at all. Nothing was republished, so
+    // nothing is carried: the candidate rebinds to the live head on the next observation.
+    if (!merged) return record({ head: candidate!.sha });
+    return record({ head: merged, merge: await this.describeMerge(candidate!.sha, merged, candidate!.baseSha, branch.tip) });
+  }
   async publish(work: Work, forcedReason?: string, beforeWrite: () => Promise<void> = async () => {}) {
     if (!work.candidate) return;
     const reasons = [...work.gates.flatMap(g => g.reasons), ...work.violations, ...(forcedReason ? [forcedReason] : [])];
@@ -554,6 +613,20 @@ async function advanceQueue(engine: Engine, github: GitHub, work: Work, job: { w
     return { work: await engine.ejectFromQueue(work.id, work.revision, error.message, job.token), published: false, held: null };
   }
 }
+/**
+ * Brings one in-flight candidate onto the base branch tip it no longer contains. The queue owns
+ * its own entries, so this is every other submitted candidate: the merge, the record of what it
+ * produced, and the binding carry are all the control plane's, and no worker is asked for a round.
+ */
+async function refreshBase(engine: Engine, github: GitHub, work: Work, job: { work_id: string; token: string }, guard: (snapshot: Work, success: boolean) => () => Promise<void>, hold: (feature: PermissionFeature) => string | null) {
+  // The refresh writes a merge commit onto the candidate's branch; without Contents: write the
+  // call can only 403. The candidate keeps its held base and waits for the permission instead.
+  const held = hold('merge-queue');
+  if (held) return { work, published: false, held };
+  const refresh = await github.refreshCandidateBase(work, guard(work, false));
+  const updated = await engine.bindBaseRefresh(work.id, work.revision, refresh, job.token);
+  return { work: updated, published: !!refresh.head && refresh.head !== refresh.from.sha, held: null };
+}
 /** A held job waits this long before one bounded re-check, unless a preflight sees the installation change first. */
 export const permissionHoldMs = 30 * 60_000;
 /** Consecutive permission refusals a job may retry at the normal cadence before it is held. */
@@ -584,9 +657,18 @@ export async function processJob(engine: Engine, github: GitHub) {
       if (held) { await engine.store.holdJob(job.work_id, job.token, held, permissionHoldMs, heldOn()); return; }
       const observation = await github.observe(work);
       work = await engine.observe(work.id, work.revision, observation, job.token);
+      // A base branch that moved under this candidate is Graphyard's to absorb, not the worker's.
+      // The republished head is what the review, the checks and the proofs then bind to, so the
+      // refresh runs before any review is dispatched and the job requeues onto the new head.
+      if (baseRefreshNeeded(work)) {
+        const refreshed = await refreshBase(engine, github, work, job, guard, hold);
+        work = refreshed.work; held ??= refreshed.held;
+        if (refreshed.published) { await engine.store.finishJob(job.work_id, job.token, undefined, true); return; }
+      }
       const provider = reviewProviderOf(work.policy);
       // A head that does not contain the base tip is not reviewed: the request is deferred, and
-      // diagnose reports why, until the worker syncs or the queue publishes a tip that contains it.
+      // diagnose reports why, until the refresh above republishes it, the queue publishes a tip
+      // that contains it, or — when the merge conflicts — the worker resolves it and pushes.
       const dispatchable = !observation.merged && observation.prState === 'open' && observation.draft === false && work.policy.review && observation.baseTipContained !== false;
       // A request binds the exact candidate; an approval Graphyard carried onto its own authored
       // tip already stands for that candidate, so no new request is dispatched for it.
