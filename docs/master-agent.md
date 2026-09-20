@@ -207,12 +207,19 @@ separation the server enforces:
 
 | What the loop sees | What it does | Who applies it |
 | --- | --- | --- |
-| A change request standing against the exact current head, or an agent reviewer that did not approve it | Requests `rework` and launches the approver session for it, then dispatches the next attempt | The approver agent |
+| A change request standing against the exact current head: a `CHANGES_REQUESTED` GitHub review of it, or an agent or Codex review carrying `verdict: changes-requested` for it and for the recorded request | Requests `rework` and launches the approver session for it, then dispatches the next attempt | The approver agent |
 | A base branch the control plane could not merge into the candidate | Requests `rework` naming the conflict — only a fresh attempt can resolve it | The approver agent |
 | A delivered item still fenced by a quarantine whose supervisor this host verified gone | Requests `recover` | The approver agent |
 | Every gate green while automatic merging is off | Requests `merge` for that exact candidate, then merges once it is approved | The approver agent |
 | A lapsed quarantine this host verifies dead | Settles it with the coordinator credential, as `master settle-containment` does | The loop |
 | An open scope request from the lease that raised it | Asks the control plane to decide it; a request the item already implies is applied without ending the attempt, anything wider is refused and escalated (see [scope requests the loop decides](#scope-requests-the-loop-decides)) | The control plane |
+
+An agent or Codex review that has not approved is not, by itself, a verdict. The observers report
+`approved: false` for a review not yet dispatched, one still running, a retry, an unready pull
+request and exhausted reviewer profiles, and a submission ends the worker's lease — so the loop acts
+only on the structural `verdict` the observer sets where the reviewer itself asked for changes on
+that exact head, and never on the refusal's reason text. A head in any other state is asked for
+nothing and keeps its proof requests.
 
 Rework and recovery carry the requester's attestation that the previous worker is stopped, and the
 engine lowers the containment fence on it, so the loop attests only what it verified. It requests

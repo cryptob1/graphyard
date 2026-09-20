@@ -5,7 +5,7 @@ import { chmod, readFile, rename, writeFile } from 'node:fs/promises';
 import { basename, dirname, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { z } from 'zod';
-import { currentEvidence, deliveryState, deploySmokeRequired, exhaustedReviewerProfiles, postDeployMs, productionLatencyMs, reviewProviderOf, reviewerProfileFor, rollbackGuidance, type ContainmentScope, type Work } from './model.js';
+import { currentEvidence, deliveryState, deploySmokeRequired, exhaustedReviewerProfiles, postDeployMs, productionLatencyMs, reviewProviderOf, reviewerProfileFor, rollbackGuidance, type AgentReview, type ContainmentScope, type Work } from './model.js';
 import { scopeBlockedBudgetMs, scopeDecisionBudgetMs, scopeDecisionSample, type ScopeRequestState } from './model/scope.js';
 import { scopePattern, watchAssignment } from './supervisor.js';
 import { baseRefreshConflict, pendingBaseRefresh } from './merge-queue.js';
@@ -495,9 +495,24 @@ export interface StandingVerdict { reviewer: string; at: string; reason: string 
 /**
  * The change request standing against the exact current candidate. Observations keep one review
  * per reviewer, so a CHANGES_REQUESTED entry on the head is the reviewer's latest word on it; an
- * agent provider records its refusal on the head instead. Either way the head cannot progress,
- * and the item is waiting for a rework round nobody has asked for.
+ * agent or Codex provider records `verdict: 'changes-requested'` on the head instead. Either way
+ * the head cannot progress, and the item is waiting for a rework round nobody has asked for.
+ *
+ * `approved: false` alone is never a verdict. The observers report it for a review not yet
+ * dispatched, one still running, a retry, an unready pull request and exhausted profiles, and a
+ * submission ends the worker's lease — so reading it as a verdict would send a head nobody has
+ * reviewed back to a worker on the cycle after it was submitted, and skip its proofs.
  */
+/**
+ * The binding `exactApproval` demands of an approval, demanded of a change request too: the verdict
+ * answers the request Graphyard recorded for this candidate, base and policy revision, under the
+ * provider the policy names. A verdict left over from an earlier request is not the head's.
+ */
+function agentVerdictBindsRequest(work: Work, agent: AgentReview): boolean {
+  const candidate = work.candidate!, request = work.reviewRequest;
+  return agent.provider === reviewProviderOf(work.policy) && !!request && request.commentId === agent.requestId
+    && request.sha === candidate.sha && request.baseSha === candidate.baseSha && request.policyRevision === work.policyRevision;
+}
 export function standingVerdict(work: Work): StandingVerdict | null {
   const candidate = work.candidate, observation = work.observation;
   if (!work.submission || work.reworkRequested || !candidate || !observation) return null;
@@ -505,8 +520,8 @@ export function standingVerdict(work: Work): StandingVerdict | null {
   const review = observation.reviews.find(entry => entry.sha === candidate.sha && entry.state === 'CHANGES_REQUESTED');
   if (review) return { reviewer: review.reviewer, at: review.submittedAt ?? observation.at, reason: `${review.reviewer} requested changes on ${review.sha.slice(0, 12)}` };
   const agent = observation.agentReview;
-  if (agent && agent.sha === candidate.sha && !agent.approved && !agent.exhausted)
-    return { reviewer: agent.profile ?? agent.provider, at: agent.completedAt ?? observation.at, reason: `${agent.profile ?? agent.provider} review of ${agent.sha.slice(0, 12)} did not approve: ${agent.reason}` };
+  if (agent && agent.sha === candidate.sha && !agent.approved && agent.verdict === 'changes-requested' && agentVerdictBindsRequest(work, agent))
+    return { reviewer: agent.profile ?? agent.provider, at: agent.completedAt ?? observation.at, reason: `${agent.profile ?? agent.provider} requested changes on ${agent.sha.slice(0, 12)}: ${agent.reason}` };
   return null;
 }
 

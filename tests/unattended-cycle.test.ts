@@ -924,3 +924,86 @@ test('a requested round is requested once, a request the item moved past is take
   live = master;
   assert.deepEqual([bare.decide, bare.approver, bare.withdraw, bare.decisions].map(effect => typeof effect), ['function', 'function', 'function', 'function']);
 });
+
+test('an agent or Codex review that has not approved is not a verdict: a head not yet dispatched, one a reviewer is still working on, and one whose profiles are exhausted are asked for nothing and keep their proofs, and only a changes-requested verdict for the exact head and request sends it back', async t => {
+  const host = await approverHost({ workers: [profile('claude-a')] });
+  t.after(host.cleanup);
+  const master = host.master;
+
+  // A worker submits: `complete` ends the lease, so from the next cycle the loop may attest that
+  // the worker is stopped. Everything it does next rests on what the review observation says.
+  const simulation = plane([{ key: 'GY-730', rounds: ['pass'] }], { host });
+  const item = simulation.work[0];
+  await cycle(emptyDaemonState(master), master, simulation, simulation.effects());
+  assert.ok(item.submission && item.candidate && !item.lease, 'the head is submitted and its worker is gone');
+  const head = item.candidate!.sha, reviewer = { name: 'claude-review', runtime: 'claude', reviewerApp: 'claude-app', timeoutSeconds: 1800 };
+  item.policy = { ...item.policy, reviewProvider: 'agent', reviewerProfiles: [reviewer] } as Work['policy'];
+  const request = { commentId: 501, sha: head, baseSha: item.candidate!.baseSha, policyRevision: item.policyRevision, body: '@claude review', createdAt: simulation.iso(),
+    provider: 'agent' as const, profile: reviewer.name, reviewerApp: reviewer.reviewerApp, marker: uuid('GY-730-request') };
+  const refusal = (reason: string, extra: Record<string, unknown> = {}) => ({ provider: 'agent' as const, sha: head, approved: false, reason, profile: reviewer.name, reviewerApp: reviewer.reviewerApp, ...extra });
+  const observe = (agentReview: NonNullable<Work['observation']>['agentReview'], changes: Partial<Work> = {}) => {
+    Object.assign(item, { reviewRequest: null, reviewFailovers: [], ...changes });
+    item.observation = { ...item.observation!, at: simulation.iso(), agentReview };
+    simulation.recompute(item);
+  };
+  /** One cycle of the real loop from a loop that has seen nothing, with the proof requests it made. */
+  const run = async () => {
+    const proofs: string[] = [];
+    const result = await runCycle(master, emptyDaemonState(master), simulation.effects({ requestProof: work => { proofs.push(work.key); } }), simulation.now);
+    return { proofs, actions: result.actions };
+  };
+  const at = simulation.now() + minute;
+
+  // Every state the observers report short of approval, as they report it (src/agent-review.ts,
+  // `observeAgent` in src/github.ts). None is a verdict, and each would have read as one.
+  const unreviewed: [string, () => void][] = [
+    ['not dispatched', () => observe(refusal('Graphyard must dispatch a review to this profile bound to this candidate and policy'))],
+    ['waiting', () => observe(refusal(`Waiting for reviewer profile ${reviewer.name} to post a verdict through its registered App`), { reviewRequest: request })],
+    ['exhausted profiles', () => observe({ provider: 'agent', sha: head, approved: false, reason: 'Every configured reviewer profile is exhausted for this candidate; add reviewer capacity or select another review provider' },
+      { reviewFailovers: [{ profile: reviewer.name, reviewerApp: reviewer.reviewerApp, runtime: reviewer.runtime, exhaustion: 'timeout', reason: 'no verdict', at: simulation.iso(), sha: head, baseSha: item.candidate!.baseSha, policyRevision: item.policyRevision, requestCommentId: request.commentId, nextProfile: null }] })],
+  ];
+  for (const [name, arrange] of unreviewed) {
+    arrange();
+    assert.equal(standingVerdict(item), null, `${name}: no verdict stands`);
+    assert.equal(routineDecision(item, master, at), null, `${name}: no decision is needed`);
+    assert.ok(actionableSubjects(master, simulation.work, simulation.now()).some(subject => subject.kind === 'proof'), `${name}: the head's proofs are still the loop's to request`);
+    const { proofs, actions } = await run();
+    assert.deepEqual(actions.filter(action => action.kind === 'decision').map(action => action.detail), [], `${name}: the loop asks for no rework`);
+    assert.equal((simulation.decisions.get(item.id) ?? []).length, 0, `${name}: and none reached the control plane`);
+    assert.deepEqual(proofs, ['GY-730'], `${name}: the proof step still runs for the head`);
+  }
+  assert.deepEqual(simulation.sessions.log.filter(entry => entry.startsWith('launch:')), [], 'no approver session was spent on a head nobody has reviewed');
+
+  // The reviewer answered the recorded request and asked for changes on this exact head.
+  const verdict = refusal(`Reviewer profile ${reviewer.name} requested changes; address the findings and request a fresh review`,
+    { verdict: 'changes-requested', verdictId: 902, requestId: request.commentId, completedAt: '2031-03-01T09:20:00.000Z' });
+  observe(verdict, { reviewRequest: request });
+  assert.deepEqual(standingVerdict(item), { reviewer: reviewer.name, at: '2031-03-01T09:20:00.000Z', reason: `${reviewer.name} requested changes on ${head.slice(0, 12)}: ${verdict.reason}` });
+  assert.equal(routineDecision(item, master, at)?.action, 'rework');
+  assert.ok(!actionableSubjects(master, simulation.work, simulation.now()).some(subject => subject.kind === 'proof'), 'a head going back to a worker is waiting on no proof');
+  // It is the head's verdict only while it answers the head's request, on the head, unapproved,
+  // under the provider the policy names: the same binding an approval must carry.
+  observe(verdict, { reviewRequest: { ...request, commentId: 777 } });
+  assert.equal(standingVerdict(item), null, 'a verdict for another request is not this head\'s');
+  observe(verdict);
+  assert.equal(standingVerdict(item), null, 'nor is one with no recorded request behind it');
+  observe({ ...verdict, sha: hex('an-earlier-head') }, { reviewRequest: request });
+  assert.equal(standingVerdict(item), null, 'nor one on another commit');
+  observe({ ...verdict, provider: 'codex' }, { reviewRequest: request });
+  assert.equal(standingVerdict(item), null, 'nor one from a provider the policy does not name');
+  observe({ ...verdict, reason: 'did not approve: requested changes', verdict: undefined }, { reviewRequest: request });
+  assert.equal(standingVerdict(item), null, 'and reason text is never read as a verdict');
+
+  observe(verdict, { reviewRequest: request });
+  const reworked = await run();
+  assert.deepEqual(reworked.proofs, [], 'the loop requests no proof for a head that is going back');
+  assert.deepEqual((simulation.decisions.get(item.id) ?? []).map(decision => [decision.action, decision.state]), [['rework', 'requested']], steps(reworked.actions).join(', '));
+  assert.match(simulation.decisions.get(item.id)![0].reason, new RegExp(`${reviewer.name} requested changes on ${head.slice(0, 12)}`));
+
+  // Codex has the same shape: running and not dispatched are no verdict; findings on the head are.
+  const codex = { ...item, policy: { ...item.policy, reviewProvider: 'codex', reviewerProfiles: undefined }, reviewRequest: { commentId: 601, sha: head, baseSha: item.candidate!.baseSha, policyRevision: item.policyRevision, body: '@codex review', createdAt: simulation.iso() } } as Work;
+  const codexReview = (reason: string, extra: Record<string, unknown> = {}) => ({ ...codex, observation: { ...codex.observation!, agentReview: { provider: 'codex' as const, sha: head, approved: false, reason, ...extra } } }) as Work;
+  for (const reason of ['Graphyard must dispatch a review bound to this candidate and policy', 'Codex review changed or is running; retry', 'Codex has not completed a supported review of this candidate'])
+    assert.equal(standingVerdict(codexReview(reason)), null, reason);
+  assert.equal(standingVerdict(codexReview('Codex posted review findings/output for this request; fix them and request a fresh clean review', { verdict: 'changes-requested', requestId: 601, completedAt: '2031-03-01T09:25:00.000Z' }))?.reviewer, 'codex');
+});
