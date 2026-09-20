@@ -91,8 +91,77 @@ export function signalTrackedProcesses(rootPid: number, supervisedPids: Map<numb
   }
 }
 
+/**
+ * What a supervisor watches besides its lease: the session it was launched in.
+ *
+ * A supervisor exists to run one agent under one lease. When the agent is gone the supervisor has
+ * nothing left to supervise, and a heartbeat it keeps sending is worse than no heartbeat at all —
+ * it keeps the item owned by a worker that cannot act, so nothing lapses and no replacement is
+ * dispatched. `visible` reports Herdr's view of this session and `surrender` ends the attempt on
+ * the record before the supervisor exits.
+ */
+export interface SupervisedSession {
+  /** Herdr's view of this session: `true` still reported, `false` gone, `null` not observable. */
+  visible?: () => boolean | null;
+  /** Records the cause on the assignment and releases the lease. */
+  surrender?: (cause: string) => Promise<void>;
+}
+
+const processAlive = (pid: number) => { try { process.kill(pid, 0); return true; } catch (error) { return (error as { code?: string }).code === 'EPERM'; } };
+
+/**
+ * Whether Herdr still reports the pane this supervisor was launched in.
+ *
+ * Herdr puts the pane id in the session's own environment, so the identity is exact rather than
+ * inferred from a working directory an agent may leave. A query that fails answers `null`: an
+ * unreachable Herdr is a signal that could not be collected, never an absence.
+ */
+export function herdrSessionProbe(env: NodeJS.ProcessEnv = process.env, run: (command: string, args: string[]) => string = (command, args) => String(execFileSync(command, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 10_000 }))): () => boolean | null {
+  const pane = env.HERDR_PANE_ID;
+  if (env.HERDR_ENV !== '1' || !pane) return () => null;
+  return () => {
+    try {
+      const parsed = JSON.parse(run('herdr', ['agent', 'list']));
+      const agents = (parsed?.result ?? parsed)?.agents;
+      return Array.isArray(agents) ? agents.some((agent: { pane_id?: string }) => agent?.pane_id === pane) : null;
+    } catch { return null; }
+  };
+}
+
+async function postAssignment(url: string, token: string, path: string, body: unknown) {
+  const response = await fetch(`${url.replace(/\/+$/, '')}/api/${path}`, { method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', 'Idempotency-Key': randomUUID() }, body: JSON.stringify(body), signal: AbortSignal.timeout(15_000) });
+  const text = await response.text();
+  if (!response.ok) throw new Error(`${path} refused: ${text.slice(0, 200)}`);
+}
+
+/**
+ * The worker protocol a supervisor follows when its session is gone: record the cause on the
+ * assignment, withdraw that report, then release the lease.
+ *
+ * The blocked report is the one free-text entry a worker writes to the append-only ledger, and
+ * the one Graphyard already reads back as the explanation for an attempt that ended early, so it
+ * is where the cause belongs. It is withdrawn in the same breath because a standing blocker would
+ * leave the freed item waiting for somebody to clear a condition that is already over: the event
+ * keeps the cause, and the release ends the attempt as released rather than as a silent lapse.
+ *
+ * The assignment comes from this supervisor's own `watch KEY EPOCH --` command line and its
+ * credential from its own environment, so no caller has to supply either; a supervisor that can
+ * read neither surrenders nothing and simply stops.
+ */
+export function assignmentSurrender(epoch: number, argv: string[] = process.argv, env: NodeJS.ProcessEnv = process.env, post = postAssignment) {
+  const assignment = watchAssignment(argv);
+  const url = env.GRAPHYARD_URL, token = env.GRAPHYARD_TOKEN;
+  if (!assignment || Number(assignment.epoch) !== epoch || !url || !token) return undefined;
+  return async (cause: string) => {
+    const reason = `Watch supervisor ended attempt ${epoch}: ${cause}`.slice(0, 2000);
+    await post(url, token, `work/${assignment.key}/blocked`, { epoch, reason });
+    await post(url, token, `work/${assignment.key}/blocked`, { epoch, reason: null });
+    await post(url, token, `work/${assignment.key}/release`, { epoch });
+  };
+}
+
 // The deadline uses elapsed local time and server-reported duration, not synchronized clocks.
-export async function supervise(command: string, args: string[], epoch: number, renew: () => Promise<Renewal>, options: { intervalMs?: number; graceMs?: number; shutdownPollMs?: number; shutdownTimeoutMs?: number; detached?: boolean; containment?: Containment; platform?: NodeJS.Platform; quarantine?: { establish: () => Promise<unknown>; revalidate?: () => Promise<unknown>; acknowledge?: () => Promise<unknown>; settle: () => Promise<unknown> } } = {}) {
+export async function supervise(command: string, args: string[], epoch: number, renew: () => Promise<Renewal>, options: { intervalMs?: number; graceMs?: number; shutdownPollMs?: number; shutdownTimeoutMs?: number; detached?: boolean; containment?: Containment; platform?: NodeJS.Platform; session?: SupervisedSession; quarantine?: { establish: () => Promise<unknown>; revalidate?: () => Promise<unknown>; acknowledge?: () => Promise<unknown>; settle: () => Promise<unknown> } } = {}) {
   let deadline = 0;
   async function heartbeat() {
     const started = performance.now();
@@ -110,9 +179,12 @@ export async function supervise(command: string, args: string[], epoch: number, 
   if (!detached && platform !== 'linux' && !options.containment) throw new Error(`Foreground worker supervision requires durable containment and is not supported on ${platform}`);
   const containment = options.containment ?? (!detached && platform === 'linux' ? systemdContainment(command, args) : undefined);
   if (containment && !options.quarantine) throw new Error('Foreground worker supervision requires a durable Graphyard containment quarantine');
+  const sessionVisible = options.session?.visible ?? herdrSessionProbe();
+  const surrender = options.session?.surrender ?? assignmentSurrender(epoch);
   return new Promise<number>((resolve, reject) => {
     let child: ReturnType<typeof spawn> | undefined;
     let stopping = false, pending = false, prelaunchInterrupted = false, finished = false;
+    let sessionSeen = false, scopeSeen = false;
     const supervisedPids = new Map<number, string>();
     let containmentFailure: unknown;
     let expiry: ReturnType<typeof setTimeout>;
@@ -164,6 +236,35 @@ export async function supervise(command: string, args: string[], epoch: number, 
       }, options.graceMs ?? 5000);
     }
     const armDeadline = () => { clearTimeout(expiry); expiry = setTimeout(() => stop(1), Math.max(0, deadline - performance.now())); };
+    /**
+     * Why there is nothing left to supervise, or null while the agent is still there.
+     *
+     * The child's own exit event is the ordinary path; this is the check that does not depend on
+     * it, because a supervisor that never receives it is exactly the failure this answers. An
+     * absence counts only once presence was observed: a scope that has not activated yet, or a
+     * session Herdr has not registered yet, must never read as a session that has ended.
+     */
+    const orphaned = (): string | null => {
+      if (!child?.pid) return null;
+      if (!processAlive(child.pid)) return `the agent process (pid ${child.pid}) has exited`;
+      if (containment) {
+        let empty: boolean | null = null;
+        try { empty = containment.empty(); } catch { empty = null; }
+        if (empty === false) scopeSeen = true;
+        else if (empty === true && scopeSeen) return 'the worker containment scope holds no process, so the agent has exited';
+      }
+      const visible = sessionVisible();
+      if (visible === true) sessionSeen = true;
+      else if (visible === false && sessionSeen) return 'Herdr no longer reports this agent session';
+      return null;
+    };
+    // The lease outlives several of these checks, so an orphaned supervisor is found, surrenders
+    // its assignment and stops well inside one lease period.
+    const surrenderAssignment = async (cause: string) => {
+      if (!surrender) return;
+      try { await surrender(cause); }
+      catch (error) { console.error(`Graphyard could not release the lease after the worker session ended: ${error instanceof Error ? error.message : String(error)}`); }
+    };
     process.on('SIGTERM', interrupted); process.on('SIGINT', interrupted);
     void (async () => {
       try {
@@ -208,7 +309,17 @@ export async function supervise(command: string, args: string[], epoch: number, 
         timer = setInterval(async () => {
           if (pending || stopping) return;
           pending = true;
-          try { await heartbeat(); if (!stopping) armDeadline(); }
+          try {
+            const cause = orphaned();
+            if (cause) {
+              clearInterval(timer);
+              console.error(`Graphyard worker supervision has nothing left to supervise: ${cause}. Releasing the lease and stopping.`);
+              await surrenderAssignment(cause);
+              stop(1);
+              return;
+            }
+            await heartbeat(); if (!stopping) armDeadline();
+          }
           catch { console.error('Graphyard lease cannot be renewed. Stopping worker.'); stop(1); }
           finally { pending = false; }
         }, options.intervalMs ?? 25_000);
@@ -239,7 +350,7 @@ export interface SupervisorProbeDeps {
  * demands the exact invocation shape rather than a loose match: an ordinary command that
  * happens to carry a `watch` argument must never excuse a process from the fence.
  */
-function watchAssignment(argv: string[]): { key: string; epoch: string } | null {
+export function watchAssignment(argv: string[]): { key: string; epoch: string } | null {
   const index = argv.indexOf('watch');
   if (index < 0) return null;
   const [key, epoch, separator] = argv.slice(index + 1, index + 4);
@@ -248,7 +359,7 @@ function watchAssignment(argv: string[]): { key: string; epoch: string } | null 
 
 const vanished = (error: unknown) => ['ENOENT', 'ESRCH'].includes((error as { code?: string }).code ?? '');
 const detail = (error: unknown) => (error instanceof Error ? error.message : String(error)).replace(/[\x00-\x1f\x7f]+/g, ' ').slice(0, 200);
-const scopePattern = /^graphyard-watch-[A-Za-z0-9:@._-]+\.scope$/;
+export const scopePattern = /^graphyard-watch-[A-Za-z0-9:@._-]+\.scope$/;
 const liveScope = ['active', 'activating', 'deactivating', 'reloading'];
 
 /**
