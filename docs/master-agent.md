@@ -148,28 +148,33 @@ Each cycle:
    ends the worker's lease, so a submitted item's session is closed here on the next cycle; a
    lease that lapses after submission, under a `blocked` report, or after your stopped-worker
    attestation is history (`lease.expired` with its cause), never an incident;
-2. **reclaims the disk finished assignments hold** — the dependency directories of worktrees whose
+2. **decides the open worker scope requests** — a worker that needs a file outside `plannedFiles`
+   records a structured request and keeps working; the loop asks the control plane to decide it on
+   the cycle it appears, and a request the item itself already implies is applied to the live item
+   without ending its attempt (see [scope requests the loop decides](#scope-requests-the-loop-decides));
+3. **reclaims the disk finished assignments hold** — the dependency directories of worktrees whose
    assignment is delivered, superseded by a later epoch, or untouched beyond the idle bound are
    removed, before anything in the cycle asks the host for more room, on a ten-minute cadence or
    every cycle while free space is below the threshold (see [worktree disk](#worktree-disk));
-3. **dispatches claimable work** to a healthy worker profile, through the same launcher
+4. **dispatches claimable work** to a healthy worker profile, through the same launcher
    `master dispatch` uses: the worker claims under its own identity and the loop holds no lease.
    Ready items are offered [smallest planned scope first](#conflict-avoidance) within a priority,
    and an item whose `plannedFiles` overlap a claimed or unmerged item is held rather than
    dispatched — the loop never overrides a hold; only `master dispatch --allow-overlap` does;
-4. **shepherds reviews and proofs** — the reviewer and producer sessions the control plane
+5. **shepherds reviews and proofs** — the reviewer and producer sessions the control plane
    requested for each exact head are launched on the dispatcher's own cadence (see
    [automatic dispatch at submit](#automatic-dispatch-at-submit)), a request goes to the trusted
    producer workflow when automatable proof is missing and one is configured, and anything that needs
    a two-party decision is surfaced in `master status` with its owner and next command;
-5. **invokes only the guarded merge**, when automatic merging is enabled (with it disabled, the
+6. **invokes only the guarded merge**, when automatic merging is enabled (with it disabled, the
    visible session merges each candidate the approver agent approved);
-6. **verifies the deployed SHA** against what Graphyard recorded as delivered, and for a delivery
+7. **verifies the deployed SHA** against what Graphyard recorded as delivered, and for a delivery
    whose policy sets `deploySmoke` records that observation on the item, requests the trusted smoke
    workflow once per deployed commit, and escalates a failed verdict with rollback guidance (see the
    [post-deployment smoke proof](github.md#post-deployment-smoke-proof));
-7. **records stage p50/p90** for every open stage, delivered lead time, creation-to-deployment
-   latency, and merge-to-smoke-verdict post-deploy time with the failure count.
+8. **records stage p50/p90** for every open stage, delivered lead time, creation-to-deployment
+   latency, merge-to-smoke-verdict post-deploy time with the failure count, and scope-request
+   latency with the longest request still undecided.
 
 Every action lands in `master status` under `daemon`: the current cycle, its measurements, the
 deployment observation, per-profile health, recent actions, and anything still unresolved.
@@ -262,11 +267,58 @@ next cycle:
 | `run.reclaimIdleHours` | How long a worktree may sit untouched before its dependency directories count as disposable, 0.25–720; default 3 |
 | `run.diskThresholdGb` | Free space below which `master status` raises disk pressure, 0.1–10000; default 10 |
 
+### Scope requests the loop decides
+
+A worker that finds it needs a file outside its item's `plannedFiles` records a structured request
+and keeps its lease:
+
+```sh
+node "$GRAPHYARD_CLI" scope-request GY-N EPOCH docs/master-agent.md -- The guide documents the behaviour this item changes
+```
+
+That request is state, not prose: the paths, the reason, the requester and the epoch. The loop
+asks the control plane to decide it on the cycle it appears (`POST /api/work/:id/autoscope`,
+the coordinator's only scope call), and the control plane recomputes the verdict from the item
+itself — never from what the caller claims — exactly as it recomputes containment death for
+`autosettle`. Two kinds of request are **approved**, with the implication as the audited reason:
+
+- **documentation this repository requires updating when behaviour changes** — `docs/`, `AGENTS.md`
+  and `README.md` (AGENTS.md: *"Update the relevant guide under `docs/` when behavior changes"*),
+  named file by file rather than as a whole tree;
+- **source files the item's own criteria name** — a criterion that says `src/master-daemon.ts` has
+  already put that file in the item's scope, whoever writes it.
+
+The approval is a purely additive planned-files widening applied to the live item, so the attempt
+keeps its lease and its containment fence exactly as an operator widening does
+(the same rule an operator's own additive widening follows). Everything else is **refused and
+escalated with the reason**, and the item stays blocked on its `Scope request refused: …` blocker
+until an operator decides it:
+
+- a path neither the criteria nor the documentation rule imply — that is new scope, and scope is
+  the operator's to give: `graphyard master scope GY-N REASON`;
+- a request that would drop planned paths, or one that rewrites criteria or proofs — that is
+  intent, decided by an operator and approved by an independent agent:
+  `graphyard master requirements GY-N FILE REASON`.
+
+Withdrawing the request (`scope-request GY-N EPOCH -`) lifts the refusal it earned, and so does an
+operator answering it; a blocker anyone else wrote is never touched. A request whose attempt has
+lost the lease is never decided — a fresh attempt asks afresh.
+
+The loop is measured on this. `master status` reports request-to-decision `p50`/`p90` under
+`daemon.metrics.scope` with the longest still-undecided request in `scopeOpenMs`, and the loop
+escalates when it breaks either bound: a p90 above five minutes over the last ten or more
+decisions, or any request left undecided for more than fifteen minutes — which can only mean the
+loop is not running, because a running one decides on its next cycle. Before GY-85 approving one
+of these requests took a master session running a command, and GY-82's implementation sat finished
+for 647 minutes waiting for it.
+
 ### What the loop will not do
 
 The daemon holds exactly one credential: the coordinator token. It cannot claim a lease, submit
 evidence, revise requirements, release backlog work, or approve a review, and it refuses to start
-if that credential is also allowed to produce evidence. The one fact it writes besides the guarded
+if that credential is also allowed to produce evidence. Deciding a scope request is no exception:
+the loop asks, the control plane decides and applies, and a widening the item does not already
+imply comes back refused to the loop exactly as it would to anyone else. The one fact it writes besides the guarded
 merge is its own deployment observation on a delivered item; the smoke verdict itself comes from
 the workflow's producer, never from the loop. Provider exhaustion, a failing reviewer, a
 missing manual proof, and an unhealthy worker profile are all escalations, never shortcuts. A
@@ -415,9 +467,13 @@ token; a producer session completes when every proof of its group has a trusted 
 one failed) and expires after `producerTimeoutMinutes`. Either is recorded as `failed` when
 Herdr reports it finished, gone, or blocked on a prompt for five minutes without its verdict or
 evidence — the resolution says which, and a blocked one says it ended waiting on input. A
-session whose head the control plane cancelled is closed on the next tick with its token
-withdrawn and the reason on the record — a head change cancels the in-flight sessions for the
-old head.
+reviewer session is prompted once, in place, the first time it is seen that way: the loop tells
+it to post the verdict it already judged, so a session that stopped short of posting usually
+answers the prompt instead of costing a relaunch, and the five minutes run from that first
+sight. The master never sends that prompt by hand. A session whose head the control plane
+cancelled is closed on the next tick with its token withdrawn and the reason on the record — a
+head change cancels the in-flight sessions for the old head, and a pending record for such a
+head never blocks the launch for the new one.
 
 **A failed or expired session is relaunched for the same request.** It does not strand the
 request until the head changes: the loop launches the request again as its next `attempt`
@@ -640,10 +696,13 @@ Templates: [Claude](../examples/master/claude-reviewer.json), [Cursor](../exampl
 1. verifies the exact current candidate — submitted, independently observed within the last two minutes, open, not a draft, not awaiting rework, and on a policy that expects a GitHub verdict;
 2. mints an installation token scoped to this repository, to read and review only, valid for at most an hour, and refuses a token that could write code;
 3. writes that token to a private `GH_CONFIG_DIR` outside the repository, never to a command line;
-4. launches the reviewer profile in its own Herdr tab with a read-only prompt naming the exact head, base, and policy revision, and the commit-bound command that posts the verdict;
-5. records the request in `.graphyard/reviews.json`.
+4. cancels any pending record of the same item whose head, base, or policy revision the candidate has superseded — a session for a head that no longer exists decides nothing, so it never blocks the current head's review. A pending record for the *exact* current candidate still refuses the launch: one live session per candidate;
+5. launches the reviewer profile in its own Herdr tab with a read-only prompt naming the exact head, base, and policy revision, and the commit-bound command that posts the verdict. Posting that verdict is granted to the reviewer role — the launch allows exactly that one call and the prompt says so — so the session never has to ask for it;
+6. records the request in `.graphyard/reviews.json`.
 
-`master status` reconciles pending requests: when the reviewer identity posts an `APPROVED` or `CHANGES_REQUESTED` review on that exact commit, Graphyard closes the session, removes its credential directory, and moves the record to completed. A verdict on another commit, from another identity, or a bare comment settles nothing. An unanswered request expires with its token. If Herdr cannot confirm the pane is gone, the record stays pending with the reason attached rather than claiming the credential was withdrawn.
+`master status` reconciles pending requests: when the reviewer identity posts an `APPROVED` or `CHANGES_REQUESTED` review on that exact commit, Graphyard closes the session, removes its credential directory, and moves the record to completed — whether the verdict came on the first attempt or after the loop's retry prompt. A verdict on another commit, from another identity, or a bare comment settles nothing. An unanswered request expires with its token. A session that stopped without posting is prompted once, by the dispatch loop itself, to post the verdict it already judged, through the same [confirmed delivery](#confirmed-prompt-delivery) a launch uses; one still silent after the five-minute grace is recorded as failed and the request relaunched as its next attempt (see [automatic dispatch at submit](#automatic-dispatch-at-submit)). No master ever sends that retry by hand, and no master ever edits the ledger to unstick a record.
+
+Settling a record always withdraws its credential: the session directory is removed even when Herdr could not confirm the pane is gone, because nothing revisits a settled record, so a token left there would sit on disk until it expired on its own. What an unconfirmed pane costs instead is the record's outcome. A verdict, and a superseded head, settle the record regardless — GitHub has already proven the one, and the candidate has already replaced the other — with the close failure kept on the record and shown as `attention` in `master status`. A session that merely failed or expired, which has proven nothing, stays pending with the reason attached, so the next reconcile retries the close.
 
 A reviewer session holds no Graphyard credential and no lease. Its verdict is an ordinary GitHub review: Graphyard's review gate still requires an approval of the current head from someone other than the author, and the merge gate still rechecks everything.
 
@@ -939,6 +998,7 @@ The master clears blockers and adds requirements as its operator-agent identity;
 | `master merge GY-N\|--all` | Guarded merge of authorized candidates; with automatic merging off, only candidates with an approved merge decision |
 | `master autonomy [--admin-token-stdin --apply]` | Provision the master's operator-agent and approver identities and harness rules (once, at onboarding) |
 | `master create FILE REASON`, `master release GY-N REASON`, `master unblock GY-N REASON`, `master requirements GY-N FILE REASON` | The master's own non-weakening intent, as its operator-agent identity |
+| `master scope GY-N [REASON]` | Apply a scope request the loop refused, while the attempt keeps its lease; requests the item already implies are decided by the loop ([scope requests the loop decides](#scope-requests-the-loop-decides)) |
 | `master decide GY-N ACTION [JSON\|@FILE] REASON` | Request a two-party decision: `release`, `unblock`, `requirements`, `resolve`, `attest`, `merge`, `rework`, `recover`, `grant` |
 | `master decisions GY-N` | An item's decisions with requester, approver, reasons, outcome, and refusals |
 | `master approver GY-N DECISION [KIND]` | Launch the independent approver session for one decision |

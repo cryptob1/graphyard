@@ -6,6 +6,7 @@ import { basename, dirname, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { z } from 'zod';
 import { currentEvidence, deliveryState, deploySmokeRequired, exhaustedReviewerProfiles, postDeployMs, productionLatencyMs, reviewProviderOf, reviewerProfileFor, rollbackGuidance, type ContainmentScope, type Work } from './model.js';
+import { scopeBlockedBudgetMs, scopeDecisionBudgetMs, scopeDecisionSample, type ScopeRequestState } from './model/scope.js';
 import { scopePattern, watchAssignment } from './supervisor.js';
 import type { SessionHandleInput } from './model/sessions.js';
 import { pendingBaseRefresh } from './merge-queue.js';
@@ -19,7 +20,7 @@ import { assertDispatchable, assertOutsideWorktrees, closeHerdrPane, diskExhaust
  * evidence, never calls an operator route, and reaches GitHub only through the guarded merge.
  */
 
-export const daemonActionKinds = ['close', 'dispatch', 'review', 'refresh', 'proof', 'merge', 'deployment', 'smoke', 'escalation', 'config', 'session', 'reclaim'] as const;
+export const daemonActionKinds = ['close', 'dispatch', 'review', 'refresh', 'proof', 'merge', 'deployment', 'smoke', 'escalation', 'config', 'session', 'reclaim', 'scope'] as const;
 export type DaemonActionKind = typeof daemonActionKinds[number];
 export const daemonActionSchema = z.object({
   kind: z.enum(daemonActionKinds),
@@ -48,6 +49,11 @@ export const cycleMetricsSchema = z.object({
   production: percentileSchema.default(noMeasurement),
   postDeploy: percentileSchema.default(noMeasurement),
   postDeployFailures: z.number().int().min(0).default(0),
+  // How promptly the loop answers the workers waiting on it: request-to-decision over the
+  // retained scope decisions, and the longest request still undecided at this cycle.
+  // (Optional, so a cursor written before the loop decided scope keeps parsing as it is.)
+  scope: percentileSchema.optional(),
+  scopeOpenMs: z.number().int().min(0).optional(),
 }).strict();
 export type CycleMetrics = z.infer<typeof cycleMetricsSchema>;
 
@@ -65,6 +71,12 @@ export const reclaimSummarySchema = z.object({
   errors: z.array(z.string().max(500)).max(20).default([]),
 }).strict();
 export type ReclaimSummary = z.infer<typeof reclaimSummarySchema>;
+
+export const scopeMeasurementSchema = z.object({
+  work: z.string().max(200), epoch: z.number().int().min(0), at: z.string(),
+  waitedMs: z.number().int().min(0), state: z.enum(['approved', 'refused']),
+}).strict();
+export type ScopeMeasurement = z.infer<typeof scopeMeasurementSchema>;
 
 /**
  * What the loop last saw of an assignment whose Herdr session is gone: enough for a later cycle
@@ -95,12 +107,14 @@ export const daemonStateSchema = z.object({
   config: z.object({ at: z.string(), changed: z.array(z.string().max(100)).max(100), refused: z.string().max(1000).nullable() }).strict().nullable().default(null),
   /** The last worktree reclamation: what it removed and how much room the host has. */
   reclaim: reclaimSummarySchema.nullable().default(null),
+  /** One entry per scope request this loop has decided, for the latency budget it must keep. */
+  scope: z.array(scopeMeasurementSchema).default([]),
   /** Per work item, what the loop last saw of an assignment whose Herdr session is gone. */
   orphans: z.record(z.string(), orphanObservationSchema).default({}),
 }).strict();
 export type DaemonState = z.infer<typeof daemonStateSchema>;
 
-export const retainedActions = 500, retainedMetrics = 100, profileCooldownMs = 600_000, maxProofAttempts = 3;
+export const retainedActions = 500, retainedMetrics = 100, profileCooldownMs = 600_000, maxProofAttempts = 3, retainedScopeDecisions = 200;
 /** Reclamation scans the worktree directory, so it runs on its own bounded interval, not every cycle. */
 export const reclaimIntervalMs = 600_000;
 const gigabytes = (bytes: number | null) => bytes === null ? 'an unknown amount of space' : `${(bytes / 1e9).toFixed(1)} GB`;
@@ -145,6 +159,7 @@ export function pruneDaemonState(state: DaemonState) {
     for (const [key] of resolved.sort((a, b) => Date.parse(a[1].at) - Date.parse(b[1].at)).slice(0, resolved.length - retainedActions)) delete state.actions[key];
   }
   if (state.metrics.length > retainedMetrics) state.metrics = state.metrics.slice(-retainedMetrics);
+  if (state.scope.length > retainedScopeDecisions) state.scope = state.scope.slice(-retainedScopeDecisions);
   return state;
 }
 
@@ -201,6 +216,13 @@ export function reconcilePendingActions(state: DaemonState, work: Work[], now: n
     } else if (action.kind === 'merge') {
       next.state = item?.observation?.merged || item?.stage === 'done' ? 'done' : 'failed';
       next.detail = next.state === 'done' ? 'Resumed: Graphyard observed the merge' : 'Resumed: no merge was observed; the guarded merge may be attempted again';
+    } else if (action.kind === 'scope' && action.work) {
+      // The decision lives on the item: either the control plane recorded one for the open
+      // request or it did not, and an undecided request is simply asked again next cycle.
+      const pending = item?.scopeRequest && !item.scopeRequest.decision;
+      next.state = pending ? 'failed' : 'done';
+      next.detail = pending ? 'Resumed: the scope request is still undecided and will be decided again'
+        : `Resumed: Graphyard holds the decision (${item?.scopeRequest?.decision?.state ?? 'the request was withdrawn or superseded'})`;
     } else if (action.kind === 'deployment' && action.work) {
       // Recording a deployment either landed on the delivery snapshot or it did not; a repeat of a
       // landed record is refused by Graphyard, so retrying is safe.
@@ -218,11 +240,38 @@ export function reconcilePendingActions(state: DaemonState, work: Work[], now: n
 export const dispatchKey = (work: Work) => `dispatch:${work.id}:${work.epoch}`;
 export const candidateKey = (kind: DaemonActionKind, work: Work) => `${kind}:${work.id}:${work.candidate?.sha ?? 'none'}:${work.candidate?.baseSha ?? 'none'}:${work.policyRevision}`;
 export const closeKey = (profile: WorkerProfile, pane: string) => `close:${profile.name}:${pane}`;
+/** One decision per request: the instant the worker recorded it identifies the ask. */
+export const scopeKey = (work: Work, request: ScopeRequestState) => `scope:${work.id}:${request.epoch}:${request.at}`;
 
 export function percentiles(values: number[]) {
   const sorted = [...values].sort((a, b) => a - b);
   const at = (p: number) => sorted.length ? Math.max(0, Math.round(sorted[Math.min(sorted.length - 1, Math.ceil(p / 100 * sorted.length) - 1)])) : 0;
   return { count: sorted.length, p50Ms: at(50), p90Ms: at(90) };
+}
+
+/**
+ * How the loop is keeping the promise a scope request rests on: request-to-decision percentiles
+ * over the decisions it has taken, every request still undecided with how long it has waited, and
+ * the breaches of the two bounds — p90 within five minutes once ten requests have been decided,
+ * and nothing left undecided for longer than fifteen. A breach means workers are waiting on the
+ * loop, so it is escalated with the numbers rather than left in the metrics.
+ */
+export function scopeBudget(work: Work[], decisions: ScopeMeasurement[], now: number) {
+  const measured = percentiles(decisions.map(entry => entry.waitedMs));
+  const open = work.flatMap(item => {
+    const request = item.scopeRequest;
+    return request && !request.decision ? [{ key: item.key, epoch: request.epoch, waitedMs: Math.max(0, now - Date.parse(request.at)) }] : [];
+  }).sort((a, b) => b.waitedMs - a.waitedMs);
+  // One id per breach, not per wording: the numbers in the detail move every cycle, and an
+  // escalation that changed key each time would read as a new incident every twenty seconds.
+  const breaches = [
+    ...(measured.count >= scopeDecisionSample && measured.p90Ms > scopeDecisionBudgetMs
+      ? [{ id: 'p90', detail: `Scope decisions are too slow: p90 is ${Math.round(measured.p90Ms / 1000)}s over the last ${measured.count} requests, above the ${scopeDecisionBudgetMs / 60_000}-minute budget` }] : []),
+    ...open.filter(entry => entry.waitedMs > scopeBlockedBudgetMs)
+      .map(entry => ({ id: `blocked:${entry.key}:${entry.epoch}`,
+        detail: `${entry.key} has been blocked on its scope request for ${Math.round(entry.waitedMs / 60_000)} minutes, above the ${scopeBlockedBudgetMs / 60_000}-minute bound; decide it with graphyard master scope ${entry.key} REASON` })),
+  ];
+  return { ...measured, open, longestOpenMs: open[0]?.waitedMs ?? 0, breaches, withinBudget: !breaches.length };
 }
 
 /**
@@ -347,6 +396,13 @@ export interface DaemonEffects {
   closeSession: (pane: string) => void | Promise<void>;
   dispatch: (work: Work, profile: WorkerProfile, agents: HerdrAgent[], snapshot: { work: Work[]; now: string }) => Promise<unknown>;
   requestProof: (work: Work) => void | Promise<void>;
+  /**
+   * Asks the control plane to decide the item's open scope request and returns the decided
+   * document. The loop carries no verdict of its own: it asks, and Graphyard decides from the
+   * item's own criteria. A loop wired without it simply never decides one, and every request
+   * waits for the operator exactly as it did before.
+   */
+  decideScope?: (work: Work) => Promise<Work>;
   merge: (work: Work) => Promise<unknown>;
   observeDeployment: (delivered: Work[]) => Promise<DeploymentObservation>;
   /** Records the coordinator's own deployment observation on the delivered item. */
@@ -473,7 +529,61 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
   // A pane this cycle just closed frees its profile, so health is read after the closures.
   const health = profileHealth(config.workers, credentials, effects.agents(), state, clock);
 
-  // 2. Reclaim the disk the finished assignments are holding, before anything asks for more of
+  // 2. Decide the open scope requests. A worker that needs a file its own criteria — or this
+  //    repository's documentation rule — already imply must not wait for a master session to run
+  //    a command: the control plane recomputes the decision from the item itself, and the loop
+  //    asks it to settle every open request on the cycle it first sees one. An implied additive
+  //    request is applied to the live item with its audited reason; anything wider is refused and
+  //    escalated here with that reason, and the item stays blocked until an operator decides it.
+  //    What this pass decides is kept, so the budget below measures what is still waiting rather
+  //    than what has just been answered.
+  const settled = new Map<string, Work>();
+  for (const item of open) {
+    const request = item.scopeRequest;
+    if (!effects.decideScope || !request || request.decision) continue;
+    // A request whose attempt no longer holds the lease is moot: a fresh attempt asks afresh.
+    if (!item.lease || item.lease.epoch !== request.epoch || Date.parse(item.lease.expiresAt) <= clock) continue;
+    const key = scopeKey(item, request);
+    const previous = state.actions[key];
+    if (!readyToRetry(previous, state.cycle)) continue;
+    const attempts = (previous?.attempts ?? 0) + 1;
+    await record(state, key, { kind: 'scope', work: item.key, principal: request.requestedBy, epoch: request.epoch, state: 'started',
+      detail: `Deciding ${item.key}'s scope request for ${request.paths.join(', ') || 'no path'}`, attempts, cycle: state.cycle }, now(), effects.persist);
+    try {
+      const decided = await effects.decideScope(item);
+      const decision = decided.scopeDecision;
+      if (!decision) throw new Error('The control plane answered without a decision');
+      settled.set(item.id, decided);
+      state.scope.push(scopeMeasurementSchema.parse({ work: item.key, epoch: request.epoch, at: decision.at, waitedMs: decision.waitedMs, state: decision.state }));
+      const waited = `${Math.round(decision.waitedMs / 1000)}s after ${request.requestedBy} asked`;
+      performed.push(await record(state, key, { kind: 'scope', work: item.key, principal: request.requestedBy, epoch: request.epoch, state: 'done',
+        detail: decision.state === 'approved'
+          ? `Widened ${item.key} with ${request.paths.join(', ')} ${waited}: ${decision.reason}`
+          : `Refused ${item.key}'s scope request for ${request.paths.join(', ') || 'no path'} ${waited}: ${decision.reason}`,
+        attempts, cycle: state.cycle }, now(), effects.persist));
+      if (decision.state === 'refused') {
+        const escalationKey = `escalation:scope:${item.id}:${request.at}`;
+        performed.push(await record(state, escalationKey, { kind: 'escalation', work: item.key, principal: request.requestedBy, epoch: request.epoch, state: 'done',
+          detail: `${item.key} is blocked on scope: ${request.requestedBy} asked for ${request.paths.join(', ') || 'a requirements change'} because ${request.reason}, and the loop refused it because ${decision.reason}. Decide it with graphyard master scope ${item.key} REASON, or graphyard master requirements ${item.key} FILE REASON for anything that is not purely additive`,
+          attempts: 1, cycle: state.cycle }, now(), effects.persist));
+      }
+    } catch (error) {
+      performed.push(await record(state, key, { kind: 'scope', work: item.key, principal: request.requestedBy, epoch: request.epoch, state: 'failed',
+        detail: `Could not decide ${item.key}'s scope request: ${message(error)}`, attempts, cycle: state.cycle }, now(), effects.persist));
+    }
+  }
+
+  // 2b. The promise that decision rests on: workers wait minutes, not a shift. A p90 above the
+  //     budget, or any request left undecided past the blocked bound, is escalated with the
+  //     numbers — the loop is the only thing that could have answered them.
+  const budget = scopeBudget(open.map(item => settled.get(item.id) ?? item), state.scope, clock);
+  for (const breach of budget.breaches) {
+    const key = `escalation:scope-budget:${breach.id}`;
+    if (state.actions[key]?.detail === breach.detail) continue;
+    performed.push(await record(state, key, { kind: 'escalation', work: null, principal: null, state: 'failed', detail: breach.detail, attempts: (state.actions[key]?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist));
+  }
+
+  // 3. Reclaim the disk the finished assignments are holding, before anything asks for more of
   //    it. Every attempt and every rework checks the repository out again, so without this step
   //    the host fills and the loop starts failing at whatever it happens to write next. The
   //    reclaimer removes dependency directories only: checkouts, branches and Graphyard's
@@ -498,7 +608,7 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
     }
   }
 
-  // 3. Dispatch claimable work to a healthy profile. The launcher claims under the worker's own
+  // 4. Dispatch claimable work to a healthy profile. The launcher claims under the worker's own
   //    identity; the daemon never holds a lease. An unhealthy profile is skipped, not waited on.
   //    An item whose planned files overlap a claimed or unmerged item is not claimable (the
   //    loop never overrides that; `master dispatch --allow-overlap` is the operator's call), and
@@ -542,7 +652,7 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
     }
   }
 
-  // 3b. A base branch that moved under an in-flight candidate. Nobody is asked to do anything
+  // 4b. A base branch that moved under an in-flight candidate. Nobody is asked to do anything
   //     about it: the control plane merges the new base into the candidate's own branch and
   //     decides what the review and each proof carry (see merge-queue.ts). The cycle reports
   //     what that refresh did — or the conflict that stopped it — so a pass that brought six
@@ -572,7 +682,7 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
       attempts: (state.actions[key]?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist));
   }
 
-  // 4. Shepherd reviews and proofs for submitted candidates. Graphyard dispatches provider reviews
+  // 5. Shepherd reviews and proofs for submitted candidates. Graphyard dispatches provider reviews
   //    and trusted producers publish evidence; the daemon records exactly one request per candidate
   //    and escalates what only a human or a producer may resolve.
   for (const item of open.filter(candidate => candidate.submission && candidate.candidate && !candidate.reworkRequested)) {
@@ -617,7 +727,7 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
     }
   }
 
-  // 5. Merge. The only path is the guarded command, which rechecks the exact candidate, every gate,
+  // 6. Merge. The only path is the guarded command, which rechecks the exact candidate, every gate,
   //    branch protection and the published queue tip immediately before the provider call.
   if (config.autoMerge) {
     for (const item of open.filter(candidate => candidate.stage === 'merge')) {
@@ -641,7 +751,7 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
     }
   }
 
-  // 6. Verify what is actually deployed. This is an observation, never a gate: Graphyard already
+  // 7. Verify what is actually deployed. This is an observation, never a gate: Graphyard already
   //    marked the work Done on an observed merge, and a lagging rollout must stay visible as lag.
   const delivered = snapshot.work.filter(item => item.stage === 'done' && item.delivery)
     .sort((a, b) => Date.parse(a.delivery!.mergedAt) - Date.parse(b.delivery!.mergedAt));
@@ -657,7 +767,7 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
     performed.push(await record(state, deploymentKey, { kind: 'deployment', work: null, principal: null, state: 'failed', detail: `Deployment SHA could not be verified: ${message(error)}`, attempts: (state.actions[deploymentKey]?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist));
   }
 
-  // 6b. The second confidence layer. For each delivery whose policy asks for a smoke proof: record
+  // 7b. The second confidence layer. For each delivery whose policy asks for a smoke proof: record
   //     the observation on Graphyard once the release serves its merge, ask the provider to run the
   //     trusted smoke workflow against exactly that commit, and escalate a failed verdict with
   //     rollback guidance. The loop never produces the verdict: the workflow's producer does.
@@ -702,16 +812,17 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
     }
   }
 
-  // 7. Measure. Every cycle records stage p50/p90 whether or not it acted.
+  // 8. Measure. Every cycle records stage p50/p90 whether or not it acted.
   const { stages, lead, production, postDeploy, postDeployFailures } = stageMetrics(snapshot.work, clock);
-  const metrics = cycleMetricsSchema.parse({ cycle: state.cycle, at: new Date(clock).toISOString(), durationMs: Math.max(0, Math.round(now() - startedAt)), open: open.length, actions: performed.length, stages, lead, production, postDeploy, postDeployFailures });
+  const metrics = cycleMetricsSchema.parse({ cycle: state.cycle, at: new Date(clock).toISOString(), durationMs: Math.max(0, Math.round(now() - startedAt)), open: open.length, actions: performed.length, stages, lead, production, postDeploy, postDeployFailures,
+    scope: { count: budget.count, p50Ms: budget.p50Ms, p90Ms: budget.p90Ms }, scopeOpenMs: budget.longestOpenMs });
   state.metrics.push(metrics);
   state.cycle += 1;
   state.lastCycleAt = new Date(now()).toISOString();
   if (state.lock) state.lock = { ...state.lock, heartbeatAt: state.lastCycleAt };
   pruneDaemonState(state);
   await effects.persist(state);
-  return { actions: performed, metrics, deployment: state.deployment, health };
+  return { actions: performed, metrics, deployment: state.deployment, health, scope: budget };
 }
 
 /**
@@ -870,6 +981,7 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     closeSession: pane => closeHerdrPane(pane, run),
     dispatch: (work, profile, agents, snapshot) => dispatchWork(root, work, profile, agents, run, snapshot.work, undefined, undefined, undefined, snapshot.now),
     recordSession: (work, handle) => deps.mutate(`work/${work.id}/session`, handle),
+    decideScope: work => deps.mutate(`work/${work.id}/autoscope`, { epoch: work.scopeRequest!.epoch }),
     requestProof: work => {
       const config = current();
       run('gh', ['workflow', 'run', config.run.proofWorkflow!, '--repo', config.repository, '--ref', config.baseBranch,

@@ -12,7 +12,7 @@ import { queueHistoryLimit, queueSequencingReason, type BaseRefresh, type QueueS
 import { githubFromEnv } from './github.js';
 import { regressionRefusals } from './regression-guard.js';
 import { ciFamilyAllows, ciProofFamilies, ciRunBindingSchema, ciRunRefusal, isCiProducer, refuseCiProducer, staleCiAttemptRefusal, type CiRunObservation } from './model/ci-proofs.js';
-import { liveScopeWidening } from './model/scope.js';
+import { decideScopeRequest, liveScopeWidening, scopeRefusalBlocker, type ScopeDecision } from './model/scope.js';
 import { reconcileAutoDispatch, type DispatchTransition } from './model/dispatch.js';
 import { nextAction, nextActionKinds, sameAction } from './model/next-action.js';
 import { claimAction, openActions, reconcileActions, settleAction, type ActionRow } from './model/actions.js';
@@ -64,9 +64,17 @@ const commands = {
   workspace: z.object({ epoch, host: z.string().trim().min(1).max(200), path: z.string().startsWith('/').max(1000).refine(p => !/[\u0000-\u001f]/.test(p), 'Invalid path').transform(workspacePath), branch: z.string().max(200).refine(validBranch, 'Invalid Graphyard branch name') }).strict(),
   submit: z.object({ epoch, pr: z.number().int().positive() }).strict(),
   blocked: z.object({ epoch, reason: z.string().max(2000).nullable() }).strict(),
-  // An empty `paths` list clears this attempt's open request; otherwise every path must
-  // reach outside the current planned scope, so the request is always a widening ask.
-  scope: z.object({ epoch, paths: z.array(z.string().min(1).max(500)).max(50), reason: z.string().trim().min(1).max(2000) }).strict(),
+  // An empty request clears this attempt's open one; otherwise it must ask for something the
+  // planned scope does not already carry. `paths` widens, and the two fields the loop never
+  // decides are stated as plainly as the widening is: `remove` drops planned containment and
+  // `criteria` rewrites requirements, so a request carrying either is refused with that reason
+  // rather than being impossible to say (see model/scope.ts).
+  scope: z.object({ epoch, paths: z.array(z.string().min(1).max(500)).max(50), reason: z.string().trim().min(1).max(2000),
+    remove: z.array(z.string().min(1).max(500)).max(50).optional(), criteria: z.array(criterionSchema).max(50).optional() }).strict(),
+  // The master loop asking the control plane to decide the open scope request now. It carries no
+  // verdict: the decision is recomputed here from the item's own criteria and the repository's
+  // documentation rule, exactly as `autosettle` recomputes containment death.
+  autoscope: z.object({ epoch }).strict(),
   // `scopeFiles` is the producer's declaration of what the proof depends on, in the planned-files
   // scope syntax; the merge queue carries a proof across its own authored tip only inside it.
   evidence: z.object({ proof: proofSchema, sha, baseSha: sha, policyRevision: z.number().int().positive(), result: z.enum(['pass', 'fail']), executed: z.number().int().min(0), skipped: z.number().int().min(0), url: publicArtifactUrl.optional(), artifacts: z.array(evidenceArtifact).max(30).optional(), scenarioRevision: z.number().int().positive().optional(), environment: z.string().min(1).max(100).optional(),
@@ -229,6 +237,8 @@ export class Engine {
       // Set by the requirements command: the revision was a purely additive planned-files
       // widening applied to a live attempt, recorded in history beside the intent.
       let widening = false;
+      // Set by the autoscope command: how the control plane decided the open scope request.
+      let decision: ScopeDecision | null = null;
       if (command === 'create') {
         if (actor.role === 'operator-agent') {
           authorizeOperatorCommand(actor, command, data, undefined, this.repository);
@@ -354,8 +364,12 @@ export class Engine {
         this.refuseRenewedDeferral(work, all);
         work.proofGaps = await unauthorizedProofs(db, this.principals, [...proofs, ...(deploySmokeRequired(work.policy) ? [deploySmokeProof] : [])]);
         work.formalReviewResetRequired = true; work.formalReviewBaseline = undefined;
-        // A request the widened scope fully covers is answered; a partial one stays open for the master.
-        if (work.scopeRequest && work.scopeRequest.paths.every(path => data.plannedFiles.some((scope: string) => pathScopeContains(scope, path)))) work.scopeRequest = null;
+        // A request the widened scope fully covers is answered; a partial one stays open for the
+        // master. Answering it also lifts the refusal that was blocking the item on scope.
+        if (work.scopeRequest && work.scopeRequest.paths.every(path => data.plannedFiles.some((scope: string) => pathScopeContains(scope, path)))) {
+          work.scopeRequest = null;
+          if (work.blocker?.startsWith(scopeRefusalBlocker)) work.blocker = null;
+        }
         // A revision other than a live-scope widening is a hand-off for an item already under way:
         // its timeline counts it, and the lapsed lease it discards (a live one was refused above)
         // ends that attempt at its deadline. A widening keeps the attempt, so it counts neither.
@@ -507,13 +521,52 @@ export class Engine {
       // A blocked report is a hand-off to the master or operator; the item's timeline counts it.
       if (command === 'blocked') { work.blocker = data.reason; if (data.reason) recordIntervention(work, 'blocked'); }
       if (command === 'scope') {
-        if (!data.paths.length) {
+        const asks = data.paths.length || data.remove?.length || data.criteria?.length;
+        if (!asks) {
           demand(work.scopeRequest, 'No scope request is open for this attempt');
           work.scopeRequest = null;
+          // Withdrawing the ask withdraws the refusal it earned; the item is no longer blocked on scope.
+          if (work.blocker?.startsWith(scopeRefusalBlocker)) work.blocker = null;
         } else {
           const outside = data.paths.filter((path: string) => !(work.plannedFiles ?? []).some(planned => pathScopeContains(planned, path)));
-          demand(outside.length, 'Every named path is already inside plannedFiles; no scope request is needed');
-          work.scopeRequest = { epoch: data.epoch, paths: data.paths, reason: data.reason, requestedBy: actor.id, at: now.toISOString() };
+          demand(outside.length || data.remove?.length || data.criteria?.length, 'Every named path is already inside plannedFiles; no scope request is needed');
+          // A fresh ask is undecided by construction: the loop decides it on its next cycle, and
+          // a standing refusal keeps blocking the item until that decision replaces it.
+          work.scopeRequest = { epoch: data.epoch, paths: data.paths, reason: data.reason, requestedBy: actor.id, at: now.toISOString(),
+            ...(data.remove?.length ? { remove: data.remove } : {}), ...(data.criteria?.length ? { criteria: data.criteria } : {}) };
+        }
+      }
+      if (command === 'autoscope') {
+        // The loop asks, the control plane decides. The verdict is recomputed here from the item's
+        // own criteria and this repository's documentation rule, so no caller — not even the
+        // coordinator that asked — can assert a widening the item does not already imply.
+        demand(actor.role === 'coordinator' || actor.role === 'admin', 'Coordinator permission required', 403);
+        const request = work.scopeRequest;
+        demand(request, 'No scope request is open for this item', 404);
+        demand(request!.epoch === data.epoch, 'Scope request belongs to another attempt; reload before deciding');
+        demand(!request!.decision, 'This scope request was already decided');
+        demand(work.lease && work.lease.epoch === request!.epoch && Date.parse(work.lease.expiresAt) > now.getTime(),
+          'The requesting attempt no longer holds the lease; a fresh attempt asks afresh');
+        const verdict = decideScopeRequest(work, request!);
+        decision = { state: verdict.state, reason: verdict.reason, at: now.toISOString(), decidedBy: 'graphyard',
+          waitedMs: Math.max(0, now.getTime() - Date.parse(request!.at)), paths: verdict.paths, requestedBy: request!.requestedBy, requestedAt: request!.at };
+        work.scopeDecision = decision;
+        // An applied request is answered and cleared, exactly as an operator widening clears it;
+        // a refused one stays open, carrying its refusal, because someone still has to decide it.
+        work.scopeRequest = verdict.state === 'approved' ? null : { ...request!, decision };
+        if (verdict.state === 'approved') {
+          // Non-weakening intent the item already carried: applied to the live attempt, which
+          // keeps its lease and its containment fence exactly as an operator widening would.
+          work.plannedFiles = [...new Set([...(work.plannedFiles ?? []), ...verdict.paths])];
+          work.policyRevision++;
+          work.formalReviewResetRequired = true; work.formalReviewBaseline = undefined;
+          work.observation = null; work.mergeAuthorization = null; work.reviewRequest = null;
+          if (work.blocker?.startsWith(scopeRefusalBlocker)) work.blocker = null;
+        } else {
+          // Refused and escalated: the reason is the item's blocker, so the ready gate holds it
+          // until an operator decides the scope the item does not already imply.
+          work.blocker = `${scopeRefusalBlocker}: ${verdict.reason}`;
+          recordIntervention(work, 'blocked');
         }
       }
       if (command === 'session') {
@@ -688,7 +741,9 @@ export class Engine {
         if (work.nextAction === undefined || !sameAction(work.nextAction, computed)) work.nextAction = computed;
       }
       await this.recordDispatch(db, work, now);
-      await save(db, work, actor.id, command, now, command === 'settle' ? { epoch: data.epoch } : actor.role === 'operator-agent' ? { before, intent: data, reason: data.reason ?? null, ...(command === 'requirements' ? { liveScopeWidening: widening } : {}) } : data);
+      await save(db, work, actor.id, command, now, command === 'settle' ? { epoch: data.epoch }
+        : command === 'autoscope' ? { ...data, decision, before: { plannedFiles: before?.plannedFiles ?? [], blocker: before?.blocker ?? null } }
+        : actor.role === 'operator-agent' ? { before, intent: data, reason: data.reason ?? null, ...(command === 'requirements' ? { liveScopeWidening: widening } : {}) } : data);
       if (work.submission && !postDeployment && !['heartbeat', 'release', 'claim', 'workspace'].includes(command)) await wakeJob(db, work.id);
       await db.query('INSERT INTO receipts(actor,key,fingerprint,result) VALUES($1,$2,$3,$4)', [actor.id, key, fingerprint, JSON.stringify(work)]);
       return work;
