@@ -7,7 +7,8 @@ export default function Dialog({ children, onClose }: { children: ReactNode; onC
   useEffect(() => {
     const previous = document.activeElement as HTMLElement | null;
     const element = root.current!;
-    const focusable = () => [...element.querySelectorAll<HTMLElement>('button:not(:disabled), a[href], input:not(:disabled), textarea:not(:disabled), select:not(:disabled), [tabindex="0"]')].filter(e => e.getClientRects().length);
+    // checkVisibility also excludes the body of a closed <details>, which still reports client rects.
+    const focusable = () => [...element.querySelectorAll<HTMLElement>('button:not(:disabled), a[href], input:not(:disabled), textarea:not(:disabled), select:not(:disabled), summary, [tabindex="0"]')].filter(e => e.getClientRects().length && (!e.checkVisibility || e.checkVisibility()));
     const focusFirst = () => (focusable()[0] ?? element).focus();
     focusFirst();
     const keydown = (event: KeyboardEvent) => {

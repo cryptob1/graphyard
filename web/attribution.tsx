@@ -31,9 +31,9 @@ const stateLabel: Record<string, string> = { measured: 'measured', unavailable: 
  * unknown figure is shown as unknown, never as zero, and each aggregate drills down to
  * the records behind it.
  */
-export default function AttributionSection({ request, days, canAudit }: { request: (path: string) => Promise<any>; days: number; canAudit: boolean }) {
-  const [report, setReport] = useState<Report | null>(null);
-  const [loading, setLoading] = useState(true);
+export default function AttributionSection({ request, days, canAudit, initialReport }: { request: (path: string) => Promise<any>; days: number; canAudit: boolean; initialReport?: Report }) {
+  const [report, setReport] = useState<Report | null>(initialReport ?? null);
+  const [loading, setLoading] = useState(!initialReport);
   const [error, setError] = useState('');
   const [drill, setDrill] = useState<{ metric: string; key: string | null; title: string } | null>(null);
   const [rows, setRows] = useState<any>(null);
@@ -91,7 +91,8 @@ export default function AttributionSection({ request, days, canAudit }: { reques
 
     {report && <>
       <p className="muted">Observed at {new Date(report.generatedAt).toLocaleString()} · window {new Date(report.window.from).toLocaleString()} to {new Date(report.window.to).toLocaleString()} · {report.coverage.records} ledger record(s), {report.coverage.targetChecks} target check(s), {report.coverage.requests} validation request(s) across {report.coverage.environmentsObserved.length} environment(s).</p>
-      <div className="flow-cards attribution-cards">{metrics.map(metric => <button key={metric.id} className="flow-card attribution-card" data-metric={metric.id} data-state={metric.state} onClick={() => setDrill({ metric: metric.id, key: null, title: metric.label })} aria-label={`${metric.label}: ${headline(metric)}, ${stateLabel[metric.state]}. Drill down`}>
+      {/* A metric with no data is not drawn as a card: it is named once under "Unknown, not zero" and in the table. */}
+      <div className="flow-cards attribution-cards">{metrics.filter(metric => metric.state !== 'unavailable').map(metric => <button key={metric.id} className="flow-card attribution-card" data-metric={metric.id} data-state={metric.state} onClick={() => setDrill({ metric: metric.id, key: null, title: metric.label })} aria-label={`${metric.label}: ${headline(metric)}, ${stateLabel[metric.state]}. Drill down`}>
         <span>{metric.label} <em className={`attribution-badge attribution-badge-${metric.state}`}>{stateLabel[metric.state]}</em></span>
         <strong>{headline(metric)}</strong>
         {metric.state === 'measured' && metric.n > 0 && <small>average {statistic(metric, metric.average)} · median {statistic(metric, metric.median)} · p90 {statistic(metric, metric.p90)} · n {metric.n}{metric.sparse ? ' · sparse' : ''}</small>}
