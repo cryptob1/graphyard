@@ -1,4 +1,5 @@
 import { bootstrapObligations, currentEvidence, describeQueueBinding, evidenceBindsCandidate, grantsAuthorize, inheritedObligations, pathScope, pathScopesOverlap, type BootstrapObligation, type ProofAuthority, type Stage, type Work } from './model.js';
+import { baseRefreshConflict, currentBaseRefreshCarry, pendingBaseRefresh } from './merge-queue.js';
 
 export interface IntegrationJob { work_id: string; available_at: string; locked_until: string | null; error: string | null; held_until?: string | null }
 export interface Diagnostic { kind: string; message: string; next: string }
@@ -94,8 +95,21 @@ export function diagnose(work: Work, all: Work[], now: number, jobs: Integration
   for (const obligation of inheritedObligations(work, all)) add('bootstrap-obligation', `${obligation.proof} is inherited from ${obligation.key} ${obligation.criterionId} because this item plans to touch ${obligation.contractPaths.join(', ')}`,
     'Produce trusted passing evidence for this proof; a bootstrap deferral cannot be renewed by the change that inherits it.');
   for (const proof of work.proofGaps ?? []) add('proof-authority-gap', `No principal is authorized to produce ${proof}`, 'Grant the proof name to a producer principal with `graphyard grants grant`; the acceptance gate cannot be satisfied until someone can produce it.');
-  if (work.submission && work.observation?.baseTipContained === false) add('base-behind', `Candidate ${work.candidate?.sha.slice(0, 12)} does not contain the base branch tip ${work.observation.baseTip?.slice(0, 12) ?? ''}`,
+  const refreshing = pendingBaseRefresh(work), baseConflict = baseRefreshConflict(work);
+  if (baseConflict) add('base-conflict', baseConflict, `Graphyard cannot bring this head onto the base branch itself. Resolve the conflict on the pull-request branch and push; nothing carries across the resolution, so the item takes a fresh review and fresh proofs.`);
+  else if (refreshing) add('base-behind', `Candidate ${work.candidate?.sha.slice(0, 12)} does not contain the base branch tip ${refreshing.baseTip.slice(0, 12)}; it stays bound to ${refreshing.boundBase.slice(0, 12)} while the control plane brings it onto the new tip`,
+    'Nothing to run: the reconciliation job merges the base into this branch and decides what the review and each proof carry. No sync, no rework round, and no review or proof round is requested for the move.');
+  else if (work.submission && work.observation?.baseTipContained === false) add('base-behind', `Candidate ${work.candidate?.sha.slice(0, 12)} does not contain the base branch tip ${work.observation.baseTip?.slice(0, 12) ?? ''}`,
     `No review is requested for it: run graphyard sync ${work.key} and push, or let the merge queue publish a tip that contains the base once the candidate is proven.`);
+  // What the control plane's last base refresh kept and what it re-required, each with its reason.
+  const refreshCarry = currentBaseRefreshCarry(work);
+  if (refreshCarry) {
+    const head = refreshCarry.to.sha.slice(0, 12);
+    for (const entry of [{ what: 'Approval', carried: refreshCarry.approval.carried, reason: refreshCarry.approval.reason }, ...refreshCarry.evidence.map(entry => ({ what: `Proof ${entry.proof}`, carried: entry.carried, reason: entry.reason }))]) {
+      if (entry.carried) add('base-refresh-carried', `${entry.what} carried onto refreshed head ${head}: ${entry.reason}`, 'No fresh review or proof round is required for it.');
+      else add('base-refresh-required', `${entry.what} is required afresh for refreshed head ${head}: ${entry.reason}`, entry.what === 'Approval' ? `Request an independent review of ${head}.` : `Produce trusted evidence for ${head}.`);
+    }
+  }
   // Per queued item: which bindings were carried across the Graphyard-authored tip or a
   // tree-identical base advance, and which must be produced afresh, each with its reason.
   const binding = describeQueueBinding(work, all, new Date(now));
