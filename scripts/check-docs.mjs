@@ -24,7 +24,10 @@ const generatedIndexes = [
     head: `<!-- page: Build integrations | 1 | roles, commands, leases, evidence, webhook. -->
 # Agent protocol and HTTP API
 
-All control-plane endpoints except \`/healthz\` require \`Authorization: Bearer TOKEN\`. Use HTTPS for remote machines. API credentials are not Git credentials.
+For an integration author: which protocol page answers the call you are about to make.
+
+- **Authentication:** every endpoint except \`/healthz\` requires \`Authorization: Bearer TOKEN\`; API credentials are not Git credentials
+- **Transport:** HTTPS for remote machines
 
 One topic per page; this index is generated in full.`,
     tail: '',
@@ -35,7 +38,7 @@ One topic per page; this index is generated in full.`,
     sections: ['Start here', 'Operate Graphyard', 'Build integrations', 'Understand or contribute', 'Maintainer and historical records'],
     head: `# Graphyard documentation
 
-Choose one path; the reference guides are there when a gate or integration needs deeper investigation. This index is generated in full.`,
+For every reader: which guide to open for the task in hand — choose one path, and use the reference guides when a gate or integration needs deeper investigation. This index is generated in full.`,
     tail: 'Historical records explain past decisions, not current setup.',
   },
 ];

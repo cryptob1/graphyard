@@ -12,12 +12,17 @@ GRAPHYARD_ATTESTOR_TOKEN_FILE=/etc/graphyard/attestor.token \
 
 ## The attestor verifies authority itself
 
-It holds a **read-only** Graphyard credential of its own — role `reader`, no proof scope, never the runner's or collector's — for one call, `GET /api/validation/attempt/REQUEST_ID`. It reads twice, and both reads gate execution: before provisioning, the plan's `grant` must be exactly the authority Graphyard dispatched; after the runner reports acknowledgement, that authority must still stand with `state: running`, an acknowledged attempt and an unexpired lease. The pipe handshake is a sequencing signal, never authority to execute, so no container starts after the collector observed settlement.
+It holds a **read-only** Graphyard credential of its own for one call, `GET /api/validation/attempt/REQUEST_ID`. It reads twice; both reads gate execution:
+
+- **Credential:** role `reader`, no proof scope, never the runner's or collector's
+- **Before provisioning:** the plan's `grant` must be exactly the authority Graphyard dispatched
+- **After the runner reports acknowledgement:** that authority must still stand with `state: running`, an acknowledged attempt and an unexpired lease
+- **Pipe handshake:** a sequencing signal, never authority to execute, so no container starts after the collector observed settlement
 
 ## Limits of this path
 
-- The target must be immutable and operator-configured; a URL from arbitrary pull-request output is not acceptable input.
-- Trace, screenshot and video capture are unimplemented under the protection policy and refused, so failure diagnosis relies on the data-minimised step trace and the target's own logs.
-- The attestor, the Docker daemon and the collector share one host, because preflight measures mounted bytes on the attestor's own filesystem; a remote execution endpoint is refused, and the three identities stay separate.
+- The target must be immutable and operator-configured; a URL from arbitrary pull-request output is unacceptable input.
+- Trace, screenshot and video capture are unimplemented under the protection policy and refused; failure diagnosis relies on the data-minimised step trace and the target's own logs.
+- The attestor, Docker daemon and collector share one host: preflight measures mounted bytes on the attestor's own filesystem; a remote execution endpoint is refused; the three identities stay separate.
 - Container isolation is asserted here: a boundary is a claim about this executor's configuration, not a proof against hostile code.
 - Settlement is verified through the container runtime, which cannot settle external side effects: use approved test accounts and fresh isolated resources, or refuse dispatch.

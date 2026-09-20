@@ -1,6 +1,7 @@
 // The documented surface. Condensing the guides may remove repetition and rationale, never a
 // name a reader has to be able to find: every CLI command and flag, every environment variable
-// the server reads, every operator-agent capability, gate, proof family and refusal trigger.
+// the server reads, every operator-agent capability, gate, proof family and refusal trigger,
+// every work command and every HTTP route the server registers.
 //
 // Each set is extracted from the code that defines it rather than from a list kept by hand, so
 // a surface added in source fails this check until the documentation names it.
@@ -76,6 +77,68 @@ export function proofFamilies(root = repositoryRoot) {
   return schema ? schema[1].split('|') : [];
 }
 
+/** The keys of the engine's `const commands = {…}` map: every `POST /api/work/:id/COMMAND`. */
+export function workCommands(root = repositoryRoot) {
+  const body = read(root, 'src/engine.ts').match(/\nconst commands = \{\n([\s\S]*?)\n\} as const;/);
+  return body ? [...body[1].matchAll(/^ {2}([a-z]+):/gm)].map(match => match[1]) : [];
+}
+
+/**
+ * Every spelling a compact path stands for. The guides write `[…]` for an optional part, `(a|b)`
+ * and `{a,b}` for alternatives, and `:id` or an upper-case word (`UUID`, `GY-N`, `REQUEST_ID`)
+ * for a placeholder segment, so `GET /api/validation[/capacity|/attempt/REQUEST_ID]` documents
+ * `/api/validation`, `/api/validation/capacity` and `/api/validation/attempt/*`.
+ */
+export function expandPath(path) {
+  const open = path.search(/[[({]/);
+  if (open < 0) return [path.split('/').map(segment => /^(:.+|[A-Z][A-Z0-9_-]*)$/.test(segment) ? '*' : segment).join('/')];
+  const closer = { '[': ']', '(': ')', '{': '}' }[path[open]];
+  let depth = 0, close = open;
+  for (; close < path.length; close++) {
+    if ('[({'.includes(path[close])) depth++;
+    else if ('])}'.includes(path[close]) && --depth === 0) break;
+  }
+  if (path[close] !== closer) return [];
+  const alternatives = [], inner = path.slice(open + 1, close);
+  let start = 0;
+  for (let index = 0, nested = 0; index <= inner.length; index++) {
+    if ('[({'.includes(inner[index])) nested++;
+    else if ('])}'.includes(inner[index])) nested--;
+    else if (index === inner.length || (!nested && inner[index] === (closer === '}' ? ',' : '|'))) { alternatives.push(inner.slice(start, index)); start = index + 1; }
+  }
+  if (closer === ']') alternatives.push('');
+  return [...new Set(alternatives.flatMap(alternative => expandPath(path.slice(0, open) + alternative + path.slice(close + 1))))];
+}
+
+/**
+ * Every route a module under src/server/routes registers, one entry per concrete path: a regex
+ * path is rewritten into the guides' own notation and expanded, a capture of one free segment
+ * becoming `*`. A pattern that is not anchored at its end guards a prefix and is no endpoint.
+ */
+export function httpRoutes(root = repositoryRoot) {
+  const routes = new Set();
+  for (const file of readdirSync(join(root, 'src/server/routes')).filter(name => name.endsWith('.ts')).sort()) {
+    for (const [, method, literal, pattern] of read(root, join('src/server/routes', file)).matchAll(/method: '([A-Z*]+)', path: (?:'([^']+)'|\/((?:\\.|\[(?:\\.|[^\]\\])*\]|[^/\\\n[])+)\/)/g)) {
+      if (pattern && !pattern.endsWith('$')) continue;
+      const path = literal ?? pattern.replace(/^\^|\$$/g, '').replace(/\\\//g, '/').replace(/\((?:\[\^\/\]\+|\\d\+|\[a-z\]\+)\)/g, 'ID').replace(/\(\?:((?:[^()]|\([^()]*\))*)\)\?/g, '[$1]');
+      for (const expanded of expandPath(path)) routes.add(`${method === '*' ? 'GET' : method} ${expanded}`);
+    }
+  }
+  return [...routes].sort();
+}
+
+/** Every `METHOD /path` the pages spell, expanded the same way; `GET|POST /path` names both methods. */
+export function documentedRoutes(pages) {
+  const documented = new Set();
+  for (const { text } of pages) {
+    for (const [, methods, path] of text.matchAll(/\b((?:GET|POST)(?:\|(?:GET|POST))?) (\/(?:api\/|healthz)[\w:/.*|()[\]{},?=&-]*)/g)) {
+      const bare = path.replace(/\?[\w=&.-]*/g, '').replace(/[.,]+$/, '');
+      for (const method of methods.split('|')) for (const expanded of expandPath(bare)) documented.add(`${method} ${expanded}`);
+    }
+  }
+  return documented;
+}
+
 /** One entry per name the documentation must contain, with the source that defines it. */
 export function surface(root = repositoryRoot, help) {
   return [
@@ -86,14 +149,16 @@ export function surface(root = repositoryRoot, help) {
     ...gateNames(root).map(name => ({ kind: 'gate', name })),
     ...proofFamilies(root).map(name => ({ kind: 'proof family', name: `${name}:` })),
     ...refusalTriggers(root).map(name => ({ kind: 'refusal trigger', name })),
+    ...workCommands(root).map(name => ({ kind: 'work command', name: `\`${name}\`` })),
+    ...httpRoutes(root).map(name => ({ kind: 'http route', name })),
   ];
 }
 
 /** Every surface entry no page mentions, with the kind that defines it. */
 export function missing(root = repositoryRoot, help) {
-  const pages = documentation(root);
+  const pages = documentation(root), routes = documentedRoutes(pages);
   return surface(root, help)
-    .filter(entry => !pages.some(page => page.text.includes(entry.name)))
+    .filter(entry => entry.kind === 'http route' ? !routes.has(entry.name) : !pages.some(page => page.text.includes(entry.name)))
     .map(entry => `${entry.kind} ${entry.name} is documented nowhere`);
 }
 

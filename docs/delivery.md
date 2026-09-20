@@ -7,7 +7,7 @@ For an integrator recording what production runs: which identity may write each 
 
 | Record | Written by | Meaning |
 | --- | --- | --- |
-| Environment `delivery` policy | `admin`, as an environment definition revision | Freshness bound for a verified interval; whether selection needs an approval |
+| Environment `delivery` policy | `admin`, as an environment definition revision | Freshness bound for a verified interval; whether selection needs approval |
 | Release build | `producer` with a `builder` registration | Source → artifact manifest for one environment, independently established |
 | Release revision | `admin`, or a `promoter` with a current lease | Immutable manifest, source and explicit membership |
 | Approval | `admin` | Binds one release revision, manifest hash, build and policy revision |
@@ -19,7 +19,7 @@ For an integrator recording what production runs: which identity may write each 
 
 ## Environment policy
 
-Add `delivery` to an environment definition; the defaults are a 300-second freshness bound and a required approval.
+Add `delivery` to an environment definition; defaults: 300-second freshness bound, required approval.
 
 ```json
 {
@@ -32,7 +32,7 @@ Add `delivery` to an environment definition; the defaults are a 300-second fresh
   "immutable": true,
   "services": ["api", "web"],
   "resources": ["production-smoke-account"],
-  "delivery": { "freshnessSeconds": 300, "approvalRequired": true }
+  "delivery": {"freshnessSeconds": 300, "approvalRequired": true}
 }
 ```
 
@@ -91,7 +91,7 @@ The build producer attests the manifest through `POST /api/delivery/build`:
 
 ## Observe
 
-An observer reads its provider outside any Graphyard transaction and submits what it measured to `POST /api/delivery/observe`:
+An observer reads its provider outside any Graphyard transaction, submitting what it measured to `POST /api/delivery/observe`:
 
 ```json
 {
@@ -114,15 +114,19 @@ An observer reads its provider outside any Graphyard transaction and submits wha
 
 ## Verification
 
-Every two seconds the server folds at most fifty new observations into each environment's coverage and re-evaluates, resuming from a stored cursor so an interrupted sweep skips none; `graphyard delivery sweep` drains a backlog sooner. Coverage keeps, per service, the merged intervals in which every listed instance matched the expected digest under measured identity, plus the latest observed state.
+- **Sweep:** every two seconds the server folds at most fifty new observations into each environment's coverage and re-evaluates, resuming from a stored cursor so an interrupted sweep skips none
+- **`graphyard delivery sweep`:** drains a backlog sooner
+- **Coverage, per service:** the merged intervals where every listed instance matched the expected digest under measured identity, plus the latest observed state
+
+States:
 
 - `unselected`: No expected release
-- `unobserved`: Some required service has no authoritative observation for this generation
-- `mismatched`, `unknown`, `unhealthy`, `incomplete`: The latest observation of some service is in that state; a mixed-version rollout is `mismatched` until it converges
-- `no-common-interval`: Every service matched at some point, but never at a common instant
-- `stale`: A common interval exists, but ended longer ago than the freshness bound
-- `verified`: The latest common interval covers the whole manifest and is within the bound
-- `degraded`: Verified earlier in this generation, and a later observation no longer matches
+- `unobserved`: A required service lacks an authoritative observation for this generation
+- `mismatched`, `unknown`, `unhealthy`, `incomplete`: Some service's latest observation is in that state; a mixed-version rollout is `mismatched` until it converges
+- `no-common-interval`: Every service matched at some point, never at a common instant
+- `stale`: A common interval ended longer ago than the freshness bound
+- `verified`: The latest common interval covers the whole manifest within the bound
+- `degraded`: Verified earlier in this generation; a later observation no longer matches
 
 ## Inspect
 

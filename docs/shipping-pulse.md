@@ -7,14 +7,30 @@ A repository view, not a worker scorecard: no rankings, lines of code, effort es
 
 ## Source and definitions
 
-Every value comes from the append-only `events` ledger. A delivery counts only from the first `github.observed` event whose immutable payload carries an accepted `delivery`, exact pull request, exact merge commit and provider merge timestamp; work snapshots, claims, submissions and lease activity never count, and an item is delivered once, decided across the whole ledger before any window applies.
+Every value comes from the append-only `events` ledger.
 
-**Clocks.** GitHub's merge timestamp, the repository clock and a provider's clock are related only by measurement. A delivery records `delivery.mergedAt` as GitHub reported it and `delivery.mergedAtRepository`, that instant carried onto the repository clock using the *lower bound* of the offset measured at merge verification, which refuses an offset wider than twenty seconds; every window, bucket and interval uses the repository instant, and older deliveries fall back to the provider timestamp.
+- **A delivery counts** only from the first `github.observed` event whose immutable payload carries an accepted `delivery`, exact pull request, exact merge commit and provider merge timestamp
+- **Never counted:** work snapshots, claims, submissions and lease activity
+- **Delivered once:** decided across the whole ledger before any window applies
 
-**Intent-to-merge** runs from the earliest `create` event to the accepted merge timestamp; the median is the ordinary middle value, and records missing an endpoint or ordered wrongly are excluded rather than fabricated, with both sample sizes reported.
+**Clocks.** GitHub's merge timestamp, the repository clock and a provider's clock are related only by measurement. A delivery records:
 
-**PR-to-production** runs from GitHub's observed pull-request `createdAt`, splits at the merge, and ends at the earliest successful production deployment independently recording containment of that exact merge SHA. Each deployment observation carries `clockOffset`, its measured bracket relative to the repository clock; ingestion refuses a bracket wider than twenty seconds, an inverted one, or one placing the clocks more than thirty days apart. A deployment counts as post-merge when its latest bound reaches the merge instant, which clamps its lower bound, so a duration is never negative and is published only to the measurement precision of its endpoints.
+- `delivery.mergedAt`: as GitHub reported it
+- `delivery.mergedAtRepository`: that instant carried onto the repository clock using the *lower bound* of the offset measured at merge verification, which refuses an offset wider than twenty seconds
+
+Every window, bucket and interval uses the repository instant; older deliveries fall back to the provider timestamp.
+
+**Intent-to-merge** runs from the earliest `create` event to the accepted merge timestamp.
+
+- **Median:** the ordinary middle value
+- **Records missing an endpoint or ordered wrongly:** excluded, never fabricated, with both sample sizes reported
+
+**PR-to-production** runs from GitHub's observed pull-request `createdAt`, splits at the merge, ends at the earliest successful production deployment independently recording containment of that exact merge SHA.
+
+- **`clockOffset`:** each deployment observation's measured bracket relative to the repository clock
+- **Ingestion refuses:** a bracket wider than twenty seconds, an inverted one, or one placing the clocks more than thirty days apart
+- **Post-merge:** a deployment counts when its latest bound reaches the merge instant, which clamps its lower bound, so a duration is never negative, published only to the measurement precision of its endpoints
 
 ## Bounds and states
 
-`GET /api/shipping-pulse` is authenticated and not offered to operator agents, whose scoped API cannot serve a repository-wide aggregate, so its navigation entry is hidden rather than leading to a denial.
+`GET /api/shipping-pulse` is authenticated and not offered to operator agents, whose scoped API cannot serve a repository-wide aggregate, so its navigation entry is hidden, not leading to a denial.

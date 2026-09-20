@@ -7,49 +7,56 @@ For every reader and guide: one definition and one canonical usage per term.
 
 ### 1. Human operator (human authority)
 
-The person administering a Graphyard installation, holding an `admin` credential that declares `sessionKind: "human"`, usually the GitHub repository administrator too. Only three decisions wait for this person ([who decides](#who-decides)); every other is made by an agent and approved by an [independent agent](operator-automation.md#two-party-decisions), though a declared human session may make any directly.
-
-**Canonical usage:** *human operator*; bare *operator* always means this person, *administrator* the same person in a GitHub or deployment context. Never *operator* for the scoped operator agent, never *user* for anyone, never *ask the operator to approve* for a two-party decision an approver agent applies.
+- **Who:** administers a Graphyard installation, usually the GitHub repository administrator too.
+- **Credential:** `admin`, declaring `sessionKind: "human"`.
+- **Decides:** only three decisions ([who decides](#who-decides)); every other is an agent's, approved by an [independent agent](operator-automation.md#two-party-decisions); a declared human session may make any directly.
+- **Canonical usage:** *human operator*; bare *operator* always means this person, *administrator* the same person in a GitHub or deployment context.
+- **Never:** *operator* for the scoped operator agent, *user* for anyone, *ask the operator to approve* for a two-party decision an approver agent applies.
 
 ### 2. AI agent
 
-A language-model program reading and writing through an agent runtime. "Agent" says what kind of program it is, not what it may do: authority comes only from the credential it holds.
+A language-model program reading and writing through an agent runtime. "Agent" names the kind of program, not what it may do: authority comes only from its credential.
 
-**Canonical usage:** *agent* alone only when the role does not matter; otherwise name it — *worker*, *master*, *approver*, *slice lead*, *reviewer*, *proof producer*, *operator agent*.
+**Canonical usage:** *agent* alone only when the role does not matter; otherwise name it: *worker*, *master*, *approver*, *slice lead*, *reviewer*, *proof producer*, *operator agent*.
 
 ### 3. Agent session (Herdr-managed session or runtime)
 
-One running instance of an agent inside a runtime, with a transcript, a process and a lifetime. Not a dashboard sign-in, which keeps a token in browser session storage, and not `sessionKind`, a declaration on a credential saying whether a human or an AI holds it.
-
-**Canonical usage:** *agent session* or *session*; *runtime* for the software hosting sessions, *dashboard sign-in* for the browser.
+- **Is:** one running instance of an agent inside a runtime, with a transcript, a process and a lifetime.
+- **Is not:** a dashboard sign-in, keeping a token in browser session storage; nor `sessionKind`, a credential's declaration of whether a human or an AI holds it.
+- **Canonical usage:** *agent session* or *session*; *runtime* for the software hosting sessions, *dashboard sign-in* for the browser.
 
 ### 4. Principal, role, and credential
 
-A *principal* is an identity Graphyard authenticates: the `id` in `GRAPHYARD_PRINCIPALS` or the operator-agent registry. Its *role* is its authority class — `admin`, `coordinator`, `slice-lead`, `worker`, `producer`, `reader`, `operator-agent` — and its *credential* is the secret proving it. Ownership, evidence trust and every refusal attach to the principal, never to a runtime or display name.
-
-**Canonical usage:** *principal*, *role*, *token* or *credential*. One principal per concurrent session.
+- ***Principal*:** an identity Graphyard authenticates: the `id` in `GRAPHYARD_PRINCIPALS` or the operator-agent registry.
+- ***Role*:** its authority class: `admin`, `coordinator`, `slice-lead`, `worker`, `producer`, `reader`, `operator-agent`.
+- ***Credential*:** the secret proving it.
+- **Attach to the principal, never a runtime or display name:** ownership, evidence trust and every refusal.
+- **Canonical usage:** *principal*, *role*, *token* or *credential*. One principal per concurrent session.
 
 ### 5. Worker lease and worktree
 
-A *lease* is time-limited ownership of one work item by one worker principal at one *epoch*: a heartbeat renews it, `complete`, release or expiry ends it, and every claim raises the epoch. The *assigned worktree* is the Git worktree registered as the assignment's workspace `(host ID, absolute path)` with a globally reserved branch.
-
-**Canonical usage:** *lease*, *epoch*, *assigned worktree*; a *workspace* is the registered `(host, path)`, a *worktree* the Git checkout there.
+- ***Lease*:** time-limited ownership of one work item by one worker principal at one *epoch*.
+- **Lifecycle:** a heartbeat renews it; `complete`, release or expiry ends it; every claim raises the epoch.
+- ***Assigned worktree*:** the Git worktree registered as the assignment's workspace `(host ID, absolute path)` with a globally reserved branch.
+- **Canonical usage:** *lease*, *epoch*, *assigned worktree*; *workspace* for the registered `(host, path)`, *worktree* for the Git checkout there.
 
 ### 6. Independent reviewer and proof producer
 
-A *reviewer* is a GitHub identity approving the exact candidate head, neither the pull-request author nor the control-plane App, holding no Graphyard credential. A *proof producer* is a `producer` principal — usually a CI workflow or trusted runner — whose live grant authorizes exact proof names and whose evidence binds to the candidate head, base and policy revision. Both are *independent*: never an implementer, never a slice lead, never the worker's credential.
-
-**Canonical usage:** *reviewer*, *proof producer*; *reviewer/proof producer* only when a sentence covers both. Never *the tester* or *QA*: evidence trust is a granted credential, not a job title.
+- ***Reviewer*:** a GitHub identity approving the exact candidate head, neither the pull-request author nor the control-plane App, holding no Graphyard credential.
+- ***Proof producer*:** a `producer` principal (usually a CI workflow or trusted runner) whose live grant authorizes exact proof names and whose evidence binds to the candidate head, base and policy revision.
+- ***Independent*:** both; never an implementer, never a slice lead, never the worker's credential.
+- **Canonical usage:** *reviewer*, *proof producer*; *reviewer/proof producer* only when a sentence covers both.
+- **Never:** *the tester* or *QA*: evidence trust is a granted credential, not a job title.
 
 ### 7. Graphyard control plane
 
 The server, Postgres database, dashboard and CLI recording ownership, requirements, candidates, evidence, gate decisions and merge authorization; its gates are deterministic evaluations, never a model's judgment.
 
-**Canonical usage:** *Graphyard* or *the control plane*. It *records*, *evaluates*, *refuses*, *observes* and *authorizes*; it never *runs*, *supervises* or *prompts* a session.
+**Canonical usage:** *Graphyard* or *the control plane*. It *records*, *evaluates*, *refuses*, *observes* and *authorizes*; never *runs*, *supervises* or *prompts* a session.
 
 ### 8. Herdr runtime
 
-The session supervisor that launches, shows and stops agent sessions, and the first packaged runtime integration: it reports whether a session is alive, never deciding ownership, evidence or progression.
+The session supervisor launching, showing and stopping agent sessions, and the first packaged runtime integration, reporting whether a session is alive, never deciding ownership, evidence or progression.
 
 **Canonical usage:** *Herdr* or *the Herdr runtime*; name other runtimes by product (*Claude Code*, *Codex*, *Cursor*, *opencode*) or collectively *agent runtimes*.
 
@@ -67,7 +74,8 @@ The session supervisor that launches, shows and stops agent sessions, and the fi
 
 ## Who decides
 
-The master requests a two-party decision with `master decide GY-N ACTION REASON`; the approver applies it with `master approve GY-N DECISION REASON` from its own session.
+- **Master requests a two-party decision:** `master decide GY-N ACTION REASON`
+- **Approver applies it, from its own session:** `master approve GY-N DECISION REASON`
 
 | Decision | Made by | Approved by |
 | --- | --- | --- |
@@ -86,7 +94,7 @@ The master requests a two-party decision with `master decide GY-N ACTION REASON`
 
 ## Diagram legend
 
-Every repo-native diagram uses this key, which is also drawn inside each SVG.
+Every repo-native diagram uses this key, also drawn inside each SVG.
 
 - **Amber rounded box:** Human operator
 - **Green rounded box:** AI agent session with one role and one credential

@@ -19,6 +19,8 @@ For a client reading Graphyard, and what bounds each read.
 - `GET /api/validation[/capacity|/definitions|/candidate/UUID|/attempt/REQUEST_ID]`: Requests, runner capacity, definition history, one candidate, or the attempt authority a host attestor reads
 - `GET /api/shipping-pulse`: The repository [delivery pulse](../shipping-pulse.md); not offered to operator agents
 
-Every attribution endpoint is a read: the ledger is written only by validation and observation ingest inside their own transactions, so no credential moves a request, attempt, result or evidence record through these routes, and a `POST` to one is not found.
+## Bounds
 
-Flow analytics reads are bounded in window, work items, records scanned, buckets, drill-down rows and payload size, report when a bound was reached, and are not offered to operator agents. The list API is unpaginated and is not an analytics export: event payload snapshots reconstruct historical revisions, and archival export pagination is future work.
+- **Attribution endpoints:** reads only — the ledger is written by validation and observation ingest inside their own transactions, so no credential moves a request, attempt, result or evidence record through them, and a `POST` to one is not found
+- **Flow analytics:** bounded in window, work items, records scanned, buckets, drill-down rows and payload size; reports when a bound was reached; not offered to operator agents
+- **The list API:** unpaginated and not an analytics export — event payload snapshots reconstruct historical revisions, and archival export pagination is future work
