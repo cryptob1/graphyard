@@ -10,7 +10,7 @@ import { scopeBlockedBudgetMs, scopeDecisionBudgetMs, scopeDecisionSample, type 
 import { scopePattern, watchAssignment } from './supervisor.js';
 import { baseRefreshConflict, pendingBaseRefresh } from './merge-queue.js';
 import { dispatchOrder } from './coordination.js';
-import { agentOwner, agentToken, approvedMerge, approverSessionName, assertDispatchable, assertOutsideWorktrees, assessContainment, closeHerdrPane, containmentPhase, decisionInput, diskExhaustion, diskThresholdBytes, dispatchWork, inspectWorkerCredentials, launchApprover, listHerdrAgents, mergeExecutor, observeHerdrAgents, reclaimAdvice, reclaimIdleMs, reclaimWorktrees, writeFailure, type AttentionItem, type ConfigReload, type ContainmentAssessment, type HerdrAgent, type MasterConfig, type WorkerProfile, type WorktreeReclaimReport } from './master.js';
+import { agentOwner, agentToken, approvedMerge, approverSessionName, assertDispatchable, assertOutsideWorktrees, assessContainment, closeHerdrPane, containmentPhase, decisionInput, diskExhaustion, diskThresholdBytes, dispatchWork, inspectWorkerCredentials, launchApprover, listHerdrAgents, mergeExecutor, mergedWithoutAuthorization, observeHerdrAgents, reclaimAdvice, reclaimIdleMs, reclaimWorktrees, unauthorizedMergeViolation, writeFailure, type AttentionItem, type ConfigReload, type ContainmentAssessment, type HerdrAgent, type MasterConfig, type MergeExecutor, type WorkerProfile, type WorktreeReclaimReport } from './master.js';
 
 /**
  * The durable coordination loop. Every step is a pure decision over one Graphyard snapshot plus
@@ -1375,7 +1375,16 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
 
   // 6. Merge. The only path is the guarded command, which rechecks the exact candidate, every gate,
   //    branch protection and the published queue tip immediately before the provider call.
-  for (const item of open.filter(candidate => candidate.stage === 'merge')) {
+  //    An item GitHub already merged with no valid execution behind it is not a candidate: the
+  //    merge cannot be re-run, so the loop names the violation and the two-party decision that
+  //    reconciles it once, instead of asking the guarded merge every cycle.
+  for (const item of open.filter(mergedWithoutAuthorization)) {
+    const key = `${candidateKey('escalation', item)}:merged`;
+    if (state.actions[key]?.state === 'done') continue;
+    performed.push(await record(state, key, { kind: 'escalation', work: item.key, principal: null, state: 'done', detail: `${item.key} was merged on GitHub (${item.observation!.mergeSha?.slice(0, 12) ?? 'merge commit unknown'} at ${item.observation!.mergedAt ?? 'an unrecorded time'}) without a valid merge execution: ${unauthorizedMergeViolation}. It stays at the merge stage until a two-party decision reconciles it: graphyard master decide ${item.key} merge REASON, then graphyard master approver ${item.key} DECISION; Graphyard re-checks the record at the merge cutoff and delivers on the approved decision`, attempts: 1, cycle: state.cycle }, now(), effects.persist));
+  }
+  const mergeCandidates = open.filter(candidate => candidate.stage === 'merge' && !mergedWithoutAuthorization(candidate));
+  for (const item of mergeCandidates) {
     const key = candidateKey('merge', item);
     const previous = state.actions[key];
     if (!readyToRetry(previous, state.cycle)) continue;
@@ -1666,7 +1675,12 @@ export async function runDaemon(config: MasterConfig, state: DaemonState, effect
 export function daemonEffects(root: string, source: MasterConfig | (() => MasterConfig), deps: {
   snapshot: () => Promise<{ work: Work[]; now: string }>;
   mutate: (path: string, data: unknown, requestId?: string) => Promise<any>;
-  executionOwner: string;
+  /**
+   * The merge executor this daemon process is: its coordinator principal and an instance minted
+   * once per process. Every guarded merge the loop runs presents it, so an execution this process
+   * acquired is resumed by this process alone and never by an interactive merge or a second loop.
+   */
+  executor: MergeExecutor;
   run?: (command: string, args: string[]) => string;
   fetcher?: typeof fetch;
 }): DaemonEffects {
@@ -1701,7 +1715,7 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
       run('gh', ['workflow', 'run', config.run.proofWorkflow!, '--repo', config.repository, '--ref', config.baseBranch,
         '-f', `pr=${work.submission!.pr}`, '-f', `work_id=${work.id}`, '-f', `policy_revision=${work.policyRevision}`]);
     },
-    merge: work => mergeExecutor(current(), deps.snapshot, deps.mutate, deps.executionOwner, randomUUID(), run)(work),
+    merge: work => mergeExecutor(current(), deps.snapshot, deps.mutate, deps.executor, randomUUID(), run)(work),
     observeDeployment: delivered => observeDeployment(current(), delivered, run),
     recordDeployment: (work, observation) => deps.mutate(`work/${work.id}/deployment`, { sha: observation.sha, mergeSha: work.delivery!.mergeSha, source: observation.source, observedAt: observation.observedAt }),
     requestSmoke: work => {

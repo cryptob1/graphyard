@@ -240,7 +240,7 @@ function plane(scripts: Script[], options: { hostId?: string; host?: { root: str
 
   // The loop's own session effects, as `master run` wires them, against the simulated Herdr. An
   // exercise that asks for no decision needs no repository for the launcher to load.
-  const wired = options.host ? daemonEffects(options.host.root, options.host.master, { snapshot: async () => ({ work: [], now: iso() }), mutate: async () => { throw new Error('not used'); }, executionOwner: 'unattended-cycle', run: sessions.run }) : null;
+  const wired = options.host ? daemonEffects(options.host.root, options.host.master, { snapshot: async () => ({ work: [], now: iso() }), mutate: async () => { throw new Error('not used'); }, executor: { principal: 'coordinator', instance: 'unattended-cycle' }, run: sessions.run }) : null;
   const effects = (overrides: Partial<DaemonEffects> = {}): DaemonEffects => ({
     agents: () => wired ? wired.agents() : [],
     ...(wired ? { herdr: wired.herdr } : {}),

@@ -871,6 +871,12 @@ A master merge succeeds only when Graphyard has a current authorization for the 
 
 The command never uses an admin bypass. Graphyard marks Done only after independently observing the matching merge. Direct or late merges remain visible violations.
 
+### One executor per execution
+
+A merge execution is owned by the executor instance that acquired it, never by the coordinator principal alone. The durable loop is one instance for the life of its process; each `master merge` command is one instance named by its request id, so a replay under the same `GRAPHYARD_REQUEST_ID` resumes its own execution. Every merge step names the instance, and the engine records the owner as `principal#instance` and refuses `merge-verify`, `merge-commit` and above all `merge-cancel` from any other instance, even under the same credential.
+
+The consequence for operating: running `master merge GY-N` beside a running loop is safe, and one of the two stands down. Whichever executor reads an execution another instance holds refuses before acquiring anything — `GY-N does not have a current all-gates-passing merge authorization for this executor: merge execution … is held by graphyard-master#daemon-… until …; this executor stands down without cancelling it` — and a confirmed `Merge execution was already verified` or `already committed` refusal mid-flight makes the executor stand down the same way, leaving the execution intact for its owner or for the observation that reconciles it. A stand-down is not a fault and cancels nothing; do not retry it against the holding instance, and do not resolve it by hand. An execution its owner never finishes lapses at its expiry and reconciliation clears it; the next cycle attempts the candidate afresh.
+
 Before any candidate is read, the broker compares the merge protocol it speaks with the one the server reports in `GET /api/status` (`build.protocol`; a server that reports none is protocol 1). A mismatch refuses with `server runs <sha>, CLI expects <sha>: deploy main first` — the deployment has not served the commit the CLI runs, typically because the container failed to start — instead of failing later with an invalid gate verification. The durable loop makes the same check at start-up and before every guarded merge. Deploy main (see [merged but not deployed](operations.md#merged-but-not-deployed)) and retry; never downgrade the CLI to match a stale server.
 
 Use `master init --no-auto-merge` when each merge needs an explicit approval. The approval is an agent's: request `master decide GY-N merge REASON`, the approver agent approves it for the exact candidate, and `master merge` refuses any candidate without an applied merge decision matching its head, base and policy revision (`master merge --all` skips them). This preference does not weaken the checks.
@@ -983,6 +989,14 @@ gate, a proof, an identity rule or a lease rule for the number.
 
 ## Recovery
 
+### Merged without a valid execution
+
+An item GitHub merged while no valid execution covered the merge — the execution was cancelled before the merge cutoff, expired, or never existed — records the violation `Merge observed without a prior authorization for this candidate` and stays out of Done; every later observation re-derives that verdict from immutable history, so no cycle recovers it on its own. The merge cannot be re-run, so this is the one place a lost race would cost a delivery for good. `master status` therefore names such an item as the violation it is, with the merge commit and time, the owner `master`, and the recovery command; the row carries `merged` (`at`, `sha`, `violation`, and the last `refusal`), `counts.mergedUnreconciled` counts them apart from `counts.mergeCandidates`, and the loop records one escalation naming the recovery instead of offering the item to the guarded merge every cycle.
+
+The recovery is a two-party decision: `master decide GY-N merge REASON`, then the independent approver (`master approver GY-N DECISION`). It must be requested after the merge — a merge approval given before the merge is not a judgement of it. On the next observation Graphyard re-checks the record as it stood at the recorded merge cutoff: the merge authorization for that exact head, base and policy revision, every gate passed, no violation standing, every required proof's trusted evidence live at that instant, and a GitHub observation less than two minutes old. When that holds, the item is delivered on the decision: the delivery cites `authorizationRevision` and `evidenceAsOf` from the historical snapshot, carries `reconciliation` (the decision, requester, approver, both reasons, the cutoff and the judgement), and the ledger records `merge.reconciled`. When it does not, nothing is delivered: the item records `Reconciliation by decision … refused: …` with every reason, once, the ledger records `merge.reconciliation.refused`, and the row's attention line carries the refusal. Such an item stays where it is; deciding it again without a reason the refusal names changes nothing.
+
+### Dead worker or provider change
+
 For a dead worker or provider change:
 
 1. stop the old worker and supervisor;
@@ -1035,7 +1049,7 @@ The master clears blockers and adds requirements as its operator-agent identity;
 | `master init --token-stdin [--browser-profile PROFILE]` | Install the operating mode; name the operator's browser profile |
 | `master environments [--create KINDS] [--apply]` | Discover or create agent environments, report login and quota, generate profiles from the logged-in ones |
 | `master start KIND` | Launch the visible master session with its harness rules |
-| `master status` | Work truth, session health, reviews, queue, `schedule` (dispatch order, overlap holds, high-conflict scopes), per-candidate `conflicts`, per-row `dispatch` (requested reviews and producers), `disk` (free space and what a reclaim would return), and `administration` (recent browser actions, pending sudo code) |
+| `master status` | Work truth, session health, reviews, queue, `schedule` (dispatch order, overlap holds, high-conflict scopes), per-candidate `conflicts`, per-row `dispatch` (requested reviews and producers), per-row `merged` (an observed merge no execution authorized, with its recovery), `disk` (free space and what a reclaim would return), and `administration` (recent browser actions, pending sudo code) |
 | `master dispatch GY-N PROFILE [--allow-overlap]` | Invite a worker to claim ready work; `--allow-overlap` dispatches over a planned-file overlap hold |
 | `master producer add FILE` | Add a proof-producer launch profile with its own producer credential |
 | `master producer replace FILE` | Replace the producer profile of the same name, verified like `add` |
@@ -1048,7 +1062,7 @@ The master clears blockers and adds requirements as its operator-agent identity;
 | `master browser protection [--dry-run]` | Reconcile branch protection through the browser |
 | `master harness [KIND] [--apply]` | Generate the master's own harness permissions |
 | `master config FIELD=VALUE…` | Tune the settings the master owns (run cadence, workflows, deployment, reviewer profile, producer timeout, quota ceiling, `accounts:PROFILE=a,b`); `autoMerge` and credential paths stay operator-only |
-| `master merge GY-N\|--all` | Guarded merge of authorized candidates; with automatic merging off, only candidates with an approved merge decision |
+| `master merge GY-N\|--all` | Guarded merge of authorized candidates as one executor instance; with automatic merging off, only candidates with an approved merge decision; stands down from an execution the loop holds |
 | `master autonomy [--admin-token-stdin --apply]` | Provision the master's operator-agent and approver identities and harness rules (once, at onboarding) |
 | `master create FILE REASON`, `master release GY-N REASON`, `master unblock GY-N REASON`, `master requirements GY-N FILE REASON` | The master's own non-weakening intent, as its operator-agent identity |
 | `master scope GY-N [REASON]` | Apply a scope request the loop refused, while the attempt keeps its lease; requests the item already implies are decided by the loop ([scope requests the loop decides](#scope-requests-the-loop-decides)) |
