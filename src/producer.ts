@@ -1,11 +1,13 @@
 import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
-import { resolve } from 'node:path';
+import { dirname, resolve } from 'node:path';
 import { z } from 'zod';
-import { accountLaunch, atomicPrivateWrite, autonomousSession, closeHerdrPane, createdHerdrTab, deliverPrompt, herdrJson, loadMasterConfig, prepareSessionHarness, privateFile, readProducerCredential, selectAccount, sharedGitDirectory, stopCreatedHerdrTab, type EnvironmentProbe, type PromptDelivery, type HerdrAgent, type MasterConfig, type ProducerProfile, type SessionRetryReport } from './master.js';
+import { accountLaunch, allocateManagedCheckout, atomicPrivateWrite, autonomousSession, closeHerdrPane, createdHerdrTab, deliverPrompt, herdrJson, loadMasterConfig, prepareSessionHarness, privateFile, readProducerCredential, selectAccount, settleCheckout, sharedGitDirectory, stopCreatedHerdrTab, writeFailure, type EnvironmentProbe, type PromptDelivery, type HerdrAgent, type MasterConfig, type ProducerProfile, type SessionRetryReport } from './master.js';
 import { implementerIdentities, type Work } from './model.js';
 import type { DispatchRequest } from './model/dispatch.js';
+import { reclaimSessionCheckouts, removeSessionCheckout, sessionCheckout, worktreeRoot, type CheckoutReclaimReport, type FilesystemProbe, type SessionCheckout } from './install/worktree-root.js';
+import { readReviewLedger } from './reviewer.js';
 
 /**
  * Producer sessions launched for the control plane's producer requests (model/dispatch.ts).
@@ -13,10 +15,12 @@ import type { DispatchRequest } from './model/dispatch.js';
  * A producer session is the proof counterpart of a reviewer session: one exact head, one proof
  * group, one principal whose evidence the control plane trusts by its grants and never by what
  * the session says. The session holds the producer's own credential file (a path in its
- * environment, never a value on a command line), works in a detached worktree it creates
- * outside every Graphyard worktree, and submits each proof with the exact head, base and policy
- * revision it was launched for. The ledger here records launch, completion and outcome per
- * session, which is what `master status` reports as running per candidate and since when.
+ * environment, never a value on a command line), works in a detached worktree it creates in the
+ * session directory Graphyard allocated for it under the managed worktree root — on durable
+ * storage, outside every Graphyard worktree, removed when the session resolves — and submits
+ * each proof with the exact head, base and policy revision it was launched for. The ledger here
+ * records launch, completion and outcome per session, which is what `master status` reports as
+ * running per candidate and since when.
  */
 
 const sha40 = z.string().regex(/^[0-9a-f]{40}$/i);
@@ -42,6 +46,10 @@ export const producerRecordSchema = z.object({
   resolution: z.string().min(1).max(500).optional(),
   closedAt: z.string().min(1).max(40).optional(),
   closeFailure: z.string().min(1).max(500).optional(),
+  /** The session directory under the managed worktree root; removed when the session resolves. */
+  checkout: z.string().min(1).max(1200).optional(),
+  /** Why the checkout could not be removed at settlement; the reclaim pass takes it back. */
+  checkoutFailure: z.string().min(1).max(500).optional(),
 }).strict();
 export type ProducerRecord = z.infer<typeof producerRecordSchema>;
 export const producerLedgerSchema = z.object({ version: z.literal(1), producers: z.array(producerRecordSchema).max(400).default([]) }).strict();
@@ -107,15 +115,21 @@ export function independentProducerProfiles(work: Work, profiles: ProducerProfil
   return profiles.filter(profile => !implementers.has(profile.principal));
 }
 
-export function producerPrompt(config: Pick<MasterConfig, 'repository' | 'cliPath'>, binding: ProducerBinding, profile: Pick<ProducerProfile, 'principal'>) {
-  const worktree = `/tmp/graphyard-proof-${binding.key.toLowerCase()}-${binding.sha.slice(0, 7)}`;
-  const evidenceFile = (proof: string) => `${worktree}-${proof.replace(/[^a-zA-Z0-9]+/g, '-')}.evidence.json`;
+/**
+ * `checkout` is the session directory a launch allocated under the managed worktree root. Without
+ * one the prompt names the directory a launch from this checkout would allocate, so what is
+ * previewed is always a path under the configured root.
+ */
+export function producerPrompt(config: Pick<MasterConfig, 'repository' | 'cliPath'> & { run?: MasterConfig['run'] }, binding: ProducerBinding, profile: Pick<ProducerProfile, 'principal'>,
+  checkout: SessionCheckout = sessionCheckout(worktreeRoot(process.cwd(), config), 'proof', binding.key, binding.sha, binding.requestId)) {
+  const worktree = checkout.worktree;
+  const evidenceFile = (proof: string) => resolve(checkout.directory, `${proof.replace(/[^a-zA-Z0-9]+/g, '-')}.evidence.json`);
   return `You are an independent Graphyard proof producer for ${config.repository}, principal ${profile.principal}. Produce trusted evidence for work item ${binding.key} (pull request #${binding.pr}) at exact head ${binding.sha} against base ${binding.baseSha} under policy revision ${binding.policyRevision}, for the ${binding.group} proof group: ${binding.proofs.join(', ')}. `
     + `Your Graphyard credential is the file named by GRAPHYARD_TOKEN_FILE and is used only by node ${config.cliPath}; never print, copy, cat, or echo it or any other credential, and never read .graphyard/connection.json, .graphyard/credentials.json, .env, or anything under ~/.config. `
-    + `Work in a detached worktree of the exact head, never in this checkout and never under .graphyard/worktrees: git fetch origin ${binding.sha} && git worktree add --detach ${worktree} ${binding.sha}. Install and build there, then run what establishes each proof — start from the tests and scripts named for the proof (grep the proof name under tests/ and scripts/) and the acceptance criteria in node ${config.cliPath} status ${binding.key} — with every GRAPHYARD_* and HERDR_* variable unset for the project's own test runs and a free GRAPHYARD_TEST_PORT. `
+    + `Work in a detached worktree of the exact head, created only at the path Graphyard allocated for this session under its managed worktree root — never in this checkout, never under .graphyard/worktrees and never under a temporary directory: git fetch origin ${binding.sha} && git worktree add --detach ${worktree} ${binding.sha}. Install and build there, then run what establishes each proof — start from the tests and scripts named for the proof (grep the proof name under tests/ and scripts/) and the acceptance criteria in node ${config.cliPath} status ${binding.key} — with every GRAPHYARD_* and HERDR_* variable unset for the project's own test runs and a free GRAPHYARD_TEST_PORT. `
     + 'Do not edit, commit, push, rebase or merge the candidate, do not claim Graphyard work, do not post a review, and never weaken, skip or narrow a test to make a proof pass. '
     + `For each proof write a JSON file such as ${evidenceFile(binding.proofs[0])} of the form {"proof":"${binding.proofs[0]}","sha":"${binding.sha}","baseSha":"${binding.baseSha}","policyRevision":${binding.policyRevision},"result":"pass"|"fail","executed":N,"skipped":0,"environment":"<runtime and how it was produced>","scopeFiles":["<paths the proof depends on>"]} — exactly this sha, baseSha and policyRevision, executed as the number of cases actually run, and a failing or incomplete run submitted as result fail rather than omitted — and submit it with node ${config.cliPath} evidence ${binding.key} FILE. `
-    + `When every proof of the group is submitted, remove the worktree with git worktree remove --force ${worktree}, print a one-paragraph summary naming each proof and its result, and stop; Graphyard closes this session once it observes the evidence. `
+    + `Keep everything this session writes — the install, build output, evidence files — inside ${checkout.directory}; Graphyard removes that directory when the session ends. When every proof of the group is submitted, remove the worktree with git worktree remove --force ${worktree}, print a one-paragraph summary naming each proof and its result, and stop; Graphyard closes this session once it observes the evidence. `
     + autonomousSession('submit pass or fail evidence for every proof of the group', `submit that proof as result fail with executed as the cases that ran, putting the blocked command and its error in environment`);
 }
 
@@ -125,6 +139,8 @@ export async function launchProducer(root: string, work: Work, request: Dispatch
   /** How the profile's agent accounts are checked before the launch, and how its prompt is confirmed. */
   probe?: EnvironmentProbe;
   prompt?: PromptDelivery;
+  /** How the managed worktree root's volume is read; the kernel's own answer by default. */
+  filesystem?: FilesystemProbe;
 } = {}) {
   const now = dependencies.now ?? (() => new Date());
   const config = await loadMasterConfig(root);
@@ -142,32 +158,39 @@ export async function launchProducer(root: string, work: Work, request: Dispatch
   if (agents.some(agent => agent.name === profile.agentName)) throw new Error(`Producer agent ${profile.agentName} is already visible in Herdr`);
   await readProducerCredential(root, profile.credentialFile);
   const selected = await selectAccount(config, 'producer', profile, { ...dependencies.probe, work: work.key });
-  // A producer builds in a detached worktree under /tmp that commits into the repository's Git directory.
-  const launch = accountLaunch(profile, selected.account, { writable: ['/tmp', sharedGitDirectory(root)].filter((path): path is string => !!path) });
+  // A producer builds in a detached worktree that commits into the repository's Git directory. Its
+  // session directory is allocated under the managed worktree root — durable storage with room
+  // left, outside every worktree — and is the only place beside the Git directory it may write.
+  const id = randomUUID();
+  const checkout = await allocateManagedCheckout(root, config, 'proof', binding.key, binding.sha, id, dependencies.filesystem);
+  const launch = accountLaunch(profile, selected.account, { writable: [checkout.directory, sharedGitDirectory(root)].filter((path): path is string => !!path) });
   // The producer loads its own role rules, never the master's. The harness follows the account's
   // runtime, so a cross-runtime failover keeps its role rules.
-  const harness = await prepareSessionHarness(root, config, { role: 'producer', kind: launch.kind, profile: profile.name, credentialFiles: [profile.credentialFile] });
   let pane: string | undefined, tabId: string | undefined;
   try {
+    const harness = await prepareSessionHarness(root, config, { role: 'producer', kind: launch.kind, profile: profile.name, credentialFiles: [profile.credentialFile] });
     const environment = { ...launch.environment, GRAPHYARD_URL: config.url, GRAPHYARD_TOKEN_FILE: profile.credentialFile, GRAPHYARD_HOST_ID: config.hostId, GRAPHYARD_PRODUCER: `${binding.key}@${binding.sha}` };
     const created = createdHerdrTab(herdrJson(['tab', 'create', ...(config.herdrWorkspace ? ['--workspace', config.herdrWorkspace] : []), '--cwd', root,
       '--label', `${binding.key} ${binding.group} proofs · ${profile.agentName}`, ...Object.entries(environment).flatMap(([name, value]) => ['--env', `${name}=${value}`]), '--no-focus'], dependencies.run));
     pane = created.pane; tabId = created.tab;
     herdrJson(['agent', 'start', profile.agentName, '--kind', launch.kind!, '--pane', created.pane, '--', ...launch.args, ...harness.args], dependencies.run);
-    deliverPrompt(profile.agentName, producerPrompt(config, binding, profile), dependencies.run, dependencies.prompt);
+    deliverPrompt(profile.agentName, producerPrompt(config, binding, profile, checkout), dependencies.run, dependencies.prompt);
   } catch (error) {
+    // A launch that never became a session leaves no checkout behind.
+    await removeSessionCheckout(root, dirname(checkout.directory), checkout.directory).catch(() => {});
     const malformedTab = (error as any)?.herdrTab as string | undefined;
     if (pane || tabId || malformedTab) try { stopCreatedHerdrTab(pane, tabId ?? malformedTab, dependencies.run); }
       catch { throw new Error(`${error instanceof Error ? error.message : 'Producer launch failed'}; Herdr could not confirm cleanup of the created tab`); }
-    throw error;
+    // A launch that failed for want of room says so, with the path and the reclaim command.
+    throw writeFailure(error, `Launching the ${binding.key} producer session (${String((error as Error)?.message ?? error).split('\n')[0]})`, checkout.directory);
   }
   const requestedAt = now();
-  const record: ProducerRecord = producerRecordSchema.parse({ id: randomUUID(), requestId: request.id, attempt: prior.length + 1, key: binding.key, pr: binding.pr, sha: binding.sha, baseSha: binding.baseSha, policyRevision: binding.policyRevision,
+  const record: ProducerRecord = producerRecordSchema.parse({ id, requestId: request.id, attempt: prior.length + 1, key: binding.key, pr: binding.pr, sha: binding.sha, baseSha: binding.baseSha, policyRevision: binding.policyRevision,
     group: binding.group, proofs: binding.proofs, profile: profile.name, principal: profile.principal, agentName: profile.agentName, pane: pane ?? null,
-    requestedAt: requestedAt.toISOString(), expiresAt: new Date(requestedAt.getTime() + config.run.producerTimeoutMinutes * 60_000).toISOString(), state: 'pending', outcome: Object.fromEntries(binding.proofs.map(proof => [proof, 'missing'])) });
+    requestedAt: requestedAt.toISOString(), expiresAt: new Date(requestedAt.getTime() + config.run.producerTimeoutMinutes * 60_000).toISOString(), state: 'pending', outcome: Object.fromEntries(binding.proofs.map(proof => [proof, 'missing'])), checkout: checkout.directory });
   await saveProducerLedger(root, { ...ledger, producers: [...ledger.producers, record] });
   return { producer: record.id, requestId: request.id, attempt: record.attempt, work: binding.key, pr: binding.pr, sha: binding.sha, baseSha: binding.baseSha, policyRevision: binding.policyRevision, group: binding.group, proofs: binding.proofs,
-    profile: profile.name, principal: profile.principal, agentName: profile.agentName, pane: record.pane, expiresAt: record.expiresAt, approvals: launch.plan.approvals,
+    profile: profile.name, principal: profile.principal, agentName: profile.agentName, pane: record.pane, checkout: checkout.directory, expiresAt: record.expiresAt, approvals: launch.plan.approvals,
     account: selected.account ? { environment: selected.account.name, kind: selected.account.kind, quota: selected.health?.quota ?? null, skipped: selected.skipped } : null,
     recorded: 'the launch is recorded; master status reconciles the evidence and closes the session' };
 }
@@ -225,11 +248,28 @@ export async function reconcileProducers(root: string, config: MasterConfig, wor
     try { if (record.pane && (agent || agents === null)) closeHerdrPane(record.pane, run); }
     catch (error) { closeFailure = `Herdr could not close pane ${record.pane}: ${error instanceof Error ? error.message : 'unknown reason'}`; }
     record.closeFailure = closeFailure;
-    if (!closeFailure) { record.state = next.state; record.resolution = next.resolution; record.closedAt = now.toISOString(); }
+    if (!closeFailure) {
+      // The session is gone, so its checkout goes with it — whatever the outcome. One that cannot
+      // be removed is said so on the record and taken back by the next reclaim pass.
+      const failure = await settleCheckout(root, config, record.checkout);
+      if (failure) record.checkoutFailure = failure; else delete record.checkoutFailure;
+      record.state = next.state; record.resolution = next.resolution; record.closedAt = now.toISOString();
+    }
     changed++;
   }
   if (changed) await saveProducerLedger(root, ledger);
   return { producers: ledger.producers, changed };
+}
+
+/**
+ * The reclaim pass over the managed worktree root: every session directory no pending producer or
+ * reviewer record owns is removed. Settlement removes a session's own checkout, so what this finds
+ * was left by a session whose master died before it could settle.
+ */
+export async function reclaimCheckouts(root: string, config: MasterConfig, options: { now?: number; graceMs?: number; probe?: FilesystemProbe } = {}): Promise<CheckoutReclaimReport> {
+  const [producers, reviews] = await Promise.all([readProducerLedger(root), readReviewLedger(root)]);
+  const live = [...producers.producers, ...reviews.reviews].filter(record => record.state === 'pending' && record.checkout).map(record => record.checkout!);
+  return reclaimSessionCheckouts(root, worktreeRoot(root, config), live, { ...options, failure: writeFailure });
 }
 
 export function summarizeProducers(records: ProducerRecord[]) {

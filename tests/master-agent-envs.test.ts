@@ -283,7 +283,7 @@ test('integration:agent-quota-failover — every launch checks login and quota, 
     const produceStart = produceCrossCalls.find(args => args[0] === 'agent' && args[1] === 'start')!;
     assert.equal(produceStart[4], 'codex', 'the session runs the account\'s runtime, not the profile\'s');
     const produceTail = produceStart.slice(produceStart.indexOf('--') + 1);
-    assert.deepEqual(produceTail, ['--ask-for-approval', 'never', '--sandbox', 'workspace-write', '-c', 'sandbox_workspace_write.network_access=true', '--add-dir', '/tmp', '--add-dir', sharedGitDirectory(root)]);
+    assert.deepEqual(produceTail, ['--ask-for-approval', 'never', '--sandbox', 'workspace-write', '-c', 'sandbox_workspace_write.network_access=true', '--add-dir', producedCross.checkout, '--add-dir', sharedGitDirectory(root)]);
     assert.equal(produceTail.includes('--setting-sources'), false, 'no Claude harness flags ride a Codex command line');
 
     const review = { id: 'request-review', kind: 'review', provider: 'github', sha: 'a'.repeat(40), baseSha: 'b'.repeat(40), policyRevision: 2, pr: 68, state: 'requested', requestedAt: new Date().toISOString(), reason: 'r' } as any;

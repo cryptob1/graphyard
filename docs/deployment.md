@@ -146,6 +146,17 @@ Upgrade with `helm upgrade graphyard deploy/helm/graphyard --set image.tag=X.Y.Z
 
 The chart's behaviour is exercised, not asserted: `deploy/helm/exercise.sh IMAGE` installs it on the current cluster with the evaluation database, runs `helm test`, seeds an assignment under lease through the API, upgrades to another image and checks that the ledger and its epoch survive the roll, takes a backup with the CronJob, uninstalls and deletes the database volume, reinstalls empty and restores the backup with a Job from the same image, then reads the ledger back. `.github/workflows/helm.yml` runs it on a kind cluster.
 
+## Agent hosts: the managed worktree root
+
+The control plane holds no checkout, but every host that runs `graphyard master run` does: assignment worktrees under `.graphyard/worktrees`, and the ephemeral proof and review checkouts under the **managed worktree root**. Put that root on durable storage with room for the sessions you run at once — about 200 MB per live proof session after its install — and never on `/tmp`, which is a tmpfs on many distributions: checkouts there are held in memory and share one quota with everything else on the host.
+
+- The root defaults to `worktrees/REPOSITORY-ID` under `$GRAPHYARD_DATA_HOME` (default `~/.local/share/graphyard`). Set `GRAPHYARD_DATA_HOME` for the account that runs the loop to move all of an installation's data, or `run.worktreeRoot` in `.graphyard/master.json` to move the root alone; both must be absolute, and the root must sit outside every worktree of the repository.
+- `graphyard master init` refuses a root on a tmpfs or ramfs, and one whose volume has less than `run.worktreeRootMinFreeGb` (default 2) free, before it writes anything. Every launch repeats the check.
+- A service unit for the loop must leave the root visible and writable: no `PrivateTmp`-style private mount over it, no `ProtectHome` when it lives under the home directory, and the path in `ReadWritePaths` when the unit is otherwise read-only.
+- Checkouts are removed when their session resolves, and the loop reclaims any a dead session left. `graphyard master status` raises an attention item — with `graphyard master run --once`, the command that reclaims immediately — when the volume falls below the minimum or the root reaches four fifths of `run.worktreeRootBudgetGb` (default 10), which covers a user quota the volume's free space does not show.
+
+See [the managed worktree root](master-agent.md#the-managed-worktree-root) for what is created there and when it is removed.
+
 ## Replicas and availability
 
 API replicas share Postgres. Coordination locks and job leases live in the database; there is no sticky session requirement. Startup migrations acquire the same coordination lock and commit transactionally. For the MVP, migration DDL is additive/idempotent; future schema changes must use explicit ordered migrations before rollout.
