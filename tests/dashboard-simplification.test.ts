@@ -359,13 +359,13 @@ test('unit:home-numbers-reconcile — every home number counts one named thing a
   assert.equal(numbers.open, 7);
   assert.equal(numbers.byPhase.shipped, 0, 'delivered items are never in a tile or the open strip');
   assert.equal(phases.filter(p => p !== 'shipped').reduce((sum, p) => sum + numbers.byPhase[p], 0), numbers.open, 'the stage strip sums to Open');
-  assert.equal(numbers.building, numbers.byPhase.building);
-  assert.equal(numbers.needsWorker, numbers.byPhase['needs-worker']);
+  // The row is the only per-stage count: no field aliases a phase under a second name.
+  assert.deepEqual(Object.keys(numbers).sort(), ['byPhase', 'open', 'shippedThisWeek', 'stuck']);
   // The lapsed claim (GY-12, stored stage "build") and the blocked item are waiting for a worker; only Alex is building.
   assert.equal(find('GY-12').stage, 'build');
   assert.equal(phaseOf(find('GY-12'), NOW), 'needs-worker');
-  assert.equal(numbers.building, 1);
-  assert.equal(numbers.needsWorker, 3);
+  assert.equal(numbers.byPhase.building, 1);
+  assert.equal(numbers.byPhase['needs-worker'], 3);
   // Stuck counts items, not reasons: GY-17 has one blocker but its item refuses several gates.
   assert.equal(numbers.stuck, 1);
   assert.ok(find('GY-17').gates.flatMap(g => g.reasons).length > 1);
