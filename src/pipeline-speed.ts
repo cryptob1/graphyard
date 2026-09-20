@@ -28,6 +28,17 @@ export interface PipelineTimeline {
   reworkRounds: number;
   /** Hand-offs to a master or operator: blocked reports, and requirements revisions of an item under way. */
   interventions: { blocked: number; requirements: number };
+  /** Present once the timeline was reconstructed from the ledger for an item that predates it. */
+  backfill?: TimelineBackfill;
+}
+/**
+ * What a reconstruction read. `retained` is false when the item's own creation event is no longer
+ * in the ledger, so the timeline starts mid-life and its figures are a floor, not a measurement;
+ * `truncated` is true when the item has more retained events than one reconstruction reads.
+ */
+export interface TimelineBackfill {
+  at: string; source: 'ledger'; events: number; fromEvent: string | null; toEvent: string | null;
+  retained: boolean; truncated: boolean;
 }
 declare module './model/work.js' { interface Work { pipeline?: PipelineTimeline } }
 
@@ -85,6 +96,95 @@ export function recordIntervention(work: Work, kind: keyof PipelineTimeline['int
   timeline.interventions[kind] += 1;
 }
 
+/** One ledger row as the events table stores it; only these four columns decide a timeline. */
+export interface LedgerEntry { seq: number | string; kind: string; payload: any; created_at: Date | string }
+const instant = (value: Date | string) => value instanceof Date ? value : new Date(value);
+
+/**
+ * Rebuild an item's timeline from its own history.
+ *
+ * Every lifecycle command wrote the work document it produced into the append-only ledger, so an
+ * item that predates the timeline still carries one — unread. This replays those rows through the
+ * very functions the engine calls, in ledger order, so a reconstruction and a live timeline are
+ * the same arithmetic over the same facts, and a delivery that happened before the timeline
+ * shipped is measured rather than reported as unmeasured forever.
+ *
+ * A lease that vanished between two consecutive documents lapsed at its own deadline, exactly as
+ * reconciliation would have recorded it. A requirements revision that kept the lease was a live
+ * scope widening, which is not a hand-off.
+ */
+export function reconstructTimeline(events: LedgerEntry[]): PipelineTimeline {
+  const shadow = { pipeline: emptyTimeline(), lease: null, submission: null } as unknown as Work;
+  for (const event of events) {
+    const snapshot: Work | undefined = event.payload?.work;
+    const details = event.payload?.details ?? {};
+    // The instant the command decided, not the instant its row reached the table: a saved
+    // document stamps `updatedAt` from the transaction clock, and a raw ledger entry carries its
+    // own `at`. Both are what the live timeline used, so a reconstruction reproduces it exactly.
+    const at = instant(snapshot?.updatedAt ?? details.at ?? event.created_at);
+    const held = shadow.lease;
+    if (event.kind === 'claim') {
+      if (held) endLapsedAttempt(shadow, held, at);
+      if (snapshot?.lease) { shadow.lease = snapshot.lease; beginAttempt(shadow, snapshot.lease, at); }
+    } else if (event.kind === 'submit') {
+      shadow.submission = snapshot?.submission ?? { epoch: details.epoch ?? held?.epoch ?? 0, pr: details.pr ?? 0 };
+      recordSubmission(shadow, details.epoch ?? shadow.submission!.epoch, at);
+      shadow.lease = null;
+    } else if (event.kind === 'release') {
+      endAttempt(shadow, details.epoch ?? held?.epoch ?? 0, 'released', at);
+      shadow.lease = null;
+    } else if (event.kind === 'rework') {
+      recordRework(shadow, at);
+      shadow.lease = null;
+    } else if (event.kind === 'blocked') {
+      if (details.reason) recordIntervention(shadow, 'blocked');
+    } else if (event.kind === 'requirements') {
+      // The revision that kept its lease widened planned files for the attempt under way: it
+      // hands nothing to anybody. Every other revision ends the attempt and is a hand-off.
+      const widening = !!(held && snapshot?.lease && snapshot.lease.epoch === held.epoch);
+      if (!widening) {
+        if (held) endLapsedAttempt(shadow, held, at);
+        recordIntervention(shadow, 'requirements');
+        shadow.lease = null;
+      }
+    }
+    // A `lease.expired` row needs no case of its own: the command that wrote it records the end
+    // itself (`rework`), or the document it wrote next no longer carries the lease, which the
+    // snapshot comparison below closes at the lease's own deadline exactly as reconciliation does.
+    if (snapshot) {
+      if (shadow.lease && (!snapshot.lease || snapshot.lease.epoch !== shadow.lease.epoch)) endLapsedAttempt(shadow, shadow.lease, at);
+      shadow.lease = snapshot.lease ?? null;
+      if (snapshot.submission) shadow.submission = snapshot.submission;
+    }
+  }
+  return shadow.pipeline!;
+}
+
+/**
+ * The timeline to keep for an item that was just reconstructed. Whatever a lifecycle command
+ * recorded as it happened stands: the reconstruction only fills what was never recorded, and a
+ * count it derives can raise a zero but never lower a recorded one.
+ */
+export function mergeTimeline(live: PipelineTimeline | undefined | null, reconstructed: PipelineTimeline, backfill: TimelineBackfill): PipelineTimeline {
+  return {
+    attempts: live?.attempts?.length ? live.attempts : reconstructed.attempts,
+    submittedAt: live?.submittedAt ?? reconstructed.submittedAt,
+    resubmittedAt: live?.resubmittedAt ?? reconstructed.resubmittedAt,
+    reworkRounds: Math.max(live?.reworkRounds ?? 0, reconstructed.reworkRounds),
+    interventions: {
+      blocked: Math.max(live?.interventions?.blocked ?? 0, reconstructed.interventions.blocked),
+      requirements: Math.max(live?.interventions?.requirements ?? 0, reconstructed.interventions.requirements),
+    },
+    backfill,
+  };
+}
+
+/**
+ * Why a delivery is not measured. `awaiting-backfill` is the only one that resolves itself: the
+ * item's history is still in the ledger and the reconstruction has not reached it yet.
+ */
+export type SpeedCoverage = 'measured' | 'awaiting-backfill' | 'events-pruned' | 'no-submission';
+
 export interface PipelineSpeed {
   attempts: number; reworkRounds: number; interventions: PipelineTimeline['interventions'];
   /** Time a worker held the item under a lease, summed over attempts; the active attempt counts up to now. */
@@ -100,6 +200,10 @@ export interface PipelineSpeed {
   /** No hand-off after submission and at most one rework round. */
   routine: boolean;
   measured: boolean;
+  /** Why this item is or is not measured, so an unmeasured delivery is explained rather than absent. */
+  coverage: SpeedCoverage;
+  /** What a reconstruction read for this item, when one ran. */
+  backfill: TimelineBackfill | null;
 }
 const time = (value: string | null | undefined) => { const parsed = value ? Date.parse(value) : NaN; return Number.isFinite(parsed) ? parsed : null; };
 /** The accepted merge on the repository clock when the delivery carried it there, else the provider's own timestamp. */
@@ -114,15 +218,21 @@ export function pipelineSpeed(work: Work, now: number): PipelineSpeed {
   const end = time(mergedAt) ?? now;
   const submittedAt = timeline?.submittedAt ?? null;
   const submitted = time(submittedAt);
+  const backfill = timeline?.backfill ?? null;
+  // Why an item is not measured: its ledger no longer reaches its creation, the reconstruction has
+  // not reached an item that has no timeline at all yet, or the history genuinely records no submission.
+  const coverage: SpeedCoverage = backfill && !backfill.retained ? 'events-pruned'
+    : !backfill && !timeline?.attempts.length ? 'awaiting-backfill' : 'no-submission';
   const unmeasured: PipelineSpeed = { attempts: timeline?.attempts.length ?? 0, reworkRounds, interventions, executionMs: null, waitMs: null, openMs: null, submittedAt, mergedAt,
-    submitToMergeMs: null, sinceSubmitMs: null, routine: reworkRounds <= 1 && !interventions.blocked && !interventions.requirements, measured: false };
+    submitToMergeMs: null, sinceSubmitMs: null, routine: reworkRounds <= 1 && !interventions.blocked && !interventions.requirements, measured: false, coverage, backfill };
   if (!timeline?.attempts.length) return unmeasured;
   const claimedAt = Math.min(...timeline.attempts.map(attempt => time(attempt.claimedAt)!).filter(Number.isFinite));
   const executionMs = timeline.attempts.reduce((total, attempt) => total + Math.max(0, Math.min(time(attempt.endedAt) ?? end, end) - (time(attempt.claimedAt) ?? end)), 0);
   const openMs = Math.max(0, end - claimedAt);
   return { ...unmeasured, executionMs, waitMs: Math.max(0, openMs - executionMs), openMs,
     submitToMergeMs: submitted !== null && mergedAt ? Math.max(0, end - submitted) : null,
-    sinceSubmitMs: submitted !== null && !mergedAt ? Math.max(0, now - submitted) : null, measured: true };
+    sinceSubmitMs: submitted !== null && !mergedAt ? Math.max(0, now - submitted) : null,
+    measured: true, coverage: submitted !== null ? 'measured' : coverage };
 }
 
 export interface Percentiles { count: number; p50Ms: number; p90Ms: number }
@@ -146,7 +256,14 @@ export interface PipelineSpeedSummary {
   execution: { totalMs: number; waitTotalMs: number; share: number | null };
   /** Whether the target is met over routine deliveries; null with the reason while too few are measured. */
   met: boolean | null; reason: string | null;
-  items: { key: string; mergedAt: string; submitToMergeMs: number; reworkRounds: number; routine: boolean }[];
+  items: { key: string; mergedAt: string; submitToMergeMs: number; executionMs: number | null; waitMs: number | null;
+    reworkRounds: number; interventions: PipelineTimeline['interventions']; routine: boolean }[];
+  /**
+   * Why every delivery in the window is or is not measured. Once a reconstruction has reached an
+   * item whose ledger rows are retained, it is measured; what is left is named, with the reason.
+   */
+  coverage: { delivered: number; measured: number; awaitingBackfill: number; eventsPruned: number; noSubmission: number;
+    items: { key: string; mergedAt: string; coverage: SpeedCoverage }[]; complete: boolean; statement: string };
 }
 /**
  * The periodic measurement: submit→merge p50/p90 over every delivery with a recorded submission
@@ -176,12 +293,26 @@ export function pipelineSpeedSummary(work: Work[], now: number, options: { since
     : met ? null : [routineSubmitToMerge.p50Ms > speedTarget.submitToMergeP50Ms ? `submit→merge p50 ${minutes(routineSubmitToMerge.p50Ms)} exceeds ${minutes(speedTarget.submitToMergeP50Ms)}` : null,
       routineSubmitToMerge.p90Ms > speedTarget.submitToMergeP90Ms ? `submit→merge p90 ${minutes(routineSubmitToMerge.p90Ms)} exceeds ${minutes(speedTarget.submitToMergeP90Ms)}` : null,
       rank(rounds, 50) > speedTarget.reworkRoundsMedian ? `median rework rounds ${rank(rounds, 50)} exceeds ${speedTarget.reworkRoundsMedian}` : null].filter(Boolean).join('; ');
+  // Every delivery in the window, measured or not, with the reason it is not. A window that
+  // reports nothing unmeasured has nothing left to reconstruct.
+  const unmeasuredEntries = delivered.filter(({ speed }) => speed.submitToMergeMs === null)
+    .sort((a, b) => a.mergedAt! - b.mergedAt!)
+    .map(({ item, speed }) => ({ key: item.key, mergedAt: speed.mergedAt!, coverage: speed.coverage }));
+  const counted = (coverage: SpeedCoverage) => unmeasuredEntries.filter(entry => entry.coverage === coverage).length;
+  const coverage = { delivered: delivered.length, measured: measured.length,
+    awaitingBackfill: counted('awaiting-backfill'), eventsPruned: counted('events-pruned'), noSubmission: counted('no-submission'),
+    items: unmeasuredEntries, complete: unmeasuredEntries.length === 0,
+    statement: unmeasuredEntries.length
+      ? `${measured.length} of ${delivered.length} deliveries in this window are measured; ${unmeasuredEntries.length} are not (${counted('awaiting-backfill')} awaiting the ledger reconstruction, ${counted('events-pruned')} whose events are no longer retained, ${counted('no-submission')} the ledger records no submission for): ${unmeasuredEntries.map(entry => `${entry.key} (${entry.coverage})`).join(', ')}.`
+      : `Every one of the ${delivered.length} deliveries in this window is measured from its own timeline.` };
   return { target: speedTarget, measured: measured.length, unmeasured: delivered.length - measured.length, submitToMerge,
     routine: { count: routine.length, submitToMerge: routineSubmitToMerge },
     reworkRounds: { median: rank(rounds, 50), p90: rank(rounds, 90), distribution },
     interventions: { items: intervened.length, blocked: measured.reduce((total, { speed }) => total + speed.interventions.blocked, 0), requirements: measured.reduce((total, { speed }) => total + speed.interventions.requirements, 0) },
     execution: { totalMs, waitTotalMs, share: totalMs + waitTotalMs ? Number((totalMs / (totalMs + waitTotalMs)).toFixed(4)) : null },
-    met, reason,
-    items: measured.map(({ item, speed }) => ({ key: item.key, mergedAt: speed.mergedAt!, submitToMergeMs: speed.submitToMergeMs!, reworkRounds: speed.reworkRounds, routine: speed.routine })) };
+    met, reason, coverage,
+    // Execution versus wait, rework rounds and hand-offs per delivered item, not only in aggregate.
+    items: measured.map(({ item, speed }) => ({ key: item.key, mergedAt: speed.mergedAt!, submitToMergeMs: speed.submitToMergeMs!,
+      executionMs: speed.executionMs, waitMs: speed.waitMs, reworkRounds: speed.reworkRounds, interventions: speed.interventions, routine: speed.routine })) };
 }
 const minutes = (ms: number) => `${Math.round(ms / 6000) / 10} min`;

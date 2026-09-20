@@ -200,7 +200,7 @@ The page shows exactly one state:
 | Loading | A read is in flight. On first load no figure is claimed; on a refresh the figures still on screen are labelled as an earlier observation that may not match the selected filters, and the previous coverage state is never carried over. |
 | Unavailable | The control plane refused or is unreachable. Any figures on screen are labelled as an earlier observation. |
 | Empty | No work item matches this window and filter. |
-| Partial | The scan bound was reached, so some records in the window are not included. |
+| Partial | The scan bound was reached, so some records in the window are not included. The report names the interval it did cover in `window.covered`. |
 | Stale | The projection is behind the ledger, or the observation is older than two minutes. |
 | Sparse | Too few records for the distributions to be representative. |
 | Complete | Every record in this window is included. |
@@ -242,7 +242,20 @@ scanned, deployment observations, daily buckets, drill-down rows, and payload si
 Reaching a bound is reported, never hidden: `coverage.truncated`,
 `coverage.workItemsTruncated`, `coverage.deploymentsTruncated`,
 `coverage.deploymentMergesTruncated`, `coverage.sliceFilterTruncated`, and the
-**partial** state say so. Reads use indexed
+**partial** state say so.
+
+A record bound does more than exclude rows: the in-window scan reads facts in observation
+order, so exhausting it truncates the **end** of the window, and the figures then describe a
+shorter interval than the one that was asked for. That interval is stated rather than implied.
+`window.covered` and `coverage.covered` carry the requested window (`from`, `to`), the instant
+the scan actually reached (`toCovered`), how long that is (`ms` against `windowMs`, and
+`fraction`), the interval nobody examined (`uncovered`), and how many facts are known to remain
+there (`remainingFacts`, itself bounded — `remainingCapped` marks a count that is a floor).
+`window.covered.statement` says it in one sentence, and `window.truncated` is the flag to branch
+on. An export carries the same four fields (`windowCovered`, `windowCoveredFraction`,
+`windowTruncated`, `windowCoverage`) in its own metadata rows, so a CSV read away from the API
+cannot present a one-day scan as a thirty-day window. Narrow the window, type or slice filter to
+cover the rest. Reads use indexed
 access paths on `flow_facts` — `(observed_at, id)`, `(work_id, observed_at, id)`,
 `(kind, observed_at, id)`, and `(work_id, kind, observed_at DESC, id DESC)` for bounded
 latest-state lookups — with deterministic ordering, so repeating a bounded query

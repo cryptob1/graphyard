@@ -15,7 +15,7 @@ import { queueSequencingReason } from './merge-queue.js';
 export const flowWindows = [7, 30, 90] as const;
 export type FlowWindow = typeof flowWindows[number];
 // Every aggregation is bounded: date range, rows scanned, buckets, drill-down rows and payload size.
-export const flowLimits = { batch: 400, batches: 20, scan: 20_000, work: 2000, buckets: 90, drilldown: 200, distinct: 25, deployments: 500, deploymentMerges: 5000, payloadBytes: 4_000_000 };
+export const flowLimits = { batch: 400, batches: 20, scan: 20_000, work: 2000, buckets: 90, drilldown: 200, distinct: 25, deployments: 500, deploymentMerges: 5000, payloadBytes: 4_000_000, remainingProbe: 100_000 };
 export const sparseSampleSize = 5;
 const day = 86_400_000;
 /**
@@ -288,8 +288,47 @@ export interface FlowDataset {
   observedAt: string; from: string; to: string; days: FlowWindow;
   work: Work[]; included: Work[]; facts: FlowFact[]; latest: FlowFact[]; carryIn: FlowFact[]; deployments: DeploymentObservation[];
   mergedForDeployments: FlowFact[]; scanned: number; truncated: boolean; workTruncated: boolean; deploymentsTruncated: boolean; deploymentMergesTruncated: boolean;
+  /**
+   * The part of the requested window the fact scan actually reached. `readFlow` always sets it;
+   * a dataset assembled by hand may leave it out and is then read as fully covered.
+   */
+  covered?: CoveredWindow;
   projection: { lastEvent: number; updatedAt: string | null; pendingEvents: number; pendingCapped: boolean };
 }
+/**
+ * How much of the requested window a bounded scan covered. The in-window scan reads facts in
+ * observation order, so exhausting its row bound truncates the *end* of the window: everything
+ * from `from` to `to` was asked for, everything up to `toCovered` was read, and the interval
+ * after it was never examined. A report that returned that partial scan while still naming the
+ * full window would state a 30-day figure computed from a single day; this says what it covered.
+ */
+export interface CoveredWindow {
+  from: string; to: string; toCovered: string; ms: number; windowMs: number; fraction: number;
+  truncated: boolean; uncovered: { from: string; to: string; ms: number } | null;
+  /** Facts known to remain past `toCovered`, counted up to a bound of its own. */
+  remainingFacts: number | null; remainingCapped: boolean;
+  statement: string;
+}
+/**
+ * The disclosure a truncated scan owes its reader: the interval it actually covered, the share of
+ * the requested window that is, the interval nobody looked at, and how many facts are known to
+ * remain there. `remainingFacts` is itself bounded, so `remainingCapped` says when the true number
+ * is at least that many rather than exactly it.
+ */
+export function coveredWindow(from: string, to: string, lastCovered: string, remaining: number, scanLimit: number, cap = flowLimits.remainingProbe): CoveredWindow {
+  const start = time(from) ?? 0, end = time(to) ?? 0;
+  const reached = Math.min(Math.max(time(lastCovered) ?? start, start), end);
+  const windowMs = Math.max(0, end - start), ms = Math.max(0, reached - start);
+  const toCovered = new Date(reached).toISOString();
+  const fraction = windowMs ? Number((ms / windowMs).toFixed(4)) : 1;
+  const capped = remaining > cap;
+  const hours = (value: number) => `${Math.round(value / 360_000) / 10} h`;
+  return { from, to, toCovered, ms, windowMs, fraction, truncated: true,
+    uncovered: { from: toCovered, to, ms: Math.max(0, end - reached) },
+    remainingFacts: Math.min(remaining, cap), remainingCapped: capped,
+    statement: `The fact scan reached its ${scanLimit.toLocaleString('en-US')}-row bound: this report is computed from ${from} to ${toCovered} (${hours(ms)} of the requested ${hours(windowMs)}, ${Math.round(fraction * 100)}%), and ${capped ? `at least ${cap.toLocaleString('en-US')}` : remaining.toLocaleString('en-US')} fact(s) between ${toCovered} and ${to} were not examined. Every figure below describes the covered interval only; narrow the window, type or slice filter to cover the rest.` };
+}
+const fullyCovered = (from: string, to: string): CoveredWindow => ({ from, to, toCovered: to, ms: Math.max(0, (time(to) ?? 0) - (time(from) ?? 0)), windowMs: Math.max(0, (time(to) ?? 0) - (time(from) ?? 0)), fraction: 1, truncated: false, uncovered: null, remainingFacts: null, remainingCapped: false, statement: 'The scan covered the whole requested window.' });
 // Facts whose most recent value before the window end is needed to describe the present
 // state and to carry an item's timeline into the window.
 const carryKinds: FlowKind[] = ['stage.changed', 'gates.changed', 'work.created', 'work.released', 'delivered', 'merged', 'candidate.observed', 'lease.claimed', 'lease.released', 'lease.lost', 'dependencies.changed'];
@@ -313,7 +352,7 @@ export async function readFlow(store: Store, query: FlowQuery): Promise<FlowData
   const included = work.filter(item => (!query.type || item.type === query.type) && (!query.slice || workSlices(item).slices.includes(query.slice)));
   const ids = included.map(item => item.id);
   const stateIds = work.map(item => item.id);
-  const empty = { observedAt, from, to, days: query.days, work, included, facts: [], latest: [], carryIn: [], deployments: [], mergedForDeployments: [], scanned: 0, truncated: false, workTruncated, deploymentsTruncated: false, deploymentMergesTruncated: false };
+  const empty = { observedAt, from, to, days: query.days, work, included, facts: [], latest: [], carryIn: [], deployments: [], mergedForDeployments: [], scanned: 0, truncated: false, workTruncated, deploymentsTruncated: false, deploymentMergesTruncated: false, covered: fullyCovered(from, to) };
   const projectionRow = (await store.pool.query('SELECT last_event,updated_at FROM flow_projection WHERE id=1')).rows[0];
   const lastEvent = Number(projectionRow?.last_event ?? 0);
   // Lag counts exactly the events the projector consumes; ledger entries without a work
@@ -326,6 +365,14 @@ export async function readFlow(store: Store, query: FlowQuery): Promise<FlowData
     [ids, from, to, scanLimit + 1]) : { rows: [], rowCount: 0 };
   const truncated = scan.rowCount! > scanLimit;
   const facts = scan.rows.slice(0, scanLimit).map(rowToFact);
+  // What an exhausted row bound cost, in window time and in facts left unread, rather than a
+  // silent partial window. The remainder is counted from the last covered instant inclusively, so
+  // facts sharing that instant are reported as unread rather than assumed returned, and the count
+  // is itself bounded and says so.
+  const remainingProbe = truncated ? await store.pool.query(
+    `SELECT count(*)::int AS remaining FROM (SELECT 1 FROM flow_facts WHERE work_id=ANY($1) AND observed_at>=$2 AND observed_at<$3 LIMIT $4) probe`,
+    [ids, facts.at(-1)?.observedAt ?? from, to, flowLimits.remainingProbe + 1]) : null;
+  const covered = truncated ? coveredWindow(from, to, facts.at(-1)?.observedAt ?? from, remainingProbe!.rows[0].remaining as number, scanLimit) : fullyCovered(from, to);
   // Current state is read as of the observation instant, inclusively: a fact recorded in
   // the same millisecond as the read clock is the state at that instant, never stale.
   // The in-window scan above stays half-open on `to` as documented.
@@ -352,7 +399,7 @@ export async function readFlow(store: Store, query: FlowQuery): Promise<FlowData
     ? (await store.pool.query(`SELECT * FROM flow_facts WHERE kind='merged' AND details->>'mergeSha'=ANY($1) ORDER BY observed_at,id LIMIT $2`, [mergeShas, flowLimits.deploymentMerges + 1])).rows : [];
   const deploymentMergesTruncated = mergeRows.length > flowLimits.deploymentMerges;
   const mergedForDeployments = mergeRows.slice(0, flowLimits.deploymentMerges).map(rowToFact);
-  return { observedAt, from, to, days: query.days, work, included, facts, latest, carryIn, deployments, mergedForDeployments, scanned: facts.length, truncated, workTruncated, deploymentsTruncated, deploymentMergesTruncated, projection };
+  return { observedAt, from, to, days: query.days, work, included, facts, latest, carryIn, deployments, mergedForDeployments, scanned: facts.length, truncated, workTruncated, deploymentsTruncated, deploymentMergesTruncated, covered, projection };
 }
 
 export type WaitCategory = 'delivered' | 'backlog' | 'blocked' | 'dependency' | 'implementation' | 'review' | 'evidence' | 'merge-blocked' | 'merge-ready';
@@ -483,6 +530,9 @@ export function productionDeployment(deployments: DeploymentObservation[], merge
 // Pure aggregation. Given the bounded dataset it always produces the same report.
 export function computeFlow(dataset: FlowDataset, query: FlowQuery) {
   const to = time(dataset.to)!, from = time(dataset.from)!;
+  // A truncated scan describes less than the window it was asked for; every figure below is over
+  // this interval, and the report says so rather than naming the full window.
+  const covered = dataset.covered ?? fullyCovered(dataset.from, dataset.to);
   const productionEnvironment = query.productionEnvironment ?? defaultProductionEnvironment;
   const excluded = new Map<string, Set<string>>();
   const exclude = (reason: string, key: string) => { (excluded.get(reason) ?? excluded.set(reason, new Set()).get(reason)!).add(key); };
@@ -866,6 +916,8 @@ export function computeFlow(dataset: FlowDataset, query: FlowQuery) {
     undelivered: stageScope.filter(item => !deliveredIds.has(item.id)).length,
     withObservedCandidate: withCandidate.length,
     facts: dataset.facts.length, scanned: dataset.scanned, scanLimit: Math.min(query.limit ?? flowLimits.scan, flowLimits.scan), truncated: dataset.truncated,
+    // What the scan covered of the window it was asked for, and what it never reached.
+    covered,
     workItemScanLimit: flowLimits.work, workItemsTruncated: dataset.workTruncated,
     deploymentScanLimit: flowLimits.deployments, deploymentsTruncated: dataset.deploymentsTruncated,
     deploymentMergeScanLimit: flowLimits.deploymentMerges, deploymentMergesTruncated: dataset.deploymentMergesTruncated,
@@ -883,7 +935,10 @@ export function computeFlow(dataset: FlowDataset, query: FlowQuery) {
 
   return {
     generatedAt: dataset.observedAt, timezone: 'UTC', productionEnvironment,
-    window: { days: query.days, from: dataset.from, to: dataset.to, boundaries: 'Half-open interval [from, to) in UTC. Daily buckets start at the window start and are labelled by their start instant.' },
+    // The window as asked for, and — when a bound cut the scan short — the interval these figures
+    // actually describe, so a partial window is never read as a full one.
+    window: { days: query.days, from: dataset.from, to: dataset.to, covered, truncated: covered.truncated,
+      boundaries: 'Half-open interval [from, to) in UTC. Daily buckets start at the window start and are labelled by their start instant.' },
     filters: { type: query.type ?? null, stage: query.stage ?? null, slice: query.slice ?? null },
     availableSlices: [...new Set(dataset.work.flatMap(item => workSlices(item).slices))].sort(),
     availableTypes: [...new Set(dataset.work.map(item => item.type))].sort(),
@@ -1036,6 +1091,10 @@ export function flowExport(report: FlowReport, drilldown: ReturnType<typeof flow
     definition: metricDefinitions[drilldown.metric === 'stage-dwell' ? 'stageDwell' : drilldown.metric === 'lead-time' ? 'leadTime' : drilldown.metric === 'merge-ready' ? 'mergeReadyDwell' : drilldown.metric === 'phase' ? 'phases' : drilldown.metric === 'blockers' ? 'operations' : drilldown.metric === 'review' ? 'operations' : drilldown.metric]?.formula ?? 'See the metric definitions in the report.',
     generatedAt: report.generatedAt, timezone: report.timezone, productionEnvironment: report.productionEnvironment,
     window: `${report.window.from}/${report.window.to}`, windowDays: report.window.days, windowBoundaries: report.window.boundaries,
+    // An export of a truncated scan carries the interval it really describes, in its own rows.
+    windowCovered: `${report.window.covered.from}/${report.window.covered.toCovered}`,
+    windowCoveredFraction: report.window.covered.fraction, windowTruncated: report.window.truncated,
+    windowCoverage: report.window.covered.statement,
     filterType: report.filters.type, filterStage: report.filters.stage, filterSlice: report.filters.slice,
     coverageWorkItems: report.coverage.workItems, coverageFacts: report.coverage.facts,
     coverageTruncated: report.coverage.truncated, coverageWorkItemsTruncated: report.coverage.workItemsTruncated,
