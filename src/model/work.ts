@@ -6,6 +6,7 @@ import type { AgentReview, ReviewFailover, ReviewRequest } from './review.js';
 import type { Delivery, ReleaseDelivery } from './delivery.js';
 import type { BlockingRulingAction } from './delegation.js';
 import type { AutoDispatch } from './dispatch.js';
+import type { ScopeDecision, ScopeRequestState } from './scope.js';
 import { proofSchema } from './proof.js';
 import { demand } from './refusal.js';
 
@@ -113,11 +114,19 @@ export interface Work extends Create {
   containmentQuarantine?: { owner: string; epoch: number; at: string; settlementHash: string; launchAcknowledgedAt?: string; launchExpiresAt?: string; leaseExpiresAt?: string; scope?: ContainmentScope } | null;
   submission: { epoch: number; pr: number } | null;
   /**
-   * A worker's open ask to widen plannedFiles, bound to the lease epoch that raised it. It
-   * surfaces to the master as a scope attention item and is applied — or superseded — without
-   * ending the attempt; `master scope` is its one-command approval.
+   * A worker's open ask to widen plannedFiles, bound to the lease epoch that raised it. It is
+   * structured state, not free text: the master loop asks the control plane to decide it on the
+   * cycle it appears, and the decision it carries — applied, or refused with the reason — is the
+   * audit of that. The attempt keeps its lease either way; `master scope` remains the operator's
+   * override for what the item does not already imply (see model/scope.ts).
    */
-  scopeRequest?: { epoch: number; paths: string[]; reason: string; requestedBy: string; at: string } | null;
+  scopeRequest?: ScopeRequestState | null;
+  /**
+   * The last scope decision the control plane took for this item, applied or refused, with the
+   * request it answered and how long that request waited. An approved request is applied and
+   * cleared; a refused one stays open, carrying the same decision, for the operator to decide.
+   */
+  scopeDecision?: ScopeDecision | null;
   queue?: QueueEntry | null; queueSequence?: number; queueEjection?: QueueEjection | null; queueHistory?: QueueHistoryEntry[];
   /**
    * The last time the control plane brought this candidate onto a base branch that had moved
