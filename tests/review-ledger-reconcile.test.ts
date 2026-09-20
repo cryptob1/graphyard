@@ -73,7 +73,9 @@ test('integration:review-ledger-reconcile — a verdict GitHub shows on the exac
     assert.equal(settled.reviews[0].state, 'completed', 'a posted verdict is never left pending');
     assert.equal(settled.reviews[0].verdict!.state, 'CHANGES_REQUESTED');
     assert.match(settled.reviews[0].closeFailure!, /Herdr could not close pane pane-review/);
-    await stat(join(sessionDirectory, 'hosts.yml'));
+    // Settling withdraws the credential even when the pane could not be closed: nothing revisits
+    // a settled record, so a session token left there would survive until it expired on its own.
+    await assert.rejects(stat(join(sessionDirectory, 'hosts.yml')), /ENOENT/, 'the session credential is withdrawn');
     // Settled records are not re-observed and not re-settled.
     const again = await reconcileReviews(root, await loadMasterConfig(root), { run, observe: () => { throw new Error('a settled record is not re-observed'); } });
     assert.equal(again.changed, 0);

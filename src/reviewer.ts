@@ -311,17 +311,21 @@ export function staleReviewReason(record: Pick<ReviewRecord, 'key' | 'sha' | 'ba
 
 /**
  * Settle one record: close its pane, withdraw the session credential, and record the outcome.
- * Herdr confirming the pane gone is what lets the session directory be removed, and a record
- * with a close failure stays pending unless `force` applies: a posted verdict, or a head the
- * candidate has replaced, settles the record even when that confirmation fails — such a session
- * decides nothing further for the candidate — with the close failure kept on the record as
- * attention and the token expiring within the hour regardless.
+ * A record whose pane Herdr could not close stays pending, so the close is retried, unless
+ * `force` applies: a posted verdict, or a head the candidate has replaced, settles the record
+ * even when that confirmation fails — such a session decides nothing further for the candidate —
+ * with the close failure kept on the record as attention. The credential is withdrawn on every
+ * path that settles the record: nothing revisits a settled record, so a session directory left
+ * behind there would never be removed at all, while a record that stays pending is retried.
  */
 async function closeReviewSession(record: ReviewRecord, dependencies: { run?: (command: string, args: string[]) => string; now: () => Date }, options: { state: ReviewRecord['state']; resolution?: string; force?: boolean }) {
   let closeFailure: string | undefined;
   try { if (record.pane) closeHerdrPane(record.pane, dependencies.run); }
   catch (error) { closeFailure = `Herdr could not close pane ${record.pane}: ${error instanceof Error ? error.message : 'unknown reason'}`; }
-  if (!closeFailure) await rm(record.sessionDirectory, { recursive: true, force: true });
+  if (!closeFailure || options.force) {
+    try { await rm(record.sessionDirectory, { recursive: true, force: true }); }
+    catch (error) { closeFailure = `${closeFailure ? `${closeFailure}; ` : ''}the reviewer credential directory ${record.sessionDirectory} could not be removed: ${error instanceof Error ? error.message : 'unknown reason'}`; }
+  }
   record.closeFailure = closeFailure;
   if (!closeFailure || options.force) {
     record.state = options.state; record.closedAt = dependencies.now().toISOString();
@@ -330,9 +334,9 @@ async function closeReviewSession(record: ReviewRecord, dependencies: { run?: (c
   return closeFailure;
 }
 
-// A session is reported closed only once Herdr confirms the pane is gone and the reviewer
-// credential directory is removed — except that a posted verdict, and a superseded head, settle
-// the record even when that confirmation fails (see closeReviewSession). Given the current work
+// A session is reported closed only once Herdr confirms the pane is gone — except that a posted
+// verdict, and a superseded head, settle the record even when that confirmation fails, and the
+// credential directory is removed either way (see closeReviewSession). Given the current work
 // snapshot, a session whose head is no longer the candidate is cancelled the same way, with the
 // reason on the record.
 export async function reconcileReviews(root: string, config: MasterConfig, dependencies: {
