@@ -80,6 +80,29 @@ There is no supported unsupervised path: do not start `muse` directly for dispat
 
 Local dispatch requires Linux with a working systemd user manager for durable containment. On macOS or Linux without user systemd, route work to a separately supervised remote worker instead.
 
+## Agent environments
+
+A Graphyard principal and a provider account are different things: the principal is who claims, reviews or proves; the account is whose subscription the session spends. An *agent environment* is one isolated config and login home for one agent CLI account — `~/.coding_agents/claude-b` is Claude Code under `CLAUDE_CONFIG_DIR`, `codex` is Codex under `CODEX_HOME`, `opencode-a` is OpenCode under `XDG_DATA_HOME`, `cursor-a` is Cursor under `CURSOR_CONFIG_DIR`. [Onboarding](onboarding.md#agent-environments) discovers or creates them and generates profiles from the logged-in ones:
+
+```sh
+node "$GRAPHYARD_CLI" master environments [--create claude,codex] [--directory DIR] [--apply]
+```
+
+A profile lists the environments it may run on in `accounts`, in failover order. Worker, reviewer and producer profiles all take it; the generated ones list every logged-in environment.
+
+**Before every launch** — `master dispatch`, the durable loop's worker dispatch, and the automatic reviewer and producer launches alike — the launcher checks the profile's accounts in order and runs on the first that is healthy:
+
+- *logged in*: the environment holds the runtime's login (for Claude, a subscription login in `.credentials.json`);
+- *quota left*: no provider usage window at or above `run.quotaCeilingPercent` (default 95) that has not reset yet. Claude's 5-hour and 7-day windows come from the provider's usage endpoint; Codex's from the rate limits its newest session recorded. OpenCode and Cursor expose no quota Graphyard can read, so theirs is `unknown`, which does not block a launch. An unreadable quota is `unknown` too.
+
+An account that fails either check is skipped with its reason — `claude-a quota is exhausted (7d window at 100% until …; ceiling 95%)`, `claude-b is not logged in` — and the launch **fails over** to the next account. A session on another runtime's account runs that runtime, without the profile's own `agentArgs` (they belong to its runtime). A worker profile none of whose accounts can launch claims nothing and is unavailable in `master status` (`workers[].credential`, with each account's reason), so the loop routes the item to another profile. Automatic review fails over from `run.reviewerProfile` to the other reviewer profiles, and a producer request to the next independent producer profile; the tick records which profiles it skipped.
+
+`master status` shows, under `dispatch.accounts`, every environment as the last launch check saw it (login, quota, usage windows, the login command when it is logged out) and the recent launches that skipped an account, with role, profile, item and reason. The same record is kept beside the coordinator credential (`*.environments.json`, mode 0600); it never holds a provider token.
+
+### Confirmed prompt delivery
+
+A launch is recorded only once its runtime visibly accepted the prompt: Herdr submits it and waits for the agent to leave `idle`. A runtime that reports ready before its input is (OpenCode does while its UI loads) drops the text and stays idle, which Herdr reports as a stalled prompt. A stalled prompt is delivered again, up to three times; a session that still has not taken it is closed — for a worker, the claim is released too — and launched once more from scratch before the launch is reported refused. A session is never left idle until a timeout.
+
 ## Durable loop
 
 A chat session is a poor coordinator. Its transcript grows without bound, it dies with its
@@ -125,23 +148,27 @@ Each cycle:
    ends the worker's lease, so a submitted item's session is closed here on the next cycle; a
    lease that lapses after submission, under a `blocked` report, or after your stopped-worker
    attestation is history (`lease.expired` with its cause), never an incident;
-2. **dispatches claimable work** to a healthy worker profile, through the same launcher
+2. **reclaims the disk finished assignments hold** — the dependency directories of worktrees whose
+   assignment is delivered, superseded by a later epoch, or untouched beyond the idle bound are
+   removed, before anything in the cycle asks the host for more room, on a ten-minute cadence or
+   every cycle while free space is below the threshold (see [worktree disk](#worktree-disk));
+3. **dispatches claimable work** to a healthy worker profile, through the same launcher
    `master dispatch` uses: the worker claims under its own identity and the loop holds no lease.
    Ready items are offered [smallest planned scope first](#conflict-avoidance) within a priority,
    and an item whose `plannedFiles` overlap a claimed or unmerged item is held rather than
    dispatched — the loop never overrides a hold; only `master dispatch --allow-overlap` does;
-3. **shepherds reviews and proofs** — the reviewer and producer sessions the control plane
+4. **shepherds reviews and proofs** — the reviewer and producer sessions the control plane
    requested for each exact head are launched on the dispatcher's own cadence (see
    [automatic dispatch at submit](#automatic-dispatch-at-submit)), a request goes to the trusted
    producer workflow when automatable proof is missing and one is configured, and anything that needs
    a two-party decision is surfaced in `master status` with its owner and next command;
-4. **invokes only the guarded merge**, when automatic merging is enabled (with it disabled, the
+5. **invokes only the guarded merge**, when automatic merging is enabled (with it disabled, the
    visible session merges each candidate the approver agent approved);
-5. **verifies the deployed SHA** against what Graphyard recorded as delivered, and for a delivery
+6. **verifies the deployed SHA** against what Graphyard recorded as delivered, and for a delivery
    whose policy sets `deploySmoke` records that observation on the item, requests the trusted smoke
    workflow once per deployed commit, and escalates a failed verdict with rollback guidance (see the
    [post-deployment smoke proof](github.md#post-deployment-smoke-proof));
-6. **records stage p50/p90** for every open stage, delivered lead time, creation-to-deployment
+7. **records stage p50/p90** for every open stage, delivered lead time, creation-to-deployment
    latency, and merge-to-smoke-verdict post-deploy time with the failure count.
 
 Every action lands in `master status` under `daemon`: the current cycle, its measurements, the
@@ -170,6 +197,70 @@ under a `/tmp` this process cannot see — is compared by its registered path an
 loop. The example systemd unit does not set `PrivateTmp`: producer sessions run in Herdr, outside
 the unit, and create their detached proof worktrees under the shared `/tmp`, which a private one
 would hide from the loop.
+
+### Worktree disk
+
+Every attempt and every rework checks the repository out again, and a checkout that installs its own
+dependencies costs about as much as the source it builds. Left alone that is unbounded: a long
+running installation ends with hundreds of worktrees, tens of gigabytes of `node_modules`, and a
+host that starts refusing writes in the middle of a cycle — reported, until the loop knew better, as
+whatever command happened to notice first.
+
+Two halves keep it bounded, and neither needs a decision from anyone.
+
+**One install, shared.** When the launcher prepares an assignment worktree it settles the
+dependency question before the session starts. An assignment worktree lives under the repository, so
+the runtime's ordinary upward lookup already resolves the repository's own install: nothing is
+created, and the worker's prompt says the install is there, naming it, so the attempt does not spend
+its first minutes and another gigabyte installing what it already has. A worktree outside the
+repository — a detached proof worktree, a checkout on another volume — resolves nothing on its own,
+and is given a mirror of that install instead: a real directory of links, one per installed package,
+so the repository's `node_modules/` ignore rule still covers it and the checkout stays clean.
+
+Either way the install has to answer for that exact head: the same `package-lock.json`, byte for
+byte. A head whose lockfile differs installs its own dependencies, and a worktree that already has
+an install of its own is reported and left exactly as it is. The attempt still starts from a clean
+checkout of its exact head — sharing never shows up as a change to it.
+
+**Finished assignments give theirs back.** The loop removes the dependency directories of
+worktrees whose assignment is finished. Scanning the worktree directory is not free, so it keeps to
+a ten-minute cadence — except while the last scan found free space below the threshold, when it
+reclaims on every cycle instead:
+
+| Disposition | Meaning |
+| --- | --- |
+| `delivered` | the item is Done; the attempt that used the worktree is over |
+| `superseded` | the worktree belongs to an epoch a later attempt replaced |
+| `idle` | nothing in the working tree has changed for longer than the idle bound |
+| `live` | the registered epoch still holds the lease — never touched, however idle it looks |
+| `recent` | changed inside the idle bound — left for the session that may still be using it |
+
+It removes dependency directories and nothing else. Checkouts keep their files and their Git
+metadata, branches keep every commit they hold — pushed or not — and Graphyard's registered
+workspace records are never written, so a reclaimed worktree is one `npm install` away from
+working and no assignment loses history the control plane still refers to. What it removed, how
+much room that returned, and what it kept are in `master status` under `daemon.reclaim`.
+
+**Before the volume fills.** `master status` reports the host's free space under `disk`, with the
+worktrees a reclaim would empty. Below the configured threshold it raises an attention item owned by
+the master, naming the free space, what a reclaim would return and how to get more of it, while
+writes still succeed. A write that does fail for want of room — a full volume or an exhausted user
+quota, reported by the kernel or only in a command's own output (`pwd: write error: Disk quota
+exceeded`) — is named as exactly that, with the same guidance, rather than left as an unexplained
+command error.
+
+A running loop is already reclaiming, so the lever is `run.reclaimIdleHours`: lowering it makes more
+worktrees disposable on the next cycle. With no loop running, `master run --once` reclaims and
+cycles once. Room the reclaimer cannot return is a host that needs fewer concurrent assignments or a
+larger volume, and `master status` shows which worktrees it kept and why.
+
+Both bounds live in `.graphyard/master.json` under `run`, and a running loop adopts a change on its
+next cycle:
+
+| Setting | Meaning |
+| --- | --- |
+| `run.reclaimIdleHours` | How long a worktree may sit untouched before its dependency directories count as disposable, 0.25–720; default 3 |
+| `run.diskThresholdGb` | Free space below which `master status` raises disk pressure, 0.1–10000; default 10 |
 
 ### What the loop will not do
 
@@ -443,14 +534,16 @@ A launched session that stops to ask "run everything?" or "trust this folder?" i
 | Runtime | What `auto` adds | What it removes | What it costs |
 | --- | --- | --- | --- |
 | Claude Code | `--permission-mode bypassPermissions` | tool-approval prompts | the command classifier stops classifying for that session |
-| Codex | `--ask-for-approval never --sandbox workspace-write` | directory-trust and per-command approval | only the workspace-write sandbox still limits a command |
+| Codex | `--ask-for-approval never --sandbox workspace-write`, plus `-c sandbox_workspace_write.network_access=true` and `--add-dir` for what the role writes | directory-trust and per-command approval | only the workspace-write sandbox still limits a command |
 | Cursor | `--force --trust` | "Run Everything" and fresh-worktree workspace trust | every proposed command runs in the assigned worktree |
-| opencode | `OPENCODE_PERMISSION={"edit":"allow","bash":"allow","webfetch":"allow"}` | edit, bash, and webfetch prompts | edits, shell commands, and fetches happen without asking |
+| opencode | `OPENCODE_PERMISSION` allowing every permission (`*`, `edit`, `bash`, `webfetch`, `external_directory`, `doom_loop`) | every permission prompt | edits, shell commands, fetches, and paths outside the worktree happen without asking |
 | Muse | nothing generated; the [template](../examples/master/muse-worker.json) passes `--approval-mode never --trust-workspace` in `agentArgs` | tool-approval and workspace-trust prompts | tool calls run without asking inside Muse's own sandbox |
 
 The trade-off is real: an `auto` session runs whatever it decides to run inside its own worktree, under its own provider and Graphyard credentials. What it cannot do is change: it still holds only a worker credential, still works in one assigned worktree, and still cannot merge, produce trusted evidence, or weaken a requirement. Use `prompt` when a human should stay in the loop for a particular profile. A profile that already sets the runtime's own approval flags keeps exactly those; Graphyard never overrides an explicit choice.
 
 `master worker add` and `master reviewer add` print the resolved launch contract, so what a profile will start with is visible before it starts.
+
+Each of these is the runtime's broadest non-interactive mode. Codex keeps its sandbox, widened to exactly what the role needs: network access for every role, the repository's shared Git directory for a worker (its worktree commits there), and `/tmp` plus that Git directory for a producer (it builds in a detached worktree under `/tmp`). The master session gets the same treatment: `master start` launches it with its runtime's broadest mode, Codex widened to the private state beside the coordinator credential. Role credentials do not change with it — a worker still holds only its worker credential file, a reviewer only its hour-long reviewer token, a producer only its producer credential.
 
 ## Independent review
 
@@ -534,6 +627,10 @@ The browser profile is the operator's identity. The master never stores, exports
 A master running inside a harness with its own command classifier stops on its own routine commands until someone approves them. In Claude Code's auto mode the classifier goes further: it refuses branch-protection reads and writes as CI-bypass reconnaissance, installation and App permission changes as permission grants, launching a second agent as a permission grant, and browser control as self-modification — so a master without generated rules cannot perform the administration it owns. `master start claude` writes project-scoped rules to `.claude/settings.local.json` (git-ignored, machine-specific) before the session starts; `master harness claude` previews them and `master harness claude --apply` writes them. Every rule prints the reason it exists.
 
 Allowed: the master's own CLI subcommands at their absolute path, with the reviewer launcher (`master review`) and the browser flows (`master browser`, which invoke `agent-browser` themselves) listed on their own; `herdr`; read-only `gh pr` commands; `gh api user`; `gh api` reads of the managed base branch's protection and `--method PATCH` writes to its subresources; `gh api user/installations` reads; `gh api apps/*` reads; `jq`; the audited-thread wrapper `scripts/resolve-thread.mjs`; reads of `.graphyard/master-actions/`; and writes to `.graphyard/profiles/`.
+
+The rules also cover everything else the master owns, so no routine master action waits for a human: reading its configuration (`.graphyard/master.json`) and tuning the settings it owns through `master config FIELD=VALUE…` (loop and dispatch cadence, proof and smoke workflows, deployment URL and SHA field, reviewer profile, producer timeout, quota ceiling, and a profile's account order with `accounts:PROFILE=a,b`); restarting, starting, stopping and reading the durable loop's unit (`systemctl --user restart graphyard-master.service`, `journalctl --user -u graphyard-master.service`); deployment administration (`railway status`, `logs`, `deployment`, `redeploy`, and `master verify-deployment` for the release a delivery serves); and CI runs (`gh run list`, `view`, `watch`, `rerun`, plus `gh workflow run` of the configured proof and smoke workflows).
+
+There is deliberately no direct edit of `.graphyard/master.json`: the file holds `autoMerge`, the merge method, and every credential and identity path, and those stay operator-only. `master config` writes the owned fields through the same validated path as the operator's own commands and refuses any other field, and the harness grants no `Edit` or `Write` rule for the file. The systemd rules name the loop's unit exactly, so no other unit can be restarted, and no allow rule lets `curl` take extra arguments — `master verify-deployment` reads the deployed release.
 
 Denied: `gh pr merge`, `gh pr review`, any `gh api` call that merges, posts a review, mints an access token, uses GraphQL, or uses `PUT`, `POST`, or `DELETE` wherever the method flag sits (replacing whole branch protection, adding a repository to an installation, deleting protection or an installation); every direct `agent-browser` command, so the operator's profile, cookies, state, and auth vault are reachable only through the recorded flows; `git push`; and reads of the coordinator credential home, `.graphyard/connection.json`, `*.pem`, and `*.token`.
 
@@ -702,8 +799,9 @@ The master clears blockers and adds requirements as its operator-agent identity;
 | Command | Purpose |
 | --- | --- |
 | `master init --token-stdin [--browser-profile PROFILE]` | Install the operating mode; name the operator's browser profile |
+| `master environments [--create KINDS] [--apply]` | Discover or create agent environments, report login and quota, generate profiles from the logged-in ones |
 | `master start KIND` | Launch the visible master session with its harness rules |
-| `master status` | Work truth, session health, reviews, queue, `schedule` (dispatch order, overlap holds, high-conflict scopes), per-candidate `conflicts`, per-row `dispatch` (requested reviews and producers), and `administration` (recent browser actions, pending sudo code) |
+| `master status` | Work truth, session health, reviews, queue, `schedule` (dispatch order, overlap holds, high-conflict scopes), per-candidate `conflicts`, per-row `dispatch` (requested reviews and producers), `disk` (free space and what a reclaim would return), and `administration` (recent browser actions, pending sudo code) |
 | `master dispatch GY-N PROFILE [--allow-overlap]` | Invite a worker to claim ready work; `--allow-overlap` dispatches over a planned-file overlap hold |
 | `master producer add FILE` | Add a proof-producer launch profile with its own producer credential |
 | `master producer replace FILE` | Replace the producer profile of the same name, verified like `add` |
@@ -715,6 +813,7 @@ The master clears blockers and adds requirements as its operator-agent identity;
 | `master browser installation-accept` | Accept the installation's pending permission request through the browser |
 | `master browser protection [--dry-run]` | Reconcile branch protection through the browser |
 | `master harness [KIND] [--apply]` | Generate the master's own harness permissions |
+| `master config FIELD=VALUE…` | Tune the settings the master owns (run cadence, workflows, deployment, reviewer profile, producer timeout, quota ceiling, `accounts:PROFILE=a,b`); `autoMerge` and credential paths stay operator-only |
 | `master merge GY-N\|--all` | Guarded merge of authorized candidates; with automatic merging off, only candidates with an approved merge decision |
 | `master autonomy [--admin-token-stdin --apply]` | Provision the master's operator-agent and approver identities and harness rules (once, at onboarding) |
 | `master create FILE REASON`, `master release GY-N REASON`, `master unblock GY-N REASON`, `master requirements GY-N FILE REASON` | The master's own non-weakening intent, as its operator-agent identity |
@@ -724,4 +823,4 @@ The master clears blockers and adds requirements as its operator-agent identity;
 | `master approve GY-N DECISION REASON` | Approve, from the approver session only |
 | `master principals [--apply]` | Preview or apply an agent-principal roster rotation that keeps every live principal |
 | `master restart` | Stop this host's durable loop and start it again detached |
-| `master run [--once]` | The durable coordination loop, with the dispatcher that launches requested reviews and producers |
+| `master run [--once]` | The durable coordination loop, with the dispatcher that launches requested reviews and producers; its cycle also reclaims [worktree disk](#worktree-disk) |

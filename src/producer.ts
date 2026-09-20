@@ -3,8 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { z } from 'zod';
-import { atomicPrivateWrite, autonomousSession, closeHerdrPane, createdHerdrTab, herdrJson, loadMasterConfig, prepareSessionHarness, privateFile, readProducerCredential, stopCreatedHerdrTab, type HerdrAgent, type MasterConfig, type ProducerProfile, type SessionRetryReport } from './master.js';
-import { launchPlan } from './harness.js';
+import { accountLaunch, atomicPrivateWrite, autonomousSession, closeHerdrPane, createdHerdrTab, deliverPrompt, herdrJson, loadMasterConfig, prepareSessionHarness, privateFile, readProducerCredential, selectAccount, sharedGitDirectory, stopCreatedHerdrTab, type EnvironmentProbe, type PromptDelivery, type HerdrAgent, type MasterConfig, type ProducerProfile, type SessionRetryReport } from './master.js';
 import { implementerIdentities, type Work } from './model.js';
 import type { DispatchRequest } from './model/dispatch.js';
 
@@ -123,6 +122,9 @@ export function producerPrompt(config: Pick<MasterConfig, 'repository' | 'cliPat
 export async function launchProducer(root: string, work: Work, request: DispatchRequest, profile: ProducerProfile, agents: { name?: string }[], observedAt: string, dependencies: {
   run?: (command: string, args: string[]) => string;
   now?: () => Date;
+  /** How the profile's agent accounts are checked before the launch, and how its prompt is confirmed. */
+  probe?: EnvironmentProbe;
+  prompt?: PromptDelivery;
 } = {}) {
   const now = dependencies.now ?? (() => new Date());
   const config = await loadMasterConfig(root);
@@ -139,17 +141,20 @@ export async function launchProducer(root: string, work: Work, request: Dispatch
   if (prior.length >= sessionRetryLimit) throw new Error(`Request ${request.id} for ${work.key} already had ${prior.length} sessions fail or expire; no further automatic attempt`);
   if (agents.some(agent => agent.name === profile.agentName)) throw new Error(`Producer agent ${profile.agentName} is already visible in Herdr`);
   await readProducerCredential(root, profile.credentialFile);
-  const launch = launchPlan(profile.kind, profile.approvals, profile.agentArgs, profile.environment);
-  // The producer loads its own role rules, never the master's.
-  const harness = await prepareSessionHarness(root, config, { role: 'producer', kind: profile.kind, profile: profile.name, credentialFiles: [profile.credentialFile] });
+  const selected = await selectAccount(config, 'producer', profile, { ...dependencies.probe, work: work.key });
+  // A producer builds in a detached worktree under /tmp that commits into the repository's Git directory.
+  const launch = accountLaunch(profile, selected.account, { writable: ['/tmp', sharedGitDirectory(root)].filter((path): path is string => !!path) });
+  // The producer loads its own role rules, never the master's. The harness follows the account's
+  // runtime, so a cross-runtime failover keeps its role rules.
+  const harness = await prepareSessionHarness(root, config, { role: 'producer', kind: launch.kind, profile: profile.name, credentialFiles: [profile.credentialFile] });
   let pane: string | undefined, tabId: string | undefined;
   try {
-    const environment = { ...launch.environment, ...profile.environment, GRAPHYARD_URL: config.url, GRAPHYARD_TOKEN_FILE: profile.credentialFile, GRAPHYARD_HOST_ID: config.hostId, GRAPHYARD_PRODUCER: `${binding.key}@${binding.sha}` };
+    const environment = { ...launch.environment, GRAPHYARD_URL: config.url, GRAPHYARD_TOKEN_FILE: profile.credentialFile, GRAPHYARD_HOST_ID: config.hostId, GRAPHYARD_PRODUCER: `${binding.key}@${binding.sha}` };
     const created = createdHerdrTab(herdrJson(['tab', 'create', ...(config.herdrWorkspace ? ['--workspace', config.herdrWorkspace] : []), '--cwd', root,
       '--label', `${binding.key} ${binding.group} proofs · ${profile.agentName}`, ...Object.entries(environment).flatMap(([name, value]) => ['--env', `${name}=${value}`]), '--no-focus'], dependencies.run));
     pane = created.pane; tabId = created.tab;
-    herdrJson(['agent', 'start', profile.agentName, '--kind', profile.kind, '--pane', created.pane, '--', ...launch.args, ...harness.args], dependencies.run);
-    herdrJson(['agent', 'prompt', profile.agentName, producerPrompt(config, binding, profile)], dependencies.run);
+    herdrJson(['agent', 'start', profile.agentName, '--kind', launch.kind!, '--pane', created.pane, '--', ...launch.args, ...harness.args], dependencies.run);
+    deliverPrompt(profile.agentName, producerPrompt(config, binding, profile), dependencies.run, dependencies.prompt);
   } catch (error) {
     const malformedTab = (error as any)?.herdrTab as string | undefined;
     if (pane || tabId || malformedTab) try { stopCreatedHerdrTab(pane, tabId ?? malformedTab, dependencies.run); }
@@ -162,7 +167,8 @@ export async function launchProducer(root: string, work: Work, request: Dispatch
     requestedAt: requestedAt.toISOString(), expiresAt: new Date(requestedAt.getTime() + config.run.producerTimeoutMinutes * 60_000).toISOString(), state: 'pending', outcome: Object.fromEntries(binding.proofs.map(proof => [proof, 'missing'])) });
   await saveProducerLedger(root, { ...ledger, producers: [...ledger.producers, record] });
   return { producer: record.id, requestId: request.id, attempt: record.attempt, work: binding.key, pr: binding.pr, sha: binding.sha, baseSha: binding.baseSha, policyRevision: binding.policyRevision, group: binding.group, proofs: binding.proofs,
-    profile: profile.name, principal: profile.principal, agentName: profile.agentName, pane: record.pane, expiresAt: record.expiresAt, approvals: launch.approvals,
+    profile: profile.name, principal: profile.principal, agentName: profile.agentName, pane: record.pane, expiresAt: record.expiresAt, approvals: launch.plan.approvals,
+    account: selected.account ? { environment: selected.account.name, kind: selected.account.kind, quota: selected.health?.quota ?? null, skipped: selected.skipped } : null,
     recorded: 'the launch is recorded; master status reconciles the evidence and closes the session' };
 }
 
