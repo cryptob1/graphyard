@@ -1,6 +1,6 @@
 import { pathScopesOverlap } from './scope.js';
 import type { Evidence } from './evidence.js';
-import { reviewerProfileFor, type ReviewProvider } from './review.js';
+import { exactApproval, reviewerProfileFor, type ReviewProvider } from './review.js';
 import type { Work } from './work.js';
 
 /**
@@ -90,7 +90,7 @@ export function decideCarry(input: CarryInput): QueueCarry {
   const reviewedTouched = input.reviewedFiles.filter(path => changed.includes(path));
   const approval: CarriedApproval | RequiredApproval = !input.approval ? { carried: false, reason: `no approval was bound to the replaced head ${short(from.sha)}` }
     : reviewedTouched.length ? { carried: false, reason: `${who} changed reviewed files ${list(reviewedTouched)}; a fresh independent approval of ${short(to.sha)} is required` }
-    : { ...input.approval, carried: true, originalSha: from.sha, reason: `approval of ${short(from.sha)} by ${input.approval.reviewer} carried to Graphyard-authored tip ${short(to.sha)}: ${who} changed none of the ${input.reviewedFiles.length} reviewed files` };
+    : { ...input.approval, carried: true, originalSha: input.approval.sha, reason: `approval of ${short(from.sha)} by ${input.approval.reviewer} carried to Graphyard-authored tip ${short(to.sha)}: ${who} changed none of the ${input.reviewedFiles.length} reviewed files` };
   const evidence = input.proofs.map(({ proof, evidence }): CarriedProof => {
     if (!evidence) return { proof, carried: false, reason: `no trusted evidence was bound to the replaced head ${short(from.sha)}` };
     // A predicted base that changed nothing relative to the bound base leaves the tested tree
@@ -104,20 +104,35 @@ export function decideCarry(input: CarryInput): QueueCarry {
   return { ...base, approval, evidence };
 }
 
-/** The carry decision that applies to the current candidate: the published tip it was decided for, under the current policy. */
-export function currentCarry(work: Pick<Work, 'candidate' | 'queue' | 'policyRevision'>): QueueCarry | null {
-  const speculation = work.queue?.speculation, carry = speculation?.carry, candidate = work.candidate;
-  if (!speculation || !carry || !candidate) return null;
-  return speculation.tip === candidate.sha && carry.to.sha === candidate.sha && carry.to.baseSha === candidate.baseSha && carry.policyRevision === work.policyRevision ? carry : null;
+export type CarryBearer = Pick<Work, 'candidate' | 'queue' | 'baseRefresh' | 'policyRevision'>;
+/**
+ * The carry decision that applies to the current candidate, under the current policy: the one
+ * decided for the published merge-queue tip the candidate is, or the one decided when the control
+ * plane brought the candidate onto a moved base branch. Both are Graphyard-authored merges of the
+ * same reviewed head, decided by the same rule; a queued tip is the later of the two, so it wins.
+ */
+export function currentCarry(work: CarryBearer): QueueCarry | null {
+  const candidate = work.candidate;
+  if (!candidate) return null;
+  const applies = (carry: QueueCarry | null | undefined) => carry && carry.to.sha === candidate.sha
+    && carry.to.baseSha === candidate.baseSha && carry.policyRevision === work.policyRevision ? carry : null;
+  const speculation = work.queue?.speculation;
+  if (speculation?.tip === candidate.sha) { const carried = applies(speculation.carry); if (carried) return carried; }
+  const refresh = work.baseRefresh;
+  return refresh?.head === candidate.sha ? applies(refresh.carry) : null;
 }
-/** True when a trusted evidence record binds the current candidate: exactly, or carried across a Graphyard-authored tip. */
-export function evidenceBindsCandidate(work: Pick<Work, 'candidate' | 'queue' | 'policyRevision'>, evidence: Pick<Evidence, 'id' | 'proof' | 'sha' | 'baseSha'>): boolean {
+/**
+ * True when a trusted evidence record binds the current candidate: exactly, or carried across a
+ * Graphyard-authored commit. The decision names the exact record it carried, which is what lets a
+ * record carried more than once — across a base refresh and then across the queue's own tip —
+ * still be the one the latest decision names.
+ */
+export function evidenceBindsCandidate(work: CarryBearer, evidence: Pick<Evidence, 'id' | 'proof' | 'sha' | 'baseSha'>): boolean {
   const candidate = work.candidate;
   if (!candidate) return false;
   if (evidence.sha === candidate.sha && evidence.baseSha === candidate.baseSha) return true;
   const carry = currentCarry(work);
-  return !!carry && evidence.sha === carry.from.sha && evidence.baseSha === carry.from.baseSha
-    && carry.evidence.some(entry => entry.carried && entry.proof === evidence.proof && entry.evidenceId === evidence.id);
+  return !!carry && carry.evidence.some(entry => entry.carried && entry.proof === evidence.proof && entry.evidenceId === evidence.id);
 }
 /** The approval carried onto the current candidate, when the decision carried one for the policy's provider. */
 export function carriedApproval(work: Work): CarriedApproval | null {
@@ -127,4 +142,18 @@ export function carriedApproval(work: Work): CarriedApproval | null {
   // over since the original review is not carried either.
   if (approval.provider === 'agent' && reviewerProfileFor(work)?.reviewerApp !== approval.reviewerApp) return null;
   return approval;
+}
+/**
+ * The identity behind the approval the review gate currently accepts: the exact one, or the one
+ * already carried onto this candidate. A second Graphyard-authored commit over the same reviewed
+ * head decides from this, so a candidate the control plane refreshed and then queued does not lose
+ * its review to the queue's own tip. The identity keeps the commit it actually approved.
+ */
+export function bindingApproval(work: Work): ApprovalIdentity | null {
+  const exact = exactApproval(work);
+  if (exact) return exact;
+  const carried = carriedApproval(work);
+  if (!carried) return null;
+  const { carried: _carried, originalSha, reason: _reason, ...identity } = carried;
+  return { ...identity, sha: originalSha };
 }

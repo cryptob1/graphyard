@@ -28,6 +28,95 @@ export interface QueuePlacement {
   current: boolean; publishable: boolean; reasons: string[];
 }
 
+/**
+ * Bringing an in-flight candidate onto a base branch that moved under it.
+ *
+ * A merge used to invalidate every other open candidate at once: the base tip they were bound to
+ * was no longer the branch head, so their approvals and proofs stopped applying and no review
+ * could be requested for a head that did not contain the tip. The only way out was a rework round
+ * per item for what is almost always a clean fast-forward. Graphyard does both halves itself now.
+ * While a candidate's head is unchanged it keeps the base it was bound to (see `heldBase`): the
+ * tree it was reviewed and proved on did not change because somebody else merged. Then the control
+ * plane merges the new base into the candidate's own pull-request branch and decides binding carry
+ * from GitHub's account of the commit it produced, exactly as the merge queue does for a
+ * speculative tip. A conflict is the one case that still belongs to the worker.
+ */
+export interface BaseRefresh {
+  /** The head the refresh acted on and the base it was bound to when it did. */
+  from: { sha: string; baseSha: string };
+  /** The base-branch tip the candidate was brought onto, and that commit's tree. */
+  base: string; baseTree: string;
+  policyRevision: number; at: string;
+  /** The republished head, or null when the merge conflicted and nothing was pushed. */
+  head: string | null;
+  /** Why the base could not be merged into the candidate, named for the worker; null on success. */
+  conflict: string | null;
+  /** How Graphyard produced the head, as GitHub reports the commit; null when nothing was merged. */
+  merge?: TipMerge | null;
+  /** Which bindings of the replaced head carried onto it, decided once when the refresh was bound. */
+  carry?: QueueCarry | null;
+}
+
+/**
+ * The base a candidate stays bound to while Graphyard has not yet brought it onto a moved branch
+ * head. Held only for the exact head the candidate was observed at, only while no refresh of that
+ * head onto that tip has reported a conflict, and never for an attempt that is being reworked: a
+ * conflict gives the binding up, which is what makes AC-2's invalidation the same as it ever was.
+ * The caller verifies that the held commit is still an ancestor of the branch head; a rewind of
+ * the managed branch is not an advance and carries nothing.
+ */
+export function heldBase(work: Pick<Work, 'candidate' | 'baseRefresh' | 'policyRevision' | 'reworkRequested'>, head: string, baseTip: string): string | null {
+  const candidate = work.candidate;
+  if (!candidate || candidate.sha !== head || candidate.baseSha === baseTip || work.reworkRequested) return null;
+  const refresh = work.baseRefresh;
+  const conflicted = !!refresh?.conflict && refresh.from.sha === head && refresh.base === baseTip && refresh.policyRevision === work.policyRevision;
+  return conflicted ? null : candidate.baseSha;
+}
+
+/**
+ * The refresh this candidate is waiting for, or null when it needs none. A queued entry refreshes
+ * through its own speculative tip, so the queue keeps its entries; everything else in flight — a
+ * candidate still in review, still running CI, still collecting proofs — is refreshed here. One
+ * attempt per head, base tip and policy revision: a refresh already recorded for the same three is
+ * never repeated, so neither a conflict nor a published head makes the reconciliation job spin.
+ */
+export function baseRefreshNeeded(work: Work): { head: string; boundBase: string; baseTip: string } | null {
+  const candidate = work.candidate, observation = work.observation;
+  if (!work.submission || work.reworkRequested || work.stage === 'done' || work.queue || work.blocker) return null;
+  if (!candidate || !observation || observation.merged || observation.prState === 'closed' || observation.draft) return null;
+  if (observation.candidate.sha !== candidate.sha) return null;
+  const baseTip = observation.baseTip;
+  if (observation.baseTipContained !== false || !baseTip || baseTip === candidate.baseSha) return null;
+  const refresh = work.baseRefresh;
+  if (refresh && refresh.from.sha === candidate.sha && refresh.base === baseTip && refresh.policyRevision === work.policyRevision) return null;
+  return { head: candidate.sha, boundBase: candidate.baseSha, baseTip };
+}
+
+/** The unresolved conflict a base refresh reported for exactly this candidate and branch head, or null. */
+export function baseRefreshConflict(work: Pick<Work, 'candidate' | 'observation' | 'baseRefresh' | 'policyRevision'>): string | null {
+  const refresh = work.baseRefresh, candidate = work.candidate, observation = work.observation;
+  if (!refresh?.conflict || !candidate || !observation) return null;
+  return refresh.from.sha === candidate.sha && refresh.base === observation.baseTip && refresh.policyRevision === work.policyRevision ? refresh.conflict : null;
+}
+
+/**
+ * The base tip the control plane is bringing this candidate onto, when that is the only thing it
+ * waits for. `master status` reads it to keep such an item out of the attention list: nobody is
+ * waiting on a person, a review round, or a proof round for it.
+ */
+export function pendingBaseRefresh(work: Work): { baseTip: string; boundBase: string } | null {
+  if (baseRefreshConflict(work)) return null;
+  const needed = baseRefreshNeeded(work);
+  return needed ? { baseTip: needed.baseTip, boundBase: needed.boundBase } : null;
+}
+
+/** The carry decision a base refresh made for exactly the current candidate, for status and diagnose. */
+export function currentBaseRefreshCarry(work: Pick<Work, 'candidate' | 'baseRefresh' | 'policyRevision'>): QueueCarry | null {
+  const refresh = work.baseRefresh, candidate = work.candidate, carry = refresh?.carry;
+  if (!refresh || !carry || !candidate || refresh.head !== candidate.sha) return null;
+  return carry.to.sha === candidate.sha && carry.to.baseSha === candidate.baseSha && carry.policyRevision === work.policyRevision ? carry : null;
+}
+
 export const queueHistoryLimit = 40;
 // Pending, queued, or missing is not failure. Only a reported adverse conclusion ejects.
 const failedConclusions = new Set(['failure', 'timed_out', 'cancelled', 'action_required', 'startup_failure', 'stale', 'neutral']);

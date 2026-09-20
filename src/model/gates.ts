@@ -1,4 +1,4 @@
-import { latestCheck } from '../merge-queue.js';
+import { baseRefreshConflict, latestCheck } from '../merge-queue.js';
 import type { QueueEjection, QueueEntry, QueueHistoryEntry } from '../merge-queue.js';
 import type { Gate, Stage, Work } from './work.js';
 import { escalationRefusals } from './escalation.js';
@@ -22,8 +22,11 @@ export function evaluate(work: Work, all: Work[], now: Date, ciAppIds: number[])
   const fresh = current && now.getTime() - Date.parse(obs!.at) < 120_000;
   // A candidate that reverts, deletes or rewrites shipped files outside its planned scope never
   // reaches review: the refusal names every file and is re-derived from each new observation.
+  // A base the control plane cannot merge in cleanly is the other thing only the worker can fix:
+  // the conflict is named here, the attempt returns to build, and nothing carries across it.
+  const conflict = baseRefreshConflict(work);
   add('build', [...(!work.submission || work.reworkRequested ? ['Worker has not submitted implementation for this attempt'] : []), ...(!candidate ? ['Pull request has not been independently observed'] : []), ...(!work.workspaces.length ? ['No workspace registered'] : []),
-    ...(current ? regressionRefusals(work, obs!, all) : [])]);
+    ...(conflict ? [conflict] : []), ...(current ? regressionRefusals(work, obs!, all) : [])]);
   const reviews = current ? obs!.reviews : [];
   const changesRequested = reviews.some(r => r.state === 'CHANGES_REQUESTED');
   const agentReview = current ? obs!.agentReview : undefined;

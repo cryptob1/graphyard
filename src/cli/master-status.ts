@@ -1,8 +1,8 @@
 import { randomUUID } from 'node:crypto';
 import { probeCandidateConflicts } from '../conflicts.js';
-import { agentOwner, agentToken, assessContainment, buildMasterStatus, diskPressure, diskPressureAttention, diskThresholdBytes, freeBytes, herdrWorkspaceHealth, humanOwner, inspectWorkerCredentials, inventoryWorktrees, mergeProtocolSkew, observeHerdrAgents, planWorktreeReclaim, reclaimIdleMs, snapshotWithClock, worktreesDirectory, type MasterConfig } from '../master.js';
+import { agentOwner, agentToken, assessContainment, buildMasterStatus, diskPressure, diskPressureAttention, diskThresholdBytes, freeBytes, herdrWorkspaceHealth, humanOwner, inspectWorkerCredentials, inventoryWorktrees, mergeProtocolSkew, observeHerdrAgents, planWorktreeReclaim, reclaimIdleMs, snapshotWithClock, worktreesDirectory, type AttentionItem, type HerdrAgent, type MasterConfig, type WorkerProfile } from '../master.js';
 import type { Work } from '../model.js';
-import { daemonSummary, readDaemonState, type DaemonState } from '../master-daemon.js';
+import { daemonSummary, orphanedSupervisors, readDaemonState, type DaemonState, type OrphanSupervisor } from '../master-daemon.js';
 import { readReviewLedger, reconcileReviews, reviewerBindingHealth, summarizeReviews } from '../reviewer.js';
 import { readProducerLedger, reconcileProducers, sessionRetries, summarizeProducers } from '../producer.js';
 import { dispatchSummary, readDispatchCursor } from '../auto-dispatch.js';
@@ -20,6 +20,83 @@ export function scopeRequestAttention(snapshot: { work: Work[]; now: string }) {
     const live = request && work.lease && work.lease.epoch === request.epoch && Date.parse(work.lease.expiresAt) > Date.parse(snapshot.now);
     return live ? [{ subject: work.key, text: `${request.requestedBy} needs files outside plannedFiles: ${request.paths.join(', ')} — ${request.reason}`, ...agentOwner('master', `graphyard master scope ${work.key}`) }] : [];
   });
+}
+
+type MasterStatus = ReturnType<typeof buildMasterStatus>;
+
+/**
+ * The command that reclaims an assignment from a watch supervisor that outlived its agent. The
+ * coordination cycle does it on its own; this is how a master runs that cycle once when the loop
+ * is stopped, which is the state the item is usually noticed in.
+ */
+export const supervisorReclaimCommand = 'graphyard master run --once';
+
+/**
+ * One attention line for an assignment whose watch supervisor has outlived its session.
+ *
+ * `Assigned worker session is done` reads as an item that finished, which is exactly what it is
+ * not: the session is gone, the lease is still advancing, and the item cannot be dispatched to
+ * anybody. This names the supervisor holding it, the process and scope it is held by, and the
+ * command that reclaims it — an agent command, never a hand search for a pid.
+ */
+export function orphanSupervisorAttention(orphan: OrphanSupervisor, host: string | null): AttentionItem {
+  return { subject: orphan.key,
+    text: `Lease epoch ${orphan.epoch} of ${orphan.key} is still advancing (to ${orphan.leaseExpiresAt}) while Herdr no longer reports session ${orphan.agentName}: an orphaned watch supervisor (pid ${orphan.scope.pid}, containment scope ${orphan.scope.unit}) holds the item for a worker that cannot act`,
+    ...agentOwner('master', `${supervisorReclaimCommand} stops that supervisor through its containment scope; on ${host ?? 'its registered host'}, systemctl --user kill --kill-whom=all --signal=SIGTERM ${orphan.scope.unit} does the same by hand`) };
+}
+
+/**
+ * Rewrite the session attention of every assignment held by an orphaned supervisor, in the row
+ * and in the attention list alike, so both say the same thing. A Herdr that could not be read
+ * reports no sessions, and every live assignment would then look orphaned, so an unavailable
+ * runtime changes nothing.
+ */
+export function nameOrphanSupervisors(status: MasterStatus, work: Work[], profiles: WorkerProfile[], runtime: { agents: HerdrAgent[]; available: boolean }, now: number): MasterStatus {
+  if (!runtime.available) return status;
+  const orphans = orphanedSupervisors(work, profiles, runtime.agents, now);
+  if (!orphans.length) return status;
+  const rewritten = new Map<string, { previous: string | null; item: AttentionItem }>();
+  const rows = status.work.map(row => {
+    const orphan = orphans.find(entry => entry.key === row.key);
+    if (!orphan) return row;
+    const item = orphanSupervisorAttention(orphan, work.find(candidate => candidate.id === orphan.id)?.workspaces.find(space => space.epoch === orphan.epoch)?.host ?? null);
+    rewritten.set(row.key, { previous: row.attention, item });
+    const { subject, text, ...owner } = item;
+    return { ...row, attention: text, attentionOwner: owner };
+  });
+  const attentionItems = status.attentionItems.map(entry => {
+    const rewrite = rewritten.get(entry.subject);
+    return rewrite && entry.text === rewrite.previous ? rewrite.item : entry;
+  });
+  for (const [key, rewrite] of rewritten) if (!attentionItems.some(entry => entry.subject === key && entry.text === rewrite.item.text)) attentionItems.push(rewrite.item);
+  return { ...status, work: rows, attentionItems };
+}
+
+/**
+ * Terminal decisions nothing waits on any more: a stale one — approval refused on a revision or
+ * candidate race, so its pin can never hold again — and a withdrawn one the requester took back.
+ * A stale decision raises master attention with the re-request command only while it is still the
+ * latest decision for its action — a later decision of the same action supersedes it, whatever its
+ * state; a withdrawn one is listed for the record and never raises attention.
+ */
+async function terminalDecisions(masterApi: (path: string) => Promise<any>, work: { id: string; key: string; stage: string }[]) {
+  const listed: { work: string; id: string; action: string; state: string; reason: string | null; race?: unknown }[] = [];
+  const attentionItems: AttentionItem[] = [];
+  for (const item of work) {
+    if (item.stage === 'done') continue;
+    const history = await masterApi(`work/${item.id}/decisions`).catch(() => null);
+    const decisions = history?.decisions ?? [];
+    const latest = new Map<string, string>();
+    for (const decision of decisions) latest.set(decision.action, decision.id);
+    for (const decision of decisions) {
+      if (decision.state !== 'stale' && decision.state !== 'withdrawn') continue;
+      listed.push({ work: item.key, id: decision.id, action: decision.action, state: decision.state, reason: decision.outcome ?? null, ...(decision.race ? { race: decision.race } : {}) });
+      if (decision.state === 'stale' && latest.get(decision.action) === decision.id)
+        attentionItems.push({ subject: item.key, text: `Decision ${decision.id} (${decision.action}) is stale: ${decision.outcome ?? 'the item moved past it'}; request it again, the stale decision no longer blocks`,
+          ...agentOwner('master', `graphyard master decide ${item.key} ${decision.action} [JSON|@FILE] REASON, then graphyard master approver ${item.key} DECISION`, 'approver') });
+    }
+  }
+  return { listed, attentionItems };
 }
 
 /**
@@ -61,7 +138,10 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
   // Browser administration is reported beside the work it unblocks: a pending sudo code is
   // the one thing the operator must act on, and the recent ledger entries say who changed what.
   const administration = { browser: master.browser ? { profile: master.browser.profile } : null, ...summarizeAdministration((await readAdministrationLedger(root)).entries, await readSudoState(root)) };
-  const status = buildMasterStatus(snapshot, master.workers, runtime.agents, credentials, containment, reviews, master.baseBranch, coordinator, { producers, failures: dispatch.failures, retries }, probeCandidateConflicts(root, snapshot.work));
+  // A worker session Herdr no longer reports, on an assignment whose lease is still advancing, is
+  // an orphaned supervisor rather than a session that finished; it is named with what reclaims it.
+  const status = nameOrphanSupervisors(buildMasterStatus(snapshot, master.workers, runtime.agents, credentials, containment, reviews, master.baseBranch, coordinator, { producers, failures: dispatch.failures, retries }, probeCandidateConflicts(root, snapshot.work)),
+    snapshot.work, master.workers, runtime, Date.parse(snapshot.now));
   // A waiting sudo prompt is the operator confirming their own GitHub credential on their device,
   // the one step no agent may take for them; a timed-out one is the master's to rerun.
   const sudo = administration.sudo;
@@ -71,8 +151,10 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
   // Setup that stops every launch is the master's to repair.
   for (const text of reviewerBinding.attention) attentionItems.push({ subject: 'setup', text, ...agentOwner('master', 'graphyard master reviewer setup (or graphyard master reviewer bind FILE --key-stdin) to bind the reviewer App') });
   if (workspace.exists === false) attentionItems.push({ subject: 'setup', text: workspace.reason!, ...agentOwner('master', 'Set herdrWorkspace in .graphyard/master.json to a workspace herdr workspace list shows; master run adopts it on its next tick') });
-  return { ...status, attentionItems,
+  const decisions = await terminalDecisions(masterApi, snapshot.work);
+  return { ...status, attentionItems: [...attentionItems, ...decisions.attentionItems],
     counts: { ...status.counts, attention: status.counts.attention + diskAttention.length + scopeRequests.filter(item => !(status.work as { key: string; attention: string | null }[]).find(row => row.key === item.subject)?.attention).length },
+    terminalDecisions: decisions.listed,
     autoMerge: master.autoMerge, mergeApproval: master.autoMerge ? 'routine merges permitted after gates pass' : 'each merge needs an approved merge decision: graphyard master decide GY-N merge REASON, approved by the approver agent',
     versionSkew: mergeProtocolSkew(coordinator, cli), cli,
     reviewer: master.reviewer ? { identity: `${master.reviewer.slug}[bot]`, appId: master.reviewer.appId, profiles: master.reviewers.map(profile => profile.name), automatic: master.run.reviewerProfile ?? (master.reviewers.length === 1 ? master.reviewers[0].name : null) } : null,

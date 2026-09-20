@@ -3,16 +3,17 @@ import { z } from 'zod';
 import { Store, save, wakeJob } from './store.js';
 import { authorizedForProof, unauthorizedProofs } from './proof-grants.js';
 import { workspacePath, pathsOverlap, validBranch } from './workspace.js';
-import { activeLease, admin, assertReviewerProfiles, operatorCapability, escalationTriggers, holdsMergeExecution, MergeExecutionInProgress, providerDelayAfterVerification, raiseEscalation, releaseLeadHold, resolveEscalation, standingEscalations, attestationFor, attestationKinds, attestationsFromLedger, leaseLapseCause, leaseLossEpoch, leaseLossReason, settleableLeaseLoss, submittedEpoch, type Attestation, requireCurrent, createSchema, criterionSchema, currentEvidence, decideCarry, deploySmokeProof, deploySmokeRequired, evidenceBindsCandidate, exactApproval, inheritedObligations, pathScopeContains, requiredProofs, resourcesSchema, demand, evaluate, exhaustedReviewerProfiles, proofSchema, reviewerProfileFor, reviewerProfileSchema, reviewProviders, reviewProviderOf, type Criterion, type Evidence, type Principal, type ReviewerApp, type ReviewFailover, type Work, type Observation, type ReviewRequest, type OperatorCapability } from './model.js';
+import { activeLease, admin, assertReviewerProfiles, operatorCapability, escalationTriggers, holdsMergeExecution, MergeExecutionInProgress, providerDelayAfterVerification, raiseEscalation, releaseLeadHold, resolveEscalation, standingEscalations, attestationFor, attestationKinds, attestationsFromLedger, leaseLapseCause, leaseLossEpoch, leaseLossReason, settleableLeaseLoss, submittedEpoch, type Attestation, requireCurrent, createSchema, criterionSchema, bindingApproval, currentEvidence, decideCarry, deploySmokeProof, deploySmokeRequired, evidenceBindsCandidate, inheritedObligations, pathScopeContains, requiredProofs, resourcesSchema, demand, evaluate, exhaustedReviewerProfiles, proofSchema, reviewerProfileFor, reviewerProfileSchema, reviewProviders, reviewProviderOf, type Criterion, type Evidence, type Principal, type ReviewerApp, type ReviewFailover, type Work, type Observation, type ReviewRequest, type OperatorCapability } from './model.js';
 import { resourceConflicts } from './coordination.js';
 import { containmentAttestation, containmentSettlementRefusals, containmentVerificationSchema } from './quarantine.js';
 import { activeEngineers, delegationLimits, implementerIdentities, leadMay, producerIndependenceRefusal, sessionKind } from './delegation.js';
-import { queueHistoryLimit, queueSequencingReason, type QueueSpeculation } from './merge-queue.js';
+import { queueHistoryLimit, queueSequencingReason, type BaseRefresh, type QueueSpeculation } from './merge-queue.js';
 import { githubFromEnv } from './github.js';
 import { regressionRefusals } from './regression-guard.js';
 import { ciFamilyAllows, ciProofFamilies, ciRunBindingSchema, ciRunRefusal, isCiProducer, refuseCiProducer, staleCiAttemptRefusal, type CiRunObservation } from './model/ci-proofs.js';
 import { liveScopeWidening } from './model/scope.js';
 import { reconcileAutoDispatch, type DispatchTransition } from './model/dispatch.js';
+import { beginAttempt, endAttempt, endLapsedAttempt, recordIntervention, recordRework, recordSubmission } from './pipeline-speed.js';
 
 const epoch = z.number().int().positive();
 const sha = z.string().regex(/^[a-f0-9]{40}$/);
@@ -332,7 +333,14 @@ export class Engine {
         work.formalReviewResetRequired = true; work.formalReviewBaseline = undefined;
         // A request the widened scope fully covers is answered; a partial one stays open for the master.
         if (work.scopeRequest && work.scopeRequest.paths.every(path => data.plannedFiles.some((scope: string) => pathScopeContains(scope, path)))) work.scopeRequest = null;
-        if (!widening) work.lease = null;
+        // A revision other than a live-scope widening is a hand-off for an item already under way:
+        // its timeline counts it, and the lapsed lease it discards (a live one was refused above)
+        // ends that attempt at its deadline. A widening keeps the attempt, so it counts neither.
+        if (!widening) {
+          if (work.lease) endLapsedAttempt(work, work.lease, now);
+          recordIntervention(work, 'requirements');
+          work.lease = null;
+        }
         work.observation = null; work.mergeAuthorization = null; work.reviewRequest = null;
         // A submitted implementation must be explicitly reconsidered for changed intent.
         if (work.submission) work.reworkRequested = true;
@@ -388,6 +396,7 @@ export class Engine {
         if (work.lease) await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, 'graphyard', 'lease.expired',
           JSON.stringify({ details: { owner: work.lease.owner, epoch: work.lease.epoch, expiresAt: work.lease.expiresAt, submission: work.submission, cause: 'stopped-by-attestation',
             attestation: { kind: 'stopped-worker', source: 'rework', epoch: work.epoch, actor: actor.id, at: now.toISOString(), reason: data.reason }, at: now.toISOString() } })]);
+        recordRework(work, now);
         work.lease = null;
         // Reopening implementation is the authorized recovery for send-back.
         // A plan rejection remains owned by its originating lead and can only
@@ -425,6 +434,7 @@ export class Engine {
           if (explained) await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, 'graphyard', 'lease.expired',
             JSON.stringify({ details: { owner: work.lease.owner, epoch: work.lease.epoch, expiresAt: work.lease.expiresAt, submission: work.submission, ...explained, at: now.toISOString() } })]);
           else raiseEscalation(work, { trigger: 'lease-loss', reason: leaseLossReason(work.lease), at: now.toISOString(), actor: 'graphyard' });
+          endLapsedAttempt(work, work.lease, now);
         }
         work.epoch++;
         // A fresh attempt asks afresh: the previous attempt's scope request belongs to a lease that no longer exists.
@@ -432,6 +442,7 @@ export class Engine {
         work.implementers = [...new Set([...implementerIdentities(work), actor.id])];
         work.lastAssignment = { owner: actor.id, epoch: work.epoch, claimedAt: now.toISOString(), ...(actor.displayName ? { displayName: actor.displayName } : {}), ...(actor.runtime ? { runtime: actor.runtime } : {}) };
         work.lease = { owner: actor.id, epoch: work.epoch, expiresAt: new Date(now.getTime() + this.leaseSeconds * 1000).toISOString() };
+        beginAttempt(work, work.lease, now);
       }
       // The lease a worker submitted under ended at that submission. A supervisor that keeps
       // renewing it is told so, rather than left to read the loss as a superseded epoch.
@@ -468,8 +479,9 @@ export class Engine {
         demand(!refusals.length, `Automatic containment settlement refused: ${refusals.join('; ')}. ${containmentAttestation(work.key)}`);
         work.containmentQuarantine = null;
       }
-      if (command === 'release') work.lease = null;
-      if (command === 'blocked') work.blocker = data.reason;
+      if (command === 'release') { endAttempt(work, data.epoch, 'released', now); work.lease = null; }
+      // A blocked report is a hand-off to the master or operator; the item's timeline counts it.
+      if (command === 'blocked') { work.blocker = data.reason; if (data.reason) recordIntervention(work, 'blocked'); }
       if (command === 'scope') {
         if (!data.paths.length) {
           demand(work.scopeRequest, 'No scope request is open for this attempt');
@@ -498,6 +510,7 @@ export class Engine {
         }
         work.submission = { epoch: data.epoch, pr: data.pr };
         work.reworkRequested = false;
+        recordSubmission(work, data.epoch, now);
         // Binding the candidate ends the implementation lease in the same transaction: submitted
         // work continues through the gates without one, and a lease left to lapse afterwards
         // would otherwise read as an abandoned assignment. The workspace and `lastAssignment`
@@ -817,7 +830,49 @@ export class Engine {
     return decideCarry({
       from: { sha: candidate.sha, baseSha: candidate.baseSha }, to: { sha: speculation.tip, baseSha: speculation.base }, policyRevision: work.policyRevision, at: now.toISOString(),
       merge: speculation.merge, predecessor: { key: aheadKey, validated }, reviewedFiles: observed ? observation!.files : [],
-      approval: exactApproval(work), proofs: requiredProofs(work, all).map(proof => ({ proof, evidence: currentEvidence(work, proof, now) })),
+      approval: bindingApproval(work), proofs: requiredProofs(work, all).map(proof => ({ proof, evidence: currentEvidence(work, proof, now) })),
+      app: this.controlPlaneAppId ? `control-plane (App ${this.controlPlaneAppId})` : 'control-plane',
+    });
+  }
+  /**
+   * Records what the control plane did about a base branch that moved under an in-flight
+   * candidate: the head it republished on the new base, or the conflict that stopped it. The
+   * carry is decided here, once, from the record as it stands and GitHub's account of the merge —
+   * the same rule the merge queue uses for its own tip — so a clean advance costs no rework round
+   * and a conflicting one carries nothing. The worker asserts none of it and never pushes for it.
+   */
+  async bindBaseRefresh(id: string, expectedRevision: number, refresh: BaseRefresh, jobToken: string) {
+    return this.store.transaction(async (db, now) => {
+      const job = (await db.query('SELECT 1 FROM jobs WHERE work_id=$1 AND token=$2 AND locked_until>$3', [id, jobToken, now])).rows[0];
+      requireCurrent(job, 'Integration job lease expired or superseded');
+      const all: Work[] = (await db.query('SELECT document FROM work_items ORDER BY number')).rows.map(r => r.document);
+      const work = all.find(w => w.id === id);
+      requireCurrent(work && work.revision === expectedRevision && work.stage !== 'done' && !work.observation?.merged, 'Task changed while the base was refreshed');
+      demand(!holdsMergeExecution(work, now.getTime()), 'Merge execution is active');
+      requireCurrent(!work.queue && refresh.policyRevision === work.policyRevision
+        && work.candidate?.sha === refresh.from.sha && work.candidate.baseSha === refresh.from.baseSha, 'Candidate, queue entry or policy changed while the base was refreshed');
+      const carry = refresh.head && refresh.head !== refresh.from.sha ? this.decideBaseRefreshCarry(work, all, refresh, now) : null;
+      work.baseRefresh = { ...refresh, carry };
+      this.evaluate(work, all, now);
+      if (carry) await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, 'graphyard', 'base.carry', JSON.stringify({ details: { ...carry, merge: refresh.merge ?? null } })]);
+      await this.recordDispatch(db, work, now);
+      await save(db, work, 'graphyard', refresh.conflict ? 'base.conflict' : 'base.refreshed', now, { from: refresh.from, base: refresh.base, head: refresh.head,
+        ...(refresh.conflict ? { conflict: refresh.conflict } : {}),
+        ...(carry ? { carry: { approval: carry.approval.carried ? 'carried' : 'required', evidence: Object.fromEntries(carry.evidence.map(entry => [entry.proof, entry.carried ? 'carried' : 'required'])) } } : {}) });
+      await wakeJob(db, work.id);
+      return work;
+    });
+  }
+  /** The carry decision for a head Graphyard republished on a moved base; see model/carry.ts for the rule. */
+  private decideBaseRefreshCarry(work: Work, all: Work[], refresh: BaseRefresh, now: Date) {
+    const candidate = work.candidate!, observation = work.observation;
+    const observed = !!observation && observation.candidate.sha === candidate.sha && observation.candidate.baseSha === candidate.baseSha;
+    // The base branch is validated by definition: every commit on it already landed through the
+    // gates, so the predecessor of a base refresh is the branch itself and nothing else.
+    return decideCarry({
+      from: refresh.from, to: { sha: refresh.head!, baseSha: refresh.base }, policyRevision: work.policyRevision, at: now.toISOString(),
+      merge: refresh.merge, predecessor: { key: null, validated: true }, reviewedFiles: observed ? observation!.files : [],
+      approval: bindingApproval(work), proofs: requiredProofs(work, all).map(proof => ({ proof, evidence: currentEvidence(work, proof, now) })),
       app: this.controlPlaneAppId ? `control-plane (App ${this.controlPlaneAppId})` : 'control-plane',
     });
   }
@@ -927,6 +982,7 @@ export class Engine {
           const explained = leaseLapseCause(work, lost, attestations);
           if (explained) ledger.push({ kind: 'lease.expired', details: { owner: lost.owner, epoch: lost.epoch, expiresAt: lost.expiresAt, submission: work.submission, ...explained } });
           else raiseEscalation(work, { trigger: 'lease-loss', reason: leaseLossReason(lost), at: now.toISOString(), actor: 'graphyard' });
+          endLapsedAttempt(work, lost, now);
         }
         // A standing lease-loss for an epoch whose candidate was already bound predates that
         // rule, and one the control plane raised for an epoch whose blocked report or stopped-worker
