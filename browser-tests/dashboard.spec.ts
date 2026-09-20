@@ -250,8 +250,11 @@ for (const viewport of [{ name: 'desktop', width: 1280, height: 900 }, { name: '
 
 test('the work page shows one count row, the stages, with the open total in the heading and nothing counted twice', async ({ page }) => {
   await fixture(page); await login(page);
-  // The open total is the heading's count and appears nowhere else; the summary tile row is gone.
+  // The open total is the heading's count and appears nowhere else: the sidebar's Work entry
+  // carries no badge, and the summary tile row is gone.
   await expect(workHeading(page)).toHaveText(/Work\s*1/);
+  await expect(page.getByRole('navigation', { name: 'Primary' }).getByRole('button', { name: /Work/ })).toHaveText(/Work$/);
+  await expect(page.getByRole('navigation', { name: 'Primary' }).locator('small')).toHaveCount(0);
   await expect(page.locator('.metrics')).toHaveCount(0);
   await expect(page.getByText('Need a worker', { exact: true })).toHaveCount(0);
   // The fixture item sits in review, so review is the only drawn stage; no zero is drawn.
@@ -262,6 +265,12 @@ test('the work page shows one count row, the stages, with the open total in the 
   // The row still filters the lists below.
   await strip.locator('.node').click();
   await expect(page.getByRole('heading', { name: 'Browser fixture' })).toBeVisible();
+  // Board view keeps every column, empty ones included, each headed by its stage name alone:
+  // the row above is the count, so a column repeats none.
+  await page.getByRole('button', { name: 'Board view' }).click();
+  await expect(page.locator('.column')).toHaveCount(7);
+  await expect(page.locator('.column > h3')).toHaveText(['Not started', 'Needs a worker', 'Being built', 'In review', 'Automated checks', 'Proving it works', 'Merging']);
+  await expect(page.locator('.column > h3 span')).toHaveCount(0);
 });
 
 test('invalid login remains on login; whitespace is trimmed and loading never claims empty work', async ({ page }) => {

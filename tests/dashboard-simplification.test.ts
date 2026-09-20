@@ -377,15 +377,24 @@ test('unit:home-numbers-reconcile — every home number counts one named thing a
   assert.match(page, new RegExp(`Shipped this week <span class="count">${numbers.shippedThisWeek}</span>`));
 });
 
+/**
+ * Every label the rendered page counts, in every form a count takes: a heading with a `.count`
+ * chip, a stage tile (`<span>label</span><strong>n</strong>`), a board column (`<h3>label
+ * <span>n</span></h3>`) and a sidebar entry (`<span>label</span><small>n</small>`). The sidebar
+ * and the top bar are part of the page: a label counted there and again on the page is the
+ * duplicate GY-81 removes.
+ */
 const countedLabels = (page: string) => {
   const labels: string[] = [];
-  for (const [, , inner] of page.matchAll(/<h([12])[^>]*>([\s\S]*?)<\/h\1>/g)) {
-    if (!/<span class="count"[^>]*>/.test(inner)) continue;
-    labels.push(inner.replace(/<span class="count"[^>]*>[\s\S]*?<\/span>/, '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim());
+  for (const [, , inner] of page.matchAll(/<h([123])[^>]*>([\s\S]*?)<\/h\1>/g)) {
+    if (!/<span(?: class="count"[^>]*)?>\d+<\/span>/.test(inner)) continue;
+    labels.push(inner.replace(/<span(?: class="count"[^>]*)?>\d+<\/span>/, '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim());
   }
-  for (const [, label] of page.matchAll(/<span>([^<]+)<\/span><strong>(\d+)<\/strong>/g)) labels.push(label);
+  for (const [, label] of page.matchAll(/<span>([^<]+)<\/span>(?:<strong>|<small>)(\d+)(?:<\/strong>|<\/small>)/g)) labels.push(label);
   return labels.filter(Boolean);
 };
+/** Every number the page draws as a count, whatever element carries it: chip, tile, column or sidebar badge. */
+const drawnCounts = (page: string) => [...page.matchAll(/<(span|strong|small)(?: class="count"[^>]*)?>(\d+)<\/\1>/g)].map(match => Number(match[2]));
 
 test('unit:work-page-single-count-row — the page shows one row of counts, the stages, plus at most one highlighted stuck count; no count appears twice and no two labels differ only by grammatical form', () => {
   const numbers = homeNumbers(work, NOW);
@@ -398,10 +407,12 @@ test('unit:work-page-single-count-row — the page shows one row of counts, the 
   // Every counted label on the page is unique: no measure is counted twice.
   const counted = countedLabels(page);
   assert.deepEqual(new Set(counted).size, counted.length, `each counted label appears once: ${counted.join(' | ')}`);
-  assert.deepEqual(counted.filter(label => label === 'Work').length, 1, 'the heading counts once');
-  // At most one highlighted count for work needing attention, and it is the stuck count.
+  assert.deepEqual(counted.filter(label => label === 'Work').length, 1, 'the heading counts once; the sidebar entry does not');
+  assert.ok(!/<nav [\s\S]*?<small>\d+<\/small>[\s\S]*?<\/nav>/.test(page), 'no sidebar entry carries a count');
+  // At most one highlighted count for work needing attention, and it is the stuck count. The
+  // heading reads "Stuck 1", with the space, to a screen reader and the clipboard alike.
   assert.deepEqual([...page.matchAll(/class="work-list attention" aria-label="([^"]+)"/g)].map(match => match[1]), ['Stuck']);
-  assert.match(page, new RegExp(`<h2>Stuck<span class="count">${numbers.stuck}</span></h2>`));
+  assert.match(page, new RegExp(`<h2>Stuck <span class="count">${numbers.stuck}</span></h2>`));
   // No label differs from another only by grammatical form ("Need a worker" vs "Needs a worker").
   const stem = (label: string) => label.toLowerCase().split(/\s+/).map(word => word.replace(/ies$/, 'y').replace(/s$/, '')).join(' ');
   const stems = counted.map(stem);
@@ -416,7 +427,11 @@ test('unit:work-page-no-derived-totals — a total that is a sum or subset of th
   assert.ok(!page.includes('aria-label="Open items"'), 'the Open tile row is gone');
   assert.ok(!/<span>Open<\/span>/.test(page), 'Open is not a tile label');
   assert.match(page, new RegExp(`<h1>Work <span class="count"[^>]*>${numbers.open}</span></h1>`));
-  assert.equal([...page.matchAll(new RegExp(`<span class="count"[^>]*>${numbers.open}</span>`, 'g'))].length, 1, 'the open count is rendered once');
+  // Once anywhere on the page, in any element that carries a count: the sidebar's Work entry
+  // used to badge the same number under the same label.
+  assert.ok(numbers.open !== numbers.stuck && numbers.open !== numbers.shippedThisWeek && !phases.some(p => numbers.byPhase[p] === numbers.open), 'the fixture keeps the open total distinct from every other number');
+  assert.deepEqual(drawnCounts(page).filter(n => n === numbers.open), [numbers.open], 'the open count is drawn once');
+  assert.ok(!page.includes(`<small>${numbers.open}</small>`), 'the sidebar badge is gone');
   // The other summary tiles repeated the row ("Being built", "Need a worker") or subset it
   // ("Stuck"): the stage strip and the one stuck highlight are their only homes.
   for (const label of ['Being built', 'Needs a worker'])

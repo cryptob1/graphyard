@@ -17,8 +17,9 @@ const openPhases = phases.filter(phase => phase !== 'shipped');
  * The home page answers three questions on one screen: what is stuck and why, what is in
  * progress, and what shipped recently. One row of counts — the stages — plus the open total in
  * the page heading and, when there is any, one highlighted stuck count; nothing is counted
- * twice. Everything else about an item is one click away in its details; analytics live under
- * Insights.
+ * twice, on this page or beside it: the sidebar's Work entry carries no count, and a board
+ * column is headed by its stage name alone. Everything else about an item is one click away in
+ * its details; analytics live under Insights.
  */
 export default function OverviewPage({ work, status, filter, setFilter, query, setQuery, setSelected, setCreating, setView, observedAt, queue }: Dashboard) {
   const [phase, setPhase] = useState<Phase | null>(null);
@@ -36,7 +37,7 @@ export default function OverviewPage({ work, status, filter, setFilter, query, s
   const shippedAt = (w: Work) => Date.parse(w.observation?.mergedAt ?? w.stageEnteredAt);
   const recent = work.filter(w => w.stage === 'done' && now - shippedAt(w) <= week && match(w)).sort((a, b) => shippedAt(b) - shippedAt(a));
   const card = (w: Work) => <WorkCard key={w.id} item={w} repository={status?.repository} now={now} onOpen={setSelected}/>;
-  const list = (title: string, items: Work[], note?: string, attention = false) => items.length > 0 && <section className={attention ? 'work-list attention' : 'work-list'} aria-label={title}><h2>{title}{attention && <span className="count">{items.length}</span>}{note && <small> {note}</small>}</h2><div className="cards">{items.map(card)}</div></section>;
+  const list = (title: string, items: Work[], note?: string, attention = false) => items.length > 0 && <section className={attention ? 'work-list attention' : 'work-list'} aria-label={title}><h2>{attention ? <>{title} <span className="count">{items.length}</span></> : title}{note && <small> {note}</small>}</h2><div className="cards">{items.map(card)}</div></section>;
   const slices = (status?.delegation?.slices ?? []).filter((slice: any) => slice.lead);
   // One row of counts: the stages that hold something. A stage with nothing in it takes no tile.
   const stages = openPhases.filter(p => numbers.byPhase[p] > 0);
@@ -62,7 +63,7 @@ export default function OverviewPage({ work, status, filter, setFilter, query, s
     <div className="list-tools"><button className="text-button" onClick={() => setTimings(v => !v)} aria-expanded={timings}>{timings ? 'Hide times' : 'Show times'}</button>{(phase || filter) && <button className="text-button" onClick={() => { setPhase(null); setFilter(null); }}>Clear filter ×</button>}<input aria-label="Search work" placeholder="Search work…" value={query} onChange={e => setQuery(e.target.value)}/><button className="text-button" aria-pressed={board} onClick={() => setBoard(v => !v)}>{board ? 'List view' : 'Board view'}</button></div>
     <div className="home-columns"><div>
     {work.length === 0 ? <div className="empty"><h2>No work yet.</h2><p>Create a work item, say what must be true when it is done, and an agent will pick it up.</p>{status?.actor?.role === 'admin' && <button onClick={() => setCreating(true)}>Create the first work item</button>}</div>
-      : board ? <div className="board">{openPhases.map(p => <div className="column" key={p}><h3>{phaseLabel[p]} <span>{open.filter(w => phaseOf(w, now) === p).length}</span></h3>{open.filter(w => phaseOf(w, now) === p).map(card)}</div>)}</div>
+      : board ? <div className="board">{openPhases.map(p => <div className="column" key={p}><h3>{phaseLabel[p]}</h3>{open.filter(w => phaseOf(w, now) === p).map(card)}</div>)}</div>
       : <>{list('Stuck', stuck, undefined, true)}{list('In progress', inProgress)}{list('Needs a worker', waiting)}
         {notStarted.length > 0 && <details className="work-list"><summary>Not started</summary><div className="cards">{notStarted.map(card)}</div></details>}
         {!open.length && <p className="muted">No open item matches.</p>}</>}

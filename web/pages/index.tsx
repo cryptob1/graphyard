@@ -25,14 +25,13 @@ export type Section = typeof sections[number]['id'];
 
 /**
  * One page. The sidebar, the tabs and the main pane are generated from this list, so a new page
- * is one entry here plus its component under web/pages/.
+ * is one entry here plus its component under web/pages/. An entry carries no count: a number
+ * has one home, on its page (the open total is the Work heading's, GY-81).
  */
 export interface View {
   id: string; icon: string; label: string;
   /** The primary entry it lives under; a page without one is opened by a link (the guide). */
   section?: Section;
-  /** A count rendered beside the section label. */
-  count?(dashboard: Dashboard): number;
   adminOnly?: boolean;
   /** Hides the page for some sessions, or while nothing is configured for it. */
   visible?(dashboard: Dashboard): boolean;
@@ -45,7 +44,7 @@ const role = (dashboard: Dashboard) => dashboard.status?.actor?.role;
 const configured = (value: boolean | null | undefined) => value !== false;
 
 export const views: readonly View[] = [
-  { id: 'work', icon: '▥', label: 'Work', section: 'work', count: dashboard => dashboard.work.filter(w => w.stage !== 'done').length, render: dashboard => <OverviewPage {...dashboard}/> },
+  { id: 'work', icon: '▥', label: 'Work', section: 'work', render: dashboard => <OverviewPage {...dashboard}/> },
   { id: 'shipped', icon: '✓', label: 'Shipped', section: 'shipped', render: dashboard => <ShippedPage {...dashboard}/> },
   { id: 'pulse', icon: '∿', label: 'Shipping pulse', section: 'insights', visible: dashboard => role(dashboard) !== 'operator-agent', render: dashboard => <ShippingPulse token={dashboard.token} repository={dashboard.status?.repository}/> },
   { id: 'flow', icon: '◷', label: 'Flow analytics', section: 'insights', visible: dashboard => role(dashboard) !== 'operator-agent', render: dashboard => <FlowAnalytics request={dashboard.api} token={dashboard.token} canAudit={['admin', 'coordinator', 'producer'].includes(role(dashboard))}/> },
