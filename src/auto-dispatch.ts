@@ -9,7 +9,7 @@ import type { SessionHandleInput } from './model/sessions.js';
 import type { DispatchRequest } from './model/dispatch.js';
 import { actionRenewIntervalMs, type ActionRow } from './model/actions.js';
 import { nextActionKinds, type NextActionKind } from './model/next-action.js';
-import { assertOutsideWorktrees, inspectProducerCredentials, listHerdrAgents, readEnvironmentLog, type ConfigReload, type EnvironmentLog, type HerdrAgent, type MasterConfig, type ProducerProfile, type ReviewerProfile } from './master.js';
+import { assertOutsideWorktrees, inspectProducerCredentials, listHerdrAgents, readCredentialFile, readEnvironmentLog, type ConfigReload, type EnvironmentLog, type HerdrAgent, type MasterConfig, type ProducerProfile, type ReviewerProfile } from './master.js';
 import { launchReview, reconcileReviews, type ReviewRecord } from './reviewer.js';
 import { independentProducerProfiles, launchProducer, reconcileProducers, sessionRetry, type ProducerRecord } from './producer.js';
 
@@ -320,6 +320,17 @@ export async function runAutoDispatch(config: MasterConfig, cursor: DispatchCurs
 export function dispatchEffects(root: string, config: MasterConfig | (() => MasterConfig), deps: { snapshot: () => Promise<{ work: Work[]; now: string }>; mutate?: (path: string, body: unknown, requestId?: string) => Promise<any>; run?: (command: string, args: string[]) => string }): DispatchEffects {
   const run = deps.run ?? ((command, args) => execFileSync(command, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 90_000 }));
   const current = typeof config === 'function' ? config : () => config;
+  // The coordinator mutation this loop records handles with. It is built from the same
+  // configuration the loop already runs on — the credential the dispatcher authenticates every
+  // launch decision with — so a dispatcher records what it launched wherever it runs, rather than
+  // only where a caller remembered to pass one. A caller with a mutation of its own passes it.
+  const mutate = deps.mutate ?? (async (path: string, body: unknown, requestId: string = randomUUID()) => {
+    const token = await readCredentialFile(current().credentialFile);
+    const response = await fetch(`${current().url}/api/${path}`, { method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', 'Idempotency-Key': requestId }, body: JSON.stringify(body), signal: AbortSignal.timeout(30_000) });
+    const result = await response.json();
+    if (!response.ok) throw new Error(typeof result?.error === 'string' ? result.error : JSON.stringify(result));
+    return result;
+  });
   return {
     snapshot: deps.snapshot,
     agents: () => { try { return listHerdrAgents(run); } catch { return null; } },
@@ -328,10 +339,9 @@ export function dispatchEffects(root: string, config: MasterConfig | (() => Mast
     reconcileProducers: (work, agents) => reconcileProducers(root, current(), work, agents, { run }),
     launchReview: (work, request, profile, agents, observedAt) => launchReview(root, work, profile.name, agents, observedAt, { run, requestId: request.id }),
     launchProducer: (work, request, profile, agents, observedAt) => launchProducer(root, work, request, profile, agents, observedAt, { run }),
-    // The handle goes where every Graphyard reader already looks, through the same coordinator
-    // mutation the daemon uses. A dispatcher built without a mutation still launches; it simply
-    // records nothing, and `master run` passes one, so its launches are visible.
-    ...(deps.mutate ? { recordSession: (work: Work, handle: SessionHandleInput) => deps.mutate!(`work/${work.id}/session`, handle, randomUUID()) } : {}),
+    // The handle goes where every Graphyard reader already looks, so watching a reviewer or
+    // producer session the loop launched never means reading this host's own ledger.
+    recordSession: (work: Work, handle: SessionHandleInput) => mutate(`work/${work.id}/session`, handle, randomUUID()),
     persist: cursor => writeDispatchCursor(current(), cursor),
   };
 }

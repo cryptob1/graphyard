@@ -1203,9 +1203,9 @@ test('integration:session-handles-visible — the reviewer and producer launcher
   assert.ok(tick.launched.every(entry => entry.work === item.key));
   assert.equal(handles.length, 2, 'a handle was recorded for each launch');
   assert.deepEqual(mutations.map(mutation => mutation.path.split('/').at(-1)), ['session', 'session'], 'each one went to the control plane through the shipped mutation');
-  // A dispatcher built without a mutation still launches; it simply records nothing, which is why
-  // `master run` passes one (src/cli/master.ts).
-  assert.equal(dispatchEffects('/outside', () => fleetConfig, { snapshot: effects.snapshot }).recordSession, undefined);
+  // And a dispatcher built with nothing but a snapshot records them too: the mutation is derived
+  // from the configuration the loop already runs on, so no caller can leave the handles out.
+  assert.ok(dispatchEffects('/outside', () => fleetConfig, { snapshot: effects.snapshot }).recordSession, 'the handle recording is not a caller\'s option');
   const recorded = (await reload(item)).sessions ?? [];
   const review = recorded.find(handle => handle.kind === 'review')!, proof = recorded.find(handle => handle.kind === 'proof')!;
   assert.deepEqual([review.runtime, review.workspace, review.pane], ['claude', 'wF', 'pane-12']);

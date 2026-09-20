@@ -472,8 +472,8 @@ A session that needs something records a typed request and exits, giving up its 
 transaction, so the item is free instead of held at a prompt:
 
 ```sh
-graphyard request GY-N request.json    # {"type": "scope-request", "epoch": 3, "paths": ["docs/"], "reason": "…"}
-POST /api/work/GY-N/request            # the same write, for a session that speaks HTTP
+POST /api/work/GY-N/request
+{"type": "scope-request", "epoch": 3, "paths": ["docs/"], "reason": "the guide describes this contract"}
 ```
 
 Recording one is the same write as the command it replaces — a `blocker` sets the blocker the ready
@@ -504,13 +504,14 @@ that attaches to it — `herdr pane attach PANE` while it runs, its transcript o
 Watching a specific agent never needs a master to relay a pane identifier.
 
 Every launcher records one: the worker dispatch (loop or executor), and the reviewer and producer
-launches in automatic dispatch — `master run` passes the dispatcher the coordinator mutation it
-records them with, so its launches are as visible as an executor's. Each records what it knows —
+launches in automatic dispatch — the dispatcher derives the coordinator mutation it records them
+with from its own configuration, so its launches are as visible as an executor's wherever it runs.
+Each records what it knows —
 the runtime it launched, the host, the Herdr workspace, the pane and the command that attaches to
 it — and names the principal whose session it is. What a launcher cannot know, the tab the runtime
 opened under its own control and the transcript the agent writes, the session records for itself
-with `graphyard session GY-N handle.json` (`POST /api/work/GY-N/session`), which is the only party
-that has them; a handle is merged field by field, so the two halves meet on one record.
+with `POST /api/work/GY-N/session`, which is the only party that has them; a handle is merged
+field by field, so the two halves meet on one record.
 
 A handle is a fact, but the attach command on it is an instruction somebody runs, so updating one
 that already exists belongs to the session it names, the coordinator that launched it, or an admin.
