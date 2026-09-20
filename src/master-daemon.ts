@@ -1,13 +1,15 @@
 import { randomUUID } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
+import { readFileSync } from 'node:fs';
 import { chmod, readFile, rename, writeFile } from 'node:fs/promises';
 import { basename, dirname, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { z } from 'zod';
-import { currentEvidence, deliveryState, deploySmokeRequired, exhaustedReviewerProfiles, postDeployMs, productionLatencyMs, reviewProviderOf, reviewerProfileFor, rollbackGuidance, type Work } from './model.js';
+import { currentEvidence, deliveryState, deploySmokeRequired, exhaustedReviewerProfiles, postDeployMs, productionLatencyMs, reviewProviderOf, reviewerProfileFor, rollbackGuidance, type ContainmentScope, type Work } from './model.js';
+import { scopePattern, watchAssignment } from './supervisor.js';
 import { baseRefreshConflict, pendingBaseRefresh } from './merge-queue.js';
 import { dispatchOrder } from './coordination.js';
-import { agentOwner, agentToken, approvedMerge, assertDispatchable, assertOutsideWorktrees, assessContainment, closeHerdrPane, containmentPhase, decisionInput, diskExhaustion, diskThresholdBytes, dispatchWork, inspectWorkerCredentials, launchApprover, listHerdrAgents, mergeExecutor, reclaimAdvice, reclaimIdleMs, reclaimWorktrees, writeFailure, type AttentionItem, type ConfigReload, type ContainmentAssessment, type HerdrAgent, type MasterConfig, type WorkerProfile, type WorktreeReclaimReport } from './master.js';
+import { agentOwner, agentToken, approvedMerge, assertDispatchable, assertOutsideWorktrees, assessContainment, closeHerdrPane, containmentPhase, decisionInput, diskExhaustion, diskThresholdBytes, dispatchWork, inspectWorkerCredentials, launchApprover, listHerdrAgents, mergeExecutor, observeHerdrAgents, reclaimAdvice, reclaimIdleMs, reclaimWorktrees, writeFailure, type AttentionItem, type ConfigReload, type ContainmentAssessment, type HerdrAgent, type MasterConfig, type WorkerProfile, type WorktreeReclaimReport } from './master.js';
 
 /**
  * The durable coordination loop. Every step is a pure decision over one Graphyard snapshot plus
@@ -104,6 +106,22 @@ export const silenceSchema = z.object({
   lastActionAt: z.string().nullable().default(null),
 }).strict();
 
+/**
+ * What the loop last saw of an assignment whose Herdr session is gone: enough for a later cycle
+ * to tell a lease that is still being renewed from one that has simply not lapsed yet. Without
+ * that second look, every session that ends a moment before its lease does would read as an
+ * orphaned supervisor.
+ */
+export const orphanObservationSchema = z.object({
+  epoch: z.number().int().min(0), owner: z.string().max(200),
+  pid: z.number().int().positive(), unit: z.string().max(200),
+  firstSeenAt: z.string(), leaseExpiresAt: z.string(),
+  /** How many times this supervisor has been stopped, and the expiry it was last stopped at. */
+  stops: z.number().int().min(0).default(0),
+  stoppedLeaseExpiresAt: z.string().nullable().default(null),
+}).strict();
+export type OrphanObservation = z.infer<typeof orphanObservationSchema>;
+
 export const daemonStateSchema = z.object({
   version: z.literal(1), url: z.string(), repository: z.string(),
   lock: z.object({ id: z.string(), pid: z.number().int().positive(), host: z.string(), startedAt: z.string(), heartbeatAt: z.string() }).strict().nullable().default(null),
@@ -122,6 +140,8 @@ export const daemonStateSchema = z.object({
   latency: z.array(latencySampleSchema).default([]),
   /** What is actionable and how long it has gone without an action (see `silenceReport`). */
   silence: silenceSchema.default({ subjects: {}, lastActionAt: null }),
+  /** Per work item, what the loop last saw of an assignment whose Herdr session is gone. */
+  orphans: z.record(z.string(), orphanObservationSchema).default({}),
 }).strict();
 export type DaemonState = z.infer<typeof daemonStateSchema>;
 
@@ -282,6 +302,62 @@ export function missingProofs(work: Work, now: Date) {
     const evidence = currentEvidence(work, proof, now);
     return !evidence || evidence.result !== 'pass' || evidence.executed < 1 || evidence.skipped > 0;
   });
+}
+
+/** An assignment whose watch supervisor has outlived the session it was launched to run. */
+export interface OrphanSupervisor { id: string; key: string; epoch: number; owner: string; profile: string; agentName: string; scope: ContainmentScope; leaseExpiresAt: string }
+
+/**
+ * Assignments held by a supervisor whose session Herdr no longer reports.
+ *
+ * The supervisor records its own pid and the containment scope it created when it launches, so an
+ * orphan is named by the launch record rather than found with `pgrep`. Only an assignment carrying
+ * that record for the very epoch that holds the lease qualifies: without it there is no scope to
+ * stop the supervisor through, and a neighbouring attempt's scope must never be mistaken for it.
+ *
+ * This says nothing about whether the lease is still advancing — the caller that acts on it needs
+ * a second observation for that (`orphanObservationSchema`); `master status` names what it sees.
+ */
+export function orphanedSupervisors(work: Work[], profiles: WorkerProfile[], agents: HerdrAgent[], now: number): OrphanSupervisor[] {
+  return work.flatMap(item => {
+    const lease = item.lease;
+    if (item.stage === 'done' || !lease || !(Date.parse(lease.expiresAt) > now)) return [];
+    const profile = profiles.find(candidate => candidate.mode === 'launch' && candidate.principal === lease.owner);
+    if (!profile || agents.some(agent => agent.name === profile.agentName)) return [];
+    const quarantine = item.containmentQuarantine;
+    if (!quarantine?.scope || quarantine.epoch !== lease.epoch || quarantine.owner !== lease.owner) return [];
+    return [{ id: item.id, key: item.key, epoch: lease.epoch, owner: lease.owner, profile: profile.name, agentName: profile.agentName, scope: quarantine.scope, leaseExpiresAt: lease.expiresAt }];
+  });
+}
+
+/**
+ * Stop one orphaned watch supervisor on this host: the containment scope it created for the agent,
+ * and the supervisor process that outlived it.
+ *
+ * The scope is the master's own user unit, so no privilege beyond the coordinator's own session is
+ * used. The recorded pid is signalled only while its own command line still names this assignment's
+ * `watch KEY EPOCH --` invocation: a pid the kernel has since handed to something else is reported,
+ * never signalled. A refusal of one half is recorded; only a stop that reached neither throws.
+ */
+export function stopWatchSupervisor(orphan: OrphanSupervisor, signal: NodeJS.Signals, run: (command: string, args: string[]) => string,
+  kill: (pid: number, signal: NodeJS.Signals) => void = process.kill, readCommand: (pid: number) => string = pid => readFileSync(`/proc/${pid}/cmdline`, 'utf8')) {
+  if (!scopePattern.test(orphan.scope.unit)) throw new Error(`Recorded containment scope ${orphan.scope.unit} is not a Graphyard watch scope`);
+  const refusals: string[] = [];
+  let stopped = 0;
+  try { run('systemctl', ['--user', 'kill', '--kill-whom=all', `--signal=${signal}`, orphan.scope.unit]); stopped++; }
+  catch (error) { refusals.push(`containment scope ${orphan.scope.unit} could not be signalled: ${message(error)}`); }
+  let argv: string[] | null = null;
+  try { argv = readCommand(orphan.scope.pid).split('\0').filter(Boolean); }
+  catch (error) { refusals.push(`supervisor pid ${orphan.scope.pid} could not be read: ${message(error)}`); }
+  if (argv) {
+    const assignment = watchAssignment(argv);
+    if (assignment?.key === orphan.key && assignment.epoch === String(orphan.epoch)) {
+      try { kill(orphan.scope.pid, signal); stopped++; }
+      catch (error) { refusals.push(`supervisor pid ${orphan.scope.pid} could not be signalled: ${message(error)}`); }
+    } else refusals.push(`pid ${orphan.scope.pid} no longer runs the watch supervisor for ${orphan.key} epoch ${orphan.epoch}`);
+  }
+  if (!stopped) throw new Error(refusals.join('; ') || 'Nothing of the recorded containment could be stopped');
+  return { unit: orphan.scope.unit, pid: orphan.scope.pid, signal, refusals };
 }
 
 export interface ProfileHealth { profile: WorkerProfile; healthy: boolean; busy: boolean; reason: string | null }
@@ -627,6 +703,14 @@ export interface DaemonEffects {
   /** Tells the process supervisor the loop is alive, so a hung cycle becomes a restart. */
   notify?: (state: 'ready' | 'alive') => void;
   agents: () => HerdrAgent[];
+  /**
+   * The same session inventory with whether it could be read at all. A Herdr that cannot be
+   * reached reports no sessions, and stopping a supervisor on that would kill live work, so the
+   * orphan step acts only on an inventory that says it is available.
+   */
+  herdr?: () => { agents: HerdrAgent[]; available: boolean };
+  /** Stops an orphaned watch supervisor through the containment scope it recorded at launch. */
+  stopSupervisor?: (orphan: OrphanSupervisor, signal: NodeJS.Signals) => void | Promise<void>;
   credentials: (profiles: WorkerProfile[]) => Promise<Record<string, { available: boolean; reason: string | null }>>;
   snapshot: () => Promise<{ work: Work[]; now: string }>;
   persist: (state: DaemonState) => Promise<void>;
@@ -687,6 +771,42 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
     const key = `session:blocked:${profile.name}:${agent.pane_id}:${item.epoch}`;
     if (state.actions[key]) continue;
     performed.push(await record(state, key, { kind: 'session', work: item.key, principal: profile.principal, state: 'failed', detail: `Worker session ${profile.agentName} on ${item.key} (epoch ${item.epoch}) is waiting on input (Herdr reports it blocked) instead of deciding on its own; answer or stop it, and have it record a blocker naming the blocked command rather than asking`, attempts: 1, epoch: item.epoch, cycle: state.cycle }, now(), effects.persist));
+  }
+
+  // 1c. A lease that keeps advancing while Herdr no longer reports the session renewing it is an
+  //     orphaned watch supervisor: the agent is gone, the item stays owned by a worker that cannot
+  //     act, nothing lapses, and no replacement can be dispatched. Two observations establish it —
+  //     one lease expiry later than the one first seen with the session already gone — and the
+  //     supervisor is then stopped through the containment scope it recorded at launch, rather
+  //     than left for a master to find with `pgrep` and kill by hand.
+  const runtime = effects.herdr?.();
+  if (runtime?.available && effects.stopSupervisor) {
+    const orphans = orphanedSupervisors(open, config.workers, runtime.agents, clock);
+    for (const id of Object.keys(state.orphans)) if (!orphans.some(orphan => orphan.id === id)) delete state.orphans[id];
+    for (const orphan of orphans) {
+      const previous = state.orphans[orphan.id];
+      const tracked = previous && previous.epoch === orphan.epoch && previous.owner === orphan.owner && previous.pid === orphan.scope.pid ? previous : null;
+      if (!tracked) {
+        state.orphans[orphan.id] = orphanObservationSchema.parse({ epoch: orphan.epoch, owner: orphan.owner, pid: orphan.scope.pid, unit: orphan.scope.unit, firstSeenAt: new Date(clock).toISOString(), leaseExpiresAt: orphan.leaseExpiresAt });
+        await effects.persist(state); continue;
+      }
+      // A supervisor already stopped is judged against the expiry it was stopped at: a lease that
+      // advances past it proves the stop did not take, and the next signal is not negotiable.
+      const baseline = Date.parse(tracked.stoppedLeaseExpiresAt ?? tracked.leaseExpiresAt);
+      state.orphans[orphan.id] = { ...tracked, leaseExpiresAt: orphan.leaseExpiresAt };
+      if (!(Date.parse(orphan.leaseExpiresAt) > baseline)) { await effects.persist(state); continue; }
+      const stops = tracked.stops + 1, signal: NodeJS.Signals = stops === 1 ? 'SIGTERM' : 'SIGKILL';
+      const key = `incident:orphan-supervisor:${orphan.id}:${orphan.epoch}:${orphan.scope.pid}`;
+      const incident = `${orphan.key} epoch ${orphan.epoch} renewed its lease to ${orphan.leaseExpiresAt} while Herdr no longer reports session ${orphan.agentName}: its watch supervisor (pid ${orphan.scope.pid}, containment scope ${orphan.scope.unit}) has outlived the agent`;
+      await record(state, key, { kind: 'escalation', work: orphan.key, principal: orphan.owner, epoch: orphan.epoch, state: 'started', detail: `${incident}; stopping it with ${signal} through that scope`, attempts: stops, cycle: state.cycle }, now(), effects.persist);
+      try {
+        await effects.stopSupervisor(orphan, signal);
+        state.orphans[orphan.id] = { ...state.orphans[orphan.id], stops, stoppedLeaseExpiresAt: orphan.leaseExpiresAt };
+        performed.push(await record(state, key, { kind: 'escalation', work: orphan.key, principal: orphan.owner, epoch: orphan.epoch, state: 'done', detail: `${incident}; stopped with ${signal} through that scope, so the lease lapses instead of renewing`, attempts: stops, cycle: state.cycle }, now(), effects.persist));
+      } catch (error) {
+        performed.push(await record(state, key, { kind: 'escalation', work: orphan.key, principal: orphan.owner, epoch: orphan.epoch, state: 'failed', detail: `${incident}; it could not be stopped through that scope: ${message(error)}`, attempts: stops, cycle: state.cycle }, now(), effects.persist));
+      }
+    }
   }
 
   // A pane this cycle just closed frees its profile, so health is read after the closures.
@@ -1242,6 +1362,8 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
   };
   return {
     agents: () => { try { return listHerdrAgents(run); } catch { return []; } },
+    herdr: () => { const runtime = observeHerdrAgents(run); return { agents: runtime.agents, available: runtime.available }; },
+    stopSupervisor: (orphan, signal) => { stopWatchSupervisor(orphan, signal, run); },
     credentials: profiles => inspectWorkerCredentials(root, profiles),
     snapshot: deps.snapshot,
     closeSession: pane => closeHerdrPane(pane, run),
