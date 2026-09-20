@@ -200,8 +200,12 @@ async function main() {
     const limits = delegationLimitAssignments(roster, deployed);
     // The regression guard's exemption list is derived from this repository's own generated-file
     // manifest and deployed beside the roster, so a docs-touching candidate is never refused for
-    // regenerating a page no work item owns. No manifest means no variable and no exemption.
-    const generated = generatedFilesAssignment(fileURLToPath(root));
+    // regenerating a page no work item owns. No manifest means no variable and no exemption; a
+    // manifest that fails or prints a value the server would refuse names itself, because the
+    // stage message alone would leave the operator guessing at a declaration they can fix.
+    let generated;
+    try { generated = generatedFilesAssignment(fileURLToPath(root)); }
+    catch (error) { throw Object.assign(new Error(error.message), { visible: true }); }
     for (const entry of limits.drift) console.error(`Drift: ${entry.reason}`);
     const variables = { GITHUB_APP_ID: String(app.appId), GITHUB_INSTALLATION_ID: String(app.installationId), GITHUB_PRIVATE_KEY: app.privateKey, GITHUB_WEBHOOK_SECRET: app.webhookSecret,
       GRAPHYARD_PRINCIPALS: JSON.stringify(roster), ...limits.variables, ...(generated ? { [generated.variable]: generated.value } : {}) };

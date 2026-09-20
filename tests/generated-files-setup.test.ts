@@ -215,7 +215,9 @@ test('integration:generated-files-setup — every other adapter deploys the same
   // The integrations adapter stages variables one by one through its own secret-safe path, so the
   // derived value travels in the same record as GRAPHYARD_PRINCIPALS and the capacity variables.
   const integrations = await source('scripts/configure-integrations.mjs');
-  assert.match(integrations, /const generated = generatedFilesAssignment\(fileURLToPath\(root\)\)/);
+  assert.match(integrations, /generated = generatedFilesAssignment\(fileURLToPath\(root\)\)/);
+  // A manifest it cannot read names itself rather than hiding behind the stage message.
+  assert.match(integrations, /catch \(error\) \{ throw Object\.assign\(new Error\(error\.message\), \{ visible: true \}\); \}/);
   assert.match(integrations, /GRAPHYARD_PRINCIPALS: JSON\.stringify\(roster\), \.\.\.limits\.variables, \.\.\.\(generated \? \{ \[generated\.variable\]: generated\.value \} : \{\}\)/);
   // Applying the Railway configuration must not drop what the adapters set.
   assert.match(await source('.railway/railway.ts'), new RegExp(`${generatedFilesVariable}: preserve\\(\\)`));
