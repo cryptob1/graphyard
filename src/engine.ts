@@ -19,6 +19,7 @@ import { claimAction, openActions, reconcileActions, settleAction, type ActionRo
 import { agentRequestLimit, agentRequestSchema, deciderFor, expireAgentRequests, leaseHeldRequestTypes, requestResolutionRefusal, resolveSatisfiedScopeRequests, type AgentRequest } from './model/agent-requests.js';
 import { recordSession, sessionHandleSchema } from './model/sessions.js';
 import { beginAttempt, endAttempt, endLapsedAttempt, recordIntervention, recordRework, recordSubmission } from './pipeline-speed.js';
+import { foldDecisions } from './model/approval.js';
 
 const epoch = z.number().int().positive();
 const sha = z.string().regex(/^[a-f0-9]{40}$/);
@@ -109,9 +110,23 @@ const actionClaimSchema = z.object({
 }).strict();
 const actionSettleSchema = z.object({ executor: executorName.optional(), result: z.enum(['done', 'failed']), reason: z.string().trim().min(1).max(2000) }).strict();
 const pullAssignmentSchema = z.object({ host: executorName.optional(), work: z.string().min(1).max(200).optional() }).strict();
-const mergeAcquireSchema = z.object({ expectedRevision: z.number().int().positive(), sha, baseSha: sha, policyRevision: z.number().int().positive() }).strict();
-const mergeCancelSchema = z.object({ executionId: z.string().uuid(), reason: z.string().trim().min(1).max(2000) }).strict();
-const mergeVerifySchema = z.object({ executionId: z.string().uuid() }).strict();
+// A merge execution is owned by the executor instance that acquired it — one daemon process or
+// one interactive `master merge` request — never by the coordinator principal alone (GY-92). Two
+// executors sharing one credential otherwise each read the other's in-flight execution as their
+// own to resume, re-verify it under a new idempotency key, and cancel it on the refusal, before the
+// provider merge the first one already committed. The instance is minted by the executor and
+// bound here to the principal that authenticates it, so no instance can name another principal's.
+const executorInstance = z.string().trim().min(1).max(100).regex(/^[A-Za-z0-9][A-Za-z0-9._:-]*$/);
+const mergeAcquireSchema = z.object({ expectedRevision: z.number().int().positive(), sha, baseSha: sha, policyRevision: z.number().int().positive(), executor: executorInstance.optional() }).strict();
+const mergeCancelSchema = z.object({ executionId: z.string().uuid(), reason: z.string().trim().min(1).max(2000), executor: executorInstance.optional() }).strict();
+const mergeVerifySchema = z.object({ executionId: z.string().uuid(), executor: executorInstance.optional() }).strict();
+/**
+ * The recorded owner of a merge execution: `principal#instance` for an executor that names its
+ * instance, the bare principal for a caller that names none. Every later step must present the
+ * same instance; the executor side derives the same string (mergeExecutionOwner in master.ts).
+ */
+export const mergeExecutionOwner = (actor: Pick<Principal, 'id'>, executor?: string | null) => executor ? `${actor.id}#${executor}` : actor.id;
+const ownedByAnother = 'Merge execution is missing, expired, superseded, or owned by another coordinator executor instance';
 export type Command = keyof typeof commands;
 const operatorCapabilitiesByCommand: Partial<Record<Command, OperatorCapability>> = { create: 'intent:create', ready: 'intent:ready', unblock: 'intent:unblock', requirements: 'policy:requirements', reviewpolicy: 'policy:review-provider' };
 
@@ -186,6 +201,51 @@ function applyScopeDecision(work: Work, request: NonNullable<Work['scopeRequest'
   return decision;
 }
 
+/** The violation an observed merge records when no valid execution covered it. */
+export const unauthorizedMergeViolation = 'Merge observed without a prior authorization for this candidate';
+/**
+ * How a delivery that recovered from that violation was judged (GY-92): the two-party merge
+ * decision it rests on, the cutoff the history was re-checked at, and the judgement itself.
+ * Recorded on the delivery beside the snapshot revision and evidence instant it cites.
+ */
+export interface MergeReconciliation {
+  decision: string; requestedBy: string; requestedAt: string; approvedBy: string; approvedAt: string; reason: string; approvalReason: string;
+  cutoff: string; snapshotRevision: number; judgement: string; proofs: string[]; violation: string;
+}
+/**
+ * Why the record as it stood before the merge cutoff does not authorize the observed merge, or
+ * nothing when it does: exactly the acceptance gate's demand at the cutoff — a bootstrap
+ * criterion's deferred proofs excluded, an inherited obligation re-checked — plus the
+ * authorization itself, the submitted pull request, every gate, a fresh observation and an
+ * authorization that predates the merge. Read for the authorized path and for a reconciliation.
+ */
+export function historicalAuthorizationRefusals(past: Work, all: Work[], observation: Observation, cutoff: number, mergedTime: number): string[] {
+  const authorization = past.mergeAuthorization;
+  const refusals: string[] = [];
+  if (!authorization || authorization.sha !== observation.candidate.sha || authorization.baseSha !== observation.candidate.baseSha || authorization.policyRevision !== past.policyRevision)
+    refusals.push(`no merge authorization for ${observation.candidate.sha.slice(0, 12)} on ${observation.candidate.baseSha.slice(0, 12)} at policy revision ${past.policyRevision} stood at the merge cutoff`);
+  else if (!(Date.parse(authorization.at) < mergedTime)) refusals.push(`the merge authorization was recorded at ${authorization.at}, not before the merge`);
+  if (past.submission?.pr !== observation.candidate.pr) refusals.push(`the record named pull request #${past.submission?.pr ?? 'none'}, not #${observation.candidate.pr}`);
+  for (const gate of past.gates.filter(gate => !gate.passed)) refusals.push(`gate ${gate.name} had not passed: ${gate.reasons.join('; ')}`);
+  for (const violation of past.violations) refusals.push(`violation stood: ${violation}`);
+  const asOf = new Date(cutoff - 1);
+  for (const proof of requiredProofs(past, all)) if (!currentEvidence(past, proof, asOf)) refusals.push(`required proof ${proof} had no live trusted evidence at ${asOf.toISOString()}`);
+  if (!past.observation || !(cutoff - Date.parse(past.observation.at) < 120_000)) refusals.push('the last GitHub observation before the merge was older than two minutes');
+  return refusals;
+}
+/**
+ * The two-party merge decision that reconciles an observed, unauthorized merge: applied — so
+ * requested by one agent identity and approved by an independent one — for exactly the observed
+ * candidate at the policy revision the pre-cutoff record carried, and requested after the merge
+ * cutoff, so it is a judgement of the merge that happened rather than a pre-merge approval.
+ */
+async function reconcilingDecision(db: { query: (text: string, values: unknown[]) => Promise<{ rows: any[] }> }, work: Work, observation: Observation, policyRevision: number, cutoff: number) {
+  const rows = (await db.query("SELECT actor, kind, payload, created_at FROM events WHERE work_id=$1 AND kind IN ('decision.requested','decision.approved','decision.applied','decision.failed') ORDER BY seq", [work.id])).rows;
+  const decisions = foldDecisions(work.id, rows.map(row => ({ kind: row.kind as string, actor: row.actor as string, at: new Date(row.created_at).toISOString(), payload: row.payload })));
+  return decisions.find(decision => decision.action === 'merge' && decision.state === 'applied' && !!decision.approvedBy && decision.approvedBy !== decision.requestedBy
+    && decision.input?.sha === observation.candidate.sha && decision.input?.baseSha === observation.candidate.baseSha && decision.input?.policyRevision === policyRevision
+    && Date.parse(decision.requestedAt) >= cutoff) ?? null;
+}
 export class Engine {
   operatorAuthorizer?: (db: any, now: Date, actor: Principal) => Promise<Principal>;
   // The configured credential registry, used to report which required proof names
@@ -925,7 +985,7 @@ export class Engine {
         ...requiredEvidence.flatMap(evidence => evidence?.expiresAt ? [Date.parse(evidence.expiresAt)] : [])];
       const expiresAt = Math.min(...validityDeadlines);
       demand(Number.isFinite(expiresAt) && expiresAt - now.getTime() > 95_000, 'Required gate inputs expire too soon for a bounded merge execution; refresh them and retry');
-      const execution = { id: randomUUID(), owner: actor.id, sha: data.sha, baseSha: data.baseSha, policyRevision: data.policyRevision, authorizationRevision: work.revision, issuedAt: now.toISOString(), expiresAt: new Date(expiresAt).toISOString() };
+      const execution = { id: randomUUID(), owner: mergeExecutionOwner(actor, data.executor), sha: data.sha, baseSha: data.baseSha, policyRevision: data.policyRevision, authorizationRevision: work.revision, issuedAt: now.toISOString(), expiresAt: new Date(expiresAt).toISOString() };
       work.mergeExecution = execution;
       await this.recordDispatch(db, work, now);
       await save(db, work, actor.id, 'merge.execution.acquired', now, { executionId: execution.id, owner: execution.owner, sha: execution.sha, baseSha: execution.baseSha, policyRevision: execution.policyRevision });
@@ -945,7 +1005,9 @@ export class Engine {
       const all: Work[] = (await db.query('SELECT document FROM work_items ORDER BY number')).rows.map(row => row.document);
       const work = all.find(item => item.id === id || item.key === id);
       demand(work, 'Work item not found', 404);
-      demand(work.mergeExecution?.id === data.executionId && work.mergeExecution.owner === actor.id, 'Merge execution is missing, expired, superseded, or owned by another coordinator');
+      // Only the instance that acquired the execution may cancel it: a second executor under the
+      // same credential that lost the race stands down instead (GY-92).
+      demand(work.mergeExecution?.id === data.executionId && work.mergeExecution.owner === mergeExecutionOwner(actor, data.executor), ownedByAnother);
       work.mergeExecution = null; this.evaluate(work, all, now);
       await this.recordDispatch(db, work, now);
       await save(db, work, actor.id, 'merge.execution.cancelled', now, { executionId: data.executionId, reason: data.reason });
@@ -964,7 +1026,7 @@ export class Engine {
       if (!receipt) return null;
       demand(receipt.fingerprint === fingerprint, 'Idempotency key reused with different input');
       const work = (await db.query('SELECT document FROM work_items WHERE id::text=$1 OR document->>\'key\'=$1', [id])).rows[0]?.document as Work | undefined;
-      demand(work?.mergeExecution?.id === data.executionId && work.mergeExecution.owner === actor.id && work.mergeExecution.verifiedAt === receipt.result.verifiedAt
+      demand(work?.mergeExecution?.id === data.executionId && work.mergeExecution.owner === mergeExecutionOwner(actor, data.executor) && work.mergeExecution.verifiedAt === receipt.result.verifiedAt
         && Date.parse(work.mergeExecution.expiresAt) > now.getTime(), 'Replayed merge verification is expired, cancelled, or superseded');
       return receipt.result;
     });
@@ -978,14 +1040,14 @@ export class Engine {
       if (receipt) {
         demand(receipt.fingerprint === fingerprint, 'Idempotency key reused with different input');
         const current = (await db.query('SELECT document FROM work_items WHERE id::text=$1 OR document->>\'key\'=$1', [id])).rows[0]?.document as Work | undefined;
-        demand(current?.mergeExecution?.id === data.executionId && current.mergeExecution.owner === actor.id && current.mergeExecution.verifiedAt === receipt.result.verifiedAt
+        demand(current?.mergeExecution?.id === data.executionId && current.mergeExecution.owner === mergeExecutionOwner(actor, data.executor) && current.mergeExecution.verifiedAt === receipt.result.verifiedAt
           && !current.mergeExecution.fenced && Date.parse(current.mergeExecution.expiresAt) > now.getTime(), 'Replayed merge verification is expired, cancelled, fenced, or superseded');
         return receipt.result;
       }
       const all: Work[] = (await db.query('SELECT document FROM work_items ORDER BY number')).rows.map(row => row.document);
       const work = all.find(item => item.id === id || item.key === id); demand(work, 'Work item not found', 404);
       const execution = work.mergeExecution;
-      demand(execution?.id === data.executionId && execution.owner === actor.id && Date.parse(execution.expiresAt) > now.getTime(), 'Merge execution is missing, expired, superseded, or owned by another coordinator');
+      demand(execution?.id === data.executionId && execution.owner === mergeExecutionOwner(actor, data.executor) && Date.parse(execution.expiresAt) > now.getTime(), ownedByAnother);
       demand(!execution.verifiedAt, 'Merge execution was already verified; retry with the original idempotency key');
       demand(!execution.fenced, `Merge execution was fenced and cannot be verified: ${execution.fenced?.reason}`);
       demand(!observation.merged && observation.prState === 'open' && observation.draft === false, 'Pull request is no longer open and ready for merge');
@@ -1014,7 +1076,7 @@ export class Engine {
       if (receipt) {
         demand(receipt.fingerprint === fingerprint, 'Idempotency key reused with different input');
         const current = (await db.query('SELECT document FROM work_items WHERE id::text=$1 OR document->>\'key\'=$1', [id])).rows[0]?.document as Work | undefined;
-        demand(current?.mergeExecution?.id === data.executionId && current.mergeExecution.owner === actor.id
+        demand(current?.mergeExecution?.id === data.executionId && current.mergeExecution.owner === mergeExecutionOwner(actor, data.executor)
           && current.mergeExecution.committingAt === receipt.result.committingAt && Date.parse(current.mergeExecution.expiresAt) > now.getTime(),
         'Replayed merge commit is expired, cancelled, or superseded');
         return receipt.result;
@@ -1022,7 +1084,7 @@ export class Engine {
       const all: Work[] = (await db.query('SELECT document FROM work_items ORDER BY number')).rows.map(row => row.document);
       const work = all.find(item => item.id === id || item.key === id); demand(work, 'Work item not found', 404);
       const execution = work.mergeExecution;
-      demand(execution?.id === data.executionId && execution.owner === actor.id && Date.parse(execution.expiresAt) > now.getTime(), 'Merge execution is missing, expired, superseded, or owned by another coordinator');
+      demand(execution?.id === data.executionId && execution.owner === mergeExecutionOwner(actor, data.executor) && Date.parse(execution.expiresAt) > now.getTime(), ownedByAnother);
       demand(execution.verifiedAt, 'Merge execution has not passed final verification');
       demand(!execution.committingAt, 'Merge execution was already committed; retry with the original idempotency key');
       this.evaluate(work, all, now);
@@ -1319,6 +1381,7 @@ export class Engine {
       // is still in hand, and record the offset itself so other provider timestamps on the
       // same observation (the pull request's creation time) can be carried with it.
       let mergedAtRepository: string | null = null; let repositoryClockOffsetMs: number | null = null;
+      let reconciliation: MergeReconciliation | null = null; let refusedReconciliation: { decision: string; reasons: string[] } | null = null;
       if (observation.merged && observation.mergedAt && Number.isFinite(Date.parse(observation.mergedAt))) {
         const providerMergedTime = Date.parse(observation.mergedAt);
         // Never allow evidence from after the earliest possible merge instant.
@@ -1355,15 +1418,33 @@ export class Engine {
           && work.gates.every(gate => gate.passed) && !work.violations.length) {
           authorizedSnapshot = structuredClone(work); authorizationRevision = activeExecution.authorizationRevision;
         }
-        const past = authorizedSnapshot || !executionValid ? undefined : (await db.query("SELECT payload->'work' AS work FROM events WHERE work_id=$1 AND created_at<$2 AND payload ? 'work' ORDER BY seq DESC LIMIT 1", [id, new Date(cutoff)])).rows[0]?.work as Work | undefined;
-        const authorization = past?.mergeAuthorization;
-        // Exactly the acceptance gate's demand at the merge cutoff: a bootstrap criterion's
-        // deferred proofs are excluded, and an inherited obligation is re-checked here too.
-        const evidenceValid = past ? requiredProofs(past, all).every(proof => !!currentEvidence(past, proof, new Date(cutoff - 1))) : false;
-        if (!authorizedSnapshot && past && authorization && authorization.sha === observation.candidate.sha && authorization.baseSha === observation.candidate.baseSha && authorization.policyRevision === past.policyRevision
-          && past.submission?.pr === observation.candidate.pr && past.gates.every(g => g.passed) && !past.violations.length
-          && evidenceValid && past.observation && cutoff - Date.parse(past.observation.at) < 120_000 && Date.parse(authorization.at) < mergedTime) {
+        // The record as it stood immediately before the merge cutoff: what the historical
+        // authorization check reads, and what a two-party reconciliation re-checks (GY-92).
+        const past = authorizedSnapshot ? undefined : (await db.query("SELECT payload->'work' AS work FROM events WHERE work_id=$1 AND created_at<$2 AND payload ? 'work' ORDER BY seq DESC LIMIT 1", [id, new Date(cutoff)])).rows[0]?.work as Work | undefined;
+        const historical = past ? historicalAuthorizationRefusals(past, all, observation, cutoff, mergedTime) : ['No record of the item precedes the merge cutoff'];
+        if (!authorizedSnapshot && past && executionValid && !historical.length) {
           authorizedSnapshot = past; authorizationRevision = boundedExecution?.authorizationRevision ?? past.revision;
+        }
+        // An observed merge whose execution was cancelled or never valid is a recorded violation
+        // that every later observation re-derives from immutable history. It is recoverable by
+        // exactly one path: a two-party merge decision for this candidate, requested after the
+        // merge, applied by an independent approver. The decision does not decide delivery by
+        // itself — the record before the cutoff must still show every gate passed and every
+        // required proof live, the same judgement an authorized merge is held to — and the
+        // delivery then cites that snapshot and the decision. A decision the history refuses
+        // is recorded on the item with the reasons, once, so the item says why it cannot be.
+        if (!authorizedSnapshot && past && observation.mergeSha) {
+          const decision = await reconcilingDecision(db, work, observation, past.policyRevision, cutoff);
+          if (decision && !historical.length) {
+            authorizedSnapshot = past; authorizationRevision = boundedExecution?.sha === observation.candidate.sha && boundedExecution.baseSha === observation.candidate.baseSha ? boundedExecution.authorizationRevision : past.revision;
+            reconciliation = { decision: decision.id, requestedBy: decision.requestedBy, requestedAt: decision.requestedAt, approvedBy: decision.approvedBy!, approvedAt: decision.approvedAt!,
+              reason: decision.reason, approvalReason: decision.approvalReason ?? '', cutoff: new Date(cutoff).toISOString(), snapshotRevision: past.revision,
+              judgement: `Every gate passed and every required proof was live at ${new Date(cutoff - 1).toISOString()}, the recorded merge cutoff; the merge was observed without a valid execution and is delivered on the approved decision`,
+              proofs: requiredProofs(past, all), violation: unauthorizedMergeViolation };
+          } else if (decision) {
+            const refusal = `Reconciliation by decision ${decision.id} refused: ${historical.join('; ')}`;
+            if (!work.violations.includes(refusal)) { work.violations.push(refusal); refusedReconciliation = { decision: decision.id, reasons: historical }; }
+          }
         }
       }
       work.candidate = observation.candidate;
@@ -1387,19 +1468,29 @@ export class Engine {
           JSON.stringify({ details: { tip: speculation.tip, boundBase: speculation.base, baseTree: speculation.baseTree, baseTip: observation.baseTip, at: now.toISOString() } })]);
       }
       if (observation.merged) {
-        const violation = 'Merge observed without a prior authorization for this candidate';
+        const violation = unauthorizedMergeViolation;
         if (authorizedSnapshot && observation.mergeSha) {
-          if (work.gates.some(g => !g.passed)) work.violations.push('Post-merge checks differ from the recorded authorization; follow-up required');
+          // A reconciled delivery is judged at the cutoff, not now: the violation it recovers from
+          // leaves the record (the ledger keeps it), and gates that moved since — evidence that
+          // expired while the item sat at the merge stage — are reported with the judgement, not
+          // recorded as a second violation.
+          if (reconciliation) work.violations = work.violations.filter(entry => entry !== violation && !entry.startsWith('Reconciliation by decision '));
+          else if (work.gates.some(g => !g.passed)) work.violations.push('Post-merge checks differ from the recorded authorization; follow-up required');
           work.stage = 'done'; work.stageEnteredAt = now.toISOString();
           work.mergeExecution = null;
-          work.delivery = { mergedAt: observation.mergedAt!, mergeSha: observation.mergeSha, authorizationRevision: authorizationRevision!, ...(evidenceAsOf ? { evidenceAsOf } : {}),
+          const delivery: Work['delivery'] = { mergedAt: observation.mergedAt!, mergeSha: observation.mergeSha, authorizationRevision: authorizationRevision!, ...(evidenceAsOf ? { evidenceAsOf } : {}),
             ...(mergedAtRepository ? { mergedAtRepository, repositoryClockOffsetMs: repositoryClockOffsetMs! } : {}) };
+          work.delivery = reconciliation ? Object.assign(delivery, { reconciliation }) : delivery;
+          if (reconciliation) await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, reconciliation.requestedBy, 'merge.reconciled',
+            JSON.stringify({ details: { ...reconciliation, mergeSha: observation.mergeSha, mergedAt: observation.mergedAt, authorizationRevision, evidenceAsOf, gatesNow: work.gates.filter(gate => !gate.passed).map(gate => ({ name: gate.name, reasons: gate.reasons })), at: now.toISOString() } })]);
           await db.query('DELETE FROM jobs WHERE work_id=$1', [work.id]);
           // The queue shifted: every entry behind this one has a new position and predicted base.
           for (const behind of all) if (behind.queue && behind.id !== work.id) await wakeJob(db, behind.id);
         } else {
           work.mergeExecution = null;
           if (!work.violations.includes(violation)) work.violations.push(violation);
+          if (refusedReconciliation) await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, 'graphyard', 'merge.reconciliation.refused',
+            JSON.stringify({ details: { ...refusedReconciliation, mergeSha: observation.mergeSha, mergedAt: observation.mergedAt, at: now.toISOString() } })]);
         }
       } else if (execution && !activeExecution) {
         // GitHub answered for the lapsed authority: the pull request is still unmerged after it
