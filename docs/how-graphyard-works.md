@@ -7,30 +7,29 @@ For a newcomer: how work reaches a verified merge, and who may move it.
 
 The operator connects the repository, GitHub enforcement, one principal per session and the trusted proof producers; the working rules go in `AGENTS.md` ([onboarding](onboarding.md)). Each item is created with an outcome, dependencies, planned files and acceptance criteria naming its proofs, then travels through six gates in order, each a deterministic evaluation it cannot skip:
 
-| Gate | Passes when |
-| --- | --- |
-| `ready` | The item is released and unblocked and its dependencies are finished |
-| `build` | One worker principal claimed it at a new lease epoch, in a registered worktree, and submitted an exact commit |
-| `review` | An independent reviewer approved that exact head |
-| `test` | Graphyard observed the required CI checks on GitHub, rather than taking them on report |
-| `acceptance` | Trusted evidence binds that head, base and policy revision, so a new commit or a revision makes an old pass insufficient |
-| `merge` | The guarded merge rechecks everything immediately before the GitHub call |
+1. **`ready`:** the item is released and unblocked and its dependencies are finished
+2. **`build`:** one worker principal claimed it at a new lease epoch, in a registered worktree, and submitted an exact commit
+3. **`review`:** an independent reviewer approved that exact head
+4. **`test`:** Graphyard observed the required CI checks on GitHub, rather than taking them on report
+5. **`acceptance`:** trusted evidence binds that head, base and policy revision, so a new commit or a revision makes an old pass insufficient
+6. **`merge`:** the guarded merge rechecks everything immediately before the GitHub call
 
 Only an independently observed authorized merge marks the item **Done**; history keeps the assignment, evidence, decisions and delivered commit.
 
 ## Two phases, one clear handoff
 
+1. **Phase 1 · Bootstrap.** The human operator connects the managed repository and activates its gates while supervising a single worker-scoped implementation agent, never receiving the operator or GitHub credentials used for setup.
+2. **Phase 2 · Normal operation.**
+   - The operator supplies goals and the three human-only decisions.
+   - An operator agent may send bounded intent.
+   - The master loop (`coordinator`), optional slice leads (`slice-lead`) and the independent reviewer and proof producers (`producer`) read ready work and gate state.
+   - The master dispatches (an invitation, not ownership) to many worker sessions.
+
+**Both phases:** identical gates and credential boundaries; Herdr hosts the sessions and reports their health.
+
 ![Bootstrap single-agent operation beside normal multi-agent operation, under the same gates and credential boundaries.](diagrams/bootstrap-vs-normal.svg)
 
-Text equivalent:
-
-- **Phase 1 · Bootstrap.** The human operator connects the managed repository and activates its gates while supervising a single worker-scoped implementation agent, never receiving the operator or GitHub credentials used for setup.
-- **Phase 2 · Normal operation.**
-  - The operator supplies goals and the three human-only decisions.
-  - An operator agent may send bounded intent.
-  - The master loop (`coordinator`), optional slice leads (`slice-lead`) and the independent reviewer and proof producers (`producer`) read ready work and gate state.
-  - The master dispatches (an invitation, not ownership) to many worker sessions.
-- **Both phases:** identical gates and credential boundaries; Herdr hosts the sessions and reports their health.
+Text equivalent: the two phases above.
 
 ## Four AI agent sessions
 

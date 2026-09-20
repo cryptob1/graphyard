@@ -38,29 +38,27 @@ for (const viewport of [{ name: 'desktop', width: 1280, height: 900 }, { name: '
     await page.setViewportSize(viewport);
     await page.goto('/docs/how-graphyard-works');
     await expect(page.getByRole('heading', { name: 'How Graphyard works', level: 1 })).toBeVisible();
+    // The six gates, in order, as one card each.
     const flow = page.locator('.how-guide > ol').first();
-    await expect(flow.locator(':scope > li')).toHaveCount(10);
+    await expect(flow.locator(':scope > li')).toHaveCount(6);
     const cards = await flow.locator(':scope > li').evaluateAll(elements => elements.map(element => element.getBoundingClientRect().top));
     expect(cards).toEqual([...cards].sort((a, b) => a - b));
     expect(new Set(cards).size).toBe(cards.length);
-    await expect(flow.getByText('Setup', { exact: true })).toBeVisible();
-    await expect(flow.getByText('Done', { exact: true })).toBeVisible();
+    const gates = ['ready', 'build', 'review', 'test', 'acceptance', 'merge'];
+    for (const [index, gate] of gates.entries()) await expect(flow.locator(':scope > li').nth(index).locator('code').first()).toHaveText(gate);
+    await expect(page.getByText('Only an independently observed authorized merge marks the item')).toBeVisible();
     await expect(page.getByRole('heading', { name: 'Two phases, one clear handoff' })).toBeVisible();
     const phases = page.getByRole('heading', { name: 'Two phases, one clear handoff' }).locator('xpath=following-sibling::ol[1]/li');
     await expect(phases).toHaveCount(2);
-    await expect(phases.nth(0)).toContainText('Human operator → one implementation agent');
-    await expect(phases.nth(0)).toContainText('the human operator connects the managed (target) repository and activates its gates');
-    await expect(phases.nth(0)).toContainText('directly supervising a single, worker-scoped implementation agent');
-    await expect(phases.nth(0)).toContainText('never receives the operator or GitHub credentials used for setup');
-    await expect(phases.nth(1)).toContainText('Human → goals, required decisions, oversight');
-    await expect(phases.nth(1)).toContainText('after the managed repository is connected, its gates are active');
-    await expect(phases.nth(1)).toContainText('GY-30 scoped operator automation is configured');
-    await expect(phases.nth(1)).toContainText('supplies goals, required decisions, and oversight');
-    await expect(phases.nth(1)).toContainText('not expected to perform the routine Operator, Master, Worker, or Reviewer/proof-producer duties');
-    await expect(phases.nth(1)).toContainText('shipped and available as an opt-in, least-privilege credential');
-    await expect(phases.nth(1)).toContainText('a configuration step, not future work');
-    await expect(phases.nth(1)).toContainText('this installation provisions the scoped operator-agent principal');
-    await expect(phases.nth(1)).toContainText('the unrestricted human administrator still makes requirements and policy changes');
+    await expect(phases.nth(0)).toContainText('Phase 1 · Bootstrap');
+    await expect(phases.nth(0)).toContainText('The human operator connects the managed repository and activates its gates');
+    await expect(phases.nth(0)).toContainText('supervising a single worker-scoped implementation agent');
+    await expect(phases.nth(0)).toContainText('never receiving the operator or GitHub credentials used for setup');
+    await expect(phases.nth(1)).toContainText('Phase 2 · Normal operation');
+    await expect(phases.nth(1)).toContainText('The operator supplies goals and the three human-only decisions');
+    await expect(phases.nth(1)).toContainText('An operator agent may send bounded intent');
+    await expect(phases.nth(1)).toContainText('The master dispatches (an invitation, not ownership) to many worker sessions');
+    await expect(page.getByText('identical gates and credential boundaries')).toBeVisible();
     const phaseBoxes = await phases.evaluateAll(elements => elements.map(element => {
       const box = element.getBoundingClientRect();
       return { left: box.left, top: box.top, width: box.width };
@@ -71,50 +69,13 @@ for (const viewport of [{ name: 'desktop', width: 1280, height: 900 }, { name: '
     } else {
       expect(phaseBoxes[1].top).toBeGreaterThan(phaseBoxes[0].top);
     }
+    // The roles have one authoritative home, the glossary; this page links to it and draws who holds what.
     await expect(page.getByRole('heading', { name: 'Four AI agent sessions' })).toBeVisible();
-    const duties = ['Operator agent', 'Master agent', 'Worker agent', 'Reviewer/proof-producer agent'];
-    for (const duty of duties) await expect(page.getByRole('cell', { name: duty, exact: true })).toBeVisible();
-    const dutiesTable = page.getByRole('heading', { name: 'Four AI agent sessions' }).locator('xpath=following-sibling::table[1]');
-    if (viewport.name === 'mobile') {
-      const geometry = await dutiesTable.evaluate(table => {
-        const cells = Array.from(table.querySelectorAll('tbody td:first-child'));
-        const box = table.getBoundingClientRect();
-        return {
-          clientWidth: table.clientWidth,
-          scrollWidth: table.scrollWidth,
-          right: box.right,
-          viewportWidth: document.documentElement.clientWidth,
-          labels: cells.map(cell => ({
-            width: cell.getBoundingClientRect().width,
-            whiteSpace: getComputedStyle(cell).whiteSpace,
-          })),
-        };
-      });
-      expect(geometry.scrollWidth).toBeGreaterThan(geometry.clientWidth);
-      expect(geometry.right).toBeLessThanOrEqual(geometry.viewportWidth);
-      expect(geometry.labels).toHaveLength(4);
-      for (const label of geometry.labels) {
-        expect(label.width).toBeGreaterThanOrEqual(190);
-        expect(label.whiteSpace).toBe('nowrap');
-      }
-    }
-    const operatorRow = page.getByRole('row', { name: /Operator agent/ });
-    await expect(operatorRow).toContainText('human-approved bounded intent');
-    await expect(operatorRow).toContainText('may add requirements but never remove or rewrite them');
-    await expect(operatorRow).toContainText('Exceptions and approval decisions stay with the human operator');
-    await expect(operatorRow).toContainText('least-privilege, never unrestricted admin authority');
-    await expect(operatorRow).toContainText('GY-30 credential behind this duty is shipped and opt-in');
-    await expect(operatorRow).toContainText('an administrator provisions it per installation');
-    await expect(operatorRow).toContainText('the unrestricted human administrator holds this authority');
-    const separation = page.locator('p', { hasText: 'These are distinct AI sessions' });
-    await expect(separation).toContainText('authenticated principal identities, scoped credentials, and authority checks');
-    await expect(separation).toContainText('must keep the sessions independent');
-    await expect(separation).toContainText('Graphyard does not verify runtime isolation');
-    await expect(separation).toContainText('Worker, Master/coordinator, and Reviewer/proof-producer map to enforced credentials today');
-    await expect(separation).toContainText('shipped credential type that each installation provisions before that session becomes active');
+    await expect(page.getByRole('link', { name: 'what each may and may never do' })).toHaveAttribute('href', '/docs/glossary#the-roles-at-a-glance');
+    for (const role of ['Human operator:', 'Control plane:', 'Herdr runtime:']) await expect(page.getByText(role, { exact: true })).toBeVisible();
     await expect(page.getByText('Workers stay untrusted.', { exact: true })).toBeVisible();
-    await expect(page.getByText('Graphyard: delivery authority')).toBeVisible();
-    await expect(page.getByText('Herdr: runtime supervision')).toBeVisible();
+    await expect(page.getByText('Graphyard answers:', { exact: true })).toBeVisible();
+    await expect(page.getByText('Herdr answers:', { exact: true })).toBeVisible();
     const bounds = await page.locator('.docs-shell').evaluate(element => ({ width: element.clientWidth, content: element.scrollWidth }));
     expect(bounds.content).toBeLessThanOrEqual(bounds.width);
   });
@@ -150,8 +111,9 @@ for (const viewport of [{ name: 'desktop', width: 1280, height: 900 }, { name: '
     await page.goto('/docs/how-graphyard-works');
     await expect(page.getByRole('heading', { name: 'How Graphyard works', level: 1 })).toBeVisible();
     await diagramsLoad(2);
-    await expect(page.getByText('Text equivalent of the diagram above. Phase 1, bootstrap:', { exact: false })).toBeVisible();
-    await expect(page.getByRole('link', { name: "glossary's diagram legend" }).first()).toHaveAttribute('href', '/docs/glossary#diagram-legend');
+    await expect(page.getByText('Text equivalent: the two phases above.', { exact: true })).toBeVisible();
+    await expect(page.getByText('Text equivalent, top to bottom:', { exact: true })).toBeVisible();
+    await expect(page.getByRole('link', { name: 'diagram legend' }).first()).toHaveAttribute('href', '/docs/glossary#diagram-legend');
     await fits();
 
     await page.goto('/docs/glossary');
@@ -160,7 +122,7 @@ for (const viewport of [{ name: 'desktop', width: 1280, height: 900 }, { name: '
       await expect(page.getByRole('heading', { name: term, level: 3 })).toBeVisible();
     }
     await expect(page.getByRole('heading', { name: 'Diagram legend', level: 2 })).toBeVisible();
-    await expect(page.getByRole('cell', { name: 'Amber rounded box' })).toBeVisible();
+    await expect(page.getByText('Amber rounded box:', { exact: true })).toBeVisible();
     await fits();
 
     await page.goto('/docs/architecture');
