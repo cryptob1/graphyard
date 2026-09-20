@@ -16,6 +16,7 @@
 // plane it cannot reach is waited out, not a reason to stop asking.
 import { readFile } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
+import { setTimeout as delay } from 'node:timers/promises';
 import { hostname } from 'node:os';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -62,12 +63,15 @@ const noAnswer = error => error?.name === 'TimeoutError' || error?.name === 'Abo
  */
 export async function pullOnce(ask, options = {}) {
   const attempts = options.attempts ?? transportRetries, log = options.log ?? (() => {});
-  const key = options.key ?? randomUUID();
+  const key = options.key ?? randomUUID(), backoffMs = options.backoffMs ?? 1000;
   for (let attempt = 1; ; attempt++) {
     try { return await ask(key); }
     catch (error) {
       if (!noAnswer(error) || attempt >= attempts) throw error;
       log(`[graphyard-worker] pull attempt ${attempt} did not answer (${error.message}); retrying under the same key`);
+      // A refused connection comes back at once, so the retries wait a little rather than
+      // spending the whole logical pull in the same instant the control plane was unreachable.
+      if (backoffMs) await delay(attempt * backoffMs);
     }
   }
 }

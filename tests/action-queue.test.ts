@@ -711,13 +711,13 @@ test('integration:worker-pull-model — a free worker asks the control plane for
     if (++attempts < 2) throw Object.assign(new Error('The operation was aborted due to timeout'), { name: 'TimeoutError' });
     return { assigned: { key: 'GY-1' }, offered: 1, refused: [], replayed: true };
   };
-  const pulled = await pullOnce(flaky, {});
+  const pulled = await pullOnce(flaky, { backoffMs: 0 });
   assert.equal(pulled.replayed, true, 'the retry got the claim the timed-out call had already made');
   assert.equal(keys.length, 2);
   assert.equal(new Set(keys).size, 1, 'both attempts carried one idempotency key');
   // A server that answered is an answer, retried by nobody.
   let refusals = 0;
-  await assert.rejects(pullOnce(async () => { refusals++; throw new Error('Worker permission required'); }, {}), /Worker permission required/);
+  await assert.rejects(pullOnce(async () => { refusals++; throw new Error('Worker permission required'); }, { backoffMs: 0 }), /Worker permission required/);
   assert.equal(refusals, 1);
   assert.ok(transportRetries >= 2);
 
