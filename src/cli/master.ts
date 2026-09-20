@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 import { startGithubSetup } from '../github-setup.js';
 import { resourceConflicts } from '../coordination.js';
-import { agentToken, approvedMerges, assertMasterBinding, autonomySubcommands, continueMergeBatch, runAutonomyCommand, currentMergeCandidates, dispatchWork, listHerdrAgents, liveMasterConfig, loadMasterConfig, masterHarness, mergeExecutor, mergeProtocolSkew, producerCommand, readCredentialFile, readWorkerCredential, saveWorkerProfile, setupMaster, snapshotWithClock, startMaster, verifyContainmentDeath, workerProfileSchema } from '../master.js';
+import { agentToken, approvedMerges, assertMasterBinding, autonomySubcommands, continueMergeBatch, runAutonomyCommand, currentMergeCandidates, dispatchWork, listHerdrAgents, liveMasterConfig, loadMasterConfig, masterHarness, masterSettingsFromArgs, mergeExecutor, mergeProtocolSkew, producerCommand, readCredentialFile, readWorkerCredential, saveMasterSettings, saveWorkerProfile, setupMaster, snapshotWithClock, startMaster, verifyContainmentDeath, workerProfileSchema } from '../master.js';
 import { cliCommit } from '../protocol-version.js';
 import { daemonEffects, readDaemonState, runDaemon } from '../master-daemon.js';
 import { verificationEffects, verifyDeployment } from '../master-verification.js';
@@ -19,10 +19,7 @@ import { approveScopeRequest, cycleBudget, masterStatusReport, scopeRequestComma
 import { coordinationViewHeader } from '../server/work-view.js';
 import { readSecretFromStdin } from './context.js';
 
-/**
- * The master-agent operating mode. Every subcommand authenticates with the coordinator
- * credential the master keeps for itself, never with the repository connection file.
- */
+/** Every master subcommand authenticates with the coordinator credential the master keeps for itself, never the repository connection file. */
 export const masterCommands = defineCommands([
   {
     name: 'master',
@@ -31,7 +28,7 @@ export const masterCommands = defineCommands([
       '  master init --token-stdin [--herdr-workspace ID] [--browser-profile PROFILE]',
       '              [--dispatch-interval SECONDS] [--reviewer-profile NAME] [--producer-timeout MINUTES]',
       '                                Install the recommended master-agent operating mode; PROFILE is',
-      "                                the operator's Chrome profile; the dispatch settings bound",
+      "                                the operator's Chrome profile the master administers GitHub",
       '  master start AGENT_KIND       Launch the dedicated visible Herdr master session',
       '  master worker add FILE        Add an existing or launchable Herdr worker profile',
       '  master reviewer setup [--name NAME]     Register the separate reviewer GitHub App; NAME',
@@ -57,8 +54,11 @@ export const masterCommands = defineCommands([
       '                                Settle a containment quarantine whose supervisor this host',
       '                                verifies dead; unverifiable signals refuse',
       '  master merge GY-N|--all       Merge exact authorized candidates without bypasses',
-      '  master verify-deployment GY-N Verify that the deployed release serves a delivery; refuse',
-      '                                stale or local-only observations, record the exact release',
+      '  master config FIELD=VALUE…   Tune owned run settings and profile accounts',
+      '                                (accounts:PROFILE=a,b); autoMerge and credential paths stay operator-only',
+      '  master verify-deployment GY-N Verify that the deployed release serves a delivery and',
+      '                                emits the current instructions; refuse stale or local-only',
+      '                                observations, record the exact release observed',
       '  master run [--once] [--interval SECONDS]',
       '                                Run the durable coordination loop as a supervised process; it',
       '                                launches the reviewer and proof producers for every submitted',
@@ -72,12 +72,13 @@ export const masterCommands = defineCommands([
       '  master decisions GY-N | approver GY-N DECISION [KIND] | approve GY-N DECISION REASON',
       '  master principals [--apply]   Preview or apply a roster rotation keeping live principals',
       '  master restart                Restart this host\'s master loop detached',
+      '  master environments [--create KIND,…] [--apply]  Agent accounts, quota, profiles',
       '  master guide                  Print the complete master-agent operating guide',
     ],
     async run(context) {
       const { id, args, base, print } = context;
       const root = context.repositoryRoot();
-      // The guide's first line is its docs-index entry, not part of the guide.
+      // The guide's first line is its docs-index entry, not guide body.
       if (id === 'guide') return console.log((await readFile(fileURLToPath(new URL('../../docs/master-agent.md', import.meta.url)), 'utf8')).replace(/^<!-- page:[^\n]*\n/, ''));
       if (id === 'init') {
         const { values } = parseArgs({ args, options: { url: { type: 'string' }, 'token-stdin': { type: 'boolean' }, 'no-auto-merge': { type: 'boolean' }, 'merge-method': { type: 'string' }, 'cli-path': { type: 'string' }, 'host-id': { type: 'string' }, 'herdr-workspace': { type: 'string' }, interval: { type: 'string' }, 'proof-workflow': { type: 'string' }, 'deployment-url': { type: 'string' }, 'deployment-sha-field': { type: 'string' }, 'smoke-workflow': { type: 'string' }, 'dispatch-interval': { type: 'string' }, 'reviewer-profile': { type: 'string' }, 'producer-timeout': { type: 'string' }, 'browser-profile': { type: 'string' }, 'browser-executable': { type: 'string' } }, allowPositionals: false });
@@ -101,7 +102,7 @@ export const masterCommands = defineCommands([
         const result = await response.json(); if (!response.ok) { const error = new Error(JSON.stringify(result)); (error as any).confirmedRefusal = response.status >= 400 && response.status < 500; throw error; } return result;
       };
       const coordinator = await masterApi('status'); assertMasterBinding(master, coordinator);
-      // The CLI's own commit, for the version-skew guard: the checkout this file runs from.
+      // The CLI's own commit, for the version-skew guard.
       const cli = { commit: cliCommit(fileURLToPath(new URL('../..', import.meta.url))) };
       const assertProtocol = (status: any) => { const skew = mergeProtocolSkew(status, cli); if (skew) throw new Error(skew); };
       if ((autonomySubcommands as readonly string[]).includes(id ?? '')) return print(await runAutonomyCommand(root, master, id!, args,
@@ -115,6 +116,7 @@ export const masterCommands = defineCommands([
       }
       if (id === 'worker' && args[0] === 'add' && args[1]) return print(await saveWorkerProfile(root, JSON.parse(await readFile(args[1], 'utf8')), credential => masterApi('status', credential)));
       if (id === 'producer') return print(await producerCommand(root, args, credential => masterApi('status', credential)));
+      if (id === 'config') return print(await saveMasterSettings(root, masterSettingsFromArgs(args)));
       if (id === 'reviewer') {
         if (args[0] === 'add' && args[1]) return print(await saveReviewerProfile(root, JSON.parse(await readFile(args[1], 'utf8'))));
         if (args[0] === 'remove' && args[1]) return print(await removeReviewerProfile(root, args[1]));
@@ -208,8 +210,7 @@ export const masterCommands = defineCommands([
       }
       if (id === 'merge') {
         if (!args[0]) throw new Error('Use master merge GY-N or master merge --all');
-        // Skew is refused before any candidate is read, so a server that has not deployed the
-        // CLI's protocol is reported as such rather than as an invalid gate verification.
+        // Skew is refused before any candidate is read: an undeployed server is protocol skew, not a failed gate.
         assertProtocol(coordinator);
         const snapshot = await masterApi('work-snapshot');
         const selected = args[0] === '--all' ? currentMergeCandidates(snapshot.work, snapshot.now, coordinator.actor.id) : snapshot.work.filter((item: any) => item.id === args[0] || item.key === args[0]);
@@ -238,22 +239,20 @@ export const masterCommands = defineCommands([
         const { values } = parseArgs({ args, options: { once: { type: 'boolean' }, interval: { type: 'string' } }, allowPositionals: false });
         const intervalSeconds = values.interval ? Number(values.interval) : master.run.intervalSeconds;
         if (!Number.isInteger(intervalSeconds) || intervalSeconds < 5 || intervalSeconds > 900) throw new Error('Use master run --interval with whole seconds between 5 and 900');
-        // A coordinator credential is the daemon's entire authority. Anything broader would let the
-        // loop satisfy a gate it is supposed to be waiting on.
+        // A coordinator credential is the daemon's entire authority; anything broader could satisfy a gate the loop must wait on.
         if (coordinator.actor.role !== 'coordinator') throw new Error('The durable master loop requires a coordinator credential; operator, producer, and worker credentials are refused');
         if (coordinator.actor.proofs?.length) throw new Error('The durable master loop refuses a credential that is also allowed to produce evidence');
         assertProtocol(coordinator);
         const state = await readDaemonState(root, master);
-        // The cycle and the dispatcher poll the bounded coordination view; the guarded merge
-        // re-reads the full documents, since it is the last check before GitHub is asked to merge.
-        // The view is asked for by header, so a server that predates it answers with whole documents.
+        // The cycle and the dispatcher poll the bounded coordination view (by header, so an older
+        // server answers with whole documents); the guarded merge re-reads the full documents.
         const live = liveMasterConfig(root, master), current = () => live.current, reload = () => live.reload();
         const coordinationSnapshot = (timeoutMs?: number) => masterApi('work-snapshot', masterToken, timeoutMs, { [coordinationViewHeader]: 'coordination' });
         const effects = daemonEffects(root, current, { snapshot: () => coordinationSnapshot(), mutate: masterMutation, executionOwner: coordinator.actor.id });
         const guardedMerge: typeof effects.merge = work => mergeExecutor(current(), () => masterApi('work-snapshot'), masterMutation, coordinator.actor.id, randomUUID())(work);
         // The loop outlives deployments: every guarded merge re-reads the server's protocol first.
         effects.merge = async work => { assertProtocol(await masterApi('status')); return guardedMerge(work); };
-        // Automatic dispatch runs beside the cycle, launching each request within 30 seconds.
+        // Automatic dispatch runs beside the cycle on a shorter cadence; it stops with the daemon.
         const dispatchCursor = await readDispatchCursor(root, master);
         const stopping = new AbortController();
         const daemonRun = runDaemon(master, state, effects, { once: values.once, intervalMs: values.interval ? intervalSeconds * 1000 : () => current().run.intervalSeconds * 1000, identity: { pid: process.pid, host: master.hostId }, reload }).finally(() => stopping.abort());
