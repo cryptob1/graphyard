@@ -24,12 +24,15 @@ Every card, and the top of every item view, carries one sentence derived from th
 
 ## The home page
 
-- **Tiles** count open items only: *Open*, *Being built*, *Need a worker* and *Stuck*. Delivered work is never in a tile. *Stuck* counts items, not gate reasons.
-- **The stage strip** splits the open items by stage. Its counts add up to *Open*. An item whose claim lapsed is under *Needs a worker*, not *Being built*, whatever its stored stage says. *Show times* adds the oldest item and the p50/p95 time in each stage.
-- **Lists** show *Stuck* first, then *In progress* and *Needs a worker*, oldest first within each. *Not started* is collapsed. *Board view* arranges the same items in stage columns.
+The page counts open work in one place. Nothing is counted twice — not on the page, not beside it in the sidebar, and not in board view — and no total that is a sum of the row is drawn as its own tile.
+
+- **The heading** carries the open total: *Work 7* is seven items not shipped yet. It is the sum of the count row, so it appears nowhere else: the sidebar's *Work* entry is a name, not a count.
+- **The count row** is the one row of counts: the stages, in work order, each with its open items. A stage holding nothing is drawn not at all — no label, no zero, no placeholder — so the row is only as wide as there is work, and the whole row is absent when nothing is open. An item whose claim lapsed is under *Needs a worker*, not *Being built*, whatever its stored stage says. Click a stage to filter the lists to it, click it again to clear. *Show times* adds the oldest item and the p50/p95 time in each drawn stage. Delivered work is never in the row.
+- **Lists** show *Stuck* first, then *In progress* and *Needs a worker*, oldest first within each; *Not started* is collapsed. Only *Stuck* carries a count, highlighted — it is the one count for work needing attention, and it counts items, not gate reasons. The other headings name a group the row already counts, so they repeat no number.
+- **Board view** draws a column for every open stage, empty ones included, because a board is read as a fixed set of columns and a missing one would read as a stage that no longer exists. A column is headed by its stage name alone: the count row above it already says how many, so no column repeats the number.
 - **Shipped this week** lists items merged in the last seven days and links to Shipped.
 
-The numbers come from one function, `homeNumbers` in `web/home-numbers.ts`, and `unit:home-numbers-reconcile` asserts that they agree.
+The numbers come from one function, `homeNumbers` in `web/home-numbers.ts`, and `unit:home-numbers-reconcile` asserts that they agree. It returns one field per number drawn — the row, the open total, the stuck count and the week's shipped count — and no per-stage alias beside the row. `unit:work-page-single-count-row` and `unit:work-page-no-derived-totals` hold the page to one count row and one home for each number; `integration:work-page-density` holds empty stages out of the default view.
 
 ## The item view
 
