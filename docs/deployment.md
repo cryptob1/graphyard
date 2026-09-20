@@ -22,7 +22,7 @@ For whoever runs the control plane: which variables, host and backup path to cho
 | `GITHUB_WEBHOOK_SECRET` | Random shared secret for GitHub signature verification |
 | `GITHUB_CI_APP_IDS` | Comma-separated IDs of trusted CI Apps; verify what your checks report |
 | `GRAPHYARD_REVIEWER_APPS` | Optional JSON array registering reviewer App identities for [agent review](github.md#trusted-producers-smoke-proof-and-review-providers) |
-| `GRAPHYARD_GENERATED_FILES` | Comma-separated paths the regression guard treats as generated; unset, none is exempt ([generated files](coordination.md#generated-files-never-conflict)) |
+| `GRAPHYARD_GENERATED_FILES` | Comma-separated paths the regression guard treats as generated — here `docs/protocol.md,docs/README.md`, what `node scripts/check-docs.mjs --list` prints; unset, none is exempt; an unparsable value refuses start-up ([generated files](coordination.md#generated-files-never-conflict)) |
 | `GRAPHYARD_PRODUCTION_ENVIRONMENT` | Provider environment (default `production`) whose successful deployments end the [flow analytics](flow-analytics.md) production phase |
 | `GRAPHYARD_MAX_SLICE_LEADS` | [Capacity variable](#delegation-capacity-variables); default 3 |
 | `GRAPHYARD_MAX_ENGINEERS_PER_LEAD` | Capacity variable; default 2 |
@@ -52,6 +52,12 @@ For whoever runs the control plane: which variables, host and backup path to cho
 - **Every `producer`** counts toward `GRAPHYARD_MAX_REVIEWERS`, every `slice-lead` toward `GRAPHYARD_MAX_SLICE_LEADS`; set all four explicitly from the principal set you deploy, as every installer adapter does beside `GRAPHYARD_PRINCIPALS`.
 - **An unset variable** does not refuse a running installation: the server derives the limit, starts, logs it and reports the derivation as drift under `delegationLimits` in `/api/status`, `doctor` and `master status`, naming the variable and value to set.
 - Only a principal *added* beyond an explicit limit refuses start-up; separation-of-duties rules refuse outright.
+
+### Generated-files variable
+
+- **Derived alike by every installer** (`generatedFilesAssignment` in `src/install/generated-files.ts`) from the managed repository's manifest, written beside `GRAPHYARD_PRINCIPALS`: `scripts/provision-railway.mjs` and `scripts/configure-integrations.mjs` set it on the Railway service, `.railway/railway.ts` preserves it, `graphyard init --scan --apply` reports the line under `generatedFiles`, and `.env.example` declares it for Compose
+- **Source:** the manifest JSON (`node scripts/check-docs.mjs --manifest`) wins whenever it parses; a well-formed `--list` line serves a script predating it; a failing script, prose or an unparsable value is refused with a clear message, and a repository without the script leaves the variable unset
+- **Drift:** the deployed value is reported under `delegationLimits.deployed`; `master status` compares it with the manifest and raises the fix as an attention item (`Set GRAPHYARD_GENERATED_FILES=docs/protocol.md,docs/README.md on the deployment`)
 
 ## Hosts
 

@@ -23,9 +23,11 @@ Every card, and the top of every item view, carries one sentence derived from th
 
 ## Home page and item view
 
-- **Tiles** count open items only: *Open*, *Being built*, *Need a worker*, *Stuck*; delivered work never appears in one
-- **Stage strip** splits open items by stage and adds up to *Open*; a lapsed claim sits under *Needs a worker* whatever the stored stage says; *Show times* adds the oldest item and the p50/p95 per stage
-- **Lists** show *Stuck* first, then *In progress* and *Needs a worker*, oldest first, *Not started* collapsed; *Board view* is the same items in stage columns, *Shipped this week* the last seven days
+- **Heading** carries the open total (*Work 7*): the sum of the count row, shown nowhere else — the sidebar's *Work* entry is a name, not a count
+- **Count row** is the one row of counts, the stages in work order; an empty stage is not drawn, and the row is absent when nothing is open; a lapsed claim sits under *Needs a worker* whatever the stored stage says; clicking a stage filters the lists, again clears; *Show times* adds the oldest item and the p50/p95 per drawn stage; delivered work never appears
+- **Lists** show *Stuck* first, then *In progress* and *Needs a worker*, oldest first, *Not started* collapsed; only *Stuck* carries a count — items, not gate reasons; *Shipped this week* the last seven days
+- **Board view** draws a column for every open stage, empty ones included, headed by the stage name alone
+- **One source:** `homeNumbers` in `web/home-numbers.ts` returns one field per number drawn; `unit:home-numbers-reconcile`, `unit:work-page-single-count-row`, `unit:work-page-no-derived-totals` and `integration:work-page-density` hold the page to it
 - **Item view** opens with the status sentence, owner, pull request and the one thing blocking progress
 - **Steps** lists the gates in order
 - **What must be true** lists each acceptance criterion once with one marker per proof: ✓ passed, ○ pending, × failed or withdrawn
