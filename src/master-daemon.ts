@@ -5,6 +5,7 @@ import { basename, dirname, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { z } from 'zod';
 import { currentEvidence, deliveryState, deploySmokeRequired, exhaustedReviewerProfiles, postDeployMs, productionLatencyMs, reviewProviderOf, reviewerProfileFor, rollbackGuidance, type Work } from './model.js';
+import { pendingBaseRefresh } from './merge-queue.js';
 import { dispatchOrder } from './coordination.js';
 import { assertDispatchable, assertOutsideWorktrees, closeHerdrPane, dispatchWork, inspectWorkerCredentials, listHerdrAgents, mergeExecutor, type ConfigReload, type HerdrAgent, type MasterConfig, type WorkerProfile } from './master.js';
 
@@ -15,7 +16,7 @@ import { assertDispatchable, assertOutsideWorktrees, closeHerdrPane, dispatchWor
  * evidence, never calls an operator route, and reaches GitHub only through the guarded merge.
  */
 
-export const daemonActionKinds = ['close', 'dispatch', 'review', 'proof', 'merge', 'deployment', 'smoke', 'escalation', 'config', 'session'] as const;
+export const daemonActionKinds = ['close', 'dispatch', 'review', 'refresh', 'proof', 'merge', 'deployment', 'smoke', 'escalation', 'config', 'session'] as const;
 export type DaemonActionKind = typeof daemonActionKinds[number];
 export const daemonActionSchema = z.object({
   kind: z.enum(daemonActionKinds),
@@ -142,6 +143,10 @@ export function reconcilePendingActions(state: DaemonState, work: Work[], now: n
   const resumed: DaemonAction[] = [];
   for (const [key, action] of Object.entries(state.actions)) {
     if (action.state !== 'started') continue;
+    // A base refresh is the control plane's own work, not an effect this loop invoked, so there is
+    // nothing interrupted to reconcile: the cycle resolves the same entry from Graphyard's record
+    // of what the merge did, or leaves it open while the reconciliation job has not run yet.
+    if (action.kind === 'refresh') continue;
     const item = work.find(candidate => candidate.key === action.work || candidate.id === action.work);
     const owned = !!item?.lease && item.lease.owner === action.principal && Date.parse(item.lease.expiresAt) > now;
     const next: DaemonAction = { ...action, at: new Date(now).toISOString() };
@@ -350,6 +355,36 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
       recordProfileFailure(state, choice.profile, message(error), now());
       performed.push(await record(state, key, { kind: 'dispatch', work: item.key, principal: choice.profile.principal, epoch: item.epoch, state: 'failed', detail: `Dispatch of ${item.key} to ${choice.profile.name} failed: ${message(error)}`, attempts: state.actions[key].attempts, cycle: state.cycle }, now(), effects.persist));
     }
+  }
+
+  // 2b. A base branch that moved under an in-flight candidate. Nobody is asked to do anything
+  //     about it: the control plane merges the new base into the candidate's own branch and
+  //     decides what the review and each proof carry (see merge-queue.ts). The cycle reports
+  //     what that refresh did — or the conflict that stopped it — so a pass that brought six
+  //     stalled items forward is an action rather than a "0 actions" line.
+  for (const item of open.filter(candidate => candidate.submission && candidate.candidate && !candidate.reworkRequested)) {
+    const refresh = item.baseRefresh, pending = pendingBaseRefresh(item);
+    // One action per head, base tip and policy revision: opened when the branch moves under the
+    // candidate, resolved when the control plane reports what its merge did.
+    const target = pending ? { head: item.candidate!.sha, base: pending.baseTip } : refresh ? { head: refresh.from.sha, base: refresh.base } : null;
+    if (!target) continue;
+    const key = `refresh:${item.id}:${target.head}:${target.base}:${item.policyRevision}`;
+    if (pending) {
+      if (state.actions[key]) continue;
+      performed.push(await record(state, key, { kind: 'refresh', work: item.key, principal: null, state: 'started',
+        detail: `${item.key}: base branch moved from ${pending.boundBase.slice(0, 12)} to ${pending.baseTip.slice(0, 12)}; the control plane is bringing ${item.candidate!.sha.slice(0, 12)} onto it. No rework round, no review round and no proof round is requested for the move.`,
+        attempts: 1, cycle: state.cycle }, now(), effects.persist));
+      continue;
+    }
+    if (state.actions[key]?.state === 'done' || state.actions[key]?.state === 'failed') continue;
+    const carry = refresh!.carry;
+    const kept = carry ? [...(carry.approval.carried ? ['the approval'] : []), ...carry.evidence.filter(entry => entry.carried).map(entry => entry.proof)] : [];
+    const again = carry ? [...(carry.approval.carried ? [] : ['the approval']), ...carry.evidence.filter(entry => !entry.carried).map(entry => entry.proof)] : [];
+    const detail = refresh!.conflict
+      ? `${item.key}: ${refresh!.from.sha.slice(0, 12)} cannot be brought onto base branch tip ${refresh!.base.slice(0, 12)} by Graphyard; it returns to the worker with the conflict named: ${refresh!.conflict}`
+      : `${item.key}: brought ${refresh!.from.sha.slice(0, 12)} onto base branch tip ${refresh!.base.slice(0, 12)} as ${(refresh!.head ?? '').slice(0, 12)} with no rework round; kept ${kept.join(', ') || 'nothing'}${again.length ? `; required afresh: ${again.join(', ')}` : ''}`;
+    performed.push(await record(state, key, { kind: 'refresh', work: item.key, principal: null, state: refresh!.conflict ? 'failed' : 'done', detail,
+      attempts: (state.actions[key]?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist));
   }
 
   // 3. Shepherd reviews and proofs for submitted candidates. Graphyard dispatches provider reviews

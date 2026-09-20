@@ -100,7 +100,9 @@ test('unit:queue-real-base-tip — the review launcher refuses a candidate that 
   const work = { key: 'GY-7', policy: { checks: [], review: true }, submission: { epoch: 1, pr: 7 }, candidate, observation, reworkRequested: false, ready: true, dependencies: [], workspaces: [], criteria: [], evidence: [], gates: [], violations: [], plannedFiles: [], scenarioRequirements: [] } as unknown as Work;
   assert.throws(() => assertReviewCandidate(work, at), new RegExp(`GY-7 candidate ${H.slice(0, 12)} does not contain the base branch tip ${sha40('b2').slice(0, 12)}; .* Run graphyard sync GY-7`));
   const behind = diagnose(work, [work], Date.parse(at)).find(entry => entry.kind === 'base-behind')!;
-  assert.match(behind.message, new RegExp(`does not contain the base branch tip ${sha40('b2').slice(0, 12)}`)); assert.match(behind.next, /graphyard sync GY-7/);
+  assert.match(behind.message, new RegExp(`does not contain the base branch tip ${sha40('b2').slice(0, 12)}`));
+  // Bringing the head onto the moved tip is the control plane's work now, not a worker sync round.
+  assert.match(behind.next, /the reconciliation job merges the base into this branch/);
   work.observation = { ...observation, baseTipContained: true };
   assert.equal(assertReviewCandidate(work, at).sha, H);
   assert.equal(diagnose(work, [work], Date.parse(at)).some(entry => entry.kind === 'base-behind'), false);
