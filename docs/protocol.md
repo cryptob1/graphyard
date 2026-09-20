@@ -24,3 +24,4 @@ The protocol is documented one topic per page. This page is generated in full fr
 14. [Supervised shutdown invariants](protocol/shutdown-invariants.md) — what the supervisor guarantees before, during, and after a contained launch.
 15. [Attribution reads and the attribution ledger](protocol/attribution.md) — reading release manifests, a work item's attribution history, and the attribution analytics; the ledger has no write endpoint.
 16. [Merge-queue bindings and carry](protocol/merge-queue-binding.md) — how a candidate is bound to its base, when the merge queue carries a review or proof across a Graphyard-authored tip, and what the record and ledger say about it.
+17. [Pipeline timeline](protocol/pipeline-speed.md) — the per-item pipeline timeline the engine keeps, and how execution, wait, rework rounds and submit→merge are derived from it.
