@@ -4,6 +4,7 @@ import { dirname, isAbsolute, resolve } from 'node:path';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { assertRepository, buildProposal, canonicalJson, collectScanInput, discover, localDirectory, saveDiscovery, setupProposalSchema, type SetupProposal } from './onboarding.js';
+import { generatedFilesAssignment } from './install/generated-files.js';
 
 export const hostIdSchema = z.string().trim().min(1).max(200);
 export const connectionSchema = z.object({ url: z.string(), cliPath: z.string(), hostId: hostIdSchema, token: z.string().min(32).optional(), principal: z.string().optional() }).strict();
@@ -267,6 +268,9 @@ export async function applyProposal(root: string, proposalInput: unknown, depend
   const proposal = setupProposalSchema.parse(proposalInput);
   const server = serverOrigin(dependencies.url);
   const directory = await localDirectory(root);
+  // Derived before any write, so a declared-but-broken manifest refuses the apply instead of
+  // leaving it half done: the generated-files variable is deployed beside GRAPHYARD_PRINCIPALS.
+  const generatedFiles = generatedFilesAssignment(root);
   const applied: string[] = [], unchanged: string[] = [], drift: string[] = [];
 
   const instructionsFile = resolve(root, 'AGENTS.md');
@@ -344,11 +348,11 @@ export async function applyProposal(root: string, proposalInput: unknown, depend
   const workerStep = workerPrincipals.length
     ? 'place each worker credential at its profile credentialFile path, then claim work'
     : 'no agent runtime was detected on this machine, so the proposal declared no worker profile and no worker principal was registered; install an agent CLI and rerun init --scan --apply to add one';
-  return { server, applied, unchanged, drift, githubApp,
+  return { server, applied, unchanged, drift, githubApp, generatedFiles: generatedFiles?.line ?? null,
     githubPending: !githubApp,
     workerPrincipals,
     principalsFile: resolve(directory, 'principals.json'),
     next: githubApp
-      ? `Install the principals array as GRAPHYARD_PRINCIPALS on the Graphyard deployment, ${workerStep}`
+      ? `Install the principals array as GRAPHYARD_PRINCIPALS on the Graphyard deployment${generatedFiles ? `, with ${generatedFiles.line} beside it` : ''}, ${workerStep}`
       : 'Run graphyard github-setup SERVER_URL to register the GitHub App, then rerun init --scan --apply to finish idempotently' };
 }
