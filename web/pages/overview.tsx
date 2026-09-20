@@ -15,8 +15,10 @@ const openPhases = phases.filter(phase => phase !== 'shipped');
 
 /**
  * The home page answers three questions on one screen: what is stuck and why, what is in
- * progress, and what shipped recently. Everything else about an item is one click away in its
- * details; analytics live under Insights.
+ * progress, and what shipped recently. One row of counts — the stages — plus the open total in
+ * the page heading and, when there is any, one highlighted stuck count; nothing is counted
+ * twice. Everything else about an item is one click away in its details; analytics live under
+ * Insights.
  */
 export default function OverviewPage({ work, status, filter, setFilter, query, setQuery, setSelected, setCreating, setView, observedAt, queue }: Dashboard) {
   const [phase, setPhase] = useState<Phase | null>(null);
@@ -34,26 +36,22 @@ export default function OverviewPage({ work, status, filter, setFilter, query, s
   const shippedAt = (w: Work) => Date.parse(w.observation?.mergedAt ?? w.stageEnteredAt);
   const recent = work.filter(w => w.stage === 'done' && now - shippedAt(w) <= week && match(w)).sort((a, b) => shippedAt(b) - shippedAt(a));
   const card = (w: Work) => <WorkCard key={w.id} item={w} repository={status?.repository} now={now} onOpen={setSelected}/>;
-  const list = (title: string, items: Work[], note?: string) => items.length > 0 && <section className="work-list" aria-label={title}><h2>{title} <span className="count">{items.length}</span>{note && <small> {note}</small>}</h2><div className="cards">{items.map(card)}</div></section>;
+  const list = (title: string, items: Work[], note?: string, attention = false) => items.length > 0 && <section className={attention ? 'work-list attention' : 'work-list'} aria-label={title}><h2>{title}{attention && <span className="count">{items.length}</span>}{note && <small> {note}</small>}</h2><div className="cards">{items.map(card)}</div></section>;
   const slices = (status?.delegation?.slices ?? []).filter((slice: any) => slice.lead);
+  // One row of counts: the stages that hold something. A stage with nothing in it takes no tile.
+  const stages = openPhases.filter(p => numbers.byPhase[p] > 0);
   const dwell = (p: Phase) => {
     const times = work.filter(w => w.stage !== 'done' && phaseOf(w, now) === p).map(w => now - Date.parse(w.stageEnteredAt)).sort((a, b) => a - b);
-    return times.length ? <span title="Time in this stage for its open items: the oldest, then the 50th and 95th percentile">{`oldest ${age(new Date(now - times.at(-1)!).toISOString())} · p50 ${formatDuration(times[Math.floor(times.length * .5)] / 60000)} · p95 ${formatDuration(times[Math.min(times.length - 1, Math.floor(times.length * .95))] / 60000)}`}</span> : <span title="No items in this stage">—</span>;
+    return times.length ? <span title="Time in this stage for its open items: the oldest, then the 50th and 95th percentile">{`oldest ${age(new Date(now - times.at(-1)!).toISOString())} · p50 ${formatDuration(times[Math.floor(times.length * .5)] / 60000)} · p95 ${formatDuration(times[Math.min(times.length - 1, Math.floor(times.length * .95))] / 60000)}`}</span> : null;
   };
   return <>
-    <div className="page-heading"><h1>Work</h1>{status?.actor?.role === 'admin' && <button onClick={() => setCreating(true)}>＋ New work item</button>}</div>
+    <div className="page-heading"><h1>Work <span className="count" title="Work items not shipped yet">{numbers.open}</span></h1>{status?.actor?.role === 'admin' && <button onClick={() => setCreating(true)}>＋ New work item</button>}</div>
     {status && !status.github && <div className="notice">GitHub is not connected, so nothing can merge yet. <a href="/docs/github">Set it up ↗</a></div>}
     {status?.appPermissions?.attention?.length > 0 && <div className="notice danger" role="alert"><strong>GitHub App permissions need attention.</strong>{status.appPermissions.attention.map((line: string) => <p key={line}>{line}</p>)}{status.heldJobs > 0 && <p>{status.heldJobs} integration job{status.heldJobs === 1 ? ' is' : 's are'} held rather than retried until the permission is accepted.</p>}{/^https:\/\/github\.com\//.test(status.appPermissions.installationUrl ?? '') && <a href={status.appPermissions.installationUrl} target="_blank" rel="noreferrer noopener">Review the App installation on GitHub ↗</a>} <a href="/docs/github#app-permissions">Migration guide ↗</a></div>}
     {status?.jobs?.length > 0 && <div className="notice danger">{status.jobs.length} GitHub update(s) failed: {status.jobs[0].error}</div>}
-    <div className="metrics" aria-label="Open items">
-      <div><span>Open</span><strong>{numbers.open}</strong></div>
-      <div><span>Being built</span><strong>{numbers.building}</strong></div>
-      <div><span>Need a worker</span><strong>{numbers.needsWorker}</strong></div>
-      <div className={numbers.stuck ? 'stuck-tile' : ''}><span>Stuck</span><strong>{numbers.stuck}</strong></div>
-    </div>
-    <section className="stage-strip" aria-label="Stages">
-      <div className="graph">{openPhases.map(p => <button key={p} className={`node ${phase === p ? 'selected' : ''}`} aria-pressed={phase === p} onClick={() => setPhase(phase === p ? null : p)}><span>{phaseLabel[p]}</span><strong>{numbers.byPhase[p]}</strong>{timings && <small>{dwell(p)}</small>}</button>)}</div>
-    </section>
+    {stages.length > 0 && <section className="stage-strip" aria-label="Stages">
+      <div className="graph">{stages.map(p => <button key={p} className={`node ${phase === p ? 'selected' : ''}`} aria-pressed={phase === p} onClick={() => setPhase(phase === p ? null : p)}><span>{phaseLabel[p]}</span><strong>{numbers.byPhase[p]}</strong>{timings && <small>{dwell(p)}</small>}</button>)}</div>
+    </section>}
     {slices.length > 0 && <section aria-label="Delivery slices"><h2><Term term="delivery slice">Delivery slices</Term></h2><div className="cards">{status.delegation.slices.map((slice: any) => <div className="slice-card" key={slice.id}>
       <div className="card-top"><span>{slice.name}</span>{slice.lead ? <SessionBadge kind={slice.lead.sessionKind} suffix="lead"/> : <span className="identity none">No lead assigned</span>}</div>
       <h3>{slice.lead ? slice.lead.displayName ?? slice.lead.id : 'Unassigned'}</h3>
@@ -65,8 +63,8 @@ export default function OverviewPage({ work, status, filter, setFilter, query, s
     <div className="home-columns"><div>
     {work.length === 0 ? <div className="empty"><h2>No work yet.</h2><p>Create a work item, say what must be true when it is done, and an agent will pick it up.</p>{status?.actor?.role === 'admin' && <button onClick={() => setCreating(true)}>Create the first work item</button>}</div>
       : board ? <div className="board">{openPhases.map(p => <div className="column" key={p}><h3>{phaseLabel[p]} <span>{open.filter(w => phaseOf(w, now) === p).length}</span></h3>{open.filter(w => phaseOf(w, now) === p).map(card)}</div>)}</div>
-      : <>{list('Stuck', stuck)}{list('In progress', inProgress)}{list('Needs a worker', waiting)}
-        {notStarted.length > 0 && <details className="work-list"><summary>Not started <span className="count">{notStarted.length}</span></summary><div className="cards">{notStarted.map(card)}</div></details>}
+      : <>{list('Stuck', stuck, undefined, true)}{list('In progress', inProgress)}{list('Needs a worker', waiting)}
+        {notStarted.length > 0 && <details className="work-list"><summary>Not started</summary><div className="cards">{notStarted.map(card)}</div></details>}
         {!open.length && <p className="muted">No open item matches.</p>}</>}
     </div><aside>
     {queue.length > 0 && <section className="graph-section" aria-label="Merge queue"><h2><Term term="merge queue">Merge queue</Term> <span className="count">{queue.length}</span></h2>{queue.map(entry => <button className="card" key={entry.id} onClick={() => setSelected(entry.id)}><div className="card-top"><span>{entry.position + 1}. {entry.key}</span><span>Waiting {age(entry.enqueuedAt)}</span></div><p className="reason">{entry.predecessors.length ? `Behind ${entry.predecessors.join(', ')}` : 'Next to merge'} · {entry.current ? 'tested with the changes ahead of it' : 'being re-tested'}</p></button>)}</section>}

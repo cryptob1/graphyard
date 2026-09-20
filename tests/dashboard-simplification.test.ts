@@ -10,7 +10,7 @@ import { apiRoutes } from '../src/server/index.js';
 import { computeAttribution } from '../src/attribution.js';
 // @ts-expect-error Dependency-free fixture and screenshot script.
 import { busyFixtureWork, fixtureApi, fixtureStatus, fixtureWork, flowApi, NOW, unexplainedWords, visibleWords } from '../scripts/dashboard-fixture.mjs';
-import { jargon, phaseOf, phases, plainReason, plainStatus } from '../web/plain-status.js';
+import { jargon, phaseLabel, phaseOf, phases, plainReason, plainStatus } from '../web/plain-status.js';
 import { homeNumbers } from '../web/home-numbers.js';
 import { glossary } from '../web/glossary.js';
 import { probeFeatures, unknownFeatures, type Features } from '../web/features.js';
@@ -370,14 +370,76 @@ test('unit:home-numbers-reconcile — every home number counts one named thing a
   assert.equal(numbers.stuck, 1);
   assert.ok(find('GY-17').gates.flatMap(g => g.reasons).length > 1);
   assert.equal(numbers.shippedThisWeek, 2, 'GY-18 and GY-19; GY-9 shipped 20 days ago');
-  // The rendered tiles and strip show exactly these numbers.
+  // The rendered strip shows exactly these numbers, one node per non-empty stage.
   const page = home();
-  const tile = (label: string) => page.match(new RegExp(`<span>${label}</span><strong>(\\d+)</strong>`))?.[1];
-  assert.equal(tile('Open'), String(numbers.open)); assert.equal(tile('Being built'), String(numbers.building));
-  assert.equal(tile('Need a worker'), String(numbers.needsWorker)); assert.equal(tile('Stuck'), String(numbers.stuck));
-  for (const phase of phases.filter(p => p !== 'shipped')) {
-    const label = { 'not-started': 'Not started', 'needs-worker': 'Needs a worker', building: 'Being built', review: 'In review', checks: 'Automated checks', proof: 'Proving it works', merging: 'Merging' }[phase];
-    assert.match(page, new RegExp(`<span>${label}</span><strong>${numbers.byPhase[phase]}</strong>`), phase);
-  }
+  for (const p of phases.filter(p => p !== 'shipped' && numbers.byPhase[p] > 0))
+    assert.match(page, new RegExp(`<span>${phaseLabel[p]}</span><strong>${numbers.byPhase[p]}</strong>`), p);
   assert.match(page, new RegExp(`Shipped this week <span class="count">${numbers.shippedThisWeek}</span>`));
+});
+
+const countedLabels = (page: string) => {
+  const labels: string[] = [];
+  for (const [, , inner] of page.matchAll(/<h([12])[^>]*>([\s\S]*?)<\/h\1>/g)) {
+    if (!/<span class="count"[^>]*>/.test(inner)) continue;
+    labels.push(inner.replace(/<span class="count"[^>]*>[\s\S]*?<\/span>/, '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim());
+  }
+  for (const [, label] of page.matchAll(/<span>([^<]+)<\/span><strong>(\d+)<\/strong>/g)) labels.push(label);
+  return labels.filter(Boolean);
+};
+
+test('unit:work-page-single-count-row — the page shows one row of counts, the stages, plus at most one highlighted stuck count; no count appears twice and no two labels differ only by grammatical form', () => {
+  const numbers = homeNumbers(work, NOW);
+  const page = home();
+  // The old summary tile row is gone; the stage strip is the one count row.
+  assert.ok(!page.includes('class="metrics"'), 'no second count row');
+  assert.ok(page.includes('aria-label="Stages"'), 'the stage strip is the count row');
+  const row = [...page.matchAll(/<span>([^<]+)<\/span><strong>(\d+)<\/strong>/g)].map(match => ({ label: match[1], n: Number(match[2]) }));
+  assert.deepEqual(row, phases.filter(p => p !== 'shipped' && numbers.byPhase[p] > 0).map(p => ({ label: phaseLabel[p], n: numbers.byPhase[p] })), 'the row is exactly the non-empty stages, in work order');
+  // Every counted label on the page is unique: no measure is counted twice.
+  const counted = countedLabels(page);
+  assert.deepEqual(new Set(counted).size, counted.length, `each counted label appears once: ${counted.join(' | ')}`);
+  assert.deepEqual(counted.filter(label => label === 'Work').length, 1, 'the heading counts once');
+  // At most one highlighted count for work needing attention, and it is the stuck count.
+  assert.deepEqual([...page.matchAll(/class="work-list attention" aria-label="([^"]+)"/g)].map(match => match[1]), ['Stuck']);
+  assert.match(page, new RegExp(`<h2>Stuck<span class="count">${numbers.stuck}</span></h2>`));
+  // No label differs from another only by grammatical form ("Need a worker" vs "Needs a worker").
+  const stem = (label: string) => label.toLowerCase().split(/\s+/).map(word => word.replace(/ies$/, 'y').replace(/s$/, '')).join(' ');
+  const stems = counted.map(stem);
+  assert.deepEqual(new Set(stems).size, stems.length, `no grammatical-twin labels: ${counted.join(' | ')}`);
+  assert.ok(!page.includes('Need a worker'), 'the old tile label is gone');
+});
+
+test('unit:work-page-no-derived-totals — a total that is a sum or subset of the stage row is never a tile; the open count appears once, in the page heading', () => {
+  const numbers = homeNumbers(work, NOW);
+  const page = home();
+  // Open is the sum of the stage row: never a tile, counted once, in the heading.
+  assert.ok(!page.includes('aria-label="Open items"'), 'the Open tile row is gone');
+  assert.ok(!/<span>Open<\/span>/.test(page), 'Open is not a tile label');
+  assert.match(page, new RegExp(`<h1>Work <span class="count"[^>]*>${numbers.open}</span></h1>`));
+  assert.equal([...page.matchAll(new RegExp(`<span class="count"[^>]*>${numbers.open}</span>`, 'g'))].length, 1, 'the open count is rendered once');
+  // The other summary tiles repeated the row ("Being built", "Need a worker") or subset it
+  // ("Stuck"): the stage strip and the one stuck highlight are their only homes.
+  for (const label of ['Being built', 'Needs a worker'])
+    assert.equal([...page.matchAll(new RegExp(`<span>${label}</span><strong>`, 'g'))].length, 1, `${label} appears only in the stage row`);
+  assert.ok(!/<span>Stuck<\/span><strong>/.test(page), 'Stuck is not a tile');
+  // A heading over several stages (In progress) carries no derived count of its own.
+  const inProgress = page.match(/<section class="work-list" aria-label="In progress">[\s\S]*?<\/section>/)![0];
+  assert.ok(!inProgress.includes('class="count"'), 'the In progress heading shows no derived total');
+});
+
+test('integration:work-page-density — a stage with nothing in it takes no labelled tile in the default view, and the page still answers what is in progress, what is stuck and why, and what shipped recently within the 150-word budget', () => {
+  const numbers = homeNumbers(work, NOW);
+  assert.equal(numbers.byPhase.checks, 0);
+  assert.equal(numbers.byPhase.merging, 0);
+  const page = home();
+  // Empty stages are not drawn: no label, no zero, no empty-stage placeholder.
+  for (const empty of ['Automated checks', 'Merging']) assert.ok(!page.includes(`>${empty}<`), `${empty} takes no tile`);
+  assert.ok(!page.includes('No items in this stage'), 'no placeholder for an empty stage');
+  assert.ok(!/(<strong>|class="count">)0</.test(page), 'no count is drawn as zero');
+  // The three questions are still answered, in order: stuck and why, in progress, shipped.
+  const order = ['aria-label="Stuck"', 'aria-label="In progress"', 'aria-label="Needs a worker"', 'aria-label="Shipped this week"'].map(label => page.indexOf(label));
+  assert.ok(order.every(index => index > 0) && order.every((index, i) => i === 0 || index > order[i - 1]), `sections in order: ${order}`);
+  assert.match(text(page), /Stuck: needs a second Postgres instance/, 'the stuck section says why');
+  for (const item of work.filter(w => w.stage !== 'done' && phaseOf(w, NOW) !== 'not-started')) assert.ok(text(page).includes(text(plainStatus(item, NOW).sentence)), item.key);
+  assert.ok(words(page).length <= 150, `home renders ${words(page).length} words excluding item titles: ${text(page)}`);
 });

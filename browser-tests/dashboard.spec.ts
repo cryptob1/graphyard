@@ -23,8 +23,8 @@ const cardSelect = (page: Page) => page.getByRole('button', { name: /Browser fix
 
 async function login(page: Page, value = 'browser-fixture') { await page.getByLabel('Access token').fill(value); await page.getByRole('button', { name: 'Open control plane' }).click(); }
 // The sidebar has four primary entries (Work, Shipped, Insights, Settings); the other pages are
-// tabs under Insights or Settings. In the item view, details and policy edits are collapsed.
-const workHeading = (page: Page) => page.getByRole('heading', { name: 'Work', level: 1, exact: true });
+// tabs under Insights or Settings. The Work heading carries the open count ("Work 7").
+const workHeading = (page: Page) => page.getByRole('heading', { name: /^Work( \d+)?$/, level: 1 });
 const openWork = (page: Page) => page.getByRole('navigation', { name: 'Primary' }).getByRole('button', { name: /Work/ }).click();
 async function openPage(page: Page, section: 'Insights' | 'Settings', tab: string) {
   await page.getByRole('navigation', { name: 'Primary' }).getByRole('button', { name: new RegExp(section) }).click();
@@ -229,11 +229,14 @@ for (const viewport of [{ name: 'desktop', width: 1280, height: 900 }, { name: '
     const node = (stage: string) => page.locator('.node', { hasText: stage });
     await expect(node('In review')).toContainText('oldest 2d 3h');
     await expect(node('In review')).toContainText('p50 14h 54m · p95 2d 3h');
-    await expect(node('Needs a worker')).toContainText('—');
-    await expect(node('Not started')).toContainText('—');
-    await expect(page.locator('.node small span[title]')).toHaveCount(7);
+    // One count row: every fixture item is in review, so it is the only drawn stage; a stage
+    // with nothing in it takes no labelled tile.
+    await expect(page.locator('.stage-strip .node')).toHaveCount(1);
+    await expect(node('Merging')).toHaveCount(0);
+    await expect(node('Needs a worker')).toHaveCount(0);
+    await expect(node('Not started')).toHaveCount(0);
+    await expect(page.locator('.node small span[title]')).toHaveCount(1);
     await expect(node('In review').locator('span[title]')).toHaveAttribute('title', /50th and 95th percentile/);
-    await expect(node('Merging').locator('span[title]')).toHaveAttribute('title', 'No items in this stage');
     await expect(node('In review').locator('span[title]')).toHaveCSS('text-transform', 'none');
     const age = (key: string) => page.locator('.card', { hasText: key }).locator('.status-line');
     await expect(age('GY-2')).toHaveAttribute('title', 'In this step for 45m');
@@ -244,6 +247,22 @@ for (const viewport of [{ name: 'desktop', width: 1280, height: 900 }, { name: '
     expect(clipped).not.toContain(true);
   });
 }
+
+test('the work page shows one count row, the stages, with the open total in the heading and nothing counted twice', async ({ page }) => {
+  await fixture(page); await login(page);
+  // The open total is the heading's count and appears nowhere else; the summary tile row is gone.
+  await expect(workHeading(page)).toHaveText(/Work\s*1/);
+  await expect(page.locator('.metrics')).toHaveCount(0);
+  await expect(page.getByText('Need a worker', { exact: true })).toHaveCount(0);
+  // The fixture item sits in review, so review is the only drawn stage; no zero is drawn.
+  const strip = page.locator('.stage-strip');
+  await expect(strip.locator('.node')).toHaveCount(1);
+  await expect(strip.locator('.node')).toContainText('In review');
+  await expect(strip.locator('.node')).not.toContainText('0');
+  // The row still filters the lists below.
+  await strip.locator('.node').click();
+  await expect(page.getByRole('heading', { name: 'Browser fixture' })).toBeVisible();
+});
 
 test('invalid login remains on login; whitespace is trimmed and loading never claims empty work', async ({ page }) => {
   const state = await fixture(page);
