@@ -534,7 +534,10 @@ function neededDecision(work: Work, config: Pick<MasterConfig, 'autoMerge'>): Ro
     return work.containmentQuarantine
       ? { action: 'recover', reason: `${work.key} is delivered and still fenced by its epoch ${work.containmentQuarantine.epoch} containment quarantine; recovery releases it without touching the delivery.`, binding: String(work.containmentQuarantine.epoch) } : null;
   }
-  const conflict = baseRefreshConflict(work);
+  // Like a verdict, a conflict keeps matching the head it was found on until a new one is pushed,
+  // and the engine's `rework` does not clear it: once the round is requested the item needs a
+  // worker, not a second decision, even when that round's worker dies before pushing.
+  const conflict = work.reworkRequested ? null : baseRefreshConflict(work);
   if (conflict) return { action: 'rework', reason: `${work.key}: ${conflict}. Only a fresh attempt can resolve it, so the candidate returns to a worker.`, binding: work.candidate!.sha };
   const verdict = standingVerdict(work);
   if (verdict) return { action: 'rework', reason: `${work.key}: ${verdict.reason}. The verdict stands against the current head, so the item returns to a worker for the next round.`, binding: work.candidate!.sha };
@@ -657,7 +660,10 @@ export interface SilenceReport { actionable: number; longestIdleMs: number; long
 /** Fold this cycle's actionable inventory and its actions into the silence record. */
 export function trackSilence(state: DaemonState, subjects: ActionableSubject[], performed: DaemonAction[], now: number): SilenceReport {
   const record = state.silence, at = new Date(now).toISOString();
-  const acted = new Set(performed.map(action => `${action.kind}:${action.work ?? 'pipeline'}`));
+  // Only an action that succeeded is the loop acting on a subject. A request refused every time it
+  // is retried — a revoked credential, a standing 409 — moves nothing, and a wait that restarted
+  // on each refusal would never reach the bound that puts it in front of someone.
+  const acted = new Set(performed.filter(action => action.state === 'done').map(action => `${action.kind}:${action.work ?? 'pipeline'}`));
   const live = new Map(subjects.map(subject => [subject.key, subject]));
   for (const key of Object.keys(record.subjects)) if (!live.has(key)) delete record.subjects[key];
   for (const [key, subject] of live) {
@@ -693,6 +699,11 @@ export const latencyTargets = {
 export function observeItemClock(state: DaemonState, work: Work, now: number): LatencySample | null {
   const at = new Date(now).toISOString();
   const time = (value: string | null | undefined) => { const parsed = value ? Date.parse(value) : Number.NaN; return Number.isFinite(parsed) ? parsed : null; };
+  // A delivery is sampled once, from the clock the loop held while the item was open, and sampling
+  // drops that clock. A delivered item with no clock is therefore history — delivered before this
+  // loop watched it, or already sampled — and measuring it again would start its clocks at this
+  // cycle and bury every real passage under a zero per delivered item per cycle.
+  if (work.stage === 'done' && !state.clocks[work.id]) return null;
   const clock: ItemClock = state.clocks[work.id] ?? itemClockSchema.parse({ key: work.key, epoch: work.epoch });
   state.clocks[work.id] = clock;
   clock.key = work.key;
@@ -876,8 +887,9 @@ export interface DaemonEffects {
   decisions?: (work: Work) => Promise<{ decisions: { id: string; action: string; state: string; input: any; approvedBy: string | null; outcome?: string | null }[] }>;
   /**
    * Takes back one of the loop's own requests, as its requester. Only for a request the item has
-   * moved past — a merge decision bound to an earlier candidate — which would otherwise stand
-   * forever and refuse the request for the current one.
+   * moved past — a merge decision bound to an earlier candidate, a round the item no longer needs —
+   * which would otherwise stand forever, refuse the request for the current one, or be adopted
+   * for a later round on a reason that describes an older head.
    */
   withdraw?: (work: Work, decision: string, reason: string) => Promise<unknown>;
   /** Verifies on this host which quarantined supervisors are demonstrably gone. */
@@ -1240,15 +1252,17 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
       }
       const requested = standing ?? await effects.decide!(item, decision.action, decision.reason);
       const watch = state.approvals[key] = approvalWatchSchema.parse({ work: item.key, action: decision.action, decision: requested.id, requestedAt: stamp, requests: (carried?.requests ?? 0) + 1, ended: carried?.ended ?? [] });
+      // A verdict measured from when the reviewer landed it to when the loop asked for the round it
+      // needs. A base conflict has no verdict behind it, so it is not part of that measurement. It
+      // is sampled with the request, before the launch: a request whose first launch throws is
+      // supervised from the watch and never comes back through here.
+      const verdictAt = verdict ? Date.parse(verdict.at) : Number.NaN;
+      if (Number.isFinite(verdictAt)) state.latency.push(latencySampleSchema.parse({ work: item.key, at: stamp, verdictToReworkMs: Math.max(0, Math.round(clock - verdictAt)) }));
       await effects.persist(state);
       // The request alone changes nothing; the approver session is what applies it. A launch that
       // fails leaves the watch behind, so the next cycle sees a decision with no session and
       // launches again, inside the same bound.
       const how = await launch(item, watch, true);
-      // A verdict measured from when the reviewer landed it to when the loop asked for the round it
-      // needs. A base conflict has no verdict behind it, so it is not part of that measurement.
-      const verdictAt = verdict ? Date.parse(verdict.at) : Number.NaN;
-      if (Number.isFinite(verdictAt)) state.latency.push(latencySampleSchema.parse({ work: item.key, at: stamp, verdictToReworkMs: Math.max(0, Math.round(clock - verdictAt)) }));
       performed.push(await record(state, key, { kind: 'decision', work: item.key, principal: null, state: 'done', detail: `${standing ? `Adopted decision ${requested.id} (${decision.action}), already standing on ${item.key},` : `Requested decision ${requested.id} (${decision.action}) for ${item.key}`} and ${how}: ${decision.reason}`.slice(0, 2000), attempts, epoch: item.epoch, cycle: state.cycle }, now(), effects.persist));
     } catch (error) {
       performed.push(await record(state, key, { kind: 'decision', work: item.key, principal: null, state: 'failed', detail: `Could not put the ${decision.action} decision for ${item.key} to an approver: ${message(error)}`.slice(0, 2000), attempts, epoch: item.epoch, cycle: state.cycle }, now(), effects.persist));
@@ -1286,11 +1300,14 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
     catch (error) { await note(`${base}:launch:${watch.launches}`, item, 'decision', 'failed', `${step.detail}; a replacement approver session could not be launched: ${message(error)}`); }
   };
 
-  const needed = new Set<string>();
+  const needed = new Set<string>(), unattestable = new Set<string>();
   for (const item of snapshot.work) {
     const assessment = assessments[item.id];
     const decision = routineDecision(item, config, clock, assessment);
     if (!decision) {
+      // Still called for, only not attestable this cycle: its request is not one the item moved past.
+      const called = neededDecision(item, config);
+      if (called) unattestable.add(decisionKey(item, called));
       // The item needs the decision and the loop will not attest what it could not verify. Step 3b
       // has already escalated an open item whose fence this host assessed and could not settle.
       const withheld = withheldDecision(item, config, clock, assessment);
@@ -1322,10 +1339,26 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
     if (needed.has(key)) continue;
     if (!sessions().available) continue;
     const item = snapshot.work.find(candidate => candidate.key === watch.work);
+    // A request the item moved past is taken back by the identity that made it, whatever its
+    // action: left `requested`, it would be adopted for some later round on a reason that describes
+    // an older head. One the item still calls for stays, and is adopted when it can be attested.
+    let withdrawn = true;
+    if (item && !watch.settledAt && !unattestable.has(key) && effects.withdraw && effects.decisions) {
+      try {
+        const standing = (await effects.decisions(item)).decisions.find(entry => entry.id === watch.decision);
+        if (standing?.state === 'requested') {
+          await effects.withdraw(item, watch.decision, `${watch.work} moved past the ${watch.action} this decision asked for before any approver judged it, so its reason no longer describes the item`);
+          await note(`approver:${watch.decision}:withdrawn`, item, 'decision', 'done', `Withdrew ${watch.action} decision ${watch.decision}: ${watch.work} no longer needs it and no approver had judged it`);
+        }
+      } catch (error) {
+        withdrawn = false; watch.closeAttempts += 1;
+        await note(`approver:${watch.decision}:withdrawn`, item, 'decision', 'failed', `Could not withdraw ${watch.action} decision ${watch.decision}, which ${watch.work} no longer needs: ${message(error)}`);
+      }
+    }
     const closed = !item || await closeApprover(item, watch, `${watch.work} no longer needs ${watch.action} decision ${watch.decision}`);
-    // A tab that will not close is left to the operator after a few tries; its name is this
-    // decision's alone, so it can refuse no other launch.
-    if (closed || watch.closeAttempts >= maxApproverCloses) delete state.approvals[key];
+    // A tab that will not close, or a request that cannot be taken back, is left to the operator
+    // after a few tries; the session name is this decision's alone, so it can refuse no other launch.
+    if ((closed && withdrawn) || watch.closeAttempts >= maxApproverCloses) delete state.approvals[key];
   }
 
   // 5. Shepherd reviews and proofs for submitted candidates. Graphyard dispatches provider reviews
@@ -1701,6 +1734,11 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     if (!response.ok) throw new Error(`Graphyard refused ${path} (${response.status}): ${result?.error ?? JSON.stringify(result)}`);
     return result;
   };
+  const decide: DaemonEffects['decide'] = async (work, action, reason) => asOperatorAgent('POST', `work/${work.id}/decide`, { action, input: decisionInput(action, work, {}), reason });
+  const approver: DaemonEffects['approver'] = async (work, decision) => { const launched = await launchApprover(root, work, decision, current().reviewers[0]?.kind ?? 'claude', listHerdrAgents(run), run); return { agentName: launched.agentName, pane: launched.pane }; };
+  // The same route, as the same requester: only the identity that asked may take a request back.
+  const withdraw: DaemonEffects['withdraw'] = (work, decision, reason) => asOperatorAgent('POST', `work/${work.id}/decide`, { action: 'withdraw', decision, reason });
+  const decisions: DaemonEffects['decisions'] = work => asOperatorAgent('GET', `work/${encodeURIComponent(work.id)}/decisions`);
   return {
     agents: () => { try { return listHerdrAgents(run); } catch { return []; } },
     herdr: () => { const runtime = observeHerdrAgents(run); return { agents: runtime.agents, available: runtime.available }; },
@@ -1726,11 +1764,15 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     // The idle bound comes from the live configuration, so a host under pressure can shorten it
     // (or a slow repository lengthen it) without restarting the loop.
     reclaim: work => reclaimWorktrees(root, work, { idleMs: reclaimIdleMs(current()) }),
-    decide: async (work, action, reason) => asOperatorAgent('POST', `work/${work.id}/decide`, { action, input: decisionInput(action, work, {}), reason }),
-    approver: async (work, decision) => { const launched = await launchApprover(root, work, decision, current().reviewers[0]?.kind ?? 'claude', listHerdrAgents(run), run); return { agentName: launched.agentName, pane: launched.pane }; },
-    // The same route, as the same requester: only the identity that asked may take a request back.
-    withdraw: (work, decision, reason) => asOperatorAgent('POST', `work/${work.id}/decide`, { action: 'withdraw', decision, reason }),
-    decisions: work => asOperatorAgent('GET', `work/${encodeURIComponent(work.id)}/decisions`),
+    // The decision effects exist only while the live configuration names the master's
+    // operator-agent identity. Without one the loop has no way to request anything, so the cycle
+    // sees them absent and records each routine decision as the escalation naming the two commands,
+    // instead of a request that fails on every retry; provisioning the identity brings them back
+    // on the next reload, with no restart.
+    get decide() { return current().operatorAgent ? decide : undefined; },
+    get approver() { return current().operatorAgent ? approver : undefined; },
+    get withdraw() { return current().operatorAgent ? withdraw : undefined; },
+    get decisions() { return current().operatorAgent ? decisions : undefined; },
     containment: (work, observed) => assessContainment(work, { hostId: current().hostId, observedAt: observed.now, clockOffset: observed.clockOffset }),
     settleContainment: (work, assessment) => deps.mutate(`work/${work.id}/autosettle`, { epoch: assessment.epoch, settlementHash: work.containmentQuarantine!.settlementHash,
       reason: `The master loop verified on ${assessment.host ?? current().hostId} that the supervisor of epoch ${assessment.epoch} is gone; the item is released for a fresh attempt`, verification: assessment.verification }),

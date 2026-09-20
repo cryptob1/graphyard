@@ -221,7 +221,10 @@ requests one in exactly two cases: no fence stands for the item — the worker's
 settled it at exit, or the loop settled it in step 4 — or the fence has lapsed and the same cycle's
 probe on the registered host verified that epoch's supervisor gone. The request's reason states
 which, because the approver cannot verify the host and judges the attestation on what the requester
-says it checked. A lapsed fence the host could not verify withholds the decision: it is escalated
+says it checked. A round is requested once: a verdict or a base conflict keeps matching the head it
+was found on until a new head is pushed, so once rework is requested neither asks again — a round
+whose worker dies before pushing is recovered by settling its fence and dispatching, not by a second
+decision. A lapsed fence the host could not verify withholds the decision: it is escalated
 with the probe's refusals (`decision-withheld` for a delivered item or a fence on another host; the
 step 4 containment escalation otherwise), it stays on the silence measure, and nothing is requested.
 
@@ -242,6 +245,7 @@ control plane and the session back from Herdr:
 | The decision ended `failed`, `stale` or `withdrawn`, or the server no longer holds it, and the item still needs it | Requests it again — at most three requests per binding, on the usual widening retry interval |
 | Three sessions spent and still unjudged | Escalates once with the decision, how each session ended, and `master approver GY-N DECISION`; stops spending sessions; leaves the request standing |
 | A `merge` decision standing for an earlier candidate | Withdraws it as its requester — it can never apply, and the server refuses a second request while it stands — then requests one for the current candidate |
+| A decision it requested, still `requested`, that the item no longer calls for — the round was requested another way, a new head arrived | Withdraws it as its requester and closes its session, so it is never adopted for a later round on a reason that describes an older head. A decision the item still calls for but the loop cannot attest this cycle is left standing, and adopted once it can |
 | Herdr or the decision history cannot be read | Concludes nothing this cycle |
 
 Each decision's session has its own name, `graphyard-approver-<key>-<first eight characters of the
@@ -253,8 +257,10 @@ own agent, a replacement session restarts that wait, and a decision nobody judge
 twenty-minute attention item like any other silence. With automatic merging off the merge wait in
 `daemon.escalations` names the decision and the session it is with, so it is raised again whenever
 either changes. A loop with no operator-agent identity provisioned (`master autonomy --admin-token-stdin
---apply`) changes nothing about the rest of the cycle: each routine decision becomes an escalation
-in `master status` naming the two commands a master session runs instead.
+--apply`) changes nothing about the rest of the cycle: `master run` wires the decision effects only
+while the live configuration names that identity, so each routine decision becomes an escalation
+in `master status` naming the two commands a master session runs instead — not a request that fails
+on every retry — and provisioning the identity is picked up on the next configuration reload.
 
 Everything else is still a judgement: how to route a novel failure, whether a requirement should
 change, what a finding means. Those reach `master status` with their owner and next command.
@@ -283,7 +289,9 @@ actionable inventory (claimable work, a routine decision from the moment the ite
 is applied — requested, waiting on an approver, or withheld for want of a verified attestation — a
 scope request, a settleable quarantine, a mergeable candidate, a proof missing on a head no verdict
 stands against, a pending base refresh, a delivery awaiting its deployment or smoke) and the
-actions it took — and each subject's wait restarts when the loop acts on it. The
+actions it took — and each subject's wait restarts when the loop acts on it and the action
+succeeds. A refused action moves nothing, so it restarts nothing: a request the server refuses on
+every retry reaches the twenty-minute bound like any other silence. The
 longest current wait is `daemon.silence.longestIdleMs`, with the subject behind it; past twenty
 minutes it becomes an attention item naming what nothing has acted on. An item nobody is waiting on
 is not silence: a claimed attempt under way asks nothing of the loop.
@@ -291,7 +299,11 @@ is not silence: a claimed attempt under way asks nothing of the loop.
 **The delivery budgets** are measured from what the loop itself observed, cycle by cycle, so no
 figure can disagree with the state it acted on. `daemon.budget` reports each one with `met` and the
 reasons behind it; `met` is null while fewer than ten deliveries are measured, and a per-candidate
-bound is judged on every sample:
+bound is judged on every sample. A delivery is sampled once, from the clock the loop kept while the
+item was open: an item delivered before the loop watched it, or already sampled, is history and
+adds nothing, so the figures are of passages this loop saw and a recorded breach is not outvoted or
+evicted by the ledger's past. The verdict → rework figure is taken when the request is made,
+whether or not its first approver session could be launched:
 
 | Budget | Bound |
 | --- | --- |

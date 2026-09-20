@@ -6,7 +6,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { actionableSubjects, approvalStep, approvalWatchSchema, approverJudgeBoundMs, cycleDelay, daemonEffects, daemonSummary, decisionKey, emptyDaemonState, latencyBudget, latencyTargets, loopAttention, loopLiveness, maxApproverLaunches, mergeableCandidate, observeItemClock, reconcilePendingActions, routineDecision, runCycle, runDaemon, silenceBudgetMs, standingVerdict, watchdogPlan, withheldDecision, workerStopped, writeDaemonState, type DaemonAction, type DaemonEffects, type DaemonState } from '../src/master-daemon.js';
+import { actionableSubjects, approvalStep, approvalWatchSchema, approverJudgeBoundMs, cycleDelay, daemonEffects, daemonSummary, decisionKey, emptyDaemonState, latencyBudget, latencyTargets, loopAttention, loopLiveness, maxApproverLaunches, mergeableCandidate, observeItemClock, reconcilePendingActions, routineDecision, runCycle, runDaemon, silenceBudgetMs, standingVerdict, trackSilence, watchdogPlan, withheldDecision, workerStopped, writeDaemonState, type DaemonAction, type DaemonEffects, type DaemonState } from '../src/master-daemon.js';
 import { masterStatusReport } from '../src/cli/master-status.js';
 import { approverSessionName, decisionInput, launchApprover, listHerdrAgents, masterConfigSchema, type ContainmentAssessment, type MasterConfig, type MasterRun, type WorkerProfile } from '../src/master.js';
 import { containmentGraceMs } from '../src/quarantine.js';
@@ -110,7 +110,7 @@ function herdr() {
  * cycles `advance` runs everyone else: the launched worker, CI, the reviewer, the producer, and
  * the approver session the loop launched for its own request.
  */
-function plane(scripts: Script[], options: { hostId?: string; host?: { root: string; master: MasterConfig }; judgements?: Judgement[] } = {}) {
+function plane(scripts: Script[], options: { hostId?: string; host?: { root: string; master: MasterConfig }; judgements?: Judgement[]; delivered?: number } = {}) {
   const hostId = options.hostId ?? 'machine-a';
   const sessions = herdr();
   sessions.judgements.push(...options.judgements ?? []);
@@ -126,6 +126,18 @@ function plane(scripts: Script[], options: { hostId?: string; host?: { root: str
     gates: [{ name: 'ready', passed: true, reasons: [] }, { name: 'build', passed: false, reasons: ['Worker has not submitted implementation for this attempt'] }],
     pr: 100 + index,
   } as unknown as Work));
+  // The ledger an installation already holds: items delivered before this loop ever watched them,
+  // reported the way the control plane reports a delivery — a submission, no rework requested,
+  // every gate passing — which is exactly what an open, approved, mergeable candidate looks like.
+  for (let index = 0; index < (options.delivered ?? 0); index++) {
+    const key = `GY-${index + 1}`, sha = hex(`${key}-1`), baseSha = hex(`base-${key}`), mergedAt = iso(now - (index + 1) * 60 * minute);
+    const candidate = { sha, baseSha, pr: index + 1, branch: `graphyard/${key.toLowerCase()}-1`, author: 'worker', createdAt: mergedAt };
+    work.push({ ...work[0], id: `id-${key}`, key, title: `Deliver ${key}`, plannedFiles: [`src/${key.toLowerCase()}.ts`], stage: 'done', stageEnteredAt: mergedAt, epoch: 1,
+      candidate, submission: { epoch: 1, pr: index + 1 }, lastAssignment: { owner: 'graphyard-claude-0', epoch: 1, claimedAt: mergedAt },
+      observation: { candidate, checks: [], reviews: [{ reviewer: 'graphyard-reviewer[bot]', sha, state: 'APPROVED', submittedAt: mergedAt }], merged: true, mergeSha: hex(`merge-${key}`), mergedAt,
+        mergeable: true, protected: true, files: [], at: mergedAt, baseTip: baseSha, baseTipContained: true, prState: 'closed', draft: false },
+      delivery: { mergedAt, mergedAtRepository: mergedAt, mergeSha: hex(`merge-${key}`), authorizationRevision: 1 }, pr: index + 1 } as unknown as Work);
+  }
   const decisions = new Map<string, PlaneDecision[]>();
   const judged = new Map<string, number>();
   const find = (id: string) => work.find(item => item.id === id || item.key === id)!;
@@ -168,6 +180,7 @@ function plane(scripts: Script[], options: { hostId?: string; host?: { root: str
     const pr = (item as unknown as { pr: number }).pr;
     item.candidate = { sha, baseSha, pr, branch: `graphyard/${item.key.toLowerCase()}-${item.epoch}`, author: 'worker', createdAt: iso() };
     item.submission = { epoch: item.epoch, pr };
+    item.reworkRequested = false;
     item.observation = { candidate: item.candidate, checks: [], reviews: [], merged: false, mergeSha: null, mergeable: true, protected: true,
       files: item.plannedFiles, at: iso(), baseTip: baseSha, baseTipContained: true, prState: 'open', draft: false } as Work['observation'];
     item.baseRefresh = null;
@@ -197,7 +210,9 @@ function plane(scripts: Script[], options: { hostId?: string; host?: { root: str
   /** The control plane's side of an approval: the decision is applied exactly as the engine applies it. */
   const approve = (item: Work, decision: PlaneDecision, approvedBy = 'graphyard-approver') => {
     Object.assign(decision, { state: 'applied', approvedBy });
-    if (decision.action === 'rework') { item.reworkRequested = true; item.lease = null; item.baseRefresh = null; item.containmentQuarantine = null; judged.set(item.key, 0); }
+    // The engine's `rework` leaves `baseRefresh` alone: a conflict keeps matching the head it was found
+    // on until a worker pushes a new one.
+    if (decision.action === 'rework') { item.reworkRequested = true; item.lease = null; item.containmentQuarantine = null; judged.set(item.key, 0); }
     if (decision.action === 'recover') item.containmentQuarantine = null;
     recompute(item);
   };
@@ -254,7 +269,8 @@ function plane(scripts: Script[], options: { hostId?: string; host?: { root: str
       target.lastAssignment = { owner: worker.principal, epoch: target.epoch, claimedAt: iso() };
       target.workspaces = [{ host: hostId, path: `/tmp/graphyard/${target.key.toLowerCase()}-${target.epoch}`, branch: `graphyard/${target.key.toLowerCase()}-${target.epoch}`, epoch: target.epoch, owner: worker.principal }];
       target.implementers = [...new Set([...(target.implementers ?? []), worker.principal])];
-      target.reworkRequested = false;
+      // A claim leaves `reworkRequested` standing, as the engine does: only the round's own
+      // submission clears it, so a round whose worker dies before pushing is still a requested round.
       if (script(target).scopeOn === target.epoch) target.scopeRequest = { epoch: target.epoch, paths: ['docs/loop.md'], reason: 'The criteria ask for the loop guide to be updated', requestedBy: worker.principal, at: iso() };
       if (round(target) === 'die') {
         // A supervised launch fences its session in a scope unit; this one dies with the fence up.
@@ -426,16 +442,28 @@ test('integration:unattended-full-cycle — with no master session and no human 
 
 test('integration:mergeable-dwell-budget — a candidate whose gates are green merges within five minutes of becoming mergeable and a standing verdict reaches a rework request in the same window, with p90 approval→merge inside ten minutes over more than ten deliveries; a loop that leaves one green reports the breach', async () => {
   const scripts = Array.from({ length: 11 }, (_, index) => ({ key: `GY-${200 + index}`, rounds: ['pass' as const] }));
-  const simulation = plane(scripts);
+  // The loop starts beside a ledger that already holds deliveries, as every real installation does,
+  // and keeps cycling long after its own: the budget is of the passages this loop watched, and a
+  // delivered item is history, not a passage that completes again every cycle.
+  const history = 79;
+  const simulation = plane(scripts, { delivered: history });
   const master = config({ workers: scripts.map((_, index) => profile(`claude-${index}`)) });
   const state = emptyDaemonState(master);
   const effects = simulation.effects();
-  for (let pass = 0; pass < 10 && simulation.work.some(item => item.stage !== 'done'); pass++) await cycle(state, master, simulation, effects, 2 * minute);
-  await cycle(state, master, simulation, effects);
+  const open = () => simulation.work.filter(item => scripts.some(entry => entry.key === item.key) && item.stage !== 'done');
+  await cycle(state, master, simulation, effects, 2 * minute);
+  assert.equal(state.latency.length, 0, 'a delivery this loop never watched is not a sample');
+  assert.equal(latencyBudget(state.latency).met, null, 'and history alone does not make the ten deliveries the targets are judged over');
+  for (let pass = 0; pass < 10 && open().length; pass++) await cycle(state, master, simulation, effects, 2 * minute);
+  for (let pass = 0; pass < 40; pass++) await cycle(state, master, simulation, effects);
 
-  assert.equal(simulation.work.filter(item => item.stage === 'done').length, 11, 'every item was delivered by the loop alone');
+  assert.equal(simulation.work.filter(item => item.stage === 'done').length, history + 11, 'every item was delivered by the loop alone');
   const budget = latencyBudget(state.latency);
-  assert.ok(budget.deliveries >= latencyTargets.minimumDeliveries, `${budget.deliveries} deliveries measured`);
+  assert.equal(budget.deliveries, 11, 'one sample per delivery the loop made, forty cycles after the last of them');
+  assert.deepEqual(state.latency.map(sample => sample.work).sort(), scripts.map(entry => entry.key).sort(), 'and each is of an item this loop delivered');
+  assert.equal(budget.approvalToMerge.count, 11, 'approval→merge is not diluted by items delivered before the loop watched');
+  assert.ok(budget.approvalToMerge.p50Ms > 0, 'the median is of real passages, not of zeros');
+  assert.deepEqual(Object.keys(state.clocks), [], 'a sampled delivery keeps no clock, and none is created for it again');
   assert.deepEqual(budget.mergeDwell.breaches, [], 'no candidate stayed mergeable past the five-minute bound');
   assert.ok(budget.mergeDwell.count >= latencyTargets.minimumDeliveries, 'every delivery measured its mergeable dwell');
   assert.ok(budget.approvalToMerge.p90Ms <= latencyTargets.approvalToMergeP90Ms, `approval→merge p90 ${budget.approvalToMerge.p90Ms}ms exceeds the ten-minute target`);
@@ -445,7 +473,7 @@ test('integration:mergeable-dwell-budget — a candidate whose gates are green m
 
   // The same measurement over a loop that cannot merge what is green: the dwell is the breach, it
   // names the candidate, and it reaches the attention list rather than a chart nobody reads.
-  const stalled = plane([{ key: 'GY-300', rounds: ['pass'] }]);
+  const stalled = plane([{ key: 'GY-300', rounds: ['pass'] }], { delivered: history });
   const stalledState = emptyDaemonState(master);
   let refuse = true;
   const stalledEffects = stalled.effects();
@@ -459,8 +487,12 @@ test('integration:mergeable-dwell-budget — a candidate whose gates are green m
   stalled.advance(30 * minute);
   refuse = false;
   await cycle(stalledState, master, stalled, stalledEffects);
-  await cycle(stalledState, master, stalled, stalledEffects);
+  // The breach is still what the budget reports many cycles later: nothing evicts it, and nothing
+  // outvotes it with deliveries that were never measured.
+  for (let pass = 0; pass < 40; pass++) await cycle(stalledState, master, stalled, stalledEffects);
   const stalledBudget = latencyBudget(stalledState.latency);
+  assert.equal(stalledBudget.deliveries, 1);
+  assert.deepEqual(stalledBudget.mergeDwell.breaches.map(breach => breach.work), ['GY-300']);
   assert.equal(stalledBudget.met, false);
   assert.match(stalledBudget.reasons.join('; '), /GY-300 stayed mergeable for 3\d(\.\d)? min, past the 5 min bound/);
   const attention = loopAttention({ liveness: loopLiveness(stalledState, stalled.now(), 20_000, master.hostId), budget: stalledBudget });
@@ -807,4 +839,88 @@ test('routine decisions rest on what the loop verified and are supervised to the
   interrupted.actions[key].state = 'started';
   interrupted.approvals[key] = approvalWatchSchema.parse({ work: 'GY-700', action: 'rework', decision: uuid('standing'), requestedAt: verdictAt });
   assert.deepEqual(reconcilePendingActions(interrupted, [reviewed], at).map(action => action.state), ['done']);
+});
+
+test('a requested round is requested once, a request the item moved past is taken back, a refused action is not the loop acting, and a loop with no operator-agent identity escalates instead of failing', async t => {
+  const host = await approverHost({ workers: [profile('claude-a')] });
+  t.after(host.cleanup);
+  const master = host.master;
+
+  // A base conflict returns the head to a worker; the round's worker dies before pushing. The
+  // conflict still matches that head — the engine's `rework` never clears it — but the round is
+  // already requested: the loop settles the dead worker's fence and dispatches, and asks for nothing.
+  const simulation = plane([{ key: 'GY-720', rounds: ['conflict', 'die', 'pass'] }], { host });
+  const state = emptyDaemonState(master), effects = simulation.effects(), item = simulation.work[0];
+  const performed: DaemonAction[] = [];
+  for (let pass = 0; pass < 40 && item.stage !== 'done'; pass++) performed.push(...(await cycle(state, master, simulation, effects)).actions);
+  assert.equal(item.stage, 'done', steps(performed).join(', '));
+  assert.equal(item.epoch, 3, 'the conflicted head, the round whose worker died, and the round that delivered');
+  assert.deepEqual(simulation.decisions.get(item.id)!.map(decision => [decision.action, decision.state]), [['rework', 'applied']], 'one conflict, one rework decision');
+  assert.equal(simulation.sessions.log.filter(entry => entry.startsWith('launch:')).length, 1, 'and one approver session spent on it');
+  assert.ok(performed.some(action => action.kind === 'settle' && action.state === 'done'), 'the dead round was recovered by settling its fence, not by a second decision');
+
+  // A verdict stands and its rework is with an approver that has not judged it when an operator
+  // requests the round by hand. The item has moved past the loop's request, so the loop — its
+  // requester — takes it back rather than leaving it to be adopted for some later round.
+  const moved = plane([{ key: 'GY-721', rounds: ['changes', 'pass'] }], { host, judgements: ['hang'] });
+  const movedState = emptyDaemonState(master), movedEffects = moved.effects(), overtaken = moved.work[0];
+  while (!(moved.decisions.get(overtaken.id) ?? []).length) await cycle(movedState, master, moved, movedEffects);
+  const asked = moved.decisions.get(overtaken.id)![0];
+  assert.equal(asked.state, 'requested');
+  Object.assign(overtaken, { reworkRequested: true }); moved.recompute(overtaken);
+  const after = await cycle(movedState, master, moved, movedEffects);
+  assert.equal(asked.state, 'withdrawn', steps(after.actions).join(', '));
+  assert.match(asked.outcome!, /GY-721 moved past the rework this decision asked for before any approver judged it/);
+  assert.ok(after.actions.some(action => action.kind === 'decision' && action.state === 'done' && new RegExp(`Withdrew rework decision ${asked.id}`).test(action.detail)));
+  assert.deepEqual(Object.keys(movedState.approvals), [], 'its watch is retired');
+  assert.ok(!moved.sessions.sessions.has(approverSessionName(overtaken, asked.id)), 'and its approver tab closed');
+
+  // A request the item still calls for, which the loop merely cannot attest this cycle, is not
+  // one it moved past: it stays requested, and is adopted once the worker is verified stopped.
+  let verified = true;
+  const withheld = plane([{ key: 'GY-722', rounds: ['changes', 'pass'] }], { host, judgements: ['hang', 'approve'] });
+  const withheldState = emptyDaemonState(master), waiting = withheld.work[0];
+  const withheldEffects = withheld.effects({ settleContainment: undefined, containment: items => Object.fromEntries(items.filter(entry => entry.containmentQuarantine).map(entry => [entry.id,
+    { key: entry.key, id: entry.id, epoch: entry.containmentQuarantine!.epoch, owner: entry.containmentQuarantine!.owner, at: entry.containmentQuarantine!.at, host: 'machine-a', workspacePath: null, scope: null,
+      settleable: verified, refusals: verified ? [] : ['Process 4242 is still present'], attestation: '', verification: null } as ContainmentAssessment])) });
+  while (!(withheld.decisions.get(waiting.id) ?? []).length) await cycle(withheldState, master, withheld, withheldEffects);
+  const standing = withheld.decisions.get(waiting.id)![0];
+  const lapsedAt = withheld.iso(withheld.now() - 2 * containmentGraceMs);
+  waiting.containmentQuarantine = { owner: 'claude-a-principal', epoch: waiting.epoch, at: lapsedAt, settlementHash: 'f'.repeat(64), leaseExpiresAt: lapsedAt, launchExpiresAt: lapsedAt, scope: { unit: 'graphyard-watch-1.scope', pid: 4242 } };
+  verified = false;
+  await cycle(withheldState, master, withheld, withheldEffects);
+  assert.equal(standing.state, 'requested', 'a withheld decision is not withdrawn');
+  verified = true;
+  for (let pass = 0; pass < 6 && !waiting.reworkRequested; pass++) await cycle(withheldState, master, withheld, withheldEffects);
+  assert.deepEqual(withheld.decisions.get(waiting.id)!.map(decision => [decision.id, decision.state]), [[standing.id, 'applied']], 'the same request is adopted and applied; no second one is made');
+
+  // Only an action that succeeded restarts a subject's wait. A request refused on every retry
+  // reaches the twenty-minute bound like any other silence.
+  const silent = emptyDaemonState(master), start = Date.parse('2031-03-01T09:00:00Z');
+  const subject = [{ key: 'decision:GY-730', kind: 'decision' as const, work: 'GY-730', detail: 'GY-730 needs a rework decision' }];
+  const acted = (outcome: DaemonAction['state']): DaemonAction[] => [{ kind: 'decision', work: 'GY-730', principal: null, state: outcome, detail: 'Requesting the rework decision', attempts: 1, epoch: 1, cycle: 1, at: new Date(start).toISOString() }];
+  trackSilence(silent, subject, [], start);
+  assert.equal(trackSilence(silent, subject, acted('failed'), start + 15 * minute).longestIdleMs, 15 * minute, 'a refusal is not the loop acting');
+  const breached = trackSilence(silent, subject, acted('failed'), start + 30 * minute);
+  assert.equal(breached.breached, true);
+  assert.equal(breached.longest!.key, 'decision:GY-730');
+  assert.equal(trackSilence(silent, subject, acted('done'), start + 31 * minute).longestIdleMs, 0, 'a request that lands is');
+
+  // No operator-agent identity: the wired loop has no decision effects at all, so a routine
+  // decision is the escalation naming the two commands — not a request that fails on every retry —
+  // and provisioning the identity brings the effects back on the next reload, with no restart.
+  let live: MasterConfig = { ...master, operatorAgent: undefined } as MasterConfig;
+  const bare = daemonEffects(host.root, () => live, { snapshot: async () => ({ work: [], now: simulation.iso() }), mutate: async () => { throw new Error('not used'); }, executor: { principal: 'coordinator', instance: 'unattended-cycle' }, run: simulation.sessions.run });
+  assert.deepEqual([bare.decide, bare.approver, bare.withdraw, bare.decisions], [undefined, undefined, undefined, undefined]);
+  const degraded = plane([{ key: 'GY-740', rounds: ['changes', 'pass'] }], { host });
+  const degradedState = emptyDaemonState(live), degradedEffects = degraded.effects({ decide: bare.decide, approver: bare.approver, withdraw: bare.withdraw, decisions: bare.decisions });
+  const raised: DaemonAction[] = [];
+  while (!standingVerdict(degraded.work[0])) await cycle(degradedState, live, degraded, degradedEffects);
+  for (let pass = 0; pass < 3; pass++) raised.push(...(await cycle(degradedState, live, degraded, degradedEffects)).actions);
+  assert.deepEqual(raised.filter(action => action.kind === 'decision'), [], 'nothing is requested, so nothing fails');
+  const escalations = raised.filter(action => action.kind === 'escalation');
+  assert.equal(escalations.length, 1, 'raised once');
+  assert.match(escalations[0].detail, /GY-740 needs a rework decision: .*graphyard master decide GY-740 rework REASON, then graphyard master approver GY-740 DECISION/);
+  live = master;
+  assert.deepEqual([bare.decide, bare.approver, bare.withdraw, bare.decisions].map(effect => typeof effect), ['function', 'function', 'function', 'function']);
 });
