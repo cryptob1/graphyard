@@ -13,6 +13,7 @@ import { regressionRefusals } from './regression-guard.js';
 import { ciFamilyAllows, ciProofFamilies, ciRunBindingSchema, ciRunRefusal, isCiProducer, refuseCiProducer, staleCiAttemptRefusal, type CiRunObservation } from './model/ci-proofs.js';
 import { liveScopeWidening } from './model/scope.js';
 import { reconcileAutoDispatch, type DispatchTransition } from './model/dispatch.js';
+import { beginAttempt, endAttempt, endLapsedAttempt, recordIntervention, recordRework, recordSubmission } from './pipeline-speed.js';
 
 const epoch = z.number().int().positive();
 const sha = z.string().regex(/^[a-f0-9]{40}$/);
@@ -332,7 +333,14 @@ export class Engine {
         work.formalReviewResetRequired = true; work.formalReviewBaseline = undefined;
         // A request the widened scope fully covers is answered; a partial one stays open for the master.
         if (work.scopeRequest && work.scopeRequest.paths.every(path => data.plannedFiles.some((scope: string) => pathScopeContains(scope, path)))) work.scopeRequest = null;
-        if (!widening) work.lease = null;
+        // A revision other than a live-scope widening is a hand-off for an item already under way:
+        // its timeline counts it, and the lapsed lease it discards (a live one was refused above)
+        // ends that attempt at its deadline. A widening keeps the attempt, so it counts neither.
+        if (!widening) {
+          if (work.lease) endLapsedAttempt(work, work.lease, now);
+          recordIntervention(work, 'requirements');
+          work.lease = null;
+        }
         work.observation = null; work.mergeAuthorization = null; work.reviewRequest = null;
         // A submitted implementation must be explicitly reconsidered for changed intent.
         if (work.submission) work.reworkRequested = true;
@@ -388,6 +396,7 @@ export class Engine {
         if (work.lease) await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, 'graphyard', 'lease.expired',
           JSON.stringify({ details: { owner: work.lease.owner, epoch: work.lease.epoch, expiresAt: work.lease.expiresAt, submission: work.submission, cause: 'stopped-by-attestation',
             attestation: { kind: 'stopped-worker', source: 'rework', epoch: work.epoch, actor: actor.id, at: now.toISOString(), reason: data.reason }, at: now.toISOString() } })]);
+        recordRework(work, now);
         work.lease = null;
         // Reopening implementation is the authorized recovery for send-back.
         // A plan rejection remains owned by its originating lead and can only
@@ -425,6 +434,7 @@ export class Engine {
           if (explained) await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, 'graphyard', 'lease.expired',
             JSON.stringify({ details: { owner: work.lease.owner, epoch: work.lease.epoch, expiresAt: work.lease.expiresAt, submission: work.submission, ...explained, at: now.toISOString() } })]);
           else raiseEscalation(work, { trigger: 'lease-loss', reason: leaseLossReason(work.lease), at: now.toISOString(), actor: 'graphyard' });
+          endLapsedAttempt(work, work.lease, now);
         }
         work.epoch++;
         // A fresh attempt asks afresh: the previous attempt's scope request belongs to a lease that no longer exists.
@@ -432,6 +442,7 @@ export class Engine {
         work.implementers = [...new Set([...implementerIdentities(work), actor.id])];
         work.lastAssignment = { owner: actor.id, epoch: work.epoch, claimedAt: now.toISOString(), ...(actor.displayName ? { displayName: actor.displayName } : {}), ...(actor.runtime ? { runtime: actor.runtime } : {}) };
         work.lease = { owner: actor.id, epoch: work.epoch, expiresAt: new Date(now.getTime() + this.leaseSeconds * 1000).toISOString() };
+        beginAttempt(work, work.lease, now);
       }
       // The lease a worker submitted under ended at that submission. A supervisor that keeps
       // renewing it is told so, rather than left to read the loss as a superseded epoch.
@@ -468,8 +479,9 @@ export class Engine {
         demand(!refusals.length, `Automatic containment settlement refused: ${refusals.join('; ')}. ${containmentAttestation(work.key)}`);
         work.containmentQuarantine = null;
       }
-      if (command === 'release') work.lease = null;
-      if (command === 'blocked') work.blocker = data.reason;
+      if (command === 'release') { endAttempt(work, data.epoch, 'released', now); work.lease = null; }
+      // A blocked report is a hand-off to the master or operator; the item's timeline counts it.
+      if (command === 'blocked') { work.blocker = data.reason; if (data.reason) recordIntervention(work, 'blocked'); }
       if (command === 'scope') {
         if (!data.paths.length) {
           demand(work.scopeRequest, 'No scope request is open for this attempt');
@@ -498,6 +510,7 @@ export class Engine {
         }
         work.submission = { epoch: data.epoch, pr: data.pr };
         work.reworkRequested = false;
+        recordSubmission(work, data.epoch, now);
         // Binding the candidate ends the implementation lease in the same transaction: submitted
         // work continues through the gates without one, and a lease left to lapse afterwards
         // would otherwise read as an abandoned assignment. The workspace and `lastAssignment`
@@ -969,6 +982,7 @@ export class Engine {
           const explained = leaseLapseCause(work, lost, attestations);
           if (explained) ledger.push({ kind: 'lease.expired', details: { owner: lost.owner, epoch: lost.epoch, expiresAt: lost.expiresAt, submission: work.submission, ...explained } });
           else raiseEscalation(work, { trigger: 'lease-loss', reason: leaseLossReason(lost), at: now.toISOString(), actor: 'graphyard' });
+          endLapsedAttempt(work, lost, now);
         }
         // A standing lease-loss for an epoch whose candidate was already bound predates that
         // rule, and one the control plane raised for an epoch whose blocked report or stopped-worker
