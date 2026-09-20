@@ -3,7 +3,7 @@
 
 For anyone defining an E2E proof: what lives where, and what a report must match.
 
-The registry holds a scenario's purpose, setup, actions, expected results and target environment; Git holds the executable Playwright, Cypress or custom test, linked by runner and file path; the work item pins the scenario version at creation; the evidence ledger records commit, base, result, executed and skipped counts, producer and environment; and screenshots, videos, traces and large logs stay in CI or object storage, linked by evidence URL.
+The registry holds a scenario's purpose, setup, actions, expected results and target environment; Git holds the executable Playwright, Cypress or custom test, linked by runner and path; the work item pins the scenario version at creation; the evidence ledger records commit, base, result, executed and skipped counts, producer and environment; and screenshots, videos, traces and large logs stay in CI or object storage, linked by evidence URL.
 
 ## Define, version and link a case
 

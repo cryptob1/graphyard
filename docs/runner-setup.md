@@ -17,10 +17,10 @@ What each preparation command does, and does not, establish:
 
 | Identity | Holds | Must not |
 | --- | --- | --- |
-| **Runner** (`worker` registration) | Dispatch authority: polls, acknowledges, heartbeats | Execute anything, read the attempt boundary, or hold an evidence-producer proof scope — the CLI refuses to start if its credential carries one |
+| **Runner** (`worker` registration) | Dispatch authority: polls, acknowledges, heartbeats | Execute anything, read the attempt boundary, or hold a proof scope — the CLI refuses to start if its credential carries one |
 | **Host attestor** (own OS identity, `reader` credential) | The signing key, the approved bundle, every attempt boundary; runs both containers | Acknowledge, heartbeat, upload or publish |
 | **Collector** (`producer` registration scoped to the proof) | Verification and publication | Execute, or reach the bundle or the key |
-| **Container user** (`runAsUser`, never root) | Writes the report through the boundary group | Anything else; it is refused when it is the account that asked for supervision |
+| **Container user** (`runAsUser`, never root) | Writes the report through the boundary group | Anything else; refused when it is the account that asked for supervision |
 
 ## Execute one dispatched attempt
 

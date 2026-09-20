@@ -1,7 +1,7 @@
 <!-- page: Build integrations | 8 | replay, reuse, cost. -->
 # Evidence replay, scoped reuse and execution analytics
 
-For an operator weighing whether to re-run a validation attempt.
+For an operator weighing a re-run: when an earlier pass may stand for a new head.
 
 ## Attempt order
 
@@ -46,9 +46,9 @@ After the head moves and a build producer has attested the new build, the operat
 }
 ```
 
-`POST /api/validation/reuse` (operator only, `Idempotency-Key` required) evaluates the newest sequenced attempt for that work item and proof and commits one decision, listing every reason when it is **refused**: a live request for the proof; a newest attempt that is not a settled, accepted pass, so nothing falls back to an older one; an executed pass older than the policy freshness, with expired artifacts, or whose collector has since held an assignment on the item; a differing requirement or proof policy revision, scenario pin, environment, bundle revision or base SHA; differing declared build inputs or, under `artifacts: identical`, artifact manifest; or a changed path that is relevant or unknown, or a head whose file comparison was never independently observed. That comparison is Graphyard's own — each candidate snapshots the changed-file list with blob identities from the GitHub observation that selected it — and nothing a client claims is consulted.
+`POST /api/validation/reuse` (operator only, `Idempotency-Key` required) evaluates the newest sequenced attempt for that item and proof and commits one decision, listing every reason when **refused**: a live request for the proof; a newest attempt that is not a settled, accepted pass, so nothing falls back to an older one; an executed pass older than the policy freshness, with expired artifacts, or whose collector has since held an assignment; a differing requirement or proof policy revision, scenario pin, environment, bundle revision or base SHA; differing declared build inputs or, under `artifacts: identical`, artifact manifest; or a changed path that is relevant or unknown, or a head whose file comparison was never independently observed. That comparison is Graphyard's own — each candidate snapshots the changed-file list with blob identities from the GitHub observation that selected it — and nothing a client claims is consulted.
 
-A **granted** decision selects a derived candidate for the new head, bound to the executed request and attempt, and records trusted evidence carrying the original collector as producer, the original counts and artifacts, an `expiresAt` at the freshness bound and a `reuse` block naming the decision, the original evidence, the executed head and the sequence; the acceptance gate treats it like any other current evidence. A live request supersedes the reused selection at once, and retrying the executed request is refused because its candidate no longer matches the head. Reconciliation revalidates the derived candidate's build, bundle, environment and registration authority on every configuration change, and an observation undermining the executed attempt's window re-anchors the binding, after which the reused entry stops authorizing.
+A **granted** decision selects a derived candidate for the new head, bound to the executed request and attempt, and records trusted evidence carrying the original collector as producer, the original counts and artifacts, an `expiresAt` at the freshness bound and a `reuse` block naming the decision, the original evidence, the executed head and the sequence; the acceptance gate treats it like any current evidence. A live request supersedes the reused selection at once, and retrying the executed request is refused because its candidate no longer matches the head. Reconciliation revalidates the derived candidate's build, bundle, environment and registration authority on every configuration change, and an observation undermining the executed attempt's window re-anchors the binding, after which the reused entry stops authorizing.
 
 ## Replay
 

@@ -3,9 +3,13 @@
 
 For an integration author: how provider events reach Graphyard.
 
+## Webhooks
+
+A signed webhook only wakes durable jobs: every fact is read back through the App, and an unsigned or unknown payload is ignored.
+
 ## Review provider changes and re-review
 
-`POST /api/work/:id/reviewpolicy` requires `admin` or an operator agent holding `policy:review-provider` and accepts `{ "provider": "github"|"codex"|"agent", "expectedPolicyRevision": 1, "reason": "…" }`. It changes only the source of an already-required review, increments the policy revision, preserves criteria and CI requirements, invalidates prior acceptance by version, and cannot mutate lifecycle state. `provider: "agent"` also requires `reviewerProfiles`: an ordered, nonempty list of `{ "name", "runtime", "reviewerApp", "mention"?, "timeoutSeconds"? }` ([examples](../../examples/reviewer-profiles.json)) with names and reviewer Apps unique within the policy and each `reviewerApp` already registered with the same runtime; every other provider rejects the field. The CLI form is `reviewpolicy GY-N agent POLICY_REVISION REASON --profiles FILE`. `POST /api/work/:id/rereview` queues a fresh provider request and, for an agent policy, restarts failover at the first profile: an `admin` sends `{}`, a worker `{ "epoch": 1 }` while owning the active lease, and the caller never supplies a verdict, reviewer identity or comment ID.
+`POST /api/work/:id/reviewpolicy` requires `admin` or an operator agent holding `policy:review-provider` and accepts `{ "provider": "github"|"codex"|"agent", "expectedPolicyRevision": 1, "reason": "…" }`. It changes only the source of an already-required review, increments the policy revision, preserves criteria and CI requirements, invalidates prior acceptance, and cannot mutate lifecycle state. `provider: "agent"` also requires `reviewerProfiles`: an ordered, nonempty list of `{ "name", "runtime", "reviewerApp", "mention"?, "timeoutSeconds"? }` ([examples](../../examples/reviewer-profiles.json)) with names and reviewer Apps unique within the policy and each `reviewerApp` already registered with the same runtime; every other provider rejects the field. The CLI form is `reviewpolicy GY-N agent POLICY_REVISION REASON --profiles FILE`. `POST /api/work/:id/rereview` queues a fresh provider request and, for an agent policy, restarts failover at the first profile: an `admin` sends `{}`, a worker `{ "epoch": 1 }` while owning the active lease, and the caller never supplies a verdict, reviewer identity or comment ID.
 
 ## Identity-bound agent review
 

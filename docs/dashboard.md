@@ -15,9 +15,9 @@ Every card, and the top of every item view, carries one sentence derived from th
 ## Home page and item view
 
 - Tiles count open items only — *Open*, *Being built*, *Need a worker*, *Stuck*; delivered work never appears in one. The stage strip splits open items by stage and adds up to *Open*; a lapsed claim sits under *Needs a worker* whatever the stored stage says, and *Show times* adds the oldest item and the p50/p95 per stage.
-- Lists show *Stuck* first, then *In progress* and *Needs a worker*, oldest first, *Not started* collapsed; *Board view* is the same items in stage columns, and *Shipped this week* covers the last seven days.
+- Lists show *Stuck* first, then *In progress* and *Needs a worker*, oldest first, *Not started* collapsed; *Board view* is the same items in stage columns, *Shipped this week* the last seven days.
 - The item view opens with the status sentence, the owner, the pull request and the one thing blocking progress. **Steps** lists the gates in order; **What must be true** lists each acceptance criterion once with one marker per proof: ✓ passed, ○ pending, × failed or withdrawn.
-- **More details** holds the description, type, priority, policy and revision, worker and assignment, workspaces, coordination diagnosis, file overlaps, merge-queue position, review provider, raw gate reasons, proof details, bootstrap obligations, observed delivery, evidence with artifacts, and history; an admin session also gets an **Edit** menu for the review provider, a fresh provider review and requirement revisions.
+- **More details** holds the description, type, priority, policy and revision, worker and assignment, workspaces, coordination diagnosis, file overlaps, merge-queue position, review provider, raw gate reasons, proof details, bootstrap obligations, observed delivery, evidence with artifacts, and history; an admin session also gets an **Edit** menu for the review provider, a fresh review and requirement revisions.
 
 ## Candidate links and definitions
 
@@ -25,4 +25,4 @@ Work cards and the Ownership section show `PR #N` and the whole 40-character can
 
 ## Connection and keyboard behaviour
 
-The access token is verified before any work or status is displayed, and a rejected token returns to the sign-in form with an explicit error; polling failures then keep the last snapshot with a stale-data warning, retrying every five seconds. The snapshot is informational — the server authorizes every mutation — and the dashboard's 300-event display limit never truncates the ledger.
+The access token is verified before any work or status is displayed, and a rejected token returns to the sign-in form with an explicit error; polling failures keep the last snapshot with a stale-data warning, retrying every five seconds. The snapshot is informational — the server authorizes every mutation — and the dashboard's 300-event display limit never truncates the ledger.

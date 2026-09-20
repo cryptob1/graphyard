@@ -5,7 +5,7 @@ For a contributor: what makes a gate decision trustworthy.
 
 ## Boundary
 
-Graphyard owns coordination decisions. A gate is a deterministic evaluation, never a model's judgment.
+Graphyard owns coordination decisions; a gate is a deterministic evaluation, never a model's judgment.
 
 ![Graphyard control-plane components. Agent sessions in a runtime such as Herdr, the human dashboard, and a proof producer each call the HTTP API and CLI under their own principals. The API hands each mutation to the coordination engine, which runs one advisory-locked transaction that writes the work aggregate and an event to Postgres. A reconciliation worker ticks every two seconds, expires leases, leases integration jobs, exchanges pull request, check, review, and protection facts with GitHub, publishes the required check, and runs the guarded merge. GitHub webhooks wake jobs but are never trusted as workflow truth.](diagrams/control-plane-components.svg)
 

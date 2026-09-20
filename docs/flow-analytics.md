@@ -10,7 +10,7 @@ For an operator asking where delivery waits, and what the figures cannot answer.
 
 ## Lineage and bounds
 
-Ledger events are projected into `flow_facts`, a normalized, append-only, trigger-protected table. The projection is incremental, bounded and idempotent on exact identities: a replayed event inserts nothing, two replicas cannot duplicate a fact, a pending review is not a completed-review fact, and repeated CI outcomes from distinct runs stay distinct. It runs in the reconciliation loop and as a catch-up before each read, reporting being behind in `coverage.projection`, which the page shows as **stale**; a provider that deletes a pull request, check run or deployment record cannot erase a stored fact. Deployment observations and their contained merge identities are repository-wide, so slice, type and stage filters never narrow them, and production phases join through those containment records rather than assuming an artifact SHA equals a merge SHA. Graphyard's own [release records](delivery.md) are a separate lineage this report does not read yet, so a repository observed only through the release pipeline reports deployment metrics as unavailable.
+Ledger events are projected into `flow_facts`, a normalized, append-only, trigger-protected table. The projection is incremental, bounded and idempotent on exact identities: a replayed event inserts nothing, two replicas cannot duplicate a fact, a pending review is not a completed-review fact, and repeated CI outcomes stay distinct. It runs in the reconciliation loop and as a catch-up before each read, reporting being behind in `coverage.projection`, which the page shows as **stale**; a provider that deletes a pull request, check run or deployment record cannot erase a stored fact. Deployment observations and their contained merge identities are repository-wide, so slice, type and stage filters never narrow them, and production phases join through those containment records rather than assuming an artifact SHA equals a merge SHA. Graphyard's own [release records](delivery.md) are a separate lineage this report does not read yet, so a repository observed only through the release pipeline reports deployment metrics as unavailable.
 
 ## Windows and metrics
 
@@ -19,13 +19,13 @@ All timestamps are UTC. A window is `[from, to)` where `to` is the observation i
 - **Stage dwell:** Entering to leaving a stage, for transitions completed inside the window; an open stage counts as work in progress instead
 - **Work in progress and aging:** Items whose latest durable stage fact has no delivered fact; age is the observation instant minus stage entry
 - **Cumulative flow:** Created undelivered items per stage at each daily boundary, from stage facts plus carried-in state
-- **Throughput and lead time:** Delivered facts per bucket, written only when an authorized merge is independently observed, and delivered observation time minus work-created time as a daily trend with p50/p75/p90 bands
+- **Throughput and lead time:** Delivered facts per bucket, written only when an authorized merge is independently observed, and delivered time minus created time as a trend with p50/p75/p90 bands
 - **Queue versus active time:** Active is the union of lease intervals clipped to the window; queue is released, undelivered time with no active lease
-- **Merge-ready dwell:** Merge ready to the next refusing gate fact, the observed merge or the observation instant, clipped to the window; an interval ending before it is excluded, not measured whole
+- **Merge-ready dwell:** Merge ready to the next refusing gate fact, the observed merge or the observation instant, clipped to the window; an interval ending before it is excluded
 - **Phase durations:** Per candidate episode: pull request created, review start and complete, evidence complete, merge authorized, merged, production
-- **CI duration, failure, retry:** Per check name and commit, first pending to first terminal observation, plus terminal failures and repeat terminal transitions
-- **Evidence wait, expiry, staleness:** Review completion to the completing evidence record; evidence expired before the observation instant, or bound to a superseded commit
-- **Operations:** Blockers, gate refusal reasons, dependency critical path, unblocked work, review rounds and findings, rework rate, lease lifecycle, queue depth
+- **CI duration, failure, retry:** Per check name and commit, first pending to first terminal observation, plus terminal failures and repeat transitions
+- **Evidence wait, expiry, staleness:** Review completion to the completing evidence record; evidence expired before the observation instant, or on a superseded commit
+- **Operations:** Blockers, gate refusals, dependency critical path, unblocked work, review rounds and findings, rework rate, lease lifecycle, queue depth
 - **Deployment:** Frequency, latency from observed merge to deployment start, failure rate and rollbacks
 
 ## Bottlenecks, filters and states
@@ -34,7 +34,7 @@ Every undelivered item falls into exactly one category, decided by its latest du
 
 ## Privacy boundary and API
 
-Flow analytics describes observed work, queueing and capacity, never people: no principal ID, provider login or producer identity is stored in a flow fact or returned by the API, review facts record only whether an approval was independent of the author, and there is no per-person view, ranking or export.
+Flow analytics describes observed work, queueing and capacity, never people: no principal ID, provider login or producer identity is stored in a flow fact or returned by the API, review facts record only whether an approval was independent of the author, and there is no per-person view or ranking.
 
 - `GET /api/analytics/flow`: The full report for a window and filter
 - `GET /api/analytics/flow/drilldown`: Bounded underlying records for one metric
@@ -44,9 +44,4 @@ Flow analytics describes observed work, queueing and capacity, never people: no 
 
 ## Pipeline speed
 
-A *routine* item has at most one rework round and no hand-off to a master or operator between submit and merge. Its target is a submit→merge p50 of at most 30 minutes and p90 of at most 60, over at least ten deliveries, with a median of at most one rework round: every step in between belongs to the control plane or the loop, leaving the master only a genuine finding or a human-only decision. Never trade a gate, a proof, an identity rule or a lease rule for the number.
-
-- **Per item:** each `master status` row's `speed`, from the item's own [pipeline timeline](protocol/pipeline-speed.md).
-- **Overall:** the top-level `speed` — `submitToMerge` and `routine.submitToMerge` (nearest-rank p50/p90 and count), `reworkRounds` (median, p90, distribution), `interventions`, `execution` (execution versus wait and its share), `unmeasured` (deliveries predating the timeline, never estimated), `items` (measured deliveries in merge order), and `met`: `true` or `false` once ten routine deliveries are measured, `reason` naming the figure that misses, `null` with the count until then.
-- **Outside a status read:** `scripts/measure-pipeline-speed.mjs --split GY-55,GY-64 --record DIR` reads the snapshot with any read-capable credential and prints the same arithmetic, per `--split` item for the deliveries merged before and after it landed; `--since`/`--until` bound the window, `--json` prints the whole report, `--record` writes one timestamped file per run. The 3-hourly measurement runs it and `manual:speed-target-met` reads it.
-- **A missed target** is routed like any other finding: `items` names the slow deliveries, each row's `interventions` and `reworkRounds` say whether the time went to a hand-off or a rework round, and the bottleneck summary says which wait category held the rest.
+How long the hops between `complete` and the merge may take, what `master status` reports per item and overall, and how the measurement script records it are in the [master guide](master-agent.md#pipeline-speed).

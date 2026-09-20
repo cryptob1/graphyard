@@ -11,11 +11,7 @@ For a maintainer of `cryptob1/graphyard`: how it proves its own contracts.
 4. Protect `main` with `node scripts/protect-github.mjs --plan`, review, then apply.
 5. Open a Graphyard-linked pull request and confirm `Graphyard / merge` refuses before acceptance evidence exists, capturing the refusal with the inspection below.
 6. Dispatch the protected workflow from `main`, naming the contract the item requires: `gh workflow run acceptance.yml --ref main -f pr=PR_NUMBER -f work_id=WORK_UUID -f policy_revision=1 -f proof=integration:claim-safety`. The proof resolves against `scripts/contracts.mjs` in that protected checkout, and a checkout not registering it refuses the dispatch before any candidate code is fetched; each dispatch produces exactly one proof, and the reporter refuses a report whose case inventory does not match the proof it claims.
-7. Confirm current-head review, CI, trusted acceptance evidence, branch protection and the guarded merge all pass, rerun the inspection for `permitted` with no refusals, then push one new commit to verify old proof becomes stale.
-
-## Proofs in CI
-
-The same protected workflow runs on every push to a `graphyard/*` branch with an open pull request into the base branch, through `pull_request_target`, so GitHub takes the workflow file and harness checkout from the default branch while the candidate is only fetched into an isolated build context. A queue tip or [base refresh](protocol/merge-queue-binding.md#base-refresh) commits onto the pull-request branch, so the same `synchronize` trigger runs the plan on the exact tip that will land; a candidate already on its predicted base keeps its head and the run it already had.
+7. Confirm current-head review, CI, trusted acceptance evidence, protection and the guarded merge all pass, rerun the inspection for `permitted`, then push one commit to verify old proof becomes stale.
 
 ## Adding a trusted contract
 

@@ -16,9 +16,9 @@ An `operator-agent` is not the human operator and holds no `admin` authority; ea
 - `decision:resolve`: Request resolution of a standing escalation
 - `decision:attest`: Request attestation of a `manual:` proof on the exact candidate
 - `decision:merge`: Request merge approval for the exact candidate when automatic merging is off
-- `decision:rework`: Request rework, or containment recovery of a delivered item, attesting the previous worker stopped
+- `decision:rework`: Request rework, or containment recovery of a delivered item, attesting the worker stopped
 - `decision:grant`: Request a proof-authority grant to a producer principal
-- `decision:approve`: Approve another identity's decision; never its own, never on an item it held, never one resting on its own evidence
+- `decision:approve`: Approve another identity's decision; never its own, never on an item it held, never one resting on its evidence
 
 ## Master autonomy setup
 

@@ -8,7 +8,7 @@ For the human operator with three minutes: what to check, and what never changes
 - `/healthz`: 200, database connectivity, expected `version` and deployed `commit`.
 - `/api/status`: no persistent integration errors, `delegationLimits.attention`, or open `production.incidents`.
 - `graphyard master status`: `daemon.running` true, `unresolved` empty, every `escalations` entry owned, `disk` above its threshold.
-- Delivery graph: no stale observations or unexplained blockers; `graphyard db backup` restore-verified recently in isolation; Postgres size watched, nothing pruned.
+- Delivery graph: no stale observations or unexplained blockers; `graphyard db backup` restore-verified recently; Postgres size watched, nothing pruned.
 
 ## Incident decision tree
 
@@ -17,7 +17,7 @@ For the human operator with three minutes: what to check, and what never changes
 - **Accepted evidence was wrong** → `graphyard revoke GY-N revoke.json` (`admin` or granted `producer` only) cancels any uncommitted merge execution. [Detail](operations-reference.md#accepted-evidence-turns-out-to-be-wrong)
 - **Integration jobs fail** → App access, protection and registered branch, then `github-setup --update-permissions`. [Detail](github.md#preflight-and-holds)
 - **Smoke proof failed post-deploy** → it stays Done, delivered with failure; roll back or revert through a new item under the same gates. [Detail](deployment.md#after-the-merge)
-- **Main ahead of production, or a capacity variable flagged** → a deployment incident named within five minutes while `/healthz` stays green. Fix the deployment, never the ledger.
+- **Main ahead of production, or a capacity variable flagged** → a deployment incident named within five minutes while `/healthz` stays green; fix the deployment, never the ledger.
 - **Master loop down** → restart `graphyard master run` freely: the cursor reconciles on start and a second loop refuses while one is alive. [Detail](operations-reference.md#master-coordination-loop)
 - **Free space low** → lower `run.reclaimIdleHours`, or run `master run --once` ([worktree disk](operations-reference.md#worktree-disk)).
 

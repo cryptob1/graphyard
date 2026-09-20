@@ -1,7 +1,7 @@
 <!-- page: Understand or contribute | 3 | profiles and increments. -->
 # Turnkey E2E execution and verified delivery
 
-For a reader asking what comes next.
+For a reader asking what comes next: which completion profile a delivery may claim.
 
 ## Product promise and boundary
 

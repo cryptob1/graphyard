@@ -1,7 +1,7 @@
 <!-- page: Start here | 3 | GitHub to first PR. -->
 # Onboard a repository
 
-For the operator connecting a real repository.
+For the operator connecting a real repository: the seven steps, and who owns each.
 
 ## 1. Deploy one control plane
 
@@ -9,7 +9,7 @@ One server and one Postgres database serve all workers ([deployment](deployment.
 
 ## 2. Connect GitHub
 
-Run `graphyard github-setup https://YOUR-GRAPHYARD-HOST` from the managed repository, or [create the App by hand](github.md#create-and-install-the-app) for an organization account; an App registered before the merge queue must be [migrated](github.md#migrating-an-existing-app) to Contents: read and write. Copy its private values into the service and configure CI and review protection now, requiring `Graphyard / merge` as soon as it is published. Later permission changes and their acceptance are the master's, through the `master browser` flows driven by the profile `master init --browser-profile` names; approving a *Confirm access* prompt on GitHub Mobile is the only human step left. Confirm the exact CI check names and their App IDs — GitHub Actions uses `15368`.
+Run `graphyard github-setup https://YOUR-GRAPHYARD-HOST` from the managed repository, or [create the App by hand](github.md#create-and-install-the-app) for an organization account; an App registered before the merge queue must be [migrated](github.md#migrating-an-existing-app) to Contents: read and write. Copy its private values into the service and configure CI and review protection now, requiring `Graphyard / merge` as soon as it is published. Later permission changes and their acceptance are the master's, through the `master browser` flows driven by the profile `master init --browser-profile` names; approving a *Confirm access* prompt on GitHub Mobile is the only human-only step left. Confirm the exact CI check names and their App IDs — GitHub Actions uses `15368`.
 
 ## 3. Connect a worker and Herdr
 
@@ -32,7 +32,7 @@ node "$GRAPHYARD_CLI" master start codex     # or: master start claude
 
 ## 5. Register the reviewer identity
 
-Independent review needs a GitHub identity that is neither the pull-request author nor the control-plane App ([the reviewer App](github.md#the-reviewer-app)). Run `master reviewer setup`, open the printed local URL, confirm the App and install it on the managed repository only — that click and your provider logins are the only hand-run steps; its key and IDs are stored outside every worktree at mode 0600. To bind an App you already created, put its IDs in a secret-free file and send the PEM on stdin with `master reviewer bind FILE --key-stdin`. Add one reviewer launch profile — [Claude](../examples/master/claude-reviewer.json), [Cursor](../examples/master/cursor-reviewer.json) or [opencode](../examples/master/opencode-reviewer.json) — with `master reviewer add /path/to/reviewer-profile.json`; it holds no Graphyard credential. Then run `master protection` and `master protection --apply` to match branch protection to every open item's review policy.
+Independent review needs a GitHub identity that is neither the pull-request author nor the control-plane App ([the reviewer App](github.md#the-reviewer-app)). Run `master reviewer setup`, open the printed local URL, confirm the App and install it on the managed repository only — that click and your provider logins are the only hand-run steps; its key and IDs are stored outside every worktree at mode 0600. To bind an App you already created, put its IDs in a secret-free file and send the PEM on stdin with `master reviewer bind FILE --key-stdin`. Add one reviewer launch profile — [Claude](../examples/master/claude-reviewer.json), [Cursor](../examples/master/cursor-reviewer.json) or [opencode](../examples/master/opencode-reviewer.json) — with `master reviewer add PROFILE.json`; it holds no Graphyard credential. Then run `master protection` and `master protection --apply` to match branch protection to every open item's review policy.
 
 ## 6. Add workers
 
@@ -47,7 +47,7 @@ Every agent CLI account gets its own isolated config and login home — an *agen
 | OpenCode | `XDG_DATA_HOME` (data under `opencode/`) | `opencode/auth.json` | `XDG_DATA_HOME=… opencode auth login` |
 | Cursor | `CURSOR_CONFIG_DIR` | `cli-config.json` | `CURSOR_CONFIG_DIR=… cursor-agent login` |
 
-Store each worker principal's token in `~/.config/graphyard/workers/PRINCIPAL.token` and each producer's in `~/.config/graphyard/producers/PRINCIPAL.token`, mode 0600, beside the coordinator credential (`$GRAPHYARD_CONFIG_HOME` if you set one). Then:
+Store each worker principal's token in `~/.config/graphyard/workers/PRINCIPAL.token` and each producer's in `~/.config/graphyard/producers/PRINCIPAL.token`, mode 0600, beside the coordinator credential (`$GRAPHYARD_CONFIG_HOME` if set). Then:
 
 ```sh
 node "$GRAPHYARD_CLI" master environments                                # discover; report login and quota
@@ -56,7 +56,7 @@ CLAUDE_CONFIG_DIR=~/.coding_agents/claude-a claude                       # /logi
 node "$GRAPHYARD_CLI" master environments --apply                        # generate the profiles
 ```
 
-Without `--apply` nothing is written: it lists every environment with whether it is logged in, the quota it could read, and the login command for each one that is not. With `--apply` it records the environments in `.graphyard/master.json`, sets the one runtime setting an unattended Claude launch needs (`skipDangerousModePermissionPrompt`) and generates the profiles: one worker profile per worker token, verified as that principal with the `worker` role; one producer profile per producer token, verified for the `producer` role and never sharing a principal with a worker; one reviewer profile per logged-in environment, the first answering automatic reviews; and every profile's `accounts` listing the logged-in environments in failover order, its own runtime first and rotated so profiles start on different accounts. An existing profile keeps its order, gains accounts that logged in since, and a home it pinned with `CLAUDE_CONFIG_DIR` becomes its first account. Rerun after logging another account in; what the launcher checks per launch is in [agent environments](master-agent.md#agent-environments).
+Without `--apply` nothing is written: it lists every environment with whether it is logged in, the quota it could read, and the login command for each one that is not. With `--apply` it records the environments in `.graphyard/master.json`, sets the one runtime setting an unattended Claude launch needs (`skipDangerousModePermissionPrompt`) and generates the profiles: one worker profile per worker token, verified as that principal with the `worker` role; one producer profile per producer token, verified for the `producer` role and never sharing a principal with a worker; one reviewer profile per logged-in environment, the first answering automatic reviews; and every profile's `accounts` listing the logged-in environments in failover order, its own runtime first and rotated so profiles start on different accounts. An existing profile keeps its order, gains accounts logged in since, and a home it pinned with `CLAUDE_CONFIG_DIR` becomes its first account. Rerun after logging another account in; what the launcher checks is in [agent environments](master-agent.md#agent-environments).
 
 ### Profiles by hand
 

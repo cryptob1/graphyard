@@ -21,7 +21,7 @@ For a contributor: which file a change belongs in, and what the size budget enfo
 | `web/main.tsx` → `web/pages/` | The dashboard shell; one page component per view, the sidebar generated from `web/pages/index.tsx` |
 | `integrations/herdr/` | Native Herdr ledger pane and open action |
 | `tests/` | Real Postgres integration and HTTP tests; `tests/hotspots.test.ts` guards the layout below |
-| `docs/` | The guides, the [glossary](glossary.md) and the diagrams under `docs/diagrams/` (`node scripts/render-docs-diagrams.mjs`); `docs/protocol/` is one page per topic, and `docs/README.md` and `docs/protocol.md` are generated |
+| `docs/` | The guides, the [glossary](glossary.md) and the diagrams under `docs/diagrams/` (`node scripts/render-docs-diagrams.mjs`); `docs/protocol/` is one page per topic, and `docs/README.md` and `docs/protocol.md` are generated in full |
 
 ## Where a new feature goes
 
@@ -34,7 +34,7 @@ One place per kind of change, so concurrent pull requests stop colliding in the 
 | A schema, type or gate rule | The concern module under `src/model/` (`policy`, `work`, `evidence`, `review`, `escalation`, `delegation`, `delivery`, `bootstrap`, `gates`, `queue`); existing imports keep working through the barrel, which never grows |
 | A table | A `defineTable` in the concern's module under `src/store/tables/`; the migration, `ledgerTables`, export order and sequences derive from it, so a backup cannot miss a table and no table list is hand-edited |
 | A dashboard view | One page component under `web/pages/` and one entry in `views`, never a branch in `web/main.tsx` |
-| A protocol topic | One page under `docs/protocol/` with a `<!-- page: Agent protocol \| N \| summary -->` first line, then `npm run docs:check -- --write`; other guides declare their `docs/README.md` section the same way. Never edit a generated index by hand or put its path in `plannedFiles` |
+| A protocol topic | One page under `docs/protocol/` with a `<!-- page: Agent protocol \| N \| summary -->` first line, then `npm run docs:check -- --write`; other guides declare their `docs/README.md` section the same way, and both indexes are `GRAPHYARD_GENERATED_FILES`. Never edit one by hand or put its path in `plannedFiles` |
 | Text in the managed `AGENTS.md` blocks | The template in `src/repository-setup.ts` or `src/master.ts`, then re-render and commit both; a test fails while the committed blocks differ, and a regeneration from another CLI version is never committed |
 
 ## Validate a change

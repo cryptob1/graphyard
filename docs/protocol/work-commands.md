@@ -14,7 +14,7 @@ For an integration author: every mutation a principal may send, with its JSON bo
 - `claim`, `heartbeat`, `release`: `{}` returning the lease and epoch; `{"epoch":1}` for the other two
 - `blocked`: `{"epoch":1,"reason":"Waiting for API contract"}`; `null` clears
 - `workspace`: `{"epoch":1,"host":"build-machine-a","path":"/work/GY-1","branch":"graphyard/gy-1-1"}`
-- `scope`, `scope-request`: The master approves requested paths; a worker requests them while keeping its lease
+- `scope`, `scope-request`: The master approves requested paths; a worker requests them keeping its lease
 - `submit`: `{"epoch":1,"pr":123}`; the server observes the pull request first and refuses, naming the files, when it reverts, deletes or rewrites anything outside `plannedFiles`
 - `evidence`, `revoke`: See [evidence and proof authority](evidence.md)
 - `reviewpolicy`, `rereview`: See [review providers](github-webhook.md)

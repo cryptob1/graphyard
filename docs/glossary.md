@@ -61,7 +61,7 @@ The session supervisor that launches, shows and stops agent sessions, and the fi
 | `operator-agent` | The master's own identity, the separate approver identity, and other scoped operator agents | Only its configured intent and policy capabilities (`intent:create`, `intent:ready`, `intent:unblock`, `policy:requirements`, `policy:review-provider`, `policy:bootstrap`) and `decision:*` requests inside a server-enforced repository and work allowlist; the approver identity approves decisions it did not request, on items it never held, not resting on its own evidence | Approve its own request; hold a lease; submit evidence except through an approved `attest` decision; merge |
 | `coordinator` | Master | Read work and runtime health, dispatch, acquire, verify or cancel the bounded merge execution authority, record the deployment observation on delivered work, settle a quarantine whose supervisor it verified dead on the registered host | Claim, implement, produce evidence, revise requirements, bypass a gate |
 | `slice-lead` | Slice lead | Record rulings in its own slice, escalate | Implement, hold a lease, submit evidence, review its own slice, merge; every lifecycle mutation is refused and recorded ([delegation](delegation.md)) |
-| `worker` | Worker | Claim work, renew and release its own lease, register its workspace, report blockers, submit its candidate, record untrusted assertions | Receive `admin`, `coordinator` or `producer` tokens; satisfy an acceptance gate |
+| `worker` | Worker | Claim work, renew and release its lease, register its workspace, report blockers, submit its candidate, record untrusted assertions | Receive `admin`, `coordinator` or `producer` tokens; satisfy an acceptance gate |
 | `producer` | Proof producer | Submit evidence; only proof names a live grant authorizes are trusted | Hold an assignment on the item it proves; lead a slice |
 | `reader` | Dashboards | Inspect work, status and events | Mutate anything |
 
@@ -71,9 +71,9 @@ The master requests a two-party decision with `master decide GY-N ACTION REASON`
 
 | Decision | Made by | Approved by |
 | --- | --- | --- |
-| Create work, release backlog work, clear a blocker, add requirements, widen scope on request | Master | Applied directly: non-weakening intent, judged by reviewer and producers |
+| Create work, release backlog work, clear a blocker, add requirements, widen scope | Master | Applied directly: non-weakening intent, judged by reviewer and producers |
 | Rewrite, remove or narrow requirements | Master | Approver; narrowing still raises a `requirement-weakening` escalation |
-| Resolve an escalation; authorize rework or containment recovery, attesting the previous worker stopped | Master | Approver |
+| Resolve an escalation; authorize rework or containment recovery, attesting the worker stopped | Master | Approver |
 | Attest a `manual:` proof | Master | Approver that produced no evidence for that proof |
 | Grant proof authority to a producer | Master | Approver that is not the grantee |
 | Approve a merge when automatic merging is off | Master | Approver that produced no evidence on the item |

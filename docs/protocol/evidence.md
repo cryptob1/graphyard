@@ -22,7 +22,7 @@ Trust is decided against the live grant set inside each mutation transaction, ne
 
 ## CI-produced evidence
 
-`unit:*` and `integration:*` proofs whose contract is registered in `scripts/contracts.mjs` are also produced without a producer session, by one dedicated **CI producer** — a `producer` whose `runtime` is `github-actions`, granted `unit:*` and `integration:*` and nothing else ([the workflow](../first-pr.md#proofs-in-ci), [provisioning](../deployment.md#ci-producer)). Its records carry a `ciRun` binding — `{ "provider": "github-actions", "repository": "OWNER/REPO", "runId": "RUN", "runAttempt": 1, "jobId": 4242 }` — with `sha`, `baseSha` and `policyRevision` from the item's candidate record.
+`unit:*` and `integration:*` proofs whose contract is registered in `scripts/contracts.mjs` are also produced without a producer session, by one dedicated **CI producer** — a `producer` whose `runtime` is `github-actions`, granted `unit:*` and `integration:*` and nothing else ([the workflow](../github.md#proofs-in-ci), [provisioning](../deployment.md#ci-producer)). Its records carry a `ciRun` binding — `{ "provider": "github-actions", "repository": "OWNER/REPO", "runId": "RUN", "runAttempt": 1, "jobId": 4242 }` — with `sha`, `baseSha` and `policyRevision` from the item's candidate record.
 
 - Only the CI producer may submit a `ciRun` binding, and it must: any other principal sending one refuses with `403`, the CI producer sending none with `400`.
 - Only `unit:*` and `integration:*` proofs are accepted from it, and only within its live grant; `manual:*` and `e2e:*` refuse with `403` whatever it is granted.
@@ -35,7 +35,7 @@ Trust is decided against the live grant set inside each mutation transaction, ne
 
 ## The post-deployment smoke proof
 
-`e2e:deploy-smoke` is the one proof submitted after delivery, and only when the work policy sets `deploySmoke`. Its `sha` is the deployed commit the checks ran against — the one recorded by the `deployment` command — and its `baseSha` is the item's merge commit.
+`e2e:deploy-smoke` is the one proof submitted after delivery, and only when the work policy sets `deploySmoke`: its `sha` is the deployed commit the checks ran against, recorded by the `deployment` command, and its `baseSha` the item's merge commit.
 
 1. The [master loop](../master-agent.md#operate) records the deployment with `POST /api/work/UUID/deployment` once the running release serves the merge commit, exactly or through a descendant: coordinator or operator only, delivered work only, naming the item's own merge commit, once per delivery.
 2. The loop asks GitHub to run the trusted smoke workflow with the work UUID, the deployed commit, the merge commit and the policy revision — one request per deployed commit — holding no producer credential.

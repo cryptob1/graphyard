@@ -1,11 +1,11 @@
 <!-- page: Operate Graphyard | 2 | install and upgrade. -->
 # Install and upgrade
 
-For an operator installing or upgrading a control plane.
+For an operator installing or upgrading a control plane: what to set, and what an upgrade still needs.
 
 ## Fresh installation
 
-The seven-step runbook is [onboarding](onboarding.md): deploy the server with Postgres and an HTTPS origin ([deployment](deployment.md)), register and configure the control-plane App, verify, and add reviewer Apps and workers. Two settings are easy to miss. Set the four [capacity variables](deployment.md#delegation-capacity-variables) — `GRAPHYARD_MAX_SLICE_LEADS`, `GRAPHYARD_MAX_ENGINEERS_PER_LEAD`, `GRAPHYARD_MIN_REVIEWERS`, `GRAPHYARD_MAX_REVIEWERS` — from the principal set you deploy. And connect proofs in CI: `init --scan --apply` registers the [CI producer](deployment.md#ci-producer) and prints `ciProofs.next` — restrict the `graphyard-reporting` environment to the default branch, store that token as its `GRAPHYARD_CI_PRODUCER_TOKEN` secret, set `GRAPHYARD_URL` on it, and deploy the principals array including it. Later pushes to a candidate branch then run the item's registered `unit:*` and `integration:*` proofs ([proofs in CI](first-pr.md#proofs-in-ci)); manual proofs still need a producer session.
+The seven-step runbook is [onboarding](onboarding.md): deploy the server with Postgres and an HTTPS origin ([deployment](deployment.md)), register and configure the control-plane App, verify, and add reviewer Apps and workers. Two settings are easy to miss. Set the four [capacity variables](deployment.md#delegation-capacity-variables) — `GRAPHYARD_MAX_SLICE_LEADS`, `GRAPHYARD_MAX_ENGINEERS_PER_LEAD`, `GRAPHYARD_MIN_REVIEWERS`, `GRAPHYARD_MAX_REVIEWERS` — from the principal set you deploy. And connect proofs in CI: `init --scan --apply` registers the [CI producer](deployment.md#ci-producer) and prints `ciProofs.next` — restrict the `graphyard-reporting` environment to the default branch, store that token as its `GRAPHYARD_CI_PRODUCER_TOKEN` secret, set `GRAPHYARD_URL` on it, and deploy the principals array including it. Later pushes to a candidate branch then run the item's registered `unit:*` and `integration:*` proofs ([proofs in CI](github.md#proofs-in-ci)); manual proofs still need a producer session.
 
 Verify with `graphyard doctor` (`appPermissions.missing` must be empty) and `graphyard status`, then [require the check](github.md#require-the-check) on the base branch and submit a real pull request: configured is not proof of enforcement.
 

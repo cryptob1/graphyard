@@ -1,7 +1,7 @@
 <!-- page: Build integrations | 6 | releases and observed delivery. -->
 # Releases and observed production delivery
 
-For an integrator recording what production runs.
+For an integrator recording what production runs: which identity may write each record.
 
 ## Records and who may change them
 

@@ -5,7 +5,7 @@ For an operator or master in an incident: the procedure behind each [recipe](ope
 
 ## Perpetual master loop
 
-The terminal condition, the cycle and the non-stopping conditions are in the [master-agent guide](master-agent.md#operate). Blockers have two records: a per-item blocker the lease holder writes with `graphyard blocked GY-N EPOCH "reason"`, and a deployment blocker as a follow-up item naming the delivered item, its merge commit and the external cause. `master verify-deployment GY-N` names a cause and fix on every refusal: *unobserved*, *stale*, *does not serve the merge yet*, *local checkout*, *already records deployment*.
+The terminal condition, the cycle and the non-stopping conditions are in the [master-agent guide](master-agent.md#operate). Blockers have two records: a per-item blocker the lease holder writes with `graphyard blocked GY-N EPOCH "reason"`, and a deployment blocker as a follow-up item naming the delivered item, its merge commit and the cause. `master verify-deployment GY-N` names a cause and fix on every refusal: *unobserved*, *stale*, *does not serve the merge yet*, *local checkout*, *already recorded*.
 
 ## Master coordination loop
 
@@ -13,9 +13,9 @@ The terminal condition, the cycle and the non-stopping conditions are in the [ma
 
 - `--interval SECONDS`: Seconds between cycles, 5–900; default 20
 - `--dispatch-interval SECONDS`: Seconds between reads of review and producer requests, 5–30; default 10
-- `--reviewer-profile NAME`: The reviewer profile automatic dispatch launches when more than one is configured
-- `--producer-timeout MINUTES`: How long a producer session may run before it is recorded as expired, 5–1440; default 120
-- `--proof-workflow FILE`: Workflow the loop asks GitHub to run when a candidate is missing automatable proof
+- `--reviewer-profile NAME`: The reviewer profile automatic dispatch launches when several are configured
+- `--producer-timeout MINUTES`: How long a producer session may run before it expires, 5–1440; default 120
+- `--proof-workflow FILE`: Workflow the loop runs when a candidate is missing automatable proof
 - `--deployment-url URL`: JSON endpoint reporting the commit the running release serves
 - `--deployment-sha-field PATH`: Dotted field holding that commit; default `commit`
 - `--smoke-workflow FILE`: Workflow run against the live deployment for a `deploySmoke` delivery
@@ -25,7 +25,7 @@ The terminal condition, the cycle and the non-stopping conditions are in the [ma
 Every attempt checks the repository out again, so the loop bounds both halves of the cost itself.
 
 - **One install, shared.** An assignment worktree lives under the repository, so the runtime's upward lookup resolves its install: nothing is created, and the worker's prompt names it. A worktree outside it gets a mirror of that install, a directory of links still covered by the `node_modules/` ignore rule. The install must answer for that exact head: a differing `package-lock.json` installs its own, and a worktree that already has one is reported and left alone.
-- **Finished assignments give theirs back.** The loop removes the dependency directories of finished assignments' worktrees every ten minutes — every cycle while free space is below the threshold — and nothing else: checkouts keep their files and Git metadata, branches every commit, and registered workspace records are never written, so a reclaimed worktree is one `npm install` from working. `daemon.reclaim` reports what went, how much room it returned and what it kept.
+- **Finished assignments give theirs back.** The loop removes the dependency directories of finished assignments' worktrees every ten minutes — every cycle while free space is below the threshold — and nothing else: checkouts keep their files and Git metadata, branches every commit, and workspace records are never written, so a reclaimed worktree is one `npm install` from working. `daemon.reclaim` reports what went, how much it returned and what it kept.
 
 | Disposition | What the loop does |
 | --- | --- |
@@ -35,11 +35,11 @@ Every attempt checks the repository out again, so the loop bounds both halves of
 | `live` | Kept: the registered epoch still holds the lease |
 | `recent` | Kept: changed inside the idle bound |
 
-`master status` reports free space under `disk` with the worktrees a reclaim would empty, and below the threshold raises an attention item owned by the master while writes still succeed; a write that fails for want of room, whether the kernel reports it or only a command's output does (`pwd: write error: Disk quota exceeded`), is named as exactly that. With no loop running, `master run --once` reclaims and cycles once.
+`master status` reports free space under `disk` with the worktrees a reclaim would empty, and below the threshold raises an attention item owned by the master while writes still succeed; a write that fails for want of room, whether the kernel reports it or only a command's output does (`pwd: write error: Disk quota exceeded`), is named as that. With no loop running, `master run --once` reclaims and cycles once.
 
 | Setting in `.graphyard/master.json` | Meaning |
 | --- | --- |
-| `run.reclaimIdleHours` | How long a worktree may sit untouched before its dependency directories count as disposable, 0.25–720; default 3 |
+| `run.reclaimIdleHours` | How long a worktree may sit untouched before its dependency directories are disposable, 0.25–720; default 3 |
 | `run.diskThresholdGb` | Free space below which `master status` raises disk pressure, 0.1–10000; default 10 |
 
 ## Recovery procedures
@@ -50,11 +50,11 @@ The lease expires 120 seconds after the last heartbeat; a new worker claims at a
 
 ### Submitted implementation needs rework
 
-An active owner may keep heartbeating and update its branch; a push invalidates old evidence. To reassign, stop the previous worker, then run `graphyard rework GY-N --previous-worker-stopped "Reproduce review failure"`: old commands are fenced, the build gate closes, reconciliation wakes, and a lease still held ends as `lease.expired` with cause `stopped-by-attestation`, so no `lease-loss` is raised and a standing one settles next tick. The next worker claims at a higher epoch, registers the existing PR branch in a fresh workspace and resubmits the same PR. Check revocation is asynchronous: suspend merging until the refusing check is visible, and merged work needs a follow-up item.
+An active owner may keep heartbeating and update its branch; a push invalidates old evidence. To reassign, stop the previous worker, then run `graphyard rework GY-N --previous-worker-stopped "Reproduce review failure"`: old commands are fenced, the build gate closes, and a lease still held ends as `lease.expired` with cause `stopped-by-attestation`, so no `lease-loss` is raised and a standing one settles next tick. The next worker claims at a higher epoch, registers the existing PR branch in a fresh workspace and resubmits the same PR. Check revocation is asynchronous: suspend merging until the refusing check is visible, and merged work needs a follow-up item.
 
 ### Supervisor died leaving a containment quarantine
 
-A foreground worker's supervisor settles its quarantine on verified shutdown. If the supervisor dies first the fence stays up: the item is undispatchable, its exclusive resources stay reserved and its requirements stay immutable, since expired authority is not evidence that a process stopped.
+A foreground worker's supervisor settles its quarantine on verified shutdown. If the supervisor dies first the fence stays up: the item is undispatchable, its exclusive resources stay reserved and its requirements immutable, since expired authority is not evidence that a process stopped.
 
 Run `graphyard master settle-containment GY-N "reason"` on the machine that ran the worker; it verifies there what [automatic containment settlement](protocol/leases.md#automatic-containment-settlement) requires, and the control plane re-checks all of it. The same assessment is in `master status` under [`containment`](master-agent.md#containment-and-recovery). Anything it cannot prove — unreachable host, failed query, surviving process, disagreeing clocks — refuses and prints what it found; then, or where this coordinator cannot inspect the host, confirm the stop yourself and attest with `rework GY-N --previous-worker-stopped "reason"` undelivered, `recover-containment GY-N --previous-worker-stopped "reason"` delivered.
 
@@ -68,7 +68,7 @@ An observed merge whose gates were not satisfied is a permanent violation: with 
 
 ## Accepted evidence turns out to be wrong
 
-Revoking leaves criteria, policy revision, review and the submitted attempt untouched, withdrawing only the runs that no longer stand.
+Revoking leaves criteria, policy revision, review and the submitted attempt untouched, withdrawing only runs that no longer stand.
 
 ```json
 { "proof": "integration:claim-safety", "sha": "HEAD_SHA", "baseSha": "BASE_SHA", "policyRevision": 1,
@@ -86,12 +86,12 @@ Add or rotate principals in `GRAPHYARD_PRINCIPALS`, then redeploy, each with a u
 - **Proof authority:** A live [grant](#proof-authority-grants), never a `GRAPHYARD_PRINCIPALS` setting after bootstrap
 - **The master's `coordinator`:** Beyond reads, only the bounded merge execution, settling a verified-dead quarantine and recording a deployment observation
 - **Operator agents:** In the [operator-agent registry](operator-automation.md), never an `admin` entry
-- **Where secrets sit:** The dashboard keeps its sign-in token in browser session storage; producer credentials belong to trusted reporters, never to pull-request code; logs omit tokens, though blocker text and evidence URLs can carry sensitive data
+- **Where secrets sit:** The dashboard keeps its sign-in token in browser session storage; producer credentials belong to trusted reporters, never pull-request code; logs omit tokens, though blocker text and evidence URLs can carry sensitive data
 - **Out of Git:** Environment files, `.graphyard/` and private-key extensions, excluded from the Docker build context too; CI runs a pinned, checksum-verified Gitleaks over all fetched history, a scan and not a guarantee — a committed credential is revoked first, then cleaned from history and caches
 
 ## Proof authority grants
 
-Proof authority is Graphyard state, not deployment configuration: an `admin` grants a `producer` exact proof names or bounded patterns, effective on the next request without a restart.
+Proof authority is Graphyard state, not deployment configuration: an `admin` grants a `producer` exact proof names or bounded patterns, effective on the next request.
 
 ```sh
 graphyard grants                                   # live authority per principal and its source
@@ -102,7 +102,7 @@ graphyard grants history ci                        # append-only record of every
 
 | Pattern | Authorizes | Does not authorize |
 | --- | --- | --- |
-| `integration:claim-safety` | exactly that name | `integration:claim-safety-extra` |
+| `integration:claim-safety` | that exact name | `integration:claim-safety-extra` |
 | `integration:*` | every `integration:` proof | any other kind |
 | `manual:gy-43/*` | `manual:gy-43/docs-ui` and deeper | `manual:gy-43`, `manual:gy-430/docs` |
 

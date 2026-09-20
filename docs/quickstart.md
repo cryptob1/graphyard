@@ -1,7 +1,7 @@
 <!-- page: Start here | 4 | run Graphyard locally. -->
 # Local quickstart
 
-For someone evaluating Graphyard on one machine.
+For someone evaluating Graphyard on one machine: what to run before connecting a repository.
 
 ## Start Graphyard
 

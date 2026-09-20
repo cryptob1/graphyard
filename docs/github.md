@@ -45,7 +45,7 @@ Independent review uses a **second, separate App**: the control-plane App observ
 
 ### Quota failover
 
-Provider exhaustion is a capacity fact, not an approval. A `verdict:usage-limit` reply, or no verdict within the profile's `timeoutSeconds`, records a `review.failover` event — profile, runtime, reason, candidate, policy revision, request comment ID, next profile — releases the request and dispatches to the next untried profile, after which the superseded one can no longer approve. Selection is derived from that history, scoped to the exact head, base and policy revision, so a rebase, new base or policy revision restarts at the first profile. With every profile exhausted the review gate stays closed with `Every configured reviewer profile is exhausted for this candidate`: add capacity, wait for quota or select another provider. `master status` reports the active profile, the failover entries, a `reviewFailover` count and attention when no reviewer capacity is left; `graphyard rereview GY-N` clears them and restarts at the first profile, while the ledger keeps every superseded entry and the work document the last hundred.
+Provider exhaustion is a capacity fact, not an approval. A `verdict:usage-limit` reply, or no verdict within the profile's `timeoutSeconds`, records a `review.failover` event — profile, runtime, reason, candidate, policy revision, comment ID, next profile — releases the request and dispatches to the next untried profile, after which the superseded one can no longer approve. Selection is derived from that history, scoped to the exact head, base and policy revision, so a rebase, new base or policy revision restarts at the first profile. With every profile exhausted the review gate stays closed with `Every configured reviewer profile is exhausted for this candidate`: add capacity, wait for quota or select another provider. `master status` reports the active profile, the failover entries, a `reviewFailover` count and attention when no reviewer capacity is left; `graphyard rereview GY-N` clears them and restarts at the first profile, and the ledger keeps every superseded entry.
 
 ## Require the check
 
@@ -70,7 +70,11 @@ Graphyard serializes the final hop through one queue, so that no merge invalidat
 
 ## Trusted producers, smoke proof and review providers
 
-A green job proves that a named check reported success, not that every behavioural criterion holds. A dedicated producer reads the report, verifies the code under test and sends evidence with its own credential, granted only the proof names it may produce ([proofs in CI](first-pr.md#proofs-in-ci), [CI-produced evidence](protocol/evidence.md#ci-produced-evidence)); the post-deployment smoke proof and the `github`, `codex` and `agent` review providers are in [evidence](protocol/evidence.md#the-post-deployment-smoke-proof) and [review providers](protocol/github-webhook.md).
+A green job proves that a named check reported success, not that every behavioural criterion holds. A dedicated producer reads the report, verifies the code under test and sends evidence with its own credential, granted only the proof names it may produce ([proofs in CI](#proofs-in-ci), [CI-produced evidence](protocol/evidence.md#ci-produced-evidence)); the post-deployment smoke proof and the `github`, `codex` and `agent` review providers are in [evidence](protocol/evidence.md#the-post-deployment-smoke-proof) and [review providers](protocol/github-webhook.md).
+
+### Proofs in CI
+
+Every `unit:*` and `integration:*` proof with a contract on `main` also runs as trusted CI, through one protected workflow on every push to a `graphyard/*` branch with an open pull request into the base branch. The trigger is `pull_request_target`, so GitHub takes the workflow file and harness checkout from the default branch while the candidate is only fetched into an isolated build context; a queue tip or [base refresh](protocol/merge-queue-binding.md#base-refresh) is committed onto the pull-request branch, so the same `synchronize` trigger runs it on the tip that will land. The plan job enumerates the item's proofs, the exercise jobs run one per proof in parallel holding no secret, and a publish job submits each report through the [CI producer](deployment.md#ci-producer), re-verified against the GitHub job ([CI-produced evidence](protocol/evidence.md#ci-produced-evidence)). Dependencies, the database image and the candidate layers are cached, so a warm proof job finishes in minutes. Manual proofs stay producer sessions started at submit, and the deploy smoke proof after delivery.
 
 ## Enforcement boundary
 
@@ -82,4 +86,4 @@ No transaction spans both systems: the ledger changes immediately while check pu
 - **403 or held job:** `appPermissions` in `/api/status`; `master browser installation-accept`, or `github-setup --update-permissions`
 - **Protection gate refuses:** Check name, App binding, `strict` left enabled, admin enforcement, force and delete settings
 - **Acceptance refuses despite green CI:** Proof names, producer grant, candidate SHA, base SHA, policy revision, skipped count
-- **PR changed while observed, or no update after a webhook:** Ordinary concurrency retry; signature secret and job errors, polling as the fallback
+- **PR changed while observed, or no webhook update:** Ordinary concurrency retry; signature secret and job errors, polling as the fallback

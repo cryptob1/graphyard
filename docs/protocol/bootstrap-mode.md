@@ -1,7 +1,7 @@
 <!-- page: Agent protocol | 7 | deferring a proof. -->
 # Bootstrap mode for a change that introduces its own proof harness
 
-For an operator shipping a change with its own proof harness.
+For an operator shipping a change with its own proof harness: when a proof may be deferred.
 
 A criterion whose proof does not exist yet cannot be proven by the change that creates it: the protected harness refuses to run against a base lacking the contract. The human operator (`admin`), or an operator agent holding `policy:bootstrap`, may declare that one criterion in **bootstrap mode**, deferring the proof for this candidate only, never dropping it.
 

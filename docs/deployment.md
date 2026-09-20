@@ -1,13 +1,13 @@
 <!-- page: Operate Graphyard | 1 | images, hosts, variables, backups. -->
 # Deployment
 
-For whoever runs the control plane.
+For whoever runs the control plane: which variables, host and backup path to choose.
 
 ## Versioned images
 
 - Every tagged release `vX.Y.Z` publishes `ghcr.io/cryptob1/graphyard:X.Y.Z`, the tag equal to the `package.json` version, and the build stamps that version and the Git revision into the image as `GRAPHYARD_VERSION`, `GRAPHYARD_BUILD_REVISION` and the matching OCI labels.
 - Publication happens only after `scripts/verify-image-release.mjs` confirms the release contract against an isolated database — `/healthz` reports `{ok, version, revision, schema}`, `db status` shows the expected schema generation, and `db backup`/`db restore` carry a live ledger into a fresh database that serves it unchanged — as it does for every candidate image.
-- A running deployment names its release at `/healthz` without a credential and under `release` in `/api/status`. Pin a digest where immutability matters.
+- A running deployment names its release at `/healthz` without a credential and under `release` in `/api/status`; pin a digest where immutability matters.
 
 ## Variables
 
@@ -20,21 +20,21 @@ For whoever runs the control plane.
 | `GITHUB_APP_ID`, `GITHUB_INSTALLATION_ID` | The dedicated App and its installation on the managed repository |
 | `GITHUB_PRIVATE_KEY` | Full PEM in a secret variable, or mount `GITHUB_PRIVATE_KEY_FILE` |
 | `GITHUB_WEBHOOK_SECRET` | Random shared secret for GitHub signature verification |
-| `GITHUB_CI_APP_IDS` | Comma-separated IDs of trusted CI Apps; verify what your check runs report |
+| `GITHUB_CI_APP_IDS` | Comma-separated IDs of trusted CI Apps; verify what your checks report |
 | `GRAPHYARD_REVIEWER_APPS` | Optional JSON array registering reviewer App identities for [agent review](github.md#trusted-producers-smoke-proof-and-review-providers) |
-| `GRAPHYARD_GENERATED_FILES` | Comma-separated exact paths the regression guard treats as generated; unset, no file is exempt ([generated files](coordination.md#generated-files-never-conflict)) |
-| `GRAPHYARD_PRODUCTION_ENVIRONMENT` | Deployment-provider environment (default `production`) whose successful deployments end the [flow analytics](flow-analytics.md) production phase |
+| `GRAPHYARD_GENERATED_FILES` | Comma-separated paths the regression guard treats as generated; unset, none is exempt ([generated files](coordination.md#generated-files-never-conflict)) |
+| `GRAPHYARD_PRODUCTION_ENVIRONMENT` | Provider environment (default `production`) whose successful deployments end the [flow analytics](flow-analytics.md) production phase |
 | `GRAPHYARD_MAX_SLICE_LEADS` | [Capacity variable](#delegation-capacity-variables); default 3 |
 | `GRAPHYARD_MAX_ENGINEERS_PER_LEAD` | Capacity variable; default 2 |
 | `GRAPHYARD_MIN_REVIEWERS` | Capacity variable; default 1 |
 | `GRAPHYARD_MAX_REVIEWERS` | Capacity variable; default 2 |
-| `GRAPHYARD_BUILD_SHA` | The 40-character commit the image was built from; Railway supplies `RAILWAY_GIT_COMMIT_SHA` |
-| `GRAPHYARD_ARTIFACT_BACKEND` | `postgres` (default) or `s3`, with `GRAPHYARD_ARTIFACT_S3_ENDPOINT`, `_BUCKET`, `_REGION`, `_ACCESS_KEY_ID`, `_SECRET_ACCESS_KEY`, optional `_PREFIX`, and `GRAPHYARD_ARTIFACT_CAPACITY_BYTES` ([artifact backends](recovery.md#artifact-backends-capacity-and-migration)) |
+| `GRAPHYARD_BUILD_SHA` | The commit the image was built from; Railway supplies `RAILWAY_GIT_COMMIT_SHA` |
+| `GRAPHYARD_ARTIFACT_BACKEND` | `postgres` (default) or `s3`, with `GRAPHYARD_ARTIFACT_S3_ENDPOINT`, `_BUCKET`, `_REGION`, `_ACCESS_KEY_ID`, `_SECRET_ACCESS_KEY`, optional `_PREFIX`, and `GRAPHYARD_ARTIFACT_CAPACITY_BYTES` ([backends](recovery.md#artifact-backends-capacity-and-migration)) |
 | `RAILWAY_API_TOKEN` | Optional account or team token reading the linked service's deployment list (`RAILWAY_TOKEN`, a project token, also works), so failed and missing deployments become incidents. Railway injects `RAILWAY_SERVICE_ID`, `RAILWAY_ENVIRONMENT_ID` and `RAILWAY_PROJECT_ID`; `GRAPHYARD_RAILWAY_SERVICE_ID`, `GRAPHYARD_RAILWAY_ENVIRONMENT_ID`, `GRAPHYARD_RAILWAY_PROJECT_ID` watch another service and `GRAPHYARD_RAILWAY_API` another endpoint |
 
 ### CI producer
 
-`{ "id": "ci-proofs", "role": "producer", "runtime": "github-actions", "proofs": ["unit:*", "integration:*"], "token": "…" }` is the principal [proofs in CI](first-pr.md#proofs-in-ci) publish through. The `github-actions` runtime makes it the CI producer: only from it is a `ciRun` binding accepted, `manual:*` and `e2e:*` refuse whatever it is granted, and every record is verified against the GitHub job. Give it no `deploymentProviders`, no `slice` and no other capability; it counts toward `GRAPHYARD_MAX_REVIEWERS`. Its token is also the `GRAPHYARD_CI_PRODUCER_TOKEN` secret of the `graphyard-reporting` environment, set after that environment is restricted to the default branch; both reporters read `GRAPHYARD_URL`, and rotating it means redeploying the principal and setting the secret in one change.
+`{ "id": "ci-proofs", "role": "producer", "runtime": "github-actions", "proofs": ["unit:*", "integration:*"], "token": "…" }` is the principal [proofs in CI](github.md#proofs-in-ci) publish through. The `github-actions` runtime makes it the CI producer: only from it is a `ciRun` binding accepted, `manual:*` and `e2e:*` refuse whatever it is granted, and every record is verified against the GitHub job. Give it no `deploymentProviders`, no `slice` and no other capability; it counts toward `GRAPHYARD_MAX_REVIEWERS`. Its token is also the `GRAPHYARD_CI_PRODUCER_TOKEN` secret of the `graphyard-reporting` environment, set after that environment is restricted to the default branch; both reporters read `GRAPHYARD_URL`, and rotating it means redeploying the principal and setting the secret in one change.
 
 ### Changing the roster safely
 
@@ -48,8 +48,8 @@ Every `producer` counts toward `GRAPHYARD_MAX_REVIEWERS` and every `slice-lead` 
 
 | Host | Bring it up | What is specific to it |
 | --- | --- | --- |
-| **Railway** | Project with Postgres, an application service from this repository on `main` building the root `Dockerfile`; `railway config plan`, then `railway config apply` | `.railway/railway.ts` defines the application, Postgres, volume, health check and restart policy, declaring every hand-set variable with `preserve()`, which retains an existing value but never creates one. Generate a domain, verify `/healthz`, point the App webhook at `https://YOUR-DOMAIN/api/github/webhook` |
-| **Docker Compose** | `cp .env.example .env`, replace every example secret, `docker compose --profile full up -d` (add `--build` to build this checkout) | `GRAPHYARD_IMAGE` pins a release or digest; `graphyard-data` holds durable state and `graphyard-backups` the logical backups. Both published ports bind loopback, so put a TLS reverse proxy in front of 4310 and never expose Postgres; set a unique database password, the four capacity variables, and `GRAPHYARD_BUILD_SHA=$(git rev-parse HEAD)` when you build |
+| **Railway** | Project with Postgres, an application service from this repository on `main` building the root `Dockerfile`; `railway config plan`, then `railway config apply` | `.railway/railway.ts` defines the application, Postgres, volume, health check and restart policy, declaring every hand-set variable with `preserve()`, which retains an existing value but never creates one. Generate a domain, verify `/healthz`, point the App webhook at `/api/github/webhook` |
+| **Docker Compose** | `cp .env.example .env`, replace every example secret, `docker compose --profile full up -d` (`--build` builds this checkout) | `GRAPHYARD_IMAGE` pins a release or digest; `graphyard-data` holds durable state and `graphyard-backups` the logical backups. Both published ports bind loopback, so put a TLS reverse proxy in front of 4310 and never expose Postgres; set a unique database password, the four capacity variables, and `GRAPHYARD_BUILD_SHA=$(git rev-parse HEAD)` when you build |
 | **Kubernetes** | `deploy/helm/graphyard`: `helm upgrade … --set image.tag=X.Y.Z`, then `helm test` | A stateless Deployment over one Postgres ledger, a Service, a TLS Ingress and a Secret, no worktree volume. Details below |
 
 The chart's `pre-upgrade` hook Job (also `pre-install` with an external database) runs `graphyard db migrate` from the image being rolled out and refuses when a newer release already migrated the database, so a rollback stops at the hook instead of replacing healthy pods. Point `secrets.existingSecret` at a Secret carrying `DATABASE_URL`, `GRAPHYARD_PRINCIPALS`, `GITHUB_PRIVATE_KEY` (a file, possibly empty) and `GITHUB_WEBHOOK_SECRET`; the chart refuses to render with nowhere to hold credentials, and `secrets.create=true` renders one for evaluation only. `backup.enabled=true` adds a CronJob running `graphyard db backup` onto a claim, verifying each file and pruning after `backup.retainDays`, with `backup.persistence.existingClaim` outliving the release; `postgresql.enabled=true` adds an evaluation StatefulSet, production pointing `DATABASE_URL` at managed Postgres. `helm test` checks `/healthz` and the running version, keeping the pod for `--logs`; the Deployment rolls with `maxUnavailable: 0`, pods run non-root, read-only and without capabilities, and `deploy/helm/exercise.sh IMAGE` exercises install, test, a leased assignment across an upgrade, a CronJob backup, uninstall, reinstall and restore on a kind cluster through `.github/workflows/helm.yml`.

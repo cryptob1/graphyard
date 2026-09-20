@@ -7,9 +7,9 @@ For an integrator driving a runner: how an attempt is authorized.
 | --- | --- | --- |
 | Human operator | `admin` | Define environments, approve bundles, register principals, select candidates, request, cancel and recover validation |
 | Worker | `worker` | Implementation ownership only; it defines no validation authority and publishes no results |
-| Runner | `worker` with a runner registration | Poll dispatch, acknowledge and heartbeat its assigned attempt until collection takes over |
+| Runner | `worker` with a runner registration | Poll dispatch, acknowledge and heartbeat its attempt until collection takes over |
 | Build producer | `producer` with a builder registration | Attest an independently verified source and build inputs → artifact mapping |
-| Collector | `producer` with a collector registration and matching `proofs` | Verify execution, inventory, approved oracle, target identity, artifacts and settlement, then publish the bound result |
+| Collector | `producer` with a collector registration and matching `proofs` | Verify execution, inventory, oracle, target identity, artifacts and settlement, then publish the bound result |
 
 ## Inspect and invoke
 
@@ -38,7 +38,7 @@ Only the pinned collector may call `result`, publishing `{requestId, attemptId, 
 - `target`: `{instance, artifacts, measurement, coversEntireRun, attribution}`; `measurement` is `provider`, `host-attestation` or `unknown`, and a self-report is never trusted measurement
 - `bundleDigest`, `runnerImageDigest`: What actually executed
 - `artifacts`, `artifactState`: Verified artifacts covering the required names; `verified`, `missing`, `upload-failed` or `expired`
-- `executionSettled`: The collector's **own** observation that execution and its operations have finished
+- `executionSettled`: The collector's **own** observation that execution has finished
 
 ## Recovery
 

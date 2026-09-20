@@ -1,7 +1,7 @@
 <!-- page: Maintainer and historical records | 2 | what the 2026 audit changed. -->
 # Implementation audit — September 13, 2026
 
-For a maintainer asking why a correctness rule exists.
+For a maintainer asking why a correctness rule exists: what this audit changed.
 
 > **Historical snapshot.** Use the [documentation index](../README.md) for current setup and operations.
 

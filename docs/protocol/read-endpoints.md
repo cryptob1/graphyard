@@ -13,9 +13,9 @@ For a client reading Graphyard, and what bounds each read.
 - `GET /api/attribution/manifest/RELEASE_ID/REVISION`: A release manifest with its `hash`, `digestHash` and membership
 - `GET /api/attribution/work/UUID`: One item's attribution ledger, newest last, at most 200 rows
 - `GET /api/deployments`: Latest recorded deployment-provider observations
-- `GET /api/delegation`: Slices, leads, engineers, workers, reviewers and bottlenecks, filtered by operator-agent scope
+- `GET /api/delegation`: Slices, leads, engineers, workers, reviewers and bottlenecks, by operator-agent scope
 - `GET /api/proof-grants[/ID/history]`: Live proof authority per principal, and one principal's append-only grant history
-- `GET /api/delivery[/observations?environment=ID]`: Every environment's delivery state and the release registry, or one environment's paged observations
+- `GET /api/delivery[/observations?environment=ID]`: Every environment's delivery state and the release registry, or one environment's observations
 - `GET /api/validation[/capacity|/definitions|/candidate/UUID|/attempt/REQUEST_ID]`: Requests, runner capacity, definition history, one candidate, or the attempt authority a host attestor reads
 - `GET /api/shipping-pulse`: The repository [delivery pulse](../shipping-pulse.md); not offered to operator agents
 
