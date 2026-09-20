@@ -51,6 +51,55 @@ An executed E2E pass may stand for a later head of the same item only through a 
 
 CI check success proves that named check reported success. It does not prove test inventory. Acceptance evidence separately requires counts and named behavioral proofs. A trusted producer is responsible for deriving these counts from actual reports and binding them to the actual tested code. Graphyard cannot determine whether an assertion adequately expresses product intent.
 
+## Inverted coordination: typed actions and stateless executors
+
+Every read already evaluates the gates. The control plane therefore names what each item needs
+next, as one typed action, instead of leaving a coordinator session to read a status report and
+decide. `nextAction` (`src/model/next-action.ts`) is pure over the item, its graph and the clock,
+so two readers always agree without talking to each other.
+
+Nine kinds exist: `dispatch`, `request-review`, `request-rework`, `approve-scope`, `resync`,
+`reclaim`, `merge`, `verify-deployment` and `escalate`. Each carries the inputs whoever runs it
+needs — the head, base and policy revision for a review; the proof group and proof names for a
+producer; the paths and requester for a scope answer. Every refusal any gate can raise maps to
+exactly one kind through `refusalAction`, whose last rule matches everything, so a refusal nobody
+wrote a rule for becomes an escalation rather than silence. Two refusals name no action for their
+own item because they belong to another: an unfinished dependency is that dependency's dispatch,
+and a queue position is the predecessor's merge.
+
+Each outstanding action is a durable row on the work aggregate (`src/model/actions.ts`), written
+inside the same advisory-locked transaction as every other decision. A row's id is a hash of what
+it binds — kind, item, situation — never of when it was made, so a re-derivation after a restart
+recognises the row it already has. An executor claims a row under its own identity for a bounded
+lease; only that claim may settle it. An executor that dies renews nothing, its claim expires, the
+next executor takes the row as a further attempt, and the dead one's late settlement is refused —
+so an interrupted action is retried without being executed twice. Every transition records the
+requester, the executor, the result and the reason on the row.
+
+Executors are stateless. One holds a credential, a host name, and a handler per action kind it can
+run; it claims one row, runs it, reports the result, and keeps nothing. Any number of them on any
+number of hosts drive the same queue and never coordinate with each other. An executor claims only
+the kinds it has a handler for, which is what keeps language models out of the loop itself: the
+`escalate` handler can be absent and a full ready-to-delivered cycle still runs. `llmRole` on each
+action names the judgment *inside* what it starts — implement, review, produce evidence, approve a
+two-party decision, resolve an escalation — and is null for the five mechanical kinds.
+
+Workers pull. A free session asks `POST /api/assignments/claim` for its next assignment and claims
+it under its own identity through the ordinary claim rules; the control plane offers the items it
+already names as needing a dispatch, in dispatch order. Nothing tracks which session is alive.
+
+Two more records make the fleet legible without a relaying coordinator. A typed agent request
+(`src/model/agent-requests.ts`) is what a session records instead of blocking on a prose question:
+one of `scope-request`, `decision`, `blocker`, `note` or `escalation`, each naming its decider — a
+deterministic rule, an independent approver agent, a tracked follow-up item, or one of the three
+human-only decisions — and the attempt ends in the same transaction, so the item is free rather
+than held at a prompt. A session handle (`src/model/sessions.ts`) records where a launched session
+runs: runtime, host, Herdr workspace, tab and pane, and its transcript, with the one command or
+link that attaches to it.
+
+None of this authorizes progression. An action is a fact about what is missing; the gates still
+decide from evidence and verdicts alone.
+
 ## Reconciliation
 
 The server runs a non-overlapping tick every two seconds. It expires leases and reevaluates affected state, then processes up to four available GitHub jobs concurrently. A successful job becomes eligible again after 20 seconds; a failed job after 45 seconds. These timings are MVP defaults, not latency guarantees under a large backlog. Add replicas or adjust batching after measuring real load.

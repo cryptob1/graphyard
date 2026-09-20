@@ -279,6 +279,82 @@ Judgment calls stay with the visible master session, and a two-party decision wi
 agent: reading a worker's report, deciding whether a review finding needs rework, choosing how to
 route a novel failure. The loop keeps the mechanical steps running underneath them.
 
+## Typed next actions and stateless executors
+
+A master session is not the planner any more, and does not have to be running for work to move.
+The control plane computes what each item needs next — one typed action with the inputs whoever
+runs it needs — and keeps a durable, leased row for it; stateless executors claim those rows and
+run them. The full model is in
+[architecture](architecture.md#inverted-coordination-typed-actions-and-stateless-executors).
+
+Nine kinds exist: `dispatch`, `request-review`, `request-rework`, `approve-scope`, `resync`,
+`reclaim`, `merge`, `verify-deployment` and `escalate`. `master status` reports them under
+`actions`: what each open item needs, which executor holds which row and since when, and every
+row that has waited past the five-minute idle bound. An item with nothing named needs nothing
+from anybody — it is delivered, or it is waiting on another item's action (an unfinished
+dependency, a predecessor's place in the merge queue).
+
+An executor holds a coordinator credential, a host name, and one handler per kind it can run:
+
+```sh
+POST /api/actions/claim   {"host": "runner-3", "kinds": ["dispatch", "merge", "resync"]}
+POST /api/actions/ID/settle {"result": "done", "reason": "reviewer session launched on aaaaaaaaaaaa"}
+GET  /api/actions          # the queue, the computed actions, open requests and running sessions
+```
+
+It keeps nothing between calls and knows nothing about other executors: two of them on two hosts
+claiming at the same instant are serialized by the coordination lock, and the loser takes the next
+row. An executor that dies mid-action renews nothing, its claim expires, another takes the row as
+a further attempt, and the dead one's late settlement is refused — so nothing is run twice. A
+handler that throws returns its row to the queue with the reason and a widening backoff.
+
+An executor claims only the kinds it has a handler for. Configure no `escalate` handler and the
+fleet still delivers: every language model is invoked inside what an action starts — implementing,
+reviewing, producing evidence, approving a two-party decision, resolving an escalation — and never
+in the loop that starts it. That is what the master session is now for: the escalations, the
+findings and the two-party decisions, outside the critical path.
+
+### Workers pull their own work
+
+A free worker session asks for its next assignment rather than waiting to be dispatched into:
+
+```sh
+POST /api/assignments/claim   {"host": "vishrog"}
+```
+
+The control plane offers the items it already names as needing a dispatch, in the dispatch order
+it already uses, and the worker claims under its own identity through every ordinary claim rule.
+An item another worker just took is skipped rather than returned as an error. Polling every
+thirty seconds keeps ready-to-claim inside two minutes with no central runtime-health tracking:
+nothing has to know which session is alive for work to reach it.
+
+### Typed requests instead of prose questions
+
+A session that needs something records a typed request and exits, giving up its lease in the same
+transaction, so the item is free instead of held at a prompt:
+
+```sh
+POST /api/work/GY-N/request
+{"type": "scope-request", "epoch": 3, "paths": ["docs/"], "reason": "the guide describes this contract"}
+```
+
+Each type names exactly one decider: a `scope-request` is the additive planned-files widening rule
+the control plane applies; a `decision` is an independent approver agent; a `blocker` is a tracked
+follow-up item; a `note` is recorded and decided by nobody; an `escalation` is an approver agent —
+unless the request names one of the three human-only decisions (goals and priorities, spending
+money or opening third-party accounts, issuing credentials to people), which routes to the
+operator whatever its type. `master status` lists every open request with its decider, the command
+that answers it, and how long it has waited. A session that ends waiting on input instead is
+recorded as failed with that reason, naming the request it should have made.
+
+### Session handles
+
+Every launched session records a durable handle on the item: runtime, host, Herdr workspace, tab
+and pane, its transcript, and what it is working on. `master status` reports them under
+`sessions`, and the dashboard drawer shows the same per item, each with the one command or link
+that attaches to it — `herdr pane attach PANE` while it runs, its transcript once it has finished.
+Watching a specific agent never needs a master to relay a pane identifier.
+
 ## Automatic dispatch at submit
 
 Review and proof collection start the moment a candidate is ready for them, not when someone

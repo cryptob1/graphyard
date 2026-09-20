@@ -6,6 +6,8 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { z } from 'zod';
 import type { Work } from './model.js';
 import type { DispatchRequest } from './model/dispatch.js';
+import type { ActionRow } from './model/actions.js';
+import { nextActionKinds, type NextActionKind } from './model/next-action.js';
 import { assertOutsideWorktrees, inspectProducerCredentials, listHerdrAgents, readEnvironmentLog, type ConfigReload, type EnvironmentLog, type HerdrAgent, type MasterConfig, type ProducerProfile, type ReviewerProfile } from './master.js';
 import { launchReview, reconcileReviews, type ReviewRecord } from './reviewer.js';
 import { independentProducerProfiles, launchProducer, reconcileProducers, sessionRetry, type ProducerRecord } from './producer.js';
@@ -305,4 +307,111 @@ export function dispatchSummary(cursor: DispatchCursor, now: number, intervalMs:
       environments: Object.values(cursor.accounts.environments).map((health: any) => ({ environment: health.name, kind: health.kind, loggedIn: health.loggedIn, quota: health.quota, healthy: health.healthy, reason: health.reason, usage: health.usage, login: health.login, checkedAt: health.checkedAt })),
       skipped: cursor.accounts.skipped.slice(-20),
     } : { environments: [], skipped: [] } };
+}
+
+/**
+ * The stateless executor.
+ *
+ * Automatic dispatch above launches sessions for the requests one candidate raises. This runs the
+ * whole inverted loop: the control plane computes a typed action per item and keeps a durable,
+ * leased row for it (model/next-action.ts, model/actions.ts); an executor claims one row, runs it,
+ * and reports the result. It holds nothing between claims — no cursor, no snapshot, no idea that
+ * other executors exist — so any number of them on any number of hosts drive the same queue
+ * without coordinating, and one that dies loses only its claim.
+ *
+ * An executor claims only the kinds it has a handler for. That is what makes AGENTS.md's rule
+ * mechanical rather than aspirational: configure no `escalate` handler and the loop still runs a
+ * full ready-to-delivered cycle, with every language model invoked inside the sessions the
+ * mechanical actions start rather than anywhere in the loop itself.
+ */
+export interface ExecutorIdentity { id: string; host: string }
+export type ExecutorHandler = (action: ActionRow, identity: ExecutorIdentity) => Promise<string> | string;
+export interface ExecutorEffects {
+  /** Ask the control plane for one row this executor can run; null when the queue has nothing for it. */
+  claim: (request: { host: string; executor: string; kinds: NextActionKind[]; leaseSeconds?: number }) => Promise<{ action: ActionRow | null; open?: number }>;
+  settle: (action: ActionRow, result: 'done' | 'failed', reason: string) => Promise<unknown>;
+  /** One handler per action kind this executor can run. A kind with no handler is never claimed. */
+  handlers: Partial<Record<NextActionKind, ExecutorHandler>>;
+}
+export interface ExecutorStep { at: string; executor: string; host: string; action: ActionRow | null; result: 'done' | 'failed' | 'idle'; kind: NextActionKind | null; work: string | null; reason: string }
+
+/**
+ * How often a free worker session asks the control plane for its next assignment.
+ *
+ * The pull model's latency is the wait for the next poll plus the time the pull itself takes, so
+ * this interval is the bound on ready-to-claim. Thirty seconds keeps p90 inside the two-minute
+ * target with room to spare, and costs one cheap request per idle worker per half minute — no
+ * central runtime-health tracking, no dispatcher deciding which session is free, and no session
+ * sitting idle because the thing that would have dispatched it is not running.
+ */
+export const workerPullIntervalMs = 30_000;
+
+/** The kinds an executor can claim: exactly the ones it has a handler for, in a stable order. */
+export const executorKinds = (handlers: ExecutorEffects['handlers']): NextActionKind[] => nextActionKinds.filter(kind => !!handlers[kind]);
+
+/**
+ * One claim-run-settle step. A handler that throws settles the row as failed with the reason, so
+ * the next executor sees what this one could not do rather than an action that silently stalls;
+ * the row backs off and is offered again.
+ */
+export async function runExecutorTick(identity: ExecutorIdentity, effects: ExecutorEffects, now: () => number = Date.now): Promise<ExecutorStep> {
+  const kinds = executorKinds(effects.handlers);
+  const step = (action: ActionRow | null, result: ExecutorStep['result'], reason: string): ExecutorStep =>
+    ({ at: new Date(now()).toISOString(), executor: identity.id, host: identity.host, action, result, kind: action?.kind ?? null, work: action?.key ?? null, reason });
+  if (!kinds.length) return step(null, 'idle', 'this executor has no handler for any action kind');
+  const claimed = await effects.claim({ host: identity.host, executor: identity.id, kinds });
+  const action = claimed.action;
+  if (!action) return step(null, 'idle', 'the queue has no action this executor can run');
+  try {
+    const reason = (await effects.handlers[action.kind]!(action, identity)) || `${action.kind} completed`;
+    await effects.settle(action, 'done', reason.slice(0, 2000));
+    return step(action, 'done', reason);
+  } catch (error) {
+    const reason = message(error).slice(0, 2000);
+    await effects.settle(action, 'failed', reason).catch(() => {});
+    return step(action, 'failed', reason);
+  }
+}
+
+/**
+ * Claim and run until stopped. An executor that finds nothing waits the idle interval; one that
+ * ran an action tries again immediately, so a queue that fills up is drained as fast as the
+ * handlers allow rather than one row per interval.
+ */
+export async function runExecutor(identity: ExecutorIdentity, effects: ExecutorEffects, options: { intervalMs: number; once?: boolean; signal?: AbortSignal; now?: () => number; log?: (line: string) => void; maxSteps?: number }) {
+  const now = options.now ?? Date.now, log = options.log ?? (() => {});
+  const steps: ExecutorStep[] = [];
+  do {
+    if (options.signal?.aborted) break;
+    let step: ExecutorStep;
+    try { step = await runExecutorTick(identity, effects, now); }
+    catch (error) {
+      step = { at: new Date(now()).toISOString(), executor: identity.id, host: identity.host, action: null, result: 'failed', kind: null, work: null, reason: message(error).slice(0, 2000) };
+    }
+    steps.push(step);
+    if (step.action) log(`[graphyard-executor] ${identity.id} ${step.result} ${step.kind} for ${step.work}: ${step.reason}`);
+    if (options.once || options.signal?.aborted || (options.maxSteps !== undefined && steps.length >= options.maxSteps)) break;
+    // Only a completed action earns an immediate retry. An empty queue and a step that failed —
+    // including a claim the control plane could not answer — both wait, so a broken executor
+    // polls at its interval rather than spinning against the error.
+    if (step.result !== 'done') { try { await delay(options.intervalMs, undefined, { signal: options.signal }); } catch { /* woken to stop */ } }
+  } while (!options.signal?.aborted);
+  return { steps };
+}
+
+/** Executor effects bound to a control plane over HTTP; the only state is the credential. */
+export function executorEffects(config: { url: string; token: string; fetcher?: typeof fetch; requestId?: () => string }, handlers: ExecutorEffects['handlers']): ExecutorEffects {
+  const fetcher = config.fetcher ?? fetch;
+  const requestId = config.requestId ?? (() => randomUUID());
+  const post = async (path: string, body: unknown) => {
+    const response = await fetcher(`${config.url}/api/${path}`, { method: 'POST', headers: { Authorization: `Bearer ${config.token}`, 'Content-Type': 'application/json', 'Idempotency-Key': requestId() }, body: JSON.stringify(body), signal: AbortSignal.timeout(30_000) });
+    const result = await response.json();
+    if (!response.ok) throw new Error(typeof result?.error === 'string' ? result.error : JSON.stringify(result));
+    return result;
+  };
+  return {
+    claim: request => post('actions/claim', request),
+    settle: (action, result, reason) => post(`actions/${action.id}/settle`, { result, reason }),
+    handlers,
+  };
 }

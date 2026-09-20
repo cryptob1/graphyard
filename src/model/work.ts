@@ -6,6 +6,10 @@ import type { AgentReview, ReviewFailover, ReviewRequest } from './review.js';
 import type { Delivery, ReleaseDelivery } from './delivery.js';
 import type { BlockingRulingAction } from './delegation.js';
 import type { AutoDispatch } from './dispatch.js';
+import type { NextAction } from './next-action.js';
+import type { ActionQueue } from './actions.js';
+import type { AgentRequest } from './agent-requests.js';
+import type { SessionHandle } from './sessions.js';
 import { proofSchema } from './proof.js';
 import { demand } from './refusal.js';
 
@@ -132,6 +136,17 @@ export interface Work extends Create {
   mergeAuthorization?: { sha: string; baseSha: string; policyRevision: number; at: string } | null;
   /** What the exact head still needs from a launched reviewer or producer; see model/dispatch.ts. */
   autoDispatch?: AutoDispatch | null;
+  /**
+   * The typed action the control plane computed for this item at the last evaluation, and the
+   * durable queue rows that say whether anybody is running it. See model/next-action.ts and
+   * model/actions.ts; neither authorizes progression.
+   */
+  nextAction?: NextAction | null;
+  actionQueue?: ActionQueue;
+  /** Typed asks an agent recorded instead of blocking on a prose question; see model/agent-requests.ts. */
+  agentRequests?: AgentRequest[];
+  /** Durable handles for the sessions launched on this item; see model/sessions.ts. */
+  sessions?: SessionHandle[];
   mergeExecution?: { id: string; owner: string; sha: string; baseSha: string; policyRevision: number; authorizationRevision: number; issuedAt: string; expiresAt: string; verifiedAt?: string; committingAt?: string; clockOffset?: { min: number; max: number }; fenced?: { reason: string; at: string } | null } | null;
   delivery?: Delivery;
   /**

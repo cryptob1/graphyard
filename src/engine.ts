@@ -4,6 +4,7 @@ import { Store, save, wakeJob } from './store.js';
 import { authorizedForProof, unauthorizedProofs } from './proof-grants.js';
 import { workspacePath, pathsOverlap, validBranch } from './workspace.js';
 import { activeLease, admin, assertReviewerProfiles, operatorCapability, escalationTriggers, holdsMergeExecution, MergeExecutionInProgress, providerDelayAfterVerification, raiseEscalation, releaseLeadHold, resolveEscalation, standingEscalations, attestationFor, attestationKinds, attestationsFromLedger, leaseLapseCause, leaseLossEpoch, leaseLossReason, settleableLeaseLoss, submittedEpoch, type Attestation, requireCurrent, createSchema, criterionSchema, bindingApproval, currentEvidence, decideCarry, deploySmokeProof, deploySmokeRequired, evidenceBindsCandidate, inheritedObligations, pathScopeContains, requiredProofs, resourcesSchema, demand, evaluate, exhaustedReviewerProfiles, proofSchema, reviewerProfileFor, reviewerProfileSchema, reviewProviders, reviewProviderOf, type Criterion, type Evidence, type Principal, type ReviewerApp, type ReviewFailover, type Work, type Observation, type ReviewRequest, type OperatorCapability } from './model.js';
+import { Refusal } from './model/refusal.js';
 import { resourceConflicts } from './coordination.js';
 import { containmentAttestation, containmentSettlementRefusals, containmentVerificationSchema } from './quarantine.js';
 import { activeEngineers, delegationLimits, implementerIdentities, leadMay, producerIndependenceRefusal, sessionKind } from './delegation.js';
@@ -13,6 +14,10 @@ import { regressionRefusals } from './regression-guard.js';
 import { ciFamilyAllows, ciProofFamilies, ciRunBindingSchema, ciRunRefusal, isCiProducer, refuseCiProducer, staleCiAttemptRefusal, type CiRunObservation } from './model/ci-proofs.js';
 import { liveScopeWidening } from './model/scope.js';
 import { reconcileAutoDispatch, type DispatchTransition } from './model/dispatch.js';
+import { nextAction, nextActionKinds, sameAction } from './model/next-action.js';
+import { claimAction, openActions, reconcileActions, settleAction, type ActionRow } from './model/actions.js';
+import { agentRequestLimit, agentRequestSchema, deciderFor, expireAgentRequests, resolveSatisfiedScopeRequests, type AgentRequest } from './model/agent-requests.js';
+import { recordSession, sessionHandleSchema } from './model/sessions.js';
 import { beginAttempt, endAttempt, endLapsedAttempt, recordIntervention, recordRework, recordSubmission } from './pipeline-speed.js';
 
 const epoch = z.number().int().positive();
@@ -77,7 +82,25 @@ const commands = {
   // serving commit and where it was read; whether it is exact is derived, never asserted.
   deployment: z.object({ sha, mergeSha: sha, source: z.enum(['endpoint', 'github-deployment']), observedAt: z.iso.datetime() }).strict(),
   revoke: z.object({ proof: proofSchema, sha, baseSha: sha, policyRevision: z.number().int().positive(), reason: z.string().trim().min(1).max(2000) }).strict(),
+  // The durable handle a launched session records on the item: its runtime and host, the runtime's
+  // own workspace, tab and pane, and the transcript it writes. A fact, never authority; see model/sessions.ts.
+  session: sessionHandleSchema,
+  // A typed ask recorded instead of blocking on a prose question. The decider is derived, the
+  // attempt ends in the same transaction, and the item is free again; see model/agent-requests.ts.
+  request: agentRequestSchema,
 } as const;
+const executorName = z.string().trim().min(1).max(200).regex(/^[^\u0000-\u001f\u007f]+$/);
+const actionClaimSchema = z.object({
+  /** The identity the claim is recorded under; the credential's own principal by default. */
+  executor: executorName.optional(),
+  host: executorName,
+  /** The action kinds this executor can actually run. A kind it cannot run is left for one that can. */
+  kinds: z.array(z.enum(nextActionKinds)).min(1).max(nextActionKinds.length).optional(),
+  leaseSeconds: z.number().int().min(10).max(900).optional(),
+  work: z.string().min(1).max(200).optional(),
+}).strict();
+const actionSettleSchema = z.object({ executor: executorName.optional(), result: z.enum(['done', 'failed']), reason: z.string().trim().min(1).max(2000) }).strict();
+const pullAssignmentSchema = z.object({ host: executorName.optional(), work: z.string().min(1).max(200).optional() }).strict();
 const mergeAcquireSchema = z.object({ expectedRevision: z.number().int().positive(), sha, baseSha: sha, policyRevision: z.number().int().positive() }).strict();
 const mergeCancelSchema = z.object({ executionId: z.string().uuid(), reason: z.string().trim().min(1).max(2000) }).strict();
 const mergeVerifySchema = z.object({ executionId: z.string().uuid() }).strict();
@@ -439,6 +462,7 @@ export class Engine {
         work.epoch++;
         // A fresh attempt asks afresh: the previous attempt's scope request belongs to a lease that no longer exists.
         work.scopeRequest = null;
+        expireAgentRequests(work, now, `epoch ${work.epoch} claimed the item; a request from an attempt that ended is asked afresh`);
         work.implementers = [...new Set([...implementerIdentities(work), actor.id])];
         work.lastAssignment = { owner: actor.id, epoch: work.epoch, claimedAt: now.toISOString(), ...(actor.displayName ? { displayName: actor.displayName } : {}), ...(actor.runtime ? { runtime: actor.runtime } : {}) };
         work.lease = { owner: actor.id, epoch: work.epoch, expiresAt: new Date(now.getTime() + this.leaseSeconds * 1000).toISOString() };
@@ -490,6 +514,47 @@ export class Engine {
           const outside = data.paths.filter((path: string) => !(work.plannedFiles ?? []).some(planned => pathScopeContains(planned, path)));
           demand(outside.length, 'Every named path is already inside plannedFiles; no scope request is needed');
           work.scopeRequest = { epoch: data.epoch, paths: data.paths, reason: data.reason, requestedBy: actor.id, at: now.toISOString() };
+        }
+      }
+      if (command === 'session') {
+        demand(['worker', 'producer', 'coordinator', 'admin'].includes(actor.role), 'Worker, producer or coordinator permission required', 403);
+        // An implementation session names the attempt it runs under and must hold that lease; a
+        // reviewer or producer session holds none, and records its handle under its own identity.
+        if (data.epoch !== undefined) activeLease(work, actor, data.epoch, now);
+        else demand(actor.role !== 'worker', 'An implementation session records its handle under its assignment epoch');
+        recordSession(work, data, actor.id, now);
+      }
+      if (command === 'request') {
+        demand(['worker', 'producer', 'coordinator', 'admin'].includes(actor.role), 'Worker, producer or coordinator permission required', 403);
+        work.agentRequests ??= [];
+        if (data.resolve) {
+          const open = work.agentRequests.find(entry => entry.id === data.resolve && entry.state === 'open');
+          demand(open, 'No open request with that id', 404);
+          open!.state = 'resolved'; open!.resolvedAt = now.toISOString(); open!.resolution = data.reason;
+        } else {
+          if (data.epoch !== undefined) activeLease(work, actor, data.epoch, now);
+          demand(data.type !== 'scope-request' || (data.paths?.length && data.epoch !== undefined), 'A scope request names its attempt epoch and the paths it needs');
+          demand(data.type !== 'decision' || data.action, 'A decision request names the action an independent approver must approve');
+          demand(data.type !== 'escalation' || data.trigger, 'An escalation request names the trigger it raises');
+          const request: AgentRequest = { id: randomUUID(), type: data.type, epoch: data.epoch ?? null, requestedBy: actor.id, at: now.toISOString(), reason: data.reason,
+            ...(data.paths ? { paths: data.paths } : {}), ...(data.action ? { action: data.action } : {}), ...(data.trigger ? { trigger: data.trigger } : {}), ...(data.humanDecision ? { humanDecision: data.humanDecision } : {}),
+            decider: deciderFor(work.key, data), releasedLease: false, state: 'open' };
+          // Each type projects onto the state the gates and the existing machinery already read,
+          // so a typed request is the same fact as the command it replaces, with a decider named.
+          if (data.type === 'scope-request') {
+            const outside = data.paths!.filter((path: string) => !(work!.plannedFiles ?? []).some(planned => pathScopeContains(planned, path)));
+            demand(outside.length, 'Every named path is already inside plannedFiles; no scope request is needed');
+            work.scopeRequest = { epoch: data.epoch, paths: data.paths, reason: data.reason, requestedBy: actor.id, at: now.toISOString() };
+          }
+          if (data.type === 'blocker') { work.blocker = data.reason; recordIntervention(work, 'blocked'); }
+          if (data.type === 'escalation') raiseEscalation(work, { trigger: data.trigger, reason: data.reason, at: now.toISOString(), actor: actor.id });
+          // A note is a record; every other type is a hand-off, so the attempt ends here rather
+          // than holding the item while its session waits for an answer.
+          const release = data.release ?? data.type !== 'note';
+          if (release && data.epoch !== undefined && work.lease?.epoch === data.epoch) {
+            endAttempt(work, data.epoch, 'released', now); work.lease = null; request.releasedLease = true;
+          }
+          work.agentRequests = [...work.agentRequests, request].slice(-agentRequestLimit);
         }
       }
       if (command === 'workspace') {
@@ -608,16 +673,106 @@ export class Engine {
         if (execution) await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)',
           [work.id, actor.id, 'merge.execution.cancelled', JSON.stringify({ details: { executionId: execution.id, reason: `Evidence ${data.proof} revoked: ${data.reason}` } })]);
       }
+      // A widening that covers an open scope ask is the answer to it: the deterministic rule the
+      // request named has been applied, so the request closes rather than waiting on nobody.
+      if (command === 'requirements') resolveSatisfiedScopeRequests(work, path => (work!.plannedFiles ?? []).some(planned => pathScopeContains(planned, path)), now);
       retainQuarantineFence(work);
       // Delivery is an immutable snapshot. A late containment cleanup or a post-deployment fact may
       // append its audit/revision metadata, but stale inputs must not re-evaluate it.
       if (!deliveredContainmentCleanup && !postDeployment) this.evaluate(work, all, now);
+      // A delivered item's gates are an immutable snapshot, but what it still owes — a deployment
+      // carrying the merge — is not; its queue is reconciled without re-evaluating the delivery.
+      else {
+        reconcileActions(work, all, now);
+        const computed = nextAction(work, all, now);
+        if (work.nextAction === undefined || !sameAction(work.nextAction, computed)) work.nextAction = computed;
+      }
       await this.recordDispatch(db, work, now);
       await save(db, work, actor.id, command, now, command === 'settle' ? { epoch: data.epoch } : actor.role === 'operator-agent' ? { before, intent: data, reason: data.reason ?? null, ...(command === 'requirements' ? { liveScopeWidening: widening } : {}) } : data);
       if (work.submission && !postDeployment && !['heartbeat', 'release', 'claim', 'workspace'].includes(command)) await wakeJob(db, work.id);
       await db.query('INSERT INTO receipts(actor,key,fingerprint,result) VALUES($1,$2,$3,$4)', [actor.id, key, fingerprint, JSON.stringify(work)]);
       return work;
     });
+  }
+
+  /**
+   * Claim the next action for a stateless executor.
+   *
+   * The executor names itself and its host, and the kinds it can actually run; the control plane
+   * hands back the oldest open row it can take, leased for a bounded time. Two executors on two
+   * hosts calling this at the same instant are serialized by the coordination lock, so the first
+   * gets the row and the second gets the next one. Neither is configured with the other, and
+   * neither reports to a master: the queue is the whole of their coordination.
+   */
+  async claimNextAction(actor: Principal, input: unknown, key: string) {
+    demand(actor.role === 'coordinator' || actor.role === 'admin', 'Coordinator permission required', 403);
+    demand(key && key.length <= 200, 'An Idempotency-Key is required', 400);
+    const data = actionClaimSchema.parse(input);
+    const fingerprint = createHash('sha256').update(JSON.stringify({ command: 'action.claim', data })).digest('hex');
+    return this.store.transaction(async (db, now) => {
+      const receipt = (await db.query('SELECT * FROM receipts WHERE actor=$1 AND key=$2', [actor.id, key])).rows[0];
+      if (receipt) { demand(receipt.fingerprint === fingerprint, 'Idempotency key reused with different input'); return receipt.result as { action: ActionRow | null }; }
+      const all: Work[] = (await db.query('SELECT document FROM work_items ORDER BY number')).rows.map(r => r.document);
+      const claimed = claimAction(all, { id: data.executor ?? actor.id, host: data.host }, now, { kinds: data.kinds, leaseMs: data.leaseSeconds ? data.leaseSeconds * 1000 : undefined, work: data.work });
+      const result = { action: claimed?.row ?? null, open: openActions(all, now, data.kinds).length, at: now.toISOString() };
+      // A poll that claims nothing changed nothing, so it leaves no receipt: an idle executor
+      // asking every few seconds must not write a row per question it asked.
+      if (claimed) {
+        await save(db, claimed.work, actor.id, 'action.claimed', now, { id: claimed.row.id, kind: claimed.row.kind, executor: claimed.row.claim!.executor, host: claimed.row.claim!.host, attempt: claimed.row.attempts });
+        await db.query('INSERT INTO receipts(actor,key,fingerprint,result) VALUES($1,$2,$3,$4)', [actor.id, key, fingerprint, JSON.stringify(result)]);
+      }
+      return result;
+    });
+  }
+  /**
+   * Record what an executor's attempt did. Only the executor holding the live claim may settle its
+   * row: a claim that expired and was taken by another executor can no longer report a result, so
+   * an executor that comes back from the dead never double-counts the action that replaced it.
+   */
+  async settleClaimedAction(actor: Principal, id: string, input: unknown, key: string) {
+    demand(actor.role === 'coordinator' || actor.role === 'admin', 'Coordinator permission required', 403);
+    demand(key && key.length <= 200, 'An Idempotency-Key is required', 400);
+    const data = actionSettleSchema.parse(input);
+    const fingerprint = createHash('sha256').update(JSON.stringify({ command: 'action.settle', id, data })).digest('hex');
+    return this.store.transaction(async (db, now) => {
+      const receipt = (await db.query('SELECT * FROM receipts WHERE actor=$1 AND key=$2', [actor.id, key])).rows[0];
+      if (receipt) { demand(receipt.fingerprint === fingerprint, 'Idempotency key reused with different input'); return receipt.result as { action: ActionRow }; }
+      const all: Work[] = (await db.query('SELECT document FROM work_items ORDER BY number')).rows.map(r => r.document);
+      const work = all.find(item => item.actionQueue?.actions.some(row => row.id === id));
+      demand(work, 'Action is not open on any work item', 404);
+      const transition = settleAction(work!, id, data.executor ?? actor.id, data.result, data.reason, now);
+      await save(db, work!, actor.id, `action.${transition.event}`, now, { id, kind: transition.action.kind, executor: data.executor ?? actor.id, result: data.result, reason: data.reason, attempt: transition.action.attempts });
+      if (work!.submission) await wakeJob(db, work!.id);
+      const result = { action: transition.action, work: { id: work!.id, key: work!.key } };
+      await db.query('INSERT INTO receipts(actor,key,fingerprint,result) VALUES($1,$2,$3,$4)', [actor.id, key, fingerprint, JSON.stringify(result)]);
+      return result;
+    });
+  }
+  /**
+   * The pull model: a free worker session asks for its next assignment instead of waiting for a
+   * dispatcher to inject one.
+   *
+   * The control plane already names which items need a worker (`nextAction` kind `dispatch`,
+   * target `implementation`), in the order the dispatcher would have offered them. The worker
+   * claims under its own identity through the ordinary claim command, so every claim rule — ready,
+   * dependencies, quarantine, exclusive resources, engineer limits — still decides. An item that
+   * refuses is skipped rather than returned as an error, so one worker racing another for the head
+   * of the queue simply takes the next item instead of going back to sleep.
+   */
+  async pullAssignment(actor: Principal, input: unknown, key: string) {
+    demand(actor.role === 'worker' || actor.role === 'admin', 'Worker permission required', 403);
+    const data = pullAssignmentSchema.parse(input);
+    const all = await this.store.list();
+    const now = new Date();
+    const offers = openActions(all, now, ['dispatch'])
+      .filter(entry => entry.row.inputs.kind === 'dispatch' && entry.row.inputs.target === 'implementation')
+      .filter(entry => !data.work || entry.work.id === data.work || entry.work.key === data.work);
+    const refused: { key: string; reason: string }[] = [];
+    for (const offer of offers) {
+      try { return { assigned: await this.execute(actor, 'claim', offer.work.id, {}, key), offered: offers.length, refused }; }
+      catch (error) { if (!(error instanceof Refusal)) throw error; refused.push({ key: offer.work.key, reason: error.message }); }
+    }
+    return { assigned: null, offered: offers.length, refused, at: now.toISOString() };
   }
   async acquireMerge(actor: Principal, id: string, input: unknown, key: string) {
     demand(actor.role === 'coordinator' || actor.role === 'admin', 'Coordinator permission required', 403);
@@ -944,6 +1099,17 @@ export class Engine {
     // What the exact head still needs from a launched reviewer or producer, decided from the
     // gates just evaluated; the transitions reach the ledger with the document (recordDispatch).
     this.dispatchTransitions.set(work, reconcileAutoDispatch(work, all, now));
+    // The typed instruction the inverted loop runs on: what this item needs next, named from the
+    // gates just evaluated, and the durable row that says whether an executor has it.
+    // The queue's own transitions are recorded on each row's history and travel to the ledger
+    // with the document every save appends, so they need no second event of their own; the
+    // executor's claim and settlement write their own named events.
+    reconcileActions(work, all, now);
+    // Only a different decision is written: an identical action rebuilt in source order would
+    // differ from the stored one by key order alone, and the reconciliation tick would rewrite
+    // every item on every pass.
+    const computed = nextAction(work, all, now);
+    if (work.nextAction === undefined || !sameAction(work.nextAction, computed)) work.nextAction = computed;
   }
   /** Append the auto-dispatch transitions of the last evaluation to the ledger, once, beside the document save. */
   private async recordDispatch(db: { query: (text: string, values: unknown[]) => Promise<unknown> }, work: Work, now: Date) {

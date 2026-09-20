@@ -1,4 +1,6 @@
 import { deliveryState, deploySmokeRequired, type Work } from '../../src/model';
+import { sessionSummary } from '../../src/model/sessions';
+import { openAgentRequests } from '../../src/model/agent-requests';
 import { diagnose, fileConflicts, obligationLedger, proofPreview } from '../../src/coordination';
 import Dialog from '../dialog';
 import History from '../history';
@@ -38,6 +40,12 @@ export default function WorkDetails({ item, work, status, token, observedAt, job
   const provider = item.policy.reviewProvider ?? 'github';
   const failedDelivery = deliveryState(item) === 'delivered-with-failure';
   const postDeployment = <PostDeployment item={item} repository={status?.repository} baseBranch={status?.baseBranch ?? 'main'} observedAt={observedAt}/>;
+  // The inverted loop, as this item sees it: what the control plane says to do next, which
+  // executor has it, who is waiting on a decision, and every session that can be watched or read.
+  const sessions = sessionSummary(item, new Date(now));
+  const running = sessions.filter(handle => handle.state === 'running');
+  const requests = openAgentRequests(item, new Date(now));
+  const actions = item.actionQueue?.actions ?? [];
   return <Dialog onClose={() => setSelected(null)}><section role="dialog" aria-modal="true" aria-label={item.title} className="drawer" onClick={e => e.stopPropagation()}><button className="close" aria-label="Close details" onClick={() => setSelected(null)}>×</button>
     <div className="drawer-key">{item.key}</div><h2>{item.title}</h2>
     <p className={`status-sentence tone-${plain.tone}`}><Explained sentence={plain.sentence}/></p>
@@ -46,6 +54,10 @@ export default function WorkDetails({ item, work, status, token, observedAt, job
       <div><dt><Term term="pull request" focusable={false}>Pull request</Term> and <Term term="commit" focusable={false}>commit</Term></dt><dd className="candidate-details">{item.candidate ? <><CandidatePr repository={status?.repository} candidate={item.candidate} workKey={item.key}/> <CandidateSha repository={status?.repository} sha={item.candidate.sha} workKey={item.key}/></> : 'None yet'}</dd></div>
     </dl>
     {plain.blocking && <p className="blocking-now"><strong>Blocking now:</strong> <Explained sentence={plain.blocking}/></p>}
+    {requests.length > 0 && <div className="notice"><strong>{requests.length === 1 ? 'An agent is waiting' : `${requests.length} agents are waiting`} on a decision</strong>
+      <ul>{requests.map(r => <li key={r.id}>{r.requestedBy} recorded a {r.type} {age(r.at)} ago and released its lease: {r.reason} — decided by {r.decider.who}{r.decider.command ? <> (<code>{r.decider.command}</code>)</> : ''}</li>)}</ul></div>}
+    {running.length > 0 && <><h3>Sessions running now</h3><ul className="sessions">{running.map(handle => <li key={handle.id}>
+      <strong>{handle.kind}</strong> · {handle.principal} · {handle.runtime} on {handle.host} · working on {handle.subject} · {age(handle.startedAt)}<br/><code>{handle.attach}</code></li>)}</ul></>}
     {item.violations.map(v => <div className="notice danger" key={v}>{v}</div>)}
     {!item.ready && admin && <button disabled={busy} onClick={() => action(item.id, 'ready')}>Release to ready</button>}
     {failedDelivery && postDeployment}
@@ -76,6 +88,25 @@ export default function WorkDetails({ item, work, status, token, observedAt, job
       {entry && <><h3>Merge queue</h3><p>Position {entry.position + 1} of {entry.size} · waiting {age(entry.enqueuedAt)} · {entry.current ? 'validated on its predicted tip' : 'awaiting speculative validation'}</p><p className="muted">Predicted base <code>{entry.predictedBase ? entry.predictedBase.slice(0, 12) : 'pending'}</code> · predicted tip <code>{entry.tip ? entry.tip.slice(0, 12) : 'pending'}</code>{entry.predecessors.length ? ` · behind ${entry.predecessors.join(', ')}` : ''}</p>{entry.reasons.map(reason => <p className="muted" key={reason}>{reason}</p>)}{item.queue?.speculation && <code>{item.queue.speculation.ref}</code>}</>}
       {!entry && item.queueEjection && <><h3>Merge queue</h3><p className="amber">Ejected {new Date(item.queueEjection.at).toLocaleString()}: {item.queueEjection.reason}</p><p className="muted">A new candidate re-enters at the back of the queue. There is no bypass.</p></>}
       <h3>Code review</h3><p>Provider: {item.policy.reviewProvider === 'codex' ? 'Codex cloud' : item.policy.reviewProvider === 'agent' ? 'Identity-bound agent reviewers' : 'Formal GitHub approval'}</p>{item.policy.reviewProvider === 'agent' && <p className="muted">Reviewer profiles in failover order: {(item.policy.reviewerProfiles ?? []).map(p => `${p.name} (${p.runtime})`).join(' → ') || 'none configured'}</p>}{item.observation?.agentReview && <p>{item.observation.agentReview.reason}</p>}{(item.reviewFailovers ?? []).filter(f => f.sha === item.candidate?.sha && f.baseSha === item.candidate?.baseSha && f.policyRevision === item.policyRevision).map(f => <p className="amber" key={`${f.profile}-${f.at}`}>Failover: {f.profile} exhausted ({f.exhaustion}) · {f.nextProfile ? `dispatched to ${f.nextProfile}` : 'no reviewer profile remains'}</p>)}{admin && <p className="muted">Changing provider creates a policy revision and requires fresh acceptance evidence. Agent reviewer profiles are configured through the CLI or API because they name registered reviewer App identities.</p>}
+      <h3>Next action and executors</h3>
+      {item.nextAction && <p className="next-action"><strong>Next:</strong> <code>{item.nextAction.kind}</code>{(() => { const row = actions.find(entry => entry.kind === item.nextAction!.kind); return row?.claim ? ` — ${row.claim.executor} on ${row.claim.host} is running it` : row ? ' — waiting for an executor to claim it' : ''; })()}</p>}
+      {item.nextAction
+        ? <p>The control plane computes <code>{item.nextAction.kind}</code> for this item{item.nextAction.gate ? <> from the <strong>{item.nextAction.gate}</strong> gate’s refusal “{item.nextAction.refusal}”</> : ''}: {item.nextAction.reason}. {item.nextAction.llmRole ? `The action starts a session whose judgment is ${item.nextAction.llmRole}; running the action itself needs no model.` : 'Running it needs no language model at all.'}</p>
+        : <p className="muted">The control plane has no outstanding action for this item.</p>}
+      {actions.map(row => <div className="criterion" key={row.id}><strong>{row.kind} · {row.state}{row.claim ? ` · ${row.claim.executor} on ${row.claim.host}` : ''}</strong>
+        <p>Requested by {row.requestedBy} {age(row.requestedAt)} ago · attempt {row.attempts}{row.resolution ? ` · last result: ${row.resolution}` : ''}</p>
+        <ul>{row.history.slice(-5).map((entry, index) => <li key={index}>{entry.event}{entry.executor ? ` by ${entry.executor}` : ''}: {entry.reason}</li>)}</ul></div>)}
+      <h3>Sessions ({sessions.length})</h3>
+      {sessions.length === 0 && <p className="muted">No session has recorded a handle on this item.</p>}
+      {sessions.map(handle => <div className="criterion" key={handle.id}><strong>{handle.state === 'running' ? '▶' : '■'} {handle.kind} · {handle.principal}</strong>
+        <p>{handle.runtime} on {handle.host}{handle.workspace ? ` · workspace ${handle.workspace}` : ''}{handle.tab ? ` · tab ${handle.tab}` : ''}{handle.pane ? ` · pane ${handle.pane}` : ''} · {handle.subject}</p>
+        <p>{handle.state === 'running' ? `Running for ${age(handle.startedAt)}` : `Finished ${age(handle.endedAt ?? handle.updatedAt)} ago${handle.outcome ? `: ${handle.outcome}` : ''}`}</p>
+        <code>{handle.attach}</code></div>)}
+      <h3>Agent requests ({(item.agentRequests ?? []).length})</h3>
+      {(item.agentRequests ?? []).length === 0 && <p className="muted">No agent has recorded a typed request on this item.</p>}
+      {(item.agentRequests ?? []).map(request => <div className="criterion" key={request.id}><strong>{request.state === 'open' ? '○' : '✓'} {request.type} · {request.requestedBy}</strong>
+        <p>{request.reason}{request.paths?.length ? ` · ${request.paths.join(', ')}` : ''}</p>
+        <p>Decided by {request.decider.who}{request.decider.command ? ` · ${request.decider.command}` : ''} · recorded {age(request.at)} ago{request.releasedLease ? ' and the attempt released its lease' : ''}{request.state === 'resolved' ? ` · resolved: ${request.resolution ?? 'no reason recorded'}` : ''}</p></div>)}
       <h3>Gate decisions</h3>{item.gates.map(g => <div className="gate" key={g.name}><strong className={g.passed ? 'green-text' : 'amber'}>{g.passed ? '✓' : '○'} {g.name}</strong>{g.reasons.map(r => <p key={r}>{r}</p>)}</div>)}
       <h3>Acceptance criteria and required proof</h3>{item.criteria.map(ac => <div className="criterion" key={ac.id}><strong>{ac.id} · {ac.text}{ac.bootstrap ? ' · bootstrap mode' : ''}</strong>{ac.bootstrap && <p className="amber">Proof deferred by {ac.bootstrap.declaredBy} on {new Date(ac.bootstrap.declaredAt).toLocaleString()} at policy v{ac.bootstrap.policyRevision}: {ac.bootstrap.reason}. Review, CI and every other criterion still gate this item. The proof is not dropped — it stays owed on {ac.bootstrap.contractPaths.join(', ')} and the next change touching that contract must produce it.</p>}</div>)}
       {proofs.map(p => <div className="criterion" key={`${p.criterion}:${p.proof}`}><strong>{p.criterion} · {p.proof} · {p.status}</strong><p>{p.status === 'deferred' ? `Deferred in bootstrap mode; recorded as an obligation on ${p.bootstrap?.contractPaths.join(', ')}` : p.scenario ? `Scenario v${p.scenario.revision} in ${p.scenario.environment}` : 'Requires an authorized producer or manual operator evidence'} · current candidate and policy v{item.policyRevision}</p>{p.status !== 'deferred' && p.bootstrap && <p className="amber">Inherited from {p.bootstrap.key} {p.bootstrap.criterionId} because this item plans to touch {p.bootstrap.contractPaths.join(', ')}. A bootstrap deferral cannot be renewed by the change that inherits it.</p>}{item.proofGaps?.includes(p.proof) && <p className="amber">No principal was authorized to produce {p.proof} when this intent was recorded. Open Proof authority and grant it before dispatch.</p>}</div>)}
