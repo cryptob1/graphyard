@@ -22,8 +22,9 @@ import { MERGE_PROTOCOL } from '../src/protocol-version.js';
 const repository = 'owner/decisions';
 const operator: Principal = { id: 'human-operator', role: 'admin', sessionKind: 'human' };
 const implementer: Principal = { id: 'implementer', role: 'worker', sessionKind: 'ai' };
+const replacement: Principal = { id: 'replacement', role: 'worker', sessionKind: 'ai' };
 const producer: Principal = { id: 'proof-runner', role: 'producer', proofs: ['unit:*'], sessionKind: 'ai' };
-const roster = [operator, implementer, producer];
+const roster = [operator, implementer, replacement, producer];
 const credentials = roster.map(principal => ({ ...principal, token: `decision-${principal.id}-${'x'.repeat(32)}` }));
 const token = (principal: Principal) => credentials.find(credential => credential.id === principal.id)!.token;
 const master = { id: 'master-operator', token: `master-operator-${'m'.repeat(32)}`, capabilities: ['intent:create', 'intent:ready', 'intent:unblock', 'policy:requirements', 'decision:resolve', 'decision:attest', 'decision:merge', 'decision:rework', 'decision:grant'] };
@@ -69,6 +70,15 @@ async function candidate(title: string) {
 /** An unrelated requirement revision: strengthens the item without touching the standing escalation. */
 let extraId = 8;
 const extraCriterion = (work: Work) => engine.execute(operator, 'requirements', work.id, { expectedPolicyRevision: work.policyRevision, criteria: [...work.criteria, { id: `AC-${++extraId}`, text: 'Changelog entry', proofs: ['manual:changelog'] }], dependencies: [], plannedFiles: work.plannedFiles, exclusiveResources: [], producerProofs: [], reason: 'Unrelated policy growth' }, randomUUID());
+/** The exact state a resolve decision is pinned to, mirrored from the server side. */
+const pinOf = (work: Work) => ({ policyRevision: work.policyRevision, sha: work.candidate?.sha ?? null, baseSha: work.candidate?.baseSha ?? null, epoch: work.epoch, escalations: standingEscalations(work).map(entry => ({ trigger: entry.trigger, at: entry.at })) });
+const overwrite = async (work: Work, mutate: (document: Work) => void) => {
+  const document = await reload(work.id); mutate(document);
+  await store.pool.query('UPDATE work_items SET document=$2::jsonb WHERE id=$1', [document.id, JSON.stringify(document)]);
+  return document;
+};
+/** A silent lease lapse: reconciliation or a replacement claim will classify it. */
+const lapse = (work: Work) => overwrite(work, document => { document.lease = { ...document.lease!, expiresAt: '2000-01-01T00:00:00Z' }; });
 
 before(async () => {
   const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 42;
@@ -135,17 +145,24 @@ test('integration:decision-stale-on-revision-race — an approval refused on a r
   assert.equal(takeBack.status, 409); assert.match(takeBack.body.error, /already stale/);
 });
 
-test('integration:decision-pinning-scope — resolve is pinned to the standing trigger and attest to the candidate head and policy, so unrelated item changes do not invalidate them', async () => {
-  // Resolving a named escalation trigger: the item moves on while the request waits, and the
-  // approval still applies because the trigger it acts on still stands.
+test('integration:decision-pinning-scope — resolve is pinned to what it acts on and attest to the candidate head and policy, so unrelated item changes do not invalidate them', async () => {
+  // Resolving a named escalation trigger: the item moves on while the request waits — a
+  // heartbeat, a workspace registration — and the approval still applies, because everything
+  // the resolver's judgement rests on still holds.
   let work = await created('pinned-resolve');
   work = await engine.execute(operator, 'requirements', work.id, { expectedPolicyRevision: work.policyRevision, criteria: [work.criteria[0]], dependencies: [], plannedFiles: work.plannedFiles, exclusiveResources: [], producerProofs: [], reason: 'AC-2 moves to a follow-up item' }, randomUUID());
   assert.deepEqual(standingEscalations(work).map(entry => entry.trigger), ['requirement-weakening']);
-  const atRequest = work.revision;
+  work = await engine.execute(operator, 'ready', work.id, {}, randomUUID());
+  work = await engine.execute(implementer, 'claim', work.id, {}, randomUUID());
+  const atRequest = work.revision, atEpoch = work.epoch;
   const requested = await decide(master.token, work, 'resolve', { trigger: 'requirement-weakening', expectedRevision: atRequest }, 'The follow-up carries the retired criterion');
   assert.equal(requested.status, 200, JSON.stringify(requested.body));
-  work = await extraCriterion(work);
+  assert.deepEqual(requested.body.pin, pinOf(await reload(work.id)), 'the request records the state the resolver judged');
+  work = await engine.execute(implementer, 'heartbeat', work.id, { epoch: work.epoch }, randomUUID());
+  work = await engine.execute(implementer, 'workspace', work.id, { epoch: work.epoch, host: 'decision-host', path: `/tmp/decision/${work.id}`, branch: `graphyard/${work.key.toLowerCase()}-${work.epoch}` }, randomUUID());
+  work = await reload(work.id);
   assert.ok(work.revision > atRequest, 'the item revision moved while the request waited');
+  assert.equal(work.epoch, atEpoch, 'the benign movers left the lease epoch alone');
   const approved = await approve(approver.token, work, requested.body.id, 'The requirement-weakening escalation still stands');
   assert.equal(approved.status, 200, JSON.stringify(approved.body));
   assert.equal(approved.body.state, 'applied');
@@ -171,15 +188,16 @@ test('integration:decision-pinning-scope — resolve is pinned to the standing t
   assert.equal(attestApproved.body.state, 'applied');
   const attested = (await reload(item.id)).evidence.find(entry => entry.proof === 'manual:audit')!;
   assert.equal(attested.trusted, true);
-  // The resolve pin names the incident, not the trigger slot: once the incident it was
-  // requested against is cleared by another path and the same trigger is raised again, the
-  // approval refuses and settles stale instead of clearing the second, unreviewed incident,
-  // and a fresh resolve of the same action is accepted immediately.
+  // The pin names the state the requester judged, not the trigger slot: once the incident it
+  // was requested against is cleared by another path and the same trigger is raised again,
+  // the approval refuses and settles stale instead of clearing the second, unreviewed
+  // incident, and a fresh resolve of the same action is accepted immediately.
   let swapped = await created('swapped-resolve');
   swapped = await engine.execute(operator, 'requirements', swapped.id, { expectedPolicyRevision: swapped.policyRevision, criteria: [swapped.criteria[0]], dependencies: [], plannedFiles: swapped.plannedFiles, exclusiveResources: [], producerProofs: [], reason: 'AC-2 moves to a follow-up item' }, randomUUID());
   const firstIncident = standingEscalations(swapped).find(entry => entry.trigger === 'requirement-weakening')!;
   const swapRequest = await decide(master.token, swapped, 'resolve', { trigger: 'requirement-weakening', expectedRevision: swapped.revision }, 'Resolve the narrowing this item records');
   assert.equal(swapRequest.status, 200, JSON.stringify(swapRequest.body));
+  const swapPin = pinOf(await reload(swapped.id));
   // Another path clears that incident: a declared human session resolves the trigger directly.
   swapped = await engine.execute(operator, 'resolve', swapped.id, { trigger: 'requirement-weakening', expectedRevision: swapped.revision, reason: 'A human session resolves the incident the request named' }, randomUUID());
   assert.deepEqual(standingEscalations(swapped), []);
@@ -192,14 +210,14 @@ test('integration:decision-pinning-scope — resolve is pinned to the standing t
   assert.ok(secondIncident.reason.includes('AC-3') && !firstIncident.reason.includes('AC-3'), 'the standing incident is the later one, not the incident the request named');
   const swapRefused = await approve(approver.token, swapped, swapRequest.body.id, 'Approved against the incident I read');
   assert.equal(swapRefused.status, 409);
-  assert.match(swapRefused.body.error, new RegExp(`The requirement-weakening escalation this decision was requested against is no longer the standing one; request it again; the decision was not applied`));
+  assert.match(swapRefused.body.error, /Task revision changed \(now \d+\); reload and request again; the decision was not applied/);
   swapped = await reload(swapped.id);
   const stillStanding = standingEscalations(swapped).find(entry => entry.trigger === 'requirement-weakening')!;
   assert.equal(stillStanding.reason, secondIncident.reason, 'the second incident is untouched by the approval');
   const swapListed = await ok(master.token, 'GET', `work/${swapped.key}/decisions`);
   const settled = swapListed.decisions.find((entry: any) => entry.id === swapRequest.body.id);
   assert.equal(settled.state, 'stale');
-  assert.deepEqual(settled.race, { expected: { trigger: 'requirement-weakening', standingAt: swapRequest.body.requestedAt }, current: { trigger: 'requirement-weakening', standingAt: stillStanding.at } });
+  assert.deepEqual(settled.race, { expected: swapPin, current: pinOf(swapped) });
   const settledEvent = (await events(swapped)).find(row => row.kind === 'decision.stale' && row.payload.id === swapRequest.body.id);
   assert.equal(settledEvent.actor, approver.id);
   // The stale settlement unblocks the action: a resolve of the new incident is accepted at once.
@@ -210,6 +228,73 @@ test('integration:decision-pinning-scope — resolve is pinned to the standing t
   assert.equal(freshApplied.body.state, 'applied');
   swapped = await reload(swapped.id);
   assert.deepEqual(standingEscalations(swapped), []);
+  // A suppressed repeat is the trap the trigger slot cannot catch: a second narrowing of the
+  // same trigger while one stands is never recorded, so the standing entry keeps its moment
+  // and the set never grows — but the policy revision moves, and the policy revision is part
+  // of the pin. The approval refuses instead of clearing both narrowings behind one review.
+  let doubled = await created('suppressed-narrowing');
+  doubled = await engine.execute(operator, 'requirements', doubled.id, { expectedPolicyRevision: doubled.policyRevision, criteria: [doubled.criteria[0]], dependencies: [], plannedFiles: doubled.plannedFiles, exclusiveResources: [], producerProofs: [], reason: 'AC-2 moves to a follow-up item' }, randomUUID());
+  const firstNarrowing = standingEscalations(doubled).find(entry => entry.trigger === 'requirement-weakening')!;
+  const doubleRequest = await decide(master.token, doubled, 'resolve', { trigger: 'requirement-weakening', expectedRevision: doubled.revision }, 'Resolve the narrowing this item records');
+  assert.equal(doubleRequest.status, 200, JSON.stringify(doubleRequest.body));
+  const doublePin = pinOf(await reload(doubled.id));
+  doubled = await extraCriterion(doubled);
+  doubled = await engine.execute(operator, 'requirements', doubled.id, { expectedPolicyRevision: doubled.policyRevision, criteria: [doubled.criteria[0]], dependencies: [], plannedFiles: doubled.plannedFiles, exclusiveResources: [], producerProofs: [], reason: 'The extra criterion moves to a follow-up item too' }, randomUUID());
+  doubled = await reload(doubled.id);
+  const repeatStanding = standingEscalations(doubled).find(entry => entry.trigger === 'requirement-weakening')!;
+  assert.equal(repeatStanding.at, firstNarrowing.at, 'the suppressed repeat left the standing incident untouched');
+  const doubleRefused = await approve(approver.token, doubled, doubleRequest.body.id, 'Approved against the one narrowing I read');
+  assert.equal(doubleRefused.status, 409);
+  assert.match(doubleRefused.body.error, /Task revision changed \(now \d+\)/);
+  const doubleListed = await ok(master.token, 'GET', `work/${doubled.key}/decisions`);
+  const doubleSettled = doubleListed.decisions.find((entry: any) => entry.id === doubleRequest.body.id);
+  assert.equal(doubleSettled.state, 'stale');
+  assert.deepEqual(doubleSettled.race, { expected: doublePin, current: pinOf(doubled) });
+  assert.deepEqual(doubleSettled.race.expected.escalations, doubleSettled.race.current.escalations, 'the set never grew; the pin caught the move anyway');
+  const freshDouble = await decide(master.token, doubled, 'resolve', { trigger: 'requirement-weakening', expectedRevision: doubled.revision }, 'Requested against both narrowings now');
+  assert.equal(freshDouble.status, 200, JSON.stringify(freshDouble.body));
+  const freshDoubleApplied = await approve(approver.token, doubled, freshDouble.body.id, 'Both narrowings are reviewed together now');
+  assert.equal(freshDoubleApplied.status, 200, JSON.stringify(freshDoubleApplied.body));
+  assert.equal(freshDoubleApplied.body.state, 'applied');
+  assert.deepEqual(standingEscalations(await reload(doubled.id)), []);
+  // A second vanished worker needs no admin at all: the lease-loss stands for one epoch, a
+  // replacement claim raises nothing (the trigger already stands), and the epoch moves — the
+  // last field of the pin. The approval refuses instead of clearing the recorded loss over a
+  // later, unrecorded one.
+  let vanished = await created('suppressed-lease-loss');
+  vanished = await engine.execute(operator, 'ready', vanished.id, {}, randomUUID());
+  vanished = await engine.execute(implementer, 'claim', vanished.id, {}, randomUUID());
+  vanished = await lapse(vanished);
+  vanished = await engine.execute(replacement, 'claim', vanished.id, {}, randomUUID());
+  vanished = await reload(vanished.id);
+  const lossIncident = standingEscalations(vanished).find(entry => entry.trigger === 'lease-loss')!;
+  assert.match(lossIncident.reason, /lost lease epoch 1/);
+  const lossRequest = await decide(master.token, vanished, 'resolve', { trigger: 'lease-loss', expectedRevision: vanished.revision }, 'The recorded loss is explained and no work was left behind');
+  assert.equal(lossRequest.status, 200, JSON.stringify(lossRequest.body));
+  const lossPin = pinOf(await reload(vanished.id));
+  // The replacement vanishes too: reconciliation records nothing for the suppressed repeat.
+  vanished = await lapse(vanished);
+  await engine.reconcile();
+  assert.equal((await reload(vanished.id)).lease, null, 'reconciliation cleared the lapsed lease');
+  vanished = await engine.execute(replacement, 'claim', vanished.id, {}, randomUUID());
+  vanished = await reload(vanished.id);
+  assert.equal(vanished.epoch, lossPin.epoch + 1, 'the replacement claim moved the lease epoch');
+  const stillLost = standingEscalations(vanished).find(entry => entry.trigger === 'lease-loss')!;
+  assert.equal(stillLost.at, lossIncident.at, 'the suppressed repeat left the standing incident untouched');
+  assert.match(stillLost.reason, /lost lease epoch 1/, 'the standing incident still names the epoch the request was made against');
+  const lossRefused = await approve(approver.token, vanished, lossRequest.body.id, 'Approved against the loss I read');
+  assert.equal(lossRefused.status, 409);
+  assert.match(lossRefused.body.error, /Task revision changed \(now \d+\)/);
+  const lossListed = await ok(master.token, 'GET', `work/${vanished.key}/decisions`);
+  const lossSettled = lossListed.decisions.find((entry: any) => entry.id === lossRequest.body.id);
+  assert.equal(lossSettled.state, 'stale');
+  assert.deepEqual(lossSettled.race, { expected: lossPin, current: { ...lossPin, epoch: vanished.epoch } });
+  const freshLoss = await decide(master.token, vanished, 'resolve', { trigger: 'lease-loss', expectedRevision: vanished.revision }, 'Requested against the loss that stands now');
+  assert.equal(freshLoss.status, 200, JSON.stringify(freshLoss.body));
+  const freshLossApplied = await approve(approver.token, vanished, freshLoss.body.id, 'The recorded loss is the one reviewed');
+  assert.equal(freshLossApplied.status, 200, JSON.stringify(freshLossApplied.body));
+  assert.equal(freshLossApplied.body.state, 'applied');
+  assert.deepEqual(standingEscalations(await reload(vanished.id)), []);
 });
 
 test('integration:decision-withdraw — the master withdraws its own requested decision with a reason, and master-visible state shows it as withdrawn without blocking a re-request', async () => {

@@ -13,17 +13,33 @@ type Db = pg.PoolClient;
  * folded on top of it from the same ledger.
  */
 type TerminalState = 'stale' | 'withdrawn';
-export type DecisionRecord = Omit<Decision, 'state'> & { state: DecisionState | TerminalState; race: { expected: unknown; current: unknown } | null };
+/**
+ * What a resolve decision is pinned to: the state its resolver's judgement rests on. A
+ * heartbeat, a workspace registration or a dispatch moves the item revision without touching
+ * any of it; a second narrowing, a replacement claim, a new candidate head, or the incident's
+ * own clearing or replacement moves exactly one field. `raiseEscalation` never records a
+ * repeat of a standing trigger, so the raised set — not the trigger slot — is what tells the
+ * incident the requester saw from whatever stands there later.
+ */
+interface ResolvePin { policyRevision: number; sha: string | null; baseSha: string | null; epoch: number; escalations: { trigger: string; at: string }[] }
+const resolvePin = (work: Work): ResolvePin => ({ policyRevision: work.policyRevision, sha: work.candidate?.sha ?? null, baseSha: work.candidate?.baseSha ?? null, epoch: work.epoch, escalations: standingEscalations(work).map(entry => ({ trigger: entry.trigger, at: entry.at })) });
+// jsonb does not keep object key order, so the recorded pin compares in a canonical form.
+const canonical = (value: unknown): unknown => Array.isArray(value) ? value.map(canonical)
+  : value && typeof value === 'object' ? Object.fromEntries(Object.entries(value).sort(([a], [b]) => a < b ? -1 : 1).map(([key, entry]) => [key, canonical(entry)]))
+  : value;
+const samePin = (current: ResolvePin, pinned: ResolvePin | null | undefined) => !!pinned && JSON.stringify(canonical(current)) === JSON.stringify(canonical(pinned));
+export type DecisionRecord = Omit<Decision, 'state'> & { state: DecisionState | TerminalState; race: { expected: unknown; current: unknown } | null; pin: ResolvePin | null };
 const digest = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex');
 const findWork = async (db: Db, id: string): Promise<Work | undefined> =>
   (await db.query('SELECT document FROM work_items WHERE id::text=$1 OR document->>\'key\'=$1 FOR UPDATE', [id])).rows[0]?.document;
 async function readDecisions(db: { query: Db['query'] }, work: Work): Promise<DecisionRecord[]> {
   const rows = (await db.query("SELECT actor, kind, payload, created_at FROM events WHERE work_id=$1 AND kind LIKE 'decision.%' ORDER BY seq", [work.id])).rows;
   const events = rows.map(row => ({ kind: row.kind as string, actor: row.actor as string, at: new Date(row.created_at).toISOString(), payload: row.payload }));
-  const decisions: DecisionRecord[] = foldDecisions(work.id, events).map(decision => ({ ...decision, race: null }));
+  const decisions: DecisionRecord[] = foldDecisions(work.id, events).map(decision => ({ ...decision, race: null, pin: null }));
   for (const event of events) {
     const decision = decisions.find(entry => entry.id === event.payload?.id);
     if (!decision) continue;
+    if (event.kind === 'decision.requested') Object.assign(decision, { pin: event.payload.pin ?? null });
     if (event.kind === 'decision.stale') Object.assign(decision, { state: 'stale', outcome: event.payload.reason ?? null, race: { expected: event.payload.expected ?? null, current: event.payload.current ?? null } });
     if (event.kind === 'decision.withdrawn') Object.assign(decision, { state: 'withdrawn', outcome: event.payload.reason ?? null });
   }
@@ -84,7 +100,7 @@ export async function requestDecision(services: Services, caller: Principal, id:
     const pending = (await readDecisions(db, work!)).find(decision => decision.action === data.action && (decision.state === 'requested' || decision.state === 'approved'));
     demand(!pending, `Decision ${pending?.id} (${data.action}) is already ${pending?.state} on ${work!.key}; wait for it before requesting another`, 409);
     const decisionId = randomUUID();
-    await record(db, work!, actor.id, 'decision.requested', { id: decisionId, action: data.action, input, reason: data.reason, requester: { id: actor.id, role: actor.role }, capabilities: requiredDecisionCapabilities(data.action, input, work!) });
+    await record(db, work!, actor.id, 'decision.requested', { id: decisionId, action: data.action, input, reason: data.reason, requester: { id: actor.id, role: actor.role }, capabilities: requiredDecisionCapabilities(data.action, input, work!), ...(data.action === 'resolve' ? { pin: resolvePin(work!) } : {}) });
     const result = (await readDecisions(db, work!)).find(decision => decision.id === decisionId)!;
     await db.query('INSERT INTO receipts(actor,key,fingerprint,result) VALUES($1,$2,$3,$4)', [actor.id, key, fingerprint, JSON.stringify(result)]);
     return result;
@@ -127,11 +143,11 @@ interface StaleRace { expected: unknown; current: unknown }
 /**
  * Whether approval failed on a pin that can never match again: the item revision, the policy
  * revision or the candidate moved past the one the decision was requested against, and
- * revisions never move back; or the resolve's escalation incident is gone or has been replaced
- * by a later one of the same trigger — a slot a repeat never takes while one stands and a
- * re-raise can only ever fill after the request was made.
+ * revisions never move back; or the resolve's pin moved — the incident cleared, a second
+ * narrowing or a replacement claim behind it, or a new candidate head — where every mover
+ * moves a field revisions never move back either.
  */
-function decisionRace(decision: Pick<Decision, 'action' | 'input' | 'requestedAt'>, work: Work): StaleRace | null {
+function decisionRace(decision: DecisionRecord, work: Work): StaleRace | null {
   if (decision.action === 'requirements' && decision.input.expectedPolicyRevision !== work.policyRevision)
     return { expected: { policyRevision: decision.input.expectedPolicyRevision }, current: { policyRevision: work.policyRevision } };
   if ((decision.action === 'attest' || decision.action === 'merge') && (!work.candidate || work.candidate.sha !== decision.input.sha
@@ -141,9 +157,12 @@ function decisionRace(decision: Pick<Decision, 'action' | 'input' | 'requestedAt
   if ((decision.action === 'release' || decision.action === 'unblock') && decision.input.expectedRevision !== work.revision)
     return { expected: { revision: decision.input.expectedRevision }, current: { revision: work.revision } };
   if (decision.action === 'resolve') {
-    const standing = standingEscalations(work).find(entry => entry.trigger === decision.input.trigger);
-    return standing && Date.parse(standing.at) <= Date.parse(decision.requestedAt) ? null
-      : { expected: { trigger: decision.input.trigger, standingAt: decision.requestedAt }, current: { trigger: standing?.trigger ?? null, standingAt: standing?.at ?? null } };
+    // A decision requested before the pin existed falls back to the revision it named:
+    // revisions never move back, so a refused request can never become applicable either.
+    if (!decision.pin) return decision.input.expectedRevision !== work.revision
+      ? { expected: { revision: decision.input.expectedRevision }, current: { revision: work.revision } } : null;
+    const current = resolvePin(work);
+    return samePin(current, decision.pin) ? null : { expected: decision.pin, current };
   }
   return null;
 }
@@ -184,21 +203,19 @@ export async function approveDecision(services: Services, caller: Principal, id:
       demand(decision!.state === 'requested' || resuming, `Decision ${decision!.id} is already ${decision!.state}${decision!.approvedBy ? ` (approved by ${decision!.approvedBy})` : ''}`, 409);
       await requesterAuthority(services, db, decision!, work!);
       let precondition = resuming ? null : decisionPrecondition(decision!.action, decision!.input, work!);
-      // A resolve decision is pinned to the escalation incident it was requested against, not
-      // to the item's whole revision: a heartbeat, workspace registration or dispatch between
-      // the request and the approval moves the revision without invalidating the request. The
-      // pin holds only while the standing escalation of that trigger is the incident the
-      // requester saw — one raised no later than the request itself, since a repeat of a
-      // standing trigger is never recorded and a re-raise after a resolution is always later.
-      // A cleared or swapped incident is a pin that can never hold again, so decisionRace
-      // settles it stale below and a fresh resolve of the same action is accepted at once.
-      if (decision!.action === 'resolve' && !resuming) {
-        const standing = standingEscalations(work!).find(entry => entry.trigger === decision!.input.trigger);
-        const pinned = !!standing && Date.parse(standing.at) <= Date.parse(decision!.requestedAt);
-        precondition = pinned && precondition?.startsWith('Task revision changed') ? null
-          : pinned ? precondition
-          : `The ${decision!.input.trigger} escalation this decision was requested against is no longer the standing one; request it again`;
-      }
+      // A resolve decision is pinned to what its resolver's judgement rests on — the policy
+      // revision, the candidate head and base, the lease epoch, and the exact standing
+      // escalation set with the moment each was raised — not to the item's whole revision: a
+      // heartbeat, a workspace registration or a dispatch between the request and the approval
+      // moves the revision without invalidating the request. While the pinned state still
+      // holds, only the revision precondition is relaxed; anything else the item moved is
+      // judged as it stands. A moved pin is a refusal decisionRace settles stale below — a
+      // suppressed repeat of the trigger never grew the set and a replacement claim never
+      // touched it, so the pin, not the trigger slot, is what keeps an approval from clearing
+      // an incident the requester never saw — and a fresh resolve of the same action is
+      // accepted at once.
+      if (decision!.action === 'resolve' && !resuming && samePin(resolvePin(work!), decision!.pin)
+        && precondition?.startsWith('Task revision changed')) precondition = null;
       if (precondition) {
         // A pin the item has moved past can never hold again, so the decision would stay
         // 'requested' forever and block every re-request; settle it as stale instead.
