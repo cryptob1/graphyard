@@ -150,35 +150,36 @@ Each cycle:
    ends the worker's lease, so a submitted item's session is closed here on the next cycle; a
    lease that lapses after submission, under a `blocked` report, or after your stopped-worker
    attestation is history (`lease.expired` with its cause), never an incident;
-2. **reclaims the disk finished assignments hold** — the dependency directories of worktrees whose
+2. **decides the open worker scope requests** — a worker that needs a file outside `plannedFiles`
+   records a structured request and keeps working; the loop asks the control plane to decide it on
+   the cycle it appears, and a request the item itself already implies is applied to the live item
+   without ending its attempt (see [scope requests the loop decides](#scope-requests-the-loop-decides));
+3. **reclaims the disk finished assignments hold** — the dependency directories of worktrees whose
    assignment is delivered, superseded by a later epoch, or untouched beyond the idle bound are
    removed, before anything in the cycle asks the host for more room, on a ten-minute cadence or
    every cycle while free space is below the threshold (see [worktree disk](#worktree-disk));
-3. **reclaims the items whose sessions died** — a supervised launch fences its worker in a scope
+4. **reclaims the items whose sessions died** — a supervised launch fences its worker in a scope
    unit, and that fence outlives the session, so a dead worker's item cannot be claimed again until
    somebody settles the quarantine. Once the lease has lapsed and the grace window has run, the
    loop verifies on the registered host that the supervisor is gone — the same probe
    `master settle-containment` runs, re-evaluated by the control plane — and settles it, so the
    next step can offer the item again. A signal it cannot verify is an escalation, never a
    settlement (see [containment quarantines](#containment-quarantines));
-4. **dispatches claimable work** to a healthy worker profile, through the same launcher
+5. **dispatches claimable work** to a healthy worker profile, through the same launcher
    `master dispatch` uses: the worker claims under its own identity and the loop holds no lease.
    Ready items are offered [smallest planned scope first](#conflict-avoidance) within a priority,
    and an item whose `plannedFiles` overlap a claimed or unmerged item is held rather than
    dispatched — the loop never overrides a hold; only `master dispatch --allow-overlap` does;
-5. **requests the routine decisions** and launches an approver session for each — a standing
+6. **requests the routine decisions** and launches an approver session for each — a standing
    verdict, a base branch Graphyard could not merge in, a delivered item still fenced, and the
    merge itself where automatic merging is off (see [unattended decisions](#unattended-decisions));
-6. **applies open scope requests** — a worker asking for a file outside `plannedFiles` keeps its
-   lease while it waits, so the loop applies the purely additive revision rather than letting the
-   attempt spend its remaining time on a request nobody has read;
 7. **shepherds reviews and proofs** — the reviewer and producer sessions the control plane
    requested for each exact head are launched on the dispatcher's own cadence (see
    [automatic dispatch at submit](#automatic-dispatch-at-submit)), a request goes to the trusted
    producer workflow when automatable proof is missing and one is configured, and anything that needs
    a judgement no rule covers is surfaced in `master status` with its owner and next command;
 8. **invokes only the guarded merge** for a candidate whose gates are all green. With automatic
-   merging off it merges exactly the candidate an approver agent approved, and step 5 is what asked
+   merging off it merges exactly the candidate an approver agent approved, and step 6 is what asked
    for that approval;
 9. **verifies the deployed SHA** against what Graphyard recorded as delivered, and for a delivery
    whose policy sets `deploySmoke` records that observation on the item, requests the trusted smoke
@@ -186,8 +187,8 @@ Each cycle:
    [post-deployment smoke proof](github.md#post-deployment-smoke-proof));
 10. **records what it could act on, what it did, and how long each passage took** — stage p50/p90
     for every open stage, delivered lead time, creation-to-deployment latency, merge-to-smoke-verdict
-    post-deploy time with the failure count, and the four delivery latencies of
-    [liveness and silence](#liveness-and-silence).
+    post-deploy time with the failure count, scope-request latency with the longest request still
+    undecided, and the four delivery latencies of [liveness and silence](#liveness-and-silence).
 
 Every action lands in `master status` under `daemon`: the current cycle, its measurements, the
 deployment observation, per-profile health, recent actions, and anything still unresolved.
@@ -210,7 +211,7 @@ separation the server enforces:
 | A delivered item still fenced by a quarantine whose supervisor is gone | Requests `recover` | The approver agent |
 | Every gate green while automatic merging is off | Requests `merge` for that exact candidate, then merges once it is approved | The approver agent |
 | A lapsed quarantine this host verifies dead | Settles it with the coordinator credential, as `master settle-containment` does | The loop |
-| An open scope request from the lease that raised it | Adds the requested paths to `plannedFiles` — purely additive intent the master applies alone | The loop |
+| An open scope request from the lease that raised it | Asks the control plane to decide it; a request the item already implies is applied without ending the attempt, anything wider is refused and escalated (see [scope requests the loop decides](#scope-requests-the-loop-decides)) | The control plane |
 
 Rework and recovery carry the requester's attestation that the previous worker is stopped, so the
 loop requests neither while a lease is live or a fence still holds. It never approves what it
@@ -347,19 +348,66 @@ next cycle:
 | `run.reclaimIdleHours` | How long a worktree may sit untouched before its dependency directories count as disposable, 0.25–720; default 3 |
 | `run.diskThresholdGb` | Free space below which `master status` raises disk pressure, 0.1–10000; default 10 |
 
+### Scope requests the loop decides
+
+A worker that finds it needs a file outside its item's `plannedFiles` records a structured request
+and keeps its lease:
+
+```sh
+node "$GRAPHYARD_CLI" scope-request GY-N EPOCH docs/master-agent.md -- The guide documents the behaviour this item changes
+```
+
+That request is state, not prose: the paths, the reason, the requester and the epoch. The loop
+asks the control plane to decide it on the cycle it appears (`POST /api/work/:id/autoscope`,
+the coordinator's only scope call), and the control plane recomputes the verdict from the item
+itself — never from what the caller claims — exactly as it recomputes containment death for
+`autosettle`. Two kinds of request are **approved**, with the implication as the audited reason:
+
+- **documentation this repository requires updating when behaviour changes** — `docs/`, `AGENTS.md`
+  and `README.md` (AGENTS.md: *"Update the relevant guide under `docs/` when behavior changes"*),
+  named file by file rather than as a whole tree;
+- **source files the item's own criteria name** — a criterion that says `src/master-daemon.ts` has
+  already put that file in the item's scope, whoever writes it.
+
+The approval is a purely additive planned-files widening applied to the live item, so the attempt
+keeps its lease and its containment fence exactly as an operator widening does
+(the same rule an operator's own additive widening follows). Everything else is **refused and
+escalated with the reason**, and the item stays blocked on its `Scope request refused: …` blocker
+until an operator decides it:
+
+- a path neither the criteria nor the documentation rule imply — that is new scope, and scope is
+  the operator's to give: `graphyard master scope GY-N REASON`;
+- a request that would drop planned paths, or one that rewrites criteria or proofs — that is
+  intent, decided by an operator and approved by an independent agent:
+  `graphyard master requirements GY-N FILE REASON`.
+
+Withdrawing the request (`scope-request GY-N EPOCH -`) lifts the refusal it earned, and so does an
+operator answering it; a blocker anyone else wrote is never touched. A request whose attempt has
+lost the lease is never decided — a fresh attempt asks afresh.
+
+The loop is measured on this. `master status` reports request-to-decision `p50`/`p90` under
+`daemon.metrics.scope` with the longest still-undecided request in `scopeOpenMs`, and the loop
+escalates when it breaks either bound: a p90 above five minutes over the last ten or more
+decisions, or any request left undecided for more than fifteen minutes — which can only mean the
+loop is not running, because a running one decides on its next cycle. Before GY-85 approving one
+of these requests took a master session running a command, and GY-82's implementation sat finished
+for 647 minutes waiting for it.
+
 ### What the loop will not do
 
 The loop runs on the coordinator credential, and reads the master's own operator-agent credential
 for exactly the requests in [unattended decisions](#unattended-decisions) — requesting `rework`,
-`recover` and `merge`, and applying an additive scope widening. It never reads the approver's
-credential, never approves a decision (its own least of all), never claims a lease, never submits
-evidence, never rewrites or narrows a requirement, never releases backlog work, and refuses to
-start if its coordinator credential is also allowed to produce evidence. Besides the guarded merge,
-the facts it writes are its own deployment observation on a delivered item and the settlement of a
-quarantine it verified on this host; the smoke verdict itself comes from the workflow's producer.
-Provider exhaustion, a failing reviewer, a missing manual proof, and an unhealthy worker profile
-are all escalations, never shortcuts. A refused merge is the gate working: the loop records the
-refusal and keeps cycling.
+`recover` and `merge`. It never reads the approver's credential, never approves a decision (its own
+least of all), never claims a lease, never submits evidence, never revises a requirement, never
+releases backlog work, and refuses to start if its coordinator credential is also allowed to
+produce evidence. Deciding a scope request is no exception: the loop asks, the control plane
+decides and applies, and a widening the item does not already imply comes back refused to the loop
+exactly as it would to anyone else. Besides the guarded merge, the facts it writes are its own
+deployment observation on a delivered item and the settlement of a quarantine it verified on this
+host; the smoke verdict itself comes from the workflow's producer, never from the loop. Provider
+exhaustion, a failing reviewer, a missing manual proof, and an unhealthy worker profile are all
+escalations, never shortcuts. A refused merge is the gate working: the loop records the refusal and
+keeps cycling.
 
 An unhealthy profile — an unreadable credential, a name already busy in Herdr, or a recent failed
 launch — is routed around for a ten-minute cool-off while other profiles keep receiving work.
@@ -960,6 +1008,7 @@ The master clears blockers and adds requirements as its operator-agent identity;
 | `master merge GY-N\|--all` | Guarded merge of authorized candidates; with automatic merging off, only candidates with an approved merge decision |
 | `master autonomy [--admin-token-stdin --apply]` | Provision the master's operator-agent and approver identities and harness rules (once, at onboarding) |
 | `master create FILE REASON`, `master release GY-N REASON`, `master unblock GY-N REASON`, `master requirements GY-N FILE REASON` | The master's own non-weakening intent, as its operator-agent identity |
+| `master scope GY-N [REASON]` | Apply a scope request the loop refused, while the attempt keeps its lease; requests the item already implies are decided by the loop ([scope requests the loop decides](#scope-requests-the-loop-decides)) |
 | `master decide GY-N ACTION [JSON\|@FILE] REASON` | Request a two-party decision: `release`, `unblock`, `requirements`, `resolve`, `attest`, `merge`, `rework`, `recover`, `grant` |
 | `master decisions GY-N` | An item's decisions with requester, approver, reasons, outcome, and refusals |
 | `master approver GY-N DECISION [KIND]` | Launch the independent approver session for one decision |

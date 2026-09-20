@@ -11,6 +11,7 @@ import { masterStatusReport } from '../src/cli/master-status.js';
 import { decisionInput, masterConfigSchema, type ContainmentAssessment, type MasterConfig, type MasterRun, type WorkerProfile } from '../src/master.js';
 import { containmentGraceMs } from '../src/quarantine.js';
 import type { Work } from '../src/model.js';
+import { decideScopeRequest } from '../src/model/scope.js';
 
 /**
  * GY-84: the loop drives every routine decision unattended.
@@ -206,12 +207,20 @@ function plane(scripts: Script[], options: { hostId?: string; autoMerge?: boolea
     },
     approver: async (item, decision) => { approvers.push(`${find(item.id).key}:${decision}`); },
     decisions: async item => ({ decisions: decisions.get(find(item.id).id) ?? [] }),
-    widenScope: async item => {
+    // The control plane's side of `autoscope`: the verdict is recomputed from the item itself, and
+    // an approved request is applied and cleared without ending the attempt.
+    decideScope: async item => {
       const target = find(item.id);
       const request = target.scopeRequest!;
-      target.plannedFiles = [...new Set([...target.plannedFiles, ...request.paths])];
-      target.policyRevision += 1; target.scopeRequest = null;
+      const verdict = decideScopeRequest(target, request);
+      target.scopeDecision = { state: verdict.state, reason: verdict.reason, at: iso(), decidedBy: 'graphyard', waitedMs: Math.max(0, now - Date.parse(request.at)),
+        paths: verdict.paths, requestedBy: request.requestedBy, requestedAt: request.at };
+      if (verdict.state === 'approved') {
+        target.plannedFiles = [...new Set([...target.plannedFiles, ...verdict.paths])];
+        target.policyRevision += 1; target.scopeRequest = null;
+      } else target.scopeRequest = { ...request, decision: target.scopeDecision };
       recompute(target);
+      return target;
     },
     containment: items => Object.fromEntries(items.filter(item => item.containmentQuarantine).map(item => [item.id, {
       key: item.key, id: item.id, epoch: item.containmentQuarantine!.epoch, owner: item.containmentQuarantine!.owner, at: item.containmentQuarantine!.at,
@@ -235,7 +244,7 @@ async function cycle(state: DaemonState, master: MasterConfig, simulation: Retur
 }
 const steps = (actions: DaemonAction[]) => actions.filter(action => action.kind !== 'deployment').map(action => `${action.kind}:${action.work ?? '-'}:${action.state}`);
 
-test('integration:unattended-full-cycle — with no master session and no human input the loop drives one item from ready to delivered: it dispatches, reclaims a dead session, widens an additive scope request, requests and dispatches rework after a verdict and after a base conflict, and merges the candidate whose gates are green', async () => {
+test('integration:unattended-full-cycle — with no master session and no human input the loop drives one item from ready to delivered: it dispatches, reclaims a dead session, has an additive scope request decided, requests and dispatches rework after a verdict and after a base conflict, and merges the candidate whose gates are green', async () => {
   // Attempt 1's session dies under its fence; attempt 2 is told to change the work; attempt 3
   // hits a base branch Graphyard cannot merge in; attempt 4 asks for one more planned file and
   // then delivers. Every step between them is the loop's to take.
