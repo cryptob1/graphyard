@@ -26,10 +26,9 @@ Flags:
 - `--deployment-url URL`: JSON endpoint reporting the commit the running release serves
 - `--deployment-sha-field PATH`: Dotted field holding that commit; default `commit`
 - `--smoke-workflow FILE`: Workflow run against the live deployment for a `deploySmoke` delivery
+- **`master init` only:** `--no-auto-merge` (each merge then needs an approved [merge decision](master-agent.md#autonomy-agents-approve-agents)), `--merge-method merge|squash|rebase`, and `--cli-path PATH` (also on `init`) to record another launcher
 
 ## Worktree disk
-
-Every attempt checks the repository out again; the loop bounds both halves of the cost.
 
 - **One install, shared.** An assignment worktree lives under the repository, so the runtime's upward lookup resolves its install: nothing is created; worker's prompt names it. A worktree outside it gets a mirror of that install, a directory of links still covered by the `node_modules/` ignore rule. The install must answer for that exact head: a differing `package-lock.json` installs its own; a worktree that already has one is reported, left alone.
 - **Finished assignments give theirs back.** The loop removes dependency directories of finished assignments' worktrees every ten minutes (every cycle while free space is below the threshold) and nothing else: checkouts keep their files and Git metadata, branches every commit, workspace records are never written, so a reclaimed worktree is one `npm install` from working. `daemon.reclaim` reports what went, how much it returned, what it kept.
@@ -69,7 +68,7 @@ Every attempt checks the repository out again; the loop bounds both halves of th
 
 ### Supervisor died leaving a containment quarantine
 
-A foreground worker's supervisor settles its quarantine on verified shutdown. If it dies first the fence stays up: item undispatchable, exclusive resources reserved, requirements immutable, since expired authority is not evidence a process stopped.
+A foreground worker's supervisor settles its quarantine on verified shutdown. If it dies first the fence stays up: item undispatchable, exclusive resources reserved, requirements immutable.
 
 - **Run** `graphyard master settle-containment GY-N "reason"` on the machine that ran the worker; verifies there what [automatic containment settlement](protocol/leases.md#automatic-containment-settlement) requires; control plane re-checks all of it
 - **Same assessment:** `master status` under [`containment`](master-agent.md#containment-and-recovery)
@@ -85,7 +84,12 @@ A foreground worker's supervisor settles its quarantine on verified shutdown. If
 
 ### Merge bypass
 
-An observed merge whose gates were not satisfied is a permanent violation: with no verified merge execution the item can never complete. Never backfill evidence or re-run the gates against the merged head. Repair the access rules that allowed it; carry remaining work in a new item under the full gate set.
+An observed merge no valid execution covered — cancelled before the merge cutoff, expired, or never existing — records the violation `Merge observed without a prior authorization for this candidate` and stays out of Done; every observation re-derives that verdict. Never backfill evidence or re-run the gates against the merged head.
+
+- **Reported:** `master status` row `merged` (`at`, `sha`, `violation`, last `refusal`) with owner `master` and the recovery command, `counts.mergedUnreconciled` apart from `counts.mergeCandidates`; the loop escalates once and stops offering the item to the guarded merge
+- **Recovery, requested after the merge** — an earlier merge approval does not judge it: `master decide GY-N merge REASON`, then `master approver GY-N DECISION`. The next observation re-checks the record as of the recorded merge cutoff: merge authorization for that exact head, base and policy revision, every gate passed, no standing violation, every required proof's trusted evidence live, a GitHub observation under two minutes old
+- **Holds:** delivered on the decision, citing that snapshot's `authorizationRevision` and `evidenceAsOf` and carrying `reconciliation` (decision, requester, approver, both reasons, cutoff, judgement); ledger `merge.reconciled`
+- **Fails:** nothing is delivered; the item records `Reconciliation by decision … refused: …` with every reason, once, the ledger `merge.reconciliation.refused`, the row's attention line the refusal; re-deciding without a reason it names changes nothing. Repair the access rules that allowed the merge; carry remaining work in a new item under the full gate set
 
 ## Accepted evidence turns out to be wrong
 
@@ -97,8 +101,6 @@ Revoking leaves criteria, policy revision, review and the submitted attempt unto
 ```
 
 ## Bootstrap mode for a self-proving change
-
-An item may require a proof that does not exist yet, when the same change introduces the harness.
 
 - **Declare:** `bootstrap` declaration on that criterion in a `requirements` revision: `reason` plus `contractPaths` inside the item's own `plannedFiles`
 - **Capability:** `policy:bootstrap`

@@ -13,7 +13,7 @@ For the human operator with three minutes: what to check, and what never changes
 ## Incident decision tree
 
 - **An item is not moving.** Read the refusal; a gate naming a cause re-evaluates once it is fixed. Never weaken requirements.
-  - **In `escalations`:** a declared human session runs `graphyard resolve GY-N TRIGGER "reason"`. No AI principal can, but any `admin` settles a control-plane-raised `lease-loss` the ledger explains (`--attestation`), and explained lapses self-settle ([who may settle what](delegation.md#who-may-settle-what)).
+  - **In `escalations`:** a declared human session runs `graphyard resolve GY-N TRIGGER "reason"`. No AI principal can, except for a `lease-loss` the ledger explains ([who may settle what](delegation.md#who-may-settle-what)).
   - **Lease expired unsubmitted:** [lost worker](#lost-worker-before-submission)
   - **Needs another attempt:** [rework](#rework-a-submitted-implementation)
   - **`containment` quarantine:** [settle it](#settle-a-containment-quarantine)
@@ -45,7 +45,7 @@ Expiry does not prove the process stopped, so keep the old worktree; the next wo
 
 ### Merge bypass
 
-An observed merge with unsatisfied gates is permanent: without a verified execution the item cannot complete. Never backfill evidence; repair the access rules and open a follow-up item. [Detail](operations-reference.md#merge-bypass)
+An observed merge no valid execution covered stays out of Done until a two-party `merge` decision reconciles it. Never backfill evidence. [Detail](operations-reference.md#merge-bypass)
 
 ## Bootstrap mode
 
@@ -61,5 +61,4 @@ One criterion whose proof harness ships with it may be deferred (`policy:bootstr
 
 ## Deeper references
 
-- **[Operations reference](operations-reference.md):** every procedure in full, with [proof authority grants](operations-reference.md#proof-authority-grants), [readiness checklist](operations-reference.md#readiness-checklist-per-completion-profile), drift and scale limits
-- **Then:** [master-agent operating mode](master-agent.md), [coordination](coordination.md), [slice-lead delegation](delegation.md), [GitHub enforcement](github.md)
+[Operations reference](operations-reference.md): every procedure in full, with [proof authority grants](operations-reference.md#proof-authority-grants), [readiness checklist](operations-reference.md#readiness-checklist-per-completion-profile), drift and scale limits; then the [master guide](master-agent.md), [coordination](coordination.md), [delegation](delegation.md) and [GitHub enforcement](github.md).

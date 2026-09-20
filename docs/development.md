@@ -45,6 +45,8 @@ npm run build
 npm test
 ```
 
+- **Isolation:** each suite starts a disposable Postgres on its own offset from `GRAPHYARD_TEST_PORT` (default 15438); move the range with it, or one suite with its own variable (`GRAPHYARD_VALIDATION_TEST_PORT`, …); give each parallel worktree a distinct value, and never point tests at production
+
 ## Bootstrap boundary and contributing
 
 - Graphyard's initial implementation predates its own control plane and remains bootstrap history; new work routes through Graphyard-assigned worktrees, current-head review, protected CI, trusted acceptance evidence and guarded merges ([repository bootstrap](first-pr.md))

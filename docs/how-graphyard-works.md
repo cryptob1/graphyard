@@ -20,20 +20,17 @@ Only an independently observed authorized merge marks the item **Done**; history
 
 ## Two phases, one clear handoff
 
+![Bootstrap single-agent operation beside normal multi-agent operation, under the same gates and credential boundaries.](diagrams/bootstrap-vs-normal.svg)
+
+Text equivalent:
+
 - **Phase 1 · Bootstrap.** The human operator connects the managed repository and activates its gates while supervising a single worker-scoped implementation agent, never receiving the operator or GitHub credentials used for setup.
 - **Phase 2 · Normal operation.**
   - The operator supplies goals and the three human-only decisions.
   - An operator agent may send bounded intent.
-  - The master loop, optional slice leads and the independent reviewer and proof producers read ready work and gate state.
+  - The master loop (`coordinator`), optional slice leads (`slice-lead`) and the independent reviewer and proof producers (`producer`) read ready work and gate state.
   - The master dispatches (an invitation, not ownership) to many worker sessions.
 - **Both phases:** identical gates and credential boundaries; Herdr hosts the sessions and reports their health.
-
-![Bootstrap single-agent operation beside normal multi-agent operation: in phase 1 the human operator supervises one worker session against the control plane and GitHub; in phase 2 an operator agent, the master loop, slice leads, reviewer and proof producers surround many worker sessions, under the same gates and credential boundaries.](diagrams/bootstrap-vs-normal.svg)
-
-Text equivalent:
-
-- **Phase 1:** the operator and one worker session against the control plane and GitHub, every gate already enforced.
-- **Phase 2 adds:** the master loop (`coordinator`), slice leads (`slice-lead`), the reviewer and proof producers (`producer`) and an optional operator agent around many worker sessions.
 
 ## Four AI agent sessions
 
@@ -49,7 +46,7 @@ Text equivalent, top to bottom:
 - **Arrows up to Graphyard:** claim, heartbeat, submit, dispatch, merge request, evidence and bounded intent, each under its own credential.
 - **Arrows down to GitHub:** the worker's push and pull request, and the reviewer's approval of the exact head.
 
-Both diagrams use the [diagram legend](glossary.md#diagram-legend), also drawn inside each SVG.
+Both diagrams use the [diagram legend](glossary.md#diagram-legend).
 
 ## The boundaries that do not move
 

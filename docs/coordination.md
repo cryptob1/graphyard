@@ -59,14 +59,14 @@ graphyard master approver GY-N DECISION                            # the indepen
 
 ### Schedule by overlap, smallest scope first
 
-An item's `plannedFiles` are a soft exclusive resource against every item claimed or submitted but not merged, since whichever of two overlapping candidates lands second re-integrates the first.
+An item's `plannedFiles` are a soft exclusive resource against every item claimed or submitted but not merged.
 
 - **`master dispatch` and the durable loop:** refuse such a dispatch, naming the item ahead and the overlapping paths.
 - **Hold nothing:** two overlapping *ready* items until one is dispatched, delivered work, an expired lease.
 - **Advisory hold:** `master dispatch GY-N PROFILE --allow-overlap` dispatches anyway and records the overlap; the loop never uses it. Exclusive resources, dependencies, blockers and quarantines refuse as before.
 - **Order:** ready items dispatch smallest planned scope first within a priority: fewest root-level directory scopes, then fewest directory scopes, then fewest files, then the older item; a root-level scope is flagged `highConflict`.
 - **`master status`:** reports which open candidates git cannot merge each candidate with (`git merge-tree` over the fetched PR heads), the conflicting files per pair, and a fewest-conflicts-first sequence.
-- **Path outside scope:** the worker runs `graphyard scope-request GY-N EPOCH PATH... -- REASON` (`-` withdraws it), keeping its lease; the master approves with `graphyard master scope GY-N`. Scope never needs a free-text blocker.
+- **Path outside scope:** a [scope request](master-agent.md#scope-requests-the-loop-decides), keeping the lease; never a free-text blocker.
 
 ## Reserve explicitly shared resources
 
@@ -80,7 +80,7 @@ An item's `plannedFiles` are a soft exclusive resource against every item claime
 
 ## Refuse candidates that revert shipped code outside their scope
 
-`plannedFiles` is also the boundary of what a candidate may change, because a worker that re-resolves a file it does not own silently deletes code that already merged.
+`plannedFiles` is also the boundary of what a candidate may change.
 
 - **Classified against `plannedFiles`:** every changed file; changes inside scope pass, as do new files nobody has shipped.
 - **Every other file:** compared by blob identity with the commit the candidate is bound to; a byte-for-byte match passes, and a deletion, revert, rewrite, rename away from a shipped path, differing binary or uncomparable file is refused.
@@ -97,7 +97,7 @@ An item's `plannedFiles` are a soft exclusive resource against every item claime
 - **`docs:check`:** fails in CI when one is stale.
 - **`--manifest`:** prints their paths, how `sync` learns what to regenerate.
 - **`graphyard init` and `master init`:** render the `AGENTS.md` blocks; a test fails while the committed file differs from the templates.
-- **Regression guard:** classifies a generated file as `generated`, not an out-of-scope rewrite, learning the set from `GRAPHYARD_GENERATED_FILES` — here `GRAPHYARD_GENERATED_FILES=docs/protocol.md,docs/README.md`.
+- **Regression guard:** classifies a generated file as `generated`, not an out-of-scope rewrite, learning the set from `GRAPHYARD_GENERATED_FILES` ([variable](deployment.md#generated-files-variable)).
 - **Unset:** nothing is exempt; deleting a generated file is still a refused deletion.
 
 ## Ship in under thirty minutes
@@ -116,5 +116,3 @@ The [routine-item target](master-agent.md#pipeline-speed) rests on five mechanis
 - **`base-behind`:** a submitted head not containing the base tip; waits on Graphyard's own [base refresh](protocol/merge-queue-binding.md#base-refresh) rather than a person; never an attention item.
 - **`base-conflict`, `base-refresh-carried` and `base-refresh-required`:** what that refresh could not absorb and what it kept.
 - **`queue-binding-carried`, `queue-binding-required` and `queue-base-carried`:** reported by a queued candidate, per binding.
-
-How long the hops between `complete` and the merge may take is the [pipeline-speed target](master-agent.md#pipeline-speed); each item's own timeline is [`pipeline`](protocol/pipeline-speed.md).

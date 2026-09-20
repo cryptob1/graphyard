@@ -1178,8 +1178,11 @@ export function installationOwner(source: 'app-permissions' | 'held-jobs' | 'del
  * identity may run is routed to an agent: decisions a human used to make go to the master and
  * its independent approver through graphyard master decide.
  */
-export function workAttentionOwner(work: Work, cause: 'containment-settleable' | 'containment-grace' | 'containment' | 'session' | 'proof-gap' | 'reviewer-exhausted' | 'launch-review' | 'launch-producer' | 'base-conflict' | 'gate'): AttentionOwner {
+export function workAttentionOwner(work: Work, cause: 'containment-settleable' | 'containment-grace' | 'containment' | 'session' | 'proof-gap' | 'reviewer-exhausted' | 'launch-review' | 'launch-producer' | 'base-conflict' | 'merged-unauthorized' | 'gate'): AttentionOwner {
   const key = work.key;
+  // The merge already happened and cannot be re-run: the only way to a correct delivery record is
+  // the two-party merge decision the engine re-checks against the record at the merge cutoff.
+  if (cause === 'merged-unauthorized') return agentOwner('master', `graphyard master decide ${key} merge REASON, then graphyard master approver ${key} DECISION; the next observation re-checks the record at the merge cutoff and delivers on the approved decision, or records why it cannot`, 'approver');
   // Graphyard absorbs a moved base itself; a conflict is the one case it cannot, so the candidate
   // goes back to a worker for a fresh attempt rather than waiting for a refresh that cannot land.
   if (cause === 'base-conflict') return agentOwner('master', `graphyard master decide ${key} rework REASON, then graphyard master approver ${key} DECISION`, 'approver');
@@ -1582,7 +1585,12 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
     const refreshCarry = currentBaseRefreshCarry(work);
     const stalledLaunch = [dispatch?.review, ...(dispatch?.producers ?? [])].find(request => request?.failure);
     const retrying = [dispatch?.review, ...(dispatch?.producers ?? [])].find(request => request?.retry && request.session && ['failed', 'expired'].includes(request.session.state));
+    // An observed merge no execution authorized is not a candidate waiting for its queue tip: it
+    // is named as the violation it is, with the recovery, and never as a gate refusal.
+    const merged = mergedWithoutAuthorization(work) ? { at: work.observation!.mergedAt ?? null, sha: work.observation!.mergeSha ?? null, violation: unauthorizedMergeViolation,
+      refusal: work.violations.find(entry => entry.startsWith('Reconciliation by decision ')) ?? null } : null;
     const [attention, cause]: [string | null, Parameters<typeof workAttentionOwner>[1] | null] = containmentAttention ? containmentAttention
+      : merged ? [`${work.key} was merged on GitHub (${merged.sha?.slice(0, 12) ?? 'merge commit unknown'} at ${merged.at ?? 'an unrecorded time'}) without a valid merge execution: ${merged.violation}. It is held at the merge stage, not waiting for its queue tip; ${merged.refusal ? `the last reconciliation was refused — ${merged.refusal}` : 'a two-party merge decision requested now reconciles it if every gate passed and every required proof was live at the merge cutoff'}`, 'merged-unauthorized']
       : active && (!session || !['working', 'idle'].includes(session.state)) ? [`Assigned worker session is ${session?.state ?? 'offline'}`, 'session']
       : gaps.length ? [`No principal is authorized to produce ${gaps.join(', ')}; grant the proof name before dispatch`, 'proof-gap']
       : review?.exhausted ? [`Every configured reviewer profile is exhausted for the current candidate (${review.failedOver.map(entry => `${entry.profile}: ${entry.exhaustion}`).join(', ')})`, 'reviewer-exhausted']
@@ -1596,6 +1604,9 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
       : work.blocker || dwellMs > 3_600_000 ? [first?.reasons[0] ?? `Work has remained at ${work.stage} for more than one hour`, 'gate'] : [null, null];
     const attentionOwner = cause ? workAttentionOwner(work, cause) : null;
     return { key: work.key, title: work.title, stage: work.stage, owner: active ? work.lease!.owner : null, profile: profile?.name ?? null, session: session?.state ?? null, refusal: first ? { gate: first.name, reason: first.reasons[0] } : null, mergeable, review, dispatch, proofGaps: gaps, containment: quarantine, attention, attentionOwner, queue: placement ? queueRows.find(row => row.key === work.key) ?? null : null,
+      // Set only for an item GitHub merged with no valid execution: the merge, the violation and
+      // the last refused reconciliation, so the row reads as stuck rather than as a candidate.
+      merged,
       // What the control plane is doing, or last did, about a base branch that moved under this
       // candidate: nobody is asked for a round while `pending` is set.
       base: baseRefresh || baseConflict || refreshCarry ? { pending: baseRefresh, conflict: baseConflict,
@@ -1615,6 +1626,9 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
   const speed = pipelineSpeedSummary(snapshot.work, now);
   return { observedAt: snapshot.now,
     counts: { open: rows.length, ready: rows.filter(row => row.stage === 'ready').length, active: rows.filter(row => row.owner).length, attention: rows.filter(row => row.attention).length + installation.attention.length, proofAuthorityGaps: rows.filter(row => row.proofGaps.length).length, mergeable: rows.filter(row => row.mergeable).length, reviewsPending: reviews.pending.length, producersPending: sessions.producers.pending.length,
+      // Candidates the guarded merge could take once their gates pass, and the items GitHub already
+      // merged without a valid execution, which are never candidates and wait on a reconciliation.
+      mergeCandidates: rows.filter(row => row.stage === 'merge' && !row.merged).length, mergedUnreconciled: rows.filter(row => row.merged).length,
       dispatchRequested: rows.reduce((total, row) => total + (row.dispatch ? (row.dispatch.review ? 1 : 0) + row.dispatch.producers.length : 0), 0), dispatchRunning: rows.reduce((total, row) => total + (row.dispatch ? [row.dispatch.review, ...row.dispatch.producers].filter(request => request?.session?.state === 'pending').length : 0), 0), reviewFailover: rows.filter(row => row.review?.failedOver.length).length, queued: placements.length,
       quarantined: rows.filter(row => row.containment && row.containment.phase !== 'live').length, settleableQuarantines: rows.filter(row => row.containment?.settleable).length,
       awaitingSmoke: delivered.filter(row => row.state === 'awaiting-deployment' || row.state === 'awaiting-smoke').length, postDeployFailures: delivered.filter(row => row.state === 'delivered-with-failure').length },
@@ -2049,18 +2063,42 @@ export async function prepareWorkerLaunch(root: string, key: string, profileName
   }
 }
 
+/**
+ * One merge executor instance: the coordinator principal and the instance minted for one daemon
+ * process or one interactive `master merge` request (its request id, so a replay under
+ * `GRAPHYARD_REQUEST_ID` is the same instance). The engine records the execution owner as
+ * `principal#instance` (Engine.acquireMerge), so two executors under one credential never read
+ * each other's execution as their own: the executor presents the same owner to
+ * assertMergeCandidate and the same instance to every merge step.
+ */
+export interface MergeExecutor { principal: string; instance: string }
+export const mergeExecutionOwner = (executor: MergeExecutor) => `${executor.principal}#${executor.instance}`;
+/**
+ * The durable loop's executor instance, minted once per daemon process: an execution this loop
+ * acquires is resumed by this loop alone, and an interactive `master merge` under the same
+ * credential — or a second loop — stands down from it.
+ */
+export const daemonExecutor = (principal: string): MergeExecutor => ({ principal, instance: `daemon-${randomUUID()}` });
+/** Where an observed merge sits with no valid execution behind it: the violation the engine records. */
+export const unauthorizedMergeViolation = 'Merge observed without a prior authorization for this candidate';
+/** True for an item held at the merge stage by an observed merge no execution authorized (GY-92). */
+export const mergedWithoutAuthorization = (work: Work) => work.stage !== 'done' && !!work.observation?.merged && work.violations.includes(unauthorizedMergeViolation);
 export function assertMergeCandidate(work: Work, observedAt?: string, executionOwner?: string) {
   const age = observedAt && work.observation ? Date.parse(observedAt) - Date.parse(work.observation.at) : 0;
   const fresh = !observedAt || !!work.observation && Number.isFinite(age) && age >= 0 && age < 120_000;
   const activeMerge = !!observedAt && !!work.mergeExecution && Date.parse(work.mergeExecution.expiresAt) > Date.parse(observedAt);
+  // Only the executor instance that acquired an execution resumes it. Another instance — the
+  // daemon beside an interactive merge, or a second daemon — is not a candidate for this item
+  // while it stands, and stands down here, before any authority is acquired or cancelled.
   const resumable = activeMerge && !!executionOwner && work.mergeExecution!.owner === executionOwner && !work.mergeExecution!.fenced
     && work.mergeExecution!.sha === work.candidate?.sha && work.mergeExecution!.baseSha === work.candidate?.baseSha
     && work.mergeExecution!.policyRevision === work.policyRevision;
+  if (activeMerge && !resumable) throw new Error(`${work.key} does not have a current all-gates-passing merge authorization for this executor: merge execution ${work.mergeExecution!.id} is held by ${work.mergeExecution!.owner} until ${work.mergeExecution!.expiresAt}; this executor stands down without cancelling it`);
   // An unresolved escalation, a standing blocking lead ruling, and trusted
   // evidence whose producer has since implemented the item each refuse delivery
   // in the broker as well as in the gate, so a stale snapshot can never present
   // such an item as selectable.
-  if ((activeMerge && !resumable) || !fresh || standingEscalations(work).length || work.leadHold || evidenceIndependenceRefusals(work).length || work.stage !== 'merge' || !work.candidate || !work.mergeAuthorization || work.mergeAuthorization.sha !== work.candidate.sha || work.mergeAuthorization.baseSha !== work.candidate.baseSha || work.mergeAuthorization.policyRevision !== work.policyRevision || work.gates.some(gate => !gate.passed) || work.violations.length) throw new Error(`${work.key} does not have a current all-gates-passing merge authorization`);
+  if (!fresh || standingEscalations(work).length || work.leadHold || evidenceIndependenceRefusals(work).length || work.stage !== 'merge' || !work.candidate || !work.mergeAuthorization || work.mergeAuthorization.sha !== work.candidate.sha || work.mergeAuthorization.baseSha !== work.candidate.baseSha || work.mergeAuthorization.policyRevision !== work.policyRevision || work.gates.some(gate => !gate.passed) || work.violations.length) throw new Error(`${work.key} does not have a current all-gates-passing merge authorization`);
   return { key: work.key, revision: work.revision, pr: work.candidate.pr, sha: work.candidate.sha, baseSha: work.candidate.baseSha, policyRevision: work.policyRevision };
 }
 // Merge order is recomputed from current dependencies and conflicts on every
@@ -2188,6 +2226,15 @@ export function githubProviderDelay(verifiedTime: number, serverDelayMs: number,
   const verifiedBoundary = Math.ceil((verifiedTime - providerToDatabaseOffsetMin + 1) / 1000) * 1000;
   return Math.max(serverDelayMs, verifiedBoundary - githubTime, 0);
 }
+/**
+ * The engine's answer when a merge step was already taken on the execution: `already verified`
+ * (merge-verify) and `already committed` (merge-commit), each a confirmed refusal that tells
+ * the caller to retry with the original idempotency key. From any executor but the one holding
+ * that key, it means the execution is being driven by someone else.
+ */
+export function stepAlreadyPerformed(error: unknown) {
+  return !!(error as { confirmedRefusal?: boolean } | null)?.confirmedRefusal && /Merge execution was already (verified|committed)/.test(error instanceof Error ? error.message : String(error));
+}
 function recordedVerification(execution: MergeExecution) {
   const verifiedAt = Date.parse(execution.verifiedAt ?? '');
   if (!Number.isFinite(verifiedAt) || !execution.clockOffset) throw Object.assign(new Error('Resumed merge execution carries an incomplete verification record'), { confirmedRefusal: true });
@@ -2303,6 +2350,12 @@ export async function mergeWork(config: MasterConfig, work: Work, freshSnapshot:
     }
   }
   catch (error) {
+    // A confirmed refusal that says the step was already performed on this execution means
+    // another executor — or an earlier attempt of this one, read from a stale snapshot — is
+    // ahead of this attempt. The execution is theirs to finish: this executor stands down and
+    // leaves it intact for its owner or for observation to reconcile. It never cancels an
+    // execution it did not just acquire, whatever the refusal (GY-92).
+    if (stepAlreadyPerformed(error)) throw new Error(`${work.key}: ${error instanceof Error ? error.message : 'merge step refused'}; another executor already performed that step on merge execution ${granted.execution.id}, so this executor stands down and leaves the execution intact`);
     if (!providerStarted && verificationStarted && !verificationCompleted && !(error as any)?.confirmedRefusal) throw new Error(`${error instanceof Error ? error.message : 'Final GitHub verification failed'}; the verification outcome is unknown, so Graphyard retained execution ${granted.execution.id} for an idempotent retry`);
     if (!providerStarted) try { await cancel(latest, granted.execution, error instanceof Error ? error.message : 'GitHub merge failed before provider invocation'); }
     catch { throw new Error(`${work.key} GitHub merge failed before provider invocation and Graphyard could not cancel execution ${granted.execution.id}`); }
@@ -2317,13 +2370,17 @@ export async function mergeWork(config: MasterConfig, work: Work, freshSnapshot:
  * repeat. The interactive command and the durable loop share it so neither can drift into a
  * different merge path.
  */
-export function mergeExecutor(config: MasterConfig, snapshot: () => Promise<{ work: Work[]; now: string }>, mutation: (path: string, data: unknown, requestId?: string) => Promise<any>, executionOwner: string, outerRequest: string, run?: (command: string, args: string[]) => string) {
+export function mergeExecutor(config: MasterConfig, snapshot: () => Promise<{ work: Work[]; now: string }>, mutation: (path: string, data: unknown, requestId?: string) => Promise<any>, executor: MergeExecutor, outerRequest: string, run?: (command: string, args: string[]) => string) {
   const stepKey = (item: Work, step: string, executionId = '') => createHash('sha256').update(`${outerRequest}\0master-merge\0${item.id}\0${item.candidate?.sha ?? ''}\0${step}\0${executionId}`).digest('hex');
+  // Every step names the executor instance; the engine binds it to the principal and refuses a
+  // step — cancel above all — from any other instance, so the owner the broker resumes on is
+  // exactly the one the engine recorded.
+  const instance = executor.instance;
   return (item: Work) => mergeWork(config, item, snapshot,
-    (latest, authorization) => mutation(`work/${latest.id}/merge-acquire`, { expectedRevision: authorization.revision, sha: authorization.sha, baseSha: authorization.baseSha, policyRevision: authorization.policyRevision }, stepKey(latest, 'acquire')),
-    (latest, execution, reason) => mutation(`work/${latest.id}/merge-cancel`, { executionId: execution.id, reason }, stepKey(latest, 'cancel', execution.id)),
-    (latest, execution) => mutation(`work/${latest.id}/merge-verify`, { executionId: execution.id }, stepKey(latest, 'verify', execution.id)), run, executionOwner,
-    (latest, execution) => mutation(`work/${latest.id}/merge-commit`, { executionId: execution.id }, stepKey(latest, 'commit', execution.id)),
+    (latest, authorization) => mutation(`work/${latest.id}/merge-acquire`, { expectedRevision: authorization.revision, sha: authorization.sha, baseSha: authorization.baseSha, policyRevision: authorization.policyRevision, executor: instance }, stepKey(latest, 'acquire')),
+    (latest, execution, reason) => mutation(`work/${latest.id}/merge-cancel`, { executionId: execution.id, reason, executor: instance }, stepKey(latest, 'cancel', execution.id)),
+    (latest, execution) => mutation(`work/${latest.id}/merge-verify`, { executionId: execution.id, executor: instance }, stepKey(latest, 'verify', execution.id)), run, mergeExecutionOwner(executor),
+    (latest, execution) => mutation(`work/${latest.id}/merge-commit`, { executionId: execution.id, executor: instance }, stepKey(latest, 'commit', execution.id)),
     (latest, carried) => repostCarriedApproval(config, latest, carried, { run: run ?? ((command, args) => execFileSync(command, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 90_000 })) }));
 }
 

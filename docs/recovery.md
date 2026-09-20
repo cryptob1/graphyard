@@ -8,6 +8,7 @@ For an operator running the validation path: why a request waits, and when a rol
 `graphyard validation capacity` (`GET /api/validation/capacity`) reports:
 
 - **Per runner registration:** last dispatch poll, whether executing, requests queued and for how long, queue limit
+- **Backpressure:** a registration may set `queueLimit` (1–100, default 20); a request for a runner already holding that many queued refuses with HTTP 429 and the count — wait for dwell to drain, cancel stale requests or register another runner
 - **Every reserved protected resource:** request and attempt holding it, whether that lease is live
 - Retained-artifact usage
 - One diagnosed condition per live request

@@ -36,7 +36,7 @@ Four triggers raise an automatic, append-only escalation:
 
 | Trigger | Raised when |
 | --- | --- |
-| `lease-loss` | A worker lease lapses on an epoch with no submission, no carried `blocked` report and no stopped-worker attestation: a worker that silently vanished. A lapse the ledger explains is a `lease.expired` history entry with its cause — `submitted` (the lease ended at `complete`), `blocked-awaiting-operator` (the worker reported `blocked` and stopped to wait), or `stopped-by-attestation` (an admin attested with `rework` or `recover-containment --previous-worker-stopped`) — and raises nothing |
+| `lease-loss` | A worker lease lapses on an epoch with no submission, no carried `blocked` report and no stopped-worker attestation: a worker that silently vanished. A lapse the ledger explains is a `lease.expired` entry naming [its cause](protocol/leases.md#lease-end-and-its-cause) and raises nothing |
 | `evidence-policy-conflict` | Trusted evidence arrives for a policy revision other than the item's current one |
 | `security-concern` | A lead's `escalate` ruling names this trigger |
 | `requirement-weakening` | A requirement revision retires a criterion or narrows an existing criterion's required proofs |

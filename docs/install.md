@@ -22,10 +22,7 @@ The seven-step runbook is [onboarding](onboarding.md): deploy the server with Po
 
 ## Upgrading an existing installation
 
-Upgrading the server image never changes the GitHub App, so a release needing a new permission leaves an installed App short until its owner accepts the change. The server says so rather than failing quietly:
-
-- **The startup and five-minute [preflight](github.md#preflight-and-holds)** raises an attention item naming the missing permission and the installation page in the server log, `GET /api/status`, the dashboard and `master status`.
-- **Jobs needing that permission** are held rather than retried, avoiding a 403 back-off loop.
+Upgrading the server image never changes the GitHub App, so a release needing a new permission leaves an installed App short until its owner accepts the change; the [preflight](github.md#preflight-and-holds) names the missing permission and installation page, and holds the jobs needing it.
 
 1. Back up the database and deploy the tested image as [deployment](deployment.md#backup-upgrade-restore) describes.
 2. Read the attention items (`graphyard doctor`, the dashboard, or `graphyard master status`).

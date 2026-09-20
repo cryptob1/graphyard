@@ -5,7 +5,7 @@ For the coordinator session: what the master decides, and must never do.
 
 ## Autonomy: agents approve agents
 
-Three decisions are human-only: goals and priorities, spending money or opening third-party accounts, and issuing credentials to people. Every other names an agent that makes it and an independent agent that approves it — [who decides](glossary.md#who-decides).
+Three decisions are human-only; every other names an agent that makes it and an independent agent that approves it — [who decides](glossary.md#who-decides).
 
 - **Non-weakening intent, as its own operator-agent identity:** `master create FILE REASON`, `master release GY-N REASON`, `master unblock GY-N REASON`, `master requirements GY-N FILE REASON` (additions), `master scope GY-N [REASON]`
 - **[Two-party decisions](operator-automation.md#two-party-decisions): `release`, `unblock`, `requirements` rewrites and removals, `resolve`, `attest`, `merge`, `rework`, `recover`, `grant`:** `master decide GY-N ACTION [JSON|@FILE] REASON`, then `master approver GY-N DECISION`; the approver runs `master approve GY-N DECISION REASON`, `master decisions GY-N` reads the outcome, and `master withdraw GY-N DECISION REASON` takes back the master's own request
@@ -18,7 +18,7 @@ Keep cycling until both hold: every in-scope item is Done or has a genuinely ext
 1. `master status` after startup and every material event
 2. `master dispatch GY-N PROFILE` in `schedule.order` ([conflict avoidance](#conflict-avoidance))
 3. Route review findings and failed proofs to rework; reviews and producers launch themselves
-4. `master merge GY-N|--all` only when the exact candidate passes every gate ([guarded merges](github.md#the-guarded-merge)); a protocol mismatch refuses with `deploy main first`
+4. `master merge GY-N|--all` only when the exact candidate passes every gate ([guarded merges](github.md#the-guarded-merge)); a protocol mismatch refuses with `deploy main first`, and it stands down from an execution the loop holds
 5. One deployment verification per delivery: `master verify-deployment GY-N`; main ahead of production, or a flagged capacity variable, is a deployment incident to fix, never a ledger edit
 6. Close finished agent sessions, then return to status
 
@@ -36,7 +36,7 @@ Ordinary review findings, rework, idle workers, and proof setup are not stopping
 - **Decided:** the cycle it appears, by the control plane at the loop's request (`POST /api/work/:id/autoscope`, the coordinator's only scope call), recomputed from the item, never from the caller
 - **Approved, applied to the live item as an additive widening:** documentation the repository requires updating when behaviour changes (`docs/`, `AGENTS.md`, `README.md`, file by file), and source files the item's own criteria name
 - **Refused and escalated, the item blocked on `Scope request refused: …`:** any other path — `master scope GY-N REASON` applies it — and a request dropping planned paths or rewriting criteria or proofs — `master requirements GY-N FILE REASON`
-- **Lifted by:** withdrawing it (`scope-request GY-N EPOCH -`) or an operator's answer; a request whose attempt lost the lease is never decided
+- **Lifted by:** withdrawing it (`scope-request GY-N EPOCH -`) or an operator's answer, never touching a blocker anyone else wrote; a request whose attempt lost the lease is never decided
 - **Measured:** `daemon.metrics.scope` reports request-to-decision `p50`/`p90` and `scopeOpenMs`, the longest undecided request; the loop escalates a p90 above five minutes over ten or more decisions, or any request undecided for fifteen minutes
 
 ## Automatic dispatch at submit
@@ -70,7 +70,7 @@ A principal is who claims, reviews or proves; an *agent environment* is whose pr
 
 ## Independent review
 
-The reviewer is a separate GitHub identity: not the pull-request author, not the control-plane App. `master run` launches it for every submitted head; `master review GY-N [PROFILE]` is that launcher and the recovery path after a refused launch.
+`master run` launches [the reviewer](github.md#the-reviewer-app) for every submitted head; `master review GY-N [PROFILE]` is that launcher and the recovery path after a refused launch.
 
 ```sh
 node "$GRAPHYARD_CLI" master reviewer setup          # registers the reviewer App
@@ -78,17 +78,16 @@ node "$GRAPHYARD_CLI" master reviewer add /path/to/reviewer-profile.json
 node "$GRAPHYARD_CLI" master review GY-42 claude-reviewer
 ```
 
-- **Profile templates:** [Claude](../examples/master/claude-reviewer.json), [Cursor](../examples/master/cursor-reviewer.json), [opencode](../examples/master/opencode-reviewer.json)
-- **`approvals` ([trade-off](onboarding.md#approval-modes)):** `auto` adds the runtime's non-interactive contract (`--permission-mode bypassPermissions`, `OPENCODE_PERMISSION`); `prompt` lets you opt out and answer in the tab
+- **Profile templates and `approvals`:** [onboarding](onboarding.md#5-register-the-reviewer-identity), [approval modes](onboarding.md#approval-modes)
 - **Verdict:** posting it is granted to the reviewer role — the launch allows exactly that one call
 - **App confirmation:** the master's, through the browser flows below
 
 ## GitHub administration through the browser
 
-The master owns control-plane App permission updates, acceptance of the installation permission request they raise, and branch-protection reconciliation. GitHub offers no API for manifest confirmation, permission-request acceptance or a sudo prompt, so three flows drive the operator's own authenticated browser profile headless.
+The master owns control-plane App permission updates, acceptance of the installation permission request they raise, and branch-protection reconciliation. Where GitHub offers only a page — manifest confirmation, permission-request acceptance, a sudo prompt — three flows drive the operator's own authenticated browser profile headless.
 
 - **Commands:** `master browser app-permissions`, `master browser installation-accept`, `master browser protection`
-- **Profile:** named by `master init --browser-profile PROFILE`; the harness denies the session every direct browser command
+- **Profile:** named by `master init --browser-profile PROFILE` (`--browser-executable PATH`, requiring it, selects a non-default Chrome); the harness denies the session every direct browser command
 - **Routine reconciliation:** stays on `master protection [--apply]`
 
 | Flow | Page | What it does | Verified afterwards by |
@@ -107,7 +106,7 @@ The browser profile is the operator's identity: the master never stores, exports
 
 ## Harness permissions
 
-A harness command classifier would otherwise stop the master on its own routine commands, and Claude Code's auto mode would refuse the browser flows outright. The rules, and the per-role files launched sessions use, are in [operator automation](operator-automation.md#harness-rules-per-role); an allowlist is a prompt policy, not an authority boundary.
+The master's rules, and the per-role files launched sessions use, are in [operator automation](operator-automation.md#harness-rules-per-role); an allowlist is a prompt policy, not an authority boundary.
 
 - `master start claude`: writes project-scoped rules to the git-ignored `.claude/settings.local.json` before the session starts
 - `master harness claude [--apply]`: previews or writes them
@@ -127,7 +126,7 @@ They cover everything else the master owns, so no routine action waits:
 - **A *routine* item:** at most one rework round and no hand-off between submit and merge; every step between belongs to the control plane or the loop, leaving the master a genuine finding or a human-only decision
 - **Target:** submit→merge p50 of at most 30 minutes and p90 of at most 60 minutes, over at least ten deliveries, with a median of at most one rework round — never traded for a gate, a proof, an identity rule or a lease rule
 
-- **Per item:** each `master status` row's `speed`, from the item's own [pipeline timeline](protocol/pipeline-speed.md): `executionMs` (lease time over attempts), `waitMs` (everything else since the first claim), `reworkRounds`, `interventions`, `sinceSubmitMs` in flight, `submitToMergeMs` once delivered, `routine`.
+- **Per item:** each `master status` row's `speed`, [derived](protocol/pipeline-speed.md#derived-figures) from the item's own pipeline timeline
 - **Overall:** the top-level `speed` — `speed.submitToMerge` and `routine.submitToMerge` (nearest-rank p50/p90 and count), `reworkRounds` (median, p90, distribution), `interventions`, `execution`, `unmeasured` (deliveries predating the timeline), `items` in merge order, and `met`: `true` or `false` once ten routine deliveries are measured, `reason` naming the figure that misses, `null` until then.
 - **Outside a status read:** `scripts/measure-pipeline-speed.mjs --split GY-55,GY-64 --record DIR` reads the snapshot with any read-capable credential and prints the same arithmetic, per `--split` item for deliveries merged before and after it landed; `--since`/`--until` bound the window, `--json` prints everything. The 3-hourly measurement runs it and `manual:speed-target-met` reads it.
 - **A missed target** is routed like any finding: `items` names the slow deliveries, each row's `interventions` and `reworkRounds` say whether the time went to a hand-off or a rework round, and the [flow-analytics](flow-analytics.md) bottleneck summary which wait category held the rest.
@@ -136,4 +135,5 @@ They cover everything else the master owns, so no routine action waits:
 
 - **A quarantine whose supervisor died:** The fence stays up until someone proves the worker stopped. `containment` carries the recorded scope unit and supervisor pid, what systemd reports for it, and `containment.held`: every process still holding the fence with its pid, cmdline and cwd.
 - `settleable: true`, no `refusals`: `master settle-containment GY-N "reason"`. **Any refusal:** stop the supervisor, then attest through a two-party `rework` decision, or `recover` once delivered ([procedure](operations-reference.md#recovery-procedures))
-- **A lapsed lease:** `lease-loss` stands only for a worker that silently vanished; every other lapse is `lease.expired` with cause `submitted`, `blocked-awaiting-operator` or `stopped-by-attestation`. Reconciliation settles an explained one each tick, any `admin` settles it at once with `resolve GY-N lease-loss --attestation blocked|stopped-worker "reason"`, and everything else needs a two-party `resolve` decision or a declared human session ([who may settle what](delegation.md#who-may-settle-what))
+- **A lapsed lease:** `lease-loss` stands only for a worker that silently vanished; every other lapse is `lease.expired` with [its cause](protocol/leases.md#lease-end-and-its-cause), settled as [who may settle what](delegation.md#who-may-settle-what) lists
+- **Merged without a valid execution:** [merge bypass](operations-reference.md#merge-bypass), a two-party `merge` decision requested after the merge

@@ -37,7 +37,7 @@ For whoever runs the control plane: which variables, host and backup path to cho
 - `{ "id": "ci-proofs", "role": "producer", "runtime": "github-actions", "proofs": ["unit:*", "integration:*"], "token": "…" }` is the principal [proofs in CI](github.md#proofs-in-ci) publish through.
 - **`github-actions` runtime** makes it the CI producer: only from it is a `ciRun` binding accepted, `manual:*` and `e2e:*` refuse whatever it is granted, and every record is verified against the GitHub job.
 - **Capabilities:** no `deploymentProviders`, no `slice`, no other capability; counts toward `GRAPHYARD_MAX_REVIEWERS`.
-- **Token:** also the `GRAPHYARD_CI_PRODUCER_TOKEN` secret of the `graphyard-reporting` environment, set after restricting it to the default branch; both reporters read `GRAPHYARD_URL`. Rotation: redeploy the principal and set the secret in one change.
+- **Token:** also the `GRAPHYARD_CI_PRODUCER_TOKEN` secret of the `graphyard-reporting` environment, beside the trusted-acceptance reporter's `GRAPHYARD_PRODUCER_TOKEN`, set after restricting it to the default branch; both reporters read `GRAPHYARD_URL`. Rotation: redeploy the principal and set the secret in one change.
 
 ### Changing the roster safely
 
@@ -90,12 +90,9 @@ Work is Done when the merge is observed; whether that commit reached production 
 ## After the merge
 
 - A merged commit production never served is a **deployment incident**, recorded within five minutes: at once when the provider reports `FAILED` or `CRASHED`, after a five-minute grace period when no deployment of the merge is observed. An append-only `delivery.deployment-incident` event, visible in `production.incidents`, in `doctor` as `next` and in `master status` as `main is N commits ahead of production (serving …): <reason>`; `/healthz` stays green because the previous release is still serving. Fix the deployment, not the ledger: a start-up refusal is printed verbatim and, for a capacity limit, names the variable and value to set; revert the merge only if the change itself is wrong; when a deployment containing it serves, the watch appends `delivery.deployment-recovered`.
-- `master merge` refusing with `server runs <sha>, CLI expects <sha>: deploy main first` means the CLI speaks a newer merge protocol than the deployed server.
 - A delivery whose trusted smoke proof failed stays Done, marked **delivered with failure** and listed under `delivered` with `rollback` guidance naming the serving commit, the merge commit and the base branch: roll the deployment back to the last release whose smoke proof passed, or revert the merge through a new item under the same gates. Never backfill a pass and never delete the failure: a later run at the same deployed commit may supersede the verdict; if the release moved on before the smoke ran, the item stays `awaiting-smoke`. Graphyard v0.1 executes no rollbacks or reverts itself.
 
 ## Backup, upgrade, restore
-
-The ledger is in Postgres, so backing up the image is insufficient.
 
 - **Physical or provider backups:** scheduled database backups, managed snapshots or `pg_dump` with a matching client, restore-verified in a separate project.
 - **Logical backups:** `graphyard db backup FILE` on the control-plane host writes every ledger table from one consistent snapshot, the serial sequences ordering work, events, grant history and observations, the schema generation and a digest over it all; `graphyard db verify FILE` checks a file without touching a database and `graphyard db restore FILE` loads one into an empty database. The documented upgrade, the Helm CronJob and the release verification use that format.

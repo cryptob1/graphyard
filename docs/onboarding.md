@@ -86,7 +86,7 @@ node "$GRAPHYARD_CLI" master environments --apply                        # gener
 
 ### Approval modes
 
-A launched session that stops to ask "run everything?" cannot start without a keypress, so every launch profile carries `approvals`:
+Every launch profile carries `approvals`, so no launch waits on a keypress:
 
 - `auto` (default) adds that runtime's non-interactive startup contract;
 - `prompt` adds nothing: a human answers in the session tab.

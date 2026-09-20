@@ -57,7 +57,7 @@ Each gets:
 
 - **Mounts:** bundle read-only at `/oracle`, writable `/output`, `noexec,nosuid,nodev` tmpfs working directory, read-only root filesystem
 - **Confinement:** `--cap-drop=ALL`, `no-new-privileges`, swap disabled, bounded memory, CPU and PIDs, non-root `runAsUser`
-- **Environment:** constructed, never inherited; no Graphyard, GitHub, cloud, database, `NODE_*` or `npm_*` variable reaches it; only approved material's `TEST_ACCOUNT_*` entries pass through the `docker` process's environment
+- **Environment:** constructed, never inherited: `GRAPHYARD_PHASE`, `GRAPHYARD_REPORT_FILE` (where the reporter writes) and, in `execute` only, `GRAPHYARD_TARGET_URL`, the approved target specs must read — a configuration hardcoding a `baseURL` or reaching the network during `enumerate` is unusable. No credential, GitHub, cloud, database, `NODE_*` or `npm_*` variable reaches it; only approved material's `TEST_ACCOUNT_*` entries pass through the `docker` process's environment
 - **Container output:** discarded
 
 Preflight happens **before the acknowledgement**, provisions the boundary, refuses unless:

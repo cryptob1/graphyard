@@ -30,7 +30,7 @@ Every permission a Graphyard App identity holds is declared once, in `src/github
 | Pull requests | Read and write | read pull requests and reviews (pull request observation); post review request comments (review dispatch) |
 
 - **Reviewer App:** never granted Contents: write, Checks, or Administration, so it cannot write code, publish the required check or read protection
-- **Workers:** worker identities are not Apps at all: ordinary GitHub accounts that push branches and open pull requests
+- **Workers:** not Apps: ordinary GitHub accounts that push branches and open pull requests
 
 | Permission | Access | Needed to |
 | --- | --- | --- |
@@ -58,14 +58,12 @@ GitHub offers no API for changing a registered App's permissions; every installa
 ## The reviewer App
 
 - Independent review uses a **second, separate App**: control-plane App observes and publishes the gate check, reviewer App reads code and posts reviews; binding the control-plane App as reviewer is refused.
-- **Register:** `master reviewer setup [--name NAME]`, or by hand with Metadata read, Contents read, Pull requests write and Issues read.
+- **Register:** `master reviewer setup [--name NAME] [--deployment HTTPS_ORIGIN] [--port PORT]` (default the master's URL and 4312) or by hand with [its permissions](#app-permissions).
 - **Bind an existing App:** `master reviewer bind FILE --key-stdin`, refusing an installation that can write code, checks or administration.
 - Each `master review GY-N` mints a repository-scoped token with `contents: read` and `pull_requests: write` for at most **one hour**, refuses one reporting longer life or broader permissions, removes it when the verdict closes the session.
 - A review by `SLUG[bot]` on the exact head is an ordinary approval satisfying the native requirement and Graphyard's gate, both still requiring current head and an author other than the reviewer.
 
 ### Quota failover
-
-Provider exhaustion is a capacity fact, not an approval.
 
 - **Trigger:** `verdict:usage-limit` reply, or no verdict within the profile's `timeoutSeconds`
 - **Record:** `review.failover` event — profile, runtime, reason, candidate, policy revision, comment ID, next profile
@@ -104,7 +102,9 @@ Graphyard reads classic protection, refusing its merge gate unless these setting
 - **Rechecked immediately before the GitHub call:** every gate and its evidence, head, base, draft state and mergeability, CI producer identity and current-head review, protection and the App-owned check including `strict` off, short-lived single-use merge execution
 - **Base tip:** read from `refs/heads/<base>`, never cached `baseRefOid`
 - **No administrative bypass:** Done follows only an independently observed matching merge
-- **Protocol mismatch:** refuses with `server runs <sha>, CLI expects <sha>: deploy main first`
+- **Protocol mismatch:** the CLI speaks a newer merge protocol than the deployed server, refusing with `server runs <sha>, CLI expects <sha>: deploy main first`
+- **One executor per execution:** the executor instance that acquired an execution owns it — the loop is one instance per process, each `master merge` one named by its request id, so a replay under the same `GRAPHYARD_REQUEST_ID` resumes its own; the engine records the owner as `principal#instance` and refuses `merge-verify`, `merge-commit` and `merge-cancel` from any other, even under the same credential
+- **Stand-down:** `master merge GY-N` beside a running loop is safe. An executor finding an execution another instance holds refuses before acquiring anything — `GY-N does not have a current all-gates-passing merge authorization for this executor: merge execution … is held by graphyard-master#daemon-… until …; this executor stands down without cancelling it` — as does a mid-flight `Merge execution was already verified` or `already committed` refusal. Never retry it against the holder or resolve it by hand: an unfinished execution lapses at expiry, reconciliation clears it, and the next cycle attempts afresh
 
 ## Merge queue
 

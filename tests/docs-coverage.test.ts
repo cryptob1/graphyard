@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import { renderHelp } from '../src/cli/index.js';
 // @ts-expect-error Dependency-free documentation script.
-import { capabilities, cliSurface, documentation, documentedRoutes, expandPath, gateNames, httpRoutes, missing, proofFamilies, refusalTriggers, serverEnvironment, surface, workCommands } from '../scripts/docs-coverage.mjs';
+import { capabilities, cliSurface, documentation, documentedRoutes, expandPath, gateNames, httpRoutes, missing, parsedFlags, proofFamilies, refusalTriggers, serverEnvironment, sourceEnvironment, surface, workCommands } from '../scripts/docs-coverage.mjs';
 
 /**
  * Condensing the guides may remove repetition and rationale, never a name a reader has to be
@@ -16,7 +16,7 @@ import { capabilities, cliSurface, documentation, documentedRoutes, expandPath, 
 const root = fileURLToPath(new URL('..', import.meta.url));
 const help = renderHelp();
 
-test('integration:docs-coverage every CLI command and flag, server environment variable, capability, gate, proof family, refusal trigger, work command and HTTP route appears in the documentation', () => {
+test('integration:docs-coverage every CLI command and flag, server and source environment variable, capability, gate, proof family, refusal trigger, work command and HTTP route appears in the documentation', () => {
   const gaps = missing(root, help);
   assert.deepEqual(gaps, [], gaps.join('\n'));
   assert.ok(surface(root, help).length >= 150, 'the extracted surface is the real one, not an empty list');
@@ -57,6 +57,34 @@ test('integration:docs-coverage HTTP routes are extracted from the route modules
   const stripped = documentation(root).map((page: { path: string; text: string }) => ({ ...page, text: page.text.replace(/POST \/api\/intake|POST \/api\/work\/:id\/lead-ruling/g, '') }));
   const lost = routes.filter((route: string) => !documentedRoutes(stripped).has(route));
   assert.deepEqual(lost, ['POST /api/intake', 'POST /api/work/*/lead-ruling']);
+});
+
+test('integration:docs-coverage options the help omits and variables the server never reads are extracted, and losing one is reported', () => {
+  // `parseArgs` accepts these; the rendered help prints none of them.
+  const flags = parsedFlags(root);
+  for (const flag of ['--browser-executable', '--merge-method', '--no-auto-merge', '--cli-path']) {
+    assert.ok(flags.includes(flag), `the CLI parses ${flag}`);
+    assert.ok(!cliSurface(help).flags.includes(flag), `${flag} is reachable only through the parsed options`);
+  }
+  // Read by the CLI, a runner container or a test run: outside the server's import graph.
+  const variables = sourceEnvironment(root), server = serverEnvironment(root);
+  for (const name of ['GRAPHYARD_REQUEST_ID', 'GRAPHYARD_HOST_ID', 'GRAPHYARD_TARGET_URL', 'GRAPHYARD_TEST_PORT']) {
+    assert.ok(variables.includes(name), `source names ${name}`);
+    assert.ok(!server.includes(name), `${name} is out of the server's reach`);
+  }
+  assert.ok(variables.every((name: string) => /^GRAPHYARD_[A-Z0-9]+(_[A-Z0-9]+)*$/.test(name)), 'a prefix the code builds names from is not a variable');
+
+  // The losses the reviewer of GY-80 caught by hand: stripped from every page, each is reported.
+  const lost = ['GRAPHYARD_REQUEST_ID', 'GRAPHYARD_HOST_ID', 'GRAPHYARD_TARGET_URL', 'GRAPHYARD_TEST_PORT', '--browser-executable'];
+  const stripped = documentation(root).map((page: { path: string; text: string }) => ({ ...page, text: lost.reduce((text, name) => text.replaceAll(name, ''), page.text) }));
+  const gaps = missing(root, help, stripped);
+  for (const name of lost) assert.ok(gaps.some((gap: string) => gap.includes(` ${name} is documented nowhere`)), `${name} is reported once no page names it`);
+
+  // A longer name does not document a shorter one: `--deployment-url` is not `--deployment`.
+  const prefixed = missing(root, help, [{ path: 'only.md', text: '`--deployment-url` and `GRAPHYARD_TOKEN_FILE`' }]);
+  assert.ok(prefixed.includes('cli flag --deployment is documented nowhere'));
+  assert.ok(prefixed.includes('environment variable GRAPHYARD_TOKEN is documented nowhere'));
+  assert.ok(!prefixed.includes('cli flag --deployment-url is documented nowhere'));
 });
 
 test('integration:docs-coverage the generated index pages stay consistent with the pages they list', async () => {

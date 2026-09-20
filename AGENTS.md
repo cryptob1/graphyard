@@ -4,7 +4,7 @@ For an agent changing this repository: which rules bind every change, and which 
 
 Keep the control plane independent of agent runtimes: Herdr is the first integration, not the source of ownership truth. The initial MVP is a single-agent bootstrap under the operator's supervision: launch no other agents for bootstrap work. Once Graphyard's own repository is connected and its gates are active, claim subsequent work in Graphyard and use its assigned worktree.
 
-Autonomy is the default — agents act without asking and agents approve agents. The human operator keeps three decisions: goals and priorities, spending money or opening third-party accounts, and issuing credentials to people. Every other decision names the agent role that makes it and the independent role that approves it (`docs/glossary.md#who-decides`); the master applies non-weakening intent with its own operator-agent identity and requests the rest with `graphyard master decide`, for a separate approver agent. The approver is never the requester, never an implementer, and never the producer of evidence it approves. Never ask a human to run a command an agent identity may run.
+Autonomy is the default ([who decides](docs/glossary.md#who-decides)): the approver is never the requester, never an implementer, and never the producer of evidence it approves.
 
 Domain mutations must be transactional, append history, and enforce principal identity and lease epochs. Never add a client-controlled lifecycle-state endpoint, never grant implementation workers trusted evidence-producer credentials, and never weaken a task's requirements to make its implementation pass.
 

@@ -63,4 +63,4 @@ Endpoints:
 
 ## Pipeline speed
 
-How long the hops between `complete` and the merge may take, what `master status` reports per item and overall, and how the measurement script records it are in the [master guide](master-agent.md#pipeline-speed).
+The `complete`-to-merge target, what `master status` reports and the measurement script: [master guide](master-agent.md#pipeline-speed).

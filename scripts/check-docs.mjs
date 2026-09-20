@@ -27,7 +27,7 @@ const generatedIndexes = [
 
 For an integration author: which protocol page answers the call you are about to make.
 
-- **Authentication:** every endpoint except \`/healthz\` requires \`Authorization: Bearer TOKEN\`; API credentials are not Git credentials
+- **Authentication:** every endpoint except \`/healthz\` and the HMAC-verified webhook requires \`Authorization: Bearer TOKEN\`; API credentials are not Git credentials
 - **Transport:** HTTPS for remote machines
 
 One topic per page; this index is generated in full.`,

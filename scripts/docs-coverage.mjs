@@ -1,7 +1,8 @@
 // The documented surface. Condensing the guides may remove repetition and rationale, never a
-// name a reader has to be able to find: every CLI command and flag, every environment variable
-// the server reads, every operator-agent capability, gate, proof family and refusal trigger,
-// every work command and every HTTP route the server registers.
+// name a reader has to be able to find: every CLI command and flag, including the options the
+// CLI parses but its help omits, every environment variable the server reads and every
+// `GRAPHYARD_*` variable any source module names, every operator-agent capability, gate, proof
+// family and refusal trigger, every work command and every HTTP route the server registers.
 //
 // Each set is extracted from the code that defines it rather than from a list kept by hand, so
 // a surface added in source fails this check until the documentation names it.
@@ -31,6 +32,35 @@ export function cliSurface(help) {
   }).filter(Boolean))];
   const flags = [...new Set([...help.matchAll(/--[a-z][a-z0-9-]*/g)].map(match => match[0]))];
   return { commands, flags };
+}
+
+/** Every TypeScript module under a source directory. */
+function sourceFiles(root, directory) {
+  return readdirSync(join(root, directory), { withFileTypes: true }).flatMap(entry => entry.isDirectory() ? sourceFiles(root, join(directory, entry.name))
+    : entry.name.endsWith('.ts') ? [join(directory, entry.name)] : []).sort();
+}
+
+/**
+ * Option names the CLI hands to `parseArgs`. The help prints the common flags only, so an option
+ * a command accepts without advertising (`master init --browser-executable`) is found here.
+ */
+export function parsedFlags(root = repositoryRoot) {
+  const flags = new Set();
+  for (const path of sourceFiles(root, 'src/cli'))
+    for (const match of read(root, path).matchAll(/(?:'([a-z][a-z0-9-]*)'|\b([a-z][a-zA-Z0-9]*))\s*:\s*\{\s*type:\s*'(?:string|boolean)'/g)) flags.add(`--${match[1] ?? match[2]}`);
+  return [...flags].sort();
+}
+
+/**
+ * Every `GRAPHYARD_*` variable a source module names, whoever reads it: the CLI, a runner
+ * container, a launched session or a test run are out of the server's import graph. A name
+ * ending in `_` is a prefix the code builds names from, not a variable.
+ */
+export function sourceEnvironment(root = repositoryRoot) {
+  const names = new Set();
+  for (const path of sourceFiles(root, 'src'))
+    for (const match of read(root, path).matchAll(/\bGRAPHYARD_[A-Z0-9]+(?:_[A-Z0-9]+)*\b(?!_)/g)) names.add(match[0]);
+  return [...names].sort();
 }
 
 /** Every module the server process can reach, following relative imports from its entry point. */
@@ -143,8 +173,8 @@ export function documentedRoutes(pages) {
 export function surface(root = repositoryRoot, help) {
   return [
     ...cliSurface(help).commands.map(name => ({ kind: 'cli command', name })),
-    ...cliSurface(help).flags.map(name => ({ kind: 'cli flag', name })),
-    ...serverEnvironment(root).map(name => ({ kind: 'environment variable', name })),
+    ...[...new Set([...cliSurface(help).flags, ...parsedFlags(root)])].map(name => ({ kind: 'cli flag', name })),
+    ...[...new Set([...serverEnvironment(root), ...sourceEnvironment(root)])].map(name => ({ kind: 'environment variable', name })),
     ...capabilities(root).map(name => ({ kind: 'capability', name })),
     ...gateNames(root).map(name => ({ kind: 'gate', name })),
     ...proofFamilies(root).map(name => ({ kind: 'proof family', name: `${name}:` })),
@@ -154,11 +184,16 @@ export function surface(root = repositoryRoot, help) {
   ];
 }
 
+/** Whether a page spells a flag or variable whole: `--deployment-url` does not document `--deployment`. */
+const spelled = (text, name) => new RegExp(`(?<![A-Za-z0-9_-])${name}(?![A-Za-z0-9_-])`).test(text);
+
 /** Every surface entry no page mentions, with the kind that defines it. */
-export function missing(root = repositoryRoot, help) {
-  const pages = documentation(root), routes = documentedRoutes(pages);
+export function missing(root = repositoryRoot, help, pages = documentation(root)) {
+  const routes = documentedRoutes(pages);
+  const mentioned = entry => entry.kind === 'http route' ? routes.has(entry.name)
+    : pages.some(page => entry.kind === 'cli flag' || entry.kind === 'environment variable' ? spelled(page.text, entry.name) : page.text.includes(entry.name));
   return surface(root, help)
-    .filter(entry => entry.kind === 'http route' ? !routes.has(entry.name) : !pages.some(page => page.text.includes(entry.name)))
+    .filter(entry => !mentioned(entry))
     .map(entry => `${entry.kind} ${entry.name} is documented nowhere`);
 }
 
