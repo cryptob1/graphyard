@@ -98,7 +98,7 @@ setfacl -d -m g:graphyard-boundary:rx /srv/graphyard/attempts
 
 ## The host attestor
 
-Execution happens inside a small [host-attestor service](runner-attestor.md) under an OS identity the implementation worker cannot act as: holds the signing key, owns the approved bundle and every attempt boundary, runs both containers, re-reads the dispatch authority, signs only what its own supervision observed.
+Execution happens inside a small [host-attestor service](runner-attestor.md) under an OS identity the implementation worker cannot act as ([identities](#the-three-identities)): it re-reads the dispatch authority and signs only what its own supervision observed.
 
 ## Collect, verify and publish
 

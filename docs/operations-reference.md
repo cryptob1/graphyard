@@ -30,8 +30,8 @@ Flags:
 
 ## Worktree disk
 
-- **One install, shared.** An assignment worktree lives under the repository, so the runtime's upward lookup resolves its install: nothing is created; worker's prompt names it. A worktree outside it gets a mirror of that install, a directory of links still covered by the `node_modules/` ignore rule. The install must answer for that exact head: a differing `package-lock.json` installs its own; a worktree that already has one is reported, left alone.
-- **Finished assignments give theirs back.** The loop removes dependency directories of finished assignments' worktrees every ten minutes (every cycle while free space is below the threshold) and nothing else: checkouts keep their files and Git metadata, branches every commit, workspace records are never written, so a reclaimed worktree is one `npm install` from working. `daemon.reclaim` reports what went, how much it returned, what it kept.
+- **One install, shared.** An assignment worktree under the repository resolves its install by upward lookup: nothing is created; the worker's prompt names it. A worktree outside it gets a mirror of that install, a directory of links still covered by the `node_modules/` ignore rule. The install must answer for that exact head: a differing `package-lock.json` installs its own; a worktree that already has one is reported, left alone.
+- **Finished assignments give theirs back.** The loop removes dependency directories of finished assignments' worktrees every ten minutes (every cycle while free space is below the threshold) and nothing else — files, Git metadata, branches and workspace records stay — so a reclaimed worktree is one `npm install` from working. `daemon.reclaim` reports what went, how much it returned, what it kept.
 
 | Disposition | What the loop does |
 | --- | --- |
@@ -68,7 +68,7 @@ Flags:
 
 ### Supervisor died leaving a containment quarantine
 
-A foreground worker's supervisor settles its quarantine on verified shutdown. If it dies first the fence stays up: item undispatchable, exclusive resources reserved, requirements immutable.
+If a foreground worker's supervisor dies before settling its quarantine, the fence stays up: item undispatchable, exclusive resources reserved, requirements immutable.
 
 - **Run** `graphyard master settle-containment GY-N "reason"` on the machine that ran the worker; verifies there what [automatic containment settlement](protocol/leases.md#automatic-containment-settlement) requires; control plane re-checks all of it
 - **Same assessment:** `master status` under [`containment`](master-agent.md#containment-and-recovery)

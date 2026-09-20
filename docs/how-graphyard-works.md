@@ -50,7 +50,6 @@ Both diagrams use the [diagram legend](glossary.md#diagram-legend).
 ## The boundaries that do not move
 
 - **Graphyard is the source of ownership and progression truth.** Runtime health is not ownership.
-- **Gates decide progression:** CI, trusted evidence, independent review and the merge gate.
 - **Workers stay untrusted.** They never receive operator, scoped operator-agent, coordinator or trusted evidence-producer credentials.
 - **There is no shortcut.** No client-controlled lifecycle-state endpoint and no administrative merge bypass.
 
@@ -59,7 +58,7 @@ Both diagrams use the [diagram legend](glossary.md#diagram-legend).
 - **Graphyard answers:** who owns the work at which epoch, what the requirements are, which commit is the candidate, whether the gates passed and the merge was authorized and observed.
 - **Herdr answers:** whether the session is alive, where it runs, whether the prompt reached it, whether it needs attention.
 
-Neither answers the other's question ([the eight distinctions](glossary.md#the-eight-distinctions)).
+Neither answers the other's ([the eight distinctions](glossary.md#the-eight-distinctions)).
 
 ## When a gate says no
 
@@ -67,9 +66,4 @@ Neither answers the other's question ([the eight distinctions](glossary.md#the-e
 2. Fix the underlying cause: an unfinished dependency, an expired lease, a changed commit, a missing review, a failed check or missing proof.
 3. Let the same gate evaluate again.
 
-Requirements are never weakened to make a candidate pass. Go deeper only when needed:
-
-- [operations](operations.md): the recipe
-- [coordination](coordination.md): requirements and overlap
-- [GitHub enforcement](github.md): the checks and the merge
-- [agent protocol](protocol.md): the exact commands
+Requirements are never weakened to make a candidate pass. Go deeper: [operations](operations.md) recipes, [coordination](coordination.md), [GitHub enforcement](github.md), [agent protocol](protocol.md) commands.

@@ -33,4 +33,4 @@ Every window, bucket and interval uses the repository instant; older deliveries 
 
 ## Bounds and states
 
-`GET /api/shipping-pulse` is authenticated and not offered to operator agents, whose scoped API cannot serve a repository-wide aggregate, so its navigation entry is hidden, not leading to a denial.
+`GET /api/shipping-pulse` is authenticated and not offered to operator agents, whose scoped API serves no repository-wide aggregate: its navigation entry is hidden.

@@ -30,7 +30,7 @@ Every permission a Graphyard App identity holds is declared once, in `src/github
 | Pull requests | Read and write | read pull requests and reviews (pull request observation); post review request comments (review dispatch) |
 
 - **Reviewer App:** never granted Contents: write, Checks, or Administration, so it cannot write code, publish the required check or read protection
-- **Workers:** not Apps: ordinary GitHub accounts that push branches and open pull requests
+- **Workers:** worker identities are not Apps at all: ordinary GitHub accounts that push branches and open pull requests
 
 | Permission | Access | Needed to |
 | --- | --- | --- |
@@ -58,7 +58,7 @@ GitHub offers no API for changing a registered App's permissions; every installa
 ## The reviewer App
 
 - Independent review uses a **second, separate App**: control-plane App observes and publishes the gate check, reviewer App reads code and posts reviews; binding the control-plane App as reviewer is refused.
-- **Register:** `master reviewer setup [--name NAME] [--deployment HTTPS_ORIGIN] [--port PORT]` (default the master's URL and 4312) or by hand with [its permissions](#app-permissions).
+- **Register:** `master reviewer setup [--name NAME] [--deployment HTTPS_ORIGIN] [--port PORT]` (default the master's URL and 4312), or by hand with Metadata read, Contents read, Pull requests write and Issues read.
 - **Bind an existing App:** `master reviewer bind FILE --key-stdin`, refusing an installation that can write code, checks or administration.
 - Each `master review GY-N` mints a repository-scoped token with `contents: read` and `pull_requests: write` for at most **one hour**, refuses one reporting longer life or broader permissions, removes it when the verdict closes the session.
 - A review by `SLUG[bot]` on the exact head is an ordinary approval satisfying the native requirement and Graphyard's gate, both still requiring current head and an author other than the reviewer.

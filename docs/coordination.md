@@ -55,7 +55,7 @@ graphyard master approver GY-N DECISION                            # the indepen
 - **`plannedFiles`:** exact repository-relative paths or directory prefixes ending in `/`, `/*` or `/**`, all including descendants.
 - **Not inferred:** globs, historical renames and semantic dependencies.
 - **Compared:** planned paths and observed pull-request files, against other unfinished ready, assigned or submitted work.
-- **Overlap never blocks a claim:** two compatible edits may legitimately touch one file.
+- **Overlap never blocks a claim.**
 
 ### Schedule by overlap, smallest scope first
 
@@ -97,7 +97,7 @@ An item's `plannedFiles` are a soft exclusive resource against every item claime
 - **`docs:check`:** fails in CI when one is stale.
 - **`--manifest`:** prints their paths, how `sync` learns what to regenerate.
 - **`graphyard init` and `master init`:** render the `AGENTS.md` blocks; a test fails while the committed file differs from the templates.
-- **Regression guard:** classifies a generated file as `generated`, not an out-of-scope rewrite, learning the set from `GRAPHYARD_GENERATED_FILES` ([variable](deployment.md#generated-files-variable)).
+- **Regression guard:** classifies a generated file as `generated`, not an out-of-scope rewrite, learning the set from `GRAPHYARD_GENERATED_FILES` — here `GRAPHYARD_GENERATED_FILES=docs/protocol.md,docs/README.md`.
 - **Unset:** nothing is exempt; deleting a generated file is still a refused deletion.
 
 ## Ship in under thirty minutes

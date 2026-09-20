@@ -63,7 +63,7 @@ Each `POST` but the webhook requires `Idempotency-Key` and replays the original 
 
 ## CLI environment
 
-- `GRAPHYARD_URL`, and `GRAPHYARD_TOKEN` or the credential file `GRAPHYARD_TOKEN_FILE` names: override the saved connection
+- `GRAPHYARD_URL`, `GRAPHYARD_TOKEN` or the file `GRAPHYARD_TOKEN_FILE` names: override the saved connection
 - `GRAPHYARD_REQUEST_ID`: the command's `Idempotency-Key`, otherwise generated; set it only to retry the exact same command after a network failure. Heartbeats — automatic ones even when it is set — and new polling attempts use fresh keys
 - `GRAPHYARD_HOST_ID`: set when hostnames are not globally unique; default the connection's `--host-id`, then the hostname
 - **Session markers, set by launchers only:** `GRAPHYARD_MASTER=1` (`master approve` refuses under it), `GRAPHYARD_APPROVER=1`, `GRAPHYARD_REVIEW` and `GRAPHYARD_PRODUCER` (the `GY-N@SHA` answered), `GRAPHYARD_HERDR_AGENT_KIND` (with `HERDR_ENV=1`, `watch` launches contained in the foreground); worker launches strip `GRAPHYARD_TOKEN`, `GRAPHYARD_MASTER_TOKEN` and `GRAPHYARD_REQUEST_ID`

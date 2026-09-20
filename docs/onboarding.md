@@ -42,7 +42,7 @@ node "$GRAPHYARD_CLI" master start codex     # or: master start claude
 
 ## 5. Register the reviewer identity
 
-Independent review needs a GitHub identity, neither the pull-request author nor the control-plane App ([the reviewer App](github.md#the-reviewer-app)).
+Independent review needs [the reviewer App](github.md#the-reviewer-app), a second GitHub identity.
 
 - `master reviewer setup`: open the printed local URL, confirm the App, install it on the managed repository only. That click and your provider logins are the only hand-run steps; its key and IDs stay outside every worktree at mode 0600.
 - `master reviewer bind FILE --key-stdin` binds an App you already created: put its IDs in a secret-free file, send the PEM on stdin.

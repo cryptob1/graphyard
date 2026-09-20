@@ -5,7 +5,7 @@ For the coordinator session: what the master decides, and must never do.
 
 ## Autonomy: agents approve agents
 
-Three decisions are human-only; every other names an agent that makes it and an independent agent that approves it — [who decides](glossary.md#who-decides).
+Three decisions are human-only: goals and priorities, spending money or opening third-party accounts, and issuing credentials to people. Every other names an agent that makes it and an independent agent that approves it — [who decides](glossary.md#who-decides).
 
 - **Non-weakening intent, as its own operator-agent identity:** `master create FILE REASON`, `master release GY-N REASON`, `master unblock GY-N REASON`, `master requirements GY-N FILE REASON` (additions), `master scope GY-N [REASON]`
 - **[Two-party decisions](operator-automation.md#two-party-decisions): `release`, `unblock`, `requirements` rewrites and removals, `resolve`, `attest`, `merge`, `rework`, `recover`, `grant`:** `master decide GY-N ACTION [JSON|@FILE] REASON`, then `master approver GY-N DECISION`; the approver runs `master approve GY-N DECISION REASON`, `master decisions GY-N` reads the outcome, and `master withdraw GY-N DECISION REASON` takes back the master's own request
@@ -78,13 +78,14 @@ node "$GRAPHYARD_CLI" master reviewer add /path/to/reviewer-profile.json
 node "$GRAPHYARD_CLI" master review GY-42 claude-reviewer
 ```
 
-- **Profile templates and `approvals`:** [onboarding](onboarding.md#5-register-the-reviewer-identity), [approval modes](onboarding.md#approval-modes)
+- **Profile templates:** [Claude](../examples/master/claude-reviewer.json), [Cursor](../examples/master/cursor-reviewer.json), [opencode](../examples/master/opencode-reviewer.json)
+- **`approvals` ([trade-off](onboarding.md#approval-modes)):** `auto` adds the runtime's non-interactive contract (`--permission-mode bypassPermissions`, `OPENCODE_PERMISSION`); `prompt` lets you opt out and answer in the tab
 - **Verdict:** posting it is granted to the reviewer role — the launch allows exactly that one call
 - **App confirmation:** the master's, through the browser flows below
 
 ## GitHub administration through the browser
 
-The master owns control-plane App permission updates, acceptance of the installation permission request they raise, and branch-protection reconciliation. Where GitHub offers only a page — manifest confirmation, permission-request acceptance, a sudo prompt — three flows drive the operator's own authenticated browser profile headless.
+The master owns control-plane App permission updates, their acceptance and branch-protection reconciliation. Where GitHub offers only a page — manifest confirmation, permission-request acceptance, a sudo prompt — three flows drive the operator's own authenticated browser profile headless.
 
 - **Commands:** `master browser app-permissions`, `master browser installation-accept`, `master browser protection`
 - **Profile:** named by `master init --browser-profile PROFILE` (`--browser-executable PATH`, requiring it, selects a non-default Chrome); the harness denies the session every direct browser command
@@ -106,13 +107,13 @@ The browser profile is the operator's identity: the master never stores, exports
 
 ## Harness permissions
 
-The master's rules, and the per-role files launched sessions use, are in [operator automation](operator-automation.md#harness-rules-per-role); an allowlist is a prompt policy, not an authority boundary.
+A harness command classifier would otherwise stop the master on its own routine commands. The rules, and the per-role files launched sessions use, are in [operator automation](operator-automation.md#harness-rules-per-role); an allowlist is a prompt policy, not an authority boundary.
 
 - `master start claude`: writes project-scoped rules to the git-ignored `.claude/settings.local.json` before the session starts
 - `master harness claude [--apply]`: previews or writes them
 - `master harness codex`: prints the `trust_level = "trusted"` block for `$CODEX_HOME/config.toml`
 
-They cover everything else the master owns, so no routine action waits:
+They also cover:
 
 - **Configuration:** reading `.graphyard/master.json`
 - **The loop's systemd unit, named exactly:** `systemctl --user restart graphyard-master.service`, `journalctl --user -u graphyard-master.service`
@@ -126,14 +127,14 @@ They cover everything else the master owns, so no routine action waits:
 - **A *routine* item:** at most one rework round and no hand-off between submit and merge; every step between belongs to the control plane or the loop, leaving the master a genuine finding or a human-only decision
 - **Target:** submit→merge p50 of at most 30 minutes and p90 of at most 60 minutes, over at least ten deliveries, with a median of at most one rework round — never traded for a gate, a proof, an identity rule or a lease rule
 
-- **Per item:** each `master status` row's `speed`, [derived](protocol/pipeline-speed.md#derived-figures) from the item's own pipeline timeline
+- **Per item:** each `master status` row's `speed`, from the item's own [pipeline timeline](protocol/pipeline-speed.md): `executionMs` (lease time over attempts), `waitMs` (everything else since the first claim), `reworkRounds`, `interventions`, `sinceSubmitMs` in flight, `submitToMergeMs` once delivered, `routine`.
 - **Overall:** the top-level `speed` — `speed.submitToMerge` and `routine.submitToMerge` (nearest-rank p50/p90 and count), `reworkRounds` (median, p90, distribution), `interventions`, `execution`, `unmeasured` (deliveries predating the timeline), `items` in merge order, and `met`: `true` or `false` once ten routine deliveries are measured, `reason` naming the figure that misses, `null` until then.
 - **Outside a status read:** `scripts/measure-pipeline-speed.mjs --split GY-55,GY-64 --record DIR` reads the snapshot with any read-capable credential and prints the same arithmetic, per `--split` item for deliveries merged before and after it landed; `--since`/`--until` bound the window, `--json` prints everything. The 3-hourly measurement runs it and `manual:speed-target-met` reads it.
-- **A missed target** is routed like any finding: `items` names the slow deliveries, each row's `interventions` and `reworkRounds` say whether the time went to a hand-off or a rework round, and the [flow-analytics](flow-analytics.md) bottleneck summary which wait category held the rest.
+- **A missed target** is a finding to route: `items` names the slow deliveries, `interventions` and `reworkRounds` whether a hand-off or rework round took the time, and the [flow-analytics](flow-analytics.md) bottleneck summary which wait category held the rest.
 
 ## Containment and recovery
 
 - **A quarantine whose supervisor died:** The fence stays up until someone proves the worker stopped. `containment` carries the recorded scope unit and supervisor pid, what systemd reports for it, and `containment.held`: every process still holding the fence with its pid, cmdline and cwd.
 - `settleable: true`, no `refusals`: `master settle-containment GY-N "reason"`. **Any refusal:** stop the supervisor, then attest through a two-party `rework` decision, or `recover` once delivered ([procedure](operations-reference.md#recovery-procedures))
-- **A lapsed lease:** `lease-loss` stands only for a worker that silently vanished; every other lapse is `lease.expired` with [its cause](protocol/leases.md#lease-end-and-its-cause), settled as [who may settle what](delegation.md#who-may-settle-what) lists
+- **A lapsed lease:** `lease-loss` stands only for a worker that silently vanished; every other lapse is `lease.expired` with cause `submitted`, `blocked-awaiting-operator` or `stopped-by-attestation`. Reconciliation settles an explained one each tick, any `admin` settles it at once with `resolve GY-N lease-loss --attestation blocked|stopped-worker "reason"`, and everything else needs a two-party `resolve` decision or a declared human session ([who may settle what](delegation.md#who-may-settle-what))
 - **Merged without a valid execution:** [merge bypass](operations-reference.md#merge-bypass), a two-party `merge` decision requested after the merge
