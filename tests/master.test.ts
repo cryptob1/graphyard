@@ -148,7 +148,7 @@ test('master commands refuse a changed repository or managed base binding', () =
   assert.throws(() => assertMasterBinding(config, { actor: { role: 'coordinator' }, repository: 'owner/project', baseBranch: 'main', githubAppId: 9999 }), /rerun master init/);
 });
 
-test('dispatch launches through watch and requires lifecycle-reported readiness before prompting', async () => {
+test('dispatch launches through watch, with the instruction on the supervised command line, and accepts a session already working on it', async () => {
   const root = await repository(); const credentialDirectory = await mkdtemp(join(tmpdir(), 'graphyard-master-credentials-')); const calls: string[][] = [];
   try {
     const credential = join(credentialDirectory, 'worker.token'); await writeFile(credential, workerToken, { mode: 0o600 });
@@ -158,16 +158,20 @@ test('dispatch launches through watch and requires lifecycle-reported readiness 
     const result = await dispatchWork(root, work({ stage: 'ready', lease: null, submission: null, candidate: null, mergeAuthorization: null }), profile, [], (_command, args) => { calls.push(args); return JSON.stringify({ result: args[0] === 'tab' ? { type: 'tab_created', root_pane: { pane_id: 'p1', tab_id: 't1' }, tab: { tab_id: 't1' } } : args[1] === 'get' ? { type: 'agent_info', agent: { pane_id: 'p1', agent_status: ++probes === 1 ? 'working' : 'idle' } } : {} }); }, undefined, async () => ({ epoch: 4, path: join(root, 'assigned'), base: 'c'.repeat(40) }));
     assert.match(result.ownership, /supervising/);
     assert.deepEqual(calls[0].slice(0, 4), ['tab', 'create', '--workspace', 'workspace-graphyard']); assert.ok(calls[0].includes('GRAPHYARD_HERDR_AGENT_KIND=codex'));
-    assert.deepEqual(calls[1].slice(0, 3), ['pane', 'run', 'p1']); assert.match(calls[1][3], /watch' 'GY-42' '4' '--' 'codex'/); assert.equal(probes, 2);
-    assert.deepEqual(calls.at(-1)!.slice(0, 3), ['agent', 'prompt', 'eng-a']); assert.doesNotMatch(calls.at(-1)![3], /coordinator-token/);
+    assert.deepEqual(calls[1].slice(0, 3), ['pane', 'run', 'p1']); assert.match(calls[1][3], /watch' 'GY-42' '4' '--' 'codex'/);
+    // GY-93: the instruction is the session's own first request, the last argument of the
+    // supervised command; a session already working on it is ready, and nothing is pasted.
+    assert.match(calls[1][3], /'Implement GY-42: [^']*complete[^']*'$/); assert.doesNotMatch(calls[1][3], /coordinator-token/);
+    assert.equal(probes, 1, 'a session working on its request is accepted at first sight'); assert.equal(result.delivery, 'request');
+    assert.deepEqual(calls.at(-1)!.slice(0, 3), ['agent', 'rename', 'p1']); assert.equal(calls.some(call => call[0] === 'agent' && call[1] === 'prompt'), false);
     const failedCalls: string[][] = []; let releasedEpoch = 0;
     await assert.rejects(dispatchWork(root, work({ stage: 'ready', lease: null, submission: null, candidate: null, mergeAuthorization: null }), profile, [], (_command, args) => { failedCalls.push(args); return JSON.stringify({ result: args[0] === 'tab' ? { pane_id: 'late-pane' } : args[0] === 'pane' && args[1] === 'list' ? { panes: [] } : {} }); }, undefined, async () => ({ epoch: 5, path: join(root, 'late'), base: 'd'.repeat(40) }), async (_root, _key, epoch) => { releasedEpoch = epoch; }, 1), /did not become visible/);
     assert.equal(releasedEpoch, 5); assert.deepEqual(failedCalls.at(-2), ['pane', 'close', 'late-pane']); assert.deepEqual(failedCalls.at(-1), ['pane', 'list']);
     const promptCalls: string[][] = []; let promptRelease = 0;
     await assert.rejects(dispatchWork(root, work({ stage: 'ready', lease: null, submission: null, candidate: null, mergeAuthorization: null }), profile, [], (_command, args) => {
-      promptCalls.push(args); if (args[1] === 'prompt') throw new Error('prompt refused');
+      promptCalls.push(args); if (args[1] === 'rename') throw new Error('rename refused');
       return JSON.stringify({ result: args[0] === 'tab' ? { pane_id: 'prompt-pane' } : args[1] === 'get' ? { type: 'agent_info', agent: { pane_id: 'prompt-pane', agent_status: 'idle' } } : args[0] === 'pane' && args[1] === 'list' ? { panes: [] } : {} });
-    }, undefined, async () => ({ epoch: 6, path: join(root, 'prompt'), base: 'e'.repeat(40) }), async (_root, _key, epoch) => { promptRelease = epoch; }), /prompt refused/);
+    }, undefined, async () => ({ epoch: 6, path: join(root, 'prompt'), base: 'e'.repeat(40) }), async (_root, _key, epoch) => { promptRelease = epoch; }), /rename refused/);
     assert.equal(promptRelease, 6); assert.deepEqual(promptCalls.at(-2), ['pane', 'close', 'prompt-pane']); assert.deepEqual(promptCalls.at(-1), ['pane', 'list']);
     let unsafeRelease = false;
     await assert.rejects(dispatchWork(root, work({ stage: 'ready', lease: null, submission: null, candidate: null, mergeAuthorization: null }), profile, [], (_command, args) => {
@@ -228,7 +232,8 @@ test('Muse dispatch runs the installed binary through claim, assigned worktree, 
     assert.deepEqual(calls[1].slice(0, 3), ['pane', 'run', 'muse-pane']);
     assert.match(calls[1][3], /'watch' 'GY-42' '4' '--' 'muse' '--approval-mode' 'never' '--trust-workspace'$/, 'Muse starts only under graphyard watch with the profile arguments');
     assert.doesNotMatch(calls[1][3], /herdr agent start|GRAPHYARD_TOKEN/);
-    assert.equal(probes, 2, 'prompting waits for Herdr to report the Muse session ready');
+    // Muse has no request contract (GY-93 launchRequest), so it is prompted once Herdr reports it ready.
+    assert.equal(probes, 2, 'prompting waits for Herdr to report the Muse session ready'); assert.equal(result.delivery, 'paste');
     assert.deepEqual(calls.at(-2)!.slice(0, 3), ['agent', 'rename', 'muse-pane']); assert.deepEqual(calls.at(-1)!.slice(0, 3), ['agent', 'prompt', 'engineering-muse-1']);
     assert.match(calls.at(-1)![3], /principal muse-1/); assert.equal(JSON.stringify(calls).includes(coordinatorToken), false); assert.equal(JSON.stringify(calls).includes(workerToken), false);
     // A Muse session that never becomes visible is closed and its epoch released; one Herdr
@@ -279,17 +284,19 @@ test('master start creates a visible non-focused coordinator session with no cre
     });
     assert.equal(result.focusChanged, false); assert.equal(result.pane, 'pane-master');
     assert.ok(calls[0].includes('--no-focus')); assert.deepEqual(calls[0].slice(0, 4), ['tab', 'create', '--workspace', 'workspace-graphyard']); assert.ok(calls[1].includes('codex'));
-    assert.match(calls[2].at(-1)!, /dedicated Graphyard master agent/);
+    // GY-93: the master's instruction is its own first request, the positional prompt of its start.
+    assert.deepEqual(calls[1].slice(0, 2), ['agent', 'start']); assert.match(calls[1].at(-1)!, /dedicated Graphyard master agent/); assert.equal(result.delivery, 'request');
+    assert.equal(calls.length, 2, 'nothing is pasted into the master session');
     assert.equal(JSON.stringify(calls).includes(coordinatorToken), false);
     await setupMaster(root, { url: 'https://graphyard.example', token: coordinatorToken, cliPath: launcher, credentialDirectory, autoMerge: false }, coordinatorStatus as typeof fetch);
     const manualCalls: string[][] = [];
     await startMaster(root, 'codex', [], [], (_command, args) => { manualCalls.push(args); return JSON.stringify({ result: args[0] === 'tab' ? { pane_id: 'manual-master' } : {} }); });
-    assert.match(manualCalls[2].at(-1)!, /Automatic merging is disabled.*explicit operator approval/);
+    assert.match(manualCalls[1].at(-1)!, /Automatic merging is disabled.*explicit operator approval/);
     const failedCalls: string[][] = [];
     await assert.rejects(startMaster(root, 'codex', [], [], (_command, args) => {
-      failedCalls.push(args); if (args[1] === 'prompt') throw new Error('prompt refused');
+      failedCalls.push(args); if (args[1] === 'start') throw new Error('start refused');
       return JSON.stringify({ result: args[0] === 'tab' ? { pane_id: 'failed-master' } : args[0] === 'pane' && args[1] === 'list' ? { panes: [] } : {} });
-    }), /prompt refused/);
+    }), /start refused/);
     assert.deepEqual(failedCalls.at(-2), ['pane', 'close', 'failed-master']); assert.deepEqual(failedCalls.at(-1), ['pane', 'list']);
     const malformedCalls: string[][] = [];
     await assert.rejects(startMaster(root, 'codex', [], [], (_command, args) => {
