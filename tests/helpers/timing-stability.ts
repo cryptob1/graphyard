@@ -24,12 +24,13 @@ export const baselineRecordingVariable = 'GRAPHYARD_TIMING_BASELINE_RECORDING';
  * measures the check CI runs. Test files start their own Postgres on `GRAPHYARD_TEST_PORT` plus a
  * per-file offset and run in parallel; tests/events-pagination.test.ts and
  * tests/reconciliation-snapshot.test.ts were both given offset 25, so whichever started second
- * failed every test whenever the scheduler overlapped them. The override moves one of them to a
- * free offset; tests/timing-stability.test.ts refuses any two files that still share a port.
+ * failed every test whenever the scheduler overlapped them. The override moves one of them to an
+ * offset no test file resolves; tests/timing-stability.test.ts refuses any two files that still
+ * share a port, so an offset a later file takes is caught here rather than on a shared runner.
  */
 export const testPortBase = 15438;
 export function requiredCheckEnvironment(base = Number(process.env.GRAPHYARD_TEST_PORT ?? testPortBase)): Record<string, string> {
-  return { GRAPHYARD_EVENTS_TEST_PORT: String(base + 27) };
+  return { GRAPHYARD_EVENTS_TEST_PORT: String(base + 28) };
 }
 
 /** The database port every test file resolves, from its own source, under `environment`. */
