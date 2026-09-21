@@ -31,6 +31,7 @@ export const dispatchFailureSchema = z.object({
   attempts: z.number().int().min(1).max(1000), reason: z.string().max(500), at: z.string(), nextAt: z.string(),
 }).strict();
 export type DispatchFailure = z.infer<typeof dispatchFailureSchema>;
+const capacityHoldSchema = z.object({ at: z.string(), recheckAt: z.string(), reason: z.string().max(1000) }).strict();
 export const dispatchCursorSchema = z.object({
   version: z.literal(1), url: z.string(), repository: z.string(),
   ticks: z.number().int().min(0).default(0),
@@ -42,6 +43,12 @@ export const dispatchCursorSchema = z.object({
   /** Launches that refused, by request id, with the widening retry time; cleared by the launch that succeeds. */
   failures: z.record(z.string(), dispatchFailureSchema).default({}),
   /**
+   * A role none of whose accounts can launch (GY-89): why, and when its accounts are read again.
+   * That is capacity, not a refusal, so it never counts toward a request's failure limit — a
+   * request that waited out a week-long reset launches the moment an account returns.
+   */
+  capacity: z.object({ review: capacityHoldSchema.optional(), producer: capacityHoldSchema.optional() }).strict().default({}),
+  /**
    * What launches last observed about each agent account and the launches that skipped an account,
    * with the reason. Read from the environment log beside the cursor, which every launcher writes;
    * never persisted in the cursor itself.
@@ -52,6 +59,8 @@ export type DispatchCursor = z.infer<typeof dispatchCursorSchema>;
 
 /** A refused launch retries on a widening interval, never more often than this and never later than this. */
 export const dispatchRetryMinMs = 30_000, dispatchRetryMaxMs = 600_000, dispatchFailureLimit = 12;
+/** How long a role with no account left is not launched before its accounts are read again. */
+export const capacityRecheckMs = 60_000;
 /**
  * A tick whose snapshot read fails is retried on its own short backoff rather than a whole
  * interval later, never faster than the first step and never slower than the interval. The read
@@ -143,7 +152,9 @@ async function launchWithFailover<P extends { name: string }>(profiles: P[], lau
       }
     }
   }
-  throw new Error(failover.join('; ') || 'no profile could launch');
+  // Every profile was passed over for the same reason — no account with quota left — which is the
+  // role's capacity, not a launch that went wrong.
+  throw Object.assign(new Error(failover.join('; ') || 'no profile could launch'), { accountsExhausted: failover.length > 0 });
 }
 
 /**
@@ -172,6 +183,17 @@ export async function runDispatchTick(config: MasterConfig, cursor: DispatchCurs
     cursor.failures[request.id] = failure;
     tick.refused.push({ ...failure, requestId: request.id });
   };
+  // A role out of capacity is not launched again until its accounts are due to be read, and the
+  // wait is never a failure: nothing is counted, and the request launches when an account returns.
+  const spent = (kind: 'review' | 'producer') => { const hold = cursor.capacity[kind]; return hold && Date.parse(hold.recheckAt) > now() ? hold : null; };
+  const capacityWait = (kind: 'review' | 'producer') => `${kind === 'review' ? 'reviewer' : 'producer'} capacity is exhausted (${cursor.capacity[kind]!.reason}); launches are paused and its accounts are read again at ${cursor.capacity[kind]!.recheckAt}`;
+  const outOfCapacity = (kind: 'review' | 'producer', item: Work, request: DispatchRequest, error: unknown) => {
+    if (!(error as { accountsExhausted?: boolean })?.accountsExhausted) return false;
+    cursor.capacity[kind] = { at: cursor.capacity[kind]?.at ?? new Date(now()).toISOString(), recheckAt: new Date(now() + capacityRecheckMs).toISOString(), reason: message(error).slice(0, 1000) };
+    delete cursor.failures[request.id];
+    wait(kind, item, request, capacityWait(kind));
+    return true;
+  };
   const retryable = (request: DispatchRequest) => { const failure = cursor.failures[request.id]; return !failure || failure.attempts < dispatchFailureLimit && Date.parse(failure.nextAt) <= now(); };
   // Whether the request already has its session, waits to relaunch one that failed or expired, or may launch now.
   const session = (kind: 'review' | 'producer', item: Work, request: DispatchRequest, records: { requestId?: string; state: string; requestedAt: string; closedAt?: string; resolution?: string }[]) => {
@@ -187,6 +209,7 @@ export async function runDispatchTick(config: MasterConfig, cursor: DispatchCurs
     if (review?.state === 'requested' && review.provider === 'github') {
       if (!session('review', item, review, reviews)) { /* settled, or waiting to relaunch */ }
       else if (!herdr) wait('review', item, review, 'Herdr session inventory is unavailable');
+      else if (spent('review')) wait('review', item, review, capacityWait('review'));
       else if (!retryable(review)) wait('review', item, review, `launch refused ${cursor.failures[review.id].attempts} time(s): ${cursor.failures[review.id].reason}; ${cursor.failures[review.id].attempts >= dispatchFailureLimit ? 'no further automatic attempt, launch it with master review once the cause is fixed' : `next attempt at ${cursor.failures[review.id].nextAt}`}`);
       else {
         const { profile, reason } = selectReviewerProfile(config);
@@ -198,9 +221,9 @@ export async function runDispatchTick(config: MasterConfig, cursor: DispatchCurs
           const order = [profile, ...config.reviewers.filter(other => other.name !== profile.name && !busy.has(other.agentName))];
           try {
             const launched = await launchWithFailover(order, candidate => effects.launchReview(item, review, candidate, agents, observedAt));
-            busy.add(launched.profile.agentName); delete cursor.failures[review.id];
+            busy.add(launched.profile.agentName); delete cursor.failures[review.id]; delete cursor.capacity.review;
             tick.launched.push({ kind: 'review', work: item.key, requestId: review.id, sha: review.sha, profile: launched.profile.name, ...(launched.failover.length ? { failover: launched.failover } : {}), ...(launched.relaunched ? { relaunched: true } : {}) });
-          } catch (error) { refuse('review', item, review, error); }
+          } catch (error) { if (!outOfCapacity('review', item, review, error)) refuse('review', item, review, error); }
           await effects.persist(cursor);
         }
       }
@@ -208,6 +231,7 @@ export async function runDispatchTick(config: MasterConfig, cursor: DispatchCurs
     for (const request of item.autoDispatch!.producers.filter(entry => entry.state === 'requested')) {
       if (!session('producer', item, request, producers)) continue;
       if (!herdr) { wait('producer', item, request, 'Herdr session inventory is unavailable'); continue; }
+      if (spent('producer')) { wait('producer', item, request, capacityWait('producer')); continue; }
       if (!retryable(request)) { wait('producer', item, request, `launch refused ${cursor.failures[request.id].attempts} time(s): ${cursor.failures[request.id].reason}; ${cursor.failures[request.id].attempts >= dispatchFailureLimit ? 'no further automatic attempt' : `next attempt at ${cursor.failures[request.id].nextAt}`}`); continue; }
       const independent = independentProducerProfiles(item, config.producers);
       const usable = independent.filter(profile => credentials[profile.name]?.available !== false && !busy.has(profile.agentName));
@@ -219,9 +243,9 @@ export async function runDispatchTick(config: MasterConfig, cursor: DispatchCurs
       }
       try {
         const launched = await launchWithFailover(usable, candidate => effects.launchProducer(item, request, candidate, agents, observedAt));
-        busy.add(launched.profile.agentName); delete cursor.failures[request.id];
+        busy.add(launched.profile.agentName); delete cursor.failures[request.id]; delete cursor.capacity.producer;
         tick.launched.push({ kind: 'producer', work: item.key, requestId: request.id, sha: request.sha, profile: launched.profile.name, group: request.group, proofs: request.proofs, ...(launched.failover.length ? { failover: launched.failover } : {}), ...(launched.relaunched ? { relaunched: true } : {}) });
-      } catch (error) { refuse('producer', item, request, error); }
+      } catch (error) { if (!outOfCapacity('producer', item, request, error)) refuse('producer', item, request, error); }
       await effects.persist(cursor);
     }
   }
@@ -300,6 +324,8 @@ export function dispatchSummary(cursor: DispatchCursor, now: number, intervalMs:
   return { running: lagMs !== null && lagMs < Math.max(3 * intervalMs, 60_000), ticks: cursor.ticks, lastTickAt: cursor.lastTickAt, lagMs, intervalMs,
     lastSuccessAt: cursor.lastSuccessAt, consecutiveFailures: cursor.consecutiveFailures, lastFailure: cursor.lastFailure,
     failures: Object.entries(cursor.failures).map(([requestId, failure]) => ({ requestId, ...failure })),
+    // A role with no account left, as one entry per role rather than a failure per request.
+    capacity: Object.entries(cursor.capacity ?? {}).map(([kind, hold]) => ({ role: kind === 'review' ? 'reviewer' : 'producer', ...hold })),
     // Each agent account as the last launch check saw it, and the launches that skipped one and why.
     accounts: cursor.accounts ? {
       environments: Object.values(cursor.accounts.environments).map((health: any) => ({ environment: health.name, kind: health.kind, loggedIn: health.loggedIn, quota: health.quota, healthy: health.healthy, reason: health.reason, usage: health.usage, login: health.login, checkedAt: health.checkedAt })),

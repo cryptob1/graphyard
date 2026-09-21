@@ -4,6 +4,7 @@ import { producerIndependenceRefusal, recordEvidenceRefusal, recordLeadViolation
 import { ciRunBindingSchema, isCiProducer, observeCiCheckRun, type CiRunObservation } from '../../model/ci-proofs.js';
 import { defineRoutes, parseJson, type RouteContext } from '../routes.js';
 import { approveDecision, listDecisions, requestDecision } from '../decisions.js';
+import { answerHumanDecision, listHumanRequests, recordCapacity, requestHumanDecision } from '../waits.js';
 
 // Every mutating work route refuses a slice lead the same way and leaves the same
 // ledger entry. Routing order decides which handler matches first; it must never
@@ -25,6 +26,20 @@ export const workRoutes = defineRoutes('work', [
       await refuseLead(context, id, action);
       const data = await parseJson(context), key = context.idempotencyKey(), target = decodeURIComponent(id);
       return action === 'decide' ? requestDecision(context.services, context.actor, target, data, key) : approveDecision(context.services, context.actor, target, data, key);
+    },
+  },
+  // The two waits that stall only their own item (GY-89): a human-only decision a worker records
+  // (`park`) and the human answers (`answer`), and the provider capacity the loop observes
+  // (`capacity`). They precede the generic route for the same reason the decisions do.
+  { method: 'GET', path: '/api/human-requests', handle: ({ actor, services }) => listHumanRequests(services, actor) },
+  {
+    method: 'POST', path: /^\/api\/work\/([^/]+)\/(park|answer|capacity)$/,
+    async handle(context, [id, action]) {
+      await refuseLead(context, id, action);
+      const data = await parseJson(context), key = context.idempotencyKey(), target = decodeURIComponent(id);
+      return action === 'park' ? requestHumanDecision(context.services, context.actor, target, data, key)
+        : action === 'answer' ? answerHumanDecision(context.services, context.actor, target, data, key)
+        : recordCapacity(context.services, context.actor, target, data, key);
     },
   },
   {

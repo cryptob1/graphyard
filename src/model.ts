@@ -13,3 +13,5 @@ export * from './model/bootstrap.js';
 export * from './model/gates.js';
 export * from './model/queue.js';
 export * from './model/carry.js';
+export * from './model/capacity.js';
+export * from './model/human-request.js';

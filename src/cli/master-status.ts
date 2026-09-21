@@ -3,6 +3,7 @@ import { probeCandidateConflicts } from '../conflicts.js';
 import { agentOwner, agentToken, assessContainment, buildMasterStatus, diskPressure, diskPressureAttention, diskThresholdBytes, freeBytes, herdrWorkspaceHealth, humanOwner, inspectWorkerCredentials, installationOwner, inventoryWorktrees, mergeProtocolSkew, observeHerdrAgents, planWorktreeReclaim, reclaimIdleMs, snapshotWithClock, worktreesDirectory, type AttentionItem, type HerdrAgent, type MasterConfig, type WorkerProfile } from '../master.js';
 import { generatedFilesAssignment, generatedFilesDrift, generatedFilesVariable, generatedManifestScript } from '../install/generated-files.js';
 import type { Work } from '../model.js';
+import { humanDecisionKinds, type HumanDecisionKind, type HumanRequestRow } from '../model/human-request.js';
 import { daemonSummary, orphanedSupervisors, readDaemonState, type DaemonState, type OrphanSupervisor } from '../master-daemon.js';
 import { readReviewLedger, reconcileReviews, reviewerBindingHealth, summarizeReviews } from '../reviewer.js';
 import { readProducerLedger, reconcileProducers, sessionRetries, summarizeProducers } from '../producer.js';
@@ -223,6 +224,65 @@ export const scopeRequestCommand: CliCommand = {
     return print(await workMutation(context, work)('scope', { epoch, paths, reason }));
   },
 };
+
+/**
+ * The worker half of a human-only wait (GY-89): record the decision only a human may make as a
+ * typed request. The same call ends the attempt's lease and parks the item, so the session exits
+ * owning nothing; the human answers it and the loop dispatches the item again.
+ */
+export const parkCommand: CliCommand = {
+  name: 'park',
+  scope: 'work',
+  help: [
+    '  park GY-N EPOCH KIND NEEDED... -- REASON',
+    '                                Record a decision only a human may make and end this attempt:',
+    `                                KIND is ${humanDecisionKinds.join(', ')};`,
+    '                                NEEDED is the exact thing the human must provide. The item',
+    '                                parks without a lease and nothing else waits on it',
+  ],
+  async run(context, work) {
+    const { args, print } = context;
+    const epoch = Number(args[0]), kind = args[1], separator = args.indexOf('--');
+    const needed = args.slice(2, separator < 0 ? args.length : separator).join(' ').trim();
+    const reason = separator < 0 ? '' : args.slice(separator + 1).join(' ').trim();
+    if (!Number.isInteger(epoch) || epoch < 1 || !humanDecisionKinds.includes(kind as HumanDecisionKind) || !needed || !reason) throw new Error(`Use park GY-N EPOCH KIND NEEDED... -- REASON, where KIND is ${humanDecisionKinds.join(', ')}`);
+    return print(await workMutation(context, work)('park', { epoch, kind, needed, reason }));
+  },
+};
+
+/** The human half: list what waits on you, and answer it. The answer is what resumes the item. */
+export const humanRequestsCommand: CliCommand = {
+  name: 'human-requests',
+  help: ['  human-requests               List every open human-only request: what is needed, why, how', '                                long it has waited, and the command that answers it'],
+  async run({ api, print }) {
+    const { now, requests } = await api('human-requests') as { now: string; requests: HumanRequestRow[] };
+    return print({ observedAt: now, waiting: requests.length, requests: requests.map(row => ({ work: row.work, title: row.title, decision: row.decision, needed: row.request.needed, reason: row.request.reason,
+      requestedBy: row.request.requestedBy, requestedAt: row.request.at, waited: waitedText(row.waitedMs), answer: row.answer.cli, decline: row.answer.decline })) });
+  },
+};
+export const answerHumanCommand: CliCommand = {
+  name: 'answer',
+  scope: 'work',
+  help: [
+    '  answer GY-N [REQUEST] [--decline] ANSWER...',
+    '                                Answer the item\'s open human-only request (operator). The item',
+    '                                resumes on its own: the loop dispatches it on its next cycle.',
+    '                                --decline keeps it parked with your reason as its blocker',
+  ],
+  async run(context, work) {
+    const open = (work as Work).humanRequest;
+    if (!open) throw new Error(`${work.key} has no open human-only request; graphyard human-requests lists the ones that wait`);
+    const args = [...context.args];
+    // The request id is optional on the command line: an item has at most one open request.
+    const request = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(args[0] ?? '') ? args.shift()! : open.id;
+    const declined = args.includes('--decline');
+    const answer = args.filter(arg => arg !== '--decline').join(' ').trim();
+    if (!answer) throw new Error('Use answer GY-N [REQUEST] [--decline] ANSWER...');
+    return context.print(await workMutation(context, work)('answer', { request, outcome: declined ? 'declined' : 'provided', answer }));
+  },
+};
+/** A wait as a person reads it: minutes under an hour, then hours, then days. */
+export const waitedText = (ms: number) => ms < 3_600_000 ? `${Math.max(1, Math.round(ms / 60_000))}m` : ms < 172_800_000 ? `${Math.round(ms / 3_600_000)}h` : `${Math.round(ms / 86_400_000)}d`;
 
 /**
  * The one-command approval behind `master scope GY-N [REASON]`: read the item's open scope

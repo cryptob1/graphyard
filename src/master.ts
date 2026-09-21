@@ -11,6 +11,8 @@ import { dispatchOrder, dispatchOverlap, resourceConflicts, scopeBreadth } from 
 import type { ConflictReport } from './conflicts.js';
 import { mergeOrder } from './delegation.js';
 import { launchPlan, masterHarnessPlan, writeHarnessPermissions, type HarnessPlan, type HarnessRule } from './harness.js';
+import { capacityRetryAt, describeCapacity, standingCapacity, type CapacityAccount, type CapacityRole, type PartialWork } from './model/capacity.js';
+import { answerCommand, humanDecisionLabel, openHumanRequests, parkedOnHuman } from './model/human-request.js';
 import { CHECK_NAME, carriedApproval, deliveryState, deploySmokeRequired, describeQueueBinding, evidenceIndependenceRefusals, exhaustedReviewerProfiles, nativeReviewRequired, postDeployMs, productionLatencyMs, providerDelayAfterVerification, reviewerProfileFor, reviewProviderOf, rollbackGuidance, standingEscalations, type CarriedApproval, type QueueBindingReport, type Work } from './model.js';
 import { containmentAttestation, containmentGraceMs, containmentSettlementRefusals, containmentVerificationSchema, type ContainmentVerification } from './quarantine.js';
 import { probeSupervisorAbsence } from './containment-probe.js';
@@ -332,8 +334,12 @@ export async function inspectWorkerCredentials(root: string, profiles: WorkerPro
 // A profile's accounts are part of whether it can launch, so status and the durable loop read them
 // with its credential: a profile none of whose accounts is logged in with quota left is unavailable.
 async function withAccountHealth<T extends { available: boolean; reason: string | null }>(root: string, role: LaunchRole, profiles: { name: string; accounts?: string[] }[], health: Record<string, T>, probe?: EnvironmentProbe) {
-  if (!profiles.some(profile => profile.accounts?.length)) return health;
-  return inspectProfileAccounts(await readMasterConfig(root), role, profiles, health, probe);
+  // A profile that names no accounts can still be held by an exhaustion one of its own sessions
+  // reported (GY-89), so the log is read for those too; only a named account needs the configuration.
+  const named = profiles.some(profile => profile.accounts?.length);
+  let config: MasterConfig;
+  try { config = await readMasterConfig(root); } catch (error) { if (named) throw error; return health; }
+  return inspectProfileAccounts(config, role, profiles, health, probe);
 }
 export async function readProducerCredential(root: string, file: string) {
   await externalCredential(root, file, 'Producer');
@@ -689,18 +695,51 @@ const environmentLogSchema = z.object({
   version: z.literal(1),
   environments: z.record(z.string(), z.any()).default({}),
   skipped: z.array(z.object({ at: z.string(), role: z.enum(['worker', 'reviewer', 'producer']), profile: z.string(), environment: z.string(), reason: z.string().max(500), work: z.string().nullable() }).strict()).max(50).default([]),
+  // Accounts a session exhausted mid-work (GY-89), by environment name, each held until its reset.
+  // The account each profile's latest launch selected, by `role:profile`, so an exhausted session can be traced to its account.
+  selected: z.record(z.string(), z.object({ environment: z.string().nullable(), kind: z.string().nullable(), at: z.string(), work: z.string().nullable() }).strict()).default({}),
+  exhausted: z.record(z.string(), z.object({ at: z.string(), until: z.string(), resetsAt: z.string().nullable(), reason: z.string().max(500), role: z.enum(['worker', 'reviewer', 'producer']), profile: z.string(), work: z.string().nullable() }).strict()).default({}),
 }).strict();
-export type EnvironmentLog = { version: 1; environments: Record<string, EnvironmentHealth>; skipped: AccountSkip[] };
+/**
+ * An account a running session exhausted. The provider's own usage endpoint may lag behind the
+ * session that hit the limit, and OpenCode and Cursor expose no quota to read at all, so what a
+ * session printed is kept here and every launch skips the account until `until`: the reset time
+ * the notice named, or an hour when it named none.
+ */
+export interface ObservedExhaustion { at: string; until: string; resetsAt: string | null; reason: string; role: LaunchRole; profile: string; work: string | null }
+export const unknownResetHoldMs = 3_600_000;
+export interface AccountSelection { environment: string | null; kind: string | null; at: string; work: string | null }
+export type EnvironmentLog = { version: 1; environments: Record<string, EnvironmentHealth>; skipped: AccountSkip[]; selected: Record<string, AccountSelection>; exhausted: Record<string, ObservedExhaustion> };
+/** A profile that names no accounts launches on whatever its own environment selects; its exhaustion is held under this name. */
+export const profileAccount = (profile: string) => `profile:${profile}`;
+export const selectionKey = (role: LaunchRole, profile: string) => `${role}:${profile}`;
 export function environmentLogPath(config: Pick<MasterConfig, 'credentialFile'>) {
   return resolve(dirname(config.credentialFile), `${basename(config.credentialFile).replace(/\.token$/, '')}.environments.json`);
 }
 export async function readEnvironmentLog(config: Pick<MasterConfig, 'credentialFile'>): Promise<EnvironmentLog> {
   try { return environmentLogSchema.parse(JSON.parse(await readFile(environmentLogPath(config), 'utf8'))) as EnvironmentLog; }
-  catch { return { version: 1, environments: {}, skipped: [] }; }
+  catch { return { version: 1, environments: {}, skipped: [], selected: {}, exhausted: {} }; }
 }
-export async function recordEnvironmentLog(config: Pick<MasterConfig, 'credentialFile'>, health: EnvironmentHealth[], skipped: AccountSkip[] = []) {
-  if (!health.length && !skipped.length) return;
+/** Record that a session exhausted `environment` mid-work, so no launch selects it before it resets. */
+export async function recordObservedExhaustion(config: Pick<MasterConfig, 'credentialFile'>, environment: string, observed: Omit<ObservedExhaustion, 'until'>, now = Date.now()) {
   const log = await readEnvironmentLog(config);
+  const reset = observed.resetsAt ? Date.parse(observed.resetsAt) : Number.NaN;
+  const entry: ObservedExhaustion = { ...observed, reason: observed.reason.slice(0, 500), until: new Date(Number.isFinite(reset) && reset > now ? reset : now + unknownResetHoldMs).toISOString() };
+  log.exhausted = { ...Object.fromEntries(Object.entries(log.exhausted).filter(([, held]) => Date.parse(held.until) > now)), [environment]: entry };
+  await atomicPrivateWrite(environmentLogPath(config), log);
+  return entry;
+}
+/** The accounts still held by an observed exhaustion at `now`. */
+export async function observedExhaustions(config: Pick<MasterConfig, 'credentialFile'>, now = Date.now()): Promise<Record<string, ObservedExhaustion>> {
+  const log = await readEnvironmentLog(config);
+  return Object.fromEntries(Object.entries(log.exhausted ?? {}).filter(([, held]) => Date.parse(held.until) > now));
+}
+export const describeObservedExhaustion = (environment: string, held: ObservedExhaustion) =>
+  `${environment} exhausted its quota mid-session at ${held.at} (${held.reason}); ${held.resetsAt ? `it resets ${held.resetsAt}` : `its reset time is unknown, so it is tried again after ${held.until}`}`;
+export async function recordEnvironmentLog(config: Pick<MasterConfig, 'credentialFile'>, health: EnvironmentHealth[], skipped: AccountSkip[] = [], selection?: { key: string } & AccountSelection) {
+  if (!health.length && !skipped.length && !selection) return;
+  const log = await readEnvironmentLog(config);
+  if (selection) { const { key, ...selected } = selection; log.selected = { ...log.selected, [key]: selected }; }
   for (const entry of health) log.environments[entry.name] = entry;
   log.skipped = [...log.skipped, ...skipped.map(entry => ({ ...entry, reason: entry.reason.slice(0, 500) }))].slice(-50);
   await atomicPrivateWrite(environmentLogPath(config), log);
@@ -712,16 +751,28 @@ export async function recordEnvironmentLog(config: Pick<MasterConfig, 'credentia
  * launches exactly as configured, on whatever its environment variables select.
  */
 export async function selectAccount(config: Pick<MasterConfig, 'environments' | 'credentialFile' | 'run'>, role: LaunchRole, profile: { name: string; accounts?: string[] }, probe: EnvironmentProbe & { work?: string } = {}) {
-  if (!profile.accounts?.length) return { account: null, health: null, skipped: [] as AccountSkip[] };
   const at = new Date(probe.now?.() ?? Date.now()).toISOString();
   const checked: EnvironmentHealth[] = [], skipped: AccountSkip[] = [];
+  const held = await observedExhaustions(config, probe.now?.() ?? Date.now());
+  if (!profile.accounts?.length) {
+    const own = held[profileAccount(profile.name)];
+    if (own) {
+      const skip: AccountSkip = { at, role, profile: profile.name, environment: profileAccount(profile.name), reason: describeObservedExhaustion(`${profile.name}'s own account`, own), work: probe.work ?? null };
+      await recordEnvironmentLog(config, [], [skip]).catch(() => {});
+      throw new NoHealthyAccountError(`No healthy agent account for ${role} profile ${profile.name}: ${skip.reason}`, [skip]);
+    }
+    await recordEnvironmentLog(config, [], [], { key: selectionKey(role, profile.name), environment: null, kind: null, at, work: probe.work ?? null }).catch(() => {});
+    return { account: null, health: null, skipped: [] as AccountSkip[] };
+  }
   for (const name of profile.accounts) {
     const environment = (config.environments ?? []).find(candidate => candidate.name === name);
     if (!environment) { skipped.push({ at, role, profile: profile.name, environment: name, reason: `${name} is not a configured agent environment; run master environments --apply`, work: probe.work ?? null }); continue; }
+    // What a session itself reported outranks the provider's usage read, which may lag or not exist.
+    if (held[name]) { skipped.push({ at, role, profile: profile.name, environment: name, reason: describeObservedExhaustion(name, held[name]), work: probe.work ?? null }); continue; }
     const health = await checkAgentEnvironment(environment, { ...probe, ceilingPercent: probe.ceilingPercent ?? config.run.quotaCeilingPercent });
     checked.push(health);
     if (health.healthy) {
-      await recordEnvironmentLog(config, checked, skipped).catch(() => {});
+      await recordEnvironmentLog(config, checked, skipped, { key: selectionKey(role, profile.name), environment: environment.name, kind: environment.kind, at, work: probe.work ?? null }).catch(() => {});
       return { account: environment, health, skipped };
     }
     skipped.push({ at, role, profile: profile.name, environment: name, reason: health.reason!, work: probe.work ?? null });
@@ -778,21 +829,68 @@ export function sharedGitDirectory(root: string) {
  * and the durable loop already read: a profile none of whose accounts can launch is unavailable,
  * with each account's reason.
  */
+export interface ProfileAccountHealth { environment: string; healthy: boolean; reason: string | null; quota: string; resetsAt: string | null }
 export async function inspectProfileAccounts<T extends { available: boolean; reason: string | null }>(config: Pick<MasterConfig, 'environments' | 'credentialFile' | 'run'>, role: LaunchRole, profiles: { name: string; accounts?: string[] }[], health: Record<string, T>, probe: EnvironmentProbe = {}) {
-  const result: Record<string, T & { accounts?: { environment: string; healthy: boolean; reason: string | null; quota: string }[] }> = { ...health };
+  const result: Record<string, T & { accounts?: ProfileAccountHealth[] }> = { ...health };
+  const now = probe.now?.() ?? Date.now(), held = await observedExhaustions(config, now);
   for (const profile of profiles) {
-    if (!profile.accounts?.length || result[profile.name]?.available === false) continue;
-    const accounts: { environment: string; healthy: boolean; reason: string | null; quota: string }[] = [];
+    if (result[profile.name]?.available === false) continue;
+    if (!profile.accounts?.length) {
+      const own = held[profileAccount(profile.name)];
+      if (own) result[profile.name] = { ...(result[profile.name] ?? { available: true, reason: null } as T), available: false, reason: `No healthy agent account: ${describeObservedExhaustion(`${profile.name}'s own account`, own)}`,
+        accounts: [{ environment: profileAccount(profile.name), healthy: false, reason: describeObservedExhaustion(`${profile.name}'s own account`, own), quota: 'exhausted', resetsAt: own.resetsAt }] };
+      continue;
+    }
+    const accounts: ProfileAccountHealth[] = [];
     for (const name of profile.accounts) {
       const environment = (config.environments ?? []).find(candidate => candidate.name === name);
-      if (!environment) { accounts.push({ environment: name, healthy: false, reason: `${name} is not a configured agent environment`, quota: 'unknown' }); continue; }
+      if (!environment) { accounts.push({ environment: name, healthy: false, reason: `${name} is not a configured agent environment`, quota: 'unknown', resetsAt: null }); continue; }
+      if (held[name]) { accounts.push({ environment: name, healthy: false, reason: describeObservedExhaustion(name, held[name]), quota: 'exhausted', resetsAt: held[name].resetsAt }); continue; }
       const checked = await checkAgentEnvironment(environment, { ...probe, ceilingPercent: probe.ceilingPercent ?? config.run.quotaCeilingPercent });
-      accounts.push({ environment: name, healthy: checked.healthy, reason: checked.reason, quota: checked.quota });
+      // The reset that matters is the latest among the spent windows: the account launches again only when all of them have.
+      const ceiling = probe.ceilingPercent ?? config.run.quotaCeilingPercent ?? defaultQuotaCeilingPercent;
+      const resets = checked.quota === 'exhausted' ? checked.usage.filter(usage => usage.percent >= ceiling).map(usage => usage.resetsAt ? Date.parse(usage.resetsAt) : Number.NaN).filter(value => Number.isFinite(value) && value > now) : [];
+      accounts.push({ environment: name, healthy: checked.healthy, reason: checked.reason, quota: checked.quota, resetsAt: resets.length ? new Date(Math.max(...resets)).toISOString() : null });
     }
     const usable = accounts.some(account => account.healthy);
     result[profile.name] = { ...(result[profile.name] ?? { available: true, reason: null } as T), available: usable, reason: usable ? null : `No healthy agent account: ${accounts.map(account => account.reason).join('; ')}`, accounts };
   }
   return result;
+}
+
+/**
+ * Whether a role has any account left. A role is out of capacity only when every launch profile
+ * it has is unavailable for one reason — each of its accounts is spent — so a logged-out account
+ * or an unreadable credential, which somebody can fix now, never reads as a wait for a reset.
+ */
+export interface RoleCapacity { role: CapacityRole; exhausted: boolean; accounts: CapacityAccount[]; retryAt: string | null }
+export function roleCapacity(role: CapacityRole, profiles: { name: string }[], health: Record<string, { available: boolean; reason: string | null; accounts?: ProfileAccountHealth[] }>): RoleCapacity {
+  const spent = profiles.map(profile => ({ profile, accounts: health[profile.name]?.accounts ?? [], available: health[profile.name]?.available !== false }));
+  const exhausted = spent.length > 0 && spent.every(entry => !entry.available && entry.accounts.length > 0 && entry.accounts.every(account => account.quota === 'exhausted'));
+  const accounts: CapacityAccount[] = exhausted ? spent.flatMap(entry => entry.accounts.map(account => ({ account: account.environment, profile: entry.profile.name, resetsAt: account.resetsAt, reason: (account.reason ?? 'quota exhausted').slice(0, 500) }))) : [];
+  return { role, exhausted, accounts, retryAt: capacityRetryAt(accounts) };
+}
+
+/**
+ * Keep what an interrupted attempt had not committed. The work is committed on the attempt's own
+ * branch in its own worktree — never pushed, never stashed (the stash is shared by every
+ * worktree) — so the next attempt can read or cherry-pick it and nothing of it is lost. Only when
+ * it cannot be committed is the worktree reset, and the record says discarded: an attempt never
+ * ends with changes that are neither kept nor gone.
+ */
+export function preservePartialWork(path: string, label: string, run: (command: string, args: string[]) => string = (command, args) => execFileSync(command, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 60_000 })): PartialWork {
+  const git = (...args: string[]) => run('git', ['-C', path, ...args]).trim();
+  const branch = (() => { try { return git('rev-parse', '--abbrev-ref', 'HEAD'); } catch { return undefined; } })();
+  const described = { path, ...(branch && branch !== 'HEAD' ? { branch } : {}) };
+  if (!git('status', '--porcelain')) return { state: 'clean', commit: git('rev-parse', 'HEAD'), ...described, detail: 'the worktree held no uncommitted change; every commit of the attempt is on its branch' };
+  try {
+    git('add', '-A');
+    git('-c', 'user.name=Graphyard', '-c', 'user.email=graphyard@localhost', 'commit', '--no-verify', '-m', `WIP: ${label}`);
+    return { state: 'committed', commit: git('rev-parse', 'HEAD'), ...described, detail: 'uncommitted changes were committed on the attempt branch, unpushed' };
+  } catch (error) {
+    git('reset', '--hard'); git('clean', '-fd');
+    return { state: 'discarded', commit: git('rev-parse', 'HEAD'), ...described, detail: `uncommitted changes could not be committed and were discarded: ${error instanceof Error ? error.message : String(error)}`.slice(0, 500) };
+  }
 }
 
 /**
@@ -1178,8 +1276,13 @@ export function installationOwner(source: 'app-permissions' | 'held-jobs' | 'del
  * identity may run is routed to an agent: decisions a human used to make go to the master and
  * its independent approver through graphyard master decide.
  */
-export function workAttentionOwner(work: Work, cause: 'containment-settleable' | 'containment-grace' | 'containment' | 'session' | 'proof-gap' | 'reviewer-exhausted' | 'launch-review' | 'launch-producer' | 'base-conflict' | 'merged-unauthorized' | 'gate'): AttentionOwner {
+export function workAttentionOwner(work: Work, cause: 'human-request' | 'containment-settleable' | 'containment-grace' | 'containment' | 'session' | 'proof-gap' | 'reviewer-exhausted' | 'launch-review' | 'launch-producer' | 'base-conflict' | 'merged-unauthorized' | 'gate'): AttentionOwner {
   const key = work.key;
+  // The one attention item no agent may clear: the three human decisions, answered by the human.
+  if (cause === 'human-request') {
+    const request = work.humanRequest!;
+    return humanOwner(humanDecisionLabel[request.kind], `${answerCommand(key, request)} (or Work → Needs you on the dashboard); the answer returns ${key} to the loop, which dispatches it without a master session`);
+  }
   // The merge already happened and cannot be re-run: the only way to a correct delivery record is
   // the two-party merge decision the engine re-checks against the record at the merge cutoff. Once
   // the record has refused one, what remains is the operator's: a decision citing that refusal,
@@ -1599,11 +1702,18 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
     const merged = mergedWithoutAuthorization(work) ? { at: work.observation!.mergedAt ?? null, sha: work.observation!.mergeSha ?? null, violation: unauthorizedMergeViolation,
       refusal: refusedReconciliation(work)?.violation ?? null,
       ...(dead && placement ? { queue: { sequence: dead.sequence, position: placement.position + 1, size: placement.size, unpublishable: true as const, behind: placements.slice(placement.position + 1).map(entry => entry.key) } } : {}) } : null;
+    // A role with no account left is one line for the whole repository (`capacity` below), never a
+    // launch failure repeated on every item that waits for it.
+    const paused = new Set(standingCapacity(work).map(entry => entry.role));
+    const capacityWait = (kind: string | undefined) => paused.has(kind === 'review' ? 'reviewer' : 'producer');
+    const parked = parkedOnHuman(work) ? work.humanRequest! : null;
     const [attention, cause]: [string | null, Parameters<typeof workAttentionOwner>[1] | null] = containmentAttention ? containmentAttention
+      : parked ? [`${work.key} is parked on a human-only decision (${humanDecisionLabel[parked.kind]}) since ${parked.at}: ${parked.needed} — ${parked.reason}. It holds no lease and delays nothing else`, 'human-request']
       : merged ? [`${work.key} was merged on GitHub (${merged.sha?.slice(0, 12) ?? 'merge commit unknown'} at ${merged.at ?? 'an unrecorded time'}) without a valid merge execution: ${merged.violation}. It is held at the merge stage, not waiting for its queue tip; ${merged.queue ? `its merge queue entry (sequence ${merged.queue.sequence}, position ${merged.queue.position} of ${merged.queue.size}) can never publish a speculative tip because the pull request is already merged${merged.queue.behind.length ? `, and ${merged.queue.behind.join(', ')} wait behind it` : ''}; ` : ''}${merged.refusal ? `the last reconciliation was refused — ${merged.refusal}; an operator may deliver it as operator-authorized by a decision citing that refusal` : `a two-party merge decision requested now reconciles it if every gate passed and every required proof was live at the merge cutoff${merged.queue ? ', and a refused one removes the entry without delivering' : ''}`}`, 'merged-unauthorized']
       : active && (!session || !['working', 'idle'].includes(session.state)) ? [`Assigned worker session is ${session?.state ?? 'offline'}`, 'session']
       : gaps.length ? [`No principal is authorized to produce ${gaps.join(', ')}; grant the proof name before dispatch`, 'proof-gap']
       : review?.exhausted ? [`Every configured reviewer profile is exhausted for the current candidate (${review.failedOver.map(entry => `${entry.profile}: ${entry.exhaustion}`).join(', ')})`, 'reviewer-exhausted']
+      : stalledLaunch && capacityWait(stalledLaunch.failure!.kind) || retrying && !stalledLaunch && capacityWait(retrying.group ? 'producer' : 'review') ? [null, null]
       : stalledLaunch ? [`Automatic ${stalledLaunch.failure!.kind} launch for ${work.key} refused ${stalledLaunch.failure!.attempts} time(s): ${stalledLaunch.failure!.reason}`, stalledLaunch.failure!.kind === 'review' ? 'launch-review' : 'launch-producer']
       : retrying ? [`${retrying.group ? `Producer session for ${retrying.group} proofs` : 'Reviewer session'} of ${work.key} ${retrying.session!.state} after attempt ${retrying.retry!.attempts} of ${retrying.retry!.limit}: ${retrying.session!.resolution ?? 'no reason recorded'}; ${retrying.retry!.exhausted ? 'no further automatic attempt' : `next attempt at ${retrying.retry!.nextAt}`}`, retrying.group ? 'launch-producer' : 'launch-review']
       : baseConflict ? [baseConflict, 'base-conflict']
@@ -1617,6 +1727,10 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
       // Set only for an item GitHub merged with no valid execution: the merge, the violation and
       // the last refused reconciliation, so the row reads as stuck rather than as a candidate.
       merged,
+      // The two waits that stall only this item (GY-89): the open human-only request, and the
+      // sessions that ran out of quota with any role that has no account left.
+      humanRequest: parked ? { id: parked.id, kind: parked.kind, decision: humanDecisionLabel[parked.kind], needed: parked.needed, reason: parked.reason, requestedBy: parked.requestedBy, at: parked.at, waitedMs: Math.max(0, now - Date.parse(parked.at)), answer: answerCommand(work.key, parked) } : null,
+      capacity: work.capacity ? { exhaustions: work.capacity.exhaustions.slice(-5), escalations: work.capacity.escalations } : null,
       // What the control plane is doing, or last did, about a base branch that moved under this
       // candidate: nobody is asked for a round while `pending` is set.
       base: baseRefresh || baseConflict || refreshCarry ? { pending: baseRefresh, conflict: baseConflict,
@@ -1638,17 +1752,31 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
   // Submit→merge p50/p90 over every delivery with a recorded submission, judged against the
   // pipeline-speed target; the periodic measurement records this beside the production latency.
   const speed = pipelineSpeedSummary(snapshot.work, now);
+  // Capacity, one line per spent role: the accounts, their resets, and every item that waits on it.
+  const open = snapshot.work.filter(work => work.stage !== 'done');
+  const capacity = (['worker', 'reviewer', 'producer'] as const).flatMap(role => {
+    const waiting = open.filter(work => standingCapacity(work, role).length);
+    if (!waiting.length) return [];
+    const latest = waiting.map(work => standingCapacity(work, role)[0]).sort((a, b) => Date.parse(b.at) - Date.parse(a.at))[0];
+    return [{ role, since: latest.at, retryAt: latest.retryAt, accounts: latest.accounts, waiting: waiting.map(work => work.key), line: `${describeCapacity(role, latest.accounts)}; waiting: ${waiting.map(work => work.key).join(', ')}` }];
+  });
+  const capacityItems: AttentionItem[] = capacity.map(entry => ({ subject: `${entry.role} capacity`, text: entry.line,
+    ...agentOwner('master', `Nothing to run before ${entry.retryAt ?? 'an account reports quota again'}: the loop resumes ${entry.role} launches on its own. To restore capacity sooner, log another account in and add it with graphyard master environments --apply and graphyard master config accounts:PROFILE=…; buying quota or opening a provider account is the human's decision`) }));
+  const humanRequests = openHumanRequests(snapshot.work, now);
   return { observedAt: snapshot.now,
-    counts: { open: rows.length, ready: rows.filter(row => row.stage === 'ready').length, active: rows.filter(row => row.owner).length, attention: rows.filter(row => row.attention).length + installation.attention.length, proofAuthorityGaps: rows.filter(row => row.proofGaps.length).length, mergeable: rows.filter(row => row.mergeable).length, reviewsPending: reviews.pending.length, producersPending: sessions.producers.pending.length,
+    counts: { open: rows.length, ready: rows.filter(row => row.stage === 'ready').length, active: rows.filter(row => row.owner).length, attention: rows.filter(row => row.attention).length + capacityItems.length + installation.attention.length, proofAuthorityGaps: rows.filter(row => row.proofGaps.length).length, mergeable: rows.filter(row => row.mergeable).length, reviewsPending: reviews.pending.length, producersPending: sessions.producers.pending.length,
       // Candidates the guarded merge could take once their gates pass, and the items GitHub already
       // merged without a valid execution, which are never candidates and wait on a reconciliation.
       mergeCandidates: rows.filter(row => row.stage === 'merge' && !row.merged).length, mergedUnreconciled: rows.filter(row => row.merged).length,
       dispatchRequested: rows.reduce((total, row) => total + (row.dispatch ? (row.dispatch.review ? 1 : 0) + row.dispatch.producers.length : 0), 0), dispatchRunning: rows.reduce((total, row) => total + (row.dispatch ? [row.dispatch.review, ...row.dispatch.producers].filter(request => request?.session?.state === 'pending').length : 0), 0), reviewFailover: rows.filter(row => row.review?.failedOver.length).length, queued: placements.length,
       quarantined: rows.filter(row => row.containment && row.containment.phase !== 'live').length, settleableQuarantines: rows.filter(row => row.containment?.settleable).length,
       awaitingSmoke: delivered.filter(row => row.state === 'awaiting-deployment' || row.state === 'awaiting-smoke').length, postDeployFailures: delivered.filter(row => row.state === 'delivered-with-failure').length,
-      reconciledDeliveries: deliveries.reconciled.length, operatorAuthorizedDeliveries: deliveries.operatorAuthorized.length },
+      reconciledDeliveries: deliveries.reconciled.length, operatorAuthorizedDeliveries: deliveries.operatorAuthorized.length,
+      humanRequests: humanRequests.length, capacityExhausted: capacity.length },
     // Every attention item with the role that resolves it and the next command, work items first.
-    attentionItems: [...rows.flatMap(row => row.attention && row.attentionOwner ? [{ subject: row.key, text: row.attention, ...row.attentionOwner }] : []), ...installation.attentionItems] as AttentionItem[],
+    attentionItems: [...rows.flatMap(row => row.attention && row.attentionOwner ? [{ subject: row.key, text: row.attention, ...row.attentionOwner }] : []), ...capacityItems, ...installation.attentionItems] as AttentionItem[],
+    // What waits on the human, longest first, with how to answer; and the roles out of capacity.
+    humanRequests, capacity,
     workers: workerSessions, reviews, producers: sessions.producers, work: rows, queue: queueRows, delivered, deliveries, latency: { mergeToProduction }, speed, controlPlane: installation,
     schedule: scheduling, conflicts: { available: candidateConflicts.available, reason: candidateConflicts.reason, ...sequenceAdvice(rows.filter(row => row.conflicts).map(row => ({ key: row.key, conflicts: row.conflicts!.candidates }))) } };
 }
@@ -1960,6 +2088,7 @@ export const describeOverlap = (overlap: ReturnType<typeof dispatchOverlap>) => 
 export function assertDispatchable(work: Work, allWork: Work[], observedAt: string, options: DispatchOptions = {}) {
   const now = Date.parse(observedAt);
   if (!Number.isFinite(now)) throw new Error('Dispatch requires a valid Graphyard snapshot clock');
+  if (parkedOnHuman(work)) throw new Error(`Dispatch waits on a human-only decision (${humanDecisionLabel[work.humanRequest!.kind]}); ${answerCommand(work.key, work.humanRequest!)} resumes it`);
   if (!work.ready || work.blocker) throw new Error('Dispatch requires released work without a blocker');
   const hold = containmentHold(work, now);
   if (hold) throw new Error(hold);
@@ -2044,13 +2173,24 @@ export function autonomousSession(outcome: string, blocker: string) {
   return `Decide and act on your own: ${outcome}. Never stop to ask a human for confirmation, never end your turn with a question, and never offer a menu of options to choose from; choose what the criteria and these instructions support and carry it out. `
     + `If a command you need is refused or cannot succeed, ${blocker}, naming the exact command that was blocked and its error, then stop. A session that ends waiting on input is recorded as failed with that reason.`;
 }
-export function workerPrompt(config: Pick<MasterConfig, 'cliPath'>, work: Pick<Work, 'key' | 'title'>, profile: Pick<WorkerProfile, 'principal'>, epoch: number, dependencies?: Pick<SharedDependencies, 'shared'> | null) {
+export function workerPrompt(config: Pick<MasterConfig, 'cliPath'>, work: Pick<Work, 'key' | 'title'> & Partial<Pick<Work, 'capacity' | 'humanRequests'>>, profile: Pick<WorkerProfile, 'principal'>, epoch: number, dependencies?: Pick<SharedDependencies, 'shared'> | null) {
   // A session that reinstalls dependencies it already has costs the host a gigabyte per attempt,
   // so the launcher says which trees are already there rather than leaving it to be guessed.
   const installed = dependencies?.shared.length ? `The assigned worktree needs no dependency install: ${dependencies.shared.map(entry => `${entry.name} ${entry.how === 'reachable' ? 'already resolves to' : 'is shared with'} the install at ${entry.source}`).join(', ')}, for this exact lockfile. Do not install dependencies again unless you change the lockfile. ` : '';
   return `Implement ${work.key}: ${work.title}. The Graphyard worker launcher has claimed this item under principal ${profile.principal}, created its assigned worktree, and placed this agent under lease supervision. Run node ${config.cliPath} status ${work.key} before editing. Work only in the current assigned worktree, satisfy the stated criteria without weakening them, open a PR, and submit it with complete as your last action: complete ends your lease and the supervisor then stops this session, which is the attempt ending, not lease loss. Stop immediately if the supervisor reports lease loss before you have submitted. Do not submit trusted evidence or merge the PR; the control plane requests the independent review and the proof producers for your exact head as soon as it passes the build gate, so ask nobody to launch them. `
     + installed
+    + resumedAttempt(work)
+    + `If the item cannot continue without a decision only a human may make — ${humanOnlyDecisions.join('; ')} — do not wait and do not write it as a blocker: record it with node ${config.cliPath} park ${work.key} ${epoch} KIND NEEDED -- REASON (KIND is goals-and-priorities, money-or-accounts or credentials-for-people; NEEDED is the exact thing the human must provide), which ends your lease and parks the item for the human, then stop. `
     + autonomousSession('implement the item, open the pull request and submit it with complete', `record a blocker with node ${config.cliPath} blocked ${work.key} ${epoch} REASON`);
+}
+
+/** What the previous attempt left for this one: the work an exhausted session had not committed, and a human's answer. */
+function resumedAttempt(work: Partial<Pick<Work, 'capacity' | 'humanRequests'>>) {
+  const interrupted = work.capacity?.exhaustions.filter(entry => entry.role === 'worker').at(-1);
+  const kept = interrupted?.partialWork.commit && interrupted.partialWork.state !== 'discarded'
+    ? `The previous attempt (epoch ${interrupted.epoch}) stopped when its provider account ran out of quota; its work is kept as commit ${interrupted.partialWork.commit}${interrupted.partialWork.branch ? ` on local branch ${interrupted.partialWork.branch}` : ''}${interrupted.partialWork.path ? ` (worktree ${interrupted.partialWork.path})` : ''}. Read it with git log and git show, and bring what is sound into your branch with git cherry-pick or git merge instead of redoing it. ` : '';
+  const answered = work.humanRequests?.at(-1)?.answer?.outcome === 'provided' ? work.humanRequests.at(-1)! : null;
+  return kept + (answered ? `An earlier attempt asked the human for ${answered.needed} (${humanDecisionLabel[answered.kind]}); the human answered: ${answered.answer!.text}. Continue from that answer. ` : '');
 }
 
 const shellQuote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
