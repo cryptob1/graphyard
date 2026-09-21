@@ -9,12 +9,18 @@ The sidebar has at most four entries.
 
 | Entry | What it holds |
 | --- | --- |
-| **Work** | The home page: open items, grouped by what needs attention. |
+| **Work** | The home page: open items, grouped by what needs attention; and **Needs you**, the requests only a human may answer, as a tab. |
 | **Shipped** | Every delivered item, newest first, with its pull request and whether the deployment serves it. |
 | **Insights** | Shipping pulse, Flow analytics, Validation and Releases, as tabs. |
 | **Settings** | Test cases, Proof authority and Operator automation, as tabs. |
 
 A page is hidden when nothing is configured for it. An empty list and a failed read are told apart: Operator automation says the read failed and that what is configured is unknown, rather than reporting the safe bootstrap default it cannot see. Validation is hidden until a validation request exists or an item requires an `e2e:` scenario. Releases is hidden until a release or an environment exists. Operator automation is hidden until a scoped operator agent exists. Delivery slices are hidden until a slice has a lead. When the read that decides this fails, the page stays visible, so an outage never hides data. Operator automation is visible to admin sessions only. Operator-agent sessions do not see Shipping pulse or Flow analytics, because their scoped API cannot serve them.
+
+## Needs you
+
+**Work → Needs you** lists every open human-only request — a decision about goals and priorities, spending money or opening a third-party account, or issuing a credential to a person — longest wait first. Each card shows the item, the exact thing needed, which of the three decisions it is, who asked and why, how long it has waited, and the terminal command that answers it (`graphyard answer GY-N REQUEST ANSWER`). An item listed here holds no worker and delays nothing else.
+
+A declared human `admin` session gets an answer box on the card. **Answer and resume** posts `work/GY-N/answer`; the item returns to the master loop, which dispatches it on its next cycle with the answer in the new worker's prompt — no master session is involved. **Decline** keeps it parked with your words as its blocker. Agent sessions see the requests but never the form, and the server refuses their answers. Recently answered requests stay listed underneath with the answer and how long it waited. On the home page a parked item reads `Stuck: Waiting on a human-only decision (…): NEEDED`.
 
 ## The status sentence
 

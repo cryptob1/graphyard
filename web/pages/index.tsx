@@ -2,6 +2,7 @@ import type { ReactNode } from 'react';
 import type { Dashboard } from './dashboard';
 import OverviewPage from './overview';
 import ShippedPage from './shipped';
+import HumanRequestsPage from './human-requests';
 import GuidePage from './guide';
 import AutomationPage from './automation';
 import ScenarioLibrary from '../scenarios';
@@ -45,6 +46,8 @@ const configured = (value: boolean | null | undefined) => value !== false;
 
 export const views: readonly View[] = [
   { id: 'work', icon: '▥', label: 'Work', section: 'work', render: dashboard => <OverviewPage {...dashboard}/> },
+  // What waits on the human (GY-89): a tab beside the work list, never a count in the sidebar.
+  { id: 'needs-you', icon: '☝', label: 'Needs you', section: 'work', render: dashboard => <HumanRequestsPage {...dashboard}/> },
   { id: 'shipped', icon: '✓', label: 'Shipped', section: 'shipped', render: dashboard => <ShippedPage {...dashboard}/> },
   { id: 'pulse', icon: '∿', label: 'Shipping pulse', section: 'insights', visible: dashboard => role(dashboard) !== 'operator-agent', render: dashboard => <ShippingPulse token={dashboard.token} repository={dashboard.status?.repository}/> },
   { id: 'flow', icon: '◷', label: 'Flow analytics', section: 'insights', visible: dashboard => role(dashboard) !== 'operator-agent', render: dashboard => <FlowAnalytics request={dashboard.api} token={dashboard.token} canAudit={['admin', 'coordinator', 'producer'].includes(role(dashboard))}/> },
