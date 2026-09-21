@@ -14,6 +14,8 @@ Ledger events are projected into `flow_facts`, a normalized, append-only, trigge
 
 - **Projection:** incremental, bounded and idempotent on exact identities: a replayed event inserts nothing, two replicas cannot duplicate a fact, a pending review is not a completed-review fact, repeated CI outcomes stay distinct
 - **Runs:** in the reconciliation loop and as a catch-up before each read, reporting lag in `coverage.projection`, which the page shows as **stale**
+- **A bound reached** (window, work items, records scanned, deployment observations, daily buckets, drill-down rows, payload size): reported in `coverage.truncated`, `coverage.workItemsTruncated`, `coverage.deploymentsTruncated`, `coverage.deploymentMergesTruncated`, `coverage.sliceFilterTruncated` and the **partial** state
+- **A truncated scan** reads facts in `(observed_at, id)` order, so it loses the end of the window. `window.covered` and `coverage.covered` state the interval: the requested `from` and `to`, the instant reached (`toCovered`), `ms` against `windowMs` and `fraction`, the `uncovered` interval, and `remainingFacts` there (`remainingCapped` marks a floor). `window.covered.statement` says it in a sentence, `window.truncated` is the flag to branch on, and an export's metadata rows carry `windowCovered`, `windowCoveredFraction`, `windowTruncated` and `windowCoverage`. Narrow the window, type or slice to cover the rest
 - **A provider that deletes a pull request, check run or deployment record** cannot erase a stored fact
 - **Deployment observations** and their contained merge identities are repository-wide, so slice, type and stage filters never narrow them; production phases join through those containment records, never assuming an artifact SHA equals a merge SHA
 - **Graphyard's [release records](delivery.md):** a separate lineage this report does not read yet, so a repository observed only through the release pipeline reports deployment metrics as unavailable
@@ -44,6 +46,16 @@ Metrics:
 Every undelivered item falls into exactly one category, read from its latest durable gate fact (which records `queued` and `mergeBlockers`), not live queue state:
 
 - **not released**, **blocked**, **dependency-blocked**, **in implementation**, **waiting on review**, **waiting on acceptance evidence**, **merge blocked**, **merge ready**
+
+The page shows exactly one state:
+
+- **Loading:** a read is in flight; figures still on screen are labelled an earlier observation, and the previous coverage state is never carried over
+- **Unavailable:** the control plane refused or is unreachable; figures on screen are labelled an earlier observation
+- **Empty:** no work item matches the window and filter
+- **Partial:** the scan bound was reached; the report names the interval it covered in `window.covered`
+- **Stale:** the projection is behind the ledger, or the observation is older than two minutes
+- **Sparse:** too few records for representative distributions
+- **Complete:** every record in the window is included
 
 ## Privacy boundary and API
 

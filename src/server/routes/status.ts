@@ -1,5 +1,7 @@
 import { z } from 'zod';
 import { demand } from '../../model.js';
+import { parseEventHistoryQuery, readEventHistory } from '../../events-history.js';
+import { catchUpPipelineTimelines, pipelineBackfillState } from '../../pipeline-backfill.js';
 import { delegationSnapshot } from '../../delegation.js';
 import { installationSettingsUrl } from '../../github.js';
 import { controlPlanePermissions, requiredPermissions } from '../../github-permissions.js';
@@ -27,7 +29,10 @@ export const statusRoutes = defineRoutes('status', [
         // that no longer cover the roster, what production serves against the base branch, and
         // the build/protocol the CLI checks before brokering a merge. Production names work
         // items across the repository, so a scoped operator agent does not see it.
-        delegationLimits: services.delegationLimits, build, production: actor.role === 'operator-agent' ? null : production?.status() ?? null, now: observedAt.toISOString(), release: releaseInfo(), schema: schemaVersion };
+        delegationLimits: services.delegationLimits, build, production: actor.role === 'operator-agent' ? null : production?.status() ?? null,
+        // What the timeline reconstruction has done in this process, and any failure it hit.
+        pipelineBackfill: pipelineBackfillState(observedAt.getTime()),
+        now: observedAt.toISOString(), release: releaseInfo(), schema: schemaVersion };
     },
   },
   {
@@ -37,6 +42,11 @@ export const statusRoutes = defineRoutes('status', [
       // (work-view.ts); without it the snapshot carries every document whole.
       const requested = url.searchParams.get('view') ?? req.headers[coordinationViewHeader.toLowerCase()];
       const view = z.enum(['full', 'coordination']).parse(Array.isArray(requested) ? requested[0] : requested ?? 'full');
+      // Bounded catch-up: items that predate the per-item timeline gain one from their own
+      // ledger before the snapshot every speed report is derived from is read. The ledger is read
+      // outside the coordination lock, one run at a time; it converges and then costs one small
+      // query per settle window; a failure is reported through /api/status, never here.
+      await catchUpPipelineTimelines(services.engine.store);
       const snapshot = await services.engine.store.workSnapshot(); const visibleWork = operatorVisible(snapshot.work);
       const scoped = { ...snapshot, work: visibleWork, jobs: actor.role === 'operator-agent' ? snapshot.jobs.filter(job => visibleWork.some(work => work.id === job.work_id)) : snapshot.jobs };
       return view === 'coordination' ? coordinationSnapshot(scoped) : scoped;
@@ -44,12 +54,17 @@ export const statusRoutes = defineRoutes('status', [
   },
   { method: 'GET', path: '/api/work', handle: async ({ services, operatorVisible }) => operatorVisible(await services.engine.store.list()) },
   {
+    // The history read: filtered by kind and time, paged by ledger sequence, with the routine
+    // rows the control plane writes continuously summarised instead of paged through. `rows`
+    // answers with the event array every existing client reads; `view=history` adds the cursor
+    // and the disclosure of what the filter left out, and `view=page` the cursor alone, for the
+    // later pages of one walk. All share one set of defaults.
     method: 'GET', path: '/api/events',
     async handle({ actor, url, services, operatorVisible }) {
-      const id = url.searchParams.get('work') ?? undefined;
-      if (id) z.string().uuid().parse(id);
-      if (actor.role === 'operator-agent') { demand(id, 'Operator-agent history reads require a scoped work item', 403); const item = (await services.engine.store.list()).find(w => w.id === id); demand(item && operatorVisible([item]).length, 'Work item is outside this operator-agent scope', 403); }
-      return services.engine.store.events(id);
+      const query = parseEventHistoryQuery(url.searchParams);
+      if (actor.role === 'operator-agent') { demand(query.work, 'Operator-agent history reads require a scoped work item', 403); const item = (await services.engine.store.list()).find(w => w.id === query.work); demand(item && operatorVisible([item]).length, 'Work item is outside this operator-agent scope', 403); }
+      const history = await readEventHistory(services.engine.store.pool, query);
+      return query.view === 'rows' ? history.events : history;
     },
   },
 ]);

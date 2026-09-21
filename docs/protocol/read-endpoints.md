@@ -7,7 +7,7 @@ For a client reading Graphyard, and what bounds each read.
 - `GET /api/status`: Current principal, integration configuration, the App permission preflight (`appPermissions`), `heldJobs`, failed jobs, `delegationLimits`, `production`, server time
 - `GET /api/work-snapshot`: Work (with each item's `autoDispatch` requests), integration job metadata and database time from one Postgres statement snapshot, as `{ work, now }` ordered by work number; `?view=coordination`: the bounded view the master loop and dispatcher poll
 - `GET /api/work`: Work aggregates, in creation order
-- `GET /api/events?work=UUID`: Latest 300 events for one item; omit the filter for the latest global events
+- `GET /api/events?work=UUID`: Event rows for one item, newest first; omit `work` for the whole ledger; see [an item's history](#reading-an-items-history)
 - `GET /api/analytics/flow[/drilldown|/export]`, `GET /api/analytics/attribution[/drilldown]`, `GET /api/deployments`: [Flow analytics](../flow-analytics.md#privacy-boundary-and-api), with their query parameters and audit-role rule
 - `GET /api/attribution/manifest/RELEASE_ID/REVISION`: A release manifest with its `hash`, `digestHash` and membership
 - `GET /api/attribution/work/UUID`: One item's attribution ledger, newest last, at most 200 rows; a worker reads only its own assignment; identifiers follow the same audit-role rule
@@ -17,9 +17,28 @@ For a client reading Graphyard, and what bounds each read.
 - `GET /api/validation[/capacity|/definitions|/candidate/UUID|/attempt/REQUEST_ID]`: Requests, runner capacity, definition history, one candidate, or the attempt authority a host attestor reads
 - `GET /api/shipping-pulse`: The repository [delivery pulse](../shipping-pulse.md); not offered to operator agents
 
+## Reading an item's history
+
+`GET /api/events` excludes the routine kinds `github.observed` (one per reconciliation pass) and `heartbeat` (one per lease renewal) by default, summarising them instead.
+
+| Parameter | Meaning |
+| --- | --- |
+| `work` | One item's UUID; omitted, the whole ledger |
+| `kind` | Only these kinds, repeated or comma-separated; naming a routine kind selects it |
+| `since`, `until` | Half-open `[since, until)` on the recorded instant |
+| `order` | `desc` (default) or `asc` |
+| `limit` | Rows per page, 1-1000 (default 300) |
+| `cursor` | The `seq` of the previous page's last row; paging never revisits a row |
+| `routine` | `exclude` (default) or `include` |
+| `payload` | `full` (default), `details` (without the embedded work snapshot) or `none` |
+| `view` | `rows` (default, the event array), `history` (adds `page` and `routine`) or `page` (`history` without the routine summary) |
+
+- **`view=history`:** answers `filters`, `events`, `page` (`returned`, `hasMore`, `nextCursor`, first and last `seq` and instant) and `routine`: each excluded kind's count with first and last instant, the total, a `statement`, and `truncated` when the summary's bounded scan filled
+- **`graphyard events GY-N`:** `--kind`, `--since`, `--until`, `--order`, `--limit`, `--cursor` and `--payload` (default `details`) are these parameters; `--routine` includes the routine rows; `--all` follows `nextCursor` forwards (`order=asc` unless given) for at most 200 pages, `page.complete` saying whether the range ended. Without an item, `graphyard events` reads the latest ledger rows and takes no flags
+
 ## Bounds
 
 - **Attribution endpoints:** reads only — the ledger is written by validation and observation ingest inside their transactions, so no credential moves a request, attempt, result or evidence record through them, and a `POST` to one is not found
 - **Flow analytics:** bounded in window, work items, records scanned, buckets, drill-down rows and payload size; reports when a bound was reached; not offered to operator agents
 - **Paged reads:** `GET /api/validation[/definitions|/reuse|/replays]?cursor=C` and `GET /api/delivery/observations?cursor=C` take the previous response's `nextCursor`, null when finished
-- **The list API:** unpaginated and not an analytics export — event payload snapshots reconstruct historical revisions, and archival export pagination is future work
+- **`GET /api/work`:** unpaginated and not an analytics export
