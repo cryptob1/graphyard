@@ -1,14 +1,18 @@
 import { randomUUID } from 'node:crypto';
 import { probeCandidateConflicts } from '../conflicts.js';
-import { agentOwner, agentToken, assessContainment, buildMasterStatus, diskPressure, diskPressureAttention, diskThresholdBytes, freeBytes, herdrWorkspaceHealth, humanOwner, inspectWorkerCredentials, installationOwner, inventoryWorktrees, mergeProtocolSkew, observeHerdrAgents, planWorktreeReclaim, reclaimIdleMs, snapshotWithClock, worktreesDirectory, type AttentionItem, type HerdrAgent, type MasterConfig, type WorkerProfile } from '../master.js';
+import { agentOwner, agentToken, assessContainment, buildMasterStatus, diskPressure, diskPressureAttention, diskThresholdBytes, freeBytes, herdrWorkspaceHealth, humanOwner, inspectWorkerCredentials, installationOwner, inventoryWorktrees, managedRootStatus, mergeProtocolSkew, observeHerdrAgents, planWorktreeReclaim, reclaimIdleMs, snapshotWithClock, worktreesDirectory, type AttentionItem, type HerdrAgent, type MasterConfig, type WorkerProfile } from '../master.js';
 import { generatedFilesAssignment, generatedFilesDrift, generatedFilesVariable, generatedManifestScript } from '../install/generated-files.js';
 import type { Work } from '../model.js';
-import { daemonSummary, orphanedSupervisors, readDaemonState, type DaemonState, type OrphanSupervisor } from '../master-daemon.js';
+import { actionReport, agentRequestAttention, agentRequestReport, sessionReport } from './loop-report.js';
+import { daemonSummary, loopAttention, orphanedSupervisors, readDaemonState, type DaemonState, type OrphanSupervisor } from '../master-daemon.js';
 import { readReviewLedger, reconcileReviews, reviewerBindingHealth, summarizeReviews } from '../reviewer.js';
 import { readProducerLedger, reconcileProducers, sessionRetries, summarizeProducers } from '../producer.js';
 import { dispatchSummary, readDispatchCursor } from '../auto-dispatch.js';
+import { unansweredRequests, type RequestProgress, type UnansweredRequest } from '../model/dispatch.js';
 import { readAdministrationLedger, readSudoState, summarizeAdministration } from '../master-browser.js';
-import { workMutation, type CliCommand } from './registry.js';
+import { ghCheckAnnotations, qualifyTimingFailures } from './timing-failures.js';
+
+export { actionReport, agentRequestAttention, agentRequestReport, sessionReport } from './loop-report.js';
 
 /**
  * One attention item per open worker scope request whose epoch still holds the lease: addressed
@@ -24,6 +28,33 @@ export function scopeRequestAttention(snapshot: { work: Work[]; now: string }) {
 }
 
 type MasterStatus = ReturnType<typeof buildMasterStatus>;
+
+/** Long waits read in the unit the reader thinks in; a request measured in seconds is still young. */
+const elapsed = (ms: number) => ms >= 3_600_000 ? `${Math.floor(ms / 3_600_000)}h${Math.floor(ms % 3_600_000 / 60_000)}m` : ms >= 60_000 ? `${Math.floor(ms / 60_000)}m` : `${Math.floor(ms / 1000)}s`;
+
+/** Who answers a request whose session settled unanswered, and with which command. */
+export function unansweredRequestOwner(key: string, request: Pick<UnansweredRequest, 'kind'>) {
+  return request.kind === 'review'
+    ? agentOwner('master', `graphyard master review ${key} [PROFILE] forces the next attempt for the open request`)
+    : agentOwner('master', `graphyard master decide ${key} rework REASON, approved by the approver agent, so the group's proofs are requested afresh on the next head`, 'approver');
+}
+
+/**
+ * One attention item per live request whose session settled without satisfying its gate. Such a
+ * request is the one state `master status` used to show as nothing at all: no session running, no
+ * launch refused, no failure — just a `sinceMs` climbing past the hour while the gate goes on
+ * refusing. It is named here with the verdict that settled the session, how long the request has
+ * stood, and the command that gets it answered, and counted apart from the requests with a
+ * session actually running (`counts.dispatchRunning`).
+ */
+export function unansweredRequestAttention(rows: { key: string; dispatch: { review: RequestProgress | null; producers: RequestProgress[] } | null }[]): AttentionItem[] {
+  return rows.flatMap(row => unansweredRequests(row.dispatch).map(request => {
+    const subject = request.kind === 'review' ? 'Review request' : `Producer request for ${request.group ?? 'its'} proofs`;
+    const verdict = request.verdict ? `with verdict ${request.verdict}` : 'without a verdict';
+    return { subject: row.key, text: `${subject} for ${row.key} has stood unanswered for ${elapsed(request.sinceMs)}: its session ${request.state} ${verdict} after attempt ${request.attempts} — ${request.resolution ?? 'no reason recorded'}; nothing is running for it and no further attempt is scheduled`,
+      ...unansweredRequestOwner(row.key, request) };
+  }));
+}
 
 /**
  * The command that reclaims an assignment from a watch supervisor that outlived its agent. The
@@ -133,22 +164,39 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
   const worktrees = worktreesDirectory(root);
   const reclaimPlan = planWorktreeReclaim(await inventoryWorktrees(root).catch(() => []), snapshot.work, { now: Date.now(), idleMs: reclaimIdleMs(master) });
   const disk = diskPressure(worktrees, await freeBytes(worktrees), diskThresholdBytes(master), reclaimPlan);
-  const diskAttention = diskPressureAttention(disk);
+  // The managed worktree root is a volume of its own as often as not: proof and review checkouts
+  // live there, and it is judged against its own minimum and budget, before a write there fails.
+  const managedRoot = await managedRootStatus(root, master, [...reviewRecords, ...producerRecords]);
+  const diskAttention = [...diskPressureAttention(disk), ...managedRoot.attention];
   const daemonState = await readDaemonState(root, master).catch(error => ({ error: error instanceof Error ? error.message : 'Master daemon state is unreadable' }));
-  const daemon = 'error' in daemonState ? { running: false, error: daemonState.error } : daemonSummary(daemonState, Date.now(), master.run.intervalSeconds * 1000);
+  const intervalMs = master.run.intervalSeconds * 1000;
+  const cycling = 'error' in daemonState ? null : daemonSummary(daemonState, Date.now(), intervalMs, master.hostId);
+  const daemon = cycling ?? { running: false, error: (daemonState as { error: string }).error };
+  // The loop's own health comes before every work item: a coordinator that is absent or stalled is
+  // why nothing else on this list is moving, and no other attention item would say so.
+  const loopItems: AttentionItem[] = cycling
+    ? loopAttention({ liveness: cycling.liveness, silence: cycling.silence, budget: cycling.budget })
+    : [{ subject: 'loop', text: `The master loop's cursor cannot be read, so whether it is cycling is unknown: ${(daemonState as { error: string }).error}`, ...agentOwner('master', 'graphyard master restart (a supervised deployment restarts it on its own: systemctl --user restart graphyard-master)') }];
   // Browser administration is reported beside the work it unblocks: a pending sudo code is
   // the one thing the operator must act on, and the recent ledger entries say who changed what.
   const administration = { browser: master.browser ? { profile: master.browser.profile } : null, ...summarizeAdministration((await readAdministrationLedger(root)).entries, await readSudoState(root)) };
   // A worker session Herdr no longer reports, on an assignment whose lease is still advancing, is
   // an orphaned supervisor rather than a session that finished; it is named with what reclaims it.
-  const status = nameOrphanSupervisors(buildMasterStatus(snapshot, master.workers, runtime.agents, credentials, containment, reviews, master.baseBranch, coordinator, { producers, failures: dispatch.failures, retries }, probeCandidateConflicts(root, snapshot.work)),
+  const sessions = nameOrphanSupervisors(buildMasterStatus(snapshot, master.workers, runtime.agents, credentials, containment, reviews, master.baseBranch, coordinator, { producers, failures: dispatch.failures, retries }, probeCandidateConflicts(root, snapshot.work)),
     snapshot.work, master.workers, runtime, Date.parse(snapshot.now));
+  // A required check that failed on the clock says so, with the measurement against its budget.
+  const status = await qualifyTimingFailures(sessions, snapshot.work, master.repository, ghCheckAnnotations(master.repository));
   // A waiting sudo prompt is the operator confirming their own GitHub credential on their device,
   // the one step no agent may take for them; a timed-out one is the master's to rerun.
   const sudo = administration.sudo;
-  const scopeRequests = scopeRequestAttention(snapshot);
-  const attentionItems = [...diskAttention, ...scopeRequests, ...(sudo ? [...status.attentionItems, { subject: 'installation', text: sudo.instruction,
+  const scopeRequests = [...scopeRequestAttention(snapshot), ...agentRequestAttention(snapshot)];
+  // A request whose session settled without satisfying its gate: nothing runs for it, nothing
+  // refused, and nothing will launch again until it is named here with the command that answers it.
+  const unanswered = unansweredRequestAttention(status.work);
+  const attentionItems = [...diskAttention, ...scopeRequests, ...unanswered, ...(sudo ? [...status.attentionItems, { subject: 'installation', text: sudo.instruction,
     ...(Date.parse(sudo.deadline) <= Date.now() ? agentOwner('master', `graphyard master browser ${sudo.flow}`) : humanOwner('issuing credentials to people', sudo.instruction)) }] : [...status.attentionItems])];
+  // The loop's own health goes in front of all of it (see loopItems above).
+  attentionItems.unshift(...loopItems);
   // Setup that stops every launch is the master's to repair.
   for (const text of reviewerBinding.attention) attentionItems.push({ subject: 'setup', text, ...agentOwner('master', 'graphyard master reviewer setup (or graphyard master reviewer bind FILE --key-stdin) to bind the reviewer App') });
   if (workspace.exists === false) attentionItems.push({ subject: 'setup', text: workspace.reason!, ...agentOwner('master', 'Set herdrWorkspace in .graphyard/master.json to a workspace herdr workspace list shows; master run adopts it on its next tick') });
@@ -168,15 +216,20 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
   attentionItems.push(...generatedFiles);
   const decisions = await terminalDecisions(masterApi, snapshot.work);
   return { ...status, attentionItems: [...attentionItems, ...decisions.attentionItems],
-    counts: { ...status.counts, attention: status.counts.attention + diskAttention.length + generatedFiles.length + scopeRequests.filter(item => !(status.work as { key: string; attention: string | null }[]).find(row => row.key === item.subject)?.attention).length },
+    counts: { ...status.counts, dispatchUnanswered: unanswered.length,
+      attention: status.counts.attention + diskAttention.length + generatedFiles.length + unanswered.length + loopItems.length + scopeRequests.filter(item => !(status.work as { key: string; attention: string | null }[]).find(row => row.key === item.subject)?.attention).length },
     terminalDecisions: decisions.listed,
     autoMerge: master.autoMerge, mergeApproval: master.autoMerge ? 'routine merges permitted after gates pass' : 'each merge needs an approved merge decision: graphyard master decide GY-N merge REASON, approved by the approver agent',
     versionSkew: mergeProtocolSkew(coordinator, cli), cli,
     reviewer: master.reviewer ? { identity: `${master.reviewer.slug}[bot]`, appId: master.reviewer.appId, profiles: master.reviewers.map(profile => profile.name), automatic: master.run.reviewerProfile ?? (master.reviewers.length === 1 ? master.reviewers[0].name : null) } : null,
     producerProfiles: master.producers.map(profile => ({ name: profile.name, principal: profile.principal, kind: profile.kind, agentName: profile.agentName })),
     setup, administration, daemon, dispatch,
+    // The inverted loop: what the control plane says each item needs, who is running it, and
+    // every session it can be watched through.
+    actions: actionReport(snapshot), sessions: sessionReport(snapshot),
+    requests: agentRequestReport(snapshot),
     // What the host has left, what a reclaim would give back, and the bound it was judged against.
-    disk: { ...disk, idleMs: reclaimIdleMs(master), reclaimable: reclaimPlan.filter(entry => entry.disposable).map(entry => ({ path: entry.path, key: entry.key, epoch: entry.epoch, disposition: entry.disposition, detail: entry.detail })) },
+    disk: { ...disk, worktreeRoot: managedRoot.health, idleMs: reclaimIdleMs(master), reclaimable: reclaimPlan.filter(entry => entry.disposable).map(entry => ({ path: entry.path, key: entry.key, epoch: entry.epoch, disposition: entry.disposition, detail: entry.detail })) },
     runtime: { herdr: { available: runtime.available, reason: runtime.reason }, reviews: reviewRuntime } };
 }
 
@@ -197,32 +250,6 @@ export function cycleBudget(state: Pick<DaemonState, 'metrics'>, intervalMs: num
     lastOverrun: overruns.length ? { cycle: overruns.at(-1)!.cycle, at: overruns.at(-1)!.at, durationMs: overruns.at(-1)!.durationMs } : null,
   };
 }
-
-/** The worker half of live scope negotiation: ask, or withdraw, without leaving the lease. */
-export const scopeRequestCommand: CliCommand = {
-  name: 'scope-request',
-  scope: 'work',
-  help: [
-    '  scope-request GY-N EPOCH PATH... -- REASON',
-    '                                Ask the master to widen plannedFiles with PATH... for a',
-    "                                reason; `scope-request GY-N EPOCH -` withdraws the open",
-    '                                request. The master approves it with one command:',
-    '                                `graphyard master scope GY-N`, and the attempt keeps its',
-    '                                lease — a free-text blocker that waits on a human is never',
-    '                                needed for scope',
-  ],
-  async run(context, work) {
-    const { args, print } = context;
-    const epoch = Number(args[0]);
-    if (!Number.isInteger(epoch) || epoch < 1) throw new Error('Use scope-request GY-N EPOCH PATH... -- REASON, or scope-request GY-N EPOCH - to withdraw');
-    if (args[1] === '-') return print(await workMutation(context, work)('scope', { epoch, paths: [], reason: 'Withdrawn by the worker' }));
-    const separator = args.indexOf('--');
-    const paths = args.slice(1, separator < 0 ? args.length : separator);
-    const reason = separator < 0 ? '' : args.slice(separator + 1).join(' ').trim();
-    if (!paths.length || !reason) throw new Error('Name at least one PATH outside plannedFiles and give a REASON after --');
-    return print(await workMutation(context, work)('scope', { epoch, paths, reason }));
-  },
-};
 
 /**
  * The one-command approval behind `master scope GY-N [REASON]`: read the item's open scope

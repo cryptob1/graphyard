@@ -30,6 +30,7 @@ import { shippingPulseRoutes } from './routes/shipping-pulse.js';
 import { flowAnalyticsRoutes } from './routes/flow-analytics.js';
 import { attributionRoutes } from './routes/attribution.js';
 import { statusRoutes } from './routes/status.js';
+import { actionRoutes } from './routes/actions.js';
 import { workRoutes } from './routes/work.js';
 import { staticRoutes } from './static.js';
 
@@ -45,7 +46,7 @@ export const publicRoutes: readonly RouteModule[] = [healthRoutes, githubRoutes]
 export const apiRoutes: readonly RouteModule[] = [
   operatorAgentRoutes, proofGrantRoutes,
   { name: 'operator-agent-scope', routes: [operatorAgentRouteGuard] },
-  agentRegistryRoutes, delegationRoutes, validationRoutes, deliveryRoutes, shippingPulseRoutes, flowAnalyticsRoutes, attributionRoutes, scenarioRoutes, statusRoutes, workRoutes,
+  agentRegistryRoutes, delegationRoutes, validationRoutes, deliveryRoutes, shippingPulseRoutes, flowAnalyticsRoutes, attributionRoutes, scenarioRoutes, actionRoutes, statusRoutes, workRoutes,
 ];
 
 async function body(req: IncomingMessage, limit = 1_000_000) {
@@ -54,7 +55,6 @@ async function body(req: IncomingMessage, limit = 1_000_000) {
   return Buffer.concat(chunks);
 }
 
-/** Wire the engine, its integrations and the configured principals into the shared services. */
 /** Where retained validation artifacts live and how much the postgres backend may hold. */
 export interface ArtifactOptions { backend: ArtifactBackend | null; capacityBytes: number }
 
@@ -65,6 +65,7 @@ export interface ArtifactOptions { backend: ArtifactBackend | null; capacityByte
  */
 export interface ServerOptions { knownPrincipals?: readonly string[]; env?: NodeJS.ProcessEnv; production?: ProductionWatch | null }
 
+/** Wire the engine, its integrations and the principals into the shared services. */
 export function assembleServices(engine: Engine, credentials: Credential[], github: GitHub | null, artifacts: ArtifactOptions = { backend: null, capacityBytes: artifactCapacityFromEnv() }, options: ServerOptions = {}): Services {
   const env = options.env ?? process.env;
   const delegationLimits = assembleDelegationLimits(credentials, env, options.knownPrincipals);

@@ -111,6 +111,28 @@ The fleet is control-plane state. The **agent registry** stores the *runtimes* (
 
 **Visibility.** `master status` reports the registry under `fleet`: per account its runtime, model (id, cost, capability tier), host, role eligibility with its place in each role's order, live sessions, login, quota, usage windows, reset time, and `ineligible` — the reason it cannot take a session now; per role the account its next action would run on, or what blocks it; the recent selections with their reasons; and the recent refusals. A blocked role, an account that serves no role, and an unconfigured role are raised as `fleet` attention items the master resolves itself with `master registry`. The dashboard's Agent fleet page shows the same view and carries the forms that configure it. The registry is kept on the append-only event ledger (every change and selection is an `agent-registry.*` event carrying the resulting registry), so its full history is `master registry history` and every logical backup carries it.
 
+### Exhaustion in the middle of a session
+
+The launch check reads an account before a session starts. An account that runs out **while its session works** does not fail: the runtime prints its provider's limit notice — `You've hit your weekly limit · resets …`, `Weekly usage limit reached … reset at …`, `You've reached your spend limit … resets on 10/8` — and the session stops there, holding its lease or its request. Until GY-89 a master noticed by reading panes and repointed profiles by hand, at 20–60 minutes each. The durable loop now does it on the cycle it sees it:
+
+1. **Detect, from the session's own output.** For every launched worker, reviewer and producer session that Herdr reports `idle`, `done` or `blocked`, the loop reads the tail of its terminal (`herdr agent read`, last 40 lines) and matches the providers' limit notices on short single lines. The notice must also **lead** its line, behind at most a two-word label — `Error: Weekly usage limit reached`, `Claude AI usage limit reached|…`: every runtime prints its banner that way, while a session reaching the phrase through a sentence of its own (`Added a test for the rate limit reached path`) is writing prose, not printing a banner. A session that is still `working` is never judged on what it prints either, so a worker discussing usage limits is not a notice. The reset time is read from the notice: an absolute timestamp, a Unix time, a wait (`try again in 3 days 4 hours`), or a wall clock in the host's zone (`resets 3pm`, `resets Sep 26`); a notice that names none records an unknown reset rather than a guess.
+2. **Keep the partial work.** For a worker on this host, uncommitted changes in the attempt worktree are committed on the attempt's own branch as `WIP: GY-N attempt E interrupted by provider quota exhaustion` — unpushed, never stashed. It is `git add -A`, so anything the attempt left in the worktree that `.gitignore` does not cover is committed with it; the commit stays local to that worktree's branch, and the next attempt reads it before it pushes anything. If they cannot be committed the worktree is reset and the record says `discarded`; an attempt never ends with changes that are neither kept nor gone. The next attempt's prompt names the commit, branch and worktree so it can cherry-pick instead of redoing the work.
+3. **Hold the account.** The account is recorded as exhausted beside the coordinator credential (`*.environments.json`, `exhausted`) until its reset time — one hour when the notice named none — and every launcher skips it with that reason, including for OpenCode and Cursor accounts whose quota Graphyard cannot read. A profile that names no `accounts` is held under `profile:NAME`.
+4. **Record it.** `POST /api/work/GY-N/capacity` with the coordinator credential writes a `capacity.exhausted` history entry — role, profile, account, runtime, the provider's notice, the reset time and how the partial work was kept — onto `capacity.exhaustions` of the item. For a worker the same transaction ends the attempt as `released`, so nothing waits for a lease nobody renews to lapse and no `lease-loss` is raised. The loop then stops the watch supervisor through the containment scope it recorded, which is the path that settles its own quarantine.
+5. **Re-queue.** A worker's item is claimable again once that quarantine settles, and the dispatch step of the next cycle launches it on the profile's next account or on another profile — twenty seconds after detection at the default interval, inside the two-minute bound. A reviewer or producer session is ended on its ledger as `failed` with the exhaustion as its resolution and its request is launched again at once, the exhausted profile last.
+
+Each failover is one `failover` action in `daemon.actions`, and `master status` shows the item's recent exhaustions under `work[].capacity`.
+
+### When a role has no account left
+
+When **every** launch profile of a role is unavailable for the same reason — each of its accounts is spent — that is capacity, not a launch failure. A logged-out account, an unreadable credential, or an `accounts:` name that is not a configured environment is something a master can fix in one command, so it is never capacity: the account selector carries *why* it passed each account over, and only a profile every one of whose accounts was passed over as spent reports itself out of capacity. The daemon and the automatic reviewer/producer dispatcher both key on that, so a role whose accounts are merely logged out keeps its counted launch refusal, its widening retry and its `launch-review` / `launch-producer` attention item addressed to the master, rather than reading as a wait for a provider reset that would never come.
+
+- Every item whose next action needs that role records **one capacity escalation**: `capacity.escalations[]` with each account, its profile, its reset time and the reason, plus `retryAt`, the first reset among them. It is a `capacity.escalated` history entry, written once per distinct set of accounts and resets, never per cycle. It blocks nothing and nobody has to clear it.
+- **The loop stops launching that role.** The worker dispatch step is skipped entirely, so there are no failed dispatches, no profile cool-offs and no `No worker profile can take GY-N` escalations. The automatic reviewer/producer dispatcher treats a launch that ran out of quota on every account as a wait, not a refusal: it counts toward no failure limit (a request that waited out a week-long reset still launches), and the role is not launched again until its accounts are due to be read, one minute later. The pause lasts only as long as it is true: the launch that succeeds clears it, and so does a launch the role refuses for anything else, so the summary never reports a provider reset beside a fault a master can fix now.
+- **Nothing else is delayed.** Reviews, proofs, merges, deployment verification and every item that needs a different role run in the same cycle exactly as before.
+- **`master status` says it in one line** per spent role, under `capacity` and as one attention item: `worker capacity is exhausted on every configured account (claude-a resets …, zai resets …); worker launches are paused until …, and nothing else is delayed; waiting: GY-7, GY-9`. Launch refusals and session retries that are only that capacity are not listed per item.
+- The cycle an account reports quota again — its reset passed, or a master added a logged-in account with `master environments --apply` and `master config accounts:PROFILE=…` — the loop withdraws the escalation (`capacity.restored`) and dispatches what was waiting. Buying quota or opening a provider account remains the human's decision.
+
 ### The request is the session's first message
 
 Every session Graphyard launches — a worker under `watch`, the reviewer and producer sessions the loop starts, the approver, the master itself — receives its instruction as the session's own first request, on the runtime's command line: Claude Code, Codex and Cursor take it as the positional prompt after their flags, OpenCode through `--prompt`. It is never typed into the running session. `herdr agent prompt` delivers text through bracketed paste, and a coding agent treats pasted text as untrusted data rather than as a request from its operator — correctly, against prompt injection — so a session launched that way often ended its first turn having refused to act, and the loop recorded it as failed with `finished (done) without trusted evidence` and spent a retry on work that was never attempted (GY-93). `master status` shows `delivery: request` on the session, or `paste` for a runtime Graphyard has no request contract for, which is still prompted after it starts.
@@ -138,9 +160,11 @@ A never-started session is a launch that failed, not work that failed, and it do
 ## Durable loop
 
 A chat session is a poor coordinator. Its transcript grows without bound, it dies with its
-provider's credits, and recovering it needs a human to hand the role to another session. The
-deterministic part of coordination does not need a language model at all, so run it as a supervised
-process:
+provider's credits, and recovering it needs a human to hand the role to another session. A pipeline
+that waits for one is worse: measured over the eleven deliveries of 2026-09-19/20, 95% of the
+create→merge time had no event anywhere in the system, and work resumed within ninety seconds every
+time the master session came back. The deterministic part of coordination does not need a language
+model at all, so run it as a supervised process, and let it decide the routine cases itself:
 
 ```sh
 node "$GRAPHYARD_CLI" master run              # cycle until stopped
@@ -188,36 +212,177 @@ Each cycle:
    assignment is delivered, superseded by a later epoch, or untouched beyond the idle bound are
    removed, before anything in the cycle asks the host for more room, on a ten-minute cadence or
    every cycle while free space is below the threshold (see [worktree disk](#worktree-disk));
-4. **dispatches claimable work** to a healthy worker profile, through the same launcher
+4. **reclaims the items whose sessions died** — a supervised launch fences its worker in a scope
+   unit, and that fence outlives the session, so a dead worker's item cannot be claimed again until
+   somebody settles the quarantine. Once the lease has lapsed and the grace window has run, the
+   loop verifies on the registered host that the supervisor is gone — the same probe
+   `master settle-containment` runs, re-evaluated by the control plane — and settles it, so the
+   next step can offer the item again. A signal it cannot verify is an escalation, never a
+   settlement (see [containment quarantines](#containment-quarantines));
+5. **dispatches claimable work** to a healthy worker profile, through the same launcher
    `master dispatch` uses: the worker claims under its own identity and the loop holds no lease.
    Ready items are offered [smallest planned scope first](#conflict-avoidance) within a priority,
    and an item whose `plannedFiles` overlap a claimed or unmerged item is held rather than
    dispatched — the loop never overrides a hold; only `master dispatch --allow-overlap` does;
-5. **shepherds reviews and proofs** — the reviewer and producer sessions the control plane
+6. **requests the routine decisions**, launches an approver session for each, and looks at every
+   one of them again on every cycle until it is applied — a standing verdict, a base branch
+   Graphyard could not merge in, a delivered item still fenced, and the merge itself where
+   automatic merging is off (see [unattended decisions](#unattended-decisions));
+7. **shepherds reviews and proofs** — the reviewer and producer sessions the control plane
    requested for each exact head are launched on the dispatcher's own cadence (see
    [automatic dispatch at submit](#automatic-dispatch-at-submit)), a request goes to the trusted
    producer workflow when automatable proof is missing and one is configured, and anything that needs
-   a two-party decision is surfaced in `master status` with its owner and next command;
-6. **invokes only the guarded merge**, when automatic merging is enabled (with it disabled, the
-   visible session merges each candidate the approver agent approved);
-7. **verifies the deployed SHA** against what Graphyard recorded as delivered, and for a delivery
+   a judgement no rule covers is surfaced in `master status` with its owner and next command;
+8. **invokes only the guarded merge** for a candidate whose gates are all green. With automatic
+   merging off it merges exactly the candidate an approver agent approved, and step 6 is what asked
+   for that approval;
+9. **verifies the deployed SHA** against what Graphyard recorded as delivered, and for a delivery
    whose policy sets `deploySmoke` records that observation on the item, requests the trusted smoke
    workflow once per deployed commit, and escalates a failed verdict with rollback guidance (see the
    [post-deployment smoke proof](github.md#post-deployment-smoke-proof));
-8. **records stage p50/p90** for every open stage, delivered lead time, creation-to-deployment
-   latency, merge-to-smoke-verdict post-deploy time with the failure count, and scope-request
-   latency with the longest request still undecided.
+10. **records what it could act on, what it did, and how long each passage took** — stage p50/p90
+    for every open stage, delivered lead time, creation-to-deployment latency, merge-to-smoke-verdict
+    post-deploy time with the failure count, scope-request latency with the longest request still
+    undecided, and the four delivery latencies of [liveness and silence](#liveness-and-silence).
 
 Every action lands in `master status` under `daemon`: the current cycle, its measurements, the
 deployment observation, per-profile health, recent actions, and anything still unresolved.
+
+The configured interval is the idle cadence, not a bound on how long ready work may sit: while
+anything is actionable the loop comes back within thirty seconds, whatever `run.intervalSeconds`
+says, so a long interval cannot push a claim past its dispatch budget.
+
+### Unattended decisions
+
+A verdict lands, a base conflicts, a session dies, a worker asks for one more file. Each has one
+correct answer, and each used to wait for a master session to notice — which is where the idle time
+went. The loop makes them, with the master's own two identities and no shortcut through the
+separation the server enforces:
+
+| What the loop sees | What it does | Who applies it |
+| --- | --- | --- |
+| A change request standing against the exact current head: a `CHANGES_REQUESTED` GitHub review of it, or an agent or Codex review carrying `verdict: changes-requested` for it and for the recorded request | Requests `rework` and launches the approver session for it, then dispatches the next attempt | The approver agent |
+| A base branch the control plane could not merge into the candidate | Requests `rework` naming the conflict — only a fresh attempt can resolve it | The approver agent |
+| A delivered item still fenced by a quarantine whose supervisor this host verified gone | Requests `recover` | The approver agent |
+| Every gate green while automatic merging is off | Requests `merge` for that exact candidate, then merges once it is approved | The approver agent |
+| A lapsed quarantine this host verifies dead | Settles it with the coordinator credential, as `master settle-containment` does | The loop |
+| An open scope request from the lease that raised it | Asks the control plane to decide it; a request the item already implies is applied without ending the attempt, anything wider is refused and escalated (see [scope requests the loop decides](#scope-requests-the-loop-decides)) | The control plane |
+
+An agent or Codex review that has not approved is not, by itself, a verdict. The observers report
+`approved: false` for a review not yet dispatched, one still running, a retry, an unready pull
+request and exhausted reviewer profiles, and a submission ends the worker's lease — so the loop acts
+only on the structural `verdict` the observer sets where the reviewer itself asked for changes on
+that exact head, and never on the refusal's reason text. A head in any other state is asked for
+nothing and keeps its proof requests.
+
+Rework and recovery carry the requester's attestation that the previous worker is stopped, and the
+engine lowers the containment fence on it, so the loop attests only what it verified. It requests
+neither while a lease is live, nor while a fence is inside its grace window. With the lease ended it
+requests one in exactly two cases: no fence stands for the item — the worker's own supervisor
+settled it at exit, or the loop settled it in step 4 — or the fence has lapsed and the same cycle's
+probe on the registered host verified that epoch's supervisor gone. The request's reason states
+which, because the approver cannot verify the host and judges the attestation on what the requester
+says it checked. A round is requested once: a verdict or a base conflict keeps matching the head it
+was found on until a new head is pushed, so once rework is requested neither asks again — a round
+whose worker dies before pushing is recovered by settling its fence and dispatching, not by a second
+decision. A lapsed fence the host could not verify withholds the decision: it is escalated
+with the probe's refusals (`decision-withheld` for a delivered item or a fence on another host; the
+step 4 containment escalation otherwise), it stays on the silence measure, and nothing is requested.
+
+It never approves what it requested: the approver session judges from its own identity, and the
+server refuses self-approval, an approver that held an assignment on the item, and one that
+produced the evidence the decision rests on.
+
+**A request is not the end of it.** The approver is a launched session like any other: it can die,
+drop its prompt, hit an account limit, decline, or hang. The loop keeps a watch per requested
+decision (`daemon.approvals` in `master status`) and on every cycle reads the decision back from the
+control plane and the session back from Herdr:
+
+| What it sees | What it does |
+| --- | --- |
+| The decision is `applied` | Closes the approver's finished tab and retires the watch once the item has moved on |
+| Still `requested` (or `approved` but not yet applied) and the session is working, inside ten minutes | Waits |
+| The session is gone, ended `idle`/`done`/`blocked` without approving (a decline is only ever visible this way), or has worked past ten minutes | Closes it and launches a replacement — at most three sessions per decision |
+| The decision ended `failed`, `stale` or `withdrawn`, or the server no longer holds it, and the item still needs it | Requests it again — at most three requests per binding, on the usual widening retry interval |
+| Three sessions spent and still unjudged | Escalates once with the decision, how each session ended, and `master approver GY-N DECISION`; stops spending sessions; leaves the request standing |
+| A `merge` decision standing for an earlier candidate | Withdraws it as its requester — it can never apply, and the server refuses a second request while it stands — then requests one for the current candidate |
+| A decision it requested, still `requested`, that the item no longer calls for — the round was requested another way, a new head arrived | Withdraws it as its requester and closes its session, so it is never adopted for a later round on a reason that describes an older head. A decision the item still calls for but the loop cannot attest this cycle is left standing, and adopted once it can |
+| Herdr or the decision history cannot be read | Concludes nothing this cycle |
+
+Each decision's session has its own name, `graphyard-approver-<key>-<first eight characters of the
+decision id>`, so the finished tab of one decision can never refuse the launch of the next on the
+same item; a session a master started for the same decision with `master approver` is adopted
+rather than doubled. A decision stays on the [silence measure](#liveness-and-silence) from the
+moment the item needs it until it is applied: waiting on an approver is the pipeline waiting on its
+own agent, a replacement session restarts that wait, and a decision nobody judges reaches the
+twenty-minute attention item like any other silence. With automatic merging off the merge wait in
+`daemon.escalations` names the decision and the session it is with, so it is raised again whenever
+either changes. A loop with no operator-agent identity provisioned (`master autonomy --admin-token-stdin
+--apply`) changes nothing about the rest of the cycle: `master run` wires the decision effects only
+while the live configuration names that identity, so each routine decision becomes an escalation
+in `master status` naming the two commands a master session runs instead — not a request that fails
+on every retry — and provisioning the identity is picked up on the next configuration reload.
+
+Everything else is still a judgement: how to route a novel failure, whether a requirement should
+change, what a finding means. Those reach `master status` with their owner and next command.
+
+### Liveness and silence
+
+Two questions the installation could not answer before: is the loop cycling, and is anything
+waiting on it?
+
+**The loop's own liveness** comes first on the attention list, because a coordinator that stopped is
+why nothing else on that list is moving. `master status` reports `daemon.liveness` as `running`,
+`stalled` (no completed cycle for more than two intervals) or `absent` (no lock, or a lock whose
+process is gone on this host), each with the command that restarts it — `master restart` — and a
+supervised deployment needs no command at all: the packaged unit sets `Restart=always` with no start
+limit, and the loop sends its supervisor a keep-alive after every completed cycle, so a cycle that
+hangs is restarted as surely as a process that exits. `WatchdogSec` must stay longer than two cycle
+intervals; a window that would restart a healthy loop mid-cycle is recorded by name in
+`master status` rather than obeyed. The keep-alive is sent with `systemd-notify`, a short-lived
+child the unit admits with `NotifyAccess=all`. From systemd 246 that tool waits until the manager
+has processed the message, so it cannot exit before it is attributed to the unit; on an older
+systemd one can be lost to that race, which is why the packaged window is 180 seconds against a
+cycle of at most thirty — a healthy loop would have to lose six in a row to be restarted.
+
+**Silence** is measured against what the loop could act on. Every cycle records both halves — the
+actionable inventory (claimable work, a routine decision from the moment the item needs it until it
+is applied — requested, waiting on an approver, or withheld for want of a verified attestation — a
+scope request, a settleable quarantine, a mergeable candidate, a proof missing on a head no verdict
+stands against, a pending base refresh, a delivery awaiting its deployment or smoke) and the
+actions it took — and each subject's wait restarts when the loop acts on it and the action
+succeeds. A refused action moves nothing, so it restarts nothing: a request the server refuses on
+every retry reaches the twenty-minute bound like any other silence. The
+longest current wait is `daemon.silence.longestIdleMs`, with the subject behind it; past twenty
+minutes it becomes an attention item naming what nothing has acted on. An item nobody is waiting on
+is not silence: a claimed attempt under way asks nothing of the loop.
+
+**The delivery budgets** are measured from what the loop itself observed, cycle by cycle, so no
+figure can disagree with the state it acted on. `daemon.budget` reports each one with `met` and the
+reasons behind it; `met` is null while fewer than ten deliveries are measured, and a per-candidate
+bound is judged on every sample. A delivery is sampled once, from the clock the loop kept while the
+item was open: an item delivered before the loop watched it, or already sampled, is history and
+adds nothing, so the figures are of passages this loop saw and a recorded breach is not outvoted or
+evicted by the ledger's past. The verdict → rework figure is taken when the request is made,
+whether or not its first approver session could be launched:
+
+| Budget | Bound |
+| --- | --- |
+| ready → claim | p90 at or under 2 minutes |
+| ready → first push | p90 at or under 15 minutes |
+| approval → merge | p90 at or under 10 minutes over at least ten deliveries |
+| mergeable → merge | 5 minutes, per candidate |
+| standing verdict → rework requested | 5 minutes, per candidate |
 
 ### Restartability
 
 The loop keeps a private cursor next to the coordinator credential, outside every worktree. It is
 written before and after each external action, so a daemon killed mid-action leaves a record that
 the next start resolves **against Graphyard, not against the cursor**: an assignment that landed is
-closed, one that never landed is released for a fresh attempt, and a review request for a candidate
-that already has one is never sent twice. Restarting is therefore always safe, and the supervisor
+closed, one that never landed is released for a fresh attempt, a review request for a candidate
+that already has one is never sent twice, and an interrupted decision request is made again — the
+request already standing on the item is adopted rather than doubled, and so is an approver session
+already listed under that decision's name. Restarting is therefore always safe, and the supervisor
 may restart it as often as it likes.
 
 Whether an assignment landed is read from the attempt epoch, which only a claim advances, and never
@@ -230,10 +395,11 @@ killed daemon on the same host is reclaimed as soon as that process is gone.
 
 Each cycle reads the repository's Git worktree inventory. A registered worktree whose path is
 missing or hidden — a proof worktree a producer removed without `git worktree remove`, or one
-under a `/tmp` this process cannot see — is compared by its registered path and never stops the
-loop. The example systemd unit does not set `PrivateTmp`: producer sessions run in Herdr, outside
-the unit, and create their detached proof worktrees under the shared `/tmp`, which a private one
-would hide from the loop.
+under a mount this process cannot see — is compared by its registered path and never stops the
+loop. Producer and reviewer sessions run in Herdr, outside the unit, and create their detached
+checkouts under the [managed worktree root](#the-managed-worktree-root); a unit that hides that
+directory from the loop (`ProtectHome`, a private mount) would hide every checkout the loop has to
+reclaim, so the example systemd unit sets neither.
 
 ### Worktree disk
 
@@ -283,8 +449,9 @@ worktrees a reclaim would empty. Below the configured threshold it raises an att
 the master, naming the free space, what a reclaim would return and how to get more of it, while
 writes still succeed. A write that does fail for want of room — a full volume or an exhausted user
 quota, reported by the kernel or only in a command's own output (`pwd: write error: Disk quota
-exceeded`) — is named as exactly that, with the same guidance, rather than left as an unexplained
-command error.
+exceeded`) — is named as exactly that, with the path that could not be written, the same guidance
+and the reclaim command (`graphyard master run --once`), rather than left as an unexplained command
+error.
 
 A running loop is already reclaiming, so the lever is `run.reclaimIdleHours`: lowering it makes more
 worktrees disposable on the next cycle. With no loop running, `master run --once` reclaims and
@@ -299,6 +466,58 @@ next cycle:
 | `run.reclaimIdleHours` | How long a worktree may sit untouched before its dependency directories count as disposable, 0.25–720; default 3 |
 | `run.diskThresholdGb` | Free space below which `master status` raises disk pressure, 0.1–10000; default 10 |
 | `run.acknowledgementSeconds` | How long a launched reviewer or producer session may show no activity before the loop re-prompts it once, and how long after that it is recorded as never started, 30–900; default 90. An unacknowledged session still in Herdr is never settled sooner, whatever the finished-session grace (see [acknowledgement](#acknowledgement-the-one-re-prompt-and-never-started)) |
+
+### The managed worktree root
+
+Proof and review checkouts are not assignment worktrees, and they do not belong in the system
+temporary directory: `/tmp` is a tmpfs on many hosts, so each checkout there is paid for in memory —
+150–200 MB once it has installed — and shares one quota with everything else that writes there.
+Graphyard owns one **managed worktree root** on durable storage instead, and every ephemeral
+checkout is created under it:
+
+- **Where.** `run.worktreeRoot` in `.graphyard/master.json`, an absolute path. Unset, it is
+  `worktrees/REPOSITORY-ID` inside the installation's data directory — `$GRAPHYARD_DATA_HOME`, or
+  `~/.local/share/graphyard` — one root per checkout of the managed repository, so two installations
+  on one host never reclaim each other's sessions. It is never derived from the temporary directory,
+  and never from `XDG_DATA_HOME`, which an OpenCode session repoints at its account home.
+- **Still outside every worktree.** The root, and each directory allocated under it, passes the same
+  check as every credential path: a root inside the repository, an assignment worktree or another
+  checkout is refused before anything is created there.
+- **One directory per session.** A launch allocates `graphyard-proof-KEY-SHA-ID` (or
+  `graphyard-review-…`) under the root and records it on the session. The detached worktree is
+  `checkout` inside it; the install, build output and evidence files stay beside it. The session's
+  prompt names that path and no other, a sandboxed runtime may write there and to the shared Git
+  directory only, and a reviewer's harness allows `git worktree add` at that one path.
+- **Removed when the session resolves.** Completed, failed, expired or cancelled — and a launch that
+  never became a session — the worktree's registration and the whole directory go, dependency
+  directory included. A directory that could not be removed is noted on the record as
+  `checkoutFailure` and taken back by the reclaim pass.
+- **Reclaimed when a session died.** The loop's reclaim step also removes every session directory no
+  pending producer or reviewer record owns — what a crash between launch and ledger write, or a host
+  that went down mid-proof, leaves behind — once it is fifteen minutes old. Only a directory with a
+  Graphyard session name directly inside the root is ever removed. `graphyard master run --once`
+  runs the pass immediately; `daemon.reclaim.checkouts` in `master status` says what it took back.
+  The same pass sweeps neighbouring default roots whose repository checkout is gone, and only when
+  they hold nothing: every removal there is a plain `rmdir`, so a root that contains a file is never touched.
+
+**Preflight.** `master init` verifies the root before it writes anything, and every launch repeats
+the check: a tmpfs or ramfs is refused with the reason and the setting to change, and so is a volume
+with less than `run.worktreeRootMinFreeGb` free. A root that does not exist yet is judged by its
+nearest existing ancestor, and created by the first launch.
+
+**Before the volume or quota is exhausted.** `master status` reports the root under
+`disk.worktreeRoot` — free space, size, checkouts, and how many no live session owns — and raises an
+attention item owned by the master, naming `graphyard master run --once`, when free space falls
+below the minimum or the root reaches four fifths of `run.worktreeRootBudgetGb`. The budget exists
+because a user quota is invisible in a volume's free space: the host that prompted this ran out at
+24 GB of a 32 GB tmpfs. A root found on a tmpfs — a configuration that predates the check — is an
+attention item too.
+
+| Setting | Meaning |
+| --- | --- |
+| `run.worktreeRoot` | Absolute path of the managed worktree root, on durable storage outside every worktree; default `worktrees/REPOSITORY-ID` in the data directory |
+| `run.worktreeRootMinFreeGb` | Free space setup and every launch require of the root's volume, and below which `master status` raises attention, 0.1–10000; default 2 |
+| `run.worktreeRootBudgetGb` | Size the root may reach; `master status` raises attention at four fifths of it, 0.1–10000; default 10 |
 
 ### Scope requests the loop decides
 
@@ -345,24 +564,249 @@ loop is not running, because a running one decides on its next cycle. Before GY-
 of these requests took a master session running a command, and GY-82's implementation sat finished
 for 647 minutes waiting for it.
 
+### Human-only waits
+
+Agents decide everything except three things: goals and priorities, spending money or opening third-party accounts, and issuing credentials to people. A worker whose item reaches one of them does not write a prose blocker and does not keep its lease (GY-49 sat that way for hours, found only when a master read the text). Its prompt tells it to record a **typed request** and stop:
+
+```sh
+node "$GRAPHYARD_CLI" park GY-N EPOCH money-or-accounts A Hetzner Cloud project with an API token for the live-install proofs -- The proofs provision real servers; opening the account is the operator's
+```
+
+`KIND` is `goals-and-priorities`, `money-or-accounts` or `credentials-for-people`; the words before `--` are the exact thing needed, the words after it the reason. That one transaction (`POST /api/work/GY-N/park`, the lease holder only) writes `humanRequest` on the item, ends the attempt as `released`, sets the blocker `Waiting on a human-only decision (…): NEEDED`, and appends a `human.requested` history entry. The session exits holding nothing: its supervisor's next renewal is refused and it stops, no `lease-loss` is raised, and the item is not claimable. The loop names the parked item once (a `human` action) and dispatches everything else as usual.
+
+The human sees what waits on them in one list — the dashboard's **Work → Needs you** tab, `graphyard human-requests`, `GET /api/human-requests`, and `humanRequests` in `master status` — each row with the decision, the exact thing needed, the reason, who asked, how long it has waited, and the command that answers it. In `master status` the attention item is addressed to the **human**, not to the master.
+
+```sh
+graphyard answer GY-N [REQUEST] The project exists; its token is in the ops vault under hetzner-ci
+graphyard answer GY-N [REQUEST] --decline We are not opening a Hetzner account this quarter
+```
+
+Only a declared human `admin` session may answer (`POST /api/work/GY-N/answer`); an agent holding an admin credential is refused. A provided answer clears the request and its blocker in one transaction (`human.answered`), which leaves the item claimable, and **the loop dispatches it on its next cycle** — the next attempt's prompt carries the answer. No master session computes or executes anything in between. A declined answer keeps the item parked with the human's words as its blocker, for the master to re-scope.
+
 ### What the loop will not do
 
-The daemon holds exactly one credential: the coordinator token. It cannot claim a lease, submit
-evidence, revise requirements, release backlog work, or approve a review, and it refuses to start
-if that credential is also allowed to produce evidence. Deciding a scope request is no exception:
-the loop asks, the control plane decides and applies, and a widening the item does not already
-imply comes back refused to the loop exactly as it would to anyone else. The one fact it writes besides the guarded
-merge is its own deployment observation on a delivered item; the smoke verdict itself comes from
-the workflow's producer, never from the loop. Provider exhaustion, a failing reviewer, a
-missing manual proof, and an unhealthy worker profile are all escalations, never shortcuts. A
-refused merge is the gate working: the loop records the refusal and keeps cycling.
+The loop runs on the coordinator credential, and reads the master's own operator-agent credential
+for exactly the requests in [unattended decisions](#unattended-decisions) — requesting `rework`,
+`recover` and `merge`. It never reads the approver's credential, never approves a decision (its own
+least of all), never claims a lease, never submits evidence, never revises a requirement, never
+releases backlog work, and refuses to start if its coordinator credential is also allowed to
+produce evidence. Deciding a scope request is no exception: the loop asks, the control plane
+decides and applies, and a widening the item does not already imply comes back refused to the loop
+exactly as it would to anyone else. Besides the guarded merge, the facts it writes are its own
+deployment observation on a delivered item and the settlement of a quarantine it verified on this
+host, and what it observed about provider capacity ([exhaustion in the middle of a
+session](#exhaustion-in-the-middle-of-a-session)), which for a worker ends the attempt the spent
+account can no longer run; the smoke verdict itself comes from the workflow's producer, never from
+the loop. Provider exhaustion, a failing reviewer, a missing manual proof, and an unhealthy worker profile are all
+escalations, never shortcuts. A refused merge is the gate working: the loop records the refusal and
+keeps cycling.
 
 An unhealthy profile — an unreadable credential, a name already busy in Herdr, or a recent failed
 launch — is routed around for a ten-minute cool-off while other profiles keep receiving work.
 
-Judgment calls stay with the visible master session, and a two-party decision with the approver
-agent: reading a worker's report, deciding whether a review finding needs rework, choosing how to
-route a novel failure. The loop keeps the mechanical steps running underneath them.
+Judgement no rule covers belongs to the visible master session, and a decision that weakens
+anything belongs to it and the approver agent together: reading a worker's report, rewriting a
+requirement, choosing how to route a novel failure. The loop keeps everything mechanical running
+underneath them, and asks for nothing while it can decide.
+
+## Typed next actions and stateless executors
+
+A master session is not the planner any more, and does not have to be running for work to move.
+The control plane computes what each item needs next — one typed action with the inputs whoever
+runs it needs — and keeps a durable, leased row for it; stateless executors claim those rows and
+run them. The full model is in
+[architecture](architecture.md#inverted-coordination-typed-actions-and-stateless-executors).
+
+Nine kinds exist: `dispatch`, `request-review`, `request-rework`, `approve-scope`, `resync`,
+`reclaim`, `merge`, `verify-deployment` and `escalate`. `master status` reports them under
+`actions`: what each open item needs, which executor holds which row and since when, and every
+row that has waited past the five-minute idle bound. An item with nothing named needs nothing
+from anybody — it is delivered, or it is waiting on another item's action (an unfinished
+dependency, a predecessor's place in the merge queue).
+
+What an item needs is named per provider, never per gate sentence. Only a `github` approval is
+answered by a reviewer session an executor launches, so only that item is named `request-review`.
+An item on the `codex` or `agent` [review provider](github.md#identity-bound-agent-review-providers)
+is named `resync`: the control plane dispatches those reviews through its own observation job, and
+waking it is what posts the request and reads the verdict back. An item whose reviewer profiles are
+all exhausted is named `escalate`, because that is a reviewer-capacity decision — add a profile on
+another provider, wait for quota, or select another review provider — and never an action that
+waits on a reviewer which cannot run.
+
+An item fenced by an unsettled [containment quarantine](#containment-quarantines) with no live
+lease is named `escalate` for the same reason. `reclaim` asks the control plane to re-read the item
+and reconcile it, which clears a lapsed lease but never lowers a fence: that takes the worker's
+settlement capability, a verified containment assessment (`master settle-containment GY-N REASON`,
+which the loop also applies on its own when it can verify the supervisor is gone) or an operator's
+stopped-worker recovery. The escalation names which, and the `reclaim` handler refuses an item
+whose quarantine still stands rather than reporting it free.
+
+An executor holds a coordinator credential, a host name, and one handler per kind it can run.
+Graphyard ships one:
+
+```sh
+node scripts/graphyard-executor.mjs                      # claim, run, report, repeat; Ctrl-C stops it
+node scripts/graphyard-executor.mjs --once               # one claim-run-settle step
+node scripts/graphyard-executor.mjs --kinds merge,resync  # a narrower one; run several with different kinds
+```
+
+It reads this host's `.graphyard/master.json` for the launch profiles the dispatching actions need
+and authenticates with the coordinator credential named there — the same credential `master run`
+uses, and nothing broader. Run as many as you like, on as many hosts; none of them is a master, and
+stopping any of them costs the one claim it held. The routes underneath, for an executor written
+elsewhere:
+
+```sh
+POST /api/actions/claim   {"host": "runner-3", "kinds": ["dispatch", "merge", "resync"]}
+POST /api/actions/ID/settle {"result": "done", "reason": "reviewer session launched on aaaaaaaaaaaa", "executor": "runner-3"}
+GET  /api/actions          # the queue, the computed actions, open requests and running sessions
+```
+
+A claim records both the executor name and the credential it was made with, and only that pair may
+settle it: several executors may run behind one coordinator credential, and a settlement that named
+the wrong one would be refused after the handler had already run — the claim would then expire and
+the action run twice. `POST /api/work/GY-N/resync` is the one route the mechanical kinds add: it
+schedules the provider reading the server already knows how to make and reconciles the item, which
+is what `resync` and `reclaim` mean.
+
+It keeps nothing between calls and knows nothing about other executors: two of them on two hosts
+claiming at the same instant are serialized by the coordination lock, and the loser takes the next
+row. An executor that dies mid-action renews nothing, its claim expires, another takes the row as
+a further attempt, and the dead one's late settlement is refused — so nothing is run twice. A
+handler that throws returns its row to the queue with the reason and a widening backoff.
+
+A claim is a two-minute lease, and the handlers are not two-minute operations: a dispatch prepares
+a worktree and waits on a runtime, and a guarded merge chains provider calls that each have their
+own timeout. An executor that is still inside a handler says so every thirty seconds and keeps the
+row:
+
+```sh
+POST /api/actions/ID/renew  {"executor": "runner-3"}
+```
+
+Only the executor named on the claim, holding the credential the claim was made with, may renew
+it, and only while it is still live — a claim that already expired may have been taken by somebody
+else, and renewing it would put two executors inside one action. A slow executor therefore keeps
+its row; a dead one loses it within the lease, which is the difference the queue has to make.
+
+### Running executors beside the daemon
+
+`master run` and any number of executors can run against the same control plane. They do not
+coordinate with each other and do not have to: the queue serializes the rows, and every merge is
+brokered under its own **execution instance** — `principal#instance`, minted once per process
+(the daemon's `daemon-…`, each executor's `executor-…`, one per interactive `master merge`). An
+execution another instance holds is refused rather than resumed, so two brokers never drive one
+merge even when they share a coordinator credential; the one that finds a foreign execution stands
+down, its action backs off, and it retries after the first has finished or its authority has
+lapsed. Nothing has to be turned off to add an executor.
+
+The daemon claims nothing from the queue, so a window in which both ran shows deliveries the
+executors settled *and* steps the daemon pushed, and the queue's own history says which was which:
+a row names the executor that settled it, and a step the daemon took appears in the item's ledger
+with no row at all.
+
+An executor claims only the kinds it has a handler for, and two kinds may never have one:
+`escalate` and `request-rework` are judgments made in the step itself rather than inside a session
+the step starts, so the shipped executor refuses to start with a handler for either. The other seven
+it ships — it launches a worker, reviewer or producer session, asks the control plane to apply the
+scope rule, re-reads a pull request, brokers the guarded merge, or records a deployment reading.
+Configure no escalation handling and the fleet still delivers: every language model is invoked
+inside what an action starts — implementing, reviewing, producing evidence, approving a two-party
+decision, resolving an escalation — and never in the loop that starts it. That is what the master
+session is now for: the escalations, the findings and the two-party decisions, outside the
+critical path.
+
+### Workers pull their own work
+
+A free worker session asks for its next assignment rather than waiting to be dispatched into:
+
+```sh
+node scripts/graphyard-pull.mjs            # ask once; exits non-zero when there is nothing to take
+node scripts/graphyard-pull.mjs --watch    # keep asking every 30s until there is
+```
+
+```sh
+POST /api/assignments/claim   {"host": "vishrog"}
+```
+
+The control plane offers the items it already names as needing a dispatch, in the dispatch order
+it already uses, and the worker claims under its own identity through every ordinary claim rule.
+An item another worker just took is skipped rather than returned as an error. Polling every
+thirty seconds keeps ready-to-claim inside two minutes with no central runtime-health tracking:
+nothing has to know which session is alive for work to reach it.
+
+A pull carries an idempotency key like every other mutation, and the shipped worker keeps that one
+key across every transport retry, so a pull that timed out after its claim committed replays that
+claim instead of taking a second item — a worker never holds a lease nobody told it about. One key
+can only ever claim one item: a concurrent retry that reaches a different offer first is refused
+for reusing the key with different input and replays the assignment the winner made. Under
+`--watch` a control plane the worker cannot reach at all is waited out rather than ending the
+session.
+
+### Typed requests instead of prose questions
+
+A session that needs something records a typed request and exits, giving up its lease in the same
+transaction, so the item is free instead of held at a prompt:
+
+```sh
+POST /api/work/GY-N/request
+{"type": "scope-request", "epoch": 3, "paths": ["docs/"], "reason": "the guide describes this contract"}
+```
+
+Recording one is the same write as the command it replaces — a `blocker` sets the blocker the ready
+gate reads, an `escalation` fences every in-flight merge — so it needs the same authority: the live
+lease of the attempt that is asking, named by its epoch. Only a `note`, which moves nothing a gate
+reads, may be recorded without one. Closing a request is the decider's, never the asker's: a
+session cannot record a request for an approver agent or the operator and then answer it itself,
+and `master status` keeps showing it until the party the record names closes it.
+
+Each type names exactly one decider: a `scope-request` is the additive planned-files widening rule,
+which the control plane applies in the same transaction the request is recorded in — the same
+verdict [the scope requests the loop decides](#scope-requests-the-loop-decides) computes, so the ask is answered
+before the session has finished exiting, and a refusal becomes the item's blocker; a `decision` is
+an independent approver agent; a `blocker` is a tracked follow-up item; a `note` is recorded and
+decided by nobody; an `escalation` is an approver agent —
+unless the request names one of the three human-only decisions (goals and priorities, spending
+money or opening third-party accounts, issuing credentials to people), which routes to the
+operator whatever its type. `master status` lists every open request with its decider, the command
+that answers it, and how long it has waited. A session that ends waiting on input instead is
+recorded as failed with that reason, naming the request it should have made.
+
+### Session handles
+
+Every launched session records a durable handle on the item: runtime, host, Herdr workspace, tab
+and pane, its transcript, and what it is working on. `master status` reports them under
+`sessions`, and the dashboard drawer shows the same per item, each with the one command or link
+that attaches to it — `herdr pane attach PANE` while it runs, its transcript once it has finished.
+Watching a specific agent never needs a master to relay a pane identifier.
+
+Every launcher records one: the worker dispatch (loop or executor), and the reviewer and producer
+launches in automatic dispatch — the dispatcher derives the coordinator mutation it records them
+with from its own configuration, so its launches are as visible as an executor's wherever it runs.
+Each records what it knows —
+the runtime it launched, the host, the Herdr workspace, the pane and the command that attaches to
+it — and names the principal whose session it is. What a launcher cannot know, the tab the runtime
+opened under its own control and the transcript the agent writes, the session records for itself
+with `POST /api/work/GY-N/session`, which is the only party that has them; a handle is merged
+field by field, so the two halves meet on one record.
+
+A handle is a fact, but the attach command on it is an instruction somebody runs, so updating one
+that already exists belongs to the session it names, the coordinator that launched it, or an admin.
+Any other credential — a producer token on a CI runner, a worker with no part in that session — is
+refused rather than allowed to mark a running session finished or replace the command an operator
+is about to run.
+
+Creating one is the same authority, for the same reason. An implementation session records its
+handle under the attempt epoch it holds. A handle with no epoch is recorded by its launcher — a
+coordinator or an admin — or by the session of a live dispatch request on that item, whose id the
+handle carries. Nothing else may create one: otherwise a credential that merely reaches the item
+could squat the predictable id of a session about to be launched, fixing the ownership on itself,
+or record enough handles to push somebody's running session off a bounded list. The bound itself
+retires finished handles first and never evicts a running one to make room.
+
+A session Herdr reports blocked is waiting on input, not gone: the attempt is recorded as failed
+with that reason, and the handle stays `running` carrying why, so the attach command still works
+at the one moment somebody needs it.
 
 ## Automatic dispatch at submit
 
@@ -410,7 +854,8 @@ request that has no session yet:
   identity that has implemented the item — a profile whose principal has held an assignment on
   the item is skipped for that item for the same reason. The session receives the credential as a
   path in `GRAPHYARD_TOKEN_FILE`, never as a value, works in a detached worktree of the exact
-  head outside every Graphyard worktree, and submits each proof with `graphyard evidence` bound
+  head in the session directory allocated for it under the
+  [managed worktree root](#the-managed-worktree-root), outside every Graphyard worktree, and submits each proof with `graphyard evidence` bound
   to that exact head, base and policy revision — a failing run as `fail`, never omitted. With
   fewer free producer profiles than groups the remaining groups wait and `master status` says
   so; add profiles for parallelism.
@@ -443,6 +888,42 @@ recovered with `master review GY-N` once its cause is fixed. A session recorded 
 (see [acknowledgement](#acknowledgement-the-one-re-prompt-and-never-started)) is relaunched a
 minute later without counting toward those four or widening the wait; three of them exhaust
 the request on their own.
+
+**A dismissed approval is not an answer.** GitHub withdraws an approval — `dismiss_stale_reviews`
+is on for a protected branch, so every approval that lands just before a push becomes one, and a
+recomputed merge base or a dismissal by hand does the same — and the review gate goes on refusing,
+because a dismissed approval is not an approval. A session that collected one is therefore recorded
+`failed`, never `completed`: unanswered, with the dismissal and its cause on the record, and
+relaunched as the request's next attempt on the same widening wait as any other unanswered session.
+The cause distinguishes the two, because they need different heads: dismissed *and* the head moved
+(`the approval of … was dismissed and head changed from … to …`) means the request for the old head
+is cancelled and the new head is reviewed afresh; dismissed *while the candidate is unchanged*
+(`… was dismissed while it was still the candidate`) means the same commit is reviewed again, with
+no new head and no rework round for a candidate nobody found fault with. A relaunch never reads the
+dismissed review back as its own verdict: the verdicts an earlier session of the same head recorded
+are skipped when the next one observes GitHub. An approval can also be withdrawn *after* its session
+closed, and nothing revisits a settled record — so while a request for that exact head still stands,
+a closed session carrying the approval the control plane is waiting for is re-read, and a dismissal
+reopens it unanswered the same way.
+
+**A request whose session settled without satisfying its gate is attention, not silence.** An
+`APPROVED` or `CHANGES_REQUESTED` verdict answers the request — the control plane resolves it on its
+next observation — but no attempt follows a settled session, so a request whose session ended with
+anything else has no session running, no refused launch and no retry — nothing but a `sinceMs` climbing while the gate refuses. `master status` names each one
+in `attentionItems` with the verdict that settled it, how long the request has stood and the command
+that answers it (`Review request for GY-N has stood unanswered for 1h3m: its session failed with
+verdict DISMISSED after attempt 4 — …`), and counts them in `counts.dispatchUnanswered`, apart from
+the requests with a session actually running in `counts.dispatchRunning`. `master run` reports the
+same request as `waiting` on every tick rather than skipping it in silence.
+
+`master review GY-N [PROFILE]` **forces the next attempt** for such a request. The launch answers
+the control plane's own open request for the exact current head — recorded with that `requestId` as
+its next `attempt`, the earlier sessions kept in the ledger — so it is a further attempt at the
+request rather than a session the record knows nothing about, and a request the loop will not
+relaunch is recoverable without producing a new head. A head with no open request (the recovery path
+for a refused launch) records none, as before. A producer request in the same state is recovered
+through `master decide GY-N rework REASON`: the proofs its group needs are requested afresh on the
+next head.
 
 **Every launched session decides and acts on its own.** The reviewer, producer and worker
 prompts require it: post the verdict, submit pass or fail evidence, or record a blocker naming
@@ -637,7 +1118,7 @@ The trade-off is real: an `auto` session runs whatever it decides to run inside 
 
 `master worker add` and `master reviewer add` print the resolved launch contract, so what a profile will start with is visible before it starts.
 
-Each of these is the runtime's broadest non-interactive mode. Codex keeps its sandbox, widened to exactly what the role needs: network access for every role, the repository's shared Git directory for a worker (its worktree commits there), and `/tmp` plus that Git directory for a producer (it builds in a detached worktree under `/tmp`). The master session gets the same treatment: `master start` launches it with its runtime's broadest mode, Codex widened to the private state beside the coordinator credential. Role credentials do not change with it — a worker still holds only its worker credential file, a reviewer only its hour-long reviewer token, a producer only its producer credential.
+Each of these is the runtime's broadest non-interactive mode. Codex keeps its sandbox, widened to exactly what the role needs: network access for every role, the repository's shared Git directory for a worker (its worktree commits there), and its own session directory under the [managed worktree root](#the-managed-worktree-root) plus that Git directory for a producer or a reviewer (a producer builds in a detached worktree there; a reviewer may read the exact head from one). The master session gets the same treatment: `master start` launches it with its runtime's broadest mode, Codex widened to the private state beside the coordinator credential. Role credentials do not change with it — a worker still holds only its worker credential file, a reviewer only its hour-long reviewer token, a producer only its producer credential.
 
 ## Independent review
 
@@ -741,7 +1222,7 @@ Claude Code loads `.claude/settings.local.json` for every session started anywhe
 
 - **worker** — the same rules dispatch writes into the assigned worktree's own `.claude/settings.local.json`: it may `git push` its assigned branch (`origin BRANCH`, `-u`, `HEAD:BRANCH`), run its item's Graphyard commands and open its pull request; it may not force-push, push the base branch, rebase, merge, post a review or submit evidence. The worktree file alone is not enough — Claude Code still loads the repository's settings above it, master denies included — which is why the session is launched with its role file instead.
 - **reviewer** — may read the diff and post the one verdict it was launched for (`gh api --method POST repos/OWNER/REPO/pulls/N/reviews`); may not push, commit, claim, submit evidence, or edit files.
-- **producer** — may fetch, add and remove its detached worktree and submit evidence; may not push, commit, claim or post a review.
+- **producer** — may fetch, add and remove its detached worktree under the managed worktree root and submit evidence; may not push, commit, claim or post a review.
 
 Every role is denied reads of credential directories, `.graphyard/connection.json`, `credentials.json`, `github-app.json`, `*.pem` and `*.token`, and every raw merge. The master's own rules are unchanged: it still cannot push. Runtimes that do not read Claude settings (Codex, Cursor, opencode) inherit no master rule and are launched with their profile arguments unchanged.
 
@@ -896,11 +1377,95 @@ row's `interventions` and `reworkRounds` say whether the time went to a hand-off
 and the flow analytics bottleneck summary says which wait category held the rest. Never trade a
 gate, a proof, an identity rule or a lease rule for the number.
 
+### A required check that failed on the clock
+
+Some assertions in the required `test` check are about elapsed real time: the 2 s p95 of the
+coordination snapshot, the dispatcher's recovery after a failed read, a coordination cycle inside
+its interval. Their budgets are real — the loop depends on them — but a shared runner can miss one
+without any defect in the candidate, and a red `test` check alone cannot say which happened. So
+every such assertion goes through one helper (`tests/helpers/timing.ts`), which makes it measure
+the system rather than the runner and makes its failure say what it is:
+
+- A latency figure is steady state. Warmup reads are taken and discarded before sampling, so
+  connection setup, JIT warmup and cold query plans never count, and the sample is large enough
+  that the percentile is the one it names: a hundred reads leave five above the p95, where twenty
+  made the "p95" the second-worst read. The budget is unchanged.
+- The run records every timing-dependent assertion, passed or failed, with what it measured, its
+  budget, its sample count and its distribution, as one JSON line in the file
+  `GRAPHYARD_TIMING_RECORD` names. CI sets it, uploads the record as the `graphyard-timing-record`
+  artifact, and lists every measurement in the job summary beside the recorded spread.
+- A failure is a `[timing-dependent]` assertion error naming the measured value against the budget,
+  and the `test` job annotates its own check run with it, saying how many tests failed beside the
+  timing-dependent ones. The annotation changes no verdict: the check stays failed and the test
+  gate stays refused until a run passes.
+
+`master status` reads those annotations for every open candidate whose required check failed, so
+the row's `refusal` and `attention` no longer read `Required CI check test has not passed on the
+current candidate` but, for example:
+
+```text
+Required CI check test failed on a timing-dependent assertion, not on behaviour:
+work-snapshot-latency.p95 (integration:work-snapshot-latency) measured p95 2092ms against its
+budget of < 2000ms over 100 samples after 5 discarded warmup reads; every other test in the run passed
+```
+
+The item raises attention at once instead of sitting behind a red check until its dwell time is
+noticed. It is the master's: `next` is the one command that reruns that job
+(`gh api --method POST repos/OWNER/REPO/actions/jobs/ID/rerun`). Rerun it once. A second
+measurement over budget is a latency regression, not noise — return it with `graphyard master
+decide GY-N rework REASON`, quoting the measurement. When other tests failed in the same run the
+line says so and offers no rerun: those failures are the worker's. A check run whose annotations
+cannot be read is reported exactly as before. Never relax a budget, widen a window or skip the
+assertion to get a candidate through.
+
+No behavioural test may depend on how long the runner took between engine calls. A case that needs
+a merge instant, an execution window or a clock offset pins it to the instants the engine recorded
+(`tests/helpers/merge-instants.ts` derives the provider merge instant from the recorded commit)
+rather than to an earlier step plus an assumed elapsed time.
+
+Nor may a test's verdict depend on which file the scheduler started first. Test files run in
+parallel, each with its own Postgres on `GRAPHYARD_TEST_PORT` plus a per-file offset; two files
+that resolve the same port fail each other whenever they overlap. The required check sets
+`GRAPHYARD_EVENTS_TEST_PORT` to keep the one known pair apart, and the suite refuses any two test
+files that still share a port under the required check's environment.
+
+The stability of the required check on an unchanged tree is measured, not assumed:
+
+```sh
+npx tsx tests/helpers/timing-stability.ts                # twenty consecutive runs of npm test
+npx tsx tests/helpers/timing-stability.ts --record tests/helpers/timing-baseline.json
+```
+
+It runs the check twenty times on the same commit, refuses to call the result stable if any run
+failed or the tree changed under it, and records the run-to-run spread of every timing-dependent
+assertion (minimum, median, maximum, headroom to the budget). `manual:suite-stability-twenty-runs`
+reads that output. The committed `tests/helpers/timing-baseline.json` is the spread a future
+regression is judged against: the CI job summary prints each run's measurement beside it, and the
+suite refuses a timing-dependent assertion whose spread was never recorded. On a machine whose
+`/tmp` is under a quota, point `TMPDIR` at a sticky directory outside it for the run.
+
+## Escalation context
+
+A master that carries the project's rules, an item's history and the precedent of earlier decisions in its own window hits a context ceiling, dies with its provider credits, and drifts between sessions. The control plane therefore assembles an escalation's context from the project, so a master spawned for one escalation decides as well as a long-lived one and precedent, not session continuity, keeps judgements consistent. `GET /api/work/GY-N/context?trigger=TRIGGER&budget=BYTES` returns it; `master context GY-N [TRIGGER] [--budget N]` prints the same document, read by key and nothing else, after verifying its fingerprint. It has four layers:
+
+| Layer | What it holds | Where it comes from |
+| --- | --- | --- |
+| `rules` | The repository's own operating rules and the item's policy | `AGENTS.md` of the repository under review, read through the control-plane App at the base tip the item was last observed against (`rules.source` names the path, ref and blob), plus `policy`. Never a template: an installation managing another codebase escalates against that codebase's rules and goals, and a repository without the file gets `rules.unavailable` saying so |
+| `goals` | The current goals and priorities | The item's priority, the reasons recorded with its `create`, `ready`, `requirements` and `unblock` intents, the open graph in priority order, and its dependencies and dependents |
+| `item` | The item slice | Requirements (criteria, retired criteria, planned files, producer proofs), the standing refusal (the escalation, every standing trigger, the gates, blocker and violations), the candidate, submission and lease, and a typed history summary: every ledger kind counted with its first and last row, the newest typed rows summarised to their reason, trigger, epoch, decision or proof, routine rows (`github.observed`, `heartbeat`) counted but never listed |
+| `precedent` | Recent decisions of the same action | Every `resolve` decision across the graph with its requester, reason, approver, approval reason, outcome and the precedent it cited itself — the escalation's own trigger first, newest first; the rest counted per trigger and state |
+
+Assembly is deterministic and bounded. The same escalation and graph state produce a byte-identical document: every ledger read runs in one snapshot, the wire form is canonical, and `fingerprint` is the SHA-256 of every byte but itself, so a handler can prove what it saw. The document stays within its budget (`GRAPHYARD_ESCALATION_CONTEXT_BUDGET`, default 32,000 bytes, or the request's `budget`) by summarising rather than truncating: `budget.level` records how many history rows and precedent decisions are shown in full, and every row not shown is still counted (`history.omitted`, `precedent.omitted`, `precedent.summary`). The rules layer is never shortened; when even the summary floor does not fit, `budget.exceeded` says so instead of cutting.
+
+A spawned handler receives that context and the escalation inside it, holds no other state, and records its decision with the reason and the precedent it relied on: `master decide GY-N resolve '{"trigger":"…"}' --precedent DECISION_ID[,DECISION_ID] --context FINGERPRINT REASON`. The request carries `precedent` and `context` into the ledger and `master decisions GY-N` shows them; a cited id that is not a recorded decision of the same action is refused, so the precedent a decision names can always be followed; a second handler that reaches the same line while the first request stands is recorded as a concurrence on that decision (`concurrences`) rather than refused, while a request citing a different precedent is still refused as a competing request. The independent approver judges the decision as before. `master escalation GY-N [TRIGGER] [precedent|KIND]` spawns a handler: `precedent` (the default) is the built-in judgement — follow the newest applied decision of the same trigger, cite it, and decline when there is none, since a reason given for another kind of incident cannot apply and a judging session weighs those rows instead — run in this process; an agent `KIND` launches a judging session whose entire input is the context written to one private file under `.graphyard/escalations/`, with the instruction to read nothing else and to record its decision with `master decide … --precedent --context`; like every session Graphyard launches it receives that instruction as its own first request, and the result's `delivery` says how.
+
 ## Recovery
 
 ### Merged without a valid execution
 
 An item GitHub merged while no valid execution covered the merge — the execution was cancelled before the merge cutoff, expired, or never existed — records the violation `Merge observed without a prior authorization for this candidate` and stays out of Done; every later observation re-derives that verdict from immutable history, so no cycle recovers it on its own. The merge cannot be re-run, so this is the one place a lost race would cost a delivery for good. `master status` therefore names such an item as the violation it is, with the merge commit and time, the owner `master`, and the recovery command; the row carries `merged` (`at`, `sha`, `violation`, and the last `refusal`), `counts.mergedUnreconciled` counts them apart from `counts.mergeCandidates`, and the loop records one escalation naming the recovery instead of offering the item to the guarded merge every cycle.
+
+A merged item whose content is **not on the base branch** is reported as that, not as an ordinary unreconciled merge. Each observation of a merged, undelivered pull request compares every file it shipped with the base-branch tip: a file the tip holds exactly as the base held it before the merge — or does not hold at all — is missing, while a file somebody changed afterwards is not. The observation records `revertedDelivery` (`base`, the missing `files`, and `removedBy`: the merge that removed them, found from the branch's own history of the path when the content was once on the branch, and otherwise the merged candidate whose head carried this item's commits without their content — the merge that made GitHub record this pull request merged). `master status` then names the item, the files missing from the base and that merge in one attention line — `GY-N was merged on GitHub (…) and its content is not on the base branch: 2 files missing from base … — removed by merge … of GY-M, pull request #P … This is a reverted delivery, not an unreconciled merge` — so a silent revert is visible without reading a diff. The row carries `merged.reverted`, `counts.revertedDeliveries` counts such items apart from `counts.mergedUnreconciled`, and the next action is a follow-up item that restores the named files: no merge decision is requested for the item until the base branch holds its content, because a reconciliation would record a delivery for work that is not there. The check that stops this from happening again is the [landing re-check](coordination.md#the-landing-re-check).
 
 The recovery is a two-party decision: `master decide GY-N merge REASON`, then the independent approver (`master approver GY-N DECISION`). It must be requested after the merge — a merge approval given before the merge is not a judgement of it. On the next observation Graphyard re-checks the record as it stood immediately before the merge: the merge authorization for that exact head, base and policy revision, every gate passed, no violation standing, every required proof's trusted evidence live at that instant, and a GitHub observation less than two minutes old. When that holds, the item is delivered on the decision: the delivery cites `authorizationRevision` and `evidenceAsOf` from the historical snapshot, carries `reconciliation` (the decision, requester, approver, both reasons, the cutoff, the snapshot revision and the judgement), and the ledger records `merge.reconciled`. When it does not, nothing is delivered: the item records `Reconciliation by decision … refused: …` with every reason, once, the ledger records `merge.reconciliation.refused`, and the row's attention line carries the refusal. A refusal is answered by a new decision, never by re-approving the refused one; a new decision that names no reason the refusal lacked is refused for the same reasons.
 
@@ -918,7 +1483,8 @@ On the next observation the item is delivered with `delivery.operatorAuthorizati
 
 ### Dead worker or provider change
 
-For a dead worker or provider change:
+A session whose provider account ran out mid-work needs none of this: the loop fails it over on
+its own ([exhaustion in the middle of a session](#exhaustion-in-the-middle-of-a-session)). For any other dead worker or provider change:
 
 1. stop the old worker and supervisor;
 2. release or let the lease expire, and settle any containment quarantine it left; a submitted
@@ -993,7 +1559,9 @@ The master clears blockers and adds requirements as its operator-agent identity;
 | `master autonomy [--admin-token-stdin --apply]` | Provision the master's operator-agent and approver identities and harness rules (once, at onboarding) |
 | `master create FILE REASON`, `master release GY-N REASON`, `master unblock GY-N REASON`, `master requirements GY-N FILE REASON` | The master's own non-weakening intent, as its operator-agent identity |
 | `master scope GY-N [REASON]` | Apply a scope request the loop refused, while the attempt keeps its lease; requests the item already implies are decided by the loop ([scope requests the loop decides](#scope-requests-the-loop-decides)) |
-| `master decide GY-N ACTION [JSON\|@FILE] REASON` | Request a two-party decision: `release`, `unblock`, `requirements`, `resolve`, `attest`, `merge`, `rework`, `recover`, `grant` |
+| `master decide GY-N ACTION [JSON\|@FILE] [--precedent ID[,ID]] [--context FINGERPRINT] REASON` | Request a two-party decision: `release`, `unblock`, `requirements`, `resolve`, `attest`, `merge`, `rework`, `recover`, `grant`; a handler cites the precedent it followed and the context it judged from |
+| `master context GY-N [TRIGGER] [--budget N]` | The assembled [escalation context](#escalation-context), read by key alone and verified against its fingerprint |
+| `master escalation GY-N [TRIGGER] [--budget N] [precedent\|KIND]` | Spawn a fresh handler on that context alone: `precedent` follows the newest applied line in this process, an agent `KIND` launches a judging session |
 | `master decisions GY-N` | An item's decisions with requester, approver, reasons, outcome, and refusals |
 | `master approver GY-N DECISION [KIND]` | Launch the independent approver session for one decision, on the registry's `approver` role (KIND overrides the runtime) |
 | `master approve GY-N DECISION REASON` | Approve, from the approver session only |

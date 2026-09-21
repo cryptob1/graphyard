@@ -1,12 +1,18 @@
 import { z } from 'zod';
-import type { BaseRefresh, QueueEjection, QueueEntry, QueueHistoryEntry } from '../merge-queue.js';
+import type { BaseRefresh, LandingCheck, QueueEjection, QueueEntry, QueueHistoryEntry, RevertedDelivery } from '../merge-queue.js';
 import { criterionSchema, policySchema, resourcesSchema, type Criterion } from './policy.js';
 import type { Evidence } from './evidence.js';
 import type { AgentReview, ReviewFailover, ReviewRequest } from './review.js';
 import type { Delivery, ReleaseDelivery } from './delivery.js';
 import type { BlockingRulingAction } from './delegation.js';
 import type { AutoDispatch } from './dispatch.js';
+import type { NextAction } from './next-action.js';
+import type { ActionQueue } from './actions.js';
+import type { AgentRequest } from './agent-requests.js';
+import type { SessionHandle } from './sessions.js';
 import type { ScopeDecision, ScopeRequestState } from './scope.js';
+import type { CapacityState } from './capacity.js';
+import type { HumanRequest } from './human-request.js';
 import { proofSchema } from './proof.js';
 import { demand } from './refusal.js';
 
@@ -89,6 +95,10 @@ export interface Observation {
   protected: boolean; files: string[]; at: string;
   /** The candidate diff compared against its bound base; see regression-guard.ts. */
   scopeFiles?: ScopeFile[];
+  /** The same judgement against the commit the candidate would land on, and the unlanded work its head carries; see merge-queue.ts LandingCheck. */
+  landing?: LandingCheck;
+  /** Set for a merged pull request whose content the base branch does not hold; see merge-queue.ts RevertedDelivery. */
+  revertedDelivery?: RevertedDelivery;
 }
 export interface Gate { name: string; passed: boolean; reasons: string[] }
 export interface Escalation { trigger: EscalationTrigger; reason: string; at: string; actor: string }
@@ -127,6 +137,15 @@ export interface Work extends Create {
    * cleared; a refused one stays open, carrying the same decision, for the operator to decide.
    */
   scopeDecision?: ScopeDecision | null;
+  /**
+   * The open decision only a human may make, recorded by the attempt that reached it. Recording it
+   * ended that attempt's lease and parked the item; the answer clears it, and answered requests
+   * are kept in `humanRequests` (see model/human-request.ts).
+   */
+  humanRequest?: HumanRequest | null;
+  humanRequests?: HumanRequest[];
+  /** Sessions of this item that ran out of provider quota, and any role with no account left (model/capacity.ts). */
+  capacity?: CapacityState | null;
   queue?: QueueEntry | null; queueSequence?: number; queueEjection?: QueueEjection | null; queueHistory?: QueueHistoryEntry[];
   /**
    * The last time the control plane brought this candidate onto a base branch that had moved
@@ -141,6 +160,17 @@ export interface Work extends Create {
   mergeAuthorization?: { sha: string; baseSha: string; policyRevision: number; at: string } | null;
   /** What the exact head still needs from a launched reviewer or producer; see model/dispatch.ts. */
   autoDispatch?: AutoDispatch | null;
+  /**
+   * The typed action the control plane computed for this item at the last evaluation, and the
+   * durable queue rows that say whether anybody is running it. See model/next-action.ts and
+   * model/actions.ts; neither authorizes progression.
+   */
+  nextAction?: NextAction | null;
+  actionQueue?: ActionQueue;
+  /** Typed asks an agent recorded instead of blocking on a prose question; see model/agent-requests.ts. */
+  agentRequests?: AgentRequest[];
+  /** Durable handles for the sessions launched on this item; see model/sessions.ts. */
+  sessions?: SessionHandle[];
   mergeExecution?: { id: string; owner: string; sha: string; baseSha: string; policyRevision: number; authorizationRevision: number; issuedAt: string; expiresAt: string; verifiedAt?: string; committingAt?: string; clockOffset?: { min: number; max: number }; fenced?: { reason: string; at: string } | null } | null;
   delivery?: Delivery;
   /**

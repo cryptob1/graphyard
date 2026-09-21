@@ -1,5 +1,6 @@
-import type { Observation, Work } from './model.js';
+import type { Observation, ScopeFile, Work } from './model.js';
 import { evidenceBindsCandidate, type QueueCarry, type TipMerge } from './model/carry.js';
+import { queuedRegressions } from './regression-guard.js';
 
 // Graphyard publishes speculative tips outside refs/heads and refs/tags: the namespace is
 // owned by the App, is never a branch a worker can push, and never appears as a PR head.
@@ -117,6 +118,55 @@ export function currentBaseRefreshCarry(work: Pick<Work, 'candidate' | 'baseRefr
   return carry.to.sha === candidate.sha && carry.to.baseSha === candidate.baseSha && carry.policyRevision === work.policyRevision ? carry : null;
 }
 
+/**
+ * What landing a candidate would do to the base branch, judged where it lands (GY-97).
+ *
+ * The regression guard compares a candidate with the base it is bound to, and a binding is held
+ * on purpose while a head is unchanged: the base moving under it is neither a new head nor a new
+ * submission. So a head that was clean when it was submitted could later delete what somebody else
+ * shipped in the meantime, and nothing looked again before the merge applied it. Every observation
+ * of an open candidate therefore records this check as well, against the commit the merge would
+ * actually land on — the live base-branch tip, or the predicted base of a tip published behind
+ * entries that have not landed yet:
+ *
+ * - `files`: every out-of-scope file of the pull request's diff, which the provider recomputes
+ *   against the moving base, compared with that commit. Present only when it differs by tree from
+ *   the bound base, where `scopeFiles` already is this comparison.
+ * - `carried`: other items' unlanded candidates whose commits this head has in its history — a
+ *   speculative tip pushed onto its branch leaves them there — while its tree holds their files as
+ *   the landing commit does. Merging such a head makes the provider record the other pull request
+ *   merged with none of its content on the base branch, and no diff against any base shows it:
+ *   that is how GY-93's merge took GY-84's delivery with it. The entries a predicted base is
+ *   published behind are excluded, since that base holds them: their files standing in the tip as
+ *   they stand there is how every queued tip holds its predecessors, and anything it really takes
+ *   from them is a change against the base it lands on, which `files` above compares.
+ */
+export interface CarriedCandidate {
+  key: string; pr: number; head: string;
+  /** The owning item's files this head does not hold, each with how it holds them instead. */
+  dropped: { path: string; detail: string }[];
+  /** The lookup budget ran out before every file was compared; never a pass, never an ejection. */
+  unverified?: boolean;
+}
+export interface LandingCheck {
+  base: string;
+  files?: ScopeFile[];
+  carried?: CarriedCandidate[];
+  /** The open candidates `carried` was decided against, as `KEY@head`, so an unchanged answer is not asked for again. */
+  examined?: string[];
+}
+/**
+ * A merged pull request whose content the base branch does not hold: each file stands on the base
+ * tip as it stood before the merge (or is absent), and `removedBy` is the merge that did it.
+ */
+export interface RevertedDelivery {
+  base: string;
+  files: { path: string; detail: string }[];
+  removedBy: { key: string | null; pr: number; mergeSha: string | null; commit: string | null } | null;
+  /** The lookup budget ran out: more files may be missing than are listed. */
+  partial?: boolean;
+}
+
 export const queueHistoryLimit = 40;
 // Pending, queued, or missing is not failure. Only a reported adverse conclusion ejects.
 const failedConclusions = new Set(['failure', 'timed_out', 'cancelled', 'action_required', 'startup_failure', 'stale', 'neutral']);
@@ -220,7 +270,7 @@ export function unpublishableEntry(work: Work): { sequence: number; mergeSha: st
  * Explicit, observed failure of a queued entry's speculative validation. Missing or pending
  * inputs keep an entry queued; only a reported adverse result removes it.
  */
-export function ejectionReason(work: Work, ciAppIds: number[]): string | null {
+export function ejectionReason(work: Work, ciAppIds: number[], all: Work[] = []): string | null {
   if (!work.queue || work.stage === 'done') return null;
   // A merged entry waits for its reconciliation, which delivers it and drops it from the order.
   // A refused reconciliation is a reported adverse conclusion about the entry itself (GY-94).
@@ -236,6 +286,11 @@ export function ejectionReason(work: Work, ciAppIds: number[]): string | null {
   if (!candidate || !observation || observation.candidate.sha !== candidate.sha || observation.candidate.baseSha !== candidate.baseSha) return null;
   const tip = candidate.sha.slice(0, 12);
   if (observation.prState === 'closed') return 'Pull request was closed without merging';
+  // The base this entry would land on holds work its head would delete, revert or rewrite: an
+  // observed adverse conclusion about the tip, which only a new head can answer. It names every
+  // file and the item that owns it; a file the observation could not compare ejects nothing.
+  const regressions = queuedRegressions(work, observation, all);
+  if (regressions.length) return `Landing speculative tip ${tip} on ${regressions[0].base.slice(0, 12)} would revert work outside its planned files: ${regressions.map(entry => entry.text).join('; ')}`;
   // Observations retain every run, including superseded ones; only the newest trusted run
   // for a required check decides, exactly as the test gate does, so a successful retry
   // never leaves an entry ejected by the failure it replaced.

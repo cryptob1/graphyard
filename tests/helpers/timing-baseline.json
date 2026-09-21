@@ -1,0 +1,225 @@
+{
+  "schema": 1,
+  "commit": "2f2b272b9da16e16f877745075ea63c1f5440fbe",
+  "treeUnchanged": true,
+  "command": [
+    "npm",
+    "test"
+  ],
+  "recordedAt": "2026-09-21T17:02:14.537Z",
+  "environment": {
+    "node": "v24.5.0",
+    "platform": "linux-x64",
+    "cpus": 24,
+    "ci": false
+  },
+  "runs": [
+    {
+      "run": 1,
+      "passed": true,
+      "exitCode": 0,
+      "durationMs": 51207,
+      "failedTests": 0,
+      "timingFailures": []
+    },
+    {
+      "run": 2,
+      "passed": true,
+      "exitCode": 0,
+      "durationMs": 46792,
+      "failedTests": 0,
+      "timingFailures": []
+    },
+    {
+      "run": 3,
+      "passed": true,
+      "exitCode": 0,
+      "durationMs": 45795,
+      "failedTests": 0,
+      "timingFailures": []
+    },
+    {
+      "run": 4,
+      "passed": true,
+      "exitCode": 0,
+      "durationMs": 55284,
+      "failedTests": 0,
+      "timingFailures": []
+    },
+    {
+      "run": 5,
+      "passed": true,
+      "exitCode": 0,
+      "durationMs": 53995,
+      "failedTests": 0,
+      "timingFailures": []
+    },
+    {
+      "run": 6,
+      "passed": true,
+      "exitCode": 0,
+      "durationMs": 54660,
+      "failedTests": 0,
+      "timingFailures": []
+    },
+    {
+      "run": 7,
+      "passed": true,
+      "exitCode": 0,
+      "durationMs": 49651,
+      "failedTests": 0,
+      "timingFailures": []
+    },
+    {
+      "run": 8,
+      "passed": true,
+      "exitCode": 0,
+      "durationMs": 45037,
+      "failedTests": 0,
+      "timingFailures": []
+    },
+    {
+      "run": 9,
+      "passed": true,
+      "exitCode": 0,
+      "durationMs": 46593,
+      "failedTests": 0,
+      "timingFailures": []
+    },
+    {
+      "run": 10,
+      "passed": true,
+      "exitCode": 0,
+      "durationMs": 46521,
+      "failedTests": 0,
+      "timingFailures": []
+    },
+    {
+      "run": 11,
+      "passed": true,
+      "exitCode": 0,
+      "durationMs": 52862,
+      "failedTests": 0,
+      "timingFailures": []
+    },
+    {
+      "run": 12,
+      "passed": true,
+      "exitCode": 0,
+      "durationMs": 53257,
+      "failedTests": 0,
+      "timingFailures": []
+    },
+    {
+      "run": 13,
+      "passed": true,
+      "exitCode": 0,
+      "durationMs": 47595,
+      "failedTests": 0,
+      "timingFailures": []
+    },
+    {
+      "run": 14,
+      "passed": true,
+      "exitCode": 0,
+      "durationMs": 48016,
+      "failedTests": 0,
+      "timingFailures": []
+    },
+    {
+      "run": 15,
+      "passed": true,
+      "exitCode": 0,
+      "durationMs": 51596,
+      "failedTests": 0,
+      "timingFailures": []
+    },
+    {
+      "run": 16,
+      "passed": true,
+      "exitCode": 0,
+      "durationMs": 49256,
+      "failedTests": 0,
+      "timingFailures": []
+    },
+    {
+      "run": 17,
+      "passed": true,
+      "exitCode": 0,
+      "durationMs": 47685,
+      "failedTests": 0,
+      "timingFailures": []
+    },
+    {
+      "run": 18,
+      "passed": true,
+      "exitCode": 0,
+      "durationMs": 50187,
+      "failedTests": 0,
+      "timingFailures": []
+    },
+    {
+      "run": 19,
+      "passed": true,
+      "exitCode": 0,
+      "durationMs": 48396,
+      "failedTests": 0,
+      "timingFailures": []
+    },
+    {
+      "run": 20,
+      "passed": true,
+      "exitCode": 0,
+      "durationMs": 49000,
+      "failedTests": 0,
+      "timingFailures": []
+    }
+  ],
+  "passed": 20,
+  "consecutivePasses": 20,
+  "stable": true,
+  "spread": [
+    {
+      "name": "cycle-within-interval.duration",
+      "test": "integration:cycle-within-interval",
+      "statistic": "duration",
+      "budgetMs": 20000,
+      "comparison": "<=",
+      "runs": 20,
+      "failures": 0,
+      "minMs": 180,
+      "medianMs": 186,
+      "maxMs": 196,
+      "spreadMs": 16,
+      "headroomMs": 19804
+    },
+    {
+      "name": "dispatch-read-resilience.recovery",
+      "test": "integration:dispatch-read-resilience",
+      "statistic": "elapsed",
+      "budgetMs": 10000,
+      "comparison": "<",
+      "runs": 20,
+      "failures": 0,
+      "minMs": 772.135,
+      "medianMs": 779.181,
+      "maxMs": 800.335,
+      "spreadMs": 28.2,
+      "headroomMs": 9199.665
+    },
+    {
+      "name": "work-snapshot-latency.p95",
+      "test": "integration:work-snapshot-latency",
+      "statistic": "p95",
+      "budgetMs": 2000,
+      "comparison": "<",
+      "runs": 20,
+      "failures": 0,
+      "minMs": 183.568,
+      "medianMs": 188.451,
+      "maxMs": 338.481,
+      "spreadMs": 154.913,
+      "headroomMs": 1661.519
+    }
+  ]
+}

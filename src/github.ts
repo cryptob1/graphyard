@@ -7,7 +7,7 @@ import type { Engine } from './engine.js';
 import { CHECK_NAME, carriedApproval, demand, nativeReviewRequired, parseReviewerApps, reviewerProfileFor, reviewProviderOf, type Observation, type ReviewerApp, type ReviewerProfile, type ScopeFile, type TipMerge, type Work, type ReviewRequest } from './model.js';
 import { inPlannedScope } from './regression-guard.js';
 export { CHECK_NAME };
-import { baseRefreshNeeded, heldBase, queuePlacement, queueRef, type BaseRefresh, type QueuePlacement, type QueueSpeculation } from './merge-queue.js';
+import { baseRefreshNeeded, heldBase, queuePlacement, queueRef, type BaseRefresh, type CarriedCandidate, type LandingCheck, type QueuePlacement, type QueueSpeculation, type RevertedDelivery } from './merge-queue.js';
 import { blockedFeatures, controlPlanePermissions, describeShortfall, permissionShortfalls, requiredPermissions, type PermissionFeature, type PermissionLevel, type PermissionShortfall } from './github-permissions.js';
 
 /** Out-of-scope paths compared against the base tip per observation; the rest are refused as uncompared. */
@@ -278,7 +278,12 @@ export class GitHub {
       && heldBase(work, pr.head.sha, branch.tip) === observation.candidate.baseSha ? observation.candidate.baseSha : null;
     return held ?? branch.tip;
   }
-  async observe(work: Work): Promise<Observation> {
+  /**
+   * `peers` is every work item as the caller read it. It is what lets the landing check see other
+   * items' unlanded candidates in this head's history, and name the merge that took a delivery
+   * off the base branch; without it those two answers are left out, never guessed.
+   */
+  async observe(work: Work, peers?: Work[]): Promise<Observation> {
     const startedAt = new Date().toISOString();
     const pr = await this.request(`/pulls/${work.submission!.pr}`);
     demand(pr.base.repo.full_name.toLowerCase() === this.config.repository.toLowerCase() && pr.head.repo?.full_name.toLowerCase() === this.config.repository.toLowerCase(), 'MVP requires same-repository pull requests');
@@ -301,6 +306,12 @@ export class GitHub {
     // Out-of-scope files are compared with the bound base: the predicted base already contains
     // every queued predecessor, so their changes on a speculative tip are not this candidate's.
     const scopeFiles = await this.compareScope(work.plannedFiles ?? [], files, bound);
+    // The bound base is held while the head is unchanged, so the same comparison is made where
+    // the merge would land, on every observation of an open candidate (GY-97). A merged pull
+    // request is judged the other way round: whether the base branch still holds what it shipped.
+    const budget = { remaining: scopeLookupBudget };
+    const landing = pr.merged || pr.state !== 'open' ? undefined : await this.landingCheck(work, pr.head.sha, files, bound, speculative, branch, peers, budget);
+    const revertedDelivery = pr.merged && work.stage !== 'done' ? await this.revertedDelivery(work, pr, files, branch, peers, budget) : undefined;
     const candidateBase = pr.merged && work.candidate && work.candidate.sha === pr.head.sha ? work.candidate.baseSha : bound;
     // A head contains the base tip by ancestry, or as a published tip whose bound base is the
     // tip's tree-identical predecessor, or as a published tip behind other queue entries, whose
@@ -331,7 +342,111 @@ export class GitHub {
       prState: pr.state, draft: pr.draft, prCreatedAt: pr.created_at, merged: pr.merged, mergeSha: pr.merge_commit_sha, mergedAt: pr.merged_at, mergeable: pr.mergeable === true && !pr.draft && pr.state === 'open',
       protected: protectedBranch, files: files.map(f => f.filename), at: startedAt,
       baseTip: branch.tip, baseTree: branch.tree, baseTipContained, scopeFiles,
+      ...(landing ? { landing } : {}), ...(revertedDelivery ? { revertedDelivery } : {}),
     };
+  }
+  /**
+   * The commit the candidate would land on, and what landing there would revert (see
+   * merge-queue.ts LandingCheck). A tip published behind entries that have not landed lands on
+   * its predicted base, which is its bound base; everything else lands on the live branch head.
+   * A base that differs from the bound one only by commit, not by tree, needs no second
+   * comparison. The answer about carried candidates is reused while the head, the landing commit
+   * and every open candidate it was decided against are unchanged.
+   */
+  private async landingCheck(work: Work, head: string, files: any[], bound: string, speculative: string | null, branch: { tip: string; tree: string }, peers: Work[] | undefined, budget: { remaining: number }): Promise<LandingCheck> {
+    const speculation = work.queue?.speculation;
+    const predicted = !!speculative && speculative !== branch.tip && speculation!.baseTree !== branch.tree && speculation!.predecessors.length > 0 && await this.contains(branch.tip, speculative);
+    const base = predicted ? speculative! : branch.tip;
+    const sameTree = base === bound || !!speculative && speculation!.baseTree === branch.tree;
+    // The pull request's own diff is taken against the live branch, which does not hold the
+    // entries ahead yet: a file one of them adds and this head drops appears in it nowhere. What
+    // landing on a predicted base does is that base compared with the head that contains it.
+    const landed = predicted ? await this.landingDiff(base, head) : sameTree ? null : files;
+    const landing: LandingCheck = { base, ...(landed ? { files: await this.compareScope(work.plannedFiles ?? [], landed, base, budget) } : {}) };
+    if (!peers) return landing;
+    const open = peers.filter(peer => peer.id !== work.id && peer.stage !== 'done' && !!peer.submission && !!peer.candidate && peer.candidate.sha !== head
+      && !!peer.observation && !peer.observation.merged && peer.observation.prState !== 'closed' && peer.observation.candidate.sha === peer.candidate.sha);
+    landing.examined = open.map(peer => `${peer.key}@${peer.candidate!.sha}`).sort();
+    const previous = work.observation && work.observation.candidate.sha === head ? work.observation.landing : undefined;
+    if (previous?.carried && previous.base === base && JSON.stringify(previous.examined) === JSON.stringify(landing.examined) && !previous.carried.some(entry => entry.unverified)) return { ...landing, carried: previous.carried };
+    const carried: CarriedCandidate[] = [];
+    // The entries ahead are in a predicted base by construction, so their files standing in this
+    // head as they stand there is the ordinary state of a queued tip and says nothing: two entries
+    // ahead that both change one file leave it merged in the tip behind them. What such a tip would
+    // really take from them is a change to the base it lands on, which `files` compares above —
+    // every drop of theirs is a removal or a modification in `base...head`. So they are judged
+    // there, and `carried` judges the candidates the landing commit does not hold.
+    const ahead = new Set(predicted ? speculation!.predecessors : []);
+    for (const peer of open) {
+      if (ahead.has(peer.key) || !await this.contains(peer.candidate!.sha, head)) continue;
+      const entry: CarriedCandidate = { key: peer.key, pr: peer.candidate!.pr, head: peer.candidate!.sha, dropped: [] };
+      for (const file of peer.observation!.scopeFiles ?? []) {
+        // A file this item planned is its own to change, whoever else touched it.
+        if (inPlannedScope(work.plannedFiles ?? [], file.path)) continue;
+        if ((budget.remaining -= 2) < 0) { entry.unverified = true; break; }
+        const held = await this.blobAt(file.path, head);
+        if (file.status !== 'removed' && held === file.sha) continue;
+        // Neither the owner's version nor anything new: exactly what the landing commit holds, so
+        // the owner's change is in this head's history and absent from its tree.
+        if (held !== await this.blobAt(file.path, base) || file.status === 'removed' && held === null) continue;
+        entry.dropped.push({ path: file.path, detail: held === null ? 'the file is absent from this head and from the commit it would land on' : 'the file is held exactly as the commit it would land on holds it' });
+      }
+      if (entry.dropped.length || entry.unverified) carried.push(entry);
+    }
+    return { ...landing, carried };
+  }
+  /** True when the commit took the path from the content the pull request delivered: one of its parents still holds that exact blob. */
+  private async revertsDelivered(commit: string, path: string, files: any[]): Promise<boolean> {
+    const delivered = files.find(file => file.filename === path)?.sha;
+    const detail = await this.request(`/commits/${commit}`);
+    for (const parent of Array.isArray(detail?.parents) ? detail.parents : []) if (typeof parent?.sha === 'string' && await this.blobAt(path, parent.sha) === delivered) return true;
+    return false;
+  }
+  /** The provider's file records for `base...head`; a list at the cap ends with a record nothing was compared for, which the guard refuses. */
+  private async landingDiff(base: string, head: string): Promise<any[]> {
+    const comparison = await this.request(`/compare/${base}...${head}`);
+    demand(Array.isArray(comparison?.files), `GitHub did not list the files changed between ${base.slice(0, 12)} and ${head.slice(0, 12)}`, 502);
+    return comparison.files.length < compareFileCap ? comparison.files
+      : [...comparison.files, { filename: `(the comparison lists ${compareFileCap} files or more; the rest were not compared)`, status: 'unchanged', additions: 0, deletions: 0, uncompared: true }];
+  }
+  /**
+   * Whether the base branch holds what a merged pull request shipped (GY-97). A file is missing
+   * when the branch head holds it exactly as the base held it before the merge — or not at all —
+   * rather than as the pull request left it; a file somebody changed afterwards is not. The merge
+   * that removed it is found from the branch's own history of the path when the content was once
+   * on the branch, accepted only if that commit took the path from the delivered content — a
+   * parent of it holds that exact blob — and otherwise among the merged candidates whose head carried this one:
+   * the merge that made the provider record this pull request merged. Asked again only when the
+   * branch head moves.
+   */
+  private async revertedDelivery(work: Work, pr: any, files: any[], branch: { tip: string }, peers: Work[] | undefined, budget: { remaining: number }): Promise<RevertedDelivery | undefined> {
+    const previous = work.observation && work.observation.candidate.sha === pr.head.sha && work.observation.merged ? work.observation.revertedDelivery : undefined;
+    if (previous && previous.base === branch.tip && !previous.partial && (previous.removedBy || !peers)) return previous;
+    const missing: RevertedDelivery['files'] = []; let partial = false;
+    for (const file of files) {
+      if (file.status === 'removed' || typeof file.sha !== 'string') continue;
+      if ((budget.remaining -= 2) < 0) { partial = true; break; }
+      const held = await this.blobAt(file.filename, branch.tip);
+      if (held === file.sha || held !== await this.blobAt(file.filename, pr.base.sha)) continue;
+      missing.push({ path: file.filename, detail: held === null ? 'absent from the base branch' : 'held as it was before this merge' });
+    }
+    if (!missing.length) return undefined;
+    const owner = (number: number) => peers?.find(peer => peer.submission?.pr === number)?.key ?? null;
+    let removedBy: RevertedDelivery['removedBy'] = null;
+    // Naming the merge is naming a work item, so it is asked only by a caller that brought them.
+    if (!peers) return { base: branch.tip, files: missing, removedBy: null, ...(partial ? { partial } : {}) };
+    const history = await this.request(`/commits?sha=${branch.tip}&path=${encodeURIComponent(missing[0].path)}&per_page=1`);
+    const commit = Array.isArray(history) && typeof history[0]?.sha === 'string' ? history[0].sha as string : null;
+    if (commit && commit !== pr.head.sha && await this.revertsDelivered(commit, missing[0].path, files)) {
+      const pulls = await this.request(`/commits/${commit}/pulls`);
+      const merged = Array.isArray(pulls) ? pulls.find((entry: any) => entry?.merged_at && entry.number !== pr.number && entry.base?.ref === this.config.base) : null;
+      if (merged) removedBy = { key: owner(merged.number), pr: merged.number, mergeSha: merged.merge_commit_sha ?? null, commit };
+    }
+    for (const peer of removedBy ? [] : peers ?? []) {
+      if (peer.id === work.id || !peer.observation?.merged || !peer.candidate || peer.candidate.sha === pr.head.sha || !await this.contains(pr.head.sha, peer.candidate.sha)) continue;
+      removedBy = { key: peer.key, pr: peer.candidate.pr, mergeSha: peer.observation.mergeSha ?? null, commit: null }; break;
+    }
+    return { base: branch.tip, files: missing, removedBy, ...(partial ? { partial } : {}) };
   }
   /**
    * The provider's PR diff is taken against the merge base. The regression guard needs every
@@ -340,8 +455,7 @@ export class GitHub {
    * up there by blob identity. Paths beyond the lookup budget stay uncompared, which the guard
    * refuses rather than passes.
    */
-  private async compareScope(plannedFiles: string[], files: any[], base: string): Promise<ScopeFile[]> {
-    const budget = { remaining: scopeLookupBudget };
+  private async compareScope(plannedFiles: string[], files: any[], base: string, budget = { remaining: scopeLookupBudget }): Promise<ScopeFile[]> {
     const lookup = async (path: string) => budget.remaining-- > 0 ? this.blobAt(path, base) : undefined;
     const compared: ScopeFile[] = [];
     for (const file of files) {
@@ -350,7 +464,7 @@ export class GitHub {
       const entry: ScopeFile = { path: file.filename, status, ...(previousPath ? { previousPath } : {}),
         sha: status !== 'removed' && typeof file.sha === 'string' && /^[a-f0-9]{40}$/.test(file.sha) ? file.sha : null,
         additions: Number.isSafeInteger(file.additions) ? file.additions : 0, deletions: Number.isSafeInteger(file.deletions) ? file.deletions : 0, binary: typeof file.patch !== 'string' };
-      if (!inPlannedScope(plannedFiles, entry.path)) { const baseSha = await lookup(entry.path); if (baseSha !== undefined) entry.baseSha = baseSha; }
+      if (!file.uncompared && !inPlannedScope(plannedFiles, entry.path)) { const baseSha = await lookup(entry.path); if (baseSha !== undefined) entry.baseSha = baseSha; }
       if (previousPath && status === 'renamed' && !inPlannedScope(plannedFiles, previousPath)) { const previousBaseSha = await lookup(previousPath); if (previousBaseSha !== undefined) entry.previousBaseSha = previousBaseSha; }
       compared.push(entry);
     }
@@ -365,10 +479,10 @@ export class GitHub {
     demand(typeof entry?.sha === 'string' && /^[a-f0-9]{40}$/.test(entry.sha), `GitHub did not return a readable blob for ${path} at ${ref}`, 502);
     return entry.sha;
   }
-  async verify(work: Work): Promise<Observation> {
-    const first = await this.observe(work);
-    const second = await this.observe(work);
-    const gates = (o: Observation) => JSON.stringify({ candidate: o.candidate, checks: o.checks, reviews: o.reviews, agentReview: o.agentReview, protected: o.protected, merged: o.merged, mergeable: o.mergeable, prState: o.prState, draft: o.draft, scopeFiles: o.scopeFiles });
+  async verify(work: Work, peers?: Work[]): Promise<Observation> {
+    const first = await this.observe(work, peers);
+    const second = await this.observe(work, peers);
+    const gates = (o: Observation) => JSON.stringify({ candidate: o.candidate, checks: o.checks, reviews: o.reviews, agentReview: o.agentReview, protected: o.protected, merged: o.merged, mergeable: o.mergeable, prState: o.prState, draft: o.draft, scopeFiles: o.scopeFiles, landing: o.landing });
     demand(gates(first) === gates(second), 'GitHub gates changed during final verification; retry');
     return second;
   }
@@ -651,11 +765,12 @@ export async function processJob(engine: Engine, github: GitHub) {
   const heldOn = () => installationFingerprint(github.permissionReport?.() ?? null);
   let held: string | null = null;
   try {
-    work = (await engine.store.list()).find(w => w.id === job.work_id);
+    const all = await engine.store.list();
+    work = all.find(w => w.id === job.work_id);
     if (work?.submission && work.stage !== 'done') {
       held = hold('observation');
       if (held) { await engine.store.holdJob(job.work_id, job.token, held, permissionHoldMs, heldOn()); return; }
-      const observation = await github.observe(work);
+      const observation = await github.observe(work, all);
       work = await engine.observe(work.id, work.revision, observation, job.token);
       // A base branch that moved under this candidate is Graphyard's to absorb, not the worker's.
       // The republished head is what the review, the checks and the proofs then bind to, so the

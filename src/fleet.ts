@@ -4,7 +4,7 @@ import { access, readFile } from 'node:fs/promises';
 import { basename, dirname, resolve } from 'node:path';
 import { homedir } from 'node:os';
 import { NoHealthyAccountError, agentEnvironmentRoot, atomicPrivateWrite, checkAgentEnvironment, discoverAgentEnvironments, environmentKinds, readCredentialFile,
-  type AccountSkip, type AgentEnvironment, type EnvironmentHealth, type EnvironmentKind, type EnvironmentProbe, type MasterConfig } from './master.js';
+  type AccountSkip, type AccountSkipCause, type AgentEnvironment, type EnvironmentHealth, type EnvironmentKind, type EnvironmentProbe, type MasterConfig } from './master.js';
 import { accountIneligibility, fleetRoles, liveSessions, proposedConcurrency, proposedRuntimes, type AgentRegistry, type FleetAccount, type FleetAccountInput, type FleetModel, type FleetRole, type FleetRoleName, type FleetRuntime, type FleetSession, type LaunchContract, type QuotaObservation, type SessionSkip } from './model/registry.js';
 
 /**
@@ -32,9 +32,23 @@ export interface FleetLaunchAccount { name: string; kind: string; home: string |
 
 export class FleetUnreachableError extends Error {}
 
+/**
+ * Why the registry passed an account over, in the launcher's own three causes. Only a quota the
+ * registry reads as spent is `exhausted`: a disabled, misplaced, unregistered or session-limited
+ * account is something a master fixes in one command, and reporting it as spent would read as a
+ * wait for a provider reset that never comes.
+ */
+export const skipCause = (reason: string): AccountSkipCause =>
+  /is not logged in/.test(reason) ? 'logged-out' : /quota is exhausted/.test(reason) ? 'exhausted' : 'unconfigured';
+
 export function httpFleetClient(config: Required<Pick<FleetConfig, 'url'>> & Pick<FleetConfig, 'credentialFile'>, fetcher: typeof fetch = fetch, timeoutMs = 10_000): FleetClient {
   const call = async (path: string, body?: unknown) => {
-    const token = await readCredentialFile(config.credentialFile);
+    // A credential this host cannot read is the registry being unaskable, not a fleet decision:
+    // it takes the same path as an outage, so a role the registry never decided still launches
+    // from its local profile while a role it did decide refuses rather than falling back.
+    let token: string;
+    try { token = await readCredentialFile(config.credentialFile); }
+    catch (error) { throw new FleetUnreachableError(`The agent registry at ${config.url} cannot be asked: ${error instanceof Error ? error.message : 'the coordinator credential is unreadable'}`); }
     let response: Response;
     try {
       response = await fetcher(`${config.url}/api/${path}`, { method: body === undefined ? 'GET' : 'POST', signal: AbortSignal.timeout(timeoutMs),
@@ -124,7 +138,7 @@ export async function selectFleetSession(config: FleetConfig, role: FleetRoleNam
   const observations = observed.filter((entry): entry is NonNullable<typeof entry> => !!entry);
   const chosen = await client.select({ role, host, work: probe.work ?? null, principal: probe.principal ?? profile.principal ?? null, observations: observations.map(({ account, quota }) => ({ account, quota })) });
   const at = new Date(probe.now?.() ?? Date.now()).toISOString();
-  const skipped: AccountSkip[] = chosen.skipped.map(entry => ({ at, role: role as AccountSkip['role'], profile: profile.name, environment: entry.account, reason: entry.reason, work: probe.work ?? null }));
+  const skipped: AccountSkip[] = chosen.skipped.map(entry => ({ at, role: role as AccountSkip['role'], profile: profile.name, environment: entry.account, reason: entry.reason, work: probe.work ?? null, cause: skipCause(entry.reason) }));
   if (!chosen.selected || !chosen.account || !chosen.runtime || !chosen.model || !chosen.session)
     throw new NoHealthyAccountError(`No healthy agent account for ${role} profile ${profile.name}: ${chosen.reason}`, skipped);
   const account: FleetLaunchAccount = { name: chosen.account.name, kind: chosen.runtime.launch.kind, home: chosen.account.credential.home,
@@ -145,7 +159,7 @@ export async function fleetRoleHealth(config: FleetConfig, role: FleetRoleName, 
   const accounts = definition.accounts.map(name => {
     const account = fleet.registry.accounts.find(entry => entry.name === name);
     const reason = account ? accountIneligibility(fleet.registry, account, now, host) : `${name} is not a registered account`;
-    return { environment: name, healthy: !reason, reason, quota: account?.quota.state ?? 'unknown' };
+    return { environment: name, healthy: !reason, reason, quota: account?.quota.state ?? 'unknown', resetsAt: account?.quota.resetsAt ?? null };
   });
   const running = liveSessions(fleet.registry).filter(session => session.role === role).length;
   const full = running >= definition.concurrency ? `role ${role} is at its concurrency limit (${running} of ${definition.concurrency} live)` : null;

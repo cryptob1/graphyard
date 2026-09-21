@@ -11,15 +11,19 @@ import { dispatchOrder, dispatchOverlap, resourceConflicts, scopeBreadth } from 
 import type { ConflictReport } from './conflicts.js';
 import { mergeOrder } from './delegation.js';
 import { launchPlan, masterHarnessPlan, writeHarnessPermissions, type HarnessPlan, type HarnessRule } from './harness.js';
-import { CHECK_NAME, carriedApproval, deliveryState, deploySmokeRequired, describeQueueBinding, evidenceIndependenceRefusals, exhaustedReviewerProfiles, nativeReviewRequired, postDeployMs, productionLatencyMs, providerDelayAfterVerification, reviewerProfileFor, reviewProviderOf, rollbackGuidance, standingEscalations, type CarriedApproval, type QueueBindingReport, type Work } from './model.js';
+import { capacityRetryAt, describeCapacity, standingCapacity, type CapacityAccount, type CapacityRole, type PartialWork } from './model/capacity.js';
+import { answerCommand, humanDecisionLabel, openHumanRequests, parkedOnHuman } from './model/human-request.js';
+import { CHECK_NAME, carriedApproval, escalationTriggers, deliveryState, deploySmokeRequired, describeQueueBinding, evidenceIndependenceRefusals, exhaustedReviewerProfiles, nativeReviewRequired, postDeployMs, productionLatencyMs, providerDelayAfterVerification, reviewerProfileFor, reviewProviderOf, rollbackGuidance, standingEscalations, type CarriedApproval, type QueueBindingReport, type Work } from './model.js';
 import { containmentAttestation, containmentGraceMs, containmentSettlementRefusals, containmentVerificationSchema, type ContainmentVerification } from './quarantine.js';
 import { probeSupervisorAbsence } from './containment-probe.js';
 import { baseRefreshConflict, currentBaseRefreshCarry, pendingBaseRefresh, predictQueue, refusedReconciliation, unpublishableEntry, type QueuePlacement } from './merge-queue.js';
 import { MERGE_PROTOCOL } from './protocol-version.js';
 import { attentionLines, type ProductionReport } from './production-watch.js';
+import { allocateSessionCheckout, inspectWorktreeRoot, reclaimCommand, removeSessionCheckout, verifyWorktreeRoot, worktreeRoot, worktreeRootBudgetBytes, worktreeRootConcerns, worktreeRootMinFreeBytes, type CheckoutReclaimReport, type FilesystemProbe, type SessionCheckout, type WorktreeRootHealth } from './install/worktree-root.js';
 import { pipelineSpeed, pipelineSpeedSummary } from './pipeline-speed.js';
 import { fleetRoleHealth, selectFleetSession, type FleetLaunchAccount, type FleetProbe } from './fleet.js';
 import type { FleetView } from './model/registry.js';
+import { contextFingerprint, escalationAction, followPrecedent, handleEscalation, type EscalationContext } from './model/escalation-context.js';
 
 const safeEnvironment = z.record(
   z.string().regex(/^[A-Z_][A-Z0-9_]*$/)
@@ -132,6 +136,13 @@ export const masterRunSchema = z.object({
   // volume raises the threshold without restarting the loop.
   reclaimIdleHours: z.number().min(0.25).max(720).optional(),
   diskThresholdGb: z.number().min(0.1).max(10_000).optional(),
+  // The managed worktree root every proof and review checkout is created under: an absolute path
+  // on durable storage outside every worktree (default: the installation's data directory), the
+  // free space setup and each launch require of its volume, and the size the root may reach before
+  // `master status` asks for a reclaim — a user quota is invisible in the volume's free space.
+  worktreeRoot: z.string().trim().min(1).max(1000).refine(isAbsolute, 'worktreeRoot must be an absolute path').optional(),
+  worktreeRootMinFreeGb: z.number().min(0.1).max(10_000).optional(),
+  worktreeRootBudgetGb: z.number().min(0.1).max(10_000).optional(),
   // An account whose provider usage reached this percentage of any window is skipped at launch:
   // a session started just below a hard limit would stall mid-task.
   quotaCeilingPercent: z.number().int().min(50).max(100).optional(),
@@ -295,12 +306,23 @@ async function repositoryWorktrees(root: string) {
   } catch { throw new Error('Cannot verify credential location because the complete Git worktree inventory is unavailable'); }
   if (!worktrees.length) throw new Error('Cannot verify credential location because Git returned an empty worktree inventory');
   // A registered worktree whose path is missing or hidden (a removed proof worktree, or one under
-  // a /tmp this process cannot see) is compared by its registered path: it cannot be resolved,
+  // a mount this process cannot see) is compared by its registered path: it cannot be resolved,
   // but a target lexically inside it is still refused, and it never stops the loop.
   return Promise.all(worktrees.map(worktree => realpath(worktree).catch(() => worktree)));
 }
-export async function assertOutsideWorktrees(root: string, target: string, label: string) {
-  const canonicalTarget = await realpath(target);
+/**
+ * Where a path is, or would be created: a target that does not exist yet is judged by its nearest
+ * existing ancestor, so a directory can be refused before anything is written into a worktree.
+ */
+async function canonicalLocation(target: string) {
+  const missing: string[] = [];
+  for (let current = resolve(target); ; current = dirname(current)) {
+    try { return resolve(await realpath(current), ...missing); }
+    catch (error: any) { if (error?.code !== 'ENOENT' || dirname(current) === current) throw error; missing.unshift(basename(current)); }
+  }
+}
+export async function assertOutsideWorktrees(root: string, target: string, label: string, options: { create?: boolean } = {}) {
+  const canonicalTarget = options.create ? await canonicalLocation(target) : await realpath(target);
   const worktrees = await repositoryWorktrees(root);
   for (const worktree of worktrees) {
     const fromRoot = relative(worktree, canonicalTarget);
@@ -338,8 +360,12 @@ export async function inspectWorkerCredentials(root: string, profiles: WorkerPro
 // A profile's accounts are part of whether it can launch, so status and the durable loop read them
 // with its credential: a profile none of whose accounts is logged in with quota left is unavailable.
 async function withAccountHealth<T extends { available: boolean; reason: string | null }>(root: string, role: LaunchRole, profiles: { name: string; accounts?: string[] }[], health: Record<string, T>, probe?: EnvironmentProbe) {
-  if (!profiles.some(profile => profile.accounts?.length)) return health;
-  return inspectProfileAccounts(await readMasterConfig(root), role, profiles, health, probe);
+  // A profile that names no accounts can still be held by an exhaustion one of its own sessions
+  // reported (GY-89), so the log is read for those too; only a named account needs the configuration.
+  const named = profiles.some(profile => profile.accounts?.length);
+  let config: MasterConfig;
+  try { config = await readMasterConfig(root); } catch (error) { if (named) throw error; return health; }
+  return inspectProfileAccounts(config, role, profiles, health, probe);
 }
 export async function readProducerCredential(root: string, file: string) {
   await externalCredential(root, file, 'Producer');
@@ -367,7 +393,7 @@ async function atomicPrivateText(file: string, value: string) {
   await chmod(file, 0o600);
 }
 
-export async function setupMaster(root: string, input: { url: string; token: string; cliPath: string; hostId?: string; herdrWorkspace?: string; credentialDirectory?: string; autoMerge?: boolean; mergeMethod?: 'merge' | 'squash' | 'rebase'; run?: Partial<MasterRun>; browser?: MasterBrowser }, fetcher: typeof fetch = fetch) {
+export async function setupMaster(root: string, input: { url: string; token: string; cliPath: string; hostId?: string; herdrWorkspace?: string; credentialDirectory?: string; autoMerge?: boolean; mergeMethod?: 'merge' | 'squash' | 'rebase'; run?: Partial<MasterRun>; browser?: MasterBrowser }, fetcher: typeof fetch = fetch, dependencies: { probe?: FilesystemProbe } = {}) {
   const url = serverOrigin(input.url); const token = input.token.trim();
   const workerConnection = await loadConnection(root);
   if (workerConnection && workerConnection.url !== url) throw new Error('Worker connection uses another Graphyard server; migrate the repository connection before master setup');
@@ -389,6 +415,12 @@ export async function setupMaster(root: string, input: { url: string; token: str
   try { previous = await readMasterConfig(root); } catch (error: any) { if (error.code !== 'ENOENT' && !/ENOENT/.test(error.message)) throw error; }
   if (previous && (previous.url !== url || previous.repository.toLowerCase() !== detected.repository.toLowerCase())) throw new Error('Existing master configuration belongs to another server or repository');
   const repositoryName = detected.repository.split('/').at(-1)!.replace(/[^a-zA-Z0-9._-]/g, '-');
+  // The managed worktree root is verified before anything is written. Every proof and review
+  // checkout is created under it, so a root inside a worktree, on a tmpfs, or on a volume without
+  // the configured room is refused here, with the reason, rather than found out mid-proof.
+  const managedRoot = worktreeRoot(root, { repository: detected.repository, run: { ...previous?.run, ...input.run } });
+  await assertOutsideWorktrees(root, managedRoot, 'The managed worktree root', { create: true });
+  const verifiedRoot = await verifyWorktreeRoot(managedRoot, { minFreeBytes: worktreeRootMinFreeBytes({ run: { ...previous?.run, ...input.run } }), probe: dependencies.probe });
   const requestedCredentialDirectory = resolve(input.credentialDirectory ?? process.env.GRAPHYARD_CONFIG_HOME ?? resolve(homedir(), '.config/graphyard'), 'masters');
   if (requestedCredentialDirectory === resolve(root) || requestedCredentialDirectory.startsWith(`${resolve(root)}/`)) throw new Error('Coordinator credentials must be stored outside the managed repository');
   await mkdir(requestedCredentialDirectory, { recursive: true, mode: 0o700 });
@@ -426,6 +458,7 @@ export async function setupMaster(root: string, input: { url: string; token: str
     return { environment: environment.name, kind: environment.kind, home: environment.home, loggedIn: health.loggedIn, login: health.login };
   }));
   return { repository: config.repository, server: config.url, role: status.actor.role, autoMerge: config.autoMerge, workers: config.workers.length, run: config.run, browser: config.browser ?? null, config: '.graphyard/master.json', reviewer: config.reviewer ? `${config.reviewer.slug}[bot]` : null, attention,
+    worktreeRoot: { path: verifiedRoot.path, freeBytes: verifiedRoot.freeBytes, minFreeBytes: verifiedRoot.minFreeBytes, configured: !!config.run.worktreeRoot },
     agentEnvironments: { directory: environmentDirectory, discovered: environments },
     next: `${remedy ? `${remedy}, then ${start}` : start[0].toUpperCase() + start.slice(1)}; give the master its agent identities once with graphyard master autonomy --admin-token-stdin --apply` };
 }
@@ -682,11 +715,24 @@ export async function checkAgentEnvironment(environment: AgentEnvironment, probe
 }
 
 export type LaunchRole = 'worker' | 'reviewer' | 'producer';
-export interface AccountSkip { at: string; role: LaunchRole; profile: string; environment: string; reason: string; work: string | null }
+/**
+ * Why a launch passed an account over. Only `exhausted` — a quota read as spent, or one a session
+ * itself reported — is the provider's capacity and waits for a reset. A logged-out account or a
+ * name that is not a configured environment is something a master fixes in one command, so it must
+ * keep reading as a launch that went wrong rather than as a wait (GY-89).
+ */
+export type AccountSkipCause = 'exhausted' | 'logged-out' | 'unconfigured';
+export interface AccountSkip { at: string; role: LaunchRole; profile: string; environment: string; reason: string; work: string | null; cause: AccountSkipCause }
 /** Every account of a profile was skipped: the caller fails over to its next profile, or reports the skips. */
 export class NoHealthyAccountError extends Error {
+  /** Fail over to the next profile: true for every reason an account was passed over. */
   readonly accountsExhausted = true;
-  constructor(message: string, readonly skipped: AccountSkip[]) { super(message); }
+  /** This profile has no capacity left: true only when every account it skipped was spent. */
+  readonly capacityExhausted: boolean;
+  constructor(message: string, readonly skipped: AccountSkip[]) {
+    super(message);
+    this.capacityExhausted = skipped.length > 0 && skipped.every(skip => skip.cause === 'exhausted');
+  }
 }
 
 // What the launch loop last observed about each environment, and the recent launches it skipped
@@ -694,19 +740,54 @@ export class NoHealthyAccountError extends Error {
 const environmentLogSchema = z.object({
   version: z.literal(1),
   environments: z.record(z.string(), z.any()).default({}),
-  skipped: z.array(z.object({ at: z.string(), role: z.enum(['worker', 'reviewer', 'producer']), profile: z.string(), environment: z.string(), reason: z.string().max(500), work: z.string().nullable() }).strict()).max(50).default([]),
+  skipped: z.array(z.object({ at: z.string(), role: z.enum(['worker', 'reviewer', 'producer']), profile: z.string(), environment: z.string(), reason: z.string().max(500), work: z.string().nullable(),
+    // Logs written before GY-89 carry no cause; they read as the exhaustion the flag then meant.
+    cause: z.enum(['exhausted', 'logged-out', 'unconfigured']).default('exhausted') }).strict()).max(50).default([]),
+  // Accounts a session exhausted mid-work (GY-89), by environment name, each held until its reset.
+  // The account each profile's latest launch selected, by `role:profile`, so an exhausted session can be traced to its account.
+  selected: z.record(z.string(), z.object({ environment: z.string().nullable(), kind: z.string().nullable(), at: z.string(), work: z.string().nullable() }).strict()).default({}),
+  exhausted: z.record(z.string(), z.object({ at: z.string(), until: z.string(), resetsAt: z.string().nullable(), reason: z.string().max(500), role: z.enum(['worker', 'reviewer', 'producer']), profile: z.string(), work: z.string().nullable() }).strict()).default({}),
 }).strict();
-export type EnvironmentLog = { version: 1; environments: Record<string, EnvironmentHealth>; skipped: AccountSkip[] };
+/**
+ * An account a running session exhausted. The provider's own usage endpoint may lag behind the
+ * session that hit the limit, and OpenCode and Cursor expose no quota to read at all, so what a
+ * session printed is kept here and every launch skips the account until `until`: the reset time
+ * the notice named, or an hour when it named none.
+ */
+export interface ObservedExhaustion { at: string; until: string; resetsAt: string | null; reason: string; role: LaunchRole; profile: string; work: string | null }
+export const unknownResetHoldMs = 3_600_000;
+export interface AccountSelection { environment: string | null; kind: string | null; at: string; work: string | null }
+export type EnvironmentLog = { version: 1; environments: Record<string, EnvironmentHealth>; skipped: AccountSkip[]; selected: Record<string, AccountSelection>; exhausted: Record<string, ObservedExhaustion> };
+/** A profile that names no accounts launches on whatever its own environment selects; its exhaustion is held under this name. */
+export const profileAccount = (profile: string) => `profile:${profile}`;
+export const selectionKey = (role: LaunchRole, profile: string) => `${role}:${profile}`;
 export function environmentLogPath(config: Pick<MasterConfig, 'credentialFile'>) {
   return resolve(dirname(config.credentialFile), `${basename(config.credentialFile).replace(/\.token$/, '')}.environments.json`);
 }
 export async function readEnvironmentLog(config: Pick<MasterConfig, 'credentialFile'>): Promise<EnvironmentLog> {
   try { return environmentLogSchema.parse(JSON.parse(await readFile(environmentLogPath(config), 'utf8'))) as EnvironmentLog; }
-  catch { return { version: 1, environments: {}, skipped: [] }; }
+  catch { return { version: 1, environments: {}, skipped: [], selected: {}, exhausted: {} }; }
 }
-export async function recordEnvironmentLog(config: Pick<MasterConfig, 'credentialFile'>, health: EnvironmentHealth[], skipped: AccountSkip[] = []) {
-  if (!health.length && !skipped.length) return;
+/** Record that a session exhausted `environment` mid-work, so no launch selects it before it resets. */
+export async function recordObservedExhaustion(config: Pick<MasterConfig, 'credentialFile'>, environment: string, observed: Omit<ObservedExhaustion, 'until'>, now = Date.now()) {
   const log = await readEnvironmentLog(config);
+  const reset = observed.resetsAt ? Date.parse(observed.resetsAt) : Number.NaN;
+  const entry: ObservedExhaustion = { ...observed, reason: observed.reason.slice(0, 500), until: new Date(Number.isFinite(reset) && reset > now ? reset : now + unknownResetHoldMs).toISOString() };
+  log.exhausted = { ...Object.fromEntries(Object.entries(log.exhausted).filter(([, held]) => Date.parse(held.until) > now)), [environment]: entry };
+  await atomicPrivateWrite(environmentLogPath(config), log);
+  return entry;
+}
+/** The accounts still held by an observed exhaustion at `now`. */
+export async function observedExhaustions(config: Pick<MasterConfig, 'credentialFile'>, now = Date.now()): Promise<Record<string, ObservedExhaustion>> {
+  const log = await readEnvironmentLog(config);
+  return Object.fromEntries(Object.entries(log.exhausted ?? {}).filter(([, held]) => Date.parse(held.until) > now));
+}
+export const describeObservedExhaustion = (environment: string, held: ObservedExhaustion) =>
+  `${environment} exhausted its quota mid-session at ${held.at} (${held.reason}); ${held.resetsAt ? `it resets ${held.resetsAt}` : `its reset time is unknown, so it is tried again after ${held.until}`}`;
+export async function recordEnvironmentLog(config: Pick<MasterConfig, 'credentialFile'>, health: EnvironmentHealth[], skipped: AccountSkip[] = [], selection?: { key: string } & AccountSelection) {
+  if (!health.length && !skipped.length && !selection) return;
+  const log = await readEnvironmentLog(config);
+  if (selection) { const { key, ...selected } = selection; log.selected = { ...log.selected, [key]: selected }; }
   for (const entry of health) log.environments[entry.name] = entry;
   log.skipped = [...log.skipped, ...skipped.map(entry => ({ ...entry, reason: entry.reason.slice(0, 500) }))].slice(-50);
   await atomicPrivateWrite(environmentLogPath(config), log);
@@ -724,26 +805,39 @@ export async function recordEnvironmentLog(config: Pick<MasterConfig, 'credentia
  * A role the registry does not define yet launches from the profile's own accounts, as before.
  */
 export type LaunchAccount = AgentEnvironment | FleetLaunchAccount;
-export interface AccountSelection { account: LaunchAccount | null; health: EnvironmentHealth | null; skipped: AccountSkip[]; /** Gives a registry session back when the launch it was chosen for failed. */ release?: (reason: string) => Promise<void> }
-export async function selectAccount(config: Pick<MasterConfig, 'environments' | 'credentialFile' | 'run'> & Partial<Pick<MasterConfig, 'url' | 'hostId'>>, role: LaunchRole, profile: { name: string; accounts?: string[]; principal?: string }, probe: FleetProbe = {}): Promise<AccountSelection> {
+export interface LaunchSelection { account: LaunchAccount | null; health: EnvironmentHealth | null; skipped: AccountSkip[]; /** Gives a registry session back when the launch it was chosen for failed. */ release?: (reason: string) => Promise<void> }
+export async function selectAccount(config: Pick<MasterConfig, 'environments' | 'credentialFile' | 'run'> & Partial<Pick<MasterConfig, 'url' | 'hostId'>>, role: LaunchRole, profile: { name: string; accounts?: string[]; principal?: string }, probe: FleetProbe = {}): Promise<LaunchSelection> {
   const fleet = await selectFleetSession(config, role, profile, probe);
   if (fleet) {
     await recordEnvironmentLog(config, fleet.health ? [fleet.health] : [], fleet.skipped).catch(() => {});
     return fleet;
   }
-  if (!profile.accounts?.length) return { account: null, health: null, skipped: [] as AccountSkip[] };
   const at = new Date(probe.now?.() ?? Date.now()).toISOString();
   const checked: EnvironmentHealth[] = [], skipped: AccountSkip[] = [];
+  const held = await observedExhaustions(config, probe.now?.() ?? Date.now());
+  if (!profile.accounts?.length) {
+    const own = held[profileAccount(profile.name)];
+    if (own) {
+      const skip: AccountSkip = { at, role, profile: profile.name, environment: profileAccount(profile.name), reason: describeObservedExhaustion(`${profile.name}'s own account`, own), work: probe.work ?? null, cause: 'exhausted' };
+      await recordEnvironmentLog(config, [], [skip]).catch(() => {});
+      throw new NoHealthyAccountError(`No healthy agent account for ${role} profile ${profile.name}: ${skip.reason}`, [skip]);
+    }
+    await recordEnvironmentLog(config, [], [], { key: selectionKey(role, profile.name), environment: null, kind: null, at, work: probe.work ?? null }).catch(() => {});
+    return { account: null, health: null, skipped: [] as AccountSkip[] };
+  }
   for (const name of profile.accounts) {
     const environment = (config.environments ?? []).find(candidate => candidate.name === name);
-    if (!environment) { skipped.push({ at, role, profile: profile.name, environment: name, reason: `${name} is not a configured agent environment; run master environments --apply`, work: probe.work ?? null }); continue; }
+    if (!environment) { skipped.push({ at, role, profile: profile.name, environment: name, reason: `${name} is not a configured agent environment; run master environments --apply`, work: probe.work ?? null, cause: 'unconfigured' }); continue; }
+    // What a session itself reported outranks the provider's usage read, which may lag or not exist.
+    if (held[name]) { skipped.push({ at, role, profile: profile.name, environment: name, reason: describeObservedExhaustion(name, held[name]), work: probe.work ?? null, cause: 'exhausted' }); continue; }
     const health = await checkAgentEnvironment(environment, { ...probe, ceilingPercent: probe.ceilingPercent ?? config.run.quotaCeilingPercent });
     checked.push(health);
     if (health.healthy) {
-      await recordEnvironmentLog(config, checked, skipped).catch(() => {});
+      await recordEnvironmentLog(config, checked, skipped, { key: selectionKey(role, profile.name), environment: environment.name, kind: environment.kind, at, work: probe.work ?? null }).catch(() => {});
       return { account: environment, health, skipped };
     }
-    skipped.push({ at, role, profile: profile.name, environment: name, reason: health.reason!, work: probe.work ?? null });
+    // `checkAgentEnvironment` reports exactly two faults: not logged in, or quota spent.
+    skipped.push({ at, role, profile: profile.name, environment: name, reason: health.reason!, work: probe.work ?? null, cause: health.loggedIn ? 'exhausted' : 'logged-out' });
   }
   await recordEnvironmentLog(config, checked, skipped).catch(() => {});
   throw new NoHealthyAccountError(`No healthy agent account for ${role} profile ${profile.name}: ${skipped.map(entry => entry.reason).join('; ')}`, skipped);
@@ -768,7 +862,8 @@ export function agentLaunchPlan(kind: string | undefined, approvals: 'auto' | 'p
  * profile's arguments when they belong to that runtime, and the runtime's broadest approval mode.
  * Codex keeps its workspace sandbox, so the paths and network access the role needs are added to it:
  * a worker commits into the repository's shared Git directory and pushes; a producer builds in a
- * detached worktree under the temporary directory.
+ * detached worktree under the managed worktree root, and is given its own session directory there
+ * and nothing beside it.
  */
 export function accountLaunch(profile: { kind?: string; approvals: 'auto' | 'prompt'; agentArgs: string[]; environment: Record<string, string> }, account: LaunchAccount | null, reach: { writable?: string[] } = {}) {
   // A registry account carries its runtime's launch contract: what to start, its own startup
@@ -803,8 +898,10 @@ export function sharedGitDirectory(root: string) {
  * and the durable loop already read: a profile none of whose accounts can launch is unavailable,
  * with each account's reason.
  */
+export interface ProfileAccountHealth { environment: string; healthy: boolean; reason: string | null; quota: string; resetsAt: string | null }
 export async function inspectProfileAccounts<T extends { available: boolean; reason: string | null }>(config: Pick<MasterConfig, 'environments' | 'credentialFile' | 'run'> & Partial<Pick<MasterConfig, 'url' | 'hostId'>>, role: LaunchRole, profiles: { name: string; accounts?: string[] }[], health: Record<string, T>, probe: EnvironmentProbe = {}) {
-  const result: Record<string, T & { accounts?: { environment: string; healthy: boolean; reason: string | null; quota: string }[] }> = { ...health };
+  const result: Record<string, T & { accounts?: ProfileAccountHealth[] }> = { ...health };
+  const now = probe.now?.() ?? Date.now(), held = await observedExhaustions(config, now);
   // A role the agent registry defines is judged from the registry: every profile of the role
   // launches on the same ordered accounts, so they share one answer.
   const fleet = await fleetRoleHealth(config, role, probe).catch(() => null);
@@ -813,18 +910,63 @@ export async function inspectProfileAccounts<T extends { available: boolean; rea
       if (result[profile.name]?.available !== false) result[profile.name] = { ...(result[profile.name] ?? { available: true, reason: null } as T), available: fleet.available, reason: fleet.reason, accounts: fleet.accounts };
       continue;
     }
-    if (!profile.accounts?.length || result[profile.name]?.available === false) continue;
-    const accounts: { environment: string; healthy: boolean; reason: string | null; quota: string }[] = [];
+    if (result[profile.name]?.available === false) continue;
+    if (!profile.accounts?.length) {
+      const own = held[profileAccount(profile.name)];
+      if (own) result[profile.name] = { ...(result[profile.name] ?? { available: true, reason: null } as T), available: false, reason: `No healthy agent account: ${describeObservedExhaustion(`${profile.name}'s own account`, own)}`,
+        accounts: [{ environment: profileAccount(profile.name), healthy: false, reason: describeObservedExhaustion(`${profile.name}'s own account`, own), quota: 'exhausted', resetsAt: own.resetsAt }] };
+      continue;
+    }
+    const accounts: ProfileAccountHealth[] = [];
     for (const name of profile.accounts) {
       const environment = (config.environments ?? []).find(candidate => candidate.name === name);
-      if (!environment) { accounts.push({ environment: name, healthy: false, reason: `${name} is not a configured agent environment`, quota: 'unknown' }); continue; }
+      if (!environment) { accounts.push({ environment: name, healthy: false, reason: `${name} is not a configured agent environment`, quota: 'unknown', resetsAt: null }); continue; }
+      if (held[name]) { accounts.push({ environment: name, healthy: false, reason: describeObservedExhaustion(name, held[name]), quota: 'exhausted', resetsAt: held[name].resetsAt }); continue; }
       const checked = await checkAgentEnvironment(environment, { ...probe, ceilingPercent: probe.ceilingPercent ?? config.run.quotaCeilingPercent });
-      accounts.push({ environment: name, healthy: checked.healthy, reason: checked.reason, quota: checked.quota });
+      // The reset that matters is the latest among the spent windows: the account launches again only when all of them have.
+      const ceiling = probe.ceilingPercent ?? config.run.quotaCeilingPercent ?? defaultQuotaCeilingPercent;
+      const resets = checked.quota === 'exhausted' ? checked.usage.filter(usage => usage.percent >= ceiling).map(usage => usage.resetsAt ? Date.parse(usage.resetsAt) : Number.NaN).filter(value => Number.isFinite(value) && value > now) : [];
+      accounts.push({ environment: name, healthy: checked.healthy, reason: checked.reason, quota: checked.quota, resetsAt: resets.length ? new Date(Math.max(...resets)).toISOString() : null });
     }
     const usable = accounts.some(account => account.healthy);
     result[profile.name] = { ...(result[profile.name] ?? { available: true, reason: null } as T), available: usable, reason: usable ? null : `No healthy agent account: ${accounts.map(account => account.reason).join('; ')}`, accounts };
   }
   return result;
+}
+
+/**
+ * Whether a role has any account left. A role is out of capacity only when every launch profile
+ * it has is unavailable for one reason — each of its accounts is spent — so a logged-out account
+ * or an unreadable credential, which somebody can fix now, never reads as a wait for a reset.
+ */
+export interface RoleCapacity { role: CapacityRole; exhausted: boolean; accounts: CapacityAccount[]; retryAt: string | null }
+export function roleCapacity(role: CapacityRole, profiles: { name: string }[], health: Record<string, { available: boolean; reason: string | null; accounts?: ProfileAccountHealth[] }>): RoleCapacity {
+  const spent = profiles.map(profile => ({ profile, accounts: health[profile.name]?.accounts ?? [], available: health[profile.name]?.available !== false }));
+  const exhausted = spent.length > 0 && spent.every(entry => !entry.available && entry.accounts.length > 0 && entry.accounts.every(account => account.quota === 'exhausted'));
+  const accounts: CapacityAccount[] = exhausted ? spent.flatMap(entry => entry.accounts.map(account => ({ account: account.environment, profile: entry.profile.name, resetsAt: account.resetsAt, reason: (account.reason ?? 'quota exhausted').slice(0, 500) }))) : [];
+  return { role, exhausted, accounts, retryAt: capacityRetryAt(accounts) };
+}
+
+/**
+ * Keep what an interrupted attempt had not committed. The work is committed on the attempt's own
+ * branch in its own worktree — never pushed, never stashed (the stash is shared by every
+ * worktree) — so the next attempt can read or cherry-pick it and nothing of it is lost. Only when
+ * it cannot be committed is the worktree reset, and the record says discarded: an attempt never
+ * ends with changes that are neither kept nor gone.
+ */
+export function preservePartialWork(path: string, label: string, run: (command: string, args: string[]) => string = (command, args) => execFileSync(command, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 60_000 })): PartialWork {
+  const git = (...args: string[]) => run('git', ['-C', path, ...args]).trim();
+  const branch = (() => { try { return git('rev-parse', '--abbrev-ref', 'HEAD'); } catch { return undefined; } })();
+  const described = { path, ...(branch && branch !== 'HEAD' ? { branch } : {}) };
+  if (!git('status', '--porcelain')) return { state: 'clean', commit: git('rev-parse', 'HEAD'), ...described, detail: 'the worktree held no uncommitted change; every commit of the attempt is on its branch' };
+  try {
+    git('add', '-A');
+    git('-c', 'user.name=Graphyard', '-c', 'user.email=graphyard@localhost', 'commit', '--no-verify', '-m', `WIP: ${label}`);
+    return { state: 'committed', commit: git('rev-parse', 'HEAD'), ...described, detail: 'uncommitted changes were committed on the attempt branch, unpushed' };
+  } catch (error) {
+    git('reset', '--hard'); git('clean', '-fd');
+    return { state: 'discarded', commit: git('rev-parse', 'HEAD'), ...described, detail: `uncommitted changes could not be committed and were discarded: ${error instanceof Error ? error.message : String(error)}`.slice(0, 500) };
+  }
 }
 
 /**
@@ -1357,8 +1499,20 @@ export function installationOwner(source: 'app-permissions' | 'held-jobs' | 'del
  * identity may run is routed to an agent: decisions a human used to make go to the master and
  * its independent approver through graphyard master decide.
  */
-export function workAttentionOwner(work: Work, cause: 'containment-settleable' | 'containment-grace' | 'containment' | 'session' | 'proof-gap' | 'reviewer-exhausted' | 'launch-review' | 'launch-producer' | 'base-conflict' | 'merged-unauthorized' | 'gate'): AttentionOwner {
+export function workAttentionOwner(work: Work, cause: 'human-request' | 'containment-settleable' | 'containment-grace' | 'containment' | 'session' | 'proof-gap' | 'reviewer-exhausted' | 'launch-review' | 'launch-producer' | 'base-conflict' | 'merged-unauthorized' | 'merged-reverted' | 'gate'): AttentionOwner {
   const key = work.key;
+  // The one attention item no agent may clear: the three human decisions, answered by the human.
+  if (cause === 'human-request') {
+    const request = work.humanRequest!;
+    return humanOwner(humanDecisionLabel[request.kind], `${answerCommand(key, request)} (or Work → Needs you on the dashboard); the answer returns ${key} to the loop, which dispatches it without a master session`);
+  }
+  // A merge the base branch does not hold the content of is not a record to settle (GY-97): no
+  // decision can deliver work that is not there. The content goes back first, as a follow-up
+  // item naming this one, its files and the merge that removed them; the delivery waits for it.
+  if (cause === 'merged-reverted') {
+    const reverted = work.observation!.revertedDelivery!;
+    return agentOwner('master', `graphyard master create FILE for a follow-up item that restores ${reverted.files.map(file => file.path).join(', ')} to the base branch as ${key} shipped them${reverted.removedBy ? `, naming merge ${reverted.removedBy.mergeSha?.slice(0, 12) ?? `of pull request #${reverted.removedBy.pr}`}${reverted.removedBy.key ? ` of ${reverted.removedBy.key}` : ''} as what removed them` : ''}; request no merge decision for ${key} until the base branch holds its content — a reconciliation now would record a delivery for work that is not there`);
+  }
   // The merge already happened and cannot be re-run: the only way to a correct delivery record is
   // the two-party merge decision the engine re-checks against the record at the merge cutoff. Once
   // the record has refused one, what remains is the operator's: a decision citing that refusal,
@@ -1479,12 +1633,24 @@ export function diskExhaustion(error: unknown): string | null {
   if (/disk quota exceeded/i.test(text)) return "the host's disk quota is exhausted (EDQUOT)";
   return null;
 }
-export const reclaimAdvice = 'the master loop reclaims the dependency directories of finished assignment worktrees on every cycle while free space is low; lower run.reclaimIdleHours in .graphyard/master.json to make more of them disposable, then retry';
-/** The same failure, named by its cause when the cause is exhausted disk and left alone otherwise. */
-export function writeFailure(error: unknown, action: string): Error {
+export const reclaimAdvice = `the master loop reclaims the dependency directories of finished assignment worktrees on every cycle while free space is low; lower run.reclaimIdleHours in .graphyard/master.json to make more of them disposable, then retry. ${reclaimCommand} reclaims immediately, ephemeral proof and review checkouts included`;
+/** The path a failed write was aimed at: the one the caller names, or the one the system call reported. */
+export function exhaustedPath(error: unknown, path?: string): string | null {
+  const reported = (error as { path?: unknown; dest?: unknown } | null);
+  return path ?? (typeof reported?.path === 'string' ? reported.path : typeof reported?.dest === 'string' ? reported.dest : null);
+}
+/** Disk exhaustion as one sentence: the condition, the path that could not be written, and the reclaim command. Null for any other failure. */
+export function diskExhaustionMessage(error: unknown, path?: string): string | null {
   const cause = diskExhaustion(error);
-  if (!cause) return error instanceof Error ? error : new Error(String(error));
-  return Object.assign(new Error(`${action} failed because ${cause}: ${reclaimAdvice}`), { code: (error as { code?: string } | null)?.code ?? 'ENOSPC', cause: error });
+  if (!cause) return null;
+  const at = exhaustedPath(error, path);
+  return `${cause}${at ? ` at ${at}` : ''}: ${reclaimAdvice}`;
+}
+/** The same failure, named by its cause when the cause is exhausted disk and left alone otherwise. */
+export function writeFailure(error: unknown, action: string, path?: string): Error {
+  const exhausted = diskExhaustionMessage(error, path);
+  if (!exhausted) return error instanceof Error ? error : new Error(String(error));
+  return Object.assign(new Error(`${action} failed because ${exhausted}`), { code: (error as { code?: string } | null)?.code ?? 'ENOSPC', cause: error });
 }
 
 /** Free space on the volume holding a path, as the kernel reports it to this user. */
@@ -1571,6 +1737,8 @@ export interface WorktreeReclaimReport {
   root: string; at: string; applied: boolean; scanned: number; idleMs: number;
   removed: string[]; kept: { path: string; disposition: ReclaimDisposition; detail: string }[];
   freeBefore: number | null; freeAfter: number | null; freedBytes: number; errors: string[];
+  /** What the same pass took back under the managed worktree root, when the loop ran it. */
+  checkouts?: CheckoutReclaimReport;
 }
 /**
  * Give the host back the dependency trees of finished assignments. The reclaimer removes nothing
@@ -1615,6 +1783,47 @@ export function diskPressureAttention(pressure: DiskPressure): AttentionItem[] {
   if (!pressure.low || pressure.freeBytes === null) return [];
   return [{ subject: 'disk', text: `${gigabytes(pressure.freeBytes)} free on ${pressure.path}, below the configured ${gigabytes(pressure.thresholdBytes)} threshold; ${pressure.reclaimable} of ${pressure.worktrees} assignment worktree(s) hold dependency directories a fresh install recreates. Reclaim them before the volume fills`,
     ...agentOwner('master', 'graphyard master run reclaims every cycle while free space is low (daemon.reclaim in master status says what it took back); lower run.reclaimIdleHours in .graphyard/master.json to make more of them disposable, and graphyard master run --once reclaims immediately when no loop is running') }];
+}
+
+/**
+ * The managed worktree root's attention items: a root on a tmpfs, a volume below its configured
+ * minimum, or a root that has grown to most of its budget. Each names the reclaim command, and
+ * each is raised while writes still succeed.
+ */
+export function worktreeRootAttention(health: WorktreeRootHealth): AttentionItem[] {
+  return worktreeRootConcerns(health).map(text => ({ subject: 'disk', text,
+    ...agentOwner('master', health.volatile && !health.low && !health.overBudget
+      ? 'Set run.worktreeRoot in .graphyard/master.json to an absolute path on durable storage, outside every worktree; master run adopts it on its next cycle'
+      : `${reclaimCommand} removes every ephemeral checkout no live session owns (graphyard master run does the same on every cycle while space is low); raise run.worktreeRootBudgetGb or move run.worktreeRoot in .graphyard/master.json if the live sessions alone need more room`) }));
+}
+
+/**
+ * Allocate one session's directory under the managed worktree root. The root is verified on every
+ * launch, not only at setup — a volume fills, and a configuration is edited — and the allocated
+ * directory is held to the same rule as every other path Graphyard owns: outside every worktree.
+ */
+export async function allocateManagedCheckout(root: string, config: MasterConfig, kind: 'proof' | 'review', key: string, sha: string, id: string, probe?: FilesystemProbe): Promise<SessionCheckout> {
+  const base = worktreeRoot(root, config);
+  await assertOutsideWorktrees(root, base, 'The managed worktree root', { create: true });
+  await verifyWorktreeRoot(base, { minFreeBytes: worktreeRootMinFreeBytes(config), probe });
+  let checkout: SessionCheckout;
+  try { checkout = await allocateSessionCheckout(base, kind, key, sha, id); }
+  catch (error) { throw writeFailure(error, `Allocating a ${kind} checkout under the managed worktree root`, base); }
+  try { await assertOutsideWorktrees(root, checkout.directory, 'An ephemeral checkout'); }
+  catch (error) { await removeSessionCheckout(root, base, checkout.directory).catch(() => {}); throw error; }
+  return checkout;
+}
+/** Remove a settled session's checkout; the reason when it could not be, never a throw. */
+export async function settleCheckout(root: string, directory: string | undefined, run?: (command: string, args: string[]) => string): Promise<string | null> {
+  if (!directory) return null;
+  try { await removeSessionCheckout(root, dirname(directory), directory, run); return null; }
+  catch (error) { return writeFailure(error, 'Removing the ephemeral checkout', directory).message.slice(0, 500); }
+}
+/** The managed worktree root as `master status` reports it, with the attention it raises. `sessions` are the review and producer records. */
+export async function managedRootStatus(root: string, config: MasterConfig, sessions: { state: string; checkout?: string }[], dependencies: Parameters<typeof inspectWorktreeRoot>[3] = {}) {
+  const live = sessions.filter(record => record.state === 'pending' && record.checkout).map(record => record.checkout!);
+  const health = await inspectWorktreeRoot(worktreeRoot(root, config), { minFreeBytes: worktreeRootMinFreeBytes(config), budgetBytes: worktreeRootBudgetBytes(config) }, live, dependencies);
+  return { health, attention: worktreeRootAttention(health) };
 }
 
 /**
@@ -1791,8 +2000,11 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
     const dispatch = describeDispatch(work, reviews, sessions, now);
     const baseRefresh = pendingBaseRefresh(work), baseConflict = baseRefreshConflict(work);
     const refreshCarry = currentBaseRefreshCarry(work);
-    const stalledLaunch = [dispatch?.review, ...(dispatch?.producers ?? [])].find(request => request?.failure);
-    const retrying = [dispatch?.review, ...(dispatch?.producers ?? [])].find(request => request?.retry && request.session && ['failed', 'expired'].includes(request.session.state));
+    // A role with no account left is one line for the whole repository (`capacity` below), never a
+    // launch refusal or a session retry repeated on every item that waits for it.
+    const paused = new Set(standingCapacity(work).map(entry => entry.role));
+    const stalledLaunch = [dispatch?.review, ...(dispatch?.producers ?? [])].find(request => request?.failure && !paused.has(request.failure.kind === 'review' ? 'reviewer' : 'producer'));
+    const retrying = [dispatch?.review, ...(dispatch?.producers ?? [])].find(request => request?.retry && request.session && ['failed', 'expired'].includes(request.session.state) && !paused.has(request.group ? 'producer' : 'reviewer'));
     // A session re-prompted once and still not acknowledged is awaiting acknowledgement, not running.
     const unacknowledged = [dispatch?.review, ...(dispatch?.producers ?? [])].find(request => request?.session?.state === 'pending' && request.session.activity === 'awaiting acknowledgement' && request.session.repromptedAt);
     // An observed merge no execution authorized is not a candidate waiting for its queue tip: it
@@ -1800,10 +2012,20 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
     // Its queue entry, when it still holds one, can never publish a speculative tip: the entry and
     // everything waiting behind it are named, with the exit (see merge-queue.ts unpublishableEntry).
     const dead = unpublishableEntry(work);
-    const merged = mergedWithoutAuthorization(work) ? { at: work.observation!.mergedAt ?? null, sha: work.observation!.mergeSha ?? null, violation: unauthorizedMergeViolation,
+    // A merged item whose content the base branch does not hold is a reverted delivery, not an
+    // ordinary unreconciled merge (GY-97): the row names the files missing from the base and the
+    // merge that removed them, so nobody has to read a diff to learn the work is gone.
+    const reverted = work.stage !== 'done' && work.observation?.merged ? work.observation.revertedDelivery ?? null : null;
+    const merged = mergedWithoutAuthorization(work) || reverted ? { at: work.observation!.mergedAt ?? null, sha: work.observation!.mergeSha ?? null, violation: unauthorizedMergeViolation,
       refusal: refusedReconciliation(work)?.violation ?? null,
+      ...(reverted ? { reverted: { base: reverted.base, files: reverted.files, removedBy: reverted.removedBy, partial: !!reverted.partial } } : {}),
       ...(dead && placement ? { queue: { sequence: dead.sequence, position: placement.position + 1, size: placement.size, unpublishable: true as const, behind: placements.slice(placement.position + 1).map(entry => entry.key) } } : {}) } : null;
+    const parked = parkedOnHuman(work) ? work.humanRequest! : null;
     const [attention, cause]: [string | null, Parameters<typeof workAttentionOwner>[1] | null] = containmentAttention ? containmentAttention
+      : parked ? [`${work.key} is parked on a human-only decision (${humanDecisionLabel[parked.kind]}) since ${parked.at}: ${parked.needed} — ${parked.reason}. It holds no lease and delays nothing else`, 'human-request']
+      : merged?.reverted ? [`${work.key} was merged on GitHub (${merged.sha?.slice(0, 12) ?? 'merge commit unknown'} at ${merged.at ?? 'an unrecorded time'}) and its content is not on the base branch: ${merged.reverted.files.length}${merged.reverted.partial ? ' or more' : ''} file${merged.reverted.files.length === 1 && !merged.reverted.partial ? '' : 's'} missing from base ${merged.reverted.base.slice(0, 12)} — ${merged.reverted.files.map(file => `${file.path} (${file.detail})`).join(', ')} — ${merged.reverted.removedBy
+        ? `removed by merge ${merged.reverted.removedBy.mergeSha?.slice(0, 12) ?? 'commit unknown'} of ${merged.reverted.removedBy.key ? `${merged.reverted.removedBy.key}, ` : ''}pull request #${merged.reverted.removedBy.pr}${merged.reverted.removedBy.commit ? ` (commit ${merged.reverted.removedBy.commit.slice(0, 12)})` : ', whose head carried this item\'s commits without their content'}`
+        : 'and the merge that removed them could not be identified from the branch history'}. This is a reverted delivery, not an unreconciled merge: nothing is delivered until the content is restored${merged.refusal ? `; the last reconciliation was refused — ${merged.refusal}` : ''}`, 'merged-reverted']
       : merged ? [`${work.key} was merged on GitHub (${merged.sha?.slice(0, 12) ?? 'merge commit unknown'} at ${merged.at ?? 'an unrecorded time'}) without a valid merge execution: ${merged.violation}. It is held at the merge stage, not waiting for its queue tip; ${merged.queue ? `its merge queue entry (sequence ${merged.queue.sequence}, position ${merged.queue.position} of ${merged.queue.size}) can never publish a speculative tip because the pull request is already merged${merged.queue.behind.length ? `, and ${merged.queue.behind.join(', ')} wait behind it` : ''}; ` : ''}${merged.refusal ? `the last reconciliation was refused — ${merged.refusal}; an operator may deliver it as operator-authorized by a decision citing that refusal` : `a two-party merge decision requested now reconciles it if every gate passed and every required proof was live at the merge cutoff${merged.queue ? ', and a refused one removes the entry without delivering' : ''}`}`, 'merged-unauthorized']
       : active && (!session || !['working', 'idle'].includes(session.state)) ? [`Assigned worker session is ${session?.state ?? 'offline'}`, 'session']
       : gaps.length ? [`No principal is authorized to produce ${gaps.join(', ')}; grant the proof name before dispatch`, 'proof-gap']
@@ -1822,6 +2044,10 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
       // Set only for an item GitHub merged with no valid execution: the merge, the violation and
       // the last refused reconciliation, so the row reads as stuck rather than as a candidate.
       merged,
+      // The two waits that stall only this item (GY-89): the open human-only request, and the
+      // sessions that ran out of quota with any role that has no account left.
+      humanRequest: parked ? { id: parked.id, kind: parked.kind, decision: humanDecisionLabel[parked.kind], needed: parked.needed, reason: parked.reason, requestedBy: parked.requestedBy, at: parked.at, waitedMs: Math.max(0, now - Date.parse(parked.at)), answer: answerCommand(work.key, parked) } : null,
+      capacity: work.capacity ? { exhaustions: work.capacity.exhaustions.slice(-5), escalations: work.capacity.escalations } : null,
       // What the control plane is doing, or last did, about a base branch that moved under this
       // candidate: nobody is asked for a round while `pending` is set.
       base: baseRefresh || baseConflict || refreshCarry ? { pending: baseRefresh, conflict: baseConflict,
@@ -1843,18 +2069,32 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
   // Submit→merge p50/p90 over every delivery with a recorded submission, judged against the
   // pipeline-speed target; the periodic measurement records this beside the production latency.
   const speed = pipelineSpeedSummary(snapshot.work, now);
+  // Capacity, one line per spent role: the accounts, their resets, and every item that waits on it.
+  const open = snapshot.work.filter(work => work.stage !== 'done');
+  const capacity = (['worker', 'reviewer', 'producer'] as const).flatMap(role => {
+    const waiting = open.filter(work => standingCapacity(work, role).length);
+    if (!waiting.length) return [];
+    const latest = waiting.map(work => standingCapacity(work, role)[0]).sort((a, b) => Date.parse(b.at) - Date.parse(a.at))[0];
+    return [{ role, since: latest.at, retryAt: latest.retryAt, accounts: latest.accounts, waiting: waiting.map(work => work.key), line: `${describeCapacity(role, latest.accounts)}; waiting: ${waiting.map(work => work.key).join(', ')}` }];
+  });
+  const capacityItems: AttentionItem[] = capacity.map(entry => ({ subject: `${entry.role} capacity`, text: entry.line,
+    ...agentOwner('master', `Nothing to run before ${entry.retryAt ?? 'an account reports quota again'}: the loop resumes ${entry.role} launches on its own. To restore capacity sooner, log another account in and add it with graphyard master environments --apply and graphyard master config accounts:PROFILE=…; buying quota or opening a provider account is the human's decision`) }));
+  const humanRequests = openHumanRequests(snapshot.work, now);
   return { observedAt: snapshot.now,
-    counts: { open: rows.length, ready: rows.filter(row => row.stage === 'ready').length, active: rows.filter(row => row.owner).length, attention: rows.filter(row => row.attention).length + installation.attention.length + registry.attentionItems.length, proofAuthorityGaps: rows.filter(row => row.proofGaps.length).length, mergeable: rows.filter(row => row.mergeable).length, reviewsPending: reviews.pending.length, producersPending: sessions.producers.pending.length,
+    counts: { open: rows.length, ready: rows.filter(row => row.stage === 'ready').length, active: rows.filter(row => row.owner).length, attention: rows.filter(row => row.attention).length + capacityItems.length + installation.attention.length + registry.attentionItems.length, proofAuthorityGaps: rows.filter(row => row.proofGaps.length).length, mergeable: rows.filter(row => row.mergeable).length, reviewsPending: reviews.pending.length, producersPending: sessions.producers.pending.length,
       // Candidates the guarded merge could take once their gates pass, and the items GitHub already
       // merged without a valid execution, which are never candidates and wait on a reconciliation.
-      mergeCandidates: rows.filter(row => row.stage === 'merge' && !row.merged).length, mergedUnreconciled: rows.filter(row => row.merged).length,
+      mergeCandidates: rows.filter(row => row.stage === 'merge' && !row.merged).length, mergedUnreconciled: rows.filter(row => row.merged && !row.merged.reverted).length, revertedDeliveries: rows.filter(row => row.merged?.reverted).length,
       dispatchRequested: rows.reduce((total, row) => total + (row.dispatch ? (row.dispatch.review ? 1 : 0) + row.dispatch.producers.length : 0), 0), dispatchRunning: rows.reduce((total, row) => total + (row.dispatch ? [row.dispatch.review, ...row.dispatch.producers].filter(request => request?.session?.state === 'pending' && request.session.activity === 'running').length : 0), 0),
       dispatchAwaiting: rows.reduce((total, row) => total + (row.dispatch ? [row.dispatch.review, ...row.dispatch.producers].filter(request => request?.session?.state === 'pending' && request.session.activity === 'awaiting acknowledgement').length : 0), 0), reviewFailover: rows.filter(row => row.review?.failedOver.length).length, queued: placements.length,
       quarantined: rows.filter(row => row.containment && row.containment.phase !== 'live').length, settleableQuarantines: rows.filter(row => row.containment?.settleable).length,
       awaitingSmoke: delivered.filter(row => row.state === 'awaiting-deployment' || row.state === 'awaiting-smoke').length, postDeployFailures: delivered.filter(row => row.state === 'delivered-with-failure').length,
-      reconciledDeliveries: deliveries.reconciled.length, operatorAuthorizedDeliveries: deliveries.operatorAuthorized.length },
+      reconciledDeliveries: deliveries.reconciled.length, operatorAuthorizedDeliveries: deliveries.operatorAuthorized.length,
+      humanRequests: humanRequests.length, capacityExhausted: capacity.length },
     // Every attention item with the role that resolves it and the next command, work items first.
-    attentionItems: [...rows.flatMap(row => row.attention && row.attentionOwner ? [{ subject: row.key, text: row.attention, ...row.attentionOwner }] : []), ...installation.attentionItems, ...registry.attentionItems] as AttentionItem[],
+    attentionItems: [...rows.flatMap(row => row.attention && row.attentionOwner ? [{ subject: row.key, text: row.attention, ...row.attentionOwner }] : []), ...capacityItems, ...installation.attentionItems, ...registry.attentionItems] as AttentionItem[],
+    // What waits on the human, longest first, with how to answer; and the roles out of capacity.
+    humanRequests, capacity,
     workers: workerSessions, reviews, producers: sessions.producers, work: rows, queue: queueRows, delivered, deliveries, latency: { mergeToProduction }, speed, controlPlane: installation, fleet: registry.fleet,
     schedule: scheduling, conflicts: { available: candidateConflicts.available, reason: candidateConflicts.reason, ...sequenceAdvice(rows.filter(row => row.conflicts).map(row => ({ key: row.key, conflicts: row.conflicts!.candidates }))) } };
 }
@@ -2039,7 +2279,9 @@ function withMasterOwnedRules(plan: HarnessPlan, config: MasterConfig): HarnessP
  * lease, the session's own credential and branch protection remain the enforcement.
  */
 export type SessionRole = 'worker' | 'reviewer' | 'producer';
-export interface SessionHarnessInput { role: SessionRole; kind: string | undefined; cliPath: string; repository: string; baseBranch: string; credentialHome: string; credentialDirectories: string[]; branch?: string; pr?: number }
+export interface SessionHarnessInput { role: SessionRole; kind: string | undefined; cliPath: string; repository: string; baseBranch: string; credentialHome: string; credentialDirectories: string[]; branch?: string; pr?: number;
+  /** The detached checkout Graphyard allocated for a reviewer session under the managed worktree root. */
+  checkout?: string }
 export function sessionHarnessPlan(input: SessionHarnessInput): HarnessPlan {
   if (input.kind !== 'claude') return { harness: input.kind ?? 'unknown', file: null, allow: [], deny: [], manual: null, note: `${input.kind ?? 'This runtime'} does not load the repository's Claude Code settings, so it inherits no master rule; its own approval configuration applies.` };
   const cli = `node ${input.cliPath}`;
@@ -2082,6 +2324,10 @@ export function sessionHarnessPlan(input: SessionHarnessInput): HarnessPlan {
       { rule: 'Bash(gh pr diff:*)', why: 'Read the candidate diff.' },
       { rule: 'Bash(gh pr view:*)', why: 'Read the pull request and poll its mergeability before posting.' },
       ...(input.pr ? [{ rule: `Bash(gh api --method POST repos/${input.repository}/pulls/${input.pr}/reviews*)`, why: 'Post the one verdict this session was launched for; the master itself is denied every review call.' }] : []),
+      // Surrounding code is read from a detached checkout under the managed worktree root, which
+      // Graphyard allocates for the session and removes when it ends.
+      ...(input.checkout ? [{ rule: 'Bash(git fetch:*)', why: 'Fetch the exact head under review.' },
+        { rule: `Bash(git worktree add --detach ${input.checkout}:*)`, why: 'Check the exact head out, read-only, in the checkout Graphyard allocated for this session.' }] : []),
     ];
     deny = [...secrets, ...noPush,
       { rule: `Bash(${cli} evidence:*)`, why: 'A reviewer never submits evidence.' },
@@ -2170,6 +2416,7 @@ export const describeOverlap = (overlap: ReturnType<typeof dispatchOverlap>) => 
 export function assertDispatchable(work: Work, allWork: Work[], observedAt: string, options: DispatchOptions = {}) {
   const now = Date.parse(observedAt);
   if (!Number.isFinite(now)) throw new Error('Dispatch requires a valid Graphyard snapshot clock');
+  if (parkedOnHuman(work)) throw new Error(`Dispatch waits on a human-only decision (${humanDecisionLabel[work.humanRequest!.kind]}); ${answerCommand(work.key, work.humanRequest!)} resumes it`);
   if (!work.ready || work.blocker) throw new Error('Dispatch requires released work without a blocker');
   const hold = containmentHold(work, now);
   if (hold) throw new Error(hold);
@@ -2263,13 +2510,24 @@ export function autonomousSession(outcome: string, blocker: string) {
   return `Decide and act on your own: ${outcome}. Never stop to ask a human for confirmation, never end your turn with a question, and never offer a menu of options to choose from; choose what the criteria and these instructions support and carry it out. `
     + `If a command you need is refused or cannot succeed, ${blocker}, naming the exact command that was blocked and its error, then stop. A session that ends waiting on input is recorded as failed with that reason.`;
 }
-export function workerPrompt(config: Pick<MasterConfig, 'cliPath'>, work: Pick<Work, 'key' | 'title'>, profile: Pick<WorkerProfile, 'principal'>, epoch: number, dependencies?: Pick<SharedDependencies, 'shared'> | null) {
+export function workerPrompt(config: Pick<MasterConfig, 'cliPath'>, work: Pick<Work, 'key' | 'title'> & Partial<Pick<Work, 'capacity' | 'humanRequests'>>, profile: Pick<WorkerProfile, 'principal'>, epoch: number, dependencies?: Pick<SharedDependencies, 'shared'> | null) {
   // A session that reinstalls dependencies it already has costs the host a gigabyte per attempt,
   // so the launcher says which trees are already there rather than leaving it to be guessed.
   const installed = dependencies?.shared.length ? `The assigned worktree needs no dependency install: ${dependencies.shared.map(entry => `${entry.name} ${entry.how === 'reachable' ? 'already resolves to' : 'is shared with'} the install at ${entry.source}`).join(', ')}, for this exact lockfile. Do not install dependencies again unless you change the lockfile. ` : '';
   return `Implement ${work.key}: ${work.title}. The Graphyard worker launcher has claimed this item under principal ${profile.principal}, created its assigned worktree, and placed this agent under lease supervision. Run node ${config.cliPath} status ${work.key} before editing. Work only in the current assigned worktree, satisfy the stated criteria without weakening them, open a PR, and submit it with complete as your last action: complete ends your lease and the supervisor then stops this session, which is the attempt ending, not lease loss. Stop immediately if the supervisor reports lease loss before you have submitted. Do not submit trusted evidence or merge the PR; the control plane requests the independent review and the proof producers for your exact head as soon as it passes the build gate, so ask nobody to launch them. `
     + installed
+    + resumedAttempt(work)
+    + `If the item cannot continue without a decision only a human may make — ${humanOnlyDecisions.join('; ')} — do not wait and do not write it as a blocker: record it with node ${config.cliPath} park ${work.key} ${epoch} KIND NEEDED -- REASON (KIND is goals-and-priorities, money-or-accounts or credentials-for-people; NEEDED is the exact thing the human must provide), which ends your lease and parks the item for the human, then stop. `
     + autonomousSession('implement the item, open the pull request and submit it with complete', `record a blocker with node ${config.cliPath} blocked ${work.key} ${epoch} REASON`);
+}
+
+/** What the previous attempt left for this one: the work an exhausted session had not committed, and a human's answer. */
+function resumedAttempt(work: Partial<Pick<Work, 'capacity' | 'humanRequests'>>) {
+  const interrupted = work.capacity?.exhaustions.filter(entry => entry.role === 'worker').at(-1);
+  const kept = interrupted?.partialWork.commit && interrupted.partialWork.state !== 'discarded'
+    ? `The previous attempt (epoch ${interrupted.epoch}) stopped when its provider account ran out of quota; its work is kept as commit ${interrupted.partialWork.commit}${interrupted.partialWork.branch ? ` on local branch ${interrupted.partialWork.branch}` : ''}${interrupted.partialWork.path ? ` (worktree ${interrupted.partialWork.path})` : ''}. Read it with git log and git show, and bring what is sound into your branch with git cherry-pick or git merge instead of redoing it. ` : '';
+  const answered = work.humanRequests?.at(-1)?.answer?.outcome === 'provided' ? work.humanRequests.at(-1)! : null;
+  return kept + (answered ? `An earlier attempt asked the human for ${answered.needed} (${humanDecisionLabel[answered.kind]}); the human answered: ${answered.answer!.text}. Continue from that answer. ` : '');
 }
 
 const shellQuote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
@@ -2785,7 +3043,7 @@ export function decisionInput(action: string, work: Work, input: Record<string, 
   return input;
 }
 /** With automatic merging off, the guarded merge runs only for a candidate an approver agent approved. */
-export function approvedMerge(work: Work, decisions: { action: string; state: string; input: any; approvedBy: string | null }[]) {
+export function approvedMerge<T extends { action: string; state: string; input: any; approvedBy: string | null }>(work: Work, decisions: T[]): T | null {
   return decisions.find(decision => decision.action === 'merge' && decision.state === 'applied' && !!work.candidate
     && decision.input.sha === work.candidate.sha && decision.input.baseSha === work.candidate.baseSha && decision.input.policyRevision === work.policyRevision) ?? null;
 }
@@ -2846,10 +3104,18 @@ export async function restartMasterLoop(root: string, config: MasterConfig, lock
  * Launch the independent approver session for one decision: its own Herdr tab, its own
  * credential by path, the approver marker, and a prompt to judge — never to implement.
  */
+/**
+ * One session name per decision, not per item. An item takes several decisions in its life — rework
+ * after a verdict, rework after a base conflict, a merge approval — and an approver stops when it
+ * has judged, leaving its tab listed. Named per item, that finished tab refused the launch of the
+ * next decision's approver until somebody closed it by hand.
+ */
+export const approverSessionName = (work: Pick<Work, 'key'>, decision: string) =>
+  `graphyard-approver-${work.key.toLowerCase()}-${decision.toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 8) || 'decision'}`;
 export async function launchApprover(root: string, work: Work, decision: string, explicitKind: NonNullable<WorkerProfile['kind']> | undefined, agents: HerdrAgent[], run?: (command: string, args: string[]) => string, probe: FleetProbe = {}) {
   const config = await loadMasterConfig(root);
   await agentToken(root, config, 'approver');
-  const name = `graphyard-approver-${work.key.toLowerCase()}`;
+  const name = approverSessionName(work, decision);
   if (agents.some(agent => agent.name === name)) throw new Error(`Approver session ${name} is already visible in Herdr; let it finish or close it first`);
   // The approver's runtime and account come from the registry's approver role. An explicit
   // AGENT_KIND is the operator's override; an installation whose registry has no approver role
@@ -2875,7 +3141,46 @@ export async function launchApprover(root: string, work: Work, decision: string,
     account: selected ? { environment: selected.account.name, kind, reason: selected.selection.reason, skipped: selected.skipped } : null };
 }
 
-export const autonomySubcommands = ['autonomy', 'create', 'release', 'unblock', 'requirements', 'decide', 'decisions', 'approve', 'approver', 'principals', 'restart', 'environments'] as const;
+/**
+ * A context the handler received is what the control plane assembled: the fingerprint covers
+ * every byte but itself, so a document altered or abridged on the way is refused before it is judged.
+ */
+export function verifiedContext(context: EscalationContext) {
+  const { fingerprint, ...document } = context;
+  if (contextFingerprint(document) !== fingerprint) throw new Error(`The escalation context for ${context.key} does not match its fingerprint ${fingerprint}; fetch it again from the control plane`);
+  return context;
+}
+/**
+ * Spawn a judging session for one escalation (GY-90). It is a fresh master: its whole input is
+ * the assembled context, written to one private file, and the escalation inside it. It holds no
+ * loop state, reads nothing else, and records its decision with `master decide … --precedent
+ * --context`, so the ledger carries the reason, the precedent it relied on and what it saw.
+ */
+export async function launchEscalationHandler(root: string, config: MasterConfig, context: EscalationContext, kind: NonNullable<WorkerProfile['kind']>, agents: HerdrAgent[], run?: (command: string, args: string[]) => string) {
+  await agentToken(root, config, 'operatorAgent');
+  const name = `graphyard-escalation-${context.key.toLowerCase()}-${context.escalation.trigger}`;
+  if (agents.some(agent => agent.name === name)) throw new Error(`Escalation handler ${name} is already visible in Herdr; let it finish or close it first`);
+  const directory = resolve(await localDirectory(root), 'escalations'); await mkdir(directory, { recursive: true, mode: 0o700 });
+  const file = resolve(directory, `${context.key}-${context.escalation.trigger}-${context.fingerprint.slice(0, 12)}.json`);
+  await atomicPrivateWrite(file, context);
+  const launch = agentLaunchPlan(kind, 'auto');
+  const cli = `node ${config.cliPath}`;
+  const prompt = `You are a Graphyard escalation handler spawned for the ${context.escalation.trigger} escalation on ${context.key} in ${config.repository}, acting as ${config.operatorAgent!.id}. Your entire input is the file ${file}: the context the control plane assembled for this decision — the repository's own operating rules and policy, the current goals and priorities, the item (requirements, the standing refusal, the candidate, its typed history) and precedent (earlier ${escalationAction} decisions with their reasons and outcomes). Read that file and nothing else: do not run status, events or any other read, do not open the repository, and hold no state beyond it. Decide whether the ${context.escalation.trigger} escalation should be resolved, following the precedent that applies and saying which. If it should, run ${cli} master decide ${context.key} ${escalationAction} '{"trigger":"${context.escalation.trigger}"}' --precedent DECISION_ID[,DECISION_ID] --context ${context.fingerprint} "YOUR REASON" exactly once; an independent approver judges it. If it should not, request nothing and state the reason in this tab. Never edit, push, merge, review, approve or submit evidence. Stop when the decision is recorded or declined.`;
+  let pane: string | undefined, tabId: string | undefined, delivery: RequestDelivery | undefined;
+  try {
+    const created = createdHerdrTab(herdrJson(['tab', 'create', ...(config.herdrWorkspace ? ['--workspace', config.herdrWorkspace] : []), '--cwd', root, '--label', `Escalation · ${context.key}`, '--env', `GRAPHYARD_URL=${config.url}`, '--env', 'GRAPHYARD_ESCALATION_HANDLER=1', '--env', `GRAPHYARD_HOST_ID=${config.hostId}`, ...Object.entries(launch.environment).flatMap(([key, value]) => ['--env', `${key}=${value}`]), '--no-focus'], run));
+    pane = created.pane; tabId = created.tab;
+    // The instruction is the session's own first request (GY-93), never pasted into it: a handler
+    // that refused a pasted prompt would record no decision and leave the escalation standing.
+    ({ delivery } = startAgentSession(name, kind, created.pane, launch.args, prompt, run));
+  } catch (error) {
+    if (pane || tabId) try { stopCreatedHerdrTab(pane, tabId, run); } catch { /* the launch error below is the report */ }
+    throw error;
+  }
+  return { agentName: name, work: context.key, trigger: context.escalation.trigger, fingerprint: context.fingerprint, context: file, identity: config.operatorAgent!.id, pane: pane!, delivery, focusChanged: false };
+}
+
+export const autonomySubcommands = ['autonomy', 'create', 'release', 'unblock', 'requirements', 'decide', 'decisions', 'approve', 'approver', 'principals', 'restart', 'environments', 'context', 'escalation'] as const;
 export interface AutonomyDependencies {
   coordinator: (path: string) => Promise<any>;
   readSecret: () => Promise<string>;
@@ -2932,10 +3237,32 @@ export async function runAutonomyCommand(root: string, config: MasterConfig, id:
   }
   if (id === 'decide') {
     const work = await item(args[0]); const action = args[1];
-    if (!action) throw new Error('Use master decide GY-N ACTION [JSON|@FILE] REASON');
-    const explicit = args[2] && /^[{@]/.test(args[2]);
-    const input = explicit ? await jsonArgument(args[2]) : {};
-    return call(await operator(), `work/${work.id}/decide`, { action, input: decisionInput(action, work, input), reason: reason(args.slice(explicit ? 3 : 2)) });
+    if (!action) throw new Error('Use master decide GY-N ACTION [JSON|@FILE] [--precedent ID[,ID]] [--context FINGERPRINT] REASON');
+    // A handler cites the decisions it followed and the fingerprint of the context it judged from.
+    const flags: Record<string, string> = {}; const rest: string[] = [];
+    for (let index = 2; index < args.length; index++) {
+      if (args[index] === '--precedent' || args[index] === '--context') { flags[args[index].slice(2)] = args[++index] ?? ''; continue; }
+      rest.push(args[index]);
+    }
+    const explicit = rest[0] && /^[{@]/.test(rest[0]);
+    const input = explicit ? await jsonArgument(rest[0]) : {};
+    return call(await operator(), `work/${work.id}/decide`, { action, input: decisionInput(action, work, input), reason: reason(rest.slice(explicit ? 1 : 0)),
+      ...(flags.precedent ? { precedent: flags.precedent.split(',').map(value => value.trim()).filter(Boolean) } : {}), ...(flags.context ? { context: flags.context } : {}) });
+  }
+  if (id === 'context' || id === 'escalation') {
+    // The assembled context, read from the control plane by key and nothing else — no snapshot,
+    // no status; `escalation` then spawns a fresh handler on it: the built-in precedent rule in
+    // this process, or a judging session of KIND.
+    if (!args[0]) throw new Error(`Use master ${id} GY-N [TRIGGER] [--budget N]${id === 'escalation' ? ' [precedent|AGENT_KIND]' : ''}`);
+    const rest: string[] = []; let budget: string | undefined;
+    for (let index = 1; index < args.length; index++) { if (args[index] === '--budget') budget = args[++index]; else rest.push(args[index]); }
+    const trigger = rest.find(value => (escalationTriggers as readonly string[]).includes(value));
+    const params = new URLSearchParams(); if (trigger) params.set('trigger', trigger); if (budget) params.set('budget', budget);
+    const context = verifiedContext(await deps.coordinator(`work/${encodeURIComponent(args[0])}/context${params.size ? `?${params}` : ''}`));
+    if (id === 'context') return context;
+    const handler = rest.find(value => value !== trigger) ?? 'precedent';
+    if (handler === 'precedent') return handleEscalation(context, followPrecedent, async request => call(await operator(), `work/${encodeURIComponent(context.key)}/decide`, request));
+    return launchEscalationHandler(root, config, context, agentKindSchema.parse(handler), deps.agents());
   }
   if (id === 'decisions') return deps.coordinator(`work/${encodeURIComponent((await item(args[0])).id)}/decisions`);
   if (id === 'approve') {
