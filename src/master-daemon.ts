@@ -10,8 +10,12 @@ import { scopeBlockedBudgetMs, scopeDecisionBudgetMs, scopeDecisionSample, type 
 import { scopePattern, watchAssignment } from './supervisor.js';
 import { baseRefreshConflict, pendingBaseRefresh } from './merge-queue.js';
 import { dispatchOrder } from './coordination.js';
+import { capacitySignature, describeCapacity, detectExhaustion, standingCapacity, type CapacityAccount, type CapacityRole, type PartialWork } from './model/capacity.js';
+import { answerCommand, humanDecisionLabel, parkedOnHuman } from './model/human-request.js';
+import { independentProducerProfiles, launchProducer, readProducerLedger, reclaimCheckouts, saveProducerLedger } from './producer.js';
+import { launchReview, readReviewLedger, saveReviewLedger } from './reviewer.js';
+import { inspectProducerCredentials, inspectProfileAccounts, preservePartialWork, profileAccount, readEnvironmentLog, recordObservedExhaustion, roleCapacity, selectionKey, type ObservedExhaustion, type ProfileAccountHealth, type RoleCapacity } from './master.js';
 import { agentOwner, agentToken, approvedMerge, approverSessionName, assertDispatchable, assertOutsideWorktrees, assessContainment, closeHerdrPane, containmentPhase, decisionInput, diskExhaustionMessage, diskThresholdBytes, dispatchWork, inspectWorkerCredentials, launchApprover, listHerdrAgents, mergeExecutor, mergedWithoutAuthorization, observeHerdrAgents, reclaimAdvice, reclaimIdleMs, reclaimWorktrees, unauthorizedMergeViolation, writeFailure, type AttentionItem, type ConfigReload, type ContainmentAssessment, type HerdrAgent, type MasterConfig, type MergeExecutor, type WorkerProfile, type WorktreeReclaimReport } from './master.js';
-import { reclaimCheckouts } from './producer.js';
 import { worktreeRootMinFreeBytes } from './install/worktree-root.js';
 
 /**
@@ -21,7 +25,7 @@ import { worktreeRootMinFreeBytes } from './install/worktree-root.js';
  * evidence, never calls an operator route, and reaches GitHub only through the guarded merge.
  */
 
-export const daemonActionKinds = ['close', 'dispatch', 'review', 'refresh', 'proof', 'merge', 'deployment', 'smoke', 'escalation', 'config', 'session', 'reclaim', 'decision', 'scope', 'settle'] as const;
+export const daemonActionKinds = ['close', 'dispatch', 'review', 'refresh', 'proof', 'merge', 'deployment', 'smoke', 'escalation', 'config', 'session', 'reclaim', 'decision', 'scope', 'settle', 'failover', 'capacity', 'human'] as const;
 export type DaemonActionKind = typeof daemonActionKinds[number];
 export const daemonActionSchema = z.object({
   kind: z.enum(daemonActionKinds),
@@ -308,6 +312,13 @@ export function reconcilePendingActions(state: DaemonState, work: Work[], now: n
       next.state = pending ? 'failed' : 'done';
       next.detail = pending ? 'Resumed: the scope request is still undecided and will be decided again'
         : `Resumed: Graphyard holds the decision (${item?.scopeRequest?.decision?.state ?? 'the request was withdrawn or superseded'})`;
+    } else if (action.kind === 'failover') {
+      // A worker failover took effect exactly when the attempt's lease ended on the record. An
+      // interrupted one is tried again: the control plane writes an exhaustion once, and a
+      // reviewer or producer session already ended is no longer pending, so nothing repeats.
+      const ended = action.epoch !== null && !!item && (!item.lease || item.lease.epoch !== action.epoch);
+      next.state = ended ? 'done' : 'failed';
+      next.detail = ended ? `Resumed: Graphyard shows attempt ${action.epoch} ended, so the item is re-queued` : 'Resumed: the failover was interrupted; the session is read again on this cycle';
     } else if (action.kind === 'deployment' && action.work) {
       // Recording a deployment either landed on the delivery snapshot or it did not; a repeat of a
       // landed record is refused by Graphyard, so retrying is safe.
@@ -864,6 +875,12 @@ export function watchdogPlan(environment: Record<string, string | undefined>, in
 export const actionableIntervalMs = 30_000;
 export const cycleDelay = (intervalMs: number, report: Pick<SilenceReport, 'actionable'> | null) =>
   report && report.actionable > 0 ? Math.min(intervalMs, actionableIntervalMs) : intervalMs;
+/** A reviewer or producer session a launch ledger holds as pending, as the failover step reads it. */
+export interface LaunchedSession { role: 'reviewer' | 'producer'; record: string; profile: string; agentName: string; pane: string | null; work: string; requestId: string | null }
+/** A session only says its account is spent once it has stopped; while it works, its output is its own prose. */
+export const stoppedStates = ['idle', 'done', 'blocked'];
+export const failoverKey = (role: CapacityRole, work: Work, attempt: string | number) => `failover:${role}:${work.id}:${attempt}`;
+export const capacityKey = (role: CapacityRole) => `capacity:${role}`;
 
 export interface DaemonEffects {
   closeSession: (pane: string) => void | Promise<void>;
@@ -918,6 +935,28 @@ export interface DaemonEffects {
   settleContainment?: (work: Work, assessment: ContainmentAssessment) => Promise<unknown>;
   /** Tells the process supervisor the loop is alive, so a hung cycle becomes a restart. */
   notify?: (state: 'ready' | 'alive') => void;
+  /**
+   * Mid-session capacity (GY-89). `sessionOutput` reads the tail of a stopped session's own
+   * terminal, which is where a runtime says its provider account is spent; `reportCapacity`
+   * records what the loop observed on the item. A loop wired without the two never fails a
+   * session over and never escalates capacity: it cycles exactly as it did before.
+   */
+  sessionOutput?: (agent: HerdrAgent) => string | null;
+  reportCapacity?: (work: Work, event: Record<string, unknown>) => Promise<Work>;
+  /** The reviewer and producer sessions the launch ledgers hold as pending. */
+  launchedSessions?: () => Promise<LaunchedSession[]>;
+  /** The account the profile's current session was launched on, as its launcher recorded it. */
+  selectedAccount?: (role: CapacityRole, profile: string) => Promise<{ environment: string | null; kind: string | null } | null>;
+  /** Commits (or cleanly discards) what the interrupted attempt left uncommitted in its worktree. */
+  preserveWork?: (work: Work, epoch: number) => Promise<PartialWork>;
+  /** Keeps every launcher off the spent account until it resets. */
+  holdAccount?: (account: string, observed: Omit<ObservedExhaustion, 'until'>) => Promise<unknown>;
+  /** Ends an exhausted reviewer or producer session on its ledger, so its request may launch again. */
+  endSession?: (session: LaunchedSession, resolution: string) => Promise<void>;
+  /** Launches the session's request again on another account or runtime; throws `accountsExhausted` when none is left. */
+  relaunch?: (session: LaunchedSession, work: Work, snapshot: { work: Work[]; now: string }) => Promise<{ profile: string }>;
+  /** Account health of the reviewer and producer profiles, as the worker profiles' arrives in `credentials`. */
+  roleHealth?: () => Promise<Partial<Record<'reviewer' | 'producer', { profiles: { name: string }[]; health: Record<string, { available: boolean; reason: string | null; accounts?: ProfileAccountHealth[] }> }>>>;
   agents: () => HerdrAgent[];
   /**
    * The same session inventory with whether it could be read at all. A Herdr that cannot be
@@ -927,7 +966,7 @@ export interface DaemonEffects {
   herdr?: () => { agents: HerdrAgent[]; available: boolean };
   /** Stops an orphaned watch supervisor through the containment scope it recorded at launch. */
   stopSupervisor?: (orphan: OrphanSupervisor, signal: NodeJS.Signals) => void | Promise<void>;
-  credentials: (profiles: WorkerProfile[]) => Promise<Record<string, { available: boolean; reason: string | null }>>;
+  credentials: (profiles: WorkerProfile[]) => Promise<Record<string, { available: boolean; reason: string | null; accounts?: ProfileAccountHealth[] }>>;
   snapshot: () => Promise<{ work: Work[]; now: string }>;
   persist: (state: DaemonState) => Promise<void>;
 }
@@ -978,12 +1017,90 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
     }
   }
 
+  // 1a. Mid-session exhaustion. A session that ran out of provider quota does not fail: it stops
+  //     on its runtime's limit notice and waits for a person. The loop reads that notice from the
+  //     session's own output, keeps what the attempt had not committed, holds the account until
+  //     it resets, records the exhaustion — account, notice, reset time, partial work — on the
+  //     item, and gets the action onto another account: a worker's lease ends in that same
+  //     record, so the dispatch step re-queues the item on the next cycle, and a reviewer or
+  //     producer request is launched again at once. Nobody repoints a profile by hand.
+  const failedOver = new Set<string>();
+  if (effects.sessionOutput && effects.reportCapacity) {
+    const stopped = (name: string) => { const agent = agents.find(candidate => candidate.name === name); return agent && stoppedStates.includes(agent.agent_status ?? '') ? agent : null; };
+    const notice = (agent: HerdrAgent) => { try { const output = effects.sessionOutput!(agent); return output ? detectExhaustion(output, clock) : null; } catch { return null; } };
+    const held = async (role: CapacityRole, profile: string, item: Work, signal: { reason: string; resetsAt: string | null }) => {
+      const selected = await effects.selectedAccount?.(role, profile) ?? null;
+      const account = selected?.environment ?? null;
+      await effects.holdAccount?.(account ?? profileAccount(profile), { at: new Date(clock).toISOString(), resetsAt: signal.resetsAt, reason: signal.reason, role, profile, work: item.key });
+      return { account, runtime: selected?.kind ?? null };
+    };
+    for (const profile of config.workers.filter(worker => worker.mode === 'launch')) {
+      const agent = stopped(profile.agentName);
+      const item = open.find(candidate => !!candidate.lease && candidate.lease.owner === profile.principal && Date.parse(candidate.lease.expiresAt) > clock);
+      if (!agent || !item || item.submission?.epoch === item.lease!.epoch) continue;
+      const key = failoverKey('worker', item, item.lease!.epoch), previous = state.actions[key];
+      if (previous?.state === 'done' || !readyToRetry(previous, state.cycle)) { if (previous) failedOver.add(item.id); continue; }
+      const signal = notice(agent);
+      if (!signal) continue;
+      failedOver.add(item.id);
+      const epoch = item.lease!.epoch, attempts = (previous?.attempts ?? 0) + 1;
+      const resets = signal.resetsAt ? `resets ${signal.resetsAt}` : 'reset time unknown';
+      await record(state, key, { kind: 'failover', work: item.key, principal: profile.principal, epoch, state: 'started', detail: `${profile.agentName} on ${item.key} (epoch ${epoch}) stopped on its provider's limit notice: ${signal.reason}`, attempts, cycle: state.cycle }, now(), effects.persist);
+      try {
+        const partialWork = await effects.preserveWork?.(item, epoch) ?? { state: 'not-applicable' as const, detail: 'this loop has no access to the attempt worktree' };
+        const { account, runtime } = await held('worker', profile.name, item, signal);
+        await effects.reportCapacity(item, { event: 'exhausted', role: 'worker', epoch, profile: profile.name, account, runtime: runtime ?? profile.kind ?? null, reason: signal.reason, resetsAt: signal.resetsAt, partialWork });
+        // The lease is over on the record; the supervisor is stopped through the containment scope
+        // it recorded, which is the path that settles its quarantine, so the item is claimable again.
+        const scope = item.containmentQuarantine?.epoch === epoch && item.containmentQuarantine.owner === profile.principal ? item.containmentQuarantine.scope : undefined;
+        let stop = 'its supervisor stops on the ended lease';
+        try {
+          if (scope && effects.stopSupervisor) { await effects.stopSupervisor({ id: item.id, key: item.key, epoch, owner: profile.principal, profile: profile.name, agentName: profile.agentName, scope, leaseExpiresAt: item.lease!.expiresAt }, 'SIGTERM'); stop = `its supervisor (pid ${scope.pid}) was stopped through ${scope.unit}`; }
+        } catch (error) { stop = `its supervisor could not be signalled (${message(error)}) and stops on the ended lease`; }
+        clearProfileFailure(state, profile);
+        performed.push(await record(state, key, { kind: 'failover', work: item.key, principal: profile.principal, epoch, state: 'done',
+          detail: `${item.key} epoch ${epoch} exhausted ${account ?? `${profile.name}'s own account`} mid-session (${signal.reason}; ${resets}). Partial work ${partialWork.state}${partialWork.commit ? ` at ${partialWork.commit.slice(0, 12)}` : ''}; the attempt ended as released, ${stop}, and ${item.key} is re-queued for another account`,
+          attempts, cycle: state.cycle }, now(), effects.persist));
+      } catch (error) {
+        performed.push(await record(state, key, { kind: 'failover', work: item.key, principal: profile.principal, epoch, state: 'failed', detail: `${item.key} epoch ${epoch} exhausted its account (${signal.reason}) but could not be failed over: ${message(error)}`, attempts, cycle: state.cycle }, now(), effects.persist));
+      }
+    }
+    for (const session of await effects.launchedSessions?.().catch(() => [] as LaunchedSession[]) ?? []) {
+      const agent = stopped(session.agentName), item = open.find(candidate => candidate.key === session.work);
+      if (!agent || !item) continue;
+      const key = failoverKey(session.role, item, session.record), previous = state.actions[key];
+      if (previous?.state === 'done' || !readyToRetry(previous, state.cycle)) continue;
+      const signal = notice(agent);
+      if (!signal) continue;
+      const attempts = (previous?.attempts ?? 0) + 1, resets = signal.resetsAt ? `resets ${signal.resetsAt}` : 'reset time unknown';
+      await record(state, key, { kind: 'failover', work: item.key, principal: null, state: 'started', detail: `${session.role} session ${session.agentName} for ${item.key} stopped on its provider's limit notice: ${signal.reason}`, attempts, cycle: state.cycle }, now(), effects.persist);
+      try {
+        const { account, runtime } = await held(session.role, session.profile, item, signal);
+        await effects.reportCapacity(item, { event: 'exhausted', role: session.role, ...(session.requestId ? { requestId: session.requestId } : {}), profile: session.profile, account, runtime, reason: signal.reason, resetsAt: signal.resetsAt,
+          partialWork: { state: 'not-applicable', detail: `a ${session.role} session edits nothing: it reads the exact head and leaves no work to keep` } });
+        await effects.endSession?.(session, `provider quota exhausted on ${account ?? `${session.profile}'s own account`} mid-session (${signal.reason}; ${resets}); launched again on another account`);
+        let next = 'its request launches again on the next dispatch tick';
+        if (session.requestId && effects.relaunch) {
+          try { next = `relaunched on profile ${(await effects.relaunch(session, item, snapshot)).profile}`; }
+          catch (error) {
+            next = (error as { capacityExhausted?: boolean })?.capacityExhausted ? `no other account is left for the role (${message(error)}), so it waits for capacity`
+              : `it could not be launched again at once (${message(error)}), so the dispatcher launches it on its retry schedule`;
+          }
+        }
+        performed.push(await record(state, key, { kind: 'failover', work: item.key, principal: null, state: 'done',
+          detail: `${session.role} session ${session.agentName} for ${item.key} exhausted ${account ?? `${session.profile}'s own account`} mid-session (${signal.reason}; ${resets}); ${next}`, attempts, cycle: state.cycle }, now(), effects.persist));
+      } catch (error) {
+        performed.push(await record(state, key, { kind: 'failover', work: item.key, principal: null, state: 'failed', detail: `${session.role} session ${session.agentName} for ${item.key} exhausted its account (${signal.reason}) but could not be failed over: ${message(error)}`, attempts, cycle: state.cycle }, now(), effects.persist));
+      }
+    }
+  }
+
   // 1b. A worker session that stops on a prompt while it holds its assignment is waiting on input
   //     no one will give; it is recorded as failed with that reason, once per pane, for the master.
   for (const profile of config.workers.filter(worker => worker.mode === 'launch')) {
     const agent = agents.find(candidate => candidate.name === profile.agentName);
     const item = open.find(candidate => !!candidate.lease && candidate.lease.owner === profile.principal && Date.parse(candidate.lease.expiresAt) > clock);
-    if (!agent?.pane_id || !item || agent.agent_status !== 'blocked') continue;
+    if (!agent?.pane_id || !item || agent.agent_status !== 'blocked' || failedOver.has(item.id)) continue;
     const key = `session:blocked:${profile.name}:${agent.pane_id}:${item.epoch}`;
     if (state.actions[key]) continue;
     performed.push(await record(state, key, { kind: 'session', work: item.key, principal: profile.principal, state: 'failed', detail: `Worker session ${profile.agentName} on ${item.key} (epoch ${item.epoch}) is waiting on input (Herdr reports it blocked) instead of deciding on its own; answer or stop it, and have it record a blocker naming the blocked command rather than asking`, attempts: 1, epoch: item.epoch, cycle: state.cycle }, now(), effects.persist));
@@ -1154,8 +1271,60 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
   const claimable = open.filter(item => {
     try { assertDispatchable(item, snapshot.work, snapshot.now); return true; } catch { return false; }
   }).sort(dispatchOrder);
+
+  // 4a. Capacity. A role whose every configured account is spent is not a launch to keep
+  //     retrying and not a failure to keep reporting: each item that needs the role records one
+  //     capacity escalation naming every account and its reset time, the loop stops launching
+  //     that role until the first of them resets, and the cycle says so in one line. Everything
+  //     that needs a different role — a review, a proof, a merge, a deployment — runs below
+  //     exactly as it would have, and the escalation is withdrawn the cycle an account returns.
+  const capacities: RoleCapacity[] = [roleCapacity('worker', config.workers.filter(worker => worker.mode === 'launch'), credentials)];
+  if (effects.reportCapacity) {
+    const others = await effects.roleHealth?.().catch(() => null) ?? {};
+    for (const role of ['reviewer', 'producer'] as const) if (others[role]) capacities.push(roleCapacity(role, others[role]!.profiles, others[role]!.health));
+    const needs: Record<CapacityRole, Work[]> = {
+      worker: claimable,
+      reviewer: open.filter(item => item.autoDispatch?.review?.state === 'requested'),
+      producer: open.filter(item => item.autoDispatch?.producers.some(request => request.state === 'requested')),
+    };
+    for (const capacity of capacities) {
+      const key = capacityKey(capacity.role), previous = state.actions[key];
+      if (capacity.exhausted) {
+        const waiting = needs[capacity.role];
+        const signature = capacitySignature(capacity.role, capacity.accounts);
+        for (const item of waiting) {
+          const standing = standingCapacity(item, capacity.role)[0];
+          if (standing && capacitySignature(standing.role, standing.accounts) === signature) continue;
+          try { await effects.reportCapacity(item, { event: 'escalated', role: capacity.role, accounts: capacity.accounts }); }
+          catch (error) { performed.push(await record(state, `${key}:${item.id}`, { kind: 'capacity', work: item.key, principal: null, state: 'failed', detail: `Could not record the ${capacity.role} capacity escalation on ${item.key}: ${message(error)}`, attempts: (state.actions[`${key}:${item.id}`]?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist)); }
+        }
+        const detail = `${describeCapacity(capacity.role, capacity.accounts)}${waiting.length ? `; waiting: ${waiting.map(item => item.key).join(', ')}` : ''}`;
+        if (previous?.detail !== detail) performed.push(await record(state, key, { kind: 'capacity', work: null, principal: null, state: 'done', detail, attempts: (previous?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist));
+        continue;
+      }
+      const restored = open.filter(item => standingCapacity(item, capacity.role).length);
+      for (const item of restored) await effects.reportCapacity(item, { event: 'restored', role: capacity.role, reason: `An account for the ${capacity.role} role reports quota again` }).catch(() => {});
+      if (restored.length || previous && !previous.detail.startsWith('Restored')) {
+        performed.push(await record(state, key, { kind: 'capacity', work: null, principal: null, state: 'done', detail: `Restored: a ${capacity.role} account reports quota again; ${capacity.role} launches resume${restored.length ? ` for ${restored.map(item => item.key).join(', ')}` : ''}`, attempts: 1, cycle: state.cycle }, now(), effects.persist));
+      }
+    }
+  }
+  const workersSpent = !!effects.reportCapacity && capacities[0].exhausted;
+
+  // 4b-human. An item parked on a decision only a human may make holds no lease and is not
+  //     claimable, so there is nothing to dispatch and nothing to escalate to an agent: the loop
+  //     names it once, with how to answer. The answer itself makes the item claimable, and the
+  //     dispatch below picks it up on the next cycle — no master session is part of that.
+  for (const item of open.filter(parkedOnHuman)) {
+    const request = item.humanRequest!, key = `human:${item.id}:${request.id}`;
+    if (state.actions[key]) continue;
+    performed.push(await record(state, key, { kind: 'human', work: item.key, principal: request.requestedBy, epoch: request.epoch, state: 'done',
+      detail: `${item.key} is parked on a human-only decision (${humanDecisionLabel[request.kind]}): ${request.needed} — ${request.reason}. Its attempt ended without a lease and nothing else waits on it; the human answers with ${answerCommand(item.key, request)} and the loop dispatches it again`,
+      attempts: 1, cycle: state.cycle }, now(), effects.persist));
+  }
+
   const taken = new Set<string>();
-  for (const item of claimable) {
+  for (const item of workersSpent ? [] : claimable) {
     const key = dispatchKey(item);
     if (state.actions[key] && state.actions[key].state !== 'failed') continue;
     const free = effects.agents();
@@ -1771,6 +1940,52 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
   const decisions: DaemonEffects['decisions'] = work => asOperatorAgent('GET', `work/${encodeURIComponent(work.id)}/decisions`);
   return {
     agents: () => { try { return listHerdrAgents(run); } catch { return []; } },
+    // The tail of the session's own terminal, unwrapped so a notice the pane folded reads as one line.
+    sessionOutput: agent => { const target = agent.name ?? agent.pane_id; return target ? run('herdr', ['agent', 'read', target, '--source', 'recent-unwrapped', '--lines', '60', '--format', 'text']) : null; },
+    reportCapacity: (work, event) => deps.mutate(`work/${work.id}/capacity`, event),
+    launchedSessions: async () => [
+      ...(await readReviewLedger(root)).reviews.filter(entry => entry.state === 'pending').map(entry => ({ role: 'reviewer' as const, record: entry.id, profile: entry.profile, agentName: entry.agentName, pane: entry.pane, work: entry.key, requestId: entry.requestId ?? null })),
+      ...(await readProducerLedger(root)).producers.filter(entry => entry.state === 'pending').map(entry => ({ role: 'producer' as const, record: entry.id, profile: entry.profile, agentName: entry.agentName, pane: entry.pane, work: entry.key, requestId: entry.requestId })),
+    ],
+    selectedAccount: async (role, profile) => (await readEnvironmentLog(current())).selected?.[selectionKey(role, profile)] ?? null,
+    preserveWork: async (work, epoch) => {
+      const workspace = work.workspaces.find(entry => entry.epoch === epoch);
+      if (!workspace || workspace.host !== current().hostId) return { state: 'not-applicable', detail: workspace ? `the attempt worktree is on ${workspace.host}, not this host; its commits stay on ${workspace.branch}` : 'the attempt registered no workspace' };
+      return preservePartialWork(workspace.path, `${work.key} attempt ${epoch} interrupted by provider quota exhaustion`, run);
+    },
+    holdAccount: (account, observed) => recordObservedExhaustion(current(), account, observed),
+    endSession: async (session, resolution) => {
+      if (session.pane) closeHerdrPane(session.pane, run);
+      const closedAt = new Date().toISOString(), ended = { state: 'failed' as const, resolution: resolution.slice(0, 500), closedAt };
+      if (session.role === 'reviewer') { const ledger = await readReviewLedger(root); await saveReviewLedger(root, { ...ledger, reviews: ledger.reviews.map(entry => entry.id === session.record && entry.state === 'pending' ? { ...entry, ...ended } : entry) }); }
+      else { const ledger = await readProducerLedger(root); await saveProducerLedger(root, { ...ledger, producers: ledger.producers.map(entry => entry.id === session.record && entry.state === 'pending' ? { ...entry, ...ended } : entry) }); }
+    },
+    relaunch: async (session, work, snapshot) => {
+      const config = current(), agents = listHerdrAgents(run);
+      const request = session.role === 'reviewer' ? work.autoDispatch?.review : work.autoDispatch?.producers.find(entry => entry.id === session.requestId);
+      if (!request || request.id !== session.requestId || request.state !== 'requested') throw new Error(`${work.key} no longer requests this ${session.role} session`);
+      // The profile that just ran out goes last: its other accounts are still its own failover.
+      const order = <P extends { name: string; agentName: string }>(profiles: P[]) => [...profiles.filter(profile => profile.name !== session.profile), ...profiles.filter(profile => profile.name === session.profile)].filter(profile => !agents.some(agent => agent.name === profile.agentName));
+      const skipped: string[] = [];
+      // As in the dispatcher: only skips that were all spent quota make this a wait for capacity.
+      let capacity = true;
+      for (const profile of session.role === 'reviewer' ? order(config.reviewers) : order(independentProducerProfiles(work, config.producers))) {
+        try {
+          if (session.role === 'reviewer') await launchReview(root, work, profile.name, agents, snapshot.now, { run, requestId: request.id });
+          else await launchProducer(root, work, request, profile as MasterConfig['producers'][number], agents, snapshot.now, { run });
+          return { profile: profile.name };
+        } catch (error) { if (!(error as { accountsExhausted?: boolean })?.accountsExhausted) throw error; skipped.push(message(error)); capacity &&= !!(error as { capacityExhausted?: boolean }).capacityExhausted; }
+      }
+      if (!skipped.length) throw new Error(`no ${session.role} profile is free to take the request`);
+      throw Object.assign(new Error(skipped.join('; ')), { accountsExhausted: true, capacityExhausted: capacity });
+    },
+    roleHealth: async () => {
+      const config = current();
+      return {
+        ...(config.reviewers.length ? { reviewer: { profiles: config.reviewers, health: await inspectProfileAccounts(config, 'reviewer', config.reviewers, Object.fromEntries(config.reviewers.map(profile => [profile.name, { available: true, reason: null as string | null }]))) } } : {}),
+        ...(config.producers.length ? { producer: { profiles: config.producers, health: await inspectProducerCredentials(root, config.producers) } } : {}),
+      };
+    },
     herdr: () => { const runtime = observeHerdrAgents(run); return { agents: runtime.agents, available: runtime.available }; },
     stopSupervisor: (orphan, signal) => { stopWatchSupervisor(orphan, signal, run); },
     credentials: profiles => inspectWorkerCredentials(root, profiles),

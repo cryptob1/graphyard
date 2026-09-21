@@ -9,7 +9,6 @@ import { readProducerLedger, reconcileProducers, sessionRetries, summarizeProduc
 import { dispatchSummary, readDispatchCursor } from '../auto-dispatch.js';
 import { unansweredRequests, type RequestProgress, type UnansweredRequest } from '../model/dispatch.js';
 import { readAdministrationLedger, readSudoState, summarizeAdministration } from '../master-browser.js';
-import { workMutation, type CliCommand } from './registry.js';
 
 /**
  * One attention item per open worker scope request whose epoch still holds the lease: addressed
@@ -241,32 +240,6 @@ export function cycleBudget(state: Pick<DaemonState, 'metrics'>, intervalMs: num
     lastOverrun: overruns.length ? { cycle: overruns.at(-1)!.cycle, at: overruns.at(-1)!.at, durationMs: overruns.at(-1)!.durationMs } : null,
   };
 }
-
-/** The worker half of live scope negotiation: ask, or withdraw, without leaving the lease. */
-export const scopeRequestCommand: CliCommand = {
-  name: 'scope-request',
-  scope: 'work',
-  help: [
-    '  scope-request GY-N EPOCH PATH... -- REASON',
-    '                                Ask the master to widen plannedFiles with PATH... for a',
-    "                                reason; `scope-request GY-N EPOCH -` withdraws the open",
-    '                                request. The master approves it with one command:',
-    '                                `graphyard master scope GY-N`, and the attempt keeps its',
-    '                                lease — a free-text blocker that waits on a human is never',
-    '                                needed for scope',
-  ],
-  async run(context, work) {
-    const { args, print } = context;
-    const epoch = Number(args[0]);
-    if (!Number.isInteger(epoch) || epoch < 1) throw new Error('Use scope-request GY-N EPOCH PATH... -- REASON, or scope-request GY-N EPOCH - to withdraw');
-    if (args[1] === '-') return print(await workMutation(context, work)('scope', { epoch, paths: [], reason: 'Withdrawn by the worker' }));
-    const separator = args.indexOf('--');
-    const paths = args.slice(1, separator < 0 ? args.length : separator);
-    const reason = separator < 0 ? '' : args.slice(separator + 1).join(' ').trim();
-    if (!paths.length || !reason) throw new Error('Name at least one PATH outside plannedFiles and give a REASON after --');
-    return print(await workMutation(context, work)('scope', { epoch, paths, reason }));
-  },
-};
 
 /**
  * The one-command approval behind `master scope GY-N [REASON]`: read the item's open scope
