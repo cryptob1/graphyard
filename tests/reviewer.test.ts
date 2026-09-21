@@ -143,9 +143,11 @@ test('master review mints a private session credential, records the request, and
     assert.match(await readFile(join(sessionDirectory, 'hosts.yml'), 'utf8'), /oauth_token: ghs_review_session_token/);
     assert.equal(sessionDirectory.startsWith(`${root}/`), false, 'session credentials never live inside the repository');
     assert.deepEqual(calls[1].slice(0, 6), ['agent', 'start', 'review-claude-1', '--kind', 'claude', '--pane']);
-    assert.deepEqual(calls[1].slice(-3), ['--', '--permission-mode', 'bypassPermissions']);
-    assert.deepEqual(calls[2].slice(0, 3), ['agent', 'prompt', 'review-claude-1']);
-    assert.match(calls[2][3], /pull request #42 at head a{40} against base b{40}/);
+    // GY-93: the request is the session's own first message, the positional prompt after the
+    // approval flag; nothing is pasted into the session afterwards.
+    assert.deepEqual(calls[1].slice(-3, -1), ['--permission-mode', 'bypassPermissions']);
+    assert.match(calls[1].at(-1)!, /pull request #42 at head a{40} against base b{40}/);
+    assert.equal(calls.some(call => call[0] === 'agent' && call[1] === 'prompt'), false); assert.equal(launched.delivery, 'request');
     const ledger = await readReviewLedger(root);
     assert.equal(ledger.reviews.length, 1); assert.equal(ledger.reviews[0].state, 'pending'); assert.equal(ledger.reviews[0].policyRevision, 2);
     assert.equal((await stat(join(root, '.graphyard/reviews.json'))).mode & 0o777, 0o600);
@@ -177,10 +179,10 @@ test('a reviewer launch leaves no credential or record behind when Herdr refuses
     const calls: string[][] = [];
     const run = (_command: string, args: string[]) => {
       calls.push(args);
-      if (args[0] === 'agent' && args[1] === 'prompt') throw new Error('prompt refused');
+      if (args[0] === 'agent' && args[1] === 'start') throw new Error('start refused');
       return JSON.stringify({ result: args[0] === 'tab' ? { pane_id: 'pane-failed' } : args[0] === 'pane' && args[1] === 'list' ? { panes: [] } : {} });
     };
-    await assert.rejects(launchReview(root, work(), 'reviewer-cursor', [], new Date().toISOString(), { run, mint: async () => ({ token: 'ghs_failed_session', expiresAt: new Date(Date.now() + 3_500_000).toISOString() }) }), /prompt refused/);
+    await assert.rejects(launchReview(root, work(), 'reviewer-cursor', [], new Date().toISOString(), { run, mint: async () => ({ token: 'ghs_failed_session', expiresAt: new Date(Date.now() + 3_500_000).toISOString() }) }), /start refused/);
     assert.deepEqual(calls.at(-2), ['pane', 'close', 'pane-failed']);
     assert.deepEqual((await readReviewLedger(root)).reviews, [], 'a failed launch records no review request');
     assert.deepEqual(await readdir(join(config.reviewer!.credentialFile, '..', 'sessions')), [], 'the session credential directory is removed');
@@ -249,10 +251,11 @@ test('dispatch starts a supervised worker with its runtime approval contract, or
     const ready = () => work({ stage: 'ready', lease: null, submission: null, candidate: null, observation: null });
     const dispatched = await dispatchWork(root, ready(), profile, [], run, [ready()], async () => ({ epoch: 4, path: join(root, 'assigned'), base: 'c'.repeat(40) }));
     assert.equal(dispatched.launch.applied, true);
-    assert.match(calls[1][3], /'--' 'cursor' '--force' '--trust'$/, 'the supervised command carries the runtime non-interactive flags');
+    // GY-93: the instruction follows the flags as the runtime's positional prompt.
+    assert.match(calls[1][3], /'--' 'cursor' '--force' '--trust' 'Implement GY-42: [^']*'$/, 'the supervised command carries the runtime non-interactive flags, then the request');
     const optOutCalls: string[][] = [];
     await dispatchWork(root, ready(), { ...profile, approvals: 'prompt', agentName: 'eng-cursor-2' }, [], (_command, args) => { optOutCalls.push(args); return run(_command, args); }, [ready()], async () => ({ epoch: 5, path: join(root, 'assigned-2'), base: 'd'.repeat(40) }));
-    assert.match(optOutCalls[1][3], /'--' 'cursor'$/, 'an opted-out profile starts exactly as the operator configured it');
+    assert.match(optOutCalls[1][3], /'--' 'cursor' 'Implement GY-42: [^']*'$/, 'an opted-out profile starts exactly as the operator configured it, plus the request');
     const opencodeCalls: string[][] = [];
     await dispatchWork(root, ready(), { ...profile, kind: 'opencode', agentName: 'eng-opencode-1' }, [], (_command, args) => { opencodeCalls.push(args); return run(_command, args); }, [ready()], async () => ({ epoch: 6, path: join(root, 'assigned-3'), base: 'e'.repeat(40) }));
     assert.ok(opencodeCalls[0].some(value => value.startsWith('OPENCODE_PERMISSION=')), 'runtimes configured by environment get their contract in the tab environment');
