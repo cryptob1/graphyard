@@ -91,7 +91,7 @@ The build producer attests the manifest through `POST /api/delivery/build`:
 
 ## Observe
 
-An observer reads its provider outside any Graphyard transaction, submitting its measurements to `POST /api/delivery/observe`:
+An observer reads its provider outside any Graphyard transaction, submitting measurements to `POST /api/delivery/observe`:
 
 ```json
 {
@@ -114,9 +114,9 @@ An observer reads its provider outside any Graphyard transaction, submitting its
 
 ## Verification
 
-- **Sweep:** every two seconds the server folds at most fifty new observations into each environment's coverage and re-evaluates, resuming from a stored cursor, so an interrupted sweep skips none
+- **Sweep:** every two seconds the server folds at most fifty new observations into each environment's coverage and re-evaluates; an interrupted sweep resumes from its stored cursor
 - **`graphyard delivery sweep`:** drains a backlog sooner
-- **Coverage, per service:** the merged intervals where every listed instance matched the expected digest under measured identity, plus the latest observed state
+- **Coverage, per service:** merged intervals where every listed instance matched the expected digest under measured identity, plus the latest observed state
 
 States:
 

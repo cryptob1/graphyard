@@ -7,7 +7,7 @@ A dedicated GitHub App, installation token minted from its private key and refre
 
 ## Create and install the App
 
-- **Personal account:** `graphyard github-setup HTTPS_URL` registers the App through a local manifest callback and saves its credentials ([onboarding](onboarding.md#2-connect-github)).
+- **Personal account:** `graphyard github-setup HTTPS_URL` registers the App through a local manifest callback, saves its credentials ([onboarding](onboarding.md#2-connect-github)).
 - **Organization account:** create by hand, installed only on the managed repository:
   - **Webhook:** `https://YOUR-HOST/api/github/webhook` and random secret
   - **Permissions:** [declared](#app-permissions)
@@ -18,7 +18,7 @@ A dedicated GitHub App, installation token minted from its private key and refre
 
 ## App permissions
 
-Every permission a Graphyard App holds is declared once, in `src/github-permissions.ts`, with the feature needing it; the manifest, tables below, preflight, job holds and `--update-permissions` migration read it. Control plane first, reviewer App second.
+Every permission a Graphyard App holds is declared once, in `src/github-permissions.ts`, with the feature needing it; manifest, tables below, preflight, job holds and `--update-permissions` migration read it. Control plane first, reviewer App second.
 
 | Permission | Access | Needed to |
 | --- | --- | --- |
@@ -66,7 +66,7 @@ GitHub offers no API for changing a registered App's permissions; every installa
 ### Quota failover
 
 - **Trigger:** `verdict:usage-limit` reply, or no verdict within the profile's `timeoutSeconds`
-- **Record:** `review.failover` event — profile, runtime, reason, candidate, policy revision, comment ID, next profile
+- **Record:** `review.failover` event: profile, runtime, reason, candidate, policy revision, comment ID, next profile
 - **Effect:** releases the request, dispatches to the next untried profile; superseded one can no longer approve
 - **Selection:** derived from that history, scoped to exact head, base and policy revision, so a rebase, new base or policy revision restarts at the first profile
 - **Every profile exhausted:** review gate stays closed with `Every configured reviewer profile is exhausted for this candidate`: add capacity, wait for quota or select another provider
@@ -84,7 +84,7 @@ On the managed base branch:
 - disable force pushes and branch deletion
 - remove bypass privileges from worker identities
 
-Graphyard reads classic protection, refusing its merge gate unless these settings are present, conservatively on ruleset-only protection; `master protection --apply` and `master browser protection` then keep protection consistent with open review policies.
+Graphyard reads classic protection, refusing its merge gate unless these settings are present, conservatively on ruleset-only protection; `master protection --apply` and `master browser protection` keep protection consistent with open review policies.
 
 ### What the merge gate checks
 
@@ -103,8 +103,8 @@ Graphyard reads classic protection, refusing its merge gate unless these setting
 - **Base tip:** read from `refs/heads/<base>`, never cached `baseRefOid`
 - **No administrative bypass:** Done follows only an independently observed matching merge
 - **Protocol mismatch:** a CLI speaking a newer merge protocol than the deployed server refuses with `server runs <sha>, CLI expects <sha>: deploy main first`
-- **One executor per execution:** the instance that acquired an execution owns it — the loop is one instance per process, each `master merge` one named by its request id, so a replay under the same `GRAPHYARD_REQUEST_ID` resumes its own; the engine records the owner as `principal#instance` and refuses `merge-verify`, `merge-commit` and `merge-cancel` from any other, even under the same credential
-- **Stand-down:** `master merge GY-N` beside a running loop is safe. An executor finding an execution another instance holds refuses before acquiring anything — `GY-N does not have a current all-gates-passing merge authorization for this executor: merge execution … is held by graphyard-master#daemon-… until …; this executor stands down without cancelling it` — as does a mid-flight `Merge execution was already verified` or `already committed` refusal. Never retry it against the holder or resolve it by hand: an unfinished execution lapses at expiry, reconciliation clears it, the next cycle attempts afresh
+- **One executor per execution:** the instance that acquired an execution owns it: the loop is one instance per process, each `master merge` one named by its request id, so a replay under the same `GRAPHYARD_REQUEST_ID` resumes its own; the engine records the owner as `principal#instance`, refuses `merge-verify`, `merge-commit` and `merge-cancel` from any other, even under the same credential
+- **Stand-down:** `master merge GY-N` beside a running loop is safe. An executor finding an execution another instance holds refuses before acquiring anything (`GY-N does not have a current all-gates-passing merge authorization for this executor: merge execution … is held by graphyard-master#daemon-… until …; this executor stands down without cancelling it`), as does a mid-flight `Merge execution was already verified` or `already committed` refusal. Never retry it against the holder or resolve it by hand: an unfinished execution lapses at expiry, reconciliation clears it, the next cycle attempts afresh
 
 ## Merge queue
 
@@ -112,7 +112,7 @@ Graphyard serializes the final hop through one queue, so no merge invalidates ca
 
 - **Entry:** when a candidate passes its own gates; membership is derived, never requested
 - **Nobody can** insert an entry, hold a position, reorder the queue or merge past the head
-- **A merge moves the base** under every candidate still short of the queue, so the control plane republishes those heads on the moved tip itself and carries what the move did not touch
+- **A merge moves the base** under every candidate still short of the queue, so the control plane republishes those heads on the moved tip itself, carries what the move did not touch
 - **[Merge-queue bindings](protocol/merge-queue-binding.md):** what a candidate is bound to, when a [base refresh](protocol/merge-queue-binding.md#base-refresh) or the queue's tip carries a review or proof, what a refresh conflict costs
 
 ## Trusted producers, smoke proof and review providers
@@ -128,7 +128,7 @@ Graphyard serializes the final hop through one queue, so no merge invalidates ca
 - **Trigger:** `pull_request_target`, so GitHub takes workflow file and harness checkout from the default branch; the candidate is only fetched into an isolated build context.
 - **A queue tip or [base refresh](protocol/merge-queue-binding.md#base-refresh)** is committed onto the pull-request branch, so the same `synchronize` trigger runs it on the tip that will land.
 - **Jobs:** plan enumerates the item's proofs, exercise jobs run one per proof in parallel holding no secret, publish submits each report through the [CI producer](deployment.md#ci-producer), re-verified against the GitHub job ([CI-produced evidence](protocol/evidence.md#ci-produced-evidence)).
-- Dependencies, database image and candidate layers are cached, so a warm proof job finishes in minutes.
+- Dependencies, database image and candidate layers are cached.
 - Manual proofs stay producer sessions started at submit, the deploy smoke proof after delivery.
 
 ## Enforcement boundary

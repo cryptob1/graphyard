@@ -3,7 +3,7 @@
 
 For an integration author reading pipeline figures: where each one comes from.
 
-Every work document carries `pipeline`, a small timeline the control plane appends to as the lifecycle commands run. It reports what the ledger already did: nothing in it moves a gate, no command writes it directly.
+Every work document carries `pipeline`, a timeline the control plane appends to as lifecycle commands run. Nothing in it moves a gate, no command writes it directly.
 
 ```json
 {
@@ -13,23 +13,23 @@ Every work document carries `pipeline`, a small timeline the control plane appen
 }
 ```
 
-- `attempts`: one entry per lease epoch. `claim` opens it; `submit` (`end: submitted`), `release` (`released`), a lapse that reconciliation, a replacement claim or a requirements revision records (`expired`, at the lease's deadline) or `rework` of a live lease (`reworked`) closes it. An attempt still open when a later claim arrives is closed as `expired`.
-- `submittedAt`: the first `submit`; the submit→merge clock starts here; a resubmission after rework does not restart it.
+- `attempts`: one entry per lease epoch. `claim` opens it; `submit` (`end: submitted`), `release` (`released`), a lapse that reconciliation, a replacement claim or a requirements revision records (`expired`, at the lease's deadline) or `rework` of a live lease (`reworked`) closes it. An attempt still open at a later claim closes as `expired`.
+- `submittedAt`: the first `submit`, starting the submit→merge clock; a resubmission after rework does not restart it.
 - `resubmittedAt`: the latest `submit`.
-- `reworkRounds`: `rework` commands for an item that had already submitted. Rework of an unsubmitted item only ends its attempt.
-- `interventions`: hand-offs to a master or operator: every `blocked` report with a reason, every `requirements` revision of an item somebody has already claimed. Clearing a blocker (`reason: null`) counts nothing.
+- `reworkRounds`: `rework` commands for an item already submitted. Rework of an unsubmitted item only ends its attempt.
+- `interventions`: hand-offs to a master or operator: every `blocked` report with a reason, every `requirements` revision of an item already claimed. Clearing a blocker (`reason: null`) counts nothing.
 
-Documents created before the timeline existed gain one at their next lifecycle command, or from their own history by the [backfill](#backfill-from-the-ledger). A delivery whose `submittedAt` cannot be recovered is reported as unmeasured with the reason, never estimated.
+Documents created before the timeline existed gain one at their next lifecycle command, or from their history by the [backfill](#backfill-from-the-ledger). A delivery whose `submittedAt` cannot be recovered is reported unmeasured with the reason, never estimated.
 
 ## Backfill from the ledger
 
 Every lifecycle command wrote its work document into the append-only ledger; the bounded catch-up behind `GET /api/work-snapshot` replays it (`src/pipeline-backfill.ts`) for each item, delivered ones included, whose timeline was never reconstructed.
 
-- **The read:** never selects an event's payload; it projects in SQL only the snapshot's `updatedAt`, `lease` and `submission` and four fields of `details`, 400 rows a page, on a plain pool connection, never holding the coordination lock
-- **The write:** one short coordination transaction per item, which re-reads the document, writes only `pipeline`, refuses if anything else would change, and appends a `pipeline.backfilled` event
-- **Bounds:** one run reads at most 20,000 ledger rows over at most 25 items, one catch-up at a time per process. A longer ledger is continued: the marker records `resume` with `truncated: true`, the next run resumes after `toEvent`, and the timeline is written once the ledger is read to its end, the item `awaiting-backfill` until then
+- **The read:** never selects an event's payload: projects in SQL only the snapshot's `updatedAt`, `lease` and `submission` and four fields of `details`, 400 rows a page, on a plain pool connection, never holding the coordination lock
+- **The write:** one short coordination transaction per item: re-reads the document, writes only `pipeline`, refuses if anything else would change, appends a `pipeline.backfilled` event
+- **Bounds:** one run reads at most 20,000 ledger rows over at most 25 items, one catch-up at a time per process. A longer ledger is continued: the marker records `resume` with `truncated: true`, the next run resumes after `toEvent`, the timeline is written once the ledger is read to its end, the item `awaiting-backfill` until then
 - **A failure:** belongs to its item: recorded, set aside for the five-minute settle window, then retried, while the run moves on
-- **The union:** the replay runs the engine's own functions at the recorded instants (`updatedAt`, or a raw ledger entry's `at`), then unites with the live timeline, itself only as old as the timeline feature: attempts unite by epoch (the live record wins), `submittedAt` is the earliest of the two, `resubmittedAt` the latest, and a replayed count can raise a recorded one, never lower it
+- **The union:** the replay runs the engine's own functions at the recorded instants (`updatedAt`, or a raw ledger entry's `at`), then unites with the live timeline: attempts unite by epoch (the live record wins), `submittedAt` the earliest of the two, `resubmittedAt` the latest, and a replayed count can raise a recorded one, never lower it
 
 ```json
 "backfill": { "at": "…", "source": "ledger", "events": 412, "fromEvent": "1207", "toEvent": "5109", "retained": true, "truncated": false, "passes": 1 }
@@ -52,4 +52,4 @@ Every lifecycle command wrote its work document into the append-only ledger; the
 - `routine`: at most one rework round and no intervention.
 - `coverage`: `measured`, `awaiting-backfill` (the reconstruction has not reached or finished the item), `events-pruned` (its ledger no longer reaches its creation) or `no-submission` (the ledger, read to its end, records none); `backfill` carries the marker above.
 
-The top-level `speed` is the [periodic measurement](../master-agent.md#pipeline-speed) over every measured delivery. Its `items` report execution versus wait, rework rounds and hand-offs per delivered item. Its `coverage` accounts for every delivery in the window: how many are measured, `awaitingBackfill`, `eventsPruned` or `noSubmission`, the key and reason of each unmeasured one, `complete` when none is left, and a `statement`.
+The top-level `speed` is the [periodic measurement](../master-agent.md#pipeline-speed) over every measured delivery. Its `items` report execution versus wait, rework rounds and hand-offs per delivered item. Its `coverage` accounts for every delivery in the window: how many measured, `awaitingBackfill`, `eventsPruned` or `noSubmission`, each unmeasured one's key and reason, `complete` when none is left, and a `statement`.

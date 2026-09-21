@@ -6,10 +6,10 @@ For a maintainer of `cryptob1/graphyard`: how it proves its own contracts.
 ## Bootstrap sequence
 
 1. `node "$GRAPHYARD_CLI" init --url https://YOUR-GRAPHYARD-HOST --herdr --token-stdin` installs the Herdr worker connection.
-2. `node "$GRAPHYARD_CLI" github-setup https://YOUR-GRAPHYARD-HOST` registers the personal-account App; copy its private values into the deployment and redeploy.
+2. `node "$GRAPHYARD_CLI" github-setup https://YOUR-GRAPHYARD-HOST` registers the personal-account App; copy its private values into the deployment, redeploy.
 3. Preview and apply the integration configuration: `node scripts/configure-integrations.mjs --plan`, then `--apply`, then the provider's plan, apply and deploy.
 4. Protect `main` with `node scripts/protect-github.mjs --plan`, review, then apply.
-5. Open a Graphyard-linked pull request and confirm `Graphyard / merge` refuses before acceptance evidence exists, capturing the refusal with the inspection below.
+5. Open a Graphyard-linked pull request, confirm `Graphyard / merge` refuses before acceptance evidence exists, capturing the refusal with the inspection below.
 6. Dispatch the protected workflow from `main`, naming the contract the item requires: `gh workflow run acceptance.yml --ref main -f pr=PR_NUMBER -f work_id=WORK_UUID -f policy_revision=1 -f proof=integration:claim-safety`.
    - The proof resolves against `scripts/contracts.mjs` in that protected checkout; a checkout not registering it refuses the dispatch before any candidate code is fetched
    - Each dispatch produces exactly one proof; the reporter refuses a report whose case inventory does not match the proof it claims
@@ -17,7 +17,7 @@ For a maintainer of `cryptob1/graphyard`: how it proves its own contracts.
 
 ## Adding a trusted contract
 
-A trusted run executes only protected source, so a contract must reach protected `main` before any work item may require its proof: land the harness, its registry entry and its unprivileged CI job as their own change, gated by the existing review, CI and proofs, then require the new proof of later work.
+A trusted run executes only protected source, so a contract must reach protected `main` before any work item may require its proof: land harness, registry entry and unprivileged CI job as their own change, gated by existing review, CI and proofs, then require the new proof of later work.
 
 ## Inspect enforcement
 

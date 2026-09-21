@@ -23,12 +23,12 @@ For a contributor: which file a change belongs in, and what the size budget enfo
 
 ## Where a new feature goes
 
-One place per kind of change, so concurrent pull requests stop colliding.
+One place per kind of change.
 
 - **A CLI command:** One entry in the matching module under `src/cli/`, or a new module exporting `defineCommands([...])` spread into `commands`; its `help` lines are the help text; `scope: 'work'` resolves the work item first. Never add a branch to `src/cli/index.ts`
 - **An HTTP route:** One entry in the resource's module under `src/server/routes/`, or a new module exporting `defineRoutes(...)` listed in `publicRoutes` or `apiRoutes`; return the JSON body, or `Sent` after writing raw bytes. Never match a path in `src/server/index.ts`
 - **A schema, type or gate rule:** Concern module under `src/model/` (`policy`, `work`, `evidence`, `review`, `escalation`, `delegation`, `delivery`, `bootstrap`, `gates`, `queue`); existing imports keep working through the barrel, which never grows
-- **A table:** `defineTable` in the concern's module under `src/store/tables/`; the migration, `ledgerTables`, export order and sequences derive from it, so a backup cannot miss a table and no table list is hand-edited
+- **A table:** `defineTable` in the concern's module under `src/store/tables/`; the migration, `ledgerTables`, export order and sequences derive from it; no table list is hand-edited
 - **A dashboard view:** One page component under `web/pages/` and one entry in `views`, never a branch in `web/main.tsx`
 - **A protocol topic:** One page under `docs/protocol/` with a `<!-- page: Agent protocol | N | summary -->` first line, then `npm run docs:check -- --write`; other guides declare their `docs/README.md` section the same way; both indexes are `GRAPHYARD_GENERATED_FILES`. Never edit one by hand or put its path in `plannedFiles`
 - **Text in the managed `AGENTS.md` blocks:** Template in `src/repository-setup.ts` or `src/master.ts`, then re-render and commit both; a test fails while the committed blocks differ; a regeneration from another CLI version is never committed

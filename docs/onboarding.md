@@ -18,7 +18,7 @@ One server and one Postgres database serve all workers ([deployment](deployment.
 ## 2. Connect GitHub
 
 - Run `graphyard github-setup https://YOUR-GRAPHYARD-HOST` from the managed repository, or [create the App by hand](github.md#create-and-install-the-app) for an organization account; an App registered before the merge queue must be [migrated](github.md#migrating-an-existing-app) to Contents: read and write. Copy its private values into the service, configure CI and review protection now, requiring `Graphyard / merge` once published.
-- Later permission changes and their acceptance are the master's, through `master browser` flows driven by the profile `master init --browser-profile` names; the only human-only step left: approving a *Confirm access* prompt on GitHub Mobile.
+- Later permission changes and their acceptance are the master's, through `master browser` flows driven by the profile `master init --browser-profile` names; the only human-only step: approving a *Confirm access* prompt on GitHub Mobile.
 - Confirm exact CI check names and their App IDs: GitHub Actions uses `15368`.
 
 ## 3. Connect a worker and Herdr
@@ -86,7 +86,7 @@ node "$GRAPHYARD_CLI" master environments --apply                        # gener
 
 ### Approval modes
 
-Every launch profile carries `approvals`, so no launch waits on a keypress:
+Every launch profile carries `approvals`:
 
 - `auto` (default) adds that runtime's non-interactive startup contract;
 - `prompt` adds nothing: a human answers in the session tab.
@@ -108,7 +108,7 @@ Every launch profile carries `approvals`, so no launch waits on a keypress:
 
 1. Read the [readiness checklist](install.md#readiness-checklist) for the profile you will enforce: a ready checklist is configuration, not proof.
 2. Create a small real work item using the repository's exact CI check names and acceptance proofs, then dispatch it: `master dispatch GY-1 codex-primary` for a trusted local profile, or a remote worker's own `claim`, `worktree` and `watch`.
-3. The worker pushes its branch, opens a pull request, runs `complete GY-1 EPOCH PR_NUMBER`; the loop launches the reviewer and producers for that head, so `master review GY-1` is only the recovery path.
+3. The worker pushes its branch, opens a pull request, runs `complete GY-1 EPOCH PR_NUMBER`; the loop launches the reviewer and producers for that head; `master review GY-1` is only the recovery path.
 4. Connect acceptance evidence before merging: a narrowly scoped `producer` token in protected CI that pull-request code cannot read, an approved `attest` decision for a `manual:` proof.
 5. When `Graphyard / merge` first appears, add it to branch protection with `strict` off, then `master merge GY-1`; Done means Graphyard observed that authorized merge, not deployment.
 6. Before adding workers, stop one, let its lease expire, reclaim with another identity, confirm the old epoch can no longer heartbeat or submit.

@@ -21,7 +21,7 @@ Register the exact branch and a stable machine ID before submitting the pull req
 - **Paths:** unique per host, historical reservations included; use the assignment epoch in both names.
 - **Normalization:** lexical; aliases through `..`, repeated separators and same-host nested reservations rejected as overlaps.
 - **Undetected:** remote symlinks, and two host IDs naming one machine, so use canonical paths and stable host IDs.
-- **Submitted rework:** `next` includes the item and `worktree` preserves the linked branch; fetch it first in a replacement clone, since Git refuses a branch already checked out.
+- **Submitted rework:** `next` includes the item and `worktree` preserves the linked branch; fetch it first in a replacement clone: Git refuses a branch already checked out.
 - **Registration:** host and path worker-reported, branch matching provider-observed.
 - **Workspace cleanup:** manual, preserving uncommitted work.
 
@@ -46,4 +46,4 @@ The control plane re-checks what it can, never trusting the report for it; all m
 - **Quarantine:** still exists at exactly that epoch and hash, superseded by no later epoch.
 - **Expiry:** the worker lease and launch authority each expired at least 120 seconds ago, measured from the lease deadline the quarantine retains; one recording no deadline refuses.
 - **Verification:** names the host and path registered for that epoch, observed within the last 120 seconds, not dated after the control-plane clock, reporting clock bounds agreeing within five seconds.
-- **Inspection:** Linux process and systemd scope inspection found no surviving process, no containment scope holding processes of the assigned workspace, and no signal it failed to collect.
+- **Inspection:** Linux process and systemd scope inspection found no surviving process, no containment scope holding the assigned workspace's processes, and no signal it failed to collect.

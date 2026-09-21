@@ -36,16 +36,16 @@ One dedicated **CI producer** ([the workflow](../github.md#proofs-in-ci), [provi
 - **`ciRun` binding:** `{ "provider": "github-actions", "repository": "OWNER/REPO", "runId": "RUN", "runAttempt": 1, "jobId": 4242 }` on each record, with `sha`, `baseSha` and `policyRevision` from the item's candidate record.
 - Only the CI producer may, and must, submit a `ciRun` binding: another principal sending one refuses with `403`, the CI producer sending none with `400`.
 - Accepted from it: only `unit:*` and `integration:*` proofs within its live grant; `manual:*` and `e2e:*` refuse with `403` whatever it is granted.
-- Before the transaction the control plane reads the named job back from GitHub through its own App: it must be GitHub Actions' own check run, belong to that workflow run, have run on exactly the evidence `sha`, and have completed with `success` for a `pass`, anything else for a `fail`. A mismatch refuses with `403`, a job GitHub cannot report with `503`.
+- Before the transaction the control plane reads the named job back from GitHub through its own App: it must be GitHub Actions' own check run, belong to that workflow run, have run on exactly the evidence `sha`, and completed with `success` for a `pass`, anything else for a `fail`. A mismatch refuses with `403`, a job GitHub cannot report with `503`.
 - A record for the same proof, head, base and policy revision is accepted only from a strictly newer run attempt; an older one refuses with `409`.
 
 ## Revocation
 
 `POST /api/work/:id/revoke` withdraws accepted evidence with `{proof, sha, baseSha, policyRevision, reason}`.
 
-- **Who:** an `admin`, or the producer whose live grant covers that exact proof name; others are refused.
+- **Who:** an `admin`, or the producer whose live grant covers that exact proof name; others refuse.
 - **No matching trusted record:** refuses with 404.
-- **Scope:** *every* trusted record for that tuple and every record reuse derived from one, so an older accepted run cannot re-authorize the same candidate or a later head.
+- **Scope:** *every* trusted record for that tuple and every record reuse derived from one, so no older accepted run re-authorizes the candidate or a later head.
 - **Records:** annotated, never deleted, each keeping a `revocation` object naming actor, reason and time.
 - **Gate:** the acceptance gate names the withdrawal; reconciliation republishes a refusing check.
 

@@ -44,7 +44,7 @@ Language-model program reading and writing through an agent runtime. "Agent" nam
 
 - ***Reviewer*:** GitHub identity approving the exact candidate head, neither the pull-request author nor the control-plane App, holding no Graphyard credential.
 - ***Proof producer*:** `producer` principal (usually a CI workflow or trusted runner) whose live grant authorizes exact proof names and whose evidence binds to the candidate head, base and policy revision.
-- ***Independent*:** both; never an implementer, a slice lead or the worker's credential.
+- ***Independent*:** both; never an implementer, slice lead or the worker's credential.
 - **Canonical usage:** *reviewer*, *proof producer*; *reviewer/proof producer* only when a sentence covers both.
 - **Never:** *the tester* or *QA*: evidence trust is a granted credential, not a job title.
 

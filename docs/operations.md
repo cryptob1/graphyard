@@ -12,7 +12,7 @@ For the human operator with three minutes: what to check, and what never changes
 
 ## Incident decision tree
 
-- **An item is not moving.** Read the refusal; a gate naming a cause re-evaluates once it is fixed. Never weaken requirements.
+- **An item is not moving.** Read the refusal; a gate naming a cause re-evaluates once fixed. Never weaken requirements.
   - **In `escalations`:** a declared human session runs `graphyard resolve GY-N TRIGGER "reason"`. No AI principal can, except for a `lease-loss` the ledger explains ([who may settle what](delegation.md#who-may-settle-what)).
   - **Lease expired unsubmitted:** [lost worker](#lost-worker-before-submission)
   - **Needs another attempt:** [rework](#rework-a-submitted-implementation)
@@ -23,14 +23,14 @@ For the human operator with three minutes: what to check, and what never changes
 - **Integration jobs fail:** App access, protection and registered branch, then `github-setup --update-permissions`. [Detail](github.md#preflight-and-holds)
 - **Smoke proof failed post-deploy:** stays Done, delivered with failure; roll back or revert through a new item under the same gates. [Detail](deployment.md#after-the-merge)
 - **Main ahead of production, or a capacity variable flagged:** deployment incident named within five minutes while `/healthz` stays green; fix the deployment, never the ledger.
-- **Master loop down:** restart `graphyard master run` freely: the cursor reconciles on start and a second loop refuses while one is alive. [Detail](operations-reference.md#master-coordination-loop)
+- **Master loop down:** restart `graphyard master run` freely: the cursor reconciles on start, a second loop refuses while one is alive. [Detail](operations-reference.md#master-coordination-loop)
 - **Free space low:** lower `run.reclaimIdleHours`, or run `master run --once` ([worktree disk](operations-reference.md#worktree-disk)).
 
 ## Recovery recipes
 
 ### Lost worker before submission
 
-Keep the old worktree: expiry does not prove the process stopped. [Detail](operations-reference.md#lost-worker-before-submission)
+Keep the old worktree. [Detail](operations-reference.md#lost-worker-before-submission)
 
 ### Rework a submitted implementation
 

@@ -29,8 +29,8 @@ Every window, bucket and interval uses the repository instant, older deliveries 
 
 - **`clockOffset`:** each deployment observation's measured bracket relative to the repository clock
 - **Ingestion refuses:** a bracket wider than twenty seconds, an inverted one, or one placing the clocks more than thirty days apart
-- **Post-merge:** a deployment counts when its latest bound reaches the merge instant, which clamps its lower bound, so a duration is never negative, published only to the measurement precision of its endpoints
+- **Post-merge:** a deployment counts when its latest bound reaches the merge instant, which clamps its lower bound, so a duration is never negative, published only to its endpoints' measurement precision
 
 ## Bounds and states
 
-`GET /api/shipping-pulse` is authenticated and not offered to operator agents, whose scoped API serves no repository-wide aggregate and whose navigation hides the entry.
+`GET /api/shipping-pulse` is authenticated and not offered to operator agents: their scoped API serves no repository-wide aggregate, their navigation hides the entry.

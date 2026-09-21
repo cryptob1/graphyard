@@ -44,7 +44,7 @@ Every decision except the three human-only ones is a two-party decision on one w
 
 ## Harness rules per role
 
-- **`master autonomy --apply`:** installs the master's harness rules, which also deny pointing a command at another identity's credential file.
+- **`master autonomy --apply`:** installs the master's harness rules, also denying a command pointed at another identity's credential file.
 - **Dispatch:** installs each worker's rules in its assigned worktree.
 - **Regeneration:** idempotent; existing entries are never removed.
 - **Master may run:** its own CLI subcommands at their absolute path, `herdr`, `jq`, the audited-thread wrapper, plus [everything else it owns](master-agent.md#harness-permissions).
@@ -64,9 +64,9 @@ Every decision except the three human-only ones is a two-party decision on one w
 - **Secret:** random, at least 32 characters, kept in a password manager.
 - **File:** only non-secret configuration: `id`, `displayName`, `capabilities`, `scope`, `reason`. Prefer explicit work IDs over `"*"`.
 - **Set up:** `printf '%s' "$SECRET" | graphyard operator-agent setup operator.json --token-stdin`, then `graphyard operator-agent list`.
-- **Dashboard's Operator automation view:** the redacted identity, fingerprint, capabilities, scopes, revision, revocation state and last mutation; plaintext secrets are never returned or stored.
+- **Dashboard's Operator automation view:** redacted identity, fingerprint, capabilities, scopes, revision, revocation state and last mutation; plaintext secrets are never returned or stored.
 - **`operator-agent configure ID FILE`:** changes scope, requiring `expectedRevision` and complete replacement lists.
-- **`operator-agent rotate ID SECONDS REASON --token-stdin`:** issues a new credential with a bounded overlap (zero for immediate cutover, at most 24 hours), so verify the new fingerprint before it ends.
+- **`operator-agent rotate ID SECONDS REASON --token-stdin`:** issues a new credential with bounded overlap (zero for immediate cutover, at most 24 hours); verify the new fingerprint before it ends.
 - **`operator-agent revoke ID REASON`:** immediate and fail-closed for every active or transitional credential; a revoked identity is retained for audit.
 - **Never** answer a denial by weakening gates.
 
@@ -78,6 +78,6 @@ Every decision except the three human-only ones is a two-party decision on one w
 - **Startup:** fails closed when a repository-bound engine is paired with another repository's adapter.
 - **Expected revisions:** reject stale policy edits.
 - **No lease commands, no evidence authority:** a `manual:` attestation needs an approved `attest` decision.
-- **[Conflicted approver](#two-party-decisions):** refused and recorded by the server; hence each approver runs in its own session.
+- **[Conflicted approver](#two-party-decisions):** refused and recorded by the server.
 - **Secrets:** travel on stdin; responses and events carry fingerprints only.
 - **Revoking the identity:** returns coordination to the human operator.

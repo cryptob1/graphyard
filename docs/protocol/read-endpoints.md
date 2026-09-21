@@ -7,7 +7,7 @@ For a client reading Graphyard, and what bounds each read.
 - `GET /api/status`: Current principal, integration configuration, the App permission preflight (`appPermissions`), `heldJobs`, failed jobs, `delegationLimits`, `production`, server time
 - `GET /api/work-snapshot`: Work (with each item's `autoDispatch` requests), integration job metadata and database time from one Postgres statement snapshot, as `{ work, now }` ordered by work number; `?view=coordination`: the bounded view the master loop and dispatcher poll
 - `GET /api/work`: Work aggregates, in creation order
-- `GET /api/events?work=UUID`: Event rows for one item, newest first; omit `work` for the whole ledger; see [an item's history](#reading-an-items-history)
+- `GET /api/events?work=UUID`: Event rows for one item, newest first; see [an item's history](#reading-an-items-history)
 - `GET /api/analytics/flow[/drilldown|/export]`, `GET /api/analytics/attribution[/drilldown]`, `GET /api/deployments`: [Flow analytics](../flow-analytics.md#privacy-boundary-and-api), with their query parameters and audit-role rule
 - `GET /api/attribution/manifest/RELEASE_ID/REVISION`: A release manifest with its `hash`, `digestHash` and membership
 - `GET /api/attribution/work/UUID`: One item's attribution ledger, newest last, at most 200 rows; a worker reads only its own assignment; identifiers follow the same audit-role rule
@@ -36,7 +36,7 @@ For a client reading Graphyard, and what bounds each read.
 
 ## Bounds
 
-- **Attribution endpoints:** reads only — the ledger is written by validation and observation ingest inside their transactions, so no credential moves a request, attempt, result or evidence record through them, and a `POST` to one is not found
+- **Attribution endpoints:** reads only: validation and observation ingest write the ledger inside their transactions, so no credential moves a request, attempt, result or evidence record through them, and a `POST` to one is not found
 - **Flow analytics:** bounded in window, work items, records scanned, buckets, drill-down rows and payload size; reports when a bound was reached; not offered to operator agents
 - **Paged reads:** `GET /api/validation[/definitions|/reuse|/replays]?cursor=C` and `GET /api/delivery/observations?cursor=C` take the previous response's `nextCursor`, null when finished
 - **`GET /api/work`:** unpaginated and not an analytics export

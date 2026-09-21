@@ -15,11 +15,11 @@ Graphyard discovers supported repository and deployment infrastructure, proposes
 
 | Increment | Outcome | Status |
 | --- | --- | --- |
-| D1 | Immutable candidates, environments and the runner protocol | Shipped — [validation](validation.md) |
-| D2 | One supported runner from guided setup to trusted results | Shipped — [runner setup](runner-setup.md) |
-| D3 | Deployment observations, release membership and production verification | Shipped as the model and protocol — [delivery](delivery.md); no provider adapter |
-| D4 | Capacity, recovery, artifact operations and safe rollback | Shipped — [recovery](recovery.md) |
-| D5 | Additional runner and report adapters, and off-the-shelf packaging | Shipped in part — [report adapters](report-adapters.md), [deployment](deployment.md); deployment-provider adapters are excluded, so production verification stays a manual proof |
-| D6 | Evidence replay, safe reuse and cost analytics | Shipped — [evidence reuse](evidence-reuse.md) |
+| D1 | Immutable candidates, environments and the runner protocol | Shipped: [validation](validation.md) |
+| D2 | One supported runner from guided setup to trusted results | Shipped: [runner setup](runner-setup.md) |
+| D3 | Deployment observations, release membership and production verification | Shipped as the model and protocol: [delivery](delivery.md); no provider adapter |
+| D4 | Capacity, recovery, artifact operations and safe rollback | Shipped: [recovery](recovery.md) |
+| D5 | Additional runner and report adapters, and off-the-shelf packaging | Shipped in part: [report adapters](report-adapters.md), [deployment](deployment.md); deployment-provider adapters are excluded, so production verification stays a manual proof |
+| D6 | Evidence replay, safe reuse and cost analytics | Shipped: [evidence reuse](evidence-reuse.md) |
 
 No increment is shipped until the invariants its page states hold.

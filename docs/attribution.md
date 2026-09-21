@@ -36,7 +36,7 @@ Enforcement:
 
 ### Whole-run coverage
 
-Coverage requires measurements bracketing the whole execution interval with no gap longer than `maxGapMs`, so an A → B → A rollout inside it is observed or left uncovered. Only that interval is judged, bounded by the nearest measurement at or before the start and at or after the finish: a later rollout never invalidates the run, an earlier measurement never covers it.
+Coverage requires measurements bracketing the whole execution interval with no gap over `maxGapMs`, so an A → B → A rollout inside it is observed or left uncovered. Only that interval is judged, bounded by the nearest measurement at or before the start and at or after the finish: a later rollout never invalidates the run, an earlier measurement never covers it.
 
 | Situation | Attribution | Outcome |
 | --- | --- | --- |
@@ -57,7 +57,7 @@ A candidate's **compatibility signature** content-addresses everything a pass de
 A target *moves* when the latest authoritative observation measures a manifest other than the candidate's.
 
 1. The existing request is superseded in place: state `superseded`, attempt history intact, attribution untouched, a run it would have started recorded avoided.
-2. Graphyard decides whether the observed target **contains the intended change**, from trusted records only: a builder's attestation for this item and environment, or a release of this environment, whose manifest is the observed one and whose source is the current candidate. Another environment's records say nothing here.
+2. Graphyard decides whether the observed target **contains the intended change**, from trusted records only: a builder's attestation for this item and environment, or a release of this environment, whose manifest is the observed one and whose source is the current candidate.
 3. If so, one transaction creates a fresh candidate and request, each carrying `reanchoredFrom` and keeping the runner, collector, deadline and budget; fresh execution is required.
 4. Otherwise the binding stays visibly **blocked** with its reasons, retried on the next observation, per reason:
    - **Observations disagree:** wait for the observers to converge, or correct the wrong one

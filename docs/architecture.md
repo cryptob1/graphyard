@@ -22,7 +22,7 @@ Text equivalent: agent sessions, the dashboard and a proof producer reach the **
 ## Transactions, assignments and evidence
 
 - **One Postgres advisory lock:** taken by every short domain mutation, serializing cross-item decisions (dependency readiness and workspace reservations included) across replicas; remote calls never hold it.
-- **Requirements and dependency edges:** revisable with an expected policy revision and audit reason, refusing active ownership and cycles, preserving history, retiring removed criterion IDs and invalidating old acceptance and review authorization.
+- **Requirements and dependency edges:** revisable by [audited revision](coordination.md#revise-requirements-explicitly), refusing active ownership and cycles.
 - **Unsupported:** editing stored JSON directly.
 
 ## Reconciliation

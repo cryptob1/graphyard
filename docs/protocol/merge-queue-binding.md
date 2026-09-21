@@ -10,7 +10,7 @@ Every observation reads the managed branch from `refs/heads/<base>`, recording:
 - `observation.baseTip`: Branch head sha. Never the pull request's cached `base.sha`.
 - `observation.baseTree`: That commit's tree.
 - `observation.baseTipContained`: Head contains `baseTip`: by ancestry, or as a published queue tip whose bound base is tree-identical to it or which sits behind other queue entries.
-- `candidate.baseSha`: Bound base: predicted base of a published speculative tip for this head under this policy revision; otherwise the base the head was already bound to while behind `baseTip` and the branch still contains that commit ([base refresh](#base-refresh)); otherwise `baseTip`.
+- `candidate.baseSha`: Bound base: predicted base of a published speculative tip for this head under this policy revision; otherwise the base the head was bound to while behind `baseTip` and the branch still contains that commit ([base refresh](#base-refresh)); otherwise `baseTip`.
 
 Review is requested only while `baseTipContained` is not `false`:
 
@@ -18,7 +18,7 @@ Review is requested only while `baseTipContained` is not `false`:
 - **`codex` and `agent` dispatchers:** defer.
 - **`diagnose`:** `base-behind`.
 
-A wait of seconds: the control plane republishes the head, and the request goes to the republished one.
+A wait of seconds: the control plane republishes the head, and the request goes to that one.
 
 ## Base refresh
 
@@ -35,11 +35,11 @@ The record gains `baseRefresh`:
 - `conflict`: Why the merge failed, named for the worker; `null` on success.
 - `merge`: GitHub's account of the commit, as `queue.speculation.merge` below. `carry`: carry decision, by the rule below, base branch as predecessor.
 
-Required CI checks never carry, here or anywhere: they run on the republished head, a different tree.
+Required CI checks never carry anywhere: they run on the republished head, a different tree.
 
 - **Ledger:** `base.refreshed` or `base.conflict` with carry summary, `base.carry` with the full decision.
 - **`master run`:** `refresh` action per head and base tip.
-- **Conflict:** writes nothing (no commit, no ref, no carried binding). The build gate names it, the item returns to `build`, and the released hold invalidates approval and every proof: a resolution is content nobody reviewed.
+- **Conflict:** writes nothing (no commit, no ref, no carried binding). The build gate names it, the item returns to `build`, and the released hold invalidates approval and every proof: a resolution is unreviewed content.
 
 ## Evidence `scopeFiles`
 
@@ -60,7 +60,7 @@ When the entry ahead merges, the base branch becomes a merge commit whose tree e
 
 ## Carry across a Graphyard-authored tip
 
-Publishing a tip for an entry not already on its predicted base merges that base into the pull request branch; the same rule decides a base refresh, with base branch as predecessor (`predecessor: "base branch"`, always validated) and `baseChanges` taken between the head's bound base and the branch tip. The speculation records `merge`:
+Publishing a tip for an entry not on its predicted base merges that base into the pull request branch; the same rule decides a base refresh, with base branch as predecessor (`predecessor: "base branch"`, always validated) and `baseChanges` taken between the head's bound base and the branch tip. The speculation records `merge`:
 
 - `from`: Replaced head.
 - `parents`, `author`, `authoredByApp`: GitHub's account of the tip.
@@ -75,7 +75,7 @@ Binding the tip decides once and records `queue.speculation.carry`:
 - `approval`: `carried: true` with `provider`, `reviewer`, `reviewId`, `reviewerApp`, `originalSha` and the reason, or `carried: false` with the reason.
 - `evidence[]`: Per required proof: `carried`, the `evidenceId` and `producer` it names, the reason.
 
-Nothing carries unless the tip is a two-parent merge of exactly `from.sha` and `to.baseSha`, authored by the control-plane App through the conflict-free merge, over a predecessor whose own gates all pass on that tip, with a complete change list. Within that:
+Nothing carries unless the tip is a two-parent merge of exactly `from.sha` and `to.baseSha`, authored by the control-plane App through the conflict-free merge, over a predecessor whose gates all pass on that tip, with a complete change list. Within that:
 
 - **Approval:** carries when no reviewed file changed.
 - **Proof:** carries when its declared scope is disjoint from the change.

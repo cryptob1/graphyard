@@ -5,13 +5,13 @@ For a newcomer: how work reaches a verified merge, and who may move it.
 
 ## One trip from setup to Done
 
-The operator connects the repository, GitHub enforcement, one principal per session and the trusted proof producers; the working rules go in `AGENTS.md` ([onboarding](onboarding.md)). Each item is created with an outcome, dependencies, planned files and acceptance criteria naming its proofs, then passes six gates in order, each a deterministic evaluation it cannot skip:
+The operator connects the repository, GitHub enforcement, one principal per session and the trusted proof producers; working rules go in `AGENTS.md` ([onboarding](onboarding.md)). Each item is created with an outcome, dependencies, planned files and acceptance criteria naming its proofs, then passes six gates in order, each a deterministic evaluation it cannot skip:
 
-1. **`ready`:** the item is released and unblocked and its dependencies are finished
+1. **`ready`:** the item is released and unblocked, its dependencies finished
 2. **`build`:** one worker principal claimed it at a new lease epoch, in a registered worktree, and submitted an exact commit
 3. **`review`:** an independent reviewer approved that exact head
 4. **`test`:** Graphyard observed the required CI checks on GitHub, never taking them on report
-5. **`acceptance`:** trusted evidence binds that head, base and policy revision, so a new commit or revision makes an old pass insufficient
+5. **`acceptance`:** trusted evidence binds that head, base and policy revision; a new commit or revision makes an old pass insufficient
 6. **`merge`:** the guarded merge rechecks everything immediately before the GitHub call
 
 Only an independently observed authorized merge marks the item **Done**; history keeps the assignment, evidence, decisions and delivered commit.
@@ -63,7 +63,7 @@ Neither answers the other's ([the eight distinctions](glossary.md#the-eight-dist
 ## When a gate says no
 
 1. Read the refusal on the work item.
-2. Fix the underlying cause: an unfinished dependency, an expired lease, a changed commit, a missing review, a failed check or missing proof.
+2. Fix the cause: an unfinished dependency, expired lease, changed commit, missing review, failed check or missing proof.
 3. Let the same gate evaluate again.
 
 Requirements are never weakened to make a candidate pass. Deeper: [operations](operations.md) recipes, [coordination](coordination.md), [GitHub enforcement](github.md), [agent protocol](protocol.md) commands.

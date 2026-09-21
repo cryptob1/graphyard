@@ -4,7 +4,7 @@
 For an integration author: every mutation a principal may send, with its JSON body.
 
 - **Notation:** `METHOD /path`; `:id` or an upper-case word is a placeholder, `(a|b)` alternatives, `[…]` optional
-- `POST /api/work`: Create from [examples/work.json](../../examples/work.json) — `title` and nonempty `criteria`, each with a unique `AC-N` ID, text and at least one proof; policy defaults to checks `test` and `typecheck` plus independent review; dependencies are existing UUIDs
+- `POST /api/work`: Create from [examples/work.json](../../examples/work.json): `title` and nonempty `criteria`, each with a unique `AC-N` ID, text and at least one proof; policy defaults to checks `test` and `typecheck` plus independent review; dependencies are existing UUIDs
 - `POST /api/work/:id/COMMAND`: Every command below; `:id` is the UUID or display key
 
 ## Commands
@@ -22,7 +22,7 @@ For an integration author: every mutation a principal may send, with its JSON bo
 - `workspace`: `{"epoch":1,"host":"build-machine-a","path":"/work/GY-1","branch":"graphyard/gy-1-1"}`
 - `scope` (`scope-request`): `{"epoch":1,"paths":[…],"reason":"…"}` records the worker's [scope request](../coordination.md#schedule-by-overlap-smallest-scope-first), empty `paths` withdrawing it; one carrying `remove` or `criteria` is refused and escalated
 - `autoscope`: `{"epoch":1}`; `coordinator` or `admin`; the control plane [decides the open request](../master-agent.md#scope-requests-the-loop-decides)
-- `quarantine`, `launch`, `settle`: `{epoch, settlementHash, scope?}`, `{epoch, settlementHash}` and `{epoch, settlementToken}` — the supervisor's [containment fence](leases.md)
+- `quarantine`, `launch`, `settle`: `{epoch, settlementHash, scope?}`, `{epoch, settlementHash}` and `{epoch, settlementToken}`: the supervisor's [containment fence](leases.md)
 - `submit`: `{"epoch":1,"pr":123}`; refused, naming the files, when the pull request reverts, deletes or rewrites anything outside `plannedFiles` ([guard](#submit-time-regression-guard))
 - `evidence`, `revoke`: See [evidence and proof authority](evidence.md)
 - `reviewpolicy`, `rereview`: See [review providers](github-webhook.md)
@@ -31,8 +31,8 @@ For an integration author: every mutation a principal may send, with its JSON bo
 ## Submit-time regression guard
 
 - **Observed before `submit` is recorded:** the pull request, through the control plane's App, outside the coordination transaction
-- **Classified:** every changed file against `plannedFiles` ([the rule](../coordination.md#refuse-candidates-that-revert-shipped-code-outside-their-scope)), each out-of-scope file compared by blob identity with the commit the candidate is bound to — the base-branch tip, or the predicted base of a published speculative tip
-- **Refusal:** `409` with `Submission refused for GY-N: DETAIL`, one entry per file; it writes nothing and leaves no receipt, so the same idempotency key may retry once the branch is fixed
+- **Classified:** every changed file against `plannedFiles` ([the rule](../coordination.md#refuse-candidates-that-revert-shipped-code-outside-their-scope)), each out-of-scope file compared by blob identity with the commit the candidate is bound to: the base-branch tip, or a published speculative tip's predicted base
+- **Refusal:** `409` with `Submission refused for GY-N: DETAIL`, one entry per file; writes nothing, leaves no receipt: the same idempotency key may retry once the branch is fixed
 - **Branch:** the observed head branch must be the epoch's registered workspace branch
 - **Without GitHub configured:** no pre-check runs; the reconciliation job still evaluates the candidate
 
@@ -58,12 +58,12 @@ Each `POST` but the webhook requires an [`Idempotency-Key`](roles.md#requests-an
 - `POST /api/validation/(define|build|candidate|request|dispatch|ack|heartbeat|collection-authority|collection-heartbeat|result|cancel|settle|retry)`: The [validation path](../validation.md)
 - `POST /api/validation/(replay|reuse|artifacts|artifacts/migrate)`, `GET /api/validation/(replays|reuse|analytics|artifacts/REQUEST_ID/NAME)`: [Replay and reuse](../evidence-reuse.md), [artifacts](../recovery.md); `?preview=1` serves a PNG, JSON or plain-text artifact up to 1 MB inline
 - `POST /api/proof-grants/:id/(grant|revoke)`: [Proof authority](evidence.md)
-- `GET|POST /api/operator-agents`, `POST /api/operator-agents/:id/(configure|rotate|revoke)`, `GET /api/principals`: [Operator agents](../operator-automation.md); the credential-free roster is for `admin`, `coordinator` and operator agents
+- `GET|POST /api/operator-agents`, `POST /api/operator-agents/:id/(configure|rotate|revoke)`, `GET /api/principals`: [Operator agents](../operator-automation.md); the credential-free roster for `admin`, `coordinator` and operator agents
 - `POST /api/github/webhook`: [HMAC-verified](github-webhook.md), no bearer token
 
 ## CLI environment
 
 - `GRAPHYARD_URL`, `GRAPHYARD_TOKEN` or the file `GRAPHYARD_TOKEN_FILE` names: override the saved connection
-- `GRAPHYARD_REQUEST_ID`: the command's `Idempotency-Key`, otherwise generated; set it only to retry the exact same command after a network failure. Heartbeats, automatic ones included, and new polling attempts always use fresh keys
+- `GRAPHYARD_REQUEST_ID`: the command's `Idempotency-Key`, otherwise generated; set it only to retry the same command after a network failure. Heartbeats, automatic ones included, and new polling attempts always use fresh keys
 - `GRAPHYARD_HOST_ID`: for hostnames not globally unique; default the connection's `--host-id`, then the hostname
 - **Session markers, set by launchers only:** `GRAPHYARD_MASTER=1` (`master approve` refuses under it), `GRAPHYARD_APPROVER=1`, `GRAPHYARD_REVIEW` and `GRAPHYARD_PRODUCER` (the `GY-N@SHA` answered), `GRAPHYARD_HERDR_AGENT_KIND` (with `HERDR_ENV=1`, `watch` launches contained in the foreground); worker launches strip `GRAPHYARD_TOKEN`, `GRAPHYARD_MASTER_TOKEN` and `GRAPHYARD_REQUEST_ID`

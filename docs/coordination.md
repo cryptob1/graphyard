@@ -44,7 +44,7 @@ graphyard master approver GY-N DECISION                            # the indepen
 - **Concurrent edits:** compare `expectedPolicyRevision`.
 - **Append-only history:** every revision records the actor, reason, complete requirements and new policy revision.
 - **First:** stop the worker and release its lease.
-- **Rewrite:** raises the `requirement-weakening` escalation; workers cannot weaken their own gates.
+- **Rewrite:** raises the `requirement-weakening` escalation.
 - **Invalidated:** review requests, observations and merge authorization; previous acceptance evidence stays in history, inapplicable; submitted work needs a new attempt and resubmission.
 - **Merging:** suspend until the refusing check shows; delivered work needs a follow-up item.
 - **Withdraw accepted runs without changing requirements:** [revoke that evidence](operations-reference.md#accepted-evidence-turns-out-to-be-wrong).
@@ -83,12 +83,12 @@ graphyard master approver GY-N DECISION                            # the indepen
 `plannedFiles` also bounds what a candidate may change.
 
 - **Classified against `plannedFiles`:** every changed file; changes inside scope pass, as do new files nobody has shipped.
-- **Every other file:** compared by blob identity with the commit the candidate is bound to; a byte-for-byte match passes; a deletion, revert, rewrite, rename away from a shipped path, differing binary or uncomparable file is refused.
+- **Every other file:** compared by blob identity with the candidate's bound commit; a byte-for-byte match passes; a deletion, revert, rewrite, rename away from a shipped path, differing binary or uncomparable file is refused.
 - **`complete`:** refuses with the exact file list and the delivered items whose scope shipped each path, recording nothing.
 - **Reconciliation:** re-derives the same refusal for the current head into the `build` gate, the required check, `diagnose` and the work detail.
 - **`graphyard sync GY-N`** (the worker's half): `git fetch origin && git merge origin/BASE`, regenerating the generated files, committing, then classifying the local diff with the same rules and exiting non-zero before any push.
 - **Conflicting merge:** stops with the remaining conflicted paths, each naming the shipped items landing it; resolve, stage and rerun `sync`, restoring a file with `git checkout BASE_TIP -- PATH`.
-- **Requirements set scope, not the worker:** `workspace`, `submit` and `evidence` never accept `plannedFiles`, and only an audited [`requirements` revision](#revise-requirements-explicitly) or an approved scope request changes it.
+- **Requirements set scope, not the worker:** `workspace`, `submit` and `evidence` never accept `plannedFiles`; only an audited [`requirements` revision](#revise-requirements-explicitly) or an approved scope request changes it.
 
 ### Generated files never conflict
 
@@ -96,15 +96,15 @@ graphyard master approver GY-N DECISION                            # the indepen
 - **`npm run docs:check -- --write`:** renders the indexes in full from each page's `<!-- page: Section | order | summary -->` line.
 - **`docs:check`:** fails CI when one is stale.
 - **`--manifest`:** prints their paths, telling `sync` what to regenerate.
-- **`graphyard init` and `master init`:** render the `AGENTS.md` blocks; a test fails while the committed file differs from the templates.
+- **`graphyard init` and `master init`:** render the `AGENTS.md` blocks from templates; a test fails while the committed file differs.
 - **Regression guard:** classifies a generated file as `generated`, not an out-of-scope rewrite, learning the set from `GRAPHYARD_GENERATED_FILES`, here `GRAPHYARD_GENERATED_FILES=docs/protocol.md,docs/README.md`.
-- **Unset:** nothing is exempt; deleting a generated file is still a refused deletion.
+- **Unset:** nothing is exempt; deleting a generated file is still refused.
 
 ## Ship in under thirty minutes
 
 The [routine-item target](master-agent.md#pipeline-speed) rests on five mechanisms, none weakening a review, evidence, identity, lease or protection rule:
 
-1. [The regression guard and `sync`](#refuse-candidates-that-revert-shipped-code-outside-their-scope), removing the commonest rework round
+1. [The regression guard and `sync`](#refuse-candidates-that-revert-shipped-code-outside-their-scope)
 2. [Automatic dispatch at submit](master-agent.md#automatic-dispatch-at-submit)
 3. [Proofs in CI](github.md#proofs-in-ci)
 4. [Conflict avoidance](#schedule-by-overlap-smallest-scope-first)
@@ -113,6 +113,6 @@ The [routine-item target](master-agent.md#pipeline-speed) rests on five mechanis
 ## Explain stalls and drill the recovery
 
 - **`graphyard diagnose GY-N` and the work-detail Coordination section:** explain dependencies, blockers, missing ownership or workspace, busy resources, unobserved or stale pull requests, integration failures, overdue unowned jobs, violations and the first refusing gate, including an out-of-scope regression with its file list. Evidence, not a lifecycle-state setter.
-- **`base-behind`:** a submitted head not containing the base tip; waits on Graphyard's [base refresh](protocol/merge-queue-binding.md#base-refresh) rather than a person; never an attention item.
+- **`base-behind`:** a submitted head not containing the base tip; waits on Graphyard's [base refresh](protocol/merge-queue-binding.md#base-refresh) not a person; never an attention item.
 - **`base-conflict`, `base-refresh-carried` and `base-refresh-required`:** what that refresh could not absorb and what it kept.
 - **`queue-binding-carried`, `queue-binding-required` and `queue-base-carried`:** reported by a queued candidate, per binding.

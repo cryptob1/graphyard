@@ -27,16 +27,16 @@ Run **Open Graphyard control plane** from Herdr.
 
 All machines use the same Graphyard URL.
 
-- **Each worker:** unique principal and token, stable host ID, own worktree, and a GitHub identity that cannot merge the protected base branch
+- **Each worker:** unique principal and token, stable host ID, own worktree, a GitHub identity that cannot merge the protected base branch
 - **No SSH access or mounted worker filesystem:** Graphyard records workspace reservations and verifies the pull-request branch through GitHub
 - **Optional `displayName` and `runtime` fields in `GRAPHYARD_PRINCIPALS`:** only control labels such as **Atlas · Codex**; the authenticated principal determines ownership; renaming affects future claims without rewriting history
 
 ## Automated recovery contract
 
-`integration:herdr-recovery` is the trusted contract behind those steps, run from protected source against a candidate container holding no producer credential, driving only the public HTTP API with two worker principals, two host IDs and two non-overlapping worktree reservations. Cases:
+`integration:herdr-recovery` is the trusted contract, run from protected source against a candidate container holding no producer credential, driving only the public HTTP API with two worker principals, two host IDs and two non-overlapping worktree reservations. Cases:
 
 - **`exclusive-claim`:** sixteen concurrent claims from two machines produce one lease and one claim event
 - **`expiry-recovery`:** lease expires without a heartbeat, the stopped machine cannot renew it, the second claims the next epoch
 - **`stale-owner-refused`:** heartbeat, release, workspace, submit, blocked, quarantine, launch, rereview and a fresh claim all refuse for the superseded owner
 - **`isolated-worktrees`:** replacement cannot reserve the stopped machine's branch or an overlapping path, registers its own; the earlier reservation is retained
-- **`supervised-fence-recovery`:** supervised worker that quarantined containment and stopped without settling keeps the item fenced — rework refused, launch authority held — until both fences expire
+- **`supervised-fence-recovery`:** supervised worker that quarantined containment and stopped without settling keeps the item fenced (rework refused, launch authority held) until both fences expire

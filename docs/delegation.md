@@ -3,11 +3,11 @@
 
 For an installation past one coordinator: what a lead rules on, and who settles escalations.
 
-Delivery scales through three formal slices — **product**, **infrastructure** and **docs/experience** (`docs-experience` in API data), each led by a dedicated AI coordinator session with its own `slice-lead` principal.
+Delivery scales through three formal slices: **product**, **infrastructure** and **docs/experience** (`docs-experience` in API data), each led by a dedicated AI coordinator session with its own `slice-lead` principal.
 
 ## Authority boundaries
 
-- **A lead coordinates workers in its own slice:** approve or reject plans, classify failures, request reruns, send work back, escalate.
+- **A lead coordinates workers in its slice:** approve or reject plans, classify failures, request reruns, send work back, escalate.
 - **Every ruling:** append-only, carrying a versioned written rule ID and a reason, written with an `Idempotency-Key`.
 - **A lead cannot:** implement, claim or renew a lease, submit evidence, review its own slice, change requirements or evidence definitions, bypass a gate, acquire merge execution or merge.
 - **Lifecycle mutations from a `slice-lead` credential:** refused and recorded as `lead.action.refused`.
@@ -28,7 +28,7 @@ Delivery scales through three formal slices — **product**, **infrastructure** 
 ## Independent proof producers
 
 - **Trusted evidence:** must come from a `producer` independent of the implementation and the lead, bound to the exact head, base and policy revision.
-- **Refused, recording `evidence.producer.refused`:** a submitter that has ever held an assignment on that item, holds `slice-lead` authority for any slice, or is a producer bound to the item's own slice.
+- **Refused, recording `evidence.producer.refused`:** a submitter that has ever held an assignment on that item, holds `slice-lead` authority for any slice, or is a producer bound to the item's slice.
 
 ## Escalation
 
@@ -36,7 +36,7 @@ Four triggers raise an automatic, append-only escalation:
 
 | Trigger | Raised when |
 | --- | --- |
-| `lease-loss` | A worker lease lapses on an epoch with no submission, no carried `blocked` report and no stopped-worker attestation: a worker that silently vanished. A lapse the ledger explains is a `lease.expired` history entry with its [cause](protocol/leases.md#lease-end-and-its-cause) — `submitted`, `blocked-awaiting-operator` or `stopped-by-attestation` — and raises nothing |
+| `lease-loss` | A worker lease lapses on an epoch with no submission, no carried `blocked` report and no stopped-worker attestation: a worker that silently vanished. A lapse the ledger explains is a `lease.expired` history entry with its [cause](protocol/leases.md#lease-end-and-its-cause) (`submitted`, `blocked-awaiting-operator` or `stopped-by-attestation`) and raises nothing |
 | `evidence-policy-conflict` | Trusted evidence arrives for a policy revision other than the item's current one |
 | `security-concern` | A lead's `escalate` ruling names this trigger |
 | `requirement-weakening` | A requirement revision retires a criterion or narrows an existing criterion's required proofs |
@@ -44,7 +44,7 @@ Four triggers raise an automatic, append-only escalation:
 ### Who may settle what
 
 - **`lease-loss` raised by the control plane for an epoch whose lapse the ledger explains:** Reconciliation, automatically; or any `admin` principal, whatever its declared session kind, with `resolve GY-N lease-loss --attestation blocked|stopped-worker "reason"`. The server verifies the citation against the ledger for that exact epoch, refusing `The ledger holds no KIND attestation for epoch N` otherwise. A declared human session may also resolve it
-- **`lease-loss` raised by the control plane for a lapse nothing explains:** A declared human session only; a citation the ledger does not hold is refused, and nothing settles it automatically
+- **`lease-loss` raised by the control plane for a lapse nothing explains:** A declared human session only; a citation the ledger does not hold is refused, nothing settles it automatically
 - **`security-concern`, `requirement-weakening`, `evidence-policy-conflict`, and any `lease-loss` a lead raised:** A declared human session only: an `admin` declaring `sessionKind: "ai"` or nothing is refused with `Escalation resolution requires a declared human session; PRINCIPAL is ai`, and a citation with `Only a lease-loss raised by the control plane is settled by citing an attestation`
 
 Every settlement is append-only history:
