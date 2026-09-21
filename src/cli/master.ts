@@ -9,7 +9,7 @@ import { agentToken, approvedMerges, assertMasterBinding, autonomySubcommands, c
 import { cliCommit } from '../protocol-version.js';
 import { daemonEffects, readDaemonState, runDaemon } from '../master-daemon.js';
 import { verificationEffects, verifyDeployment } from '../master-verification.js';
-import { bindReviewer, launchReview, removeReviewerProfile, reviewerCredentialDirectory, saveReviewerProfile, verifyReviewerInstallation } from '../reviewer.js';
+import { bindReviewer, removeReviewerProfile, reviewCommand, reviewerCredentialDirectory, saveReviewerProfile, verifyReviewerInstallation } from '../reviewer.js';
 import { dispatchEffects, dispatchReadTimeoutMs, readDispatchCursor, runAutoDispatch } from '../auto-dispatch.js';
 import { applyProtection, protectionPlan, readProtection } from '../protection.js';
 import { writeHarnessPermissions } from '../harness.js';
@@ -36,8 +36,9 @@ export const masterCommands = defineCommands([
       '  master reviewer bind FILE --key-stdin   Bind an existing reviewer App (IDs in FILE, PEM on stdin)',
       '  master reviewer add FILE | remove NAME   Add or remove a reviewer launch profile',
       '  master producer add FILE | replace FILE | remove NAME  Manage proof-producer profiles',
-      '  master review GY-N [PROFILE]  Launch the bound reviewer on the exact current candidate;',
-      '                                master run does this on its own for every submitted head',
+      '  master review GY-N [PROFILE]  Launch the bound reviewer on the exact current candidate as the',
+      '                                open request\'s next attempt; master run does this on its own,',
+      '                                so it is the recovery path for a request nothing else answers',
       '  master protection [--apply]   Reconcile branch protection with every open review policy',
       '  master browser FLOW [--dry-run]',
       "                                Perform GitHub administration through the operator's browser",
@@ -145,13 +146,7 @@ export const masterCommands = defineCommands([
         }
         throw new Error('Use master reviewer setup, master reviewer bind FILE --key-stdin, or master reviewer add FILE');
       }
-      if (id === 'review') {
-        if (!args[0]) throw new Error('Use master review GY-N [PROFILE]');
-        const snapshot = await masterApi('work-snapshot');
-        const work = snapshot.work.find((item: any) => item.id === args[0] || item.key === args[0]);
-        if (!work) throw new Error(`Unknown work item ${args[0]}`);
-        return print(await launchReview(root, work, args[1], listHerdrAgents(), snapshot.now));
-      }
+      if (id === 'review') return print(await reviewCommand(root, args, await masterApi('work-snapshot'), listHerdrAgents()));
       if (id === 'protection') {
         const { values } = parseArgs({ args, options: { apply: { type: 'boolean' } }, allowPositionals: false });
         const snapshot = await masterApi('work-snapshot');
