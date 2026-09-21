@@ -195,11 +195,39 @@ export function latestCheck(checks: Observation['checks']): Observation['checks'
 }
 
 /**
+ * The violation an observed, unauthorized merge records when a two-party reconciliation of it was
+ * refused; the engine writes it as `<prefix><decision id> refused: <reasons>`. Read here because
+ * that refusal is the one exit a merged queue entry has (GY-94), and by master status.
+ */
+export const reconciliationRefusalPrefix = 'Reconciliation by decision ';
+export function refusedReconciliation(work: Pick<Work, 'violations'>): { decision: string; violation: string } | null {
+  const violation = work.violations.find(entry => entry.startsWith(reconciliationRefusalPrefix));
+  return violation ? { decision: violation.slice(reconciliationRefusalPrefix.length).split(' ')[0], violation } : null;
+}
+/**
+ * A queue entry whose pull request GitHub already merged while no execution authorized it can
+ * never publish a speculative tip: the branch is closed, `bindSpeculativeTip` refuses a merged
+ * candidate, and every entry behind it waits for a tip that will never come. It is not a
+ * validation failure, so it never ejects on its own; it leaves when the item is delivered, or
+ * when the two-party merge decision that could have reconciled it is refused — the recorded
+ * refusal is the exit, and it delivers nothing.
+ */
+export function unpublishableEntry(work: Work): { sequence: number; mergeSha: string | null; refusal: { decision: string; violation: string } | null } | null {
+  if (!work.queue || work.stage === 'done' || !work.observation?.merged) return null;
+  return { sequence: work.queue.sequence, mergeSha: work.observation.mergeSha ?? null, refusal: refusedReconciliation(work) };
+}
+/**
  * Explicit, observed failure of a queued entry's speculative validation. Missing or pending
  * inputs keep an entry queued; only a reported adverse result removes it.
  */
 export function ejectionReason(work: Work, ciAppIds: number[]): string | null {
-  if (!work.queue || work.stage === 'done' || work.observation?.merged) return null;
+  if (!work.queue || work.stage === 'done') return null;
+  // A merged entry waits for its reconciliation, which delivers it and drops it from the order.
+  // A refused reconciliation is a reported adverse conclusion about the entry itself (GY-94).
+  if (work.observation?.merged) {
+    const refusal = refusedReconciliation(work);
+    return refusal ? `Pull request was merged without a valid merge execution and can never publish a speculative tip; reconciliation by decision ${refusal.decision} was refused, so the entry leaves the queue undelivered` : null;
+  }
   if (!work.submission || work.reworkRequested) return 'Implementation returned to the worker for a new attempt';
   if (work.policyRevision !== work.queue.policyRevision) return `Policy revision changed from ${work.queue.policyRevision} to ${work.policyRevision} after this entry was queued`;
   if (work.blocker) return `Queued work was blocked: ${work.blocker}`;
