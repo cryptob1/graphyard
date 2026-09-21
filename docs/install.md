@@ -18,7 +18,10 @@ Exactly four things, and nothing else:
 
 1. **Which provider**, supplied in the instruction — and, on a Railway account that belongs
    to several workspaces, which workspace (`--workspace`); the plan lists them.
-2. **Provider login**, once, in a terminal (`railway login`, `hcloud context create`, an SSH key, or a local Docker daemon).
+2. **Provider login** with an account they own, once, in a terminal (`railway login`,
+   `hcloud context create`, an SSH key, or a local Docker daemon). The account is what the
+   compute is billed to; the CLI that talks to it is not — every provider row below gives the
+   command that installs it, and the preflight prints that command when one is missing.
 3. **The GitHub App confirmation click**, once, in a browser page the installer opens.
 4. **Approval of the printed plan**, before anything is applied.
 
@@ -66,12 +69,17 @@ export GRAPHYARD_CLI=/absolute/path/to/graphyard/bin/graphyard.mjs
 
 ### Providers
 
-| Provider | Check | Login | Notes |
-| --- | --- | --- | --- |
-| `railway` | `railway whoami` | `railway login` | Managed Postgres, managed TLS domain. An account in more than one workspace passes `--workspace NAME-OR-ID` |
-| `hetzner` | `hcloud context active` | `hcloud context create graphyard` | Creates the server, volume, Docker, and Caddy TLS; pass `--domain` and `--ssh-key` |
-| `docker-host` | `ssh USER@HOST docker version` | your SSH key | Any existing Docker host; pass `--ssh-host` and `--domain` |
-| `compose` | `docker compose version` | none | One machine, loopback only, for evaluation |
+| Provider | Check | Install the CLI | Login | Notes |
+| --- | --- | --- | --- | --- |
+| `railway` | `railway whoami` | `npm i -g @railway/cli` | `railway login` | Managed Postgres, managed TLS domain. An account in more than one workspace passes `--workspace NAME-OR-ID` |
+| `hetzner` | `hcloud context active` | `brew install hcloud`, or the archive for this platform from `https://github.com/hetznercloud/cli/releases` | `hcloud context create graphyard`, then paste a Read & Write API token from the Hetzner Cloud console (Security → API tokens) | Creates the server, volume, Docker, and Caddy TLS; pass `--domain` and `--ssh-key` |
+| `docker-host` | `ssh USER@HOST docker version` | `ssh USER@HOST 'curl -fsSL https://get.docker.com \| sh'` | your SSH key | Any existing Docker host; pass `--ssh-host` and `--domain` |
+| `compose` | `docker compose version` | `curl -fsSL https://get.docker.com \| sh` | none | One machine, loopback only, for evaluation |
+
+A provider CLI that is missing is a precondition to satisfy, not a reason to stop: install it
+with the command in its row, log in, and rerun. Only the account behind it — a Railway
+workspace, a Hetzner Cloud project, a host to run on — is the human's to open, because it is
+what the compute is billed to.
 
 On `railway`, the installer creates the project outside a terminal, and there the Railway CLI
 refuses to choose between workspaces. The plan settles the workspace before you approve it: an
@@ -377,6 +385,7 @@ a step to reduce it — and worker identities are never Apps. The reasons are in
 | Symptom | Cause | Action |
 | --- | --- | --- |
 | `Preflight is incomplete` | a CLI is missing or not authenticated | nothing was created; run the `fix` command printed for that item, then rerun |
+| `<cli> is missing or not authenticated` | the provider CLI is not installed on this machine, or holds no account | nothing was created; the item's `fix` gives the install command and the login command — run both, then rerun. Opening the provider account itself is the human's step 2 |
 | `Railway workspace` preflight is `false` | the Railway account belongs to several workspaces, or `--workspace` names none of them | nothing was created; rerun with `--workspace` set to one of the names the item lists |
 | `Public hostname` preflight is `false` | `hetzner` or `docker-host` ran without `--domain`, or the A record is not pointed yet | nothing was created; pass `--domain HOST` with its record pointed at the host, then rerun |
 | `SSH key` preflight is `false` | `hetzner` ran without `--ssh-key` | nothing was created; rerun with a key name from `hcloud ssh-key list` |

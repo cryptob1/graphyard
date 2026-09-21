@@ -54,6 +54,13 @@ test('docs/install.md is an agent-executable runbook with commands, verification
   assert.match(runbook, /Approval of the printed plan/);
   assert.match(runbook, /Never invent a fifth/);
 
+  // A missing provider CLI is not a fifth thing to ask a human for: every provider row carries
+  // the command that installs it, so a live install stops only for the account behind it.
+  const providers = runbook.slice(runbook.indexOf('### Providers'), runbook.indexOf('## Step 1'));
+  for (const command of ['npm i -g @railway/cli', 'brew install hcloud', 'get.docker.com']) {
+    assert.ok(providers.includes(command), `the provider table must give the command that installs the CLI: ${command}`);
+  }
+
   // Failure handling is a symptom-to-action table, not prose.
   const failures = runbook.slice(runbook.indexOf('## Failure handling'));
   assert.ok((failures.match(/^\| `/gm) ?? []).length >= 8, 'the failure table must cover the real refusals');

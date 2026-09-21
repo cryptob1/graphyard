@@ -358,8 +358,8 @@ async function waitForDataVolume(ctx: AdapterContext, remote: Transport, attempt
 export const hetznerAdapter: ProviderAdapter = {
   provider: 'hetzner',
   async preflight(ctx) {
-    const items = [await tool(ctx, ctx.transport, 'hcloud', ['version'], 'hcloud CLI', 'Install hcloud and run: hcloud context create graphyard')];
-    items.push(await tool(ctx, ctx.transport, 'hcloud', ['context', 'active'], 'Hetzner Cloud project', 'Run: hcloud context create graphyard, then paste a project API token'));
+    const items = [await tool(ctx, ctx.transport, 'hcloud', ['version'], 'hcloud CLI', 'Install the hcloud CLI (brew install hcloud, or the archive for this platform from https://github.com/hetznercloud/cli/releases), then run: hcloud context create graphyard')];
+    items.push(await tool(ctx, ctx.transport, 'hcloud', ['context', 'active'], 'Hetzner Cloud project', 'Run: hcloud context create graphyard, then paste a Read & Write API token from the Hetzner Cloud console (Security - API tokens) of the project this installation is billed to'));
     items.push({ name: 'Public hostname', ok: !!ctx.domain, detail: ctx.domain ?? 'no domain selected; Caddy will issue an internal certificate', fix: 'Pass --domain graphyard.example.com and point its A record at the created server for publicly trusted TLS' });
     // The installer reaches the server over key-authenticated SSH only (BatchMode, no
     // passwords). Without a key Hetzner sets a root password, and provisioning would wait

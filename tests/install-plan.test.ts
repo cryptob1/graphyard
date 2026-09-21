@@ -107,6 +107,12 @@ test('preflight names the exact command to run when a CLI is missing or unauthen
     const hcloud = plan.preflight.find(item => item.name === 'hcloud CLI')!;
     assert.equal(hcloud.ok, false);
     assert.match(hcloud.fix!, /hcloud context create graphyard/);
+    // A missing CLI is a precondition an agent can satisfy on its own, so every fix names the
+    // command that installs it; only the account behind it is the human's to open.
+    assert.match(hcloud.fix!, /brew install hcloud|hetznercloud\/cli\/releases/);
+    const project = plan.preflight.find(item => item.name === 'Hetzner Cloud project')!;
+    assert.equal(project.ok, false);
+    assert.match(project.fix!, /API token/);
     assert.ok(plan.preflight.some(item => item.name === 'GitHub CLI'));
   } finally { await fixture.cleanup(); await failing.cleanup(); }
 });
