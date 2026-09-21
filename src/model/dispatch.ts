@@ -191,3 +191,52 @@ export function dispatchRequestsFor(work: Pick<Work, 'autoDispatch'>, sha: strin
   if (!state) return [];
   return [...(state.review ? [state.review] : []), ...state.producers, ...state.history].filter(request => request.sha === sha);
 }
+
+/**
+ * The live review request the current candidate holds, or null. A launch by hand answers this
+ * request — the same one the loop would launch — so the session it starts counts as that
+ * request's next attempt instead of a session the record knows nothing about.
+ */
+export function liveReviewRequest(work: Work): DispatchRequest | null {
+  const request = work.autoDispatch?.review;
+  return request && request.state === 'requested' && binds(request, work) ? request : null;
+}
+
+/** One live request as a reader joins it onto the session launched for it and that session's retry schedule. */
+export interface RequestProgress {
+  requestId: string; sinceMs: number; group?: string;
+  /** `verdict` is the session's recorded verdict state, as a status reader summarizes it: `DISMISSED`, `APPROVED`, or null. */
+  session: { state: string; attempt?: number; resolution?: string | null; verdict?: string | null } | null;
+  retry?: { attempts: number; limit: number; nextAt: string | null; exhausted: boolean } | null;
+}
+/**
+ * Verdicts that answer a review request. The gate accepts one and refuses the other, and either
+ * resolves the request on the next observation, so a session that posted one is not unanswered
+ * while the control plane catches up. A dismissal answers nothing: GitHub withdrew it.
+ */
+export const answeringVerdicts = ['APPROVED', 'CHANGES_REQUESTED'];
+/** A live request whose session settled leaving its gate unsatisfied, with nothing scheduled to answer it. */
+export interface UnansweredRequest { requestId: string; kind: DispatchKind; group?: string; sinceMs: number; state: string; verdict: string | null; attempts: number; resolution: string | null }
+
+/**
+ * A request nothing is going to answer: its session settled — with a verdict the gate cannot
+ * accept, such as an approval GitHub dismissed, or without one at all — and no further attempt
+ * is scheduled for it. Such a request is not running and not refused; left unnamed it simply
+ * waits, which is how an item sits at the review stage for an hour with nothing to show for it.
+ * A session still pending, and one whose next attempt is already due, are answers in progress.
+ */
+export function unansweredRequest(request: RequestProgress, kind: DispatchKind): UnansweredRequest | null {
+  const session = request.session;
+  if (!session || session.state === 'pending') return null;
+  if (request.retry && !request.retry.exhausted && request.retry.nextAt) return null;
+  if (session.verdict && answeringVerdicts.includes(session.verdict)) return null;
+  return { requestId: request.requestId, kind, ...(request.group ? { group: request.group } : {}), sinceMs: request.sinceMs,
+    state: session.state, verdict: session.verdict ?? null, attempts: request.retry?.attempts ?? session.attempt ?? 1, resolution: session.resolution ?? null };
+}
+
+/** Every live request of one candidate that nothing is going to answer, review first. */
+export function unansweredRequests(dispatch: { review: RequestProgress | null; producers: RequestProgress[] } | null | undefined): UnansweredRequest[] {
+  if (!dispatch) return [];
+  return [...(dispatch.review ? [unansweredRequest(dispatch.review, 'review')] : []), ...dispatch.producers.map(request => unansweredRequest(request, 'producer'))]
+    .filter((entry): entry is UnansweredRequest => !!entry);
+}
