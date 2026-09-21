@@ -14,7 +14,7 @@ import { launchPlan, masterHarnessPlan, writeHarnessPermissions, type HarnessPla
 import { CHECK_NAME, carriedApproval, deliveryState, deploySmokeRequired, describeQueueBinding, evidenceIndependenceRefusals, exhaustedReviewerProfiles, nativeReviewRequired, postDeployMs, productionLatencyMs, providerDelayAfterVerification, reviewerProfileFor, reviewProviderOf, rollbackGuidance, standingEscalations, type CarriedApproval, type QueueBindingReport, type Work } from './model.js';
 import { containmentAttestation, containmentGraceMs, containmentSettlementRefusals, containmentVerificationSchema, type ContainmentVerification } from './quarantine.js';
 import { probeSupervisorAbsence } from './containment-probe.js';
-import { baseRefreshConflict, currentBaseRefreshCarry, pendingBaseRefresh, predictQueue, type QueuePlacement } from './merge-queue.js';
+import { baseRefreshConflict, currentBaseRefreshCarry, pendingBaseRefresh, predictQueue, refusedReconciliation, unpublishableEntry, type QueuePlacement } from './merge-queue.js';
 import { MERGE_PROTOCOL } from './protocol-version.js';
 import { attentionLines, type ProductionReport } from './production-watch.js';
 import { allocateSessionCheckout, inspectWorktreeRoot, reclaimCommand, removeSessionCheckout, verifyWorktreeRoot, worktreeRoot, worktreeRootBudgetBytes, worktreeRootConcerns, worktreeRootMinFreeBytes, type CheckoutReclaimReport, type FilesystemProbe, type SessionCheckout, type WorktreeRootHealth } from './install/worktree-root.js';
@@ -1208,8 +1208,14 @@ export function installationOwner(source: 'app-permissions' | 'held-jobs' | 'del
 export function workAttentionOwner(work: Work, cause: 'containment-settleable' | 'containment-grace' | 'containment' | 'session' | 'proof-gap' | 'reviewer-exhausted' | 'launch-review' | 'launch-producer' | 'base-conflict' | 'merged-unauthorized' | 'gate'): AttentionOwner {
   const key = work.key;
   // The merge already happened and cannot be re-run: the only way to a correct delivery record is
-  // the two-party merge decision the engine re-checks against the record at the merge cutoff.
-  if (cause === 'merged-unauthorized') return agentOwner('master', `graphyard master decide ${key} merge REASON, then graphyard master approver ${key} DECISION; the next observation re-checks the record at the merge cutoff and delivers on the approved decision, or records why it cannot`, 'approver');
+  // the two-party merge decision the engine re-checks against the record at the merge cutoff. Once
+  // the record has refused one, what remains is the operator's: a decision citing that refusal,
+  // with an admin credential on one side, delivers the merge as operator-authorized (GY-94).
+  if (cause === 'merged-unauthorized') {
+    const refused = refusedReconciliation(work);
+    return refused ? agentOwner('master', `graphyard master decide ${key} merge REASON with a REASON that cites refused decision ${refused.decision}, then the operator approves it with their admin credential (GRAPHYARD_TOKEN_FILE=ADMIN_TOKEN_FILE graphyard master approve ${key} DECISION REASON); the next observation delivers it as operator-authorized, stating that no execution authorized the merge and what the record lacked`, 'approver')
+      : agentOwner('master', `graphyard master decide ${key} merge REASON, then graphyard master approver ${key} DECISION; the next observation re-checks the record at the merge cutoff and delivers on the approved decision, or records why it cannot${work.queue ? ` and removes the queue entry the merged pull request can never publish, without delivering` : ''}`, 'approver');
+  }
   // Graphyard absorbs a moved base itself; a conflict is the one case it cannot, so the candidate
   // goes back to a worker for a fresh attempt rather than waiting for a refresh that cannot land.
   if (cause === 'base-conflict') return agentOwner('master', `graphyard master decide ${key} rework REASON, then graphyard master approver ${key} DECISION`, 'approver');
@@ -1669,10 +1675,14 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
     const retrying = [dispatch?.review, ...(dispatch?.producers ?? [])].find(request => request?.retry && request.session && ['failed', 'expired'].includes(request.session.state));
     // An observed merge no execution authorized is not a candidate waiting for its queue tip: it
     // is named as the violation it is, with the recovery, and never as a gate refusal.
+    // Its queue entry, when it still holds one, can never publish a speculative tip: the entry and
+    // everything waiting behind it are named, with the exit (see merge-queue.ts unpublishableEntry).
+    const dead = unpublishableEntry(work);
     const merged = mergedWithoutAuthorization(work) ? { at: work.observation!.mergedAt ?? null, sha: work.observation!.mergeSha ?? null, violation: unauthorizedMergeViolation,
-      refusal: work.violations.find(entry => entry.startsWith('Reconciliation by decision ')) ?? null } : null;
+      refusal: refusedReconciliation(work)?.violation ?? null,
+      ...(dead && placement ? { queue: { sequence: dead.sequence, position: placement.position + 1, size: placement.size, unpublishable: true as const, behind: placements.slice(placement.position + 1).map(entry => entry.key) } } : {}) } : null;
     const [attention, cause]: [string | null, Parameters<typeof workAttentionOwner>[1] | null] = containmentAttention ? containmentAttention
-      : merged ? [`${work.key} was merged on GitHub (${merged.sha?.slice(0, 12) ?? 'merge commit unknown'} at ${merged.at ?? 'an unrecorded time'}) without a valid merge execution: ${merged.violation}. It is held at the merge stage, not waiting for its queue tip; ${merged.refusal ? `the last reconciliation was refused — ${merged.refusal}` : 'a two-party merge decision requested now reconciles it if every gate passed and every required proof was live at the merge cutoff'}`, 'merged-unauthorized']
+      : merged ? [`${work.key} was merged on GitHub (${merged.sha?.slice(0, 12) ?? 'merge commit unknown'} at ${merged.at ?? 'an unrecorded time'}) without a valid merge execution: ${merged.violation}. It is held at the merge stage, not waiting for its queue tip; ${merged.queue ? `its merge queue entry (sequence ${merged.queue.sequence}, position ${merged.queue.position} of ${merged.queue.size}) can never publish a speculative tip because the pull request is already merged${merged.queue.behind.length ? `, and ${merged.queue.behind.join(', ')} wait behind it` : ''}; ` : ''}${merged.refusal ? `the last reconciliation was refused — ${merged.refusal}; an operator may deliver it as operator-authorized by a decision citing that refusal` : `a two-party merge decision requested now reconciles it if every gate passed and every required proof was live at the merge cutoff${merged.queue ? ', and a refused one removes the entry without delivering' : ''}`}`, 'merged-unauthorized']
       : active && (!session || !['working', 'idle'].includes(session.state)) ? [`Assigned worker session is ${session?.state ?? 'offline'}`, 'session']
       : gaps.length ? [`No principal is authorized to produce ${gaps.join(', ')}; grant the proof name before dispatch`, 'proof-gap']
       : review?.exhausted ? [`Every configured reviewer profile is exhausted for the current candidate (${review.failedOver.map(entry => `${entry.profile}: ${entry.exhaustion}`).join(', ')})`, 'reviewer-exhausted']
@@ -1700,6 +1710,10 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
       speed: pipelineSpeed(work, now) };
   });
   const delivered = snapshot.work.filter(work => work.stage === 'done' && work.delivery && deploySmokeRequired(work.policy)).map(work => deliveredRow(work, now, baseBranch));
+  // Every delivery no valid execution authorized, apart by how it was judged: reconciled — the
+  // record at the merge cutoff satisfied every gate — or operator-authorized, where it did not
+  // and an operator took responsibility (GY-94). Neither is mistaken for the other or for a routine merge.
+  const deliveries = recoveredDeliveries(snapshot.work);
   // Merge-to-production over every delivery with an observed deployment, whether or not its
   // policy asked for a smoke proof, so the periodic measurement reads one number for the repository.
   const mergeToProduction = latencyPercentiles(snapshot.work.map(work => mergeToProductionMs(work)).filter((value): value is number => value !== null));
@@ -1713,10 +1727,11 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
       mergeCandidates: rows.filter(row => row.stage === 'merge' && !row.merged).length, mergedUnreconciled: rows.filter(row => row.merged).length,
       dispatchRequested: rows.reduce((total, row) => total + (row.dispatch ? (row.dispatch.review ? 1 : 0) + row.dispatch.producers.length : 0), 0), dispatchRunning: rows.reduce((total, row) => total + (row.dispatch ? [row.dispatch.review, ...row.dispatch.producers].filter(request => request?.session?.state === 'pending').length : 0), 0), reviewFailover: rows.filter(row => row.review?.failedOver.length).length, queued: placements.length,
       quarantined: rows.filter(row => row.containment && row.containment.phase !== 'live').length, settleableQuarantines: rows.filter(row => row.containment?.settleable).length,
-      awaitingSmoke: delivered.filter(row => row.state === 'awaiting-deployment' || row.state === 'awaiting-smoke').length, postDeployFailures: delivered.filter(row => row.state === 'delivered-with-failure').length },
+      awaitingSmoke: delivered.filter(row => row.state === 'awaiting-deployment' || row.state === 'awaiting-smoke').length, postDeployFailures: delivered.filter(row => row.state === 'delivered-with-failure').length,
+      reconciledDeliveries: deliveries.reconciled.length, operatorAuthorizedDeliveries: deliveries.operatorAuthorized.length },
     // Every attention item with the role that resolves it and the next command, work items first.
     attentionItems: [...rows.flatMap(row => row.attention && row.attentionOwner ? [{ subject: row.key, text: row.attention, ...row.attentionOwner }] : []), ...installation.attentionItems] as AttentionItem[],
-    workers: workerSessions, reviews, producers: sessions.producers, work: rows, queue: queueRows, delivered, latency: { mergeToProduction }, speed, controlPlane: installation,
+    workers: workerSessions, reviews, producers: sessions.producers, work: rows, queue: queueRows, delivered, deliveries, latency: { mergeToProduction }, speed, controlPlane: installation,
     schedule: scheduling, conflicts: { available: candidateConflicts.available, reason: candidateConflicts.reason, ...sequenceAdvice(rows.filter(row => row.conflicts).map(row => ({ key: row.key, conflicts: row.conflicts!.candidates }))) } };
 }
 
@@ -1740,6 +1755,24 @@ export function sequenceAdvice(candidates: { key: string; conflicts: string[] }[
   return { sequence, conflicting: conflicting.map(entry => ({ key: entry.key, conflicts: entry.conflicts })) };
 }
 
+/**
+ * The deliveries that did not come through an authorized merge execution, each with the decision
+ * it rests on. A reconciled delivery cites the pre-merge snapshot that satisfied every gate; an
+ * operator-authorized one states that no execution authorized the merge, names the operator and
+ * both reasons, and lists what the record lacked. The item's own `delivery` carries the same
+ * record under `reconciliation` or `operatorAuthorization`; the ledger keeps `merge.reconciled` or
+ * `merge.operator-authorized`.
+ */
+export function recoveredDeliveries(work: Work[]) {
+  const done = work.filter(item => item.stage === 'done' && item.delivery) as (Work & { delivery: NonNullable<Work['delivery']> & { reconciliation?: any; operatorAuthorization?: any } })[];
+  const cite = (item: typeof done[number], record: any) => ({ key: item.key, title: item.title, mergeSha: item.delivery.mergeSha, mergedAt: item.delivery.mergedAt, decision: record.decision as string,
+    requestedBy: record.requestedBy as string, approvedBy: record.approvedBy as string, reason: record.reason as string, approvalReason: record.approvalReason as string, cutoff: record.cutoff as string, snapshotRevision: record.snapshotRevision as number });
+  return {
+    reconciled: done.filter(item => item.delivery.reconciliation).map(item => ({ ...cite(item, item.delivery.reconciliation), authorization: 'reconciled' as const, judgement: item.delivery.reconciliation.judgement as string })),
+    operatorAuthorized: done.filter(item => item.delivery.operatorAuthorization).map(item => ({ ...cite(item, item.delivery.operatorAuthorization), authorization: 'operator' as const, execution: null,
+      operator: item.delivery.operatorAuthorization.operator as string, refusedDecision: item.delivery.operatorAuthorization.refusedDecision as string, unmet: item.delivery.operatorAuthorization.unmet as string[], judgement: item.delivery.operatorAuthorization.judgement as string })),
+  };
+}
 /**
  * The second confidence layer, per delivered item that asked for it: what the release served, what
  * the trusted producer found, and — on a failure — exactly what to roll back. Failures stay listed;
