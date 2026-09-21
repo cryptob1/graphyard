@@ -432,6 +432,42 @@ recovered with `master review GY-N` once its cause is fixed. A session recorded 
 minute later without counting toward those four or widening the wait; three of them exhaust
 the request on their own.
 
+**A dismissed approval is not an answer.** GitHub withdraws an approval — `dismiss_stale_reviews`
+is on for a protected branch, so every approval that lands just before a push becomes one, and a
+recomputed merge base or a dismissal by hand does the same — and the review gate goes on refusing,
+because a dismissed approval is not an approval. A session that collected one is therefore recorded
+`failed`, never `completed`: unanswered, with the dismissal and its cause on the record, and
+relaunched as the request's next attempt on the same widening wait as any other unanswered session.
+The cause distinguishes the two, because they need different heads: dismissed *and* the head moved
+(`the approval of … was dismissed and head changed from … to …`) means the request for the old head
+is cancelled and the new head is reviewed afresh; dismissed *while the candidate is unchanged*
+(`… was dismissed while it was still the candidate`) means the same commit is reviewed again, with
+no new head and no rework round for a candidate nobody found fault with. A relaunch never reads the
+dismissed review back as its own verdict: the verdicts an earlier session of the same head recorded
+are skipped when the next one observes GitHub. An approval can also be withdrawn *after* its session
+closed, and nothing revisits a settled record — so while a request for that exact head still stands,
+a closed session carrying the approval the control plane is waiting for is re-read, and a dismissal
+reopens it unanswered the same way.
+
+**A request whose session settled without satisfying its gate is attention, not silence.** An
+`APPROVED` or `CHANGES_REQUESTED` verdict answers the request — the control plane resolves it on its
+next observation — but no attempt follows a settled session, so a request whose session ended with
+anything else has no session running, no refused launch and no retry — nothing but a `sinceMs` climbing while the gate refuses. `master status` names each one
+in `attentionItems` with the verdict that settled it, how long the request has stood and the command
+that answers it (`Review request for GY-N has stood unanswered for 1h3m: its session failed with
+verdict DISMISSED after attempt 4 — …`), and counts them in `counts.dispatchUnanswered`, apart from
+the requests with a session actually running in `counts.dispatchRunning`. `master run` reports the
+same request as `waiting` on every tick rather than skipping it in silence.
+
+`master review GY-N [PROFILE]` **forces the next attempt** for such a request. The launch answers
+the control plane's own open request for the exact current head — recorded with that `requestId` as
+its next `attempt`, the earlier sessions kept in the ledger — so it is a further attempt at the
+request rather than a session the record knows nothing about, and a request the loop will not
+relaunch is recoverable without producing a new head. A head with no open request (the recovery path
+for a refused launch) records none, as before. A producer request in the same state is recovered
+through `master decide GY-N rework REASON`: the proofs its group needs are requested afresh on the
+next head.
+
 **Every launched session decides and acts on its own.** The reviewer, producer and worker
 prompts require it: post the verdict, submit pass or fail evidence, or record a blocker naming
 the exact command that was blocked and its error — a reviewer as a `COMMENT` review on the
