@@ -487,6 +487,42 @@ recovered with `master review GY-N` once its cause is fixed. A session recorded 
 minute later without counting toward those four or widening the wait; three of them exhaust
 the request on their own.
 
+**A dismissed approval is not an answer.** GitHub withdraws an approval — `dismiss_stale_reviews`
+is on for a protected branch, so every approval that lands just before a push becomes one, and a
+recomputed merge base or a dismissal by hand does the same — and the review gate goes on refusing,
+because a dismissed approval is not an approval. A session that collected one is therefore recorded
+`failed`, never `completed`: unanswered, with the dismissal and its cause on the record, and
+relaunched as the request's next attempt on the same widening wait as any other unanswered session.
+The cause distinguishes the two, because they need different heads: dismissed *and* the head moved
+(`the approval of … was dismissed and head changed from … to …`) means the request for the old head
+is cancelled and the new head is reviewed afresh; dismissed *while the candidate is unchanged*
+(`… was dismissed while it was still the candidate`) means the same commit is reviewed again, with
+no new head and no rework round for a candidate nobody found fault with. A relaunch never reads the
+dismissed review back as its own verdict: the verdicts an earlier session of the same head recorded
+are skipped when the next one observes GitHub. An approval can also be withdrawn *after* its session
+closed, and nothing revisits a settled record — so while a request for that exact head still stands,
+a closed session carrying the approval the control plane is waiting for is re-read, and a dismissal
+reopens it unanswered the same way.
+
+**A request whose session settled without satisfying its gate is attention, not silence.** An
+`APPROVED` or `CHANGES_REQUESTED` verdict answers the request — the control plane resolves it on its
+next observation — but no attempt follows a settled session, so a request whose session ended with
+anything else has no session running, no refused launch and no retry — nothing but a `sinceMs` climbing while the gate refuses. `master status` names each one
+in `attentionItems` with the verdict that settled it, how long the request has stood and the command
+that answers it (`Review request for GY-N has stood unanswered for 1h3m: its session failed with
+verdict DISMISSED after attempt 4 — …`), and counts them in `counts.dispatchUnanswered`, apart from
+the requests with a session actually running in `counts.dispatchRunning`. `master run` reports the
+same request as `waiting` on every tick rather than skipping it in silence.
+
+`master review GY-N [PROFILE]` **forces the next attempt** for such a request. The launch answers
+the control plane's own open request for the exact current head — recorded with that `requestId` as
+its next `attempt`, the earlier sessions kept in the ledger — so it is a further attempt at the
+request rather than a session the record knows nothing about, and a request the loop will not
+relaunch is recoverable without producing a new head. A head with no open request (the recovery path
+for a refused launch) records none, as before. A producer request in the same state is recovered
+through `master decide GY-N rework REASON`: the proofs its group needs are requested afresh on the
+next head.
+
 **Every launched session decides and acts on its own.** The reviewer, producer and worker
 prompts require it: post the verdict, submit pass or fail evidence, or record a blocker naming
 the exact command that was blocked and its error — a reviewer as a `COMMENT` review on the
@@ -939,6 +975,21 @@ row's `interventions` and `reworkRounds` say whether the time went to a hand-off
 and the flow analytics bottleneck summary says which wait category held the rest. Never trade a
 gate, a proof, an identity rule or a lease rule for the number.
 
+## Escalation context
+
+A master that carries the project's rules, an item's history and the precedent of earlier decisions in its own window hits a context ceiling, dies with its provider credits, and drifts between sessions. The control plane therefore assembles an escalation's context from the project, so a master spawned for one escalation decides as well as a long-lived one and precedent, not session continuity, keeps judgements consistent. `GET /api/work/GY-N/context?trigger=TRIGGER&budget=BYTES` returns it; `master context GY-N [TRIGGER] [--budget N]` prints the same document, read by key and nothing else, after verifying its fingerprint. It has four layers:
+
+| Layer | What it holds | Where it comes from |
+| --- | --- | --- |
+| `rules` | The repository's own operating rules and the item's policy | `AGENTS.md` of the repository under review, read through the control-plane App at the base tip the item was last observed against (`rules.source` names the path, ref and blob), plus `policy`. Never a template: an installation managing another codebase escalates against that codebase's rules and goals, and a repository without the file gets `rules.unavailable` saying so |
+| `goals` | The current goals and priorities | The item's priority, the reasons recorded with its `create`, `ready`, `requirements` and `unblock` intents, the open graph in priority order, and its dependencies and dependents |
+| `item` | The item slice | Requirements (criteria, retired criteria, planned files, producer proofs), the standing refusal (the escalation, every standing trigger, the gates, blocker and violations), the candidate, submission and lease, and a typed history summary: every ledger kind counted with its first and last row, the newest typed rows summarised to their reason, trigger, epoch, decision or proof, routine rows (`github.observed`, `heartbeat`) counted but never listed |
+| `precedent` | Recent decisions of the same action | Every `resolve` decision across the graph with its requester, reason, approver, approval reason, outcome and the precedent it cited itself — the escalation's own trigger first, newest first; the rest counted per trigger and state |
+
+Assembly is deterministic and bounded. The same escalation and graph state produce a byte-identical document: every ledger read runs in one snapshot, the wire form is canonical, and `fingerprint` is the SHA-256 of every byte but itself, so a handler can prove what it saw. The document stays within its budget (`GRAPHYARD_ESCALATION_CONTEXT_BUDGET`, default 32,000 bytes, or the request's `budget`) by summarising rather than truncating: `budget.level` records how many history rows and precedent decisions are shown in full, and every row not shown is still counted (`history.omitted`, `precedent.omitted`, `precedent.summary`). The rules layer is never shortened; when even the summary floor does not fit, `budget.exceeded` says so instead of cutting.
+
+A spawned handler receives that context and the escalation inside it, holds no other state, and records its decision with the reason and the precedent it relied on: `master decide GY-N resolve '{"trigger":"…"}' --precedent DECISION_ID[,DECISION_ID] --context FINGERPRINT REASON`. The request carries `precedent` and `context` into the ledger and `master decisions GY-N` shows them; a cited id that is not a recorded decision of the same action is refused, so the precedent a decision names can always be followed; a second handler that reaches the same line while the first request stands is recorded as a concurrence on that decision (`concurrences`) rather than refused, while a request citing a different precedent is still refused as a competing request. The independent approver judges the decision as before. `master escalation GY-N [TRIGGER] [precedent|KIND]` spawns a handler: `precedent` (the default) is the built-in judgement — follow the newest applied decision of the same trigger, cite it, and decline when there is none, since a reason given for another kind of incident cannot apply and a judging session weighs those rows instead — run in this process; an agent `KIND` launches a judging session whose entire input is the context written to one private file under `.graphyard/escalations/`, with the instruction to read nothing else and to record its decision with `master decide … --precedent --context`; like every session Graphyard launches it receives that instruction as its own first request, and the result's `delivery` says how.
+
 ## Recovery
 
 ### Merged without a valid execution
@@ -1030,7 +1081,9 @@ The master clears blockers and adds requirements as its operator-agent identity;
 | `master autonomy [--admin-token-stdin --apply]` | Provision the master's operator-agent and approver identities and harness rules (once, at onboarding) |
 | `master create FILE REASON`, `master release GY-N REASON`, `master unblock GY-N REASON`, `master requirements GY-N FILE REASON` | The master's own non-weakening intent, as its operator-agent identity |
 | `master scope GY-N [REASON]` | Apply a scope request the loop refused, while the attempt keeps its lease; requests the item already implies are decided by the loop ([scope requests the loop decides](#scope-requests-the-loop-decides)) |
-| `master decide GY-N ACTION [JSON\|@FILE] REASON` | Request a two-party decision: `release`, `unblock`, `requirements`, `resolve`, `attest`, `merge`, `rework`, `recover`, `grant` |
+| `master decide GY-N ACTION [JSON\|@FILE] [--precedent ID[,ID]] [--context FINGERPRINT] REASON` | Request a two-party decision: `release`, `unblock`, `requirements`, `resolve`, `attest`, `merge`, `rework`, `recover`, `grant`; a handler cites the precedent it followed and the context it judged from |
+| `master context GY-N [TRIGGER] [--budget N]` | The assembled [escalation context](#escalation-context), read by key alone and verified against its fingerprint |
+| `master escalation GY-N [TRIGGER] [--budget N] [precedent\|KIND]` | Spawn a fresh handler on that context alone: `precedent` follows the newest applied line in this process, an agent `KIND` launches a judging session |
 | `master decisions GY-N` | An item's decisions with requester, approver, reasons, outcome, and refusals |
 | `master approver GY-N DECISION [KIND]` | Launch the independent approver session for one decision |
 | `master approve GY-N DECISION REASON` | Approve, from the approver session only |

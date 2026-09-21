@@ -41,7 +41,15 @@ export const decisionInputs = {
   grant: z.object({ principal: principalId, patterns: z.array(z.string().min(1).max(200)).min(1).max(50), expectedRevision: z.number().int().min(0).optional() }).strict(),
 } satisfies Record<DecisionAction, z.ZodType>;
 const reason = z.string().trim().min(1).max(2000);
-export const decisionRequestSchema = z.object({ action: z.enum(decisionActions), input: z.unknown(), reason }).strict();
+/**
+ * A request may cite the precedent it follows and the fingerprint of the assembled escalation
+ * context it judged from (model/escalation-context.ts). Both are recorded with the request so a
+ * later handler can follow the same line; a second request that cites the same precedent while
+ * the first still stands is recorded as a concurrence with it rather than refused as a duplicate.
+ */
+export const decisionPrecedentSchema = z.array(z.string().uuid()).max(20);
+export const decisionContextSchema = z.string().regex(/^[a-f0-9]{64}$/);
+export const decisionRequestSchema = z.object({ action: z.enum(decisionActions), input: z.unknown(), reason, precedent: decisionPrecedentSchema.optional(), context: decisionContextSchema.optional() }).strict();
 export const decisionApprovalSchema = z.object({ decision: z.string().uuid(), reason }).strict();
 
 export type DecisionState = 'requested' | 'approved' | 'applied' | 'failed';
@@ -50,6 +58,10 @@ export interface Decision {
   requestedBy: string; requestedAt: string; state: DecisionState;
   approvedBy: string | null; approvedAt: string | null; approvalReason: string | null;
   outcome: string | null; refusals: { approver: string; conflict: string; at: string }[];
+  /** The decisions the requester cited and the context fingerprint it judged from; empty and null for a request that named none. */
+  precedent: string[]; context: string | null;
+  /** Later requesters that followed the same precedent while this decision stood. */
+  concurrences: { requester: string; reason: string; precedent: string[]; context: string | null; at: string }[];
 }
 export interface DecisionEvent { kind: string; actor: string; at: string; payload: any }
 
@@ -60,11 +72,13 @@ export function foldDecisions(workId: string, events: DecisionEvent[]): Decision
     const details = event.payload ?? {};
     if (event.kind === 'decision.requested') {
       decisions.set(details.id, { id: details.id, workId, action: details.action, input: details.input, reason: details.reason, requestedBy: event.actor, requestedAt: event.at, state: 'requested',
-        approvedBy: null, approvedAt: null, approvalReason: null, outcome: null, refusals: [] });
+        approvedBy: null, approvedAt: null, approvalReason: null, outcome: null, refusals: [],
+        precedent: Array.isArray(details.precedent) ? [...details.precedent] : [], context: typeof details.context === 'string' ? details.context : null, concurrences: [] });
       continue;
     }
     const decision = decisions.get(details.id);
     if (!decision) continue;
+    if (event.kind === 'decision.concurred') decision.concurrences.push({ requester: event.actor, reason: details.reason, precedent: Array.isArray(details.precedent) ? [...details.precedent] : [], context: typeof details.context === 'string' ? details.context : null, at: event.at });
     if (event.kind === 'decision.refused') decision.refusals.push({ approver: event.actor, conflict: details.conflict, at: event.at });
     if (event.kind === 'decision.approved') Object.assign(decision, { state: 'approved', approvedBy: event.actor, approvedAt: event.at, approvalReason: details.reason });
     if (event.kind === 'decision.applied') Object.assign(decision, { state: 'applied', outcome: details.outcome ?? null });

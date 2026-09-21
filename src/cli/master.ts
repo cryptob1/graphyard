@@ -9,7 +9,7 @@ import { agentToken, approvedMerges, assertMasterBinding, autonomySubcommands, c
 import { cliCommit } from '../protocol-version.js';
 import { daemonEffects, readDaemonState, runDaemon } from '../master-daemon.js';
 import { verificationEffects, verifyDeployment } from '../master-verification.js';
-import { bindReviewer, launchReview, removeReviewerProfile, reviewerCredentialDirectory, saveReviewerProfile, verifyReviewerInstallation } from '../reviewer.js';
+import { bindReviewer, removeReviewerProfile, reviewCommand, reviewerCredentialDirectory, saveReviewerProfile, verifyReviewerInstallation } from '../reviewer.js';
 import { dispatchEffects, dispatchReadTimeoutMs, readDispatchCursor, runAutoDispatch } from '../auto-dispatch.js';
 import { applyProtection, protectionPlan, readProtection } from '../protection.js';
 import { writeHarnessPermissions } from '../harness.js';
@@ -36,8 +36,9 @@ export const masterCommands = defineCommands([
       '  master reviewer bind FILE --key-stdin   Bind an existing reviewer App (IDs in FILE, PEM on stdin)',
       '  master reviewer add FILE | remove NAME   Add or remove a reviewer launch profile',
       '  master producer add FILE | replace FILE | remove NAME  Manage proof-producer profiles',
-      '  master review GY-N [PROFILE]  Launch the bound reviewer on the exact current candidate;',
-      '                                master run does this on its own for every submitted head',
+      '  master review GY-N [PROFILE]  Launch the bound reviewer on the exact current candidate as the',
+      '                                open request\'s next attempt; master run does this on its own,',
+      '                                so it is the recovery path for a request nothing else answers',
       '  master protection [--apply]   Reconcile branch protection with every open review policy',
       '  master browser FLOW [--dry-run]',
       "                                Perform GitHub administration through the operator's browser",
@@ -47,30 +48,29 @@ export const masterCommands = defineCommands([
       '  master status                 Graphyard work truth joined with Herdr session health, the',
       '                                dispatch order, overlaps and merge conflicts',
       '  master dispatch GY-N PROFILE [--allow-overlap]',
-      '                                Invite a worker to claim ready work in a visible tab; an',
-      '                                item whose planned files overlap a claimed or unmerged item',
-      '                                is held unless --allow-overlap is passed',
+      '                                Invite a worker to claim ready work in a visible tab; a',
+      '                                planned-file overlap holds it unless --allow-overlap is passed',
       '  master settle-containment GY-N REASON',
       '                                Settle a containment quarantine whose supervisor this host',
       '                                verifies dead; unverifiable signals refuse',
       '  master merge GY-N|--all       Merge exact authorized candidates without bypasses',
       '  master config FIELD=VALUE…   Tune owned run settings and profile accounts',
       '                                (accounts:PROFILE=a,b); autoMerge and credential paths stay operator-only',
-      '  master verify-deployment GY-N Verify that the deployed release serves a delivery and',
-      '                                emits the current instructions; refuse stale or local-only',
-      '                                observations, record the exact release observed',
+      '  master verify-deployment GY-N Verify that the deployed release serves a delivery and emits',
+      '                                the current instructions; records the exact release observed',
       '  master run [--once] [--interval SECONDS]',
-      '                                Run the durable coordination loop as a supervised process; it',
-      '                                launches the reviewer and proof producers for every submitted',
-      '                                head within 30 seconds of the request, and decides every open',
-      '                                worker scope request on the cycle it appears',
+      '                                The durable coordination loop: launches reviewers and producers',
+      '                                for every submitted head and decides open scope requests',
       '  master autonomy [--admin-token-stdin --apply]  Provision the master and approver identities',
       '  master create FILE|release GY-N|unblock GY-N|requirements GY-N FILE REASON  Own intent',
-      '  master scope GY-N [REASON]    Approve a worker scope request the loop refused: add its',
-      '                                requested paths to plannedFiles while the attempt keeps its',
-      '                                lease. master run decides every request the item itself',
-      '                                already implies, so this is the override for the rest',
-      '  master decide GY-N ACTION [JSON|@FILE] REASON  Request a two-party decision',
+      '  master scope GY-N [REASON]    Apply a scope request the loop refused, widening plannedFiles',
+      '                                while the attempt keeps its lease (the loop decides the rest)',
+      '  master decide GY-N ACTION [JSON|@FILE] [--precedent ID[,ID]] [--context FINGERPRINT] REASON',
+      '                                Request a two-party decision, citing precedent and context',
+      '  master context GY-N [TRIGGER] [--budget N]  The assembled escalation context a handler sees',
+      '  master escalation GY-N [TRIGGER] [--budget N] [precedent|KIND]',
+      '                                Spawn a fresh handler on that context alone: precedent follows',
+      '                                the newest applied line, KIND launches a judging session',
       '  master withdraw GY-N DECISION REASON  Take back the master\'s own requested decision',
       '  master decisions GY-N | approver GY-N DECISION [KIND] | approve GY-N DECISION REASON',
       '  master principals [--apply]   Preview or apply a roster rotation keeping live principals',
@@ -145,13 +145,7 @@ export const masterCommands = defineCommands([
         }
         throw new Error('Use master reviewer setup, master reviewer bind FILE --key-stdin, or master reviewer add FILE');
       }
-      if (id === 'review') {
-        if (!args[0]) throw new Error('Use master review GY-N [PROFILE]');
-        const snapshot = await masterApi('work-snapshot');
-        const work = snapshot.work.find((item: any) => item.id === args[0] || item.key === args[0]);
-        if (!work) throw new Error(`Unknown work item ${args[0]}`);
-        return print(await launchReview(root, work, args[1], listHerdrAgents(), snapshot.now));
-      }
+      if (id === 'review') return print(await reviewCommand(root, args, await masterApi('work-snapshot'), listHerdrAgents()));
       if (id === 'protection') {
         const { values } = parseArgs({ args, options: { apply: { type: 'boolean' } }, allowPositionals: false });
         const snapshot = await masterApi('work-snapshot');

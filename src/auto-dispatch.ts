@@ -176,7 +176,15 @@ export async function runDispatchTick(config: MasterConfig, cursor: DispatchCurs
   // Whether the request already has its session, waits to relaunch one that failed or expired, or may launch now.
   const session = (kind: 'review' | 'producer', item: Work, request: DispatchRequest, records: { requestId?: string; state: string; requestedAt: string; closedAt?: string; resolution?: string }[]) => {
     const retry = sessionRetry(records, request.id, now());
-    if (retry.settled) { tick.skipped++; return false; }
+    if (retry.settled) {
+      tick.skipped++;
+      // A session that settled while its request stands answered nothing the gates accept, and no
+      // attempt follows a settled session. The tick says so rather than passing over it in silence:
+      // a request nothing is running for and nothing refused is otherwise invisible until somebody
+      // notices the item has not moved.
+      if (retry.last && retry.last.state !== 'pending') wait(kind, item, request, `${kind === 'review' ? 'reviewer' : 'producer'} session attempt ${retry.attempts} ${retry.last.state} without satisfying the request: ${retry.last.resolution ?? 'no reason recorded'}; no automatic attempt follows a settled session${kind === 'review' ? `, force one with master review ${item.key}` : ''}`);
+      return false;
+    }
     if (retry.launch) return true;
     const last = `${kind === 'review' ? 'reviewer' : 'producer'} session attempt ${retry.attempts} ${retry.last!.state}: ${retry.last!.resolution ?? 'no reason recorded'}`;
     wait(kind, item, request, retry.exhausted ? `${last}; no further automatic attempt after ${retry.attempts} sessions${kind === 'review' ? ', launch it with master review once the cause is fixed' : ''}` : `${last}; attempt ${retry.attempts + 1} of ${retry.limit} at ${retry.nextAt}`);
