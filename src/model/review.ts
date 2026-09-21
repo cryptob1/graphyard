@@ -41,6 +41,10 @@ export interface AgentReview {
   summaryId?: number; resultId?: number; requestId?: number; reactionId?: number; completedAt?: string;
   profile?: string; reviewerApp?: string; verdictId?: number;
   exhausted?: boolean; exhaustion?: 'usage-limit' | 'timeout';
+  // `approved: false` is every state short of approval — not dispatched, waiting, retry, unready,
+  // exhausted — and none of those is a verdict. This is set only where the reviewer itself asked
+  // for changes on exactly `sha`, for the recorded request; nothing may infer it from `reason`.
+  verdict?: 'changes-requested';
 }
 export interface ReviewFailover {
   profile: string; reviewerApp: string; runtime: string; exhaustion: 'usage-limit' | 'timeout'; reason: string;
