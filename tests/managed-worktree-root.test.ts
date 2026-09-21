@@ -38,7 +38,8 @@ function herdr(calls: string[][] = []) {
     return JSON.stringify({ result: args[0] === 'pane' && args[1] === 'list' ? { panes: [] } : {} });
   };
 }
-const promptOf = (calls: string[][]) => calls.find(args => args[0] === 'agent' && args[1] === 'prompt')![3];
+// Since GY-93 the request is the session's own first message: the last argument of its command line.
+const promptOf = (calls: string[][]) => calls.find(args => args[0] === 'agent' && args[1] === 'start')!.at(-1)!;
 
 /** A managed repository with one commit, a bound reviewer, a reviewer profile and two producer profiles, its worktree root under `managed`. */
 async function installation(run: Partial<MasterRun> = {}) {
@@ -98,7 +99,7 @@ test('integration:managed-worktree-root — producer and reviewer checkouts are 
     assert.ok(existsSync(produced.checkout));
     assert.equal((await readProducerLedger(root)).producers[0].checkout, produced.checkout, 'the session record owns the checkout');
     const produceStart = produceCalls.find(args => args[0] === 'agent' && args[1] === 'start')!;
-    assert.deepEqual(produceStart.slice(produceStart.indexOf('--add-dir')), ['--add-dir', produced.checkout, '--add-dir', sharedGitDirectory(root)]);
+    assert.deepEqual(produceStart.slice(produceStart.indexOf('--add-dir'), -1), ['--add-dir', produced.checkout, '--add-dir', sharedGitDirectory(root)]);
     const producerText = promptOf(produceCalls);
     assert.ok(producerText.includes(`git worktree add --detach ${join(produced.checkout, 'checkout')} ${H}`));
     assert.ok(producerText.includes(join(produced.checkout, 'integration-managed-worktree-root.evidence.json')));
@@ -112,7 +113,7 @@ test('integration:managed-worktree-root — producer and reviewer checkouts are 
     assert.match(reviewed.checkout, /\/graphyard-review-gy-89-aaaaaaa-[0-9a-f]{8}$/);
     assert.equal((await readReviewLedger(root)).reviews[0].checkout, reviewed.checkout);
     const reviewStart = reviewCalls.find(args => args[0] === 'agent' && args[1] === 'start')!;
-    assert.deepEqual(reviewStart.slice(reviewStart.indexOf('--add-dir')), ['--add-dir', reviewed.checkout, '--add-dir', sharedGitDirectory(root)]);
+    assert.deepEqual(reviewStart.slice(reviewStart.indexOf('--add-dir'), -1), ['--add-dir', reviewed.checkout, '--add-dir', sharedGitDirectory(root)]);
     assert.ok(promptOf(reviewCalls).includes(`git worktree add --detach ${join(reviewed.checkout, 'checkout')} ${H}`));
     const plan = sessionHarnessPlan({ role: 'reviewer', kind: 'claude', cliPath: launcher, repository: 'owner/project', baseBranch: 'main', credentialHome: scratch, credentialDirectories: [], pr: 88, checkout: join(reviewed.checkout, 'checkout') });
     assert.ok(plan.allow.some(entry => entry.rule === `Bash(git worktree add --detach ${join(reviewed.checkout, 'checkout')}:*)`), 'a reviewer may add a worktree at its allocated path and nowhere else');
@@ -150,7 +151,7 @@ test('integration:managed-worktree-root — producer and reviewer checkouts are 
     const binding: ProducerBinding = { key: 'GY-88', id: 'id', pr: 88, sha: H, baseSha: B, policyRevision: 2, group: 'integration', proofs: ['integration:managed-worktree-root'], requestId: 'request-1', branch: 'graphyard/gy-88-1' };
     const elsewhere = sessionCheckout('/srv/graphyard/worktrees/project-0123456789ab', 'proof', 'GY-88', H, randomUUID());
     for (const text of [producerPrompt(config, binding, { principal: 'proof-runner' }, elsewhere), producerPrompt({ repository: 'owner/project', cliPath: launcher }, binding, { principal: 'proof-runner' }),
-      reviewPrompt(config, { ...binding, author: 'implementer' }, elsewhere), reviewPrompt(config, { ...binding, author: 'implementer' })]) assert.equal(text.includes('/tmp'), false, 'a generated prompt never names /tmp');
+      reviewPrompt(config, binding, elsewhere), reviewPrompt(config, binding)]) assert.equal(text.includes('/tmp'), false, 'a generated prompt never names /tmp');
     assert.ok(producerPrompt({ repository: 'owner/project', cliPath: launcher }, binding, { principal: 'proof-runner' }).includes(resolve(homedir(), '.local/share/graphyard/worktrees')), 'a previewed prompt names the default root');
     const sources = fileURLToPath(new URL('../src/', import.meta.url));
     for (const file of ['producer.ts', 'reviewer.ts', 'master.ts', 'master-daemon.ts', 'auto-dispatch.ts', 'harness.ts', 'install/worktree-root.ts']) {

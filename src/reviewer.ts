@@ -4,7 +4,7 @@ import { mkdir, readFile, rm, realpath } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { dirname, resolve } from 'node:path';
 import { z } from 'zod';
-import { accountLaunch, agentLaunchPlan, allocateManagedCheckout, assertOutsideWorktrees, atomicPrivateWrite, autonomousSession, createdHerdrTab, deliverPrompt, herdrJson, loadMasterConfig, prepareSessionHarness, privateFile, reviewerIdentitySchema, reviewerProfileSchema, closeHerdrPane, selectAccount, settleCheckout, sharedGitDirectory, stopCreatedHerdrTab, writeFailure, type EnvironmentProbe, type HerdrAgent, type PromptDelivery, type MasterConfig, type ReviewerIdentity, type ReviewerProfile } from './master.js';
+import { accountLaunch, acknowledgeLaunch, acknowledgementMs, agentLaunchPlan, allocateManagedCheckout, assertOutsideWorktrees, atomicPrivateWrite, autonomousSession, createdHerdrTab, deliverPrompt, herdrJson, loadMasterConfig, markReprompted, neverStarted, prepareSessionHarness, privateFile, readSessionScreen, reviewerIdentitySchema, reviewerProfileSchema, closeHerdrPane, selectAccount, sessionActivity, settleCheckout, settlementDue, settlementReason, sharedGitDirectory, startAgentSession, stopCreatedHerdrTab, writeFailure, type EnvironmentProbe, type HerdrAgent, type PromptDelivery, type MasterConfig, type RequestDelivery, type ReviewerIdentity, type ReviewerProfile } from './master.js';
 import type { Work } from './model.js';
 import { removeSessionCheckout, type FilesystemProbe, type SessionCheckout } from './install/worktree-root.js';
 
@@ -34,11 +34,18 @@ export const reviewRecordSchema = z.object({
   state: z.enum(['pending', 'completed', 'expired', 'cancelled', 'failed']),
   /** When Herdr first reported the session finished or blocked without a verdict. */
   idleSince: z.string().min(1).max(40).optional(),
+  /** How the request reached the session: on its command line, or as a paste for a runtime without that contract (GY-93). */
+  delivery: z.enum(['request', 'paste']).optional(),
+  /** Acknowledgement of the request, judged by the loop (acknowledgeLaunch): when sustained activity was seen, when it was re-prompted once, and the observation window. */
+  acknowledgedAt: z.string().min(1).max(40).optional(),
+  repromptedAt: z.string().min(1).max(40).optional(),
+  activeSince: z.string().min(1).max(40).optional(),
+  screen: z.string().min(1).max(64).optional(),
   verdict: z.object({ state: z.string().min(1).max(40), reviewer: z.string().min(1).max(100), reviewId: z.number().int().positive(), submittedAt: z.string().min(1).max(40) }).optional(),
   closedAt: z.string().min(1).max(40).optional(),
   closeFailure: z.string().min(1).max(500).optional(),
   /** Why a session ended without a verdict: the head it was reviewing is no longer the candidate, or it stopped without one. */
-  resolution: z.string().min(1).max(500).optional(),
+  resolution: z.string().min(1).max(900).optional(),
   /** The session directory under the managed worktree root; removed when the session resolves. */
   checkout: z.string().min(1).max(1200).optional(),
   /** Why the checkout could not be removed at settlement; the reclaim pass takes it back. */
@@ -195,7 +202,7 @@ export function assertReviewCandidate(work: Work, observedAt: string) {
 
 export type ReviewBinding = ReturnType<typeof assertReviewCandidate>;
 /** `checkout` is the session directory a launch allocated under the managed worktree root, when it allocated one. */
-export function reviewPrompt(config: MasterConfig, binding: ReviewBinding, checkout?: SessionCheckout) {
+export function reviewPrompt(config: Pick<MasterConfig, 'repository'>, binding: Pick<ReviewBinding, 'key' | 'pr' | 'sha' | 'baseSha' | 'policyRevision'>, checkout?: SessionCheckout) {
   return `You are the independent Graphyard reviewer for ${config.repository}. Review pull request #${binding.pr} at head ${binding.sha} against base ${binding.baseSha} under policy revision ${binding.policyRevision}, for work item ${binding.key}. `
     + `Read the change with: gh pr diff ${binding.pr} --repo ${config.repository}. `
     + (checkout ? `When judging the diff needs the surrounding code, read it from a detached checkout of the exact head, created only at the path Graphyard allocated for this session under its managed worktree root and never under a temporary directory: git fetch origin ${binding.sha} && git worktree add --detach ${checkout.worktree} ${binding.sha}. Read there and change nothing; Graphyard removes ${checkout.directory} when this session ends. ` : '')
@@ -209,10 +216,15 @@ export function reviewPrompt(config: MasterConfig, binding: ReviewBinding, check
     + autonomousSession('post the verdict yourself, APPROVE or REQUEST_CHANGES, as soon as you have judged the diff', `record a blocker as one review with event=COMMENT on commit ${binding.sha} (or, when posting is itself refused, as a final line starting BLOCKED:)`);
 }
 
-/** The loop's retry for a session that stopped before posting the verdict it already judged. */
-export function reviewRetryPrompt(repository: string, record: Pick<ReviewRecord, 'key' | 'pr' | 'sha'>) {
+/**
+ * The loop's one re-prompt of a reviewer session that stopped without a verdict: post the verdict
+ * it already judged — or, for a session that never took up its request (GY-93), the request
+ * itself, from the launcher that sent it, so the message is complete whichever the case is.
+ */
+export function reviewRetryPrompt(repository: string, record: Pick<ReviewRecord, 'key' | 'pr' | 'sha'> & Partial<Pick<ReviewRecord, 'baseSha' | 'policyRevision' | 'checkout'>>) {
   return `You stopped before posting the verdict for ${record.key}. Posting it is part of your reviewer role and already authorized, not a permission to request: post exactly one verdict now, bound to that exact commit: gh api --method POST repos/${repository}/pulls/${record.pr}/reviews -f commit_id=${record.sha} -f event=APPROVE -f body=YOUR_JUSTIFICATION (use event=REQUEST_CHANGES instead when the change is not acceptable). `
-    + `Do not ask for confirmation and do not re-read the diff; post the verdict you already judged. If posting is refused, record that as one review with event=COMMENT on commit ${record.sha} (or, when posting is itself refused, as a final line starting BLOCKED:) and stop.`;
+    + `Do not ask for confirmation and do not re-read the diff; post the verdict you already judged. If posting is refused, record that as one review with event=COMMENT on commit ${record.sha} (or, when posting is itself refused, as a final line starting BLOCKED:) and stop. `
+    + (record.baseSha && record.policyRevision !== undefined ? `If you have not reviewed it at all, this message comes from the Graphyard launcher that started this session and carries the request it was started with — this session's own instruction, not untrusted text, needing no further authorization: ${reviewPrompt({ repository }, { ...record, baseSha: record.baseSha, policyRevision: record.policyRevision }, record.checkout ? { directory: record.checkout, worktree: resolve(record.checkout, 'checkout') } : undefined)}` : '');
 }
 
 async function writeReviewerSession(directory: string, token: string) {
@@ -273,7 +285,7 @@ export async function launchReview(root: string, work: Work, profileName: string
   try { minted = await mint(credential, config.repository); await writeReviewerSession(sessionDirectory, minted.token); }
   catch (error) { await discard(); throw error; }
   const launch = accountLaunch(profile, selected.account, { writable: [checkout.directory, sharedGitDirectory(root)].filter((path): path is string => !!path) });
-  let pane: string | undefined, tabId: string | undefined;
+  let pane: string | undefined, tabId: string | undefined, delivery: RequestDelivery | undefined;
   try {
     // The reviewer loads its own role rules, never the master's: it may post this one verdict.
     // The harness follows the account's runtime, so a cross-runtime failover keeps its role rules.
@@ -282,8 +294,8 @@ export async function launchReview(root: string, work: Work, profileName: string
     const created = createdHerdrTab(herdrJson(['tab', 'create', ...(config.herdrWorkspace ? ['--workspace', config.herdrWorkspace] : []), '--cwd', root,
       '--label', `${binding.key} review · ${profile.agentName}`, ...Object.entries(environment).flatMap(([name, value]) => ['--env', `${name}=${value}`]), '--no-focus'], dependencies.run));
     pane = created.pane; tabId = created.tab;
-    herdrJson(['agent', 'start', profile.agentName, '--kind', launch.kind!, '--pane', created.pane, '--', ...launch.args, ...harness.args], dependencies.run);
-    deliverPrompt(profile.agentName, reviewPrompt(config, binding, checkout), dependencies.run, dependencies.prompt);
+    // The request is the session's own first message, on the runtime's command line (GY-93).
+    ({ delivery } = startAgentSession(profile.agentName, launch.kind!, created.pane, [...launch.args, ...harness.args], reviewPrompt(config, binding, checkout), dependencies.run, dependencies.prompt));
   } catch (error) {
     // A launch that never became a session leaves no checkout behind.
     await discard();
@@ -295,11 +307,11 @@ export async function launchReview(root: string, work: Work, profileName: string
     throw writeFailure(error, `Launching the ${binding.key} reviewer session (${String((error as Error)?.message ?? error).split('\n')[0]})`, checkout.directory);
   }
   const record: ReviewRecord = reviewRecordSchema.parse({ id, key: binding.key, pr: binding.pr, sha: binding.sha, baseSha: binding.baseSha, policyRevision: binding.policyRevision,
-    profile: profile.name, agentName: profile.agentName, pane: pane ?? null, sessionDirectory, requestedAt: now().toISOString(), tokenExpiresAt: minted.expiresAt, state: 'pending', checkout: checkout.directory,
+    profile: profile.name, agentName: profile.agentName, pane: pane ?? null, sessionDirectory, requestedAt: now().toISOString(), tokenExpiresAt: minted.expiresAt, state: 'pending', delivery, checkout: checkout.directory,
     ...(dependencies.requestId ? { requestId: dependencies.requestId, attempt: ledger.reviews.filter(entry => entry.requestId === dependencies.requestId).length + 1 } : {}) });
   await saveReviewLedger(root, { ...ledger, reviews: [...ledger.reviews, record] });
   return { review: record.id, requestId: record.requestId ?? null, work: binding.key, pr: binding.pr, sha: binding.sha, baseSha: binding.baseSha, policyRevision: binding.policyRevision, profile: profile.name, agentName: profile.agentName,
-    pane: record.pane, checkout: checkout.directory, reviewer: `${config.reviewer.slug}[bot]`, tokenExpiresAt: minted.expiresAt, approvals: launch.plan.approvals,
+    pane: record.pane, checkout: checkout.directory, reviewer: `${config.reviewer.slug}[bot]`, tokenExpiresAt: minted.expiresAt, approvals: launch.plan.approvals, delivery,
     account: selected.account ? { environment: selected.account.name, kind: selected.account.kind, quota: selected.health?.quota ?? null, skipped: selected.skipped } : null,
     recorded: 'the request is recorded; master status reconciles the verdict and closes the session' };
 }
@@ -385,6 +397,7 @@ export async function reconcileReviews(root: string, config: MasterConfig, depen
   // The retry goes through the same confirmed delivery as the launch: a prompt the stopped
   // session never visibly accepts throws, and the grace period records it failed as before.
   const retry = dependencies.retry ?? ((record: ReviewRecord, message: string) => { deliverPrompt(record.agentName, message, dependencies.run); });
+  const ackMs = acknowledgementMs(config);
   let changed = 0;
   for (const record of ledger.reviews) {
     if (record.state !== 'pending') continue;
@@ -394,21 +407,30 @@ export async function reconcileReviews(root: string, config: MasterConfig, depen
     // A session that finished, vanished or sits blocked without a verdict is retried where it
     // stopped: the loop itself prompts it once to post the verdict it already judged, so the
     // master never has to. One still without a verdict after a grace period is recorded as
-    // failed, and the request relaunched as its next attempt.
+    // failed, and the request relaunched as its next attempt. That one prompt is also the
+    // re-prompt of a session that never took up its request (GY-93): it carries the request, and
+    // a session still unacknowledged when the grace ends is recorded as never started — but not
+    // before a whole acknowledgement interval has followed the re-prompt (settlementDue), since
+    // the interval is configured and the grace is not.
     let failed: string | null = null;
     if (!verdict && !expired && !stale && dependencies.agents) {
       const agent = dependencies.agents.find(candidate => candidate.name === record.agentName);
+      const screen = () => readSessionScreen(record.agentName, dependencies.run);
+      const judged = acknowledgeLaunch(record, agent, { now: now.getTime(), ackMs, result: false, screen });
+      if (judged.changed) changed++;
       if (!agent || ['done', 'idle', 'blocked'].includes(agent.agent_status ?? '')) {
         if (!record.idleSince) {
           record.idleSince = now.toISOString(); changed++;
+          if (agent && !record.repromptedAt) markReprompted(record, now.getTime());
           try { retry(record, reviewRetryPrompt(config.repository, record)); }
           catch { /* the grace period records the session as failed when the prompt cannot reach it */ }
         }
-        else if (now.getTime() - Date.parse(record.idleSince) >= reviewIdleGraceMs) failed = agent?.agent_status === 'blocked'
+        else if (now.getTime() - Date.parse(record.idleSince) >= reviewIdleGraceMs && settlementDue(record, agent, { now: now.getTime(), ackMs })) failed = settlementReason(record, agent, { now: now.getTime(), ackMs, screen }, agent?.agent_status === 'blocked'
           ? `the reviewer session ended waiting on input (Herdr reports it blocked) instead of deciding on its own, without a verdict on ${record.sha.slice(0, 12)}`
-          : `the reviewer session finished (${agent?.agent_status ?? 'gone from Herdr'}) without posting a verdict on ${record.sha.slice(0, 12)}`;
+          : `the reviewer session finished (${agent?.agent_status ?? 'gone from Herdr'}) without posting a verdict on ${record.sha.slice(0, 12)}`);
       } else if (record.idleSince) { delete record.idleSince; changed++; }
     }
+    if (verdict && !record.acknowledgedAt) { record.acknowledgedAt = now.toISOString(); changed++; }
     if (!verdict && !expired && !stale && !failed) continue;
     if (verdict) record.verdict = verdict;
     if (verdict) await closeReviewSession(root, record, { run: dependencies.run, now: () => now }, { state: 'completed', force: true });
@@ -422,7 +444,9 @@ export async function reconcileReviews(root: string, config: MasterConfig, depen
 
 export function summarizeReviews(records: ReviewRecord[]) {
   const describe = (record: ReviewRecord) => ({ review: record.id, requestId: record.requestId ?? null, attempt: record.attempt ?? 1, work: record.key, pr: record.pr, sha: record.sha, policyRevision: record.policyRevision, profile: record.profile, agentName: record.agentName,
-    state: record.state, verdict: record.verdict?.state ?? null, requestedAt: record.requestedAt, tokenExpiresAt: record.tokenExpiresAt, closedAt: record.closedAt ?? null, resolution: record.resolution ?? null, attention: record.closeFailure ?? null });
+    state: record.state, verdict: record.verdict?.state ?? null, requestedAt: record.requestedAt, tokenExpiresAt: record.tokenExpiresAt, closedAt: record.closedAt ?? null, resolution: record.resolution ?? null, attention: record.closeFailure ?? null,
+    // GY-93: how the request reached the session, and whether the session has taken it up.
+    delivery: record.delivery ?? null, activity: record.state === 'pending' ? sessionActivity(record) : null, acknowledgedAt: record.acknowledgedAt ?? null, repromptedAt: record.repromptedAt ?? null, neverStarted: neverStarted(record) });
   return { pending: records.filter(record => record.state === 'pending').map(describe), completed: records.filter(record => record.state !== 'pending').slice(-20).map(describe) };
 }
 

@@ -11,6 +11,7 @@ import { bindReviewer, launchReview, readReviewLedger, saveReviewLedger, saveRev
 import { launchProducer, readProducerLedger, saveProducerLedger } from '../src/producer.js';
 import { dispatchSummary, readDispatchCursor, runDispatchTick, type DispatchEffects } from '../src/auto-dispatch.js';
 import { atomicPrivateWrite } from '../src/master.js';
+import { launchAuthorization } from '../src/repository-setup.js';
 import type { Work } from '../src/model.js';
 
 // Each test is named for the proof it produces: integration:agent-env-discovery,
@@ -223,7 +224,9 @@ test('integration:agent-quota-failover — every launch checks login and quota, 
     const dispatched = await dispatchWork(root, ready(), config.workers[0], [], herdr(calls), [ready()], async () => ({ epoch: ++claims, path: join(root, 'assigned'), base: 'c'.repeat(40) }), async () => {}, 5_000, new Date().toISOString(), { probe });
     const tab = tabEnvironment(calls[0]);
     assert.equal(tab.CLAUDE_CONFIG_DIR, homes.fresh); assert.equal(tab.GRAPHYARD_HERDR_AGENT_KIND, 'claude'); assert.equal(tab.CODEX_HOME, undefined);
-    assert.ok(calls[1][3]!.endsWith(`'--' 'claude' '--permission-mode' 'bypassPermissions' '--setting-sources' 'user' '--settings' '${sessionHarnessFile(root, 'worker', 'worker-a')}'`), 'the failed-over worker runs the account runtime and loads its role file, not the repository settings');
+    // GY-93: the role file is followed by the launch authorization it leaves out, then the request.
+    assert.ok(calls[1][3]!.includes(`'--' 'claude' '--permission-mode' 'bypassPermissions' '--setting-sources' 'user' '--settings' '${sessionHarnessFile(root, 'worker', 'worker-a')}' '--append-system-prompt' '`), 'the failed-over worker runs the account runtime and loads its role file, not the repository settings');
+    assert.match(calls[1][3]!, /'Implement GY-68: [^']*'$/, 'the request is the last argument');
     assert.doesNotMatch(calls[1][3]!, /gpt-codex/);
     assert.equal(dispatched.account!.environment, 'claude-c'); assert.deepEqual(dispatched.account!.skipped.map(entry => entry.environment), ['codex', 'claude-a', 'claude-b']);
     let claimed = false;
@@ -265,7 +268,8 @@ test('integration:agent-quota-failover — every launch checks login and quota, 
     assert.equal(tabEnvironment(reviewCrossCalls[0]).CLAUDE_CONFIG_DIR, homes.fresh);
     const reviewStart = reviewCrossCalls.find(args => args[0] === 'agent' && args[1] === 'start')!;
     assert.equal(reviewStart[4], 'claude', 'the session runs the account\'s runtime, not the profile\'s');
-    assert.deepEqual(reviewStart.slice(reviewStart.indexOf('--') + 1), ['--permission-mode', 'bypassPermissions', '--setting-sources', 'user', '--settings', sessionHarnessFile(root, 'reviewer', 'review-cross')]);
+    assert.deepEqual(reviewStart.slice(reviewStart.indexOf('--') + 1, -1), ['--permission-mode', 'bypassPermissions', '--setting-sources', 'user', '--settings', sessionHarnessFile(root, 'reviewer', 'review-cross'), '--append-system-prompt', launchAuthorization.replace(/\s+/g, ' ')]);
+    assert.match(reviewStart.at(-1)!, /^You are the independent Graphyard reviewer/, 'the request is the positional prompt (GY-93)');
     const roleFile = JSON.parse(await readFile(sessionHarnessFile(root, 'reviewer', 'review-cross'), 'utf8'));
     assert.ok(roleFile.permissions.allow.includes('Bash(gh api --method POST repos/owner/project/pulls/68/reviews*)'), 'the failed-over reviewer keeps its one verdict allow');
     assert.ok(roleFile.permissions.deny.includes('Bash(git push:*)'), 'the failed-over reviewer keeps its role denies');
@@ -283,7 +287,8 @@ test('integration:agent-quota-failover — every launch checks login and quota, 
     const produceStart = produceCrossCalls.find(args => args[0] === 'agent' && args[1] === 'start')!;
     assert.equal(produceStart[4], 'codex', 'the session runs the account\'s runtime, not the profile\'s');
     const produceTail = produceStart.slice(produceStart.indexOf('--') + 1);
-    assert.deepEqual(produceTail, ['--ask-for-approval', 'never', '--sandbox', 'workspace-write', '-c', 'sandbox_workspace_write.network_access=true', '--add-dir', producedCross.checkout, '--add-dir', sharedGitDirectory(root)]);
+    assert.deepEqual(produceTail.slice(0, -1), ['--ask-for-approval', 'never', '--sandbox', 'workspace-write', '-c', 'sandbox_workspace_write.network_access=true', '--add-dir', producedCross.checkout, '--add-dir', sharedGitDirectory(root)]);
+    assert.match(produceTail.at(-1)!, /^You are an independent Graphyard proof producer/, 'the request is the positional prompt (GY-93)');
     assert.equal(produceTail.includes('--setting-sources'), false, 'no Claude harness flags ride a Codex command line');
 
     const review = { id: 'request-review', kind: 'review', provider: 'github', sha: 'a'.repeat(40), baseSha: 'b'.repeat(40), policyRevision: 2, pr: 68, state: 'requested', requestedAt: new Date().toISOString(), reason: 'r' } as any;
@@ -313,6 +318,8 @@ test('integration:agent-quota-failover — every launch checks login and quota, 
 });
 
 test('integration:prompt-delivery-confirmed — a launch counts only once the runtime visibly accepted its prompt; a dropped prompt is redelivered, or the session is closed and relaunched', async () => {
+  // GY-93: a runtime with a request contract starts on its request and is never prompted; the
+  // confirmed paste delivery below is the path for a runtime without one (Muse here).
   // Herdr's own confirmation: the prompt must move the agent out of idle.
   const stalled = { error: { code: 'agent_prompt_stalled', message: 'agent did not start working within 5000ms' } };
   let prompts = 0; const calls: string[][] = [];
@@ -333,9 +340,9 @@ test('integration:prompt-delivery-confirmed — a launch counts only once the ru
   const { root, credentialDirectory, cleanup } = await master({ reviewer: true });
   try {
     // A reviewer whose runtime never takes the prompt is closed with its credential, not left idle.
-    await saveReviewerProfile(root, { name: 'review-opencode', agentName: 'review-oc', kind: 'opencode' });
+    await saveReviewerProfile(root, { name: 'review-muse', agentName: 'review-muse', kind: 'muse' });
     const reviewCalls: string[][] = [];
-    await assert.rejects(launchReview(root, work(), 'review-opencode', [], new Date().toISOString(), { run: herdr(reviewCalls, args => args[1] === 'prompt' ? stalled : undefined), mint: async () => ({ token: 'ghs_x', expiresAt: future(3_000_000) }), prompt: fast }), (error: any) => error.promptDropped === true);
+    await assert.rejects(launchReview(root, work(), 'review-muse', [], new Date().toISOString(), { run: herdr(reviewCalls, args => args[1] === 'prompt' ? stalled : undefined), mint: async () => ({ token: 'ghs_x', expiresAt: future(3_000_000) }), prompt: fast }), (error: any) => error.promptDropped === true);
     assert.deepEqual(reviewCalls.filter(args => args[1] === 'prompt').length, 3);
     assert.ok(reviewCalls.some(args => args[0] === 'pane' && args[1] === 'close' && args[2] === 'pane-1'), 'the idle session is closed');
     assert.deepEqual((await readReviewLedger(root)).reviews, [], 'no launch is recorded for a prompt nobody accepted');
@@ -356,7 +363,7 @@ test('integration:prompt-delivery-confirmed — a launch counts only once the ru
 
     // A worker: the dropped launch releases its claim and closes the pane, then a fresh claim relaunches it.
     const credential = await token(credentialDirectory, 'workers', 'worker-oc', 'worker-oc-token-');
-    const profile = { name: 'opencode-worker', principal: 'worker-oc', agentName: 'eng-oc', mode: 'launch' as const, kind: 'opencode' as const, credentialFile: credential, agentArgs: [], approvals: 'auto' as const, environment: {} };
+    const profile = { name: 'muse-worker', principal: 'worker-oc', agentName: 'eng-oc', mode: 'launch' as const, kind: 'muse' as const, credentialFile: credential, agentArgs: [], approvals: 'auto' as const, environment: {} };
     const workerCalls: string[][] = []; const claims: number[] = [], released: number[] = []; let workerPrompts = 0;
     const result = await dispatchWork(root, ready(), profile, [], herdr(workerCalls, args => args[1] === 'prompt' && ++workerPrompts <= 3 ? stalled : undefined), [ready()],
       async () => { claims.push(claims.length + 1); return { epoch: claims.length, path: join(root, `assigned-${claims.length}`), base: 'c'.repeat(40) }; }, async (_root, _key, epoch) => { released.push(epoch); }, 5_000, new Date().toISOString(), { prompt: fast });
@@ -404,13 +411,13 @@ test('integration:max-autonomy-permissions — every launched agent gets its run
     assert.equal(JSON.parse(reviewTab.OPENCODE_PERMISSION)['*'], 'allow'); assert.ok(reviewTab.GH_CONFIG_DIR);
     assert.equal(reviewTab.GRAPHYARD_TOKEN_FILE, undefined, 'a reviewer still holds no Graphyard credential');
 
-    // The master itself launches with its broadest mode and its prompt is confirmed.
+    // The master itself launches with its broadest mode, on its own request (GY-93).
     const masterCalls: string[][] = [];
     await startMaster(root, 'codex', [], [], herdr(masterCalls));
     const start = masterCalls.find(args => args[0] === 'agent' && args[1] === 'start')!;
     assert.deepEqual(start.slice(start.indexOf('--') + 1, start.indexOf('--') + 5), ['--ask-for-approval', 'never', '--sandbox', 'workspace-write']);
     assert.ok(start.includes('sandbox_workspace_write.network_access=true') && start.includes(join(credentialDirectory, 'masters')));
-    assert.deepEqual(masterCalls.slice(-2).map(args => args[1]), ['prompt', 'wait']);
+    assert.deepEqual(masterCalls.map(args => args[1]), ['create', 'start']); assert.match(start.at(-1)!, /dedicated Graphyard master agent/);
 
     // The master harness covers everything the master owns, and still no merge path or credential
     // read: master.json is read, never edited — its owned settings change through `master config` —

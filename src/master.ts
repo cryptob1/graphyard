@@ -6,7 +6,7 @@ import { basename, dirname, isAbsolute, relative, resolve, sep } from 'node:path
 import { homedir, hostname } from 'node:os';
 import { z } from 'zod';
 import { assertRepository, discover, localDirectory, saveDiscovery } from './onboarding.js';
-import { loadConnection, managedInstructions, serverOrigin } from './repository-setup.js';
+import { launchAuthorization, loadConnection, managedInstructions, serverOrigin } from './repository-setup.js';
 import { dispatchOrder, dispatchOverlap, resourceConflicts, scopeBreadth } from './coordination.js';
 import type { ConflictReport } from './conflicts.js';
 import { mergeOrder } from './delegation.js';
@@ -121,6 +121,10 @@ export const masterRunSchema = z.object({
   dispatchIntervalSeconds: z.number().int().min(5).max(30).default(10),
   reviewerProfile: profileName.optional(),
   producerTimeoutMinutes: z.number().int().min(5).max(1440).default(120),
+  // How long a launched reviewer or producer session may show no activity before the loop
+  // re-prompts it once, and how long after that re-prompt a still-quiet session is recorded as
+  // never started (see acknowledgeLaunch); default 90.
+  acknowledgementSeconds: z.number().int().min(30).max(900).optional(),
   // Worktree reclamation: how long an assignment worktree may sit untouched before its dependency
   // directories count as disposable, and the free space below which `master status` raises disk
   // pressure. Both are read from .graphyard/master.json on every cycle, so a host with a smaller
@@ -493,11 +497,11 @@ export async function saveProducerProfile(root: string, profileInput: unknown, v
  * writes it, and the master's harness grants no direct edit of master.json, so flipping autoMerge
  * or re-pointing a credential can never be a routine master action.
  */
-export const masterOwnedRunFields = ['intervalSeconds', 'dispatchIntervalSeconds', 'proofWorkflow', 'smokeWorkflow', 'deploymentUrl', 'deploymentShaField', 'reviewerProfile', 'producerTimeoutMinutes', 'quotaCeilingPercent'] as const;
+export const masterOwnedRunFields = ['intervalSeconds', 'dispatchIntervalSeconds', 'proofWorkflow', 'smokeWorkflow', 'deploymentUrl', 'deploymentShaField', 'reviewerProfile', 'producerTimeoutMinutes', 'acknowledgementSeconds', 'quotaCeilingPercent'] as const;
 const masterClearableRunFields = ['proofWorkflow', 'smokeWorkflow', 'deploymentUrl', 'reviewerProfile', 'quotaCeilingPercent'] as const;
 export interface MasterOwnedSettings {
   intervalSeconds?: number | null; dispatchIntervalSeconds?: number | null; proofWorkflow?: string | null; smokeWorkflow?: string | null;
-  deploymentUrl?: string | null; deploymentShaField?: string | null; reviewerProfile?: string | null; producerTimeoutMinutes?: number | null; quotaCeilingPercent?: number | null;
+  deploymentUrl?: string | null; deploymentShaField?: string | null; reviewerProfile?: string | null; producerTimeoutMinutes?: number | null; acknowledgementSeconds?: number | null; quotaCeilingPercent?: number | null;
   accounts?: { profile: string; accounts: string[] }[];
 }
 
@@ -823,12 +827,56 @@ export async function inspectProfileAccounts<T extends { available: boolean; rea
 }
 
 /**
+ * The instruction a launched session starts on, as the session's own first request.
+ *
+ * `herdr agent prompt` types its text into the running session through bracketed paste, and a
+ * coding agent treats pasted text as untrusted data rather than as a request from its operator —
+ * correctly, against prompt injection — so a session launched that way often ends its first turn
+ * having refused to act (GY-93). Every runtime Graphyard launches takes an initial prompt on its
+ * own command line instead, where it is the user's own first message: Claude Code, Codex and
+ * Cursor as a positional argument after their flags, OpenCode through `--prompt`. A runtime with
+ * no such contract keeps the paste, and the record says so.
+ */
+export const launchRequestContracts: Record<string, (text: string) => string[]> = {
+  claude: text => [text], codex: text => [text], cursor: text => [text], opencode: text => ['--prompt', text],
+};
+export type RequestDelivery = 'request' | 'paste';
+export function launchRequest(kind: string | undefined, text: string): { args: string[]; delivery: RequestDelivery } {
+  const contract = kind ? launchRequestContracts[kind] : undefined;
+  return contract ? { args: contract(text), delivery: 'request' } : { args: [], delivery: 'paste' };
+}
+
+/**
+ * Start a session on its request. Herdr's `agent start` returns once the runtime is ready for
+ * input, which a session already at work on its own first request may not show within the bound:
+ * a start that times out on a pane where Herdr sees the expected runtime acting is a session that
+ * started, and it is named rather than closed. Only a runtime without a request contract is
+ * prompted after it starts, through the confirmed paste delivery below.
+ */
+export const agentStartTimeoutMs = 30_000;
+export function startAgentSession(name: string, kind: string, pane: string, args: string[], text: string, run?: (command: string, args: string[]) => string, options: PromptDelivery & { timeoutMs?: number; confirm?: 'inline' | 'follow' } = {}) {
+  const request = launchRequest(kind, text);
+  try { herdrJson(['agent', 'start', name, '--kind', kind, '--pane', pane, '--timeout', String(options.timeoutMs ?? agentStartTimeoutMs), '--', ...args, ...request.args], run); }
+  catch (error) {
+    if (request.delivery !== 'request' || herdrErrorCode(error) !== 'timeout') throw error;
+    const raw = herdrJson(['agent', 'get', pane], run);
+    const agent = raw?.agent ?? raw;
+    if (agent?.agent !== kind || !['working', 'idle', 'done'].includes(agent?.agent_status)) throw error;
+    herdrJson(['agent', 'rename', pane, name], run);
+  }
+  if (request.delivery === 'paste') deliverPrompt(name, text, run, options);
+  return { delivery: request.delivery };
+}
+
+/**
  * Prompt delivery the runtime visibly accepted. Herdr submits the prompt and reports whether the
  * agent left its idle state for it; a runtime that reported ready before its input was (OpenCode
  * does, while its UI loads) drops the text and stays idle, which Herdr answers as a stalled prompt.
  * A stalled prompt is delivered again after a pause; one still refused after every attempt fails
  * the launch, whose caller closes the session and launches afresh. Anything else Herdr refuses
- * fails at once.
+ * fails at once. Since GY-93 this is the path for a runtime without a request contract, for the
+ * loop's one re-prompt of a session that has not taken up its request, and for the reviewer's
+ * retry to post a verdict it already judged.
  */
 export const promptAttempts = 3, promptAcceptMs = 20_000, promptRetryPauseMs = 3_000;
 export class PromptNotAcceptedError extends Error { readonly promptDropped = true; }
@@ -856,6 +904,107 @@ export function deliverPrompt(target: string, text: string, run?: (command: stri
     }
   }
   throw new PromptNotAcceptedError(`${target} did not visibly accept its prompt after ${attempts} deliveries (${stalls.join(', ')}); the session is closed and relaunched rather than left idle`);
+}
+
+/**
+ * Whether a launched session has taken up its request, judged from what Herdr shows and nothing
+ * the session says (GY-93).
+ *
+ * A session that refused its request ends its only turn within seconds and then sits still:
+ * `done`, a screen that no longer changes. A session at work is seen `working` or `blocked`, or —
+ * while a long command runs, which Herdr reports as `idle` for Claude Code — with a screen that
+ * keeps changing under its timer and output. A refusal is often caught `working` too, for the
+ * seconds its answer takes, so one sighting proves nothing: the session is *acknowledged* once
+ * activity has been seen across `sustainedActivityMs`, once it is `blocked` (an approval or
+ * question UI: it reached a tool call), or once its result exists.
+ *
+ * A session still quiet `acknowledgementSeconds` after its launch is re-prompted exactly once,
+ * with its request, and the record says when. The re-prompt starts the activity window afresh,
+ * so the seconds a second refusal takes cannot acknowledge the session either; a sighting that is
+ * not active ends the window too, so activity counts only across consecutive sightings and a
+ * single later screen change cannot complete a window a refusal opened. What the loop then
+ * records — never started, or finished without its result — is decided where each ledger settles
+ * the session, from `acknowledgedAt` and `repromptedAt`, and no sooner than `settlementDue` allows.
+ */
+export const defaultAcknowledgementSeconds = 90, sustainedActivityMs = 30_000;
+export const acknowledgementMs = (config: { run: Pick<MasterRun, 'acknowledgementSeconds'> }) => (config.run.acknowledgementSeconds ?? defaultAcknowledgementSeconds) * 1000;
+export interface LaunchAcknowledgement { requestedAt: string; acknowledgedAt?: string; repromptedAt?: string; activeSince?: string; screen?: string }
+export type SessionActivity = 'awaiting acknowledgement' | 'running';
+export const sessionActivity = (record: Pick<LaunchAcknowledgement, 'acknowledgedAt'>): SessionActivity => record.acknowledgedAt ? 'running' : 'awaiting acknowledgement';
+export const activeStates = ['working', 'blocked'];
+export const screenDigest = (text: string) => createHash('sha256').update(text).digest('hex').slice(0, 32);
+/** The session's terminal, as text; null when Herdr cannot read it. */
+export function readSessionScreen(target: string, run: (command: string, args: string[]) => string = (command, args) => execFileSync(command, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }), lines = 80) {
+  try { return String(run('herdr', ['agent', 'read', target, '--source', 'recent-unwrapped', '--lines', String(lines)])); } catch { return null; }
+}
+const screenDecoration = /^[\s─━═╌┄┈│┃╭╮╰╯┌┐└┘├┤=_*·•-]*$|^[❯⏵✻✶✳✢·]|bypass permissions on|shift\+tab to cycle|for shortcuts|esc to interrupt|\? for help/;
+/** The session's own last words: the tail of its screen without the runtime's frame, bounded for a ledger record. */
+export function sessionWords(text: string | null, limit = 400) {
+  const lines = (text ?? '').split('\n').map(line => line.trim()).filter(line => line && !screenDecoration.test(line));
+  const words = lines.slice(-8).join(' ').replace(/\s+/g, ' ').trim();
+  return words.length > limit ? `…${words.slice(-limit)}` : words;
+}
+export function acknowledgeLaunch(record: LaunchAcknowledgement, agent: Pick<HerdrAgent, 'agent_status'> | undefined, observed: { now: number; ackMs: number; result: boolean; screen: () => string | null }) {
+  if (record.acknowledgedAt) return { changed: false, reprompt: false };
+  const at = new Date(observed.now).toISOString();
+  const confirm = () => { record.acknowledgedAt = at; delete record.activeSince; delete record.screen; return { changed: true, reprompt: false }; };
+  if (observed.result) return confirm();
+  // Blocked is an approval or question UI: the session reached a tool call and is acknowledged at once.
+  if (agent?.agent_status === 'blocked') return confirm();
+  let changed = false;
+  let active = !!agent && activeStates.includes(agent.agent_status ?? '');
+  if (agent && !active) {
+    const text = observed.screen();
+    if (text !== null) {
+      const digest = screenDigest(text);
+      // The first screen read is a baseline: it shows no change, so it is not activity.
+      active = !!record.screen && record.screen !== digest;
+      if (record.screen !== digest) { record.screen = digest; changed = true; }
+    }
+  }
+  if (active) {
+    if (record.activeSince && observed.now - Date.parse(record.activeSince) >= sustainedActivityMs) return confirm();
+    if (!record.activeSince) { record.activeSince = at; changed = true; }
+    return { changed, reprompt: false };
+  }
+  // Not seen active: the window closes, so activity is sustained only across consecutive
+  // sightings, and one later screen change after a quiet spell starts a window rather than
+  // completing one.
+  if (record.activeSince) { delete record.activeSince; changed = true; }
+  const quietFor = observed.now - Date.parse(record.requestedAt);
+  return { changed, reprompt: !!agent && !record.repromptedAt && quietFor >= observed.ackMs };
+}
+/** The one re-prompt was sent (or attempted): it is never repeated, and activity is counted afresh from here. */
+export function markReprompted(record: LaunchAcknowledgement, now: number) { record.repromptedAt = new Date(now).toISOString(); delete record.activeSince; }
+/**
+ * Whether a session that stopped without its result may be settled yet. The grace a finished
+ * session gets is fixed, while `acknowledgementSeconds` is configured (30–900), so neither may cut
+ * the other short: a session still in Herdr that has not taken up its request is settled only once
+ * it has had its one re-prompt and a whole interval after it, whatever the grace says — before
+ * that, its ledger keeps it pending. A session that left Herdr, or one that was acknowledged, is
+ * settled by the grace alone.
+ */
+export function settlementDue(record: LaunchAcknowledgement, agent: Pick<HerdrAgent, 'agent_status'> | undefined, observed: { now: number; ackMs: number }) {
+  if (!agent || record.acknowledgedAt) return true;
+  return !!record.repromptedAt && observed.now - Date.parse(record.repromptedAt) >= observed.ackMs;
+}
+/**
+ * A session that settled without its result never started when it was never acknowledged and
+ * either left Herdr or stayed quiet through the interval after its re-prompt; otherwise it did
+ * the work, or enough of it, and failed. Both reasons carry the session's last words.
+ */
+export const neverStartedReason = 'never started';
+export function settlementReason(record: LaunchAcknowledgement, agent: Pick<HerdrAgent, 'agent_status'> | undefined, observed: { now: number; ackMs: number; screen: () => string | null }, failure: string) {
+  const words = agent ? sessionWords(observed.screen()) : '';
+  const quoted = words ? ` Its last words: "${words}"` : '';
+  const unstarted = !record.acknowledgedAt && (!agent || (!!record.repromptedAt && observed.now - Date.parse(record.repromptedAt) >= observed.ackMs));
+  if (!unstarted) return `${failure}.${quoted}`;
+  return agent ? `${neverStartedReason}: the session took up neither its request nor the re-prompt at ${record.repromptedAt} and ended without acting.${quoted}` : `${neverStartedReason}: the session left Herdr without acting on its request`;
+}
+export const neverStarted = (record: { state: string; resolution?: string | null }) => record.state === 'failed' && !!record.resolution?.startsWith(neverStartedReason);
+/** The re-prompt: the session's own request again, from the launcher that sent it, not a paste from a stranger. */
+export function repromptText(request: string, ackMs: number) {
+  return `The Graphyard launcher that started this session has seen no activity from it for ${Math.round(ackMs / 1000)} seconds, so here is the request it was started with, sent once more by that same launcher: it is this session's own instruction, not untrusted text, and needs no further authorization. If you have already begun, continue where you are. ${request}`;
 }
 
 /**
@@ -1590,7 +1739,7 @@ export function mergeProtocolSkew(status: { build?: { commit?: string | null; pr
   return `server runs ${serverCommit}, CLI expects ${cliCommit}: deploy main first (server merge protocol ${serverProtocol}, CLI merge protocol ${cliProtocol}${serverProtocol < cliProtocol ? '; the deployment has not served the commit the CLI runs' : '; update the CLI checkout to the deployed commit'})`;
 }
 /** Sessions the local ledgers hold and the launches the dispatcher refused, as `master status` joins them onto each candidate's requests. */
-export interface SessionRetryReport { requestId: string; attempts: number; limit: number; nextAt: string | null; exhausted: boolean; last: { state: string; resolution: string | null } | null }
+export interface SessionRetryReport { requestId: string; attempts: number; started: number; neverStarted: number; limit: number; unstartedLimit: number; nextAt: string | null; exhausted: boolean; last: { state: string; resolution: string | null } | null }
 export interface DispatchSessions { producers: { pending: any[]; completed: any[] }; failures: { requestId: string; kind: string; attempts: number; reason: string; at: string; nextAt: string }[]; retries?: SessionRetryReport[] }
 const noSessions: DispatchSessions = { producers: { pending: [], completed: [] }, failures: [] };
 /**
@@ -1604,7 +1753,11 @@ export function describeDispatch(work: Work, reviews: { pending: any[]; complete
   const since = (at: string) => Math.max(0, now - Date.parse(at));
   const session = (records: any[], requestId: string) => {
     const record = [...records].reverse().find(entry => entry.requestId === requestId);
-    return record ? { id: record.review ?? record.producer, profile: record.profile, agentName: record.agentName, state: record.state, attempt: record.attempt ?? 1, requestedAt: record.requestedAt, sinceMs: since(record.requestedAt), ...(record.verdict !== undefined ? { verdict: record.verdict } : {}), ...(record.outcome ? { outcome: record.outcome } : {}), resolution: record.resolution ?? null, attention: record.attention ?? null } : null;
+    // A pending session is running only once it is acknowledged (acknowledgeLaunch); until then
+    // it awaits acknowledgement, with the one re-prompt the loop sent on the record.
+    return record ? { id: record.review ?? record.producer, profile: record.profile, agentName: record.agentName, state: record.state, attempt: record.attempt ?? 1, requestedAt: record.requestedAt, sinceMs: since(record.requestedAt),
+      delivery: record.delivery ?? null, activity: record.state === 'pending' ? record.activity ?? sessionActivity(record) : null, acknowledgedAt: record.acknowledgedAt ?? null, repromptedAt: record.repromptedAt ?? null,
+      ...(record.verdict !== undefined ? { verdict: record.verdict } : {}), ...(record.outcome ? { outcome: record.outcome } : {}), resolution: record.resolution ?? null, attention: record.attention ?? null } : null;
   };
   const failure = (requestId: string) => sessions.failures.find(entry => entry.requestId === requestId) ?? null;
   // A session that failed or expired is relaunched for the same request on a widening interval;
@@ -1673,6 +1826,8 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
     const refreshCarry = currentBaseRefreshCarry(work);
     const stalledLaunch = [dispatch?.review, ...(dispatch?.producers ?? [])].find(request => request?.failure);
     const retrying = [dispatch?.review, ...(dispatch?.producers ?? [])].find(request => request?.retry && request.session && ['failed', 'expired'].includes(request.session.state));
+    // A session re-prompted once and still not acknowledged is awaiting acknowledgement, not running.
+    const unacknowledged = [dispatch?.review, ...(dispatch?.producers ?? [])].find(request => request?.session?.state === 'pending' && request.session.activity === 'awaiting acknowledgement' && request.session.repromptedAt);
     // An observed merge no execution authorized is not a candidate waiting for its queue tip: it
     // is named as the violation it is, with the recovery, and never as a gate refusal.
     // Its queue entry, when it still holds one, can never publish a speculative tip: the entry and
@@ -1688,6 +1843,7 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
       : review?.exhausted ? [`Every configured reviewer profile is exhausted for the current candidate (${review.failedOver.map(entry => `${entry.profile}: ${entry.exhaustion}`).join(', ')})`, 'reviewer-exhausted']
       : stalledLaunch ? [`Automatic ${stalledLaunch.failure!.kind} launch for ${work.key} refused ${stalledLaunch.failure!.attempts} time(s): ${stalledLaunch.failure!.reason}`, stalledLaunch.failure!.kind === 'review' ? 'launch-review' : 'launch-producer']
       : retrying ? [`${retrying.group ? `Producer session for ${retrying.group} proofs` : 'Reviewer session'} of ${work.key} ${retrying.session!.state} after attempt ${retrying.retry!.attempts} of ${retrying.retry!.limit}: ${retrying.session!.resolution ?? 'no reason recorded'}; ${retrying.retry!.exhausted ? 'no further automatic attempt' : `next attempt at ${retrying.retry!.nextAt}`}`, retrying.group ? 'launch-producer' : 'launch-review']
+      : unacknowledged ? [`${unacknowledged.group ? `Producer session for ${unacknowledged.group} proofs` : 'Reviewer session'} of ${work.key} (${unacknowledged.session!.agentName}) is awaiting acknowledgement: no activity since its launch at ${unacknowledged.session!.requestedAt}, re-prompted once at ${unacknowledged.session!.repromptedAt}; the loop records it as never started if it stays quiet`, unacknowledged.group ? 'launch-producer' : 'launch-review']
       : baseConflict ? [baseConflict, 'base-conflict']
       // An item the control plane is bringing onto a moved base is not waiting for anybody. It
       // used to be the commonest attention line on this list — one per open candidate, every
@@ -1725,7 +1881,8 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
       // Candidates the guarded merge could take once their gates pass, and the items GitHub already
       // merged without a valid execution, which are never candidates and wait on a reconciliation.
       mergeCandidates: rows.filter(row => row.stage === 'merge' && !row.merged).length, mergedUnreconciled: rows.filter(row => row.merged).length,
-      dispatchRequested: rows.reduce((total, row) => total + (row.dispatch ? (row.dispatch.review ? 1 : 0) + row.dispatch.producers.length : 0), 0), dispatchRunning: rows.reduce((total, row) => total + (row.dispatch ? [row.dispatch.review, ...row.dispatch.producers].filter(request => request?.session?.state === 'pending').length : 0), 0), reviewFailover: rows.filter(row => row.review?.failedOver.length).length, queued: placements.length,
+      dispatchRequested: rows.reduce((total, row) => total + (row.dispatch ? (row.dispatch.review ? 1 : 0) + row.dispatch.producers.length : 0), 0), dispatchRunning: rows.reduce((total, row) => total + (row.dispatch ? [row.dispatch.review, ...row.dispatch.producers].filter(request => request?.session?.state === 'pending' && request.session.activity === 'running').length : 0), 0),
+      dispatchAwaiting: rows.reduce((total, row) => total + (row.dispatch ? [row.dispatch.review, ...row.dispatch.producers].filter(request => request?.session?.state === 'pending' && request.session.activity === 'awaiting acknowledgement').length : 0), 0), reviewFailover: rows.filter(row => row.review?.failedOver.length).length, queued: placements.length,
       quarantined: rows.filter(row => row.containment && row.containment.phase !== 'live').length, settleableQuarantines: rows.filter(row => row.containment?.settleable).length,
       awaitingSmoke: delivered.filter(row => row.state === 'awaiting-deployment' || row.state === 'awaiting-smoke').length, postDeployFailures: delivered.filter(row => row.state === 'delivered-with-failure').length,
       reconciledDeliveries: deliveries.reconciled.length, operatorAuthorizedDeliveries: deliveries.operatorAuthorized.length },
@@ -1821,7 +1978,8 @@ export function observeHerdrAgents(run?: (command: string, args: string[]) => st
   catch { return { agents: [] as HerdrAgent[], available: false, reason: 'Herdr session health is unavailable; Graphyard work state remains authoritative' }; }
 }
 
-export function waitForHerdrAgent(target: string, run?: (command: string, args: string[]) => string, timeoutMs = 30_000) {
+/** `onRequest`: the session started on its own request (launchRequest), so one already working is ready too; a session still to be prompted must be idle. */
+export function waitForHerdrAgent(target: string, run?: (command: string, args: string[]) => string, timeoutMs = 30_000, onRequest = false) {
   const deadline = Date.now() + timeoutMs;
   let lastError: unknown;
   while (Date.now() < deadline) {
@@ -1831,7 +1989,7 @@ export function waitForHerdrAgent(target: string, run?: (command: string, args: 
       agent = raw?.agent ?? raw;
     } catch (error) { lastError = error; }
     if (agent?.agent_status === 'blocked') throw new Error('Launched worker is blocked before it is ready for a prompt');
-    if (['idle', 'done'].includes(agent?.agent_status)) return agent as HerdrAgent;
+    if (['idle', 'done', ...(onRequest ? ['working'] : [])].includes(agent?.agent_status)) return agent as HerdrAgent;
     Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 250);
   }
   throw new Error(`Launched worker did not become visible in Herdr within ${timeoutMs}ms${lastError instanceof Error ? `: ${lastError.message}` : ''}`);
@@ -1993,7 +2151,9 @@ async function repositoryCarriesClaudeSettings(root: string) {
 /**
  * Writes the role file and returns the runtime arguments that load it instead of the repository's
  * settings. A Claude session under a repository that carries no project settings inherits nothing
- * and is launched with its profile arguments unchanged.
+ * and is launched with its profile arguments unchanged. Loading only the user settings also leaves
+ * out the repository's AGENTS.md, so such a session carries the launch authorization written there
+ * (repository-setup.ts launchAuthorization) on its own command line instead.
  */
 export async function prepareSessionHarness(root: string, config: MasterConfig, input: Omit<SessionHarnessInput, 'cliPath' | 'repository' | 'baseBranch' | 'credentialHome' | 'credentialDirectories'> & { profile: string; credentialFiles?: string[] }) {
   const plan = sessionHarnessPlan({ ...input, cliPath: config.cliPath, repository: config.repository, baseBranch: config.baseBranch, credentialHome: dirname(dirname(config.credentialFile)),
@@ -2002,7 +2162,7 @@ export async function prepareSessionHarness(root: string, config: MasterConfig, 
   const file = sessionHarnessFile(root, input.role, input.profile);
   await mkdir(dirname(file), { recursive: true, mode: 0o700 });
   await atomicPrivateText(file, `${JSON.stringify({ permissions: { allow: plan.allow.map(entry => entry.rule), deny: plan.deny.map(entry => entry.rule) } }, null, 2)}\n`);
-  return { plan, file, args: ['--setting-sources', 'user', '--settings', file] };
+  return { plan, file, args: ['--setting-sources', 'user', '--settings', file, '--append-system-prompt', launchAuthorization.replace(/\s+/g, ' ')] };
 }
 export async function startMaster(root: string, kind: WorkerProfile['kind'], agentArgs: string[], agents: HerdrAgent[], run?: (command: string, args: string[]) => string) {
   if (!kind) throw new Error('Choose a supported master agent kind');
@@ -2011,7 +2171,7 @@ export async function startMaster(root: string, kind: WorkerProfile['kind'], age
   // Installation, not operator memory: the harness the master runs under learns the master's own
   // commands before the session starts, so a routine status or review never waits on a keypress.
   const harness = await writeHarnessPermissions(root, masterHarness(root, config, kind), true);
-  let pane: string | undefined, tabId: string | undefined;
+  let pane: string | undefined, tabId: string | undefined, delivery: RequestDelivery | undefined;
   try {
     const created = createdHerdrTab(herdrJson(['tab', 'create', ...(config.herdrWorkspace ? ['--workspace', config.herdrWorkspace] : []), '--cwd', root, '--label', `Graphyard master · ${config.repository}`, '--env', 'GRAPHYARD_MASTER=1', '--no-focus'], run));
     pane = created.pane; tabId = created.tab;
@@ -2019,7 +2179,6 @@ export async function startMaster(root: string, kind: WorkerProfile['kind'], age
     // runtime prompts, say what it may do. Codex's sandbox is widened to the private state the
     // master's own commands write beside its credential.
     const launch = accountLaunch({ kind, approvals: 'auto', agentArgs, environment: {} }, null, { writable: [dirname(config.credentialFile)] });
-    herdrJson(['agent', 'start', config.masterAgentName, '--kind', kind, '--pane', created.pane, '--', ...launch.args], run);
     const prompt = `You are the dedicated Graphyard master agent for ${config.repository}. Do not implement product work, claim worker leases, submit evidence, weaken requirements, or bypass gates. Read AGENTS.md, run node ${config.cliPath} master guide, then run node ${config.cliPath} master status. Use Graphyard as assignment and progression truth and Herdr only for session health and control. Route ready work to configured worker profiles, require workers to claim for themselves, preserve handoffs, and invoke routine merge only through graphyard master merge after every exact-candidate gate passes. Act without asking: only goals and priorities, spending money or opening third-party accounts, and issuing credentials to people belong to the human. Create, release, unblock and add requirements with node ${config.cliPath} master create, release, unblock, or requirements; request every other decision with node ${config.cliPath} master decide GY-N ACTION REASON and launch its independent approver with node ${config.cliPath} master approver GY-N DECISION.${config.operatorAgent ? '' : ` Your operator-agent and approver identities are not provisioned yet; report that onboarding must run node ${config.cliPath} master autonomy --admin-token-stdin --apply once.`}`;
     const reviewInstruction = config.reviewer
       ? `Independent review and proof collection start on their own: when a candidate passes the build gate the control plane records a review request and producer requests bound to its exact head, and node ${config.cliPath} master run launches the reviewer identity ${config.reviewer.slug}[bot] and one producer session per proof group for them within 30 seconds. Read the findings, route rework, and merge; never launch reviews or producers by hand, never review a candidate yourself, and never submit evidence. master status shows what is running per candidate and since when, and node ${config.cliPath} master review GY-N is only the recovery path for a refused reviewer launch.`
@@ -2030,14 +2189,16 @@ export async function startMaster(root: string, kind: WorkerProfile['kind'], age
     const administrationInstruction = config.browser
       ? `GitHub administration of ${config.repository} is yours: reconcile protection with node ${config.cliPath} master protection --apply, and when only a GitHub page can do it run node ${config.cliPath} master browser app-permissions, installation-accept, or protection, which drive the operator's browser profile ${config.browser.profile} headless, record every step, verify through the API, and append an audit entry. Report a pending sudo code from master status; the operator only approves it on their device. Never ask the operator to click through what those flows cover.`
       : `No browser profile is configured, so App permission updates, installation acceptance, and page-only protection changes still need the operator; ask them to rerun node ${config.cliPath} master init --browser-profile PROFILE so those become yours.`;
-    deliverPrompt(config.masterAgentName, `${prompt} ${reviewInstruction} ${administrationInstruction} ${mergeInstruction}`, run, { confirm: 'follow' });
+    // The master starts on its own request too; a runtime without that contract is prompted
+    // after start, with the text last and the confirmation following it.
+    ({ delivery } = startAgentSession(config.masterAgentName, kind, created.pane, launch.args, `${prompt} ${reviewInstruction} ${administrationInstruction} ${mergeInstruction}`, run, { confirm: 'follow' }));
   } catch (error) {
     const malformedTab = (error as any)?.herdrTab as string | undefined;
     if (pane || tabId || malformedTab) try { stopCreatedHerdrTab(pane, tabId ?? malformedTab, run); }
     catch { throw new Error(`${error instanceof Error ? error.message : 'Master startup failed'}; Herdr could not confirm cleanup of the created tab`); }
     throw error;
   }
-  return { agentName: config.masterAgentName, kind, pane: pane!, status: 'started and prompted', focusChanged: false, harness };
+  return { agentName: config.masterAgentName, kind, pane: pane!, status: delivery === 'request' ? 'started on its request' : 'started and prompted', delivery, focusChanged: false, harness };
 }
 
 type WorkerCommand = (command: string, args: string[], options?: any) => string | Buffer;
@@ -2069,6 +2230,7 @@ export async function dispatchWork(root: string, work: Work, profile: WorkerProf
   let selected: Awaited<ReturnType<typeof selectAccount>> | undefined, launched: ReturnType<typeof accountLaunch> | undefined, relaunched = 0;
   let harness: Awaited<ReturnType<typeof installWorkerHarness>> | null = null;
   let dependencies: PreparedWorker['dependencies'] | null = null;
+  let delivery: RequestDelivery | null = null;
   if (profile.mode === 'existing') {
     if (!target) throw new Error('Existing worker is not visible in Herdr');
     throw new Error('Existing sessions are observable but cannot be safely adopted for new work; use a launch profile so Graphyard supervises the agent process');
@@ -2083,13 +2245,13 @@ export async function dispatchWork(root: string, work: Work, profile: WorkerProf
     // A prompt the runtime never accepted closes the session and releases the claim; the launch is
     // then made once more from a fresh claim, rather than leaving an idle session holding the item.
     for (let attempt = 1; ; attempt++) {
-      try { ({ target, harness, dependencies } = await launchWorker(root, config, work, profile, launch, run, prepare, release, agentTimeoutMs, options.prompt)); break; }
+      try { ({ target, harness, dependencies, delivery } = await launchWorker(root, config, work, profile, launch, run, prepare, release, agentTimeoutMs, options.prompt)); break; }
       catch (error) { if (!(error instanceof PromptNotAcceptedError) || attempt >= 2) throw error; relaunched++; }
     }
   }
   const overlap = dispatchOverlap(work, allWork, Date.parse(observedAt));
   return { work: work.key, profile: profile.name, principal: profile.principal, agentName: profile.agentName, pane: target.pane_id ?? null, approvals: profile.approvals,
-    launch: launched?.plan ?? agentLaunchPlan(profile.kind, profile.approvals, profile.agentArgs, profile.environment), ownership: 'worker launcher claimed and is supervising the agent process', harness, dependencies,
+    launch: launched?.plan ?? agentLaunchPlan(profile.kind, profile.approvals, profile.agentArgs, profile.environment), ownership: 'worker launcher claimed and is supervising the agent process', harness, dependencies, delivery,
     account: selected?.account ? { environment: selected.account.name, kind: selected.account.kind, quota: selected.health?.quota ?? null, skipped: selected.skipped } : null, relaunched,
     overlap: overlap.length ? { allowed: true, ahead: overlap, note: `Dispatched over a planned-file overlap with ${describeOverlap(overlap)}; expect a sync → review → proof round for whichever lands second` } : null };
 }
@@ -2106,12 +2268,15 @@ async function launchWorker(root: string, config: MasterConfig, work: Work, prof
   try {
     const tabArgs = ['tab', 'create', ...(config.herdrWorkspace ? ['--workspace', config.herdrWorkspace] : []), '--cwd', prepared.path, '--label', `${work.key} · ${profile.agentName}`, '--env', `GRAPHYARD_URL=${config.url}`, '--env', `GRAPHYARD_TOKEN_FILE=${profile.credentialFile}`, '--env', `GRAPHYARD_HOST_ID=${config.hostId}`, '--env', `GRAPHYARD_HERDR_AGENT_KIND=${launch.kind}`, ...Object.entries(launch.environment).flatMap(([key, value]) => ['--env', `${key}=${value}`]), '--no-focus'];
     const created = createdHerdrTab(herdrJson(tabArgs, run)); pane = created.pane; tabId = created.tab;
-    const supervised = [process.execPath, config.cliPath, 'watch', work.key, String(prepared.epoch), '--', launch.kind!, ...launch.args, ...sessionHarness.args].map(shellQuote).join(' ');
+    // The instruction is the session's own first request, on the runtime's command line under
+    // the supervisor (launchRequest); only a runtime without that contract is prompted after.
+    const request = launchRequest(launch.kind, prompt);
+    const supervised = [process.execPath, config.cliPath, 'watch', work.key, String(prepared.epoch), '--', launch.kind!, ...launch.args, ...sessionHarness.args, ...request.args].map(shellQuote).join(' ');
     herdrRun(['pane', 'run', pane, supervised], run);
-    waitForHerdrAgent(pane, run, agentTimeoutMs);
+    waitForHerdrAgent(pane, run, agentTimeoutMs, request.delivery === 'request');
     herdrJson(['agent', 'rename', pane, profile.agentName], run);
-    deliverPrompt(profile.agentName, prompt, run, delivery);
-    return { target: { name: profile.agentName, pane_id: pane, agent_status: 'working', cwd: prepared.path } as HerdrAgent, harness, dependencies: prepared.dependencies ?? null };
+    if (request.delivery === 'paste') deliverPrompt(profile.agentName, prompt, run, delivery);
+    return { target: { name: profile.agentName, pane_id: pane, agent_status: 'working', cwd: prepared.path } as HerdrAgent, harness, dependencies: prepared.dependencies ?? null, delivery: request.delivery };
   } catch (error) {
     const malformedTab = (error as any)?.herdrTab as string | undefined;
     if (pane || tabId || malformedTab) {
@@ -2722,18 +2887,18 @@ export async function launchApprover(root: string, work: Work, decision: string,
   if (agents.some(agent => agent.name === name)) throw new Error(`Approver session ${name} is already visible in Herdr; let it finish or close it first`);
   const launch = agentLaunchPlan(kind, 'auto');
   const cli = `node ${config.cliPath}`;
+  let delivery: RequestDelivery | undefined;
   const prompt = `You are the independent Graphyard approver for ${config.repository}, acting as ${config.approver!.id}. Judge decision ${decision} on ${work.key}: run ${cli} master decisions ${work.key}, read the item with ${cli} status ${work.key}, its pull request and history, and weigh the requester's reason against the item's criteria and the operator's goals. If it is justified, run ${cli} master approve ${work.key} ${decision} "YOUR REASON". If not, do not approve; state the reason in this tab. Never approve a decision you requested, implemented, or produced evidence for; never edit, push, merge, review, or submit evidence. Stop when the decision is judged.`;
   let pane: string | undefined, tabId: string | undefined;
   try {
     const created = createdHerdrTab(herdrJson(['tab', 'create', ...(config.herdrWorkspace ? ['--workspace', config.herdrWorkspace] : []), '--cwd', root, '--label', `Approver · ${work.key}`, '--env', `GRAPHYARD_URL=${config.url}`, '--env', `GRAPHYARD_TOKEN_FILE=${config.approver!.credentialFile}`, '--env', 'GRAPHYARD_APPROVER=1', '--env', `GRAPHYARD_HOST_ID=${config.hostId}`, ...Object.entries(launch.environment).flatMap(([key, value]) => ['--env', `${key}=${value}`]), '--no-focus'], run));
     pane = created.pane; tabId = created.tab;
-    herdrJson(['agent', 'start', name, '--kind', kind, '--pane', created.pane, '--', ...launch.args], run);
-    deliverPrompt(name, prompt, run);
+    ({ delivery } = startAgentSession(name, kind, created.pane, launch.args, prompt, run));
   } catch (error) {
     if (pane || tabId) try { stopCreatedHerdrTab(pane, tabId, run); } catch { /* the launch error below is the report */ }
     throw error;
   }
-  return { agentName: name, work: work.key, decision, identity: config.approver!.id, pane: pane!, focusChanged: false };
+  return { agentName: name, work: work.key, decision, identity: config.approver!.id, pane: pane!, delivery, focusChanged: false };
 }
 
 export const autonomySubcommands = ['autonomy', 'create', 'release', 'unblock', 'requirements', 'decide', 'decisions', 'approve', 'approver', 'principals', 'restart', 'environments'] as const;
