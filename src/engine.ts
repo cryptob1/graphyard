@@ -303,20 +303,22 @@ export class Engine {
    * review. Left undefined, the deployment's GitHub App (from the environment) observes; null
    * disables the pre-check, and every later observation still re-derives the refusal.
    */
-  submissionObserver: ((work: Work) => Promise<Observation>) | null | undefined = undefined;
+  submissionObserver: ((work: Work, peers?: Work[]) => Promise<Observation>) | null | undefined = undefined;
   // Auto-dispatch transitions the last evaluation of a document produced, written to the ledger
   // by the transaction that persists it. Keyed by the object, so a probe clone records nothing.
   private dispatchTransitions = new WeakMap<Work, DispatchTransition[]>();
   // The launch fence is a deployment-independent safety default; only tests shorten it.
   constructor(public store: Store, public ciAppIds: number[] = [15368], public leaseSeconds = 120, public repository = process.env.GITHUB_REPOSITORY ?? '', public launchFence = launchFenceMs) {}
   private async observeSubmission(actor: Principal, id: string | null, data: { epoch: number; pr: number }, key: string): Promise<Observation | null> {
-    if (this.submissionObserver === undefined) { const github = await githubFromEnv(); this.submissionObserver = github ? probe => github.observe(probe) : null; }
+    if (this.submissionObserver === undefined) { const github = await githubFromEnv(); this.submissionObserver = github ? (probe, peers) => github.observe(probe, peers) : null; }
     if (!this.submissionObserver || !id) return null;
     // A replayed submission returns its receipt; it must not depend on the provider again.
     if ((await this.store.pool.query('SELECT 1 FROM receipts WHERE actor=$1 AND key=$2', [actor.id, key])).rowCount) return null;
-    const work = (await this.store.list()).find(w => w.id === id || w.key === id);
+    const all = await this.store.list();
+    const work = all.find(w => w.id === id || w.key === id);
     if (!work || work.stage === 'done' || !work.workspaces.some(w => w.epoch === data.epoch)) return null;
-    return this.submissionObserver({ ...work, submission: { epoch: data.epoch, pr: data.pr } });
+    // Every item goes with it: the landing check reads other items' unlanded candidates (GY-97).
+    return this.submissionObserver({ ...work, submission: { epoch: data.epoch, pr: data.pr } }, all);
   }
   /**
    * Bootstrap deferral is an operator act. It requires the explicit policy:bootstrap capability,
@@ -1159,6 +1161,11 @@ export class Engine {
       demand(!observation.merged && observation.prState === 'open' && observation.draft === false, 'Pull request is no longer open and ready for merge');
       demand(observation.candidate.sha === execution.sha && observation.candidate.baseSha === execution.baseSha && observation.candidate.pr === work.submission?.pr
         && work.workspaces.some(workspace => workspace.epoch === work.submission!.epoch && workspace.branch === observation.candidate.branch), 'GitHub candidate changed during merge execution');
+      // The final verification re-runs the landing check against the branch head as it is now
+      // (GY-97). It is taken without the other items, so what the recorded observation of this
+      // exact head found carried in its history stands beside it rather than being dropped.
+      const recorded = work.observation && work.observation.candidate.sha === observation.candidate.sha ? work.observation.landing?.carried : undefined;
+      if (observation.landing && observation.landing.carried === undefined && recorded) observation.landing = { ...observation.landing, carried: recorded };
       const probe = structuredClone(work); probe.candidate = observation.candidate; probe.observation = observation;
       this.evaluate(probe, all.map(item => item.id === probe.id ? probe : item), now);
       demand(probe.stage === 'merge' && probe.gates.every(gate => gate.passed) && !probe.violations.length, `GitHub gates changed during merge execution: ${probe.gates.flatMap(gate => gate.reasons).concat(probe.violations).join('; ')}`);
