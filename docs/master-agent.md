@@ -121,9 +121,29 @@ When **every** launch profile of a role is unavailable for the same reason — e
 - **`master status` says it in one line** per spent role, under `capacity` and as one attention item: `worker capacity is exhausted on every configured account (claude-a resets …, zai resets …); worker launches are paused until …, and nothing else is delayed; waiting: GY-7, GY-9`. Launch refusals and session retries that are only that capacity are not listed per item.
 - The cycle an account reports quota again — its reset passed, or a master added a logged-in account with `master environments --apply` and `master config accounts:PROFILE=…` — the loop withdraws the escalation (`capacity.restored`) and dispatches what was waiting. Buying quota or opening a provider account remains the human's decision.
 
-### Confirmed prompt delivery
+### The request is the session's first message
 
-A launch is recorded only once its runtime visibly accepted the prompt: Herdr submits it and waits for the agent to leave `idle`. A runtime that reports ready before its input is (OpenCode does while its UI loads) drops the text and stays idle, which Herdr reports as a stalled prompt. A stalled prompt is delivered again, up to three times; a session that still has not taken it is closed — for a worker, the claim is released too — and launched once more from scratch before the launch is reported refused. A session is never left idle until a timeout.
+Every session Graphyard launches — a worker under `watch`, the reviewer and producer sessions the loop starts, the approver, the master itself — receives its instruction as the session's own first request, on the runtime's command line: Claude Code, Codex and Cursor take it as the positional prompt after their flags, OpenCode through `--prompt`. It is never typed into the running session. `herdr agent prompt` delivers text through bracketed paste, and a coding agent treats pasted text as untrusted data rather than as a request from its operator — correctly, against prompt injection — so a session launched that way often ended its first turn having refused to act, and the loop recorded it as failed with `finished (done) without trusted evidence` and spent a retry on work that was never attempted (GY-93). `master status` shows `delivery: request` on the session, or `paste` for a runtime Graphyard has no request contract for, which is still prompted after it starts.
+
+A runtime busy on its request may not show Herdr a prompt-ready session within the start bound; a start that times out on a pane where Herdr sees the expected runtime acting is a session that started, and the launcher names it rather than closing it. A worker is likewise accepted as started when the supervisor's session is first seen `working`.
+
+The positional request follows the profile's `agentArgs` and the role harness on the command line. A runtime that takes a variadic flag (Claude Code's `--add-dir` and `--allowedTools`, for example) would read the request as one more value of that flag if it were the last thing before the request, so `agentArgs` must not end in such a flag: put its values first and a single-valued flag (`--model …`) or nothing after it. When the launcher passes a [role file](#session-harness-rules), its flags come between the profile's arguments and the request; otherwise the request follows `agentArgs` directly.
+
+#### Confirmed prompt delivery
+
+The paste path remains for the three messages that are typed into a running session: the request of a runtime without a request contract, the loop's one re-prompt of a session that has shown no activity, and the reviewer's reminder to post a verdict it already judged. Each is recorded only once its runtime visibly accepted it: Herdr submits the text and waits for the agent to leave `idle`. A runtime that reports ready before its input is (OpenCode does while its UI loads) drops the text and stays idle, which Herdr reports as a stalled prompt. A stalled prompt is delivered again, up to three times; a session that still has not taken its request is closed — for a worker, the claim is released too — and launched once more from scratch before the launch is reported refused. A session is never left idle until a timeout.
+
+The generated `AGENTS.md` section ([onboarding](onboarding.md#3-connect-a-worker-and-herdr)) tells every runtime that reads it what those pastes are: the session's own request again, from the launcher that started it, to act on without waiting for confirmation. A Claude Code session launched under a [role file](#session-harness-rules) loads only the user settings, which leaves the repository's `AGENTS.md` out, so the launcher passes the same authorization on its command line (`--append-system-prompt`).
+
+### Acknowledgement, the one re-prompt, and never started
+
+A launched reviewer or producer session is *running* only once it has visibly taken up its request; until then `master status` shows it as `awaiting acknowledgement` (`session.activity`, and `counts.dispatchAwaiting` beside `counts.dispatchRunning`). The loop judges that from Herdr alone: a session is acknowledged once activity — `working` or `blocked`, or a screen that keeps changing while a long command runs, which Herdr reports as `idle` for Claude Code — has been seen across thirty seconds of consecutive sightings, or once its verdict or evidence exists. One sighting proves nothing, because a refusal is often caught `working` for the seconds its answer takes; the first read of a screen is a baseline rather than a change, and a sighting that is not active closes the window.
+
+A session still quiet `run.acknowledgementSeconds` (30–900, default 90) after its launch is re-prompted exactly once, with its request, and the record says when (`repromptedAt`); a reviewer's re-prompt is the same reminder it gets for a verdict it stopped short of posting, which carries the request for a session that never reviewed anything. The re-prompt starts the activity window afresh, and a quiet sighting closes one, so neither a second refusal nor a single later screen change can acknowledge the session. A session that then settles without its result is recorded as **`never started: …`**, with the session's own last words from its screen, when it was never acknowledged and either left Herdr or stayed quiet through a whole interval after its re-prompt; otherwise it is recorded as before, `finished (done) without …`, with its last words appended. `master status` raises a re-prompted session that is still unacknowledged as the row's `attention`.
+
+The five-minute grace that already applies to a finished session and the configured interval are kept from cutting each other short: a session still in Herdr that has not taken up its request is never settled before its re-prompt and the interval after it, however short the grace, and the grace is what settles a session that was acknowledged or that left Herdr. With the interval at 600 seconds, a session that refuses at once stays pending through the grace, is re-prompted at 600 seconds, and is recorded never started at 1200 — not as a genuine failure at 310. The producer timeout (`run.producerTimeoutMinutes`, at least 5) is the outer bound on all of this and expires a session regardless.
+
+A never-started session is a launch that failed, not work that failed, and it does not spend the retry budget: it counts neither toward the four sessions nor toward the widening wait, and the request is launched again one minute after it closed. Three never-started sessions for one request exhaust it on their own (`retry.neverStarted`, `retry.unstartedLimit`): more launches will not fix a launcher that is not starting sessions.
 
 ## Durable loop
 
@@ -288,6 +308,7 @@ next cycle:
 | --- | --- |
 | `run.reclaimIdleHours` | How long a worktree may sit untouched before its dependency directories count as disposable, 0.25–720; default 3 |
 | `run.diskThresholdGb` | Free space below which `master status` raises disk pressure, 0.1–10000; default 10 |
+| `run.acknowledgementSeconds` | How long a launched reviewer or producer session may show no activity before the loop re-prompts it once, and how long after that it is recorded as never started, 30–900; default 90. An unacknowledged session still in Herdr is never settled sooner, whatever the finished-session grace (see [acknowledgement](#acknowledgement-the-one-re-prompt-and-never-started)) |
 
 ### Scope requests the loop decides
 
@@ -449,7 +470,10 @@ after a widening wait — 1, 4, then 16 minutes after the last session closed, n
 limit, `nextAt`, whether it is exhausted, and the last session's state and resolution) beside its
 `session`, and raises it as the row's `attention` (`Producer session for integration proofs of
 GY-N failed after attempt 1 of 4: …; next attempt at …`). An exhausted reviewer request is
-recovered with `master review GY-N` once its cause is fixed.
+recovered with `master review GY-N` once its cause is fixed. A session recorded `never started`
+(see [acknowledgement](#acknowledgement-the-one-re-prompt-and-never-started)) is relaunched a
+minute later without counting toward those four or widening the wait; three of them exhaust
+the request on their own.
 
 **Every launched session decides and acts on its own.** The reviewer, producer and worker
 prompts require it: post the verdict, submit pass or fail evidence, or record a blocker naming
@@ -469,11 +493,13 @@ free.
 
 `master status` shows it all per candidate under each row's `dispatch`: the open review and
 producer requests with `requestedAt`, `sinceMs` and the recorded reason; the `session` launched
-for each (profile, agent, state, verdict or per-proof outcome, and how long it has run); any
+for each (profile, agent, state, `activity` — `awaiting acknowledgement` or `running` —
+`acknowledgedAt`, `repromptedAt`, verdict or per-proof outcome, and how long it has run); any
 `failure` standing against it; and `recent`, the last resolved requests with their resolution.
 `producers` lists the pending and recent producer sessions, `dispatch` reports the dispatcher's
-cadence, last tick and failures, and `counts.dispatchRequested` and `counts.dispatchRunning`
-total the requests and the sessions running for them.
+cadence, last tick and failures, and `counts.dispatchRequested`, `counts.dispatchRunning` and
+`counts.dispatchAwaiting` total the requests, the acknowledged sessions running for them, and
+the sessions still awaiting acknowledgement.
 
 A tick whose snapshot read fails or times out is retried promptly with a widening wait, and
 each consecutive failure doubles the bound on the next read (8 s, 16 s, 32 s…), up to the
@@ -667,7 +693,7 @@ Templates: [Claude](../examples/master/claude-reviewer.json), [Cursor](../exampl
 5. launches the reviewer profile in its own Herdr tab with a read-only prompt naming the exact head, base, and policy revision, and the commit-bound command that posts the verdict. Posting that verdict is granted to the reviewer role — the launch allows exactly that one call and the prompt says so — so the session never has to ask for it;
 6. records the request in `.graphyard/reviews.json`.
 
-`master status` reconciles pending requests: when the reviewer identity posts an `APPROVED` or `CHANGES_REQUESTED` review on that exact commit, Graphyard closes the session, removes its credential directory, and moves the record to completed — whether the verdict came on the first attempt or after the loop's retry prompt. A verdict on another commit, from another identity, or a bare comment settles nothing. An unanswered request expires with its token. A session that stopped without posting is prompted once, by the dispatch loop itself, to post the verdict it already judged, through the same [confirmed delivery](#confirmed-prompt-delivery) a launch uses; one still silent after the five-minute grace is recorded as failed and the request relaunched as its next attempt (see [automatic dispatch at submit](#automatic-dispatch-at-submit)). No master ever sends that retry by hand, and no master ever edits the ledger to unstick a record.
+`master status` reconciles pending requests: when the reviewer identity posts an `APPROVED` or `CHANGES_REQUESTED` review on that exact commit, Graphyard closes the session, removes its credential directory, and moves the record to completed — whether the verdict came on the first attempt or after the loop's retry prompt. A verdict on another commit, from another identity, or a bare comment settles nothing. An unanswered request expires with its token. A session that stopped without posting is prompted once, by the dispatch loop itself, to post the verdict it already judged — or, for a session that never took up its request, with that request — through the same [confirmed delivery](#confirmed-prompt-delivery) a paste uses; one still silent after the five-minute grace is recorded as failed, or as [never started](#acknowledgement-the-one-re-prompt-and-never-started), and the request relaunched as its next attempt (see [automatic dispatch at submit](#automatic-dispatch-at-submit)). No master ever sends that retry by hand, and no master ever edits the ledger to unstick a record.
 
 Settling a record always withdraws its credential: the session directory is removed even when Herdr could not confirm the pane is gone, because nothing revisits a settled record, so a token left there would sit on disk until it expired on its own. What an unconfirmed pane costs instead is the record's outcome. A verdict, and a superseded head, settle the record regardless — GitHub has already proven the one, and the candidate has already replaced the other — with the close failure kept on the record and shown as `attention` in `master status`. A session that merely failed or expired, which has proven nothing, stays pending with the reason attached, so the next reconcile retries the close.
 
