@@ -7,14 +7,14 @@ import { activeLease, admin, assertReviewerProfiles, operatorCapability, escalat
 import { resourceConflicts } from './coordination.js';
 import { containmentAttestation, containmentSettlementRefusals, containmentVerificationSchema } from './quarantine.js';
 import { activeEngineers, delegationLimits, implementerIdentities, leadMay, producerIndependenceRefusal, sessionKind } from './delegation.js';
-import { queueHistoryLimit, queueSequencingReason, type BaseRefresh, type QueueSpeculation } from './merge-queue.js';
+import { queueHistoryLimit, queueSequencingReason, reconciliationRefusalPrefix, type BaseRefresh, type QueueSpeculation } from './merge-queue.js';
 import { githubFromEnv } from './github.js';
 import { regressionRefusals } from './regression-guard.js';
 import { ciFamilyAllows, ciProofFamilies, ciRunBindingSchema, ciRunRefusal, isCiProducer, refuseCiProducer, staleCiAttemptRefusal, type CiRunObservation } from './model/ci-proofs.js';
 import { decideScopeRequest, liveScopeWidening, scopeRefusalBlocker, type ScopeDecision } from './model/scope.js';
 import { reconcileAutoDispatch, type DispatchTransition } from './model/dispatch.js';
 import { beginAttempt, endAttempt, endLapsedAttempt, recordIntervention, recordRework, recordSubmission } from './pipeline-speed.js';
-import { foldDecisions } from './model/approval.js';
+import { foldDecisions, type Decision } from './model/approval.js';
 
 const epoch = z.number().int().positive();
 const sha = z.string().regex(/^[a-f0-9]{40}$/);
@@ -163,32 +163,70 @@ export interface MergeReconciliation {
  * authorization itself, the submitted pull request, every gate, a fresh observation and an
  * authorization that predates the merge. Read for the authorized path and for a reconciliation.
  */
-export function historicalAuthorizationRefusals(past: Work, all: Work[], observation: Observation, cutoff: number, mergedTime: number): string[] {
+export function historicalAuthorizationRefusals(past: Work, all: Work[], observation: Observation, cutoff: number, mergedTime: number, options: { reconciling?: boolean } = {}): string[] {
   const authorization = past.mergeAuthorization;
   const refusals: string[] = [];
   if (!authorization || authorization.sha !== observation.candidate.sha || authorization.baseSha !== observation.candidate.baseSha || authorization.policyRevision !== past.policyRevision)
     refusals.push(`no merge authorization for ${observation.candidate.sha.slice(0, 12)} on ${observation.candidate.baseSha.slice(0, 12)} at policy revision ${past.policyRevision} stood at the merge cutoff`);
   else if (!(Date.parse(authorization.at) < mergedTime)) refusals.push(`the merge authorization was recorded at ${authorization.at}, not before the merge`);
   if (past.submission?.pr !== observation.candidate.pr) refusals.push(`the record named pull request #${past.submission?.pr ?? 'none'}, not #${observation.candidate.pr}`);
-  for (const gate of past.gates.filter(gate => !gate.passed)) refusals.push(`gate ${gate.name} had not passed: ${gate.reasons.join('; ')}`);
-  for (const violation of past.violations) refusals.push(`violation stood: ${violation}`);
+  // A reconciliation judges the merge that happened, so nothing that merge itself wrote can refuse
+  // it (GY-94): the unauthorized-merge violation it exists to clear, a refusal of an earlier
+  // decision, and a merge gate that only reports the queue position the merge left behind.
+  const circular = (violation: string) => options.reconciling && (violation === unauthorizedMergeViolation || violation.startsWith(reconciliationRefusalPrefix));
+  const sequencingOnly = (gate: Work['gates'][number]) => options.reconciling && gate.name === 'merge' && gate.reasons.length > 0 && gate.reasons.every(queueSequencingReason);
+  for (const gate of past.gates.filter(gate => !gate.passed && !sequencingOnly(gate))) refusals.push(`gate ${gate.name} had not passed: ${gate.reasons.join('; ')}`);
+  for (const violation of past.violations.filter(violation => !circular(violation))) refusals.push(`violation stood: ${violation}`);
   const asOf = new Date(cutoff - 1);
   for (const proof of requiredProofs(past, all)) if (!currentEvidence(past, proof, asOf)) refusals.push(`required proof ${proof} had no live trusted evidence at ${asOf.toISOString()}`);
   if (!past.observation || !(cutoff - Date.parse(past.observation.at) < 120_000)) refusals.push('the last GitHub observation before the merge was older than two minutes');
   return refusals;
 }
 /**
- * The two-party merge decision that reconciles an observed, unauthorized merge: applied — so
+ * How a delivery an operator authorized outside the guarded path was recorded (GY-94). No merge
+ * execution authorized the merge and the record at the cutoff did not either — `unmet` is what it
+ * lacked — so an admin credential on one side of a post-merge two-party merge decision took
+ * responsibility, citing the refused reconciliation it overrides. Distinct from a reconciliation,
+ * which delivers only when the record at the cutoff satisfied every gate on its own.
+ */
+export interface OperatorAuthorizedDelivery {
+  decision: string; requestedBy: string; requestedAt: string; approvedBy: string; approvedAt: string; reason: string; approvalReason: string;
+  /** The admin credential that authorized the merge, and the refused reconciliation its decision cites. */
+  operator: string; refusedDecision: string; unmet: string[];
+  cutoff: string; snapshotRevision: number; judgement: string; violation: string;
+  /** Always null: the statement that no merge execution authorized this merge. */
+  execution: null;
+}
+/** A post-merge merge decision with the roles its two parties held, read from the ledger. */
+interface PostMergeDecision extends Decision { requesterRole: string | null; approverRole: string | null }
+/**
+ * The two-party merge decisions that judge an observed, unauthorized merge: applied — so
  * requested by one agent identity and approved by an independent one — for exactly the observed
  * candidate at the policy revision the pre-cutoff record carried, and requested after the merge
- * cutoff, so it is a judgement of the merge that happened rather than a pre-merge approval.
+ * cutoff, so each is a judgement of the merge that happened rather than a pre-merge approval.
+ * Oldest first; the caller judges the latest one the record has not already answered.
  */
-async function reconcilingDecision(db: { query: (text: string, values: unknown[]) => Promise<{ rows: any[] }> }, work: Work, observation: Observation, policyRevision: number, cutoff: number) {
+async function postMergeDecisions(db: { query: (text: string, values: unknown[]) => Promise<{ rows: any[] }> }, work: Work, observation: Observation, policyRevision: number, cutoff: number): Promise<PostMergeDecision[]> {
   const rows = (await db.query("SELECT actor, kind, payload, created_at FROM events WHERE work_id=$1 AND kind IN ('decision.requested','decision.approved','decision.applied','decision.failed') ORDER BY seq", [work.id])).rows;
   const decisions = foldDecisions(work.id, rows.map(row => ({ kind: row.kind as string, actor: row.actor as string, at: new Date(row.created_at).toISOString(), payload: row.payload })));
-  return decisions.find(decision => decision.action === 'merge' && decision.state === 'applied' && !!decision.approvedBy && decision.approvedBy !== decision.requestedBy
+  const role = (kind: string, id: string, party: 'requester' | 'approver') => rows.find(row => row.kind === kind && row.payload?.id === id)?.payload?.[party]?.role ?? null;
+  return decisions.filter(decision => decision.action === 'merge' && decision.state === 'applied' && !!decision.approvedBy && decision.approvedBy !== decision.requestedBy
     && decision.input?.sha === observation.candidate.sha && decision.input?.baseSha === observation.candidate.baseSha && decision.input?.policyRevision === policyRevision
-    && Date.parse(decision.requestedAt) >= cutoff) ?? null;
+    && Date.parse(decision.requestedAt) >= cutoff)
+    .map(decision => ({ ...decision, requesterRole: role('decision.requested', decision.id, 'requester'), approverRole: role('decision.approved', decision.id, 'approver') }));
+}
+/**
+ * The operator authorizing a merge outside the guarded path, or the reason the decision is not
+ * that: an operator-authorized delivery needs an admin credential — the operator, not the
+ * master's agent pair — on one side of the decision, and a reason that cites a refused
+ * reconciliation of this merge, so the override names exactly what the record lacked.
+ */
+function operatorAuthorizing(decision: PostMergeDecision, refused: Set<string>): { operator: string; refusedDecision: string } | { refusal: string | null } {
+  const cited = [...refused].find(id => decision.reason.includes(id));
+  if (!cited) return { refusal: null };
+  const operator = decision.requesterRole === 'admin' ? decision.requestedBy : decision.approverRole === 'admin' ? decision.approvedBy! : null;
+  return operator ? { operator, refusedDecision: cited }
+    : { refusal: `an operator-authorized delivery needs an admin credential as requester or approver; ${decision.requestedBy} is ${decision.requesterRole ?? 'of unrecorded role'} and ${decision.approvedBy} is ${decision.approverRole ?? 'of unrecorded role'}` };
 }
 export class Engine {
   operatorAuthorizer?: (db: any, now: Date, actor: Principal) => Promise<Principal>;
@@ -1110,12 +1148,19 @@ export class Engine {
           resolveEscalation(work, settled.escalation.trigger);
           ledger.push({ kind: 'escalation.auto-settled', details: { trigger: settled.escalation.trigger, epoch: settled.epoch, escalation: settled.escalation, note: settled.note, cause: settled.cause, attestation: settled.attestation, submission: work.submission } });
         }
+        const queuedBefore = work.queue?.sequence ?? null;
         this.evaluate(work, all, now);
+        // A queue entry the evaluation derived out — here, a merged entry whose reconciliation a
+        // standing refusal already answered (GY-94) — is recorded as an ejection, and the entries
+        // behind it are woken to predict against the real base.
+        const ejected = queuedBefore !== null && !work.queue && work.queueEjection?.sequence === queuedBefore;
+        if (ejected) ledger.push({ kind: 'queue.ejected', details: { sequence: queuedBefore, reason: work.queueEjection!.reason } });
         if (JSON.stringify(work) !== before) {
           for (const entry of ledger) await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, 'graphyard', entry.kind, JSON.stringify({ details: { ...entry.details, at: now.toISOString() } })]);
           await this.recordDispatch(db, work, now);
           await save(db, work, 'graphyard', 'reconciled', now, ledger.length ? { ledger: ledger.map(entry => entry.kind) } : undefined);
           if (work.submission) await wakeJob(db, work.id);
+          if (ejected) for (const behind of all) if (behind.queue && behind.id !== work.id) await wakeJob(db, behind.id);
         }
       }
     });
@@ -1140,6 +1185,7 @@ export class Engine {
       demand(work.submission?.pr === observation.candidate.pr, 'Unassigned pull request');
       demand(work.workspaces.some(w => w.epoch === work.submission!.epoch && w.branch === observation.candidate.branch), 'PR branch does not match the assigned workspace');
       if (work.stage === 'done') return work;
+      const queuedBefore = work.queue?.sequence ?? null;
       let authorizedSnapshot: Work | null = null; let authorizationRevision: number | null = null;
       // The repository-clock instant at which this authorization's evidence was judged
       // applicable. The provider merge timestamp cannot stand in for it: the two clocks
@@ -1155,6 +1201,7 @@ export class Engine {
       // same observation (the pull request's creation time) can be carried with it.
       let mergedAtRepository: string | null = null; let repositoryClockOffsetMs: number | null = null;
       let reconciliation: MergeReconciliation | null = null; let refusedReconciliation: { decision: string; reasons: string[] } | null = null;
+      let operatorAuthorization: OperatorAuthorizedDelivery | null = null;
       if (observation.merged && observation.mergedAt && Number.isFinite(Date.parse(observation.mergedAt))) {
         const providerMergedTime = Date.parse(observation.mergedAt);
         // Never allow evidence from after the earliest possible merge instant.
@@ -1191,9 +1238,14 @@ export class Engine {
           && work.gates.every(gate => gate.passed) && !work.violations.length) {
           authorizedSnapshot = structuredClone(work); authorizationRevision = activeExecution.authorizationRevision;
         }
-        // The record as it stood immediately before the merge cutoff: what the historical
-        // authorization check reads, and what a two-party reconciliation re-checks (GY-92).
-        const past = authorizedSnapshot ? undefined : (await db.query("SELECT payload->'work' AS work FROM events WHERE work_id=$1 AND created_at<$2 AND payload ? 'work' ORDER BY seq DESC LIMIT 1", [id, new Date(cutoff)])).rows[0]?.work as Work | undefined;
+        // The record as it stood immediately before the merge: what the historical authorization
+        // check reads, and what a two-party reconciliation re-checks (GY-92). The cutoff carries
+        // the clock-offset allowance so an authorization recorded up to the merge instant on the
+        // repository clock still counts, but that allowance admits no post-merge record (GY-94):
+        // a snapshot whose own observation already reports this pull request merged was written
+        // after the merge, whatever its timestamp, and carries the merge's consequences.
+        const past = authorizedSnapshot ? undefined : (await db.query(`SELECT payload->'work' AS work FROM events WHERE work_id=$1 AND created_at<$2 AND payload ? 'work'
+          AND NOT COALESCE((payload->'work'->'observation'->>'merged')::boolean AND (payload->'work'->'observation'->'candidate'->>'pr')::int=$3, false) ORDER BY seq DESC LIMIT 1`, [id, new Date(cutoff), observation.candidate.pr])).rows[0]?.work as Work | undefined;
         const historical = past ? historicalAuthorizationRefusals(past, all, observation, cutoff, mergedTime) : ['No record of the item precedes the merge cutoff'];
         if (!authorizedSnapshot && past && executionValid && !historical.length) {
           authorizedSnapshot = past; authorizationRevision = boundedExecution?.authorizationRevision ?? past.revision;
@@ -1205,18 +1257,35 @@ export class Engine {
         // itself — the record before the cutoff must still show every gate passed and every
         // required proof live, the same judgement an authorized merge is held to — and the
         // delivery then cites that snapshot and the decision. A decision the history refuses
-        // is recorded on the item with the reasons, once, so the item says why it cannot be.
+        // is recorded on the item with the reasons, once, so the item says why it cannot be;
+        // that refusal is also the exit of a queue entry that can never publish (merge-queue.ts).
+        // What the history refuses, an operator may still own (GY-94): a later decision with an
+        // admin credential on one side, citing the refusal, delivers the merge as operator-
+        // authorized — stating that no execution authorized it and what the record lacked.
         if (!authorizedSnapshot && past && observation.mergeSha) {
-          const decision = await reconcilingDecision(db, work, observation, past.policyRevision, cutoff);
-          if (decision && !historical.length) {
+          const decisions = await postMergeDecisions(db, work, observation, past.policyRevision, cutoff);
+          const refused = new Set<string>((await db.query("SELECT payload->'details'->>'decision' AS decision FROM events WHERE work_id=$1 AND kind='merge.reconciliation.refused'", [id])).rows.map(row => row.decision as string));
+          const decision = decisions.filter(entry => !refused.has(entry.id)).at(-1) ?? null;
+          const reconcilable = decision ? historicalAuthorizationRefusals(past, all, observation, cutoff, mergedTime, { reconciling: true }) : historical;
+          if (decision && !reconcilable.length) {
             authorizedSnapshot = past; authorizationRevision = boundedExecution?.sha === observation.candidate.sha && boundedExecution.baseSha === observation.candidate.baseSha ? boundedExecution.authorizationRevision : past.revision;
             reconciliation = { decision: decision.id, requestedBy: decision.requestedBy, requestedAt: decision.requestedAt, approvedBy: decision.approvedBy!, approvedAt: decision.approvedAt!,
               reason: decision.reason, approvalReason: decision.approvalReason ?? '', cutoff: new Date(cutoff).toISOString(), snapshotRevision: past.revision,
               judgement: `Every gate passed and every required proof was live at ${new Date(cutoff - 1).toISOString()}, the recorded merge cutoff; the merge was observed without a valid execution and is delivered on the approved decision`,
               proofs: requiredProofs(past, all), violation: unauthorizedMergeViolation };
           } else if (decision) {
-            const refusal = `Reconciliation by decision ${decision.id} refused: ${historical.join('; ')}`;
-            if (!work.violations.includes(refusal)) { work.violations.push(refusal); refusedReconciliation = { decision: decision.id, reasons: historical }; }
+            const operator = operatorAuthorizing(decision, refused);
+            if ('operator' in operator) {
+              authorizedSnapshot = past; authorizationRevision = past.revision;
+              operatorAuthorization = { decision: decision.id, requestedBy: decision.requestedBy, requestedAt: decision.requestedAt, approvedBy: decision.approvedBy!, approvedAt: decision.approvedAt!,
+                reason: decision.reason, approvalReason: decision.approvalReason ?? '', operator: operator.operator, refusedDecision: operator.refusedDecision, unmet: reconcilable,
+                cutoff: new Date(cutoff).toISOString(), snapshotRevision: past.revision, execution: null, violation: unauthorizedMergeViolation,
+                judgement: `No merge execution authorized merge ${observation.mergeSha.slice(0, 12)} and the record at ${new Date(cutoff - 1).toISOString()}, the recorded merge cutoff, did not either (${reconcilable.join('; ')}); operator ${operator.operator} authorized it outside the guarded path by decision ${decision.id}, citing refused reconciliation ${operator.refusedDecision}` };
+            } else {
+              const reasons = operator.refusal ? [...reconcilable, operator.refusal] : reconcilable;
+              const refusal = `${reconciliationRefusalPrefix}${decision.id} refused: ${reasons.join('; ')}`;
+              if (!work.violations.includes(refusal)) { work.violations.push(refusal); refusedReconciliation = { decision: decision.id, reasons }; }
+            }
           }
         }
       }
@@ -1247,15 +1316,19 @@ export class Engine {
           // leaves the record (the ledger keeps it), and gates that moved since — evidence that
           // expired while the item sat at the merge stage — are reported with the judgement, not
           // recorded as a second violation.
-          if (reconciliation) work.violations = work.violations.filter(entry => entry !== violation && !entry.startsWith('Reconciliation by decision '));
+          // An operator-authorized delivery is judged by the operator, not the gates: what the
+          // record lacked is on the delivery, and the violation it owns leaves the record the same way.
+          if (reconciliation || operatorAuthorization) work.violations = work.violations.filter(entry => entry !== violation && !entry.startsWith(reconciliationRefusalPrefix));
           else if (work.gates.some(g => !g.passed)) work.violations.push('Post-merge checks differ from the recorded authorization; follow-up required');
           work.stage = 'done'; work.stageEnteredAt = now.toISOString();
           work.mergeExecution = null;
           const delivery: Work['delivery'] = { mergedAt: observation.mergedAt!, mergeSha: observation.mergeSha, authorizationRevision: authorizationRevision!, ...(evidenceAsOf ? { evidenceAsOf } : {}),
             ...(mergedAtRepository ? { mergedAtRepository, repositoryClockOffsetMs: repositoryClockOffsetMs! } : {}) };
-          work.delivery = reconciliation ? Object.assign(delivery, { reconciliation }) : delivery;
+          work.delivery = reconciliation ? Object.assign(delivery, { reconciliation }) : operatorAuthorization ? Object.assign(delivery, { operatorAuthorization }) : delivery;
           if (reconciliation) await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, reconciliation.requestedBy, 'merge.reconciled',
             JSON.stringify({ details: { ...reconciliation, mergeSha: observation.mergeSha, mergedAt: observation.mergedAt, authorizationRevision, evidenceAsOf, gatesNow: work.gates.filter(gate => !gate.passed).map(gate => ({ name: gate.name, reasons: gate.reasons })), at: now.toISOString() } })]);
+          if (operatorAuthorization) await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, operatorAuthorization.operator, 'merge.operator-authorized',
+            JSON.stringify({ details: { ...operatorAuthorization, mergeSha: observation.mergeSha, mergedAt: observation.mergedAt, authorizationRevision, evidenceAsOf, gatesNow: work.gates.filter(gate => !gate.passed).map(gate => ({ name: gate.name, reasons: gate.reasons })), at: now.toISOString() } })]);
           await db.query('DELETE FROM jobs WHERE work_id=$1', [work.id]);
           // The queue shifted: every entry behind this one has a new position and predicted base.
           for (const behind of all) if (behind.queue && behind.id !== work.id) await wakeJob(db, behind.id);
@@ -1269,6 +1342,15 @@ export class Engine {
         // GitHub answered for the lapsed authority: the pull request is still unmerged after it
         // expired, so the execution — committed or not — is reconciled and the record reopens.
         work.mergeExecution = null;
+      }
+      // A queue entry the evaluation derived out is recorded as an ejection, and every entry behind
+      // it is woken to predict against the real base. For a merged entry that could never publish
+      // a speculative tip, the ejection is its refused reconciliation (GY-94): nothing is delivered,
+      // and the ledger keeps the refusal and the exit side by side.
+      if (queuedBefore !== null && !work.queue && work.queueEjection?.sequence === queuedBefore) {
+        await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, 'graphyard', 'queue.ejected',
+          JSON.stringify({ details: { sequence: queuedBefore, reason: work.queueEjection.reason, ...(refusedReconciliation ? { decision: refusedReconciliation.decision, mergeSha: observation.mergeSha } : {}), at: now.toISOString() } })]);
+        for (const behind of all) if (behind.queue && behind.id !== work.id) await wakeJob(db, behind.id);
       }
       await this.recordDispatch(db, work, now);
       await save(db, work, 'github', 'github.observed', now);
