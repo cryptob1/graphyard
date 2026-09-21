@@ -476,7 +476,8 @@ blocker is recorded in Graphyard:
    and leaving `schedule.held` items for the item ahead of them to merge (see
    [conflict avoidance](#conflict-avoidance)).
 3. Route review findings and failed proofs to rework; the reviewer and the producers for every
-   submitted head are launched by the loop, never by hand.
+   submitted head are launched by the loop, never by hand. A required check that failed on a
+   [timing assertion](#timing-assertions-in-required-checks) is re-run, not reworked.
 4. Request a guarded merge only when the exact candidate passes every gate.
 5. Run [deployment verification](#deployment-verification) for each delivery with
    `master verify-deployment GY-N`: the required live behavior is established against
@@ -858,6 +859,46 @@ row's `interventions` and `reworkRounds` say whether the time went to a hand-off
 and the flow analytics bottleneck summary says which wait category held the rest. Never trade a
 gate, a proof, an identity rule or a lease rule for the number.
 
+## Timing assertions in required checks
+
+A few tests in the required `test` check assert on elapsed real time: the coordination snapshot of a
+100-item ledger answers under 2 s p95, a dispatcher recovers from failed reads inside its interval, a
+coordination cycle fits its schedule. Those budgets are properties the loop depends on and are never
+relaxed, but what such a test measures on a shared runner is the runner as much as the system, so a
+timing assertion is treated as a different kind of failure from a behavioural one.
+
+Every timing-dependent assertion goes through `tests/helpers/timing.ts`: warmup reads are taken and
+discarded before sampling, the sample is large enough for the named percentile to be an order
+statistic with observations above it (40 reads for a p95, where 20 made it the second-slowest read),
+and the measurement — assertion, statistic, samples, budget, verdict — is appended to the report at
+`GRAPHYARD_TIMING_REPORT`. A failed budget fails with a message that begins `timing assertion`.
+Cases about merge authority never derive an instant from elapsed time either: the merge instant a
+delivery case asserts on is pinned to the execution's recorded `committingAt` through
+`tests/helpers/clock.ts`, so the case reads the same however long the runner took between engine
+calls.
+
+The CI `test` job publishes the report whatever the outcome of `npm test`: a table in the job
+summary, the report as an artifact, and one annotation per measurement on the job's check run, titled
+`timing assertion` — an error when its budget was missed. `master status` reads those annotations for
+every open candidate held on a failed required check and, when a timing assertion is among the
+failures, replaces `Required CI check test has not passed on the current candidate` with what was
+measured against which budget, on the row's `refusal` and as an attention item whose next step is the
+re-run of exactly that job (`gh run rerun --job ID --repo OWNER/REPO`). The item is never left silent
+on a runner artefact. Each row carries `timing` — the check, its run id, the failed measurements and
+every measurement the run published — and the top-level `timing.heldOnTiming` lists the items held
+that way. A failed check with no timing annotation stays an unqualified refusal: that is a regression,
+routed to rework as before. A budget missed on three consecutive re-runs of the same head is a
+regression too, never a budget to relax.
+
+Stability is demonstrated, not assumed. `npx tsx tests/helpers/timing-stability.ts --runs 20` runs
+the required check twenty times against one commit (a dirty tree is refused), records each run's
+report, and writes `summary.md` and `summary.json` with the run-to-run spread — min / median / p95 /
+max of the reported statistic, the budget, the worst run's share of it and the failure count — per
+timing assertion under `.graphyard/timing-stability/<commit>/`. That record is what a future
+regression is judged against: an assertion whose worst run sits at a third of its budget has room;
+one that creeps towards the budget is measuring the runner, and the fix is in how it measures, never
+in the number.
+
 ## Recovery
 
 ### Merged without a valid execution
@@ -932,7 +973,7 @@ The master clears blockers and adds requirements as its operator-agent identity;
 | `master init --token-stdin [--browser-profile PROFILE]` | Install the operating mode; name the operator's browser profile |
 | `master environments [--create KINDS] [--apply]` | Discover or create agent environments, report login and quota, generate profiles from the logged-in ones |
 | `master start KIND` | Launch the visible master session with its harness rules |
-| `master status` | Work truth, session health, reviews, queue, `schedule` (dispatch order, overlap holds, high-conflict scopes), per-candidate `conflicts`, per-row `dispatch` (requested reviews and producers), per-row `merged` (an observed merge no execution authorized, with its recovery), `disk` (free space and what a reclaim would return), and `administration` (recent browser actions, pending sudo code) |
+| `master status` | Work truth, session health, reviews, queue, `schedule` (dispatch order, overlap holds, high-conflict scopes), per-candidate `conflicts`, per-row `dispatch` (requested reviews and producers), per-row `merged` (an observed merge no execution authorized, with its recovery), per-row `timing` (a required check that failed on a [timing assertion](#timing-assertions-in-required-checks), with the measurement against its budget), `disk` (free space and what a reclaim would return), and `administration` (recent browser actions, pending sudo code) |
 | `master dispatch GY-N PROFILE [--allow-overlap]` | Invite a worker to claim ready work; `--allow-overlap` dispatches over a planned-file overlap hold |
 | `master producer add FILE` | Add a proof-producer launch profile with its own producer credential |
 | `master producer replace FILE` | Replace the producer profile of the same name, verified like `add` |

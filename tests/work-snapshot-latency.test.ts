@@ -18,6 +18,7 @@ import { dispatchSummary, emptyDispatchCursor, runAutoDispatch, tickRetryDelay, 
 import { proofOutcome } from '../src/producer.js';
 import { coordinationHistoryLimit, coordinationViewHeader } from '../src/server/work-view.js';
 import { cycleBudget } from '../src/cli/master.js';
+import { assertWithinBudget, measureLatency, sampleCount, singleObservation } from './helpers/timing.js';
 
 // A ledger the size production reached and beyond: 100 items, each carrying the history a long-lived
 // item accumulates (evidence for every head it ever had, the per-file scope comparison of its last
@@ -105,25 +106,24 @@ async function read(path: string, headers: Record<string, string> = {}) {
 }
 // As the master loop asks for it: by header, so a server without the view still answers.
 const snapshot = () => read('work-snapshot', { [coordinationViewHeader]: 'coordination' }).then(result => result.body as { work: Work[]; now: string });
-const p95 = (samples: number[]) => [...samples].sort((a, b) => a - b)[Math.ceil(samples.length * 0.95) - 1];
+// The 2 s p95 is what the coordination loop depends on and is asserted unchanged. How it is measured
+// is the helper's: warmup reads discarded, a sample large enough for p95 to be an order statistic
+// with reads above it (40, not 20, where p95 was the second-slowest read), the measurement recorded
+// and a failure named as a timing assertion (GY-95).
+const snapshotBudget = { assertion: 'integration:work-snapshot-latency', measure: 'coordination snapshot read', budgetMs: 2_000, percentile: 0.95, warmup: 5, samples: sampleCount(0.95) };
 
 test('integration:work-snapshot-latency — the coordination snapshot of a 100-item ledger with thousands of github.observed events answers under 2 s p95, bounded, with every decision input intact', async () => {
   const events = Number((await store.pool.query("SELECT count(*) FROM events WHERE kind='github.observed'")).rows[0].count);
   assert.ok(events >= 4000, `the ledger carries ${events} github.observed events`);
-  const samples: number[] = [];
-  let compact: { body: any; bytes: number } | undefined;
-  for (let run = 0; run < 20; run++) {
-    const started = performance.now();
-    compact = await read('work-snapshot?view=coordination');
-    samples.push(performance.now() - started);
-  }
-  const latency = p95(samples);
-  assert.ok(latency < 2_000, `p95 ${Math.round(latency)}ms over ${samples.length} reads`);
+  const { measurement, last } = await measureLatency(snapshotBudget, () => read('work-snapshot?view=coordination'));
+  const compact: { body: any; bytes: number } = last;
+  assert.equal(measurement.observed.all.length, 40); assert.equal(measurement.discarded.length, 5);
+  assertWithinBudget(measurement);
   const full = await read('work-snapshot');
-  const view = compact!.body;
+  const view = compact.body;
   assert.equal(view.view, 'coordination'); assert.equal(view.work.length, ITEMS); assert.equal(view.jobs.length, ITEMS);
   // Bounded: history no longer grows with the ledger's age, and no event payload or per-file scope rides along.
-  assert.ok(compact!.bytes * 3 < full.bytes, `coordination view ${compact!.bytes} bytes against the full ${full.bytes}`);
+  assert.ok(compact.bytes * 3 < full.bytes, `coordination view ${compact.bytes} bytes against the full ${full.bytes}`);
   assert.ok(view.omitted.evidence > 0 && view.omitted.dispatchHistory > 0 && view.omitted.queueHistory > 0);
   for (const item of view.work as Work[]) {
     assert.ok(item.autoDispatch!.history.length <= coordinationHistoryLimit);
@@ -147,7 +147,7 @@ test('integration:work-snapshot-latency — the coordination snapshot of a 100-i
   }
   // The header the CLI sends selects the same view.
   const byHeader = await read('work-snapshot', { [coordinationViewHeader]: 'coordination' });
-  assert.equal(byHeader.body.view, 'coordination'); assert.equal(byHeader.bytes, compact!.bytes);
+  assert.equal(byHeader.body.view, 'coordination'); assert.equal(byHeader.bytes, compact.bytes);
   // The full view stays available and unchanged for readers that want whole documents.
   assert.equal(full.body.view, undefined); assert.ok((full.body.work[0] as Work).evidence.length === HEADS_PER_ITEM * 3);
   const refused = await fetch(`${origin}/api/work-snapshot?view=everything`, { headers: { Authorization: `Bearer ${coordinatorToken}` } });
@@ -178,7 +178,7 @@ test('integration:dispatch-read-resilience — a dispatcher tick whose read time
   const elapsed = performance.now() - started;
   // Two failures and a success, well inside one interval: nothing waited a whole interval to retry.
   assert.equal(reads, 3); assert.equal(run.ticks.length, 1);
-  assert.ok(elapsed < 10_000 && elapsed < intervalMs, `recovered in ${Math.round(elapsed)}ms`);
+  assertWithinBudget(singleObservation({ assertion: 'integration:dispatch-read-resilience', measure: 'recovery from two failed reads', budgetMs: Math.min(10_000, intervalMs) }, elapsed));
   assert.match(log[0], /tick failed \(1 in a row, retrying in 100ms\): work snapshot read timed out after 300ms/);
   assert.match(log[1], /tick failed \(2 in a row, retrying in 200ms\): fetch failed/);
   const failing = persisted.find(state => state.consecutiveFailures === 2)!;
@@ -209,7 +209,7 @@ test('integration:cycle-within-interval — a coordination cycle over the 100-it
   assert.equal(result.cycles.length, 1);
   const [cycle] = state.metrics;
   assert.equal(cycle.open, (await snapshot()).work.filter(item => item.stage !== 'done').length, 'the cycle measured the whole ledger');
-  assert.ok(cycle.durationMs <= intervalMs, `cycle took ${cycle.durationMs}ms against a ${intervalMs}ms interval`);
+  assertWithinBudget(singleObservation({ assertion: 'integration:cycle-within-interval', measure: 'coordination cycle over the 100-item ledger', budgetMs: intervalMs }, cycle.durationMs));
   const budget = cycleBudget(state, intervalMs);
   assert.deepEqual(budget.lastCycle, { cycle: cycle.cycle, at: cycle.at, durationMs: cycle.durationMs });
   assert.equal(budget.withinInterval, true); assert.equal(budget.overruns, 0); assert.equal(budget.measured, 1); assert.equal(budget.intervalMs, intervalMs);

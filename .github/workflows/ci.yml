@@ -84,11 +84,27 @@ jobs:
       - run: npm run docs:check
   test:
     runs-on: ubuntu-latest
+    env:
+      # Every timing-dependent assertion records what it measured here (tests/helpers/timing.ts).
+      GRAPHYARD_TIMING_REPORT: ${{ runner.temp }}/timing-report.jsonl
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with: { node-version: '24', cache: npm }
       - run: npm ci
       - run: npm test
+      - name: Publish the timing assertions this run measured
+        # Whatever the outcome: the measurements go to the job summary, and each one becomes an
+        # annotation on this job's check run titled "timing assertion" — an error when its budget was
+        # missed. Master status reads those annotations, so an item held on a runner artefact is
+        # reported with the measured value against the budget, not as an unqualified failed check.
+        if: always()
+        run: npx tsx tests/helpers/timing-report.ts "$GRAPHYARD_TIMING_REPORT"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: timing-report-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/timing-report.jsonl
+          if-no-files-found: ignore
       - run: npx playwright install --with-deps chromium
       - run: npm run test:browser

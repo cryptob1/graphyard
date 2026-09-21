@@ -20,6 +20,7 @@ import { GitHubPermissionRefusal, installationFingerprint, permissionHoldMs, per
 import { acknowledgeContainment, containmentGraceMs, isConfirmedCoordinationRefusal } from '../src/quarantine.js';
 import { supervise } from '../src/supervisor.js';
 import { probeSupervisorAbsence } from '../src/containment-probe.js';
+import { providerMergeInstant, wholeSecondAfter } from './helpers/clock.js';
 import { assertDispatchable, assessContainment, buildMasterStatus, snapshotWithClock } from '../src/master.js';
 // @ts-expect-error The trusted runner intentionally uses dependency-free JavaScript outside the candidate source.
 import { exercise } from '../scripts/acceptance-contract.mjs';
@@ -432,7 +433,7 @@ test('single-use merge execution freezes relevant mutations through observed mer
   const renewed = await engine.execute(worker, 'heartbeat', w.id, { epoch: w.epoch }, randomUUID());
   assert.equal(renewed.mergeExecution?.id, second.execution.id, 'lease renewal cannot replace or cancel merge authority');
   assert.deepEqual(await engine.acquireMerge(coordinator, w.id, secondInput, secondKey), second, 'the coordinator can recover a lost acquire response after a heartbeat');
-  const mergedAt = new Date(Math.ceil((Date.parse(committed.committingAt) + 1) / 1000) * 1000).toISOString().replace(/\.\d+Z$/, 'Z');
+  const mergedAt = providerMergeInstant(committed.committingAt);
   const merged = { ...observation(w), merged: true, mergeSha: 'c'.repeat(40), mergedAt } as Observation;
   const delivered = await engine.observe(w.id, renewed.revision, merged);
   assert.equal(delivered.stage, 'done', 'a whole-second provider timestamp proves ordering once its lower bound postdates the grant'); assert.equal(delivered.mergeExecution, null);
@@ -443,18 +444,29 @@ test('single-use merge execution freezes relevant mutations through observed mer
   assert.ok(Number.isFinite(asOf), 'delivery records the authorization-time clock bound');
   assert.ok(asOf < Date.parse(second.execution.expiresAt), 'the recorded bound precedes the execution expiry that capped required-evidence validity');
 });
-test('a delivery carries the merge instant onto the repository clock with the measured offset', async () => {
+/**
+ * The delivery case, parameterised only by a pause between the engine calls so the same assertions
+ * can be run with the runner's own pace and with an artificial delay (GY-95). The repository clock
+ * trails GitHub's by a measured five seconds. Nothing recorded after the verifying observation can
+ * recover that, so the delivery has to carry the instant itself: every later repository-clock
+ * comparison - which reporting window a delivery falls in, and how long it took from its append-only
+ * intent event - is otherwise off by the offset.
+ */
+async function deliveryCarriesMeasuredOffset(pause: () => Promise<void> = async () => {}) {
   let w = await submitted(); w = await engine.observe(w.id, w.revision, observation(w));
   w = await proven(w);
   const granted = await engine.acquireMerge(coordinator, w.id, { expectedRevision: w.revision, sha: head, baseSha: base, policyRevision: w.policyRevision }, randomUUID());
-  // The repository clock trails GitHub's by a measured five seconds. Nothing recorded after
-  // this observation can recover that, so the delivery has to carry the instant itself:
-  // every later repository-clock comparison - which reporting window a delivery falls in,
-  // and how long it took from its append-only intent event - is otherwise off by the offset.
+  await pause();
   const clockOffset = { min: -5000, max: -4000 };
   const verified = await engine.verifyMerge(coordinator, w.id, { executionId: granted.execution.id }, { ...observation(w), prState: 'open', draft: false, clockOffset }, randomUUID());
+  await pause();
   const committed = await engine.commitMerge(coordinator, w.id, { executionId: granted.execution.id }, randomUUID());
-  const mergedAt = new Date(Math.ceil((Date.parse(verified.verifiedAt) + 5001) / 1000) * 1000).toISOString().replace(/\.\d+Z$/, 'Z');
+  await pause();
+  // The merge instant is pinned to the recorded commit instant, not derived from the verification
+  // plus however long the runner took to reach the commit: the engine attributes a provider merge
+  // to the execution only when, carried onto the repository clock by the offset's lower bound, it
+  // postdates `committingAt`.
+  const mergedAt = providerMergeInstant(committed.committingAt, clockOffset);
   const delivered = await engine.observe(w.id, committed.revision, { ...observation(w), merged: true, mergeSha: 'c'.repeat(40), mergedAt } as Observation);
   assert.equal(delivered.stage, 'done');
   assert.equal(delivered.delivery?.mergedAt, mergedAt, 'the provider timestamp is kept exactly as GitHub reported it');
@@ -462,6 +474,24 @@ test('a delivery carries the merge instant onto the repository clock with the me
   // The lower bound of the measured offset: the earliest repository instant the merge can
   // have happened at, so a duration derived from it is never inflated by clock skew.
   assert.equal(delivered.delivery?.mergedAtRepository, new Date(Date.parse(mergedAt) + clockOffset.min).toISOString());
+  return { granted, verified, committed, clockOffset, mergedAt };
+}
+test('a delivery carries the merge instant onto the repository clock with the measured offset', async () => {
+  await deliveryCarriesMeasuredOffset();
+});
+test('integration:clock-independent-delivery-case the delivery case passes unchanged with an artificial delay between acquire, verify, commit and the observed merge', async () => {
+  // Long enough that an instant derived from `verifiedAt` plus the runner's pace would land at or
+  // before the recorded commit, which is exactly what a slow shared runner did to this case.
+  const pauseMs = 1_200; let pauses = 0;
+  const started = performance.now();
+  const { verified, committed, clockOffset } = await deliveryCarriesMeasuredOffset(async () => { pauses++; await delay(pauseMs); });
+  assert.equal(pauses, 3); assert.ok(performance.now() - started >= 3 * pauseMs, 'the delays were inserted between the engine calls');
+  // The derivation this case used to make — the next whole second after the verification plus the
+  // offset — is refused by the engine once the commit trails the verification by more than a second:
+  // on the repository clock it no longer postdates `committingAt`. The case now passes because its
+  // instant is pinned to the record instead.
+  const derivedFromVerification = Date.parse(wholeSecondAfter(Date.parse(verified.verifiedAt) - clockOffset.min)) + clockOffset.min;
+  assert.ok(derivedFromVerification <= Date.parse(committed.committingAt), 'the elapsed-time derivation would have placed the merge before the recorded commit');
 });
 test('a matching merge from before the execution grant remains an unauthorized violation', async () => {
   let w = await submitted(); w = await engine.observe(w.id, w.revision, observation(w));

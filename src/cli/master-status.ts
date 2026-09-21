@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { probeCandidateConflicts } from '../conflicts.js';
+import { nameTimingFailures, readCheckAnnotations } from './master-timing.js';
 import { agentOwner, agentToken, assessContainment, buildMasterStatus, diskPressure, diskPressureAttention, diskThresholdBytes, freeBytes, herdrWorkspaceHealth, humanOwner, inspectWorkerCredentials, installationOwner, inventoryWorktrees, mergeProtocolSkew, observeHerdrAgents, planWorktreeReclaim, reclaimIdleMs, snapshotWithClock, worktreesDirectory, type AttentionItem, type HerdrAgent, type MasterConfig, type WorkerProfile } from '../master.js';
 import { generatedFilesAssignment, generatedFilesDrift, generatedFilesVariable, generatedManifestScript } from '../install/generated-files.js';
 import type { Work } from '../model.js';
@@ -23,7 +24,7 @@ export function scopeRequestAttention(snapshot: { work: Work[]; now: string }) {
   });
 }
 
-type MasterStatus = ReturnType<typeof buildMasterStatus>;
+export type MasterStatus = ReturnType<typeof buildMasterStatus>;
 
 /**
  * The command that reclaims an assignment from a watch supervisor that outlived its agent. The
@@ -141,8 +142,10 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
   const administration = { browser: master.browser ? { profile: master.browser.profile } : null, ...summarizeAdministration((await readAdministrationLedger(root)).entries, await readSudoState(root)) };
   // A worker session Herdr no longer reports, on an assignment whose lease is still advancing, is
   // an orphaned supervisor rather than a session that finished; it is named with what reclaims it.
-  const status = nameOrphanSupervisors(buildMasterStatus(snapshot, master.workers, runtime.agents, credentials, containment, reviews, master.baseBranch, coordinator, { producers, failures: dispatch.failures, retries }, probeCandidateConflicts(root, snapshot.work)),
-    snapshot.work, master.workers, runtime, Date.parse(snapshot.now));
+  // A required check that failed on a timing assertion is named with what it measured against its
+  // budget, and the re-run, rather than as an unqualified failed check (GY-95).
+  const status = nameTimingFailures(nameOrphanSupervisors(buildMasterStatus(snapshot, master.workers, runtime.agents, credentials, containment, reviews, master.baseBranch, coordinator, { producers, failures: dispatch.failures, retries }, probeCandidateConflicts(root, snapshot.work)),
+    snapshot.work, master.workers, runtime, Date.parse(snapshot.now)), snapshot.work, master.repository, check => readCheckAnnotations(master.repository, check.id));
   // A waiting sudo prompt is the operator confirming their own GitHub credential on their device,
   // the one step no agent may take for them; a timed-out one is the master's to rerun.
   const sudo = administration.sudo;
