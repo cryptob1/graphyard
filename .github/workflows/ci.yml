@@ -89,6 +89,22 @@ jobs:
       - uses: actions/setup-node@v4
         with: { node-version: '24', cache: npm }
       - run: npm ci
-      - run: npm test
+      - name: Run the suite, keeping the record of its timing-dependent assertions
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "GRAPHYARD_TIMING_RECORD=$RUNNER_TEMP/graphyard-timing.jsonl" >> "$GITHUB_ENV"
+          GRAPHYARD_TIMING_RECORD="$RUNNER_TEMP/graphyard-timing.jsonl" npm test 2>&1 | tee "$RUNNER_TEMP/graphyard-test.log"
+      - name: Report timing-dependent assertions on this check run
+        # Whatever the suite's verdict, and never changing it: an assertion that went over its
+        # budget is annotated with what it measured, which `graphyard master status` reads back.
+        if: always()
+        run: npx tsx tests/helpers/timing-report.ts "$GRAPHYARD_TIMING_RECORD" "$RUNNER_TEMP/graphyard-test.log"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: graphyard-timing-record
+          path: ${{ runner.temp }}/graphyard-timing.jsonl
+          if-no-files-found: ignore
       - run: npx playwright install --with-deps chromium
       - run: npm run test:browser
