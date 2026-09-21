@@ -5,7 +5,7 @@ For an operator installing or upgrading a control plane: what to set, and what a
 
 ## Fresh installation
 
-The seven-step runbook is [onboarding](onboarding.md); the server, Postgres and HTTPS origin are [deployment](deployment.md). Easy to miss: the four [capacity variables](deployment.md#delegation-capacity-variables) set from the principal set you deploy; the [CI producer](deployment.md#ci-producer) `init --scan --apply` registers, whose token `ciProofs.next` names, so later pushes run its [proofs in CI](github.md#proofs-in-ci); and verifying with `graphyard doctor` (`appPermissions.missing` empty) and `graphyard status` before you [require the check](github.md#require-the-check) and submit a real pull request.
+The seven-step runbook is [onboarding](onboarding.md); the server, Postgres and HTTPS origin are [deployment](deployment.md). Easy to miss: the four [capacity variables](deployment.md#delegation-capacity-variables) (`GRAPHYARD_MAX_SLICE_LEADS`, `GRAPHYARD_MAX_ENGINEERS_PER_LEAD`, `GRAPHYARD_MIN_REVIEWERS`, `GRAPHYARD_MAX_REVIEWERS`) set from the principal set you deploy; the [CI producer](deployment.md#ci-producer) `init --scan --apply` registers, whose token `ciProofs.next` names, so later pushes run its [proofs in CI](github.md#proofs-in-ci); and verifying with `graphyard doctor` (`appPermissions.missing` empty) and `graphyard status` before you [require the check](github.md#require-the-check) and submit a real pull request.
 
 ## Readiness checklist
 

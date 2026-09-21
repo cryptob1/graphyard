@@ -18,8 +18,6 @@ Review is requested only while `baseTipContained` is not `false`:
 - **`codex` and `agent` dispatchers:** defer.
 - **`diagnose`:** `base-behind`.
 
-A wait of seconds: the control plane republishes the head, and the request goes to that one.
-
 ## Base refresh
 
 The control plane, not a rework round, brings a candidate outside the queue whose head no longer contains `baseTip` onto it.

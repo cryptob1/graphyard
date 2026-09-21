@@ -23,7 +23,7 @@ Keep cycling until both hold: every in-scope item is Done or has a genuinely ext
 5. One deployment verification per delivery: `master verify-deployment GY-N`; main ahead of production, or a flagged capacity variable, is a deployment incident, never a ledger edit
 6. Close finished agent sessions, then return to status
 
-Review findings, rework, idle workers and proof setup never stop the loop: resolve them and keep cycling.
+Ordinary review findings, rework, idle workers, and proof setup are not stopping conditions: resolve them and keep cycling.
 
 ## Conflict avoidance
 
@@ -114,10 +114,10 @@ They also cover reading `.graphyard/master.json`; the loop's systemd unit, named
 - **A *routine* item:** at most one rework round and no hand-off between submit and merge, every step between belonging to the control plane or the loop
 - **Target:** submit→merge p50 at most 30 minutes and p90 at most 60 minutes, over at least ten deliveries, with a median of at most one rework round; never traded for a gate, proof, identity rule or lease rule
 
-- **Per item:** each `master status` row's `speed`, [derived from its pipeline timeline](protocol/pipeline-speed.md#derived-figures).
-- **Overall:** the top-level `speed`: `speed.submitToMerge` and `routine.submitToMerge` (nearest-rank p50/p90 and count), `reworkRounds`, `interventions`, `execution`, `unmeasured` (explained by `coverage`) and `items` in merge order; `met` turns `true` or `false` once ten routine deliveries are measured, `reason` naming the figure that misses.
+- **Per item:** each `master status` row's `speed`, [derived from its pipeline timeline](protocol/pipeline-speed.md#derived-figures): `executionMs`, `waitMs`, `reworkRounds`, `interventions`, `submitToMergeMs`, `routine`.
+- **Overall:** the top-level `speed`: `speed.submitToMerge` and `routine.submitToMerge` (nearest-rank p50/p90 and count), `execution`, `unmeasured` (explained by `coverage`) and `items` in merge order; `met` turns `true` or `false` once ten routine deliveries are measured, `reason` naming the figure that misses.
 - **Outside a status read:** `scripts/measure-pipeline-speed.mjs --split GY-55,GY-64 --record DIR` prints the same arithmetic with any read-capable credential, per `--split` item for deliveries merged before and after it landed; `--since`/`--until` bound the window, `--json` prints everything. The 3-hourly measurement runs it for `manual:speed-target-met`.
-- **A missed target** is a finding to route: `items` names the slow deliveries, `interventions` and `reworkRounds` whether a hand-off or rework took the time, the [flow-analytics](flow-analytics.md) summary which wait held the rest.
+- **A missed target** is a finding to route: `items` names the slow deliveries, the [flow-analytics](flow-analytics.md) summary the wait that held them.
 
 ## Containment and recovery
 

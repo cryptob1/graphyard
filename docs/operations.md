@@ -33,7 +33,9 @@ Each procedure in full, with what it verifies and what it refuses:
 - [Settle a containment quarantine](operations-reference.md#supervisor-died-leaving-a-containment-quarantine) — Never attest a stop you have not confirmed
 - [Merge bypass](operations-reference.md#merge-bypass) — never backfill evidence; only a two-party `merge` decision reconciles it
 
-One criterion whose proof harness ships with it may be [deferred](operations-reference.md#bootstrap-mode-for-a-self-proving-change) under `policy:bootstrap`, other gates staying in force.
+## Bootstrap mode
+
+One criterion whose proof harness ships with it may be [deferred](operations-reference.md#bootstrap-mode-for-a-self-proving-change) under `policy:bootstrap`, other gates staying in force; the next item touching its `contractPaths` owes the proof.
 
 ## Safety facts that never change
 

@@ -31,9 +31,9 @@ node "$GRAPHYARD_CLI" init --url https://YOUR-GRAPHYARD-HOST --herdr --host-id U
 
 ### What the generated instructions authorize
 
-The managed `AGENTS.md` section is the coordination contract every agent runtime reads from the repository, and it states the one thing launched sessions need: each receives its instruction as [the session's own first request](master-agent.md#the-request-is-the-sessions-first-message), never as pasted text.
+The managed `AGENTS.md` section is the coordination contract every agent runtime reads from the repository, and it states the one thing launched sessions need: every session Graphyard launches receives its instruction as the session's own first request, never as pasted text.
 
-It is generated because a coding agent treats Herdr's bracketed paste as untrusted data rather than its operator's request: the statement is what lets [the pastes a session may still receive](master-agent.md#the-request-is-the-sessions-first-message) be taken as the operator's instruction. A Claude Code session launched under a role file loads only the user settings, which leaves `AGENTS.md` out, so the launcher passes the same statement as `--append-system-prompt`. Nothing else pasted carries that authority, and no other generated file grants any: the role files under `.graphyard/harness/` hold permissions, not instructions.
+It is generated because Herdr's bracketed paste reaches a coding agent as untrusted data rather than its operator's request — right against prompt injection, wrong for a launch. Sessions now start without anybody sending `go`, and the generated statement is what lets the two pastes that remain — the loop's single re-prompt, and the reviewer's reminder to post a verdict it already judged — be taken as the operator's instruction. A Claude Code session under a role file loads only the user settings, which leaves `AGENTS.md` out, so the launcher passes the same statement as `--append-system-prompt`; nothing else pasted carries that authority, and the role files under `.graphyard/harness/` hold permissions, not instructions.
 
 ## 4. Start the master
 

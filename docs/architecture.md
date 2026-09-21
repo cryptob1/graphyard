@@ -23,7 +23,6 @@ Text equivalent: agent sessions, the dashboard and a proof producer reach the **
 
 - **One Postgres advisory lock:** taken by every short domain mutation, serializing cross-item decisions (dependency readiness and workspace reservations included) across replicas; remote calls never hold it.
 - **Requirements and dependency edges:** revisable by [audited revision](coordination.md#revise-requirements-explicitly), refusing active ownership and cycles.
-- **Unsupported:** editing stored JSON directly.
 
 ## Reconciliation
 
