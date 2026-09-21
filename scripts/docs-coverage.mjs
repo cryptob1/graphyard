@@ -166,7 +166,8 @@ export const httpRoutes = (root = repositoryRoot) => [...new Set(routeRegistrati
 /**
  * Every query parameter a route accepts, one entry per concrete route: each `searchParams.get('NAME')`
  * its handler reads, and the keys of each `z.object({…})` schema that parses the query string, in
- * the handler or in a module function the handler calls. A schema that parses a request body names
+ * the handler, in a module function the handler calls, or in a parser the module imports and hands
+ * `searchParams`. A schema that parses a request body names
  * no query parameter. Such schemas are `.strict()`, so a parameter a client cannot learn from the
  * guides is one it cannot discover by trial either.
  */
@@ -180,9 +181,28 @@ export function queryParameters(root = repositoryRoot) {
       const callers = [`${schema}.parse(`, ...[...module.matchAll(/\nfunction (\w+)\([^\n]*\{\n([\s\S]*?)\n\}/g)].filter(helper => helper[2].includes(`${schema}.parse(`)).map(helper => `${helper[1]}(`)];
       if (callers.some(call => handler.includes(call))) names.push(...[...body.matchAll(/(?:^|,)\s*([A-Za-z]\w*): z\./gm)].map(match => match[1]));
     }
+    names.push(...importedQueryParsers(root, module, handler));
     for (const route of routes) for (const name of names) parameters.add(`${name} on ${route}`);
   }
   return [...parameters].sort();
+}
+
+/**
+ * Schema keys of a query parser the route module imports: the handler passes it `searchParams`
+ * (`parseEventHistoryQuery(url.searchParams)`), and the module that exports it parses a
+ * `z.object({…})` schema inside that function.
+ */
+function importedQueryParsers(root, module, handler) {
+  const names = [];
+  for (const [, parser] of handler.matchAll(/\b(\w+)\(url\.searchParams\)/g)) {
+    const source = module.match(new RegExp(`import \\{[^}]*\\b${parser}\\b[^}]*\\} from '(\\.[^']+)\\.js'`));
+    if (!source) continue;
+    const text = read(root, join('src/server/routes', `${source[1]}.ts`));
+    const body = text.match(new RegExp(`\\nexport function ${parser}\\([^\\n]*\\{\\n([\\s\\S]*?)\\n\\}`))?.[1] ?? '';
+    for (const [, schema, keys] of text.matchAll(/\bconst (\w+) = z\.object\(\{\n([\s\S]*?)\n\}\)/g))
+      if (body.includes(`${schema}.parse(`)) names.push(...[...keys.matchAll(/(?:^|,)\s*([A-Za-z]\w*): z\./gm)].map(match => match[1]));
+  }
+  return names;
 }
 
 /**

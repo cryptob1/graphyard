@@ -65,6 +65,9 @@ test('integration:docs-coverage query parameters and audit-role rules are extrac
   for (const parameter of ['window on GET /api/analytics/flow', 'format on GET /api/analytics/flow/export', 'asOf on GET /api/analytics/attribution/drilldown', 'metric on GET /api/analytics/attribution/drilldown',
     'cursor on GET /api/validation/reuse', 'view on GET /api/work-snapshot', 'preview on GET /api/validation/artifacts/*/*', 'work on GET /api/events'])
     assert.ok(parameters.includes(parameter), `the server accepts ${parameter}`);
+  // A parser the route module imports and hands `searchParams` (src/events-history.ts).
+  for (const name of ['kind', 'since', 'until', 'order', 'limit', 'cursor', 'routine', 'payload', 'view'])
+    assert.ok(parameters.includes(`${name} on GET /api/events`), `the server accepts ${name} on GET /api/events`);
   // Attribution's schema has no flow filter, and a body schema names no query parameter.
   assert.ok(!parameters.some((parameter: string) => /^(type|stage|slice|format) on GET \/api\/analytics\/attribution/.test(parameter)));
   assert.ok(!parameters.some((parameter: string) => /^(provider|externalId|containedMergeShas) on /.test(parameter)), 'the deployment body schema is not a query schema');
@@ -72,9 +75,9 @@ test('integration:docs-coverage query parameters and audit-role rules are extrac
 
   // The parameter is a code span of its own or a query string, on a page that spells its route.
   const gapsOf = (text: string) => missing(root, help, [{ path: 'only.md', text }]).filter((gap: string) => /^(query parameter \w+ on|audit-role rule) GET \/api\/(analytics\/flow|deployments|events) /.test(gap)).sort();
-  assert.deepEqual(gapsOf('`GET /api/analytics/flow` takes `window`, `asOf`, `metric`, `key`, `type`, `stage`, `slice` and `format`; audit roles see identifiers. `GET /api/events?work=UUID`. `GET /api/deployments` refuses all but audit roles.'), []);
+  assert.deepEqual(gapsOf('`GET /api/analytics/flow` takes `window`, `asOf`, `metric`, `key`, `type`, `stage`, `slice` and `format`; audit roles see identifiers. `GET /api/events?work=UUID` takes `kind`, `since`, `until`, `order`, `limit`, `cursor`, `routine`, `payload` and `view`. `GET /api/deployments` refuses all but audit roles.'), []);
   assert.deepEqual(gapsOf('`GET /api/analytics/flow` reports a window for a slice, by stage. `GET /api/events` and `GET /api/deployments` are reads.'),
-    [...['asOf', 'format', 'key', 'metric', 'slice', 'stage', 'type', 'window'].map(name => `query parameter ${name} on GET /api/analytics/flow is documented nowhere`), 'query parameter work on GET /api/events is documented nowhere',
+    [...['asOf', 'format', 'key', 'metric', 'slice', 'stage', 'type', 'window'].map(name => `query parameter ${name} on GET /api/analytics/flow is documented nowhere`), ...['cursor', 'kind', 'limit', 'order', 'payload', 'routine', 'since', 'until', 'view', 'work'].map(name => `query parameter ${name} on GET /api/events is documented nowhere`),
       'audit-role rule GET /api/analytics/flow is documented nowhere', 'audit-role rule GET /api/deployments is documented nowhere'].sort());
   // `slice`, the delegation term, on a page that spells no analytics route documents no parameter.
   assert.ok(missing(root, help, [{ path: 'a.md', text: '`GET /api/analytics/flow`' }, { path: 'b.md', text: 'a `slice` of principals' }]).includes('query parameter slice on GET /api/analytics/flow is documented nowhere'));
