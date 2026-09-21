@@ -1,4 +1,4 @@
-<!-- page: Operate Graphyard | 7 | procedures, credentials, grants, limits. -->
+<!-- page: Operate Graphyard | 7 | procedures, credentials. -->
 # Operations reference
 
 For an operator or master in an incident: the procedure behind each [recipe](operations.md).
@@ -30,7 +30,7 @@ Flags:
 
 ## Worktree disk
 
-- **One install, shared.** An assignment worktree under the repository resolves its install by upward lookup: nothing is created; the worker's prompt names it. A worktree outside it gets a mirror of that install, a directory of links still covered by the `node_modules/` ignore rule. The install must answer for that exact head: a differing `package-lock.json` installs its own; a worktree that already has one is reported, left alone.
+- **One install, shared.** An assignment worktree under the repository resolves its install by upward lookup: nothing is created, and the worker's prompt names it. A worktree outside it gets a mirror, a directory of links still covered by the `node_modules/` ignore rule. The install must answer for that exact head: a differing `package-lock.json` installs its own; a worktree that already has one is reported and left alone.
 - **Finished assignments give theirs back.** The loop removes dependency directories of finished assignments' worktrees every ten minutes (every cycle while free space is below the threshold) and nothing else (files, Git metadata, branches and workspace records stay): a reclaimed worktree is one `npm install` from working. `daemon.reclaim` reports what went, how much it returned, what it kept.
 
 Each worktree's disposition:
@@ -42,7 +42,7 @@ Each worktree's disposition:
 - `recent`: Kept: changed inside the idle bound
 
 - **`master status`:** free space under `disk` with worktrees a reclaim would empty; below the threshold raises a master-owned attention item while writes still succeed
-- **A write that fails for want of room**, whether the kernel reports it or only a command's output does (`pwd: write error: Disk quota exceeded`), is named as that
+- **A write that fails for want of room**, whether the kernel reports it or only a command's output does (`write error: Disk quota exceeded`), is named as that
 - **No loop running:** `master run --once` reclaims and cycles once
 
 Settings in `.graphyard/master.json`:
@@ -86,13 +86,13 @@ If a foreground worker's supervisor dies before settling its quarantine, the fen
 
 An observed merge no valid execution covered (cancelled before the merge cutoff, expired, or never existing) records the violation `Merge observed without a prior authorization for this candidate` and stays out of Done; every observation re-derives that verdict. Never backfill evidence or re-run the gates against the merged head.
 
-- **Reported:** `master status` row `merged` (`at`, `sha`, `violation`, last `refusal`) with owner `master` and the recovery command, `counts.mergedUnreconciled` apart from `counts.mergeCandidates`; the loop escalates once and stops offering the item to the guarded merge
+- **Reported:** `master status` row `merged` (with the violation and last refusal), owner `master`, the recovery command and `counts.mergedUnreconciled` apart from `counts.mergeCandidates`; the loop escalates once and stops offering the item to the guarded merge
 - **Recovery, requested after the merge** (an earlier merge approval does not judge it): `master decide GY-N merge REASON`, then `master approver GY-N DECISION`. The next observation re-checks the record as it stood immediately before the merge: merge authorization for that exact head, base and policy revision, every gate passed, no standing violation, every required proof's trusted evidence live, a GitHub observation under two minutes old
-- **The snapshot re-checked:** the last preceding the merge. The cutoff is GitHub's `mergedAt` plus one second plus the upper bound of the merge broker's recorded clock offset; a snapshot whose observation reports the pull request merged never qualifies. What the merge wrote refuses nothing: the violation being cleared, an earlier decision's refusal, a merge gate reporting only the queue position left behind
+- **The snapshot re-checked:** the last preceding the merge. The cutoff is GitHub's `mergedAt` plus one second plus the upper bound of the merge broker's recorded clock offset; a snapshot whose observation reports the pull request merged never qualifies. What the merge wrote refuses nothing: the cleared violation, an earlier decision's refusal, a merge gate reporting only the queue position left behind
 - **Holds:** delivered on the decision, citing that snapshot's `authorizationRevision` and `evidenceAsOf` and carrying `reconciliation` (decision, requester, approver, both reasons, cutoff, snapshot revision, judgement); ledger `merge.reconciled`
-- **Fails:** nothing is delivered; the item records `Reconciliation by decision … refused: …` with every reason, once, the ledger `merge.reconciliation.refused`, the row's attention line the refusal. Answer it with a new decision, never by re-approving the refused one; one naming no new reason is refused again. Repair the access rules that allowed the merge; carry remaining work in a new item under the full gate set
-- **A queue entry that can never publish:** the merged item's pull request is closed; entries behind it wait (`Waiting for GY-N to publish its speculative tip`). The row's `merged.queue` carries `sequence`, `position`, `size`, `unpublishable: true` and the keys `behind`. The exit is the same decision: an accepted reconciliation delivers the item and drops the entry; a refused one removes the entry and delivers nothing: `queueEjection` names the refused decision, the ledger records `queue.ejected`, and the entries behind predict against the real base. A standing refusal removes the entry on the next reconciliation tick
-- **Operator-authorized delivery:** when the record refuses a merge an operator authorized administratively, a further merge decision whose `REASON` cites the refused decision's id records it, with the operator's admin credential on one side: the operator requests it through the API, or the master requests it and the operator approves with `GRAPHYARD_TOKEN_FILE=ADMIN_TOKEN_FILE graphyard master approve GY-N DECISION REASON`. An operator-agent pair citing the refusal is refused again; a decision citing no refusal is a plain reconciliation. `attentionOwner.next` carries the exact command once a refusal stands
+- **Fails:** nothing is delivered; the item records `Reconciliation by decision … refused: …` with every reason, once, the ledger `merge.reconciliation.refused`, the row's attention line the refusal. Answer it with a new decision, never by re-approving the refused one; one naming no new reason is refused again. Repair the access rules that allowed the merge, and carry remaining work in a new item under the full gate set
+- **A queue entry that can never publish:** the merged item's pull request is closed; entries behind it wait (`Waiting for GY-N to publish its speculative tip`). The row's `merged.queue` carries `sequence`, `position`, `size`, `unpublishable: true` and the keys `behind`. The exit is the same decision: an accepted reconciliation delivers the item and drops the entry; a refused one removes it and delivers nothing, `queueEjection` naming the refused decision, the ledger recording `queue.ejected`, the entries behind predicting against the real base. A standing refusal removes the entry on the next reconciliation tick
+- **Operator-authorized delivery:** when the record refuses a merge an operator authorized administratively, a further merge decision whose `REASON` cites the refused decision's id records it, the operator's admin credential on one side: the operator requests it through the API, or the master requests it and the operator approves with `GRAPHYARD_TOKEN_FILE=ADMIN_TOKEN_FILE graphyard master approve GY-N DECISION REASON`. An operator-agent pair citing the refusal is refused again; one citing no refusal is a plain reconciliation. `attentionOwner.next` carries the exact command once a refusal stands
 - **Its record:** `delivery.operatorAuthorization` with `execution: null`, the `operator`, the decision, the `refusedDecision`, `unmet` (every reason refused), the cutoff, the snapshot revision and a judgement; `authorizationRevision` is the pre-merge snapshot's. Ledger `merge.operator-authorized` under the operator's identity, never `merge.reconciled`
 - **Listed apart:** `master status` `deliveries.reconciled` (`authorization: 'reconciled'`) and `deliveries.operatorAuthorized` (`authorization: 'operator'`), with `counts.reconciledDeliveries` and `counts.operatorAuthorizedDeliveries`
 
@@ -133,15 +133,9 @@ graphyard grants revoke ci "integration:claim-safety" "Runner decommissioned"
 graphyard grants history ci                        # append-only record of every change
 ```
 
-| Pattern | Authorizes | Does not authorize |
-| --- | --- | --- |
-| `integration:claim-safety` | that exact name | `integration:claim-safety-extra` |
-| `integration:*` | every `integration:` proof | any other kind |
-| `manual:gy-43/*` | `manual:gy-43/docs-ui` and deeper | `manual:gy-43`, `manual:gy-430/docs` |
-
-## Readiness checklist per completion profile
-
-- **`graphyard doctor --profile PROFILE`:** the checklist, and what resolves each `missing` or `unknown` item, [per profile](install.md#readiness-checklist)
+- `integration:claim-safety` authorizes that exact name, not `integration:claim-safety-extra`
+- `integration:*` authorizes every `integration:` proof, no other kind
+- `manual:gy-43/*` authorizes `manual:gy-43/docs-ui` and deeper, not `manual:gy-43` or `manual:gy-430/docs`
 
 ## Setup proposals and drift
 
@@ -150,12 +144,10 @@ graphyard grants history ci                        # append-only record of every
 - **Apply is idempotent:** unchanged artifacts left alone, existing tokens preserved, operator-edited profiles reported as drift and kept; a repository that changed between review and apply refuses
 - **Every proposal:** declares the candidate-bound-environment invariant
 
-| Detected stack | Deploy target | Topology | Declaration |
-| --- | --- | --- | --- |
-| Node package with `railway.json`/`railway.toml` | Railway | `ephemeral` | Own environment per candidate, destroyed after review; datastores copied per candidate from structure |
-| Python project with `Dockerfile`/compose | Container registry | `pooled` | Isolated containers over a shared datastore: each candidate needs its own schema or database |
-| Static site (`index.html`, `.nojekyll`/`CNAME`) | GitHub Pages | `ephemeral` | A disposable static target per commit |
-| Any stack with no deploy configuration | none | `partial` | CI-level isolation only; add a deploy target or accept partial verification |
+- **Node package with `railway.json`/`railway.toml`:** Railway, `ephemeral` — own environment per candidate, destroyed after review; datastores copied per candidate from structure
+- **Python project with `Dockerfile`/compose:** container registry, `pooled` — isolated containers over a shared datastore, each candidate needing its own schema or database
+- **Static site (`index.html`, `.nojekyll`/`CNAME`):** GitHub Pages, `ephemeral` — a disposable static target per commit
+- **Any stack with no deploy configuration:** no target, `partial` — CI-level isolation only; add a deploy target or accept partial verification
 
 - **Vercel and Fly:** Railway pattern with target-specific SHA verification (`RAILWAY_GIT_COMMIT_SHA`, Vercel deployment metadata, `fly status` releases)
 - **Container deployments:** propose SHA-tagged images and digest verification

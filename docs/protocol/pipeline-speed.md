@@ -1,4 +1,4 @@
-<!-- page: Agent protocol | 9 | the per-item timeline. -->
+<!-- page: Agent protocol | 9 | per-item timeline. -->
 # Pipeline timeline
 
 For an integration author reading pipeline figures: where each one comes from.

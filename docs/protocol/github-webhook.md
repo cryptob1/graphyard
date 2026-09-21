@@ -1,4 +1,4 @@
-<!-- page: Agent protocol | 6 | webhooks and review providers. -->
+<!-- page: Agent protocol | 6 | webhooks, providers. -->
 # GitHub webhook and review providers
 
 For an integration author: how provider events reach Graphyard.

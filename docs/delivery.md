@@ -1,4 +1,4 @@
-<!-- page: Build integrations | 6 | releases and observed delivery. -->
+<!-- page: Build integrations | 6 | releases, observations. -->
 # Releases and observed production delivery
 
 For an integrator recording what production runs: which identity may write each record.

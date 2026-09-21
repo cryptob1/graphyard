@@ -1,4 +1,4 @@
-<!-- page: Build integrations | 7 | capacity, artifacts, rollback. -->
+<!-- page: Build integrations | 7 | capacity, rollback. -->
 # Runner capacity, artifact operations and delivery recovery
 
 For an operator running the validation path: why a request waits, and when a rollback is complete.
@@ -53,11 +53,9 @@ A rollback is four records plus a repair-work link; register the executor as a s
 }
 ```
 
-| Fencing | Meaning | May be automatic | Effect on successors |
-| --- | --- | --- | --- |
-| `provider` | Write conditioned provider-side on the deployment that should still be running (`precondition.expectedRunning`) and this operation's `generation` and `token` | Yes | A newer selection may supersede the target; the delayed write fails at the provider its late report recorded as non-authoritative |
-| `serialized` | Adapter observes its own operation settle but cannot fence the write | Yes | No selection, rollback or other environment mutation is authorized until the operation is settled or resolved; lease expiry alone releases nothing |
-| `none` | Neither | **No**: definition refuses `automatic: true`; claiming an automatic rollback refuses | Same serialized barrier |
+- **`provider`:** the write is conditioned provider-side on the deployment that should still be running (`precondition.expectedRunning`) and this operation's `generation` and `token`. May be automatic; a newer selection may supersede the target, the delayed write failing at the provider, its late report recorded as non-authoritative
+- **`serialized`:** the adapter observes its own operation settle but cannot fence the write. May be automatic; no selection, rollback or other environment mutation is authorized until the operation is settled or resolved, and lease expiry alone releases nothing
+- **`none`:** neither, and **never automatic**: the definition refuses `automatic: true`, claiming an automatic rollback refuses, and the same serialized barrier holds
 
 ### Request, claim and settle
 

@@ -1,4 +1,4 @@
-<!-- page: Build integrations | 4 | runner, attestor, collector. -->
+<!-- page: Build integrations | 4 | runner, collector. -->
 # The packaged Playwright runner and collector
 
 For the operator connecting a Playwright suite: three identities, and which refusals are by design.
@@ -13,12 +13,10 @@ For the operator connecting a Playwright suite: three identities, and which refu
 
 ## The three identities
 
-| Identity | Holds | Must not |
-| --- | --- | --- |
-| **Runner** (`worker` registration) | Dispatch authority: polls, acknowledges, heartbeats | Execute anything, read the attempt boundary, or hold a proof scope; the CLI refuses to start if its credential carries one |
-| **Host attestor** (own OS identity, `reader` credential) | Signing key, approved bundle, every attempt boundary; runs both containers | Acknowledge, heartbeat, upload or publish |
-| **Collector** (`producer` registration scoped to the proof) | Verification and publication | Execute, or reach the bundle or the key |
-| **Container user** (`runAsUser`, never root) | Writes the report through the boundary group | Anything else; refused when it is the account that asked for supervision |
+- **Runner** (`worker` registration): holds dispatch authority — polls, acknowledges, heartbeats. Never executes anything, reads the attempt boundary or holds a proof scope; the CLI refuses to start if its credential carries one
+- **Host attestor** (own OS identity, `reader` credential): holds the signing key, approved bundle and every attempt boundary, and runs both containers. Never acknowledges, heartbeats, uploads or publishes
+- **Collector** (`producer` registration scoped to the proof): verifies and publishes. Never executes, or reaches the bundle or the key
+- **Container user** (`runAsUser`, never root): writes the report through the boundary group, and nothing else; refused when it is the account that asked for supervision
 
 ## Execute one dispatched attempt
 
@@ -55,7 +53,7 @@ Each gets:
 
 - **Mounts:** bundle read-only at `/oracle`, writable `/output`, `noexec,nosuid,nodev` tmpfs working directory, read-only root filesystem
 - **Confinement:** `--cap-drop=ALL`, `no-new-privileges`, swap disabled, bounded memory, CPU and PIDs, non-root `runAsUser`
-- **Environment:** constructed, never inherited: `GRAPHYARD_PHASE`, `GRAPHYARD_REPORT_FILE` (where the reporter writes) and, in `execute` only, `GRAPHYARD_TARGET_URL`, the approved target specs must read; a configuration hardcoding a `baseURL` or reaching the network during `enumerate` is unusable. No credential, GitHub, cloud, database, `NODE_*` or `npm_*` variable reaches it; only approved material's `TEST_ACCOUNT_*` entries pass through the `docker` process's environment
+- **Environment:** constructed, never inherited: `GRAPHYARD_PHASE`, `GRAPHYARD_REPORT_FILE` (where the reporter writes) and, in `execute` only, `GRAPHYARD_TARGET_URL`, the approved target specs must read; a configuration hardcoding a `baseURL`, or reaching the network in `enumerate`, is unusable. No credential, GitHub, cloud, database, `NODE_*` or `npm_*` variable reaches it; only approved material's `TEST_ACCOUNT_*` entries pass through the `docker` process's environment
 - **Container output:** discarded
 
 Preflight happens **before the acknowledgement**, provisions the boundary, refuses unless:

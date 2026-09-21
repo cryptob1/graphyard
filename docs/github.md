@@ -1,4 +1,4 @@
-<!-- page: Operate Graphyard | 3 | permissions, protection, CI, review. -->
+<!-- page: Operate Graphyard | 3 | permissions, protection. -->
 # GitHub enforcement
 
 For whoever wires GitHub to Graphyard: which identity holds which permission.
@@ -73,6 +73,11 @@ GitHub offers no API for changing a registered App's permissions; every installa
 - **`master status`:** active profile, failover entries, `reviewFailover` count, attention when no reviewer capacity is left
 - **`graphyard rereview GY-N`:** clears them, restarts at the first profile; ledger keeps every superseded entry
 
+### Dismissed approvals and unanswered requests
+
+- **A dismissed approval is not an answer:** `dismiss_stale_reviews`, a recomputed merge base or a manual dismissal withdraws one, the gate goes on refusing, and the session is recorded `failed` and unanswered, with the cause, relaunched on the usual wait. Dismissed *with the head moved* cancels that request and reviews the new head afresh; dismissed *on an unchanged candidate* reviews the same commit again, with no new head and no rework round. A relaunch skips that head's earlier verdicts, and a dismissal after a session closed reopens its record while the request stands
+- **Unanswered requests are attention, not silence:** only an `APPROVED` or `CHANGES_REQUESTED` verdict answers a request, and nothing follows a settled session, so `master status` names each settled-but-unanswered request in `attentionItems` with the verdict, how long it has stood and the command that answers it, counts them in `counts.dispatchUnanswered` apart from `counts.dispatchRunning`, and `master run` reports it `waiting`. `master review GY-N [PROFILE]` forces the next attempt against the open request for the exact head (recorded under its `requestId`, earlier sessions kept); a head with no open request records none, and a producer request in that state is recovered with `master decide GY-N rework REASON`
+
 ## Require the check
 
 On the managed base branch:
@@ -104,7 +109,7 @@ Graphyard reads classic protection, refusing its merge gate unless these setting
 - **No administrative bypass:** Done follows only an independently observed matching merge
 - **Protocol mismatch:** a CLI speaking a newer merge protocol than the deployed server refuses with `server runs <sha>, CLI expects <sha>: deploy main first`
 - **One executor per execution:** the instance that acquired an execution owns it: the loop is one instance per process, each `master merge` one named by its request id, so a replay under the same `GRAPHYARD_REQUEST_ID` resumes its own; the engine records the owner as `principal#instance`, refuses `merge-verify`, `merge-commit` and `merge-cancel` from any other, even under the same credential
-- **Stand-down:** `master merge GY-N` beside a running loop is safe. An executor finding an execution another instance holds refuses before acquiring anything (`GY-N does not have a current all-gates-passing merge authorization for this executor: merge execution … is held by graphyard-master#daemon-… until …; this executor stands down without cancelling it`), as does a mid-flight `Merge execution was already verified` or `already committed` refusal. Never retry it against the holder or resolve it by hand: an unfinished execution lapses at expiry, reconciliation clears it, the next cycle attempts afresh
+- **Stand-down:** `master merge GY-N` beside a running loop is safe. An executor finding an execution another instance holds refuses before acquiring anything (`merge execution … is held by graphyard-master#daemon-… until …; this executor stands down without cancelling it`), as does a mid-flight `Merge execution was already verified` or `already committed` refusal. Never retry it against the holder or resolve it by hand: an unfinished execution lapses at expiry, reconciliation clears it, the next cycle attempts afresh
 
 ## Merge queue
 
@@ -141,7 +146,7 @@ No transaction spans both systems: the ledger changes immediately, check publica
 ## Troubleshooting
 
 - **Disconnected, or a job shows 401:** App ID, installation ID, PEM secret, server restart; a rejected key is a refusal, not a pause
-- **403 or held job:** `appPermissions` in `/api/status`; `master browser installation-accept`, or `github-setup --update-permissions`
-- **Protection gate refuses:** Check name, App binding, `strict` left enabled, admin enforcement, force and delete settings
-- **Acceptance refuses despite green CI:** Proof names, producer grant, candidate SHA, base SHA, policy revision, skipped count
-- **PR changed while observed, or no webhook update:** Ordinary concurrency retry; signature secret and job errors, polling as fallback
+- **403 or held job:** `appPermissions` in `/api/status`, then [accept the request](#migrating-an-existing-app)
+- **Protection gate refuses:** check name, App binding, `strict` left enabled, admin enforcement, force and delete settings
+- **Acceptance refuses despite green CI:** proof names, producer grant, candidate SHA, base SHA, policy revision, skipped count
+- **PR changed while observed, or no webhook update:** ordinary concurrency retry; signature secret and job errors, polling as fallback

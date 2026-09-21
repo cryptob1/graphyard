@@ -1,4 +1,4 @@
-<!-- page: Start here | 1 | lifecycle and authority. -->
+<!-- page: Start here | 1 | lifecycle, authority. -->
 # How Graphyard works
 
 For a newcomer: how work reaches a verified merge, and who may move it.

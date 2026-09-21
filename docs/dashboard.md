@@ -1,4 +1,4 @@
-<!-- page: Operate Graphyard | 3 | what each number means. -->
+<!-- page: Operate Graphyard | 3 | the numbers. -->
 # Reading the dashboard
 
 For anyone looking at the control plane: what is being worked on, and what is stuck.
@@ -31,7 +31,7 @@ Every card, and the top of every item view, carries one sentence from the item's
 - **Item view** opens with the status sentence, owner, pull request and the one blocker
 - **Steps** lists the gates in order
 - **What must be true** lists each acceptance criterion once with one marker per proof: ✓ passed, ○ pending, × failed or withdrawn
-- **More details** holds description, type, priority, policy and revision, worker and assignment, workspaces, coordination diagnosis, file overlaps, merge-queue position, review provider, raw gate reasons, proof details, bootstrap obligations, observed delivery, evidence with artifacts, history; an admin session gets an **Edit** menu for the review provider, a fresh review and requirement revisions.
+- **More details** holds the rest: description and metadata, policy and revision, worker, assignment and workspaces, coordination diagnosis, file overlaps, merge-queue position, review provider, raw gate reasons, proof details, bootstrap obligations, observed delivery, evidence with artifacts and history; an admin session gets an **Edit** menu for the review provider, a fresh review and requirement revisions.
 
 ## Candidate links and definitions
 

@@ -1,11 +1,11 @@
-<!-- page: Understand or contribute | 3 | profiles and increments. -->
+<!-- page: Understand or contribute | 3 | profiles, increments. -->
 # Turnkey E2E execution and verified delivery
 
 For a reader asking what comes next: which completion profile a delivery may claim.
 
 ## Product promise and boundary
 
-Graphyard discovers supported repository and deployment infrastructure, proposes an explicit delivery profile, configures supported adapters, dispatches required validation, collects results and explains every refusal. A repository without tests needs scenarios and executable assertions first: a planning agent may propose them, but the product never manufactures passing evidence or presents inferred criteria as verified requirements. Profiles are labelled so a green merge never stands in for verified production behaviour.
+Graphyard discovers supported infrastructure, proposes a delivery profile, configures adapters, dispatches validation, collects results and explains every refusal. A repository without tests needs scenarios and executable assertions first: a planning agent may propose them, but Graphyard never manufactures passing evidence or presents inferred criteria as verified requirements. A labelled profile keeps a green merge from standing in for verified production behaviour.
 
 - **Through merge:** A verified, authorized merge completes the configured workflow
 - **Preview validation:** A pinned preview artifact plus required behavioural proof
@@ -13,13 +13,11 @@ Graphyard discovers supported repository and deployment infrastructure, proposes
 
 ## Increments
 
-| Increment | Outcome | Status |
-| --- | --- | --- |
-| D1 | Immutable candidates, environments and the runner protocol | Shipped: [validation](validation.md) |
-| D2 | One supported runner from guided setup to trusted results | Shipped: [runner setup](runner-setup.md) |
-| D3 | Deployment observations, release membership and production verification | Shipped as the model and protocol: [delivery](delivery.md); no provider adapter |
-| D4 | Capacity, recovery, artifact operations and safe rollback | Shipped: [recovery](recovery.md) |
-| D5 | Additional runner and report adapters, and off-the-shelf packaging | Shipped in part: [report adapters](report-adapters.md), [deployment](deployment.md); deployment-provider adapters are excluded, so production verification stays a manual proof |
-| D6 | Evidence replay, safe reuse and cost analytics | Shipped: [evidence reuse](evidence-reuse.md) |
+Each is shipped once the invariants its page states hold:
 
-No increment is shipped until the invariants its page states hold.
+- **D1** immutable candidates, environments and the runner protocol: [validation](validation.md)
+- **D2** one supported runner from guided setup to trusted results: [runner setup](runner-setup.md)
+- **D3** deployment observations, release membership and production verification: the model and protocol only, [delivery](delivery.md); no provider adapter
+- **D4** capacity, recovery, artifact operations and safe rollback: [recovery](recovery.md)
+- **D5** additional runner and report adapters, and off-the-shelf packaging: in part, [report adapters](report-adapters.md), [deployment](deployment.md); deployment-provider adapters are excluded, so production verification stays a manual proof
+- **D6** evidence replay, safe reuse and cost analytics: [evidence reuse](evidence-reuse.md)

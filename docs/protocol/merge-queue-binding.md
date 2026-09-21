@@ -1,4 +1,4 @@
-<!-- page: Agent protocol | 8 | base binding and carry. -->
+<!-- page: Agent protocol | 8 | binding, carry. -->
 # Merge-queue bindings and carry
 
 For an integration author: what a candidate is bound to.

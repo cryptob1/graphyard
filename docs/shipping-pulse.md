@@ -1,9 +1,9 @@
-<!-- page: Operate Graphyard | 10 | throughput and deployment lag. -->
+<!-- page: Operate Graphyard | 10 | throughput, lag. -->
 # Shipping pulse
 
 For an operator watching delivery flow: what each figure counts, and on which clock.
 
-A repository view, not a worker scorecard: no rankings, lines of code, effort estimates, productivity measures or causal claims.
+A repository view, not a worker scorecard, under the same [privacy boundary](flow-analytics.md#privacy-boundary-and-api): no rankings, effort estimates or causal claims.
 
 ## Source and definitions
 

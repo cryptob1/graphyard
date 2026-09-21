@@ -1,4 +1,4 @@
-<!-- page: Operate Graphyard | 2 | install and upgrade. -->
+<!-- page: Operate Graphyard | 2 | upgrades, readiness. -->
 # Install and upgrade
 
 For an operator installing or upgrading a control plane: what to set, and what an upgrade still needs.

@@ -1,4 +1,4 @@
-<!-- page: Start here | 2 | one definition per term. -->
+<!-- page: Start here | 2 | definitions, usage. -->
 # Glossary
 
 For every reader and guide: one definition and one canonical usage per term.
@@ -62,15 +62,15 @@ Session supervisor launching, showing and stopping agent sessions, and the first
 
 ## The roles at a glance
 
-| Role (credential) | Normally held by | May | Never |
-| --- | --- | --- | --- |
-| `admin` | Human operator | Set goals and priorities; provision the master's agent identities at onboarding; issue credentials to people; create and release work, revise requirements, rework, participate as a worker, attest `manual:` proofs, grant proof authority; resolve escalations and record human-only intake from a declared human session; from any session kind, settle a control-plane-raised `lease-loss` the ledger explains, citing its attestation | Mint trusted automated evidence; be shared with any AI session |
-| `operator-agent` | The master's identity, the separate approver identity, other scoped operator agents | Only its configured intent and policy capabilities (`intent:create`, `intent:ready`, `intent:unblock`, `policy:requirements`, `policy:review-provider`, `policy:bootstrap`) and `decision:*` requests inside a server-enforced repository and work allowlist; the approver identity approves decisions it did not request, on items it never held, not resting on its own evidence | Approve its own request; hold a lease; submit evidence except through an approved `attest` decision; merge |
-| `coordinator` | Master | Read work and runtime health, dispatch, acquire, verify or cancel bounded merge execution authority, record deployment observation on delivered work, settle a quarantine whose supervisor it verified dead on the registered host | Claim, implement, produce evidence, revise requirements, bypass a gate |
-| `slice-lead` | Slice lead | Record rulings in its own slice, escalate | Implement, hold a lease, submit evidence, review its own slice, merge; every lifecycle mutation refused and recorded ([delegation](delegation.md)) |
-| `worker` | Worker | Claim work, renew and release its lease, register its workspace, report blockers, submit its candidate, record untrusted assertions | Receive `admin`, `coordinator` or `producer` tokens; satisfy an acceptance gate |
-| `producer` | Proof producer | Submit evidence; only proof names a live grant authorizes are trusted | Hold an assignment on the item it proves; lead a slice |
-| `reader` | Dashboards | Inspect work, status and events | Mutate anything |
+| Role (credential) | May | Never |
+| --- | --- | --- |
+| `admin` | Human operator: set goals and priorities; provision the master's agent identities at onboarding; issue credentials to people; create and release work, revise requirements, rework, participate as a worker, attest `manual:` proofs, grant proof authority; resolve escalations and record human-only intake from a declared human session; from any session kind, settle a control-plane-raised `lease-loss` the ledger explains, citing its attestation | Mint trusted automated evidence; be shared with any AI session |
+| `operator-agent` | The master's identity, the separate approver identity and other scoped operator agents: only their configured intent and policy capabilities (`intent:create`, `intent:ready`, `intent:unblock`, `policy:requirements`, `policy:review-provider`, `policy:bootstrap`) and `decision:*` requests inside a server-enforced repository and work allowlist; the approver identity approves decisions it did not request, on items it never held, not resting on its own evidence | Approve its own request; hold a lease; submit evidence except through an approved `attest` decision; merge |
+| `coordinator` | Master: read work and runtime health, dispatch, acquire, verify or cancel bounded merge execution authority, record deployment observation on delivered work, settle a quarantine whose supervisor it verified dead on the registered host | Claim, implement, produce evidence, revise requirements, bypass a gate |
+| `slice-lead` | Slice lead: record rulings in its own slice, escalate | Implement, hold a lease, submit evidence, review its own slice, merge; every lifecycle mutation refused and recorded ([delegation](delegation.md)) |
+| `worker` | Worker: claim work, renew and release its lease, register its workspace, report blockers, submit its candidate, record untrusted assertions | Receive `admin`, `coordinator` or `producer` tokens; satisfy an acceptance gate |
+| `producer` | Proof producer: submit evidence; only proof names a live grant authorizes are trusted | Hold an assignment on the item it proves; lead a slice |
+| `reader` | Dashboards: inspect work, status and events | Mutate anything |
 
 ## Who decides
 

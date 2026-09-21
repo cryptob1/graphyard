@@ -1,4 +1,4 @@
-<!-- page: Build integrations | 8 | replay, reuse, cost. -->
+<!-- page: Build integrations | 8 | replay, reuse. -->
 # Evidence replay, scoped reuse and execution analytics
 
 For an operator weighing a re-run: when an earlier pass may stand for a new head.

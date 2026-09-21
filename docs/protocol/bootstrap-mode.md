@@ -1,4 +1,4 @@
-<!-- page: Agent protocol | 7 | deferring a proof. -->
+<!-- page: Agent protocol | 7 | deferred proofs. -->
 # Bootstrap mode for a change that introduces its own proof harness
 
 For an operator shipping a change with its own proof harness: when a proof may be deferred.

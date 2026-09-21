@@ -1,4 +1,4 @@
-<!-- page: Operate Graphyard | 4 | worker installation and hosts. -->
+<!-- page: Operate Graphyard | 4 | workers, hosts. -->
 # Herdr integration
 
 For an operator installing workers, and what a live session does not prove.

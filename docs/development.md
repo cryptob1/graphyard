@@ -1,4 +1,4 @@
-<!-- page: Understand or contribute | 2 | layout and dogfooding. -->
+<!-- page: Understand or contribute | 2 | layout, dogfooding. -->
 # Development and dogfooding
 
 For a contributor: which file a change belongs in, and what the size budget enforces.

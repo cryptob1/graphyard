@@ -1,9 +1,9 @@
-<!-- page: Agent protocol | 1 | authentication and retries. -->
+<!-- page: Agent protocol | 1 | authentication, retries. -->
 # Roles, requests and reads
 
 For an integration author: which credential may call what.
 
-Every credential's authority is tabulated once, in [the roles at a glance](../glossary.md#the-roles-at-a-glance). All control-plane endpoints except `/healthz` require `Authorization: Bearer TOKEN`; API credentials are not Git credentials.
+Every credential's authority is tabulated once, in [the roles at a glance](../glossary.md#the-roles-at-a-glance). All control-plane endpoints except `/healthz` and the HMAC-verified webhook require `Authorization: Bearer TOKEN`, over HTTPS from a remote machine; API credentials are not Git credentials.
 
 ## Requests and retries
 

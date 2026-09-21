@@ -2,7 +2,7 @@
 
 For an agent changing this repository: which rules bind every change, and which command comes next.
 
-Keep the control plane independent of agent runtimes: Herdr is the first integration, not the source of ownership truth. The initial MVP is a single-agent bootstrap under the operator's supervision: launch no other agents for it. Once Graphyard's own repository is connected and its gates are active, claim subsequent work in Graphyard and use its assigned worktree.
+Keep the control plane independent of agent runtimes: Herdr is the first integration, not the source of ownership truth. Claim work in Graphyard and use its assigned worktree; launch no agent of your own.
 
 Autonomy is the default ([who decides](docs/glossary.md#who-decides)): the approver is never the requester, never an implementer, and never the producer of evidence it approves.
 

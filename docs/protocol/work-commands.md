@@ -21,7 +21,7 @@ For an integration author: every mutation a principal may send, with its JSON bo
 - `blocked`: `{"epoch":1,"reason":"Waiting for API contract"}`; `null` clears
 - `workspace`: `{"epoch":1,"host":"build-machine-a","path":"/work/GY-1","branch":"graphyard/gy-1-1"}`
 - `scope` (`scope-request`): `{"epoch":1,"paths":[…],"reason":"…"}` records the worker's [scope request](../coordination.md#schedule-by-overlap-smallest-scope-first), empty `paths` withdrawing it; one carrying `remove` or `criteria` is refused and escalated
-- `autoscope`: `{"epoch":1}`; `coordinator` or `admin`; the control plane [decides the open request](../master-agent.md#scope-requests-the-loop-decides)
+- `autoscope`: `{"epoch":1}`; `coordinator` or `admin`; the control plane [decides the open request](../coordination.md#scope-requests-the-loop-decides)
 - `quarantine`, `launch`, `settle`: `{epoch, settlementHash, scope?}`, `{epoch, settlementHash}` and `{epoch, settlementToken}`: the supervisor's [containment fence](leases.md)
 - `submit`: `{"epoch":1,"pr":123}`; refused, naming the files, when the pull request reverts, deletes or rewrites anything outside `plannedFiles` ([guard](#submit-time-regression-guard))
 - `evidence`, `revoke`: See [evidence and proof authority](evidence.md)

@@ -1,4 +1,4 @@
-<!-- page: Build integrations | 7 | manifests, targets, re-anchoring. -->
+<!-- page: Build integrations | 7 | manifests, targets. -->
 # Candidate-to-deployment attribution
 
 For anyone reading a validation pass: what binds it to one target.
@@ -36,14 +36,12 @@ Enforcement:
 
 ### Whole-run coverage
 
-Coverage requires measurements bracketing the whole execution interval with no gap over `maxGapMs`, so an A → B → A rollout inside it is observed or left uncovered. Only that interval is judged, bounded by the nearest measurement at or before the start and at or after the finish: a later rollout never invalidates the run, an earlier measurement never covers it.
+Coverage requires measurements bracketing the whole execution interval with no gap over `maxGapMs`, so a rollout inside it is observed or leaves the run uncovered. Only that interval is judged, bounded by the nearest measurement at or before the start and at or after the finish: a later rollout never invalidates the run, an earlier measurement never covers it.
 
-| Situation | Attribution | Outcome |
-| --- | --- | --- |
-| Continuous coverage, every measurement matches | `matched` | Can pass |
-| A mid-run measurement differs, boundaries agree | `changed` | Attempt and behaviour retained, attribution invalid |
-| The final measurement differs | `mismatched` | Refused |
-| Fewer than two measurements, a gap over `maxGapMs`, or any `unknown` measurement | `unknown` | Refused |
+- **Continuous coverage, every measurement matching:** `matched`, can pass
+- **A mid-run measurement differing, boundaries agreeing:** `changed`; attempt and behaviour retained, attribution invalid
+- **The final measurement differing:** `mismatched`, refused
+- **Fewer than two measurements, a gap over `maxGapMs`, or any `unknown` measurement:** `unknown`, refused
 
 ## Compatibility signatures
 

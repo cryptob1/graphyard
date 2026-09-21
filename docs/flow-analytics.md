@@ -1,4 +1,4 @@
-<!-- page: Operate Graphyard | 11 | bottlenecks and phase durations. -->
+<!-- page: Operate Graphyard | 11 | bottlenecks, phases. -->
 # Flow analytics
 
 For an operator asking where delivery waits, and what the figures cannot answer.
@@ -14,8 +14,8 @@ Ledger events are projected into `flow_facts`, a normalized, append-only, trigge
 
 - **Projection:** incremental, bounded and idempotent on exact identities: a replayed event inserts nothing, two replicas cannot duplicate a fact, a pending review is not a completed-review fact, repeated CI outcomes stay distinct
 - **Runs:** in the reconciliation loop and as a catch-up before each read, reporting lag in `coverage.projection`, shown as **stale**
-- **A bound reached** (window, work items, records scanned, deployment observations, daily buckets, drill-down rows, payload size): reported in `coverage.truncated`, `coverage.workItemsTruncated`, `coverage.deploymentsTruncated`, `coverage.deploymentMergesTruncated`, `coverage.sliceFilterTruncated` and the **partial** state
-- **A truncated scan** reads facts in `(observed_at, id)` order, losing the window's end. `window.covered` and `coverage.covered` state the interval: `from`, `to`, the instant reached (`toCovered`), `ms` against `windowMs`, `fraction`, `uncovered`, and `remainingFacts` (a floor when `remainingCapped`), with a one-sentence `statement`. Branch on `window.truncated`; an export's metadata rows carry `windowCovered`, `windowCoveredFraction`, `windowTruncated` and `windowCoverage`. Narrow the window, type or slice to cover the rest
+- **A bound reached** (window, work items, records scanned, deployment observations, daily buckets, drill-down rows, payload size): reported per dimension under `coverage` (`truncated`, `workItemsTruncated`, `deploymentsTruncated`, `deploymentMergesTruncated`, `sliceFilterTruncated`) and as the **partial** state
+- **A truncated scan** reads facts in `(observed_at, id)` order, losing the window's end. `window.covered` and `coverage.covered` state the interval reached, the fraction covered, what is `uncovered`, `remainingFacts` (a floor when `remainingCapped`) and a one-sentence `statement`; an export's metadata rows carry the same coverage. Branch on `window.truncated`, narrowing the window, type or slice to cover the rest
 - **A provider that deletes a pull request, check run or deployment record** cannot erase a stored fact
 - **Deployment observations** and their contained merge identities are repository-wide: slice, type and stage filters never narrow them; production phases join through those containment records, never assuming an artifact SHA equals a merge SHA
 - **Graphyard's [release records](delivery.md):** a separate lineage this report does not read yet; a repository observed only through the release pipeline reports deployment metrics as unavailable
@@ -84,6 +84,4 @@ Identifiers by role:
 - **Other readers:** results and counts; deployment drill-down and export withhold artifact SHAs, provider names and external deployment IDs, attribution showing `requires audit role` for one withheld
 - `authorized`: which view a drill-down served
 
-## Pipeline speed
-
-Target, `master status` figures and measurement script: [master guide](master-agent.md#pipeline-speed).
+The submit-to-merge target, its `master status` figures and the measurement script are in the [master guide](master-agent.md#pipeline-speed).

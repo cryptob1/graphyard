@@ -1,4 +1,4 @@
-<!-- page: Build integrations | 3 | candidates, attempts, results. -->
+<!-- page: Build integrations | 3 | candidates, attempts. -->
 # Validation candidates and runner protocol
 
 For an integrator driving a runner: how an attempt is authorized.

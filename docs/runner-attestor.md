@@ -1,4 +1,4 @@
-<!-- page: Build integrations | 5 | the attestor and its signature. -->
+<!-- page: Build integrations | 5 | attestor signature. -->
 # The host attestor and its attestation
 
 For the operator deploying the [packaged runner](runner-setup.md): what the signature is worth.

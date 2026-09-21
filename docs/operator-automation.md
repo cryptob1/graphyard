@@ -1,4 +1,4 @@
-<!-- page: Operate Graphyard | 10 | least-privilege operator agents. -->
+<!-- page: Operate Graphyard | 10 | least-privilege agents. -->
 # Scoped operator-agent automation
 
 For the operator enabling autonomy: which capabilities an agent holds, and what is denied.
@@ -18,7 +18,7 @@ An `operator-agent` is not the human operator and holds no `admin` authority; ea
 - `decision:merge`: Request merge approval for the exact candidate when automatic merging is off
 - `decision:rework`: Request rework, or containment recovery of a delivered item, attesting the worker stopped
 - `decision:grant`: Request a proof-authority grant to a producer principal
-- `decision:approve`: Approve another identity's decision; never its own, never on an item it held, never one resting on its evidence
+- `decision:approve`: Approve another identity's decision, under the [conflict rules](#two-party-decisions)
 
 ## Master autonomy setup
 
@@ -53,11 +53,9 @@ Every decision except the three human-only ones is a two-party decision on one w
 - **Denied `gh`:** `gh pr merge`, `gh pr review`, any `gh api` call that merges, posts a review, mints a token, uses GraphQL, `PUT`, `POST` or `DELETE`.
 - **Also denied:** every direct `agent-browser` command, `git push`, reads of the coordinator credential home, `.graphyard/connection.json`, `*.pem` and `*.token`.
 
-| Role | May | May not |
-| --- | --- | --- |
-| worker | push its assigned branch (`origin BRANCH`, `-u`, `HEAD:BRANCH`), run its item's Graphyard commands, open its pull request | force-push, push the base branch, rebase, merge, post a review, submit evidence |
-| reviewer | read the diff and post the one verdict it was launched for | push, commit, claim, submit evidence, edit files |
-| producer | fetch, add and remove its detached worktree, submit evidence | push, commit, claim, post a review |
+- **worker:** may push its assigned branch (`origin BRANCH`, `-u`, `HEAD:BRANCH`), run its item's Graphyard commands and open its pull request; never force-push, push the base branch, rebase, merge, post a review or submit evidence
+- **reviewer:** may read the diff and post the one verdict it was launched for; never push, commit, claim, submit evidence or edit files
+- **producer:** may fetch, add and remove its detached worktree and submit evidence; never push, commit, claim or post a review
 
 ## Other operator agents
 

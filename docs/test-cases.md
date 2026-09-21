@@ -1,4 +1,4 @@
-<!-- page: Build integrations | 2 | versioned E2E scenarios. -->
+<!-- page: Build integrations | 2 | E2E scenarios. -->
 # E2E test-case registry
 
 For anyone defining an E2E proof: what lives where, and what a report must match.

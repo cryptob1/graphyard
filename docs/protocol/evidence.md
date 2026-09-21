@@ -1,4 +1,4 @@
-<!-- page: Agent protocol | 5 | evidence, grants, revocation. -->
+<!-- page: Agent protocol | 5 | evidence, grants. -->
 # Evidence and proof authority
 
 For a producer or integration author: what makes an evidence record trusted.
@@ -36,7 +36,7 @@ One dedicated **CI producer** ([the workflow](../github.md#proofs-in-ci), [provi
 - **`ciRun` binding:** `{ "provider": "github-actions", "repository": "OWNER/REPO", "runId": "RUN", "runAttempt": 1, "jobId": 4242 }` on each record, with `sha`, `baseSha` and `policyRevision` from the item's candidate record.
 - Only the CI producer may, and must, submit a `ciRun` binding: another principal sending one refuses with `403`, the CI producer sending none with `400`.
 - Accepted from it: only `unit:*` and `integration:*` proofs within its live grant; `manual:*` and `e2e:*` refuse with `403` whatever it is granted.
-- Before the transaction the control plane reads the named job back from GitHub through its own App: it must be GitHub Actions' own check run, belong to that workflow run, have run on exactly the evidence `sha`, and completed with `success` for a `pass`, anything else for a `fail`. A mismatch refuses with `403`, a job GitHub cannot report with `503`.
+- Before the transaction the control plane reads the named job back from GitHub through its own App: it must be GitHub Actions' own check run, belong to that workflow run, have run on exactly the evidence `sha`, and have completed `success` for a `pass`, anything else for a `fail`. A mismatch refuses with `403`, a job GitHub cannot report with `503`.
 - A record for the same proof, head, base and policy revision is accepted only from a strictly newer run attempt; an older one refuses with `409`.
 
 ## Revocation

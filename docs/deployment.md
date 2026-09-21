@@ -1,4 +1,4 @@
-<!-- page: Operate Graphyard | 1 | images, hosts, variables, backups. -->
+<!-- page: Operate Graphyard | 1 | images, variables. -->
 # Deployment
 
 For whoever runs the control plane: which variables, host and backup path to choose.
@@ -61,11 +61,9 @@ For whoever runs the control plane: which variables, host and backup path to cho
 
 ## Hosts
 
-| Host | Bring it up | Specifics |
-| --- | --- | --- |
-| **Railway** | Project with Postgres, an application service from this repository on `main` building the root `Dockerfile`; `railway config plan`, then `railway config apply` | `.railway/railway.ts` defines the application, Postgres, volume, health check and restart policy, declaring every hand-set variable with `preserve()`, which retains an existing value but never creates one. Generate a domain, verify `/healthz`, point the App webhook at `/api/github/webhook` |
-| **Docker Compose** | `cp .env.example .env`, replace every example secret, `docker compose --profile full up -d` (`--build` builds this checkout) | `GRAPHYARD_IMAGE` pins a release or digest; `graphyard-data` holds durable state, `graphyard-backups` the logical backups. Both published ports bind loopback, so put a TLS reverse proxy before 4310 and never expose Postgres; set a unique database password, the four capacity variables, and `GRAPHYARD_BUILD_SHA=$(git rev-parse HEAD)` when you build |
-| **Kubernetes** | `deploy/helm/graphyard`: `helm upgrade … --set image.tag=X.Y.Z`, then `helm test` | Stateless Deployment over one Postgres ledger, a Service, a TLS Ingress and a Secret, no worktree volume |
+- **Railway:** a project with Postgres and an application service from this repository on `main` building the root `Dockerfile`; `railway config plan`, then `railway config apply`. `.railway/railway.ts` defines the application, Postgres, volume, health check and restart policy, declaring every hand-set variable with `preserve()`, which retains an existing value but never creates one. Generate a domain, verify `/healthz`, point the App webhook at `/api/github/webhook`
+- **Docker Compose:** `cp .env.example .env`, replace every example secret, `docker compose --profile full up -d` (`--build` builds this checkout). `GRAPHYARD_IMAGE` pins a release or digest; `graphyard-data` holds durable state, `graphyard-backups` the logical backups. Both published ports bind loopback, so put a TLS reverse proxy before 4310 and never expose Postgres; set a unique database password, the four capacity variables, and `GRAPHYARD_BUILD_SHA=$(git rev-parse HEAD)` when you build
+- **Kubernetes:** `deploy/helm/graphyard`, `helm upgrade … --set image.tag=X.Y.Z`, then `helm test`: a stateless Deployment over one Postgres ledger, a Service, a TLS Ingress and a Secret, no worktree volume
 
 - **The chart's `pre-upgrade` hook Job** (also `pre-install` with an external database) runs `graphyard db migrate` from the image being rolled out and refuses when a newer release already migrated the database, so a rollback stops at the hook, not replacing healthy pods.
 - `secrets.existingSecret`: a Secret carrying `DATABASE_URL`, `GRAPHYARD_PRINCIPALS`, `GITHUB_PRIVATE_KEY` (a file, possibly empty) and `GITHUB_WEBHOOK_SECRET`; the chart refuses to render with nowhere to hold credentials; `secrets.create=true` renders one for evaluation only.
@@ -89,8 +87,8 @@ Work is Done when the merge is observed; whether that commit reached production 
 
 ## After the merge
 
-- A merged commit production never served is a **deployment incident**, recorded at once when the provider reports `FAILED` or `CRASHED`, after a five-minute grace period when no deployment of the merge is observed. An append-only `delivery.deployment-incident` event shows in `production.incidents`, `doctor` (`next`) and `master status`: `main is N commits ahead of production (serving …): <reason>`; `/healthz` stays green, the previous release still serving. Fix the deployment, not the ledger: a start-up refusal is printed verbatim and, for a capacity limit, names the variable and value to set; revert the merge only if the change itself is wrong; when a deployment containing it serves, the watch appends `delivery.deployment-recovered`.
-- A delivery whose trusted smoke proof failed stays Done, marked **delivered with failure** and listed under `delivered` with `rollback` guidance naming the serving commit, the merge commit and the base branch: roll the deployment back to the last release whose smoke proof passed, or revert the merge through a new item under the same gates. Never backfill a pass or delete the failure: a later run at the same deployed commit may supersede the verdict; if the release moved on before the smoke ran, the item stays `awaiting-smoke`. Graphyard v0.1 executes no rollbacks or reverts itself.
+- A merged commit production never served is a **deployment incident**, recorded at once when the provider reports `FAILED` or `CRASHED`, after a five-minute grace when no deployment of the merge is observed. An append-only `delivery.deployment-incident` event shows in `production.incidents`, `doctor` (`next`) and `master status`: `main is N commits ahead of production (serving …): <reason>`; `/healthz` stays green, the previous release serving. Fix the deployment, not the ledger: a start-up refusal is printed verbatim and, for a capacity limit, names the variable and value to set; revert the merge only if the change is wrong. When a deployment containing it serves, the watch appends `delivery.deployment-recovered`.
+- A delivery whose trusted smoke proof failed stays Done, marked **delivered with failure** and listed under `delivered` with `rollback` guidance naming the serving commit, the merge commit and the base branch: roll the deployment back to the last release whose smoke proof passed, or revert the merge through a new item under the same gates. Never backfill a pass or delete the failure: a later run at the same deployed commit may supersede the verdict; a release that moved on before the smoke ran leaves the item `awaiting-smoke`. Graphyard v0.1 executes no rollback or revert itself.
 
 ## Backup, upgrade, restore
 

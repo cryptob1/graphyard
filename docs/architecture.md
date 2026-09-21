@@ -1,4 +1,4 @@
-<!-- page: Understand or contribute | 1 | invariants and boundaries. -->
+<!-- page: Understand or contribute | 1 | invariants, boundaries. -->
 # Architecture and correctness model
 
 For a contributor: what makes a gate decision trustworthy.
@@ -9,7 +9,7 @@ Graphyard owns coordination decisions; a gate is a deterministic evaluation, nev
 
 ![Graphyard control-plane components; the text equivalent follows.](diagrams/control-plane-components.svg)
 
-Text equivalent: agent sessions, the dashboard and a proof producer reach the **HTTP API and CLI**, handing authenticated commands to the **coordination engine** (one advisory-locked transaction per mutation, no external I/O inside), writing the aggregate and its event together to **Postgres**. Jobs flow to the **reconciliation worker**, exchanging pull-request, review, check, protection and merge facts with **GitHub**; the dashed arrow back is the signed webhook, only waking a job.
+Text equivalent: agent sessions, the dashboard and a proof producer reach the **HTTP API and CLI**, which hands authenticated commands to the **coordination engine** (one advisory-locked transaction per mutation, no external I/O inside), writing the aggregate and its event together to **Postgres**. Jobs flow to the **reconciliation worker**, which exchanges pull-request, review, check, protection and merge facts with **GitHub**; the dashed arrow back is the signed webhook, waking a job.
 
 ## Storage
 
@@ -42,6 +42,5 @@ Text equivalent: agent sessions, the dashboard and a proof producer reach the **
 
 ## Display state and replicas
 
-- **Graph:** shows the first refusing stage; the card carries every refusal reason.
 - **Delivered work:** stays delivered in history; a merge observed with unsatisfied gates is a permanent visible violation.
 - **One formatter renders every elapsed duration:** `Xm` below 60 minutes, `Xh Ym` under 48 hours, `Xd Yh` above, missing input `—`, negatives clamped.

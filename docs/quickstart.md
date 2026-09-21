@@ -1,4 +1,4 @@
-<!-- page: Start here | 4 | run Graphyard locally. -->
+<!-- page: Start here | 4 | local evaluation. -->
 # Local quickstart
 
 For someone evaluating Graphyard on one machine: what to run before connecting a repository.

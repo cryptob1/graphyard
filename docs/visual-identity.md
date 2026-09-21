@@ -1,4 +1,4 @@
-<!-- page: Understand or contribute | 4 | marks, palette, voice. -->
+<!-- page: Understand or contribute | 4 | marks, palette. -->
 # Graphyard visual identity
 
 For anyone placing the mark, and what colour may never mean.

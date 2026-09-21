@@ -1,4 +1,4 @@
-<!-- page: Operate Graphyard | 6 | leads, rulings, escalations. -->
+<!-- page: Operate Graphyard | 6 | leads, rulings. -->
 # Slice-lead delegation
 
 For an installation past one coordinator: what a lead rules on, and who settles escalations.

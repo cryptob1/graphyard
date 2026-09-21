@@ -1,11 +1,11 @@
-<!-- page: Operate Graphyard | 8 | requirements, overlap, scope. -->
+<!-- page: Operate Graphyard | 8 | requirements, overlap. -->
 # Coordinating independent agents
 
 For anyone changing what an item requires or owns: what may be revised, and what holds a dispatch.
 
 ## Observable requirements
 
-A criterion states an outcome and names required proofs: `{ "id": "AC-1", "text": "Retries produce one SMS request", "proofs": ["integration:sms-idempotency", "e2e:confirmed-booking-sms"] }`.
+A criterion states an outcome and names the proofs required for it, in the [revision format](#revise-requirements-explicitly) below.
 
 - **Assertions:** the repository's tests define them; Graphyard checks evidence identity, version, result and counts.
 - **E2E:** register an [E2E scenario](test-cases.md) before naming it; authorize its reporter separately.
@@ -66,7 +66,16 @@ graphyard master approver GY-N DECISION                            # the indepen
 - **Advisory hold:** `master dispatch GY-N PROFILE --allow-overlap` dispatches anyway, recording the overlap; the loop never uses it. Exclusive resources, dependencies, blockers and quarantines still refuse.
 - **Order:** ready items dispatch smallest planned scope first within a priority: fewest root-level directory scopes, then fewest directory scopes, then fewest files, then the older item; a root-level scope is flagged `highConflict`.
 - **`master status`:** reports which open candidates git cannot merge each candidate with (`git merge-tree` over the fetched PR heads), the conflicting files per pair, and a fewest-conflicts-first sequence.
-- **Path outside scope:** a [scope request](master-agent.md#scope-requests-the-loop-decides), keeping the lease; never a free-text blocker.
+- **Path outside scope:** a [scope request](#scope-requests-the-loop-decides), keeping the lease; never a free-text blocker.
+
+### Scope requests the loop decides
+
+- **Asked:** a worker needing a file outside `plannedFiles` runs `scope-request GY-N EPOCH PATH... -- REASON` and keeps its lease
+- **Decided:** the cycle it appears, by the control plane at the loop's request (`POST /api/work/:id/autoscope`, the coordinator's only scope call), recomputed from the item, not the caller
+- **Approved, applied to the live item as an additive widening:** documentation the repository requires updating when behaviour changes (`docs/`, `AGENTS.md`, `README.md`, file by file), and source files the item's criteria name
+- **Refused and escalated, the item blocked on `Scope request refused: …`:** any other path (`master scope GY-N REASON` applies it), and a request dropping planned paths or rewriting criteria or proofs (`master requirements GY-N FILE REASON`)
+- **Lifted by:** withdrawing it (`scope-request GY-N EPOCH -`) or an operator's answer, never touching a blocker anyone else wrote; a request whose attempt lost the lease is never decided
+- **Measured:** `daemon.metrics.scope` reports request-to-decision `p50`/`p90` and `scopeOpenMs`, the longest undecided request; the loop escalates a p90 over five minutes across ten or more decisions, or any request undecided for fifteen minutes
 
 ## Reserve explicitly shared resources
 

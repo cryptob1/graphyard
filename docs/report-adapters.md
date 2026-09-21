@@ -1,4 +1,4 @@
-<!-- page: Build integrations | 5 | what each format proves. -->
+<!-- page: Build integrations | 5 | format contracts. -->
 # Report adapters
 
 For an integrator choosing a report format, and how failures are classified.
@@ -12,10 +12,8 @@ The operator-approved **bundle definition** pins the report format beside the ru
 - **Verified:** the collector verifies **only** the pinned adapter's structure
 - **Refused:** bytes in any other shape, never sniffed; an unknown format name, when the bundle is defined
 
-| Format | Kind | Frameworks and reporters covered by contract fixtures | Files the phases write |
-| --- | --- | --- | --- |
-| `graphyard-playwright-v1` | end-to-end | `@playwright/test` 1.63.x through the [packaged runner image](#the-approved-runner-image) and its built-in reporter | `inventory.json`, `report.json` |
-| `junit-xml-v1` | unit / integration | `node --test --test-reporter=junit` (Node 20–24), `pytest --junitxml` (7.x–8.x, `xunit2`), `jest-junit` 16.x, Maven Surefire/Failsafe 3.x XML, `go-junit-report` v2 | `inventory.json` (`graphyard-inventory-v1`), `report.xml` |
+- **`graphyard-playwright-v1`** (end-to-end): `@playwright/test` 1.63.x through the [packaged runner image](#the-approved-runner-image) and its built-in reporter, covered by contract fixtures; the phases write `inventory.json` and `report.json`
+- **`junit-xml-v1`** (unit and integration): `node --test --test-reporter=junit` (Node 20–24), `pytest --junitxml` (7.x–8.x, `xunit2`), `jest-junit` 16.x, Maven Surefire/Failsafe 3.x XML, `go-junit-report` v2; the phases write `inventory.json` (`graphyard-inventory-v1`) and `report.xml`
 
 ## The approved runner image
 
