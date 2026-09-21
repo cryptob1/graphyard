@@ -99,6 +99,28 @@ An account that fails either check is skipped with its reason — `claude-a quot
 
 `master status` shows, under `dispatch.accounts`, every environment as the last launch check saw it (login, quota, usage windows, the login command when it is logged out) and the recent launches that skipped an account, with role, profile, item and reason. The same record is kept beside the coordinator credential (`*.environments.json`, mode 0600); it never holds a provider token.
 
+### Exhaustion in the middle of a session
+
+The launch check reads an account before a session starts. An account that runs out **while its session works** does not fail: the runtime prints its provider's limit notice — `You've hit your weekly limit · resets …`, `Weekly usage limit reached … reset at …`, `You've reached your spend limit … resets on 10/8` — and the session stops there, holding its lease or its request. Until GY-89 a master noticed by reading panes and repointed profiles by hand, at 20–60 minutes each. The durable loop now does it on the cycle it sees it:
+
+1. **Detect, from the session's own output.** For every launched worker, reviewer and producer session that Herdr reports `idle`, `done` or `blocked`, the loop reads the tail of its terminal (`herdr agent read`, last 40 lines) and matches the providers' limit notices on short single lines. The notice must also **lead** its line, behind at most a two-word label — `Error: Weekly usage limit reached`, `Claude AI usage limit reached|…`: every runtime prints its banner that way, while a session reaching the phrase through a sentence of its own (`Added a test for the rate limit reached path`) is writing prose, not printing a banner. A session that is still `working` is never judged on what it prints either, so a worker discussing usage limits is not a notice. The reset time is read from the notice: an absolute timestamp, a Unix time, a wait (`try again in 3 days 4 hours`), or a wall clock in the host's zone (`resets 3pm`, `resets Sep 26`); a notice that names none records an unknown reset rather than a guess.
+2. **Keep the partial work.** For a worker on this host, uncommitted changes in the attempt worktree are committed on the attempt's own branch as `WIP: GY-N attempt E interrupted by provider quota exhaustion` — unpushed, never stashed. It is `git add -A`, so anything the attempt left in the worktree that `.gitignore` does not cover is committed with it; the commit stays local to that worktree's branch, and the next attempt reads it before it pushes anything. If they cannot be committed the worktree is reset and the record says `discarded`; an attempt never ends with changes that are neither kept nor gone. The next attempt's prompt names the commit, branch and worktree so it can cherry-pick instead of redoing the work.
+3. **Hold the account.** The account is recorded as exhausted beside the coordinator credential (`*.environments.json`, `exhausted`) until its reset time — one hour when the notice named none — and every launcher skips it with that reason, including for OpenCode and Cursor accounts whose quota Graphyard cannot read. A profile that names no `accounts` is held under `profile:NAME`.
+4. **Record it.** `POST /api/work/GY-N/capacity` with the coordinator credential writes a `capacity.exhausted` history entry — role, profile, account, runtime, the provider's notice, the reset time and how the partial work was kept — onto `capacity.exhaustions` of the item. For a worker the same transaction ends the attempt as `released`, so nothing waits for a lease nobody renews to lapse and no `lease-loss` is raised. The loop then stops the watch supervisor through the containment scope it recorded, which is the path that settles its own quarantine.
+5. **Re-queue.** A worker's item is claimable again once that quarantine settles, and the dispatch step of the next cycle launches it on the profile's next account or on another profile — twenty seconds after detection at the default interval, inside the two-minute bound. A reviewer or producer session is ended on its ledger as `failed` with the exhaustion as its resolution and its request is launched again at once, the exhausted profile last.
+
+Each failover is one `failover` action in `daemon.actions`, and `master status` shows the item's recent exhaustions under `work[].capacity`.
+
+### When a role has no account left
+
+When **every** launch profile of a role is unavailable for the same reason — each of its accounts is spent — that is capacity, not a launch failure. A logged-out account, an unreadable credential, or an `accounts:` name that is not a configured environment is something a master can fix in one command, so it is never capacity: the account selector carries *why* it passed each account over, and only a profile every one of whose accounts was passed over as spent reports itself out of capacity. The daemon and the automatic reviewer/producer dispatcher both key on that, so a role whose accounts are merely logged out keeps its counted launch refusal, its widening retry and its `launch-review` / `launch-producer` attention item addressed to the master, rather than reading as a wait for a provider reset that would never come.
+
+- Every item whose next action needs that role records **one capacity escalation**: `capacity.escalations[]` with each account, its profile, its reset time and the reason, plus `retryAt`, the first reset among them. It is a `capacity.escalated` history entry, written once per distinct set of accounts and resets, never per cycle. It blocks nothing and nobody has to clear it.
+- **The loop stops launching that role.** The worker dispatch step is skipped entirely, so there are no failed dispatches, no profile cool-offs and no `No worker profile can take GY-N` escalations. The automatic reviewer/producer dispatcher treats a launch that ran out of quota on every account as a wait, not a refusal: it counts toward no failure limit (a request that waited out a week-long reset still launches), and the role is not launched again until its accounts are due to be read, one minute later. The pause lasts only as long as it is true: the launch that succeeds clears it, and so does a launch the role refuses for anything else, so the summary never reports a provider reset beside a fault a master can fix now.
+- **Nothing else is delayed.** Reviews, proofs, merges, deployment verification and every item that needs a different role run in the same cycle exactly as before.
+- **`master status` says it in one line** per spent role, under `capacity` and as one attention item: `worker capacity is exhausted on every configured account (claude-a resets …, zai resets …); worker launches are paused until …, and nothing else is delayed; waiting: GY-7, GY-9`. Launch refusals and session retries that are only that capacity are not listed per item.
+- The cycle an account reports quota again — its reset passed, or a master added a logged-in account with `master environments --apply` and `master config accounts:PROFILE=…` — the loop withdraws the escalation (`capacity.restored`) and dispatches what was waiting. Buying quota or opening a provider account remains the human's decision.
+
 ### The request is the session's first message
 
 Every session Graphyard launches — a worker under `watch`, the reviewer and producer sessions the loop starts, the approver, the master itself — receives its instruction as the session's own first request, on the runtime's command line: Claude Code, Codex and Cursor take it as the positional prompt after their flags, OpenCode through `--prompt`. It is never typed into the running session. `herdr agent prompt` delivers text through bracketed paste, and a coding agent treats pasted text as untrusted data rather than as a request from its operator — correctly, against prompt injection — so a session launched that way often ended its first turn having refused to act, and the loop recorded it as failed with `finished (done) without trusted evidence` and spent a retry on work that was never attempted (GY-93). `master status` shows `delivery: request` on the session, or `paste` for a runtime Graphyard has no request contract for, which is still prompted after it starts.
@@ -387,6 +409,25 @@ loop is not running, because a running one decides on its next cycle. Before GY-
 of these requests took a master session running a command, and GY-82's implementation sat finished
 for 647 minutes waiting for it.
 
+### Human-only waits
+
+Agents decide everything except three things: goals and priorities, spending money or opening third-party accounts, and issuing credentials to people. A worker whose item reaches one of them does not write a prose blocker and does not keep its lease (GY-49 sat that way for hours, found only when a master read the text). Its prompt tells it to record a **typed request** and stop:
+
+```sh
+node "$GRAPHYARD_CLI" park GY-N EPOCH money-or-accounts A Hetzner Cloud project with an API token for the live-install proofs -- The proofs provision real servers; opening the account is the operator's
+```
+
+`KIND` is `goals-and-priorities`, `money-or-accounts` or `credentials-for-people`; the words before `--` are the exact thing needed, the words after it the reason. That one transaction (`POST /api/work/GY-N/park`, the lease holder only) writes `humanRequest` on the item, ends the attempt as `released`, sets the blocker `Waiting on a human-only decision (…): NEEDED`, and appends a `human.requested` history entry. The session exits holding nothing: its supervisor's next renewal is refused and it stops, no `lease-loss` is raised, and the item is not claimable. The loop names the parked item once (a `human` action) and dispatches everything else as usual.
+
+The human sees what waits on them in one list — the dashboard's **Work → Needs you** tab, `graphyard human-requests`, `GET /api/human-requests`, and `humanRequests` in `master status` — each row with the decision, the exact thing needed, the reason, who asked, how long it has waited, and the command that answers it. In `master status` the attention item is addressed to the **human**, not to the master.
+
+```sh
+graphyard answer GY-N [REQUEST] The project exists; its token is in the ops vault under hetzner-ci
+graphyard answer GY-N [REQUEST] --decline We are not opening a Hetzner account this quarter
+```
+
+Only a declared human `admin` session may answer (`POST /api/work/GY-N/answer`); an agent holding an admin credential is refused. A provided answer clears the request and its blocker in one transaction (`human.answered`), which leaves the item claimable, and **the loop dispatches it on its next cycle** — the next attempt's prompt carries the answer. No master session computes or executes anything in between. A declined answer keeps the item parked with the human's words as its blocker, for the master to re-scope.
+
 ### What the loop will not do
 
 The daemon holds exactly one credential: the coordinator token. It cannot claim a lease, submit
@@ -395,7 +436,9 @@ if that credential is also allowed to produce evidence. Deciding a scope request
 the loop asks, the control plane decides and applies, and a widening the item does not already
 imply comes back refused to the loop exactly as it would to anyone else. The one fact it writes besides the guarded
 merge is its own deployment observation on a delivered item; the smoke verdict itself comes from
-the workflow's producer, never from the loop. Provider exhaustion, a failing reviewer, a
+the workflow's producer, never from the loop. Besides that it records what it observed about provider capacity
+([exhaustion in the middle of a session](#exhaustion-in-the-middle-of-a-session)), which for a worker ends the attempt the
+spent account can no longer run. Provider exhaustion, a failing reviewer, a
 missing manual proof, and an unhealthy worker profile are all escalations, never shortcuts. A
 refused merge is the gate working: the loop records the refusal and keeps cycling.
 
@@ -1079,7 +1122,8 @@ On the next observation the item is delivered with `delivery.operatorAuthorizati
 
 ### Dead worker or provider change
 
-For a dead worker or provider change:
+A session whose provider account ran out mid-work needs none of this: the loop fails it over on
+its own ([exhaustion in the middle of a session](#exhaustion-in-the-middle-of-a-session)). For any other dead worker or provider change:
 
 1. stop the old worker and supervisor;
 2. release or let the lease expire, and settle any containment quarantine it left; a submitted
