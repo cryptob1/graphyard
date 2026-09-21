@@ -15,6 +15,11 @@ import { evidenceBindsCandidate, type Work } from '../model.js';
  *   and evidence reuse read (the touched-path list stays, the overlap scheduler needs it);
  * - resolved dispatch requests, resolved action rows and queue history: the most recent entries
  *   only (the open action rows are what the executors claim from and pass through whole);
+ * - the pipeline timeline: dropped whole, like the observation's scope comparison and without a
+ *   tally, because the omission is structural rather than a count of entries. It is a report of
+ *   what already happened — one entry per attempt, growing for the life of the item — and every
+ *   reader of it (master status, the speed summary) derives that report from the full documents.
+ *   No gate, dispatch or action decision consults it, so the loop's own poll need not carry it;
  *
  * Gates, violations, leases, candidates and the open requests are the server's own verdicts and
  * pass through unchanged, so nothing the loop decides on is recomputed from a trimmed history.
@@ -40,8 +45,9 @@ export function coordinationWork(work: Work, omitted: CoordinationOmissions): Wo
   const actions = work.actionQueue;
   const actionHistory = actions?.history.slice(-coordinationHistoryLimit);
   omitted.actionHistory += (actions?.history.length ?? 0) - (actionHistory?.length ?? 0);
+  const { pipeline: _pipeline, ...decisions } = work;
   return {
-    ...work, evidence, observation,
+    ...decisions, evidence, observation,
     ...(dispatch ? { autoDispatch: { ...dispatch, history: recentHistory } } : {}),
     ...(queueHistory ? { queueHistory } : {}),
     ...(actions ? { actionQueue: { ...actions, history: actionHistory! } } : {}),

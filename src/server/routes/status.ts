@@ -46,7 +46,13 @@ export const statusRoutes = defineRoutes('status', [
       // ledger before the snapshot every speed report is derived from is read. The ledger is read
       // outside the coordination lock, one run at a time; it converges and then costs one small
       // query per settle window; a failure is reported through /api/status, never here.
-      await catchUpPipelineTimelines(services.engine.store);
+      //
+      // It rides the full read alone, which is the read its output is for: master status derives
+      // every speed report from whole documents. The coordination view is the inverted loop's
+      // poll — the cycle, the dispatcher and every stateless executor ask for it every few
+      // seconds — and a ledger reconstruction in front of those reads would sit in the path of
+      // every claim, so a fleet that polls harder would pay reconstruction latency to act.
+      if (view === 'full') await catchUpPipelineTimelines(services.engine.store);
       const snapshot = await services.engine.store.workSnapshot(); const visibleWork = operatorVisible(snapshot.work);
       const scoped = { ...snapshot, work: visibleWork, jobs: actor.role === 'operator-agent' ? snapshot.jobs.filter(job => visibleWork.some(work => work.id === job.work_id)) : snapshot.jobs };
       return view === 'coordination' ? coordinationSnapshot(scoped) : scoped;

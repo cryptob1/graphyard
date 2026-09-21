@@ -144,6 +144,16 @@ A merge brokered from the loop is owned by the executor instance that acquired i
 coordinator principal alone, so a daemon, an interactive merge and any number of executors sharing
 one credential stand down from each other's in-flight executions instead of resuming them.
 
+What the fleet polls is the bounded coordination view of the work snapshot
+(`src/server/work-view.ts`), never whole documents. Inverting the loop multiplies that read: one
+master session asking every few seconds becomes the cycle, the dispatcher and every executor
+asking, so the view carries the decision state and nothing only a report consults — evidence
+without artifacts or per-file scope, the observation without its scope comparison, resolved
+requests, resolved action rows and queue entries bounded to the most recent, and no pipeline
+timeline. For the same reason the ledger reconstruction that rebuilds those timelines rides the
+full read whose speed report it feeds (`master status`) and never the poll: a maintenance walk in
+front of the claim path would be paid more often the more executors joined.
+
 None of this authorizes progression. An action is a fact about what is missing; the gates still
 decide from evidence and verdicts alone.
 

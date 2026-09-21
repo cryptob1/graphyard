@@ -25,6 +25,8 @@ import { assertMergeCandidate, mergeExecutionOwner, masterConfigSchema } from '.
 import { pullOnce, transportRetries } from '../scripts/graphyard-pull.mjs';
 import { agentRequestAttention, agentRequestReport, actionReport, sessionReport } from '../src/cli/master-status.js';
 import { queueRef, type QueueSpeculation } from '../src/merge-queue.js';
+import { pipelineBackfillState, resetPipelineBackfillState } from '../src/pipeline-backfill.js';
+import { coordinationViewHeader } from '../src/server/work-view.js';
 import WorkDetails from '../web/pages/work-details.js';
 
 /**
@@ -639,6 +641,30 @@ test('integration:multi-executor-throughput — two executors on different hosts
   const unnamed = (await store.list()).filter(item => mine.has(item.id))
     .filter(item => item.stage !== 'done' && !item.nextAction && !item.lease && !item.dependencies.length && item.ready && !item.blocker && !item.queue);
   assert.deepEqual(unnamed.map(item => item.key), [], 'no open, unassigned, unblocked item lacked a typed next action');
+});
+
+test('integration:multi-executor-throughput — the poll every executor runs on carries no ledger reconstruction, so a fleet that polls harder never pays for one', async () => {
+  // The timeline catch-up walks an item's own ledger, page by page, to rebuild what it did before
+  // the per-item timeline existed. It belongs to the read its output is for — master status,
+  // which derives every speed report from whole documents — and not to the coordination view,
+  // which is what the cycle, the dispatcher and every stateless executor ask for every few
+  // seconds. Riding that view, a reconstruction sits in front of every claim, and the more
+  // executors join the queue the more often it is paid for.
+  const item = await submitted();
+  resetPipelineBackfillState();
+  const executorToken = { Authorization: `Bearer ${'x'.repeat(32)}` };
+  for (let poll = 0; poll < 3; poll++) {
+    const view = await fetch(`${url}/api/work-snapshot`, { headers: { ...executorToken, [coordinationViewHeader]: 'coordination' } }).then(response => response.json());
+    assert.equal(view.view, 'coordination');
+    assert.ok(view.work.some((entry: Work) => entry.id === item.id));
+  }
+  assert.equal(pipelineBackfillState().lastRun, null, 'no executor poll walked a ledger');
+  assert.equal(pipelineBackfillState().backfilled, 0);
+  assert.equal((await reload(item)).pipeline?.backfill, undefined, 'and none of them wrote a reconstruction');
+  // The read the reconstruction is for still runs it, so the speed reports converge as before.
+  const full = await fetch(`${url}/api/work-snapshot`, { headers: executorToken }).then(response => response.json());
+  assert.equal(full.view, undefined);
+  assert.ok(pipelineBackfillState().lastRun!.backfilled > 0, 'the full read still reconstructs what is pending');
 });
 
 test('integration:multi-executor-throughput — every executor brokers merges under its own execution instance, so a second executor and the daemon stand down from an in-flight merge instead of resuming it', async () => {
