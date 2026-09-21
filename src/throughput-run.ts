@@ -170,10 +170,13 @@ export async function runFleetWitness(options: FleetWitnessOptions): Promise<Fle
    * execution another instance holds is never resumed (GY-92), so this raises rather than takes it
    * and the row backs off as it should.
    */
+  const ownedBy = (owner: string, actor: Principal) => owner === actor.id || owner.startsWith(`${actor.id}#`);
+  const holdsOwnExecution = (work: Work, actor: Principal) =>
+    !!work.mergeExecution && !work.mergeExecution.fenced && holdsMergeExecution(work, Date.now()) && ownedBy(work.mergeExecution.owner, actor);
   const heldExecution = (work: Work, actor: Principal) => {
     const execution = work.mergeExecution;
     if (!execution || execution.fenced || !holdsMergeExecution(work, Date.now())) return null;
-    if (!execution.owner.startsWith(`${actor.id}#`) && execution.owner !== actor.id) throw new Error(`${work.key} has an in-flight merge execution held by ${execution.owner}; this executor stands down rather than resuming it`);
+    if (!ownedBy(execution.owner, actor)) throw new Error(`${work.key} has an in-flight merge execution held by ${execution.owner}; this executor stands down rather than resuming it`);
     return execution;
   };
   const mergeItem = async (actor: Principal, item: Work, attempts = 6): Promise<Work> => {
@@ -200,9 +203,13 @@ export async function runFleetWitness(options: FleetWitnessOptions): Promise<Fle
       current = await reload(current.id);
       return await engine.observe(current.id, current.revision, { ...observation(current), merged: true, mergeSha: mergeSha(current), mergedAt });
     } catch (error) {
-      if (!staleRead(error) || attempts <= 1) throw error;
+      // An execution this executor already holds is not abandoned half-finished: while it stands,
+      // no other broker may take it and every other reading of the item is refused, so walking
+      // away would leave the item waiting out the execution's own lease with nobody entitled to
+      // move it. The broker that acquired it finishes it or fails it, and that is what this does.
+      if (attempts <= 1 || !(staleRead(error) || holdsOwnExecution(await reload(item.id), actor))) throw error;
       await delay(100);
-      return mergeItem(actor, current, attempts - 1);
+      return mergeItem(actor, await reload(item.id), attempts - 1);
     }
   };
 
