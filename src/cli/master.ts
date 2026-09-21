@@ -1,15 +1,14 @@
-import { readFile, mkdir } from 'node:fs/promises';
+import { readFile } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
-import { startGithubSetup } from '../github-setup.js';
 import { resourceConflicts } from '../coordination.js';
 import { agentToken, approvedMerges, assertMasterBinding, autonomySubcommands, continueMergeBatch, runAutonomyCommand, currentMergeCandidates, daemonExecutor, dispatchWork, listHerdrAgents, liveMasterConfig, loadMasterConfig, masterHarness, masterSettingsFromArgs, mergeExecutor, mergeProtocolSkew, producerCommand, readCredentialFile, readWorkerCredential, saveMasterSettings, saveWorkerProfile, setupMaster, snapshotWithClock, startMaster, verifyContainmentDeath, workerProfileSchema } from '../master.js';
 import { cliCommit } from '../protocol-version.js';
 import { daemonEffects, readDaemonState, runDaemon } from '../master-daemon.js';
 import { verificationEffects, verifyDeployment } from '../master-verification.js';
-import { bindReviewer, launchReview, removeReviewerProfile, reviewerCredentialDirectory, saveReviewerProfile, verifyReviewerInstallation } from '../reviewer.js';
+import { launchReview } from '../reviewer.js';
 import { dispatchEffects, dispatchReadTimeoutMs, readDispatchCursor, runAutoDispatch } from '../auto-dispatch.js';
 import { applyProtection, protectionPlan, readProtection } from '../protection.js';
 import { writeHarnessPermissions } from '../harness.js';
@@ -19,15 +18,69 @@ import { approveScopeRequest, cycleBudget, masterStatusReport, scopeRequestComma
 import { coordinationViewHeader } from '../server/work-view.js';
 import { executorHostHeader } from '../model/registry.js';
 import { readSecretFromStdin } from './context.js';
-import { initialFleetProposal, registryCommand } from './master-registry.js';
-import { masterHelp } from './master-help.js';
+import { reviewerCommand } from './master-reviewer.js';
+import { initialFleetProposal, registryCommand, registryHelp } from './master-registry.js';
 
 /** Every master subcommand authenticates with the coordinator credential the master keeps for itself, never the repository connection file. */
 export const masterCommands = defineCommands([
   {
     name: 'master',
     readsConnection: () => false,
-    help: masterHelp,
+    help: [
+      '  master init --token-stdin [--herdr-workspace ID] [--browser-profile PROFILE]',
+      '              [--dispatch-interval SECONDS] [--reviewer-profile NAME] [--producer-timeout MINUTES]',
+      '                                Install the recommended master-agent operating mode; PROFILE is',
+      "                                the operator's Chrome profile the master administers GitHub",
+      '  master start AGENT_KIND       Launch the dedicated visible Herdr master session',
+      '  master worker add FILE        Add an existing or launchable Herdr worker profile',
+      '  master reviewer setup [--name NAME]     Register the separate reviewer GitHub App; NAME',
+      "                                defaults to reviewer, within GitHub's 34-character limit",
+      '  master reviewer bind FILE --key-stdin   Bind an existing reviewer App (IDs in FILE, PEM on stdin)',
+      '  master reviewer add FILE | remove NAME   Add or remove a reviewer launch profile',
+      '  master producer add FILE | replace FILE | remove NAME  Manage proof-producer profiles',
+      '  master review GY-N [PROFILE]  Launch the bound reviewer on the exact current candidate;',
+      '                                master run does this on its own for every submitted head',
+      '  master protection [--apply]   Reconcile branch protection with every open review policy',
+      '  master browser FLOW [--dry-run]',
+      "                                Perform GitHub administration through the operator's browser",
+      '                                profile: app-permissions, installation-accept, or protection;',
+      '                                recorded, API-verified, audited',
+      '  master harness [KIND] [--apply]  Generate the master\'s own harness permissions',
+      '  master status                 Graphyard work truth joined with Herdr session health, the',
+      '                                dispatch order, overlaps and merge conflicts',
+      '  master dispatch GY-N PROFILE [--allow-overlap]',
+      '                                Invite a worker to claim ready work in a visible tab; an',
+      '                                item whose planned files overlap a claimed or unmerged item',
+      '                                is held unless --allow-overlap is passed',
+      '  master settle-containment GY-N REASON',
+      '                                Settle a containment quarantine whose supervisor this host',
+      '                                verifies dead; unverifiable signals refuse',
+      '  master merge GY-N|--all       Merge exact authorized candidates without bypasses',
+      '  master config FIELD=VALUE…   Tune owned run settings and profile accounts',
+      '                                (accounts:PROFILE=a,b); autoMerge and credential paths stay operator-only',
+      '  master verify-deployment GY-N Verify that the deployed release serves a delivery and',
+      '                                emits the current instructions; refuse stale or local-only',
+      '                                observations, record the exact release observed',
+      '  master run [--once] [--interval SECONDS]',
+      '                                Run the durable coordination loop as a supervised process; it',
+      '                                launches the reviewer and proof producers for every submitted',
+      '                                head within 30 seconds of the request, and decides every open',
+      '                                worker scope request on the cycle it appears',
+      '  master autonomy [--admin-token-stdin --apply]  Provision the master and approver identities',
+      '  master create FILE|release GY-N|unblock GY-N|requirements GY-N FILE REASON  Own intent',
+      '  master scope GY-N [REASON]    Approve a worker scope request the loop refused: add its',
+      '                                requested paths to plannedFiles while the attempt keeps its',
+      '                                lease. master run decides every request the item itself',
+      '                                already implies, so this is the override for the rest',
+      '  master decide GY-N ACTION [JSON|@FILE] REASON  Request a two-party decision',
+      '  master withdraw GY-N DECISION REASON  Take back the master\'s own requested decision',
+      '  master decisions GY-N | approver GY-N DECISION [KIND] | approve GY-N DECISION REASON',
+      '  master principals [--apply]   Preview or apply a roster rotation keeping live principals',
+      '  master restart                Restart this host\'s master loop detached',
+      '  master environments [--create KIND,…] [--apply]  Agent accounts, quota, profiles',
+      '  master guide                  Print the complete master-agent operating guide',
+      ...registryHelp,
+    ],
     async run(context) {
       const { id, args, base, print } = context;
       const root = context.repositoryRoot();
@@ -75,31 +128,7 @@ export const masterCommands = defineCommands([
       if (id === 'producer') return print(await producerCommand(root, args, credential => masterApi('status', credential)));
       if (id === 'config') return print(await saveMasterSettings(root, masterSettingsFromArgs(args)));
       if (id === 'registry') return print(await registryCommand(master, args, { read: path => masterApi(path), write: (path, data) => masterMutation(path, data) }));
-      if (id === 'reviewer') {
-        if (args[0] === 'add' && args[1]) return print(await saveReviewerProfile(root, JSON.parse(await readFile(args[1], 'utf8'))));
-        if (args[0] === 'remove' && args[1]) return print(await removeReviewerProfile(root, args[1]));
-        if (args[0] === 'bind' && args[1]) {
-          const { values, positionals } = parseArgs({ args: args.slice(1), options: { 'key-stdin': { type: 'boolean' } }, allowPositionals: true });
-          if (!values['key-stdin']) throw new Error('Use master reviewer bind FILE --key-stdin so the reviewer private key is not stored in shell history');
-          const input = await readSecretFromStdin(20_000, 'Reviewer key input is too large');
-          const identity = JSON.parse(await readFile(positionals[0], 'utf8'));
-          return print(await bindReviewer(root, { appId: Number(identity.appId), installationId: Number(identity.installationId), slug: String(identity.slug), privateKey: input }, verifyReviewerInstallation));
-        }
-        if (args[0] === 'setup') {
-          const { values } = parseArgs({ args: args.slice(1), options: { deployment: { type: 'string' }, port: { type: 'string' }, name: { type: 'string' } }, allowPositionals: false });
-          const deployment = values.deployment ?? master.url;
-          if (!deployment.startsWith('https://')) throw new Error('Reviewer App registration needs the deployed HTTPS origin; pass --deployment https://YOUR-GRAPHYARD-HOST');
-          const registrations = reviewerCredentialDirectory(master);
-          await mkdir(registrations, { recursive: true, mode: 0o700 });
-          const setup = await startGithubSetup(root, master.repository, deployment, Number(values.port ?? 4312), {
-            file: resolve(registrations, `${master.repository.replace('/', '-')}-registration.json`),
-            record: async app => { await bindReviewer(root, { appId: app.appId, installationId: app.installationId, slug: app.slug, privateKey: app.privateKey }, verifyReviewerInstallation); },
-          }, values.name ?? 'reviewer');
-          console.log(`Open ${setup.url} in your browser and register the reviewer App. It is a second App, separate from the Graphyard control-plane App, and it cannot write code. Credentials stay outside this repository with mode 0600. Press Ctrl+C when the page reports the installation is verified.`);
-          const stop = () => setup.http.close(); process.once('SIGINT', stop); process.once('SIGTERM', stop); return;
-        }
-        throw new Error('Use master reviewer setup, master reviewer bind FILE --key-stdin, or master reviewer add FILE');
-      }
+      if (id === 'reviewer') return reviewerCommand(root, master, args, print);
       if (id === 'review') {
         if (!args[0]) throw new Error('Use master review GY-N [PROFILE]');
         const snapshot = await masterApi('work-snapshot');
