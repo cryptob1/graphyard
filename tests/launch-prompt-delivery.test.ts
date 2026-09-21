@@ -167,7 +167,8 @@ test('integration:launch-prompt-is-a-request — a producer, a reviewer, an appr
     const produced = await launchProducer(root, item, request, config.producers[0], [], new Date().toISOString(), { run: herdr.run });
     assert.equal(produced.delivery, 'request');
     const producer = herdr.named('produce-codex');
-    assert.equal(producer.request, producerPrompt(config, { key: 'GY-93', pr: 93, sha: H, baseSha: B, policyRevision: 1, group: request.group!, proofs: request.proofs! }, { principal: 'proof-runner' }));
+    // GY-88: the request names the session directory the launch allocated under the managed worktree root.
+    assert.equal(producer.request, producerPrompt(config, { key: 'GY-93', pr: 93, sha: H, baseSha: B, policyRevision: 1, group: request.group!, proofs: request.proofs!, checkout: produced.checkout }, { principal: 'proof-runner' }));
     assert.equal(producer.toolCalls.length, 1); assert.deepEqual(producer.pasted, []);
     const produceStart = herdr.calls.filter(call => call[0] === 'agent' && call[1] === 'start').at(-1)!;
     assert.ok(produceStart.includes('--ask-for-approval') && produceStart.includes('--add-dir'), 'the Codex sandbox flags are kept');

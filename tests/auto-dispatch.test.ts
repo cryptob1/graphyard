@@ -440,7 +440,8 @@ test('integration:auto-dispatch-producers — a producer session is launched on 
     assert.ok(tab.includes('GRAPHYARD_URL=https://graphyard.example') && tab.includes(`GRAPHYARD_PRODUCER=GY-64@${H}`));
     assert.deepEqual(calls[1].slice(0, 6), ['agent', 'start', 'produce-a', '--kind', 'claude', '--pane']);
     // GY-93: the request rides the start as the positional prompt; nothing is pasted afterwards.
-    assert.equal(calls[1].at(-1), prompt); assert.equal(calls.some(call => call[0] === 'agent' && call[1] === 'prompt'), false); assert.equal(launched.delivery, 'request');
+    // GY-88: it names the session directory the launch allocated under the managed worktree root.
+    assert.equal(calls[1].at(-1), producerPrompt(config, { ...binding, checkout: launched.checkout }, profile)); assert.equal(calls.some(call => call[0] === 'agent' && call[1] === 'prompt'), false); assert.equal(launched.delivery, 'request');
     const ledger = await readProducerLedger(root);
     assert.equal(ledger.producers.length, 1); assert.equal(ledger.producers[0].state, 'pending'); assert.deepEqual(ledger.producers[0].outcome, { 'integration:auto-dispatch-review': 'missing', 'integration:auto-dispatch-producers': 'missing' });
     assert.equal((await stat(join(root, '.graphyard/producers.json'))).mode & 0o777, 0o600);
