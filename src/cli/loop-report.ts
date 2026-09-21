@@ -46,16 +46,17 @@ export function actionReport(snapshot: { work: Work[]; now: string }) {
   };
 }
 
-/**
- * Every session Graphyard knows is running, with what it is working on and the command or link
- * that attaches to it, plus the finished sessions whose transcripts are still linked. A human or
- * an executor watches a specific agent from this; no master relays a pane identifier.
- */
+/** Every open typed request, item by item, with the decider each names and how long it has waited. */
 export function agentRequestReport(snapshot: { work: Work[]; now: string }) {
   const now = new Date(snapshot.now);
   return snapshot.work.flatMap(work => openAgentRequests(work, now).map(request => ({ key: work.key, work: work.id, ...request })));
 }
 
+/**
+ * Every session Graphyard knows is running, with what it is working on and the command or link
+ * that attaches to it, plus the finished sessions whose transcripts are still linked. A human or
+ * an executor watches a specific agent from this; no master relays a pane identifier.
+ */
 export function sessionReport(snapshot: { work: Work[]; now: string }) {
   const now = new Date(snapshot.now);
   const all = snapshot.work.flatMap(work => sessionSummary(work, now));

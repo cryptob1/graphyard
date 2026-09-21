@@ -152,10 +152,15 @@ export function controlPlaneHandlers(config: () => MasterConfig, effects: Contro
     },
     reclaim: async action => {
       const { work } = await find(action);
-      // A lapsed lease and an unsettled quarantine are both cleared by the control plane's own
-      // reconciliation, which explains the lapse from the ledger; the executor only asks for it.
+      // A lapsed lease is cleared by the control plane's own reconciliation, which explains the
+      // lapse from the ledger; the executor only asks for it.
       const result = await effects.mutate(`work/${work.id}/resync`, {}, randomUUID());
       const after: Work | undefined = result?.work;
+      // Reconciliation never lowers a containment fence, so an item quarantined since this row was
+      // computed is still unassignable. Reporting it free would be a success about an item nothing
+      // may be assigned to; the row fails with what the item actually owes, and the control plane
+      // names that as an escalation rather than handing back a reclaim nothing can complete.
+      if (after?.containmentQuarantine) throw new Error(`${work.key} is still fenced by unverified containment from epoch ${after.containmentQuarantine.epoch}; a quarantine is lowered by settlement or stopped-worker recovery, never by a re-read`);
       return after?.lease ? `${work.key} is still held by ${after.lease.owner} under epoch ${after.lease.epoch}` : `${work.key} is no longer held by a lapsed assignment`;
     },
     merge: async action => {

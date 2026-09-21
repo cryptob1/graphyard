@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
@@ -11,10 +11,10 @@ import EmbeddedPostgres from 'embedded-postgres';
 import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import { server } from '../src/server.js';
-import { evaluate, type Observation, type Principal, type Work } from '../src/model.js';
+import { evaluate, standingEscalations, type Observation, type Principal, type Work } from '../src/model.js';
 import { actionClaimMs, actionId, actionRenewIntervalMs, claimable, claimAction, idleActionable, openActions, queueSnapshot, reconcileActions, renewClaim, settleAction, type ActionRow } from '../src/model/actions.js';
 import { actionJudgment, executorRunnableKinds, llmRoles, mechanicalActionKinds, nextAction, nextActionKinds, nextActionLlmRoles, refusalAction, type NextActionKind } from '../src/model/next-action.js';
-import { agentRequestTypes, deciderFor, humanDecisions, leaseHeldRequestTypes, openAgentRequests, requestResolutionRefusal } from '../src/model/agent-requests.js';
+import { agentRequestLimit, agentRequestTypes, deciderFor, humanDecisions, leaseHeldRequestTypes, openAgentRequests, requestResolutionRefusal } from '../src/model/agent-requests.js';
 import { reconcileAutoDispatch, reviewNeed } from '../src/model/dispatch.js';
 import { reviewProviders } from '../src/model/review.js';
 import { attachCommand, runningSessions, sessionHandleLimit, sessionSummary } from '../src/model/sessions.js';
@@ -80,6 +80,8 @@ const rows = (item: Work) => item.actionQueue?.actions ?? [];
 const inputs = (item: Work): any => item.nextAction!.inputs;
 const groupBy = <T>(entries: T[], key: (entry: T) => string) => entries.reduce<Record<string, T[]>>((groups, entry) => { (groups[key(entry)] ??= []).push(entry); return groups; }, {});
 const row = (item: Work) => rows(item)[0];
+/** A lease that lapsed: the document as it stands between the expiry and the reconciliation that clears it. */
+const expireLease = (item: Work) => store.pool.query("UPDATE work_items SET document=jsonb_set(document,'{lease,expiresAt}',to_jsonb($2::text)) WHERE id=$1", [item.id, new Date(Date.now() - 60_000).toISOString()]);
 
 let sequence = 0;
 async function created(overrides: Record<string, unknown> = {}) {
@@ -314,6 +316,80 @@ test('integration:typed-next-action — the control plane names one typed action
   const failing = { ...all[0], observation: { ...observation(item), checks: [{ name: 'test', result: 'failure', appId: 15368 }] } } as Work;
   assert.equal(refusalAction(failing, 'test', 'Required CI check test has not passed on the current candidate'), 'request-rework');
   assert.equal(refusalAction({ ...failing, observation: { ...failing.observation!, checks: [] } } as Work, 'test', 'Required CI check test has not passed on the current candidate'), 'resync');
+});
+
+test('integration:typed-next-action — an unsettled containment fence escalates instead of naming a reclaim nothing can complete, and the reclaim handler refuses to call a fenced item free', async () => {
+  // A supervised worker fences its launch, submits, and lets the lease lapse. The quarantine
+  // outlives the attempt that raised it, and reconciliation records that lapse as an explained
+  // expiry rather than an incident — so nothing pre-empts what the fence itself needs.
+  let fenced = await engine.execute(worker, 'claim', (await release(await created())).id, {}, randomUUID());
+  const settlementToken = randomBytes(32).toString('hex'), settlementHash = createHash('sha256').update(settlementToken).digest('hex');
+  const fencedEpoch = fenced.epoch;
+  fenced = await engine.execute(worker, 'workspace', fenced.id, { epoch: fencedEpoch, host: 'machine-a', path: `/tmp/fenced/${fenced.id}`, branch: `graphyard/${fenced.key.toLowerCase()}-${fencedEpoch}` }, randomUUID());
+  fenced = await engine.execute(worker, 'quarantine', fenced.id, { epoch: fencedEpoch, settlementHash }, randomUUID());
+  fenced = await engine.execute(worker, 'submit', fenced.id, { epoch: fencedEpoch, pr: Number(fenced.key.slice(3)) }, randomUUID());
+  await expireLease(fenced);
+
+  // An assignment nobody fenced, whose lease lapsed with nothing submitted, is the other half of
+  // `reclaim` — and the half that works: the reconciliation the control plane already runs clears
+  // it, so the executor only has to ask for one.
+  const lapsed = await engine.execute(worker, 'claim', (await release(await created())).id, {}, randomUUID());
+  await expireLease(lapsed);
+  const now = new Date();
+  const probe = structuredClone(await reload(lapsed));
+  Object.assign(probe, evaluate(probe, [probe], now, [15368]));
+  const reclaim = nextAction(probe, [probe], now)!;
+  assert.equal(reclaim.kind, 'reclaim');
+  assert.equal(reclaim.llmRole, null, 'asking the control plane to look again needs no judgment');
+  assert.deepEqual(reclaim.inputs, { kind: 'reclaim', epoch: probe.lease!.epoch, owner: worker.id, leaseExpiresAt: probe.lease!.expiresAt });
+  reconcileActions(probe, [probe], now, { next: reclaim });
+  const reclaimRow = probe.actionQueue!.actions.find(entry => entry.kind === 'reclaim')!;
+
+  // Nothing an executor runs lowers a fence. `reclaim` asks the control plane to re-read the item
+  // and reconcile it, which clears a lapsed lease and never touches a quarantine: only the
+  // worker's settlement capability, a verified containment assessment or an operator's
+  // stopped-worker recovery does, and each rests on somebody judging that the worker really
+  // stopped. Naming `reclaim` here handed an executor a row whose handler reported the item free
+  // while it was still fenced and came back every settle window for as long as the fence stood.
+  // No executor step answers it, so it escalates — visible and owed — exactly as an exhausted
+  // reviewer roster does.
+  await engine.reconcile();
+  fenced = await reload(fenced);
+  assert.equal(fenced.lease, null, 'the lapse is cleared');
+  assert.ok(fenced.containmentQuarantine, 'and the fence it raised outlives it');
+  assert.deepEqual(standingEscalations(fenced), [], 'a submitted epoch explains its own lapse, so no lease-loss escalation stands in front of this');
+  assert.equal(fenced.nextAction!.kind, 'escalate');
+  assert.equal(fenced.nextAction!.llmRole, 'resolve-escalation');
+  assert.match(fenced.nextAction!.reason, new RegExp(`${fenced.key} is fenced by unverified containment from epoch ${fencedEpoch}`));
+  assert.equal(inputs(fenced).trigger, 'containment');
+  assert.match(inputs(fenced).detail, new RegExp(`settle the epoch ${fencedEpoch} quarantine \\(graphyard master settle-containment ${fenced.key} REASON\\)`));
+  const fencedRow = rows(fenced).find(entry => entry.binding === fenced.nextAction!.binding)!;
+  assert.equal(fencedRow.kind, 'escalate', 'the durable row is the escalation');
+  assert.equal(actionJudgment.escalate, 'in-step');
+  assert.ok(!executorRunnableKinds.includes('escalate'), 'which no executor claims, so nothing retries it every settle window');
+  assert.ok(!rows(fenced).some(entry => entry.kind === 'reclaim'), 'and no reclaim row stands beside it');
+
+  // A row computed before a fence landed is still claimed and run after it, so the handler itself
+  // must never call such an item free. The shipped handlers are the ones under test here.
+  const unusable = async (): Promise<never> => { throw new Error('a reclaim reaches no launcher'); };
+  const handlers = controlPlaneHandlers(() => fleetConfig, {
+    snapshot: async () => ({ work: await store.list(), now: new Date().toISOString() }),
+    mutate: async path => engine.resyncWork(executorA, path.split('/')[1]),
+    agents: () => [], workerCredentials: async () => ({}), producerCredentials: async () => ({}),
+    dispatchWorker: unusable, launchReview: unusable, launchProducer: unusable, merge: unusable, observeDeployment: unusable,
+  });
+  const who = { id: executorA.id, host: 'host-1' };
+  await assert.rejects(async () => handlers.reclaim!({ ...reclaimRow, work: fenced.id, key: fenced.key }, who),
+    new RegExp(`${fenced.key} is still fenced by unverified containment from epoch ${fencedEpoch}; a quarantine is lowered by settlement or stopped-worker recovery, never by a re-read`));
+
+  // The unfenced lapse is exactly what the kind is for, and the guard leaves it alone.
+  assert.match(await handlers.reclaim!(reclaimRow, who) as string, new RegExp(`${lapsed.key} is no longer held by a lapsed assignment`));
+  assert.equal((await reload(lapsed)).lease, null);
+
+  // The fence is what held it: settled, the item needs what the gates say again.
+  const settled = await engine.execute(worker, 'settle', fenced.id, { epoch: fencedEpoch, settlementToken }, randomUUID());
+  assert.equal(settled.containmentQuarantine, null);
+  assert.equal(settled.nextAction!.kind, 'resync', 'a submitted candidate nobody has observed is read, not escalated');
 });
 
 // ---- AC-2: durable rows, leased claims, idempotency ------------------------------------------
@@ -1106,6 +1182,38 @@ test('integration:typed-agent-requests — an agent that needs something records
   assert.match(failure!.detail, /is waiting on input \(Herdr reports it blocked\)/);
   assert.match(failure!.detail, /records a typed request and exits — POST \/api\/work\/GY-\d+\/request with a type of scope-request, decision, blocker, note or escalation — which names its decider and frees the item/);
   await engine.execute(worker, 'release', waiting.id, { epoch: waiting.epoch }, randomUUID());
+});
+
+test('integration:typed-agent-requests — the bound on recorded requests retires resolved ones and never evicts an open ask', async () => {
+  // An open decision request, recorded under the live lease of the attempt that asked, and left
+  // for its approver. Its only durable effect is the record itself: unlike a blocker, an
+  // escalation or a scope ask, nothing else on the item carries it, so losing the record loses
+  // both the ask and the escalation the control plane raises from it.
+  let item = await engine.execute(worker, 'claim', (await release(await created())).id, {}, randomUUID());
+  item = await engine.execute(worker, 'request', item.id, { type: 'decision', epoch: item.epoch, action: 'rework', reason: 'the finding needs a second head, which only an approved rework opens' }, randomUUID());
+  const ask = openAgentRequests(item, new Date())[0];
+  assert.equal(item.lease, null, 'and the attempt ended, so the ask is not held by a session');
+
+  // A note needs no lease, so any credential that reaches the item may record one. Trimming the
+  // oldest entries to bound the list would therefore be a way to remove somebody else's ask:
+  // enough notes and the open request falls off the end. The bound retires resolved requests
+  // first — oldest first — and never evicts an open one, exactly as `sessions.ts::bounded` does
+  // for handles, so the list stays bounded without anybody being able to silence a decision.
+  for (let index = 0; index < agentRequestLimit + 10; index++) {
+    item = await engine.execute(producer, 'request', item.id, { type: 'note', reason: `fixture ${index} is the slow one` }, randomUUID());
+  }
+  assert.equal(item.agentRequests!.length, agentRequestLimit, 'the list stays bounded');
+  assert.ok(item.agentRequests!.some(entry => entry.id === ask.id), 'the open decision survived every one of them');
+  assert.equal(openAgentRequests(item, new Date()).filter(entry => entry.type === 'decision').length, 1);
+  assert.equal(item.nextAction!.kind, 'escalate', 'so the control plane still names the escalation the ask raises');
+  assert.equal(inputs(item).trigger, 'decision');
+  // The notes themselves are what the bound retired: resolved entries, oldest first.
+  const resolvedNote = item.agentRequests!.find(entry => entry.type === 'note')!;
+  const closed = await engine.execute(producer, 'request', item.id, { type: 'note', resolve: resolvedNote.id, reason: 'a note is closed by its author' }, randomUUID());
+  assert.equal(closed.agentRequests!.find(entry => entry.id === resolvedNote.id)!.state, 'resolved');
+  const bounded = await engine.execute(producer, 'request', closed.id, { type: 'note', reason: 'one more, which retires a resolved entry rather than the ask' }, randomUUID());
+  assert.ok(bounded.agentRequests!.some(entry => entry.id === ask.id));
+  assert.ok(!bounded.agentRequests!.some(entry => entry.id === resolvedNote.id), 'the resolved note is the one that made room');
 });
 
 // ---- AC-8: session handles --------------------------------------------------------------------

@@ -61,7 +61,7 @@ export type NextActionInputs =
   | { kind: 'request-rework'; pr: number | null; sha: string | null; detail: string }
   | { kind: 'approve-scope'; epoch: number; paths: string[]; requestedBy: string; detail: string }
   | { kind: 'resync'; pr: number | null; sha: string | null; baseSha: string | null; baseTip: string | null; observedAt: string | null }
-  | { kind: 'reclaim'; epoch: number; owner: string | null; leaseExpiresAt: string | null; quarantined: boolean }
+  | { kind: 'reclaim'; epoch: number; owner: string | null; leaseExpiresAt: string | null }
   | { kind: 'merge'; pr: number; sha: string; baseSha: string; policyRevision: number; queuePosition: number | null }
   | { kind: 'verify-deployment'; mergeSha: string; mergedAt: string; state: string }
   | { kind: 'escalate'; trigger: string; detail: string };

@@ -91,6 +91,14 @@ raised, and it raises one only while `reviewNeed().needed` — which is true for
 alone. So the mapping is exhaustive over the review states rather than falling through to "ask for
 a review": a state nobody mapped escalates, visible and owed, instead of looping in the queue.
 
+An unsettled containment quarantine is the same test applied to the fence. `reclaim` is what an
+item held by a session that cannot act needs, and reconciliation answers it by clearing the lapsed
+lease — but it never lowers a quarantine. Only the worker's settlement capability, a verified
+containment assessment or an operator's stopped-worker recovery does, and each rests on somebody
+judging that the worker really stopped. So a fenced item with no live lease is named `escalate`,
+exactly as an exhausted reviewer roster is, and the `reclaim` handler refuses rather than reporting
+an item free while its fence still stands.
+
 Each outstanding action is a durable row on the work aggregate (`src/model/actions.ts`), written
 inside the same advisory-locked transaction as every other decision. A row's id is a hash of what
 it binds — kind, item, situation — never of when it was made, so a re-derivation after a restart

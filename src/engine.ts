@@ -16,7 +16,7 @@ import { decideScopeRequest, liveScopeWidening, scopeRefusalBlocker, type ScopeD
 import { liveDispatchHandleIds, reconcileAutoDispatch, type DispatchTransition } from './model/dispatch.js';
 import { nextAction, nextActionKinds, sameAction } from './model/next-action.js';
 import { claimAction, openActions, reconcileActions, renewClaim, settleAction, type ActionRow } from './model/actions.js';
-import { agentRequestLimit, agentRequestSchema, deciderFor, expireAgentRequests, leaseHeldRequestTypes, requestResolutionRefusal, resolveSatisfiedScopeRequests, type AgentRequest } from './model/agent-requests.js';
+import { agentRequestSchema, boundedAgentRequests, deciderFor, expireAgentRequests, leaseHeldRequestTypes, requestResolutionRefusal, resolveSatisfiedScopeRequests, type AgentRequest } from './model/agent-requests.js';
 import { recordSession, sessionHandleSchema } from './model/sessions.js';
 import { beginAttempt, endAttempt, endLapsedAttempt, recordIntervention, recordRework, recordSubmission } from './pipeline-speed.js';
 import { foldDecisions, type Decision } from './model/approval.js';
@@ -768,7 +768,7 @@ export class Engine {
           if (release && data.epoch !== undefined && work.lease?.epoch === data.epoch) {
             endAttempt(work, data.epoch, 'released', now); work.lease = null; request.releasedLease = true;
           }
-          work.agentRequests = [...work.agentRequests, request].slice(-agentRequestLimit);
+          work.agentRequests = boundedAgentRequests([...work.agentRequests, request], request);
         }
       }
       if (command === 'workspace') {

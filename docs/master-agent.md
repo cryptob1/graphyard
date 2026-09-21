@@ -621,6 +621,14 @@ all exhausted is named `escalate`, because that is a reviewer-capacity decision 
 another provider, wait for quota, or select another review provider — and never an action that
 waits on a reviewer which cannot run.
 
+An item fenced by an unsettled [containment quarantine](#containment-quarantines) with no live
+lease is named `escalate` for the same reason. `reclaim` asks the control plane to re-read the item
+and reconcile it, which clears a lapsed lease but never lowers a fence: that takes the worker's
+settlement capability, a verified containment assessment (`master settle-containment GY-N REASON`,
+which the loop also applies on its own when it can verify the supervisor is gone) or an operator's
+stopped-worker recovery. The escalation names which, and the `reclaim` handler refuses an item
+whose quarantine still stands rather than reporting it free.
+
 An executor holds a coordinator credential, a host name, and one handler per kind it can run.
 Graphyard ships one:
 

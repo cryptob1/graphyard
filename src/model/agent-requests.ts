@@ -91,7 +91,36 @@ export function deciderFor(key: string, request: Pick<AgentRequest, 'type' | 'ac
   }
 }
 
-export const agentRequestLimit = 50;
+export const agentRequestLimit = 50, agentRequestCeiling = 200;
+
+/**
+ * The bound on an item's recorded requests, which never drops an open ask a decider owes an
+ * answer to.
+ *
+ * Trimming the oldest entries would be a way to remove somebody else's ask: a `note` needs no
+ * lease, so any credential that reaches the item could push the open requests off the end by
+ * writing fifty of them. A `decision`'s only durable effect *is* its record — `blocker`,
+ * `escalation` and `scope-request` each project onto state that survives — so losing it loses
+ * both the ask and the `escalate` action the control plane raises from it. Room is therefore made
+ * from resolved entries first, oldest first, and then from notes, which name no decider and move
+ * nothing anybody is waiting on; the request just recorded is never the one dropped to make room
+ * for itself. This is the rule `sessions.ts::bounded` applies to handles, with the same ceiling
+ * behind it so the document stays bounded whatever is outstanding.
+ */
+export function boundedAgentRequests(requests: AgentRequest[], recorded: AgentRequest): AgentRequest[] {
+  if (requests.length <= agentRequestLimit) return requests;
+  const excess = requests.length - agentRequestLimit;
+  const retire = new Set<AgentRequest>();
+  const disposable = [(request: AgentRequest) => request.state === 'resolved', (request: AgentRequest) => request.type === 'note'];
+  for (const spends of disposable) for (const request of requests) {
+    if (retire.size >= excess) break;
+    if (request !== recorded && !retire.has(request) && spends(request)) retire.add(request);
+  }
+  const kept = requests.filter(request => !retire.has(request));
+  // Only open asks with a named decider are left; the recorded one is last, so trimming to the
+  // ceiling keeps it and drops the oldest.
+  return kept.length <= agentRequestCeiling ? kept : kept.slice(kept.length - agentRequestCeiling);
+}
 
 /**
  * The types that move state a gate reads. Recording one is the same fact as the command it

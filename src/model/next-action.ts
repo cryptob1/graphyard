@@ -214,25 +214,34 @@ export function nextAction(work: Work, all: Work[], now: Date): NextAction | nul
     return null;
   }
 
-  // An assignment whose lease has lapsed without a submission, or one fenced by a containment
-  // quarantine nobody settled, is held by a session that cannot act. Reclaiming it is mechanical.
-  const leaseExpired = !!work.lease && Date.parse(work.lease.expiresAt) <= now.getTime();
-  if (leaseExpired && !work.submission) {
-    const lease = work.lease!;
-    return make('reclaim', `${key} is held by ${lease.owner} under epoch ${lease.epoch}, whose lease expired at ${lease.expiresAt} with nothing submitted`,
-      { kind: 'reclaim', epoch: lease.epoch, owner: lease.owner, leaseExpiresAt: lease.expiresAt, quarantined: !!work.containmentQuarantine }, `lease:${lease.epoch}:${lease.expiresAt}`);
-  }
-  if (work.containmentQuarantine && !work.lease) {
+  const liveLease = !!work.lease && Date.parse(work.lease.expiresAt) > now.getTime();
+  // A containment quarantine outlives the attempt that raised it, and no executor step lowers one:
+  // reconciliation clears a lapsed lease — the other half of `reclaim`, and the half that works —
+  // but a fence comes down only on the worker's settlement capability, a verified containment
+  // assessment or an operator's stopped-worker recovery, each resting on somebody judging that the
+  // worker really stopped. Naming `reclaim` handed an executor a row whose handler re-read the
+  // item, called it free while it was still fenced, and came back every settle window for as long
+  // as the fence stood. This is `provider-exhausted` again: no executor step answers it.
+  if (work.containmentQuarantine && !liveLease) {
     const quarantine = work.containmentQuarantine;
-    return make('reclaim', `${key} is quarantined by unverified containment from epoch ${quarantine.epoch}; nothing may be assigned until it is settled`,
-      { kind: 'reclaim', epoch: quarantine.epoch, owner: quarantine.owner, leaseExpiresAt: quarantine.leaseExpiresAt ?? null, quarantined: true }, `quarantine:${quarantine.epoch}:${quarantine.settlementHash}`);
+    return make('escalate', `${key} is fenced by unverified containment from epoch ${quarantine.epoch} and nothing may be assigned to it; no executor step lowers a quarantine`,
+      { kind: 'escalate', trigger: 'containment', detail: `verify that ${quarantine.owner}'s worker stopped and settle the epoch ${quarantine.epoch} quarantine (graphyard master settle-containment ${key} REASON), or recover it as a stopped worker` },
+      `quarantine:${quarantine.epoch}:${quarantine.settlementHash}`);
+  }
+  // An assignment whose lease has lapsed without a submission is held by a session that cannot
+  // act, and nothing fences the item. Reclaiming it is mechanical: the reconciliation the control
+  // plane already runs clears the lapse, and the executor only asks for it.
+  if (!liveLease && work.lease && !work.submission) {
+    const lease = work.lease;
+    return make('reclaim', `${key} is held by ${lease.owner} under epoch ${lease.epoch}, whose lease expired at ${lease.expiresAt} with nothing submitted`,
+      { kind: 'reclaim', epoch: lease.epoch, owner: lease.owner, leaseExpiresAt: lease.expiresAt }, `lease:${lease.epoch}:${lease.expiresAt}`);
   }
 
   // A worker that asked for scope is idle until it is answered, whatever the gates say. A request
   // the rule has already decided is not waiting on anybody: an approved one is applied and gone,
   // and a refused one carries its refusal as the item's blocker, which the ready gate reports.
   const scope = work.scopeRequest;
-  if (scope && !scope.decision && work.lease && work.lease.epoch === scope.epoch && Date.parse(work.lease.expiresAt) > now.getTime()) {
+  if (scope && !scope.decision && liveLease && work.lease!.epoch === scope.epoch) {
     return make('approve-scope', `${scope.requestedBy} needs files outside plannedFiles for ${key}: ${scope.paths.join(', ')} — ${scope.reason}`,
       { kind: 'approve-scope', epoch: scope.epoch, paths: [...scope.paths], requestedBy: scope.requestedBy, detail: scope.reason }, `scope:${scope.epoch}:${scope.at}`);
   }
@@ -243,7 +252,7 @@ export function nextAction(work: Work, all: Work[], now: Date): NextAction | nul
     if (refusal === undefined) return null;
     // A live lease is a session already doing exactly what the build gate is waiting for. Naming
     // a dispatch here would offer the item to a second worker while the first still holds it.
-    if (failing.name === 'build' && work.lease && Date.parse(work.lease.expiresAt) > now.getTime()) return null;
+    if (failing.name === 'build' && liveLease) return null;
     const kind = refusalAction(work, failing.name, refusal);
     // An unfinished dependency is the dependency's dispatch, not this item's; nothing waits here.
     if (failing.name === 'ready' && /^Dependency .+ is unfinished$/.test(refusal)) return null;
