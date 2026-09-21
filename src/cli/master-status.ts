@@ -285,6 +285,12 @@ export const answerHumanCommand: CliCommand = {
 export const waitedText = (ms: number) => ms < 3_600_000 ? `${Math.max(1, Math.round(ms / 60_000))}m` : ms < 172_800_000 ? `${Math.round(ms / 3_600_000)}h` : `${Math.round(ms / 86_400_000)}d`;
 
 /**
+ * The commands a session runs about its own item, registered beside the master's: the worker's
+ * scope request, and the two halves of a human-only wait — the worker parks, the human lists and answers.
+ */
+export const sessionCommands: CliCommand[] = [scopeRequestCommand, parkCommand, humanRequestsCommand, answerHumanCommand];
+
+/**
  * The one-command approval behind `master scope GY-N [REASON]`: read the item's open scope
  * request, verify the requesting epoch still holds the lease, and apply the purely additive
  * requirements revision that adds the requested paths — with the master's own operator-agent

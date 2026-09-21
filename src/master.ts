@@ -1692,8 +1692,11 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
     const dispatch = describeDispatch(work, reviews, sessions, now);
     const baseRefresh = pendingBaseRefresh(work), baseConflict = baseRefreshConflict(work);
     const refreshCarry = currentBaseRefreshCarry(work);
-    const stalledLaunch = [dispatch?.review, ...(dispatch?.producers ?? [])].find(request => request?.failure);
-    const retrying = [dispatch?.review, ...(dispatch?.producers ?? [])].find(request => request?.retry && request.session && ['failed', 'expired'].includes(request.session.state));
+    // A role with no account left is one line for the whole repository (`capacity` below), never a
+    // launch refusal or a session retry repeated on every item that waits for it.
+    const paused = new Set(standingCapacity(work).map(entry => entry.role));
+    const stalledLaunch = [dispatch?.review, ...(dispatch?.producers ?? [])].find(request => request?.failure && !paused.has(request.failure.kind === 'review' ? 'reviewer' : 'producer'));
+    const retrying = [dispatch?.review, ...(dispatch?.producers ?? [])].find(request => request?.retry && request.session && ['failed', 'expired'].includes(request.session.state) && !paused.has(request.group ? 'producer' : 'reviewer'));
     // An observed merge no execution authorized is not a candidate waiting for its queue tip: it
     // is named as the violation it is, with the recovery, and never as a gate refusal.
     // Its queue entry, when it still holds one, can never publish a speculative tip: the entry and
@@ -1702,10 +1705,6 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
     const merged = mergedWithoutAuthorization(work) ? { at: work.observation!.mergedAt ?? null, sha: work.observation!.mergeSha ?? null, violation: unauthorizedMergeViolation,
       refusal: refusedReconciliation(work)?.violation ?? null,
       ...(dead && placement ? { queue: { sequence: dead.sequence, position: placement.position + 1, size: placement.size, unpublishable: true as const, behind: placements.slice(placement.position + 1).map(entry => entry.key) } } : {}) } : null;
-    // A role with no account left is one line for the whole repository (`capacity` below), never a
-    // launch failure repeated on every item that waits for it.
-    const paused = new Set(standingCapacity(work).map(entry => entry.role));
-    const capacityWait = (kind: string | undefined) => paused.has(kind === 'review' ? 'reviewer' : 'producer');
     const parked = parkedOnHuman(work) ? work.humanRequest! : null;
     const [attention, cause]: [string | null, Parameters<typeof workAttentionOwner>[1] | null] = containmentAttention ? containmentAttention
       : parked ? [`${work.key} is parked on a human-only decision (${humanDecisionLabel[parked.kind]}) since ${parked.at}: ${parked.needed} — ${parked.reason}. It holds no lease and delays nothing else`, 'human-request']
@@ -1713,7 +1712,6 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
       : active && (!session || !['working', 'idle'].includes(session.state)) ? [`Assigned worker session is ${session?.state ?? 'offline'}`, 'session']
       : gaps.length ? [`No principal is authorized to produce ${gaps.join(', ')}; grant the proof name before dispatch`, 'proof-gap']
       : review?.exhausted ? [`Every configured reviewer profile is exhausted for the current candidate (${review.failedOver.map(entry => `${entry.profile}: ${entry.exhaustion}`).join(', ')})`, 'reviewer-exhausted']
-      : stalledLaunch && capacityWait(stalledLaunch.failure!.kind) || retrying && !stalledLaunch && capacityWait(retrying.group ? 'producer' : 'review') ? [null, null]
       : stalledLaunch ? [`Automatic ${stalledLaunch.failure!.kind} launch for ${work.key} refused ${stalledLaunch.failure!.attempts} time(s): ${stalledLaunch.failure!.reason}`, stalledLaunch.failure!.kind === 'review' ? 'launch-review' : 'launch-producer']
       : retrying ? [`${retrying.group ? `Producer session for ${retrying.group} proofs` : 'Reviewer session'} of ${work.key} ${retrying.session!.state} after attempt ${retrying.retry!.attempts} of ${retrying.retry!.limit}: ${retrying.session!.resolution ?? 'no reason recorded'}; ${retrying.retry!.exhausted ? 'no further automatic attempt' : `next attempt at ${retrying.retry!.nextAt}`}`, retrying.group ? 'launch-producer' : 'launch-review']
       : baseConflict ? [baseConflict, 'base-conflict']

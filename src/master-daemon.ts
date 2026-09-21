@@ -227,6 +227,13 @@ export function reconcilePendingActions(state: DaemonState, work: Work[], now: n
       next.state = pending ? 'failed' : 'done';
       next.detail = pending ? 'Resumed: the scope request is still undecided and will be decided again'
         : `Resumed: Graphyard holds the decision (${item?.scopeRequest?.decision?.state ?? 'the request was withdrawn or superseded'})`;
+    } else if (action.kind === 'failover') {
+      // A worker failover took effect exactly when the attempt's lease ended on the record. An
+      // interrupted one is tried again: the control plane writes an exhaustion once, and a
+      // reviewer or producer session already ended is no longer pending, so nothing repeats.
+      const ended = action.epoch !== null && !!item && (!item.lease || item.lease.epoch !== action.epoch);
+      next.state = ended ? 'done' : 'failed';
+      next.detail = ended ? `Resumed: Graphyard shows attempt ${action.epoch} ended, so the item is re-queued` : 'Resumed: the failover was interrupted; the session is read again on this cycle';
     } else if (action.kind === 'deployment' && action.work) {
       // Recording a deployment either landed on the delivery snapshot or it did not; a repeat of a
       // landed record is refused by Graphyard, so retrying is safe.

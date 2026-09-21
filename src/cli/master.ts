@@ -15,7 +15,7 @@ import { applyProtection, protectionPlan, readProtection } from '../protection.j
 import { writeHarnessPermissions } from '../harness.js';
 import { browserFlows, runBrowserFlow, type BrowserFlow } from '../master-browser.js';
 import { defineCommands } from './registry.js';
-import { answerHumanCommand, approveScopeRequest, cycleBudget, humanRequestsCommand, masterStatusReport, parkCommand, scopeRequestCommand } from './master-status.js';
+import { approveScopeRequest, cycleBudget, masterStatusReport, sessionCommands } from './master-status.js';
 import { coordinationViewHeader } from '../server/work-view.js';
 import { readSecretFromStdin } from './context.js';
 
@@ -269,9 +269,7 @@ export const masterCommands = defineCommands([
       throw new Error(`There is no master ${id}; use master guide for the subcommands`);
     },
   },
-  scopeRequestCommand,
-  // The two halves of a human-only wait (GY-89): the worker parks, the human lists and answers.
-  parkCommand, humanRequestsCommand, answerHumanCommand,
+  ...sessionCommands,
 ]);
 
 export { cycleBudget };
