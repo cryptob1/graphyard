@@ -15,6 +15,8 @@ import { evaluate, type Observation, type Principal, type Work } from '../src/mo
 import { actionClaimMs, actionId, actionRenewIntervalMs, claimable, claimAction, idleActionable, openActions, queueSnapshot, reconcileActions, renewClaim, settleAction, type ActionRow } from '../src/model/actions.js';
 import { actionJudgment, executorRunnableKinds, llmRoles, mechanicalActionKinds, nextAction, nextActionKinds, nextActionLlmRoles, refusalAction, type NextActionKind } from '../src/model/next-action.js';
 import { agentRequestTypes, deciderFor, humanDecisions, leaseHeldRequestTypes, openAgentRequests, requestResolutionRefusal } from '../src/model/agent-requests.js';
+import { reconcileAutoDispatch, reviewNeed } from '../src/model/dispatch.js';
+import { reviewProviders } from '../src/model/review.js';
 import { attachCommand, runningSessions, sessionHandleLimit, sessionSummary } from '../src/model/sessions.js';
 import { pipelineSpeedSummary, speedTarget } from '../src/pipeline-speed.js';
 import { dispatchEffects, executorEffects, executorKinds, launchedSessionHandle, runDispatchTick, runExecutor, runExecutorTick, runWorkerPull, workerPullIntervalMs, emptyDispatchCursor, type DispatchEffects, type ExecutorEffects } from '../src/auto-dispatch.js';
@@ -186,6 +188,67 @@ test('integration:typed-next-action — the control plane names one typed action
   assert.equal(conflictAction.kind, 'request-rework', 'a conflict the control plane cannot resolve needs a new head, not a re-read');
   assert.equal(refusalAction(conflicted, 'build', conflict), 'request-rework');
   assert.match((conflictAction.inputs as any).detail, new RegExp(`Run graphyard sync ${item.key}, resolve it and push`), 'and the detail carries the instruction the worker follows');
+
+  // The same mistake, one provider over. A `codex` or `agent` review is dispatched by the control
+  // plane's own durable observation job and never by a session an executor launches, so
+  // `reviewNeed` raises no review request for those providers — and naming `request-review` there
+  // handed an executor a row nothing could settle: no request stands, the handler refuses for want
+  // of one, and the row fails, backs off to the retry cap and is claimed again every tick forever
+  // while the item is never shown as owing a judgment. Every provider the policy supports is
+  // therefore named an action an executor can carry to completion, or an escalation where only an
+  // operator can act — never one that cannot succeed.
+  const reviewable = await reload(item);
+  const providerProbe = (policy: Record<string, unknown>, overrides: Partial<Work> = {}) => {
+    const probe = { ...structuredClone(reviewable), lease: null, policy: { ...reviewable.policy, ...policy },
+      observation: observation(reviewable, { reviews: [], baseTipContained: true, baseTip: base }), ...structuredClone(overrides) } as unknown as Work;
+    Object.assign(probe, evaluate(probe, [probe], new Date(), [15368]));
+    return probe;
+  };
+  const claude = { name: 'claude', runtime: 'claude', reviewerApp: 'claude-app', timeoutSeconds: 1800 };
+  const answerable: NextActionKind[] = [...executorRunnableKinds, 'escalate'];
+  for (const provider of reviewProviders) {
+    const probe = providerProbe(provider === 'agent' ? { reviewProvider: provider, reviewerProfiles: [claude] } : { reviewProvider: provider });
+    const action = nextAction(probe, [probe], new Date())!;
+    assert.equal(action.gate, 'review', `${provider}: the review gate is the one refusing`);
+    assert.ok(answerable.includes(action.kind), `${provider}: ${action.kind} is an action an executor runs or an escalation, not one nothing can complete`);
+    assert.equal(refusalAction(probe, 'review', action.refusal!), action.kind, `${provider}: the refusal maps to the same kind, so the queue and the gate agree`);
+    reconcileAutoDispatch(probe, [probe], new Date());
+    if (provider === 'github') {
+      assert.equal(action.kind, 'request-review', 'a GitHub approval is the one review a launched session answers');
+      assert.ok(probe.autoDispatch!.review, 'so a request stands for its handler to find');
+      assert.equal((nextAction(probe, [probe], new Date())!.inputs as any).requestId, probe.autoDispatch!.review!.id, 'and the action names it');
+    } else {
+      assert.equal(action.kind, 'resync', `${provider}: the fresh reading that wakes the observation job is what requests the review and reads its verdict`);
+      assert.equal(reviewNeed(probe).needed, false, `${provider}: no launched reviewer is asked for`);
+      assert.equal(probe.autoDispatch!.review, null, `${provider}: and none is requested, so no executor could answer a request-review`);
+      assert.match(action.reason, new RegExp(`control plane dispatches ${provider} review`));
+    }
+  }
+
+  // An agent policy whose reviewer roster is spent for this candidate has nobody left to ask.
+  // Adding reviewer capacity or selecting another provider is the operator's judgment, so it
+  // escalates — visible and owed — rather than naming a review or re-reading forever.
+  const spent = providerProbe({ reviewProvider: 'agent', reviewerProfiles: [claude] }, { reviewFailovers: [{ profile: 'claude', reviewerApp: 'claude-app', runtime: 'claude',
+    exhaustion: 'usage-limit', reason: 'the reviewer runtime reported a usage limit', at: new Date().toISOString(), sha: head, baseSha: base, policyRevision: 1, requestCommentId: 7, nextProfile: null }] } as Partial<Work>);
+  const spentAction = nextAction(spent, [spent], new Date())!;
+  assert.equal(spentAction.kind, 'escalate');
+  assert.equal(spentAction.gate, 'review');
+  assert.equal(spentAction.llmRole, 'resolve-escalation');
+  assert.match(spentAction.reason, /no executor step answers it: every configured reviewer profile is exhausted for [0-9a-f]{12} \(claude\)/);
+  assert.match((spentAction.inputs as any).detail, /adding reviewer capacity or selecting another review provider is the operator's decision/);
+  assert.equal(spentAction.refusal, 'Every configured reviewer profile is exhausted for this candidate (claude); add reviewer capacity or select another review provider', 'and the refusal it classified is carried verbatim');
+  assert.equal(refusalAction(spent, 'review', spentAction.refusal!), 'escalate');
+
+  // A change request answers a head under every provider as well: an agent reviewer records its
+  // verdict against the dispatched request rather than as a GitHub review, and either way the
+  // item owes a new head rather than another review of this one.
+  const answered = providerProbe({ reviewProvider: 'codex' });
+  answered.observation!.agentReview = { provider: 'codex', sha: head, approved: false, verdict: 'changes-requested', requestId: 11, reason: 'the refusal is still swallowed' };
+  Object.assign(answered, evaluate(answered, [answered], new Date(), [15368]));
+  const answeredAction = nextAction(answered, [answered], new Date())!;
+  assert.equal(answeredAction.kind, 'request-rework');
+  assert.equal(answeredAction.llmRole, 'approve-decision', 'a new head is a judgment owed, not a step an executor runs');
+  assert.match((answeredAction.inputs as any).detail, /codex requested changes on [0-9a-f]{12}; the next head is reviewed afresh/);
 
   // Approved and green: the proof the acceptance gate is missing, with its group and proof names.
   item = await engine.observe(item.id, item.revision, observation(item, { baseTipContained: true, baseTip: base }));

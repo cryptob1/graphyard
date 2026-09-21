@@ -612,6 +612,15 @@ row that has waited past the five-minute idle bound. An item with nothing named 
 from anybody — it is delivered, or it is waiting on another item's action (an unfinished
 dependency, a predecessor's place in the merge queue).
 
+What an item needs is named per provider, never per gate sentence. Only a `github` approval is
+answered by a reviewer session an executor launches, so only that item is named `request-review`.
+An item on the `codex` or `agent` [review provider](github.md#identity-bound-agent-review-providers)
+is named `resync`: the control plane dispatches those reviews through its own observation job, and
+waking it is what posts the request and reads the verdict back. An item whose reviewer profiles are
+all exhausted is named `escalate`, because that is a reviewer-capacity decision — add a profile on
+another provider, wait for quota, or select another review provider — and never an action that
+waits on a reviewer which cannot run.
+
 An executor holds a coordinator credential, a host name, and one handler per kind it can run.
 Graphyard ships one:
 

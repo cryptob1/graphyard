@@ -89,25 +89,50 @@ const refusalRules: { gate: string | null; match: RegExp; kind: NextActionKind }
 ];
 
 /**
- * What a review-gate refusal is really waiting on, when the reviewer's own reading of the head
- * answers it, or null when an independent review is genuinely what is missing.
+ * What a review-gate refusal is really waiting on, when the head's own record already answers it,
+ * or null when a review an executor can ask for is genuinely what is missing.
  *
- * The review gate's first refusal is always "approval ... is required", whatever stands behind it.
+ * Whatever stands behind it, the review gate refuses with a sentence that reads as "a review is
+ * required": an approval for `github`, a verified Codex review, a verdict from a reviewer profile.
  * But `reviewNeed` — the same function auto-dispatch uses to decide whether to raise a review
- * request — may already have answered that no review can be asked for this head: a reviewer has
- * requested changes on it, or it does not contain the base tip, so GitHub would dismiss any
- * approval of it. Naming `request-review` there asks for something no executor can ever complete:
- * no review request is raised, the handler refuses for want of one, and the row retries forever
- * while the item is never shown as owing a new head. These are the two silences AC-1 exists to end.
+ * request — may already have answered that no *launched* review can be asked for this head, and
+ * each of those answers is a different action:
+ *
+ * - a reviewer requested changes on exactly this head, so the item owes a new one;
+ * - the head does not contain the base tip, so any approval would be dismissed;
+ * - the provider's review is dispatched by the control plane's own observation job, which a fresh
+ *   reading wakes (`Engine.resyncWork`): it posts the request the reviewer answers and reads the
+ *   verdict back, and no session exists for an executor to launch;
+ * - every configured reviewer profile is exhausted, so there is nobody left to ask and adding
+ *   capacity or changing provider is the operator's call.
+ *
+ * Naming `request-review` for any of them asks for something no executor can ever complete: no
+ * review request is raised (`reconcileAutoDispatch` opens one only while `reviewNeed().needed`),
+ * the handler refuses for want of one, and the row fails, backs off to the retry cap and is
+ * claimed again every tick forever, while the item is never shown as owing a judgment. That is
+ * the silence AC-1 exists to end, and it has to end for every provider, not just the one whose
+ * reviews a session answers — so this mapping is exhaustive over `ReviewState` and the only state
+ * it leaves to `request-review` is the one a launched reviewer can actually answer.
  */
 export function reviewStandstill(work: Work): { kind: NextActionKind; reason: string } | null {
   if (!work.candidate || !work.observation) return null;
   const need = reviewNeed(work);
-  // Changes requested on this exact head: the item needs a new commit, which is a judgment's to make.
-  if (need.state === 'changes-requested') return { kind: 'request-rework', reason: need.reason };
-  // A head that does not contain the base tip is answered by a fresh reading and base refresh.
-  if (need.state === 'base-not-contained') return { kind: 'resync', reason: need.reason };
-  return null;
+  switch (need.state) {
+    // Changes requested on this exact head — as a GitHub review, or as the verdict an agent
+    // reviewer records — means the item needs a new commit, which is a judgment's to make.
+    case 'changes-requested': return { kind: 'request-rework', reason: need.reason };
+    // A head that does not contain the base tip is answered by a fresh reading and base refresh.
+    case 'base-not-contained': return { kind: 'resync', reason: need.reason };
+    // The control plane dispatches this provider's review itself: the fresh reading that wakes its
+    // observation job is both how the request is posted and how the verdict arrives.
+    case 'provider-dispatched': return { kind: 'resync', reason: need.reason };
+    // Nobody is left to ask. An executor cannot add reviewer capacity or change the provider.
+    case 'provider-exhausted': return { kind: 'escalate', reason: need.reason };
+    // `required` is the one state a launched reviewer answers, and the three remaining states
+    // raise no review refusal at all: without a review the policy requires, an approval or a
+    // carried approval, the gate passes (or refuses only its outstanding change requests).
+    case 'required': case 'not-required': case 'approved': case 'carried': return null;
+  }
 }
 
 /**
@@ -245,6 +270,12 @@ export function nextAction(work: Work, all: Work[], now: Date): NextAction | nul
       const ineligible = dispatchIneligibility(work);
       if (ineligible) return make('resync', `${key} cannot be reviewed yet: ${ineligible}`, resyncInputs(work), binding, failing.name, refusal);
       const need = reviewNeed(work);
+      // The last guard on the invariant this item exists to hold: a review request is opened only
+      // while `needed`, so asking for a reviewer when it is false would hand an executor a row
+      // nothing can settle. `reviewStandstill` names an action for every such state today; a state
+      // added tomorrow without one escalates — visible and owed — rather than looping in the queue.
+      if (!need.needed) return make('escalate', `${key} cannot be reviewed and no executor step answers it: ${need.reason}`,
+        { kind: 'escalate', trigger: failing.name, detail: need.reason }, binding, failing.name, refusal);
       const request = work.autoDispatch?.review ?? null;
       return make('request-review', `${key}: ${need.reason}`,
         { kind: 'request-review', provider: work.policy.reviewProvider ?? 'github', requestId: request?.id ?? null, pr: work.candidate!.pr, sha: work.candidate!.sha, baseSha: work.candidate!.baseSha, policyRevision: work.policyRevision },
@@ -258,8 +289,10 @@ export function nextAction(work: Work, all: Work[], now: Date): NextAction | nul
     if (kind === 'merge' && failing.reasons.every(entry => queueSequencingReason(entry)) && /^Merge queue position /.test(refusal)) return null;
     if (kind === 'merge') return make('merge', `${key} is queued to merge: ${refusal}`,
       { kind: 'merge', pr: work.candidate!.pr, sha: work.candidate!.sha, baseSha: work.candidate!.baseSha, policyRevision: work.policyRevision, queuePosition: work.queue?.sequence ?? null }, binding, failing.name, refusal);
-    return make('escalate', `${key} is refused at the ${failing.name} gate and no executor step answers it: ${refusal}`,
-      { kind: 'escalate', trigger: failing.name, detail: refusal }, binding, failing.name, refusal);
+    // `detail` again rather than the refusal: a review refusal standing over a spent reviewer
+    // roster says "a review is required", and what the operator has to decide is the roster.
+    return make('escalate', `${key} is refused at the ${failing.name} gate and no executor step answers it: ${detail}`,
+      { kind: 'escalate', trigger: failing.name, detail }, binding, failing.name, refusal);
   }
 
   if (work.violations.length) return make('escalate', `${key} carries ${work.violations.length} violation(s): ${work.violations[0]}`,

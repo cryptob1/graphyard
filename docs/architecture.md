@@ -68,16 +68,28 @@ own item because they belong to another: an unfinished dependency is that depend
 and a queue position is the predecessor's merge.
 
 A refusal is classified from the item, not from its text alone, because the same sentence can
-stand for different situations. The review gate always refuses with "approval is required", but
-`reviewNeed` may already have decided that no review can be asked for this head: a reviewer has
-requested changes on it, so the item owes a new one (`request-rework`), or the head does not
-contain the base tip, so any approval would be dismissed and a base refresh is what it waits for
-(`resync`). A base the control plane could not merge in cleanly is named `request-rework` for the
-same reason — its own refusal says to resolve the conflict and push, and that the approval and
-proofs bound to that head do not survive the resolution, which no mechanical step can do. Naming
-an action nobody can complete is the failure mode this mapping exists to prevent: the row would
-be claimed, fail or complete without effect, and come back forever while the item is never shown
-as owing a judgment.
+stand for different situations. The review gate refuses with a sentence that reads as "a review is
+required", but `reviewNeed` may already have decided that no review can be *asked for* this head,
+and `reviewStandstill` names what each of those answers actually needs:
+
+| What `reviewNeed` found | Action | Why |
+| --- | --- | --- |
+| A reviewer requested changes on exactly this head — a GitHub review, or the verdict an agent reviewer recorded | `request-rework` | The item owes a new head; nobody reviews this one again |
+| The head does not contain the base tip | `resync` | Any approval would be dismissed when GitHub recomputes the merge base; a fresh reading and base refresh is what it waits for |
+| The provider's review is dispatched by the control plane itself (`codex`, `agent`) | `resync` | Waking that observation job is both how the request is posted and how the verdict arrives; no session exists for an executor to launch |
+| Every configured reviewer profile is exhausted | `escalate` | Nobody is left to ask, and adding capacity or changing provider is the operator's call |
+| An approval is genuinely missing (`github`) | `request-review` | A launched reviewer session answers it, against the request auto-dispatch raised |
+
+A base the control plane could not merge in cleanly is named `request-rework` for the same reason
+— its own refusal says to resolve the conflict and push, and that the approval and proofs bound to
+that head do not survive the resolution, which no mechanical step can do.
+
+Naming an action nobody can complete is the failure mode this mapping exists to prevent: the row
+would be claimed, fail or complete without effect, and come back forever while the item is never
+shown as owing a judgment. `request-review` in particular stands on a request `reconcileAutoDispatch`
+raised, and it raises one only while `reviewNeed().needed` — which is true for the `github` provider
+alone. So the mapping is exhaustive over the review states rather than falling through to "ask for
+a review": a state nobody mapped escalates, visible and owed, instead of looping in the queue.
 
 Each outstanding action is a durable row on the work aggregate (`src/model/actions.ts`), written
 inside the same advisory-locked transaction as every other decision. A row's id is a hash of what
