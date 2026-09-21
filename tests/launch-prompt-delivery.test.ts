@@ -8,7 +8,7 @@ import { generateKeyPairSync } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import type { Observation, Work } from '../src/model.js';
 import { reconcileAutoDispatch } from '../src/model/dispatch.js';
-import { acknowledgeLaunch, acknowledgementMs, atomicPrivateWrite, buildMasterStatus, defaultAcknowledgementSeconds, dispatchWork, launchApprover, launchRequest, loadMasterConfig, masterOwnedRunFields, neverStarted, prepareSessionHarness, saveMasterSettings, saveProducerProfile, sessionWords, setupMaster, startAgentSession, sustainedActivityMs, type HerdrAgent, type WorkerProfile } from '../src/master.js';
+import { acknowledgeLaunch, acknowledgementMs, atomicPrivateWrite, buildMasterStatus, defaultAcknowledgementSeconds, dispatchWork, launchApprover, launchRequest, loadMasterConfig, masterOwnedRunFields, neverStarted, prepareSessionHarness, saveMasterSettings, saveProducerProfile, sessionWords, settlementDue, setupMaster, startAgentSession, sustainedActivityMs, type HerdrAgent, type WorkerProfile } from '../src/master.js';
 import { launchAuthorization, managedInstructions } from '../src/repository-setup.js';
 import { bindReviewer, launchReview, readReviewLedger, reconcileReviews, reviewIdleGraceMs, reviewRetryPrompt, saveReviewerProfile, summarizeReviews } from '../src/reviewer.js';
 import { launchProducer, producerIdleGraceMs, producerPrompt, readProducerLedger, reconcileProducers, sessionRetries, sessionRetry, sessionRetryBaseMs, sessionRetryLimit, summarizeProducers, unstartedRetryLimit, type ProducerRecord } from '../src/producer.js';
@@ -282,10 +282,14 @@ test('integration:never-started-vs-failed — a session that ends without doing 
     await launch();
     prompts.length = 0;
     record = await scenario('working', '', 10_000);
-    assert.equal(record.acknowledgedAt, undefined, 'one sighting proves nothing');
+    assert.equal(record.acknowledgedAt, undefined, 'one sighting proves nothing'); assert.equal(record.activeSince, iso(10_000));
     record = await scenario('idle', '❯ …\n  Running npm test (12s)\n', 30_000);
+    assert.equal(record.activeSince, undefined, 'the first screen read is a baseline, not activity: the window a working sighting opened is closed');
     record = await scenario('idle', '❯ …\n  Running npm test (22s)\n', 40_000);
-    assert.equal(record.acknowledgedAt, iso(40_000), 'a screen that keeps changing while a long command runs is activity, sustained across thirty seconds');
+    assert.equal(record.activeSince, iso(40_000)); assert.equal(record.acknowledgedAt, undefined);
+    record = await scenario('idle', '❯ …\n  Running npm test (42s)\n', 60_000);
+    record = await scenario('idle', '❯ …\n  Running npm test (52s)\n', 70_000);
+    assert.equal(record.acknowledgedAt, iso(70_000), 'a screen that keeps changing while a long command runs is activity, sustained across thirty seconds');
     assert.equal(summarizeProducers([record]).pending[0].activity, 'running');
     record = await scenario('done', '● The integration suite failed on two cases; I did not submit evidence.\n', 200_000);
     assert.equal(record.idleSince, iso(30_000), 'the grace runs from the first finished sighting, as before'); assert.equal(prompts.length, 0, 'an acknowledged session is never re-prompted');
@@ -317,6 +321,79 @@ test('integration:never-started-vs-failed — a session that ends without doing 
     assert.ok(reviewRecord.resolution!.includes(words));
     assert.match(reviewRetryPrompt('owner/project', { key: 'GY-93', pr: 93, sha: H }), /Do not ask for confirmation/);
     assert.equal(/If you have not reviewed it at all/.test(reviewRetryPrompt('owner/project', { key: 'GY-93', pr: 93, sha: H })), false, 'without the binding the reminder cannot repeat the request, and does not pretend to');
+
+    // An interval longer than the finished-session grace: the grace does not settle an
+    // unacknowledged session that is still in Herdr before its re-prompt and the interval after
+    // it, so the whole configured range records a refusal as never started, never as a failure.
+    await saveMasterSettings(root, { acknowledgementSeconds: 600 });
+    const slow = await loadMasterConfig(root);
+    const slowMs = acknowledgementMs(slow);
+    assert.ok(slowMs > producerIdleGraceMs && slowMs > reviewIdleGraceMs, 'the case is above both graces');
+    const slowLedger = await readProducerLedger(root);
+    slowLedger.producers = slowLedger.producers.filter(entry => entry.state !== 'failed');
+    await atomicPrivateWrite(join(root, '.graphyard/producers.json'), slowLedger);
+    await launch();
+    prompts.length = 0;
+    const slowly = async (status: string, screen: string, offsetMs: number) => {
+      const agents = status === 'gone' ? [] : [{ name: 'produce-a', pane_id: 'pane-1', agent_status: status }];
+      const run = (_command: string, args: string[]) => {
+        if (args[0] === 'agent' && args[1] === 'read') return screen;
+        if (args[0] === 'agent' && args[1] === 'prompt') { prompts.push(args[3]); return JSON.stringify({ result: {} }); }
+        return JSON.stringify({ result: args[0] === 'pane' && args[1] === 'list' ? { panes: [] } : {} });
+      };
+      return (await reconcileProducers(root, slow, [item], agents, { run, now: () => new Date(clock + offsetMs) })).producers.at(-1)!;
+    };
+    record = await slowly('done', refusal, 10_000);
+    assert.equal(record.idleSince, iso(10_000));
+    record = await slowly('done', refusal, 10_000 + producerIdleGraceMs);
+    assert.equal(record.state, 'pending', 'the grace has run out, but the session has not yet been re-prompted: it is not settled');
+    assert.equal(record.repromptedAt, undefined); assert.equal(prompts.length, 0);
+    record = await slowly('done', refusal, slowMs);
+    assert.equal(record.repromptedAt, iso(slowMs), 're-prompted at the configured interval'); assert.equal(prompts.length, 1); assert.match(prompts[0], /seen no activity from it for 600 seconds/);
+    assert.equal(record.state, 'pending');
+    record = await slowly('done', refusal, slowMs + producerIdleGraceMs);
+    assert.equal(record.state, 'pending', 'a grace after the re-prompt is not enough either: the interval after it is what counts');
+    record = await slowly('done', refusal, 2 * slowMs - 1);
+    assert.equal(record.state, 'pending');
+    record = await slowly('done', refusal, 2 * slowMs);
+    assert.equal(record.state, 'failed'); assert.equal(neverStarted(record), true);
+    assert.match(record.resolution!, /^never started: the session took up neither its request nor the re-prompt at .* and ended without acting\./);
+    assert.equal(prompts.length, 1, 'still exactly one re-prompt');
+    // The gate itself: a session gone from Herdr, or acknowledged, is settled by the grace alone.
+    assert.equal(settlementDue({ requestedAt: iso(0) }, undefined, { now: clock + 1, ackMs: slowMs }), true);
+    assert.equal(settlementDue({ requestedAt: iso(0), acknowledgedAt: iso(40_000) }, { agent_status: 'done' }, { now: clock + 50_000, ackMs: slowMs }), true);
+    assert.equal(settlementDue({ requestedAt: iso(0) }, { agent_status: 'done' }, { now: clock + 10 * slowMs, ackMs: slowMs }), false, 'never re-prompted: never settled while it is still in Herdr');
+    assert.equal(settlementDue({ requestedAt: iso(0), repromptedAt: iso(slowMs) }, { agent_status: 'done' }, { now: clock + 2 * slowMs - 1, ackMs: slowMs }), false);
+    assert.equal(settlementDue({ requestedAt: iso(0), repromptedAt: iso(slowMs) }, { agent_status: 'done' }, { now: clock + 2 * slowMs, ackMs: slowMs }), true);
+
+    // The reviewer at the same interval: its reminder goes at the first finished sighting, and the
+    // session is settled an interval after that, not when the grace ends.
+    const slowReviews = await readReviewLedger(root);
+    slowReviews.reviews = slowReviews.reviews.filter(entry => entry.state !== 'failed');
+    await atomicPrivateWrite(join(root, '.graphyard/reviews.json'), slowReviews);
+    await launchReview(root, work(), 'reviewer-claude', [], new Date().toISOString(), { run: (_command, args) => JSON.stringify({ result: args[0] === 'tab' ? { root_pane: { pane_id: 'pane-r', tab_id: 'tab-r' } } : {} }), mint, requestId: 'review-request-slow', now: () => new Date(clock) });
+    reviewPrompts.length = 0;
+    const slowReview = async (status: string, screen: string, offsetMs: number) => (await reconcileReviews(root, slow, { run: (_command, args) => args[0] === 'agent' && args[1] === 'read' ? screen : JSON.stringify({ result: args[0] === 'pane' && args[1] === 'list' ? { panes: [] } : {} }), observe: () => null, work: [work()], agents: [{ name: 'review-claude-1', pane_id: 'pane-r', agent_status: status }], now: () => new Date(clock + offsetMs), retry: (_record, message) => { reviewPrompts.push(message); } })).reviews.at(-1)!;
+    reviewRecord = await slowReview('done', `● ${words}\n`, 10_000);
+    assert.equal(reviewRecord.repromptedAt, iso(10_000)); assert.equal(reviewPrompts.length, 1);
+    reviewRecord = await slowReview('done', `● ${words}\n`, 10_000 + reviewIdleGraceMs);
+    assert.equal(reviewRecord.state, 'pending', 'the grace alone does not settle an unacknowledged reviewer session');
+    reviewRecord = await slowReview('done', `● ${words}\n`, 10_000 + slowMs - 1);
+    assert.equal(reviewRecord.state, 'pending');
+    reviewRecord = await slowReview('done', `● ${words}\n`, 10_000 + slowMs);
+    assert.equal(reviewRecord.state, 'failed'); assert.equal(neverStarted(reviewRecord), true); assert.equal(reviewPrompts.length, 1);
+    // An acknowledged reviewer session that stops without a verdict is still settled by the grace.
+    const acknowledgedReviews = await readReviewLedger(root);
+    acknowledgedReviews.reviews = acknowledgedReviews.reviews.filter(entry => entry.state !== 'failed');
+    await atomicPrivateWrite(join(root, '.graphyard/reviews.json'), acknowledgedReviews);
+    await launchReview(root, work(), 'reviewer-claude', [], new Date().toISOString(), { run: (_command, args) => JSON.stringify({ result: args[0] === 'tab' ? { root_pane: { pane_id: 'pane-r', tab_id: 'tab-r' } } : {} }), mint, requestId: 'review-request-worked', now: () => new Date(clock) });
+    reviewRecord = await slowReview('working', '', 5_000);
+    reviewRecord = await slowReview('working', '', 5_000 + sustainedActivityMs);
+    assert.equal(reviewRecord.acknowledgedAt, iso(5_000 + sustainedActivityMs));
+    reviewRecord = await slowReview('done', '● I judged it but the post was refused.\n', 60_000);
+    reviewRecord = await slowReview('done', '● I judged it but the post was refused.\n', 60_000 + reviewIdleGraceMs);
+    assert.equal(reviewRecord.state, 'failed'); assert.equal(neverStarted(reviewRecord), false);
+    assert.match(reviewRecord.resolution!, /^the reviewer session finished \(done\) without posting a verdict/);
   } finally { await cleanup(); }
 });
 
@@ -336,6 +413,19 @@ test('integration:unacknowledged-session-recovery — the loop detects a launche
   assert.equal(active.acknowledgedAt, undefined);
   acknowledgeLaunch(active, { agent_status: 'blocked' }, { now: clock + 5_000 + sustainedActivityMs, ackMs: 90_000, result: false, screen: screen('') });
   assert.equal(active.acknowledgedAt, iso(5_000 + sustainedActivityMs));
+  // A refusal caught working, then quiet, then one late screen change: two active sightings far
+  // apart are not activity sustained across thirty seconds, because the quiet sighting between
+  // them closed the window.
+  const flicker = { requestedAt: iso(0) } as typeof record;
+  acknowledgeLaunch(flicker, { agent_status: 'working' }, { now: clock + 5_000, ackMs: 90_000, result: false, screen: screen('a') });
+  assert.equal(flicker.activeSince, iso(5_000));
+  assert.deepEqual(acknowledgeLaunch(flicker, { agent_status: 'done' }, { now: clock + 35_000, ackMs: 90_000, result: false, screen: screen('a') }), { changed: true, reprompt: false });
+  assert.equal(flicker.activeSince, undefined, 'a sighting that is not active closes the activity window, the first screen read among them');
+  acknowledgeLaunch(flicker, { agent_status: 'done' }, { now: clock + 65_000, ackMs: 90_000, result: false, screen: screen('b') });
+  assert.equal(flicker.acknowledgedAt, undefined, 'one later screen change starts a window, it does not complete one');
+  assert.equal(flicker.activeSince, iso(65_000));
+  assert.deepEqual(acknowledgeLaunch(flicker, { agent_status: 'done' }, { now: clock + 95_000, ackMs: 90_000, result: false, screen: screen('b') }), { changed: true, reprompt: true });
+  assert.equal(flicker.activeSince, undefined, 'quiet again: the window closes and the re-prompt is due');
 
   const { root, token, cleanup } = await installed();
   try {

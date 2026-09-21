@@ -4,7 +4,7 @@ import { mkdir, readFile, rm, realpath } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { dirname, resolve } from 'node:path';
 import { z } from 'zod';
-import { accountLaunch, acknowledgeLaunch, acknowledgementMs, agentLaunchPlan, assertOutsideWorktrees, atomicPrivateWrite, autonomousSession, createdHerdrTab, deliverPrompt, herdrJson, loadMasterConfig, markReprompted, neverStarted, prepareSessionHarness, privateFile, readSessionScreen, reviewerIdentitySchema, reviewerProfileSchema, closeHerdrPane, selectAccount, sessionActivity, settlementReason, startAgentSession, stopCreatedHerdrTab, type EnvironmentProbe, type HerdrAgent, type PromptDelivery, type MasterConfig, type RequestDelivery, type ReviewerIdentity, type ReviewerProfile } from './master.js';
+import { accountLaunch, acknowledgeLaunch, acknowledgementMs, agentLaunchPlan, assertOutsideWorktrees, atomicPrivateWrite, autonomousSession, createdHerdrTab, deliverPrompt, herdrJson, loadMasterConfig, markReprompted, neverStarted, prepareSessionHarness, privateFile, readSessionScreen, reviewerIdentitySchema, reviewerProfileSchema, closeHerdrPane, selectAccount, sessionActivity, settlementDue, settlementReason, startAgentSession, stopCreatedHerdrTab, type EnvironmentProbe, type HerdrAgent, type PromptDelivery, type MasterConfig, type RequestDelivery, type ReviewerIdentity, type ReviewerProfile } from './master.js';
 import type { Work } from './model.js';
 
 const sha40 = z.string().regex(/^[0-9a-f]{40}$/i);
@@ -387,7 +387,9 @@ export async function reconcileReviews(root: string, config: MasterConfig, depen
     // master never has to. One still without a verdict after a grace period is recorded as
     // failed, and the request relaunched as its next attempt. That one prompt is also the
     // re-prompt of a session that never took up its request (GY-93): it carries the request, and
-    // a session still unacknowledged when the grace ends is recorded as never started.
+    // a session still unacknowledged when the grace ends is recorded as never started — but not
+    // before a whole acknowledgement interval has followed the re-prompt (settlementDue), since
+    // the interval is configured and the grace is not.
     let failed: string | null = null;
     if (!verdict && !expired && !stale && dependencies.agents) {
       const agent = dependencies.agents.find(candidate => candidate.name === record.agentName);
@@ -401,7 +403,7 @@ export async function reconcileReviews(root: string, config: MasterConfig, depen
           try { retry(record, reviewRetryPrompt(config.repository, record)); }
           catch { /* the grace period records the session as failed when the prompt cannot reach it */ }
         }
-        else if (now.getTime() - Date.parse(record.idleSince) >= reviewIdleGraceMs) failed = settlementReason(record, agent, { now: now.getTime(), ackMs, screen }, agent?.agent_status === 'blocked'
+        else if (now.getTime() - Date.parse(record.idleSince) >= reviewIdleGraceMs && settlementDue(record, agent, { now: now.getTime(), ackMs })) failed = settlementReason(record, agent, { now: now.getTime(), ackMs, screen }, agent?.agent_status === 'blocked'
           ? `the reviewer session ended waiting on input (Herdr reports it blocked) instead of deciding on its own, without a verdict on ${record.sha.slice(0, 12)}`
           : `the reviewer session finished (${agent?.agent_status ?? 'gone from Herdr'}) without posting a verdict on ${record.sha.slice(0, 12)}`);
       } else if (record.idleSince) { delete record.idleSince; changed++; }

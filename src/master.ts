@@ -893,9 +893,11 @@ export function deliverPrompt(target: string, text: string, run?: (command: stri
  *
  * A session still quiet `acknowledgementSeconds` after its launch is re-prompted exactly once,
  * with its request, and the record says when. The re-prompt starts the activity window afresh,
- * so the seconds a second refusal takes cannot acknowledge the session either. What the loop then
+ * so the seconds a second refusal takes cannot acknowledge the session either; a sighting that is
+ * not active ends the window too, so activity counts only across consecutive sightings and a
+ * single later screen change cannot complete a window a refusal opened. What the loop then
  * records — never started, or finished without its result — is decided where each ledger settles
- * the session, from `acknowledgedAt` and `repromptedAt`.
+ * the session, from `acknowledgedAt` and `repromptedAt`, and no sooner than `settlementDue` allows.
  */
 export const defaultAcknowledgementSeconds = 90, sustainedActivityMs = 30_000;
 export const acknowledgementMs = (config: { run: Pick<MasterRun, 'acknowledgementSeconds'> }) => (config.run.acknowledgementSeconds ?? defaultAcknowledgementSeconds) * 1000;
@@ -928,6 +930,7 @@ export function acknowledgeLaunch(record: LaunchAcknowledgement, agent: Pick<Her
     const text = observed.screen();
     if (text !== null) {
       const digest = screenDigest(text);
+      // The first screen read is a baseline: it shows no change, so it is not activity.
       active = !!record.screen && record.screen !== digest;
       if (record.screen !== digest) { record.screen = digest; changed = true; }
     }
@@ -937,11 +940,27 @@ export function acknowledgeLaunch(record: LaunchAcknowledgement, agent: Pick<Her
     if (!record.activeSince) { record.activeSince = at; changed = true; }
     return { changed, reprompt: false };
   }
+  // Not seen active: the window closes, so activity is sustained only across consecutive
+  // sightings, and one later screen change after a quiet spell starts a window rather than
+  // completing one.
+  if (record.activeSince) { delete record.activeSince; changed = true; }
   const quietFor = observed.now - Date.parse(record.requestedAt);
   return { changed, reprompt: !!agent && !record.repromptedAt && quietFor >= observed.ackMs };
 }
 /** The one re-prompt was sent (or attempted): it is never repeated, and activity is counted afresh from here. */
 export function markReprompted(record: LaunchAcknowledgement, now: number) { record.repromptedAt = new Date(now).toISOString(); delete record.activeSince; }
+/**
+ * Whether a session that stopped without its result may be settled yet. The grace a finished
+ * session gets is fixed, while `acknowledgementSeconds` is configured (30–900), so neither may cut
+ * the other short: a session still in Herdr that has not taken up its request is settled only once
+ * it has had its one re-prompt and a whole interval after it, whatever the grace says — before
+ * that, its ledger keeps it pending. A session that left Herdr, or one that was acknowledged, is
+ * settled by the grace alone.
+ */
+export function settlementDue(record: LaunchAcknowledgement, agent: Pick<HerdrAgent, 'agent_status'> | undefined, observed: { now: number; ackMs: number }) {
+  if (!agent || record.acknowledgedAt) return true;
+  return !!record.repromptedAt && observed.now - Date.parse(record.repromptedAt) >= observed.ackMs;
+}
 /**
  * A session that settled without its result never started when it was never acknowledged and
  * either left Herdr or stayed quiet through the interval after its re-prompt; otherwise it did

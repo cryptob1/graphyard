@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { z } from 'zod';
-import { accountLaunch, acknowledgeLaunch, acknowledgementMs, atomicPrivateWrite, autonomousSession, closeHerdrPane, createdHerdrTab, deliverPrompt, herdrJson, loadMasterConfig, markReprompted, neverStarted, prepareSessionHarness, privateFile, readProducerCredential, readSessionScreen, repromptText, selectAccount, sessionActivity, settlementReason, sharedGitDirectory, startAgentSession, stopCreatedHerdrTab, type EnvironmentProbe, type PromptDelivery, type HerdrAgent, type MasterConfig, type ProducerProfile, type RequestDelivery, type SessionRetryReport } from './master.js';
+import { accountLaunch, acknowledgeLaunch, acknowledgementMs, atomicPrivateWrite, autonomousSession, closeHerdrPane, createdHerdrTab, deliverPrompt, herdrJson, loadMasterConfig, markReprompted, neverStarted, prepareSessionHarness, privateFile, readProducerCredential, readSessionScreen, repromptText, selectAccount, sessionActivity, settlementDue, settlementReason, sharedGitDirectory, startAgentSession, stopCreatedHerdrTab, type EnvironmentProbe, type PromptDelivery, type HerdrAgent, type MasterConfig, type ProducerProfile, type RequestDelivery, type SessionRetryReport } from './master.js';
 import { implementerIdentities, type Work } from './model.js';
 import type { DispatchRequest } from './model/dispatch.js';
 
@@ -205,7 +205,9 @@ export function proofOutcome(work: Work | undefined, record: Pick<ProducerRecord
  * Every pending session is also judged for acknowledgement (master.ts acknowledgeLaunch): one
  * that shows no activity for `run.acknowledgementSeconds` is re-prompted once with its request,
  * and one that then settles without evidence is recorded as never started, in the session's own
- * words, rather than as work that failed.
+ * words, rather than as work that failed. The grace never settles an unacknowledged session that
+ * is still in Herdr before its re-prompt and the interval after it (settlementDue), whatever the
+ * interval is set to.
  */
 /** `agents` is null when Herdr could not be read: a session is then never judged finished. */
 export async function reconcileProducers(root: string, config: MasterConfig, work: Work[], agents: HerdrAgent[] | null, dependencies: {
@@ -249,7 +251,7 @@ export async function reconcileProducers(root: string, config: MasterConfig, wor
     else if (Date.parse(record.expiresAt) <= now.getTime()) next = { state: 'expired', resolution: `no trusted evidence for ${record.proofs.filter(proof => outcome[proof] !== 'pass').join(', ')} within ${config.run.producerTimeoutMinutes} minutes` };
     else if (finished) {
       if (!record.idleSince) { record.idleSince = now.toISOString(); changed++; }
-      else if (now.getTime() - Date.parse(record.idleSince) >= producerIdleGraceMs) {
+      else if (now.getTime() - Date.parse(record.idleSince) >= producerIdleGraceMs && settlementDue(record, agent, { now: now.getTime(), ackMs })) {
         const missing = record.proofs.filter(proof => outcome[proof] !== 'pass').map(proof => `${proof} (${outcome[proof]})`).join(', ');
         const failure = agent?.agent_status === 'blocked'
           ? `the session ended waiting on input (Herdr reports it blocked) instead of deciding on its own, without trusted evidence for ${missing}`

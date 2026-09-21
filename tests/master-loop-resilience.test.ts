@@ -8,7 +8,7 @@ import { randomUUID, generateKeyPairSync } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import type { Observation, Work } from '../src/model.js';
 import { reconcileAutoDispatch } from '../src/model/dispatch.js';
-import { assertOutsideWorktrees, autonomousSession, buildMasterStatus, dispatchWork, herdrWorkspaceHealth, liveMasterConfig, loadMasterConfig, masterConfigChanges, masterConfigSchema, masterHarness, prepareSessionHarness, removeProducerProfile, replaceProducerProfile, saveProducerProfile, sessionHarnessFile, sessionHarnessPlan, setupMaster, workerHarnessPlan, workerPrompt, type MasterConfig, type MasterRun, type WorkerProfile } from '../src/master.js';
+import { assertOutsideWorktrees, autonomousSession, buildMasterStatus, dispatchWork, herdrWorkspaceHealth, liveMasterConfig, loadMasterConfig, masterConfigChanges, masterConfigSchema, masterHarness, prepareSessionHarness, removeProducerProfile, replaceProducerProfile, saveProducerProfile, sessionHarnessFile, sessionHarnessPlan, setupMaster, sustainedActivityMs, workerHarnessPlan, workerPrompt, type MasterConfig, type MasterRun, type WorkerProfile } from '../src/master.js';
 import { writeHarnessPermissions } from '../src/harness.js';
 import { bindReviewer, launchReview, readReviewLedger, reconcileReviews, removeReviewerProfile, reviewerBindingHealth, reviewerRegistrationFile, reviewIdleGraceMs, reviewPrompt, saveReviewerProfile, summarizeReviews, type ReviewRecord } from '../src/reviewer.js';
 import { launchProducer, producerIdleGraceMs, producerPrompt, readProducerLedger, reconcileProducers, sessionRetries, sessionRetry, sessionRetryBaseMs, sessionRetryLimit, summarizeProducers, unstartedRetryLimit, type ProducerRecord } from '../src/producer.js';
@@ -116,12 +116,19 @@ test('integration:producer-session-retry — a failed or expired producer sessio
     const calls: string[][] = [];
     const first = await launchProducer(root, item, request, config.producers[0], [], new Date().toISOString(), { run: herdr(calls) });
     assert.equal(first.attempt, 1);
-    // The session finishes without submitting; after the grace period it is recorded failed, not left pending.
+    // The session takes up its request (GY-93: acknowledged after sustained activity), then
+    // finishes without submitting; after the grace period it is recorded failed, not left pending.
+    const working = [{ name: 'produce-a', pane_id: 'pane-1', agent_status: 'working' }];
     const idle = [{ name: 'produce-a', pane_id: 'pane-1', agent_status: 'done' }];
     const start = Date.parse((await readProducerLedger(root)).producers[0].requestedAt);
-    await reconcileProducers(root, config, [item], idle, { run: herdr([]), now: () => new Date(start + 1000) });
-    const settled = await reconcileProducers(root, config, [item], idle, { run: herdr([]), now: () => new Date(start + 1000 + producerIdleGraceMs) });
+    await reconcileProducers(root, config, [item], working, { run: herdr([]), now: () => new Date(start + 1000) });
+    const acknowledged = await reconcileProducers(root, config, [item], working, { run: herdr([]), now: () => new Date(start + 1000 + sustainedActivityMs) });
+    assert.equal(acknowledged.producers[0].acknowledgedAt, new Date(start + 1000 + sustainedActivityMs).toISOString());
+    const finishedAt = start + 2000 + sustainedActivityMs;
+    await reconcileProducers(root, config, [item], idle, { run: herdr([]), now: () => new Date(finishedAt) });
+    const settled = await reconcileProducers(root, config, [item], idle, { run: herdr([]), now: () => new Date(finishedAt + producerIdleGraceMs) });
     assert.equal(settled.producers[0].state, 'failed');
+    assert.match(settled.producers[0].resolution!, /^the session finished \(done\) without trusted evidence/);
     // The same request is launched again: the next attempt, not a refusal.
     await assert.rejects(launchProducer(root, item, request, config.producers[0], idle, new Date().toISOString(), { run: herdr([]) }), /already visible in Herdr/, 'the old pane still holds the agent name');
     const second = await launchProducer(root, item, request, config.producers[0], [], new Date().toISOString(), { run: herdr([]) });
