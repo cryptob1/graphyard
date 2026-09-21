@@ -2,6 +2,7 @@ import { readFile } from 'node:fs/promises';
 import { inheritedObligations } from '../model.js';
 import { diagnose, fileConflicts, obligationLedger, proofAuthorization, proofPreview, resourceConflicts } from '../coordination.js';
 import { handoff } from '../repository-setup.js';
+import { eventHistoryLimits, parseEventHistoryFlags } from '../events-history.js';
 import { defineCommands } from './registry.js';
 
 /** Reading work: control-plane status, the ledger, diagnosis, creation and history. */
@@ -65,8 +66,42 @@ export const workCommands = defineCommands([
   {
     name: 'events',
     scope: 'work',
-    help: ['  events [GY-N]                Read immutable history'],
+    help: [
+      '  events                       Read the latest rows of the whole ledger',
+      '  events GY-N [--kind K[,K]] [--since ISO] [--until ISO] [--order asc|desc]',
+      '        [--limit N] [--cursor SEQ] [--payload full|details|none] [--routine] [--all]',
+      '                               Read an item\'s immutable history. Routine rows (github.observed,',
+      '                               heartbeat) are summarised as counts with their first and',
+      '                               last instants instead of filling the page; --routine returns',
+      '                               them, and --all follows the cursor to the end of the range,',
+      '                               so an item of any age can be read in full',
+    ],
     unscoped: async ({ api, print }) => print(await api('events')),
-    run: async ({ api, print }, work) => print(await api(`events?work=${work.id}`)),
+    async run({ api, print, args }, work) {
+      const { params, all } = parseEventHistoryFlags(args);
+      params.set('work', work.id);
+      params.set('view', 'history');
+      // The command reads history, not document snapshots: every event payload embeds the whole
+      // work document, which is unreadable at page scale and is what `--payload full` is for.
+      if (!params.has('payload')) params.set('payload', 'details');
+      const page = await api(`events?${params}`);
+      if (!all) return print(page);
+      // The whole range, one bounded page at a time, as one reconstruction.
+      const events = [...page.events];
+      let last = page, pages = 1;
+      // The routine summary covers the whole filtered range and came with the first page; the
+      // pages after it ask for the cursor alone rather than the same aggregate again.
+      params.set('view', 'page');
+      while (last.page.nextCursor && pages < eventHistoryLimits.pages) {
+        params.set('cursor', last.page.nextCursor);
+        last = await api(`events?${params}`);
+        events.push(...last.events);
+        pages++;
+      }
+      return print({ ...last, events, routine: page.routine,
+        page: { ...last.page, returned: events.length, pages, pageLimit: eventHistoryLimits.pages,
+          firstSeq: page.page.firstSeq, firstAt: page.page.firstAt,
+          complete: !last.page.hasMore, hasMore: last.page.hasMore } });
+    },
   },
 ]);
