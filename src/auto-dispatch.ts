@@ -42,13 +42,6 @@ export const dispatchCursorSchema = z.object({
   /** Launches that refused, by request id, with the widening retry time; cleared by the launch that succeeds. */
   failures: z.record(z.string(), dispatchFailureSchema).default({}),
   /**
-   * Both halves of the last tick: what it could launch and what it did. A dispatcher that is
-   * ticking but launching nothing looks identical to a stopped one from the tick count alone,
-   * so the counts and the reasons nothing launched are kept for `master status`.
-   */
-  lastTick: z.object({ at: z.string(), launched: z.number().int().min(0), refused: z.number().int().min(0), waiting: z.number().int().min(0), settled: z.number().int().min(0),
-    reasons: z.array(z.string().max(500)).max(20).default([]) }).strict().nullable().default(null),
-  /**
    * What launches last observed about each agent account and the launches that skipped an account,
    * with the reason. Read from the environment log beside the cursor, which every launcher writes;
    * never persisted in the cursor itself.
@@ -236,8 +229,6 @@ export async function runDispatchTick(config: MasterConfig, cursor: DispatchCurs
   const live = new Set(snapshot.work.flatMap(work => [...(work.autoDispatch?.review ? [work.autoDispatch.review.id] : []), ...(work.autoDispatch?.producers ?? []).map(request => request.id)]));
   for (const id of Object.keys(cursor.failures)) if (!live.has(id)) delete cursor.failures[id];
   cursor.ticks += 1; cursor.lastTickAt = cursor.lastSuccessAt = new Date(now()).toISOString(); cursor.consecutiveFailures = 0;
-  cursor.lastTick = { at: tick.at, launched: tick.launched.length, refused: tick.refused.length, waiting: tick.waiting.length, settled: tick.skipped,
-    reasons: [...new Set(tick.waiting.map(entry => `${entry.kind} for ${entry.work} ${entry.sha.slice(0, 12)}: ${entry.reason}`))].slice(0, 20) };
   await effects.persist(cursor);
   return tick;
 }
@@ -255,7 +246,7 @@ export async function runAutoDispatch(config: MasterConfig, cursor: DispatchCurs
   reload?: () => Promise<ConfigReload> }) {
   const now = options.now ?? Date.now, log = options.log ?? (line => console.error(line));
   const ticks: DispatchTick[] = [];
-  let refused: string | null = null, waiting = '';
+  let refused: string | null = null;
   do {
     if (options.signal?.aborted) break;
     const interval = typeof options.intervalMs === 'function' ? options.intervalMs() : options.intervalMs;
@@ -272,11 +263,6 @@ export async function runAutoDispatch(config: MasterConfig, cursor: DispatchCurs
       ticks.push(tick);
       for (const launch of tick.launched) log(`[graphyard-dispatch] launched ${launch.kind} for ${launch.work} ${launch.sha.slice(0, 12)} on ${launch.profile}${launch.group ? ` (${launch.group}: ${launch.proofs?.join(', ')})` : ''}${launch.failover?.length ? ` after skipping ${launch.failover.join('; ')}` : ''}${launch.relaunched ? ' (relaunched after a dropped prompt)' : ''}`);
       for (const refusal of tick.refused) log(`[graphyard-dispatch] ${refusal.kind} launch for ${refusal.work} refused (attempt ${refusal.attempts}): ${refusal.reason}`);
-      // A tick that launched nothing says why, once per distinct set of reasons: a request waiting
-      // on a busy profile or a backoff is the dispatcher working, and silence would hide both.
-      const reasons = (cursor.lastTick?.reasons ?? []).join(' | ');
-      if (!tick.launched.length && !tick.refused.length && reasons && reasons !== waiting) log(`[graphyard-dispatch] ${tick.waiting.length} request(s) waiting: ${reasons}`);
-      waiting = reasons;
     } catch (error) {
       // A failed tick launched nothing it has not already recorded, so it is retried promptly;
       // the cursor keeps the streak so master status can say how long dispatch has been blind.
@@ -312,7 +298,7 @@ export function dispatchSummary(cursor: DispatchCursor, now: number, intervalMs:
   const lastTickAt = cursor.lastTickAt ? Date.parse(cursor.lastTickAt) : Number.NaN;
   const lagMs = Number.isFinite(lastTickAt) ? now - lastTickAt : null;
   return { running: lagMs !== null && lagMs < Math.max(3 * intervalMs, 60_000), ticks: cursor.ticks, lastTickAt: cursor.lastTickAt, lagMs, intervalMs,
-    lastSuccessAt: cursor.lastSuccessAt, consecutiveFailures: cursor.consecutiveFailures, lastFailure: cursor.lastFailure, lastTick: cursor.lastTick ?? null,
+    lastSuccessAt: cursor.lastSuccessAt, consecutiveFailures: cursor.consecutiveFailures, lastFailure: cursor.lastFailure,
     failures: Object.entries(cursor.failures).map(([requestId, failure]) => ({ requestId, ...failure })),
     // Each agent account as the last launch check saw it, and the launches that skipped one and why.
     accounts: cursor.accounts ? {

@@ -58,14 +58,9 @@ export async function observeAgentReview(source: Source, pr: number, head: strin
     : refuse(`Waiting for reviewer profile ${profile.name} to post a verdict through its registered App`);
   if (mine.length !== 1) return refuse(`Reviewer profile ${profile.name} posted conflicting verdicts for this request; request a fresh review`);
   const verdict = mine[0], decision = decisionOf(verdict) as VerdictDecision;
-  const verdictAt = Date.parse(verdict.created_at);
-  // The one refusal that is a verdict: the registered identity answered this request and asked for
-  // changes. It is marked as one only when the verdict names this exact head; every other refusal
-  // here — not dispatched, waiting, conflicting, edited — leaves `verdict` unset.
-  if (decision === 'changes-requested') return refuse(`Reviewer profile ${profile.name} requested changes; address the findings and request a fresh review`,
-    parseVerdict(verdict.body)!.sha === head
-      ? { verdict: 'changes-requested', verdictId: verdict.id, requestId: trigger.id, ...(Number.isFinite(verdictAt) ? { completedAt: new Date(verdictAt).toISOString() } : {}) } : {});
+  if (decision === 'changes-requested') return refuse(`Reviewer profile ${profile.name} requested changes; address the findings and request a fresh review`);
   if (parseVerdict(verdict.body)!.sha !== head) return refuse(`Reviewer profile ${profile.name} reviewed a different commit`);
+  const verdictAt = Date.parse(verdict.created_at);
   if (!Number.isFinite(verdictAt) || verdictAt > now + 5000 || verdict.updated_at !== verdict.created_at)
     return refuse(`Reviewer profile ${profile.name} posted an edited verdict or an invalid completion time`);
   const newerActivity = (rows: any[]) => rows.some(row => fromReviewer(row) && row.id !== verdict.id && Date.parse(row.updated_at ?? row.created_at) >= verdictAt);

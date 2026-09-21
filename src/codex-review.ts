@@ -109,12 +109,7 @@ export async function observeCodex(source: Source, pr: number, head: string, rev
   if (row.trigger !== 'Manual request' && Math.floor(completedAt / 1000) <= Math.floor(Date.parse(trigger.created_at) / 1000))
     return refuse('Automatic review completion must be unambiguously later than the recorded request');
   // A new clean run supersedes earlier findings; resolving threads alone never does.
-  const output = reviews.filter(r => isCodex(r) && Date.parse(r.submitted_at) >= Date.parse(trigger.created_at));
-  // Codex has no changes-requested state: findings filed against exactly this head, for a completed
-  // run of the authenticated request, are its verdict. Output on another commit, a run still in
-  // progress, a retry and a request never dispatched all refuse above or below without one.
-  if (output.length) return { ...refuse('Codex posted review findings/output for this request; fix them and request a fresh clean review'),
-    ...(output.some(r => r.commit_id === head) ? { verdict: 'changes-requested' as const, requestId: trigger.id, completedAt: new Date(completedAt).toISOString() } : {}) };
+  if (reviews.some(r => isCodex(r) && Date.parse(r.submitted_at) >= Date.parse(trigger.created_at))) return refuse('Codex posted review findings/output for this request; fix them and request a fresh clean review');
   // Automatic reviews report their clean result on the PR, manual reviews on the request.
   const reactionPath = row.trigger === 'Manual request' ? `/issues/comments/${trigger.id}/reactions` : `/issues/${pr}/reactions`;
   const reactions = await source.pages(reactionPath);

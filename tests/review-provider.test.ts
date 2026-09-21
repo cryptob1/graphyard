@@ -209,23 +209,12 @@ test('findings, newer activity, edits and unsupported formats refuse instead of 
   findings.verdict.body = findings.verdict.body.replace('verdict:approved', 'verdict:changes-requested');
   const requested = await findings.run();
   assert.equal(requested.approved, false); assert.equal(requested.exhausted, undefined); assert.match(requested.reason, /requested changes/);
-  // The one refusal that is a verdict says so structurally, bound to the request and the head.
-  assert.equal(requested.verdict, 'changes-requested'); assert.equal(requested.requestId, 500); assert.equal(requested.verdictId, 501);
-  assert.equal(requested.completedAt, new Date(verdictAt).toISOString());
-  const elsewhere = adapter();
-  elsewhere.verdict.body = elsewhere.verdict.body.replace('verdict:approved', 'verdict:changes-requested').replace(head, other);
-  assert.equal((await elsewhere.run()).verdict, undefined, 'changes requested on another commit are not a verdict on this head');
-  // Every other state short of approval carries none: not dispatched, waiting, timed out.
-  const undispatched = adapter(); undispatched.request.sha = other;
-  const silent = adapter(); silent.comments.splice(silent.comments.indexOf(silent.verdict), 1);
-  for (const result of [await undispatched.run(), await silent.run(), await silent.run(Date.parse(requestedAt) + 1800_001), await adapter().run()])
-    assert.equal(result.verdict, undefined, result.reason);
   for (const change of [
     (f: ReturnType<typeof adapter>) => { f.verdict.updated_at = '2026-01-01T00:05:30Z'; },
     (f: ReturnType<typeof adapter>) => { f.reviews.push({ user: { id: CLAUDE_BOT, type: 'Bot' }, performed_via_github_app: { id: CLAUDE_APP }, submitted_at: '2026-01-01T00:04:00Z' }); },
     (f: ReturnType<typeof adapter>) => { f.comments.push({ ...f.verdict, id: 502, body: 'One more thing: this is broken.', created_at: '2026-01-01T00:05:30Z', updated_at: '2026-01-01T00:05:30Z' }); },
     (f: ReturnType<typeof adapter>) => { f.comments.push({ ...f.verdict, id: 502 }); },
-  ]) { const f = adapter(); change(f); const result = await f.run(); assert.equal(result.approved, false); assert.equal(result.verdict, undefined, result.reason); }
+  ]) { const f = adapter(); change(f); assert.equal((await f.run()).approved, false); }
   for (const body of ['<!-- graphyard-verdict:not-a-uuid head:x verdict:approved -->', `<!-- graphyard-verdict:${marker} head:${head} verdict:approved --><!-- graphyard-verdict:${marker} head:${head} verdict:approved -->`]) {
     const f = adapter(); f.verdict.body = body;
     const result = await f.run();
