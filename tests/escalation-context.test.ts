@@ -2,7 +2,7 @@ import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile, execFileSync } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -13,7 +13,7 @@ import { server } from '../src/server.js';
 import type { GitHub } from '../src/github.js';
 import { Refusal, standingEscalations, type Observation, type Principal, type Work } from '../src/model.js';
 import { assembleEscalationContext, canonical, contextFingerprint, contextLadder, defaultContextBudget, followPrecedent, handleEscalation, type EscalationContext } from '../src/model/escalation-context.js';
-import { masterConfigSchema, runAutonomyCommand, type AutonomyDependencies, type MasterConfig } from '../src/master.js';
+import { launchEscalationHandler, masterConfigSchema, runAutonomyCommand, type AutonomyDependencies, type MasterConfig } from '../src/master.js';
 import { Store } from '../src/store.js';
 
 // GY-90: the control plane assembles an escalation's context from the project — the repository's
@@ -276,12 +276,17 @@ console.log(JSON.stringify({ result, reads }));
   // The ledger carries the decision with its reason, the precedent cited and the context judged from; the later handler is a concurrence.
   const ledger = await events(work);
   const requested = ledger.filter(row => row.kind === 'decision.requested');
-  assert.equal(requested.length, 1); assert.deepEqual(requested[0].payload.precedent, [expected.id]); assert.equal(requested[0].payload.context, handlers[0].result.fingerprint);
+  assert.equal(requested.length, 1); assert.deepEqual(requested[0].payload.precedent, [expected.id]);
+  // Whichever handler recorded first, each judgement is bound to the context that handler judged from: the later one may
+  // have assembled its context after the first request landed, which changes the fingerprint and never the line followed.
+  const fingerprints = handlers.map(handler => handler.result.fingerprint);
+  assert.ok(fingerprints.includes(requested[0].payload.context), 'the request names the context its handler judged from');
   const concurred = ledger.filter(row => row.kind === 'decision.concurred');
   assert.equal(concurred.length, 1); assert.deepEqual(concurred[0].payload.precedent, [expected.id]); assert.equal(concurred[0].payload.id, requested[0].payload.id);
+  assert.deepEqual([requested[0].payload.context, concurred[0].payload.context].sort(), [...fingerprints].sort());
   const listed = await ok(master.token, 'GET', `work/${work.key}/decisions`);
   const decision = listed.decisions.find((entry: any) => entry.id === requested[0].payload.id);
-  assert.deepEqual(decision.precedent, [expected.id]); assert.equal(decision.context, handlers[0].result.fingerprint); assert.equal(decision.concurrences.length, 1);
+  assert.deepEqual(decision.precedent, [expected.id]); assert.equal(decision.context, requested[0].payload.context); assert.equal(decision.concurrences.length, 1);
   assert.equal(decision.concurrences[0].requester, master.id);
   // A later handler in this process follows the same line from the context alone.
   const reads: string[] = [];
@@ -290,8 +295,14 @@ console.log(JSON.stringify({ result, reads }));
   assert.deepEqual(later.judgement!.precedent, [expected.id]); assert.equal((later.decision as any).id, decision.id);
   assert.equal((later.decision as any).concurrences.length, 2);
   // A request that names a different precedent while the decision stands is still a competing request, refused as before.
-  const competing = await decide(master.token, work, { action: 'resolve', input: { trigger: 'requirement-weakening', expectedRevision: (await reload(work.id)).revision }, reason: 'Another line', precedent: [randomUUID()] });
+  const other = before.precedent.detail.find(entry => entry.state === 'applied' && entry.id !== expected.id)!;
+  const competing = await decide(master.token, work, { action: 'resolve', input: { trigger: 'requirement-weakening', expectedRevision: (await reload(work.id)).revision }, reason: 'Another line', precedent: [other.id] });
   assert.equal(competing.status, 409); assert.match(competing.body.error, /already requested/);
+  // A citation is a claim the ledger can check: an id that is no recorded resolve decision is refused, and nothing is recorded for it.
+  const invented = randomUUID();
+  const uncited = await decide(master.token, work, { action: 'resolve', input: { trigger: 'requirement-weakening', expectedRevision: (await reload(work.id)).revision }, reason: 'A line nobody took', precedent: [invented] });
+  assert.equal(uncited.status, 422); assert.match(uncited.body.error, new RegExp(`${invented} is not a recorded resolve decision`));
+  assert.equal((await events(work)).filter(row => row.kind === 'decision.concurred').length, 2);
   // The independent approver applies it; the resolution names the decision the handlers recorded.
   const applied = await approve(approver.token, work, decision.id, 'Consistent with the precedent cited');
   assert.equal(applied.status, 200, applied.text); assert.equal(applied.body.state, 'applied');
@@ -303,7 +314,41 @@ console.log(JSON.stringify({ result, reads }));
   assert.equal(followPrecedent(empty), null);
   let recorded = 0;
   const declined = await handleEscalation(empty, followPrecedent, async () => { recorded++; return null; });
-  assert.equal(recorded, 0); assert.match(declined.declined!, /No applied resolve precedent/); assert.equal(declined.request, null);
+  assert.equal(recorded, 0); assert.match(declined.declined!, /No applied resolve precedent of the requirement-weakening trigger/); assert.equal(declined.request, null);
+  // An applied decision of another trigger is no line to follow: its reason describes a different kind of incident.
+  // It stays in the context for a judging session to weigh, and the built-in judgement declines.
+  const foreign: EscalationContext = { ...before, precedent: { ...before.precedent, detail: before.precedent.detail.filter(entry => entry.state === 'applied').map(entry => ({ ...entry, trigger: 'lease-loss' })) } };
+  assert.ok(foreign.precedent.detail.length > 0);
+  assert.equal(followPrecedent(foreign), null);
+  assert.match((await handleEscalation(foreign, followPrecedent, async () => { recorded++; return null; })).declined!, /a judging session decides this escalation/);
+  assert.equal(recorded, 0);
+
+  // The judging session that decides then is launched like every other session (GY-93): its instruction rides the
+  // runtime's own command line as its first request, never a paste it would refuse, and its whole input is one private file.
+  const herdrCalls: string[][] = [];
+  const herdr = (_command: string, args: string[]) => {
+    herdrCalls.push(args);
+    if (args[0] === 'tab' && args[1] === 'create') return JSON.stringify({ result: { root_pane: { pane_id: 'pane-escalation', tab_id: 'tab-escalation' } } });
+    return JSON.stringify({ result: {} });
+  };
+  const launched = await launchEscalationHandler(masterRoot, config, before, 'claude', [], herdr);
+  assert.equal(launched.delivery, 'request');
+  const start = herdrCalls.find(call => call[0] === 'agent' && call[1] === 'start')!;
+  assert.deepEqual(start.slice(2, 7), [launched.agentName, '--kind', 'claude', '--pane', 'pane-escalation']);
+  assert.ok(start.includes('--timeout'), 'the start is bounded, so a session already at work on its request is adopted rather than closed');
+  const request = start.at(-1)!;
+  assert.ok(start.indexOf('--') > 0 && start.indexOf('--') < start.length - 1, 'the request follows the runtime arguments');
+  assert.match(request, new RegExp(`^You are a Graphyard escalation handler spawned for the requirement-weakening escalation on ${work.key}`));
+  assert.ok(request.includes(launched.context) && request.includes(`--context ${before.fingerprint}`), 'the prompt names the context file and its fingerprint');
+  assert.equal(herdrCalls.filter(call => call[0] === 'agent' && call[1] === 'prompt').length, 0, 'nothing is typed into the session');
+  assert.ok(launched.context.startsWith(join(masterRoot, '.graphyard/escalations/')), launched.context);
+  assert.equal((await stat(launched.context)).mode & 0o777, 0o600);
+  assert.deepEqual(JSON.parse(await readFile(launched.context, 'utf8')), before);
+  // A runtime with no request contract keeps the confirmed paste, and the result says so.
+  herdrCalls.length = 0;
+  const pasted = await launchEscalationHandler(masterRoot, config, before, 'muse', [], herdr);
+  assert.equal(pasted.delivery, 'paste');
+  assert.equal(herdrCalls.filter(call => call[0] === 'agent' && call[1] === 'prompt').length, 1);
   // The context's rules layer never comes from a template: it is the repository's file, or an explicit absence.
   assert.equal(before.rules.text, projectRules(base));
   assert.ok(!before.rules.text!.includes('<!-- graphyard'), 'no generated Graphyard block is mistaken for the project\'s rules');

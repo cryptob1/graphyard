@@ -99,6 +99,13 @@ export async function requestDecision(services: Services, caller: Principal, id:
     const precondition = decisionPrecondition(data.action, input, work!); demand(!precondition, precondition!, 409);
     const pending = (await readDecisions(db, work!)).find(decision => decision.action === data.action && (decision.state === 'requested' || decision.state === 'approved'));
     const cited = data.precedent ? [...new Set(data.precedent)].sort() : null;
+    // The ledger's "precedent it relied on" is only worth following if it names real decisions:
+    // every cited id must be a recorded decision of this same action, on any item of the graph.
+    if (cited?.length) {
+      const known = new Set((await db.query("SELECT payload->>'id' AS id FROM events WHERE kind='decision.requested' AND payload->>'action'=$1 AND payload->>'id'=ANY($2::text[])", [data.action, cited])).rows.map(row => row.id as string));
+      const unknown = cited.filter(entry => !known.has(entry));
+      demand(!unknown.length, `Cited precedent ${unknown.join(', ')} is not a recorded ${data.action} decision; cite decisions from the assembled context`, 422);
+    }
     // A spawned handler that reaches the same line as a standing request — same action, same
     // input, same precedent — is following it, not competing with it: its judgement is appended
     // to that decision as a concurrence and the standing decision is returned.

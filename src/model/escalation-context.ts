@@ -179,13 +179,14 @@ export function rulesRef(work: Work, baseBranch: string) {
 /**
  * A handler's judgement: the resolve decision it requests, the reason, and the precedent it relied
  * on. `followPrecedent` is the built-in judgement: adopt the newest applied decision of the same
- * trigger, or of the same action when the trigger has none, and cite it; with no applied precedent
- * it declines rather than invent a line, and a judging session decides instead.
+ * trigger and cite it. A decision's reason is a claim about one kind of incident, so an applied
+ * decision of another trigger is never adopted — it stays in the context for a judging session to
+ * weigh — and with no applied precedent of its own trigger the judgement declines rather than
+ * invent a line.
  */
 export interface EscalationJudgement { trigger: EscalationTrigger; reason: string; precedent: string[]; followed: PrecedentEntry | null }
 export function followPrecedent(context: EscalationContext): EscalationJudgement | null {
-  const applied = context.precedent.detail.filter(entry => entry.state === 'applied');
-  const followed = applied.find(entry => entry.trigger === context.escalation.trigger) ?? applied[0];
+  const followed = context.precedent.detail.find(entry => entry.state === 'applied' && entry.trigger === context.escalation.trigger);
   if (!followed) return null;
   const line = followed.reason.replace(/^Following precedent [0-9a-f-]+ on GY-\d+ \([^)]*\): /, '');
   return { trigger: context.escalation.trigger, precedent: [followed.id], followed,
@@ -202,7 +203,7 @@ export interface HandledEscalation { key: string; trigger: EscalationTrigger; fi
 export async function handleEscalation(context: EscalationContext, judge: EscalationJudge, record: (request: DecisionRequest) => Promise<unknown>): Promise<HandledEscalation> {
   const judgement = await judge(context);
   const base = { key: context.key, trigger: context.escalation.trigger, fingerprint: context.fingerprint, judgement };
-  if (!judgement) return { ...base, request: null, decision: null, declined: `No applied ${context.action} precedent to follow among ${context.precedent.total} recorded decision(s); a judging session decides this escalation` };
+  if (!judgement) return { ...base, request: null, decision: null, declined: `No applied ${context.action} precedent of the ${context.escalation.trigger} trigger to follow among ${context.precedent.total} recorded decision(s); a judging session decides this escalation` };
   const request: DecisionRequest = { action: escalationAction, input: { trigger: judgement.trigger, expectedRevision: context.item.revision }, reason: judgement.reason, precedent: judgement.precedent, context: context.fingerprint };
   return { ...base, request, decision: await record(request), declined: null };
 }
