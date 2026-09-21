@@ -279,7 +279,7 @@ export interface QueueSnapshot {
   executors: { executor: string; host: string; actions: number }[];
 }
 
-/** What the queue holds right now, for master status, the dashboard and the throughput measurement. */
+/** What the queue holds right now, for master status and the dashboard. */
 export function queueSnapshot(all: Work[], now: Date): QueueSnapshot {
   const rows = all.flatMap(work => (work.actionQueue?.actions ?? []).map(row => ({ work, row })));
   const byKind: Record<string, number> = {};

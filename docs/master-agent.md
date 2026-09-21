@@ -427,8 +427,9 @@ down, its action backs off, and it retries after the first has finished or its a
 lapsed. Nothing has to be turned off to add an executor.
 
 The daemon claims nothing from the queue, so a window in which both ran shows deliveries the
-executors settled *and* steps the daemon pushed; a measurement of throughput without a master
-means a window with `master run` stopped.
+executors settled *and* steps the daemon pushed, and the queue's own history says which was which:
+a row names the executor that settled it, and a step the daemon took appears in the item's ledger
+with no row at all.
 
 An executor claims only the kinds it has a handler for, and two kinds may never have one:
 `escalate` and `request-rework` are judgments made in the step itself rather than inside a session
@@ -440,87 +441,6 @@ inside what an action starts — implementing, reviewing, producing evidence, ap
 decision, resolving an escalation — and never in the loop that starts it. That is what the master
 session is now for: the escalations, the findings and the two-party decisions, outside the
 critical path.
-
-### Measuring whether it is working
-
-This section is the procedure behind the `manual:throughput-without-master` proof: a producer
-session that has been asked for it runs the conducted run below on the exact candidate and records
-the verdict it returns, pass or fail.
-
-Whether throughput now follows the number of executors and agents rather than an operator's
-attention is a measurement, not a claim. The measurement is stated over a particular population:
-deliveries made **with no master session running**. `src/throughput.ts` decides that per delivery,
-from the record, and both ways have to hold — the queue's own history has to show a stateless
-executor settling the rows that moved the item after it submitted, and nothing may have been
-handed to a master or an operator in between. A master daemon claims nothing from the queue and so
-settles nothing in it, which is what makes the executor list evidence that the fleet moved a
-delivery rather than something else. A delivery that fails either test is excluded and says which,
-so a window is never certified by averaging deliveries a master drove into the ones it did not.
-
-There are two readings, and which one is evidence depends on what the control plane runs. The
-conducted run is the only one that executes the candidate's own code, so it is the one that judges
-a candidate. The live reading judges whichever release the control plane it is pointed at is
-running: once this change is that release it is how an operator keeps watching the same property
-in production, and until then it measures a system that has no queue — it excludes every delivery
-in the ledger, by name, and reports "not met" about a release the candidate is not part of. That
-reading is not evidence about the candidate in either direction, and the proof does not take it
-against a control plane that does not run the candidate.
-
-**The live reading** judges what the running control plane recorded:
-
-```sh
-GRAPHYARD_URL=… GRAPHYARD_TOKEN=… node scripts/measure-throughput.mjs --minutes 30 --json
-```
-
-It reports the population and its submit→merge p50, every delivery in the window beside it for
-comparison, every sample of the live queue across the window and the worst row left unclaimed past
-the five-minute idle bound, the hand-offs to a master or operator, and the executor identities that
-settled rows. It exits 1 when the window does not meet the target, and `--record DIR` keeps
-each run as a timestamped JSON file.
-
-**The conducted run** makes the window rather than waiting for one:
-
-```sh
-node scripts/measure-throughput.mjs --fleet --deliveries 12 --executors 2 --scale --record DIR
-```
-
-A control plane that still runs the coordination loop the queue replaces cannot produce a
-masterless delivery — every delivery in its ledger is excluded, and the live reading names them —
-so the criterion would be one that only the merge it gates could ever satisfy. The conducted run
-stands a control plane up on a scratch Postgres (its own, never production: `--database` points at
-one, and without it the run starts an embedded server and throws it away), releases the items,
-runs the shipped executor loop against it over the shipped HTTP effects under distinct identities
-and hosts, with no master session anywhere in the process tree, and judges what they delivered
-with the same arithmetic. `--scale` runs the same workload with one executor and then with the
-configured fleet, because "throughput scales with executors" is a comparison rather than a
-threshold. Read that comparison for how the load divides — each executor carries its share of the
-rows and none of them waits on a coordinator — rather than for a wall-clock speed-up: with
-stand-in agents that answer immediately, the merge queue's own sequencing is the bound, not the
-number of executors. The report also carries the wait from a row being requested to being claimed,
-which is the latency a single master session used to set by its poll interval.
-
-The exit status is the verdict, and there are three. `0` is met and `1` is not met — every run of
-a `--scale` comparison has to meet it, and a run that leaves any item it released undelivered is
-not met whatever its other deliveries measured, with each one named beside where it stands, what
-refuses it and the last action that failed on it — and either way the verdict is printed, and recorded under
-`--record`, before the scratch database is put away, so nothing that happens while the run is
-being torn down can take it or change it. `2` is **no verdict**: the scratch Postgres would not
-start, its directory had no room, the port was taken. The message says which and nothing was
-measured, so it is recorded neither as a pass nor as the criterion failing; put the cause right and
-take the run again. The scratch cluster lives under the system temporary directory, listens on loopback TCP only (so
-it writes nothing to `/tmp` that `TMPDIR` did not send there) and asks the operating system for a
-free port, so on a host whose `/tmp` is a quota'd tmpfs shared with other
-sessions, `TMPDIR=/var/tmp/somewhere` gives it room, and `--port` or `--database` take the choice
-back. A run that *did* reach a verdict is never retaken for a better one.
-
-What a conducted run stands in for is named in its own report and never implied: the provider (no
-GitHub is reachable in a witness run) and the four judgments a language model makes. Each stand-in
-does to the control plane exactly what that session really does and takes no coordination decision
-of its own. So is the limit that leaves: the agents answer immediately, so the run measures the
-coordination this change owns — who claims a row, how long one waits, whether anything sits idle
-while actionable, and whether a master is needed at all — not how long a human-scale agent takes to
-think. `docs/architecture.md` says the same in one paragraph; the arithmetic for both readings is
-`src/throughput.ts`, the same module `master status` reports from.
 
 ### Workers pull their own work
 
