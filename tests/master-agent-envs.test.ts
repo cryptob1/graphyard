@@ -287,7 +287,7 @@ test('integration:agent-quota-failover — every launch checks login and quota, 
     const produceStart = produceCrossCalls.find(args => args[0] === 'agent' && args[1] === 'start')!;
     assert.equal(produceStart[4], 'codex', 'the session runs the account\'s runtime, not the profile\'s');
     const produceTail = produceStart.slice(produceStart.indexOf('--') + 1);
-    assert.deepEqual(produceTail.slice(0, -1), ['--ask-for-approval', 'never', '--sandbox', 'workspace-write', '-c', 'sandbox_workspace_write.network_access=true', '--add-dir', '/tmp', '--add-dir', sharedGitDirectory(root)]);
+    assert.deepEqual(produceTail.slice(0, -1), ['--ask-for-approval', 'never', '--sandbox', 'workspace-write', '-c', 'sandbox_workspace_write.network_access=true', '--add-dir', producedCross.checkout, '--add-dir', sharedGitDirectory(root)]);
     assert.match(produceTail.at(-1)!, /^You are an independent Graphyard proof producer/, 'the request is the positional prompt (GY-93)');
     assert.equal(produceTail.includes('--setting-sources'), false, 'no Claude harness flags ride a Codex command line');
 
