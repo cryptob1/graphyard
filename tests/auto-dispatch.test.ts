@@ -246,7 +246,9 @@ test('integration:auto-dispatch-review — a pending reviewer session for a repl
     const request = item.autoDispatch!.review!;
     const launched = await launchReview(root, item, 'claude-reviewer', [], new Date().toISOString(), { run, mint, requestId: request.id });
     assert.equal(launched.requestId, request.id);
-    assert.match(calls[2][3], /repeat it every 5 seconds until mergeable is no longer UNKNOWN/, 'the reviewer polls mergeability before posting');
+    // GY-93: the request is the last argument of the start, the runtime's positional prompt.
+    assert.deepEqual(calls[1].slice(0, 2), ['agent', 'start']);
+    assert.match(calls[1].at(-1)!, /repeat it every 5 seconds until mergeable is no longer UNKNOWN/, 'the reviewer polls mergeability before posting');
     const ledger = await readReviewLedger(root);
     assert.equal(ledger.reviews[0].requestId, request.id); assert.equal(ledger.reviews[0].state, 'pending');
     const sessionDirectory = ledger.reviews[0].sessionDirectory;
@@ -437,7 +439,9 @@ test('integration:auto-dispatch-producers — a producer session is launched on 
     assert.equal(JSON.stringify(calls).includes('producer-token-'), false);
     assert.ok(tab.includes('GRAPHYARD_URL=https://graphyard.example') && tab.includes(`GRAPHYARD_PRODUCER=GY-64@${H}`));
     assert.deepEqual(calls[1].slice(0, 6), ['agent', 'start', 'produce-a', '--kind', 'claude', '--pane']);
-    assert.deepEqual(calls[2].slice(0, 3), ['agent', 'prompt', 'produce-a']);
+    // GY-93: the request rides the start as the positional prompt; nothing is pasted afterwards.
+    // GY-88: it names the session directory the launch allocated under the managed worktree root.
+    assert.equal(calls[1].at(-1), producerPrompt(config, { ...binding, checkout: launched.checkout }, profile)); assert.equal(calls.some(call => call[0] === 'agent' && call[1] === 'prompt'), false); assert.equal(launched.delivery, 'request');
     const ledger = await readProducerLedger(root);
     assert.equal(ledger.producers.length, 1); assert.equal(ledger.producers[0].state, 'pending'); assert.deepEqual(ledger.producers[0].outcome, { 'integration:auto-dispatch-review': 'missing', 'integration:auto-dispatch-producers': 'missing' });
     assert.equal((await stat(join(root, '.graphyard/producers.json'))).mode & 0o777, 0o600);

@@ -18,10 +18,12 @@ The initial setup works with one worker. Add more workers or machines only after
 ## Before you start
 
 You need Node 24, Git, a Graphyard checkout, a GitHub repository you administer, and access
-to one supported provider. The GitHub CLI must be authenticated as an identity that
-administers the base branch. Agent providers such as Codex or Claude must already be signed
-in on the machine that runs them; Herdr 0.7.1+ is optional and is bound automatically when
-it is installed.
+to one supported provider — a Railway account, a Hetzner account, any Docker host, or Docker
+locally for the `compose` provider. The GitHub CLI must be authenticated as an identity that
+administers the base branch. The agent CLIs (Claude Code, Codex, OpenCode, Cursor) must be
+installed on the machine that runs them, and each provider account is logged in once, in its
+own [agent environment](#agent-environments); Herdr 0.7.1+ is optional and is bound
+automatically when it is installed.
 
 Graphyard is not published to npm yet. In the commands below:
 
@@ -112,6 +114,44 @@ Ctrl-D. Setup verifies the repository and worker identity, updates one managed s
 `AGENTS.md`, adds the `.graphyard/` ignore rule, stores the private connection locally, and
 links and enables the Herdr plugin. Commit `AGENTS.md` and `.gitignore`. Never commit
 `.graphyard/`. Give every concurrent session a different worker identity and host ID.
+
+### What the generated instructions authorize
+
+The managed `AGENTS.md` section is the coordination contract every agent runtime reads from the repository (Codex, Cursor and OpenCode natively; Claude Code where the project has no `CLAUDE.md`), and it carries one statement the launched sessions need in order to start on their own: **every session Graphyard launches receives its instruction as the session's own first request, on the runtime's command line, never as pasted text — and the one message it may later receive as a paste comes from that same launcher, repeating the session's own request, and is to be acted on without waiting for confirmation.**
+
+It is generated because of how sessions used to fail. Herdr types a prompt into a running session through bracketed paste, and a coding agent treats pasted text as untrusted data rather than as a request from its operator — the right behaviour against prompt injection, and the wrong outcome for a launch: a producer, reviewer or approver session would end its first turn having refused to act, until a human typed `go` into its tab, and the loop would record the attempt as failed and spend a retry on work that was never attempted. The launchers now put the request on the runtime's command line ([the request is the session's first message](master-agent.md#the-request-is-the-sessions-first-message)), so a new installation's producer, reviewer and approver sessions start without anybody sending `go`; the generated statement is what lets the two pastes a session can still receive — the loop's single re-prompt of a session that has shown no activity, and the reviewer's reminder to post a verdict it already judged — be taken as the operator's instruction. A Claude Code session that the master launches under a role file loads only the user settings, which leaves `AGENTS.md` out, so the launcher passes the same statement on that session's command line (`--append-system-prompt`). Nothing else pasted into a session carries that authority, and no other generated file grants any: the role files under `.graphyard/harness/` hold permissions, not instructions.
+
+### Agent environments
+
+Every agent CLI account gets its own isolated config and login home, an *agent environment*: one directory per account, named `<agent>-<letter>`, under `~/.coding_agents` (pass `--directory DIR` or set `GRAPHYARD_AGENT_ENVIRONMENTS` to use another root). Two Claude subscriptions are `claude-a` and `claude-b`; a single Codex login may simply be `codex`. The launcher selects an environment with the runtime's own variable, so accounts never share a login:
+
+| Agent | Variable set to the environment | Login held inside it | Log in with |
+| --- | --- | --- | --- |
+| Claude Code | `CLAUDE_CONFIG_DIR` | `.credentials.json` | `CLAUDE_CONFIG_DIR=… claude`, then `/login` |
+| Codex | `CODEX_HOME` | `auth.json` | `CODEX_HOME=… codex login` |
+| OpenCode | `XDG_DATA_HOME` (data under `opencode/`) | `opencode/auth.json` | `XDG_DATA_HOME=… opencode auth login` |
+| Cursor | `CURSOR_CONFIG_DIR` | `cli-config.json` | `CURSOR_CONFIG_DIR=… cursor-agent login` |
+
+Store each worker principal's token in `~/.config/graphyard/workers/PRINCIPAL.token` and each proof producer's in `~/.config/graphyard/producers/PRINCIPAL.token` (mode 0600; the directory beside the coordinator credential `master init` stored, so `$GRAPHYARD_CONFIG_HOME` if you set it). Then:
+
+```sh
+node "$GRAPHYARD_CLI" master environments                                # discover; report login and quota
+node "$GRAPHYARD_CLI" master environments --create claude,codex --apply  # add claude-<next>, codex-<next>
+CLAUDE_CONFIG_DIR=~/.coding_agents/claude-a claude                       # /login, once per new environment
+node "$GRAPHYARD_CLI" master environments --apply                        # generate the profiles
+node "$GRAPHYARD_CLI" master status
+```
+
+Without `--apply` the command writes nothing: it lists every environment with whether it is logged in, the provider quota it could read (Claude's 5-hour and 7-day usage, Codex's last reported rate-limit windows; OpenCode and Cursor expose none, reported as `unknown`), and the exact login command for each one that is not. With `--apply` it records the environments in `.graphyard/master.json`, sets the one runtime setting an unattended Claude launch needs (`skipDangerousModePermissionPrompt`), and generates profiles from the logged-in environments — no profile JSON by hand:
+
+- one worker profile per worker token, each verified against Graphyard as that principal with the `worker` role;
+- one producer profile per producer token, verified for the `producer` role and never shared with a worker principal;
+- one reviewer profile per logged-in environment, with the first one answering automatic reviews;
+- every profile's `accounts` lists the logged-in environments in failover order, its own runtime's first and rotated so profiles start on different accounts. An existing profile keeps the order it has and gains accounts that logged in since; a home it pinned with `CLAUDE_CONFIG_DIR` becomes its first account.
+
+Rerun `master environments --apply` after logging in another account; nothing changes when nothing new logged in. Before every worker, reviewer and producer launch the master checks the chosen account's login and quota and fails over to the next healthy one; see [agent environments](master-agent.md#agent-environments).
+
+### Profiles by hand
 
 Worker profile templates, for a profile added by hand:
 
@@ -243,7 +283,7 @@ Before adding more workers, stop one worker, let its lease expire, reclaim with 
 
 The installer covers deployment, identities, GitHub integration, protection, profiles, and
 verification. The human operator still authenticates the provider CLI, the GitHub CLI, and each agent
-runtime, confirms each GitHub App in the browser once in the manifest flow, approves the plan,
+environment in to its provider, confirms each GitHub App in the browser once in the manifest flow, approves the plan,
 signs the master's browser profile in to GitHub once and approves GitHub's *Confirm access*
 prompt on their device when a page asks for it, and connects project-specific trusted evidence
 by granting a producer its proof names. App permission updates, installation acceptance, and

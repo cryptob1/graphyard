@@ -17,6 +17,7 @@ This page is generated in full from each page's `<!-- page: Section | order | su
 
 - [Deployment](deployment.md) — provider reference behind the installer: versioned images, the variables table, a manual fallback for Railway, Docker Compose and the Helm chart, backups, upgrades, and restores.
 - [GitHub enforcement](github.md) — App permissions, branch protection, CI producers, and Codex review.
+- [Reading the dashboard](dashboard.md) — the dashboard page by page: what each number, sentence and marker means, and where everything else moved.
 - [Herdr integration](herdr.md) — worker installation and multi-machine use.
 - [Master-agent operating mode](master-agent.md) — routing, recovery, and guarded merges.
 - [Slice-lead delegation](delegation.md) — bounded product, infrastructure, and docs/experience coordination.

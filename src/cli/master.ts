@@ -5,24 +5,22 @@ import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 import { startGithubSetup } from '../github-setup.js';
 import { resourceConflicts } from '../coordination.js';
-import { approvedMerges, assertMasterBinding, autonomySubcommands, continueMergeBatch, runAutonomyCommand, currentMergeCandidates, dispatchWork, listHerdrAgents, liveMasterConfig, loadMasterConfig, masterHarness, mergeExecutor, mergeProtocolSkew, producerCommand, readCredentialFile, readWorkerCredential, saveWorkerProfile, setupMaster, snapshotWithClock, startMaster, verifyContainmentDeath, workerProfileSchema } from '../master.js';
+import { agentToken, approvedMerges, assertMasterBinding, autonomySubcommands, continueMergeBatch, runAutonomyCommand, currentMergeCandidates, daemonExecutor, dispatchWork, listHerdrAgents, liveMasterConfig, loadMasterConfig, masterHarness, masterSettingsFromArgs, mergeExecutor, mergeProtocolSkew, producerCommand, readCredentialFile, readWorkerCredential, saveMasterSettings, saveWorkerProfile, setupMaster, snapshotWithClock, startMaster, verifyContainmentDeath, workerProfileSchema } from '../master.js';
 import { cliCommit } from '../protocol-version.js';
-import { daemonEffects, readDaemonState, runDaemon, type DaemonState } from '../master-daemon.js';
+import { daemonEffects, readDaemonState, runDaemon } from '../master-daemon.js';
 import { verificationEffects, verifyDeployment } from '../master-verification.js';
-import { bindReviewer, launchReview, removeReviewerProfile, reviewerCredentialDirectory, saveReviewerProfile, verifyReviewerInstallation } from '../reviewer.js';
+import { bindReviewer, removeReviewerProfile, reviewCommand, reviewerCredentialDirectory, saveReviewerProfile, verifyReviewerInstallation } from '../reviewer.js';
 import { dispatchEffects, dispatchReadTimeoutMs, readDispatchCursor, runAutoDispatch } from '../auto-dispatch.js';
 import { applyProtection, protectionPlan, readProtection } from '../protection.js';
 import { writeHarnessPermissions } from '../harness.js';
 import { browserFlows, runBrowserFlow, type BrowserFlow } from '../master-browser.js';
 import { defineCommands } from './registry.js';
-import { masterStatusReport } from './master-status.js';
+import { approveScopeRequest, cycleBudget, masterStatusReport } from './master-status.js';
+import { sessionCommands } from './session-commands.js';
 import { coordinationViewHeader } from '../server/work-view.js';
 import { readSecretFromStdin } from './context.js';
 
-/**
- * The master-agent operating mode. Every subcommand authenticates with the coordinator
- * credential the master keeps for itself, never with the repository connection file.
- */
+/** Every master subcommand authenticates with the coordinator credential the master keeps for itself, never the repository connection file. */
 export const masterCommands = defineCommands([
   {
     name: 'master',
@@ -30,56 +28,61 @@ export const masterCommands = defineCommands([
     help: [
       '  master init --token-stdin [--herdr-workspace ID] [--browser-profile PROFILE]',
       '              [--dispatch-interval SECONDS] [--reviewer-profile NAME] [--producer-timeout MINUTES]',
-      '                                Install the recommended master-agent operating mode;',
-      "                                PROFILE is the operator's Chrome profile the master",
-      '                                administers GitHub through; the dispatch settings bound the',
-      '                                automatic reviewer and producer launches',
+      '                                Install the recommended master-agent operating mode; PROFILE is',
+      "                                the operator's Chrome profile the master administers GitHub",
       '  master start AGENT_KIND       Launch the dedicated visible Herdr master session',
       '  master worker add FILE        Add an existing or launchable Herdr worker profile',
-      '  master reviewer setup [--name NAME]     Register the separate reviewer GitHub App in a',
-      '                                browser flow; NAME defaults to reviewer and must keep the',
-      "                                generated App name within GitHub's 34-character limit",
+      '  master reviewer setup [--name NAME]     Register the separate reviewer GitHub App; NAME',
+      "                                defaults to reviewer, within GitHub's 34-character limit",
       '  master reviewer bind FILE --key-stdin   Bind an existing reviewer App (IDs in FILE, PEM on stdin)',
       '  master reviewer add FILE | remove NAME   Add or remove a reviewer launch profile',
       '  master producer add FILE | replace FILE | remove NAME  Manage proof-producer profiles',
-      '  master review GY-N [PROFILE]  Launch the bound reviewer on the exact current candidate;',
-      '                                master run does this on its own for every submitted head',
+      '  master review GY-N [PROFILE]  Launch the bound reviewer on the exact current candidate as the',
+      '                                open request\'s next attempt; master run does this on its own,',
+      '                                so it is the recovery path for a request nothing else answers',
       '  master protection [--apply]   Reconcile branch protection with every open review policy',
       '  master browser FLOW [--dry-run]',
       "                                Perform GitHub administration through the operator's browser",
-      '                                profile: app-permissions, installation-accept, or protection.',
-      '                                Recorded with screenshots, verified via the API, audited',
-      "  master harness [KIND] [--apply]  Generate the master's own harness permissions",
-      '  master status                 Join Graphyard work truth with Herdr session health; the',
-      '                                dispatch order, planned-file overlaps holding items, and',
-      '                                which open candidates git cannot merge with each other',
+      '                                profile: app-permissions, installation-accept, or protection;',
+      '                                recorded, API-verified, audited',
+      '  master harness [KIND] [--apply]  Generate the master\'s own harness permissions',
+      '  master status                 Graphyard work truth joined with Herdr session health, the',
+      '                                dispatch order, overlaps and merge conflicts',
       '  master dispatch GY-N PROFILE [--allow-overlap]',
-      '                                Invite a worker to claim ready work in a visible tab; an',
-      '                                item whose planned files overlap a claimed or unmerged',
-      '                                item is held unless --allow-overlap is passed',
+      '                                Invite a worker to claim ready work in a visible tab; a',
+      '                                planned-file overlap holds it unless --allow-overlap is passed',
       '  master settle-containment GY-N REASON',
-      '                                Settle a containment quarantine whose supervisor this',
-      '                                host verifies dead; unverifiable signals refuse',
+      '                                Settle a containment quarantine whose supervisor this host',
+      '                                verifies dead; unverifiable signals refuse',
       '  master merge GY-N|--all       Merge exact authorized candidates without bypasses',
-      '  master verify-deployment GY-N Verify that the deployed release serves a delivery and',
-      '                                emits the current instructions; refuse stale or local-only',
-      '                                observations, record the exact release observed',
+      '  master config FIELD=VALUE…   Tune owned run settings and profile accounts',
+      '                                (accounts:PROFILE=a,b); autoMerge and credential paths stay operator-only',
+      '  master verify-deployment GY-N Verify that the deployed release serves a delivery and emits',
+      '                                the current instructions; records the exact release observed',
       '  master run [--once] [--interval SECONDS]',
-      '                                Run the durable coordination loop as a supervised process;',
-      '                                it launches the reviewer and the proof producers for every',
-      '                                submitted head within 30 seconds of the request',
+      '                                The durable coordination loop: launches reviewers and producers',
+      '                                for every submitted head and decides open scope requests',
       '  master autonomy [--admin-token-stdin --apply]  Provision the master and approver identities',
       '  master create FILE|release GY-N|unblock GY-N|requirements GY-N FILE REASON  Own intent',
-      '  master decide GY-N ACTION [JSON|@FILE] REASON  Request a two-party decision',
+      '  master scope GY-N [REASON]    Apply a scope request the loop refused, widening plannedFiles',
+      '                                while the attempt keeps its lease (the loop decides the rest)',
+      '  master decide GY-N ACTION [JSON|@FILE] [--precedent ID[,ID]] [--context FINGERPRINT] REASON',
+      '                                Request a two-party decision, citing precedent and context',
+      '  master context GY-N [TRIGGER] [--budget N]  The assembled escalation context a handler sees',
+      '  master escalation GY-N [TRIGGER] [--budget N] [precedent|KIND]',
+      '                                Spawn a fresh handler on that context alone: precedent follows',
+      '                                the newest applied line, KIND launches a judging session',
+      '  master withdraw GY-N DECISION REASON  Take back the master\'s own requested decision',
       '  master decisions GY-N | approver GY-N DECISION [KIND] | approve GY-N DECISION REASON',
       '  master principals [--apply]   Preview or apply a roster rotation keeping live principals',
       '  master restart                Restart this host\'s master loop detached',
+      '  master environments [--create KIND,…] [--apply]  Agent accounts, quota, profiles',
       '  master guide                  Print the complete master-agent operating guide',
     ],
     async run(context) {
       const { id, args, base, print } = context;
       const root = context.repositoryRoot();
-      // The guide's first line is its docs-index entry, not part of the guide.
+      // The guide's first line is its docs-index entry, not guide body.
       if (id === 'guide') return console.log((await readFile(fileURLToPath(new URL('../../docs/master-agent.md', import.meta.url)), 'utf8')).replace(/^<!-- page:[^\n]*\n/, ''));
       if (id === 'init') {
         const { values } = parseArgs({ args, options: { url: { type: 'string' }, 'token-stdin': { type: 'boolean' }, 'no-auto-merge': { type: 'boolean' }, 'merge-method': { type: 'string' }, 'cli-path': { type: 'string' }, 'host-id': { type: 'string' }, 'herdr-workspace': { type: 'string' }, interval: { type: 'string' }, 'proof-workflow': { type: 'string' }, 'deployment-url': { type: 'string' }, 'deployment-sha-field': { type: 'string' }, 'smoke-workflow': { type: 'string' }, 'dispatch-interval': { type: 'string' }, 'reviewer-profile': { type: 'string' }, 'producer-timeout': { type: 'string' }, 'browser-profile': { type: 'string' }, 'browser-executable': { type: 'string' } }, allowPositionals: false });
@@ -98,16 +101,17 @@ export const masterCommands = defineCommands([
         const response = await fetch(`${master.url}/api/${path}`, { headers: { ...headers, Authorization: `Bearer ${credential}` }, signal: AbortSignal.timeout(timeoutMs) });
         const body = await response.json(); if (!response.ok) throw new Error(JSON.stringify(body)); return body;
       };
-      const masterMutation = async (path: string, data: unknown, requestId: string = randomUUID()) => {
-        const response = await fetch(`${master.url}/api/${path}`, { method: 'POST', headers: { Authorization: `Bearer ${masterToken}`, 'Content-Type': 'application/json', 'Idempotency-Key': requestId }, body: JSON.stringify(data), signal: AbortSignal.timeout(30_000) });
+      const masterMutation = async (path: string, data: unknown, requestId: string = randomUUID(), credential: string = masterToken) => {
+        const response = await fetch(`${master.url}/api/${path}`, { method: 'POST', headers: { Authorization: `Bearer ${credential}`, 'Content-Type': 'application/json', 'Idempotency-Key': requestId }, body: JSON.stringify(data), signal: AbortSignal.timeout(30_000) });
         const result = await response.json(); if (!response.ok) { const error = new Error(JSON.stringify(result)); (error as any).confirmedRefusal = response.status >= 400 && response.status < 500; throw error; } return result;
       };
       const coordinator = await masterApi('status'); assertMasterBinding(master, coordinator);
-      // The CLI's own commit, for the version-skew guard: the checkout this file runs from.
+      // The CLI's own commit, for the version-skew guard.
       const cli = { commit: cliCommit(fileURLToPath(new URL('../..', import.meta.url))) };
       const assertProtocol = (status: any) => { const skew = mergeProtocolSkew(status, cli); if (skew) throw new Error(skew); };
       if ((autonomySubcommands as readonly string[]).includes(id ?? '')) return print(await runAutonomyCommand(root, master, id!, args,
         { coordinator: masterApi, readSecret: () => readSecretFromStdin(10_000), agents: listHerdrAgents, daemonLock: async () => (await readDaemonState(root, master)).lock }));
+      if (id === 'scope') return print(await approveScopeRequest(root, master, args, { coordinator: masterApi }));
       if (id === 'start') {
         const kind = workerProfileSchema.shape.kind.safeParse(args[0]); if (!kind.success) throw new Error('Use master start with a supported agent kind such as codex or claude');
         const separator = args.indexOf('--'); const agentArgs = separator < 0 ? [] : args.slice(separator + 1);
@@ -116,6 +120,7 @@ export const masterCommands = defineCommands([
       }
       if (id === 'worker' && args[0] === 'add' && args[1]) return print(await saveWorkerProfile(root, JSON.parse(await readFile(args[1], 'utf8')), credential => masterApi('status', credential)));
       if (id === 'producer') return print(await producerCommand(root, args, credential => masterApi('status', credential)));
+      if (id === 'config') return print(await saveMasterSettings(root, masterSettingsFromArgs(args)));
       if (id === 'reviewer') {
         if (args[0] === 'add' && args[1]) return print(await saveReviewerProfile(root, JSON.parse(await readFile(args[1], 'utf8'))));
         if (args[0] === 'remove' && args[1]) return print(await removeReviewerProfile(root, args[1]));
@@ -141,13 +146,7 @@ export const masterCommands = defineCommands([
         }
         throw new Error('Use master reviewer setup, master reviewer bind FILE --key-stdin, or master reviewer add FILE');
       }
-      if (id === 'review') {
-        if (!args[0]) throw new Error('Use master review GY-N [PROFILE]');
-        const snapshot = await masterApi('work-snapshot');
-        const work = snapshot.work.find((item: any) => item.id === args[0] || item.key === args[0]);
-        if (!work) throw new Error(`Unknown work item ${args[0]}`);
-        return print(await launchReview(root, work, args[1], listHerdrAgents(), snapshot.now));
-      }
+      if (id === 'review') return print(await reviewCommand(root, args, await masterApi('work-snapshot'), listHerdrAgents()));
       if (id === 'protection') {
         const { values } = parseArgs({ args, options: { apply: { type: 'boolean' } }, allowPositionals: false });
         const snapshot = await masterApi('work-snapshot');
@@ -209,17 +208,22 @@ export const masterCommands = defineCommands([
       }
       if (id === 'merge') {
         if (!args[0]) throw new Error('Use master merge GY-N or master merge --all');
-        // Skew is refused before any candidate is read, so a server that has not deployed the
-        // CLI's protocol is reported as such rather than as an invalid gate verification.
+        // Skew is refused before any candidate is read: an undeployed server is protocol skew, not a failed gate.
         assertProtocol(coordinator);
         const snapshot = await masterApi('work-snapshot');
         const selected = args[0] === '--all' ? currentMergeCandidates(snapshot.work, snapshot.now, coordinator.actor.id) : snapshot.work.filter((item: any) => item.id === args[0] || item.key === args[0]);
         if (!selected.length) throw new Error(args[0] === '--all' ? 'No work has a current all-gates-passing merge authorization' : `Unknown work item ${args[0]}`);
         if (!master.autoMerge) selected.splice(0, selected.length, ...await approvedMerges(selected, item => masterApi(`work/${item.id}/decisions`), args[0] !== '--all'));
+        // One executor instance per request id (see MergeExecutor in master.ts).
         const outerRequest = process.env.GRAPHYARD_REQUEST_ID ?? randomUUID();
-        const mergeOne = mergeExecutor(master, () => masterApi('work-snapshot'), masterMutation, coordinator.actor.id, outerRequest);
+        const mergeOne = mergeExecutor(master, () => masterApi('work-snapshot'), masterMutation, { principal: coordinator.actor.id, instance: outerRequest }, outerRequest);
         const results = args[0] === '--all' ? await continueMergeBatch(selected, mergeOne) : [await mergeOne(selected[0])];
         return print({ requestId: outerRequest, results });
+      }
+      if (id === 'withdraw') {
+        // Runs under the operator-agent identity that made the request; the server resolves GY-N.
+        if (!args[0] || !args[1] || !args.slice(2).join(' ').trim()) throw new Error('Use master withdraw GY-N DECISION REASON');
+        return print(await masterMutation(`work/${encodeURIComponent(args[0])}/decide`, { action: 'withdraw', decision: args[1], reason: args.slice(2).join(' ') }, randomUUID(), await agentToken(root, master, 'operatorAgent')));
       }
       if (id === 'verify-deployment') {
         if (!args[0]) throw new Error('Use master verify-deployment GY-N');
@@ -234,22 +238,21 @@ export const masterCommands = defineCommands([
         const { values } = parseArgs({ args, options: { once: { type: 'boolean' }, interval: { type: 'string' } }, allowPositionals: false });
         const intervalSeconds = values.interval ? Number(values.interval) : master.run.intervalSeconds;
         if (!Number.isInteger(intervalSeconds) || intervalSeconds < 5 || intervalSeconds > 900) throw new Error('Use master run --interval with whole seconds between 5 and 900');
-        // A coordinator credential is the daemon's entire authority. Anything broader would let the
-        // loop satisfy a gate it is supposed to be waiting on.
+        // A coordinator credential is the daemon's entire authority; anything broader could satisfy a gate the loop must wait on.
         if (coordinator.actor.role !== 'coordinator') throw new Error('The durable master loop requires a coordinator credential; operator, producer, and worker credentials are refused');
         if (coordinator.actor.proofs?.length) throw new Error('The durable master loop refuses a credential that is also allowed to produce evidence');
         assertProtocol(coordinator);
         const state = await readDaemonState(root, master);
-        // The cycle and the dispatcher poll the bounded coordination view; the guarded merge
-        // re-reads the full documents, since it is the last check before GitHub is asked to merge.
-        // The view is asked for by header, so a server that predates it answers with whole documents.
+        // The cycle and the dispatcher poll the bounded coordination view (by header, so an older
+        // server answers with whole documents); the guarded merge re-reads the full documents.
         const live = liveMasterConfig(root, master), current = () => live.current, reload = () => live.reload();
         const coordinationSnapshot = (timeoutMs?: number) => masterApi('work-snapshot', masterToken, timeoutMs, { [coordinationViewHeader]: 'coordination' });
-        const effects = daemonEffects(root, current, { snapshot: () => coordinationSnapshot(), mutate: masterMutation, executionOwner: coordinator.actor.id });
-        const guardedMerge: typeof effects.merge = work => mergeExecutor(current(), () => masterApi('work-snapshot'), masterMutation, coordinator.actor.id, randomUUID())(work);
+        const executor = daemonExecutor(coordinator.actor.id);
+        const effects = daemonEffects(root, current, { snapshot: () => coordinationSnapshot(), mutate: masterMutation, executor });
+        const guardedMerge: typeof effects.merge = work => mergeExecutor(current(), () => masterApi('work-snapshot'), masterMutation, executor, randomUUID())(work);
         // The loop outlives deployments: every guarded merge re-reads the server's protocol first.
         effects.merge = async work => { assertProtocol(await masterApi('status')); return guardedMerge(work); };
-        // Automatic dispatch runs beside the cycle, launching each request within 30 seconds.
+        // Automatic dispatch runs beside the cycle on a shorter cadence; it stops with the daemon.
         const dispatchCursor = await readDispatchCursor(root, master);
         const stopping = new AbortController();
         const daemonRun = runDaemon(master, state, effects, { once: values.once, intervalMs: values.interval ? intervalSeconds * 1000 : () => current().run.intervalSeconds * 1000, identity: { pid: process.pid, host: master.hostId }, reload }).finally(() => stopping.abort());
@@ -258,25 +261,10 @@ export const masterCommands = defineCommands([
         return print({ repository: master.repository, coordinator: coordinator.actor.id, intervalSeconds, dispatchIntervalSeconds: master.run.dispatchIntervalSeconds, cycles: result.cycles.length, stopped: result.stopped ? 'signal' : 'completed', last: result.cycles.at(-1) ?? null,
           dispatch: { ticks: dispatched.ticks.length, launched: dispatched.ticks.reduce((total, tick) => total + tick.launched.length, 0), refused: dispatched.ticks.reduce((total, tick) => total + tick.refused.length, 0), last: dispatched.ticks.at(-1) ?? null } });
       }
-      throw new Error(`Use master init, start, worker add, producer, reviewer, review, protection, browser, harness, status, dispatch, settle-containment, run, merge, verify-deployment, ${autonomySubcommands.join(', ')}, or guide`);
+      throw new Error(`There is no master ${id}; use master guide for the subcommands`);
     },
   },
+  ...sessionCommands,
 ]);
 
-/**
- * How the coordination cycle keeps to its configured interval, from the durations the daemon
- * records for its retained cycles: the last one, the p95, and every cycle that overran. A cycle
- * longer than its interval means the loop is falling behind the work it shepherds.
- */
-export function cycleBudget(state: Pick<DaemonState, 'metrics'>, intervalMs: number) {
-  const metrics = state.metrics;
-  const last = metrics.at(-1) ?? null;
-  const durations = metrics.map(metric => metric.durationMs).sort((a, b) => a - b);
-  const p95Ms = durations.length ? durations[Math.min(durations.length - 1, Math.ceil(durations.length * 0.95) - 1)] : null;
-  const overruns = metrics.filter(metric => metric.durationMs > intervalMs);
-  return {
-    intervalMs, measured: metrics.length, lastCycle: last ? { cycle: last.cycle, at: last.at, durationMs: last.durationMs } : null,
-    withinInterval: last ? last.durationMs <= intervalMs : null, p95Ms, overruns: overruns.length,
-    lastOverrun: overruns.length ? { cycle: overruns.at(-1)!.cycle, at: overruns.at(-1)!.at, durationMs: overruns.at(-1)!.durationMs } : null,
-  };
-}
+export { cycleBudget };

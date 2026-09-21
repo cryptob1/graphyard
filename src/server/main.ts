@@ -10,10 +10,15 @@ import { projectFlow } from '../flow-analytics.js';
 import { principalSchema, server } from './index.js';
 import { buildIdentity } from '../protocol-version.js';
 import { ProductionWatch, railwayProvider } from '../production-watch.js';
+import { configuredGeneratedFiles } from '../generated-files.js';
+import { generatedFilesVariable } from '../install/generated-files.js';
 
 /** Process entry: configuration, migration, the HTTP server and the reconciliation tick. */
 export async function main() {
   try { process.loadEnvFile(); } catch (error: any) { if (error.code !== 'ENOENT') throw error; }
+  // An unparseable generated-files declaration refuses start-up with a clear message instead of
+  // silently exempting nothing; the regression guard runs with exactly this parsed set.
+  const generatedFiles = configuredGeneratedFiles();
   const credentials = principalSchema.parse(JSON.parse(process.env.GRAPHYARD_PRINCIPALS ?? '[]'));
   demand(new Set(credentials.map(p => p.id)).size === credentials.length && new Set(credentials.map(p => p.token)).size === credentials.length, 'Principal IDs and tokens must be unique');
   const store = new Store(process.env.DATABASE_URL ?? 'postgres://graphyard:graphyard@localhost:5438/graphyard');
@@ -39,7 +44,12 @@ export async function main() {
   const provider = railwayProvider();
   const production = new ProductionWatch(store, { provider, github, build, baseBranch: github?.config.base ?? process.env.GITHUB_BASE_BRANCH ?? 'main' });
   const http = server(engine, credentials, github, artifacts, { knownPrincipals, production });
+  // The deployed-variables record the status route reports gains the generated-files variable the
+  // installers set beside GRAPHYARD_PRINCIPALS, so master status can compare what the deployment
+  // runs with against the managed repository's manifest and name the command that fixes it.
+  http.services.delegationLimits.deployed[generatedFilesVariable] = process.env.GRAPHYARD_GENERATED_FILES ?? null;
   for (const line of http.services.delegationLimits.attention) console.error(`Delegation limits: ${line}`);
+  console.log(`Generated files: ${generatedFiles.length ? generatedFiles.join(', ') : 'none declared; the regression guard exempts nothing'}`);
   console.log(`Build ${build.commit ?? 'commit unknown'} (merge protocol ${build.protocol}); production observation ${provider ? `via ${provider.description}` : build.commit ? 'from the build identity only; set RAILWAY_API_TOKEN or RAILWAY_TOKEN to read the deployment list' : 'unavailable: set GRAPHYARD_BUILD_SHA or RAILWAY_GIT_COMMIT_SHA'}`);
   await production.load().catch(error => console.error('production incidents could not be loaded', error instanceof Error ? error.message : 'unknown'));
   // One-time materialization of the deployment allowlist. Operators manage proof authority

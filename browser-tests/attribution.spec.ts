@@ -72,7 +72,10 @@ async function fixture(page: Page, role = 'admin') {
   await page.goto('/');
   await page.getByLabel('Access token').fill('browser-fixture');
   await page.getByRole('button', { name: 'Open control plane' }).click();
+  // Attribution is part of Flow analytics' details, under Insights.
+  await page.getByRole('button', { name: /Insights/ }).click();
   await page.getByRole('button', { name: 'Flow analytics' }).click();
+  await page.getByText('Show details', { exact: true }).click();
   await expect(page.getByRole('heading', { name: 'Attribution', level: 2 })).toBeVisible();
   return state;
 }
@@ -89,10 +92,15 @@ for (const viewport of [{ name: 'desktop', width: 1280, height: 900 }, { name: '
     const overflow = await page.evaluate(() => ({ width: document.documentElement.clientWidth, content: document.documentElement.scrollWidth }));
     expect(overflow.content).toBeLessThanOrEqual(overflow.width + 1);
 
-    // Every metric the acceptance criteria name is a card with an explicit state, and the
-    // metrics table carries average, median, p90 and n for each.
-    for (const metric of ['targetMismatches', 'paidRunsAvoided', 'superseded', 'rescheduled', 'convergenceWait', 'reanchors', 'signatureRegenerations', 'candidateToReleaseDrift', 'multiServiceConvergence', 'immutablePreviewShare', 'unsupportedClaims', 'cost', 'blocked'])
-      await expect(card(page, metric)).toHaveAttribute('data-state', /measured|unavailable|blocked/);
+    // Every metric the acceptance criteria name is a measured or blocked card, or, with no data,
+    // is named once under "Unknown, not zero" rather than drawn as an UNKNOWN card; the metrics
+    // table carries average, median, p90 and n for each.
+    const metrics = ['targetMismatches', 'paidRunsAvoided', 'superseded', 'rescheduled', 'convergenceWait', 'reanchors', 'signatureRegenerations', 'candidateToReleaseDrift', 'multiServiceConvergence', 'immutablePreviewShare', 'unsupportedClaims', 'cost', 'blocked'];
+    const drawn = await region.locator('.attribution-card').evaluateAll(elements => elements.map(element => [(element as HTMLElement).dataset.metric, (element as HTMLElement).dataset.state]));
+    for (const [, cardState] of drawn) expect(cardState).toMatch(/measured|blocked/);
+    const unknown = region.locator('h4', { hasText: 'Unknown, not zero' }).locator('xpath=following-sibling::ul[1]/li');
+    expect(drawn.length + await unknown.count()).toBe(metrics.length);
+    for (const [metric] of drawn) expect(metrics).toContain(metric);
     const table = region.getByRole('region', { name: 'Attribution metrics table' });
     for (const column of ['Average', 'Median', 'p90', 'n']) await expect(table.getByRole('columnheader', { name: column, exact: true })).toBeVisible();
     await expect(table.locator('tbody tr')).toHaveCount(13);
@@ -119,9 +127,8 @@ for (const viewport of [{ name: 'desktop', width: 1280, height: 900 }, { name: '
     await page.getByLabel('Window').selectOption('7');
     await expect.poll(() => state.queries.filter(q => !q.includes('metric=')).at(-1)).toContain('window=7');
     await expect(card(page, 'targetMismatches').locator('strong')).toHaveText('1');
-    await expect(card(page, 'multiServiceConvergence')).toHaveAttribute('data-state', 'unavailable');
-    await expect(card(page, 'multiServiceConvergence').locator('strong')).toHaveText('—');
-    await expect(card(page, 'multiServiceConvergence')).toContainText('No partial rollout');
+    await expect(card(page, 'multiServiceConvergence')).toHaveCount(0);
+    await expect(unknown.filter({ hasText: 'No partial rollout' })).toHaveCount(1);
     await expect(card(page, 'signatureRegenerations')).toHaveAttribute('data-state', 'measured');
     await expect(card(page, 'signatureRegenerations').locator('strong')).toHaveText('0');
     await page.getByLabel('Window').selectOption('90');

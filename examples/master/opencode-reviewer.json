@@ -3,6 +3,6 @@
   "agentName": "review-opencode-1",
   "kind": "opencode",
   "agentArgs": [],
-  "approvals": "prompt",
+  "approvals": "auto",
   "environment": {}
 }

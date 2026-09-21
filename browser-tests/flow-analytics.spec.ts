@@ -80,7 +80,9 @@ function dataset(): FlowDataset {
   };
 }
 
-type FixtureState = { report: any; drill: any; status: number; delay: boolean; queries: string[] };
+// `phase` answers the phase drill-down per requested key, so a test can reproduce the row bound
+// the control plane applies (flowLimits.drilldown) exactly as the page meets it.
+type FixtureState = { report: any; drill: any; phase?: (key: string | null) => any; status: number; delay: boolean; queries: string[] };
 async function fixture(page: Page, role = 'admin', mutate: (report: any) => any = report => report) {
   const source = dataset();
   const report = mutate(computeFlow(source, { days: 30 }));
@@ -100,6 +102,8 @@ async function fixture(page: Page, role = 'admin', mutate: (report: any) => any 
       if (state.status !== 200) return route.fulfill({ status: state.status, json: { error: 'Flow analytics are temporarily unavailable' } });
       if (url.pathname.endsWith('/export'))
         return route.fulfill({ status: 200, contentType: 'text/csv; charset=utf-8', headers: { 'content-disposition': 'attachment; filename="graphyard-flow-bottleneck-30d.csv"' }, body: flowExport(state.report, state.drill, 'csv') });
+      if (url.pathname.endsWith('/drilldown') && url.searchParams.get('metric') === 'phase' && state.phase)
+        return route.fulfill({ json: state.phase(url.searchParams.get('key')) });
       return route.fulfill({ json: url.pathname.endsWith('/drilldown') ? state.drill : state.report });
     }
     return route.fulfill({
@@ -110,18 +114,24 @@ async function fixture(page: Page, role = 'admin', mutate: (report: any) => any 
   await page.goto('/');
   await page.getByLabel('Access token').fill('browser-fixture');
   await page.getByRole('button', { name: 'Open control plane' }).click();
+  // Flow analytics is a tab under Insights.
+  await page.getByRole('button', { name: /Insights/ }).click();
   await page.getByRole('button', { name: 'Flow analytics' }).click();
   await expect(page.getByRole('heading', { name: 'Flow analytics', level: 1 })).toBeVisible();
   return state;
 }
+// The page opens on where work waits and pull-request-to-merge time; everything else is behind Show details.
+const showDetails = (page: Page) => page.getByText('Show details', { exact: true }).click();
 
 test('integration:flow-analytics-browser', async ({ page }) => {
   const state = await fixture(page);
   await expect(page.locator('.flow-state')).toHaveAttribute('data-state', /complete|sparse/);
 
-  // Every aggregate is visible with its count, and the narrative matches the cards.
-  const reviewCard = page.getByRole('button', { name: /Waiting on review/ });
+  // The default view: each wait category with items is a card with its count; nothing else.
+  const reviewCard = page.getByRole('button', { name: /Waiting for review/ });
   await expect(reviewCard).toContainText('1');
+  await expect(page.getByRole('img', { name: /Cumulative flow by stage/ })).toBeHidden();
+  await showDetails(page);
   await expect(page.getByText(/undelivered item\(s\) are/)).toBeVisible();
 
   // Each visualization is paired with an equivalent data table.
@@ -149,7 +159,7 @@ test('integration:flow-analytics-browser', async ({ page }) => {
 
   // Drill-down opens the exact underlying records and exports them.
   await reviewCard.click();
-  const dialog = page.getByRole('dialog', { name: 'Waiting on review drill-down' });
+  const dialog = page.getByRole('dialog', { name: 'Waiting for review drill-down' });
   await expect(dialog.getByRole('region', { name: /records/ }).locator('tbody tr')).toHaveCount(1);
   await expect(dialog.getByText('GY-1')).toBeVisible();
   const download = page.waitForEvent('download');
@@ -198,10 +208,38 @@ test('flow analytics distinguishes loading, unavailable, empty, sparse, partial,
   await expect(page.getByText('nothing is shown as zero')).toBeVisible();
 });
 
+// The five phases the handed-in-to-merged figure adds up, in the client's order.
+const phases = ['pr-created-to-review-start', 'review-start-to-review-complete', 'review-complete-to-evidence-complete', 'evidence-complete-to-merge-authorized', 'merge-authorized-to-merged'];
+const phaseRows = (episodes: number, bucket: string) => Array.from({ length: episodes }, (_, index) =>
+  ({ workKey: `GY-${index}`, metric: 'phase', bucket, observedAt: new Date(observedAt).toISOString(), valueMs: 60_000, pullRequest: index, commit: `${index}`.repeat(4), detail: bucket }));
+
+test('a phase drill-down cut off by the row bound is read per phase, and never averaged when even that is cut off', async ({ page }) => {
+  const state = await fixture(page);
+  // One request for every phase of every episode exceeds the bound: the rows come back cut off
+  // and sorted by work key, so their percentiles would be a biased sample presented as the whole.
+  state.phase = key => key === null
+    ? { metric: 'phase', key, columns: [], total: 900, truncated: true, rows: phaseRows(3, phases[0]) }
+    : { metric: 'phase', key, columns: [], total: 3, truncated: false, rows: phaseRows(3, key) };
+  await page.getByRole('button', { name: 'Refresh' }).click();
+  // Asking one phase at a time stays inside the bound, so the figure is the whole window's.
+  await expect.poll(() => phases.every(phase => state.queries.some(query => query.includes(`key=${phase}`)))).toBe(true);
+  const headline = page.locator('.flow-headline');
+  await expect(headline).toContainText('5m typical (p50)');
+  await expect(headline).toContainText('3 merged');
+
+  // Past the bound even per phase, nothing is drawn from the part that came back.
+  state.phase = key => ({ metric: 'phase', key, columns: [], total: 900, truncated: true, rows: phaseRows(3, key ?? phases[0]) });
+  await page.getByRole('button', { name: 'Refresh' }).click();
+  await expect(page.getByRole('heading', { name: 'Handed in → merged' })).toBeVisible();
+  await expect(page.locator('.flow-unreadable')).toContainText('more merged changes than one read can return');
+  await expect(page.locator('.flow-headline')).not.toContainText('typical');
+});
+
 for (const viewport of [{ name: 'desktop', width: 1280, height: 900 }, { name: 'mobile', width: 390, height: 844 }]) {
   test(`flow analytics is keyboard reachable, labelled, and usable on ${viewport.name}`, async ({ page }) => {
     await page.setViewportSize({ width: viewport.width, height: viewport.height });
     await fixture(page, 'reader');
+    await showDetails(page);
     for (const name of ['Window', 'Work type', 'Stage', 'Delivery slice']) await expect(page.getByLabel(name, { exact: true })).toBeVisible();
     await expect(page.getByRole('region', { name: 'Cumulative flow data table' })).toBeVisible();
     await expect(page.getByRole('img', { name: /Cumulative flow by stage/ })).toBeVisible();
@@ -210,10 +248,10 @@ for (const viewport of [{ name: 'desktop', width: 1280, height: 900 }, { name: '
     const scroller = page.getByRole('region', { name: 'Cumulative flow data table' });
     await scroller.focus();
     expect(await scroller.evaluate(element => element === document.activeElement)).toBe(true);
-    const card = page.getByRole('button', { name: /Waiting on review/ });
+    const card = page.getByRole('button', { name: /Waiting for review/ });
     await card.focus();
     await page.keyboard.press('Enter');
-    const dialog = page.getByRole('dialog', { name: 'Waiting on review drill-down' });
+    const dialog = page.getByRole('dialog', { name: 'Waiting for review drill-down' });
     await expect(dialog.getByRole('button', { name: 'Close drill-down' })).toBeFocused();
     await expect(dialog).toContainText('Evidence and artifact identifiers require an operator');
     await page.keyboard.press('Escape');

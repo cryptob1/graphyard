@@ -15,6 +15,10 @@
 Description=Graphyard master coordination loop
 After=network-online.target
 Wants=network-online.target
+# Never give up restarting it. Under the default start limit a loop that crashed five times inside
+# ten seconds would be left dead, and a dead coordinator makes no decision at all until a person
+# notices — exactly what this unit exists to prevent.
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple
@@ -24,6 +28,13 @@ ExecStart=/usr/bin/node %h/code/graphyard/bin/graphyard.mjs master run
 # repeating. Give it time to finish the action in flight before SIGKILL.
 Restart=always
 RestartSec=10
+# A hung cycle leaves the process alive and the pipeline silent, which no Restart= setting notices.
+# The loop sends a keep-alive after every completed cycle, so systemd restarts it when the cycles
+# stop rather than when the process does. The window must stay longer than two cycle intervals
+# (run.intervalSeconds, 20 by default) or a healthy loop would be restarted mid-cycle; the loop
+# records that mismatch by name in `master status` instead of obeying it.
+WatchdogSec=180
+NotifyAccess=all
 TimeoutStopSec=120
 KillSignal=SIGTERM
 StandardOutput=journal
