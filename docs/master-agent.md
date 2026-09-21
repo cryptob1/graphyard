@@ -218,10 +218,11 @@ killed daemon on the same host is reclaimed as soon as that process is gone.
 
 Each cycle reads the repository's Git worktree inventory. A registered worktree whose path is
 missing or hidden — a proof worktree a producer removed without `git worktree remove`, or one
-under a `/tmp` this process cannot see — is compared by its registered path and never stops the
-loop. The example systemd unit does not set `PrivateTmp`: producer sessions run in Herdr, outside
-the unit, and create their detached proof worktrees under the shared `/tmp`, which a private one
-would hide from the loop.
+under a mount this process cannot see — is compared by its registered path and never stops the
+loop. Producer and reviewer sessions run in Herdr, outside the unit, and create their detached
+checkouts under the [managed worktree root](#the-managed-worktree-root); a unit that hides that
+directory from the loop (`ProtectHome`, a private mount) would hide every checkout the loop has to
+reclaim, so the example systemd unit sets neither.
 
 ### Worktree disk
 
@@ -271,8 +272,9 @@ worktrees a reclaim would empty. Below the configured threshold it raises an att
 the master, naming the free space, what a reclaim would return and how to get more of it, while
 writes still succeed. A write that does fail for want of room — a full volume or an exhausted user
 quota, reported by the kernel or only in a command's own output (`pwd: write error: Disk quota
-exceeded`) — is named as exactly that, with the same guidance, rather than left as an unexplained
-command error.
+exceeded`) — is named as exactly that, with the path that could not be written, the same guidance
+and the reclaim command (`graphyard master run --once`), rather than left as an unexplained command
+error.
 
 A running loop is already reclaiming, so the lever is `run.reclaimIdleHours`: lowering it makes more
 worktrees disposable on the next cycle. With no loop running, `master run --once` reclaims and
@@ -287,6 +289,58 @@ next cycle:
 | `run.reclaimIdleHours` | How long a worktree may sit untouched before its dependency directories count as disposable, 0.25–720; default 3 |
 | `run.diskThresholdGb` | Free space below which `master status` raises disk pressure, 0.1–10000; default 10 |
 | `run.acknowledgementSeconds` | How long a launched reviewer or producer session may show no activity before the loop re-prompts it once, and how long after that it is recorded as never started, 30–900; default 90. An unacknowledged session still in Herdr is never settled sooner, whatever the finished-session grace (see [acknowledgement](#acknowledgement-the-one-re-prompt-and-never-started)) |
+
+### The managed worktree root
+
+Proof and review checkouts are not assignment worktrees, and they do not belong in the system
+temporary directory: `/tmp` is a tmpfs on many hosts, so each checkout there is paid for in memory —
+150–200 MB once it has installed — and shares one quota with everything else that writes there.
+Graphyard owns one **managed worktree root** on durable storage instead, and every ephemeral
+checkout is created under it:
+
+- **Where.** `run.worktreeRoot` in `.graphyard/master.json`, an absolute path. Unset, it is
+  `worktrees/REPOSITORY-ID` inside the installation's data directory — `$GRAPHYARD_DATA_HOME`, or
+  `~/.local/share/graphyard` — one root per checkout of the managed repository, so two installations
+  on one host never reclaim each other's sessions. It is never derived from the temporary directory,
+  and never from `XDG_DATA_HOME`, which an OpenCode session repoints at its account home.
+- **Still outside every worktree.** The root, and each directory allocated under it, passes the same
+  check as every credential path: a root inside the repository, an assignment worktree or another
+  checkout is refused before anything is created there.
+- **One directory per session.** A launch allocates `graphyard-proof-KEY-SHA-ID` (or
+  `graphyard-review-…`) under the root and records it on the session. The detached worktree is
+  `checkout` inside it; the install, build output and evidence files stay beside it. The session's
+  prompt names that path and no other, a sandboxed runtime may write there and to the shared Git
+  directory only, and a reviewer's harness allows `git worktree add` at that one path.
+- **Removed when the session resolves.** Completed, failed, expired or cancelled — and a launch that
+  never became a session — the worktree's registration and the whole directory go, dependency
+  directory included. A directory that could not be removed is noted on the record as
+  `checkoutFailure` and taken back by the reclaim pass.
+- **Reclaimed when a session died.** The loop's reclaim step also removes every session directory no
+  pending producer or reviewer record owns — what a crash between launch and ledger write, or a host
+  that went down mid-proof, leaves behind — once it is fifteen minutes old. Only a directory with a
+  Graphyard session name directly inside the root is ever removed. `graphyard master run --once`
+  runs the pass immediately; `daemon.reclaim.checkouts` in `master status` says what it took back.
+  The same pass sweeps neighbouring default roots whose repository checkout is gone, and only when
+  they hold nothing: every removal there is a plain `rmdir`, so a root that contains a file is never touched.
+
+**Preflight.** `master init` verifies the root before it writes anything, and every launch repeats
+the check: a tmpfs or ramfs is refused with the reason and the setting to change, and so is a volume
+with less than `run.worktreeRootMinFreeGb` free. A root that does not exist yet is judged by its
+nearest existing ancestor, and created by the first launch.
+
+**Before the volume or quota is exhausted.** `master status` reports the root under
+`disk.worktreeRoot` — free space, size, checkouts, and how many no live session owns — and raises an
+attention item owned by the master, naming `graphyard master run --once`, when free space falls
+below the minimum or the root reaches four fifths of `run.worktreeRootBudgetGb`. The budget exists
+because a user quota is invisible in a volume's free space: the host that prompted this ran out at
+24 GB of a 32 GB tmpfs. A root found on a tmpfs — a configuration that predates the check — is an
+attention item too.
+
+| Setting | Meaning |
+| --- | --- |
+| `run.worktreeRoot` | Absolute path of the managed worktree root, on durable storage outside every worktree; default `worktrees/REPOSITORY-ID` in the data directory |
+| `run.worktreeRootMinFreeGb` | Free space setup and every launch require of the root's volume, and below which `master status` raises attention, 0.1–10000; default 2 |
+| `run.worktreeRootBudgetGb` | Size the root may reach; `master status` raises attention at four fifths of it, 0.1–10000; default 10 |
 
 ### Scope requests the loop decides
 
@@ -398,7 +452,8 @@ request that has no session yet:
   identity that has implemented the item — a profile whose principal has held an assignment on
   the item is skipped for that item for the same reason. The session receives the credential as a
   path in `GRAPHYARD_TOKEN_FILE`, never as a value, works in a detached worktree of the exact
-  head outside every Graphyard worktree, and submits each proof with `graphyard evidence` bound
+  head in the session directory allocated for it under the
+  [managed worktree root](#the-managed-worktree-root), outside every Graphyard worktree, and submits each proof with `graphyard evidence` bound
   to that exact head, base and policy revision — a failing run as `fail`, never omitted. With
   fewer free producer profiles than groups the remaining groups wait and `master status` says
   so; add profiles for parallelism.
@@ -661,7 +716,7 @@ The trade-off is real: an `auto` session runs whatever it decides to run inside 
 
 `master worker add` and `master reviewer add` print the resolved launch contract, so what a profile will start with is visible before it starts.
 
-Each of these is the runtime's broadest non-interactive mode. Codex keeps its sandbox, widened to exactly what the role needs: network access for every role, the repository's shared Git directory for a worker (its worktree commits there), and `/tmp` plus that Git directory for a producer (it builds in a detached worktree under `/tmp`). The master session gets the same treatment: `master start` launches it with its runtime's broadest mode, Codex widened to the private state beside the coordinator credential. Role credentials do not change with it — a worker still holds only its worker credential file, a reviewer only its hour-long reviewer token, a producer only its producer credential.
+Each of these is the runtime's broadest non-interactive mode. Codex keeps its sandbox, widened to exactly what the role needs: network access for every role, the repository's shared Git directory for a worker (its worktree commits there), and its own session directory under the [managed worktree root](#the-managed-worktree-root) plus that Git directory for a producer or a reviewer (a producer builds in a detached worktree there; a reviewer may read the exact head from one). The master session gets the same treatment: `master start` launches it with its runtime's broadest mode, Codex widened to the private state beside the coordinator credential. Role credentials do not change with it — a worker still holds only its worker credential file, a reviewer only its hour-long reviewer token, a producer only its producer credential.
 
 ## Independent review
 
@@ -765,7 +820,7 @@ Claude Code loads `.claude/settings.local.json` for every session started anywhe
 
 - **worker** — the same rules dispatch writes into the assigned worktree's own `.claude/settings.local.json`: it may `git push` its assigned branch (`origin BRANCH`, `-u`, `HEAD:BRANCH`), run its item's Graphyard commands and open its pull request; it may not force-push, push the base branch, rebase, merge, post a review or submit evidence. The worktree file alone is not enough — Claude Code still loads the repository's settings above it, master denies included — which is why the session is launched with its role file instead.
 - **reviewer** — may read the diff and post the one verdict it was launched for (`gh api --method POST repos/OWNER/REPO/pulls/N/reviews`); may not push, commit, claim, submit evidence, or edit files.
-- **producer** — may fetch, add and remove its detached worktree and submit evidence; may not push, commit, claim or post a review.
+- **producer** — may fetch, add and remove its detached worktree under the managed worktree root and submit evidence; may not push, commit, claim or post a review.
 
 Every role is denied reads of credential directories, `.graphyard/connection.json`, `credentials.json`, `github-app.json`, `*.pem` and `*.token`, and every raw merge. The master's own rules are unchanged: it still cannot push. Runtimes that do not read Claude settings (Codex, Cursor, opencode) inherit no master rule and are launched with their profile arguments unchanged.
 
