@@ -13,17 +13,14 @@ Every value comes from the append-only `events` ledger.
 - **Never counted:** work snapshots, claims, submissions and lease activity
 - **Delivered once:** decided across the whole ledger before any window applies
 
-**Clocks.** Only measurement relates GitHub's merge timestamp, the repository clock and a provider's clock. A delivery records:
+**Clocks.** Only measurement relates GitHub's merge timestamp, the repository clock and a provider's. A delivery records:
 
 - `delivery.mergedAt`: as GitHub reported it
 - `delivery.mergedAtRepository`: that instant on the repository clock, using the *lower bound* of the offset measured at merge verification, which refuses one wider than twenty seconds
 
 Every window, bucket and interval uses the repository instant, older deliveries the provider timestamp.
 
-**Intent-to-merge** runs from the earliest `create` event to the accepted merge timestamp.
-
-- **Median:** the ordinary middle value
-- **Records missing an endpoint or ordered wrongly:** excluded, never fabricated, both sample sizes reported
+**Intent-to-merge** runs from the earliest `create` event to the accepted merge timestamp, reported as the ordinary median; records missing an endpoint or ordered wrongly are excluded, never fabricated, with both sample sizes reported.
 
 **PR-to-production** runs from GitHub's observed pull-request `createdAt`, splits at the merge, and ends at the earliest successful production deployment independently recording containment of that exact merge SHA.
 
@@ -31,6 +28,4 @@ Every window, bucket and interval uses the repository instant, older deliveries 
 - **Ingestion refuses:** a bracket wider than twenty seconds, an inverted one, or one placing the clocks more than thirty days apart
 - **Post-merge:** a deployment counts when its latest bound reaches the merge instant, which clamps its lower bound, so a duration is never negative, published only to its endpoints' measurement precision
 
-## Bounds and states
-
-`GET /api/shipping-pulse` is authenticated and not offered to operator agents: their scoped API serves no repository-wide aggregate, their navigation hides the entry.
+`GET /api/shipping-pulse` is authenticated and not offered to operator agents: their scoped API serves no repository-wide aggregate, and their navigation hides the entry.

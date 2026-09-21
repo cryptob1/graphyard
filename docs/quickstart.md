@@ -7,13 +7,13 @@ For someone evaluating Graphyard on one machine: what to run before connecting a
 
 Requires Node 24, Git, Docker Engine and Docker Compose.
 
+Replace every example token in `.env` with a distinct random secret, and set `GITHUB_REPOSITORY` to a repository you own and can push to.
+
 ```sh
 git clone https://github.com/cryptob1/graphyard.git
 cd graphyard
 npm ci
 cp .env.example .env
-# Replace every example token with a distinct random secret, and set
-# GITHUB_REPOSITORY to a repository you own and can push to.
 docker compose up -d db
 npm run build
 npm start
@@ -21,7 +21,7 @@ npm start
 
 ## Propose the delivery workflow, then apply it
 
-`node "$GRAPHYARD_CLI" init --scan --url "$GRAPHYARD_URL"` reads package manifests, CI workflows, deploy configuration and test layout, writes one ignored file, `.graphyard/setup-proposal.json` ([a Node and Railway sample](../examples/setup-proposal.json)). Review, then apply with `init --scan --apply` ([what it proposes and reports as drift](operations-reference.md#setup-proposals-and-drift)).
+`node "$GRAPHYARD_CLI" init --scan --url "$GRAPHYARD_URL"` writes one ignored file, `.graphyard/setup-proposal.json` ([a Node and Railway sample](../examples/setup-proposal.json)). Review it, then `init --scan --apply` ([what it proposes and reports as drift](operations-reference.md#setup-proposals-and-drift)).
 
 ## Create, claim and submit
 

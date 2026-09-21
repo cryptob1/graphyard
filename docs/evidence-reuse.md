@@ -13,7 +13,7 @@ Every dispatch takes a durable sequence number under the coordination lock, repo
 
 ## Reuse policy
 
-Reuse is off until an operator publishes a `reuse` definition for the environment, through the `define` command and revision rules of environments, registrations and bundles:
+Reuse is off until an operator publishes a `reuse` definition for the environment, through the `define` command and the revision rules of environments, registrations and bundles:
 
 ```json
 {

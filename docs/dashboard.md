@@ -3,10 +3,7 @@
 
 For anyone looking at the control plane: what is being worked on, and what is stuck.
 
-- **Work:** open items, grouped by what needs attention
-- **Shipped:** every delivered item, newest first, its pull request and whether the deployment serves it
-- **Insights:** Shipping pulse, Flow analytics, Validation and Releases, as tabs
-- **Settings:** Test cases, Proof authority and Operator automation, as tabs
+**Work** holds open items grouped by what needs attention and **Shipped** every delivered item, newest first, with its pull request and whether the deployment serves it; **Insights** tabs Shipping pulse, Flow analytics, Validation and Releases, **Settings** tabs Test cases, Proof authority and Operator automation.
 
 ## The status sentence
 
@@ -27,11 +24,11 @@ Every card, and the top of every item view, carries one sentence from the item's
 - **Count row** is the one row of counts, stages in work order; an empty stage is not drawn, the row absent when nothing is open; a lapsed claim sits under *Needs a worker* whatever the stored stage says; clicking a stage filters the lists, again clears; *Show times* adds the oldest item and the p50/p95 per drawn stage; delivered work never appears
 - **Lists** show *Stuck* first, then *In progress* and *Needs a worker*, oldest first, *Not started* collapsed; only *Stuck* carries a count: items, not gate reasons; *Shipped this week* the last seven days
 - **Board view** draws a column for every open stage, empty ones included, headed by the stage name alone
-- **One source:** `homeNumbers` in `web/home-numbers.ts` returns one field per number drawn; `unit:home-numbers-reconcile`, `unit:work-page-single-count-row`, `unit:work-page-no-derived-totals` and `integration:work-page-density` hold the page to it
+- **One source:** `homeNumbers` in `web/home-numbers.ts` returns one field per number drawn, and `unit:home-numbers-reconcile`, `unit:work-page-single-count-row`, `unit:work-page-no-derived-totals` and `integration:work-page-density` hold the page to it
 - **Item view** opens with the status sentence, owner, pull request and the one blocker
 - **Steps** lists the gates in order
 - **What must be true** lists each acceptance criterion once with one marker per proof: ✓ passed, ○ pending, × failed or withdrawn
-- **More details** holds the rest: description and metadata, policy and revision, worker, assignment and workspaces, coordination diagnosis, file overlaps, merge-queue position, review provider, raw gate reasons, proof details, bootstrap obligations, observed delivery, evidence with artifacts and history; an admin session gets an **Edit** menu for the review provider, a fresh review and requirement revisions.
+- **More details** holds the rest: metadata, policy and revision, worker, assignment and workspaces, coordination diagnosis, file overlaps, merge-queue position, review provider, raw gate reasons, proof details, bootstrap obligations, observed delivery, evidence with artifacts, and history; an admin session gets an **Edit** menu for the review provider, a fresh review and requirement revisions.
 
 ## Candidate links and definitions
 
@@ -40,9 +37,6 @@ Every card, and the top of every item view, carries one sentence from the item's
 - **Unconfigured or failing validation:** renders as selectable plain text
 - **A technical word** carries a hover definition from one interface glossary; a test reads each default view as a newcomer, failing on any abbreviation, proof name or commit shown without its definition
 
-## Connection and keyboard behaviour
+## Connection
 
-- **Access token:** verified before any work or status displays; a rejected one returns to the sign-in form with an error
-- **Polling failures:** keep the last snapshot with a stale-data warning, retrying every five seconds
-- **Snapshot:** informational; the server authorizes every mutation
-- **The dashboard's 300-event display limit** never truncates the ledger
+The access token is verified before any work or status displays, a rejected one returning to the sign-in form with an error. A polling failure keeps the last snapshot with a stale-data warning and retries every five seconds; the snapshot is informational, the server authorizes every mutation, and the 300-event display limit never truncates the ledger.

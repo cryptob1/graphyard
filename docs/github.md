@@ -7,18 +7,17 @@ A dedicated GitHub App, installation token minted from its private key and refre
 
 ## Create and install the App
 
-- **Personal account:** `graphyard github-setup HTTPS_URL` registers the App through a local manifest callback, saves its credentials ([onboarding](onboarding.md#2-connect-github)).
+- **Personal account:** `graphyard github-setup HTTPS_URL` registers the App through a local manifest callback and saves its credentials ([onboarding](onboarding.md#2-connect-github)).
 - **Organization account:** create by hand, installed only on the managed repository:
   - **Webhook:** `https://YOUR-HOST/api/github/webhook` and random secret
   - **Permissions:** [declared](#app-permissions)
   - **Events:** Pull request, Pull request review, Check run, Check suite, Issue comment, Push
   - **Variables:** generate a private key, set `GITHUB_APP_ID`, `GITHUB_INSTALLATION_ID`, `GITHUB_PRIVATE_KEY` (full PEM, secret), `GITHUB_WEBHOOK_SECRET`, `GITHUB_REPOSITORY` and `GITHUB_BASE_BRANCH`, redeploy
-- **A webhook ping proves nothing:** submit a test pull request, inspect the job and check.
-- **A personal access token is no substitute:** the required check must be bound to a specific producer.
+- **A webhook ping proves nothing:** submit a test pull request, inspect the job and check. A personal access token is no substitute: the required check must be bound to a specific producer.
 
 ## App permissions
 
-Every permission a Graphyard App holds is declared once, in `src/github-permissions.ts`, with the feature needing it; manifest, tables below, preflight, job holds and `--update-permissions` migration read it. Control plane first, reviewer App second.
+Every permission a Graphyard App holds is declared once in `src/github-permissions.ts` with the feature needing it; manifest, tables below, preflight, job holds and the `--update-permissions` migration read it. Control plane first, reviewer App second.
 
 | Permission | Access | Needed to |
 | --- | --- | --- |
@@ -49,18 +48,18 @@ Every permission a Graphyard App holds is declared once, in `src/github-permissi
 
 ### Migrating an existing App
 
-GitHub offers no API for changing a registered App's permissions; every installation must accept the change.
+GitHub offers no API for changing a registered App's permissions: every installation must accept it.
 
-- **`github-setup --update-permissions [--wait 600] [--reviewer NAME]`:** on the machine holding `.graphyard/github-app.json`, reads both back, prints remaining steps, verifies acceptance, exits nonzero while anything remains
+- **`github-setup --update-permissions [--wait 600] [--reviewer NAME]`:** on the machine holding `.graphyard/github-app.json`; reads both back, prints remaining steps, verifies acceptance, exits nonzero while anything remains
 - **`--reviewer`:** reports a reviewer App's excess grants instead
 - **The master does both halves:** `master browser app-permissions` raises the declared set, `master browser installation-accept` accepts the request, `master browser protection` reaches settings the API cannot
 
 ## The reviewer App
 
-- Independent review uses a **second, separate App**: control-plane App observes and publishes the gate check, reviewer App reads code and posts reviews; binding the control-plane App as reviewer is refused.
+- Independent review uses a **second, separate App**: the control-plane App observes and publishes the gate check, the reviewer App reads code and posts reviews; binding the control-plane App as reviewer is refused.
 - **Register:** `master reviewer setup [--name NAME] [--deployment HTTPS_ORIGIN] [--port PORT]` (default the master's URL and 4312), or by hand with Metadata read, Contents read, Pull requests write and Issues read.
 - **Bind an existing App:** `master reviewer bind FILE --key-stdin`, refusing an installation that can write code, checks or administration.
-- Each `master review GY-N` mints a repository-scoped token with `contents: read` and `pull_requests: write` for at most **one hour**, refuses one reporting longer life or broader permissions, removes it when the verdict closes the session.
+- Each `master review GY-N` mints a repository-scoped token with `contents: read` and `pull_requests: write` for at most **one hour**, refuses one reporting longer life or broader permissions, and removes it when the verdict closes the session.
 - A review by `SLUG[bot]` on the exact head is an ordinary approval satisfying the native requirement and Graphyard's gate, both still requiring current head and an author other than the reviewer.
 
 ### Quota failover
@@ -75,8 +74,8 @@ GitHub offers no API for changing a registered App's permissions; every installa
 
 ### Dismissed approvals and unanswered requests
 
-- **A dismissed approval is not an answer:** `dismiss_stale_reviews`, a recomputed merge base or a manual dismissal withdraws one, the gate goes on refusing, and the session is recorded `failed` and unanswered, with the cause, relaunched on the usual wait. Dismissed *with the head moved* cancels that request and reviews the new head afresh; dismissed *on an unchanged candidate* reviews the same commit again, with no new head and no rework round. A relaunch skips that head's earlier verdicts, and a dismissal after a session closed reopens its record while the request stands
-- **Unanswered requests are attention, not silence:** only an `APPROVED` or `CHANGES_REQUESTED` verdict answers a request, and nothing follows a settled session, so `master status` names each settled-but-unanswered request in `attentionItems` with the verdict, how long it has stood and the command that answers it, counts them in `counts.dispatchUnanswered` apart from `counts.dispatchRunning`, and `master run` reports it `waiting`. `master review GY-N [PROFILE]` forces the next attempt against the open request for the exact head (recorded under its `requestId`, earlier sessions kept); a head with no open request records none, and a producer request in that state is recovered with `master decide GY-N rework REASON`
+- **A dismissed approval is not an answer:** `dismiss_stale_reviews`, a recomputed merge base or a manual dismissal withdraws one, the gate goes on refusing, and the session is recorded `failed` and unanswered with the cause, relaunched on the usual wait. Dismissed *with the head moved* cancels that request and reviews the new head afresh; dismissed *on an unchanged candidate* reviews the same commit again, no new head and no rework round. A relaunch skips that head's earlier verdicts; a dismissal after a session closed reopens its record while the request stands
+- **Unanswered requests are attention, not silence:** only an `APPROVED` or `CHANGES_REQUESTED` verdict answers a request, and nothing follows a settled session, so `master status` names each settled-but-unanswered request in `attentionItems` with the verdict, how long it has stood and the command that answers it, counts them in `counts.dispatchUnanswered` apart from `counts.dispatchRunning`, and `master run` reports it `waiting`. `master review GY-N [PROFILE]` forces the next attempt against the exact head's open request (its `requestId`, earlier sessions kept); a head with no open request records none, a producer request in that state is recovered with `master decide GY-N rework REASON`
 
 ## Require the check
 
@@ -89,12 +88,12 @@ On the managed base branch:
 - disable force pushes and branch deletion
 - remove bypass privileges from worker identities
 
-Graphyard reads classic protection, refusing its merge gate unless these settings are present, conservatively on ruleset-only protection; `master protection --apply` and `master browser protection` keep protection consistent with open review policies.
+Graphyard reads classic protection, refusing its merge gate unless these settings are present and conservatively on ruleset-only protection; `master protection --apply` and `master browser protection` keep it consistent with open review policies.
 
 ### What the merge gate checks
 
 - **Pull request:** in the configured repository, targeting the configured base branch, head branch matching the workspace registered for the submission.
-- Every configured CI check name passed from an approved CI App ID (`GITHUB_CI_APP_IDS`, default `15368` for GitHub Actions); pending, skipped, neutral, cancelled and failing checks do not; a right-named check from an unknown App cannot satisfy policy.
+- Every configured CI check name passed from an approved CI App ID (`GITHUB_CI_APP_IDS`, default `15368` for GitHub Actions); pending, skipped, neutral, cancelled and failing checks do not, nor a right-named check from an unknown App.
 - Required independent review approves the current head; unresolved change requests refuse.
 - Each acceptance proof has trusted evidence for the current head/base/policy tuple: pass result, nonzero executed count, zero skipped count.
 - GitHub says the pull request is mergeable, not a draft; required protection is independently observed.
@@ -108,8 +107,8 @@ Graphyard reads classic protection, refusing its merge gate unless these setting
 - **Base tip:** read from `refs/heads/<base>`, never cached `baseRefOid`
 - **No administrative bypass:** Done follows only an independently observed matching merge
 - **Protocol mismatch:** a CLI speaking a newer merge protocol than the deployed server refuses with `server runs <sha>, CLI expects <sha>: deploy main first`
-- **One executor per execution:** the instance that acquired an execution owns it: the loop is one instance per process, each `master merge` one named by its request id, so a replay under the same `GRAPHYARD_REQUEST_ID` resumes its own; the engine records the owner as `principal#instance`, refuses `merge-verify`, `merge-commit` and `merge-cancel` from any other, even under the same credential
-- **Stand-down:** `master merge GY-N` beside a running loop is safe. An executor finding an execution another instance holds refuses before acquiring anything (`merge execution … is held by graphyard-master#daemon-… until …; this executor stands down without cancelling it`), as does a mid-flight `Merge execution was already verified` or `already committed` refusal. Never retry it against the holder or resolve it by hand: an unfinished execution lapses at expiry, reconciliation clears it, the next cycle attempts afresh
+- **One executor per execution:** the instance that acquired it owns it — the loop one instance per process, each `master merge` one named by its request id, so a replay under the same `GRAPHYARD_REQUEST_ID` resumes its own; the engine records the owner as `principal#instance` and refuses `merge-verify`, `merge-commit` and `merge-cancel` from any other, even under the same credential
+- **Stand-down:** `master merge GY-N` beside a running loop is safe. An executor finding an execution another instance holds refuses before acquiring anything (`merge execution … is held by graphyard-master#daemon-… until …; this executor stands down without cancelling it`), as does a mid-flight `Merge execution was already verified` or `already committed`. Never retry against the holder or resolve it by hand: an unfinished execution lapses at expiry, reconciliation clears it, the next cycle attempts afresh
 
 ## Merge queue
 
@@ -117,13 +116,13 @@ Graphyard serializes the final hop through one queue, so no merge invalidates ca
 
 - **Entry:** when a candidate passes its own gates; membership is derived, never requested
 - **Nobody can** insert an entry, hold a position, reorder the queue or merge past the head
-- **A merge moves the base** under every candidate still short of the queue, so the control plane republishes those heads on the moved tip itself, carries what the move did not touch
+- **A merge moves the base** under every candidate still short of the queue, so the control plane republishes those heads on the moved tip itself, carrying what the move did not touch
 - **[Merge-queue bindings](protocol/merge-queue-binding.md):** what a candidate is bound to, when a [base refresh](protocol/merge-queue-binding.md#base-refresh) or the queue's tip carries a review or proof, what a refresh conflict costs
 
 ## Trusted producers, smoke proof and review providers
 
 - **A green job** proves a named check reported success, not that every behavioural criterion holds.
-- **A dedicated producer** reads the report, verifies the code under test, sends evidence with its own credential, granted only the proof names it may produce ([proofs in CI](#proofs-in-ci), [CI-produced evidence](protocol/evidence.md#ci-produced-evidence)).
+- **A dedicated producer** reads the report, verifies the code under test and sends evidence with its own credential, granted only the proof names it may produce ([proofs in CI](#proofs-in-ci), [CI-produced evidence](protocol/evidence.md#ci-produced-evidence)).
 - **[Evidence](protocol/evidence.md#the-post-deployment-smoke-proof):** the post-deployment smoke proof
 - **[Review providers](protocol/github-webhook.md):** `github`, `codex` and `agent`
 
@@ -132,21 +131,13 @@ Graphyard serializes the final hop through one queue, so no merge invalidates ca
 - Every `unit:*` and `integration:*` proof with a contract on `main` also runs as trusted CI, through one protected workflow on every push to a `graphyard/*` branch with an open pull request into the base branch.
 - **Trigger:** `pull_request_target`, so GitHub takes workflow file and harness checkout from the default branch; the candidate is only fetched into an isolated build context.
 - **A queue tip or [base refresh](protocol/merge-queue-binding.md#base-refresh)** is committed onto the pull-request branch, so the same `synchronize` trigger runs it on the tip that will land.
-- **Jobs:** plan enumerates the item's proofs, exercise jobs run one per proof in parallel holding no secret, publish submits each report through the [CI producer](deployment.md#ci-producer), re-verified against the GitHub job ([CI-produced evidence](protocol/evidence.md#ci-produced-evidence)).
+- **Jobs:** plan enumerates the item's proofs; exercise runs one per proof in parallel holding no secret; publish submits each report through the [CI producer](deployment.md#ci-producer), re-verified against the GitHub job ([CI-produced evidence](protocol/evidence.md#ci-produced-evidence)).
 - Dependencies, database image and candidate layers are cached.
 - Manual proofs stay producer sessions started at submit, the deploy smoke proof after delivery.
 
 ## Enforcement boundary
 
-No transaction spans both systems: the ledger changes immediately, check publication goes through a separate API, so a refusal can precede revocation of a previously successful check; GitHub never expires a check when Graphyard goes offline ([the merge execution boundary](architecture.md#the-merge-execution-boundary)).
+No transaction spans both systems: the ledger changes immediately and check publication goes through a separate API, so a refusal can precede revocation of a previously successful check, and GitHub never expires a check when Graphyard goes offline ([the merge execution boundary](architecture.md#the-merge-execution-boundary)).
 
 - **Rate limit:** 429, or 403 carrying `x-ratelimit-remaining: 0`, `Retry-After` header or rate-limit message, pauses that process's client for at least a minute
 - **Permission refusal:** 401, or 403 without those signals, never pauses it
-
-## Troubleshooting
-
-- **Disconnected, or a job shows 401:** App ID, installation ID, PEM secret, server restart; a rejected key is a refusal, not a pause
-- **403 or held job:** `appPermissions` in `/api/status`, then [accept the request](#migrating-an-existing-app)
-- **Protection gate refuses:** check name, App binding, `strict` left enabled, admin enforcement, force and delete settings
-- **Acceptance refuses despite green CI:** proof names, producer grant, candidate SHA, base SHA, policy revision, skipped count
-- **PR changed while observed, or no webhook update:** ordinary concurrency retry; signature secret and job errors, polling as fallback

@@ -11,13 +11,15 @@ import { dispatchOrder, dispatchOverlap, resourceConflicts, scopeBreadth } from 
 import type { ConflictReport } from './conflicts.js';
 import { mergeOrder } from './delegation.js';
 import { launchPlan, masterHarnessPlan, writeHarnessPermissions, type HarnessPlan, type HarnessRule } from './harness.js';
-import { CHECK_NAME, carriedApproval, deliveryState, deploySmokeRequired, describeQueueBinding, evidenceIndependenceRefusals, exhaustedReviewerProfiles, nativeReviewRequired, postDeployMs, productionLatencyMs, providerDelayAfterVerification, reviewerProfileFor, reviewProviderOf, rollbackGuidance, standingEscalations, type CarriedApproval, type QueueBindingReport, type Work } from './model.js';
+import { CHECK_NAME, carriedApproval, escalationTriggers, deliveryState, deploySmokeRequired, describeQueueBinding, evidenceIndependenceRefusals, exhaustedReviewerProfiles, nativeReviewRequired, postDeployMs, productionLatencyMs, providerDelayAfterVerification, reviewerProfileFor, reviewProviderOf, rollbackGuidance, standingEscalations, type CarriedApproval, type QueueBindingReport, type Work } from './model.js';
 import { containmentAttestation, containmentGraceMs, containmentSettlementRefusals, containmentVerificationSchema, type ContainmentVerification } from './quarantine.js';
 import { probeSupervisorAbsence } from './containment-probe.js';
 import { baseRefreshConflict, currentBaseRefreshCarry, pendingBaseRefresh, predictQueue, refusedReconciliation, unpublishableEntry, type QueuePlacement } from './merge-queue.js';
 import { MERGE_PROTOCOL } from './protocol-version.js';
 import { attentionLines, type ProductionReport } from './production-watch.js';
+import { allocateSessionCheckout, inspectWorktreeRoot, reclaimCommand, removeSessionCheckout, verifyWorktreeRoot, worktreeRoot, worktreeRootBudgetBytes, worktreeRootConcerns, worktreeRootMinFreeBytes, type CheckoutReclaimReport, type FilesystemProbe, type SessionCheckout, type WorktreeRootHealth } from './install/worktree-root.js';
 import { pipelineSpeed, pipelineSpeedSummary } from './pipeline-speed.js';
+import { contextFingerprint, escalationAction, followPrecedent, handleEscalation, type EscalationContext } from './model/escalation-context.js';
 
 const safeEnvironment = z.record(
   z.string().regex(/^[A-Z_][A-Z0-9_]*$/)
@@ -130,6 +132,13 @@ export const masterRunSchema = z.object({
   // volume raises the threshold without restarting the loop.
   reclaimIdleHours: z.number().min(0.25).max(720).optional(),
   diskThresholdGb: z.number().min(0.1).max(10_000).optional(),
+  // The managed worktree root every proof and review checkout is created under: an absolute path
+  // on durable storage outside every worktree (default: the installation's data directory), the
+  // free space setup and each launch require of its volume, and the size the root may reach before
+  // `master status` asks for a reclaim — a user quota is invisible in the volume's free space.
+  worktreeRoot: z.string().trim().min(1).max(1000).refine(isAbsolute, 'worktreeRoot must be an absolute path').optional(),
+  worktreeRootMinFreeGb: z.number().min(0.1).max(10_000).optional(),
+  worktreeRootBudgetGb: z.number().min(0.1).max(10_000).optional(),
   // An account whose provider usage reached this percentage of any window is skipped at launch:
   // a session started just below a hard limit would stall mid-task.
   quotaCeilingPercent: z.number().int().min(50).max(100).optional(),
@@ -293,12 +302,23 @@ async function repositoryWorktrees(root: string) {
   } catch { throw new Error('Cannot verify credential location because the complete Git worktree inventory is unavailable'); }
   if (!worktrees.length) throw new Error('Cannot verify credential location because Git returned an empty worktree inventory');
   // A registered worktree whose path is missing or hidden (a removed proof worktree, or one under
-  // a /tmp this process cannot see) is compared by its registered path: it cannot be resolved,
+  // a mount this process cannot see) is compared by its registered path: it cannot be resolved,
   // but a target lexically inside it is still refused, and it never stops the loop.
   return Promise.all(worktrees.map(worktree => realpath(worktree).catch(() => worktree)));
 }
-export async function assertOutsideWorktrees(root: string, target: string, label: string) {
-  const canonicalTarget = await realpath(target);
+/**
+ * Where a path is, or would be created: a target that does not exist yet is judged by its nearest
+ * existing ancestor, so a directory can be refused before anything is written into a worktree.
+ */
+async function canonicalLocation(target: string) {
+  const missing: string[] = [];
+  for (let current = resolve(target); ; current = dirname(current)) {
+    try { return resolve(await realpath(current), ...missing); }
+    catch (error: any) { if (error?.code !== 'ENOENT' || dirname(current) === current) throw error; missing.unshift(basename(current)); }
+  }
+}
+export async function assertOutsideWorktrees(root: string, target: string, label: string, options: { create?: boolean } = {}) {
+  const canonicalTarget = options.create ? await canonicalLocation(target) : await realpath(target);
   const worktrees = await repositoryWorktrees(root);
   for (const worktree of worktrees) {
     const fromRoot = relative(worktree, canonicalTarget);
@@ -365,7 +385,7 @@ async function atomicPrivateText(file: string, value: string) {
   await chmod(file, 0o600);
 }
 
-export async function setupMaster(root: string, input: { url: string; token: string; cliPath: string; hostId?: string; herdrWorkspace?: string; credentialDirectory?: string; autoMerge?: boolean; mergeMethod?: 'merge' | 'squash' | 'rebase'; run?: Partial<MasterRun>; browser?: MasterBrowser }, fetcher: typeof fetch = fetch) {
+export async function setupMaster(root: string, input: { url: string; token: string; cliPath: string; hostId?: string; herdrWorkspace?: string; credentialDirectory?: string; autoMerge?: boolean; mergeMethod?: 'merge' | 'squash' | 'rebase'; run?: Partial<MasterRun>; browser?: MasterBrowser }, fetcher: typeof fetch = fetch, dependencies: { probe?: FilesystemProbe } = {}) {
   const url = serverOrigin(input.url); const token = input.token.trim();
   const workerConnection = await loadConnection(root);
   if (workerConnection && workerConnection.url !== url) throw new Error('Worker connection uses another Graphyard server; migrate the repository connection before master setup');
@@ -387,6 +407,12 @@ export async function setupMaster(root: string, input: { url: string; token: str
   try { previous = await readMasterConfig(root); } catch (error: any) { if (error.code !== 'ENOENT' && !/ENOENT/.test(error.message)) throw error; }
   if (previous && (previous.url !== url || previous.repository.toLowerCase() !== detected.repository.toLowerCase())) throw new Error('Existing master configuration belongs to another server or repository');
   const repositoryName = detected.repository.split('/').at(-1)!.replace(/[^a-zA-Z0-9._-]/g, '-');
+  // The managed worktree root is verified before anything is written. Every proof and review
+  // checkout is created under it, so a root inside a worktree, on a tmpfs, or on a volume without
+  // the configured room is refused here, with the reason, rather than found out mid-proof.
+  const managedRoot = worktreeRoot(root, { repository: detected.repository, run: { ...previous?.run, ...input.run } });
+  await assertOutsideWorktrees(root, managedRoot, 'The managed worktree root', { create: true });
+  const verifiedRoot = await verifyWorktreeRoot(managedRoot, { minFreeBytes: worktreeRootMinFreeBytes({ run: { ...previous?.run, ...input.run } }), probe: dependencies.probe });
   const requestedCredentialDirectory = resolve(input.credentialDirectory ?? process.env.GRAPHYARD_CONFIG_HOME ?? resolve(homedir(), '.config/graphyard'), 'masters');
   if (requestedCredentialDirectory === resolve(root) || requestedCredentialDirectory.startsWith(`${resolve(root)}/`)) throw new Error('Coordinator credentials must be stored outside the managed repository');
   await mkdir(requestedCredentialDirectory, { recursive: true, mode: 0o700 });
@@ -424,6 +450,7 @@ export async function setupMaster(root: string, input: { url: string; token: str
     return { environment: environment.name, kind: environment.kind, home: environment.home, loggedIn: health.loggedIn, login: health.login };
   }));
   return { repository: config.repository, server: config.url, role: status.actor.role, autoMerge: config.autoMerge, workers: config.workers.length, run: config.run, browser: config.browser ?? null, config: '.graphyard/master.json', reviewer: config.reviewer ? `${config.reviewer.slug}[bot]` : null, attention,
+    worktreeRoot: { path: verifiedRoot.path, freeBytes: verifiedRoot.freeBytes, minFreeBytes: verifiedRoot.minFreeBytes, configured: !!config.run.worktreeRoot },
     agentEnvironments: { directory: environmentDirectory, discovered: environments },
     next: `${remedy ? `${remedy}, then ${start}` : start[0].toUpperCase() + start.slice(1)}; give the master its agent identities once with graphyard master autonomy --admin-token-stdin --apply` };
 }
@@ -753,7 +780,8 @@ export function agentLaunchPlan(kind: string | undefined, approvals: 'auto' | 'p
  * profile's arguments when they belong to that runtime, and the runtime's broadest approval mode.
  * Codex keeps its workspace sandbox, so the paths and network access the role needs are added to it:
  * a worker commits into the repository's shared Git directory and pushes; a producer builds in a
- * detached worktree under the temporary directory.
+ * detached worktree under the managed worktree root, and is given its own session directory there
+ * and nothing beside it.
  */
 export function accountLaunch(profile: { kind?: string; approvals: 'auto' | 'prompt'; agentArgs: string[]; environment: Record<string, string> }, account: AgentEnvironment | null, reach: { writable?: string[] } = {}) {
   const kind = account?.kind ?? profile.kind;
@@ -1430,12 +1458,24 @@ export function diskExhaustion(error: unknown): string | null {
   if (/disk quota exceeded/i.test(text)) return "the host's disk quota is exhausted (EDQUOT)";
   return null;
 }
-export const reclaimAdvice = 'the master loop reclaims the dependency directories of finished assignment worktrees on every cycle while free space is low; lower run.reclaimIdleHours in .graphyard/master.json to make more of them disposable, then retry';
-/** The same failure, named by its cause when the cause is exhausted disk and left alone otherwise. */
-export function writeFailure(error: unknown, action: string): Error {
+export const reclaimAdvice = `the master loop reclaims the dependency directories of finished assignment worktrees on every cycle while free space is low; lower run.reclaimIdleHours in .graphyard/master.json to make more of them disposable, then retry. ${reclaimCommand} reclaims immediately, ephemeral proof and review checkouts included`;
+/** The path a failed write was aimed at: the one the caller names, or the one the system call reported. */
+export function exhaustedPath(error: unknown, path?: string): string | null {
+  const reported = (error as { path?: unknown; dest?: unknown } | null);
+  return path ?? (typeof reported?.path === 'string' ? reported.path : typeof reported?.dest === 'string' ? reported.dest : null);
+}
+/** Disk exhaustion as one sentence: the condition, the path that could not be written, and the reclaim command. Null for any other failure. */
+export function diskExhaustionMessage(error: unknown, path?: string): string | null {
   const cause = diskExhaustion(error);
-  if (!cause) return error instanceof Error ? error : new Error(String(error));
-  return Object.assign(new Error(`${action} failed because ${cause}: ${reclaimAdvice}`), { code: (error as { code?: string } | null)?.code ?? 'ENOSPC', cause: error });
+  if (!cause) return null;
+  const at = exhaustedPath(error, path);
+  return `${cause}${at ? ` at ${at}` : ''}: ${reclaimAdvice}`;
+}
+/** The same failure, named by its cause when the cause is exhausted disk and left alone otherwise. */
+export function writeFailure(error: unknown, action: string, path?: string): Error {
+  const exhausted = diskExhaustionMessage(error, path);
+  if (!exhausted) return error instanceof Error ? error : new Error(String(error));
+  return Object.assign(new Error(`${action} failed because ${exhausted}`), { code: (error as { code?: string } | null)?.code ?? 'ENOSPC', cause: error });
 }
 
 /** Free space on the volume holding a path, as the kernel reports it to this user. */
@@ -1522,6 +1562,8 @@ export interface WorktreeReclaimReport {
   root: string; at: string; applied: boolean; scanned: number; idleMs: number;
   removed: string[]; kept: { path: string; disposition: ReclaimDisposition; detail: string }[];
   freeBefore: number | null; freeAfter: number | null; freedBytes: number; errors: string[];
+  /** What the same pass took back under the managed worktree root, when the loop ran it. */
+  checkouts?: CheckoutReclaimReport;
 }
 /**
  * Give the host back the dependency trees of finished assignments. The reclaimer removes nothing
@@ -1566,6 +1608,47 @@ export function diskPressureAttention(pressure: DiskPressure): AttentionItem[] {
   if (!pressure.low || pressure.freeBytes === null) return [];
   return [{ subject: 'disk', text: `${gigabytes(pressure.freeBytes)} free on ${pressure.path}, below the configured ${gigabytes(pressure.thresholdBytes)} threshold; ${pressure.reclaimable} of ${pressure.worktrees} assignment worktree(s) hold dependency directories a fresh install recreates. Reclaim them before the volume fills`,
     ...agentOwner('master', 'graphyard master run reclaims every cycle while free space is low (daemon.reclaim in master status says what it took back); lower run.reclaimIdleHours in .graphyard/master.json to make more of them disposable, and graphyard master run --once reclaims immediately when no loop is running') }];
+}
+
+/**
+ * The managed worktree root's attention items: a root on a tmpfs, a volume below its configured
+ * minimum, or a root that has grown to most of its budget. Each names the reclaim command, and
+ * each is raised while writes still succeed.
+ */
+export function worktreeRootAttention(health: WorktreeRootHealth): AttentionItem[] {
+  return worktreeRootConcerns(health).map(text => ({ subject: 'disk', text,
+    ...agentOwner('master', health.volatile && !health.low && !health.overBudget
+      ? 'Set run.worktreeRoot in .graphyard/master.json to an absolute path on durable storage, outside every worktree; master run adopts it on its next cycle'
+      : `${reclaimCommand} removes every ephemeral checkout no live session owns (graphyard master run does the same on every cycle while space is low); raise run.worktreeRootBudgetGb or move run.worktreeRoot in .graphyard/master.json if the live sessions alone need more room`) }));
+}
+
+/**
+ * Allocate one session's directory under the managed worktree root. The root is verified on every
+ * launch, not only at setup — a volume fills, and a configuration is edited — and the allocated
+ * directory is held to the same rule as every other path Graphyard owns: outside every worktree.
+ */
+export async function allocateManagedCheckout(root: string, config: MasterConfig, kind: 'proof' | 'review', key: string, sha: string, id: string, probe?: FilesystemProbe): Promise<SessionCheckout> {
+  const base = worktreeRoot(root, config);
+  await assertOutsideWorktrees(root, base, 'The managed worktree root', { create: true });
+  await verifyWorktreeRoot(base, { minFreeBytes: worktreeRootMinFreeBytes(config), probe });
+  let checkout: SessionCheckout;
+  try { checkout = await allocateSessionCheckout(base, kind, key, sha, id); }
+  catch (error) { throw writeFailure(error, `Allocating a ${kind} checkout under the managed worktree root`, base); }
+  try { await assertOutsideWorktrees(root, checkout.directory, 'An ephemeral checkout'); }
+  catch (error) { await removeSessionCheckout(root, base, checkout.directory).catch(() => {}); throw error; }
+  return checkout;
+}
+/** Remove a settled session's checkout; the reason when it could not be, never a throw. */
+export async function settleCheckout(root: string, directory: string | undefined, run?: (command: string, args: string[]) => string): Promise<string | null> {
+  if (!directory) return null;
+  try { await removeSessionCheckout(root, dirname(directory), directory, run); return null; }
+  catch (error) { return writeFailure(error, 'Removing the ephemeral checkout', directory).message.slice(0, 500); }
+}
+/** The managed worktree root as `master status` reports it, with the attention it raises. `sessions` are the review and producer records. */
+export async function managedRootStatus(root: string, config: MasterConfig, sessions: { state: string; checkout?: string }[], dependencies: Parameters<typeof inspectWorktreeRoot>[3] = {}) {
+  const live = sessions.filter(record => record.state === 'pending' && record.checkout).map(record => record.checkout!);
+  const health = await inspectWorktreeRoot(worktreeRoot(root, config), { minFreeBytes: worktreeRootMinFreeBytes(config), budgetBytes: worktreeRootBudgetBytes(config) }, live, dependencies);
+  return { health, attention: worktreeRootAttention(health) };
 }
 
 /**
@@ -1990,7 +2073,9 @@ function withMasterOwnedRules(plan: HarnessPlan, config: MasterConfig): HarnessP
  * lease, the session's own credential and branch protection remain the enforcement.
  */
 export type SessionRole = 'worker' | 'reviewer' | 'producer';
-export interface SessionHarnessInput { role: SessionRole; kind: string | undefined; cliPath: string; repository: string; baseBranch: string; credentialHome: string; credentialDirectories: string[]; branch?: string; pr?: number }
+export interface SessionHarnessInput { role: SessionRole; kind: string | undefined; cliPath: string; repository: string; baseBranch: string; credentialHome: string; credentialDirectories: string[]; branch?: string; pr?: number;
+  /** The detached checkout Graphyard allocated for a reviewer session under the managed worktree root. */
+  checkout?: string }
 export function sessionHarnessPlan(input: SessionHarnessInput): HarnessPlan {
   if (input.kind !== 'claude') return { harness: input.kind ?? 'unknown', file: null, allow: [], deny: [], manual: null, note: `${input.kind ?? 'This runtime'} does not load the repository's Claude Code settings, so it inherits no master rule; its own approval configuration applies.` };
   const cli = `node ${input.cliPath}`;
@@ -2033,6 +2118,10 @@ export function sessionHarnessPlan(input: SessionHarnessInput): HarnessPlan {
       { rule: 'Bash(gh pr diff:*)', why: 'Read the candidate diff.' },
       { rule: 'Bash(gh pr view:*)', why: 'Read the pull request and poll its mergeability before posting.' },
       ...(input.pr ? [{ rule: `Bash(gh api --method POST repos/${input.repository}/pulls/${input.pr}/reviews*)`, why: 'Post the one verdict this session was launched for; the master itself is denied every review call.' }] : []),
+      // Surrounding code is read from a detached checkout under the managed worktree root, which
+      // Graphyard allocates for the session and removes when it ends.
+      ...(input.checkout ? [{ rule: 'Bash(git fetch:*)', why: 'Fetch the exact head under review.' },
+        { rule: `Bash(git worktree add --detach ${input.checkout}:*)`, why: 'Check the exact head out, read-only, in the checkout Graphyard allocated for this session.' }] : []),
     ];
     deny = [...secrets, ...noPush,
       { rule: `Bash(${cli} evidence:*)`, why: 'A reviewer never submits evidence.' },
@@ -2813,7 +2902,46 @@ export async function launchApprover(root: string, work: Work, decision: string,
   return { agentName: name, work: work.key, decision, identity: config.approver!.id, pane: pane!, delivery, focusChanged: false };
 }
 
-export const autonomySubcommands = ['autonomy', 'create', 'release', 'unblock', 'requirements', 'decide', 'decisions', 'approve', 'approver', 'principals', 'restart', 'environments'] as const;
+/**
+ * A context the handler received is what the control plane assembled: the fingerprint covers
+ * every byte but itself, so a document altered or abridged on the way is refused before it is judged.
+ */
+export function verifiedContext(context: EscalationContext) {
+  const { fingerprint, ...document } = context;
+  if (contextFingerprint(document) !== fingerprint) throw new Error(`The escalation context for ${context.key} does not match its fingerprint ${fingerprint}; fetch it again from the control plane`);
+  return context;
+}
+/**
+ * Spawn a judging session for one escalation (GY-90). It is a fresh master: its whole input is
+ * the assembled context, written to one private file, and the escalation inside it. It holds no
+ * loop state, reads nothing else, and records its decision with `master decide … --precedent
+ * --context`, so the ledger carries the reason, the precedent it relied on and what it saw.
+ */
+export async function launchEscalationHandler(root: string, config: MasterConfig, context: EscalationContext, kind: NonNullable<WorkerProfile['kind']>, agents: HerdrAgent[], run?: (command: string, args: string[]) => string) {
+  await agentToken(root, config, 'operatorAgent');
+  const name = `graphyard-escalation-${context.key.toLowerCase()}-${context.escalation.trigger}`;
+  if (agents.some(agent => agent.name === name)) throw new Error(`Escalation handler ${name} is already visible in Herdr; let it finish or close it first`);
+  const directory = resolve(await localDirectory(root), 'escalations'); await mkdir(directory, { recursive: true, mode: 0o700 });
+  const file = resolve(directory, `${context.key}-${context.escalation.trigger}-${context.fingerprint.slice(0, 12)}.json`);
+  await atomicPrivateWrite(file, context);
+  const launch = agentLaunchPlan(kind, 'auto');
+  const cli = `node ${config.cliPath}`;
+  const prompt = `You are a Graphyard escalation handler spawned for the ${context.escalation.trigger} escalation on ${context.key} in ${config.repository}, acting as ${config.operatorAgent!.id}. Your entire input is the file ${file}: the context the control plane assembled for this decision — the repository's own operating rules and policy, the current goals and priorities, the item (requirements, the standing refusal, the candidate, its typed history) and precedent (earlier ${escalationAction} decisions with their reasons and outcomes). Read that file and nothing else: do not run status, events or any other read, do not open the repository, and hold no state beyond it. Decide whether the ${context.escalation.trigger} escalation should be resolved, following the precedent that applies and saying which. If it should, run ${cli} master decide ${context.key} ${escalationAction} '{"trigger":"${context.escalation.trigger}"}' --precedent DECISION_ID[,DECISION_ID] --context ${context.fingerprint} "YOUR REASON" exactly once; an independent approver judges it. If it should not, request nothing and state the reason in this tab. Never edit, push, merge, review, approve or submit evidence. Stop when the decision is recorded or declined.`;
+  let pane: string | undefined, tabId: string | undefined, delivery: RequestDelivery | undefined;
+  try {
+    const created = createdHerdrTab(herdrJson(['tab', 'create', ...(config.herdrWorkspace ? ['--workspace', config.herdrWorkspace] : []), '--cwd', root, '--label', `Escalation · ${context.key}`, '--env', `GRAPHYARD_URL=${config.url}`, '--env', 'GRAPHYARD_ESCALATION_HANDLER=1', '--env', `GRAPHYARD_HOST_ID=${config.hostId}`, ...Object.entries(launch.environment).flatMap(([key, value]) => ['--env', `${key}=${value}`]), '--no-focus'], run));
+    pane = created.pane; tabId = created.tab;
+    // The instruction is the session's own first request (GY-93), never pasted into it: a handler
+    // that refused a pasted prompt would record no decision and leave the escalation standing.
+    ({ delivery } = startAgentSession(name, kind, created.pane, launch.args, prompt, run));
+  } catch (error) {
+    if (pane || tabId) try { stopCreatedHerdrTab(pane, tabId, run); } catch { /* the launch error below is the report */ }
+    throw error;
+  }
+  return { agentName: name, work: context.key, trigger: context.escalation.trigger, fingerprint: context.fingerprint, context: file, identity: config.operatorAgent!.id, pane: pane!, delivery, focusChanged: false };
+}
+
+export const autonomySubcommands = ['autonomy', 'create', 'release', 'unblock', 'requirements', 'decide', 'decisions', 'approve', 'approver', 'principals', 'restart', 'environments', 'context', 'escalation'] as const;
 export interface AutonomyDependencies {
   coordinator: (path: string) => Promise<any>;
   readSecret: () => Promise<string>;
@@ -2870,10 +2998,32 @@ export async function runAutonomyCommand(root: string, config: MasterConfig, id:
   }
   if (id === 'decide') {
     const work = await item(args[0]); const action = args[1];
-    if (!action) throw new Error('Use master decide GY-N ACTION [JSON|@FILE] REASON');
-    const explicit = args[2] && /^[{@]/.test(args[2]);
-    const input = explicit ? await jsonArgument(args[2]) : {};
-    return call(await operator(), `work/${work.id}/decide`, { action, input: decisionInput(action, work, input), reason: reason(args.slice(explicit ? 3 : 2)) });
+    if (!action) throw new Error('Use master decide GY-N ACTION [JSON|@FILE] [--precedent ID[,ID]] [--context FINGERPRINT] REASON');
+    // A handler cites the decisions it followed and the fingerprint of the context it judged from.
+    const flags: Record<string, string> = {}; const rest: string[] = [];
+    for (let index = 2; index < args.length; index++) {
+      if (args[index] === '--precedent' || args[index] === '--context') { flags[args[index].slice(2)] = args[++index] ?? ''; continue; }
+      rest.push(args[index]);
+    }
+    const explicit = rest[0] && /^[{@]/.test(rest[0]);
+    const input = explicit ? await jsonArgument(rest[0]) : {};
+    return call(await operator(), `work/${work.id}/decide`, { action, input: decisionInput(action, work, input), reason: reason(rest.slice(explicit ? 1 : 0)),
+      ...(flags.precedent ? { precedent: flags.precedent.split(',').map(value => value.trim()).filter(Boolean) } : {}), ...(flags.context ? { context: flags.context } : {}) });
+  }
+  if (id === 'context' || id === 'escalation') {
+    // The assembled context, read from the control plane by key and nothing else — no snapshot,
+    // no status; `escalation` then spawns a fresh handler on it: the built-in precedent rule in
+    // this process, or a judging session of KIND.
+    if (!args[0]) throw new Error(`Use master ${id} GY-N [TRIGGER] [--budget N]${id === 'escalation' ? ' [precedent|AGENT_KIND]' : ''}`);
+    const rest: string[] = []; let budget: string | undefined;
+    for (let index = 1; index < args.length; index++) { if (args[index] === '--budget') budget = args[++index]; else rest.push(args[index]); }
+    const trigger = rest.find(value => (escalationTriggers as readonly string[]).includes(value));
+    const params = new URLSearchParams(); if (trigger) params.set('trigger', trigger); if (budget) params.set('budget', budget);
+    const context = verifiedContext(await deps.coordinator(`work/${encodeURIComponent(args[0])}/context${params.size ? `?${params}` : ''}`));
+    if (id === 'context') return context;
+    const handler = rest.find(value => value !== trigger) ?? 'precedent';
+    if (handler === 'precedent') return handleEscalation(context, followPrecedent, async request => call(await operator(), `work/${encodeURIComponent(context.key)}/decide`, request));
+    return launchEscalationHandler(root, config, context, agentKindSchema.parse(handler), deps.agents());
   }
   if (id === 'decisions') return deps.coordinator(`work/${encodeURIComponent((await item(args[0])).id)}/decisions`);
   if (id === 'approve') {

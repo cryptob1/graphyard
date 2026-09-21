@@ -5,11 +5,11 @@ For an integrator driving a runner: how an attempt is authorized.
 
 Identity (credential role): authority.
 
-- **Human operator** (`admin`): Define environments, approve bundles, register principals, select candidates, request, cancel and recover validation
-- **Worker** (`worker`): Implementation ownership only: defines no validation authority, publishes no results
-- **Runner** (`worker` with a runner registration): Poll dispatch, acknowledge and heartbeat its attempt until collection takes over
-- **Build producer** (`producer` with a builder registration): Attest an independently verified source and build inputs → artifact mapping
-- **Collector** (`producer` with a collector registration and matching `proofs`): Verify execution, inventory, oracle, target identity, artifacts and settlement, then publish the bound result
+- **Human operator** (`admin`): define environments, approve bundles, register principals, select candidates, request, cancel and recover validation
+- **Worker** (`worker`): implementation ownership only — no validation authority, no results
+- **Runner** (`worker` with a runner registration): poll dispatch, acknowledge and heartbeat its attempt until collection takes over
+- **Build producer** (`producer` with a builder registration): attest a verified source and build inputs → artifact mapping
+- **Collector** (`producer` with a collector registration and matching `proofs`): verify execution, inventory, oracle, target identity, artifacts and settlement, then publish the bound result
 
 ## Inspect and invoke
 
@@ -64,4 +64,4 @@ Operator commands take `{requestId, epoch, reason}`:
 - `retry`: needs a settled prior attempt, unexpired deadline, remaining budget and current authority; invalidates any earlier pass
 - Revoked definitions need newly authorized configuration and a new request
 
-Never reassign a protected resource on a timer's expiry: unknown outcomes stay blocked until verified settlement. Every attempt carries a durable `sequence` ([replay and scoped reuse](evidence-reuse.md)).
+A protected resource is never reassigned on a timer's expiry ([why](recovery.md#runner-capacity-and-request-diagnostics)). Every attempt carries a durable `sequence` ([replay and scoped reuse](evidence-reuse.md)).

@@ -17,7 +17,7 @@ One server and one Postgres database serve all workers ([deployment](deployment.
 
 ## 2. Connect GitHub
 
-- Run `graphyard github-setup https://YOUR-GRAPHYARD-HOST` from the managed repository, or [create the App by hand](github.md#create-and-install-the-app) for an organization account; an App registered before the merge queue must be [migrated](github.md#migrating-an-existing-app) to Contents: read and write. Copy its private values into the service, configure CI and review protection now, requiring `Graphyard / merge` once published.
+- Run `graphyard github-setup https://YOUR-GRAPHYARD-HOST` from the managed repository, or [create the App by hand](github.md#create-and-install-the-app) for an organization account; one registered before the merge queue must be [migrated](github.md#migrating-an-existing-app) to Contents: read and write. Copy its private values into the service, and configure CI and review protection now, requiring `Graphyard / merge` once published.
 - Later permission changes and their acceptance are the master's, through `master browser` flows driven by the profile `master init --browser-profile` names; the only human-only step: approving a *Confirm access* prompt on GitHub Mobile.
 - Confirm exact CI check names and their App IDs: GitHub Actions uses `15368`.
 
@@ -31,9 +31,9 @@ node "$GRAPHYARD_CLI" init --url https://YOUR-GRAPHYARD-HOST --herdr --host-id U
 
 ### What the generated instructions authorize
 
-The managed `AGENTS.md` section is the coordination contract every agent runtime reads from the repository, and it states one thing the launched sessions need: every session Graphyard launches receives its instruction as the session's own first request, on the runtime's command line ([the first message](master-agent.md#the-request-is-the-sessions-first-message)), never as pasted text.
+The managed `AGENTS.md` section is the coordination contract every agent runtime reads from the repository, and it states the one thing launched sessions need: each receives its instruction as [the session's own first request](master-agent.md#the-request-is-the-sessions-first-message), never as pasted text.
 
-It is generated because of how sessions used to fail. Herdr types into a running session through bracketed paste, which a coding agent treats as untrusted data rather than a request from its operator — right against prompt injection, wrong for a launch: the session refused, and the loop spent a retry on work never attempted. Producer, reviewer and approver sessions now start without anybody sending `go`, and the generated statement is what lets the two pastes a session may still receive — the loop's single re-prompt of a session that has shown no activity, and the reviewer's reminder to post a verdict it already judged — be taken as the operator's instruction. A Claude Code session launched under a role file loads only the user settings, which leaves `AGENTS.md` out, so the launcher passes the same statement on its command line (`--append-system-prompt`). Nothing else pasted carries that authority, and no other generated file grants any: the role files under `.graphyard/harness/` hold permissions, not instructions.
+It is generated because a coding agent treats Herdr's bracketed paste as untrusted data rather than its operator's request: the statement is what lets [the pastes a session may still receive](master-agent.md#the-request-is-the-sessions-first-message) be taken as the operator's instruction. A Claude Code session launched under a role file loads only the user settings, which leaves `AGENTS.md` out, so the launcher passes the same statement as `--append-system-prompt`. Nothing else pasted carries that authority, and no other generated file grants any: the role files under `.graphyard/harness/` hold permissions, not instructions.
 
 ## 4. Start the master
 
@@ -50,7 +50,7 @@ node "$GRAPHYARD_CLI" master start codex     # or: master start claude
 
 Independent review needs [the reviewer App](github.md#the-reviewer-app), a second GitHub identity.
 
-- `master reviewer setup`: open the printed local URL, confirm the App, install it on the managed repository only. That click and your provider logins are the only hand-run steps; its key and IDs stay outside every worktree at mode 0600.
+- `master reviewer setup`: open the printed local URL, confirm the App, install it on the managed repository only — that click and your provider logins are the only hand-run steps. Its key and IDs stay outside every worktree at mode 0600.
 - `master reviewer bind FILE --key-stdin` binds an App you already created: put its IDs in a secret-free file, send the PEM on stdin.
 - `master reviewer add PROFILE.json` adds one reviewer launch profile ([Claude](../examples/master/claude-reviewer.json), [Cursor](../examples/master/cursor-reviewer.json) or [opencode](../examples/master/opencode-reviewer.json)); it holds no Graphyard credential.
 - `master protection`, then `master protection --apply`, match branch protection to every open item's review policy.
@@ -60,7 +60,6 @@ Independent review needs [the reviewer App](github.md#the-reviewer-app), a secon
 ### Agent environments
 
 - **Agent environment:** every agent CLI account's own isolated config and login home, one directory per account named `<agent>-<letter>` under `~/.coding_agents` (`--directory DIR`, or `GRAPHYARD_AGENT_ENVIRONMENTS`, uses another root).
-- Two Claude subscriptions are `claude-a` and `claude-b`; logging each environment in to its provider is yours, once.
 
 Each runtime's variable, login file and login command:
 
@@ -79,7 +78,7 @@ node "$GRAPHYARD_CLI" master environments --apply                        # gener
 ```
 
 - **Without `--apply`** writes nothing; lists every environment: whether logged in, quota it could read, login command for each that is not.
-- **With `--apply`** records environments in `.graphyard/master.json`, sets the one runtime setting an unattended Claude launch needs (`skipDangerousModePermissionPrompt`) and generates profiles: one worker profile per worker token, verified as that principal with the `worker` role; one producer profile per producer token, verified for the `producer` role, never sharing a principal with a worker; one reviewer profile per logged-in environment, the first answering automatic reviews. Each profile's `accounts` lists logged-in environments in failover order, its own runtime first, rotated so profiles start on different accounts.
+- **With `--apply`** records environments in `.graphyard/master.json`, sets the one runtime setting an unattended Claude launch needs (`skipDangerousModePermissionPrompt`) and generates profiles: one worker profile per worker token verified as that principal with the `worker` role; one producer profile per producer token verified for the `producer` role, never sharing a principal with a worker; one reviewer profile per logged-in environment, the first answering automatic reviews. Each profile's `accounts` lists logged-in environments in failover order, its own runtime first, rotated so profiles start on different accounts.
 - **An existing profile** keeps its order, gains accounts logged in since, a home it pinned with `CLAUDE_CONFIG_DIR` becomes its first account.
 - **Rerun** after logging another account in; launcher checks: [agent environments](master-agent.md#agent-environments).
 
@@ -88,7 +87,7 @@ node "$GRAPHYARD_CLI" master environments --apply                        # gener
 - **Start from a template** ([Codex](../examples/master/codex-worker.json), [Claude](../examples/master/claude-worker.json), [Cursor](../examples/master/cursor-worker.json), [Muse](../examples/master/muse-worker.json) or an [existing Herdr session](../examples/master/existing-worker.json)), store each worker token in a mode-0600 file outside the repository, then `master worker add /path/to/profile.json` and `master status`.
 - **Profile files** stay in the ignored `.graphyard/profiles/` directory; a profile may contain no Graphyard variable or secret-looking value: provider login and Graphyard identity are separate.
 - **A `launch` profile** is supervised, can receive new work; an `existing` profile only adds health visibility.
-- **Local launch profiles** share the coordinator host, need Linux with a working systemd user manager: use only for trusted dogfooding; recommended: workers on other machines with GitHub identities that can push branches but not merge the base branch. Version 0.1 does not remotely launch supervised Herdr tabs across hosts.
+- **Local launch profiles** share the coordinator host and need Linux with a working systemd user manager: use them only for trusted dogfooding. Prefer workers on other machines, with GitHub identities that can push branches but not merge the base branch; version 0.1 launches no supervised Herdr tab across hosts.
 
 ### Approval modes
 
@@ -107,7 +106,7 @@ What `auto` adds per runtime, and what it costs:
 - **opencode:** `OPENCODE_PERMISSION` allowing every permission (`*`, `edit`, `bash`, `webfetch`, `external_directory`, `doom_loop`); no permission prompt, so edits, shell commands, fetches and paths outside the worktree happen without asking
 - **Muse:** nothing generated; the [template](../examples/master/muse-worker.json) passes `--approval-mode never --trust-workspace` in `agentArgs`, so tool calls run without asking inside Muse's own sandbox
 
-- **Each** is that runtime's broadest non-interactive mode; `master start` launches the master session the same way. Codex keeps its sandbox, widened to what the role writes: network access for every role, the repository's shared Git directory for a worker, `/tmp` plus that directory for a producer building in a detached worktree.
+- **Each** is that runtime's broadest non-interactive mode; `master start` launches the master session the same way. Codex keeps its sandbox, widened to what the role writes: network access for every role, the repository's shared Git directory for a worker, and for a producer or reviewer its own [session checkout](master-agent.md#session-checkouts) plus that directory.
 - **Credentials** do not widen with it: a worker holds only its worker credential, a reviewer only its hour-long token, a producer only its producer credential.
 
 ## 7. Prove the first PR
@@ -117,4 +116,4 @@ What `auto` adds per runtime, and what it costs:
 3. The worker pushes its branch, opens a pull request, runs `complete GY-1 EPOCH PR_NUMBER`; the loop launches the reviewer and producers for that head; `master review GY-1` is only the recovery path.
 4. Connect acceptance evidence before merging: a narrowly scoped `producer` token in protected CI that pull-request code cannot read, an approved `attest` decision for a `manual:` proof.
 5. When `Graphyard / merge` first appears, add it to branch protection with `strict` off, then `master merge GY-1`; Done means Graphyard observed that authorized merge, not deployment.
-6. Before adding workers, stop one, let its lease expire, reclaim with another identity, confirm the old epoch can no longer heartbeat or submit.
+6. Before adding workers, rehearse [a lost worker](operations-reference.md#lost-worker-before-submission) on that item.

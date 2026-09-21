@@ -3,12 +3,11 @@
 
 For an installation past one coordinator: what a lead rules on, and who settles escalations.
 
-Delivery scales through three formal slices: **product**, **infrastructure** and **docs/experience** (`docs-experience` in API data), each led by a dedicated AI coordinator session with its own `slice-lead` principal.
+Delivery scales through three formal slices — **product**, **infrastructure** and **docs/experience** (`docs-experience` in API data) — each led by an AI coordinator session with its own `slice-lead` principal.
 
 ## Authority boundaries
 
-- **A lead coordinates workers in its slice:** approve or reject plans, classify failures, request reruns, send work back, escalate.
-- **Every ruling:** append-only, carrying a versioned written rule ID and a reason, written with an `Idempotency-Key`.
+- **A lead coordinates workers in its slice:** approve or reject plans, classify failures, request reruns, send work back, escalate. Every ruling is append-only, carrying a versioned written rule ID and a reason, written with an `Idempotency-Key`.
 - **A lead cannot:** implement, claim or renew a lease, submit evidence, review its own slice, change requirements or evidence definitions, bypass a gate, acquire merge execution or merge.
 - **Lifecycle mutations from a `slice-lead` credential:** refused and recorded as `lead.action.refused`.
 - **Aimed at another slice:** recorded without a work item, naming the action and target, leaving that slice's ledger untouched.
@@ -57,10 +56,6 @@ Every settlement is append-only history:
 
 ## Ownership, capacity and identity
 
-- **Ownership, per claimed item:** one worker identity, one lease epoch, one registered worktree, held only while its `watch` supervisor keeps renewing.
-- **Refusals:**
-  - `Task already has an active owner`: a second identity claiming an owned item
-  - `Lease missing, expired, or superseded`: a heartbeat, workspace, submission or release from another identity or epoch
-  - `This assignment already has a workspace`: a second worktree
-- **Capacity:** a worker occupying one seat may hold several claimed items in a slice, each with its own epoch and worktree.
+- **Ownership, per claimed item:** one worker identity, one lease epoch, one registered worktree, held only while its `watch` supervisor keeps renewing. A worker occupying one seat may hold several claimed items in a slice, each with its own epoch and worktree.
+- **Refusals:** `Task already has an active owner` for a second identity claiming an owned item, `Lease missing, expired, or superseded` for a heartbeat, workspace, submission or release from another identity or epoch, `This assignment already has a workspace` for a second worktree.
 

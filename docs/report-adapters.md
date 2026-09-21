@@ -7,7 +7,7 @@ For an integrator choosing a report format, and how failures are classified.
 
 The operator-approved **bundle definition** pins the report format beside the runner image digest, as `reportFormat`, default `graphyard-playwright-v1`.
 
-- **Fixed:** like the digests, for a scenario revision once the bundle is approved; a different adapter for the same bytes needs a new scenario revision
+- **Fixed** for a scenario revision once the bundle is approved, like the digests: a different adapter for the same bytes needs a new scenario revision
 - **Carried in the dispatch grant** to the runner and collector, so the signed attestation's grant digest covers it
 - **Verified:** the collector verifies **only** the pinned adapter's structure
 - **Refused:** bytes in any other shape, never sniffed; an unknown format name, when the bundle is defined
@@ -27,10 +27,4 @@ The operator-approved **bundle definition** pins the report format beside the ru
 
 ## Adding an adapter
 
-An adapter is added to `src/report-adapters.ts` with:
-
-- Its contract fields
-- Contract fixtures from real frameworks and reporters
-- Tests showing failures, skips, retries, inconsistent reports and unknown documents are refused
-
-Its name joins `reportFormats`, which bundle definitions and dispatch grants validate against. Runner images writing it are approved by digest like any other.
+An adapter joins `src/report-adapters.ts` with its contract fields, contract fixtures from real frameworks and reporters, and tests showing that failures, skips, retries, inconsistent reports and unknown documents are refused. Its name joins `reportFormats`, which bundle definitions and dispatch grants validate against; runner images writing it are approved by digest like any other.

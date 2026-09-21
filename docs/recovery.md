@@ -12,15 +12,15 @@ For an operator running the validation path: why a request waits, and when a rol
 - **Every reserved protected resource:** request and attempt holding it, whether that lease is live
 - Retained-artifact usage
 - One diagnosed condition per live request:
-  - `queued-starved`: No dispatch poll since request creation: start or repair the runner, enable a current registration revision, or re-request on a polling runner
-  - `queued-waiting-for-slot`: A needed resource held by an attempt under a live lease: wait for it to settle, or add a registration if dwell grows
-  - `queued-resource-held`: A needed resource reserved by an attempt whose settlement was never verified: verify execution stopped, then `validation settle` with evidence; never release on a timer
-  - `unacknowledged`: Dispatched, not acknowledged inside the ACK window: no execution authorized, an expired window settles itself, `validation retry` queues another
-  - `heartbeat-missing`: Acknowledged, not renewed within the 20-second interval while the lease is live: runner may still be executing; leave its reservations until the collector observes settlement or an operator settles it with evidence
-  - `collection-stalled`: Collector holds authority but stopped renewing: check the collector process; an expired collection keeps the barrier closed
-  - `awaiting-settlement`: Terminal, reservations held by an unsettled attempt: verify termination and its external operations, then `validation settle` with evidence
-  - `retryable`: Settled, attempts and deadline remaining: `validation retry`
-  - `running`, `collecting`, `settled`: Healthy or finished
+  - `queued-starved`: no dispatch poll since creation — start or repair the runner, enable a current registration revision, or re-request on a polling runner
+  - `queued-waiting-for-slot`: a needed resource held under a live lease — wait, or add a registration if dwell grows
+  - `queued-resource-held`: a needed resource reserved by an attempt whose settlement was never verified — verify execution stopped, then `validation settle` with evidence; never release on a timer
+  - `unacknowledged`: dispatched, not acknowledged inside the ACK window — nothing was authorized, an expired window settles itself, `validation retry` queues another
+  - `heartbeat-missing`: acknowledged, not renewed within the 20-second interval while the lease is live — the runner may still be executing, so leave its reservations until the collector observes settlement or an operator settles it with evidence
+  - `collection-stalled`: the collector holds authority but stopped renewing — check its process; an expired collection keeps the barrier closed
+  - `awaiting-settlement`: terminal, reservations held by an unsettled attempt — verify termination and its external operations, then `validation settle` with evidence
+  - `retryable`: settled, attempts and deadline remaining — `validation retry`
+  - `running`, `collecting`, `settled`: healthy or finished
 
 ## Artifact backends, capacity and migration
 
@@ -35,7 +35,7 @@ Private artifacts keep their authorization, digest, retention and request bindin
 
 ## Rollback
 
-A rollback is four records plus a repair-work link; register the executor as a service-scoped `rollback` registration:
+A rollback is four records plus a repair-work link, the executor registered as a service-scoped `rollback` registration:
 
 ```json
 {

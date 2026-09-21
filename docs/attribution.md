@@ -5,11 +5,10 @@ For anyone reading a validation pass: what binds it to one target.
 
 ## Manifests and trust
 
-A **manifest** maps every service of an environment to an artifact digest and a source SHA at one configuration revision. Never supplied, only derived from:
+A **manifest** maps every service of an environment to an artifact digest and a source SHA at one configuration revision, never supplied, only derived from:
 
 - **A release revision:** its `manifest`, `sourceSha`, environment revision and explicit `members`
 - **The build attestation a candidate pins:** `artifacts`, `sourceSha`, `baseSha`
-- **`GET /api/attribution/manifest/RELEASE_ID/REVISION`:** returns one with its `hash`, `digestHash` and membership, excluded members too
 
 What each identity may establish:
 

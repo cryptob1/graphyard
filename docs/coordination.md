@@ -5,10 +5,10 @@ For anyone changing what an item requires or owns: what may be revised, and what
 
 ## Observable requirements
 
-A criterion states an outcome and names the proofs required for it, in the [revision format](#revise-requirements-explicitly) below.
+A criterion states an outcome and names its required proofs, in the [revision format](#revise-requirements-explicitly) below.
 
 - **Assertions:** the repository's tests define them; Graphyard checks evidence identity, version, result and counts.
-- **E2E:** register an [E2E scenario](test-cases.md) before naming it; authorize its reporter separately.
+- **E2E:** register an [E2E scenario](test-cases.md) before naming it, authorizing its reporter separately.
 - **`unit:` and `integration:` proofs:** producer-runnable; a producer session per proof group is requested once the candidate passes the build gate.
 - **`manual:` proofs:** need a two-party `attest` decision unless the item lists them in `producerProofs`, which only says who may run them.
 - **`e2e:` proofs:** run through the [validation runner](validation.md).
@@ -52,10 +52,8 @@ graphyard master approver GY-N DECISION                            # the indepen
 
 ## Overlap and scheduling
 
-- **`plannedFiles`:** exact repository-relative paths or directory prefixes ending in `/`, `/*` or `/**`, all including descendants.
-- **Not inferred:** globs, historical renames and semantic dependencies.
-- **Compared:** planned paths and observed pull-request files, against other unfinished ready, assigned or submitted work.
-- **Overlap never blocks a claim.**
+- **`plannedFiles`:** exact repository-relative paths or directory prefixes ending in `/`, `/*` or `/**`, all including descendants; globs, historical renames and semantic dependencies are not inferred.
+- **Compared:** planned paths and observed pull-request files, against other unfinished ready, assigned or submitted work. Overlap never blocks a claim.
 
 ### Schedule by overlap, smallest scope first
 
@@ -70,12 +68,12 @@ graphyard master approver GY-N DECISION                            # the indepen
 
 ### Scope requests the loop decides
 
-- **Asked:** a worker needing a file outside `plannedFiles` runs `scope-request GY-N EPOCH PATH... -- REASON` and keeps its lease
-- **Decided:** the cycle it appears, by the control plane at the loop's request (`POST /api/work/:id/autoscope`, the coordinator's only scope call), recomputed from the item, not the caller
+- **Asked:** a worker needing a file outside `plannedFiles` runs `scope-request GY-N EPOCH PATH... -- REASON`, keeping its lease
+- **Decided:** the cycle it appears, by the control plane at the loop's request (`POST /api/work/:id/autoscope`, the coordinator's only scope call), recomputed from the item
 - **Approved, applied to the live item as an additive widening:** documentation the repository requires updating when behaviour changes (`docs/`, `AGENTS.md`, `README.md`, file by file), and source files the item's criteria name
 - **Refused and escalated, the item blocked on `Scope request refused: …`:** any other path (`master scope GY-N REASON` applies it), and a request dropping planned paths or rewriting criteria or proofs (`master requirements GY-N FILE REASON`)
 - **Lifted by:** withdrawing it (`scope-request GY-N EPOCH -`) or an operator's answer, never touching a blocker anyone else wrote; a request whose attempt lost the lease is never decided
-- **Measured:** `daemon.metrics.scope` reports request-to-decision `p50`/`p90` and `scopeOpenMs`, the longest undecided request; the loop escalates a p90 over five minutes across ten or more decisions, or any request undecided for fifteen minutes
+- **Measured:** `daemon.metrics.scope` reports request-to-decision `p50`/`p90` and `scopeOpenMs`, the longest undecided request; the loop escalates a p90 over five minutes across ten decisions, or any request undecided for fifteen minutes
 
 ## Reserve explicitly shared resources
 
@@ -91,8 +89,7 @@ graphyard master approver GY-N DECISION                            # the indepen
 
 `plannedFiles` also bounds what a candidate may change.
 
-- **Classified against `plannedFiles`:** every changed file; changes inside scope pass, as do new files nobody has shipped.
-- **Every other file:** compared by blob identity with the candidate's bound commit; a byte-for-byte match passes; a deletion, revert, rewrite, rename away from a shipped path, differing binary or uncomparable file is refused.
+- **Classified against `plannedFiles`:** every changed file; changes inside scope pass, as do new files nobody has shipped. Every other file is compared by blob identity with the candidate's bound commit: a byte-for-byte match passes, while a deletion, revert, rewrite, rename away from a shipped path, differing binary or uncomparable file is refused.
 - **`complete`:** refuses with the exact file list and the delivered items whose scope shipped each path, recording nothing.
 - **Reconciliation:** re-derives the same refusal for the current head into the `build` gate, the required check, `diagnose` and the work detail.
 - **`graphyard sync GY-N`** (the worker's half): `git fetch origin && git merge origin/BASE`, regenerating the generated files, committing, then classifying the local diff with the same rules and exiting non-zero before any push.
@@ -111,17 +108,11 @@ graphyard master approver GY-N DECISION                            # the indepen
 
 ## Ship in under thirty minutes
 
-The [routine-item target](master-agent.md#pipeline-speed) rests on five mechanisms, none weakening a review, evidence, identity, lease or protection rule:
-
-1. [The regression guard and `sync`](#refuse-candidates-that-revert-shipped-code-outside-their-scope)
-2. [Automatic dispatch at submit](master-agent.md#automatic-dispatch-at-submit)
-3. [Proofs in CI](github.md#proofs-in-ci)
-4. [Conflict avoidance](#schedule-by-overlap-smallest-scope-first)
-5. [Measurement](protocol/pipeline-speed.md) of every item's timeline
+The [routine-item target](master-agent.md#pipeline-speed) rests on five mechanisms, none weakening a review, evidence, identity, lease or protection rule: [the regression guard and `sync`](#refuse-candidates-that-revert-shipped-code-outside-their-scope), [automatic dispatch at submit](master-agent.md#automatic-dispatch-at-submit), [proofs in CI](github.md#proofs-in-ci), [conflict avoidance](#schedule-by-overlap-smallest-scope-first) and [measurement](protocol/pipeline-speed.md) of every item's timeline.
 
 ## Explain stalls and drill the recovery
 
-- **`graphyard diagnose GY-N` and the work-detail Coordination section:** explain dependencies, blockers, missing ownership or workspace, busy resources, unobserved or stale pull requests, integration failures, overdue unowned jobs, violations and the first refusing gate, including an out-of-scope regression with its file list. Evidence, not a lifecycle-state setter.
+- **`graphyard diagnose GY-N` and the work-detail Coordination section:** explain dependencies, blockers, missing ownership or workspace, busy resources, unobserved or stale pull requests, integration failures, overdue unowned jobs, violations and the first refusing gate, an out-of-scope regression with its file list included. Evidence, not a lifecycle-state setter.
 - **`base-behind`:** a submitted head not containing the base tip; waits on Graphyard's [base refresh](protocol/merge-queue-binding.md#base-refresh) not a person; never an attention item.
 - **`base-conflict`, `base-refresh-carried` and `base-refresh-required`:** what that refresh could not absorb and what it kept.
 - **`queue-binding-carried`, `queue-binding-required` and `queue-base-carried`:** reported by a queued candidate, per binding.

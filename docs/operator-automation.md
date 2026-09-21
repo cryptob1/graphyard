@@ -42,6 +42,19 @@ Every decision except the three human-only ones is a two-party decision on one w
 3. `master approve GY-N DECISION REASON` applies it, after re-checking the requester's live authority and the item's state.
    - **The server refuses, naming the conflict, when the approver:** requested the decision, has held an assignment on the item, produced evidence it rests on, or is the principal a `grant` would empower.
 
+## Escalation context
+
+A master carrying the rules, an item's history and earlier decisions in its own window hits a context ceiling and drifts between sessions, so the control plane assembles that context from the project instead: a handler spawned for one escalation decides as well as a long-lived master. `GET /api/work/GY-N/context?trigger=TRIGGER&budget=BYTES`, printed by `master context GY-N [TRIGGER] [--budget N]`, returns four layers, read by key alone and verified against its fingerprint:
+
+- **`rules`:** the managed repository's own `AGENTS.md` at the base tip the item was last observed against, read through the control-plane App (`rules.source`), plus the item's policy — never a template, so an installation escalates against the codebase it manages; without the file, `rules.unavailable`
+- **`goals`:** priority, the reasons recorded with the item's `create`, `ready`, `requirements` and `unblock` intents, the open graph in priority order, dependencies and dependents
+- **`item`:** requirements, the standing refusal, candidate, submission, lease and a typed history summary counting every ledger kind, routine rows counted but never listed
+- **`precedent`:** every `resolve` decision across the graph with requester, reason, approver, outcome and the precedent it cited — this trigger first, the rest counted
+
+Assembly is deterministic and bounded: one snapshot, canonical bytes, `fingerprint` the SHA-256 of the rest, so a handler can prove what it saw. `GRAPHYARD_ESCALATION_CONTEXT_BUDGET` (default 32,000) or the request's `budget` is met by summarising — `budget.level`, `history.omitted`, `precedent.omitted`, `precedent.summary` — never by shortening `rules`; `budget.exceeded` says so rather than cut.
+
+A handler decides with `master decide GY-N resolve '{"trigger":"…"}' --precedent ID[,ID] --context FINGERPRINT REASON`, both carried into the ledger and shown by `master decisions GY-N`: a cited id that is no decision of the same action is refused, and a second handler on the same line is a `concurrences` entry, not a competing request. `master escalation GY-N [TRIGGER] [--budget N] [precedent|KIND]` spawns one — `precedent`, the default, follows the newest applied decision of that trigger in this process and declines when there is none; an agent `KIND` launches a judging session under `GRAPHYARD_ESCALATION_HANDLER=1` whose whole input is the context in one private file under `.graphyard/escalations/`, delivered as [its own first request](master-agent.md#the-request-is-the-sessions-first-message).
+
 ## Harness rules per role
 
 - **`master autonomy --apply`:** installs the master's harness rules, also denying a command pointed at another identity's credential file.
@@ -55,7 +68,7 @@ Every decision except the three human-only ones is a two-party decision on one w
 
 - **worker:** may push its assigned branch (`origin BRANCH`, `-u`, `HEAD:BRANCH`), run its item's Graphyard commands and open its pull request; never force-push, push the base branch, rebase, merge, post a review or submit evidence
 - **reviewer:** may read the diff and post the one verdict it was launched for; never push, commit, claim, submit evidence or edit files
-- **producer:** may fetch, add and remove its detached worktree and submit evidence; never push, commit, claim or post a review
+- **producer:** may fetch, add and remove its detached worktree under the [managed worktree root](deployment.md#agent-hosts-the-managed-worktree-root) and submit evidence; never push, commit, claim or post a review
 
 ## Other operator agents
 

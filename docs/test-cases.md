@@ -13,9 +13,7 @@ For anyone defining an E2E proof: what lives where, and what a report must match
 
 - **Dashboard:** open **Test cases** → **New test case**
 - **CLI, as an operator:** `graphyard scenario scenario.json` (`graphyard scenarios` lists them)
-- **Definition fields:** stable `id`, `title`, `purpose`, `setup`, `steps`, `expected`, `environment`, `runner`, `testPath`, `expectedRevision`
-
-- **Example:** [examples/scenario.json](../examples/scenario.json)
+- **Definition fields:** stable `id`, `title`, `purpose`, `setup`, `steps`, `expected`, `environment`, `runner`, `testPath`, `expectedRevision` ([example](../examples/scenario.json))
 
 ## Report an execution
 

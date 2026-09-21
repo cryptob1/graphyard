@@ -9,20 +9,20 @@ For every reader and guide: one definition and one canonical usage per term.
 
 - **Who:** administers a Graphyard installation, usually also the GitHub repository.
 - **Credential:** `admin`, declaring `sessionKind: "human"`.
-- **Decides:** only three decisions ([who decides](#who-decides)); every other is an agent's, approved by an [independent agent](operator-automation.md#two-party-decisions); a declared human session may make any directly.
+- **Decides:** only three ([who decides](#who-decides)); every other is an agent's, approved by an [independent agent](operator-automation.md#two-party-decisions), though a declared human session may make any directly.
 - **Canonical usage:** *human operator*; bare *operator* means this person, *administrator* same person in a GitHub or deployment context.
 - **Never:** *operator* for the scoped operator agent, *user* for anyone, *ask the operator to approve* for a two-party decision an approver agent applies.
 
 ### 2. AI agent
 
-Language-model program reading and writing through an agent runtime. "Agent" names the program kind, not what it may do: authority comes only from its credential.
+Language-model program reading and writing through an agent runtime. "Agent" names the program kind, never what it may do: authority comes only from its credential.
 
 **Canonical usage:** *agent* alone only when role does not matter; otherwise name it: *worker*, *master*, *approver*, *slice lead*, *reviewer*, *proof producer*, *operator agent*.
 
 ### 3. Agent session (Herdr-managed session or runtime)
 
 - **Is:** one running agent instance inside a runtime, with transcript, process and lifetime.
-- **Is not:** dashboard sign-in, keeping a token in browser session storage; nor `sessionKind`, a credential's declaration whether a human or AI holds it.
+- **Is not:** a dashboard sign-in, which keeps a token in browser session storage, nor `sessionKind`, a credential's declaration of whether a human or AI holds it.
 - **Canonical usage:** *agent session* or *session*; *runtime* for software hosting sessions, *dashboard sign-in* for the browser.
 
 ### 4. Principal, role, and credential
@@ -50,13 +50,13 @@ Language-model program reading and writing through an agent runtime. "Agent" nam
 
 ### 7. Graphyard control plane
 
-Server, Postgres database, dashboard and CLI recording ownership, requirements, candidates, evidence, gate decisions and merge authorization; its gates are deterministic evaluations, never a model's judgment.
+Server, Postgres database, dashboard and CLI recording ownership, requirements, candidates, evidence, [gate decisions](architecture.md#boundary) and merge authorization.
 
 **Canonical usage:** *Graphyard* or *the control plane*. It *records*, *evaluates*, *refuses*, *observes* and *authorizes*; never *runs*, *supervises* or *prompts* a session.
 
 ### 8. Herdr runtime
 
-Session supervisor launching, showing and stopping agent sessions, and the first packaged runtime integration, reporting whether a session is alive, never deciding ownership, evidence or progression.
+Session supervisor launching, showing and stopping agent sessions: it reports whether a session is alive, never deciding ownership, evidence or progression.
 
 **Canonical usage:** *Herdr* or *the Herdr runtime*; name other runtimes by product (*Claude Code*, *Codex*, *Cursor*, *opencode*) or collectively *agent runtimes*.
 
@@ -64,8 +64,8 @@ Session supervisor launching, showing and stopping agent sessions, and the first
 
 | Role (credential) | May | Never |
 | --- | --- | --- |
-| `admin` | Human operator: set goals and priorities; provision the master's agent identities at onboarding; issue credentials to people; create and release work, revise requirements, rework, participate as a worker, attest `manual:` proofs, grant proof authority; resolve escalations and record human-only intake from a declared human session; from any session kind, settle a control-plane-raised `lease-loss` the ledger explains, citing its attestation | Mint trusted automated evidence; be shared with any AI session |
-| `operator-agent` | The master's identity, the separate approver identity and other scoped operator agents: only their configured intent and policy capabilities (`intent:create`, `intent:ready`, `intent:unblock`, `policy:requirements`, `policy:review-provider`, `policy:bootstrap`) and `decision:*` requests inside a server-enforced repository and work allowlist; the approver identity approves decisions it did not request, on items it never held, not resting on its own evidence | Approve its own request; hold a lease; submit evidence except through an approved `attest` decision; merge |
+| `admin` | Human operator: set goals and priorities; provision the master's agent identities at onboarding; issue credentials to people; create and release work, revise requirements, rework, participate as a worker, attest `manual:` proofs, grant proof authority; resolve escalations and record human-only intake from a declared human session, and settle a `lease-loss` [the ledger explains](delegation.md#who-may-settle-what) from any session kind | Mint trusted automated evidence; be shared with any AI session |
+| `operator-agent` | The master's identity, the separate approver identity and other scoped operator agents: only their configured intent and policy capabilities (`intent:create`, `intent:ready`, `intent:unblock`, `policy:requirements`, `policy:review-provider`, `policy:bootstrap`) and `decision:*` requests inside a server-enforced repository and work allowlist, the approver identity under the [conflict rules](operator-automation.md#two-party-decisions) | Approve its own request; hold a lease; submit evidence except through an approved `attest` decision; merge |
 | `coordinator` | Master: read work and runtime health, dispatch, acquire, verify or cancel bounded merge execution authority, record deployment observation on delivered work, settle a quarantine whose supervisor it verified dead on the registered host | Claim, implement, produce evidence, revise requirements, bypass a gate |
 | `slice-lead` | Slice lead: record rulings in its own slice, escalate | Implement, hold a lease, submit evidence, review its own slice, merge; every lifecycle mutation refused and recorded ([delegation](delegation.md)) |
 | `worker` | Worker: claim work, renew and release its lease, register its workspace, report blockers, submit its candidate, record untrusted assertions | Receive `admin`, `coordinator` or `producer` tokens; satisfy an acceptance gate |
@@ -74,10 +74,7 @@ Session supervisor launching, showing and stopping agent sessions, and the first
 
 ## Who decides
 
-- **Master requests a two-party decision:** `master decide GY-N ACTION REASON`
-- **Approver applies it, in its own session:** `master approve GY-N DECISION REASON`
-
-The master decides, approved by:
+The master requests, an independent approver applies ([how](operator-automation.md#two-party-decisions)). The master decides, approved by:
 
 - **Create work, release backlog work, clear a blocker, add requirements, widen scope:** applied directly: non-weakening intent, judged by reviewer and producers
 - **Rewrite, remove or narrow requirements:** approver; narrowing still raises a `requirement-weakening` escalation
@@ -97,7 +94,7 @@ Others decide:
 
 ## Diagram legend
 
-Every repo-native diagram uses this key, drawn inside each SVG too.
+Every repo-native diagram uses this key, drawn inside each SVG too:
 
 - **Amber rounded box:** Human operator
 - **Green rounded box:** AI agent session, one role, one credential

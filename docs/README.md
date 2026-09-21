@@ -49,6 +49,4 @@ For every reader: which guide to open for the task in hand; each page opens with
 ## Maintainer and historical records
 
 - [Graphyard repository bootstrap](first-pr.md)
-- [Implementation audit — September 13, 2026](history/implementation-audit-2026-09-13.md)
-- [Huck Engineer investigation: lessons for Graphyard](history/huck-engineer-comparison.md)
-- [Role-glossary audit — September 18, 2026](history/role-glossary-audit-2026-09-18.md)
+- [Audits and adopted lessons](history/audits.md)

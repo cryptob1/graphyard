@@ -3,10 +3,10 @@
 
 For an operator asking where delivery waits, and what the figures cannot answer.
 
-- **Graphyard ledger** (stage transitions, gate refusals, lease claims and losses, blockers, rework, merge authorization): appended in the mutation's transaction
-- **GitHub observation** (pull-request creation, review submission and state, merge time and commit; CI check names, results and transitions): collected by the control plane's own App
-- **Evidence records** (proof, result, executed and skipped counts, trust, expiry): trust follows the submitting credential; a worker assertion never counts
-- **Deployment-provider observation** (environment, artifact commit, contained merge commits, state, start and finish): recorded through `POST /api/deployments` with a `producer` or `admin` credential
+- **Graphyard ledger** — stage transitions, gate refusals, lease claims and losses, blockers, rework, merge authorization — appended in the mutation's transaction
+- **GitHub observation** — pull requests, reviews, merge time and commit, CI check names, results and transitions — collected by the control plane's own App
+- **Evidence records** — proof, result, executed and skipped counts, trust, expiry — whose trust follows the submitting credential, a worker assertion never counting
+- **Deployment-provider observation** — environment, artifact commit, contained merge commits, state, start and finish — recorded through `POST /api/deployments` with a `producer` or `admin` credential
 
 ## Lineage and bounds
 
@@ -15,9 +15,9 @@ Ledger events are projected into `flow_facts`, a normalized, append-only, trigge
 - **Projection:** incremental, bounded and idempotent on exact identities: a replayed event inserts nothing, two replicas cannot duplicate a fact, a pending review is not a completed-review fact, repeated CI outcomes stay distinct
 - **Runs:** in the reconciliation loop and as a catch-up before each read, reporting lag in `coverage.projection`, shown as **stale**
 - **A bound reached** (window, work items, records scanned, deployment observations, daily buckets, drill-down rows, payload size): reported per dimension under `coverage` (`truncated`, `workItemsTruncated`, `deploymentsTruncated`, `deploymentMergesTruncated`, `sliceFilterTruncated`) and as the **partial** state
-- **A truncated scan** reads facts in `(observed_at, id)` order, losing the window's end. `window.covered` and `coverage.covered` state the interval reached, the fraction covered, what is `uncovered`, `remainingFacts` (a floor when `remainingCapped`) and a one-sentence `statement`; an export's metadata rows carry the same coverage. Branch on `window.truncated`, narrowing the window, type or slice to cover the rest
+- **A truncated scan** reads facts in `(observed_at, id)` order, losing the window's end. `window.covered` and `coverage.covered` state the interval reached, the fraction covered, what is `uncovered`, `remainingFacts` (a floor when `remainingCapped`) and a one-sentence `statement`, an export's metadata rows carrying the same; branch on `window.truncated`, narrowing window, type or slice to cover the rest
 - **A provider that deletes a pull request, check run or deployment record** cannot erase a stored fact
-- **Deployment observations** and their contained merge identities are repository-wide: slice, type and stage filters never narrow them; production phases join through those containment records, never assuming an artifact SHA equals a merge SHA
+- **Deployment observations** and their contained merge identities are repository-wide: slice, type and stage filters never narrow them, and production phases join through those containment records, never assuming an artifact SHA equals a merge SHA
 - **Graphyard's [release records](delivery.md):** a separate lineage this report does not read yet; a repository observed only through the release pipeline reports deployment metrics as unavailable
 
 ## Windows and metrics
@@ -49,7 +49,7 @@ Every undelivered item falls into exactly one category, read from its latest dur
 
 The page shows exactly one state:
 
-- **Loading:** a read is in flight; figures still on screen are labelled an earlier observation; the previous coverage state is never carried over
+- **Loading:** a read is in flight; figures on screen are labelled an earlier observation and the previous coverage state is never carried over
 - **Unavailable:** the control plane refused or is unreachable; figures on screen are labelled an earlier observation
 - **Empty:** no work item matches the window and filter
 - **Partial:** the scan bound was reached; the report names the covered interval in `window.covered`

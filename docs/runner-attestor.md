@@ -21,8 +21,8 @@ It holds a **read-only** Graphyard credential of its own for one call, `GET /api
 
 ## Limits of this path
 
-- The target must be immutable and operator-configured; a URL from arbitrary pull-request output is unacceptable input.
-- Trace, screenshot and video capture are unimplemented under the protection policy and refused; failure diagnosis relies on the data-minimised step trace and the target's logs.
-- The attestor, Docker daemon and collector share one host: preflight measures mounted bytes on the attestor's filesystem; a remote execution endpoint is refused; the three identities stay separate.
+- The target must be immutable and operator-configured: a URL from arbitrary pull-request output is unacceptable input.
+- Trace, screenshot and video capture are unimplemented under the protection policy and refused; diagnosis relies on the data-minimised step trace and the target's logs.
+- The attestor, Docker daemon and collector share one host — preflight measures mounted bytes on the attestor's filesystem and a remote execution endpoint is refused — while the three identities stay separate.
 - Container isolation is asserted here: a boundary is a claim about this executor's configuration, not a proof against hostile code.
 - Settlement is verified through the container runtime, which cannot settle external side effects: use approved test accounts and fresh isolated resources, or refuse dispatch.

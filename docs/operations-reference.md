@@ -5,11 +5,7 @@ For an operator or master in an incident: the procedure behind each [recipe](ope
 
 ## Perpetual master loop
 
-Terminal condition, cycle and non-stopping conditions: [master-agent guide](master-agent.md#operate).
-
-- **Per-item blocker:** lease holder writes `graphyard blocked GY-N EPOCH "reason"`
-- **Deployment blocker:** follow-up item naming the delivered item, merge commit and cause
-- **`master verify-deployment GY-N`:** names cause and fix on every refusal: *unobserved*, *stale*, *does not serve the merge yet*, *local checkout*, *already recorded*
+Terminal condition, cycle and non-stopping conditions: [master-agent guide](master-agent.md#operate). A per-item blocker is the lease holder's `graphyard blocked GY-N EPOCH "reason"`; a deployment blocker is a follow-up item naming the delivered item, merge commit and cause. `master verify-deployment GY-N` names cause and fix on every refusal: *unobserved*, *stale*, *does not serve the merge yet*, *local checkout*, *already recorded*.
 
 ## Master coordination loop
 
@@ -30,16 +26,10 @@ Flags:
 
 ## Worktree disk
 
-- **One install, shared.** An assignment worktree under the repository resolves its install by upward lookup: nothing is created, and the worker's prompt names it. A worktree outside it gets a mirror, a directory of links still covered by the `node_modules/` ignore rule. The install must answer for that exact head: a differing `package-lock.json` installs its own; a worktree that already has one is reported and left alone.
-- **Finished assignments give theirs back.** The loop removes dependency directories of finished assignments' worktrees every ten minutes (every cycle while free space is below the threshold) and nothing else (files, Git metadata, branches and workspace records stay): a reclaimed worktree is one `npm install` from working. `daemon.reclaim` reports what went, how much it returned, what it kept.
+- **One install, shared.** An assignment worktree under the repository resolves its install by upward lookup — nothing is created, and the worker's prompt names it — while one outside it gets a mirror, a directory of links still covered by the `node_modules/` ignore rule. The install must answer for that exact head: a differing `package-lock.json` installs its own, and a worktree that already has one is reported and left alone.
+- **Finished assignments give theirs back.** The loop removes those worktrees' dependency directories every ten minutes, every cycle while free space is below the threshold, and nothing else — files, Git metadata, branches and workspace records stay, so a reclaimed worktree is one `npm install` from working. `daemon.reclaim` reports what went, how much it returned and what it kept.
 
-Each worktree's disposition:
-
-- `delivered`: Removed: the item is Done
-- `superseded`: Removed: a later attempt replaced that epoch
-- `idle`: Removed: nothing changed for longer than the idle bound
-- `live`: Kept: the registered epoch still holds the lease
-- `recent`: Kept: changed inside the idle bound
+Each worktree's disposition is `delivered` (the item is Done), `superseded` (a later attempt replaced that epoch) or `idle` (nothing changed for longer than the idle bound), all removed; `live` (the registered epoch still holds the lease) and `recent` (changed inside the idle bound) are kept.
 
 - **`master status`:** free space under `disk` with worktrees a reclaim would empty; below the threshold raises a master-owned attention item while writes still succeed
 - **A write that fails for want of room**, whether the kernel reports it or only a command's output does (`write error: Disk quota exceeded`), is named as that
@@ -60,8 +50,7 @@ Settings in `.graphyard/master.json`:
 
 ### Submitted implementation needs rework
 
-- **Active owner:** may keep heartbeating, update its branch; a push invalidates old evidence
-- **To reassign:** stop the previous worker, then `graphyard rework GY-N --previous-worker-stopped "Reproduce review failure"`
+- **Active owner:** may keep heartbeating and update its branch, a push invalidating old evidence; to reassign, stop it, then `graphyard rework GY-N --previous-worker-stopped "Reproduce review failure"`
 - **Effect:** old commands are fenced, build gate closes, a lease still held ends as `lease.expired` with cause `stopped-by-attestation`, raising no `lease-loss`
 - **Next worker:** claims at a higher epoch, registers existing PR branch in a fresh workspace, resubmits the same PR
 - **Check revocation is asynchronous:** suspend merging until the refusing check is visible; merged work needs a follow-up item
@@ -70,17 +59,15 @@ Settings in `.graphyard/master.json`:
 
 If a foreground worker's supervisor dies before settling its quarantine, the fence stays up: item undispatchable, exclusive resources reserved, requirements immutable.
 
-- **Run** `graphyard master settle-containment GY-N "reason"` on the machine that ran the worker; verifies there what [automatic containment settlement](protocol/leases.md#automatic-containment-settlement) requires; control plane re-checks everything
-- **Same assessment:** `master status` under [`containment`](master-agent.md#containment-and-recovery)
-- **Anything it cannot prove** (unreachable host, failed query, surviving process, disagreeing clocks) refuses, prints what it found
+- **Run** `graphyard master settle-containment GY-N "reason"` on the machine that ran the worker: it verifies there what [automatic containment settlement](protocol/leases.md#automatic-containment-settlement) requires, the control plane re-checking everything, and `master status` shows the same assessment under [`containment`](master-agent.md#containment-and-recovery)
+- **Anything it cannot prove** — unreachable host, failed query, surviving process, disagreeing clocks — refuses and prints what it found
 - **Then, or where this coordinator cannot inspect the host:** confirm the stop yourself, attest with `rework GY-N --previous-worker-stopped "reason"` undelivered, `recover-containment GY-N --previous-worker-stopped "reason"` delivered
 
 ### Worktree creation failed
 
-- **Reservation:** retained
-- **Inspect:** Git output, local branch and worktree state
+- **Reservation:** retained; inspect the Git output and local branch and worktree state
 - **No files created:** run the intended `git worktree` operation locally
-- **Ownership expired:** new attempt, fresh path; never blanket worktree deletion across worker machines
+- **Ownership expired:** new attempt, fresh path; never a blanket worktree deletion across worker machines
 
 ### Merge bypass
 
@@ -92,8 +79,7 @@ An observed merge no valid execution covered (cancelled before the merge cutoff,
 - **Holds:** delivered on the decision, citing that snapshot's `authorizationRevision` and `evidenceAsOf` and carrying `reconciliation` (decision, requester, approver, both reasons, cutoff, snapshot revision, judgement); ledger `merge.reconciled`
 - **Fails:** nothing is delivered; the item records `Reconciliation by decision … refused: …` with every reason, once, the ledger `merge.reconciliation.refused`, the row's attention line the refusal. Answer it with a new decision, never by re-approving the refused one; one naming no new reason is refused again. Repair the access rules that allowed the merge, and carry remaining work in a new item under the full gate set
 - **A queue entry that can never publish:** the merged item's pull request is closed; entries behind it wait (`Waiting for GY-N to publish its speculative tip`). The row's `merged.queue` carries `sequence`, `position`, `size`, `unpublishable: true` and the keys `behind`. The exit is the same decision: an accepted reconciliation delivers the item and drops the entry; a refused one removes it and delivers nothing, `queueEjection` naming the refused decision, the ledger recording `queue.ejected`, the entries behind predicting against the real base. A standing refusal removes the entry on the next reconciliation tick
-- **Operator-authorized delivery:** when the record refuses a merge an operator authorized administratively, a further merge decision whose `REASON` cites the refused decision's id records it, the operator's admin credential on one side: the operator requests it through the API, or the master requests it and the operator approves with `GRAPHYARD_TOKEN_FILE=ADMIN_TOKEN_FILE graphyard master approve GY-N DECISION REASON`. An operator-agent pair citing the refusal is refused again; one citing no refusal is a plain reconciliation. `attentionOwner.next` carries the exact command once a refusal stands
-- **Its record:** `delivery.operatorAuthorization` with `execution: null`, the `operator`, the decision, the `refusedDecision`, `unmet` (every reason refused), the cutoff, the snapshot revision and a judgement; `authorizationRevision` is the pre-merge snapshot's. Ledger `merge.operator-authorized` under the operator's identity, never `merge.reconciled`
+- **Operator-authorized delivery:** when the record refuses a merge an operator authorized administratively, a further merge decision whose `REASON` cites the refused decision's id records it, the operator's admin credential on one side — the operator requests it through the API, or approves the master's with `GRAPHYARD_TOKEN_FILE=ADMIN_TOKEN_FILE graphyard master approve GY-N DECISION REASON`. An operator-agent pair citing the refusal is refused again, one citing no refusal is a plain reconciliation, and `attentionOwner.next` carries the exact command. Its record is `delivery.operatorAuthorization` — `execution: null`, the `operator`, the decision, the `refusedDecision`, `unmet`, the cutoff, the pre-merge snapshot's `authorizationRevision` and a judgement — with the ledger entry `merge.operator-authorized` under the operator's identity, never `merge.reconciled`
 - **Listed apart:** `master status` `deliveries.reconciled` (`authorization: 'reconciled'`) and `deliveries.operatorAuthorized` (`authorization: 'operator'`), with `counts.reconciledDeliveries` and `counts.operatorAuthorizedDeliveries`
 
 ## Accepted evidence turns out to be wrong
@@ -107,15 +93,12 @@ Revoking leaves criteria, policy revision, review and the submitted attempt unto
 
 ## Bootstrap mode for a self-proving change
 
-- **Declare:** `bootstrap` declaration on that criterion in a `requirements` revision: `reason` plus `contractPaths` inside the item's `plannedFiles`
-- **Capability:** `policy:bootstrap`
-- **Obligation:** the next item touching those paths inherits the proof and cannot defer it again; cleared only when some change is delivered with trusted, passing, complete evidence
-- **Outstanding:** listed by `graphyard obligations` and `diagnose GY-N` ([bootstrap mode](protocol/bootstrap-mode.md))
+- **Declare**, under `policy:bootstrap`: a `bootstrap` block on that criterion in a `requirements` revision, `reason` plus `contractPaths` inside the item's `plannedFiles`
+- **Obligation:** the next item touching those paths inherits the proof and cannot defer it again, cleared only when some change is delivered with trusted, passing, complete evidence; `graphyard obligations` and `diagnose GY-N` list what is outstanding ([bootstrap mode](protocol/bootstrap-mode.md))
 
 ## Credentials
 
-- **Add or rotate principals:** in `GRAPHYARD_PRINCIPALS`, then redeploy, each with unique ID and secret
-- **Rotation:** invalidates the old credential on restarted replicas; App keys revoked separately
+- **Add or rotate principals:** in `GRAPHYARD_PRINCIPALS`, then redeploy, each with a unique ID and secret ([safely](deployment.md#changing-the-roster-safely)); rotation invalidates the old credential on restarted replicas, App keys being revoked separately
 - **Proof authority:** A live [grant](#proof-authority-grants), never a `GRAPHYARD_PRINCIPALS` setting after bootstrap
 - **The master's `coordinator`:** Beyond reads, only bounded merge execution, settling a verified-dead quarantine and recording a deployment observation
 - **Operator agents:** In the [operator-agent registry](operator-automation.md), never an `admin` entry
@@ -144,22 +127,13 @@ graphyard grants history ci                        # append-only record of every
 - **Apply is idempotent:** unchanged artifacts left alone, existing tokens preserved, operator-edited profiles reported as drift and kept; a repository that changed between review and apply refuses
 - **Every proposal:** declares the candidate-bound-environment invariant
 
-- **Node package with `railway.json`/`railway.toml`:** Railway, `ephemeral` — own environment per candidate, destroyed after review; datastores copied per candidate from structure
-- **Python project with `Dockerfile`/compose:** container registry, `pooled` — isolated containers over a shared datastore, each candidate needing its own schema or database
-- **Static site (`index.html`, `.nojekyll`/`CNAME`):** GitHub Pages, `ephemeral` — a disposable static target per commit
-- **Any stack with no deploy configuration:** no target, `partial` — CI-level isolation only; add a deploy target or accept partial verification
-
-- **Vercel and Fly:** Railway pattern with target-specific SHA verification (`RAILWAY_GIT_COMMIT_SHA`, Vercel deployment metadata, `fly status` releases)
-- **Container deployments:** propose SHA-tagged images and digest verification
+- **What each stack proposes:** a Node package with `railway.json`/`railway.toml` gets Railway and `ephemeral`, an environment per candidate destroyed after review with datastores copied from structure; a Python project with `Dockerfile`/compose a container registry and `pooled`, isolated containers over a shared datastore each candidate needing its own schema; a static site (`index.html`, `.nojekyll`/`CNAME`) GitHub Pages and `ephemeral`; a stack with no deploy configuration no target and `partial`, CI-level isolation only. Vercel and Fly follow the Railway pattern with target-specific SHA verification (`RAILWAY_GIT_COMMIT_SHA`, Vercel deployment metadata, `fly status` releases); container deployments propose SHA-tagged images and digest verification
 - **Drift:** informational, never auto-repaired: rerun `init --scan`, compare, reapply after review; `graphyard doctor` reports stored proposal, applied setup record and current drift
 
 ## Scale limits
 
-- **Kernel:** serializes short coordination mutations
-- **Reconciler:** up to four provider jobs per tick per replica
-- **List API:** returns all work
-- **Event API:** 300 events a page by default
+The kernel serializes short coordination mutations; the list API returns all work and the [event API](protocol/read-endpoints.md) pages.
 
 ### Concurrent reconciliation
 
-A task that changes while GitHub is being read, or an integration lease that expires before a review request is recorded, rejects that stale snapshot, schedules another observation after two seconds, or at once when newer work queued a wakeup.
+[Reconciliation](architecture.md#reconciliation) bounds each tick and rejects a stale snapshot, scheduling another observation.

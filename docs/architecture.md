@@ -9,12 +9,12 @@ Graphyard owns coordination decisions; a gate is a deterministic evaluation, nev
 
 ![Graphyard control-plane components; the text equivalent follows.](diagrams/control-plane-components.svg)
 
-Text equivalent: agent sessions, the dashboard and a proof producer reach the **HTTP API and CLI**, which hands authenticated commands to the **coordination engine** (one advisory-locked transaction per mutation, no external I/O inside), writing the aggregate and its event together to **Postgres**. Jobs flow to the **reconciliation worker**, which exchanges pull-request, review, check, protection and merge facts with **GitHub**; the dashed arrow back is the signed webhook, waking a job.
+Text equivalent: agent sessions, the dashboard and a proof producer reach the **HTTP API and CLI**, which hands authenticated commands to the **coordination engine** — one advisory-locked transaction per mutation, no external I/O inside — writing the aggregate and its event together to **Postgres**. Jobs flow to the **reconciliation worker**, which exchanges pull-request, review, check, protection and merge facts with **GitHub**; the dashed arrow back is the signed webhook waking a job.
 
 ## Storage
 
 - **`work_items.document`:** the current aggregate; each mutation updates it, appending an event carrying the new snapshot in the same transaction, ordered by `events.seq`.
-- **`receipts`:** each successful command under `(principal, idempotency key)` with a fingerprint: a retry returns the original result, a key reused for different input refuses, a replay is not a renewed lease.
+- **`receipts`:** each successful command under `(principal, idempotency key)` with a fingerprint: a retry returns the original result, a key reused for different input refuses, and a replay never renews a lease.
 - **Release, delivery, attribution and validation tables:** those protocols' immutable records.
 - **`jobs`:** durable queue processed with `FOR UPDATE SKIP LOCKED`, acknowledged with the exact owner token.
 - **`flow_facts` and `deployment_observations`:** the append-only projection [flow analytics](flow-analytics.md) reads, never part of gate evaluation.
@@ -43,4 +43,4 @@ Text equivalent: agent sessions, the dashboard and a proof producer reach the **
 ## Display state and replicas
 
 - **Delivered work:** stays delivered in history; a merge observed with unsatisfied gates is a permanent visible violation.
-- **One formatter renders every elapsed duration:** `Xm` below 60 minutes, `Xh Ym` under 48 hours, `Xd Yh` above, missing input `—`, negatives clamped.
+- **One formatter renders every elapsed duration:** `Xm`, `Xh Ym` under 48 hours, `Xd Yh` above; missing input `—`, negatives clamped.

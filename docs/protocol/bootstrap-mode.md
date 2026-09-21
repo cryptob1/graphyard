@@ -3,7 +3,7 @@
 
 For an operator shipping a change with its own proof harness: when a proof may be deferred.
 
-The change that creates a proof cannot prove its criterion: the protected harness refuses to run against a base lacking the contract.
+The change that creates a proof cannot prove its criterion: the protected harness refuses to run against a base without the contract.
 
 - **Declared by:** human operator (`admin`), or an operator agent holding `policy:bootstrap`.
 - **Scope:** one criterion in **bootstrap mode**, deferring the proof for this candidate only, never dropping it.
@@ -22,13 +22,9 @@ The change that creates a proof cannot prove its criterion: the protected harnes
 }
 ```
 
-## What the gate does
+## What the gate does, and what is owed
 
-The acceptance gate stops demanding the deferred criterion's proofs for this candidate.
-
-## What is owed
-
-The deferred proof becomes an obligation on its contract paths, derived from the work documents, never asserted.
+The acceptance gate stops demanding the deferred criterion's proofs for this candidate, and the proof becomes an obligation on its contract paths, derived from the work documents and never asserted.
 
 - **Inherited by:** later items whose `plannedFiles` overlap those paths, as a required criterion.
 - **Acceptance gate:** `Bootstrap obligation inherited from GY-N AC-M`.
