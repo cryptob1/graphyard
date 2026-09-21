@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { buildMasterStatus } from '../src/master.js';
 import type { Work } from '../src/model.js';
-import { parseTimingAnnotations, qualifyTimingFailures, timingFailureReason } from '../src/cli/master-status.js';
+import { parseTimingAnnotations, qualifyTimingFailures, timingFailureReason } from '../src/cli/timing-failures.js';
 import { TimingAssertionError, assertTiming, measureTiming, minimumSamples, observationsAbove, parseTimingRecord, percentile, percentileRank, steadyState, timingFailureMarker } from './helpers/timing.js';
 import { annotationCommand, failedTestCount, readBaseline, timingFailures, timingSpread, timingSummary } from './helpers/timing-report.js';
 import { baselineRecordingVariable, requiredRuns, stabilityRecord, type StabilityRecord } from './helpers/timing-stability.js';

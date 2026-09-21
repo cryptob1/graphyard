@@ -1,7 +1,7 @@
 import { appendFileSync, existsSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { describeTiming, parseTimingRecord, percentile, type TimingMeasurement } from './timing.js';
-import { timingAnnotationMarker, type TimingFailure } from '../../src/cli/master-status.js';
+import { timingAnnotationMarker, type TimingFailure } from '../../src/cli/timing-failures.js';
 
 // The CI half of a distinguishable timing failure. The required `test` job runs this after the
 // suite, whatever the suite's outcome: it reads the run's timing record and publishes, on the
