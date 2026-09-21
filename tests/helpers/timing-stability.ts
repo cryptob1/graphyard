@@ -19,6 +19,32 @@ export const requiredRuns = 20;
 /** Set for the suite while `--record` rewrites the baseline, which cannot be judged by the runs that produce it. */
 export const baselineRecordingVariable = 'GRAPHYARD_TIMING_BASELINE_RECORDING';
 
+/**
+ * What the required check sets beside `npm test` (.github/workflows/ci.yml), so the stability run
+ * measures the check CI runs. Test files start their own Postgres on `GRAPHYARD_TEST_PORT` plus a
+ * per-file offset and run in parallel; tests/events-pagination.test.ts and
+ * tests/reconciliation-snapshot.test.ts were both given offset 25, so whichever started second
+ * failed every test whenever the scheduler overlapped them. The override moves one of them to a
+ * free offset; tests/timing-stability.test.ts refuses any two files that still share a port.
+ */
+export const testPortBase = 15438;
+export function requiredCheckEnvironment(base = Number(process.env.GRAPHYARD_TEST_PORT ?? testPortBase)): Record<string, string> {
+  return { GRAPHYARD_EVENTS_TEST_PORT: String(base + 27) };
+}
+
+/** The database port every test file resolves, from its own source, under `environment`. */
+export function testFilePorts(sources: Record<string, string>, environment: Record<string, string | undefined>, base = testPortBase) {
+  const ports: { file: string; port: number }[] = [];
+  for (const [file, text] of Object.entries(sources)) {
+    const resolved = new Set<number>();
+    for (const match of text.matchAll(/(?:process\.env\.(GRAPHYARD_\w+_PORT) \?\? )?Number\(process\.env\.GRAPHYARD_TEST_PORT \?\? 15438\)(?: \+ (\d+))?/g))
+      resolved.add(Number((match[1] && environment[match[1]]) || base + Number(match[2] ?? 0)));
+    for (const match of text.matchAll(/new EmbeddedPostgres\(\{[^}]*\bport: (\d{4,5})\b/g)) resolved.add(Number(match[1]));
+    for (const port of resolved) ports.push({ file, port });
+  }
+  return ports;
+}
+
 export interface StabilityRun { run: number; passed: boolean; exitCode: number | null; durationMs: number; failedTests: number | null; timingFailures: string[] }
 export interface StabilityRecord {
   schema: 1; commit: string | null; treeUnchanged: boolean; command: string[]; recordedAt: string;
@@ -57,7 +83,7 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
   try {
     for (let run = 1; run <= runs; run++) {
       const timingFile = join(directory, `run-${run}.jsonl`), started = performance.now();
-      const result = spawnSync(command[0], command.slice(1), { encoding: 'utf8', maxBuffer: 256 * 1024 * 1024, env: { ...process.env, [timingRecordVariable]: timingFile, ...(recordFile ? { [baselineRecordingVariable]: '1' } : {}) } });
+      const result = spawnSync(command[0], command.slice(1), { encoding: 'utf8', maxBuffer: 256 * 1024 * 1024, env: { ...requiredCheckEnvironment(), ...process.env, [timingRecordVariable]: timingFile, ...(recordFile ? { [baselineRecordingVariable]: '1' } : {}) } });
       const measured = existsSync(timingFile) ? parseTimingRecord(readFileSync(timingFile, 'utf8')) : [];
       timings.push(measured);
       const entry: StabilityRun = { run, passed: result.status === 0, exitCode: result.status, durationMs: Math.round(performance.now() - started), failedTests: failedTestCount(`${result.stdout ?? ''}\n${result.stderr ?? ''}`), timingFailures: measured.filter(item => !item.passed).map(item => item.name) };

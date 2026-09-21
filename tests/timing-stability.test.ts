@@ -8,7 +8,7 @@ import type { Work } from '../src/model.js';
 import { parseTimingAnnotations, qualifyTimingFailures, timingFailureReason } from '../src/cli/timing-failures.js';
 import { TimingAssertionError, assertTiming, measureTiming, minimumSamples, observationsAbove, parseTimingRecord, percentile, percentileRank, steadyState, timingFailureMarker } from './helpers/timing.js';
 import { annotationCommand, failedTestCount, readBaseline, timingFailures, timingSpread, timingSummary } from './helpers/timing-report.js';
-import { baselineRecordingVariable, requiredRuns, stabilityRecord, type StabilityRecord } from './helpers/timing-stability.js';
+import { baselineRecordingVariable, requiredCheckEnvironment, requiredRuns, stabilityRecord, testFilePorts, testPortBase, type StabilityRecord } from './helpers/timing-stability.js';
 
 const source = (path: string) => readFile(new URL(path, import.meta.url), 'utf8');
 
@@ -141,6 +141,25 @@ test('the stability record counts consecutive passes on an unchanged tree and th
   const flaky = stabilityRecord({ commit: 'a'.repeat(40), treeUnchanged: true, command: ['npm', 'test'], runs: twenty.map(entry => entry.run === 12 ? run(12, false) : entry), timings });
   assert.equal(flaky.stable, false); assert.equal(flaky.consecutivePasses, 11); assert.equal(flaky.passed, 19);
   assert.equal(stabilityRecord({ commit: 'a'.repeat(40), treeUnchanged: false, command: ['npm', 'test'], runs: twenty, timings }).stable, false);
+});
+
+test('no two test files share a database port under the required check, so parallel files never fail on which one the scheduler started first', async () => {
+  const sources: Record<string, string> = {};
+  for (const file of (await readdir(new URL('.', import.meta.url))).filter(name => name.endsWith('.test.ts'))) sources[file] = await source(`./${file}`);
+  const shared = (environment: Record<string, string | undefined>) => {
+    const byPort = new Map<number, string[]>();
+    for (const { file, port } of testFilePorts(sources, environment)) byPort.set(port, [...(byPort.get(port) ?? []), file]);
+    return [...byPort.entries()].filter(([, files]) => files.length > 1).map(([port, files]) => `${port}: ${files.sort().join(' + ')}`);
+  };
+  assert.ok(testFilePorts(sources, {}).length >= 30, 'the scan reads the port every database-backed test file resolves');
+  // The collision the stability run found: on the bare defaults two files resolve offset 25.
+  // Renumbering either file removes it, and the override with it; no other pair may appear.
+  assert.deepEqual(shared({}).filter(entry => entry !== `${testPortBase + 25}: events-pagination.test.ts + reconciliation-snapshot.test.ts`), []);
+  // The required check separates them, in CI and in the stability run alike, and nothing else collides.
+  const environment = requiredCheckEnvironment(testPortBase);
+  assert.deepEqual(shared(environment), []);
+  const ci = await source('../.github/workflows/ci.yml');
+  for (const [name, value] of Object.entries(environment)) assert.ok(ci.includes(`${name}=${value} `) && /GRAPHYARD_EVENTS_TEST_PORT=\d+ [^\n]*npm test/.test(ci), `ci.yml runs npm test with ${name}=${value}`);
 });
 
 test('the recorded baseline holds twenty consecutive passing runs of the required check and the spread of every timing assertion in the suite', async t => {

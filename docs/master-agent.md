@@ -930,6 +930,12 @@ a merge instant, an execution window or a clock offset pins it to the instants t
 (`tests/helpers/merge-instants.ts` derives the provider merge instant from the recorded commit)
 rather than to an earlier step plus an assumed elapsed time.
 
+Nor may a test's verdict depend on which file the scheduler started first. Test files run in
+parallel, each with its own Postgres on `GRAPHYARD_TEST_PORT` plus a per-file offset; two files
+that resolve the same port fail each other whenever they overlap. The required check sets
+`GRAPHYARD_EVENTS_TEST_PORT` to keep the one known pair apart, and the suite refuses any two test
+files that still share a port under the required check's environment.
+
 The stability of the required check on an unchanged tree is measured, not assumed:
 
 ```sh

@@ -94,7 +94,9 @@ jobs:
         run: |
           set -euo pipefail
           echo "GRAPHYARD_TIMING_RECORD=$RUNNER_TEMP/graphyard-timing.jsonl" >> "$GITHUB_ENV"
-          GRAPHYARD_TIMING_RECORD="$RUNNER_TEMP/graphyard-timing.jsonl" npm test 2>&1 | tee "$RUNNER_TEMP/graphyard-test.log"
+          # Test files run in parallel, each with its own Postgres on a per-file port offset. Two
+          # files share offset 25; this gives one of them a free port so neither fails on scheduling.
+          GRAPHYARD_EVENTS_TEST_PORT=15465 GRAPHYARD_TIMING_RECORD="$RUNNER_TEMP/graphyard-timing.jsonl" npm test 2>&1 | tee "$RUNNER_TEMP/graphyard-test.log"
       - name: Report timing-dependent assertions on this check run
         # Whatever the suite's verdict, and never changing it: an assertion that went over its
         # budget is annotated with what it measured, which `graphyard master status` reads back.
