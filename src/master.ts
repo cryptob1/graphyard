@@ -30,6 +30,82 @@ const safeEnvironment = z.record(
   z.string().min(1).max(1000).refine(value => !/[\u0000-\u001f\u007f]/.test(value), 'Profile environment values cannot contain control characters'),
 ).default({});
 
+// ---- Session names a runtime will accept ----------------------------------------------------
+/*
+ * Herdr names a session with at most 32 characters, starting with a lowercase letter and using
+ * only lowercase letters, digits, '-' and '_'. Every name Graphyard generates — worker, reviewer,
+ * producer, approver, master, escalation handler — is a name it will hand to that runtime, so it
+ * is built inside those bounds and checked where it is constructed rather than discovered at the
+ * launch, after a pane has been allocated (GY-101). `sessionName` composes one: the parts, joined
+ * and slugified, while they fit, and otherwise as much of them as the limit leaves plus a digest
+ * of the whole identity, so a name that has to be shortened still names one thing only.
+ */
+export const sessionNameLimit = 32, sessionNameDigestLength = 8;
+export const sessionNameRule = `a session name must start with a lowercase letter, use only lowercase letters, digits, '-' or '_', and be 1-${sessionNameLimit} characters`;
+/** Why a runtime would refuse this name, or null when it will accept it. */
+export function sessionNameRefusal(name: string): string | null {
+  if (!name.length) return 'it is empty';
+  if (name.length > sessionNameLimit) return `it is ${name.length} characters, past the ${sessionNameLimit}-character limit`;
+  if (!/^[a-z]/.test(name)) return `it starts with ${JSON.stringify(name[0])} rather than a lowercase letter`;
+  const refused = [...new Set([...name].filter(character => !/[a-z0-9_-]/.test(character)))];
+  return refused.length ? `it contains ${refused.map(character => JSON.stringify(character)).join(', ')}` : null;
+}
+/** A launch refused for its name, reported as that: the limit, the name attempted, and how to retry. */
+export class SessionNameRefusedError extends Error {
+  constructor(readonly sessionName: string, readonly reason: string, readonly retry: string | null) {
+    super(`No session can be launched as ${JSON.stringify(sessionName)}: ${reason}. ${sessionNameRule[0].toUpperCase()}${sessionNameRule.slice(1)}${retry ? `. Retry with ${retry} once the name is within it` : ''}`);
+    this.name = 'SessionNameRefusedError';
+  }
+}
+export function assertSessionName(name: string, retry?: string | null) {
+  const refusal = sessionNameRefusal(name);
+  if (refusal) throw new SessionNameRefusedError(name, refusal, retry ?? null);
+  return name;
+}
+/**
+ * A name for one session of one role on one item, inside the same bounds. What a human reads first
+ * — the role, then the work key — is kept whole, and the rest of the limit goes to what tells this
+ * session from the next of that role on that item: the decision id, the escalation trigger. The
+ * role word is what gives way when the limit is tight, in the order the caller writes it, because
+ * a name whose key has been cut short says less than an abbreviated role does; only when even the
+ * shortest role word leaves too little to tell two sessions apart does the whole identity go
+ * through `sessionName`, which shortens the key and carries a digest of everything.
+ */
+export const sessionNameDistinguisher = 4, sessionNameDistinguisherLimit = 8;
+export function distinctSessionName(prefixes: readonly [string, ...string[]], subject: string, distinguisher: string) {
+  for (const prefix of prefixes) {
+    const head = sessionName(prefix, subject);
+    const room = Math.min(sessionNameLimit - head.length - 1, sessionNameDistinguisherLimit);
+    const tail = distinguisher.toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, Math.max(0, room));
+    if (tail.length >= sessionNameDistinguisher) return assertSessionName(`${head}-${tail}`);
+  }
+  return sessionName(prefixes.at(-1)!, subject, distinguisher);
+}
+/** The name one launch will use, refused with the command that retries that launch once it is fixed. */
+export function nameForLaunch(retry: string, build: () => string) {
+  try { return assertSessionName(build(), retry); }
+  catch (error) { throw error instanceof SessionNameRefusedError ? new SessionNameRefusedError(error.sessionName, error.reason, retry) : error; }
+}
+/**
+ * One launchable name for one identity. Distinct identities never share a name: the parts are kept
+ * whole while they fit, and a name the limit forces to be shortened carries a digest of the full
+ * identity instead of its tail, so two decisions on one item are two sessions however long the
+ * work key and decision id are.
+ */
+export function sessionName(...parts: readonly string[]) {
+  const slug = (value: string) => value.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+  const joined = parts.map(slug).filter(Boolean).join('-');
+  const full = /^[a-z]/.test(joined) ? joined : `gy-${joined}`;
+  if (full.length <= sessionNameLimit) return assertSessionName(full);
+  const digest = createHash('sha256').update(parts.join('\u0000')).digest('hex').slice(0, sessionNameDigestLength);
+  return assertSessionName(`${full.slice(0, sessionNameLimit - sessionNameDigestLength - 1).replace(/-+$/, '')}-${digest}`);
+}
+/** The Herdr name of a configured profile's session, refused here rather than at its launch. */
+const sessionNameField = z.string().trim().min(1).max(100).superRefine((name, context) => {
+  const refusal = sessionNameRefusal(name);
+  if (refusal) context.addIssue({ code: 'custom', message: `Herdr cannot launch a session named ${JSON.stringify(name)}: ${refusal}. ${sessionNameRule[0].toUpperCase()}${sessionNameRule.slice(1)}` });
+});
+
 export const agentKindSchema = z.enum(['pi', 'claude', 'codex', 'gemini', 'cursor', 'devin', 'agy', 'cline', 'omp', 'mastracode', 'opencode', 'copilot', 'kimi', 'kiro', 'droid', 'amp', 'grok', 'hermes', 'kilo', 'qodercli', 'qwen', 'maki', 'muse']);
 const profileName = z.string().trim().regex(/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,79}$/);
 // 'auto' installs the runtime's own non-interactive startup contract; 'prompt' keeps the
@@ -54,7 +130,7 @@ const accountList = z.array(profileName).min(1).max(20).optional();
 export const workerProfileSchema = z.object({
   name: profileName,
   principal: z.string().trim().min(1).max(200),
-  agentName: z.string().trim().min(1).max(100),
+  agentName: sessionNameField,
   mode: z.enum(['existing', 'launch']),
   kind: agentKindSchema.optional(),
   credentialFile: z.string().optional(),
@@ -73,7 +149,7 @@ export type WorkerProfile = z.infer<typeof workerProfileSchema>;
 // verdict with a short-lived reviewer-App token, so it needs no principal and no credential file.
 export const reviewerProfileSchema = z.object({
   name: profileName,
-  agentName: z.string().trim().min(1).max(100),
+  agentName: sessionNameField,
   kind: agentKindSchema,
   agentArgs: z.array(z.string().max(1000)).max(30).default([]),
   approvals: approvalMode,
@@ -89,7 +165,7 @@ export type ReviewerProfile = z.infer<typeof reviewerProfileSchema>;
 export const producerProfileSchema = z.object({
   name: profileName,
   principal: z.string().trim().min(1).max(200),
-  agentName: z.string().trim().min(1).max(100),
+  agentName: sessionNameField,
   kind: agentKindSchema,
   credentialFile: z.string(),
   agentArgs: z.array(z.string().max(1000)).max(30).default([]),
@@ -166,7 +242,7 @@ export const masterConfigSchema = z.object({
   githubAppId: z.number().int().positive(),
   hostId: z.string().trim().min(1).max(200),
   herdrWorkspace: z.string().trim().min(1).max(200).optional(),
-  masterAgentName: z.string().trim().regex(/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,99}$/),
+  masterAgentName: sessionNameField,
   autoMerge: z.boolean().default(true),
   mergeMethod: z.enum(['merge', 'squash', 'rebase']).default('merge'),
   workers: z.array(workerProfileSchema).max(100).default([]),
@@ -426,7 +502,7 @@ export async function setupMaster(root: string, input: { url: string; token: str
   await assertOutsideWorktrees(root, credentialDirectory, 'Coordinator credential directory');
   const identity = createHash('sha256').update(`${url}\0${detected.repository}`).digest('hex').slice(0, 20);
   const credentialFile = resolve(credentialDirectory, `${identity}.token`);
-  const config = masterConfigSchema.parse({ version: 1, url, credentialFile, cliPath: resolve(input.cliPath), repository: detected.repository, baseBranch: status.baseBranch, githubAppId: status.githubAppId, hostId: input.hostId ?? previous?.hostId ?? hostname(), herdrWorkspace: input.herdrWorkspace ?? previous?.herdrWorkspace, masterAgentName: previous?.masterAgentName ?? `graphyard-master-${repositoryName}`, autoMerge: input.autoMerge ?? previous?.autoMerge ?? true, mergeMethod: input.mergeMethod ?? previous?.mergeMethod ?? 'merge', workers: previous?.workers ?? [], ...(previous?.reviewer ? { reviewer: previous.reviewer } : {}), reviewers: previous?.reviewers ?? [], producers: previous?.producers ?? [], run: { ...previous?.run, ...input.run }, ...(input.browser ?? previous?.browser ? { browser: input.browser ?? previous?.browser } : {}) });
+  const config = masterConfigSchema.parse({ version: 1, url, credentialFile, cliPath: resolve(input.cliPath), repository: detected.repository, baseBranch: status.baseBranch, githubAppId: status.githubAppId, hostId: input.hostId ?? previous?.hostId ?? hostname(), herdrWorkspace: input.herdrWorkspace ?? previous?.herdrWorkspace, masterAgentName: previous?.masterAgentName ?? sessionName('graphyard-master', repositoryName), autoMerge: input.autoMerge ?? previous?.autoMerge ?? true, mergeMethod: input.mergeMethod ?? previous?.mergeMethod ?? 'merge', workers: previous?.workers ?? [], ...(previous?.reviewer ? { reviewer: previous.reviewer } : {}), reviewers: previous?.reviewers ?? [], producers: previous?.producers ?? [], run: { ...previous?.run, ...input.run }, ...(input.browser ?? previous?.browser ? { browser: input.browser ?? previous?.browser } : {}) });
   const instructionsFile = resolve(root, 'AGENTS.md');
   let existing = ''; let mode = 0o644;
   try { const info = await lstat(instructionsFile); if (!info.isFile()) throw new Error('Refusing to replace a non-regular AGENTS.md'); mode = info.mode & 0o777; existing = await readFile(instructionsFile, 'utf8'); }
@@ -967,12 +1043,21 @@ export function launchRequest(kind: string | undefined, text: string): { args: s
  * a start that times out on a pane where Herdr sees the expected runtime acting is a session that
  * started, and it is named rather than closed. Only a runtime without a request contract is
  * prompted after it starts, through the confirmed paste delivery below.
+ *
+ * The name goes in before the runtime does. A name the runtime would refuse — too long, or built
+ * from characters it does not take — is refused here as that refusal, naming the limit, the name
+ * attempted and the command that retries the launch, rather than reaching the caller as whatever
+ * the runtime says about its arguments (GY-101).
  */
 export const agentStartTimeoutMs = 30_000;
-export function startAgentSession(name: string, kind: string, pane: string, args: string[], text: string, run?: (command: string, args: string[]) => string, options: PromptDelivery & { timeoutMs?: number; confirm?: 'inline' | 'follow' } = {}) {
+export function startAgentSession(name: string, kind: string, pane: string, args: string[], text: string, run?: (command: string, args: string[]) => string, options: PromptDelivery & { timeoutMs?: number; confirm?: 'inline' | 'follow'; retry?: string } = {}) {
   const request = launchRequest(kind, text);
+  assertSessionName(name, options.retry);
   try { herdrJson(['agent', 'start', name, '--kind', kind, '--pane', pane, '--timeout', String(options.timeoutMs ?? agentStartTimeoutMs), '--', ...args, ...request.args], run); }
   catch (error) {
+    // A runtime whose own naming rules are narrower than the ones checked above says so in its
+    // refusal; that is a refused name too, and it is reported as one rather than as a failed start.
+    if (nameRefusedByRuntime(error)) throw new SessionNameRefusedError(name, `the runtime refused it: ${herdrErrorText(error).split('\n')[0].slice(0, 200)}`, options.retry ?? null);
     if (request.delivery !== 'request' || herdrErrorCode(error) !== 'timeout') throw error;
     const raw = herdrJson(['agent', 'get', pane], run);
     const agent = raw?.agent ?? raw;
@@ -998,6 +1083,14 @@ export class PromptNotAcceptedError extends Error { readonly promptDropped = tru
 export function herdrErrorCode(error: unknown) {
   const text = [(error as any)?.herdrCode, (error as any)?.stdout, (error as any)?.stderr, (error as any)?.message].filter(value => value !== undefined && value !== null).map(String).join('\n');
   return (error as any)?.herdrCode ?? /"code"\s*:\s*"([a-z_]+)"/.exec(text)?.[1] ?? null;
+}
+/** Everything a Herdr failure said, whichever stream it said it on. */
+export function herdrErrorText(error: unknown) {
+  return [(error as any)?.stdout, (error as any)?.stderr, error instanceof Error ? error.message : error].filter(value => value !== undefined && value !== null && value !== '').map(String).join('\n');
+}
+/** A runtime refusing the name it was given, rather than failing to start the session it names. */
+export function nameRefusedByRuntime(error: unknown) {
+  return /\b(?:agent|session) name\b|\binvalid (?:agent |session )?name\b/i.test(herdrErrorText(error));
 }
 export interface PromptDelivery { attempts?: number; acceptMs?: number; pauseMs?: number }
 export function deliverPrompt(target: string, text: string, run?: (command: string, args: string[]) => string, options: PromptDelivery & { confirm?: 'inline' | 'follow' } = {}) {
@@ -1195,28 +1288,32 @@ export async function setupAgentEnvironments(root: string, input: { directory?: 
       return found;
     };
     const profileNameOf = (value: string) => value.replace(/[^a-zA-Z0-9._-]/g, '-').replace(/^[^a-zA-Z0-9]+/, '').slice(0, 80) || 'agent';
+    // A profile name is Graphyard's own label, in its own syntax; the session name onboarding
+    // generates beside it is what Herdr is asked to launch, so it is built inside the runtime's
+    // naming rules (GY-101) rather than taken from the label and refused at the first launch.
+    const agentNameOf = (name: string) => sessionName(name);
     for (const { file, principal } of await issued('worker')) {
       const name = profileNameOf(principal);
-      if (next.workers.some(profile => profile.principal === principal || profile.name === name) || agentNames().has(name)) { skipped.push({ file, reason: `a profile already uses principal or name ${principal}` }); continue; }
+      if (next.workers.some(profile => profile.principal === principal || profile.name === name) || agentNames().has(agentNameOf(name))) { skipped.push({ file, reason: `a profile already uses principal or name ${principal}` }); continue; }
       const index = next.workers.filter(profile => profile.mode === 'launch').length, accounts = accountsFor(undefined, index);
       const kind = next.environments.find(entry => entry.name === accounts[0])!.kind;
-      next.workers.push(workerProfileSchema.parse({ name, principal, agentName: name, mode: 'launch', kind, credentialFile: file, accounts: accountsFor(kind, index) }));
+      next.workers.push(workerProfileSchema.parse({ name, principal, agentName: agentNameOf(name), mode: 'launch', kind, credentialFile: file, accounts: accountsFor(kind, index) }));
       changes.push({ role: 'worker', profile: name, action: 'added', accounts: accountsFor(kind, index), principal });
     }
     for (const { file, principal } of await issued('producer')) {
       const name = profileNameOf(`produce-${principal}`);
       if (next.workers.some(profile => profile.principal === principal)) { skipped.push({ file, reason: `${principal} is also a worker principal; the control plane refuses evidence from an implementer` }); continue; }
-      if (next.producers.some(profile => profile.principal === principal || profile.name === name) || agentNames().has(name)) { skipped.push({ file, reason: `a profile already uses principal or name ${principal}` }); continue; }
+      if (next.producers.some(profile => profile.principal === principal || profile.name === name) || agentNames().has(agentNameOf(name))) { skipped.push({ file, reason: `a profile already uses principal or name ${principal}` }); continue; }
       const index = next.producers.length, accounts = accountsFor(undefined, index);
       const kind = next.environments.find(entry => entry.name === accounts[0])!.kind;
-      next.producers.push(producerProfileSchema.parse({ name, principal, agentName: name, kind, credentialFile: file, accounts: accountsFor(kind, index) }));
+      next.producers.push(producerProfileSchema.parse({ name, principal, agentName: agentNameOf(name), kind, credentialFile: file, accounts: accountsFor(kind, index) }));
       changes.push({ role: 'producer', profile: name, action: 'added', accounts: accountsFor(kind, index), principal });
     }
     for (const environment of loggedIn) {
       const name = profileNameOf(`review-${environment.name}`);
-      if (next.reviewers.some(profile => profile.name === name) || agentNames().has(name)) continue;
+      if (next.reviewers.some(profile => profile.name === name) || agentNames().has(agentNameOf(name))) continue;
       const accounts = [environment.name, ...accountsFor(environment.kind, 0).filter(entry => entry !== environment.name)];
-      next.reviewers.push(reviewerProfileSchema.parse({ name, agentName: name, kind: environment.kind, accounts }));
+      next.reviewers.push(reviewerProfileSchema.parse({ name, agentName: agentNameOf(name), kind: environment.kind, accounts }));
       changes.push({ role: 'reviewer', profile: name, action: 'added', accounts });
     }
     // Automatic review answers with one profile and fails over to the rest.
@@ -2325,7 +2422,9 @@ export async function prepareSessionHarness(root: string, config: MasterConfig, 
 export async function startMaster(root: string, kind: WorkerProfile['kind'], agentArgs: string[], agents: HerdrAgent[], run?: (command: string, args: string[]) => string) {
   if (!kind) throw new Error('Choose a supported master agent kind');
   const config = await loadMasterConfig(root);
-  if (agents.some(agent => agent.name === config.masterAgentName)) throw new Error(`Master agent ${config.masterAgentName} is already visible in Herdr`);
+  const masterRetry = `graphyard master start ${kind}, once masterAgentName in .graphyard/master.json is a name Herdr can launch`;
+  const name = nameForLaunch(masterRetry, () => config.masterAgentName);
+  if (agents.some(agent => agent.name === name)) throw new Error(`Master agent ${name} is already visible in Herdr`);
   // Installation, not operator memory: the harness the master runs under learns the master's own
   // commands before the session starts, so a routine status or review never waits on a keypress.
   const harness = await writeHarnessPermissions(root, masterHarness(root, config, kind), true);
@@ -2349,14 +2448,14 @@ export async function startMaster(root: string, kind: WorkerProfile['kind'], age
       : `No browser profile is configured, so App permission updates, installation acceptance, and page-only protection changes still need the operator; ask them to rerun node ${config.cliPath} master init --browser-profile PROFILE so those become yours.`;
     // The master starts on its own request too; a runtime without that contract is prompted
     // after start, with the text last and the confirmation following it.
-    ({ delivery } = startAgentSession(config.masterAgentName, kind, created.pane, launch.args, `${prompt} ${reviewInstruction} ${administrationInstruction} ${mergeInstruction}`, run, { confirm: 'follow' }));
+    ({ delivery } = startAgentSession(name, kind, created.pane, launch.args, `${prompt} ${reviewInstruction} ${administrationInstruction} ${mergeInstruction}`, run, { confirm: 'follow', retry: masterRetry }));
   } catch (error) {
     const malformedTab = (error as any)?.herdrTab as string | undefined;
     if (pane || tabId || malformedTab) try { stopCreatedHerdrTab(pane, tabId ?? malformedTab, run); }
     catch { throw new Error(`${error instanceof Error ? error.message : 'Master startup failed'}; Herdr could not confirm cleanup of the created tab`); }
     throw error;
   }
-  return { agentName: config.masterAgentName, kind, pane: pane!, status: delivery === 'request' ? 'started on its request' : 'started and prompted', delivery, focusChanged: false, harness };
+  return { agentName: name, kind, pane: pane!, status: delivery === 'request' ? 'started on its request' : 'started and prompted', delivery, focusChanged: false, harness };
 }
 
 type WorkerCommand = (command: string, args: string[], options?: any) => string | Buffer;
@@ -3055,13 +3154,18 @@ export async function restartMasterLoop(root: string, config: MasterConfig, lock
  * after a verdict, rework after a base conflict, a merge approval — and an approver stops when it
  * has judged, leaving its tab listed. Named per item, that finished tab refused the launch of the
  * next decision's approver until somebody closed it by hand.
+ *
+ * Per decision and inside the runtime's limit, both (GY-101): the fixed prefix and an eight-
+ * character decision fragment left four characters for the key, so every key from GY-10 up built a
+ * 33-character name no runtime would take and no approver could be launched at all. The key is
+ * kept whole now and the decision id takes what the limit leaves.
  */
-export const approverSessionName = (work: Pick<Work, 'key'>, decision: string) =>
-  `graphyard-approver-${work.key.toLowerCase()}-${decision.toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 8) || 'decision'}`;
+export const approverSessionName = (work: Pick<Work, 'key'>, decision: string) => distinctSessionName(['graphyard-approver', 'gy-approver'], work.key, decision);
 export async function launchApprover(root: string, work: Work, decision: string, kind: NonNullable<WorkerProfile['kind']>, agents: HerdrAgent[], run?: (command: string, args: string[]) => string) {
   const config = await loadMasterConfig(root);
   await agentToken(root, config, 'approver');
-  const name = approverSessionName(work, decision);
+  const retry = `graphyard master approver ${work.key} ${decision} [AGENT_KIND]`;
+  const name = nameForLaunch(retry, () => approverSessionName(work, decision));
   if (agents.some(agent => agent.name === name)) throw new Error(`Approver session ${name} is already visible in Herdr; let it finish or close it first`);
   const launch = agentLaunchPlan(kind, 'auto');
   const cli = `node ${config.cliPath}`;
@@ -3071,7 +3175,7 @@ export async function launchApprover(root: string, work: Work, decision: string,
   try {
     const created = createdHerdrTab(herdrJson(['tab', 'create', ...(config.herdrWorkspace ? ['--workspace', config.herdrWorkspace] : []), '--cwd', root, '--label', `Approver · ${work.key}`, '--env', `GRAPHYARD_URL=${config.url}`, '--env', `GRAPHYARD_TOKEN_FILE=${config.approver!.credentialFile}`, '--env', 'GRAPHYARD_APPROVER=1', '--env', `GRAPHYARD_HOST_ID=${config.hostId}`, ...Object.entries(launch.environment).flatMap(([key, value]) => ['--env', `${key}=${value}`]), '--no-focus'], run));
     pane = created.pane; tabId = created.tab;
-    ({ delivery } = startAgentSession(name, kind, created.pane, launch.args, prompt, run));
+    ({ delivery } = startAgentSession(name, kind, created.pane, launch.args, prompt, run, { retry }));
   } catch (error) {
     if (pane || tabId) try { stopCreatedHerdrTab(pane, tabId, run); } catch { /* the launch error below is the report */ }
     throw error;
@@ -3096,7 +3200,8 @@ export function verifiedContext(context: EscalationContext) {
  */
 export async function launchEscalationHandler(root: string, config: MasterConfig, context: EscalationContext, kind: NonNullable<WorkerProfile['kind']>, agents: HerdrAgent[], run?: (command: string, args: string[]) => string) {
   await agentToken(root, config, 'operatorAgent');
-  const name = `graphyard-escalation-${context.key.toLowerCase()}-${context.escalation.trigger}`;
+  const escalationRetry = `graphyard master escalation ${context.key} ${context.escalation.trigger} ${kind}`;
+  const name = nameForLaunch(escalationRetry, () => distinctSessionName(['graphyard-escalation', 'graphyard-esc', 'gy-esc'], context.key, context.escalation.trigger));
   if (agents.some(agent => agent.name === name)) throw new Error(`Escalation handler ${name} is already visible in Herdr; let it finish or close it first`);
   const directory = resolve(await localDirectory(root), 'escalations'); await mkdir(directory, { recursive: true, mode: 0o700 });
   const file = resolve(directory, `${context.key}-${context.escalation.trigger}-${context.fingerprint.slice(0, 12)}.json`);
@@ -3110,7 +3215,7 @@ export async function launchEscalationHandler(root: string, config: MasterConfig
     pane = created.pane; tabId = created.tab;
     // The instruction is the session's own first request (GY-93), never pasted into it: a handler
     // that refused a pasted prompt would record no decision and leave the escalation standing.
-    ({ delivery } = startAgentSession(name, kind, created.pane, launch.args, prompt, run));
+    ({ delivery } = startAgentSession(name, kind, created.pane, launch.args, prompt, run, { retry: escalationRetry }));
   } catch (error) {
     if (pane || tabId) try { stopCreatedHerdrTab(pane, tabId, run); } catch { /* the launch error below is the report */ }
     throw error;
