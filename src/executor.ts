@@ -160,9 +160,12 @@ export function controlPlaneHandlers(config: () => MasterConfig, effects: Contro
     },
     merge: async action => {
       const { work } = await find(action);
-      const result = await effects.merge(work) as { merged?: boolean; reason?: string; state?: string } | undefined;
-      if (result && result.merged === false) throw new Error(result.reason ?? `the guarded merge did not commit ${work.key}`);
-      return `guarded merge of ${work.key} ${result?.state ?? 'committed'}`;
+      // The broker throws when it does not hand the merge to the provider, so reaching here means
+      // it did. What it returns is its own account of what happened — a merge requested and not
+      // yet observed, or an execution it retained until GitHub reconciles — and the row records
+      // that verbatim rather than a word of the executor's own: only the observation says merged.
+      const result = await effects.merge(work) as { result?: string } | undefined;
+      return `${work.key}: ${result?.result ?? 'the guarded merge returned without a result of its own'}`;
     },
     'verify-deployment': async action => {
       const { work } = await find(action);

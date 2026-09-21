@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { demand } from './refusal.js';
-import { nextAction, type NextActionInputs, type NextActionKind } from './next-action.js';
+import { nextAction, type NextAction, type NextActionInputs, type NextActionKind } from './next-action.js';
 import type { Work } from './work.js';
 
 /**
@@ -124,7 +124,8 @@ export function actionQueue(work: Work): ActionQueue {
  * the row that does. An expired claim returns its row to `pending` without losing the attempt
  * count, which is what makes a dead executor cost one attempt rather than the action.
  */
-export function reconcileActions(work: Work, all: Work[], now: Date, requester = 'graphyard'): ActionTransition[] {
+export function reconcileActions(work: Work, all: Work[], now: Date, options: { requester?: string; next?: NextAction | null } = {}): ActionTransition[] {
+  const requester = options.requester ?? 'graphyard';
   const queue = actionQueue(work);
   const at = now.toISOString();
   const transitions: ActionTransition[] = [];
@@ -137,7 +138,10 @@ export function reconcileActions(work: Work, all: Work[], now: Date, requester =
     record(resolved, { at, event: 'cancelled', requester: row.requestedBy, executor: row.claim?.executor ?? null, result: null, reason });
     transitions.push({ event: 'cancelled', action: resolved });
   };
-  const next = nextAction(work, all, now);
+  // The caller may have computed the action already — an evaluation writes it onto the item as
+  // well as reconciling the queue — and the same snapshot always names the same action, so it is
+  // taken rather than computed a second time.
+  const next = 'next' in options ? options.next ?? null : nextAction(work, all, now);
   const wanted = next ? actionId(next.kind, work.id, next.binding) : null;
 
   const kept: ActionRow[] = [];
