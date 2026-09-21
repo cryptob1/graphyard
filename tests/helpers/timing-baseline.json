@@ -1,12 +1,12 @@
 {
   "schema": 1,
-  "commit": "4d8146923caa3272d930159a03da1afb52d49a43",
+  "commit": "44b1bf618d1fe988c91f6d54c76f35f45dc5ec3d",
   "treeUnchanged": true,
   "command": [
     "npm",
     "test"
   ],
-  "recordedAt": "2026-09-21T04:49:44.895Z",
+  "recordedAt": "2026-09-21T14:47:03.832Z",
   "environment": {
     "node": "v24.5.0",
     "platform": "linux-x64",
@@ -18,7 +18,7 @@
       "run": 1,
       "passed": true,
       "exitCode": 0,
-      "durationMs": 59491,
+      "durationMs": 39677,
       "failedTests": 0,
       "timingFailures": []
     },
@@ -26,7 +26,7 @@
       "run": 2,
       "passed": true,
       "exitCode": 0,
-      "durationMs": 58222,
+      "durationMs": 39702,
       "failedTests": 0,
       "timingFailures": []
     },
@@ -34,7 +34,7 @@
       "run": 3,
       "passed": true,
       "exitCode": 0,
-      "durationMs": 53897,
+      "durationMs": 36987,
       "failedTests": 0,
       "timingFailures": []
     },
@@ -42,7 +42,7 @@
       "run": 4,
       "passed": true,
       "exitCode": 0,
-      "durationMs": 57137,
+      "durationMs": 39910,
       "failedTests": 0,
       "timingFailures": []
     },
@@ -50,7 +50,7 @@
       "run": 5,
       "passed": true,
       "exitCode": 0,
-      "durationMs": 46430,
+      "durationMs": 38860,
       "failedTests": 0,
       "timingFailures": []
     },
@@ -58,7 +58,7 @@
       "run": 6,
       "passed": true,
       "exitCode": 0,
-      "durationMs": 56045,
+      "durationMs": 40505,
       "failedTests": 0,
       "timingFailures": []
     },
@@ -66,7 +66,7 @@
       "run": 7,
       "passed": true,
       "exitCode": 0,
-      "durationMs": 64930,
+      "durationMs": 40086,
       "failedTests": 0,
       "timingFailures": []
     },
@@ -74,7 +74,7 @@
       "run": 8,
       "passed": true,
       "exitCode": 0,
-      "durationMs": 53833,
+      "durationMs": 39580,
       "failedTests": 0,
       "timingFailures": []
     },
@@ -82,7 +82,7 @@
       "run": 9,
       "passed": true,
       "exitCode": 0,
-      "durationMs": 53590,
+      "durationMs": 40247,
       "failedTests": 0,
       "timingFailures": []
     },
@@ -90,7 +90,7 @@
       "run": 10,
       "passed": true,
       "exitCode": 0,
-      "durationMs": 73664,
+      "durationMs": 41240,
       "failedTests": 0,
       "timingFailures": []
     },
@@ -98,7 +98,7 @@
       "run": 11,
       "passed": true,
       "exitCode": 0,
-      "durationMs": 44095,
+      "durationMs": 41397,
       "failedTests": 0,
       "timingFailures": []
     },
@@ -106,7 +106,7 @@
       "run": 12,
       "passed": true,
       "exitCode": 0,
-      "durationMs": 52126,
+      "durationMs": 41576,
       "failedTests": 0,
       "timingFailures": []
     },
@@ -114,7 +114,7 @@
       "run": 13,
       "passed": true,
       "exitCode": 0,
-      "durationMs": 54031,
+      "durationMs": 41793,
       "failedTests": 0,
       "timingFailures": []
     },
@@ -122,7 +122,7 @@
       "run": 14,
       "passed": true,
       "exitCode": 0,
-      "durationMs": 49311,
+      "durationMs": 40152,
       "failedTests": 0,
       "timingFailures": []
     },
@@ -130,7 +130,7 @@
       "run": 15,
       "passed": true,
       "exitCode": 0,
-      "durationMs": 54829,
+      "durationMs": 41049,
       "failedTests": 0,
       "timingFailures": []
     },
@@ -138,7 +138,7 @@
       "run": 16,
       "passed": true,
       "exitCode": 0,
-      "durationMs": 66963,
+      "durationMs": 40290,
       "failedTests": 0,
       "timingFailures": []
     },
@@ -146,7 +146,7 @@
       "run": 17,
       "passed": true,
       "exitCode": 0,
-      "durationMs": 54484,
+      "durationMs": 41380,
       "failedTests": 0,
       "timingFailures": []
     },
@@ -154,7 +154,7 @@
       "run": 18,
       "passed": true,
       "exitCode": 0,
-      "durationMs": 53807,
+      "durationMs": 42058,
       "failedTests": 0,
       "timingFailures": []
     },
@@ -162,7 +162,7 @@
       "run": 19,
       "passed": true,
       "exitCode": 0,
-      "durationMs": 50303,
+      "durationMs": 39368,
       "failedTests": 0,
       "timingFailures": []
     },
@@ -170,7 +170,7 @@
       "run": 20,
       "passed": true,
       "exitCode": 0,
-      "durationMs": 47698,
+      "durationMs": 39830,
       "failedTests": 0,
       "timingFailures": []
     }
@@ -187,11 +187,11 @@
       "comparison": "<=",
       "runs": 20,
       "failures": 0,
-      "minMs": 179,
-      "medianMs": 190,
-      "maxMs": 203,
-      "spreadMs": 24,
-      "headroomMs": 19797
+      "minMs": 189,
+      "medianMs": 200,
+      "maxMs": 241,
+      "spreadMs": 52,
+      "headroomMs": 19759
     },
     {
       "name": "dispatch-read-resilience.recovery",
@@ -201,11 +201,11 @@
       "comparison": "<",
       "runs": 20,
       "failures": 0,
-      "minMs": 772.901,
-      "medianMs": 779.797,
-      "maxMs": 801.694,
-      "spreadMs": 28.793,
-      "headroomMs": 9198.306
+      "minMs": 777.694,
+      "medianMs": 800.298,
+      "maxMs": 821.09,
+      "spreadMs": 43.396,
+      "headroomMs": 9178.91
     },
     {
       "name": "work-snapshot-latency.p95",
@@ -215,11 +215,11 @@
       "comparison": "<",
       "runs": 20,
       "failures": 0,
-      "minMs": 184.284,
-      "medianMs": 192.298,
-      "maxMs": 326.114,
-      "spreadMs": 141.83,
-      "headroomMs": 1673.886
+      "minMs": 202.657,
+      "medianMs": 221.594,
+      "maxMs": 230.122,
+      "spreadMs": 27.465,
+      "headroomMs": 1769.878
     }
   ]
 }
