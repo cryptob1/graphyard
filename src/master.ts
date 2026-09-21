@@ -11,13 +11,14 @@ import { dispatchOrder, dispatchOverlap, resourceConflicts, scopeBreadth } from 
 import type { ConflictReport } from './conflicts.js';
 import { mergeOrder } from './delegation.js';
 import { launchPlan, masterHarnessPlan, writeHarnessPermissions, type HarnessPlan, type HarnessRule } from './harness.js';
-import { CHECK_NAME, carriedApproval, deliveryState, deploySmokeRequired, describeQueueBinding, evidenceIndependenceRefusals, exhaustedReviewerProfiles, nativeReviewRequired, postDeployMs, productionLatencyMs, providerDelayAfterVerification, reviewerProfileFor, reviewProviderOf, rollbackGuidance, standingEscalations, type CarriedApproval, type QueueBindingReport, type Work } from './model.js';
+import { CHECK_NAME, carriedApproval, escalationTriggers, deliveryState, deploySmokeRequired, describeQueueBinding, evidenceIndependenceRefusals, exhaustedReviewerProfiles, nativeReviewRequired, postDeployMs, productionLatencyMs, providerDelayAfterVerification, reviewerProfileFor, reviewProviderOf, rollbackGuidance, standingEscalations, type CarriedApproval, type QueueBindingReport, type Work } from './model.js';
 import { containmentAttestation, containmentGraceMs, containmentSettlementRefusals, containmentVerificationSchema, type ContainmentVerification } from './quarantine.js';
 import { probeSupervisorAbsence } from './containment-probe.js';
 import { baseRefreshConflict, currentBaseRefreshCarry, pendingBaseRefresh, predictQueue, refusedReconciliation, unpublishableEntry, type QueuePlacement } from './merge-queue.js';
 import { MERGE_PROTOCOL } from './protocol-version.js';
 import { attentionLines, type ProductionReport } from './production-watch.js';
 import { pipelineSpeed, pipelineSpeedSummary } from './pipeline-speed.js';
+import { contextFingerprint, escalationAction, followPrecedent, handleEscalation, type EscalationContext } from './model/escalation-context.js';
 
 const safeEnvironment = z.record(
   z.string().regex(/^[A-Z_][A-Z0-9_]*$/)
@@ -2836,7 +2837,46 @@ export async function launchApprover(root: string, work: Work, decision: string,
   return { agentName: name, work: work.key, decision, identity: config.approver!.id, pane: pane!, delivery, focusChanged: false };
 }
 
-export const autonomySubcommands = ['autonomy', 'create', 'release', 'unblock', 'requirements', 'decide', 'decisions', 'approve', 'approver', 'principals', 'restart', 'environments'] as const;
+/**
+ * A context the handler received is what the control plane assembled: the fingerprint covers
+ * every byte but itself, so a document altered or abridged on the way is refused before it is judged.
+ */
+export function verifiedContext(context: EscalationContext) {
+  const { fingerprint, ...document } = context;
+  if (contextFingerprint(document) !== fingerprint) throw new Error(`The escalation context for ${context.key} does not match its fingerprint ${fingerprint}; fetch it again from the control plane`);
+  return context;
+}
+/**
+ * Spawn a judging session for one escalation (GY-90). It is a fresh master: its whole input is
+ * the assembled context, written to one private file, and the escalation inside it. It holds no
+ * loop state, reads nothing else, and records its decision with `master decide … --precedent
+ * --context`, so the ledger carries the reason, the precedent it relied on and what it saw.
+ */
+export async function launchEscalationHandler(root: string, config: MasterConfig, context: EscalationContext, kind: NonNullable<WorkerProfile['kind']>, agents: HerdrAgent[], run?: (command: string, args: string[]) => string) {
+  await agentToken(root, config, 'operatorAgent');
+  const name = `graphyard-escalation-${context.key.toLowerCase()}-${context.escalation.trigger}`;
+  if (agents.some(agent => agent.name === name)) throw new Error(`Escalation handler ${name} is already visible in Herdr; let it finish or close it first`);
+  const directory = resolve(await localDirectory(root), 'escalations'); await mkdir(directory, { recursive: true, mode: 0o700 });
+  const file = resolve(directory, `${context.key}-${context.escalation.trigger}-${context.fingerprint.slice(0, 12)}.json`);
+  await atomicPrivateWrite(file, context);
+  const launch = agentLaunchPlan(kind, 'auto');
+  const cli = `node ${config.cliPath}`;
+  const prompt = `You are a Graphyard escalation handler spawned for the ${context.escalation.trigger} escalation on ${context.key} in ${config.repository}, acting as ${config.operatorAgent!.id}. Your entire input is the file ${file}: the context the control plane assembled for this decision — the repository's own operating rules and policy, the current goals and priorities, the item (requirements, the standing refusal, the candidate, its typed history) and precedent (earlier ${escalationAction} decisions with their reasons and outcomes). Read that file and nothing else: do not run status, events or any other read, do not open the repository, and hold no state beyond it. Decide whether the ${context.escalation.trigger} escalation should be resolved, following the precedent that applies and saying which. If it should, run ${cli} master decide ${context.key} ${escalationAction} '{"trigger":"${context.escalation.trigger}"}' --precedent DECISION_ID[,DECISION_ID] --context ${context.fingerprint} "YOUR REASON" exactly once; an independent approver judges it. If it should not, request nothing and state the reason in this tab. Never edit, push, merge, review, approve or submit evidence. Stop when the decision is recorded or declined.`;
+  let pane: string | undefined, tabId: string | undefined, delivery: RequestDelivery | undefined;
+  try {
+    const created = createdHerdrTab(herdrJson(['tab', 'create', ...(config.herdrWorkspace ? ['--workspace', config.herdrWorkspace] : []), '--cwd', root, '--label', `Escalation · ${context.key}`, '--env', `GRAPHYARD_URL=${config.url}`, '--env', 'GRAPHYARD_ESCALATION_HANDLER=1', '--env', `GRAPHYARD_HOST_ID=${config.hostId}`, ...Object.entries(launch.environment).flatMap(([key, value]) => ['--env', `${key}=${value}`]), '--no-focus'], run));
+    pane = created.pane; tabId = created.tab;
+    // The instruction is the session's own first request (GY-93), never pasted into it: a handler
+    // that refused a pasted prompt would record no decision and leave the escalation standing.
+    ({ delivery } = startAgentSession(name, kind, created.pane, launch.args, prompt, run));
+  } catch (error) {
+    if (pane || tabId) try { stopCreatedHerdrTab(pane, tabId, run); } catch { /* the launch error below is the report */ }
+    throw error;
+  }
+  return { agentName: name, work: context.key, trigger: context.escalation.trigger, fingerprint: context.fingerprint, context: file, identity: config.operatorAgent!.id, pane: pane!, delivery, focusChanged: false };
+}
+
+export const autonomySubcommands = ['autonomy', 'create', 'release', 'unblock', 'requirements', 'decide', 'decisions', 'approve', 'approver', 'principals', 'restart', 'environments', 'context', 'escalation'] as const;
 export interface AutonomyDependencies {
   coordinator: (path: string) => Promise<any>;
   readSecret: () => Promise<string>;
@@ -2893,10 +2933,32 @@ export async function runAutonomyCommand(root: string, config: MasterConfig, id:
   }
   if (id === 'decide') {
     const work = await item(args[0]); const action = args[1];
-    if (!action) throw new Error('Use master decide GY-N ACTION [JSON|@FILE] REASON');
-    const explicit = args[2] && /^[{@]/.test(args[2]);
-    const input = explicit ? await jsonArgument(args[2]) : {};
-    return call(await operator(), `work/${work.id}/decide`, { action, input: decisionInput(action, work, input), reason: reason(args.slice(explicit ? 3 : 2)) });
+    if (!action) throw new Error('Use master decide GY-N ACTION [JSON|@FILE] [--precedent ID[,ID]] [--context FINGERPRINT] REASON');
+    // A handler cites the decisions it followed and the fingerprint of the context it judged from.
+    const flags: Record<string, string> = {}; const rest: string[] = [];
+    for (let index = 2; index < args.length; index++) {
+      if (args[index] === '--precedent' || args[index] === '--context') { flags[args[index].slice(2)] = args[++index] ?? ''; continue; }
+      rest.push(args[index]);
+    }
+    const explicit = rest[0] && /^[{@]/.test(rest[0]);
+    const input = explicit ? await jsonArgument(rest[0]) : {};
+    return call(await operator(), `work/${work.id}/decide`, { action, input: decisionInput(action, work, input), reason: reason(rest.slice(explicit ? 1 : 0)),
+      ...(flags.precedent ? { precedent: flags.precedent.split(',').map(value => value.trim()).filter(Boolean) } : {}), ...(flags.context ? { context: flags.context } : {}) });
+  }
+  if (id === 'context' || id === 'escalation') {
+    // The assembled context, read from the control plane by key and nothing else — no snapshot,
+    // no status; `escalation` then spawns a fresh handler on it: the built-in precedent rule in
+    // this process, or a judging session of KIND.
+    if (!args[0]) throw new Error(`Use master ${id} GY-N [TRIGGER] [--budget N]${id === 'escalation' ? ' [precedent|AGENT_KIND]' : ''}`);
+    const rest: string[] = []; let budget: string | undefined;
+    for (let index = 1; index < args.length; index++) { if (args[index] === '--budget') budget = args[++index]; else rest.push(args[index]); }
+    const trigger = rest.find(value => (escalationTriggers as readonly string[]).includes(value));
+    const params = new URLSearchParams(); if (trigger) params.set('trigger', trigger); if (budget) params.set('budget', budget);
+    const context = verifiedContext(await deps.coordinator(`work/${encodeURIComponent(args[0])}/context${params.size ? `?${params}` : ''}`));
+    if (id === 'context') return context;
+    const handler = rest.find(value => value !== trigger) ?? 'precedent';
+    if (handler === 'precedent') return handleEscalation(context, followPrecedent, async request => call(await operator(), `work/${encodeURIComponent(context.key)}/decide`, request));
+    return launchEscalationHandler(root, config, context, agentKindSchema.parse(handler), deps.agents());
   }
   if (id === 'decisions') return deps.coordinator(`work/${encodeURIComponent((await item(args[0])).id)}/decisions`);
   if (id === 'approve') {
