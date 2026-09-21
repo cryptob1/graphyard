@@ -14,10 +14,10 @@ import { processJob, type GitHub } from '../src/github.js';
 import { queueRef, type QueuePlacement, type QueueSpeculation } from '../src/merge-queue.js';
 import { server } from '../src/server.js';
 import { Store } from '../src/store.js';
-import { answerHumanCommand, humanRequestsCommand, parkCommand } from '../src/cli/master-status.js';
+import { answerHumanCommand, humanRequestsCommand, parkCommand } from '../src/cli/session-commands.js';
 import type { CliContext } from '../src/cli/context.js';
 import { capacityKey, emptyDaemonState, failoverKey, runCycle, type DaemonEffects, type DaemonState, type LaunchedSession } from '../src/master-daemon.js';
-import { emptyDispatchCursor, runDispatchTick, type DispatchEffects } from '../src/auto-dispatch.js';
+import { capacityRecheckMs, emptyDispatchCursor, runDispatchTick, type DispatchEffects } from '../src/auto-dispatch.js';
 import { buildMasterStatus, inspectProfileAccounts, masterConfigSchema, observedExhaustions, preservePartialWork, profileAccount, recordObservedExhaustion, selectAccount, readEnvironmentLog, workerPrompt, type MasterConfig } from '../src/master.js';
 import { detectExhaustion, parseResetTime } from '../src/model/capacity.js';
 import { answerCommand, humanRequestBlocker, openHumanRequests } from '../src/model/human-request.js';
@@ -405,13 +405,17 @@ test('integration:capacity-exhausted-escalation — with every account of a role
     launchConfig = { ...reviewerConfig, environments: [...(reviewerConfig.environments ?? []), { name: 'env-out', kind: 'claude', home: join(home, 'env-out') }],
       reviewers: [{ ...reviewerConfig.reviewers[0], accounts: [...accounts] }] } as MasterConfig;
     const fixableCursor = emptyDispatchCursor(launchConfig);
+    // The role was paused for spent quota on an earlier tick and is due to be read again: the
+    // hold is stale, and the refusal is what proves it wrong, so the refusal withdraws it rather
+    // than leaving `dispatch.capacity` reporting a provider reset beside the fault.
+    fixableCursor.capacity.review = { at: new Date(now() - 2 * capacityRecheckMs).toISOString(), recheckAt: new Date(now() - capacityRecheckMs).toISOString(), reason: 'reviewer-a: every account exhausted its quota' };
     const refusedTick = await runDispatchTick(launchConfig, fixableCursor, dispatchEffects, now);
     const refusal = refusedTick.refused.find(entry => entry.requestId === fixableRequest.id);
     assert.ok(refusal, `${label}: the launch is refused, not recorded as capacity`);
     assert.match(refusal.reason, expected);
     assert.equal(refusal.kind, 'review');
     assert.equal(fixableCursor.failures[fixableRequest.id]?.attempts, 1, `${label}: and counts toward the failure limit`);
-    assert.deepEqual(fixableCursor.capacity, {}, `${label}: no role is paused for a reset that would never come`);
+    assert.deepEqual(fixableCursor.capacity, {}, `${label}: no role is paused for a reset that would never come, and a stale pause is withdrawn`);
     assert.equal(refusedTick.waiting.find(entry => entry.requestId === fixableRequest.id), undefined, `${label}: it does not read as a wait`);
 
     // And the master is told: the launch-review attention item the refusal has always raised.

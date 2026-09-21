@@ -185,6 +185,10 @@ export async function runDispatchTick(config: MasterConfig, cursor: DispatchCurs
     const attempts = (previous?.attempts ?? 0) + 1;
     const failure: DispatchFailure = { kind, work: item.key, sha: request.sha, attempts, reason: message(error).slice(0, 500), at: new Date(now()).toISOString(), nextAt: new Date(now() + retryDelay(attempts)).toISOString() };
     cursor.failures[request.id] = failure;
+    // A refusal is the role answering with something other than spent quota, so any hold the
+    // previous tick armed is stale: withdraw it rather than let the summary keep reporting a
+    // provider reset beside the failure a master can fix now.
+    delete cursor.capacity[kind];
     tick.refused.push({ ...failure, requestId: request.id });
   };
   // A role out of capacity is not launched again until its accounts are due to be read, and the
