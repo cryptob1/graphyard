@@ -176,7 +176,10 @@ test('integration:launch-prompt-is-a-request — a producer, a reviewer, an appr
     // Approver on Cursor: the same, for the decision it judges.
     const approved = await launchApprover(root, work(), 'decision-1', 'cursor', [], herdr.run);
     assert.equal(approved.delivery, 'request');
-    const approver = herdr.named('graphyard-approver-gy-93');
+    // Looked up under the name the launcher reports: how an approver session is named is the
+    // launcher's to decide, and what this asserts is how that session received its request.
+    assert.match(approved.agentName, /^graphyard-approver-gy-93/);
+    const approver = herdr.named(approved.agentName);
     assert.match(approver.request!, /Judge decision decision-1 on GY-93/);
     assert.equal(approver.toolCalls.length, 1); assert.deepEqual(approver.pasted, []);
 
@@ -193,7 +196,7 @@ test('integration:launch-prompt-is-a-request — a producer, a reviewer, an appr
     // A runtime without a request contract keeps the confirmed paste delivery, and the record says so.
     const approvedMuse = await launchApprover(root, work({ key: 'GY-94', id: 'work-94' }), 'decision-2', 'muse', [], herdr.run);
     assert.equal(approvedMuse.delivery, 'paste');
-    assert.equal(herdr.named('graphyard-approver-gy-94').pasted.length, 1);
+    assert.equal(herdr.named(approvedMuse.agentName).pasted.length, 1);
 
     // Herdr's start bound can expire while the runtime is busy on its request: the session is
     // adopted by the name it was started under, never closed.
