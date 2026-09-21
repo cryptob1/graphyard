@@ -6,6 +6,7 @@ import { dirname, resolve } from 'node:path';
 import { z } from 'zod';
 import { accountLaunch, agentLaunchPlan, assertOutsideWorktrees, atomicPrivateWrite, autonomousSession, createdHerdrTab, deliverPrompt, herdrJson, loadMasterConfig, prepareSessionHarness, privateFile, reviewerIdentitySchema, reviewerProfileSchema, closeHerdrPane, selectAccount, stopCreatedHerdrTab, type EnvironmentProbe, type HerdrAgent, type PromptDelivery, type MasterConfig, type ReviewerIdentity, type ReviewerProfile } from './master.js';
 import type { Work } from './model.js';
+import { liveReviewRequest } from './model/dispatch.js';
 
 const sha40 = z.string().regex(/^[0-9a-f]{40}$/i);
 export const reviewerCredentialSchema = z.object({
@@ -287,12 +288,52 @@ export async function launchReview(root: string, work: Work, profileName: string
     recorded: 'the request is recorded; master status reconciles the verdict and closes the session' };
 }
 
+/**
+ * `master review GY-N [PROFILE]`: launch the bound reviewer on the item's exact current candidate.
+ *
+ * The launch answers the control plane's own open request for that head, as the loop's would, and
+ * is recorded as that request's next attempt. That is what forces a further attempt for a request
+ * whose session already settled without satisfying the review gate — a dismissed approval, a
+ * reviewer that stopped — which no automatic relaunch follows. A head with no open request (the
+ * recovery path for a launch the loop refused) records none.
+ */
+export async function reviewCommand(root: string, args: string[], snapshot: { work: Work[]; now: string }, agents: { name?: string }[], dependencies: Parameters<typeof launchReview>[5] = {}) {
+  if (!args[0]) throw new Error('Use master review GY-N [PROFILE]');
+  const work = snapshot.work.find(item => item.id === args[0] || item.key === args[0]);
+  if (!work) throw new Error(`Unknown work item ${args[0]}`);
+  const request = liveReviewRequest(work);
+  return launchReview(root, work, args[1], agents, snapshot.now, { ...dependencies, ...(request ? { requestId: request.id } : {}) });
+}
+
 const reviewStates = ['APPROVED', 'CHANGES_REQUESTED', 'DISMISSED'];
-export function observeReviewVerdict(repository: string, record: ReviewRecord, reviewer: string, run: (command: string, args: string[]) => string) {
+/**
+ * The reviewer identity's latest verdict on this session's exact head, ignoring the verdicts an
+ * earlier session of the same head already recorded. Without that, a relaunch after a dismissal
+ * would read the dismissed review back as its own answer the moment it started and burn every
+ * remaining attempt on a verdict GitHub had already withdrawn.
+ */
+export function observeReviewVerdict(repository: string, record: ReviewRecord, reviewer: string, run: (command: string, args: string[]) => string, answered: Set<number> = new Set()) {
   const reviews = JSON.parse(run('gh', ['api', '--paginate', `repos/${repository}/pulls/${record.pr}/reviews`]));
   if (!Array.isArray(reviews)) throw new Error('GitHub did not return a review list for the pending reviewer session');
-  const match = reviews.filter((review: any) => review?.commit_id === record.sha && typeof review?.user?.login === 'string' && review.user.login.toLowerCase() === reviewer.toLowerCase() && reviewStates.includes(review?.state)).at(-1);
+  const match = reviews.filter((review: any) => review?.commit_id === record.sha && typeof review?.user?.login === 'string' && review.user.login.toLowerCase() === reviewer.toLowerCase() && reviewStates.includes(review?.state) && !answered.has(Number(review?.id))).at(-1);
   return match ? { state: String(match.state), reviewer, reviewId: Number(match.id), submittedAt: String(match.submitted_at ?? new Date().toISOString()) } : null;
+}
+
+/**
+ * A dismissal is GitHub withdrawing a verdict, never the reviewer giving one: the review gate
+ * still refuses, so the session that collected it answered nothing. This is the resolution such
+ * a session is recorded unanswered with, and it distinguishes the two causes, because they need
+ * different heads. `dismiss_stale_reviews` dismisses an approval when the head it was bound to is
+ * replaced, and the review the control plane then wants is of the new head. A dismissal while the
+ * candidate is unchanged — a recomputed merge base, a dismissal by hand — leaves the same commit
+ * needing the same review, and demanding a new head for it would cost a rework round for a
+ * candidate nobody found fault with.
+ */
+export function dismissalResolution(record: Pick<ReviewRecord, 'key' | 'sha' | 'baseSha' | 'policyRevision'>, work: Work[] | undefined): string {
+  const moved = staleReviewReason(record, work);
+  return moved
+    ? `the approval of ${record.sha.slice(0, 12)} was dismissed and ${moved}; the request for the current head is answered afresh`
+    : `the approval of ${record.sha.slice(0, 12)} was dismissed while it was still the candidate; the same commit is reviewed again`;
 }
 
 /**
@@ -347,7 +388,8 @@ async function closeReviewSession(record: ReviewRecord, dependencies: { run?: (c
 // reason on the record.
 export async function reconcileReviews(root: string, config: MasterConfig, dependencies: {
   run?: (command: string, args: string[]) => string;
-  observe?: (record: ReviewRecord, reviewer: string) => { state: string; reviewer: string; reviewId: number; submittedAt: string } | null;
+  /** `answered` holds the verdict ids an earlier session of the same head already recorded. */
+  observe?: (record: ReviewRecord, reviewer: string, answered: Set<number>) => { state: string; reviewer: string; reviewId: number; submittedAt: string } | null;
   now?: () => Date;
   work?: Work[];
   /** Herdr's agent list; null when Herdr could not be read, when a session is never judged finished. */
@@ -358,7 +400,7 @@ export async function reconcileReviews(root: string, config: MasterConfig, depen
   const ledger = await readReviewLedger(root);
   if (!config.reviewer) return { reviews: ledger.reviews, changed: 0 };
   const reviewer = `${config.reviewer.slug}[bot]`;
-  const observe = dependencies.observe ?? ((record: ReviewRecord, identity: string) => observeReviewVerdict(config.repository, record, identity, dependencies.run ?? ((command: string, args: string[]) => execFileSync(command, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }))));
+  const observe = dependencies.observe ?? ((record: ReviewRecord, identity: string, answered: Set<number>) => observeReviewVerdict(config.repository, record, identity, dependencies.run ?? ((command: string, args: string[]) => execFileSync(command, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] })), answered));
   const now = (dependencies.now ?? (() => new Date()))();
   // The retry goes through the same confirmed delivery as the launch: a prompt the stopped
   // session never visibly accepts throws, and the grace period records it failed as before.
@@ -366,7 +408,12 @@ export async function reconcileReviews(root: string, config: MasterConfig, depen
   let changed = 0;
   for (const record of ledger.reviews) {
     if (record.state !== 'pending') continue;
-    const verdict = record.verdict ?? observe(record, reviewer) ?? undefined;
+    const answered = new Set(ledger.reviews.filter(entry => entry.id !== record.id && entry.key === record.key && entry.sha === record.sha && entry.verdict).map(entry => entry.verdict!.reviewId));
+    const verdict = record.verdict ?? observe(record, reviewer, answered) ?? undefined;
+    // A dismissed approval is not an answer: the session is recorded unanswered, with the
+    // dismissal and its cause, so the request is relaunched exactly as any other unanswered
+    // session is rather than settling a request the review gate still refuses.
+    const dismissed = verdict?.state === 'DISMISSED' ? dismissalResolution(record, dependencies.work) : null;
     const expired = !verdict && Date.parse(record.tokenExpiresAt) <= now.getTime();
     const stale = verdict ? null : staleReviewReason(record, dependencies.work);
     // A session that finished, vanished or sits blocked without a verdict is retried where it
@@ -389,9 +436,24 @@ export async function reconcileReviews(root: string, config: MasterConfig, depen
     }
     if (!verdict && !expired && !stale && !failed) continue;
     if (verdict) record.verdict = verdict;
-    if (verdict) await closeReviewSession(record, { run: dependencies.run, now: () => now }, { state: 'completed', force: true });
+    if (dismissed) await closeReviewSession(record, { run: dependencies.run, now: () => now }, { state: 'failed', resolution: dismissed, force: true });
+    else if (verdict) await closeReviewSession(record, { run: dependencies.run, now: () => now }, { state: 'completed', force: true });
     else if (stale) await closeReviewSession(record, { run: dependencies.run, now: () => now }, { state: 'cancelled', resolution: stale, force: true });
     else await closeReviewSession(record, { run: dependencies.run, now: () => now }, { state: failed ? 'failed' : 'expired', resolution: failed ?? `the reviewer token expired at ${record.tokenExpiresAt} without a verdict on ${record.sha.slice(0, 12)}` });
+    changed++;
+  }
+  // An approval recorded as a session's verdict can be withdrawn after that session closed: a push
+  // or a recomputed merge base dismisses it, the review gate refuses again, and nothing revisits a
+  // settled record. A closed session carrying the approval the control plane is still waiting for
+  // on this exact head is therefore re-read, and a dismissal reopens it as an unanswered session,
+  // so the request is relaunched instead of waiting on a verdict that no longer exists.
+  for (const record of ledger.reviews) {
+    if (record.state !== 'completed' || record.verdict?.state !== 'APPROVED') continue;
+    const request = dependencies.work?.find(item => item.key === record.key)?.autoDispatch?.review;
+    if (!request || request.state !== 'requested' || request.sha !== record.sha || request.baseSha !== record.baseSha || request.policyRevision !== record.policyRevision) continue;
+    if (observe(record, reviewer, new Set())?.state !== 'DISMISSED') continue;
+    record.verdict = { ...record.verdict, state: 'DISMISSED' };
+    record.state = 'failed'; record.resolution = dismissalResolution(record, dependencies.work); record.closedAt = now.toISOString();
     changed++;
   }
   if (changed) await saveReviewLedger(root, ledger);
