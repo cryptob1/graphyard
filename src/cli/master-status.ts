@@ -7,6 +7,7 @@ import { daemonSummary, orphanedSupervisors, readDaemonState, type DaemonState, 
 import { readReviewLedger, reconcileReviews, reviewerBindingHealth, summarizeReviews } from '../reviewer.js';
 import { readProducerLedger, reconcileProducers, sessionRetries, summarizeProducers } from '../producer.js';
 import { dispatchSummary, readDispatchCursor } from '../auto-dispatch.js';
+import { unansweredRequests, type RequestProgress, type UnansweredRequest } from '../model/dispatch.js';
 import { readAdministrationLedger, readSudoState, summarizeAdministration } from '../master-browser.js';
 import { workMutation, type CliCommand } from './registry.js';
 import { ghCheckAnnotations, qualifyTimingFailures } from './timing-failures.js';
@@ -25,6 +26,33 @@ export function scopeRequestAttention(snapshot: { work: Work[]; now: string }) {
 }
 
 type MasterStatus = ReturnType<typeof buildMasterStatus>;
+
+/** Long waits read in the unit the reader thinks in; a request measured in seconds is still young. */
+const elapsed = (ms: number) => ms >= 3_600_000 ? `${Math.floor(ms / 3_600_000)}h${Math.floor(ms % 3_600_000 / 60_000)}m` : ms >= 60_000 ? `${Math.floor(ms / 60_000)}m` : `${Math.floor(ms / 1000)}s`;
+
+/** Who answers a request whose session settled unanswered, and with which command. */
+export function unansweredRequestOwner(key: string, request: Pick<UnansweredRequest, 'kind'>) {
+  return request.kind === 'review'
+    ? agentOwner('master', `graphyard master review ${key} [PROFILE] forces the next attempt for the open request`)
+    : agentOwner('master', `graphyard master decide ${key} rework REASON, approved by the approver agent, so the group's proofs are requested afresh on the next head`, 'approver');
+}
+
+/**
+ * One attention item per live request whose session settled without satisfying its gate. Such a
+ * request is the one state `master status` used to show as nothing at all: no session running, no
+ * launch refused, no failure — just a `sinceMs` climbing past the hour while the gate goes on
+ * refusing. It is named here with the verdict that settled the session, how long the request has
+ * stood, and the command that gets it answered, and counted apart from the requests with a
+ * session actually running (`counts.dispatchRunning`).
+ */
+export function unansweredRequestAttention(rows: { key: string; dispatch: { review: RequestProgress | null; producers: RequestProgress[] } | null }[]): AttentionItem[] {
+  return rows.flatMap(row => unansweredRequests(row.dispatch).map(request => {
+    const subject = request.kind === 'review' ? 'Review request' : `Producer request for ${request.group ?? 'its'} proofs`;
+    const verdict = request.verdict ? `with verdict ${request.verdict}` : 'without a verdict';
+    return { subject: row.key, text: `${subject} for ${row.key} has stood unanswered for ${elapsed(request.sinceMs)}: its session ${request.state} ${verdict} after attempt ${request.attempts} — ${request.resolution ?? 'no reason recorded'}; nothing is running for it and no further attempt is scheduled`,
+      ...unansweredRequestOwner(row.key, request) };
+  }));
+}
 
 /**
  * The command that reclaims an assignment from a watch supervisor that outlived its agent. The
@@ -150,7 +178,10 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
   // the one step no agent may take for them; a timed-out one is the master's to rerun.
   const sudo = administration.sudo;
   const scopeRequests = scopeRequestAttention(snapshot);
-  const attentionItems = [...diskAttention, ...scopeRequests, ...(sudo ? [...status.attentionItems, { subject: 'installation', text: sudo.instruction,
+  // A request whose session settled without satisfying its gate: nothing runs for it, nothing
+  // refused, and nothing will launch again until it is named here with the command that answers it.
+  const unanswered = unansweredRequestAttention(status.work);
+  const attentionItems = [...diskAttention, ...scopeRequests, ...unanswered, ...(sudo ? [...status.attentionItems, { subject: 'installation', text: sudo.instruction,
     ...(Date.parse(sudo.deadline) <= Date.now() ? agentOwner('master', `graphyard master browser ${sudo.flow}`) : humanOwner('issuing credentials to people', sudo.instruction)) }] : [...status.attentionItems])];
   // Setup that stops every launch is the master's to repair.
   for (const text of reviewerBinding.attention) attentionItems.push({ subject: 'setup', text, ...agentOwner('master', 'graphyard master reviewer setup (or graphyard master reviewer bind FILE --key-stdin) to bind the reviewer App') });
@@ -171,7 +202,8 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
   attentionItems.push(...generatedFiles);
   const decisions = await terminalDecisions(masterApi, snapshot.work);
   return { ...status, attentionItems: [...attentionItems, ...decisions.attentionItems],
-    counts: { ...status.counts, attention: status.counts.attention + diskAttention.length + generatedFiles.length + scopeRequests.filter(item => !(status.work as { key: string; attention: string | null }[]).find(row => row.key === item.subject)?.attention).length },
+    counts: { ...status.counts, dispatchUnanswered: unanswered.length,
+      attention: status.counts.attention + diskAttention.length + generatedFiles.length + unanswered.length + scopeRequests.filter(item => !(status.work as { key: string; attention: string | null }[]).find(row => row.key === item.subject)?.attention).length },
     terminalDecisions: decisions.listed,
     autoMerge: master.autoMerge, mergeApproval: master.autoMerge ? 'routine merges permitted after gates pass' : 'each merge needs an approved merge decision: graphyard master decide GY-N merge REASON, approved by the approver agent',
     versionSkew: mergeProtocolSkew(coordinator, cli), cli,
