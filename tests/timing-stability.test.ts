@@ -113,7 +113,7 @@ test('unit:timing-failure-reported a required check that failed on a timing asse
   // emitted whatever the outcome of `npm test`, and the report survives as an artifact.
   const ci = await readFile(new URL('../.github/workflows/ci.yml', import.meta.url), 'utf8');
   const testJob = ci.slice(ci.indexOf('\n  test:\n'));
-  assert.match(testJob, /GRAPHYARD_TIMING_REPORT: \$\{\{ runner\.temp \}\}\/timing-report\.jsonl/);
+  assert.match(testJob, /GRAPHYARD_TIMING_REPORT: \$\{\{ github\.workspace \}\}\/\.graphyard\/timing-report\.jsonl/);
   assert.match(testJob, /if: always\(\)\n\s+run: npx tsx tests\/helpers\/timing-report\.ts "\$GRAPHYARD_TIMING_REPORT"/);
   assert.ok(testJob.indexOf('run: npm test') < testJob.indexOf('timing-report.ts'), 'published after the run it reports on');
 

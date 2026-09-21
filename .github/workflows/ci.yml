@@ -86,7 +86,7 @@ jobs:
     runs-on: ubuntu-latest
     env:
       # Every timing-dependent assertion records what it measured here (tests/helpers/timing.ts).
-      GRAPHYARD_TIMING_REPORT: ${{ runner.temp }}/timing-report.jsonl
+      GRAPHYARD_TIMING_REPORT: ${{ github.workspace }}/.graphyard/timing-report.jsonl
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -104,7 +104,7 @@ jobs:
         if: always()
         with:
           name: timing-report-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/timing-report.jsonl
+          path: .graphyard/timing-report.jsonl
           if-no-files-found: ignore
       - run: npx playwright install --with-deps chromium
       - run: npm run test:browser
