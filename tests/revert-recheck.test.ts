@@ -72,13 +72,13 @@ class Repository {
   }
   /** `git log -1 -- path` with history simplification: a commit that holds the path as one of its parents does is skipped for that parent. */
   lastTouching(sha: string, path: string): string | null {
-    for (let at: string | undefined = sha; at;) {
-      const commit = this.commits.get(at)!;
-      const same: string | undefined = commit.parents.find(parent => this.tree(parent)[path] === commit.tree[path]);
-      if (same) { at = same; continue; }
-      return commit.parents.length || commit.tree[path] ? at : null;
+    let at = sha;
+    for (;;) {
+      const { parents, tree } = this.commits.get(at)!;
+      const same = parents.find((parent: string) => this.tree(parent)[path] === tree[path]);
+      if (same === undefined) return parents.length || tree[path] ? at : null;
+      at = same;
     }
-    return null;
   }
   open(number: number, branch: string, head: string) {
     this.pulls.set(number, { number, head: { sha: head, ref: branch, repo: { full_name: 'owner/project' } }, base: { sha: this.main, ref: 'main', repo: { full_name: 'owner/project' } },
