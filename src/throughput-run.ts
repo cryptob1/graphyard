@@ -7,6 +7,7 @@ import { executorEffects, runExecutor, type ExecutorStep } from './auto-dispatch
 import { controlPlaneHandlers } from './executor.js';
 import { masterConfigSchema } from './master.js';
 import { holdsMergeExecution } from './model/escalation.js';
+import { nextAction } from './model/next-action.js';
 import { nearestRankPercentiles, type Percentiles } from './pipeline-speed.js';
 import { queueRef, type QueueSpeculation } from './merge-queue.js';
 import { judgeThroughput, sampleQueue, type QueueSample, type ThroughputWitness } from './throughput.js';
@@ -69,6 +70,11 @@ export interface FleetWitnessReport {
   executors: { id: string; host: string; ran: number; failed: number; kinds: string[] }[];
   /** How long a row waited from being requested to being claimed, over every row the run settled. */
   queueWait: Percentiles;
+  /**
+   * Every item the run released and did not deliver, with where it stands and what it is waiting
+   * for. A run that leaves one behind is not met, whatever the deliveries it did make measured.
+   */
+  undelivered: { key: string; stage: string; refusals: string[]; nextAction: string | null; lastFailure: string | null }[];
   /** The parts of the world this run stood in for. */
   standIns: readonly string[];
   /** The honest limit of a conducted run, carried beside the verdict. */
@@ -79,6 +85,38 @@ export interface FleetWitnessReport {
 }
 
 export const fleetCaveat = 'A conducted run measures the coordination this change owns — who claims a row, how long one waits, whether anything sits idle while actionable, and whether a master is needed at all. It does not measure how long a human-scale agent takes to implement, review or prove an item; the agents here answer immediately, so the submit→merge figure is the coordination component of the criterion and is reported as such.';
+
+/**
+ * The run's own connection pool, which a scratch database going away may not take the verdict with.
+ *
+ * A pool with no `error` listener turns the loss of one idle connection into an uncaught
+ * exception, and a witness run loses idle connections as a matter of course: the database it
+ * measured against is thrown away when it ends, and `pool.end()` resolves once its clients are
+ * forgotten rather than once their sockets have closed, so the server's shutdown can reach a
+ * connection the pool has already let go of. That killed the instrument after the fleet had
+ * finished and before the verdict was written — a failure of the witness, reported as one of the
+ * loop. An idle connection carries no query, so losing one is logged and costs nothing: a query
+ * that fails is raised where it was made, and fails the action or the run that made it.
+ */
+export function witnessStore(databaseUrl: string, log: (line: string) => void = () => {}): Store {
+  const store = new Store(databaseUrl);
+  store.pool.on('error', error => log(`[witness] an idle database connection was lost (${error.message}); no query was on it`));
+  return store;
+}
+
+/** Close the pool and wait for its sockets to be gone, so whoever stops the database next races nothing. */
+export async function closeWitnessStore(store: Store, graceMs = 2_000): Promise<void> {
+  const open = store.pool.totalCount;
+  const waiting = new AbortController();
+  let removed = 0;
+  const gone = new Promise<void>(resolve => {
+    if (!open) return resolve();
+    store.pool.on('remove', () => { if (++removed >= open) resolve(); });
+  });
+  await store.close();
+  await Promise.race([gone, delay(graceMs, undefined, { signal: waiting.signal }).catch(() => {})]);
+  waiting.abort();
+}
 
 const token = (label: string) => label.padEnd(32, '0').slice(0, 32);
 const sha40 = (label: string) => label.replace(/[^a-f0-9]/g, '0').padEnd(40, 'f').slice(0, 40);
@@ -104,7 +142,7 @@ export async function runFleetWitness(options: FleetWitnessOptions): Promise<Fle
   const producer: Principal = { id: 'witness-producer', role: 'producer', proofs: [PROOF] };
   const coordinators: Principal[] = Array.from({ length: executorCount }, (_unused, index) => ({ id: `witness-executor-${index + 1}`, role: 'coordinator' }));
 
-  const store = new Store(options.databaseUrl);
+  const store = witnessStore(options.databaseUrl, log);
   await store.init();
   const engine = new Engine(store, [15368], 120, 'owner/project');
   engine.principals = [operator, ...workers, ...coordinators, producer];
@@ -132,7 +170,11 @@ export async function runFleetWitness(options: FleetWitnessOptions): Promise<Fle
     const current = await reload(item.id);
     if (!current.queue || current.queue.speculation) return current;
     const speculation: QueueSpeculation = { ref: queueRef(current.key), tip: current.candidate!.sha, base: current.candidate!.baseSha, baseTree: sha40('7e'), predecessors: [], policyRevision: current.policyRevision, publishedAt: new Date().toISOString() };
-    await store.pool.query("UPDATE work_items SET document=jsonb_set(document,'{queue,speculation}',$2::jsonb) WHERE id=$1", [current.id, JSON.stringify(speculation)]);
+    // Published once per queue entry, and decided by the database rather than by the reading
+    // above: two executors that both saw an unpublished entry would otherwise both publish, and
+    // the second would move `publishedAt` under an authorization the first had already been given.
+    await store.pool.query(`UPDATE work_items SET document=jsonb_set(document,'{queue,speculation}',$2::jsonb)
+      WHERE id=$1 AND jsonb_typeof(document #> '{queue}')='object' AND COALESCE(jsonb_typeof(document #> '{queue,speculation}'),'null')='null'`, [current.id, JSON.stringify(speculation)]);
     return reload(current.id);
   };
   /**
@@ -148,16 +190,26 @@ export async function runFleetWitness(options: FleetWitnessOptions): Promise<Fle
    */
   const staleRead = (error: unknown) => /Task changed while GitHub was being observed|Task changed before merge execution/.test(error instanceof Error ? error.message : String(error));
   /**
-   * Apply a reading, and let a lost race pass. The control plane refuses an observation bound to
-   * a revision that has since moved, exactly as it refuses one from the real provider job; the
-   * reading that matters is the one taken against the revision that stands, and the loop takes
-   * another within its next tick. Anything else is raised, so a reading that cannot be applied
-   * still fails the action that asked for it.
+   * Apply a reading, and take it again when it lost a race.
+   *
+   * The control plane refuses an observation bound to a revision that has since moved, exactly as
+   * it refuses one from the real provider job, and the real job answers that the way this does:
+   * it reads again, against the revision that stands. Letting the lost reading pass instead is
+   * not neutral here. The action that asked for it settles as done with nothing applied, a
+   * completed row holds its situation for the queue's whole settle window before anyone is owed
+   * another attempt, and no provider job exists in a witness run to make the reading in the
+   * meantime — so one lost race parked an item for ten minutes, which is a fact about the
+   * stand-in and would have been reported as one about the loop. A reading that still cannot be
+   * applied is raised, so the action fails and backs off as any failed action does.
    */
-  const observeNow = async (item: Work, overrides: Partial<Observation> = {}) => {
+  const observeNow = async (item: Work, overrides: Partial<Observation> = {}, attempts = 20): Promise<Work> => {
     const current = await reload(item.id);
     try { return await engine.observe(current.id, current.revision, observation(current, overrides)); }
-    catch (error) { if (staleRead(error)) return current; throw error; }
+    catch (error) {
+      if (!staleRead(error) || attempts <= 1) throw error;
+      await delay(25);
+      return observeNow(item, overrides, attempts - 1);
+    }
   };
   /**
    * The guarded merge's own contract, against the control plane: acquire, verify, commit, observe.
@@ -322,7 +374,17 @@ export async function runFleetWitness(options: FleetWitnessOptions): Promise<Fle
       const claimed = row.history.find(entry => entry.event === 'claimed');
       if (requested && claimed) waits.push(Math.max(0, Date.parse(claimed.at) - Date.parse(requested.at)));
     }
-    const witness = judgeThroughput(mine, endedAt.getTime(), samples, { since: startedAt.toISOString() });
+    const judged = judgeThroughput(mine, endedAt.getTime(), samples, { since: startedAt.toISOString() });
+    // The run released these items itself, so one it did not deliver is a finding and not a gap
+    // in the sample: ten good deliveries do not certify a loop that left the eleventh stuck.
+    const undelivered = mine.filter(item => item.stage !== 'done').map(item => {
+      const next = nextAction(item, all, endedAt);
+      const failure = steps.filter(step => (step.work === item.id || step.work === item.key) && step.result === 'failed').at(-1);
+      return { key: item.key, stage: item.stage, refusals: item.gates.filter(gate => !gate.passed).flatMap(gate => gate.reasons.map(reason => `${gate.name}: ${reason}`)),
+        nextAction: next ? `${next.kind}: ${next.reason}` : null, lastFailure: failure ? `${failure.kind} by ${failure.executor}: ${failure.reason}` : null };
+    });
+    const witness: ThroughputWitness = undelivered.length ? { ...judged, met: false, reasons: [...judged.reasons,
+      `${undelivered.length} of the ${deliveries} items the run released ${undelivered.length === 1 ? 'was' : 'were'} not delivered within ${Math.round(timeoutMs / 1000)}s: ${undelivered.map(entry => `${entry.key} in ${entry.stage}${entry.lastFailure ? ` (${entry.lastFailure})` : ''}`).join('; ')}`] } : judged;
     return {
       startedAt: startedAt.toISOString(), endedAt: endedAt.toISOString(), elapsedMs: endedAt.getTime() - startedAt.getTime(),
       requested: deliveries, delivered: mine.filter(item => item.stage === 'done').length,
@@ -331,11 +393,11 @@ export async function runFleetWitness(options: FleetWitnessOptions): Promise<Fle
         failed: steps.filter(step => step.executor === member.identity.id && step.result === 'failed').length,
         kinds: [...new Set(steps.filter(step => step.executor === member.identity.id && step.kind).map(step => step.kind!))].sort() })),
       queueWait: nearestRankPercentiles(waits),
-      standIns: fleetStandIns, caveat: fleetCaveat, witness, samples, steps,
+      undelivered, standIns: fleetStandIns, caveat: fleetCaveat, witness, samples, steps,
     };
   } finally {
     stopping.abort();
     await new Promise<void>(resolve => http.close(() => resolve()));
-    await store.close();
+    await closeWitnessStore(store);
   }
 }

@@ -60,7 +60,9 @@ const sha40 = (label: string) => label.replace(/[^a-f0-9]/g, '0').padEnd(40, 'f'
 let database: EmbeddedPostgres, store: Store, engine: Engine;
 let http: ReturnType<typeof server>, url: string;
 before(async () => {
-  const port = Number(process.env.GRAPHYARD_ACTION_QUEUE_TEST_PORT ?? Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 25);
+  // An offset no other file takes: test files run side by side, and two that share a port fail
+  // whichever starts its Postgres second, in its `before` hook, with no reason given.
+  const port = Number(process.env.GRAPHYARD_ACTION_QUEUE_TEST_PORT ?? Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 71);
   database = new EmbeddedPostgres({ databaseDir: await mkdtemp(join(tmpdir(), 'graphyard-action-queue-')), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('graphyard_test');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/graphyard_test`); await store.init();
