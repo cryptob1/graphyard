@@ -4,6 +4,7 @@ import { producerIndependenceRefusal, recordEvidenceRefusal, recordLeadViolation
 import { ciRunBindingSchema, isCiProducer, observeCiCheckRun, type CiRunObservation } from '../../model/ci-proofs.js';
 import { defineRoutes, parseJson, type RouteContext } from '../routes.js';
 import { approveDecision, listDecisions, requestDecision } from '../decisions.js';
+import { readEscalationContext } from '../escalation-context.js';
 
 // Every mutating work route refuses a slice lead the same way and leaves the same
 // ledger entry. Routing order decides which handler matches first; it must never
@@ -19,6 +20,8 @@ export const workRoutes = defineRoutes('work', [
   // Two-party decisions: an agent requests, a second independent agent approves, and the
   // control plane applies. They precede the generic route, which would read them as commands.
   { method: 'GET', path: /^\/api\/work\/([^/]+)\/decisions$/, handle: ({ actor, services }, [id]) => listDecisions(services, actor, decodeURIComponent(id)) },
+  // The context a spawned escalation handler decides from: four layers, deterministic, bounded.
+  { method: 'GET', path: /^\/api\/work\/([^/]+)\/context$/, handle: ({ actor, services, url }, [id]) => readEscalationContext(services, actor, decodeURIComponent(id), url.searchParams) },
   {
     method: 'POST', path: /^\/api\/work\/([^/]+)\/(decide|approve)$/,
     async handle(context, [id, action]) {

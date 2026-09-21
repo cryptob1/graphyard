@@ -90,7 +90,7 @@ export async function requestDecision(services: Services, caller: Principal, id:
   if ((body as any)?.action === 'withdraw') return withdrawDecision(services, caller, id, body, key);
   const data = decisionRequestSchema.parse(body);
   const input = decisionInputs[data.action].parse(data.input);
-  const fingerprint = digest({ id, action: data.action, input, reason: data.reason });
+  const fingerprint = digest({ id, action: data.action, input, reason: data.reason, ...(data.precedent ? { precedent: data.precedent } : {}), ...(data.context ? { context: data.context } : {}) });
   return services.engine.store.transaction(async (db, now) => {
     const actor = await authenticated(services, db, now, caller);
     const replay = await receipt(db, actor, key, fingerprint); if (replay) return replay;
@@ -98,9 +98,20 @@ export async function requestDecision(services: Services, caller: Principal, id:
     for (const capability of requiredDecisionCapabilities(data.action, input, work!)) assertDecisionAuthority(actor, capability, work!, services.repository);
     const precondition = decisionPrecondition(data.action, input, work!); demand(!precondition, precondition!, 409);
     const pending = (await readDecisions(db, work!)).find(decision => decision.action === data.action && (decision.state === 'requested' || decision.state === 'approved'));
+    const cited = data.precedent ? [...new Set(data.precedent)].sort() : null;
+    // A spawned handler that reaches the same line as a standing request — same action, same
+    // input, same precedent — is following it, not competing with it: its judgement is appended
+    // to that decision as a concurrence and the standing decision is returned.
+    if (pending && cited && JSON.stringify(canonical(pending.input)) === JSON.stringify(canonical(input)) && JSON.stringify([...pending.precedent].sort()) === JSON.stringify(cited)) {
+      await record(db, work!, actor.id, 'decision.concurred', { id: pending.id, action: data.action, reason: data.reason, precedent: cited, context: data.context ?? null, requester: { id: actor.id, role: actor.role } });
+      const result = (await readDecisions(db, work!)).find(decision => decision.id === pending.id)!;
+      await db.query('INSERT INTO receipts(actor,key,fingerprint,result) VALUES($1,$2,$3,$4)', [actor.id, key, fingerprint, JSON.stringify(result)]);
+      return result;
+    }
     demand(!pending, `Decision ${pending?.id} (${data.action}) is already ${pending?.state} on ${work!.key}; wait for it before requesting another`, 409);
     const decisionId = randomUUID();
-    await record(db, work!, actor.id, 'decision.requested', { id: decisionId, action: data.action, input, reason: data.reason, requester: { id: actor.id, role: actor.role }, capabilities: requiredDecisionCapabilities(data.action, input, work!), ...(data.action === 'resolve' ? { pin: resolvePin(work!) } : {}) });
+    await record(db, work!, actor.id, 'decision.requested', { id: decisionId, action: data.action, input, reason: data.reason, requester: { id: actor.id, role: actor.role }, capabilities: requiredDecisionCapabilities(data.action, input, work!),
+      ...(cited ? { precedent: cited } : {}), ...(data.context ? { context: data.context } : {}), ...(data.action === 'resolve' ? { pin: resolvePin(work!) } : {}) });
     const result = (await readDecisions(db, work!)).find(decision => decision.id === decisionId)!;
     await db.query('INSERT INTO receipts(actor,key,fingerprint,result) VALUES($1,$2,$3,$4)', [actor.id, key, fingerprint, JSON.stringify(result)]);
     return result;
