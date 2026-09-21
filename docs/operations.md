@@ -30,12 +30,11 @@ For the human operator with three minutes: what to check, and what never changes
 
 ### Lost worker before submission
 
-Expiry does not prove the process stopped, so keep the old worktree; the next worker claims at a higher epoch; old-epoch commands refuse. [Detail](operations-reference.md#lost-worker-before-submission)
+Keep the old worktree: expiry does not prove the process stopped. [Detail](operations-reference.md#lost-worker-before-submission)
 
 ### Rework a submitted implementation
 
-- **Run:** stop the previous worker yourself, then `graphyard rework GY-N --previous-worker-stopped "Reproduce review failure"`
-- **Effect:** old commands are fenced and the build gate closes, raising no `lease-loss`. [Detail](operations-reference.md#submitted-implementation-needs-rework)
+- **Run:** stop the previous worker yourself, then `graphyard rework GY-N --previous-worker-stopped "Reproduce review failure"`. [Detail](operations-reference.md#submitted-implementation-needs-rework)
 
 ### Settle a containment quarantine
 

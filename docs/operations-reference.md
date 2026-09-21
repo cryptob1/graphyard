@@ -33,22 +33,22 @@ Flags:
 - **One install, shared.** An assignment worktree under the repository resolves its install by upward lookup: nothing is created; the worker's prompt names it. A worktree outside it gets a mirror of that install, a directory of links still covered by the `node_modules/` ignore rule. The install must answer for that exact head: a differing `package-lock.json` installs its own; a worktree that already has one is reported, left alone.
 - **Finished assignments give theirs back.** The loop removes dependency directories of finished assignments' worktrees every ten minutes (every cycle while free space is below the threshold) and nothing else — files, Git metadata, branches and workspace records stay — so a reclaimed worktree is one `npm install` from working. `daemon.reclaim` reports what went, how much it returned, what it kept.
 
-| Disposition | What the loop does |
-| --- | --- |
-| `delivered` | Removed: the item is Done |
-| `superseded` | Removed: a later attempt replaced that epoch |
-| `idle` | Removed: nothing changed for longer than the idle bound |
-| `live` | Kept: the registered epoch still holds the lease |
-| `recent` | Kept: changed inside the idle bound |
+Each worktree's disposition:
+
+- `delivered`: Removed: the item is Done
+- `superseded`: Removed: a later attempt replaced that epoch
+- `idle`: Removed: nothing changed for longer than the idle bound
+- `live`: Kept: the registered epoch still holds the lease
+- `recent`: Kept: changed inside the idle bound
 
 - **`master status`:** free space under `disk` with worktrees a reclaim would empty; below the threshold raises a master-owned attention item while writes still succeed
 - **A write that fails for want of room**, whether the kernel reports it or only a command's output does (`pwd: write error: Disk quota exceeded`), is named as that
 - **No loop running:** `master run --once` reclaims and cycles once
 
-| Setting in `.graphyard/master.json` | Meaning |
-| --- | --- |
-| `run.reclaimIdleHours` | How long a worktree may sit untouched before its dependency directories are disposable, 0.25–720; default 3 |
-| `run.diskThresholdGb` | Free space below which `master status` raises disk pressure, 0.1–10000; default 10 |
+Settings in `.graphyard/master.json`:
+
+- `run.reclaimIdleHours`: How long a worktree may sit untouched before its dependency directories are disposable, 0.25–720; default 3
+- `run.diskThresholdGb`: Free space below which `master status` raises disk pressure, 0.1–10000; default 10
 
 ## Recovery procedures
 
@@ -56,13 +56,13 @@ Flags:
 
 - **Expiry:** 120 seconds after last heartbeat; a new worker claims at a higher epoch, old-epoch mutations refuse
 - **Old worktree:** preserve it, use a new branch and path: expiry does not prove the process stopped
-- **`lease-loss`:** raised only by a lapse nothing explains; if you stopped the worker, attest it; an attestation recorded after the lapse settles a standing escalation next tick ([classification](delegation.md#escalation))
+- **`lease-loss`:** raised only by a lapse nothing explains; if you stopped the worker, attest it ([classification and settlement](delegation.md#escalation))
 
 ### Submitted implementation needs rework
 
 - **Active owner:** may keep heartbeating, update its branch; a push invalidates old evidence
 - **To reassign:** stop the previous worker, then `graphyard rework GY-N --previous-worker-stopped "Reproduce review failure"`
-- **Effect:** old commands are fenced, build gate closes, a lease still held ends as `lease.expired` with cause `stopped-by-attestation`, so no `lease-loss` is raised; a standing one settles next tick
+- **Effect:** old commands are fenced, build gate closes, a lease still held ends as `lease.expired` with cause `stopped-by-attestation`, so no `lease-loss` is raised
 - **Next worker:** claims at a higher epoch, registers existing PR branch in a fresh workspace, resubmits the same PR
 - **Check revocation is asynchronous:** suspend merging until the refusing check is visible; merged work needs a follow-up item
 
@@ -88,13 +88,13 @@ An observed merge no valid execution covered — cancelled before the merge cuto
 
 - **Reported:** `master status` row `merged` (`at`, `sha`, `violation`, last `refusal`) with owner `master` and the recovery command, `counts.mergedUnreconciled` apart from `counts.mergeCandidates`; the loop escalates once and stops offering the item to the guarded merge
 - **Recovery, requested after the merge** — an earlier merge approval does not judge it: `master decide GY-N merge REASON`, then `master approver GY-N DECISION`. The next observation re-checks the record as it stood immediately before the merge: merge authorization for that exact head, base and policy revision, every gate passed, no standing violation, every required proof's trusted evidence live, a GitHub observation under two minutes old
-- **The snapshot re-checked:** the last one preceding the merge. The cutoff is GitHub's `mergedAt` plus one second plus the upper bound of the merge broker's recorded clock offset; a snapshot whose own observation reports the pull request merged is never the one. What the merge itself wrote is no reason to refuse: the violation being cleared, an earlier decision's refusal, a merge gate reporting only the queue position left behind
+- **The snapshot re-checked:** the last preceding the merge. The cutoff is GitHub's `mergedAt` plus one second plus the upper bound of the merge broker's recorded clock offset; a snapshot whose own observation reports the pull request merged never qualifies. What the merge itself wrote refuses nothing: the violation being cleared, an earlier decision's refusal, a merge gate reporting only the queue position left behind
 - **Holds:** delivered on the decision, citing that snapshot's `authorizationRevision` and `evidenceAsOf` and carrying `reconciliation` (decision, requester, approver, both reasons, cutoff, snapshot revision, judgement); ledger `merge.reconciled`
-- **Fails:** nothing is delivered; the item records `Reconciliation by decision … refused: …` with every reason, once, the ledger `merge.reconciliation.refused`, the row's attention line the refusal. Answer it with a new decision, never by re-approving the refused one; one naming no reason the refusal lacked is refused again. Repair the access rules that allowed the merge; carry remaining work in a new item under the full gate set
-- **A queue entry that can never publish:** the merged item's pull request is closed, so entries behind it wait (`Waiting for GY-N to publish its speculative tip`). The row's `merged.queue` carries `sequence`, `position`, `size`, `unpublishable: true` and the keys `behind`. The exit is the same decision, with no administrative bypass: an accepted reconciliation delivers the item and drops the entry; a refused one removes the entry and delivers nothing — `queueEjection` names the refused decision, the ledger records `queue.ejected`, and the entries behind are woken to predict against the real base. A refusal standing from before this rule removes the entry on the next reconciliation tick
-- **Operator-authorized delivery:** when the record refuses and an operator authorized the merge administratively, a further merge decision whose `REASON` cites the refused decision's id records it, with the operator's admin credential on one side: the operator requests it through the API, or the master requests it and the operator approves with `GRAPHYARD_TOKEN_FILE=ADMIN_TOKEN_FILE graphyard master approve GY-N DECISION REASON`. An operator-agent pair citing the refusal is refused again; a decision citing no refusal is a plain reconciliation. `attentionOwner.next` carries the exact command once a refusal stands
-- **Its record:** `delivery.operatorAuthorization` with `execution: null`, the `operator`, the decision (requester, approver, both reasons), the `refusedDecision`, `unmet` (every reason refused), the cutoff, the snapshot revision and a judgement; `authorizationRevision` is the pre-merge snapshot's. Ledger `merge.operator-authorized` under the operator's identity, never `merge.reconciled`
-- **Listed apart:** `master status` `deliveries.reconciled` (`authorization: 'reconciled'`) and `deliveries.operatorAuthorized` (`authorization: 'operator'`, `execution: null`, the operator, `unmet`), with `counts.reconciledDeliveries` and `counts.operatorAuthorizedDeliveries`
+- **Fails:** nothing is delivered; the item records `Reconciliation by decision … refused: …` with every reason, once, the ledger `merge.reconciliation.refused`, the row's attention line the refusal. Answer it with a new decision, never by re-approving the refused one; one naming no new reason is refused again. Repair the access rules that allowed the merge; carry remaining work in a new item under the full gate set
+- **A queue entry that can never publish:** the merged item's pull request is closed, so entries behind it wait (`Waiting for GY-N to publish its speculative tip`). The row's `merged.queue` carries `sequence`, `position`, `size`, `unpublishable: true` and the keys `behind`. The exit is the same decision: an accepted reconciliation delivers the item and drops the entry; a refused one removes the entry and delivers nothing — `queueEjection` names the refused decision, the ledger records `queue.ejected`, and the entries behind predict against the real base. An already standing refusal removes the entry on the next reconciliation tick
+- **Operator-authorized delivery:** when the record refuses a merge an operator authorized administratively, a further merge decision whose `REASON` cites the refused decision's id records it, with the operator's admin credential on one side: the operator requests it through the API, or the master requests it and the operator approves with `GRAPHYARD_TOKEN_FILE=ADMIN_TOKEN_FILE graphyard master approve GY-N DECISION REASON`. An operator-agent pair citing the refusal is refused again; a decision citing no refusal is a plain reconciliation. `attentionOwner.next` carries the exact command once a refusal stands
+- **Its record:** `delivery.operatorAuthorization` with `execution: null`, the `operator`, the decision, the `refusedDecision`, `unmet` (every reason refused), the cutoff, the snapshot revision and a judgement; `authorizationRevision` is the pre-merge snapshot's. Ledger `merge.operator-authorized` under the operator's identity, never `merge.reconciled`
+- **Listed apart:** `master status` `deliveries.reconciled` (`authorization: 'reconciled'`) and `deliveries.operatorAuthorized` (`authorization: 'operator'`), with `counts.reconciledDeliveries` and `counts.operatorAuthorizedDeliveries`
 
 ## Accepted evidence turns out to be wrong
 
@@ -109,7 +109,7 @@ Revoking leaves criteria, policy revision, review and the submitted attempt unto
 
 - **Declare:** `bootstrap` declaration on that criterion in a `requirements` revision: `reason` plus `contractPaths` inside the item's `plannedFiles`
 - **Capability:** `policy:bootstrap`
-- **Obligation:** deferred proof becomes one the next item touching those paths inherits and cannot defer again, cleared only when some change is delivered with trusted, passing, complete evidence
+- **Obligation:** the next item touching those paths inherits the proof and cannot defer it again; cleared only when some change is delivered with trusted, passing, complete evidence
 - **Outstanding:** listed by `graphyard obligations` and `diagnose GY-N` ([bootstrap mode](protocol/bootstrap-mode.md))
 
 ## Credentials
@@ -141,8 +141,7 @@ graphyard grants history ci                        # append-only record of every
 
 ## Readiness checklist per completion profile
 
-- **`graphyard doctor --profile through-merge|preview-validation|production-verification`:** prints the checklist for one [completion profile](turnkey-delivery-roadmap.md#product-promise-and-boundary)
-- **Every `missing` or `unknown` item:** names what resolves it; `unknown` is never `ready` ([per profile](install.md#readiness-checklist))
+- **`graphyard doctor --profile PROFILE`:** the checklist, and what resolves each `missing` or `unknown` item, [per profile](install.md#readiness-checklist)
 
 ## Setup proposals and drift
 
@@ -167,7 +166,7 @@ graphyard grants history ci                        # append-only record of every
 - **Kernel:** serializes short coordination mutations
 - **Reconciler:** up to four provider jobs per tick per replica
 - **List API:** returns all work
-- **Event API:** most recent 300 events
+- **Event API:** 300 events a page by default
 
 ### Concurrent reconciliation
 

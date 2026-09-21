@@ -3,7 +3,7 @@
 
 For an operator shipping a change with its own proof harness: when a proof may be deferred.
 
-A criterion whose proof does not exist yet cannot be proven by the change that creates it: the protected harness refuses to run against a base lacking the contract.
+The change that creates a proof cannot prove its criterion: the protected harness refuses to run against a base lacking the contract.
 
 - **Declared by:** human operator (`admin`), or an operator agent holding `policy:bootstrap`.
 - **Scope:** one criterion in **bootstrap mode**, deferring the proof for this candidate only, never dropping it.
@@ -28,11 +28,11 @@ The acceptance gate stops demanding the deferred criterion's proofs for this can
 
 ## What is owed
 
-The deferred proof becomes an obligation on its contract paths, derived from the work documents, not asserted.
+The deferred proof becomes an obligation on its contract paths, derived from the work documents, never asserted.
 
 - **Inherited by:** later items whose `plannedFiles` overlap those paths, as a required criterion.
 - **Acceptance gate:** `Bootstrap obligation inherited from GY-N AC-M`.
-- **No second deferral:** a `bootstrap` declaration over an inherited proof is refused; the inherited requirement is evaluated whatever the item declares.
+- **No second deferral:** a `bootstrap` declaration over an inherited proof is refused, the inherited requirement evaluated whatever the item declares.
 
 ## Inspecting obligations
 

@@ -80,4 +80,4 @@ Every decision except the three human-only ones is a two-party decision on one w
 - **No lease commands, no evidence authority:** a `manual:` attestation needs an approved `attest` decision.
 - **[Conflicted approver](#two-party-decisions):** refused and recorded by the server; hence each approver runs in its own session.
 - **Secrets:** travel on stdin; responses and events carry fingerprints only.
-- **Revoking the identity:** returns coordination to the human operator while history remains.
+- **Revoking the identity:** returns coordination to the human operator.

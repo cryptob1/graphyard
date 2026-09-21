@@ -5,7 +5,7 @@ For a reader asking what comes next: which completion profile a delivery may cla
 
 ## Product promise and boundary
 
-Graphyard discovers supported repository and deployment infrastructure, proposes an explicit delivery profile, configures supported adapters, dispatches required validation, collects results and explains every refusal. A repository without tests needs scenarios and executable assertions created first: a planning agent may propose them, but the product never manufactures passing evidence or presents inferred criteria as verified requirements. Profiles are labelled precisely, so a green merge never stands in for verified production behaviour.
+Graphyard discovers supported repository and deployment infrastructure, proposes an explicit delivery profile, configures supported adapters, dispatches required validation, collects results and explains every refusal. A repository without tests needs scenarios and executable assertions first: a planning agent may propose them, but the product never manufactures passing evidence or presents inferred criteria as verified requirements. Profiles are labelled so a green merge never stands in for verified production behaviour.
 
 - **Through merge:** A verified, authorized merge completes the configured workflow
 - **Preview validation:** A pinned preview artifact plus required behavioural proof

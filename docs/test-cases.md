@@ -15,24 +15,11 @@ For anyone defining an E2E proof: what lives where, and what a report must match
 - **CLI, as an operator:** `graphyard scenario scenario.json` (`graphyard scenarios` lists them)
 - **Definition fields:** stable `id`, `title`, `purpose`, `setup`, `steps`, `expected`, `environment`, `runner`, `testPath`, `expectedRevision`
 
-```json
-{
-  "id": "confirmed-booking-sends-sms",
-  "title": "Booking confirmation sends one SMS",
-  "purpose": "Prove the customer receives exactly one correctly formatted confirmation",
-  "setup": ["A test customer and pending booking exist", "SMS requests are captured by the staging test sink"],
-  "steps": ["Confirm the booking", "Retry the same confirmation", "Inspect captured SMS requests"],
-  "expected": ["Exactly one SMS was sent", "The message includes the booking date and time"],
-  "environment": "staging",
-  "runner": "Playwright",
-  "testPath": "tests/e2e/booking-sms.spec.ts",
-  "expectedRevision": 0
-}
-```
+- **Example:** [examples/scenario.json](../examples/scenario.json)
 
 ## Report an execution
 
-A trusted producer holding that exact proof name submits ordinary [evidence](protocol/evidence.md) plus `{"scenarioRevision": 1, "environment": "staging"}`, which must match the pinned scenario revision and environment, the candidate and policy:
+A trusted producer holding that exact proof name submits ordinary [evidence](protocol/evidence.md) plus `{"scenarioRevision": 1, "environment": "staging"}`, matching the pinned scenario revision and environment, the candidate and policy:
 
 - A staging run cannot satisfy a production requirement
 - An older or newer scenario run cannot satisfy the pinned version

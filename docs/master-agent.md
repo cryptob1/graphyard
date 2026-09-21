@@ -8,8 +8,8 @@ For the coordinator session: what the master decides, and must never do.
 Three decisions are human-only: goals and priorities, spending money or opening third-party accounts, and issuing credentials to people. Every other names an agent that makes it and an independent agent that approves it — [who decides](glossary.md#who-decides).
 
 - **Non-weakening intent, as its own operator-agent identity:** `master create FILE REASON`, `master release GY-N REASON`, `master unblock GY-N REASON`, `master requirements GY-N FILE REASON` (additions), `master scope GY-N [REASON]`
-- **[Two-party decisions](operator-automation.md#two-party-decisions): `release`, `unblock`, `requirements` rewrites and removals, `resolve`, `attest`, `merge`, `rework`, `recover`, `grant`:** `master decide GY-N ACTION [JSON|@FILE] REASON`, then `master approver GY-N DECISION`; the approver runs `master approve GY-N DECISION REASON`, `master decisions GY-N` reads the outcome, and `master withdraw GY-N DECISION REASON` takes back the master's request
-- **Routine operations:** `master principals [--apply]`, `master restart`, `master run [--once]`, `master config FIELD=VALUE…`, dispatch, GitHub administration, guarded merge
+- **[Two-party decisions](operator-automation.md#two-party-decisions), `requirements` rewrites and removals among them:** `master decide GY-N ACTION [JSON|@FILE] REASON`, then `master approver GY-N DECISION`; the approver runs `master approve GY-N DECISION REASON`, `master decisions GY-N` reads the outcome, `master withdraw GY-N DECISION REASON` takes the request back
+- **Routine operations:** `master principals [--apply]` (preview or apply a [roster rotation](deployment.md#changing-the-roster-safely) keeping every live principal), `master restart` (stop this host's durable loop, start it again detached), `master run [--once]`, `master config FIELD=VALUE…`, dispatch, GitHub administration, guarded merge
 
 ## Operate
 
@@ -27,8 +27,8 @@ Ordinary review findings, rework, idle workers, and proof setup are not stopping
 ## Conflict avoidance
 
 - **Order:** ready items are offered smallest planned scope first within a priority ([the rule](coordination.md#schedule-by-overlap-smallest-scope-first))
-- **Held:** `schedule.held` items wait for the item ahead to merge; the loop never overrides a hold, only `master dispatch GY-N PROFILE [--allow-overlap]` does
-- **`conflicts`:** a real `git merge-tree` between fetched candidate heads, not an overlap guess
+- **Held:** `schedule.held` items wait for the item ahead to merge; only `master dispatch GY-N PROFILE [--allow-overlap]` overrides a hold
+- **`conflicts`:** a real `git merge-tree` between fetched candidate heads
 
 ## Scope requests the loop decides
 
@@ -47,7 +47,7 @@ The control plane [records under `autoDispatch`](protocol/github-webhook.md#auto
 - **Producer request:** one per proof group — `unit`, `integration`, and `manual` for proofs listed in `producerProofs` — for proofs no trusted passing evidence binds; a group whose trusted evidence already failed on this head is a finding to route, not a run to repeat
 
 - **Binding:** Head, base and policy revision; changing any cancels the request and asks afresh unless a carried binding covers it. An approval, a `CHANGES_REQUESTED` verdict or trusted evidence satisfies it; rework, closure and merge cancel it
-- **Launch cadence:** Launched within 30 seconds of the request, then every `dispatchIntervalSeconds`: the reviewer profile (`run.reviewerProfile`, or the only one) plus one producer session per proof group on a free, independent producer profile (`master producer add FILE`, [template](../examples/master/claude-producer.json))
+- **Launch cadence:** within 30 seconds of the request, then every `dispatchIntervalSeconds`: the reviewer profile (`run.reviewerProfile`, or the only one) plus one producer session per proof group on a free, independent producer profile (`master producer add FILE`, [template](../examples/master/claude-producer.json))
 - **Producer identity:** Its credential authenticates exactly its principal as a producer, never shares a principal with a worker profile, and is skipped for an item its principal implemented. The session receives it as a path in `GRAPHYARD_TOKEN_FILE`, works in a detached worktree of the head, and submits each proof bound to that head, base and policy revision, a failing run as `fail`
 - **One session per request:** `.graphyard/reviews.json` and `.graphyard/producers.json` record which request each session answers. A session is `failed` when Herdr reports it finished, gone or blocked on a prompt for five minutes without a verdict or evidence, and relaunched at most four times; `master review GY-N [PROFILE]` recovers an exhausted one
 - **Reviewer retry:** a reviewer first seen stopped without a verdict is prompted once, in place, by the loop to post the verdict it judged; the five minutes run from that sight, and no master sends the prompt or edits the ledger by hand
@@ -59,7 +59,7 @@ The control plane [records under `autoDispatch`](protocol/github-webhook.md#auto
 
 ## Agent environments
 
-A principal is who claims, reviews or proves; an *agent environment* is whose provider subscription a session spends — one isolated config and login home per account ([onboarding](onboarding.md#agent-environments)). Every launch profile lists its environments in `accounts`, in failover order; `master environments [--create KINDS] [--directory DIR] [--apply]` discovers, creates and profiles them.
+A principal is who claims, reviews or proves; an *agent environment* is whose provider subscription a session spends ([onboarding](onboarding.md#agent-environments)). Every launch profile lists its environments in `accounts`, in failover order; `master environments [--create KINDS] [--directory DIR] [--apply]` discovers, creates and profiles them.
 
 - **Checked before every launch** — `master dispatch`, the loop's worker dispatch, and automatic reviewer and producer launches: the session runs on the first account logged in and holding quota — no unreset usage window at or above `run.quotaCeilingPercent` (default 95)
 - **Quota sources:** Claude's 5-hour and 7-day windows from the provider's usage endpoint; Codex's from its newest session's rate limits; OpenCode and Cursor expose none, so theirs is `unknown`, which never blocks a launch
@@ -79,7 +79,7 @@ node "$GRAPHYARD_CLI" master review GY-42 claude-reviewer
 ```
 
 - **Profile templates:** [Claude](../examples/master/claude-reviewer.json), [Cursor](../examples/master/cursor-reviewer.json), [opencode](../examples/master/opencode-reviewer.json)
-- **`approvals` ([trade-off](onboarding.md#approval-modes)):** `auto` adds the runtime's non-interactive contract (`--permission-mode bypassPermissions`, `OPENCODE_PERMISSION`); `prompt` lets you opt out and answer in the tab
+- **`approvals` ([trade-off](onboarding.md#approval-modes)):** `auto` adds the runtime's non-interactive contract (`--permission-mode bypassPermissions`, `OPENCODE_PERMISSION`); `prompt` lets you opt out
 - **Verdict:** posting it is granted to the reviewer role — the launch allows exactly that one call
 - **App confirmation:** the master's, through the browser flows below
 
@@ -127,14 +127,14 @@ They also cover:
 - **A *routine* item:** at most one rework round and no hand-off between submit and merge; every step between belongs to the control plane or the loop, leaving the master a genuine finding or a human-only decision
 - **Target:** submit→merge p50 of at most 30 minutes and p90 of at most 60 minutes, over at least ten deliveries, with a median of at most one rework round — never traded for a gate, a proof, an identity rule or a lease rule
 
-- **Per item:** each `master status` row's `speed`, from the item's [pipeline timeline](protocol/pipeline-speed.md): `executionMs` (lease time over attempts), `waitMs` (everything else since the first claim), `reworkRounds`, `interventions`, `sinceSubmitMs` in flight, `submitToMergeMs` once delivered, `routine`.
-- **Overall:** the top-level `speed` — `speed.submitToMerge` and `routine.submitToMerge` (nearest-rank p50/p90 and count), `reworkRounds` (median, p90, distribution), `interventions`, `execution`, `unmeasured` (deliveries predating the timeline), `items` in merge order, and `met`: `true` or `false` once ten routine deliveries are measured, `reason` naming the figure that misses, `null` until then.
+- **Per item:** each `master status` row's `speed`, from the item's [pipeline timeline](protocol/pipeline-speed.md): `executionMs`, `waitMs`, `reworkRounds`, `interventions`, `sinceSubmitMs` in flight, `submitToMergeMs` once delivered, `routine`.
+- **Overall:** the top-level `speed` — `speed.submitToMerge` and `routine.submitToMerge` (nearest-rank p50/p90 and count), `reworkRounds` (median, p90, distribution), `interventions`, `execution`, `unmeasured` (each explained by `coverage`), `items` in merge order, and `met`: `true` or `false` once ten routine deliveries are measured, `reason` naming the figure that misses, `null` until then.
 - **Outside a status read:** `scripts/measure-pipeline-speed.mjs --split GY-55,GY-64 --record DIR` reads the snapshot with any read-capable credential and prints the same arithmetic, per `--split` item for deliveries merged before and after it landed; `--since`/`--until` bound the window, `--json` prints everything. The 3-hourly measurement runs it and `manual:speed-target-met` reads it.
 - **A missed target** is a finding to route: `items` names the slow deliveries, `interventions` and `reworkRounds` whether a hand-off or rework round took the time, and the [flow-analytics](flow-analytics.md) bottleneck summary which wait category held the rest.
 
 ## Containment and recovery
 
-- **A quarantine whose supervisor died:** The fence stays up until someone proves the worker stopped. `containment` carries the recorded scope unit and supervisor pid, what systemd reports for it, and `containment.held`: every process still holding the fence with its pid, cmdline and cwd.
+- **A quarantine whose supervisor died:** `containment` carries the recorded scope unit and supervisor pid, what systemd reports for it, and `containment.held`: every process still holding the fence with its pid, cmdline and cwd.
 - `settleable: true`, no `refusals`: `master settle-containment GY-N "reason"`. **Any refusal:** stop the supervisor, then attest through a two-party `rework` decision, or `recover` once delivered ([procedure](operations-reference.md#recovery-procedures))
 - **A lapsed lease:** `lease-loss` stands only for a worker that silently vanished; every other lapse is `lease.expired` with cause `submitted`, `blocked-awaiting-operator` or `stopped-by-attestation`. Reconciliation settles an explained one each tick, any `admin` settles it at once with `resolve GY-N lease-loss --attestation blocked|stopped-worker "reason"`, and everything else needs a two-party `resolve` decision or a declared human session ([who may settle what](delegation.md#who-may-settle-what))
 - **Merged without a valid execution:** [merge bypass](operations-reference.md#merge-bypass), a two-party `merge` decision requested after the merge

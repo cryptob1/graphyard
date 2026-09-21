@@ -23,13 +23,13 @@ Documents created before the timeline existed gain one at their next lifecycle c
 
 ## Backfill from the ledger
 
-Every lifecycle command wrote its work document into the append-only ledger. The bounded catch-up behind `GET /api/work-snapshot` replays that history (`src/pipeline-backfill.ts`) for each item, delivered ones included, whose timeline was never reconstructed.
+Every lifecycle command wrote its work document into the append-only ledger; the bounded catch-up behind `GET /api/work-snapshot` replays it (`src/pipeline-backfill.ts`) for each item, delivered ones included, whose timeline was never reconstructed.
 
-- **The read:** never selects an event's payload. It projects in SQL only the snapshot's `updatedAt`, `lease` and `submission` and four fields of `details`, 400 rows a page, on a plain pool connection, so the coordination lock is never held while ledger rows are read
-- **The write:** one short coordination transaction per item. It re-reads the document, may write only `pipeline`, refuses if anything else would change, and appends a `pipeline.backfilled` event
-- **Bounds:** one run reads at most 20,000 ledger rows over at most 25 items, one catch-up at a time per process. A longer ledger is continued: the marker records `resume` with `truncated: true`, the next run resumes after `toEvent`, and the timeline is written only once the ledger is read to its end; until then the item is `awaiting-backfill`
-- **A failure:** belongs to its item. It is recorded, the item is set aside for the five-minute settle window, then retried; the run moves on
-- **The union:** the replay runs the engine's own functions at the recorded instants (`updatedAt`, or a raw ledger entry's `at`), then is united with the live timeline, which is only as old as the timeline feature: attempts unite by epoch (the live record wins), `submittedAt` is the earliest of the two, `resubmittedAt` the latest, and a replayed count can raise a recorded one, never lower it
+- **The read:** never selects an event's payload; it projects in SQL only the snapshot's `updatedAt`, `lease` and `submission` and four fields of `details`, 400 rows a page, on a plain pool connection, never holding the coordination lock
+- **The write:** one short coordination transaction per item, which re-reads the document, writes only `pipeline`, refuses if anything else would change, and appends a `pipeline.backfilled` event
+- **Bounds:** one run reads at most 20,000 ledger rows over at most 25 items, one catch-up at a time per process. A longer ledger is continued: the marker records `resume` with `truncated: true`, the next run resumes after `toEvent`, and the timeline is written once the ledger is read to its end, the item `awaiting-backfill` until then
+- **A failure:** belongs to its item: recorded, set aside for the five-minute settle window, then retried, while the run moves on
+- **The union:** the replay runs the engine's own functions at the recorded instants (`updatedAt`, or a raw ledger entry's `at`), then unites with the live timeline, itself only as old as the timeline feature: attempts unite by epoch (the live record wins), `submittedAt` is the earliest of the two, `resubmittedAt` the latest, and a replayed count can raise a recorded one, never lower it
 
 ```json
 "backfill": { "at": "…", "source": "ledger", "events": 412, "fromEvent": "1207", "toEvent": "5109", "retained": true, "truncated": false, "passes": 1 }

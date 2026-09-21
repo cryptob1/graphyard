@@ -5,17 +5,17 @@ For an integrator recording what production runs: which identity may write each 
 
 ## Records and who may change them
 
-| Record | Written by | Meaning |
-| --- | --- | --- |
-| Environment `delivery` policy | `admin`, as an environment definition revision | Freshness bound for a verified interval; whether selection needs approval |
-| Release build | `producer` with a `builder` registration | Source → artifact manifest for one environment, independently established |
-| Release revision | `admin`, or a `promoter` with a current lease | Immutable manifest, source and explicit membership |
-| Approval | `admin` | Binds one release revision, manifest hash, build and policy revision |
-| Expected release selection | `admin` or promoter | Advances the environment's generation; fenced by `expectedGeneration` |
-| Deployment observation | `producer` with an `observer` registration and a current lease | Append-only runtime facts for its services |
-| Rollback request, operation, resolution | `admin` or promoter; a `rollback` registration; `admin` | The [rollback workflow](recovery.md#rollback) |
-| Notification | Any authenticated non-worker credential | A provider webhook relayed as a hint, never authoritative |
-| Verification, incidents, attribution | Graphyard's bounded sweep | Derived from observations, never asserted by a client |
+Record (written by): meaning.
+
+- **Environment `delivery` policy** (`admin`, as an environment definition revision): Freshness bound for a verified interval; whether selection needs approval
+- **Release build** (`producer` with a `builder` registration): Source → artifact manifest for one environment, independently established
+- **Release revision** (`admin`, or a `promoter` with a current lease): Immutable manifest, source and explicit membership
+- **Approval** (`admin`): Binds one release revision, manifest hash, build and policy revision
+- **Expected release selection** (`admin` or promoter): Advances the environment's generation; fenced by `expectedGeneration`
+- **Deployment observation** (`producer` with an `observer` registration and a current lease): Append-only runtime facts for its services
+- **Rollback request, operation, resolution** (`admin` or promoter; a `rollback` registration; `admin`): The [rollback workflow](recovery.md#rollback)
+- **Notification** (any authenticated non-worker credential): A provider webhook relayed as a hint, never authoritative
+- **Verification, incidents, attribution** (Graphyard's bounded sweep): Derived from observations, never asserted by a client
 
 ## Environment policy
 
@@ -91,7 +91,7 @@ The build producer attests the manifest through `POST /api/delivery/build`:
 
 ## Observe
 
-An observer reads its provider outside any Graphyard transaction, submitting what it measured to `POST /api/delivery/observe`:
+An observer reads its provider outside any Graphyard transaction, submitting its measurements to `POST /api/delivery/observe`:
 
 ```json
 {
@@ -114,7 +114,7 @@ An observer reads its provider outside any Graphyard transaction, submitting wha
 
 ## Verification
 
-- **Sweep:** every two seconds the server folds at most fifty new observations into each environment's coverage and re-evaluates, resuming from a stored cursor so an interrupted sweep skips none
+- **Sweep:** every two seconds the server folds at most fifty new observations into each environment's coverage and re-evaluates, resuming from a stored cursor, so an interrupted sweep skips none
 - **`graphyard delivery sweep`:** drains a backlog sooner
 - **Coverage, per service:** the merged intervals where every listed instance matched the expected digest under measured identity, plus the latest observed state
 

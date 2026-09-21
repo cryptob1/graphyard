@@ -7,7 +7,7 @@ For every reader and guide: one definition and one canonical usage per term.
 
 ### 1. Human operator (human authority)
 
-- **Who:** administers a Graphyard installation, usually also GitHub repository administrator.
+- **Who:** administers a Graphyard installation, usually also the GitHub repository.
 - **Credential:** `admin`, declaring `sessionKind: "human"`.
 - **Decides:** only three decisions ([who decides](#who-decides)); every other is an agent's, approved by an [independent agent](operator-automation.md#two-party-decisions); a declared human session may make any directly.
 - **Canonical usage:** *human operator*; bare *operator* means this person, *administrator* same person in a GitHub or deployment context.
@@ -27,7 +27,7 @@ Language-model program reading and writing through an agent runtime. "Agent" nam
 
 ### 4. Principal, role, and credential
 
-- ***Principal*:** identity Graphyard authenticates: the `id` in `GRAPHYARD_PRINCIPALS` or the operator-agent registry.
+- ***Principal*:** identity Graphyard authenticates, the `id` in `GRAPHYARD_PRINCIPALS` or the operator-agent registry.
 - ***Role*:** its authority class: `admin`, `coordinator`, `slice-lead`, `worker`, `producer`, `reader`, `operator-agent`.
 - ***Credential*:** secret proving it.
 - **Attach to the principal, never runtime or display name:** ownership, evidence trust and every refusal.
@@ -75,26 +75,29 @@ Session supervisor launching, showing and stopping agent sessions, and the first
 ## Who decides
 
 - **Master requests a two-party decision:** `master decide GY-N ACTION REASON`
-- **Approver applies it, from its own session:** `master approve GY-N DECISION REASON`
+- **Approver applies it, in its own session:** `master approve GY-N DECISION REASON`
 
-| Decision | Made by | Approved by |
-| --- | --- | --- |
-| Create work, release backlog work, clear a blocker, add requirements, widen scope | Master | Applied directly: non-weakening intent, judged by reviewer and producers |
-| Rewrite, remove or narrow requirements | Master | Approver; narrowing still raises a `requirement-weakening` escalation |
-| Resolve an escalation; authorize rework or containment recovery, attesting the worker stopped | Master | Approver |
-| Attest a `manual:` proof | Master | Approver that produced no evidence for that proof |
-| Grant proof authority to a producer | Master | Approver that is not the grantee |
-| Approve a merge with automatic merging off | Master | Approver that produced no evidence on the item |
-| Select a review provider | Master | The reviewer approves each candidate |
-| Approve a candidate | Reviewer | Branch protection and the merge gate |
-| Produce trusted evidence | Proof producer | The acceptance gate |
-| Merge | Master (guarded merge) | The merge gate, rechecked on the exact candidate |
-| GitHub administration, rotating agent principals, restarting the loop | Master | API verification and audit ledger; a preview refusing to drop a live principal |
-| Goals and priorities; spending money or opening third-party accounts; issuing credentials to people | **Human operator** | — |
+The master decides, approved by:
+
+- **Create work, release backlog work, clear a blocker, add requirements, widen scope:** applied directly: non-weakening intent, judged by reviewer and producers
+- **Rewrite, remove or narrow requirements:** approver; narrowing still raises a `requirement-weakening` escalation
+- **Resolve an escalation; authorize rework or containment recovery, attesting the worker stopped:** approver
+- **Attest a `manual:` proof:** approver that produced no evidence for that proof
+- **Grant proof authority to a producer:** approver that is not the grantee
+- **Approve a merge with automatic merging off:** approver that produced no evidence on the item
+- **Select a review provider:** the reviewer approves each candidate
+- **Merge (guarded merge):** the merge gate, rechecked on the exact candidate
+- **GitHub administration, rotating agent principals, restarting the loop:** API verification and audit ledger; a preview refusing to drop a live principal
+
+Others decide:
+
+- **Approve a candidate:** reviewer, under branch protection and the merge gate
+- **Produce trusted evidence:** proof producer, under the acceptance gate
+- **Goals and priorities; spending money or opening third-party accounts; issuing credentials to people:** **Human operator**, alone
 
 ## Diagram legend
 
-Every repo-native diagram uses this key, also drawn inside each SVG.
+Every repo-native diagram uses this key, drawn inside each SVG too.
 
 - **Amber rounded box:** Human operator
 - **Green rounded box:** AI agent session, one role, one credential

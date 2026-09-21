@@ -21,7 +21,7 @@ A trusted run executes only protected source, so a contract must reach protected
 
 ## Inspect enforcement
 
-Configured is not enforced. `node scripts/verify-enforcement.mjs GY-N [PR_NUMBER]` joins live GitHub and Graphyard observations for one submitted item into a read-only report.
+`node scripts/verify-enforcement.mjs GY-N [PR_NUMBER]` joins live GitHub and Graphyard observations for one submitted item into a read-only report.
 
 - **Reports:** which App published `Graphyard / merge` on the exact head, protection settings the merge verifier requires, every gate with its refusal reasons, GitHub's mergeability
 - **Requires:** a completed successful run from its bound App for every protected required context, not only `Graphyard / merge`

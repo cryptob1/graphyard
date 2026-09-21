@@ -7,7 +7,7 @@ For whoever runs the control plane: which variables, host and backup path to cho
 
 - Every tagged release `vX.Y.Z` publishes `ghcr.io/cryptob1/graphyard:X.Y.Z`, the tag equal to the `package.json` version; the build stamps it and the Git revision into the image as `GRAPHYARD_VERSION`, `GRAPHYARD_BUILD_REVISION` and the matching OCI labels.
 - Published only after `scripts/verify-image-release.mjs` confirms the release contract against an isolated database, as for every candidate image: `/healthz` reports `{ok, version, revision, schema}`, `db status` shows the expected schema generation, and `db backup`/`db restore` carry a live ledger into a fresh database that serves it unchanged.
-- A running deployment names its release at `/healthz` without a credential and under `release` in `/api/status`; pin a digest where immutability matters.
+- A deployment names its release at `/healthz` without a credential and under `release` in `/api/status`; pin a digest where immutability matters.
 
 ## Variables
 
@@ -41,7 +41,7 @@ For whoever runs the control plane: which variables, host and backup path to cho
 
 ### Changing the roster safely
 
-- `scripts/configure-integrations.mjs --apply` never rebuilds `GRAPHYARD_PRINCIPALS` from a local file: it reads the live roster and merges `.graphyard/credentials.json` into it by id, keeping every live principal the file omits.
+- `scripts/configure-integrations.mjs --apply` never rebuilds `GRAPHYARD_PRINCIPALS` from a local file: it merges `.graphyard/credentials.json` into the live roster by id, keeping every live principal the file omits.
 - **Preview:** each id, role, change and token state (`unchanged`, `rotated`, `new`, `removed`), never a token.
 - `--remove ID`: dropping or demoting the coordinator, an admin or another live principal is refused without it; `--rotate ID` rotates one.
 - `--deploy`, required by a changed producer token: variables staged, service redeployed, GitHub secret set only once the deployed server authenticates the new token. With no token change nothing is deployed.
@@ -85,12 +85,12 @@ Work is Done when the merge is observed; whether that commit reached production 
 
 - **Build:** `GRAPHYARD_BUILD_SHA` or `RAILWAY_GIT_COMMIT_SHA`; `/healthz` reports it as `commit` with the merge `protocol` the server speaks.
 - **Each delivery** merged in the last 14 days is compared with the serving commit through the App, and `GET /api/status` carries `production`: the serving commit, how far the base branch is ahead, the newest provider deployment and its status, pending and deployed items, and open incidents.
-- **Point the loop's probe** at the same fact with `master init --deployment-url https://YOUR-DOMAIN/healthz --deployment-sha-field commit`.
+- **Point the loop's probe** at it with `master init --deployment-url https://YOUR-DOMAIN/healthz --deployment-sha-field commit`.
 
 ## After the merge
 
-- A merged commit production never served is a **deployment incident**, recorded within five minutes: at once when the provider reports `FAILED` or `CRASHED`, after a five-minute grace period when no deployment of the merge is observed. An append-only `delivery.deployment-incident` event shows in `production.incidents`, `doctor` (`next`) and `master status`: `main is N commits ahead of production (serving …): <reason>`; `/healthz` stays green, the previous release still serving. Fix the deployment, not the ledger: a start-up refusal is printed verbatim and, for a capacity limit, names the variable and value to set; revert the merge only if the change itself is wrong; when a deployment containing it serves, the watch appends `delivery.deployment-recovered`.
-- A delivery whose trusted smoke proof failed stays Done, marked **delivered with failure** and listed under `delivered` with `rollback` guidance naming the serving commit, the merge commit and the base branch: roll the deployment back to the last release whose smoke proof passed, or revert the merge through a new item under the same gates. Never backfill a pass and never delete the failure: a later run at the same deployed commit may supersede the verdict; if the release moved on before the smoke ran, the item stays `awaiting-smoke`. Graphyard v0.1 executes no rollbacks or reverts itself.
+- A merged commit production never served is a **deployment incident**, recorded at once when the provider reports `FAILED` or `CRASHED`, after a five-minute grace period when no deployment of the merge is observed. An append-only `delivery.deployment-incident` event shows in `production.incidents`, `doctor` (`next`) and `master status`: `main is N commits ahead of production (serving …): <reason>`; `/healthz` stays green, the previous release still serving. Fix the deployment, not the ledger: a start-up refusal is printed verbatim and, for a capacity limit, names the variable and value to set; revert the merge only if the change itself is wrong; when a deployment containing it serves, the watch appends `delivery.deployment-recovered`.
+- A delivery whose trusted smoke proof failed stays Done, marked **delivered with failure** and listed under `delivered` with `rollback` guidance naming the serving commit, the merge commit and the base branch: roll the deployment back to the last release whose smoke proof passed, or revert the merge through a new item under the same gates. Never backfill a pass or delete the failure: a later run at the same deployed commit may supersede the verdict; if the release moved on before the smoke ran, the item stays `awaiting-smoke`. Graphyard v0.1 executes no rollbacks or reverts itself.
 
 ## Backup, upgrade, restore
 

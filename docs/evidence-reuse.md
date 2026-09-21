@@ -8,12 +8,12 @@ For an operator weighing a re-run: when an earlier pass may stand for a new head
 Every dispatch takes a durable sequence number under the coordination lock, reported as `sequence`.
 
 - **"The newest attempt"** for a proof is the highest sequence, decided when execution authority was granted
-- A result for an older attempt arriving after a newer dispatch is rejected
-- Attempts recorded before this generation carry no sequence and are never reused
+- An older attempt's result arriving after a newer dispatch is rejected
+- Attempts predating this generation carry no sequence and are never reused
 
 ## Reuse policy
 
-Reuse is off until an operator publishes a `reuse` definition for the environment, through the same `define` command and revision rules as environments, registrations and bundles:
+Reuse is off until an operator publishes a `reuse` definition for the environment, through the `define` command and revision rules of environments, registrations and bundles:
 
 ```json
 {
@@ -53,26 +53,26 @@ Once the head moves and a build producer attests the new build, the operator ask
 `POST /api/validation/reuse` (operator only, `Idempotency-Key` required) evaluates the newest sequenced attempt for that item and proof and commits one decision, listing every reason when **refused**:
 
 - Live request for the proof
-- Newest attempt that is not a settled, accepted pass, so nothing falls back to an older one
+- Newest attempt not a settled, accepted pass; nothing falls back to an older one
 - Executed pass older than the policy freshness, with expired artifacts, or whose collector has since held an assignment
 - Differing requirement or proof policy revision, scenario pin, environment, bundle revision or base SHA
 - Differing declared build inputs or, under `artifacts: identical`, artifact manifest
 - Changed path that is relevant or unknown
 - Head whose file comparison was never independently observed
 
-That comparison is Graphyard's own: each candidate snapshots the changed-file list with blob identities from the GitHub observation that selected it; nothing a client claims is consulted.
+That comparison is Graphyard's own: each candidate snapshots the changed-file list with blob identities from the GitHub observation that selected it; no client claim is consulted.
 
 A **granted** decision:
 
 - **Selects** a derived candidate for the new head, bound to the executed request and attempt
-- **Records trusted evidence** the acceptance gate treats like any current evidence: the original collector as producer, the original counts and artifacts, an `expiresAt` at the freshness bound, a `reuse` block naming the decision, the original evidence, the executed head and the sequence
+- **Records trusted evidence** the acceptance gate treats as current: the original collector as producer, the original counts and artifacts, an `expiresAt` at the freshness bound, a `reuse` block naming the decision, the original evidence, the executed head and the sequence
 
 Afterwards:
 
 - **A live request:** supersedes the reused selection at once
-- **Retrying the executed request:** refused: its candidate no longer matches the head
+- **Retrying the executed request:** refused, its candidate no longer matching the head
 - **Reconciliation:** revalidates the derived candidate's build, bundle, environment and registration authority on every configuration change
-- **An observation undermining the executed attempt's window:** re-anchors the binding; the reused entry then stops authorizing
+- **An observation undermining the executed attempt's window:** re-anchors the binding, and the reused entry stops authorizing
 
 ## Replay
 
@@ -84,15 +84,15 @@ Coverage is per dimension:
 
 - **`inventory`, `behavior`:** `covered` when both files were retained, unexpired, intact and parsed, otherwise `unmeasured` with the missing instrumentation named
 - **`artifactIntegrity`:** `covered` when every artifact read matches its recorded digest
-- **`bundleIdentity`, `targetAttribution`, `settlement`, `deploymentHealth`:** always `not-covered`: measurements at the execution boundary and on the target that a stored file cannot repeat
+- **`bundleIdentity`, `targetAttribution`, `settlement`, `deploymentHealth`:** always `not-covered`: measurements at the execution boundary and on the target no stored file can repeat
 - **`outcome`:** `consistent` or `inconsistent` against the collector's submitted summary, `uncompared` when the attempt predates those summaries, `unmeasured` when the artifacts cannot be replayed
-- **The record:** carries the measured cost and states `authorizes: nothing` and `liveVerification: not-established`; no evidence, selection or gate changes because of a replay
+- **The record:** carries the measured cost and states `authorizes: nothing` and `liveVerification: not-established`; a replay changes no evidence, selection or gate
 
 ## Execution analytics
 
 `graphyard validation analytics` groups every sequenced attempt by proof, environment and runner registration.
 
-- **Reports:** outcomes, Graphyard's observed timings, and the runner-reported duration and CPU time kept separate from them
+- **Reports:** outcomes, Graphyard's observed timings, and separately the runner-reported duration and CPU time
 - **Cost:** **observed**, **estimated** or **unavailable**, never zero when nobody metered it
 - **Refused:** a measurement whose `basis` is neither `observed` nor `estimated`
 - **Also carried:** the reuse and replay ledgers by outcome; the response never ranks groups

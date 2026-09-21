@@ -21,17 +21,15 @@ For a client reading Graphyard, and what bounds each read.
 
 `GET /api/events` excludes the routine kinds `github.observed` (one per reconciliation pass) and `heartbeat` (one per lease renewal) by default, summarising them instead.
 
-| Parameter | Meaning |
-| --- | --- |
-| `work` | One item's UUID; omitted, the whole ledger |
-| `kind` | Only these kinds, repeated or comma-separated; naming a routine kind selects it |
-| `since`, `until` | Half-open `[since, until)` on the recorded instant |
-| `order` | `desc` (default) or `asc` |
-| `limit` | Rows per page, 1-1000 (default 300) |
-| `cursor` | The `seq` of the previous page's last row; paging never revisits a row |
-| `routine` | `exclude` (default) or `include` |
-| `payload` | `full` (default), `details` (without the embedded work snapshot) or `none` |
-| `view` | `rows` (default, the event array), `history` (adds `page` and `routine`) or `page` (`history` without the routine summary) |
+- `work`: One item's UUID; omitted, the whole ledger
+- `kind`: Only these kinds, repeated or comma-separated; naming a routine kind selects it
+- `since`, `until`: Half-open `[since, until)` on the recorded instant
+- `order`: `desc` (default) or `asc`
+- `limit`: Rows per page, 1-1000 (default 300)
+- `cursor`: The `seq` of the previous page's last row; paging never revisits a row
+- `routine`: `exclude` (default) or `include`
+- `payload`: `full` (default), `details` (without the embedded work snapshot) or `none`
+- `view`: `rows` (default, the event array), `history` (adds `page` and `routine`) or `page` (`history` without the routine summary)
 
 - **`view=history`:** answers `filters`, `events`, `page` (`returned`, `hasMore`, `nextCursor`, first and last `seq` and instant) and `routine`: each excluded kind's count with first and last instant, the total, a `statement`, and `truncated` when the summary's bounded scan filled
 - **`graphyard events GY-N`:** `--kind`, `--since`, `--until`, `--order`, `--limit`, `--cursor` and `--payload` (default `details`) are these parameters; `--routine` includes the routine rows; `--all` follows `nextCursor` forwards (`order=asc` unless given) for at most 200 pages, `page.complete` saying whether the range ended. Without an item, `graphyard events` reads the latest ledger rows and takes no flags

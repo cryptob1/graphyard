@@ -5,8 +5,6 @@ For the operator connecting a Playwright suite: three identities, and which refu
 
 ## Inspect, snapshot, approve
 
-What each preparation command does, and does not, establish:
-
 - `runner inspect [DIRECTORY]`: Linux-only; proposes conventional test and configuration paths from package metadata, bounded to 10,000 entries and 20 directory levels, excluding symlinks, generated output and credential files. Imports no config, installs nothing, runs nothing
 - `runner snapshot selected-files.json`: Exact base64 source bytes, per-file hashes and manifest digest for an explicit list; symlinks, traversal and credential filenames refuse. Not a bundle, not approval
 - `runner bundle-digest ./oracle`: Content-addresses every regular file under the bundle; symlinks, non-regular files, `node_modules` and credential filenames **refuse**, never skipped, so a bundle cannot smuggle bytes past approval or carry its own module path

@@ -3,7 +3,7 @@
 
 For whoever wires GitHub to Graphyard: which identity holds which permission.
 
-Graphyard uses a dedicated GitHub App, installation token minted from its private key and refreshed automatically, to observe the repository and publish **`Graphyard / merge`** on the exact pull-request head commit.
+A dedicated GitHub App, installation token minted from its private key and refreshed automatically, observes the repository and publishes **`Graphyard / merge`** on the exact pull-request head commit.
 
 ## Create and install the App
 
@@ -18,7 +18,7 @@ Graphyard uses a dedicated GitHub App, installation token minted from its privat
 
 ## App permissions
 
-Every permission a Graphyard App identity holds is declared once, in `src/github-permissions.ts`, with the feature needing it; the manifest, tables below, preflight, job holds and `--update-permissions` migration all read it. Control plane first, reviewer App second.
+Every permission a Graphyard App holds is declared once, in `src/github-permissions.ts`, with the feature needing it; the manifest, tables below, preflight, job holds and `--update-permissions` migration read it. Control plane first, reviewer App second.
 
 | Permission | Access | Needed to |
 | --- | --- | --- |
@@ -29,7 +29,7 @@ Every permission a Graphyard App identity holds is declared once, in `src/github
 | Metadata | Read | read the managed repository (repository access) |
 | Pull requests | Read and write | read pull requests and reviews (pull request observation); post review request comments (review dispatch) |
 
-- **Reviewer App:** never granted Contents: write, Checks, or Administration, so it cannot write code, publish the required check or read protection
+- **Reviewer App:** never granted Contents: write, Checks, or Administration
 - **Workers:** worker identities are not Apps at all: ordinary GitHub accounts that push branches and open pull requests
 
 | Permission | Access | Needed to |
@@ -53,7 +53,7 @@ GitHub offers no API for changing a registered App's permissions; every installa
 
 - **`github-setup --update-permissions [--wait 600] [--reviewer NAME]`:** on the machine holding `.graphyard/github-app.json`, reads both back, prints remaining steps, verifies acceptance, exits nonzero while anything remains
 - **`--reviewer`:** reports a reviewer App's excess grants instead
-- **The master does both halves itself:** `master browser app-permissions` raises the declared set, `master browser installation-accept` accepts the request, `master browser protection` reaches settings the API cannot
+- **The master does both halves:** `master browser app-permissions` raises the declared set, `master browser installation-accept` accepts the request, `master browser protection` reaches settings the API cannot
 
 ## The reviewer App
 
@@ -102,9 +102,9 @@ Graphyard reads classic protection, refusing its merge gate unless these setting
 - **Rechecked immediately before the GitHub call:** every gate and its evidence, head, base, draft state and mergeability, CI producer identity and current-head review, protection and the App-owned check including `strict` off, short-lived single-use merge execution
 - **Base tip:** read from `refs/heads/<base>`, never cached `baseRefOid`
 - **No administrative bypass:** Done follows only an independently observed matching merge
-- **Protocol mismatch:** the CLI speaks a newer merge protocol than the deployed server, refusing with `server runs <sha>, CLI expects <sha>: deploy main first`
-- **One executor per execution:** the executor instance that acquired an execution owns it — the loop is one instance per process, each `master merge` one named by its request id, so a replay under the same `GRAPHYARD_REQUEST_ID` resumes its own; the engine records the owner as `principal#instance` and refuses `merge-verify`, `merge-commit` and `merge-cancel` from any other, even under the same credential
-- **Stand-down:** `master merge GY-N` beside a running loop is safe. An executor finding an execution another instance holds refuses before acquiring anything — `GY-N does not have a current all-gates-passing merge authorization for this executor: merge execution … is held by graphyard-master#daemon-… until …; this executor stands down without cancelling it` — as does a mid-flight `Merge execution was already verified` or `already committed` refusal. Never retry it against the holder or resolve it by hand: an unfinished execution lapses at expiry, reconciliation clears it, and the next cycle attempts afresh
+- **Protocol mismatch:** a CLI speaking a newer merge protocol than the deployed server refuses with `server runs <sha>, CLI expects <sha>: deploy main first`
+- **One executor per execution:** the instance that acquired an execution owns it — the loop is one instance per process, each `master merge` one named by its request id, so a replay under the same `GRAPHYARD_REQUEST_ID` resumes its own; the engine records the owner as `principal#instance` and refuses `merge-verify`, `merge-commit` and `merge-cancel` from any other, even under the same credential
+- **Stand-down:** `master merge GY-N` beside a running loop is safe. An executor finding an execution another instance holds refuses before acquiring anything — `GY-N does not have a current all-gates-passing merge authorization for this executor: merge execution … is held by graphyard-master#daemon-… until …; this executor stands down without cancelling it` — as does a mid-flight `Merge execution was already verified` or `already committed` refusal. Never retry it against the holder or resolve it by hand: an unfinished execution lapses at expiry, reconciliation clears it, the next cycle attempts afresh
 
 ## Merge queue
 
@@ -133,7 +133,7 @@ Graphyard serializes the final hop through one queue, so no merge invalidates ca
 
 ## Enforcement boundary
 
-No transaction spans both systems: ledger changes immediately while check publication goes through a separate API, so a delay can separate a refusal from revocation of a previously successful check; GitHub never expires a check when Graphyard goes offline ([the merge execution boundary](architecture.md#the-merge-execution-boundary)).
+No transaction spans both systems: the ledger changes immediately, check publication goes through a separate API, so a refusal can precede revocation of a previously successful check; GitHub never expires a check when Graphyard goes offline ([the merge execution boundary](architecture.md#the-merge-execution-boundary)).
 
 - **Rate limit:** 429, or 403 carrying `x-ratelimit-remaining: 0`, `Retry-After` header or rate-limit message, pauses that process's client for at least a minute
 - **Permission refusal:** 401, or 403 without those signals, never pauses it

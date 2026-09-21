@@ -36,18 +36,16 @@ Four triggers raise an automatic, append-only escalation:
 
 | Trigger | Raised when |
 | --- | --- |
-| `lease-loss` | A worker lease lapses on an epoch with no submission, no carried `blocked` report and no stopped-worker attestation: a worker that silently vanished. A lapse the ledger explains is a `lease.expired` history entry with its cause — `submitted` (the lease ended at `complete`), `blocked-awaiting-operator` (the worker reported `blocked` and stopped to wait), or `stopped-by-attestation` (an admin attested with `rework` or `recover-containment --previous-worker-stopped`) — and raises nothing |
+| `lease-loss` | A worker lease lapses on an epoch with no submission, no carried `blocked` report and no stopped-worker attestation: a worker that silently vanished. A lapse the ledger explains is a `lease.expired` history entry with its [cause](protocol/leases.md#lease-end-and-its-cause) — `submitted`, `blocked-awaiting-operator` or `stopped-by-attestation` — and raises nothing |
 | `evidence-policy-conflict` | Trusted evidence arrives for a policy revision other than the item's current one |
 | `security-concern` | A lead's `escalate` ruling names this trigger |
 | `requirement-weakening` | A requirement revision retires a criterion or narrows an existing criterion's required proofs |
 
 ### Who may settle what
 
-| Standing escalation | Settled by |
-| --- | --- |
-| `lease-loss` raised by the control plane for an epoch whose lapse the ledger explains | Reconciliation, automatically; or any `admin` principal, whatever its declared session kind, with `resolve GY-N lease-loss --attestation blocked\|stopped-worker "reason"`. The server verifies the citation against the ledger for that exact epoch, refusing `The ledger holds no KIND attestation for epoch N` otherwise. A declared human session may also resolve it |
-| `lease-loss` raised by the control plane for a lapse nothing explains | A declared human session only; a citation the ledger does not hold is refused, and nothing settles it automatically |
-| `security-concern`, `requirement-weakening`, `evidence-policy-conflict`, and any `lease-loss` a lead raised | A declared human session only: an `admin` declaring `sessionKind: "ai"` or nothing is refused with `Escalation resolution requires a declared human session; PRINCIPAL is ai`, and a citation with `Only a lease-loss raised by the control plane is settled by citing an attestation` |
+- **`lease-loss` raised by the control plane for an epoch whose lapse the ledger explains:** Reconciliation, automatically; or any `admin` principal, whatever its declared session kind, with `resolve GY-N lease-loss --attestation blocked|stopped-worker "reason"`. The server verifies the citation against the ledger for that exact epoch, refusing `The ledger holds no KIND attestation for epoch N` otherwise. A declared human session may also resolve it
+- **`lease-loss` raised by the control plane for a lapse nothing explains:** A declared human session only; a citation the ledger does not hold is refused, and nothing settles it automatically
+- **`security-concern`, `requirement-weakening`, `evidence-policy-conflict`, and any `lease-loss` a lead raised:** A declared human session only: an `admin` declaring `sessionKind: "ai"` or nothing is refused with `Escalation resolution requires a declared human session; PRINCIPAL is ai`, and a citation with `Only a lease-loss raised by the control plane is settled by citing an attestation`
 
 Every settlement is append-only history:
 
@@ -56,7 +54,6 @@ Every settlement is append-only history:
   - `auto-settled: submitted before expiry` for an epoch with a bound submission
   - `auto-settled: blocked report for epoch N explains the lapse` or `auto-settled: stopped-worker attestation for epoch N explains the lapse` for a control-plane one
 - **Attestation after the lapse:** a later `rework --previous-worker-stopped` for that epoch settles it next tick.
-- **Never settled this way:** a `lease-loss` a lead raised; a lapse nothing explains stands until someone resolves it — auto-settlement never invents an explanation.
 
 ## Ownership, capacity and identity
 

@@ -3,13 +3,13 @@
 
 For an integrator driving a runner: how an attempt is authorized.
 
-| Identity | Credential role | Authority |
-| --- | --- | --- |
-| Human operator | `admin` | Define environments, approve bundles, register principals, select candidates, request, cancel and recover validation |
-| Worker | `worker` | Implementation ownership only: defines no validation authority, publishes no results |
-| Runner | `worker` with a runner registration | Poll dispatch, acknowledge and heartbeat its attempt until collection takes over |
-| Build producer | `producer` with a builder registration | Attest an independently verified source and build inputs → artifact mapping |
-| Collector | `producer` with a collector registration and matching `proofs` | Verify execution, inventory, oracle, target identity, artifacts and settlement, then publish the bound result |
+Identity (credential role): authority.
+
+- **Human operator** (`admin`): Define environments, approve bundles, register principals, select candidates, request, cancel and recover validation
+- **Worker** (`worker`): Implementation ownership only: defines no validation authority, publishes no results
+- **Runner** (`worker` with a runner registration): Poll dispatch, acknowledge and heartbeat its attempt until collection takes over
+- **Build producer** (`producer` with a builder registration): Attest an independently verified source and build inputs → artifact mapping
+- **Collector** (`producer` with a collector registration and matching `proofs`): Verify execution, inventory, oracle, target identity, artifacts and settlement, then publish the bound result
 
 ## Inspect and invoke
 
@@ -22,7 +22,7 @@ graphyard validation define|build|candidate|request|dispatch|ack|heartbeat|resul
 
 ## Configure a candidate
 
-Define an [E2E scenario](test-cases.md) first and create work requiring its `e2e:SCENARIO_ID` proof, which pins the scenario revision, hash and environment. The environment definition:
+Define an [E2E scenario](test-cases.md) first, then create work requiring its `e2e:SCENARIO_ID` proof, which pins the scenario revision, hash and environment. The environment definition:
 
 - **ID:** stable, matching that scenario's environment
 - **`delivery` block:** optional, for its [release policy](delivery.md#environment-policy)
@@ -59,9 +59,9 @@ Only the pinned collector may call `result`, publishing `{requestId, attemptId, 
 
 Operator commands take `{requestId, epoch, reason}`:
 
-- `cancel`: stops authorization but never claims a process stopped, so running reservations remain; never-acknowledged dispatches settle safely
-- `settle`: also requires `settlementEvidence`, a URL referencing independent termination proof; a manual attestation, only after confirming the process and its external operations are stopped or fenced
+- `cancel`: stops authorization, never claiming a process stopped, so running reservations remain; never-acknowledged dispatches settle safely
+- `settle`: also requires `settlementEvidence`, a URL referencing independent termination proof; a manual attestation, only once the process and its external operations are confirmed stopped or fenced
 - `retry`: needs a settled prior attempt, unexpired deadline, remaining budget and current authority; invalidates any earlier pass
 - Revoked definitions need newly authorized configuration and a new request
 
-Never reassign a protected resource because a timer expired: unknown outcomes stay blocked until verified settlement. Every attempt carries a durable `sequence` ([replay and scoped reuse](evidence-reuse.md)).
+Never reassign a protected resource on a timer's expiry: unknown outcomes stay blocked until verified settlement. Every attempt carries a durable `sequence` ([replay and scoped reuse](evidence-reuse.md)).
