@@ -8,12 +8,13 @@ import { controlPlanePermissions, requiredPermissions } from '../../github-permi
 import { releaseInfo, schemaVersion } from '../../release.js';
 import { defineRoutes } from '../routes.js';
 import { coordinationSnapshot, coordinationViewHeader } from '../work-view.js';
+import { executorHost } from './agent-registry.js';
 
 /** Control-plane status and the work reads every client polls. */
 export const statusRoutes = defineRoutes('status', [
   {
     method: 'GET', path: '/api/status',
-    async handle({ actor, services, operatorVisible }) {
+    async handle({ actor, req, url, services, operatorVisible }) {
       const { engine, github, repository, principals, limits, build, production } = services;
       const jobs = actor.role === 'operator-agent' ? [] : (await engine.store.pool.query('SELECT work_id,available_at,locked_until,attempts,error,held_until FROM jobs WHERE error IS NOT NULL ORDER BY available_at LIMIT 50')).rows;
       const githubRepository = github ? await github.reviewRepository() : null;
@@ -32,6 +33,11 @@ export const statusRoutes = defineRoutes('status', [
         delegationLimits: services.delegationLimits, build, production: actor.role === 'operator-agent' ? null : production?.status() ?? null,
         // What the timeline reconstruction has done in this process, and any failure it hit.
         pipelineBackfill: pipelineBackfillState(observedAt.getTime()),
+        // The fleet as the registry holds it: each account's runtime, model, role eligibility, live
+        // sessions, quota and reset time, and why it is ineligible when it is. `?host=` (or the executor-host header) judges
+        // placement for the executor asking. It names hosts and login homes, so identities that
+        // only implement or produce do not read it.
+        fleet: ['admin', 'coordinator', 'reader', 'slice-lead'].includes(actor.role) ? await services.agentRegistry.snapshot(executorHost(url, req)) : null,
         now: observedAt.toISOString(), release: releaseInfo(), schema: schemaVersion };
     },
   },

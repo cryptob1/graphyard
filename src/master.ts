@@ -18,6 +18,8 @@ import { baseRefreshConflict, currentBaseRefreshCarry, pendingBaseRefresh, predi
 import { MERGE_PROTOCOL } from './protocol-version.js';
 import { attentionLines, type ProductionReport } from './production-watch.js';
 import { pipelineSpeed, pipelineSpeedSummary } from './pipeline-speed.js';
+import { fleetRoleHealth, selectFleetSession, type FleetLaunchAccount, type FleetProbe } from './fleet.js';
+import type { FleetView } from './model/registry.js';
 
 const safeEnvironment = z.record(
   z.string().regex(/^[A-Z_][A-Z0-9_]*$/)
@@ -710,8 +712,21 @@ export async function recordEnvironmentLog(config: Pick<MasterConfig, 'credentia
  * The account a launch runs on: the first of the profile's accounts that is logged in with quota
  * left. Every account passed over is recorded with its reason. A profile that names no accounts
  * launches exactly as configured, on whatever its environment variables select.
+ *
+ * When the control plane's agent registry defines the role, the registry decides instead: the
+ * control plane chooses the first eligible account of the role — placed on this host, logged in,
+ * within quota, under its session and concurrency limits — and records the choice and its reason
+ * (see fleet.ts). The profile then supplies only the Graphyard identity the session acts under.
+ * A role the registry does not define yet launches from the profile's own accounts, as before.
  */
-export async function selectAccount(config: Pick<MasterConfig, 'environments' | 'credentialFile' | 'run'>, role: LaunchRole, profile: { name: string; accounts?: string[] }, probe: EnvironmentProbe & { work?: string } = {}) {
+export type LaunchAccount = AgentEnvironment | FleetLaunchAccount;
+export interface AccountSelection { account: LaunchAccount | null; health: EnvironmentHealth | null; skipped: AccountSkip[]; /** Gives a registry session back when the launch it was chosen for failed. */ release?: (reason: string) => Promise<void> }
+export async function selectAccount(config: Pick<MasterConfig, 'environments' | 'credentialFile' | 'run'> & Partial<Pick<MasterConfig, 'url' | 'hostId'>>, role: LaunchRole, profile: { name: string; accounts?: string[]; principal?: string }, probe: FleetProbe = {}): Promise<AccountSelection> {
+  const fleet = await selectFleetSession(config, role, profile, probe);
+  if (fleet) {
+    await recordEnvironmentLog(config, fleet.health ? [fleet.health] : [], fleet.skipped).catch(() => {});
+    return fleet;
+  }
   if (!profile.accounts?.length) return { account: null, health: null, skipped: [] as AccountSkip[] };
   const at = new Date(probe.now?.() ?? Date.now()).toISOString();
   const checked: EnvironmentHealth[] = [], skipped: AccountSkip[] = [];
@@ -751,14 +766,20 @@ export function agentLaunchPlan(kind: string | undefined, approvals: 'auto' | 'p
  * a worker commits into the repository's shared Git directory and pushes; a producer builds in a
  * detached worktree under the temporary directory.
  */
-export function accountLaunch(profile: { kind?: string; approvals: 'auto' | 'prompt'; agentArgs: string[]; environment: Record<string, string> }, account: AgentEnvironment | null, reach: { writable?: string[] } = {}) {
+export function accountLaunch(profile: { kind?: string; approvals: 'auto' | 'prompt'; agentArgs: string[]; environment: Record<string, string> }, account: LaunchAccount | null, reach: { writable?: string[] } = {}) {
+  // A registry account carries its runtime's launch contract: what to start, its own startup
+  // arguments, the variable that selects the login home, and the flag that selects its model.
+  const contract = account && 'fleet' in account ? account.fleet.contract : null;
   const kind = account?.kind ?? profile.kind;
-  const plan = agentLaunchPlan(kind, profile.approvals, !account || account.kind === profile.kind ? profile.agentArgs : [], profile.environment);
-  const environment: Record<string, string> = { ...plan.environment, ...profile.environment };
+  const own = !account || account.kind === profile.kind ? profile.agentArgs : [];
+  const model = contract?.modelFlag && account && 'fleet' in account && account.fleet.modelId && !own.includes(contract.modelFlag) && !contract.args.includes(contract.modelFlag) ? [contract.modelFlag, account.fleet.modelId] : [];
+  const plan = agentLaunchPlan(kind, profile.approvals, [...(contract?.args ?? []), ...model, ...own], { ...contract?.environment, ...profile.environment });
+  const environment: Record<string, string> = { ...plan.environment, ...contract?.environment, ...profile.environment };
   if (account) {
-    environment[environmentVariable[account.kind]] = account.home;
+    const variable = contract ? contract.homeVariable : environmentVariable[account.kind as EnvironmentKind];
+    if (variable && account.home) environment[variable] = account.home;
     // mise resolves installed runtimes under XDG_DATA_HOME; keep it on the operator's own install.
-    if (account.kind === 'opencode') {
+    if (variable === 'XDG_DATA_HOME' && account.home) {
       const mise = process.env.MISE_DATA_DIR ?? resolve(process.env.XDG_DATA_HOME ?? resolve(homedir(), '.local/share'), 'mise');
       if (existsSync(mise)) environment.MISE_DATA_DIR = mise;
     }
@@ -778,9 +799,16 @@ export function sharedGitDirectory(root: string) {
  * and the durable loop already read: a profile none of whose accounts can launch is unavailable,
  * with each account's reason.
  */
-export async function inspectProfileAccounts<T extends { available: boolean; reason: string | null }>(config: Pick<MasterConfig, 'environments' | 'credentialFile' | 'run'>, role: LaunchRole, profiles: { name: string; accounts?: string[] }[], health: Record<string, T>, probe: EnvironmentProbe = {}) {
+export async function inspectProfileAccounts<T extends { available: boolean; reason: string | null }>(config: Pick<MasterConfig, 'environments' | 'credentialFile' | 'run'> & Partial<Pick<MasterConfig, 'url' | 'hostId'>>, role: LaunchRole, profiles: { name: string; accounts?: string[] }[], health: Record<string, T>, probe: EnvironmentProbe = {}) {
   const result: Record<string, T & { accounts?: { environment: string; healthy: boolean; reason: string | null; quota: string }[] }> = { ...health };
+  // A role the agent registry defines is judged from the registry: every profile of the role
+  // launches on the same ordered accounts, so they share one answer.
+  const fleet = await fleetRoleHealth(config, role, probe).catch(() => null);
   for (const profile of profiles) {
+    if (fleet) {
+      if (result[profile.name]?.available !== false) result[profile.name] = { ...(result[profile.name] ?? { available: true, reason: null } as T), available: fleet.available, reason: fleet.reason, accounts: fleet.accounts };
+      continue;
+    }
     if (!profile.accounts?.length || result[profile.name]?.available === false) continue;
     const accounts: { environment: string; healthy: boolean; reason: string | null; quota: string }[] = [];
     for (const name of profile.accounts) {
@@ -1154,6 +1182,8 @@ export interface ControlPlaneStatus {
   build?: { commit?: string | null; protocol?: number | null } | null;
   /** Production deployment observation for the base branch. */
   production?: Partial<ProductionReport> | null;
+  /** The agent registry as the control plane holds it; a server before GY-91 reports none. */
+  fleet?: FleetView | null;
 }
 /**
  * Who resolves an attention item and the next command they run. `role` is an agent role
@@ -1230,6 +1260,25 @@ export function controlPlaneAttention(status: ControlPlaneStatus | undefined) {
   return { attention, attentionItems: items, appPermissions: report ? { app: report.app ?? null, installationUrl: report.installationUrl ?? null, verifiedAt: report.verifiedAt ?? null, error: report.error ?? null, suspended: report.suspended ?? false, missing: (report.missing ?? []).map(shortfall => ({ permission: shortfall.permission, required: shortfall.required, features: shortfall.features })) } : null, heldJobs: status?.heldJobs ?? 0,
     delegationLimits: status?.delegationLimits ? { limits: status.delegationLimits.limits ?? null, deployed: status.delegationLimits.deployed ?? null, drift: (status.delegationLimits.drift ?? []).map(entry => ({ variable: entry.variable, deployed: entry.deployed, required: entry.required, reason: entry.reason })) } : null,
     build: status?.build ? { commit: status.build.commit ?? null, protocol: status.build.protocol ?? null } : null, production };
+}
+/**
+ * The fleet as `master status` reports it, straight from the control plane's agent registry:
+ * each account with its runtime, model, role eligibility, live sessions, quota and reset time, and
+ * the reason it is ineligible when it is; each role with the account its next action would run
+ * on. Everything that stops a role from launching is attention the master resolves itself, in
+ * the registry: no file on this host decides it.
+ */
+export function fleetStatus(fleet: FleetView | null | undefined) {
+  if (!fleet) return { fleet: null, attentionItems: [] as AttentionItem[] };
+  const accounts = fleet.accounts.map(account => ({ account: account.name, runtime: account.runtime, model: account.model, modelId: account.modelId, cost: account.cost, capability: account.capability?.tier ?? null, host: account.host,
+    roles: account.roles.map(entry => `${entry.role} (${entry.preference} of ${entry.of})`), liveSessions: account.liveSessions.map(session => ({ role: session.role, work: session.work, since: session.since })),
+    loggedIn: account.loggedIn, quota: account.quota, usage: account.usage, resetsAt: account.resetsAt, observedAt: account.observedAt, eligible: account.eligible, ineligible: account.ineligible }));
+  const attentionItems: AttentionItem[] = fleet.configured ? fleet.attention.map(text => ({ subject: 'fleet', text,
+    ...agentOwner('master', /is not configured/.test(text) ? 'graphyard master registry role set ROLE ACCOUNT[,ACCOUNT…] --concurrency N --reason REASON' : /serves no role/.test(text) ? 'graphyard master registry role set ROLE ACCOUNT[,ACCOUNT…] --reason REASON, or graphyard master registry account remove NAME --reason REASON'
+      : 'graphyard master registry (each account\'s ineligible reason names what to fix: log it in, wait for its reset, or add an account and name it in the role)') })) : [];
+  return { attentionItems, fleet: { configured: fleet.configured, revision: fleet.revision, updatedAt: fleet.updatedAt, host: fleet.host, runtimes: fleet.runtimes.map(runtime => runtime.name), accounts, roles: fleet.roles,
+    ineligible: accounts.filter(account => !account.eligible).map(account => ({ account: account.account, reason: account.ineligible })), recentSelections: fleet.sessions.slice(-10).map(session => ({ at: session.selectedAt, role: session.role, account: session.account, work: session.work, reason: session.reason, endedAt: session.endedAt })),
+    refusals: fleet.refusals.slice(-5), next: fleet.configured ? null : 'No role is configured in the agent registry, so sessions launch from local profiles; run graphyard master registry propose --apply' } };
 }
 /**
  * The production lag an operator reads first: what production serves, how far the base
@@ -1537,7 +1586,7 @@ export function describeDispatch(work: Work, reviews: { pending: any[]; complete
 export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profiles: WorkerProfile[], agents: HerdrAgent[], credentialHealth: Record<string, { available: boolean; reason: string | null }> = {}, containment: Record<string, ContainmentAssessment> = {}, reviews: { pending: any[]; completed: any[] } = { pending: [], completed: [] }, baseBranch = 'main', controlPlane?: ControlPlaneStatus, sessions: DispatchSessions = noSessions, candidateConflicts: { report: Record<string, ConflictReport>; available: boolean; reason: string | null } = { report: {}, available: false, reason: 'Candidate conflicts were not probed' }) {
   const now = Date.parse(snapshot.now);
   const scheduling = dispatchSchedule(snapshot.work, now);
-  const installation = controlPlaneAttention(controlPlane);
+  const installation = controlPlaneAttention(controlPlane), registry = fleetStatus(controlPlane?.fleet);
   const workerSessions = profiles.map(profile => {
     const agent = agents.find(candidate => candidate.name === profile.agentName);
     const credential = credentialHealth[profile.name] ?? { available: true, reason: null };
@@ -1639,7 +1688,7 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
   // pipeline-speed target; the periodic measurement records this beside the production latency.
   const speed = pipelineSpeedSummary(snapshot.work, now);
   return { observedAt: snapshot.now,
-    counts: { open: rows.length, ready: rows.filter(row => row.stage === 'ready').length, active: rows.filter(row => row.owner).length, attention: rows.filter(row => row.attention).length + installation.attention.length, proofAuthorityGaps: rows.filter(row => row.proofGaps.length).length, mergeable: rows.filter(row => row.mergeable).length, reviewsPending: reviews.pending.length, producersPending: sessions.producers.pending.length,
+    counts: { open: rows.length, ready: rows.filter(row => row.stage === 'ready').length, active: rows.filter(row => row.owner).length, attention: rows.filter(row => row.attention).length + installation.attention.length + registry.attentionItems.length, proofAuthorityGaps: rows.filter(row => row.proofGaps.length).length, mergeable: rows.filter(row => row.mergeable).length, reviewsPending: reviews.pending.length, producersPending: sessions.producers.pending.length,
       // Candidates the guarded merge could take once their gates pass, and the items GitHub already
       // merged without a valid execution, which are never candidates and wait on a reconciliation.
       mergeCandidates: rows.filter(row => row.stage === 'merge' && !row.merged).length, mergedUnreconciled: rows.filter(row => row.merged).length,
@@ -1648,8 +1697,8 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
       awaitingSmoke: delivered.filter(row => row.state === 'awaiting-deployment' || row.state === 'awaiting-smoke').length, postDeployFailures: delivered.filter(row => row.state === 'delivered-with-failure').length,
       reconciledDeliveries: deliveries.reconciled.length, operatorAuthorizedDeliveries: deliveries.operatorAuthorized.length },
     // Every attention item with the role that resolves it and the next command, work items first.
-    attentionItems: [...rows.flatMap(row => row.attention && row.attentionOwner ? [{ subject: row.key, text: row.attention, ...row.attentionOwner }] : []), ...installation.attentionItems] as AttentionItem[],
-    workers: workerSessions, reviews, producers: sessions.producers, work: rows, queue: queueRows, delivered, deliveries, latency: { mergeToProduction }, speed, controlPlane: installation,
+    attentionItems: [...rows.flatMap(row => row.attention && row.attentionOwner ? [{ subject: row.key, text: row.attention, ...row.attentionOwner }] : []), ...installation.attentionItems, ...registry.attentionItems] as AttentionItem[],
+    workers: workerSessions, reviews, producers: sessions.producers, work: rows, queue: queueRows, delivered, deliveries, latency: { mergeToProduction }, speed, controlPlane: installation, fleet: registry.fleet,
     schedule: scheduling, conflicts: { available: candidateConflicts.available, reason: candidateConflicts.reason, ...sequenceAdvice(rows.filter(row => row.conflicts).map(row => ({ key: row.key, conflicts: row.conflicts!.candidates }))) } };
 }
 
@@ -1996,7 +2045,12 @@ export async function dispatchWork(root: string, work: Work, profile: WorkerProf
     // then made once more from a fresh claim, rather than leaving an idle session holding the item.
     for (let attempt = 1; ; attempt++) {
       try { ({ target, harness, dependencies } = await launchWorker(root, config, work, profile, launch, run, prepare, release, agentTimeoutMs, options.prompt)); break; }
-      catch (error) { if (!(error instanceof PromptNotAcceptedError) || attempt >= 2) throw error; relaunched++; }
+      catch (error) {
+        if (error instanceof PromptNotAcceptedError && attempt < 2) { relaunched++; continue; }
+        // The registry session chosen for this launch never ran; its account is free again at once.
+        await selected.release?.(`worker launch for ${work.key} failed: ${failureText(error).slice(0, 300)}`);
+        throw error;
+      }
     }
   }
   const overlap = dispatchOverlap(work, allWork, Date.parse(observedAt));
@@ -2627,12 +2681,18 @@ export async function restartMasterLoop(root: string, config: MasterConfig, lock
  * Launch the independent approver session for one decision: its own Herdr tab, its own
  * credential by path, the approver marker, and a prompt to judge — never to implement.
  */
-export async function launchApprover(root: string, work: Work, decision: string, kind: NonNullable<WorkerProfile['kind']>, agents: HerdrAgent[], run?: (command: string, args: string[]) => string) {
+export async function launchApprover(root: string, work: Work, decision: string, explicitKind: NonNullable<WorkerProfile['kind']> | undefined, agents: HerdrAgent[], run?: (command: string, args: string[]) => string, probe: FleetProbe = {}) {
   const config = await loadMasterConfig(root);
   await agentToken(root, config, 'approver');
   const name = `graphyard-approver-${work.key.toLowerCase()}`;
   if (agents.some(agent => agent.name === name)) throw new Error(`Approver session ${name} is already visible in Herdr; let it finish or close it first`);
-  const launch = agentLaunchPlan(kind, 'auto');
+  // The approver's runtime and account come from the registry's approver role. An explicit
+  // AGENT_KIND is the operator's override; an installation whose registry has no approver role
+  // yet runs the approver on its first reviewer profile's runtime. No runtime is assumed.
+  const selected = explicitKind ? null : await selectFleetSession(config, 'approver', { name, principal: config.approver!.id }, { ...probe, work: work.key });
+  const kind = selected?.account.kind ?? explicitKind ?? config.reviewers[0]?.kind;
+  if (!kind) throw new Error('No runtime is configured for the approver: name accounts for the approver role with graphyard master registry role set approver ACCOUNT[,ACCOUNT…] --reason REASON, or pass AGENT_KIND');
+  const launch = accountLaunch({ kind, approvals: 'auto', agentArgs: [], environment: {} }, selected?.account ?? null);
   const cli = `node ${config.cliPath}`;
   const prompt = `You are the independent Graphyard approver for ${config.repository}, acting as ${config.approver!.id}. Judge decision ${decision} on ${work.key}: run ${cli} master decisions ${work.key}, read the item with ${cli} status ${work.key}, its pull request and history, and weigh the requester's reason against the item's criteria and the operator's goals. If it is justified, run ${cli} master approve ${work.key} ${decision} "YOUR REASON". If not, do not approve; state the reason in this tab. Never approve a decision you requested, implemented, or produced evidence for; never edit, push, merge, review, or submit evidence. Stop when the decision is judged.`;
   let pane: string | undefined, tabId: string | undefined;
@@ -2643,9 +2703,11 @@ export async function launchApprover(root: string, work: Work, decision: string,
     deliverPrompt(name, prompt, run);
   } catch (error) {
     if (pane || tabId) try { stopCreatedHerdrTab(pane, tabId, run); } catch { /* the launch error below is the report */ }
+    await selected?.release(`approver launch for ${work.key} failed: ${failureText(error).slice(0, 300)}`);
     throw error;
   }
-  return { agentName: name, work: work.key, decision, identity: config.approver!.id, pane: pane!, focusChanged: false };
+  return { agentName: name, work: work.key, decision, identity: config.approver!.id, pane: pane!, focusChanged: false,
+    account: selected ? { environment: selected.account.name, kind, reason: selected.selection.reason, skipped: selected.skipped } : null };
 }
 
 export const autonomySubcommands = ['autonomy', 'create', 'release', 'unblock', 'requirements', 'decide', 'decisions', 'approve', 'approver', 'principals', 'restart', 'environments'] as const;
@@ -2723,8 +2785,7 @@ export async function runAutonomyCommand(root: string, config: MasterConfig, id:
   }
   if (id === 'approver') {
     const work = await item(args[0]); if (!args[1]) throw new Error('Use master approver GY-N DECISION [AGENT_KIND]');
-    const kind = agentKindSchema.parse(args[2] ?? config.reviewers[0]?.kind ?? 'claude');
-    return launchApprover(root, work, args[1], kind, deps.agents());
+    return launchApprover(root, work, args[1], args[2] ? agentKindSchema.parse(args[2]) : undefined, deps.agents());
   }
   if (id === 'principals') {
     const live = (await deps.coordinator('principals')).principals;

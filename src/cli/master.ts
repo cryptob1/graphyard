@@ -17,7 +17,10 @@ import { browserFlows, runBrowserFlow, type BrowserFlow } from '../master-browse
 import { defineCommands } from './registry.js';
 import { approveScopeRequest, cycleBudget, masterStatusReport, scopeRequestCommand } from './master-status.js';
 import { coordinationViewHeader } from '../server/work-view.js';
+import { executorHostHeader } from '../model/registry.js';
 import { readSecretFromStdin } from './context.js';
+import { registryCommand, registryHelp } from './master-registry.js';
+import { discoverHostLogins, proposeFleet } from '../fleet.js';
 
 /** Every master subcommand authenticates with the coordinator credential the master keeps for itself, never the repository connection file. */
 export const masterCommands = defineCommands([
@@ -76,6 +79,7 @@ export const masterCommands = defineCommands([
       '  master principals [--apply]   Preview or apply a roster rotation keeping live principals',
       '  master restart                Restart this host\'s master loop detached',
       '  master environments [--create KIND,…] [--apply]  Agent accounts, quota, profiles',
+      ...registryHelp,
       '  master guide                  Print the complete master-agent operating guide',
     ],
     async run(context) {
@@ -92,7 +96,19 @@ export const masterCommands = defineCommands([
           ...(values['dispatch-interval'] ? { dispatchIntervalSeconds: Number(values['dispatch-interval']) } : {}), ...(values['reviewer-profile'] ? { reviewerProfile: values['reviewer-profile'] } : {}), ...(values['producer-timeout'] ? { producerTimeoutMinutes: Number(values['producer-timeout']) } : {}) };
         if (values['browser-executable'] && !values['browser-profile']) throw new Error('--browser-executable requires --browser-profile');
         const browser = values['browser-profile'] ? { profile: values['browser-profile'], ...(values['browser-executable'] ? { executable: values['browser-executable'] } : {}) } : undefined;
-        return print(await setupMaster(root, { url: values.url ?? base, token: masterToken, cliPath: resolve(values['cli-path'] ?? await context.activeCliPath()), hostId: values['host-id'] ?? context.individualHostId(), herdrWorkspace: values['herdr-workspace'], ...(values['no-auto-merge'] ? { autoMerge: false } : {}), ...(method ? { mergeMethod: method as 'merge' | 'squash' | 'rebase' } : {}), ...(Object.keys(run).length ? { run } : {}), ...(browser ? { browser } : {}) }));
+        const installed = await setupMaster(root, { url: values.url ?? base, token: masterToken, cliPath: resolve(values['cli-path'] ?? await context.activeCliPath()), hostId: values['host-id'] ?? context.individualHostId(), herdrWorkspace: values['herdr-workspace'], ...(values['no-auto-merge'] ? { autoMerge: false } : {}), ...(method ? { mergeMethod: method as 'merge' | 'squash' | 'rebase' } : {}), ...(Object.keys(run).length ? { run } : {}), ...(browser ? { browser } : {}) });
+        // Setup looks at what this host already has — the agent CLIs that are logged in — and
+        // proposes the registry for them, so the fleet needs no hand-written profile. Nothing is
+        // stored until the operator accepts it; a failed discovery never fails the install.
+        const fleet = await (async () => {
+          const configured = await loadMasterConfig(root);
+          const response = await fetch(`${configured.url}/api/agent-registry/document`, { headers: { Authorization: `Bearer ${masterToken}` }, signal: AbortSignal.timeout(10_000) });
+          if (!response.ok) return { proposal: null, next: `The control plane at ${configured.url} does not serve an agent registry (status ${response.status}); deploy a release that does, then run graphyard master registry propose` };
+          const logins = await discoverHostLogins(), proposal = proposeFleet(logins, configured.hostId, await response.json());
+          return { discovered: logins.map(login => ({ account: login.name, runtime: login.runtime, home: login.home, loggedIn: login.loggedIn, login: login.login })), proposal,
+            next: proposal.accounts.length ? 'graphyard master registry propose --apply stores this fleet in the control plane' : logins.length ? 'Every login found on this host is already registered (or logged out); graphyard master registry shows the fleet' : 'No agent CLI login was found on this host; log one in, then run graphyard master registry propose --apply' };
+        })().catch(error => ({ proposal: null, next: `The fleet proposal could not be prepared (${error instanceof Error ? error.message : 'unknown reason'}); run graphyard master registry propose once the control plane answers` }));
+        return print({ ...installed, fleet });
       }
       const master = await loadMasterConfig(root);
       const masterToken = await readCredentialFile(master.credentialFile);
@@ -104,7 +120,8 @@ export const masterCommands = defineCommands([
         const response = await fetch(`${master.url}/api/${path}`, { method: 'POST', headers: { Authorization: `Bearer ${credential}`, 'Content-Type': 'application/json', 'Idempotency-Key': requestId }, body: JSON.stringify(data), signal: AbortSignal.timeout(30_000) });
         const result = await response.json(); if (!response.ok) { const error = new Error(JSON.stringify(result)); (error as any).confirmedRefusal = response.status >= 400 && response.status < 500; throw error; } return result;
       };
-      const coordinator = await masterApi('status'); assertMasterBinding(master, coordinator);
+      // The host is named so the control plane judges fleet placement for this executor.
+      const coordinator = await masterApi('status', masterToken, 30_000, { [executorHostHeader]: master.hostId }); assertMasterBinding(master, coordinator);
       // The CLI's own commit, for the version-skew guard.
       const cli = { commit: cliCommit(fileURLToPath(new URL('../..', import.meta.url))) };
       const assertProtocol = (status: any) => { const skew = mergeProtocolSkew(status, cli); if (skew) throw new Error(skew); };
@@ -120,6 +137,7 @@ export const masterCommands = defineCommands([
       if (id === 'worker' && args[0] === 'add' && args[1]) return print(await saveWorkerProfile(root, JSON.parse(await readFile(args[1], 'utf8')), credential => masterApi('status', credential)));
       if (id === 'producer') return print(await producerCommand(root, args, credential => masterApi('status', credential)));
       if (id === 'config') return print(await saveMasterSettings(root, masterSettingsFromArgs(args)));
+      if (id === 'registry') return print(await registryCommand(master, args, { read: path => masterApi(path), write: (path, data) => masterMutation(path, data) }));
       if (id === 'reviewer') {
         if (args[0] === 'add' && args[1]) return print(await saveReviewerProfile(root, JSON.parse(await readFile(args[1], 'utf8'))));
         if (args[0] === 'remove' && args[1]) return print(await removeReviewerProfile(root, args[1]));
