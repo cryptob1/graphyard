@@ -1348,6 +1348,73 @@ row's `interventions` and `reworkRounds` say whether the time went to a hand-off
 and the flow analytics bottleneck summary says which wait category held the rest. Never trade a
 gate, a proof, an identity rule or a lease rule for the number.
 
+### A required check that failed on the clock
+
+Some assertions in the required `test` check are about elapsed real time: the 2 s p95 of the
+coordination snapshot, the dispatcher's recovery after a failed read, a coordination cycle inside
+its interval. Their budgets are real — the loop depends on them — but a shared runner can miss one
+without any defect in the candidate, and a red `test` check alone cannot say which happened. So
+every such assertion goes through one helper (`tests/helpers/timing.ts`), which makes it measure
+the system rather than the runner and makes its failure say what it is:
+
+- A latency figure is steady state. Warmup reads are taken and discarded before sampling, so
+  connection setup, JIT warmup and cold query plans never count, and the sample is large enough
+  that the percentile is the one it names: a hundred reads leave five above the p95, where twenty
+  made the "p95" the second-worst read. The budget is unchanged.
+- The run records every timing-dependent assertion, passed or failed, with what it measured, its
+  budget, its sample count and its distribution, as one JSON line in the file
+  `GRAPHYARD_TIMING_RECORD` names. CI sets it, uploads the record as the `graphyard-timing-record`
+  artifact, and lists every measurement in the job summary beside the recorded spread.
+- A failure is a `[timing-dependent]` assertion error naming the measured value against the budget,
+  and the `test` job annotates its own check run with it, saying how many tests failed beside the
+  timing-dependent ones. The annotation changes no verdict: the check stays failed and the test
+  gate stays refused until a run passes.
+
+`master status` reads those annotations for every open candidate whose required check failed, so
+the row's `refusal` and `attention` no longer read `Required CI check test has not passed on the
+current candidate` but, for example:
+
+```text
+Required CI check test failed on a timing-dependent assertion, not on behaviour:
+work-snapshot-latency.p95 (integration:work-snapshot-latency) measured p95 2092ms against its
+budget of < 2000ms over 100 samples after 5 discarded warmup reads; every other test in the run passed
+```
+
+The item raises attention at once instead of sitting behind a red check until its dwell time is
+noticed. It is the master's: `next` is the one command that reruns that job
+(`gh api --method POST repos/OWNER/REPO/actions/jobs/ID/rerun`). Rerun it once. A second
+measurement over budget is a latency regression, not noise — return it with `graphyard master
+decide GY-N rework REASON`, quoting the measurement. When other tests failed in the same run the
+line says so and offers no rerun: those failures are the worker's. A check run whose annotations
+cannot be read is reported exactly as before. Never relax a budget, widen a window or skip the
+assertion to get a candidate through.
+
+No behavioural test may depend on how long the runner took between engine calls. A case that needs
+a merge instant, an execution window or a clock offset pins it to the instants the engine recorded
+(`tests/helpers/merge-instants.ts` derives the provider merge instant from the recorded commit)
+rather than to an earlier step plus an assumed elapsed time.
+
+Nor may a test's verdict depend on which file the scheduler started first. Test files run in
+parallel, each with its own Postgres on `GRAPHYARD_TEST_PORT` plus a per-file offset; two files
+that resolve the same port fail each other whenever they overlap. The required check sets
+`GRAPHYARD_EVENTS_TEST_PORT` to keep the one known pair apart, and the suite refuses any two test
+files that still share a port under the required check's environment.
+
+The stability of the required check on an unchanged tree is measured, not assumed:
+
+```sh
+npx tsx tests/helpers/timing-stability.ts                # twenty consecutive runs of npm test
+npx tsx tests/helpers/timing-stability.ts --record tests/helpers/timing-baseline.json
+```
+
+It runs the check twenty times on the same commit, refuses to call the result stable if any run
+failed or the tree changed under it, and records the run-to-run spread of every timing-dependent
+assertion (minimum, median, maximum, headroom to the budget). `manual:suite-stability-twenty-runs`
+reads that output. The committed `tests/helpers/timing-baseline.json` is the spread a future
+regression is judged against: the CI job summary prints each run's measurement beside it, and the
+suite refuses a timing-dependent assertion whose spread was never recorded. On a machine whose
+`/tmp` is under a quota, point `TMPDIR` at a sticky directory outside it for the run.
+
 ## Escalation context
 
 A master that carries the project's rules, an item's history and the precedent of earlier decisions in its own window hits a context ceiling, dies with its provider credits, and drifts between sessions. The control plane therefore assembles an escalation's context from the project, so a master spawned for one escalation decides as well as a long-lived one and precedent, not session continuity, keeps judgements consistent. `GET /api/work/GY-N/context?trigger=TRIGGER&budget=BYTES` returns it; `master context GY-N [TRIGGER] [--budget N]` prints the same document, read by key and nothing else, after verifying its fingerprint. It has four layers:
