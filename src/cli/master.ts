@@ -15,7 +15,8 @@ import { applyProtection, protectionPlan, readProtection } from '../protection.j
 import { writeHarnessPermissions } from '../harness.js';
 import { browserFlows, runBrowserFlow, type BrowserFlow } from '../master-browser.js';
 import { defineCommands } from './registry.js';
-import { approveScopeRequest, cycleBudget, masterStatusReport, scopeRequestCommand } from './master-status.js';
+import { approveScopeRequest, cycleBudget, masterStatusReport } from './master-status.js';
+import { sessionCommands } from './session-commands.js';
 import { coordinationViewHeader } from '../server/work-view.js';
 import { readSecretFromStdin } from './context.js';
 
@@ -263,7 +264,7 @@ export const masterCommands = defineCommands([
       throw new Error(`There is no master ${id}; use master guide for the subcommands`);
     },
   },
-  scopeRequestCommand,
+  ...sessionCommands,
 ]);
 
 export { cycleBudget };

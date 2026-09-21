@@ -11,6 +11,8 @@ import type { ActionQueue } from './actions.js';
 import type { AgentRequest } from './agent-requests.js';
 import type { SessionHandle } from './sessions.js';
 import type { ScopeDecision, ScopeRequestState } from './scope.js';
+import type { CapacityState } from './capacity.js';
+import type { HumanRequest } from './human-request.js';
 import { proofSchema } from './proof.js';
 import { demand } from './refusal.js';
 
@@ -131,6 +133,15 @@ export interface Work extends Create {
    * cleared; a refused one stays open, carrying the same decision, for the operator to decide.
    */
   scopeDecision?: ScopeDecision | null;
+  /**
+   * The open decision only a human may make, recorded by the attempt that reached it. Recording it
+   * ended that attempt's lease and parked the item; the answer clears it, and answered requests
+   * are kept in `humanRequests` (see model/human-request.ts).
+   */
+  humanRequest?: HumanRequest | null;
+  humanRequests?: HumanRequest[];
+  /** Sessions of this item that ran out of provider quota, and any role with no account left (model/capacity.ts). */
+  capacity?: CapacityState | null;
   queue?: QueueEntry | null; queueSequence?: number; queueEjection?: QueueEjection | null; queueHistory?: QueueHistoryEntry[];
   /**
    * The last time the control plane brought this candidate onto a base branch that had moved
