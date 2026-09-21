@@ -422,6 +422,10 @@ critical path.
 
 ### Measuring whether it is working
 
+This section is the procedure behind the `manual:throughput-without-master` proof: a producer
+session that has been asked for it runs the two readings below on the exact candidate and records
+what they return, pass or fail.
+
 Whether throughput now follows the number of executors and agents rather than an operator's
 attention is a measurement, not a claim. The measurement is stated over a particular population:
 deliveries made **with no master session running**. `src/throughput.ts` decides that per delivery,
