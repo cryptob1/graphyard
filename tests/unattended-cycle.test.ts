@@ -88,7 +88,10 @@ function herdr() {
     if (noun === 'agent' && verb === 'start') {
       const name = args[2], pane = args[args.indexOf('--pane') + 1];
       assert.ok(!sessions.has(name), `Herdr refuses a second agent named ${name}`);
-      sessions.set(name, { name, pane, status: 'idle', prompt: '', judgement: judgements.shift() ?? 'approve' }); log.push(`launch:${name}`); return ok();
+      // A runtime with a request contract starts on its instruction (GY-93): it arrives on the
+      // command line after the runtime's own flags, never as a later paste, and the session is at work on it at once.
+      const runtime = args.slice(args.indexOf('--') + 1), request = args.includes('--') && runtime.at(-1)?.includes(' ') ? runtime.at(-1)! : '';
+      sessions.set(name, { name, pane, status: request ? 'working' : 'idle', prompt: request, judgement: judgements.shift() ?? 'approve' }); log.push(`launch:${name}`); return ok();
     }
     if (noun === 'agent' && verb === 'prompt') { Object.assign(sessions.get(args[2])!, { status: 'working', prompt: args[3] }); return ok(); }
     if (noun === 'agent' && verb === 'list') return ok({ agents: [...sessions.values()].map(session => ({ name: session.name, pane_id: session.pane, agent_status: session.status })) });
