@@ -200,11 +200,11 @@ A runtime is an agent CLI and its **launch contract**: what to start, the argume
 
 ```sh
 node "$GRAPHYARD_CLI" master registry runtime set aider --kind aider --arg=--yes-always \
-  --home-variable AIDER_HOME --model-flag --model --login 'AIDER_HOME={home} aider --login' --login-file session.json \
+  --home-variable AIDER_HOME --model-flag=--model --login 'AIDER_HOME={home} aider --login' --login-file session.json \
   --reason "Add the Aider runtime"
 ```
 
-`--kind` is the executable (Herdr's agent kind); an argument that starts with a dash is written `--arg=--flag`. `--login-file` is a path inside the login home whose presence means "logged in", for runtimes whose login and quota Graphyard cannot read itself. A contract never carries a secret: a variable named like a token, a `GRAPHYARD_` variable, or a value that looks like a credential is refused.
+`--kind` is the executable (Herdr's agent kind); a value that starts with a dash is written onto its flag with `=`, as `--arg=--yes-always` and `--model-flag=--model` are here — written apart, the shell hands the CLI two flags and it refuses. `--login-file` is a path inside the login home whose presence means "logged in", for runtimes whose login and quota Graphyard cannot read itself. A contract never carries a secret: a variable named like a token, a `GRAPHYARD_` variable, or a value that looks like a credential is refused.
 
 ### Add an account
 

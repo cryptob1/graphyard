@@ -19,11 +19,11 @@ import { accountIneligibility, fleetRoles, liveSessions, proposedConcurrency, pr
  * role at a time.
  */
 export type FleetConfig = Pick<MasterConfig, 'credentialFile'> & Partial<Pick<MasterConfig, 'url' | 'hostId' | 'run'>>;
-export interface FleetProbe extends EnvironmentProbe { work?: string; principal?: string; /** Replaces the HTTP client, for executors embedded beside the control plane and for tests. */ registry?: FleetClient }
+export interface FleetProbe extends EnvironmentProbe { work?: string; principal?: string; /** The proof group a producer launch answers; one live session per group, not per item. */ group?: string; /** Replaces the HTTP client, for executors embedded beside the control plane and for tests. */ registry?: FleetClient }
 /** The three calls an executor makes. */
 export interface FleetClient {
   document(): Promise<AgentRegistry>;
-  select(request: { role: FleetRoleName; host: string; work: string | null; principal: string | null; observations: { account: string; quota: QuotaObservation }[] }): Promise<FleetSelection>;
+  select(request: { role: FleetRoleName; host: string; work: string | null; group: string | null; principal: string | null; observations: { account: string; quota: QuotaObservation }[] }): Promise<FleetSelection>;
   end(session: string, reason: string): Promise<void>;
 }
 export interface FleetSelection { selected: boolean; reason: string; skipped: SessionSkip[]; session: FleetSession | null; account: FleetAccount | null; runtime: FleetRuntime | null; model: FleetModel | null; revision: number }
@@ -136,7 +136,7 @@ export async function selectFleetSession(config: FleetConfig, role: FleetRoleNam
     return runtime ? { account: account.name, ...await observeAccount(account, runtime, { ...probe, ceilingPercent: ceiling }) } : null;
   }));
   const observations = observed.filter((entry): entry is NonNullable<typeof entry> => !!entry);
-  const chosen = await client.select({ role, host, work: probe.work ?? null, principal: probe.principal ?? profile.principal ?? null, observations: observations.map(({ account, quota }) => ({ account, quota })) });
+  const chosen = await client.select({ role, host, work: probe.work ?? null, group: probe.group ?? null, principal: probe.principal ?? profile.principal ?? null, observations: observations.map(({ account, quota }) => ({ account, quota })) });
   const at = new Date(probe.now?.() ?? Date.now()).toISOString();
   const skipped: AccountSkip[] = chosen.skipped.map(entry => ({ at, role: role as AccountSkip['role'], profile: profile.name, environment: entry.account, reason: entry.reason, work: probe.work ?? null, cause: skipCause(entry.reason) }));
   if (!chosen.selected || !chosen.account || !chosen.runtime || !chosen.model || !chosen.session)

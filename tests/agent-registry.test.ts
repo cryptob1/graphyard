@@ -1,7 +1,7 @@
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { randomUUID } from 'node:crypto';
+import { generateKeyPairSync, randomUUID } from 'node:crypto';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -17,6 +17,7 @@ import { ledgerTables } from '../src/store/schema.js';
 import { AgentRegistry } from '../src/agent-registry.js';
 import { discoverHostLogins, proposeFleet } from '../src/fleet.js';
 import { registryCommand } from '../src/cli/master-registry.js';
+import { bindReviewer, launchReview, saveReviewerProfile } from '../src/reviewer.js';
 import { NoHealthyAccountError, atomicPrivateWrite, buildMasterStatus, dispatchWork, launchApprover, loadMasterConfig, selectAccount, setupMaster, type EnvironmentProbe } from '../src/master.js';
 import { applyRegistryMutation, chooseSession, emptyRegistry, fleetRoles, fleetView, foldObservation, launchGraceMs, proposedRuntimes, sessionEnded, settleSessions, type AgentRegistry as Registry, type FleetSession, type FleetView } from '../src/model/registry.js';
 import type { Principal, Work } from '../src/model.js';
@@ -109,6 +110,29 @@ const tabEnvironment = (tab: string[]) => Object.fromEntries(tab.flatMap((value,
 let items = 0;
 const readyWork = (key = `GY-${++items + 900}`) => ({ id: `work-${key}`, key, title: 'Registry fixture', description: '', type: 'feature', priority: 1, dependencies: [], criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:x'] }], policy: { checks: ['test'], review: true }, plannedFiles: [],
   stage: 'ready', revision: 1, policyRevision: 1, createdAt: '', updatedAt: '', stageEnteredAt: '', ready: true, epoch: 0, lease: null, workspaces: [], candidate: null, submission: null, reworkRequested: false, scenarioRequirements: [], evidence: [], blocker: null, gates: [], violations: [], observation: null }) as unknown as Work;
+/** A candidate ready for its independent review, as the loop reads one out of the snapshot. */
+function reviewWork(key: string, sha: string): Work {
+  const candidate = { sha, baseSha: 'b'.repeat(40), pr: 93, branch: `graphyard/${key.toLowerCase()}-1`, author: 'implementer' };
+  return { ...readyWork(key), stage: 'review', submission: { epoch: 1, pr: 93 }, candidate, epoch: 1,
+    policy: { checks: ['test'], review: true, reviewProvider: 'github' },
+    observation: { candidate, checks: [], reviews: [], merged: false, mergeSha: null, mergeable: true, protected: true, files: ['src/a.ts'], scopeFiles: [],
+      at: new Date().toISOString(), prState: 'open', draft: false, baseTip: candidate.baseSha, baseTree: 'c'.repeat(40), baseTipContained: true } } as unknown as Work;
+}
+const { privateKey } = generateKeyPairSync('rsa', { modulusLength: 2048, privateKeyEncoding: { type: 'pkcs8', format: 'pem' }, publicKeyEncoding: { type: 'spki', format: 'pem' } });
+const mintReviewerSession = async () => ({ token: 'ghs_review_session_token', expiresAt: new Date(Date.now() + 3_500_000).toISOString() });
+
+/**
+ * The `master registry` commands docs/onboarding.md prints, as a caller's argv: shell continuations
+ * joined, quotes honoured, and the `node "$GRAPHYARD_CLI" master registry` prefix dropped.
+ */
+function documentedCommands(guide: string): string[][] {
+  const joined = guide.replaceAll(/\\\n\s*/g, ' ');
+  return joined.split('\n').filter(line => line.startsWith('node "$GRAPHYARD_CLI" master registry')).map(line => {
+    const words = [...line.replace(/\s+#.*$/, '').matchAll(/'([^']*)'|"([^"]*)"|(\S+)/g)].map(match => match[1] ?? match[2] ?? match[3]);
+    return words.slice(words.indexOf('registry') + 1);
+  });
+}
+
 /** One executor action: a worker dispatch through the same code path `master run` and `master dispatch` take. */
 async function dispatch(root: string, config: any, profile: string, probe: EnvironmentProbe, calls: string[][] = [], fail?: (args: string[]) => boolean) {
   const item = readyWork();
@@ -232,7 +256,7 @@ test('integration:registry-driven-selection — an executor\'s action runs on th
 
   // The profile is a Graphyard identity and nothing else here: it says codex, with Codex-only
   // arguments, and names no account. The registry decides what actually runs.
-  const { root, config } = await master([{ name: 'worker-a', principal: 'implementer', kind: 'codex', agentArgs: ['--model', 'gpt-codex-only'] }, { name: 'worker-b', principal: 'implementer-b', kind: 'codex' }]);
+  const { root, config, credentialDirectory } = await master([{ name: 'worker-a', principal: 'implementer', kind: 'codex', agentArgs: ['--model', 'gpt-codex-only'] }, { name: 'worker-b', principal: 'implementer-b', kind: 'codex' }]);
   assert.equal(config.environments, undefined); assert.ok(config.workers.every(entry => !entry.accounts));
   const calls: string[][] = [];
   const dispatched = await dispatch(root, config, 'worker-a', probe, calls);
@@ -287,6 +311,52 @@ test('integration:registry-driven-selection — an executor\'s action runs on th
   const source = await readFile(new URL('../src/master.ts', import.meta.url), 'utf8');
   const launchPaths = source.slice(source.indexOf('export async function launchApprover'), source.indexOf('export const autonomySubcommands')) + source.slice(source.indexOf("if (id === 'approver')"), source.indexOf("if (id === 'approver')") + 400);
   assert.doesNotMatch(launchPaths, /\?\? '(claude|codex|cursor|opencode|muse)'/, 'no launch path falls back to a runtime named in code');
+
+  // A launch that fails *after* the choice gives its session back on every path, not only the
+  // worker's: the reviewer's token mint fails here, and its account and the role's one slot are
+  // free again at once rather than at the two-hour session cap.
+  await ok('agent-registry/roles', operator, { role: { name: 'reviewer', accounts: ['claude-fresh'], concurrency: 1 }, reason: 'one reviewer at a time' });
+  await bindReviewer(root, { appId: 5678, installationId: 91011, slug: 'graphyard-reviewer', privateKey, credentialDirectory: join(credentialDirectory, 'reviewers') },
+    async () => ({ repository: 'owner/project', permissions: { metadata: 'read', contents: 'read', pull_requests: 'write' } }) as any);
+  await saveReviewerProfile(root, { name: 'reviewer-a', agentName: 'review-a', kind: 'claude' });
+  const head = 'a'.repeat(40), reviewed = reviewWork('GY-960', head);
+  await assert.rejects(launchReview(root, reviewed, 'reviewer-a', [], new Date().toISOString(),
+    { run: herdr([]), probe, mint: async () => { throw new Error('the installation token could not be minted'); } }), /could not be minted/);
+  const givenBack = (await ok('agent-registry/document', coordinator) as Registry).sessions.at(-1)!;
+  assert.equal(givenBack.role, 'reviewer'); assert.ok(givenBack.endedAt, 'the session the failed launch chose is ended');
+  assert.match(givenBack.endReason!, /reviewer launch for GY-960 failed: the installation token could not be minted/);
+
+  // So the next attempt of the same request is selected, at a concurrency of 1, rather than being
+  // refused by the session of its own first attempt.
+  const relaunch = await launchReview(root, reviewed, 'reviewer-a', [], new Date().toISOString(), { run: herdr([]), probe, mint: mintReviewerSession });
+  assert.equal(relaunch.account!.environment, 'claude-fresh');
+
+  // And a review relaunched for a new head supersedes the live session of the head it replaces:
+  // the local ledger cancels its record, and the registry frees the slot in the same breath.
+  const next = await launchReview(root, reviewWork('GY-960', 'd'.repeat(40)), 'reviewer-a', [], new Date().toISOString(), { run: herdr([]), probe, mint: mintReviewerSession });
+  assert.equal(next.account!.environment, 'claude-fresh');
+  const reviewSessions = (await ok('agent-registry/document', coordinator) as Registry).sessions.filter(entry => entry.role === 'reviewer' && entry.work === 'GY-960');
+  assert.equal(reviewSessions.filter(entry => !entry.endedAt).length, 1, 'one live reviewer session for the item, the newest');
+  assert.match(reviewSessions.at(-2)!.endReason!, /superseded by the reviewer session requested for GY-960/);
+
+  // A producer is superseded only within its own proof group, so the groups of one item still run
+  // side by side while each group's relaunch replaces its own predecessor.
+  await ok('agent-registry/roles', operator, { role: { name: 'producer', accounts: ['claude-fresh'], concurrency: 2 }, reason: 'two proof groups at a time' });
+  const select = (group: string) => ok('agent-registry/select', coordinator, { role: 'producer', host: HOST, work: 'GY-961', group, observations: [] });
+  assert.equal((await select('integration')).selected, true); assert.equal((await select('manual')).selected, true);
+  const again = await select('integration');
+  assert.equal(again.selected, true, 'the integration group replaces its own session rather than waiting for the concurrency limit');
+  const producers = (await ok('agent-registry/document', coordinator) as Registry).sessions.filter(entry => entry.role === 'producer' && entry.work === 'GY-961');
+  assert.deepEqual(producers.filter(entry => !entry.endedAt).map(entry => entry.group), ['manual', 'integration']);
+  assert.match(producers.find(entry => entry.endedAt)!.endReason!, /superseded by the producer session requested for GY-961/);
+
+  // The one end the control plane cannot infer — a launcher killed mid-flight, a host that went
+  // away — is an operator's own command rather than a wait for the session's outer cap.
+  const stranded = producers.find(entry => !entry.endedAt)!;
+  await registryCommand({ hostId: HOST }, ['session', 'end', stranded.id, '--reason', 'its executor host went away'],
+    { read: path => ok(path, coordinator), write: (path, data) => ok(path, coordinator, data) });
+  const ended = (await ok('agent-registry/document', coordinator) as Registry).sessions.find(entry => entry.id === stranded.id)!;
+  assert.equal(ended.endReason, 'its executor host went away'); assert.ok(ended.endedAt);
 
   // An outage never hands a registry-decided role back to a file: nothing launches until the control plane answers.
   const down = { ...probe, fetch: (async (target: string, init: any) => String(target).includes('/api/agent-registry') ? new Response('bad gateway', { status: 502 }) : probe.fetch!(target, init)) as unknown as typeof fetch };
@@ -447,4 +517,18 @@ test('integration:registry-setup-proposal — setup discovers the logged-in CLIs
   const order = ['### Add a runtime', '### Add an account', '### Add a role'].map(heading => guide.indexOf(heading));
   assert.ok(order.every(index => index >= 0) && order[0] < order[1] && order[1] < order[2], 'docs/onboarding.md adds a runtime, an account and a role, in that order');
   for (const command of ['master registry propose --apply', 'master registry runtime set', 'master registry account set', 'master registry role set']) assert.ok(guide.includes(command), command);
+
+  // Every command the guide prints is run as written: a documented form the CLI cannot parse — a
+  // value starting with a dash written apart from its flag, say — is a broken onboarding, and an
+  // onboarding review is the only thing that ever found it.
+  const empty = await mkdtemp(join(scratch, 'no-logins-'));
+  const written: { path: string; data: any }[] = [];
+  const recording = { read: async () => emptyRegistry(), write: async (path: string, data: unknown) => { written.push({ path, data }); return { revision: 1, registry: {} }; } };
+  const documented = documentedCommands(guide);
+  assert.ok(documented.length >= 8, 'the guide prints the fleet commands');
+  for (const command of documented)
+    await registryCommand({ hostId: HOST }, command, recording, { directory: empty, home: empty, executables: () => false });
+  const runtime = written.find(entry => entry.path === 'agent-registry/runtimes')!;
+  assert.deepEqual([runtime.data.runtime.name, runtime.data.runtime.launch.args, runtime.data.runtime.launch.modelFlag, runtime.data.runtime.launch.homeVariable], ['aider', ['--yes-always'], '--model', 'AIDER_HOME']);
+  assert.deepEqual(written.filter(entry => entry.path === 'agent-registry/roles').map(entry => entry.data.role.name), ['worker', 'reviewer']);
 });

@@ -844,6 +844,18 @@ export async function selectAccount(config: Pick<MasterConfig, 'environments' | 
 }
 
 /**
+ * Run a launch on the session that was just chosen, and give that session back the moment
+ * anything after the choice fails. Everything past selection can fail — a credential mismatch, a
+ * token mint, a session harness, a Herdr tab, a prompt the runtime never took — and a session
+ * that never ran would otherwise count against its account and its role for as long as the
+ * request it answers stands: two hours for a reviewer, a day for a producer.
+ */
+export async function onSelectedSession<T>(selected: LaunchSelection, failed: string, launch: () => Promise<T>): Promise<T> {
+  try { return await launch(); }
+  catch (error) { await selected.release?.(`${failed}: ${failureText(error).slice(0, 300)}`); throw error; }
+}
+
+/**
  * Each runtime's broadest non-interactive approval mode. Claude Code, Codex and Cursor already get
  * theirs from the launch contract; OpenCode's contract allows edit, bash and webfetch only, so its
  * other permissions (directories outside the worktree, repeated tool calls, subagents, …) would

@@ -121,6 +121,8 @@ export interface SessionSkip { account: string; reason: string }
 export interface FleetSession {
   id: string; role: FleetRoleName; account: string; runtime: string; model: string;
   host: string; work: string | null; principal: string | null;
+  /** For a producer, the proof group its session answers: one live session per group, not per item. */
+  group?: string | null;
   selectedAt: string; selectedBy: string; reason: string; skipped: SessionSkip[];
   endedAt: string | null; endReason: string | null;
 }
@@ -158,6 +160,8 @@ export const selectionRequestSchema = z.object({
   host: hostName,
   work: z.string().trim().min(1).max(40).nullable().default(null),
   principal: z.string().trim().min(1).max(200).nullable().default(null),
+  /** The proof group a producer request answers; every other role names none. */
+  group: z.string().trim().min(1).max(40).nullable().default(null),
   /** What the executor just observed about the accounts that live on its host. */
   observations: z.array(z.object({ account: entryName, quota: quotaObservationSchema }).strict()).max(200).default([]),
 }).strict();

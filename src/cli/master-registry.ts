@@ -11,7 +11,7 @@ export const registryHelp = [
   '                                Discover the agent CLIs logged in on this host and propose the',
   '                                runtimes, models, accounts and roles for them; --apply stores it',
   '  master registry runtime set NAME|@FILE [--kind K] [--arg=A]… [--home-variable VAR]',
-  '              [--model-flag FLAG] [--login COMMAND] [--login-file PATH] [--env K=V]… --reason R',
+  '              [--model-flag=FLAG] [--login COMMAND] [--login-file PATH] [--env K=V]… --reason R',
   '  master registry model set NAME|@FILE [--provider P] [--id ID] [--input-cost USD]',
   '              [--output-cost USD] [--tier frontier|strong|fast] [--context TOKENS] --reason R',
   '  master registry account set NAME|@FILE --runtime R --model M [--home PATH] [--host HOST]',
@@ -19,6 +19,7 @@ export const registryHelp = [
   '  master registry account quota NAME exhausted|available|unknown [--resets-at ISO] --reason R',
   '  master registry role set ROLE ACCOUNT[,ACCOUNT…] [--concurrency N] --reason R',
   '  master registry runtime|model|account|role remove NAME --reason R',
+  '  master registry session end ID --reason R   End one live session the registry still counts',
   '  master registry history [--limit N]   Every registry change and selection, newest first',
 ];
 
@@ -54,7 +55,14 @@ export async function registryCommand(master: Pick<MasterConfig, 'hostId'>, args
     const applied = await api.write('agent-registry/apply', { ...proposal, reason: values.reason ?? `Setup proposal from the agent CLIs logged in on ${master.hostId}` });
     return { ...report, applied: true, revision: applied.revision, registry: applied.registry, next: 'The registry decides every launch from now on; graphyard master registry shows each account and why any is ineligible' };
   }
-  if (!['runtime', 'model', 'account', 'role'].includes(collection) || !action) throw new Error('Use master registry [propose|history|runtime|model|account|role …]; master guide lists every form');
+  // A session the registry still counts but that nothing is running any more: a launcher killed
+  // mid-flight, a host that went away. Every other end is the control plane's own doing.
+  if (collection === 'session') {
+    const { values, positionals } = parseArgs({ args: rest, options: { reason: { type: 'string' } }, allowPositionals: true });
+    if (action !== 'end' || !positionals[0] || !values.reason) throw new Error('Use master registry session end SESSION_ID --reason REASON');
+    return api.write(`agent-registry/sessions/${encodeURIComponent(positionals[0])}/end`, { reason: values.reason });
+  }
+  if (!['runtime', 'model', 'account', 'role'].includes(collection) || !action) throw new Error('Use master registry [propose|history|runtime|model|account|role|session …]; master guide lists every form');
   const plural = `${collection}s`;
   if (action === 'remove') {
     const { values, positionals } = parseArgs({ args: rest, options: { reason: { type: 'string' } }, allowPositionals: true });
@@ -71,7 +79,7 @@ export async function registryCommand(master: Pick<MasterConfig, 'hostId'>, args
   const current: AgentRegistry = await api.read('agent-registry/document');
   if (collection === 'runtime') {
     const { values, positionals } = parseArgs({ args: rest, allowPositionals: true, options: { reason: { type: 'string' }, kind: { type: 'string' }, arg: { type: 'string', multiple: true }, 'home-variable': { type: 'string' }, 'model-flag': { type: 'string' }, login: { type: 'string' }, 'login-file': { type: 'string' }, env: { type: 'string', multiple: true }, description: { type: 'string' } } });
-    if (!positionals[0] || !values.reason) throw new Error('Use master registry runtime set NAME|@FILE [--kind K] [--arg A]… --reason REASON');
+    if (!positionals[0] || !values.reason) throw new Error('Use master registry runtime set NAME|@FILE [--kind K] [--arg=A]… --reason REASON; a value that starts with a dash is written onto its flag with =, as --arg=--yes-always and --model-flag=--model');
     if (positionals[0].startsWith('@')) return api.write('agent-registry/runtimes', { runtime: await fromFile(positionals[0]), reason: values.reason });
     const existing = current.runtimes.find(runtime => runtime.name === positionals[0]);
     const environment = values.env ? Object.fromEntries(values.env.map(pair => { const at = pair.indexOf('='); if (at < 1) throw new Error('--env takes NAME=VALUE'); return [pair.slice(0, at), pair.slice(at + 1)]; })) : undefined;

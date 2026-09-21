@@ -58,6 +58,24 @@ export function settleSessions(registry: AgentRegistry, work: readonly SessionWo
 }
 export const liveSessions = (registry: Pick<AgentRegistry, 'sessions'>) => registry.sessions.filter(session => !session.endedAt);
 
+/**
+ * The live sessions an incoming request replaces, before anything about limits is counted: one
+ * session answers one review request, one holds one worker lease, one answers one producer proof
+ * group. A relaunch for the same work is that same slot again, so a session whose launch failed,
+ * whose runtime died, or whose head has been superseded must never refuse its own successor —
+ * at a concurrency of 1 that deadlocks the role until the session's outer cap (two hours for a
+ * reviewer, a day for a producer). `settleSessions` cannot see this, because it only ends a
+ * session once a *newer* one exists, and at the limit the newer one is never created.
+ *
+ * A producer is superseded only within its own proof group, so the integration and manual groups
+ * of one item still run side by side; a producer request that names no group supersedes nothing.
+ */
+export function supersededByRequest(registry: Pick<AgentRegistry, 'sessions'>, request: Pick<SelectionRequest, 'role' | 'work' | 'group'>): FleetSession[] {
+  if (!request.work) return [];
+  return liveSessions(registry).filter(session => session.role === request.role && session.work === request.work
+    && (request.role !== 'producer' || (!!request.group && (session.group ?? null) === request.group)));
+}
+
 const until = (iso: string | null) => iso ? ` until ${iso}` : '';
 /**
  * Why an account cannot take a session right now, whatever role asks — null when it can. `host`

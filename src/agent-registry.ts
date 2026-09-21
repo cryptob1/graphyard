@@ -3,7 +3,7 @@ import type pg from 'pg';
 import { z } from 'zod';
 import { demand, type Principal } from './model.js';
 import type { Store } from './store.js';
-import { RegistryError, applyRegistryMutation, chooseSession, emptyRegistry, fleetView, foldObservation, liveSessions, refusalHistoryLimit, registryMutationSchemas, selectionRequestSchema, settleSessions,
+import { RegistryError, applyRegistryMutation, chooseSession, emptyRegistry, fleetView, foldObservation, liveSessions, refusalHistoryLimit, registryMutationSchemas, selectionRequestSchema, settleSessions, supersededByRequest,
   type AgentRegistry as RegistryDocument, type FleetSession, type RegistryMutation } from './model/registry.js';
 
 /**
@@ -107,6 +107,11 @@ export class AgentRegistry {
       if (receipt) { demand(receipt.fingerprint === fingerprint, 'Idempotency key reused with different input'); return receipt.result; }
       const registry = await readRegistry(db), at = now.toISOString();
       let changed = settleSessions(registry, await this.sessionWork(db, registry), at).length > 0;
+      // The request supersedes the session it replaces before any limit is counted, so a relaunch
+      // for the same work is never refused by its own dead predecessor.
+      for (const superseded of supersededByRequest(registry, request)) {
+        superseded.endedAt = at; superseded.endReason = `superseded by the ${request.role} session requested for ${request.work}`; changed = true;
+      }
       for (const observed of request.observations) {
         const account = registry.accounts.find(entry => entry.name === observed.account);
         // An executor only vouches for the logins on its own host.
@@ -116,7 +121,7 @@ export class AgentRegistry {
       const choice = chooseSession(registry, request, now.getTime());
       let result: { selected: boolean; reason: string; skipped: typeof choice.skipped; session: FleetSession | null; account: unknown; runtime: unknown; model: unknown; revision: number };
       if (choice.account) {
-        const session: FleetSession = { id: randomUUID(), role: request.role, account: choice.account.name, runtime: choice.runtime.name, model: choice.model.name, host: request.host, work: request.work, principal: request.principal,
+        const session: FleetSession = { id: randomUUID(), role: request.role, account: choice.account.name, runtime: choice.runtime.name, model: choice.model.name, host: request.host, work: request.work, principal: request.principal, group: request.group,
           selectedAt: at, selectedBy: actor.id, reason: choice.reason, skipped: choice.skipped, endedAt: null, endReason: null };
         registry.sessions.push(session); registry.revision++; registry.updatedAt = at;
         await this.append(db, actor, 'selected', registry, { session });
