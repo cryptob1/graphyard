@@ -1327,8 +1327,15 @@ export function installationOwner(source: 'app-permissions' | 'held-jobs' | 'del
  * identity may run is routed to an agent: decisions a human used to make go to the master and
  * its independent approver through graphyard master decide.
  */
-export function workAttentionOwner(work: Work, cause: 'containment-settleable' | 'containment-grace' | 'containment' | 'session' | 'proof-gap' | 'reviewer-exhausted' | 'launch-review' | 'launch-producer' | 'base-conflict' | 'merged-unauthorized' | 'gate'): AttentionOwner {
+export function workAttentionOwner(work: Work, cause: 'containment-settleable' | 'containment-grace' | 'containment' | 'session' | 'proof-gap' | 'reviewer-exhausted' | 'launch-review' | 'launch-producer' | 'base-conflict' | 'merged-unauthorized' | 'merged-reverted' | 'gate'): AttentionOwner {
   const key = work.key;
+  // A merge the base branch does not hold the content of is not a record to settle (GY-97): no
+  // decision can deliver work that is not there. The content goes back first, as a follow-up
+  // item naming this one, its files and the merge that removed them; the delivery waits for it.
+  if (cause === 'merged-reverted') {
+    const reverted = work.observation!.revertedDelivery!;
+    return agentOwner('master', `graphyard master create FILE for a follow-up item that restores ${reverted.files.map(file => file.path).join(', ')} to the base branch as ${key} shipped them${reverted.removedBy ? `, naming merge ${reverted.removedBy.mergeSha?.slice(0, 12) ?? `of pull request #${reverted.removedBy.pr}`}${reverted.removedBy.key ? ` of ${reverted.removedBy.key}` : ''} as what removed them` : ''}; request no merge decision for ${key} until the base branch holds its content — a reconciliation now would record a delivery for work that is not there`);
+  }
   // The merge already happened and cannot be re-run: the only way to a correct delivery record is
   // the two-party merge decision the engine re-checks against the record at the merge cutoff. Once
   // the record has refused one, what remains is the operator's: a decision citing that refusal,
@@ -1751,10 +1758,18 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
     // Its queue entry, when it still holds one, can never publish a speculative tip: the entry and
     // everything waiting behind it are named, with the exit (see merge-queue.ts unpublishableEntry).
     const dead = unpublishableEntry(work);
-    const merged = mergedWithoutAuthorization(work) ? { at: work.observation!.mergedAt ?? null, sha: work.observation!.mergeSha ?? null, violation: unauthorizedMergeViolation,
+    // A merged item whose content the base branch does not hold is a reverted delivery, not an
+    // ordinary unreconciled merge (GY-97): the row names the files missing from the base and the
+    // merge that removed them, so nobody has to read a diff to learn the work is gone.
+    const reverted = work.stage !== 'done' && work.observation?.merged ? work.observation.revertedDelivery ?? null : null;
+    const merged = mergedWithoutAuthorization(work) || reverted ? { at: work.observation!.mergedAt ?? null, sha: work.observation!.mergeSha ?? null, violation: unauthorizedMergeViolation,
       refusal: refusedReconciliation(work)?.violation ?? null,
+      ...(reverted ? { reverted: { base: reverted.base, files: reverted.files, removedBy: reverted.removedBy, partial: !!reverted.partial } } : {}),
       ...(dead && placement ? { queue: { sequence: dead.sequence, position: placement.position + 1, size: placement.size, unpublishable: true as const, behind: placements.slice(placement.position + 1).map(entry => entry.key) } } : {}) } : null;
     const [attention, cause]: [string | null, Parameters<typeof workAttentionOwner>[1] | null] = containmentAttention ? containmentAttention
+      : merged?.reverted ? [`${work.key} was merged on GitHub (${merged.sha?.slice(0, 12) ?? 'merge commit unknown'} at ${merged.at ?? 'an unrecorded time'}) and its content is not on the base branch: ${merged.reverted.files.length}${merged.reverted.partial ? ' or more' : ''} file${merged.reverted.files.length === 1 && !merged.reverted.partial ? '' : 's'} missing from base ${merged.reverted.base.slice(0, 12)} — ${merged.reverted.files.map(file => `${file.path} (${file.detail})`).join(', ')} — ${merged.reverted.removedBy
+        ? `removed by merge ${merged.reverted.removedBy.mergeSha?.slice(0, 12) ?? 'commit unknown'} of ${merged.reverted.removedBy.key ? `${merged.reverted.removedBy.key}, ` : ''}pull request #${merged.reverted.removedBy.pr}${merged.reverted.removedBy.commit ? ` (commit ${merged.reverted.removedBy.commit.slice(0, 12)})` : ', whose head carried this item\'s commits without their content'}`
+        : 'and the merge that removed them could not be identified from the branch history'}. This is a reverted delivery, not an unreconciled merge: nothing is delivered until the content is restored${merged.refusal ? `; the last reconciliation was refused — ${merged.refusal}` : ''}`, 'merged-reverted']
       : merged ? [`${work.key} was merged on GitHub (${merged.sha?.slice(0, 12) ?? 'merge commit unknown'} at ${merged.at ?? 'an unrecorded time'}) without a valid merge execution: ${merged.violation}. It is held at the merge stage, not waiting for its queue tip; ${merged.queue ? `its merge queue entry (sequence ${merged.queue.sequence}, position ${merged.queue.position} of ${merged.queue.size}) can never publish a speculative tip because the pull request is already merged${merged.queue.behind.length ? `, and ${merged.queue.behind.join(', ')} wait behind it` : ''}; ` : ''}${merged.refusal ? `the last reconciliation was refused — ${merged.refusal}; an operator may deliver it as operator-authorized by a decision citing that refusal` : `a two-party merge decision requested now reconciles it if every gate passed and every required proof was live at the merge cutoff${merged.queue ? ', and a refused one removes the entry without delivering' : ''}`}`, 'merged-unauthorized']
       : active && (!session || !['working', 'idle'].includes(session.state)) ? [`Assigned worker session is ${session?.state ?? 'offline'}`, 'session']
       : gaps.length ? [`No principal is authorized to produce ${gaps.join(', ')}; grant the proof name before dispatch`, 'proof-gap']
@@ -1798,7 +1813,7 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
     counts: { open: rows.length, ready: rows.filter(row => row.stage === 'ready').length, active: rows.filter(row => row.owner).length, attention: rows.filter(row => row.attention).length + installation.attention.length, proofAuthorityGaps: rows.filter(row => row.proofGaps.length).length, mergeable: rows.filter(row => row.mergeable).length, reviewsPending: reviews.pending.length, producersPending: sessions.producers.pending.length,
       // Candidates the guarded merge could take once their gates pass, and the items GitHub already
       // merged without a valid execution, which are never candidates and wait on a reconciliation.
-      mergeCandidates: rows.filter(row => row.stage === 'merge' && !row.merged).length, mergedUnreconciled: rows.filter(row => row.merged).length,
+      mergeCandidates: rows.filter(row => row.stage === 'merge' && !row.merged).length, mergedUnreconciled: rows.filter(row => row.merged && !row.merged.reverted).length, revertedDeliveries: rows.filter(row => row.merged?.reverted).length,
       dispatchRequested: rows.reduce((total, row) => total + (row.dispatch ? (row.dispatch.review ? 1 : 0) + row.dispatch.producers.length : 0), 0), dispatchRunning: rows.reduce((total, row) => total + (row.dispatch ? [row.dispatch.review, ...row.dispatch.producers].filter(request => request?.session?.state === 'pending' && request.session.activity === 'running').length : 0), 0),
       dispatchAwaiting: rows.reduce((total, row) => total + (row.dispatch ? [row.dispatch.review, ...row.dispatch.producers].filter(request => request?.session?.state === 'pending' && request.session.activity === 'awaiting acknowledgement').length : 0), 0), reviewFailover: rows.filter(row => row.review?.failedOver.length).length, queued: placements.length,
       quarantined: rows.filter(row => row.containment && row.containment.phase !== 'live').length, settleableQuarantines: rows.filter(row => row.containment?.settleable).length,

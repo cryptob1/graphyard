@@ -50,9 +50,12 @@ export function classifyScope(plannedFiles: string[], files: ScopeFile[], genera
   return findings;
 }
 
-/** Delivered work items whose planned scope or observed diff covers the path. */
+/**
+ * Delivered work items whose planned scope or observed diff covers the path. A pull request the
+ * provider reports merged shipped its files whether or not its delivery is recorded yet.
+ */
 export function shippedBy(path: string, all: Work[]): string[] {
-  return all.filter(item => item.stage === 'done' && (inPlannedScope(item.plannedFiles ?? [], path) || (item.observation?.files ?? []).includes(path))).map(item => item.key);
+  return all.filter(item => (item.stage === 'done' || !!item.observation?.merged) && (inPlannedScope(item.plannedFiles ?? [], path) || (item.observation?.files ?? []).includes(path))).map(item => item.key);
 }
 
 export function describeRefusal(finding: ScopeFinding, all: Work[]) {
@@ -61,13 +64,61 @@ export function describeRefusal(finding: ScopeFinding, all: Work[]) {
 }
 
 /**
+ * The landing re-check (GY-97; see merge-queue.ts LandingCheck): what the candidate would revert
+ * on the commit it would actually land on, as opposed to the base it is bound to. One entry per
+ * file, naming the item that owns it. `adverse` is false for a file the observation could not
+ * compare: that refuses the build gate like any uncompared file, and ejects nothing.
+ */
+export interface LandingRegression { base: string; path: string; owners: string[]; adverse: boolean; text: string }
+export function landingRegressions(work: Pick<Work, 'id' | 'plannedFiles'>, observation: Pick<Observation, 'scopeFiles' | 'landing'>, all: Work[], generated: readonly string[] = generatedFiles): LandingRegression[] {
+  const landing = observation.landing;
+  if (!landing) return [];
+  const planned = work.plannedFiles ?? [], found: LandingRegression[] = [];
+  // A file the bound-base comparison already refuses is reported there, once.
+  const reported = new Set(classifyScope(planned, observation.scopeFiles ?? [], generated).filter(finding => finding.refused).map(finding => finding.path));
+  for (const finding of classifyScope(planned, landing.files ?? [], generated)) {
+    if (!finding.refused || reported.has(finding.path)) continue;
+    // A predicted base holds entries that have not landed: the file belongs to the unlanded
+    // candidate whose planned scope or observed diff covers it, when no delivery does.
+    const shipped = shippedBy(finding.path, all);
+    const ahead = shipped.length ? [] : all.filter(item => item.id !== work.id && item.stage !== 'done' && !!item.candidate
+      && (inPlannedScope(item.plannedFiles ?? [], finding.path) || (item.observation?.files ?? []).includes(finding.path))).map(item => item.key);
+    found.push({ base: landing.base, path: finding.path, owners: [...shipped, ...ahead], adverse: finding.kind !== 'unverified',
+      text: `${finding.path}: ${finding.detail.replaceAll('the base branch tip', 'that commit').replaceAll('the base branch', 'that commit')} (${shipped.length ? `shipped by ${shipped.join(', ')}` : ahead.length ? `owned by ${ahead.join(', ')}, ahead of it and not yet landed` : 'no delivered work item claims this path'})` });
+  }
+  for (const carried of landing.carried ?? []) {
+    const owner = `${carried.key}, unlanded pull request #${carried.pr} at ${carried.head.slice(0, 12)}`;
+    for (const file of carried.dropped) found.push({ base: landing.base, path: file.path, owners: [carried.key], adverse: true,
+      text: `${file.path}: this head carries ${carried.key}'s commits but not this change — ${file.detail}; merging it would record ${carried.key} merged without it (owned by ${owner})` });
+    if (carried.unverified) found.push({ base: landing.base, path: '*', owners: [carried.key], adverse: false,
+      text: `this head carries ${carried.key}'s commits and not every file of theirs could be compared (owned by ${owner})` });
+  }
+  return found;
+}
+
+/**
+ * Every reported regression of a queued tip, against its bound base and where it would land, as
+ * the merge queue's ejection names them. A file the observation could not compare is not a
+ * reported conclusion: it holds the build gate and ejects nothing.
+ */
+export function queuedRegressions(work: Pick<Work, 'id' | 'plannedFiles'>, observation: Pick<Observation, 'scopeFiles' | 'landing' | 'candidate'>, all: Work[], generated: readonly string[] = generatedFiles): { base: string; text: string }[] {
+  const bound = classifyScope(work.plannedFiles ?? [], observation.scopeFiles ?? [], generated).filter(finding => finding.refused && finding.kind !== 'unverified')
+    .map(finding => ({ base: observation.candidate.baseSha, text: describeRefusal(finding, all) }));
+  return [...bound, ...landingRegressions(work, observation, all, generated).filter(entry => entry.adverse).map(entry => ({ base: entry.base, text: entry.text }))];
+}
+
+/**
  * Build-gate reasons for the observed candidate. An observation that never compared the diff
  * against the base branch tip proves nothing about scope and is refused until a fresh one does.
  */
-export function regressionRefusals(work: Pick<Work, 'key' | 'plannedFiles'>, observation: Pick<Observation, 'scopeFiles'>, all: Work[], generated: readonly string[] = generatedFiles): string[] {
+export function regressionRefusals(work: Pick<Work, 'key' | 'plannedFiles'> & { id?: string }, observation: Pick<Observation, 'scopeFiles' | 'landing'>, all: Work[], generated: readonly string[] = generatedFiles): string[] {
   if (!observation.scopeFiles) return ['Candidate diff has not been compared against the base branch tip; a fresh GitHub observation is required'];
   const refused = classifyScope(work.plannedFiles ?? [], observation.scopeFiles, generated).filter(finding => finding.refused);
-  if (!refused.length) return [];
-  return [`Candidate changes ${refused.length} file${refused.length === 1 ? '' : 's'} outside its planned files that must match the base branch byte-for-byte; run graphyard sync ${work.key}, restore each file from origin/<base>, and push again`,
-    ...refused.map(finding => `Out-of-scope regression: ${describeRefusal(finding, all)}`)];
+  // The same judgement where the candidate would land: the base it is bound to is held while its
+  // head is unchanged, so what the base gained since is only visible against the landing commit.
+  const landing = landingRegressions({ id: work.id ?? '', plannedFiles: work.plannedFiles }, observation, all, generated);
+  return [...(refused.length ? [`Candidate changes ${refused.length} file${refused.length === 1 ? '' : 's'} outside its planned files that must match the base branch byte-for-byte; run graphyard sync ${work.key}, restore each file from origin/<base>, and push again`,
+    ...refused.map(finding => `Out-of-scope regression: ${describeRefusal(finding, all)}`)] : []),
+  ...(landing.length ? [`Landing the candidate on ${landing[0].base.slice(0, 12)}, the commit it would merge onto, would revert ${landing.length} file${landing.length === 1 ? '' : 's'} outside its planned files; run graphyard sync ${work.key}, restore each file as its owner shipped it, and push again`,
+    ...landing.map(entry => `Landing regression: ${entry.text}`)] : [])];
 }

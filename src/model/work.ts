@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import type { BaseRefresh, QueueEjection, QueueEntry, QueueHistoryEntry } from '../merge-queue.js';
+import type { BaseRefresh, LandingCheck, QueueEjection, QueueEntry, QueueHistoryEntry, RevertedDelivery } from '../merge-queue.js';
 import { criterionSchema, policySchema, resourcesSchema, type Criterion } from './policy.js';
 import type { Evidence } from './evidence.js';
 import type { AgentReview, ReviewFailover, ReviewRequest } from './review.js';
@@ -89,6 +89,10 @@ export interface Observation {
   protected: boolean; files: string[]; at: string;
   /** The candidate diff compared against its bound base; see regression-guard.ts. */
   scopeFiles?: ScopeFile[];
+  /** The same judgement against the commit the candidate would land on, and the unlanded work its head carries; see merge-queue.ts LandingCheck. */
+  landing?: LandingCheck;
+  /** Set for a merged pull request whose content the base branch does not hold; see merge-queue.ts RevertedDelivery. */
+  revertedDelivery?: RevertedDelivery;
 }
 export interface Gate { name: string; passed: boolean; reasons: string[] }
 export interface Escalation { trigger: EscalationTrigger; reason: string; at: string; actor: string }
