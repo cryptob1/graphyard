@@ -42,7 +42,7 @@ Every card, and the top of every item view, carries one sentence derived from th
 
 ## Connection and keyboard behaviour
 
-- **Access token:** verified before any work or status displays; a rejected token returns to the sign-in form with an explicit error
+- **Access token:** verified before any work or status displays; a rejected token returns to the sign-in form with an error
 - **Polling failures:** keep the last snapshot with a stale-data warning, retrying every five seconds
 - **Snapshot:** informational; the server authorizes every mutation
 - **The dashboard's 300-event display limit** never truncates the ledger

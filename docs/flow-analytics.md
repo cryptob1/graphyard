@@ -16,7 +16,7 @@ Ledger events are projected into `flow_facts`, a normalized, append-only, trigge
 - **Runs:** in the reconciliation loop and as a catch-up before each read, reporting lag in `coverage.projection`, which the page shows as **stale**
 - **A provider that deletes a pull request, check run or deployment record** cannot erase a stored fact
 - **Deployment observations** and their contained merge identities are repository-wide, so slice, type and stage filters never narrow them; production phases join through those containment records, never assuming an artifact SHA equals a merge SHA
-- **Graphyard's own [release records](delivery.md):** a separate lineage this report does not read yet, so a repository observed only through the release pipeline reports deployment metrics as unavailable
+- **Graphyard's [release records](delivery.md):** a separate lineage this report does not read yet, so a repository observed only through the release pipeline reports deployment metrics as unavailable
 
 ## Windows and metrics
 
@@ -41,7 +41,7 @@ Metrics:
 
 ## Bottlenecks, filters and states
 
-Every undelivered item falls into exactly one category, decided by its latest durable gate fact, which records `queued` and `mergeBlockers`, so the distinction is read from the ledger, not live queue state:
+Every undelivered item falls into exactly one category, read from its latest durable gate fact (which records `queued` and `mergeBlockers`), not live queue state:
 
 - **not released**, **blocked**, **dependency-blocked**, **in implementation**, **waiting on review**, **waiting on acceptance evidence**, **merge blocked**, **merge ready**
 
@@ -55,12 +55,23 @@ Flow analytics describes observed work, queueing and capacity, never people:
 
 Endpoints:
 
-- `GET /api/analytics/flow`: Full report for a window and filter
-- `GET /api/analytics/flow/drilldown`: Bounded underlying records for one metric
-- `GET /api/analytics/flow/export`: Same bounded records as deterministic CSV or JSON
-- `GET /api/analytics/attribution[/drilldown]`: The [attribution](attribution.md#cost-and-metrics) report and its records
-- `GET /api/deployments`, `POST /api/deployments`: Read or record deployment-provider observations
+- `GET /api/analytics/flow[/drilldown|/export]`: The report, one metric's records (up to 200 rows), or those rows as a deterministic export
+- `GET /api/analytics/attribution[/drilldown]`: The [attribution](attribution.md#cost-and-metrics) report, and up to 200 rows for one metric
+- `GET /api/deployments`: Latest deployment-provider observations; audit roles only, else 403
+
+Query parameters; any other is refused:
+
+- `window`: 7, 30 or 90, default 30
+- `asOf`: observation instant, never later than the server clock
+- `metric`, `key`: drill-down metric and the key narrowing it; an unknown metric's response lists the `supported` ones
+- `type`, `stage`, `slice`, `format` (`json` or `csv`): flow only
+
+Identifiers by role:
+
+- **Audit roles** (`admin`, `coordinator`, `producer`): also see evidence, artifact, request, attempt and build identifiers
+- **Other readers:** results and counts; deployment drill-down and export withhold artifact SHAs, provider names and external deployment IDs, attribution showing `requires audit role` for one withheld
+- `authorized`: which view a drill-down served
 
 ## Pipeline speed
 
-The `complete`-to-merge target, what `master status` reports and the measurement script: [master guide](master-agent.md#pipeline-speed).
+Target, `master status` figures and measurement script: [master guide](master-agent.md#pipeline-speed).

@@ -2,7 +2,8 @@
 // name a reader has to be able to find: every CLI command and flag, including the options the
 // CLI parses but its help omits, every environment variable the server reads and every
 // `GRAPHYARD_*` variable any source module names, every operator-agent capability, gate, proof
-// family and refusal trigger, every work command and every HTTP route the server registers.
+// family and refusal trigger, every work command, every HTTP route the server registers and
+// every query parameter a route accepts, and every route that answers by audit role.
 //
 // Each set is extracted from the code that defines it rather than from a list kept by hand, so
 // a surface added in source fails this check until the documentation names it.
@@ -144,18 +145,65 @@ export function expandPath(path) {
  * Every route a module under src/server/routes registers, one entry per concrete path: a regex
  * path is rewritten into the guides' own notation and expanded, a capture of one free segment
  * becoming `*`. A pattern that is not anchored at its end guards a prefix and is no endpoint.
+ * Each registration carries its module's text and its own slice of it, up to the next one.
  */
-export function httpRoutes(root = repositoryRoot) {
-  const routes = new Set();
+function routeRegistrations(root) {
+  const registrations = [];
   for (const file of readdirSync(join(root, 'src/server/routes')).filter(name => name.endsWith('.ts')).sort()) {
-    for (const [, method, literal, pattern] of read(root, join('src/server/routes', file)).matchAll(/method: '([A-Z*]+)', path: (?:'([^']+)'|\/((?:\\.|\[(?:\\.|[^\]\\])*\]|[^/\\\n[])+)\/)/g)) {
-      if (pattern && !pattern.endsWith('$')) continue;
+    const text = read(root, join('src/server/routes', file));
+    const matches = [...text.matchAll(/method: '([A-Z*]+)', path: (?:'([^']+)'|\/((?:\\.|\[(?:\\.|[^\]\\])*\]|[^/\\\n[])+)\/)/g)];
+    matches.forEach(([, method, literal, pattern], index) => {
+      if (pattern && !pattern.endsWith('$')) return;
       const path = literal ?? pattern.replace(/^\^|\$$/g, '').replace(/\\\//g, '/').replace(/\((?:\[\^\/\]\+|\\d\+|\[a-z\]\+)\)/g, 'ID').replace(/\(\?:((?:[^()]|\([^()]*\))*)\)\?/g, '[$1]');
-      for (const expanded of expandPath(path)) routes.add(`${method === '*' ? 'GET' : method} ${expanded}`);
-    }
+      registrations.push({ routes: expandPath(path).map(expanded => `${method === '*' ? 'GET' : method} ${expanded}`), module: text, handler: text.slice(matches[index].index, matches[index + 1]?.index) });
+    });
   }
-  return [...routes].sort();
+  return registrations;
 }
+
+export const httpRoutes = (root = repositoryRoot) => [...new Set(routeRegistrations(root).flatMap(registration => registration.routes))].sort();
+
+/**
+ * Every query parameter a route accepts, one entry per concrete route: each `searchParams.get('NAME')`
+ * its handler reads, and the keys of each `z.object({…})` schema that parses the query string, in
+ * the handler or in a module function the handler calls. A schema that parses a request body names
+ * no query parameter. Such schemas are `.strict()`, so a parameter a client cannot learn from the
+ * guides is one it cannot discover by trial either.
+ */
+export function queryParameters(root = repositoryRoot) {
+  const parameters = new Set();
+  for (const { routes, module, handler } of routeRegistrations(root)) {
+    const names = [...handler.matchAll(/searchParams\.get\('([A-Za-z]\w*)'\)/g)].map(match => match[1]);
+    for (const [, schema, body] of module.matchAll(/\bconst (\w+) = z\.object\(\{\n([\s\S]*?)\n\}\)/g)) {
+      const parse = module.match(new RegExp(`(?:const (\\w+) = ([^\\n]*)\\n\\s*)?[^\\n]*\\b${schema}\\.parse\\((\\w*)([^\\n]*)`));
+      if (!parse || !(parse[4].includes('searchParams') || (parse[1] === parse[3] && parse[2].includes('searchParams')))) continue;
+      const callers = [`${schema}.parse(`, ...[...module.matchAll(/\nfunction (\w+)\([^\n]*\{\n([\s\S]*?)\n\}/g)].filter(helper => helper[2].includes(`${schema}.parse(`)).map(helper => `${helper[1]}(`)];
+      if (callers.some(call => handler.includes(call))) names.push(...[...body.matchAll(/(?:^|,)\s*([A-Za-z]\w*): z\./gm)].map(match => match[1]));
+    }
+    for (const route of routes) for (const name of names) parameters.add(`${name} on ${route}`);
+  }
+  return [...parameters].sort();
+}
+
+/**
+ * Whether a page documents a query parameter: it spells the route, and spells the parameter as a
+ * code span of its own or as `?name=` or `&name=` inside one. A word in running prose, or on a
+ * page about something else (`slice` the delegation term), documents nothing a client can send.
+ */
+function spellsParameter(page, entry) {
+  const [name, route] = entry.split(' on ');
+  return documentedRoutes([page]).has(route) && new RegExp(`\`${name}\`|\`[^\`\\n]*[?&]${name}=[^\`\\n]*\``).test(page.text);
+}
+
+/**
+ * Every route whose answer depends on the caller holding an audit role: its handler consults the
+ * module's `auditRoles`, to refuse the read or to withhold identifiers. Most role checks live in
+ * the services and are out of a route module's sight; this one is a route's own, so it is
+ * extracted. A page documents it by spelling the route and stating the audit-role rule, or
+ * linking to it by that name.
+ */
+export const auditRoleRoutes = (root = repositoryRoot) => [...new Set(routeRegistrations(root).filter(registration => /\bauditRoles\b/.test(registration.handler)).flatMap(registration => registration.routes))].sort();
+const statesAuditRule = (page, route) => documentedRoutes([page]).has(route) && /\baudit[- ]roles?\b/i.test(page.text);
 
 /** Every `METHOD /path` the pages spell, expanded the same way; `GET|POST /path` names both methods. */
 export function documentedRoutes(pages) {
@@ -181,6 +229,8 @@ export function surface(root = repositoryRoot, help) {
     ...refusalTriggers(root).map(name => ({ kind: 'refusal trigger', name })),
     ...workCommands(root).map(name => ({ kind: 'work command', name: `\`${name}\`` })),
     ...httpRoutes(root).map(name => ({ kind: 'http route', name })),
+    ...queryParameters(root).map(name => ({ kind: 'query parameter', name })),
+    ...auditRoleRoutes(root).map(name => ({ kind: 'audit-role rule', name })),
   ];
 }
 
@@ -191,6 +241,8 @@ const spelled = (text, name) => new RegExp(`(?<![A-Za-z0-9_-])${name}(?![A-Za-z0
 export function missing(root = repositoryRoot, help, pages = documentation(root)) {
   const routes = documentedRoutes(pages);
   const mentioned = entry => entry.kind === 'http route' ? routes.has(entry.name)
+    : entry.kind === 'query parameter' ? pages.some(page => spellsParameter(page, entry.name))
+    : entry.kind === 'audit-role rule' ? pages.some(page => statesAuditRule(page, entry.name))
     : pages.some(page => entry.kind === 'cli flag' || entry.kind === 'environment variable' ? spelled(page.text, entry.name) : page.text.includes(entry.name));
   return surface(root, help)
     .filter(entry => !mentioned(entry))

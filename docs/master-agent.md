@@ -8,7 +8,7 @@ For the coordinator session: what the master decides, and must never do.
 Three decisions are human-only: goals and priorities, spending money or opening third-party accounts, and issuing credentials to people. Every other names an agent that makes it and an independent agent that approves it — [who decides](glossary.md#who-decides).
 
 - **Non-weakening intent, as its own operator-agent identity:** `master create FILE REASON`, `master release GY-N REASON`, `master unblock GY-N REASON`, `master requirements GY-N FILE REASON` (additions), `master scope GY-N [REASON]`
-- **[Two-party decisions](operator-automation.md#two-party-decisions): `release`, `unblock`, `requirements` rewrites and removals, `resolve`, `attest`, `merge`, `rework`, `recover`, `grant`:** `master decide GY-N ACTION [JSON|@FILE] REASON`, then `master approver GY-N DECISION`; the approver runs `master approve GY-N DECISION REASON`, `master decisions GY-N` reads the outcome, and `master withdraw GY-N DECISION REASON` takes back the master's own request
+- **[Two-party decisions](operator-automation.md#two-party-decisions): `release`, `unblock`, `requirements` rewrites and removals, `resolve`, `attest`, `merge`, `rework`, `recover`, `grant`:** `master decide GY-N ACTION [JSON|@FILE] REASON`, then `master approver GY-N DECISION`; the approver runs `master approve GY-N DECISION REASON`, `master decisions GY-N` reads the outcome, and `master withdraw GY-N DECISION REASON` takes back the master's request
 - **Routine operations:** `master principals [--apply]`, `master restart`, `master run [--once]`, `master config FIELD=VALUE…`, dispatch, GitHub administration, guarded merge
 
 ## Operate
@@ -34,7 +34,7 @@ Ordinary review findings, rework, idle workers, and proof setup are not stopping
 
 - **Asked:** a worker needing a file outside `plannedFiles` runs `scope-request GY-N EPOCH PATH... -- REASON` and keeps its lease
 - **Decided:** the cycle it appears, by the control plane at the loop's request (`POST /api/work/:id/autoscope`, the coordinator's only scope call), recomputed from the item, never from the caller
-- **Approved, applied to the live item as an additive widening:** documentation the repository requires updating when behaviour changes (`docs/`, `AGENTS.md`, `README.md`, file by file), and source files the item's own criteria name
+- **Approved, applied to the live item as an additive widening:** documentation the repository requires updating when behaviour changes (`docs/`, `AGENTS.md`, `README.md`, file by file), and source files the item's criteria name
 - **Refused and escalated, the item blocked on `Scope request refused: …`:** any other path — `master scope GY-N REASON` applies it — and a request dropping planned paths or rewriting criteria or proofs — `master requirements GY-N FILE REASON`
 - **Lifted by:** withdrawing it (`scope-request GY-N EPOCH -`) or an operator's answer, never touching a blocker anyone else wrote; a request whose attempt lost the lease is never decided
 - **Measured:** `daemon.metrics.scope` reports request-to-decision `p50`/`p90` and `scopeOpenMs`, the longest undecided request; the loop escalates a p90 above five minutes over ten or more decisions, or any request undecided for fifteen minutes
@@ -119,7 +119,7 @@ They also cover:
 - **The loop's systemd unit, named exactly:** `systemctl --user restart graphyard-master.service`, `journalctl --user -u graphyard-master.service`
 - **Deployment administration:** `railway status`, `logs`, `deployment`, `redeploy`, `master verify-deployment`
 - **CI runs:** `gh run list`, `view`, `watch`, `rerun`, `gh workflow run`
-- `master config FIELD=VALUE…`: tunes loop and dispatch cadence, proof and smoke workflows, deployment URL and SHA field, reviewer profile, producer timeout, quota ceiling and a profile's account order (`accounts:PROFILE=a,b`) through the operator commands' own validated path, refusing every other field
+- `master config FIELD=VALUE…`: tunes loop and dispatch cadence, proof and smoke workflows, deployment URL and SHA field, reviewer profile, producer timeout, quota ceiling and a profile's account order (`accounts:PROFILE=a,b`) through the operator commands' validated path, refusing every other field
 - **Operator-only:** no `Edit` or `Write` rule covers `.graphyard/master.json` itself — `autoMerge`, the merge method and every credential path
 
 ## Pipeline speed
@@ -127,7 +127,7 @@ They also cover:
 - **A *routine* item:** at most one rework round and no hand-off between submit and merge; every step between belongs to the control plane or the loop, leaving the master a genuine finding or a human-only decision
 - **Target:** submit→merge p50 of at most 30 minutes and p90 of at most 60 minutes, over at least ten deliveries, with a median of at most one rework round — never traded for a gate, a proof, an identity rule or a lease rule
 
-- **Per item:** each `master status` row's `speed`, from the item's own [pipeline timeline](protocol/pipeline-speed.md): `executionMs` (lease time over attempts), `waitMs` (everything else since the first claim), `reworkRounds`, `interventions`, `sinceSubmitMs` in flight, `submitToMergeMs` once delivered, `routine`.
+- **Per item:** each `master status` row's `speed`, from the item's [pipeline timeline](protocol/pipeline-speed.md): `executionMs` (lease time over attempts), `waitMs` (everything else since the first claim), `reworkRounds`, `interventions`, `sinceSubmitMs` in flight, `submitToMergeMs` once delivered, `routine`.
 - **Overall:** the top-level `speed` — `speed.submitToMerge` and `routine.submitToMerge` (nearest-rank p50/p90 and count), `reworkRounds` (median, p90, distribution), `interventions`, `execution`, `unmeasured` (deliveries predating the timeline), `items` in merge order, and `met`: `true` or `false` once ten routine deliveries are measured, `reason` naming the figure that misses, `null` until then.
 - **Outside a status read:** `scripts/measure-pipeline-speed.mjs --split GY-55,GY-64 --record DIR` reads the snapshot with any read-capable credential and prints the same arithmetic, per `--split` item for deliveries merged before and after it landed; `--since`/`--until` bound the window, `--json` prints everything. The 3-hourly measurement runs it and `manual:speed-target-met` reads it.
 - **A missed target** is a finding to route: `items` names the slow deliveries, `interventions` and `reworkRounds` whether a hand-off or rework round took the time, and the [flow-analytics](flow-analytics.md) bottleneck summary which wait category held the rest.

@@ -92,7 +92,7 @@ Coverage is per dimension:
 
 `graphyard validation analytics` groups every sequenced attempt by proof, environment and runner registration.
 
-- **Reports:** outcomes, Graphyard's own observed timings, and the runner-reported duration and CPU time kept separate from them
+- **Reports:** outcomes, Graphyard's observed timings, and the runner-reported duration and CPU time kept separate from them
 - **Cost:** **observed**, **estimated** or **unavailable**, never zero when nobody metered it
 - **Refused:** a measurement whose `basis` is neither `observed` nor `estimated`
 - **Also carried:** the reuse and replay ledgers by outcome; the response never ranks groups

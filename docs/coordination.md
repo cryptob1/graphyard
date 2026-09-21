@@ -113,6 +113,6 @@ The [routine-item target](master-agent.md#pipeline-speed) rests on five mechanis
 ## Explain stalls and drill the recovery
 
 - **`graphyard diagnose GY-N` and the work-detail Coordination section:** explain dependencies, blockers, missing ownership or workspace, busy resources, unobserved or stale pull requests, integration failures, overdue unowned jobs, violations and the first refusing gate, including an out-of-scope regression with its file list. Evidence, not a lifecycle-state setter.
-- **`base-behind`:** a submitted head not containing the base tip; waits on Graphyard's own [base refresh](protocol/merge-queue-binding.md#base-refresh) rather than a person; never an attention item.
+- **`base-behind`:** a submitted head not containing the base tip; waits on Graphyard's [base refresh](protocol/merge-queue-binding.md#base-refresh) rather than a person; never an attention item.
 - **`base-conflict`, `base-refresh-carried` and `base-refresh-required`:** what that refresh could not absorb and what it kept.
 - **`queue-binding-carried`, `queue-binding-required` and `queue-base-carried`:** reported by a queued candidate, per binding.

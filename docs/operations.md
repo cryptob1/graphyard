@@ -35,7 +35,7 @@ Expiry does not prove the process stopped, so keep the old worktree; the next wo
 ### Rework a submitted implementation
 
 - **Run:** stop the previous worker yourself, then `graphyard rework GY-N --previous-worker-stopped "Reproduce review failure"`
-- **Effect:** old commands are fenced, the build gate closes, a held lease ends as `lease.expired`, not `lease-loss`. [Detail](operations-reference.md#submitted-implementation-needs-rework)
+- **Effect:** old commands are fenced and the build gate closes, raising no `lease-loss`. [Detail](operations-reference.md#submitted-implementation-needs-rework)
 
 ### Settle a containment quarantine
 

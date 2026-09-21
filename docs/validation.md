@@ -51,7 +51,7 @@ Only the pinned collector may call `result`, publishing `{requestId, attemptId, 
 - `behavior`: `passed`, `failed`, `blocked` or `unmeasured`
 - `executed`, `skipped`, `inventoryComplete`: The actual inventory, compared against the offline enumeration
 - `target`: `{instance, artifacts, measurement, coversEntireRun, attribution}`; `measurement` is `provider`, `host-attestation` or `unknown`; a self-report is never trusted measurement
-- `bundleDigest`, `runnerImageDigest`: What actually executed
+- `bundleDigest`, `runnerImageDigest`: What executed
 - `artifacts`, `artifactState`: Verified artifacts covering the required names; `verified`, `missing`, `upload-failed` or `expired`
 - `executionSettled`: The collector's **own** observation that execution finished
 

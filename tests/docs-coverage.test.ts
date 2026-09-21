@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import { renderHelp } from '../src/cli/index.js';
 // @ts-expect-error Dependency-free documentation script.
-import { capabilities, cliSurface, documentation, documentedRoutes, expandPath, gateNames, httpRoutes, missing, parsedFlags, proofFamilies, refusalTriggers, serverEnvironment, sourceEnvironment, surface, workCommands } from '../scripts/docs-coverage.mjs';
+import { auditRoleRoutes, capabilities, cliSurface, documentation, documentedRoutes, expandPath, gateNames, httpRoutes, missing, parsedFlags, proofFamilies, queryParameters, refusalTriggers, serverEnvironment, sourceEnvironment, surface, workCommands } from '../scripts/docs-coverage.mjs';
 
 /**
  * Condensing the guides may remove repetition and rationale, never a name a reader has to be
@@ -16,7 +16,7 @@ import { capabilities, cliSurface, documentation, documentedRoutes, expandPath, 
 const root = fileURLToPath(new URL('..', import.meta.url));
 const help = renderHelp();
 
-test('integration:docs-coverage every CLI command and flag, server and source environment variable, capability, gate, proof family, refusal trigger, work command and HTTP route appears in the documentation', () => {
+test('integration:docs-coverage every CLI command and flag, server and source environment variable, capability, gate, proof family, refusal trigger, work command, HTTP route, query parameter and audit-role rule appears in the documentation', () => {
   const gaps = missing(root, help);
   assert.deepEqual(gaps, [], gaps.join('\n'));
   assert.ok(surface(root, help).length >= 150, 'the extracted surface is the real one, not an empty list');
@@ -57,6 +57,34 @@ test('integration:docs-coverage HTTP routes are extracted from the route modules
   const stripped = documentation(root).map((page: { path: string; text: string }) => ({ ...page, text: page.text.replace(/POST \/api\/intake|POST \/api\/work\/:id\/lead-ruling/g, '') }));
   const lost = routes.filter((route: string) => !documentedRoutes(stripped).has(route));
   assert.deepEqual(lost, ['POST /api/intake', 'POST /api/work/*/lead-ruling']);
+});
+
+test('integration:docs-coverage query parameters and audit-role rules are extracted per route, and a page that stops stating one is reported', () => {
+  const parameters = queryParameters(root);
+  // Schema keys parsed in the handler or in a function it calls, and parameters a handler reads directly.
+  for (const parameter of ['window on GET /api/analytics/flow', 'format on GET /api/analytics/flow/export', 'asOf on GET /api/analytics/attribution/drilldown', 'metric on GET /api/analytics/attribution/drilldown',
+    'cursor on GET /api/validation/reuse', 'view on GET /api/work-snapshot', 'preview on GET /api/validation/artifacts/*/*', 'work on GET /api/events'])
+    assert.ok(parameters.includes(parameter), `the server accepts ${parameter}`);
+  // Attribution's schema has no flow filter, and a body schema names no query parameter.
+  assert.ok(!parameters.some((parameter: string) => /^(type|stage|slice|format) on GET \/api\/analytics\/attribution/.test(parameter)));
+  assert.ok(!parameters.some((parameter: string) => /^(provider|externalId|containedMergeShas) on /.test(parameter)), 'the deployment body schema is not a query schema');
+  assert.deepEqual(auditRoleRoutes(root), ['GET /api/analytics/attribution', 'GET /api/analytics/attribution/drilldown', 'GET /api/analytics/flow', 'GET /api/analytics/flow/drilldown', 'GET /api/analytics/flow/export', 'GET /api/attribution/work/*', 'GET /api/deployments']);
+
+  // The parameter is a code span of its own or a query string, on a page that spells its route.
+  const gapsOf = (text: string) => missing(root, help, [{ path: 'only.md', text }]).filter((gap: string) => /^(query parameter \w+ on|audit-role rule) GET \/api\/(analytics\/flow|deployments|events) /.test(gap)).sort();
+  assert.deepEqual(gapsOf('`GET /api/analytics/flow` takes `window`, `asOf`, `metric`, `key`, `type`, `stage`, `slice` and `format`; audit roles see identifiers. `GET /api/events?work=UUID`. `GET /api/deployments` refuses all but audit roles.'), []);
+  assert.deepEqual(gapsOf('`GET /api/analytics/flow` reports a window for a slice, by stage. `GET /api/events` and `GET /api/deployments` are reads.'),
+    [...['asOf', 'format', 'key', 'metric', 'slice', 'stage', 'type', 'window'].map(name => `query parameter ${name} on GET /api/analytics/flow is documented nowhere`), 'query parameter work on GET /api/events is documented nowhere',
+      'audit-role rule GET /api/analytics/flow is documented nowhere', 'audit-role rule GET /api/deployments is documented nowhere'].sort());
+  // `slice`, the delegation term, on a page that spells no analytics route documents no parameter.
+  assert.ok(missing(root, help, [{ path: 'a.md', text: '`GET /api/analytics/flow`' }, { path: 'b.md', text: 'a `slice` of principals' }]).includes('query parameter slice on GET /api/analytics/flow is documented nowhere'));
+
+  // The losses the reviewer of GY-80 caught by hand: the analytics parameters, who sees identifiers, and the deployment read's refusal.
+  const stripped = documentation(root).map((page: { path: string; text: string }) => ({ ...page, text: page.text.replace(/`(window|asOf|metric|key|type|stage|slice|format)`/g, '$1').replace(/audit[- ]roles?/gi, '') }));
+  const gaps = missing(root, help, stripped);
+  for (const lost of ['query parameter window on GET /api/analytics/flow', 'query parameter format on GET /api/analytics/flow/export', 'query parameter metric on GET /api/analytics/attribution/drilldown',
+    'audit-role rule GET /api/analytics/flow/drilldown', 'audit-role rule GET /api/attribution/work/*', 'audit-role rule GET /api/deployments'])
+    assert.ok(gaps.includes(`${lost} is documented nowhere`), `${lost} is reported once no page states it`);
 });
 
 test('integration:docs-coverage options the help omits and variables the server never reads are extracted, and losing one is reported', () => {

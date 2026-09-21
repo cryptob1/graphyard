@@ -38,4 +38,4 @@ The deferred proof becomes an obligation on its contract paths, derived from the
 
 - **`GET /api/work-snapshot`:** declarations on each criterion.
 - **`graphyard obligations`:** every outstanding obligation and who inherits it.
-- **`graphyard diagnose GY-N`:** the item's own deferrals and inherited obligations.
+- **`graphyard diagnose GY-N`:** the item's deferrals and inherited obligations.

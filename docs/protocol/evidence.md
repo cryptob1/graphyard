@@ -56,7 +56,7 @@ Trust is decided against the live grant set inside each mutation transaction, ne
 - **`sha`:** the deployed commit the checks ran against, recorded by the `deployment` command.
 - **`baseSha`:** the item's merge commit.
 
-1. The [master loop](../master-agent.md#operate) records the deployment with `POST /api/work/UUID/deployment` once the running release serves the merge commit, exactly or through a descendant: coordinator or operator only, delivered work only, naming the item's own merge commit, once per delivery.
+1. The [master loop](../master-agent.md#operate) records the deployment with `POST /api/work/UUID/deployment` once the running release serves the merge commit, exactly or through a descendant: coordinator or operator only, delivered work only, naming the item's merge commit, once per delivery.
 2. The loop asks GitHub to run the trusted smoke workflow with the work UUID, the deployed commit, the merge commit and the policy revision (one request per deployed commit), holding no producer credential.
 3. `scripts/deploy-smoke.mjs run` reads the commit the deployment reports serving (`SMOKE_DEPLOYMENT_URL`, field `SMOKE_SHA_FIELD`), refuses unless it is the recorded deployed commit, runs the configured checks (`SMOKE_CHECK_URLS` must answer 2xx; the optional `SMOKE_COMMAND` comes from the trusted checkout), and reads the serving commit again; a target that moved is a refusal to attribute, not a failure of the change.
 4. `scripts/deploy-smoke.mjs publish`, in a separate job holding the producer secret, submits the evidence.

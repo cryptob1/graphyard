@@ -39,7 +39,7 @@ One topic per page; this index is generated in full.`,
     sections: ['Start here', 'Operate Graphyard', 'Build integrations', 'Understand or contribute', 'Maintainer and historical records'],
     head: `# Graphyard documentation
 
-For every reader: which guide to open for the task in hand — choose one path, and use the reference guides when a gate or integration needs deeper investigation. This index is generated in full.`,
+For every reader: which guide to open for the task in hand; the reference guides go deeper on a gate or integration. This index is generated in full.`,
     tail: 'Historical records explain past decisions, not current setup.',
   },
 ];

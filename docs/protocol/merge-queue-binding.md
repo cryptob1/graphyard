@@ -84,7 +84,7 @@ Nothing carries unless the tip is a two-parent merge of exactly `from.sha` and `
 - **Carried binding:** holds only while the candidate is exactly `to` under the same policy revision (and, for agent review, the same reviewer App); revoking the original evidence withdraws it and ejects the tip.
 - **Ledger:** one `queue.carry` event per decision, a `carried`/`required` summary on `queue.predicted`.
 
-GitHub dismisses stale reviews on Graphyard's own tip push, so before acquiring merge authority `master merge` re-posts a carried approval bound to the tip through the reviewer App that gave it (never the control-plane App, never a human reviewer's approval, never over a reviewer that has since requested changes), reported as `carriedApproval`.
+GitHub dismisses stale reviews on Graphyard's tip push, so before acquiring merge authority `master merge` re-posts a carried approval bound to the tip through the reviewer App that gave it (never the control-plane App, never a human reviewer's approval, never over a reviewer that has since requested changes), reported as `carriedApproval`.
 
 ## Where it is reported
 

@@ -49,7 +49,7 @@ npm test
 
 ## Bootstrap boundary and contributing
 
-- Graphyard's initial implementation predates its own control plane and remains bootstrap history; new work routes through Graphyard-assigned worktrees, current-head review, protected CI, trusted acceptance evidence and guarded merges ([repository bootstrap](first-pr.md))
+- The initial implementation predates the control plane and remains bootstrap history; new work routes through Graphyard-assigned worktrees, current-head review, protected CI, trusted acceptance evidence and guarded merges ([repository bootstrap](first-pr.md))
 - Regular pull-request CI validates packaging without production credentials
 - Only the protected workflow may publish trusted acceptance evidence
 - Dogfooding work defines an observable outcome and trusted proof names before a worker claims it

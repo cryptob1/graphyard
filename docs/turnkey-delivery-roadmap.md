@@ -22,4 +22,4 @@ Graphyard discovers supported repository and deployment infrastructure, proposes
 | D5 | Additional runner and report adapters, and off-the-shelf packaging | Shipped in part — [report adapters](report-adapters.md), [deployment](deployment.md); deployment-provider adapters are excluded, so production verification stays a manual proof |
 | D6 | Evidence replay, safe reuse and cost analytics | Shipped — [evidence reuse](evidence-reuse.md) |
 
-Every increment keeps the invariants its own page states, and none is considered shipped until they hold.
+No increment is shipped until the invariants its page states hold.

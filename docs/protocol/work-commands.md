@@ -56,7 +56,7 @@ Each `POST` but the webhook requires `Idempotency-Key` and replays the original 
 - `GET|POST /api/scenarios`: Lists or defines an [E2E scenario](../test-cases.md)
 - `POST /api/delivery/(build|release|approve|select|lease|observe|notify|sweep|rollback|rollback-claim|rollback-settle|rollback-resolve)`: [Delivery](../delivery.md) and [rollback](../recovery.md)
 - `POST /api/validation/(define|build|candidate|request|dispatch|ack|heartbeat|collection-authority|collection-heartbeat|result|cancel|settle|retry)`: The [validation path](../validation.md)
-- `POST /api/validation/(replay|reuse|artifacts|artifacts/migrate)`, `GET /api/validation/(replays|reuse|analytics|artifacts/REQUEST_ID/NAME)`: [Replay and reuse](../evidence-reuse.md), [artifacts](../recovery.md)
+- `POST /api/validation/(replay|reuse|artifacts|artifacts/migrate)`, `GET /api/validation/(replays|reuse|analytics|artifacts/REQUEST_ID/NAME)`: [Replay and reuse](../evidence-reuse.md), [artifacts](../recovery.md); `?preview=1` serves a PNG, JSON or plain-text artifact up to 1 MB inline
 - `POST /api/proof-grants/:id/(grant|revoke)`: [Proof authority](evidence.md)
 - `GET|POST /api/operator-agents`, `POST /api/operator-agents/:id/(configure|rotate|revoke)`, `GET /api/principals`: [Operator agents](../operator-automation.md); the credential-free roster is for `admin`, `coordinator` and operator agents
 - `POST /api/github/webhook`: [HMAC-verified](github-webhook.md), no bearer token

@@ -44,7 +44,7 @@ Every decision except the three human-only ones is a two-party decision on one w
 
 ## Harness rules per role
 
-- **`master autonomy --apply`:** installs the master's own harness rules, which also deny pointing a command at another identity's credential file.
+- **`master autonomy --apply`:** installs the master's harness rules, which also deny pointing a command at another identity's credential file.
 - **Dispatch:** installs each worker's rules in its assigned worktree.
 - **Regeneration:** idempotent; existing entries are never removed.
 - **Master may run:** its own CLI subcommands at their absolute path, `herdr`, `jq`, the audited-thread wrapper, plus [everything else it owns](master-agent.md#harness-permissions).

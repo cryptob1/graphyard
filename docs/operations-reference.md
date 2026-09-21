@@ -102,7 +102,7 @@ Revoking leaves criteria, policy revision, review and the submitted attempt unto
 
 ## Bootstrap mode for a self-proving change
 
-- **Declare:** `bootstrap` declaration on that criterion in a `requirements` revision: `reason` plus `contractPaths` inside the item's own `plannedFiles`
+- **Declare:** `bootstrap` declaration on that criterion in a `requirements` revision: `reason` plus `contractPaths` inside the item's `plannedFiles`
 - **Capability:** `policy:bootstrap`
 - **Obligation:** deferred proof becomes one the next item touching those paths inherits and cannot defer again, cleared only when some change is delivered with trusted, passing, complete evidence
 - **Outstanding:** listed by `graphyard obligations` and `diagnose GY-N` ([bootstrap mode](protocol/bootstrap-mode.md))

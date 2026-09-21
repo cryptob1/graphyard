@@ -42,7 +42,7 @@ Every permission a Graphyard App identity holds is declared once, in `src/github
 ### Preflight and holds
 
 - Server compares granted permissions with the declaration at startup, every five minutes and after any 403.
-- **Shortfall:** under `appPermissions` in `/api/status`, on the dashboard, in `master status` under `controlPlane.attention`, naming missing permission, feature it blocks and installation page to accept the request on.
+- **Shortfall:** in the server log, under `appPermissions` in `/api/status`, on the dashboard, in `master status` under `controlPlane.attention`, naming missing permission, feature it blocks and installation page to accept it on.
 - **Jobs needing it:** **held, not retried**, re-checked every thirty minutes until a preflight sees it granted; one that cannot read the installation lifts nothing.
 - **Unpredicted 401 or 403:** refusal, never a rate limit: at most three retries, then a thirty-minute hold released only when installation reading changes.
 - **Held jobs:** `heldJobs`, `integration-held` in `diagnose`; no hold weakens a gate.
@@ -113,7 +113,7 @@ Graphyard serializes the final hop through one queue, so no merge invalidates ca
 - **Entry:** when a candidate passes its own gates; membership is derived, never requested
 - **Nobody can** insert an entry, hold a position, reorder the queue or merge past the head
 - **A merge moves the base** under every candidate still short of the queue, so the control plane republishes those heads on the moved tip itself and carries what the move did not touch
-- **[Merge-queue bindings](protocol/merge-queue-binding.md):** what a candidate is bound to, when a [base refresh](protocol/merge-queue-binding.md#base-refresh) or the queue's own tip carries a review or proof, what a refresh conflict costs
+- **[Merge-queue bindings](protocol/merge-queue-binding.md):** what a candidate is bound to, when a [base refresh](protocol/merge-queue-binding.md#base-refresh) or the queue's tip carries a review or proof, what a refresh conflict costs
 
 ## Trusted producers, smoke proof and review providers
 
