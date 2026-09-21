@@ -423,21 +423,58 @@ critical path.
 ### Measuring whether it is working
 
 Whether throughput now follows the number of executors and agents rather than an operator's
-attention is a measurement, not a claim:
+attention is a measurement, not a claim. The measurement is stated over a particular population:
+deliveries made **with no master session running**. `src/throughput.ts` decides that per delivery,
+from the record, and both ways have to hold — the queue's own history has to show a stateless
+executor settling the rows that moved the item after it submitted, and nothing may have been
+handed to a master or an operator in between. A master daemon claims nothing from the queue and so
+settles nothing in it, which is what makes the executor list evidence that the fleet moved a
+delivery rather than something else. A delivery that fails either test is excluded and says which,
+so a window is never certified by averaging deliveries a master drove into the ones it did not.
+
+There are two readings, and a full witness takes both.
+
+**The live reading** judges what the running control plane recorded:
 
 ```sh
 GRAPHYARD_URL=… GRAPHYARD_TOKEN=… node scripts/measure-throughput.mjs --minutes 30 --json
 ```
 
-It reads the live control plane and judges what it recorded: the deliveries in the window and
-their submit→merge p50, every sample of the live queue across the window and the worst row left
-unclaimed past the five-minute idle bound, the hand-offs to a master or operator between submit
-and merge, and the executor identities that settled the rows. It exits non-zero when the window
-does not meet the target, and `--record DIR` keeps each run as a timestamped JSON file. Its
-arithmetic is `src/throughput.ts`, the same module `master status` reports from.
+It reports the population and its submit→merge p50, every delivery in the window beside it for
+comparison, every sample of the live queue across the window and the worst row left unclaimed past
+the five-minute idle bound, the hand-offs to a master or operator, and the executor identities that
+settled rows. It exits non-zero when the window does not meet the target, and `--record DIR` keeps
+each run as a timestamped JSON file.
 
-A master daemon claims nothing from the queue and so settles nothing in it, which is what makes
-the executor list evidence that the fleet — not a master session — moved the window.
+**The conducted run** makes the window rather than waiting for one:
+
+```sh
+node scripts/measure-throughput.mjs --fleet --deliveries 12 --executors 2 --scale --record DIR
+```
+
+A control plane that still runs the coordination loop the queue replaces cannot produce a
+masterless delivery — every delivery in its ledger is excluded, and the live reading names them —
+so the criterion would be one that only the merge it gates could ever satisfy. The conducted run
+stands a control plane up on a scratch Postgres (its own, never production: `--database` points at
+one, and without it the run starts an embedded server and throws it away), releases the items,
+runs the shipped executor loop against it over the shipped HTTP effects under distinct identities
+and hosts, with no master session anywhere in the process tree, and judges what they delivered
+with the same arithmetic. `--scale` runs the same workload with one executor and then with the
+configured fleet, because "throughput scales with executors" is a comparison rather than a
+threshold. Read that comparison for how the load divides — each executor carries its share of the
+rows and none of them waits on a coordinator — rather than for a wall-clock speed-up: with
+stand-in agents that answer immediately, the merge queue's own sequencing is the bound, not the
+number of executors. The report also carries the wait from a row being requested to being claimed,
+which is the latency a single master session used to set by its poll interval.
+
+What a conducted run stands in for is named in its own report and never implied: the provider (no
+GitHub is reachable in a witness run) and the four judgments a language model makes. Each stand-in
+does to the control plane exactly what that session really does and takes no coordination decision
+of its own. So is the limit that leaves: the agents answer immediately, so the run measures the
+coordination this change owns — who claims a row, how long one waits, whether anything sits idle
+while actionable, and whether a master is needed at all — not how long a human-scale agent takes to
+think. `docs/architecture.md` says the same in one paragraph; the arithmetic for both readings is
+`src/throughput.ts`, the same module `master status` reports from.
 
 ### Workers pull their own work
 

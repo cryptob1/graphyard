@@ -19,7 +19,7 @@ import { attachCommand, runningSessions, sessionHandleLimit, sessionSummary } fr
 import { pipelineSpeedSummary, speedTarget } from '../src/pipeline-speed.js';
 import { dispatchEffects, executorEffects, executorKinds, launchedSessionHandle, runDispatchTick, runExecutor, runExecutorTick, runWorkerPull, workerPullIntervalMs, emptyDispatchCursor, type DispatchEffects, type ExecutorEffects } from '../src/auto-dispatch.js';
 import { controlPlaneHandlers, executorMergeExecutor, judgmentInExecutorLoop } from '../src/executor.js';
-import { judgeThroughput, sampleQueue, settlingExecutors } from '../src/throughput.js';
+import { deliveryAttribution, judgeThroughput, sampleQueue, settlingExecutors } from '../src/throughput.js';
 import { runCycle, emptyDaemonState, type DaemonEffects } from '../src/master-daemon.js';
 import { assertMergeCandidate, mergeExecutionOwner, masterConfigSchema } from '../src/master.js';
 // @ts-expect-error Dependency-free worker entry point.
@@ -37,10 +37,10 @@ import WorkDetails from '../web/pages/work-details.js';
  * integration:multi-executor-throughput, integration:worker-pull-model,
  * integration:no-llm-in-critical-path, integration:typed-agent-requests and
  * integration:session-handles-visible. AC-6's proof is deliberately not among them: throughput
- * over real deliveries is measured against the live control plane by
- * `scripts/measure-throughput.mjs`, and no case here carries that proof's name, so nothing in
- * this file can be submitted as its evidence. The cases with ordinary names test the arithmetic
- * that witness applies.
+ * over real deliveries is measured by `scripts/measure-throughput.mjs`, which reads the running
+ * control plane and conducts a fleet run of its own, and no case here carries that proof's name,
+ * so nothing in this file can be submitted as its evidence. The cases with ordinary names test
+ * the arithmetic that witness applies.
  *
  * No test here runs a master session. The fleet tests drive whole items to delivery through the
  * queue, using the handlers Graphyard ships (`src/executor.ts`) over stubbed launchers; `runCycle`
@@ -849,52 +849,100 @@ test('integration:no-llm-in-critical-path — a full ready-to-delivered cycle ru
 
 // ---- AC-6: throughput without a master --------------------------------------------------------
 //
-// AC-6 is a claim about real deliveries — at least ten of them, with a submit→merge p50 inside
-// thirty minutes and nothing idle-but-actionable past five minutes — so `manual:throughput-without-master`
-// is produced by running `scripts/measure-throughput.mjs` against the live control plane, not from
-// this file. A fixture cannot establish it: a fleet of stubs finishing in milliseconds passes a
-// thirty-minute target whatever the loop does, and sampling a run that took three seconds says
-// nothing about a five-minute idle bound. No case here is named for that proof, so nothing in
-// this file can be submitted as its evidence.
+// AC-6 is a claim about real deliveries — at least ten of them, made with no master session
+// running, with a submit→merge p50 inside thirty minutes and nothing idle-but-actionable past
+// five minutes. `manual:throughput-without-master` is produced by `scripts/measure-throughput.mjs`
+// rather than from this file, and no case here is named for that proof, so nothing in this file
+// can be submitted as its evidence.
 //
-// What is tested here is the arithmetic the witness applies, against windows it must refuse.
+// What is tested here is the arithmetic the witness applies: which deliveries the criterion is
+// stated over, and the windows it must refuse.
 
-test('the throughput witness refuses a window with too few deliveries, a slow p50, an idle-but-actionable row or a hand-off to a master', () => {
-  const at = '2026-09-20T12:00:00.000Z', clock = Date.parse(at);
-  const delivered = (index: number, submitToMergeMinutes: number, interventions = { blocked: 0, requirements: 0 }) => ({
+/** A delivered item, with the queue history that says whether the fleet or a master moved it. */
+function deliveredFixture(clock: number, index: number, submitToMergeMinutes: number, options: { interventions?: { blocked: number; requirements: number }; settledBy?: string | null } = {}) {
+  const interventions = options.interventions ?? { blocked: 0, requirements: 0 };
+  const settledBy = options.settledBy === undefined ? 'executor-a@host-1' : options.settledBy;
+  const mergedAt = new Date(clock - 3_600_000 + index).toISOString();
+  const submittedAt = new Date(clock - 3_600_000 - submitToMergeMinutes * 60_000 + index).toISOString();
+  return {
     id: `work-${index}`, key: `GY-${index}`, stage: 'done', dependencies: [], evidence: [], violations: [], gates: [],
-    delivery: { mergeSha: mergeSha, mergedAt: new Date(clock - 3_600_000 + index).toISOString() },
+    delivery: { mergeSha, mergedAt },
     pipeline: {
-      attempts: [{ epoch: 1, owner: 'agent-a', claimedAt: new Date(clock - 7_200_000).toISOString(), endedAt: new Date(clock - 3_600_000 - submitToMergeMinutes * 60_000 + index).toISOString(), end: 'submitted' }],
-      submittedAt: new Date(clock - 3_600_000 - submitToMergeMinutes * 60_000 + index).toISOString(),
-      resubmittedAt: new Date(clock - 3_600_000 - submitToMergeMinutes * 60_000 + index).toISOString(),
-      reworkRounds: 0, interventions,
+      attempts: [{ epoch: 1, owner: 'agent-a', claimedAt: new Date(clock - 7_200_000).toISOString(), endedAt: submittedAt, end: 'submitted' }],
+      submittedAt, resubmittedAt: submittedAt, reworkRounds: 0, interventions,
     },
-  } as unknown as Work);
+    // The queue's own account of who moved it after it submitted. A master daemon claims nothing
+    // from the queue, so a delivery it drove carries no settlement at all.
+    actionQueue: { actions: [], history: settledBy ? [{ id: 'd'.repeat(32), kind: 'merge', work: `work-${index}`, key: `GY-${index}`, state: 'done', result: 'done',
+      history: [{ at: mergedAt, event: 'completed', requester: 'graphyard', executor: settledBy, result: 'done', reason: 'merge requested' }] }] : [] },
+  } as unknown as Work;
+}
 
-  // Ten quick deliveries, nothing waiting: the window is certifiable.
+test('the throughput witness judges the deliveries AC-6 is stated over, and refuses a window with too few of them, a slow p50 or an idle-but-actionable row', () => {
+  const at = '2026-09-20T12:00:00.000Z', clock = Date.parse(at);
+  const delivered = (index: number, submitToMergeMinutes: number, options?: Parameters<typeof deliveredFixture>[3]) => deliveredFixture(clock, index, submitToMergeMinutes, options);
+
+  // Ten quick deliveries the queue moved, nothing waiting: the window is certifiable.
   const quick = Array.from({ length: 10 }, (_unused, index) => delivered(index, 4));
   const clean = judgeThroughput(quick, clock, [sampleQueue(quick, new Date(clock))]);
   assert.equal(clean.met, true, clean.reasons.join('; '));
   assert.equal(clean.deliveries, 10);
+  assert.deepEqual(clean.excluded, []);
   assert.equal(clean.worstIdle, null);
   assert.equal(clean.thresholds.submitToMergeP50Ms, 30 * 60_000);
   assert.equal(clean.thresholds.idleMs, 5 * 60_000);
 
+  // A delivery no executor settled a row on was moved by something that is not the queue, which
+  // is what a master session is. It is excluded and said so, never averaged into the population.
+  const byMaster = delivered(10, 4, { settledBy: null });
+  assert.equal(deliveryAttribution(byMaster, clock)!.masterless, false);
+  assert.match(deliveryAttribution(byMaster, clock)!.reason!, /^no action row was settled by an executor after it submitted/);
+  const masterMoved = judgeThroughput([...quick.slice(0, 9), byMaster], clock, [sampleQueue(quick, new Date(clock))]);
+  assert.equal(masterMoved.met, false);
+  assert.equal(masterMoved.deliveries, 9);
+  assert.equal(masterMoved.delivered, 10);
+  assert.match(masterMoved.reasons.join('; '), /9 of the 10 deliveries in the window were made with no master session running/);
+  assert.deepEqual(masterMoved.excluded.map(entry => entry.key), ['GY-10']);
+
+  // A settlement recorded before the item submitted belongs to an earlier attempt, so it does not
+  // say the queue moved this delivery.
+  const stale = delivered(11, 4);
+  stale.actionQueue!.history[0].history[0].at = new Date(clock - 6_000_000).toISOString();
+  assert.equal(deliveryAttribution(stale, clock)!.masterless, false);
+
+  // A hand-off to a master or operator between submit and merge is a master in the path by
+  // definition, so that delivery leaves the population too — and only that one.
+  const handed = delivered(12, 4, { interventions: { blocked: 1, requirements: 0 } });
+  const attribution = deliveryAttribution(handed, clock)!;
+  assert.equal(attribution.masterless, false);
+  assert.match(attribution.reason!, /^1 hand-off to a master or operator between submit and merge/);
+  const withHandoff = judgeThroughput([...quick, handed], clock, [sampleQueue(quick, new Date(clock))]);
+  assert.equal(withHandoff.met, true, 'the ten deliveries the fleet moved still stand on their own');
+  assert.equal(withHandoff.deliveries, 10);
+  assert.deepEqual(withHandoff.excluded.map(entry => entry.key), ['GY-12']);
+
   // Nine is not ten; a witness must not certify a window the criterion does not cover.
   const thin = judgeThroughput(quick.slice(0, 9), clock, [sampleQueue(quick.slice(0, 9), new Date(clock))]);
   assert.equal(thin.met, false);
-  assert.match(thin.reasons.join('; '), /9 deliveries measured in the window; the criterion asks for at least 10/);
+  assert.match(thin.reasons.join('; '), /9 of the 9 deliveries in the window were made with no master session running; the criterion asks for at least 10/);
 
   // A p50 past the target is refused, whatever else the window shows.
   const slow = Array.from({ length: 10 }, (_unused, index) => delivered(index, 45));
   const slowVerdict = judgeThroughput(slow, clock, [sampleQueue(slow, new Date(clock))]);
   assert.equal(slowVerdict.met, false);
-  assert.match(slowVerdict.reasons.join('; '), /submit→merge p50 45 min exceeds the 30-minute target/);
+  assert.match(slowVerdict.reasons.join('; '), /submit→merge p50 45 min over the 10 masterless deliveries exceeds the 30-minute target/);
+  // And the p50 is over the population, not over the window: ten quick masterless deliveries are
+  // not made slow by a slow one a master drove.
+  const dragged = [13, 14, 15].map(index => delivered(index, 600, { settledBy: null }));
+  const mixed = judgeThroughput([...quick, ...dragged], clock, [sampleQueue(quick, new Date(clock))]);
+  assert.equal(mixed.met, true, mixed.reasons.join('; '));
+  assert.equal(mixed.deliveries, 10);
+  assert.equal(mixed.windowSubmitToMerge.count, 13);
+  assert.ok(mixed.windowSubmitToMerge.p90Ms > mixed.submitToMergeP90Ms, 'the whole window is reported beside the population, never in place of it');
 
   // A row nobody has claimed past the idle bound is exactly the stall the inversion is for, and
   // one sample that saw it refuses the window even though every other sample was clean.
-  const stalled = { ...structuredClone(quick[0]), id: 'work-stalled', key: 'GY-STALL', stage: 'ready' } as unknown as Work;
+  const stalled = { ...structuredClone(quick[0]), id: 'work-stalled', key: 'GY-STALL', stage: 'ready', delivery: null } as unknown as Work;
   stalled.actionQueue = { actions: [{ id: 'a'.repeat(32), kind: 'dispatch', work: stalled.id, key: stalled.key, inputs: { kind: 'dispatch', target: 'implementation', epoch: 0, priority: 1, plannedFiles: [] },
     gate: 'build', refusal: 'Worker has not submitted implementation for this attempt', reason: 'GY-STALL is ready and unassigned', binding: 'dispatch:0',
     requestedBy: 'graphyard', requestedAt: new Date(clock - 9 * 60_000).toISOString(), state: 'pending', claim: null, attempts: 0, history: [] }], history: [] } as any;
@@ -904,22 +952,13 @@ test('the throughput witness refuses a window with too few deliveries, a slow p5
   assert.equal(stalledVerdict.samples, 2);
   assert.match(stalledVerdict.reasons.join('; '), /GY-STALL was idle but actionable for 9 min/);
 
-  // A hand-off to a master or operator between submit and merge is the thing AC-6 says must not
-  // be needed, so a window that contains one is refused even when every number is inside target.
-  const handed = [...quick.slice(0, 9), delivered(9, 4, { blocked: 1, requirements: 0 })];
-  const handedVerdict = judgeThroughput(handed, clock, [sampleQueue(handed, new Date(clock))]);
-  assert.equal(handedVerdict.met, false);
-  assert.match(handedVerdict.reasons.join('; '), /1 delivery\(ies\) needed a hand-off to a master or operator/);
-
   // The executors that settled rows come from the queue's own history, which is what says a fleet
   // rather than a master moved the window: a master daemon claims nothing and so settles nothing.
-  const settled = structuredClone(stalled) as Work;
-  settled.actionQueue!.actions[0].history = [{ at, event: 'completed', requester: 'graphyard', executor: 'executor-a@host-2', result: 'done', reason: 'dispatched' }];
-  assert.deepEqual(settlingExecutors([settled], null), ['executor-a@host-2']);
-  assert.deepEqual(settlingExecutors([settled], clock + 1), [], 'a settlement before the window is not counted in it');
+  assert.deepEqual(settlingExecutors([quick[0]], null), ['executor-a@host-1']);
+  assert.deepEqual(settlingExecutors([quick[0]], clock + 1), [], 'a settlement before the window is not counted in it');
 });
 
-test('the throughput witness is what the fleet run is measured with: a real drain leaves no idle row and no hand-off', async () => {
+test('the throughput witness is what the fleet run is measured with: a real drain leaves no idle row, no hand-off and a population of its own deliveries', async () => {
   const items: Work[] = [];
   for (let index = 0; index < 12; index++) items.push(await release(await created()));
   const mine = new Set(items.map(item => item.id));
@@ -932,17 +971,21 @@ test('the throughput witness is what the fleet run is measured with: a real drai
 
   for (const item of items) assert.equal((await reload(item)).stage, 'done', `${item.key} was delivered`);
   const all = (await store.list()).filter(item => mine.has(item.id));
-  // The measurement the witness makes, over this run's own items. It says nothing about the
-  // thirty-minute target — twelve deliveries that took seconds cannot — but it does establish
-  // that nothing sat idle-but-actionable, that no hand-off was needed, and that the rows were
-  // settled by the two executors rather than by anything else.
+  // The measurement the witness makes, over this run's own items. Twelve deliveries that took
+  // seconds say nothing about a human-scale agent, which is why the conducted run reports that
+  // limit with its verdict; what they do establish is that every one of them is in the population
+  // — the queue moved it and nothing was handed to a master — that nothing sat idle-but-actionable,
+  // and that the rows were settled by the two executors rather than by anything else.
   assert.equal(Math.max(...log.idle), 0, 'no row waited longer than the idle bound at any sample');
   assert.deepEqual(samples[0].idle, []);
   const witness = judgeThroughput(all, Date.now(), samples);
-  assert.equal(witness.deliveries, 12);
+  assert.equal(witness.delivered, 12);
+  assert.equal(witness.deliveries, 12, 'every delivery the fleet made is one the criterion is stated over');
+  assert.deepEqual(witness.excluded, []);
   assert.equal(witness.worstIdle, null);
   assert.equal(witness.handoffs.items, 0, 'no delivery needed a hand-off to a master or operator');
   assert.deepEqual(witness.executors.sort(), [executorA.id, executorB.id]);
+  assert.equal(witness.met, true, witness.reasons.join('; '));
 
   // Every stall had a named action. An open item with no computed action was never observed, and
   // that is the property the inversion buys: there is no situation the loop has no step for.

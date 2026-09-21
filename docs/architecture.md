@@ -144,11 +144,16 @@ A merge brokered from the loop is owned by the executor instance that acquired i
 coordinator principal alone, so a daemon, an interactive merge and any number of executors sharing
 one credential stand down from each other's in-flight executions instead of resuming them.
 
-Whether this is worth it is a measurement, not a claim: `scripts/measure-throughput.mjs` reads the
-live control plane and judges what it recorded — the deliveries in a window and their submit→merge
-p50, every sample of the live queue and the worst row left unclaimed past the five-minute idle
-bound, the hand-offs to a master or operator between submit and merge, and the executor identities
-that settled the rows. A master daemon claims nothing from the queue, so it settles nothing in it.
+Whether this is worth it is a measurement, not a claim, and it is stated over deliveries made with
+no master session running. `src/throughput.ts` decides that per delivery from the record: the
+queue's own history has to show a stateless executor settling the rows that moved the item after it
+submitted, and nothing may have been handed to a master or an operator in between. A master daemon
+claims nothing from the queue, so it settles nothing in it. `scripts/measure-throughput.mjs` takes
+two readings over that population — the live control plane, and a run it conducts itself on a
+scratch control plane with stateless executors and no master, which is the only way to have such a
+window before the change ships. Both report the submit→merge p50, every sample of the queue and the
+worst row left unclaimed past the five-minute idle bound, and the conducted run names everything it
+stood in for and the limit that leaves.
 
 None of this authorizes progression. An action is a fact about what is missing; the gates still
 decide from evidence and verdicts alone.
