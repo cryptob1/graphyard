@@ -72,21 +72,44 @@ export function dispatchIneligibility(work: Work): string | null {
   return null;
 }
 
-/** Whether the current head needs a launched reviewer, with the reason either way. */
-export function reviewNeed(work: Work): { needed: boolean; reason: string } {
-  if (!work.policy.review) return { needed: false, reason: 'the policy requires no independent review' };
+/**
+ * Why the current head does or does not need a launched reviewer.
+ *
+ * `needed` answers the dispatcher; `state` names *which* answer it is, because two of the
+ * negative ones are not "nothing to do" at all. A standing change request and a head that does
+ * not contain the base tip both mean no review can be asked for this head — the item needs a new
+ * one — and a caller that reads only the review gate's first refusal ("approval is required")
+ * would keep asking for a review nobody can give. `model/next-action.ts` maps these states to the
+ * action that actually moves the item, so the two readings cannot drift apart.
+ */
+export type ReviewState = 'required' | 'not-required' | 'other-provider' | 'approved' | 'carried' | 'changes-requested' | 'base-not-contained';
+export function reviewNeed(work: Work): { needed: boolean; reason: string; state: ReviewState } {
+  if (!work.policy.review) return { needed: false, state: 'not-required', reason: 'the policy requires no independent review' };
   const provider = reviewProviderOf(work.policy);
-  if (provider !== 'github') return { needed: false, reason: `the control plane dispatches ${provider} review through GitHub itself` };
+  if (provider !== 'github') return { needed: false, state: 'other-provider', reason: `the control plane dispatches ${provider} review through GitHub itself` };
   const approval = exactApproval(work);
-  if (approval) return { needed: false, reason: `approved by ${approval.reviewer} on ${short(approval.sha)}` };
+  if (approval) return { needed: false, state: 'approved', reason: `approved by ${approval.reviewer} on ${short(approval.sha)}` };
   const carried = carriedApproval(work);
-  if (carried) return { needed: false, reason: `approval of ${short(carried.originalSha)} by ${carried.reviewer} carried to this head` };
+  if (carried) return { needed: false, state: 'carried', reason: `approval of ${short(carried.originalSha)} by ${carried.reviewer} carried to this head` };
   const candidate = work.candidate!, observation = work.observation!;
   const changes = observation.reviews.find(review => review.sha === candidate.sha && review.state === 'CHANGES_REQUESTED');
-  if (changes) return { needed: false, reason: `${changes.reviewer} requested changes on ${short(candidate.sha)}; the next head is reviewed afresh` };
-  if (observation.baseTipContained === false) return { needed: false, reason: `head ${short(candidate.sha)} does not contain the base tip ${short(observation.baseTip ?? '')}; a review of it would be dismissed when GitHub recomputes the merge base` };
-  return { needed: true, reason: `independent approval of ${short(candidate.sha)} against ${short(candidate.baseSha)} under policy revision ${work.policyRevision} is required` };
+  if (changes) return { needed: false, state: 'changes-requested', reason: `${changes.reviewer} requested changes on ${short(candidate.sha)}; the next head is reviewed afresh` };
+  if (observation.baseTipContained === false) return { needed: false, state: 'base-not-contained', reason: `head ${short(candidate.sha)} does not contain the base tip ${short(observation.baseTip ?? '')}; a review of it would be dismissed when GitHub recomputes the merge base` };
+  return { needed: true, state: 'required', reason: `independent approval of ${short(candidate.sha)} against ${short(candidate.baseSha)} under policy revision ${work.policyRevision} is required` };
 }
+
+/**
+ * The handle ids the sessions this item is currently asking for may record for themselves.
+ *
+ * A launched reviewer or producer holds no lease, and its handle is keyed on the dispatch request
+ * that asked for it (`launchedSessionHandle`). So a live request is the item naming that session:
+ * it is what lets the session fill in the tab and transcript its launcher could not know, without
+ * opening handle creation to every credential that can read the item.
+ */
+export const liveDispatchHandleIds = (work: Work): string[] =>
+  [work.autoDispatch?.review ?? null, ...(work.autoDispatch?.producers ?? [])]
+    .filter((request): request is DispatchRequest => !!request && request.state === 'requested')
+    .map(request => request.id);
 
 export type ProofOutcome = 'proven' | 'unproven' | 'failed';
 /** Every automatable required proof with what the trusted evidence bound to this head says about it. */

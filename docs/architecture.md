@@ -67,6 +67,18 @@ wrote a rule for becomes an escalation rather than silence. Two refusals name no
 own item because they belong to another: an unfinished dependency is that dependency's dispatch,
 and a queue position is the predecessor's merge.
 
+A refusal is classified from the item, not from its text alone, because the same sentence can
+stand for different situations. The review gate always refuses with "approval is required", but
+`reviewNeed` may already have decided that no review can be asked for this head: a reviewer has
+requested changes on it, so the item owes a new one (`request-rework`), or the head does not
+contain the base tip, so any approval would be dismissed and a base refresh is what it waits for
+(`resync`). A base the control plane could not merge in cleanly is named `request-rework` for the
+same reason — its own refusal says to resolve the conflict and push, and that the approval and
+proofs bound to that head do not survive the resolution, which no mechanical step can do. Naming
+an action nobody can complete is the failure mode this mapping exists to prevent: the row would
+be claimed, fail or complete without effect, and come back forever while the item is never shown
+as owing a judgment.
+
 Each outstanding action is a durable row on the work aggregate (`src/model/actions.ts`), written
 inside the same advisory-locked transaction as every other decision. A row's id is a hash of what
 it binds — kind, item, situation — never of when it was made, so a re-derivation after a restart

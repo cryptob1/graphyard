@@ -1,11 +1,16 @@
 import { queueSequencingReason } from '../merge-queue.js';
-import type { ProducerGroup } from './dispatch.js';
 import { automatableOutcomes, dispatchIneligibility, reviewNeed } from './dispatch.js';
 import { standingEscalations } from './escalation.js';
 import { leadHoldRefusal } from './delegation.js';
 import { deliveryState } from './delivery.js';
 import { openAgentRequests } from './agent-requests.js';
 import type { Work } from './work.js';
+import { nextActionKinds, nextActionLlmRoles, type NextAction, type NextActionInputs, type NextActionKind } from './action-kinds.js';
+
+// The vocabulary lives in `action-kinds.ts`; it is re-exported here so that what an item needs
+// next and the kinds it can need are still read from one place.
+export { actionJudgment, executorRunnableKinds, llmRoles, mechanicalActionKinds, nextActionKinds, nextActionLlmRoles } from './action-kinds.js';
+export type { LlmRole, NextAction, NextActionInputs, NextActionKind } from './action-kinds.js';
 
 /**
  * The typed next action.
@@ -28,77 +33,6 @@ import type { Work } from './work.js';
  * from evidence and verdicts alone.
  */
 
-export const nextActionKinds = ['dispatch', 'request-review', 'request-rework', 'approve-scope', 'resync', 'reclaim', 'merge', 'verify-deployment', 'escalate'] as const;
-export type NextActionKind = typeof nextActionKinds[number];
-
-/**
- * Where a language model is required, per action kind. The executor step itself never needs one:
- * an executor launches a session, calls the provider, or records a fact. `llmRole` names the
- * judgment that happens *inside* what the action starts, which is the only place a model belongs
- * (see AGENTS.md: agents implement, review, approve, produce evidence and resolve escalations).
- * A kind whose role is `null` is mechanical end to end. `dispatch` carries the one distinction the
- * kind alone cannot make: dispatching a worker starts an implementation, dispatching a producer
- * starts evidence production, and the computed action names which (`llmRole` on the action).
- */
-export type LlmRole = 'implement' | 'review' | 'produce-evidence' | 'approve-decision' | 'resolve-escalation';
-export const nextActionLlmRoles: Record<NextActionKind, LlmRole | null> = {
-  dispatch: 'implement', 'request-review': 'review', 'request-rework': 'approve-decision',
-  'approve-scope': null, resync: null, reclaim: null, merge: null, 'verify-deployment': null,
-  escalate: 'resolve-escalation',
-};
-export const llmRoles: readonly LlmRole[] = ['implement', 'review', 'produce-evidence', 'approve-decision', 'resolve-escalation'];
-/** The action kinds an executor can drive to completion with no language model anywhere in the loop. */
-export const mechanicalActionKinds = nextActionKinds.filter(kind => nextActionLlmRoles[kind] === null);
-
-/**
- * Where the judgment for a kind happens, which is what decides whether an executor may run it:
- *
- * - `none` — mechanical end to end; the step is a provider call or a record.
- * - `in-session` — the step launches a session and walks away; the model works inside that
- *   session, under its own credential, never inside the loop.
- * - `in-step` — running the action *is* the judgment. An executor must never have a handler for
- *   one of these: configuring one would be the loop quietly deciding what the project reserves
- *   for an agent, and the row would stop being visible as something a judgment still owes.
- *
- * This is the rule `executor.ts` checks when handlers are configured, so adding a kind cannot
- * silently widen what an executor runs.
- */
-export const actionJudgment: Record<NextActionKind, 'none' | 'in-session' | 'in-step'> = {
-  dispatch: 'in-session', 'request-review': 'in-session',
-  'request-rework': 'in-step', escalate: 'in-step',
-  'approve-scope': 'none', resync: 'none', reclaim: 'none', merge: 'none', 'verify-deployment': 'none',
-};
-/** Every kind an executor may hold a handler for: everything but the judgments made in the step itself. */
-export const executorRunnableKinds = nextActionKinds.filter(kind => actionJudgment[kind] !== 'in-step');
-
-export type NextActionInputs =
-  | { kind: 'dispatch'; target: 'implementation'; epoch: number; priority: number; plannedFiles: string[] }
-  | { kind: 'dispatch'; target: 'proof'; group: ProducerGroup; proofs: string[]; requestId: string | null; pr: number; sha: string; baseSha: string; policyRevision: number }
-  | { kind: 'request-review'; provider: string; requestId: string | null; pr: number; sha: string; baseSha: string; policyRevision: number }
-  | { kind: 'request-rework'; pr: number | null; sha: string | null; detail: string }
-  | { kind: 'approve-scope'; epoch: number; paths: string[]; requestedBy: string; detail: string }
-  | { kind: 'resync'; pr: number | null; sha: string | null; baseSha: string | null; baseTip: string | null; observedAt: string | null }
-  | { kind: 'reclaim'; epoch: number; owner: string | null; leaseExpiresAt: string | null; quarantined: boolean }
-  | { kind: 'merge'; pr: number; sha: string; baseSha: string; policyRevision: number; queuePosition: number | null }
-  | { kind: 'verify-deployment'; mergeSha: string; mergedAt: string; state: string }
-  | { kind: 'escalate'; trigger: string; detail: string };
-
-export interface NextAction {
-  kind: NextActionKind;
-  /** The item the action is about: its id and key, so an executor needs no second lookup. */
-  work: string; key: string;
-  /** The gate whose refusal named this action, and that refusal verbatim; null for actions no gate raised. */
-  gate: string | null; refusal: string | null;
-  reason: string;
-  inputs: NextActionInputs;
-  /** The judgment inside what this action starts, or null when running it needs no language model. */
-  llmRole: LlmRole | null;
-  /**
-   * What binds this action to the state that asked for it. Two evaluations of the same situation
-   * produce the same binding, which is what lets the queue recognise an action it already holds.
-   */
-  binding: string;
-}
 
 const short = (sha: string | null | undefined) => sha ? sha.slice(0, 12) : 'none';
 
@@ -132,8 +66,11 @@ const refusalRules: { gate: string | null; match: RegExp; kind: NextActionKind }
   { gate: 'build', match: /^Pull request has not been independently observed$/, kind: 'resync' },
   { gate: 'build', match: /has not been compared against the base branch tip/, kind: 'resync' },
   { gate: 'build', match: /^(Candidate changes|Out-of-scope regression)/, kind: 'request-rework' },
-  // A base the control plane cannot merge in cleanly is the worker's to resolve, on a fresh head.
-  { gate: 'build', match: /conflict/i, kind: 'resync' },
+  // A base the control plane cannot merge in cleanly is the worker's to resolve, on a fresh head:
+  // the refusal itself says to run `graphyard sync`, resolve it and push, and that approval and
+  // proofs do not survive the resolution. Re-reading the pull request cannot produce that head, so
+  // a conflict is rework — the one kind that says a judgment owes this item a new commit.
+  { gate: 'build', match: /conflict/i, kind: 'request-rework' },
   // review
   { gate: 'review', match: /^Outstanding change requests/, kind: 'request-rework' },
   { gate: 'review', match: /.*/, kind: 'request-review' },
@@ -152,19 +89,46 @@ const refusalRules: { gate: string | null; match: RegExp; kind: NextActionKind }
 ];
 
 /**
- * The single action kind a refusal maps to. `work` decides the two cases the refusal text cannot:
- * a CI check that reported a failure (rework) rather than one still to answer (re-read), and a
- * merge-gate refusal raised by a standing escalation or lead hold rather than by the queue.
+ * What a review-gate refusal is really waiting on, when the reviewer's own reading of the head
+ * answers it, or null when an independent review is genuinely what is missing.
+ *
+ * The review gate's first refusal is always "approval ... is required", whatever stands behind it.
+ * But `reviewNeed` — the same function auto-dispatch uses to decide whether to raise a review
+ * request — may already have answered that no review can be asked for this head: a reviewer has
+ * requested changes on it, or it does not contain the base tip, so GitHub would dismiss any
+ * approval of it. Naming `request-review` there asks for something no executor can ever complete:
+ * no review request is raised, the handler refuses for want of one, and the row retries forever
+ * while the item is never shown as owing a new head. These are the two silences AC-1 exists to end.
  */
-export function refusalAction(work: Pick<Work, 'observation' | 'policy' | 'escalation' | 'escalations' | 'leadHold'>, gate: string, refusal: string): NextActionKind {
+export function reviewStandstill(work: Work): { kind: NextActionKind; reason: string } | null {
+  if (!work.candidate || !work.observation) return null;
+  const need = reviewNeed(work);
+  // Changes requested on this exact head: the item needs a new commit, which is a judgment's to make.
+  if (need.state === 'changes-requested') return { kind: 'request-rework', reason: need.reason };
+  // A head that does not contain the base tip is answered by a fresh reading and base refresh.
+  if (need.state === 'base-not-contained') return { kind: 'resync', reason: need.reason };
+  return null;
+}
+
+/**
+ * The single action kind a refusal maps to. `work` decides the three cases the refusal text cannot:
+ * a CI check that reported a failure (rework) rather than one still to answer (re-read), a
+ * merge-gate refusal raised by a standing escalation or lead hold rather than by the queue, and a
+ * review refusal standing over a head no review can be asked for (`reviewStandstill`).
+ */
+export function refusalAction(work: Work, gate: string, refusal: string): NextActionKind {
   if (gate === 'test' && /^Required CI check (.+) has not passed on the current candidate$/.test(refusal)) {
     const name = refusal.match(/^Required CI check (.+) has not passed on the current candidate$/)![1];
     const runs = (work.observation?.checks ?? []).filter(check => check.name === name);
     const latest = runs.length ? runs.reduce((newest, check) => (check.attempt ?? 0) >= (newest.attempt ?? 0) ? check : newest) : null;
     return latest && ['failure', 'timed_out', 'action_required', 'cancelled'].includes(latest.result) ? 'request-rework' : 'resync';
   }
+  if (gate === 'review') {
+    const standstill = reviewStandstill(work);
+    if (standstill) return standstill.kind;
+  }
   if (gate === 'merge') {
-    if (standingEscalations(work).some(entry => refusal.includes(entry.reason)) || leadHoldRefusal(work as Work) === refusal) return 'escalate';
+    if (standingEscalations(work).some(entry => refusal.includes(entry.reason)) || leadHoldRefusal(work) === refusal) return 'escalate';
     // The queue's own sequencing — waiting a turn, waiting for a speculative tip — is the merge
     // action making progress, not a refusal anyone acts on differently.
     if (queueSequencingReason(refusal)) return 'merge';
@@ -270,6 +234,11 @@ export function nextAction(work: Work, all: Work[], now: Date): NextAction | nul
       }
       return make('dispatch', `${key} is ready and unassigned: ${refusal}`, dispatchInputs(work), `dispatch:${work.epoch}`, failing.name, refusal);
     }
+    // A review refusal the reviewer's own reading already answered says "approval is required"
+    // while the item is actually waiting for a new head or a base refresh; the reason and the
+    // detail name what it is waiting for rather than the refusal that classified it.
+    const standstill = failing.name === 'review' ? reviewStandstill(work) : null;
+    const detail = standstill?.reason ?? refusal;
     if (kind === 'request-review') {
       // Nothing may be asked of a head the control plane has not observed as a live candidate;
       // reviewNeed reads that observation, so ineligibility is decided before it is consulted.
@@ -281,9 +250,9 @@ export function nextAction(work: Work, all: Work[], now: Date): NextAction | nul
         { kind: 'request-review', provider: work.policy.reviewProvider ?? 'github', requestId: request?.id ?? null, pr: work.candidate!.pr, sha: work.candidate!.sha, baseSha: work.candidate!.baseSha, policyRevision: work.policyRevision },
         binding, failing.name, refusal);
     }
-    if (kind === 'request-rework') return make('request-rework', `${key} needs a new head: ${refusal}`,
-      { kind: 'request-rework', pr: work.candidate?.pr ?? null, sha: work.candidate?.sha ?? null, detail: refusal }, binding, failing.name, refusal);
-    if (kind === 'resync') return make('resync', `${key} is waiting on a fresh reading of its pull request: ${refusal}`, resyncInputs(work), binding, failing.name, refusal);
+    if (kind === 'request-rework') return make('request-rework', `${key} needs a new head: ${detail}`,
+      { kind: 'request-rework', pr: work.candidate?.pr ?? null, sha: work.candidate?.sha ?? null, detail }, binding, failing.name, refusal);
+    if (kind === 'resync') return make('resync', `${key} is waiting on a fresh reading of its pull request: ${detail}`, resyncInputs(work), binding, failing.name, refusal);
     // Waiting a turn in the merge queue is nobody's action: the predecessor's merge is the one
     // that moves this item, exactly as an unfinished dependency is that item's dispatch.
     if (kind === 'merge' && failing.reasons.every(entry => queueSequencingReason(entry)) && /^Merge queue position /.test(refusal)) return null;
