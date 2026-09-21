@@ -309,8 +309,10 @@ test('integration:registry-driven-selection — an executor\'s action runs on th
   // …and a role the registry does not define is not guessed at: reviewer falls to the local profile, which names none.
   assert.deepEqual(await selectAccount(config, 'reviewer', { name: 'review-a' }, probe), { account: null, health: null, skipped: [] });
   const source = await readFile(new URL('../src/master.ts', import.meta.url), 'utf8');
-  const launchPaths = source.slice(source.indexOf('export async function launchApprover'), source.indexOf('export const autonomySubcommands')) + source.slice(source.indexOf("if (id === 'approver')"), source.indexOf("if (id === 'approver')") + 400);
-  assert.doesNotMatch(launchPaths, /\?\? '(claude|codex|cursor|opencode|muse)'/, 'no launch path falls back to a runtime named in code');
+  const daemon = await readFile(new URL('../src/master-daemon.ts', import.meta.url), 'utf8');
+  const launchPaths = source.slice(source.indexOf('export async function launchApprover'), source.indexOf('export const autonomySubcommands')) + source.slice(source.indexOf("if (id === 'approver')"), source.indexOf("if (id === 'approver')") + 400)
+    + daemon.slice(daemon.indexOf("const approver: DaemonEffects['approver']"), daemon.indexOf("const approver: DaemonEffects['approver']") + 400);
+  assert.doesNotMatch(launchPaths, /\?\? '(claude|codex|cursor|opencode|muse)'/, 'no launch path falls back to a runtime named in code, in the loop as much as in the command');
 
   // A launch that fails *after* the choice gives its session back on every path, not only the
   // worker's: the reviewer's token mint fails here, and its account and the role's one slot are
