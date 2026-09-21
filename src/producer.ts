@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { z } from 'zod';
-import { accountLaunch, atomicPrivateWrite, autonomousSession, closeHerdrPane, createdHerdrTab, deliverPrompt, herdrJson, loadMasterConfig, prepareSessionHarness, privateFile, readProducerCredential, selectAccount, sharedGitDirectory, stopCreatedHerdrTab, type EnvironmentProbe, type PromptDelivery, type HerdrAgent, type MasterConfig, type ProducerProfile, type SessionRetryReport } from './master.js';
+import { accountLaunch, acknowledgeLaunch, acknowledgementMs, atomicPrivateWrite, autonomousSession, closeHerdrPane, createdHerdrTab, deliverPrompt, herdrJson, loadMasterConfig, markReprompted, neverStarted, prepareSessionHarness, privateFile, readProducerCredential, readSessionScreen, repromptText, selectAccount, sessionActivity, settlementDue, settlementReason, sharedGitDirectory, startAgentSession, stopCreatedHerdrTab, type EnvironmentProbe, type PromptDelivery, type HerdrAgent, type MasterConfig, type ProducerProfile, type RequestDelivery, type SessionRetryReport } from './master.js';
 import { implementerIdentities, type Work } from './model.js';
 import type { DispatchRequest } from './model/dispatch.js';
 
@@ -39,7 +39,14 @@ export const producerRecordSchema = z.object({
   outcome: z.record(z.string(), z.enum(producerOutcomes)).default({}),
   /** When the session was first seen finished by Herdr without every proof submitted. */
   idleSince: z.string().min(1).max(40).optional(),
-  resolution: z.string().min(1).max(500).optional(),
+  /** How the request reached the session: on its command line, or as a paste for a runtime without that contract (GY-93). */
+  delivery: z.enum(['request', 'paste']).optional(),
+  /** Acknowledgement of the request, judged by the loop (acknowledgeLaunch): when sustained activity was seen, when it was re-prompted once, and the observation window. */
+  acknowledgedAt: z.string().min(1).max(40).optional(),
+  repromptedAt: z.string().min(1).max(40).optional(),
+  activeSince: z.string().min(1).max(40).optional(),
+  screen: z.string().min(1).max(64).optional(),
+  resolution: z.string().min(1).max(900).optional(),
   closedAt: z.string().min(1).max(40).optional(),
   closeFailure: z.string().min(1).max(500).optional(),
 }).strict();
@@ -63,25 +70,33 @@ export const producerIdleGraceMs = 5 * 60_000;
  * same request, up to `sessionRetryLimit` sessions in all, each after a wider wait than the last
  * (1, 4 and 16 minutes, never more than 30). Any other recorded state — pending, completed,
  * cancelled — means the request has its session, and nothing is launched for it again.
+ *
+ * A session that never started (GY-93: it took up neither its request nor the re-prompt) is a
+ * launch that failed, not work that failed, and it does not spend that budget: it neither counts
+ * toward the limit nor widens the wait, and the request is launched again after the base wait.
+ * Such sessions have a bound of their own, `unstartedRetryLimit`, because a request whose
+ * sessions keep not starting has a launcher problem that more launches will not fix.
  */
-export const sessionRetryLimit = 4, sessionRetryBaseMs = 60_000, sessionRetryMaxMs = 30 * 60_000;
+export const sessionRetryLimit = 4, sessionRetryBaseMs = 60_000, sessionRetryMaxMs = 30 * 60_000, unstartedRetryLimit = 3;
 export const sessionRetryDelay = (attempts: number) => Math.min(sessionRetryBaseMs * 4 ** Math.max(0, attempts - 1), sessionRetryMaxMs);
 const retriedStates = ['failed', 'expired'];
 export function sessionRetry(records: { requestId?: string; state: string; requestedAt: string; closedAt?: string | null; resolution?: string | null }[], requestId: string, now: number) {
   const launched = records.filter(record => record.requestId === requestId);
   const last = launched.at(-1);
-  const report = { requestId, attempts: launched.length, limit: sessionRetryLimit, last: last ? { state: last.state, resolution: last.resolution ?? null } : null };
+  const unstarted = launched.filter(neverStarted);
+  const started = launched.length - unstarted.length;
+  const report = { requestId, attempts: launched.length, started, neverStarted: unstarted.length, limit: sessionRetryLimit, unstartedLimit: unstartedRetryLimit, last: last ? { state: last.state, resolution: last.resolution ?? null } : null };
   if (!last) return { ...report, launch: true, settled: false, nextAt: null, exhausted: false };
   if (!retriedStates.includes(last.state)) return { ...report, launch: false, settled: true, nextAt: null, exhausted: false };
-  if (launched.length >= sessionRetryLimit) return { ...report, launch: false, settled: false, nextAt: null, exhausted: true };
-  const nextAt = Date.parse(last.closedAt ?? last.requestedAt) + sessionRetryDelay(launched.length);
+  if (started >= sessionRetryLimit || unstarted.length >= unstartedRetryLimit) return { ...report, launch: false, settled: false, nextAt: null, exhausted: true };
+  const nextAt = Date.parse(last.closedAt ?? last.requestedAt) + (neverStarted(last) ? sessionRetryBaseMs : sessionRetryDelay(started));
   return { ...report, launch: now >= nextAt, settled: false, nextAt: new Date(nextAt).toISOString(), exhausted: false };
 }
 /** The retry schedule of every request whose latest session failed or expired, as master status reports it. */
 export function sessionRetries(records: { requestId?: string; state: string; requestedAt: string; closedAt?: string | null; resolution?: string | null }[], now: number): SessionRetryReport[] {
   const requests = [...new Set(records.map(record => record.requestId).filter((id): id is string => !!id))];
   return requests.map(id => sessionRetry(records, id, now)).filter(retry => retry.last && retriedStates.includes(retry.last.state))
-    .map(({ requestId, attempts, limit, nextAt, exhausted, last }) => ({ requestId, attempts, limit, nextAt, exhausted, last }));
+    .map(({ requestId, attempts, started, neverStarted: unstarted, limit, unstartedLimit, nextAt, exhausted, last }) => ({ requestId, attempts, started, neverStarted: unstarted, limit, unstartedLimit, nextAt, exhausted, last }));
 }
 
 // The request must still be the one the record holds for the exact current candidate; a session
@@ -107,7 +122,7 @@ export function independentProducerProfiles(work: Work, profiles: ProducerProfil
   return profiles.filter(profile => !implementers.has(profile.principal));
 }
 
-export function producerPrompt(config: Pick<MasterConfig, 'repository' | 'cliPath'>, binding: ProducerBinding, profile: Pick<ProducerProfile, 'principal'>) {
+export function producerPrompt(config: Pick<MasterConfig, 'repository' | 'cliPath'>, binding: Pick<ProducerBinding, 'key' | 'pr' | 'sha' | 'baseSha' | 'policyRevision' | 'proofs'> & { group: string }, profile: Pick<ProducerProfile, 'principal'>) {
   const worktree = `/tmp/graphyard-proof-${binding.key.toLowerCase()}-${binding.sha.slice(0, 7)}`;
   const evidenceFile = (proof: string) => `${worktree}-${proof.replace(/[^a-zA-Z0-9]+/g, '-')}.evidence.json`;
   return `You are an independent Graphyard proof producer for ${config.repository}, principal ${profile.principal}. Produce trusted evidence for work item ${binding.key} (pull request #${binding.pr}) at exact head ${binding.sha} against base ${binding.baseSha} under policy revision ${binding.policyRevision}, for the ${binding.group} proof group: ${binding.proofs.join(', ')}. `
@@ -147,14 +162,14 @@ export async function launchProducer(root: string, work: Work, request: Dispatch
   // The producer loads its own role rules, never the master's. The harness follows the account's
   // runtime, so a cross-runtime failover keeps its role rules.
   const harness = await prepareSessionHarness(root, config, { role: 'producer', kind: launch.kind, profile: profile.name, credentialFiles: [profile.credentialFile] });
-  let pane: string | undefined, tabId: string | undefined;
+  let pane: string | undefined, tabId: string | undefined, delivery: RequestDelivery | undefined;
   try {
     const environment = { ...launch.environment, GRAPHYARD_URL: config.url, GRAPHYARD_TOKEN_FILE: profile.credentialFile, GRAPHYARD_HOST_ID: config.hostId, GRAPHYARD_PRODUCER: `${binding.key}@${binding.sha}` };
     const created = createdHerdrTab(herdrJson(['tab', 'create', ...(config.herdrWorkspace ? ['--workspace', config.herdrWorkspace] : []), '--cwd', root,
       '--label', `${binding.key} ${binding.group} proofs · ${profile.agentName}`, ...Object.entries(environment).flatMap(([name, value]) => ['--env', `${name}=${value}`]), '--no-focus'], dependencies.run));
     pane = created.pane; tabId = created.tab;
-    herdrJson(['agent', 'start', profile.agentName, '--kind', launch.kind!, '--pane', created.pane, '--', ...launch.args, ...harness.args], dependencies.run);
-    deliverPrompt(profile.agentName, producerPrompt(config, binding, profile), dependencies.run, dependencies.prompt);
+    // The request is the session's own first message, on the runtime's command line (GY-93).
+    ({ delivery } = startAgentSession(profile.agentName, launch.kind!, created.pane, [...launch.args, ...harness.args], producerPrompt(config, binding, profile), dependencies.run, dependencies.prompt));
   } catch (error) {
     const malformedTab = (error as any)?.herdrTab as string | undefined;
     if (pane || tabId || malformedTab) try { stopCreatedHerdrTab(pane, tabId ?? malformedTab, dependencies.run); }
@@ -164,10 +179,10 @@ export async function launchProducer(root: string, work: Work, request: Dispatch
   const requestedAt = now();
   const record: ProducerRecord = producerRecordSchema.parse({ id: randomUUID(), requestId: request.id, attempt: prior.length + 1, key: binding.key, pr: binding.pr, sha: binding.sha, baseSha: binding.baseSha, policyRevision: binding.policyRevision,
     group: binding.group, proofs: binding.proofs, profile: profile.name, principal: profile.principal, agentName: profile.agentName, pane: pane ?? null,
-    requestedAt: requestedAt.toISOString(), expiresAt: new Date(requestedAt.getTime() + config.run.producerTimeoutMinutes * 60_000).toISOString(), state: 'pending', outcome: Object.fromEntries(binding.proofs.map(proof => [proof, 'missing'])) });
+    requestedAt: requestedAt.toISOString(), expiresAt: new Date(requestedAt.getTime() + config.run.producerTimeoutMinutes * 60_000).toISOString(), state: 'pending', outcome: Object.fromEntries(binding.proofs.map(proof => [proof, 'missing'])), delivery });
   await saveProducerLedger(root, { ...ledger, producers: [...ledger.producers, record] });
   return { producer: record.id, requestId: request.id, attempt: record.attempt, work: binding.key, pr: binding.pr, sha: binding.sha, baseSha: binding.baseSha, policyRevision: binding.policyRevision, group: binding.group, proofs: binding.proofs,
-    profile: profile.name, principal: profile.principal, agentName: profile.agentName, pane: record.pane, expiresAt: record.expiresAt, approvals: launch.plan.approvals,
+    profile: profile.name, principal: profile.principal, agentName: profile.agentName, pane: record.pane, expiresAt: record.expiresAt, approvals: launch.plan.approvals, delivery,
     account: selected.account ? { environment: selected.account.name, kind: selected.account.kind, quota: selected.health?.quota ?? null, skipped: selected.skipped } : null,
     recorded: 'the launch is recorded; master status reconciles the evidence and closes the session' };
 }
@@ -186,15 +201,26 @@ export function proofOutcome(work: Work | undefined, record: Pick<ProducerRecord
  * withdrew the request, expired past the configured timeout, and failed when the session
  * finished without submitting. A pane is closed on every settlement; if Herdr cannot confirm
  * it, the record stays pending with the reason rather than claiming the session is gone.
+ *
+ * Every pending session is also judged for acknowledgement (master.ts acknowledgeLaunch): one
+ * that shows no activity for `run.acknowledgementSeconds` is re-prompted once with its request,
+ * and one that then settles without evidence is recorded as never started, in the session's own
+ * words, rather than as work that failed. The grace never settles an unacknowledged session that
+ * is still in Herdr before its re-prompt and the interval after it (settlementDue), whatever the
+ * interval is set to.
  */
 /** `agents` is null when Herdr could not be read: a session is then never judged finished. */
 export async function reconcileProducers(root: string, config: MasterConfig, work: Work[], agents: HerdrAgent[] | null, dependencies: {
   run?: (command: string, args: string[]) => string;
   now?: () => Date;
+  /** Re-prompts a quiet session with its request; the default delivers it in Herdr. */
+  reprompt?: (record: ProducerRecord, message: string) => void;
 } = {}) {
   const ledger = await readProducerLedger(root);
   const now = (dependencies.now ?? (() => new Date()))();
   const run = dependencies.run ?? ((command: string, args: string[]) => execFileSync(command, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }));
+  const reprompt = dependencies.reprompt ?? ((record: ProducerRecord, message: string) => { deliverPrompt(record.agentName, message, run); });
+  const ackMs = acknowledgementMs(config);
   let changed = 0;
   for (const record of ledger.producers) {
     if (record.state !== 'pending') continue;
@@ -205,6 +231,18 @@ export async function reconcileProducers(root: string, config: MasterConfig, wor
     const request = item?.autoDispatch ? [...item.autoDispatch.producers, ...item.autoDispatch.history].find(entry => entry.id === record.requestId) : undefined;
     const agent = agents?.find(candidate => candidate.name === record.agentName);
     const finished = agents !== null && (!agent || ['done', 'idle', 'blocked'].includes(agent.agent_status ?? ''));
+    const screen = () => readSessionScreen(record.agentName, run);
+    // Acknowledgement is judged only from a Herdr that could be read; a submitted proof is the
+    // strongest acknowledgement of all.
+    if (agents !== null) {
+      const judged = acknowledgeLaunch(record, agent, { now: now.getTime(), ackMs, result: results.some(result => result !== 'missing'), screen });
+      if (judged.changed) changed++;
+      if (judged.reprompt) {
+        markReprompted(record, now.getTime()); changed++;
+        try { reprompt(record, repromptText(producerPrompt(config, record, record), ackMs)); }
+        catch { /* the settlement below records a session the re-prompt could not reach */ }
+      }
+    }
     let next: { state: ProducerRecord['state']; resolution: string } | null = null;
     if (results.some(result => result === 'fail')) next = { state: 'completed', resolution: `trusted evidence failed for ${record.proofs.filter(proof => outcome[proof] === 'fail').join(', ')}` };
     else if (results.every(result => result === 'pass')) next = { state: 'completed', resolution: `trusted passing evidence recorded for ${record.proofs.join(', ')}` };
@@ -213,11 +251,12 @@ export async function reconcileProducers(root: string, config: MasterConfig, wor
     else if (Date.parse(record.expiresAt) <= now.getTime()) next = { state: 'expired', resolution: `no trusted evidence for ${record.proofs.filter(proof => outcome[proof] !== 'pass').join(', ')} within ${config.run.producerTimeoutMinutes} minutes` };
     else if (finished) {
       if (!record.idleSince) { record.idleSince = now.toISOString(); changed++; }
-      else if (now.getTime() - Date.parse(record.idleSince) >= producerIdleGraceMs) {
+      else if (now.getTime() - Date.parse(record.idleSince) >= producerIdleGraceMs && settlementDue(record, agent, { now: now.getTime(), ackMs })) {
         const missing = record.proofs.filter(proof => outcome[proof] !== 'pass').map(proof => `${proof} (${outcome[proof]})`).join(', ');
-        next = { state: 'failed', resolution: agent?.agent_status === 'blocked'
+        const failure = agent?.agent_status === 'blocked'
           ? `the session ended waiting on input (Herdr reports it blocked) instead of deciding on its own, without trusted evidence for ${missing}`
-          : `the session finished (${agent?.agent_status ?? 'gone from Herdr'}) without trusted evidence for ${missing}` };
+          : `the session finished (${agent?.agent_status ?? 'gone from Herdr'}) without trusted evidence for ${missing}`;
+        next = { state: 'failed', resolution: settlementReason(record, agent, { now: now.getTime(), ackMs, screen }, failure) };
       }
     } else if (record.idleSince) { delete record.idleSince; changed++; }
     if (!next) continue;
@@ -234,6 +273,8 @@ export async function reconcileProducers(root: string, config: MasterConfig, wor
 
 export function summarizeProducers(records: ProducerRecord[]) {
   const describe = (record: ProducerRecord) => ({ producer: record.id, requestId: record.requestId, attempt: record.attempt, work: record.key, pr: record.pr, sha: record.sha, policyRevision: record.policyRevision, group: record.group, proofs: record.proofs,
-    profile: record.profile, principal: record.principal, agentName: record.agentName, state: record.state, outcome: record.outcome, requestedAt: record.requestedAt, expiresAt: record.expiresAt, closedAt: record.closedAt ?? null, resolution: record.resolution ?? null, attention: record.closeFailure ?? null });
+    profile: record.profile, principal: record.principal, agentName: record.agentName, state: record.state, outcome: record.outcome, requestedAt: record.requestedAt, expiresAt: record.expiresAt, closedAt: record.closedAt ?? null, resolution: record.resolution ?? null, attention: record.closeFailure ?? null,
+    // GY-93: how the request reached the session, and whether the session has taken it up.
+    delivery: record.delivery ?? null, activity: record.state === 'pending' ? sessionActivity(record) : null, acknowledgedAt: record.acknowledgedAt ?? null, repromptedAt: record.repromptedAt ?? null, neverStarted: neverStarted(record) });
   return { pending: records.filter(record => record.state === 'pending').map(describe), completed: records.filter(record => record.state !== 'pending').slice(-20).map(describe) };
 }
