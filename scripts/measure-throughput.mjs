@@ -24,7 +24,7 @@
 //   and no master session anywhere, and judges what they delivered:
 //
 //     node scripts/measure-throughput.mjs --fleet [--deliveries N] [--executors N] \
-//       [--scale] [--database URL] [--port N] [--record DIR] [--json]
+//       [--scale] [--timeout MINUTES] [--database URL] [--port N] [--record DIR] [--json]
 //
 //   `--scale` runs the same workload twice, with one executor and then with `--executors`, and
 //   reports both, because "throughput scales with executors" is a comparison and not a threshold.
@@ -44,7 +44,7 @@ import { pathToFileURL } from 'node:url';
 
 export function parseArguments(argv) {
   const options = { mode: 'live', since: null, until: null, minutes: 30, intervalSeconds: 60, record: null, json: false,
-    deliveries: 12, executors: 2, scale: false, database: null, port: null };
+    deliveries: 12, executors: 2, scale: false, database: null, port: null, timeoutMinutes: 15 };
   for (let i = 0; i < argv.length; i++) {
     const argument = argv[i];
     const value = () => { const next = argv[++i]; if (next === undefined) throw new Error(`${argument} needs a value`); return next; };
@@ -59,6 +59,7 @@ export function parseArguments(argv) {
     else if (argument === '--scale') options.scale = true;
     else if (argument === '--database') options.database = value();
     else if (argument === '--port') options.port = Number(value());
+    else if (argument === '--timeout') options.timeoutMinutes = Number(value());
     else if (argument === '--record') options.record = value();
     else if (argument === '--json') options.json = true;
     else throw new Error(`Unknown argument ${argument}`);
@@ -71,6 +72,10 @@ export function parseArguments(argv) {
   if (!Number.isInteger(options.deliveries) || options.deliveries < 10 || options.deliveries > 200) throw new Error('--deliveries takes a whole number between 10 and 200; AC-6 is stated over at least ten');
   if (!Number.isInteger(options.executors) || options.executors < 1 || options.executors > 16) throw new Error('--executors takes a whole number between 1 and 16');
   if (options.port !== null && (!Number.isInteger(options.port) || options.port < 1024 || options.port > 65535)) throw new Error('--port takes a whole port number');
+  // A conducted run is bounded, and generously: two executors racing for the merge queue back off
+  // on the queue's own widening retry, so a loaded host costs minutes rather than seconds and a
+  // tight deadline would report "not met" about the host rather than about the loop.
+  if (!Number.isFinite(options.timeoutMinutes) || options.timeoutMinutes < 1 || options.timeoutMinutes > 120) throw new Error('--timeout takes 1 to 120 minutes');
   return options;
 }
 
@@ -182,8 +187,9 @@ export async function measureFleet(options, env) {
       // "Throughput scales with executors" is a comparison, so `--scale` makes it one: the same
       // workload, once with a single executor and once with the configured fleet.
       const runs = [];
-      if (options.scale && options.executors > 1) runs.push(await runFleetWitness({ databaseUrl: url, deliveries: options.deliveries, executors: 1, log }));
-      runs.push(await runFleetWitness({ databaseUrl: url, deliveries: options.deliveries, executors: options.executors, log }));
+      const timeoutMs = options.timeoutMinutes * 60_000;
+      if (options.scale && options.executors > 1) runs.push(await runFleetWitness({ databaseUrl: url, deliveries: options.deliveries, executors: 1, timeoutMs, log }));
+      runs.push(await runFleetWitness({ databaseUrl: url, deliveries: options.deliveries, executors: options.executors, timeoutMs, log }));
       const witnessed = runs.at(-1);
       return { measuredAt: new Date().toISOString(), mode: 'fleet', deliveries: options.deliveries, executors: options.executors,
         runs, standIns: witnessed.standIns, caveat: witnessed.caveat, witness: witnessed.witness };

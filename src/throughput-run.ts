@@ -6,6 +6,7 @@ import { server } from './server.js';
 import { executorEffects, runExecutor, type ExecutorStep } from './auto-dispatch.js';
 import { controlPlaneHandlers } from './executor.js';
 import { masterConfigSchema } from './master.js';
+import { holdsMergeExecution } from './model/escalation.js';
 import { nearestRankPercentiles, type Percentiles } from './pipeline-speed.js';
 import { queueRef, type QueueSpeculation } from './merge-queue.js';
 import { judgeThroughput, sampleQueue, type QueueSample, type ThroughputWitness } from './throughput.js';
@@ -134,15 +135,75 @@ export async function runFleetWitness(options: FleetWitnessOptions): Promise<Fle
     await store.pool.query("UPDATE work_items SET document=jsonb_set(document,'{queue,speculation}',$2::jsonb) WHERE id=$1", [current.id, JSON.stringify(speculation)]);
     return reload(current.id);
   };
-  /** The guarded merge's own contract, against the control plane: acquire, verify, commit, observe. */
-  const mergeItem = async (actor: Principal, item: Work) => {
-    let current = await publishTip(item);
-    current = await engine.observe(current.id, current.revision, observation(current));
-    const granted = await engine.acquireMerge(actor, current.id, { expectedRevision: current.revision, sha: head(current), baseSha: base, policyRevision: current.policyRevision }, randomUUID());
-    await engine.verifyMerge(actor, current.id, { executionId: granted.execution.id }, observation(current), randomUUID());
-    const committed = await engine.commitMerge(actor, current.id, { executionId: granted.execution.id }, randomUUID());
-    const mergedAt = new Date(Math.ceil((Date.parse(committed.committingAt) + 1) / 1000) * 1000).toISOString().replace(/\.\d+Z$/, 'Z');
-    return engine.observe(current.id, committed.revision, { ...observation(current), merged: true, mergeSha: mergeSha(current), mergedAt });
+  /**
+   * The guarded merge's own contract, against the control plane: acquire, verify, commit, observe.
+   *
+   * A reading that lost a race with the reconciliation pass is what the real broker retries
+   * rather than reports — the control plane refuses an observation bound to a revision that has
+   * since moved, and the next reading is bound to the one that stands. Without that retry here
+   * the race would settle the action as failed, and the row would wait out the queue's own
+   * backoff before anyone tried again: a measurement of this harness's impatience rather than of
+   * the loop. A failure that is not that race is raised, so a merge that genuinely cannot happen
+   * still fails its row.
+   */
+  const staleRead = (error: unknown) => /Task changed while GitHub was being observed|Task changed before merge execution/.test(error instanceof Error ? error.message : String(error));
+  /**
+   * Apply a reading, and let a lost race pass. The control plane refuses an observation bound to
+   * a revision that has since moved, exactly as it refuses one from the real provider job; the
+   * reading that matters is the one taken against the revision that stands, and the loop takes
+   * another within its next tick. Anything else is raised, so a reading that cannot be applied
+   * still fails the action that asked for it.
+   */
+  const observeNow = async (item: Work, overrides: Partial<Observation> = {}) => {
+    const current = await reload(item.id);
+    try { return await engine.observe(current.id, current.revision, observation(current, overrides)); }
+    catch (error) { if (staleRead(error)) return current; throw error; }
+  };
+  /**
+   * The guarded merge's own contract, against the control plane: acquire, verify, commit, observe.
+   *
+   * It resumes rather than restarts, because a merge execution is the authority to merge and not
+   * a step: once one is held, the control plane refuses any further reading of the item that does
+   * not report the matching merge, so beginning again from a fresh observation would be refused
+   * for as long as the execution stood. That is what the real broker does with an execution it
+   * still owns, and standing down from one it does not is what it does with the other — an
+   * execution another instance holds is never resumed (GY-92), so this raises rather than takes it
+   * and the row backs off as it should.
+   */
+  const heldExecution = (work: Work, actor: Principal) => {
+    const execution = work.mergeExecution;
+    if (!execution || execution.fenced || !holdsMergeExecution(work, Date.now())) return null;
+    if (!execution.owner.startsWith(`${actor.id}#`) && execution.owner !== actor.id) throw new Error(`${work.key} has an in-flight merge execution held by ${execution.owner}; this executor stands down rather than resuming it`);
+    return execution;
+  };
+  const mergeItem = async (actor: Principal, item: Work, attempts = 6): Promise<Work> => {
+    let current = await reload(item.id);
+    try {
+      let execution: NonNullable<Work['mergeExecution']> | null = heldExecution(current, actor);
+      if (!execution) {
+        current = await publishTip(current);
+        current = await engine.observe(current.id, current.revision, observation(current));
+        execution = (await engine.acquireMerge(actor, current.id, { expectedRevision: current.revision, sha: head(current), baseSha: base, policyRevision: current.policyRevision }, randomUUID())).execution as NonNullable<Work['mergeExecution']>;
+        current = await reload(current.id);
+      }
+      const held = execution!;
+      // Each step is skipped when the record already holds it. An execution that was verified,
+      // or committed, and lost its reading to a race is resumed from where it stands: committing
+      // a second time is refused, and the merge the provider has already been handed is not one
+      // to hand it again.
+      let committingAt: string | undefined = held.committingAt;
+      if (!committingAt) {
+        if (!held.verifiedAt) await engine.verifyMerge(actor, current.id, { executionId: held.id }, observation(current), randomUUID());
+        committingAt = (await engine.commitMerge(actor, current.id, { executionId: held.id }, randomUUID())).committingAt;
+      }
+      const mergedAt = new Date(Math.ceil((Date.parse(committingAt!) + 1) / 1000) * 1000).toISOString().replace(/\.\d+Z$/, 'Z');
+      current = await reload(current.id);
+      return await engine.observe(current.id, current.revision, { ...observation(current), merged: true, mergeSha: mergeSha(current), mergedAt });
+    } catch (error) {
+      if (!staleRead(error) || attempts <= 1) throw error;
+      await delay(100);
+      return mergeItem(actor, current, attempts - 1);
+    }
   };
 
   const config = masterConfigSchema.parse({
@@ -174,7 +235,7 @@ export async function runFleetWitness(options: FleetWitnessOptions): Promise<Fle
         const [, id, command] = path.split('/');
         const item = await reload(id);
         if (command === 'resync') {
-          if (item.submission && item.workspaces.length) await engine.observe(item.id, item.revision, observation(item, { reviews: [] }));
+          if (item.submission && item.workspaces.length) await observeNow(item, { reviews: [] });
           return engine.resyncWork(actor, id);
         }
         return engine.execute(actor, command as any, id, body, randomUUID());
@@ -191,8 +252,7 @@ export async function runFleetWitness(options: FleetWitnessOptions): Promise<Fle
         return { pane: 'witness-worker' };
       },
       launchReview: async item => {
-        const current = await reload(item.id);
-        await engine.observe(current.id, current.revision, observation(current));
+        await observeNow(item);
         return { pane: 'witness-review' };
       },
       launchProducer: async (item, request) => {
