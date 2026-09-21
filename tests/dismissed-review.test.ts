@@ -176,7 +176,7 @@ test('unit:unsatisfied-settled-request-visible — master status names a request
   const resolution = 'the approval of a1ffffffffff was dismissed while it was still the candidate; the same commit is reviewed again';
   const record = { review: 'r1', requestId: request.id, attempt: 4, work: 'GY-84', pr: 84, sha: H, policyRevision: 3, profile: 'claude-reviewer', agentName: 'review-claude-1',
     state: 'failed', verdict: 'DISMISSED', requestedAt: iso(0), tokenExpiresAt: iso(3_600_000), closedAt: iso(60_000), resolution, attention: null };
-  const exhausted = { requestId: request.id, attempts: 4, limit: 4, nextAt: null, exhausted: true, last: { state: 'failed', resolution } };
+  const exhausted = { requestId: request.id, attempts: 4, started: 4, neverStarted: 0, limit: 4, unstartedLimit: 3, nextAt: null, exhausted: true, last: { state: 'failed', resolution } };
   // Sixty-three minutes after the request, with nothing running and nothing refused.
   const status = buildMasterStatus({ work: [item], now: iso(3_780_000) }, [], [], {}, {}, { pending: [], completed: [record] }, 'main', undefined,
     { producers: { pending: [], completed: [] }, failures: [], retries: [exhausted] });
