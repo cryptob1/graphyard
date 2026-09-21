@@ -426,6 +426,8 @@ export class GitHub {
     if (!missing.length) return undefined;
     const owner = (number: number) => peers?.find(peer => peer.submission?.pr === number)?.key ?? null;
     let removedBy: RevertedDelivery['removedBy'] = null;
+    // Naming the merge is naming a work item, so it is asked only by a caller that brought them.
+    if (!peers) return { base: branch.tip, files: missing, removedBy: null, ...(partial ? { partial } : {}) };
     const history = await this.request(`/commits?sha=${branch.tip}&path=${encodeURIComponent(missing[0].path)}&per_page=1`);
     const commit = Array.isArray(history) && typeof history[0]?.sha === 'string' ? history[0].sha as string : null;
     if (commit && commit !== pr.head.sha && await this.revertsDelivered(commit, missing[0].path, files)) {
