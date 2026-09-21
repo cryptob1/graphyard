@@ -686,11 +686,24 @@ export async function checkAgentEnvironment(environment: AgentEnvironment, probe
 }
 
 export type LaunchRole = 'worker' | 'reviewer' | 'producer';
-export interface AccountSkip { at: string; role: LaunchRole; profile: string; environment: string; reason: string; work: string | null }
+/**
+ * Why a launch passed an account over. Only `exhausted` — a quota read as spent, or one a session
+ * itself reported — is the provider's capacity and waits for a reset. A logged-out account or a
+ * name that is not a configured environment is something a master fixes in one command, so it must
+ * keep reading as a launch that went wrong rather than as a wait (GY-89).
+ */
+export type AccountSkipCause = 'exhausted' | 'logged-out' | 'unconfigured';
+export interface AccountSkip { at: string; role: LaunchRole; profile: string; environment: string; reason: string; work: string | null; cause: AccountSkipCause }
 /** Every account of a profile was skipped: the caller fails over to its next profile, or reports the skips. */
 export class NoHealthyAccountError extends Error {
+  /** Fail over to the next profile: true for every reason an account was passed over. */
   readonly accountsExhausted = true;
-  constructor(message: string, readonly skipped: AccountSkip[]) { super(message); }
+  /** This profile has no capacity left: true only when every account it skipped was spent. */
+  readonly capacityExhausted: boolean;
+  constructor(message: string, readonly skipped: AccountSkip[]) {
+    super(message);
+    this.capacityExhausted = skipped.length > 0 && skipped.every(skip => skip.cause === 'exhausted');
+  }
 }
 
 // What the launch loop last observed about each environment, and the recent launches it skipped
@@ -698,7 +711,9 @@ export class NoHealthyAccountError extends Error {
 const environmentLogSchema = z.object({
   version: z.literal(1),
   environments: z.record(z.string(), z.any()).default({}),
-  skipped: z.array(z.object({ at: z.string(), role: z.enum(['worker', 'reviewer', 'producer']), profile: z.string(), environment: z.string(), reason: z.string().max(500), work: z.string().nullable() }).strict()).max(50).default([]),
+  skipped: z.array(z.object({ at: z.string(), role: z.enum(['worker', 'reviewer', 'producer']), profile: z.string(), environment: z.string(), reason: z.string().max(500), work: z.string().nullable(),
+    // Logs written before GY-89 carry no cause; they read as the exhaustion the flag then meant.
+    cause: z.enum(['exhausted', 'logged-out', 'unconfigured']).default('exhausted') }).strict()).max(50).default([]),
   // Accounts a session exhausted mid-work (GY-89), by environment name, each held until its reset.
   // The account each profile's latest launch selected, by `role:profile`, so an exhausted session can be traced to its account.
   selected: z.record(z.string(), z.object({ environment: z.string().nullable(), kind: z.string().nullable(), at: z.string(), work: z.string().nullable() }).strict()).default({}),
@@ -761,7 +776,7 @@ export async function selectAccount(config: Pick<MasterConfig, 'environments' | 
   if (!profile.accounts?.length) {
     const own = held[profileAccount(profile.name)];
     if (own) {
-      const skip: AccountSkip = { at, role, profile: profile.name, environment: profileAccount(profile.name), reason: describeObservedExhaustion(`${profile.name}'s own account`, own), work: probe.work ?? null };
+      const skip: AccountSkip = { at, role, profile: profile.name, environment: profileAccount(profile.name), reason: describeObservedExhaustion(`${profile.name}'s own account`, own), work: probe.work ?? null, cause: 'exhausted' };
       await recordEnvironmentLog(config, [], [skip]).catch(() => {});
       throw new NoHealthyAccountError(`No healthy agent account for ${role} profile ${profile.name}: ${skip.reason}`, [skip]);
     }
@@ -770,16 +785,17 @@ export async function selectAccount(config: Pick<MasterConfig, 'environments' | 
   }
   for (const name of profile.accounts) {
     const environment = (config.environments ?? []).find(candidate => candidate.name === name);
-    if (!environment) { skipped.push({ at, role, profile: profile.name, environment: name, reason: `${name} is not a configured agent environment; run master environments --apply`, work: probe.work ?? null }); continue; }
+    if (!environment) { skipped.push({ at, role, profile: profile.name, environment: name, reason: `${name} is not a configured agent environment; run master environments --apply`, work: probe.work ?? null, cause: 'unconfigured' }); continue; }
     // What a session itself reported outranks the provider's usage read, which may lag or not exist.
-    if (held[name]) { skipped.push({ at, role, profile: profile.name, environment: name, reason: describeObservedExhaustion(name, held[name]), work: probe.work ?? null }); continue; }
+    if (held[name]) { skipped.push({ at, role, profile: profile.name, environment: name, reason: describeObservedExhaustion(name, held[name]), work: probe.work ?? null, cause: 'exhausted' }); continue; }
     const health = await checkAgentEnvironment(environment, { ...probe, ceilingPercent: probe.ceilingPercent ?? config.run.quotaCeilingPercent });
     checked.push(health);
     if (health.healthy) {
       await recordEnvironmentLog(config, checked, skipped, { key: selectionKey(role, profile.name), environment: environment.name, kind: environment.kind, at, work: probe.work ?? null }).catch(() => {});
       return { account: environment, health, skipped };
     }
-    skipped.push({ at, role, profile: profile.name, environment: name, reason: health.reason!, work: probe.work ?? null });
+    // `checkAgentEnvironment` reports exactly two faults: not logged in, or quota spent.
+    skipped.push({ at, role, profile: profile.name, environment: name, reason: health.reason!, work: probe.work ?? null, cause: health.loggedIn ? 'exhausted' : 'logged-out' });
   }
   await recordEnvironmentLog(config, checked, skipped).catch(() => {});
   throw new NoHealthyAccountError(`No healthy agent account for ${role} profile ${profile.name}: ${skipped.map(entry => entry.reason).join('; ')}`, skipped);

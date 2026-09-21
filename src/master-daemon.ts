@@ -577,7 +577,7 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
         if (session.requestId && effects.relaunch) {
           try { next = `relaunched on profile ${(await effects.relaunch(session, item, snapshot)).profile}`; }
           catch (error) {
-            next = (error as { accountsExhausted?: boolean })?.accountsExhausted ? `no other account is left for the role (${message(error)}), so it waits for capacity`
+            next = (error as { capacityExhausted?: boolean })?.capacityExhausted ? `no other account is left for the role (${message(error)}), so it waits for capacity`
               : `it could not be launched again at once (${message(error)}), so the dispatcher launches it on its retry schedule`;
           }
         }
@@ -1170,15 +1170,17 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
       // The profile that just ran out goes last: its other accounts are still its own failover.
       const order = <P extends { name: string; agentName: string }>(profiles: P[]) => [...profiles.filter(profile => profile.name !== session.profile), ...profiles.filter(profile => profile.name === session.profile)].filter(profile => !agents.some(agent => agent.name === profile.agentName));
       const skipped: string[] = [];
+      // As in the dispatcher: only skips that were all spent quota make this a wait for capacity.
+      let capacity = true;
       for (const profile of session.role === 'reviewer' ? order(config.reviewers) : order(independentProducerProfiles(work, config.producers))) {
         try {
           if (session.role === 'reviewer') await launchReview(root, work, profile.name, agents, snapshot.now, { run, requestId: request.id });
           else await launchProducer(root, work, request, profile as MasterConfig['producers'][number], agents, snapshot.now, { run });
           return { profile: profile.name };
-        } catch (error) { if (!(error as { accountsExhausted?: boolean })?.accountsExhausted) throw error; skipped.push(message(error)); }
+        } catch (error) { if (!(error as { accountsExhausted?: boolean })?.accountsExhausted) throw error; skipped.push(message(error)); capacity &&= !!(error as { capacityExhausted?: boolean }).capacityExhausted; }
       }
       if (!skipped.length) throw new Error(`no ${session.role} profile is free to take the request`);
-      throw Object.assign(new Error(skipped.join('; ')), { accountsExhausted: true });
+      throw Object.assign(new Error(skipped.join('; ')), { accountsExhausted: true, capacityExhausted: capacity });
     },
     roleHealth: async () => {
       const config = current();

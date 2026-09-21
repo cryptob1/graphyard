@@ -142,19 +142,23 @@ const retryDelay = (attempts: number) => Math.min(dispatchRetryMinMs * 2 ** Math
  */
 async function launchWithFailover<P extends { name: string }>(profiles: P[], launch: (profile: P) => Promise<unknown>) {
   const failover: string[] = [];
+  // Whether every profile so far was passed over for spent quota alone. A logged-out account or an
+  // unconfigured environment also fails over, but it is a fault a master can fix now, so it must
+  // not turn the role's launches into a wait for a provider reset (GY-89).
+  let capacity = true;
   for (const profile of profiles) {
     for (let attempt = 1; ; attempt++) {
       try { await launch(profile); return { profile, failover, relaunched: attempt > 1 }; }
       catch (error: any) {
         if (error?.promptDropped && attempt < 2) continue;
-        if (error?.accountsExhausted) { failover.push(`${profile.name}: ${message(error)}`); break; }
+        if (error?.accountsExhausted) { failover.push(`${profile.name}: ${message(error)}`); capacity &&= !!error.capacityExhausted; break; }
         throw error;
       }
     }
   }
-  // Every profile was passed over for the same reason — no account with quota left — which is the
-  // role's capacity, not a launch that went wrong.
-  throw Object.assign(new Error(failover.join('; ') || 'no profile could launch'), { accountsExhausted: failover.length > 0 });
+  // `accountsExhausted` still means only that every profile was passed over; `capacityExhausted`
+  // means the role has no quota left, which is the one case that waits rather than refuses.
+  throw Object.assign(new Error(failover.join('; ') || 'no profile could launch'), { accountsExhausted: failover.length > 0, capacityExhausted: failover.length > 0 && capacity });
 }
 
 /**
@@ -188,7 +192,7 @@ export async function runDispatchTick(config: MasterConfig, cursor: DispatchCurs
   const spent = (kind: 'review' | 'producer') => { const hold = cursor.capacity[kind]; return hold && Date.parse(hold.recheckAt) > now() ? hold : null; };
   const capacityWait = (kind: 'review' | 'producer') => `${kind === 'review' ? 'reviewer' : 'producer'} capacity is exhausted (${cursor.capacity[kind]!.reason}); launches are paused and its accounts are read again at ${cursor.capacity[kind]!.recheckAt}`;
   const outOfCapacity = (kind: 'review' | 'producer', item: Work, request: DispatchRequest, error: unknown) => {
-    if (!(error as { accountsExhausted?: boolean })?.accountsExhausted) return false;
+    if (!(error as { capacityExhausted?: boolean })?.capacityExhausted) return false;
     cursor.capacity[kind] = { at: cursor.capacity[kind]?.at ?? new Date(now()).toISOString(), recheckAt: new Date(now() + capacityRecheckMs).toISOString(), reason: message(error).slice(0, 1000) };
     delete cursor.failures[request.id];
     wait(kind, item, request, capacityWait(kind));

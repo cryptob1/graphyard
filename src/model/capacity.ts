@@ -37,6 +37,16 @@ const exhaustionNotices: readonly RegExp[] = [
   /\bexceeded your (?:current )?(?:quota|usage|plan)\b/i,
 ];
 export const exhaustionTailLines = 40, exhaustionNoticeMaxLength = 240;
+/**
+ * How much may stand in front of the notice on its line. Every runtime prints its banner at the
+ * start, behind at most a short label — `Error: Weekly usage limit reached`, `Claude AI usage
+ * limit reached|…` — while an agent writing about a limit reaches the phrase through a sentence:
+ * `Added a test for the rate limit reached path`, `Tests pass; the token limit reached branch is
+ * covered.` Two words of label admits every banner the runtimes print and no sentence. Without it
+ * the last summary line of a worker that had just finished this very item would end its lease,
+ * commit its work as interrupted and hold its account for an hour.
+ */
+export const exhaustionNoticeLabelWords = 2;
 
 const months = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec'];
 const unitMs: Record<string, number> = { d: 86_400_000, h: 3_600_000, m: 60_000, s: 1_000 };
@@ -90,16 +100,20 @@ export function parseResetTime(text: string, now: number): string | null {
 /**
  * Whether the tail of a stopped session's output is its provider saying the account is spent.
  * Only the last lines are read — a notice the session has long since worked past is history —
- * and the reset time is looked for on the notice and the two lines after it, where the runtimes
- * that split the sentence put it.
+ * the notice must lead its line rather than sit inside a sentence the session wrote, and the
+ * reset time is looked for on the notice and the two lines after it, where the runtimes that
+ * split the sentence put it.
  */
 export function detectExhaustion(output: string, now: number): ExhaustionSignal | null {
   const lines = output.replace(/\u001b\[[0-9;?]*[ -/]*[@-~]/g, '').split('\n').map(line => line.replace(/[│┃|]\s*$/, '').trim()).filter(Boolean).slice(-exhaustionTailLines);
   for (let index = lines.length - 1; index >= 0; index--) {
-    const line = lines[index];
-    if (line.length > exhaustionNoticeMaxLength || !exhaustionNotices.some(notice => notice.test(line))) continue;
-    const context = lines.slice(index, index + 3).join(' ');
-    return { reason: line.replace(/^[^A-Za-z0-9]+/, '').slice(0, 300), resetsAt: parseResetTime(context, now) };
+    // The banner itself, with whatever the terminal drew in front of it removed.
+    const line = lines[index].replace(/^[^A-Za-z0-9]+/, '');
+    if (line.length > exhaustionNoticeMaxLength) continue;
+    const at = exhaustionNotices.map(notice => notice.exec(line)?.index ?? -1).filter(offset => offset >= 0);
+    if (!at.length || (line.slice(0, Math.min(...at)).match(/\S+/g) ?? []).length > exhaustionNoticeLabelWords) continue;
+    const context = [line, ...lines.slice(index + 1, index + 3)].join(' ');
+    return { reason: line.slice(0, 300), resetsAt: parseResetTime(context, now) };
   }
   return null;
 }

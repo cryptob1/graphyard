@@ -171,7 +171,8 @@ before(async () => {
   await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));
   url = `http://127.0.0.1:${(http.address() as { port: number }).port}`;
   home = await mkdtemp(join(tmpdir(), 'graphyard-capacity-'));
-  await mkdir(join(home, 'env-a'), { recursive: true }); await mkdir(join(home, 'env-b'), { recursive: true });
+  // env-a and env-b are logged in; env-out is a real environment with no credential at all.
+  await mkdir(join(home, 'env-a'), { recursive: true }); await mkdir(join(home, 'env-b'), { recursive: true }); await mkdir(join(home, 'env-out'), { recursive: true });
   await writeFile(join(home, 'env-a/.credentials.json'), JSON.stringify({ claudeAiOauth: { accessToken: 'not-a-real-token', refreshToken: 'not-a-real-token' } }));
   await writeFile(join(home, 'env-b/auth.json'), JSON.stringify({ tokens: { access_token: 'not-a-real-token' } }));
 });
@@ -190,6 +191,15 @@ test('a provider limit notice is read from the tail of a stopped session, with t
   assert.ok(Date.parse(clock) > now && Date.parse(clock) - now <= 24 * 3_600_000, 'a wall clock is the next time the host reads it');
   assert.equal(detectExhaustion('Rate limit reached for requests', now)!.resetsAt, null, 'a notice that names no time records an unknown reset rather than a guess');
   // Not a notice: a worker's own prose about limits, a notice the session has long worked past, an ordinary failure.
+  // The short prose matters most: an idle worker's last summary line, on exactly the items that
+  // touch this code, would otherwise end a live lease and hold its account for an hour.
+  for (const summary of [
+    'Added a test for the rate limit reached path',
+    'I covered the case where the weekly usage limit is reached',
+    'Done: the dispatcher now waits when the usage limit is reached.',
+    'GY-89: escalate once when every account quota is exhausted',
+    'Tests pass; the token limit reached branch is covered.',
+  ]) assert.equal(detectExhaustion(`● ${summary}`, now), null, summary);
   assert.equal(detectExhaustion(`I will make sure the loop reads "usage limit reached" notices from a session, ${'and explain at length why that matters '.repeat(8)}`, now), null);
   assert.equal(detectExhaustion(`You've hit your limit · resets 3pm\n${Array.from({ length: 60 }, (_, index) => `edited file ${index}`).join('\n')}`, now), null);
   assert.equal(detectExhaustion('npm ERR! Test failed. See above for more details.', now), null);
@@ -367,10 +377,10 @@ test('integration:capacity-exhausted-escalation — with every account of a role
   const request = (await reload(reviewed.id)).autoDispatch?.review;
   assert.equal(request?.state, 'requested');
   const reviewerConfig = { ...config, reviewer: { appId: 99, installationId: 1, slug: 'graphyard-reviewer', credentialFile: join(capacityHome, 'reviewer.json'), boundAt: new Date().toISOString() }, reviewers: [{ name: 'reviewer-a', agentName: 'agent-reviewer-a', kind: 'claude' as const, agentArgs: [], approvals: 'auto' as const, environment: {}, accounts: ['env-a'] }] } as MasterConfig;
-  let launches = 0;
+  let launches = 0, launchConfig = reviewerConfig;
   const dispatchEffects: DispatchEffects = { snapshot: async () => { const fresh = await ok(coordinator, 'GET', 'work-snapshot'); return { work: fresh.work, now: fresh.now }; }, agents: () => [], credentials: async () => ({}),
     reconcileReviews: async () => ({ reviews: [] }), reconcileProducers: async () => ({ producers: [] }), launchProducer: async () => {}, persist: async () => {},
-    launchReview: async (_work, _request, profile) => { launches++; await selectAccount(reviewerConfig, 'reviewer', profile, loginsOnly(now)); } };
+    launchReview: async (_work, _request, profile) => { launches++; await selectAccount(launchConfig, 'reviewer', profile, loginsOnly(now)); } };
   const cursor = emptyDispatchCursor(reviewerConfig);
   const tick = await runDispatchTick(reviewerConfig, cursor, dispatchEffects, now);
   assert.deepEqual(tick.refused, [], 'out of capacity is not a refused launch');
@@ -379,6 +389,43 @@ test('integration:capacity-exhausted-escalation — with every account of a role
   const next = await runDispatchTick(reviewerConfig, cursor, dispatchEffects, now);
   assert.equal(launches, 1, 'the dispatcher stops launching the role until its accounts are due to be read again');
   assert.match(next.waiting.find(entry => entry.requestId === request!.id)!.reason, /launches are paused/);
+
+  // …and only that condition. An account that is logged out, or a name that is not a configured
+  // environment, also leaves no profile able to launch, but it is a fault a master fixes in one
+  // command. It must stay a counted refusal with its own attention item, never a wait for a
+  // provider reset that nothing would ever clear.
+  for (const [label, accounts, expected] of [
+    ['its only account is logged out', ['env-out'], /env-out is not logged in/],
+    ['one account is spent and the other logged out', ['env-a', 'env-out'], /env-out is not logged in/],
+    ['its account is not a configured environment', ['env-nope'], /env-nope is not a configured agent environment/],
+  ] as const) {
+    const fixable = await released(`reviewer ${label}`);
+    await submittedAndProven(await launcherClaims(fixable, workerB), workerB, { reviews: [] });
+    const fixableRequest = (await reload(fixable.id)).autoDispatch!.review!;
+    launchConfig = { ...reviewerConfig, environments: [...(reviewerConfig.environments ?? []), { name: 'env-out', kind: 'claude', home: join(home, 'env-out') }],
+      reviewers: [{ ...reviewerConfig.reviewers[0], accounts: [...accounts] }] } as MasterConfig;
+    const fixableCursor = emptyDispatchCursor(launchConfig);
+    const refusedTick = await runDispatchTick(launchConfig, fixableCursor, dispatchEffects, now);
+    const refusal = refusedTick.refused.find(entry => entry.requestId === fixableRequest.id);
+    assert.ok(refusal, `${label}: the launch is refused, not recorded as capacity`);
+    assert.match(refusal.reason, expected);
+    assert.equal(refusal.kind, 'review');
+    assert.equal(fixableCursor.failures[fixableRequest.id]?.attempts, 1, `${label}: and counts toward the failure limit`);
+    assert.deepEqual(fixableCursor.capacity, {}, `${label}: no role is paused for a reset that would never come`);
+    assert.equal(refusedTick.waiting.find(entry => entry.requestId === fixableRequest.id), undefined, `${label}: it does not read as a wait`);
+
+    // And the master is told: the launch-review attention item the refusal has always raised.
+    const snapshot = await ok(coordinator, 'GET', 'work-snapshot');
+    const status = buildMasterStatus({ work: snapshot.work, now: snapshot.now }, config.workers, [], await workerHealth(config, now), {}, { pending: [], completed: [] }, 'main', undefined,
+      { producers: { pending: [], completed: [] }, failures: Object.entries(fixableCursor.failures).map(([requestId, failure]) => ({ requestId, ...failure })) });
+    const item = status.attentionItems.find(entry => entry.subject === fixable.key);
+    assert.ok(item, `${label}: the master is told; attention is ${JSON.stringify(status.attentionItems.map(entry => entry.subject))}`);
+    assert.match(item.text, new RegExp(`^Automatic review launch for ${fixable.key} refused 1 time\\(s\\)`));
+    assert.match(item.text, expected);
+    assert.equal(item.role, 'master'); assert.equal(item.human, false);
+    assert.equal(status.capacity.filter(entry => /reviewer/.test(entry.line)).length, 0, `${label}: and it is not reported as reviewer capacity`);
+  }
+  launchConfig = reviewerConfig;
 
   // An account resets: the escalation is withdrawn on the record and the item is dispatched, by the loop alone.
   clock.skewMs += 2 * 3_600_000 + 60_000; const restored = await cycle(state);
