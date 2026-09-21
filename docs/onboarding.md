@@ -1,4 +1,4 @@
-<!-- page: Start here | 3 | GitHub to first PR. -->
+<!-- page: Start here | 3 | seven-step setup. -->
 # Onboard a repository
 
 For the operator connecting a real repository: the seven steps, and who owns each.
@@ -29,6 +29,12 @@ From a worker-only checkout on a worker machine:
 node "$GRAPHYARD_CLI" init --url https://YOUR-GRAPHYARD-HOST --herdr --host-id UNIQUE_MACHINE_NAME --token-stdin
 ```
 
+### What the generated instructions authorize
+
+The managed `AGENTS.md` section is the coordination contract every agent runtime reads from the repository, and it states one thing the launched sessions need: every session Graphyard launches receives its instruction as the session's own first request, on the runtime's command line ([the first message](master-agent.md#the-request-is-the-sessions-first-message)), never as pasted text.
+
+It is generated because of how sessions used to fail. Herdr types into a running session through bracketed paste, which a coding agent treats as untrusted data rather than a request from its operator — right against prompt injection, wrong for a launch: the session refused, and the loop spent a retry on work never attempted. Producer, reviewer and approver sessions now start without anybody sending `go`, and the generated statement is what lets the two pastes a session may still receive — the loop's single re-prompt of a session that has shown no activity, and the reviewer's reminder to post a verdict it already judged — be taken as the operator's instruction. A Claude Code session launched under a role file loads only the user settings, which leaves `AGENTS.md` out, so the launcher passes the same statement on its command line (`--append-system-prompt`). Nothing else pasted carries that authority, and no other generated file grants any: the role files under `.graphyard/harness/` hold permissions, not instructions.
+
 ## 4. Start the master
 
 Use a clean checkout under a dedicated coordinator OS identity, no worker connection and no worker session able to read its merge-capable GitHub CLI credentials:
@@ -54,14 +60,14 @@ Independent review needs [the reviewer App](github.md#the-reviewer-app), a secon
 ### Agent environments
 
 - **Agent environment:** every agent CLI account's own isolated config and login home, one directory per account named `<agent>-<letter>` under `~/.coding_agents` (`--directory DIR`, or `GRAPHYARD_AGENT_ENVIRONMENTS`, uses another root).
-- Two Claude subscriptions are `claude-a` and `claude-b`, one Codex login may be `codex`; logging each in to its provider is yours, once.
+- Two Claude subscriptions are `claude-a` and `claude-b`; logging each environment in to its provider is yours, once.
 
-| Agent | Environment variable | Login file | Login command |
-| --- | --- | --- | --- |
-| Claude Code | `CLAUDE_CONFIG_DIR` | `.credentials.json` | `CLAUDE_CONFIG_DIR=… claude`, then `/login` |
-| Codex | `CODEX_HOME` | `auth.json` | `CODEX_HOME=… codex login` |
-| OpenCode | `XDG_DATA_HOME` (data under `opencode/`) | `opencode/auth.json` | `XDG_DATA_HOME=… opencode auth login` |
-| Cursor | `CURSOR_CONFIG_DIR` | `cli-config.json` | `CURSOR_CONFIG_DIR=… cursor-agent login` |
+Each runtime's variable, login file and login command:
+
+- **Claude Code:** `CLAUDE_CONFIG_DIR`, `.credentials.json`, `CLAUDE_CONFIG_DIR=… claude` then `/login`
+- **Codex:** `CODEX_HOME`, `auth.json`, `CODEX_HOME=… codex login`
+- **OpenCode:** `XDG_DATA_HOME` (data under `opencode/`), `opencode/auth.json`, `XDG_DATA_HOME=… opencode auth login`
+- **Cursor:** `CURSOR_CONFIG_DIR`, `cli-config.json`, `CURSOR_CONFIG_DIR=… cursor-agent login`
 
 - **Tokens:** each worker principal's in `~/.config/graphyard/workers/PRINCIPAL.token`, each producer's in `~/.config/graphyard/producers/PRINCIPAL.token`, mode 0600, beside the coordinator credential (`$GRAPHYARD_CONFIG_HOME` if set).
 
@@ -73,7 +79,7 @@ node "$GRAPHYARD_CLI" master environments --apply                        # gener
 ```
 
 - **Without `--apply`** writes nothing; lists every environment: whether logged in, quota it could read, login command for each that is not.
-- **With `--apply`** records environments in `.graphyard/master.json`, sets the one runtime setting an unattended Claude launch needs (`skipDangerousModePermissionPrompt`) and generates profiles: one worker profile per worker token, verified as that principal with the `worker` role; one producer profile per producer token, verified for the `producer` role, never sharing a principal with a worker; one reviewer profile per logged-in environment, the first answering automatic reviews; every profile's `accounts` listing logged-in environments in failover order, its own runtime first, rotated so profiles start on different accounts.
+- **With `--apply`** records environments in `.graphyard/master.json`, sets the one runtime setting an unattended Claude launch needs (`skipDangerousModePermissionPrompt`) and generates profiles: one worker profile per worker token, verified as that principal with the `worker` role; one producer profile per producer token, verified for the `producer` role, never sharing a principal with a worker; one reviewer profile per logged-in environment, the first answering automatic reviews. Each profile's `accounts` lists logged-in environments in failover order, its own runtime first, rotated so profiles start on different accounts.
 - **An existing profile** keeps its order, gains accounts logged in since, a home it pinned with `CLAUDE_CONFIG_DIR` becomes its first account.
 - **Rerun** after logging another account in; launcher checks: [agent environments](master-agent.md#agent-environments).
 
@@ -93,13 +99,13 @@ Every launch profile carries `approvals`:
 
 `master worker add` and `master reviewer add` print what a profile will start with.
 
-| Runtime | `auto` adds | Removes | Costs |
-| --- | --- | --- | --- |
-| Claude Code | `--permission-mode bypassPermissions` | tool-approval prompts | the command classifier stops classifying for that session |
-| Codex | `--ask-for-approval never --sandbox workspace-write`, with `-c sandbox_workspace_write.network_access=true` and `--add-dir` for what the role writes | directory-trust and per-command approval | only the widened workspace-write sandbox still limits a command |
-| Cursor | `--force --trust` | "Run Everything" and fresh-worktree workspace trust | every proposed command runs in the assigned worktree |
-| opencode | `OPENCODE_PERMISSION` allowing every permission (`*`, `edit`, `bash`, `webfetch`, `external_directory`, `doom_loop`) | every permission prompt | edits, shell commands, fetches and paths outside the worktree happen without asking |
-| Muse | nothing generated; the [template](../examples/master/muse-worker.json) passes `--approval-mode never --trust-workspace` in `agentArgs` | tool-approval and workspace-trust prompts | tool calls run without asking inside Muse's own sandbox |
+What `auto` adds per runtime, and what it costs:
+
+- **Claude Code:** `--permission-mode bypassPermissions`; no tool-approval prompts, and the command classifier stops classifying for that session
+- **Codex:** `--ask-for-approval never --sandbox workspace-write`, with `-c sandbox_workspace_write.network_access=true` and `--add-dir` for what the role writes; no directory-trust or per-command approval, only the widened workspace-write sandbox still limiting a command
+- **Cursor:** `--force --trust`; no "Run Everything" or fresh-worktree workspace trust, every proposed command running in the assigned worktree
+- **opencode:** `OPENCODE_PERMISSION` allowing every permission (`*`, `edit`, `bash`, `webfetch`, `external_directory`, `doom_loop`); no permission prompt, so edits, shell commands, fetches and paths outside the worktree happen without asking
+- **Muse:** nothing generated; the [template](../examples/master/muse-worker.json) passes `--approval-mode never --trust-workspace` in `agentArgs`, so tool calls run without asking inside Muse's own sandbox
 
 - **Each** is that runtime's broadest non-interactive mode; `master start` launches the master session the same way. Codex keeps its sandbox, widened to what the role writes: network access for every role, the repository's shared Git directory for a worker, `/tmp` plus that directory for a producer building in a detached worktree.
 - **Credentials** do not widen with it: a worker holds only its worker credential, a reviewer only its hour-long token, a producer only its producer credential.
