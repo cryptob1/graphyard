@@ -11,7 +11,9 @@ import { scopePattern, watchAssignment } from './supervisor.js';
 import type { SessionHandleInput } from './model/sessions.js';
 import { pendingBaseRefresh } from './merge-queue.js';
 import { dispatchOrder } from './coordination.js';
-import { assertDispatchable, assertOutsideWorktrees, closeHerdrPane, diskExhaustion, diskThresholdBytes, dispatchWork, inspectWorkerCredentials, listHerdrAgents, mergedWithoutAuthorization, mergeExecutor, observeHerdrAgents, reclaimAdvice, reclaimIdleMs, reclaimWorktrees, unauthorizedMergeViolation, writeFailure, type ConfigReload, type HerdrAgent, type MasterConfig, type MergeExecutor, type WorkerProfile, type WorktreeReclaimReport } from './master.js';
+import { assertDispatchable, assertOutsideWorktrees, closeHerdrPane, diskExhaustionMessage, diskThresholdBytes, dispatchWork, inspectWorkerCredentials, listHerdrAgents, mergedWithoutAuthorization, mergeExecutor, observeHerdrAgents, reclaimAdvice, reclaimIdleMs, reclaimWorktrees, unauthorizedMergeViolation, writeFailure, type ConfigReload, type HerdrAgent, type MasterConfig, type MergeExecutor, type WorkerProfile, type WorktreeReclaimReport } from './master.js';
+import { reclaimCheckouts } from './producer.js';
+import { worktreeRootMinFreeBytes } from './install/worktree-root.js';
 
 /**
  * The durable coordination loop. Every step is a pure decision over one Graphyard snapshot plus
@@ -69,6 +71,9 @@ export const reclaimSummarySchema = z.object({
   at: z.string(), scanned: z.number().int().min(0), removed: z.number().int().min(0), kept: z.number().int().min(0),
   freedBytes: z.number().int().min(0), freeBytes: z.number().int().min(0).nullable().default(null),
   errors: z.array(z.string().max(500)).max(20).default([]),
+  // The managed worktree root's share of the pass: ephemeral checkouts no live session owned that
+  // were removed, and the free space left on the root's own volume.
+  checkouts: z.number().int().min(0).default(0), rootFreeBytes: z.number().int().min(0).nullable().default(null),
 }).strict();
 export type ReclaimSummary = z.infer<typeof reclaimSummarySchema>;
 
@@ -599,15 +604,24 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
   //    while the last scan found free space below the configured threshold, when the host needs
   //    every cycle it can get rather than a cadence.
   const reclaimedAt = state.reclaim ? Date.parse(state.reclaim.at) : Number.NaN;
-  const pressed = state.reclaim?.freeBytes !== null && state.reclaim?.freeBytes !== undefined && state.reclaim.freeBytes < diskThresholdBytes(config);
+  const below = (free: number | null | undefined, bound: number) => free !== null && free !== undefined && free < bound;
+  const pressed = below(state.reclaim?.freeBytes, diskThresholdBytes(config)) || below(state.reclaim?.rootFreeBytes, worktreeRootMinFreeBytes(config));
   if (effects.reclaim && (pressed || !(Number.isFinite(reclaimedAt) && clock - reclaimedAt < reclaimIntervalMs))) {
     try {
       const report = await effects.reclaim(snapshot.work);
       state.reclaim = reclaimSummarySchema.parse({ at: report.at, scanned: report.scanned, removed: report.removed.length, kept: report.kept.length,
-        freedBytes: report.freedBytes, freeBytes: report.freeAfter === null ? null : Math.max(0, Math.round(report.freeAfter)), errors: report.errors.slice(0, 20) });
-      if (report.removed.length || report.errors.length) {
+        freedBytes: report.freedBytes, freeBytes: report.freeAfter === null ? null : Math.max(0, Math.round(report.freeAfter)), errors: [...report.errors, ...(report.checkouts?.errors ?? [])].map(entry => entry.slice(0, 500)).slice(0, 20),
+        checkouts: report.checkouts?.removed.length ?? 0, rootFreeBytes: report.checkouts?.freeBytes == null ? null : Math.max(0, Math.round(report.checkouts.freeBytes)) });
+      const orphans = report.checkouts?.removed.length ?? 0, failures = report.errors.length + (report.checkouts?.errors.length ?? 0);
+      if (orphans && !report.removed.length && !failures) {
+        performed.push(await record(state, `reclaim:${report.at}`, { kind: 'reclaim', work: null, principal: null, state: 'done',
+          detail: `Reclaimed ${orphans} ephemeral checkout(s) no live session owned from ${report.checkouts!.root}, ${gigabytes(report.checkouts!.freeBytes)} free there`, attempts: 1, cycle: state.cycle }, now(), effects.persist));
+      } else if (report.checkouts?.errors.length && !report.removed.length && !report.errors.length) {
+        performed.push(await record(state, `reclaim:${report.at}`, { kind: 'reclaim', work: null, principal: null, state: 'failed',
+          detail: `Reclaimed ${orphans} ephemeral checkout(s) from ${report.checkouts.root}; ${report.checkouts.errors.length} could not be removed: ${report.checkouts.errors[0]}`, attempts: 1, cycle: state.cycle }, now(), effects.persist));
+      } else if (report.removed.length || report.errors.length) {
         performed.push(await record(state, `reclaim:${report.at}`, { kind: 'reclaim', work: null, principal: null, state: report.errors.length ? 'failed' : 'done',
-          detail: `Reclaimed ${report.removed.length} dependency director${report.removed.length === 1 ? 'y' : 'ies'} from ${report.scanned} assignment worktree(s), ${gigabytes(report.freedBytes)} recovered, ${gigabytes(report.freeAfter)} free${report.errors.length ? `; ${report.errors.length} could not be removed: ${report.errors[0]}` : ''}`,
+          detail: `Reclaimed ${report.removed.length} dependency director${report.removed.length === 1 ? 'y' : 'ies'} from ${report.scanned} assignment worktree(s), ${gigabytes(report.freedBytes)} recovered, ${gigabytes(report.freeAfter)} free${orphans ? `; ${orphans} ephemeral checkout(s) no live session owned removed from ${report.checkouts!.root}` : ''}${report.errors.length ? `; ${report.errors.length} could not be removed: ${report.errors[0]}` : ''}`,
           attempts: 1, cycle: state.cycle }, now(), effects.persist));
       } else await effects.persist(state);
     } catch (error) {
@@ -848,8 +862,9 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
  * as a disk to reclaim rather than as an unexplained command error.
  */
 const message = (error: unknown) => {
-  const text = error instanceof Error ? error.message : String(error), cause = diskExhaustion(error);
-  return cause ? `${text} — ${cause}: ${reclaimAdvice}` : text;
+  const text = error instanceof Error ? error.message : String(error), exhausted = diskExhaustionMessage(error);
+  // An error already reported as disk exhaustion is not explained twice.
+  return exhausted && !text.includes(reclaimAdvice) ? `${text} — ${exhausted}` : text;
 };
 function deploymentDetail(observation: DeploymentObservation) {
   if (observation.source === 'unavailable') return `Deployment SHA is unverified: ${observation.reason ?? 'no deployment observation is configured or available'}`;
@@ -1019,7 +1034,12 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     },
     // The idle bound comes from the live configuration, so a host under pressure can shorten it
     // (or a slow repository lengthen it) without restarting the loop.
-    reclaim: work => reclaimWorktrees(root, work, { idleMs: reclaimIdleMs(current()) }),
+    // The same pass takes back every ephemeral checkout no live session owns, under the managed root.
+    reclaim: async work => {
+      const report = await reclaimWorktrees(root, work, { idleMs: reclaimIdleMs(current()) });
+      try { return { ...report, checkouts: await reclaimCheckouts(root, current()) }; }
+      catch (error) { return { ...report, errors: [...report.errors, `Ephemeral checkouts: ${writeFailure(error, 'Reclaiming the managed worktree root').message}`] }; }
+    },
     persist: state => writeDaemonState(current(), state),
   };
 }
