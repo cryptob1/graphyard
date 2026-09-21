@@ -51,6 +51,132 @@ An executed E2E pass may stand for a later head of the same item only through a 
 
 CI check success proves that named check reported success. It does not prove test inventory. Acceptance evidence separately requires counts and named behavioral proofs. A trusted producer is responsible for deriving these counts from actual reports and binding them to the actual tested code. Graphyard cannot determine whether an assertion adequately expresses product intent.
 
+## Inverted coordination: typed actions and stateless executors
+
+Every read already evaluates the gates. The control plane therefore names what each item needs
+next, as one typed action, instead of leaving a coordinator session to read a status report and
+decide. `nextAction` (`src/model/next-action.ts`) is pure over the item, its graph and the clock,
+so two readers always agree without talking to each other.
+
+Nine kinds exist: `dispatch`, `request-review`, `request-rework`, `approve-scope`, `resync`,
+`reclaim`, `merge`, `verify-deployment` and `escalate`. Each carries the inputs whoever runs it
+needs — the head, base and policy revision for a review; the proof group and proof names for a
+producer; the paths and requester for a scope answer. Every refusal any gate can raise maps to
+exactly one kind through `refusalAction`, whose last rule matches everything, so a refusal nobody
+wrote a rule for becomes an escalation rather than silence. Two refusals name no action for their
+own item because they belong to another: an unfinished dependency is that dependency's dispatch,
+and a queue position is the predecessor's merge.
+
+A refusal is classified from the item, not from its text alone, because the same sentence can
+stand for different situations. The review gate refuses with a sentence that reads as "a review is
+required", but `reviewNeed` may already have decided that no review can be *asked for* this head,
+and `reviewStandstill` names what each of those answers actually needs:
+
+| What `reviewNeed` found | Action | Why |
+| --- | --- | --- |
+| A reviewer requested changes on exactly this head — a GitHub review, or the verdict an agent reviewer recorded | `request-rework` | The item owes a new head; nobody reviews this one again |
+| The head does not contain the base tip | `resync` | Any approval would be dismissed when GitHub recomputes the merge base; a fresh reading and base refresh is what it waits for |
+| The provider's review is dispatched by the control plane itself (`codex`, `agent`) | `resync` | Waking that observation job is both how the request is posted and how the verdict arrives; no session exists for an executor to launch |
+| Every configured reviewer profile is exhausted | `escalate` | Nobody is left to ask, and adding capacity or changing provider is the operator's call |
+| An approval is genuinely missing (`github`) | `request-review` | A launched reviewer session answers it, against the request auto-dispatch raised |
+
+A base the control plane could not merge in cleanly is named `request-rework` for the same reason
+— its own refusal says to resolve the conflict and push, and that the approval and proofs bound to
+that head do not survive the resolution, which no mechanical step can do.
+
+Naming an action nobody can complete is the failure mode this mapping exists to prevent: the row
+would be claimed, fail or complete without effect, and come back forever while the item is never
+shown as owing a judgment. `request-review` in particular stands on a request `reconcileAutoDispatch`
+raised, and it raises one only while `reviewNeed().needed` — which is true for the `github` provider
+alone. So the mapping is exhaustive over the review states rather than falling through to "ask for
+a review": a state nobody mapped escalates, visible and owed, instead of looping in the queue.
+
+An unsettled containment quarantine is the same test applied to the fence. `reclaim` is what an
+item held by a session that cannot act needs, and reconciliation answers it by clearing the lapsed
+lease — but it never lowers a quarantine. Only the worker's settlement capability, a verified
+containment assessment or an operator's stopped-worker recovery does, and each rests on somebody
+judging that the worker really stopped. So a fenced item with no live lease is named `escalate`,
+exactly as an exhausted reviewer roster is, and the `reclaim` handler refuses rather than reporting
+an item free while its fence still stands.
+
+Each outstanding action is a durable row on the work aggregate (`src/model/actions.ts`), written
+inside the same advisory-locked transaction as every other decision. A row's id is a hash of what
+it binds — kind, item, situation — never of when it was made, so a re-derivation after a restart
+recognises the row it already has. An executor claims a row under its own identity for a bounded
+lease; only that claim may settle it. An executor that dies renews nothing, its claim expires, the
+next executor takes the row as a further attempt, and the dead one's late settlement is refused —
+so an interrupted action is retried without being executed twice. Every transition records the
+requester, the executor, the result and the reason on the row.
+
+A claim is a bounded lease, not a bounded handler: an executor still inside one renews the claim
+while it runs, so a dispatch that waits on a runtime or a merge that chains provider calls keeps
+its row, and only an executor that stopped renewing loses it. A renewal carries no result and is
+accepted from nobody but the live claim's own executor and credential.
+
+A claim records the executor's self-asserted name *and* the credential it was made with, and only
+that pair may settle the row. Several executors behind one coordinator credential is an ordinary
+deployment, and a settlement under the wrong name would be refused after the handler had already
+run — the claim would then expire and the action run a second time, which is exactly what the lease
+exists to prevent. A row whose claim is still live is never retired even when the situation has
+moved on, because running the action is usually what moved it: the executor still owes a result,
+and the row the item now needs is opened beside it.
+
+Executors are stateless. One holds a credential, a host name, and a handler per action kind it can
+run; it claims one row, runs it, reports the result, and keeps nothing. Any number of them on any
+number of hosts drive the same queue and never coordinate with each other.
+`scripts/graphyard-executor.mjs` is the one Graphyard ships: it launches worker, reviewer and
+producer sessions, applies the scope rule, re-reads a pull request, brokers the guarded merge and
+records a deployment reading.
+
+An executor claims only the kinds it has a handler for, which is what keeps judgment out of the
+loop itself. `actionJudgment` classifies every kind: `none` is mechanical end to end, `in-session`
+launches a session and walks away — the model works inside it, under its own credential — and
+`in-step` means running the action *is* the judgment. The two `in-step` kinds, `escalate` and
+`request-rework`, may never have a handler, and the executor entry point refuses one that does, so
+a full ready-to-delivered cycle runs with no judgment anywhere in the loop. `llmRole` on each
+action names the judgment inside what it starts — implement, review, produce evidence, approve a
+two-party decision, resolve an escalation — and is null for the five mechanical kinds.
+
+Workers pull. A free session asks `POST /api/assignments/claim` (`scripts/graphyard-pull.mjs`) for
+its next assignment and claims it under its own identity through the ordinary claim rules; the control plane
+offers the items it already names as needing a dispatch, in dispatch order. Nothing tracks which
+session is alive. A pull is idempotent on its own key, and one key can claim at most one item: the
+claim and its receipt are written in the same transaction, a retry replays that receipt, and a
+concurrent retry that reaches another offer first is refused for reusing the key with different
+input and replays the winner's assignment. The shipped worker keeps one key across its transport
+retries, which is what makes the replay reachable when a pull times out after its claim committed.
+
+Two more records make the fleet legible without a relaying coordinator. A typed agent request
+(`src/model/agent-requests.ts`) is what a session records instead of blocking on a prose question:
+one of `scope-request`, `decision`, `blocker`, `note` or `escalation`, each naming its decider — a
+deterministic rule, an independent approver agent, a tracked follow-up item, or one of the three
+human-only decisions — and the attempt ends in the same transaction, so the item is free rather
+than held at a prompt. Recording one is the same write as the command it replaces, so it carries
+the same authority: every type but `note` needs the live lease of the attempt that is asking, and
+only the decider the record names may close it. A session handle (`src/model/sessions.ts`) records
+where a launched session runs: runtime, host, Herdr workspace, tab and pane, and its transcript,
+with the one command or link that attaches to it. Every launcher writes what it knows and names
+whose session it is, and that session adds the tab and transcript only it knows, onto the same
+record; updating a handle that exists is the named session's, its launcher's or an admin's, because
+the attach command on it is an instruction an operator runs.
+
+A merge brokered from the loop is owned by the executor instance that acquired it, never by the
+coordinator principal alone, so a daemon, an interactive merge and any number of executors sharing
+one credential stand down from each other's in-flight executions instead of resuming them.
+
+What the fleet polls is the bounded coordination view of the work snapshot
+(`src/server/work-view.ts`), never whole documents. Inverting the loop multiplies that read: one
+master session asking every few seconds becomes the cycle, the dispatcher and every executor
+asking, so the view carries the decision state and nothing only a report consults — evidence
+without artifacts or per-file scope, the observation without its scope comparison, resolved
+requests, resolved action rows and queue entries bounded to the most recent, and no pipeline
+timeline. For the same reason the ledger reconstruction that rebuilds those timelines rides the
+full read whose speed report it feeds (`master status`) and never the poll: a maintenance walk in
+front of the claim path would be paid more often the more executors joined.
+
+None of this authorizes progression. An action is a fact about what is missing; the gates still
+decide from evidence and verdicts alone.
+
 ## Reconciliation
 
 The server runs a non-overlapping tick every two seconds. It expires leases and reevaluates affected state, then processes up to four available GitHub jobs concurrently. A successful job becomes eligible again after 20 seconds; a failed job after 45 seconds. These timings are MVP defaults, not latency guarantees under a large backlog. Add replicas or adjust batching after measuring real load.

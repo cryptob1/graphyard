@@ -597,6 +597,205 @@ anything belongs to it and the approver agent together: reading a worker's repor
 requirement, choosing how to route a novel failure. The loop keeps everything mechanical running
 underneath them, and asks for nothing while it can decide.
 
+## Typed next actions and stateless executors
+
+A master session is not the planner any more, and does not have to be running for work to move.
+The control plane computes what each item needs next — one typed action with the inputs whoever
+runs it needs — and keeps a durable, leased row for it; stateless executors claim those rows and
+run them. The full model is in
+[architecture](architecture.md#inverted-coordination-typed-actions-and-stateless-executors).
+
+Nine kinds exist: `dispatch`, `request-review`, `request-rework`, `approve-scope`, `resync`,
+`reclaim`, `merge`, `verify-deployment` and `escalate`. `master status` reports them under
+`actions`: what each open item needs, which executor holds which row and since when, and every
+row that has waited past the five-minute idle bound. An item with nothing named needs nothing
+from anybody — it is delivered, or it is waiting on another item's action (an unfinished
+dependency, a predecessor's place in the merge queue).
+
+What an item needs is named per provider, never per gate sentence. Only a `github` approval is
+answered by a reviewer session an executor launches, so only that item is named `request-review`.
+An item on the `codex` or `agent` [review provider](github.md#identity-bound-agent-review-providers)
+is named `resync`: the control plane dispatches those reviews through its own observation job, and
+waking it is what posts the request and reads the verdict back. An item whose reviewer profiles are
+all exhausted is named `escalate`, because that is a reviewer-capacity decision — add a profile on
+another provider, wait for quota, or select another review provider — and never an action that
+waits on a reviewer which cannot run.
+
+An item fenced by an unsettled [containment quarantine](#containment-quarantines) with no live
+lease is named `escalate` for the same reason. `reclaim` asks the control plane to re-read the item
+and reconcile it, which clears a lapsed lease but never lowers a fence: that takes the worker's
+settlement capability, a verified containment assessment (`master settle-containment GY-N REASON`,
+which the loop also applies on its own when it can verify the supervisor is gone) or an operator's
+stopped-worker recovery. The escalation names which, and the `reclaim` handler refuses an item
+whose quarantine still stands rather than reporting it free.
+
+An executor holds a coordinator credential, a host name, and one handler per kind it can run.
+Graphyard ships one:
+
+```sh
+node scripts/graphyard-executor.mjs                      # claim, run, report, repeat; Ctrl-C stops it
+node scripts/graphyard-executor.mjs --once               # one claim-run-settle step
+node scripts/graphyard-executor.mjs --kinds merge,resync  # a narrower one; run several with different kinds
+```
+
+It reads this host's `.graphyard/master.json` for the launch profiles the dispatching actions need
+and authenticates with the coordinator credential named there — the same credential `master run`
+uses, and nothing broader. Run as many as you like, on as many hosts; none of them is a master, and
+stopping any of them costs the one claim it held. The routes underneath, for an executor written
+elsewhere:
+
+```sh
+POST /api/actions/claim   {"host": "runner-3", "kinds": ["dispatch", "merge", "resync"]}
+POST /api/actions/ID/settle {"result": "done", "reason": "reviewer session launched on aaaaaaaaaaaa", "executor": "runner-3"}
+GET  /api/actions          # the queue, the computed actions, open requests and running sessions
+```
+
+A claim records both the executor name and the credential it was made with, and only that pair may
+settle it: several executors may run behind one coordinator credential, and a settlement that named
+the wrong one would be refused after the handler had already run — the claim would then expire and
+the action run twice. `POST /api/work/GY-N/resync` is the one route the mechanical kinds add: it
+schedules the provider reading the server already knows how to make and reconciles the item, which
+is what `resync` and `reclaim` mean.
+
+It keeps nothing between calls and knows nothing about other executors: two of them on two hosts
+claiming at the same instant are serialized by the coordination lock, and the loser takes the next
+row. An executor that dies mid-action renews nothing, its claim expires, another takes the row as
+a further attempt, and the dead one's late settlement is refused — so nothing is run twice. A
+handler that throws returns its row to the queue with the reason and a widening backoff.
+
+A claim is a two-minute lease, and the handlers are not two-minute operations: a dispatch prepares
+a worktree and waits on a runtime, and a guarded merge chains provider calls that each have their
+own timeout. An executor that is still inside a handler says so every thirty seconds and keeps the
+row:
+
+```sh
+POST /api/actions/ID/renew  {"executor": "runner-3"}
+```
+
+Only the executor named on the claim, holding the credential the claim was made with, may renew
+it, and only while it is still live — a claim that already expired may have been taken by somebody
+else, and renewing it would put two executors inside one action. A slow executor therefore keeps
+its row; a dead one loses it within the lease, which is the difference the queue has to make.
+
+### Running executors beside the daemon
+
+`master run` and any number of executors can run against the same control plane. They do not
+coordinate with each other and do not have to: the queue serializes the rows, and every merge is
+brokered under its own **execution instance** — `principal#instance`, minted once per process
+(the daemon's `daemon-…`, each executor's `executor-…`, one per interactive `master merge`). An
+execution another instance holds is refused rather than resumed, so two brokers never drive one
+merge even when they share a coordinator credential; the one that finds a foreign execution stands
+down, its action backs off, and it retries after the first has finished or its authority has
+lapsed. Nothing has to be turned off to add an executor.
+
+The daemon claims nothing from the queue, so a window in which both ran shows deliveries the
+executors settled *and* steps the daemon pushed, and the queue's own history says which was which:
+a row names the executor that settled it, and a step the daemon took appears in the item's ledger
+with no row at all.
+
+An executor claims only the kinds it has a handler for, and two kinds may never have one:
+`escalate` and `request-rework` are judgments made in the step itself rather than inside a session
+the step starts, so the shipped executor refuses to start with a handler for either. The other seven
+it ships — it launches a worker, reviewer or producer session, asks the control plane to apply the
+scope rule, re-reads a pull request, brokers the guarded merge, or records a deployment reading.
+Configure no escalation handling and the fleet still delivers: every language model is invoked
+inside what an action starts — implementing, reviewing, producing evidence, approving a two-party
+decision, resolving an escalation — and never in the loop that starts it. That is what the master
+session is now for: the escalations, the findings and the two-party decisions, outside the
+critical path.
+
+### Workers pull their own work
+
+A free worker session asks for its next assignment rather than waiting to be dispatched into:
+
+```sh
+node scripts/graphyard-pull.mjs            # ask once; exits non-zero when there is nothing to take
+node scripts/graphyard-pull.mjs --watch    # keep asking every 30s until there is
+```
+
+```sh
+POST /api/assignments/claim   {"host": "vishrog"}
+```
+
+The control plane offers the items it already names as needing a dispatch, in the dispatch order
+it already uses, and the worker claims under its own identity through every ordinary claim rule.
+An item another worker just took is skipped rather than returned as an error. Polling every
+thirty seconds keeps ready-to-claim inside two minutes with no central runtime-health tracking:
+nothing has to know which session is alive for work to reach it.
+
+A pull carries an idempotency key like every other mutation, and the shipped worker keeps that one
+key across every transport retry, so a pull that timed out after its claim committed replays that
+claim instead of taking a second item — a worker never holds a lease nobody told it about. One key
+can only ever claim one item: a concurrent retry that reaches a different offer first is refused
+for reusing the key with different input and replays the assignment the winner made. Under
+`--watch` a control plane the worker cannot reach at all is waited out rather than ending the
+session.
+
+### Typed requests instead of prose questions
+
+A session that needs something records a typed request and exits, giving up its lease in the same
+transaction, so the item is free instead of held at a prompt:
+
+```sh
+POST /api/work/GY-N/request
+{"type": "scope-request", "epoch": 3, "paths": ["docs/"], "reason": "the guide describes this contract"}
+```
+
+Recording one is the same write as the command it replaces — a `blocker` sets the blocker the ready
+gate reads, an `escalation` fences every in-flight merge — so it needs the same authority: the live
+lease of the attempt that is asking, named by its epoch. Only a `note`, which moves nothing a gate
+reads, may be recorded without one. Closing a request is the decider's, never the asker's: a
+session cannot record a request for an approver agent or the operator and then answer it itself,
+and `master status` keeps showing it until the party the record names closes it.
+
+Each type names exactly one decider: a `scope-request` is the additive planned-files widening rule,
+which the control plane applies in the same transaction the request is recorded in — the same
+verdict [the scope requests the loop decides](#scope-requests-the-loop-decides) computes, so the ask is answered
+before the session has finished exiting, and a refusal becomes the item's blocker; a `decision` is
+an independent approver agent; a `blocker` is a tracked follow-up item; a `note` is recorded and
+decided by nobody; an `escalation` is an approver agent —
+unless the request names one of the three human-only decisions (goals and priorities, spending
+money or opening third-party accounts, issuing credentials to people), which routes to the
+operator whatever its type. `master status` lists every open request with its decider, the command
+that answers it, and how long it has waited. A session that ends waiting on input instead is
+recorded as failed with that reason, naming the request it should have made.
+
+### Session handles
+
+Every launched session records a durable handle on the item: runtime, host, Herdr workspace, tab
+and pane, its transcript, and what it is working on. `master status` reports them under
+`sessions`, and the dashboard drawer shows the same per item, each with the one command or link
+that attaches to it — `herdr pane attach PANE` while it runs, its transcript once it has finished.
+Watching a specific agent never needs a master to relay a pane identifier.
+
+Every launcher records one: the worker dispatch (loop or executor), and the reviewer and producer
+launches in automatic dispatch — the dispatcher derives the coordinator mutation it records them
+with from its own configuration, so its launches are as visible as an executor's wherever it runs.
+Each records what it knows —
+the runtime it launched, the host, the Herdr workspace, the pane and the command that attaches to
+it — and names the principal whose session it is. What a launcher cannot know, the tab the runtime
+opened under its own control and the transcript the agent writes, the session records for itself
+with `POST /api/work/GY-N/session`, which is the only party that has them; a handle is merged
+field by field, so the two halves meet on one record.
+
+A handle is a fact, but the attach command on it is an instruction somebody runs, so updating one
+that already exists belongs to the session it names, the coordinator that launched it, or an admin.
+Any other credential — a producer token on a CI runner, a worker with no part in that session — is
+refused rather than allowed to mark a running session finished or replace the command an operator
+is about to run.
+
+Creating one is the same authority, for the same reason. An implementation session records its
+handle under the attempt epoch it holds. A handle with no epoch is recorded by its launcher — a
+coordinator or an admin — or by the session of a live dispatch request on that item, whose id the
+handle carries. Nothing else may create one: otherwise a credential that merely reaches the item
+could squat the predictable id of a session about to be launched, fixing the ownership on itself,
+or record enough handles to push somebody's running session off a bounded list. The bound itself
+retires finished handles first and never evicts a running one to make room.
+
+A session Herdr reports blocked is waiting on input, not gone: the attempt is recorded as failed
+with that reason, and the handle stays `running` carrying why, so the attach command still works
+at the one moment somebody needs it.
+
 ## Automatic dispatch at submit
 
 Review and proof collection start the moment a candidate is ready for them, not when someone

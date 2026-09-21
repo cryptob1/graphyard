@@ -8,6 +8,7 @@ import { z } from 'zod';
 import { currentEvidence, deliveryState, deploySmokeRequired, exhaustedReviewerProfiles, postDeployMs, productionLatencyMs, reviewProviderOf, reviewerProfileFor, rollbackGuidance, type AgentReview, type ContainmentScope, type Work } from './model.js';
 import { scopeBlockedBudgetMs, scopeDecisionBudgetMs, scopeDecisionSample, type ScopeRequestState } from './model/scope.js';
 import { scopePattern, watchAssignment } from './supervisor.js';
+import type { SessionHandleInput } from './model/sessions.js';
 import { baseRefreshConflict, pendingBaseRefresh } from './merge-queue.js';
 import { dispatchOrder } from './coordination.js';
 import { capacitySignature, describeCapacity, detectExhaustion, standingCapacity, type CapacityAccount, type CapacityRole, type PartialWork } from './model/capacity.js';
@@ -966,6 +967,13 @@ export interface DaemonEffects {
   herdr?: () => { agents: HerdrAgent[]; available: boolean };
   /** Stops an orphaned watch supervisor through the containment scope it recorded at launch. */
   stopSupervisor?: (orphan: OrphanSupervisor, signal: NodeJS.Signals) => void | Promise<void>;
+  /**
+   * Records a launched session's durable handle on the item: the runtime, host, Herdr coordinates
+   * and transcript a human or an executor attaches to it with. A loop configured without it keeps
+   * cycling; the sessions it launches are then only visible in this host's own local ledgers,
+   * which is the relaying the handle exists to end.
+   */
+  recordSession?: (work: Work, handle: SessionHandleInput) => Promise<unknown>;
   credentials: (profiles: WorkerProfile[]) => Promise<Record<string, { available: boolean; reason: string | null; accounts?: ProfileAccountHealth[] }>>;
   snapshot: () => Promise<{ work: Work[]; now: string }>;
   persist: (state: DaemonState) => Promise<void>;
@@ -1103,7 +1111,15 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
     if (!agent?.pane_id || !item || agent.agent_status !== 'blocked' || failedOver.has(item.id)) continue;
     const key = `session:blocked:${profile.name}:${agent.pane_id}:${item.epoch}`;
     if (state.actions[key]) continue;
-    performed.push(await record(state, key, { kind: 'session', work: item.key, principal: profile.principal, state: 'failed', detail: `Worker session ${profile.agentName} on ${item.key} (epoch ${item.epoch}) is waiting on input (Herdr reports it blocked) instead of deciding on its own; answer or stop it, and have it record a blocker naming the blocked command rather than asking`, attempts: 1, epoch: item.epoch, cycle: state.cycle }, now(), effects.persist));
+    performed.push(await record(state, key, { kind: 'session', work: item.key, principal: profile.principal, state: 'failed', detail: `Worker session ${profile.agentName} on ${item.key} (epoch ${item.epoch}) is waiting on input (Herdr reports it blocked) instead of deciding on its own; answer or stop it. A session that needs something records a typed request and exits — POST /api/work/${item.key}/request with a type of scope-request, decision, blocker, note or escalation — which names its decider and frees the item, rather than holding the lease at a prompt`, attempts: 1, epoch: item.epoch, cycle: state.cycle }, now(), effects.persist));
+    // The session is blocked, not gone: it still holds its pane, and the one moment somebody
+    // needs the attach command is this one. The handle stays running, carrying why it stalled;
+    // step 1 records it finished once the agent is actually closed.
+    await effects.recordSession?.(item, { id: `${profile.principal}:${item.epoch}`, kind: 'implementation', principal: profile.principal, runtime: profile.kind ?? profile.mode, host: config.hostId,
+      ...(config.herdrWorkspace ? { workspace: config.herdrWorkspace } : {}),
+      ...(agent.pane_id ? { pane: agent.pane_id, attach: `herdr pane attach ${agent.pane_id}${config.herdrWorkspace ? ` --workspace ${config.herdrWorkspace}` : ''}` } : {}),
+      subject: `${item.key}: ${item.title}`.slice(0, 300), state: 'running',
+      outcome: 'waiting on input instead of recording a typed request; answer or stop it, and the attempt is recorded as failed with that reason' }).catch(() => {});
   }
 
   // 1c. A lease that keeps advancing while Herdr no longer reports the session renewing it is an
@@ -1343,8 +1359,16 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
     taken.add(choice.profile.name);
     await record(state, key, { kind: 'dispatch', work: item.key, principal: choice.profile.principal, epoch: item.epoch, state: 'started', detail: `Dispatching ${item.key} to ${choice.profile.name}`, attempts: (state.actions[key]?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist);
     try {
-      await effects.dispatch(item, choice.profile, free, snapshot);
+      const dispatched = await effects.dispatch(item, choice.profile, free, snapshot) as { pane?: string | null; agentName?: string; principal?: string } | undefined;
       clearProfileFailure(state, choice.profile);
+      // The session is now running somewhere. Put the handle where every Graphyard reader looks,
+      // so watching this specific agent never means asking this loop to relay its pane id.
+      await effects.recordSession?.(item, {
+        id: `${choice.profile.principal}:${item.epoch + 1}`, kind: 'implementation', principal: choice.profile.principal, runtime: choice.profile.kind ?? choice.profile.mode, host: config.hostId,
+        ...(config.herdrWorkspace ? { workspace: config.herdrWorkspace } : {}),
+        ...(dispatched?.pane ? { pane: dispatched.pane, attach: `herdr pane attach ${dispatched.pane}${config.herdrWorkspace ? ` --workspace ${config.herdrWorkspace}` : ''}` } : {}),
+        subject: `${item.key}: ${item.title}`.slice(0, 300), state: 'running',
+      }).catch(() => { /* the dispatch landed; a handle that could not be written is not a failed dispatch */ });
       performed.push(await record(state, key, { kind: 'dispatch', work: item.key, principal: choice.profile.principal, epoch: item.epoch, state: 'done', detail: `Dispatched ${item.key} to ${choice.profile.name}; the worker launcher claimed under ${choice.profile.principal}`, attempts: state.actions[key].attempts, cycle: state.cycle }, now(), effects.persist));
     } catch (error) {
       recordProfileFailure(state, choice.profile, message(error), now());
@@ -1992,6 +2016,7 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     snapshot: deps.snapshot,
     closeSession: pane => closeHerdrPane(pane, run),
     dispatch: (work, profile, agents, snapshot) => dispatchWork(root, work, profile, agents, run, snapshot.work, undefined, undefined, undefined, snapshot.now),
+    recordSession: (work, handle) => deps.mutate(`work/${work.id}/session`, handle),
     decideScope: work => deps.mutate(`work/${work.id}/autoscope`, { epoch: work.scopeRequest!.epoch }),
     requestProof: work => {
       const config = current();
