@@ -5,9 +5,10 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { approverSessionName, assertSessionName, atomicPrivateWrite, distinctSessionName, launchApprover, loadMasterConfig, masterConfigSchema, producerProfileSchema, reviewerProfileSchema, sessionName, sessionNameLimit, sessionNameRefusal, SessionNameRefusedError, setupMaster, startAgentSession, startMaster, workerProfileSchema, type HerdrAgent, type MasterConfig, type MasterRun } from '../src/master.js';
+import { approverSessionName, assertSessionName, atomicPrivateWrite, distinctSessionName, launchApprover, saveWorkerProfile, loadMasterConfig, masterConfigSchema, producerProfileSchema, reviewerProfileSchema, sessionName, sessionNameLimit, sessionNameRefusal, SessionNameRefusedError, setupMaster, startAgentSession, startMaster, workerProfileSchema, type HerdrAgent, type MasterConfig, type MasterRun } from '../src/master.js';
 import { daemonSummary, emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-daemon.js';
 import { approverLaunchAttention } from '../src/cli/master-status.js';
+import { buildProposal, proposedWorkerProfileSchema } from '../src/onboarding.js';
 import { escalationTriggers, type Work } from '../src/model.js';
 
 // GY-101: a per-decision approver session name that no runtime would accept meant no approver
@@ -109,6 +110,31 @@ test('unit:generated-session-names-valid — every session name Graphyard genera
     assert.throws(() => producerProfileSchema.parse({ name: 'produce-a', principal: 'proof-runner', agentName: 'produce a', kind: 'claude', credentialFile: '/outside/producer.token' }), /it contains/);
     assert.throws(() => masterConfigSchema.parse({ ...config, masterAgentName: 'graphyard-master-of-a-repository-named-at-length' }), /past the 32-character limit/);
     assert.ok(workerProfileSchema.parse({ ...worker, agentName: 'eng-claude-1' }), 'a launchable name is taken as it always was');
+
+    // The worker profile name `master init` proposes, derived from the repository (GY-103). A
+    // proposal cannot carry a name the profile it becomes would refuse, so `master worker add`
+    // never fails on a name Graphyard itself produced, however long the repository is named.
+    assert.throws(() => proposedWorkerProfileSchema.parse({ name: 'claude-primary', principal: 'worker-1', agentName: 'kubernetes-sigs-cluster-api-provider-aws-claude-1', mode: 'launch', kind: 'claude', credentialFile: '/outside/claude.token', agentArgs: [], environment: {} }),
+      /Herdr cannot launch a session named .*49 characters, past the 32-character limit/);
+    for (const repository of ['owner/orders-api', 'kubernetes-sigs/cluster-api-provider-aws', 'kubernetes-sigs/cluster-api-provider-gcp', 'x/y']) {
+      const proposed = buildProposal({ files: ['package.json'], contents: { 'package.json': '{"name":"app"}' } },
+        { repository, runtimes: ['claude', 'codex'], credentialDirectory: credentials }).profiles.workers;
+      assert.equal(proposed.length, 2);
+      for (const profile of proposed) {
+        assert.ok(launchable(profile.agentName), `${repository}: ${profile.agentName} is ${profile.agentName.length} characters`);
+        assert.ok(profile.agentName.endsWith(`-${profile.kind}-1`) || profile.agentName.endsWith(`-${profile.kind}-2`), `${repository}: ${profile.agentName} still says which runtime and which of them it is`);
+        // The name is accepted where `master worker add` reads it, with the credential that profile names.
+        await writeFile(profile.credentialFile, `${profile.kind}-token-`.padEnd(40, 'x'), { mode: 0o600 });
+        const added = await saveWorkerProfile(root, profile, async () => ({ actor: { id: profile.principal, role: 'worker' } }));
+        assert.equal(added.added, profile.name);
+      }
+      assert.equal(new Set(proposed.map(profile => profile.agentName)).size, 2, `${repository}: two proposed workers are two sessions`);
+      await atomicPrivateWrite(join(root, '.graphyard/master.json'), { ...await loadMasterConfig(root), workers: [] });
+    }
+    // Repositories whose names begin alike are still two names once the limit shortens them.
+    const named = (repository: string) => buildProposal({ files: ['package.json'], contents: { 'package.json': '{}' } }, { repository, runtimes: ['claude'], credentialDirectory: credentials }).profiles.workers[0].agentName;
+    assert.notEqual(named('kubernetes-sigs/cluster-api-provider-aws'), named('kubernetes-sigs/cluster-api-provider-gcp'));
+    assert.equal(named('owner/orders-api'), 'owner-orders-api-claude-1', 'a repository that fits is named after itself, unshortened');
 
     // The last check before the runtime: a name no runtime would take never reaches one, and the
     // refusal names the limit, the name attempted and how to retry.
