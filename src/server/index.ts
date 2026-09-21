@@ -16,6 +16,7 @@ import { buildIdentity } from '../protocol-version.js';
 import type { ProductionWatch } from '../production-watch.js';
 import { Next, Sent, matchRoute, type RouteContext, type RouteModule, type Services } from './routes.js';
 import { authenticate, operatorAgentRouteGuard, operatorVisible } from './auth.js';
+import type { Credential } from './principals.js';
 import { healthRoutes } from './routes/health.js';
 import { githubRoutes } from './routes/github.js';
 import { operatorAgentRoutes } from './routes/operator-agents.js';
@@ -32,8 +33,7 @@ import { statusRoutes } from './routes/status.js';
 import { workRoutes } from './routes/work.js';
 import { staticRoutes } from './static.js';
 
-export const principalSchema = z.array(z.object({ id: z.string().min(1), role: z.enum(['admin', 'coordinator', 'slice-lead', 'worker', 'producer', 'reader']), token: z.string().min(32), proofs: z.array(z.string()).optional(), deploymentProviders: z.array(z.string().trim().min(1).max(40)).max(20).optional(), displayName: z.string().trim().min(1).max(100).regex(/^[^\u0000-\u001f\u007f]+$/).optional(), runtime: z.string().trim().min(1).max(80).regex(/^[^\u0000-\u001f\u007f]+$/).optional(), slice: z.enum(['product', 'infrastructure', 'docs-experience']).optional(), sessionKind: z.enum(['human', 'ai']).optional() }).strict()).min(1);
-export type Credential = Principal & { token: string };
+export { principalSchema, type Credential } from './principals.js';
 
 /** Routes that answer without a bearer token. */
 export const publicRoutes: readonly RouteModule[] = [healthRoutes, githubRoutes];

@@ -19,69 +19,15 @@ import { approveScopeRequest, cycleBudget, masterStatusReport, scopeRequestComma
 import { coordinationViewHeader } from '../server/work-view.js';
 import { executorHostHeader } from '../model/registry.js';
 import { readSecretFromStdin } from './context.js';
-import { registryCommand, registryHelp } from './master-registry.js';
-import { discoverHostLogins, proposeFleet } from '../fleet.js';
+import { initialFleetProposal, registryCommand } from './master-registry.js';
+import { masterHelp } from './master-help.js';
 
 /** Every master subcommand authenticates with the coordinator credential the master keeps for itself, never the repository connection file. */
 export const masterCommands = defineCommands([
   {
     name: 'master',
     readsConnection: () => false,
-    help: [
-      '  master init --token-stdin [--herdr-workspace ID] [--browser-profile PROFILE]',
-      '              [--dispatch-interval SECONDS] [--reviewer-profile NAME] [--producer-timeout MINUTES]',
-      '                                Install the recommended master-agent operating mode; PROFILE is',
-      "                                the operator's Chrome profile the master administers GitHub",
-      '  master start AGENT_KIND       Launch the dedicated visible Herdr master session',
-      '  master worker add FILE        Add an existing or launchable Herdr worker profile',
-      '  master reviewer setup [--name NAME]     Register the separate reviewer GitHub App; NAME',
-      "                                defaults to reviewer, within GitHub's 34-character limit",
-      '  master reviewer bind FILE --key-stdin   Bind an existing reviewer App (IDs in FILE, PEM on stdin)',
-      '  master reviewer add FILE | remove NAME   Add or remove a reviewer launch profile',
-      '  master producer add FILE | replace FILE | remove NAME  Manage proof-producer profiles',
-      '  master review GY-N [PROFILE]  Launch the bound reviewer on the exact current candidate;',
-      '                                master run does this on its own for every submitted head',
-      '  master protection [--apply]   Reconcile branch protection with every open review policy',
-      '  master browser FLOW [--dry-run]',
-      "                                Perform GitHub administration through the operator's browser",
-      '                                profile: app-permissions, installation-accept, or protection;',
-      '                                recorded, API-verified, audited',
-      '  master harness [KIND] [--apply]  Generate the master\'s own harness permissions',
-      '  master status                 Graphyard work truth joined with Herdr session health, the',
-      '                                dispatch order, overlaps and merge conflicts',
-      '  master dispatch GY-N PROFILE [--allow-overlap]',
-      '                                Invite a worker to claim ready work in a visible tab; an',
-      '                                item whose planned files overlap a claimed or unmerged item',
-      '                                is held unless --allow-overlap is passed',
-      '  master settle-containment GY-N REASON',
-      '                                Settle a containment quarantine whose supervisor this host',
-      '                                verifies dead; unverifiable signals refuse',
-      '  master merge GY-N|--all       Merge exact authorized candidates without bypasses',
-      '  master config FIELD=VALUE…   Tune owned run settings and profile accounts',
-      '                                (accounts:PROFILE=a,b); autoMerge and credential paths stay operator-only',
-      '  master verify-deployment GY-N Verify that the deployed release serves a delivery and',
-      '                                emits the current instructions; refuse stale or local-only',
-      '                                observations, record the exact release observed',
-      '  master run [--once] [--interval SECONDS]',
-      '                                Run the durable coordination loop as a supervised process; it',
-      '                                launches the reviewer and proof producers for every submitted',
-      '                                head within 30 seconds of the request, and decides every open',
-      '                                worker scope request on the cycle it appears',
-      '  master autonomy [--admin-token-stdin --apply]  Provision the master and approver identities',
-      '  master create FILE|release GY-N|unblock GY-N|requirements GY-N FILE REASON  Own intent',
-      '  master scope GY-N [REASON]    Approve a worker scope request the loop refused: add its',
-      '                                requested paths to plannedFiles while the attempt keeps its',
-      '                                lease. master run decides every request the item itself',
-      '                                already implies, so this is the override for the rest',
-      '  master decide GY-N ACTION [JSON|@FILE] REASON  Request a two-party decision',
-      '  master withdraw GY-N DECISION REASON  Take back the master\'s own requested decision',
-      '  master decisions GY-N | approver GY-N DECISION [KIND] | approve GY-N DECISION REASON',
-      '  master principals [--apply]   Preview or apply a roster rotation keeping live principals',
-      '  master restart                Restart this host\'s master loop detached',
-      '  master environments [--create KIND,…] [--apply]  Agent accounts, quota, profiles',
-      ...registryHelp,
-      '  master guide                  Print the complete master-agent operating guide',
-    ],
+    help: masterHelp,
     async run(context) {
       const { id, args, base, print } = context;
       const root = context.repositoryRoot();
@@ -97,17 +43,8 @@ export const masterCommands = defineCommands([
         if (values['browser-executable'] && !values['browser-profile']) throw new Error('--browser-executable requires --browser-profile');
         const browser = values['browser-profile'] ? { profile: values['browser-profile'], ...(values['browser-executable'] ? { executable: values['browser-executable'] } : {}) } : undefined;
         const installed = await setupMaster(root, { url: values.url ?? base, token: masterToken, cliPath: resolve(values['cli-path'] ?? await context.activeCliPath()), hostId: values['host-id'] ?? context.individualHostId(), herdrWorkspace: values['herdr-workspace'], ...(values['no-auto-merge'] ? { autoMerge: false } : {}), ...(method ? { mergeMethod: method as 'merge' | 'squash' | 'rebase' } : {}), ...(Object.keys(run).length ? { run } : {}), ...(browser ? { browser } : {}) });
-        // Setup looks at what this host already has — the agent CLIs that are logged in — and
-        // proposes the registry for them, so the fleet needs no hand-written profile. Nothing is
-        // stored until the operator accepts it; a failed discovery never fails the install.
-        const fleet = await (async () => {
-          const configured = await loadMasterConfig(root);
-          const response = await fetch(`${configured.url}/api/agent-registry/document`, { headers: { Authorization: `Bearer ${masterToken}` }, signal: AbortSignal.timeout(10_000) });
-          if (!response.ok) return { proposal: null, next: `The control plane at ${configured.url} does not serve an agent registry (status ${response.status}); deploy a release that does, then run graphyard master registry propose` };
-          const logins = await discoverHostLogins(), proposal = proposeFleet(logins, configured.hostId, await response.json());
-          return { discovered: logins.map(login => ({ account: login.name, runtime: login.runtime, home: login.home, loggedIn: login.loggedIn, login: login.login })), proposal,
-            next: proposal.accounts.length ? 'graphyard master registry propose --apply stores this fleet in the control plane' : logins.length ? 'Every login found on this host is already registered (or logged out); graphyard master registry shows the fleet' : 'No agent CLI login was found on this host; log one in, then run graphyard master registry propose --apply' };
-        })().catch(error => ({ proposal: null, next: `The fleet proposal could not be prepared (${error instanceof Error ? error.message : 'unknown reason'}); run graphyard master registry propose once the control plane answers` }));
+        // Setup proposes the fleet from the agent CLIs already logged in on this host; nothing is stored until accepted.
+        const fleet = await initialFleetProposal(await loadMasterConfig(root), masterToken);
         return print({ ...installed, fleet });
       }
       const master = await loadMasterConfig(root);

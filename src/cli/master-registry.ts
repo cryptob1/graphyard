@@ -10,7 +10,7 @@ export const registryHelp = [
   '  master registry propose [--directory DIR] [--apply]',
   '                                Discover the agent CLIs logged in on this host and propose the',
   '                                runtimes, models, accounts and roles for them; --apply stores it',
-  '  master registry runtime set NAME|@FILE [--kind K] [--arg A]… [--home-variable VAR]',
+  '  master registry runtime set NAME|@FILE [--kind K] [--arg=A]… [--home-variable VAR]',
   '              [--model-flag FLAG] [--login COMMAND] [--login-file PATH] [--env K=V]… --reason R',
   '  master registry model set NAME|@FILE [--provider P] [--id ID] [--input-cost USD]',
   '              [--output-cost USD] [--tier frontier|strong|fast] [--context TOKENS] --reason R',
@@ -108,4 +108,19 @@ export async function registryCommand(master: Pick<MasterConfig, 'hostId'>, args
   const concurrency = number(values.concurrency, '--concurrency') ?? existing?.concurrency;
   if (!accounts || concurrency === undefined) throw new Error(`${name} is a new role; name its accounts in preference order and its --concurrency`);
   return api.write('agent-registry/roles', { role: { name, accounts, concurrency }, reason: values.reason });
+}
+
+/**
+ * What `master init` adds to its report: the logins this host already has and the registry they
+ * imply, so a new installation reaches a working fleet without a hand-written profile. Nothing is
+ * stored until the operator accepts it, and a failed discovery never fails the install.
+ */
+export async function initialFleetProposal(master: Pick<MasterConfig, 'url' | 'hostId'>, token: string, fetcher: typeof fetch = fetch) {
+  try {
+    const response = await fetcher(`${master.url}/api/agent-registry/document`, { headers: { Authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(10_000) });
+    if (!response.ok) return { proposal: null, next: `The control plane at ${master.url} does not serve an agent registry (status ${response.status}); deploy a release that does, then run graphyard master registry propose` };
+    const logins = await discoverHostLogins(), proposal = proposeFleet(logins, master.hostId, await response.json());
+    return { discovered: logins.map(login => ({ account: login.name, runtime: login.runtime, home: login.home, loggedIn: login.loggedIn, login: login.login })), proposal,
+      next: proposal.accounts.length ? 'graphyard master registry propose --apply stores this fleet in the control plane' : logins.length ? 'Every login found on this host is already registered (or logged out); graphyard master registry shows the fleet' : 'No agent CLI login was found on this host; log one in, then run graphyard master registry propose --apply' };
+  } catch (error) { return { proposal: null, next: `The fleet proposal could not be prepared (${error instanceof Error ? error.message : 'unknown reason'}); run graphyard master registry propose once the control plane answers` }; }
 }

@@ -193,12 +193,12 @@ Adding capacity by hand follows the same order the proposal does, because each e
 A runtime is an agent CLI and its **launch contract**: what to start, the arguments every session of it starts with, the variable that points it at one login home, the flag that selects a model, and how to log in. The five runtimes Graphyard knows (`claude`, `codex`, `cursor`, `opencode`, `muse`) are proposed with their contracts; any other CLI is one command:
 
 ```sh
-node "$GRAPHYARD_CLI" master registry runtime set aider --kind aider --arg --yes-always \
+node "$GRAPHYARD_CLI" master registry runtime set aider --kind aider --arg=--yes-always \
   --home-variable AIDER_HOME --model-flag --model --login 'AIDER_HOME={home} aider --login' --login-file session.json \
   --reason "Add the Aider runtime"
 ```
 
-`--kind` is the executable (Herdr's agent kind). `--login-file` is a path inside the login home whose presence means "logged in", for runtimes whose login and quota Graphyard cannot read itself. A contract never carries a secret: a variable named like a token, a `GRAPHYARD_` variable, or a value that looks like a credential is refused.
+`--kind` is the executable (Herdr's agent kind); an argument that starts with a dash is written `--arg=--flag`. `--login-file` is a path inside the login home whose presence means "logged in", for runtimes whose login and quota Graphyard cannot read itself. A contract never carries a secret: a variable named like a token, a `GRAPHYARD_` variable, or a value that looks like a credential is refused.
 
 ### Add an account
 

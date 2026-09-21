@@ -17,7 +17,7 @@ import { ledgerTables } from '../src/store/schema.js';
 import { AgentRegistry } from '../src/agent-registry.js';
 import { discoverHostLogins, proposeFleet } from '../src/fleet.js';
 import { registryCommand } from '../src/cli/master-registry.js';
-import { NoHealthyAccountError, accountLaunch, atomicPrivateWrite, buildMasterStatus, dispatchWork, launchApprover, loadMasterConfig, selectAccount, setupMaster, type EnvironmentProbe } from '../src/master.js';
+import { NoHealthyAccountError, atomicPrivateWrite, buildMasterStatus, dispatchWork, launchApprover, loadMasterConfig, selectAccount, setupMaster, type EnvironmentProbe } from '../src/master.js';
 import { applyRegistryMutation, chooseSession, emptyRegistry, fleetRoles, fleetView, foldObservation, launchGraceMs, proposedRuntimes, sessionEnded, settleSessions, type AgentRegistry as Registry, type FleetSession, type FleetView } from '../src/model/registry.js';
 import type { Principal, Work } from '../src/model.js';
 import { FleetOverview } from '../web/pages/fleet.js';
@@ -153,6 +153,8 @@ test('integration:agent-registry-model — the control plane stores runtimes wit
   await registryCommand({ hostId: HOST }, ['account', 'set', 'claude-a', '--runtime', 'claude', '--model', 'opus', '--home', claudeHome, '--max-sessions', '2', '--reason', 'First Claude subscription'], cli);
   await registryCommand({ hostId: HOST }, ['account', 'set', 'codex-a', '--runtime', 'codex', '--model', 'gpt', '--home', join(homes, 'codex-a'), '--host', 'build-host-2', '--reason', 'Codex on the second host'], cli);
   await registryCommand({ hostId: HOST }, ['account', 'set', 'aider-a', '--runtime', 'aider', '--model', 'gpt', '--home', join(homes, 'aider-a'), '--reason', 'The later runtime has accounts like any other'], cli);
+  await registryCommand({ hostId: HOST }, ['runtime', 'set', 'goose', '--kind', 'goose', '--arg=--yolo', '--home-variable', 'GOOSE_HOME', '--login', 'GOOSE_HOME={home} goose configure', '--reason', 'A runtime added from the CLI'], cli);
+  assert.deepEqual((await ok('agent-registry/document', coordinator) as Registry).runtimes.find(runtime => runtime.name === 'goose')!.launch, { kind: 'goose', args: ['--yolo'], environment: {}, homeVariable: 'GOOSE_HOME', modelFlag: null, login: 'GOOSE_HOME={home} goose configure', loginFile: null });
   await assert.rejects(registryCommand({ hostId: HOST }, ['account', 'set', 'orphan', '--reason', 'r'], cli), /new account; name its --runtime and --model/);
   // A set names only what changes: the model moves, the credential reference and the limit stand.
   await registryCommand({ hostId: HOST }, ['model', 'set', 'sonnet', '--id', 'claude-sonnet-5', '--tier', 'fast', '--reason', 'Cheaper model'], cli);
@@ -173,6 +175,8 @@ test('integration:agent-registry-model — the control plane stores runtimes wit
   // What the role form submits, as the signed-in admin's browser sends it.
   await ok('agent-registry/roles', operator, { role: { name: 'worker', accounts: ['claude-a', 'codex-a', 'aider-a'], concurrency: 3 }, reason: 'Prefer Claude, then Codex, then the newcomer' });
   await ok('agent-registry/roles', operator, { role: { name: 'reviewer', accounts: ['codex-a', 'claude-a'], concurrency: 1 }, reason: 'Review on a different model than the author' });
+  await registryCommand({ hostId: HOST }, ['role', 'set', 'reviewer', '--concurrency', '2', '--reason', 'One more reviewer at a time'], cli);
+  assert.deepEqual((await ok('agent-registry/document', coordinator) as Registry).roles.find(role => role.name === 'reviewer'), { name: 'reviewer', accounts: ['codex-a', 'claude-a'], concurrency: 2 }, 'the CLI changed the limit and kept the order');
   for (const name of ['producer', 'approver', 'escalation-handler']) await ok('agent-registry/roles', operator, { role: { name, accounts: ['claude-a'], concurrency: 1 }, reason: `Configure ${name}` });
   assert.equal((await call('agent-registry/roles', operator, { role: { name: 'janitor', accounts: ['claude-a'], concurrency: 1 }, reason: 'r' })).status, 400, 'the roles are the five the control plane launches');
   assert.equal((await call('agent-registry/roles', operator, { role: { name: 'worker', accounts: ['claude-a', 'claude-a'], concurrency: 1 }, reason: 'r' })).status, 400);
