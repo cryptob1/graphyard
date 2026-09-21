@@ -133,10 +133,13 @@ export function currentBaseRefreshCarry(work: Pick<Work, 'candidate' | 'baseRefr
  *   against the moving base, compared with that commit. Present only when it differs by tree from
  *   the bound base, where `scopeFiles` already is this comparison.
  * - `carried`: other items' unlanded candidates whose commits this head has in its history — a
- *   speculative tip pushed onto its branch leaves them there — while its tree holds their files
- *   as the landing commit does. Merging such a head makes the provider record the other pull
- *   request merged with none of its content on the base branch, and no diff against any base shows
- *   it: that is how GY-93's merge took GY-84's delivery with it.
+ *   speculative tip pushed onto its branch leaves them there — while its tree holds their files as
+ *   the landing commit does. Merging such a head makes the provider record the other pull request
+ *   merged with none of its content on the base branch, and no diff against any base shows it:
+ *   that is how GY-93's merge took GY-84's delivery with it. The entries a predicted base is
+ *   published behind are excluded, since that base holds them: their files standing in the tip as
+ *   they stand there is how every queued tip holds its predecessors, and anything it really takes
+ *   from them is a change against the base it lands on, which `files` above compares.
  */
 export interface CarriedCandidate {
   key: string; pr: number; head: string;

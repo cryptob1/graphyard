@@ -370,8 +370,15 @@ export class GitHub {
     const previous = work.observation && work.observation.candidate.sha === head ? work.observation.landing : undefined;
     if (previous?.carried && previous.base === base && JSON.stringify(previous.examined) === JSON.stringify(landing.examined) && !previous.carried.some(entry => entry.unverified)) return { ...landing, carried: previous.carried };
     const carried: CarriedCandidate[] = [];
+    // The entries ahead are in a predicted base by construction, so their files standing in this
+    // head as they stand there is the ordinary state of a queued tip and says nothing: two entries
+    // ahead that both change one file leave it merged in the tip behind them. What such a tip would
+    // really take from them is a change to the base it lands on, which `files` compares above —
+    // every drop of theirs is a removal or a modification in `base...head`. So they are judged
+    // there, and `carried` judges the candidates the landing commit does not hold.
+    const ahead = new Set(predicted ? speculation!.predecessors : []);
     for (const peer of open) {
-      if (!await this.contains(peer.candidate!.sha, head)) continue;
+      if (ahead.has(peer.key) || !await this.contains(peer.candidate!.sha, head)) continue;
       const entry: CarriedCandidate = { key: peer.key, pr: peer.candidate!.pr, head: peer.candidate!.sha, dropped: [] };
       for (const file of peer.observation!.scopeFiles ?? []) {
         // A file this item planned is its own to change, whoever else touched it.
