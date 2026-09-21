@@ -519,6 +519,14 @@ Any other credential — a producer token on a CI runner, a worker with no part 
 refused rather than allowed to mark a running session finished or replace the command an operator
 is about to run.
 
+Creating one is the same authority, for the same reason. An implementation session records its
+handle under the attempt epoch it holds. A handle with no epoch is recorded by its launcher — a
+coordinator or an admin — or by the session of a live dispatch request on that item, whose id the
+handle carries. Nothing else may create one: otherwise a credential that merely reaches the item
+could squat the predictable id of a session about to be launched, fixing the ownership on itself,
+or record enough handles to push somebody's running session off a bounded list. The bound itself
+retires finished handles first and never evicts a running one to make room.
+
 A session Herdr reports blocked is waiting on input, not gone: the attempt is recorded as failed
 with that reason, and the handle stays `running` carrying why, so the attach command still works
 at the one moment somebody needs it.

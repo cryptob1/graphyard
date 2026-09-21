@@ -60,7 +60,31 @@ export const sessionHandleSchema = z.object({
 }).strict();
 export type SessionHandleInput = z.infer<typeof sessionHandleSchema>;
 
-export const sessionHandleLimit = 40;
+/**
+ * How many handles an item keeps, and the ceiling the list never passes.
+ *
+ * A bound that simply dropped the oldest entries would be a way to remove somebody else's handle:
+ * record enough new ones and the running session an operator is about to attach to falls off the
+ * end. So the bound evicts finished handles first, oldest first, and never evicts a running one to
+ * make room — a list of live sessions grows up to the ceiling instead, which only a launcher can
+ * fill (`engine.ts`, `command === 'session'`) and which keeps the document bounded regardless.
+ */
+export const sessionHandleLimit = 40, sessionHandleCeiling = 200;
+
+function bounded(handles: SessionHandle[], recorded: SessionHandle): SessionHandle[] {
+  if (handles.length <= sessionHandleLimit) return handles;
+  const excess = handles.length - sessionHandleLimit;
+  const retire = new Set<SessionHandle>();
+  for (const handle of handles) {
+    if (retire.size >= excess) break;
+    // The handle just written is never the one dropped to make room for itself: a session that
+    // ends would otherwise lose the transcript link the moment it recorded it.
+    if (handle.state === 'finished' && handle !== recorded) retire.add(handle);
+  }
+  const kept = handles.filter(handle => !retire.has(handle));
+  // The recorded handle is last, so trimming to the ceiling keeps it and drops the oldest.
+  return kept.length <= sessionHandleCeiling ? kept : kept.slice(kept.length - sessionHandleCeiling);
+}
 
 /**
  * The command or link that attaches to this session: the one its launcher recorded while it runs,
@@ -94,7 +118,7 @@ export function recordSession(work: Work, input: SessionHandleInput, principal: 
     // that has not ended — so the note is kept rather than dropped for want of an end.
     state: input.state, outcome: input.outcome ?? existing?.outcome ?? null,
   };
-  work.sessions = [...work.sessions.filter(entry => entry.id !== input.id), handle].slice(-sessionHandleLimit);
+  work.sessions = bounded([...work.sessions.filter(entry => entry.id !== input.id), handle], handle);
   return handle;
 }
 

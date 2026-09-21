@@ -13,7 +13,7 @@ import { githubFromEnv } from './github.js';
 import { regressionRefusals } from './regression-guard.js';
 import { ciFamilyAllows, ciProofFamilies, ciRunBindingSchema, ciRunRefusal, isCiProducer, refuseCiProducer, staleCiAttemptRefusal, type CiRunObservation } from './model/ci-proofs.js';
 import { decideScopeRequest, liveScopeWidening, scopeRefusalBlocker, type ScopeDecision } from './model/scope.js';
-import { reconcileAutoDispatch, type DispatchTransition } from './model/dispatch.js';
+import { liveDispatchHandleIds, reconcileAutoDispatch, type DispatchTransition } from './model/dispatch.js';
 import { nextAction, nextActionKinds, sameAction } from './model/next-action.js';
 import { claimAction, openActions, reconcileActions, renewClaim, settleAction, type ActionRow } from './model/actions.js';
 import { agentRequestLimit, agentRequestSchema, deciderFor, expireAgentRequests, leaseHeldRequestTypes, requestResolutionRefusal, resolveSatisfiedScopeRequests, type AgentRequest } from './model/agent-requests.js';
@@ -649,21 +649,33 @@ export class Engine {
       }
       if (command === 'session') {
         demand(['worker', 'producer', 'coordinator', 'admin'].includes(actor.role), 'Worker, producer or coordinator permission required', 403);
-        // An implementation session names the attempt it runs under and must hold that lease; a
-        // reviewer or producer session holds none, and records its handle under its own identity.
-        if (data.epoch !== undefined) activeLease(work, actor, data.epoch, now);
-        else demand(actor.role !== 'worker', 'An implementation session records its handle under its assignment epoch');
+        const existing = (work.sessions ?? []).find(handle => handle.id === data.id);
         // A launcher records the handle of a session it started under somebody else's credential,
         // and names whose: that is what lets the session itself fill in the tab and transcript
         // only it has. Naming another principal is the launch authority a coordinator already
         // holds, so nobody below it may claim a handle on another session's behalf.
         demand(!data.principal || data.principal === actor.id || actor.role === 'coordinator' || actor.role === 'admin',
           'Only a coordinator or an admin records a handle on behalf of the session it launched', 403);
+        // An implementation session names the attempt it runs under and must hold that lease; a
+        // reviewer or producer session holds none, and records its handle under its own identity.
+        if (data.epoch !== undefined) activeLease(work, actor, data.epoch, now);
+        else {
+          demand(actor.role !== 'worker', 'An implementation session records its handle under its assignment epoch');
+          // Creating a lease-less handle is the launch authority: a coordinator or an admin
+          // records what it launched, and a session the control plane itself asked for records
+          // the handle of that request. Anything else would let a credential that merely reaches
+          // this item mint handles — enough of them to push a running session off a bounded list,
+          // or to squat the predictable id of a session about to be launched and so take the
+          // ownership its own launcher needs.
+          const requested = liveDispatchHandleIds(work);
+          demand(existing || ['coordinator', 'admin'].includes(actor.role) || requested.includes(data.id),
+            requested.length ? `A handle without an attempt epoch is recorded by its launcher or by the session of a live dispatch request on ${work.key} (${requested.join(', ')})`
+              : `A handle without an attempt epoch is recorded by its launcher; ${work.key} has no live dispatch request whose session could record one`, 403);
+        }
         // An existing handle is the attach command master status and the dashboard show an
         // operator. Overwriting one — marking a running worker finished, or replacing the command
         // somebody is about to run — belongs to that session, its launcher, or an admin, never to
         // any credential that happens to reach this item.
-        const existing = (work.sessions ?? []).find(handle => handle.id === data.id);
         demand(!existing || existing.principal === actor.id || actor.role === 'coordinator' || actor.role === 'admin',
           `Session handle ${data.id} belongs to ${existing?.principal}; only that session, its launcher or an admin may update it`, 403);
         recordSession(work, data, actor.id, now);
@@ -845,8 +857,8 @@ export class Engine {
       // A delivered item's gates are an immutable snapshot, but what it still owes — a deployment
       // carrying the merge — is not; its queue is reconciled without re-evaluating the delivery.
       else {
-        reconcileActions(work, all, now);
         const computed = nextAction(work, all, now);
+        reconcileActions(work, all, now, { next: computed });
         if (work.nextAction === undefined || !sameAction(work.nextAction, computed)) work.nextAction = computed;
       }
       await this.recordDispatch(db, work, now);
@@ -1338,11 +1350,13 @@ export class Engine {
     // The queue's own transitions are recorded on each row's history and travel to the ledger
     // with the document every save appends, so they need no second event of their own; the
     // executor's claim and settlement write their own named events.
-    reconcileActions(work, all, now);
+    // One computation answers both: the queue reconciles against it and the item carries it, so
+    // two readers of the same evaluation cannot disagree about what this item needs.
+    const computed = nextAction(work, all, now);
+    reconcileActions(work, all, now, { next: computed });
     // Only a different decision is written: an identical action rebuilt in source order would
     // differ from the stored one by key order alone, and the reconciliation tick would rewrite
     // every item on every pass.
-    const computed = nextAction(work, all, now);
     if (work.nextAction === undefined || !sameAction(work.nextAction, computed)) work.nextAction = computed;
   }
   /** Append the auto-dispatch transitions of the last evaluation to the ledger, once, beside the document save. */
